@@ -294,6 +294,41 @@ struct ProfilerRenderOptimizationEvidence
 	std::array<ProfilerRenderOptimizationViewSummary, 2U> views{};
 };
 
+// ProfilerFramePublicationEvidence is optional v2 evidence for one complete
+// frame. Availability is explicit: an unavailable field is not represented as
+// a numeric zero, which keeps comparisons fail-closed when instrumentation is
+// absent on one run.
+struct ProfilerFramePublicationEvidence
+{
+	static constexpr std::uint32_t kSchemaVersion = 1U;
+	// Keep enough bounded slots for scene, game, capture, picking, shadow, and
+	// visualizer consumers without allocating per-view diagnostics dynamically.
+	static constexpr std::size_t kMaximumViews = 8U;
+	std::uint32_t schemaVersion = kSchemaVersion;
+	std::uint64_t availabilityMask = 0U;
+	std::uint64_t frameGeneration = 0U;
+	std::uint64_t sceneGeneration = 0U;
+	std::uint64_t renderSessionGeneration = 0U;
+	std::uint64_t topologyGeneration = 0U;
+	std::uint64_t dynamicGeneration = 0U;
+	std::uint64_t authorityGeneration = 0U;
+	std::uint64_t presentationGeneration = 0U;
+	std::uint32_t renderOutcome = 0U;
+	std::uint32_t animationOutcome = 0U;
+	std::uint32_t rejectionReason = 0U;
+	std::uint32_t persistentReuseCount = 0U;
+	std::uint32_t persistentRebuildCount = 0U;
+	std::uint32_t dynamicReuseCount = 0U;
+	std::uint32_t dynamicRebuildCount = 0U;
+	std::uint32_t authorityReuseCount = 0U;
+	std::uint32_t authorityRebuildCount = 0U;
+	std::uint32_t viewSelectionReuseCount = 0U;
+	std::uint32_t viewSelectionRebuildCount = 0U;
+	std::array<std::uint64_t, 8U> disjointTimingNanoseconds{};
+	std::array<ProfilerRenderOptimizationViewSummary, kMaximumViews> views{};
+	std::uint32_t viewCount = 0U;
+};
+
 // ProfilerAnimationStage is append-only because saved capture files store these
 // values numerically. The names split CPU planning/authority work from GPU work
 // and protected publication so a slow frame cannot hide behind one aggregate.
@@ -432,6 +467,7 @@ struct ProfilerFrameRecord
 	// leave it null so disabled/collapsed projects retain structurally minimal data.
 	std::shared_ptr<const ProfilerAnimationFrameTelemetry> animationTelemetry;
 	std::optional<ProfilerRenderOptimizationEvidence> renderOptimization;
+	std::optional<ProfilerFramePublicationEvidence> framePublication;
 	// Typed streams are value snapshots. They make native/editor telemetry
 	// available after loading a capture without retaining a live subsystem.
 	std::vector<PerformanceStageRecord> performanceStages;
@@ -507,6 +543,8 @@ bool ValidateProfilerAnimationFrameTelemetry(const ProfilerAnimationFrameTelemet
 bool ValidateProfilerAnimationOptimizationEvidence(
 	const ProfilerAnimationOptimizationEvidence& evidence) noexcept;
 bool ValidateProfilerRenderOptimizationEvidence(const ProfilerRenderOptimizationEvidence& evidence) noexcept;
+bool ValidateProfilerFramePublicationEvidence(const ProfilerFramePublicationEvidence& evidence) noexcept;
+bool ValidateProfilerDisjointTimingBuckets(const std::array<std::uint64_t, 8U>& buckets, std::uint64_t frameNanoseconds, std::uint64_t toleranceNanoseconds = 0U) noexcept;
 std::string MakeTimestampForFileName();
 std::string MakeReadableTimestamp();
 bool AnyModuleEnabled(const ProfilerCaptureSettings& settings);

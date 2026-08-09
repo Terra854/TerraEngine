@@ -446,11 +446,11 @@ bool Engine::Update(float deltaTime)
 	if (!running) {
 		return false;
 	}
-
 	// A profiler session may be armed before Play Mode begins. Sample only frames
 	// whose runtime world was active at frame start; editor-preview updates never
 	// enter game performance captures.
 	TerraEngine::Profiling::Profiler& profiler = TerraEngine::Profiling::Profiler::Instance();
+	profiler.BeginLatestEngineFrameTiming();
 	const bool playModeFrame = ScriptingSystem::Instance().IsRunning();
 	profiler.BeginFrame(playModeFrame);
 	{
@@ -529,6 +529,7 @@ bool Engine::Update(float deltaTime)
 			systemScheduler.SetLatestEcsGraphSummary(TerraEngine::Scheduling::FormatPublishedEcsGraphFrameSummaries());
 		}
 	}
+	profiler.PublishLatestEngineFrameTiming();
 	if (playModeFrame)
 	{
 		profiler.EndFrame();

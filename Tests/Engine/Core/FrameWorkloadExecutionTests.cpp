@@ -249,6 +249,36 @@ namespace TerraEngine::Tests {
 			for (const auto& record : plan.executionRecords)
 			{
 				context.Expect(TerraEngine::Profiling::ValidateWorkloadExecutionRecord(record).valid, "Partition execution evidence must remain a valid bounded value record.");
+				if(plan.executionMode
+					== TerraEngine::Scheduling::FrameWorkloadExecutionMode::Parallel
+					&& record.selectedPath
+					== TerraEngine::Profiling::WorkloadExecutionPath::Worker
+					&& record.status
+						== TerraEngine::Profiling::WorkloadExecutionStatus::Completed)
+				{
+					context.Expect(record.completionSequence != 0u,
+						"Completed worker range '" + record.descriptorId
+							+ "' must expose its actual completion order (dispatch="
+							+ std::to_string(record.dispatchCount) + ", wave="
+							+ std::to_string(record.dependencyWave) + ").");
+				}
+				context.Expect(record.runStartNanoseconds != 0u
+					&& record.runEndNanoseconds >= record.runStartNanoseconds,
+					"Executed partition '" + record.workloadName
+						+ "' must retain scheduler wall endpoints for non-additive profiler attribution (start="
+						+ std::to_string(record.runStartNanoseconds) + ", end="
+						+ std::to_string(record.runEndNanoseconds) + ", dispatch="
+						+ std::to_string(record.dispatchCount) + ", run="
+						+ std::to_string(record.runDuration.nanoseconds) + ").");
+			}
+			if(plan.executionMode
+				== TerraEngine::Scheduling::FrameWorkloadExecutionMode::Parallel)
+			{
+				context.Expect(plan.migrationSummary.dependencyWaveCount != 0u
+					&& plan.migrationSummary.workerCompletionWakeCount != 0u
+					&& plan.migrationSummary.peakConcurrentWorkerCount != 0u
+					&& plan.migrationSummary.criticalPathTimeNs != 0u,
+					"Parallel frame evidence must retain dependency shape, completion wakes, concurrency, and the measured critical path.");
 			}
 		});
 	}

@@ -43,6 +43,7 @@
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Components/CameraComponent.h"
+#include "Engine/Components/MeshRenderComponent.h"
 #include "Engine/Components/Transform.h"
 #include "Engine/Components/Physics/CharacterControllerComponent.h"
 #include "Engine/Scene/SceneManager.h"
@@ -1638,8 +1639,10 @@ namespace TerraEngine::Editor::Automation
 		// same availability semantics shown in the Profiler window.
 		nlohmann::json SerializeProfilerCaptureEvidence()
 		{
+			const TerraEngine::Profiling::ProfilerCaptureDocument document =
+				TerraEngine::Profiling::Profiler::Instance().GetDocumentSnapshot();
 			const EditorProfilerCaptureSummary summary = EditorProfilerService::SummarizeDocument(
-				"live", TerraEngine::Profiling::Profiler::Instance().GetDocumentSnapshot());
+				"live", document);
 			const auto metrics = [](const std::vector<EditorProfilerMetricSummary>& values) {
 				nlohmann::json result = nlohmann::json::array();
 				for (const EditorProfilerMetricSummary& value : values)
@@ -1656,6 +1659,7 @@ namespace TerraEngine::Editor::Automation
 				{"complete", summary.captureComplete}, {"recoveredIncompleteTail", summary.recoveredIncompleteTail},
 				{"stageTimings", metrics(summary.stageTimings)}, {"protectedBoundaryTimings", metrics(summary.protectedBoundaryTimings)},
 				{"presentationWaitTimings", metrics(summary.presentationWaitTimings)}, {"responsivenessTimings", metrics(summary.responsivenessTimings)},
+				{"framePublication", EditorAutomationService::SummarizeFramePublicationEvidence(document.frames)},
 				{"workVolumes", {{"totalBodies", summary.workVolumes.totalBodies}, {"examinedBodies", summary.workVolumes.examinedBodies},
 					{"extractedBodies", summary.workVolumes.extractedBodies}, {"changedBodies", summary.workVolumes.changedBodies}, {"publishedBodies", summary.workVolumes.publishedBodies}}}
 			};
@@ -1770,6 +1774,11 @@ namespace TerraEngine::Editor::Automation
 				{"workerPreparationTimeNs", summary.workerPreparationTimeNs},
 				{"protectedCommitTimeNs", summary.protectedCommitTimeNs},
 				{"coordinatorWaitTimeNs", summary.coordinatorWaitTimeNs},
+				{"criticalPathTimeNs", summary.criticalPathTimeNs},
+				{"dependencyWaveCount", summary.dependencyWaveCount},
+				{"workerCompletionWakeCount", summary.workerCompletionWakeCount},
+				{"completionDrivenDispatchCount", summary.completionDrivenDispatchCount},
+				{"peakConcurrentWorkerCount", summary.peakConcurrentWorkerCount},
 				{"workerUtilization", summary.workerUtilization},
 				{"activeMembershipInvalidationCount", summary.activeMembershipInvalidationCount},
 				{"staleObjectHandleCount", summary.staleObjectHandleCount},
@@ -1889,6 +1898,7 @@ namespace TerraEngine::Editor::Automation
 						{"workerIdentityAvailable", record.workerIdentityAvailable}, {"workerId", record.workerId},
 						{"queueDepthAtEnqueue", record.queueDepthAtEnqueue}, {"queueDepthAtStart", record.queueDepthAtStart},
 						{"dispatchCount", record.dispatchCount}, {"usefulWorkItemCount", record.usefulWorkItemCount},
+						{"dependencyWave", record.dependencyWave}, {"completionSequence", record.completionSequence},
 						{"partitionIndex", record.partitionIndex}, {"partitionCount", record.partitionCount},
 						{"itemBegin", record.itemBegin}, {"itemEnd", record.itemEnd},
 						{"sameFrameVisibilityRequired", record.sameFrameVisibilityRequired},
@@ -2069,6 +2079,198 @@ namespace TerraEngine::Editor::Automation
 			return WriteMode::WritesEnabled;
 		}
 		return std::nullopt;
+	}
+
+	nlohmann::json EditorAutomationService::SummarizeFramePublicationEvidence(
+		const std::vector<TerraEngine::Profiling::ProfilerFrameRecord>& frames)
+	{
+		// Storage lane 6 is deliberately reserved by the profiler contract. Keep
+		// automation aligned with the user-facing seven-lane table rather than
+		// exposing that internal slot as an invented phase.
+		constexpr std::array<std::size_t, 7U> kTimingIndices{0U, 1U, 2U, 3U, 4U, 5U, 7U};
+		constexpr std::array<const char*, 7U> kTimingIds{
+			"persistent_state", "dynamic_refresh", "view_selection",
+			"animation_evaluation", "protected_publication", "backend_preparation",
+			"uninstrumented_remainder"};
+		constexpr std::array<const char*, 7U> kTimingLabels{
+			"Persistent state maintenance", "Dynamic refresh", "View selection",
+			"Animation evaluation", "Protected publication", "Backend preparation",
+			"Uninstrumented remainder"};
+		struct LaneAggregate
+		{
+			std::uint64_t availableFrameCount = 0U;
+			std::uint64_t unavailableFrameCount = 0U;
+			std::uint64_t totalNanoseconds = 0U;
+		};
+		std::array<LaneAggregate, kTimingIndices.size()> lanes{};
+		std::uint64_t evidenceFrameCount = 0U;
+		std::uint64_t missingEvidenceFrameCount = 0U;
+		std::uint64_t completeFrameCount = 0U;
+		std::uint64_t incompleteFrameCount = 0U;
+		std::uint64_t availabilityMaskUnion = 0U;
+		std::uint64_t availabilityMaskIntersection = 0U;
+		bool hasAvailabilityMask = false;
+		std::uint64_t conservationEligibleFrameCount = 0U;
+		std::uint64_t conservedFrameCount = 0U;
+		std::uint64_t unconservedFrameCount = 0U;
+		std::uint64_t unavailableConservationFrameCount = 0U;
+		std::uint64_t invalidDurationFrameCount = 0U;
+		std::uint64_t totalConservationFrameNanoseconds = 0U;
+		std::uint64_t totalAttributedNanoseconds = 0U;
+		std::uint64_t totalRemainderNanoseconds = 0U;
+		std::uint64_t maximumAbsoluteConservationErrorNanoseconds = 0U;
+		std::uint64_t invalidReservedLaneFrameCount = 0U;
+		std::uint64_t invalidReservedLaneNanoseconds = 0U;
+
+		const auto saturatingAdd = [](std::uint64_t& destination, std::uint64_t value) {
+			if (value > std::numeric_limits<std::uint64_t>::max() - destination)
+			{
+				destination = std::numeric_limits<std::uint64_t>::max();
+				return;
+			}
+			destination += value;
+		};
+		const auto frameDurationNanoseconds = [](double durationMs) -> std::optional<std::uint64_t> {
+			constexpr double kNanosecondsPerMillisecond = 1'000'000.0;
+			const double maximumMilliseconds = static_cast<double>(
+				std::numeric_limits<std::uint64_t>::max()) / kNanosecondsPerMillisecond;
+			if (!std::isfinite(durationMs) || durationMs < 0.0
+				|| durationMs > maximumMilliseconds)
+			{
+				return std::nullopt;
+			}
+			return static_cast<std::uint64_t>(std::llround(
+				durationMs * kNanosecondsPerMillisecond));
+		};
+
+		for (const TerraEngine::Profiling::ProfilerFrameRecord& frame : frames)
+		{
+			if (frame.complete)
+			{
+				++completeFrameCount;
+			}
+			else
+			{
+				++incompleteFrameCount;
+			}
+			if (!frame.framePublication.has_value())
+			{
+				++missingEvidenceFrameCount;
+				for (LaneAggregate& lane : lanes)
+				{
+					++lane.unavailableFrameCount;
+				}
+				continue;
+			}
+
+			++evidenceFrameCount;
+			const TerraEngine::Profiling::ProfilerFramePublicationEvidence& evidence =
+				*frame.framePublication;
+			availabilityMaskUnion |= evidence.availabilityMask;
+			availabilityMaskIntersection = hasAvailabilityMask
+				? availabilityMaskIntersection & evidence.availabilityMask
+				: evidence.availabilityMask;
+			hasAvailabilityMask = true;
+
+			bool allPublicLanesAvailable = true;
+			std::uint64_t attributedNanoseconds = 0U;
+			for (std::size_t laneIndex = 0U; laneIndex < lanes.size(); ++laneIndex)
+			{
+				const bool laneAvailable = (evidence.availabilityMask & (1ULL << laneIndex)) != 0U;
+				LaneAggregate& lane = lanes[laneIndex];
+				if (!laneAvailable)
+				{
+					++lane.unavailableFrameCount;
+					allPublicLanesAvailable = false;
+					continue;
+				}
+				const std::uint64_t nanoseconds =
+					evidence.disjointTimingNanoseconds[kTimingIndices[laneIndex]];
+				++lane.availableFrameCount;
+				saturatingAdd(lane.totalNanoseconds, nanoseconds);
+				saturatingAdd(attributedNanoseconds, nanoseconds);
+			}
+			if (evidence.disjointTimingNanoseconds[6U] != 0U)
+			{
+				++invalidReservedLaneFrameCount;
+				saturatingAdd(invalidReservedLaneNanoseconds,
+					evidence.disjointTimingNanoseconds[6U]);
+			}
+			// Interrupted capture-tail frames can retain useful per-lane evidence, but
+			// never reached EndFrame's complete frame-clock boundary. Keep their lane
+			// availability above while excluding them from reconciliation statistics.
+			if (!frame.complete)
+			{
+				continue;
+			}
+			if (!allPublicLanesAvailable)
+			{
+				++unavailableConservationFrameCount;
+				continue;
+			}
+			const std::optional<std::uint64_t> expectedNanoseconds =
+				frameDurationNanoseconds(frame.durationMs);
+			if (!expectedNanoseconds.has_value())
+			{
+				++invalidDurationFrameCount;
+				continue;
+			}
+
+			++conservationEligibleFrameCount;
+			saturatingAdd(totalConservationFrameNanoseconds, *expectedNanoseconds);
+			saturatingAdd(totalAttributedNanoseconds, attributedNanoseconds);
+			saturatingAdd(totalRemainderNanoseconds,
+				evidence.disjointTimingNanoseconds[kTimingIndices.back()]);
+			const std::uint64_t absoluteError = attributedNanoseconds >= *expectedNanoseconds
+				? attributedNanoseconds - *expectedNanoseconds
+				: *expectedNanoseconds - attributedNanoseconds;
+			maximumAbsoluteConservationErrorNanoseconds = std::max(
+				maximumAbsoluteConservationErrorNanoseconds, absoluteError);
+			if (absoluteError == 0U)
+			{
+				++conservedFrameCount;
+			}
+			else
+			{
+				++unconservedFrameCount;
+			}
+		}
+
+		nlohmann::json serializedLanes = nlohmann::json::array();
+		for (std::size_t laneIndex = 0U; laneIndex < lanes.size(); ++laneIndex)
+		{
+			const LaneAggregate& lane = lanes[laneIndex];
+			serializedLanes.push_back({
+				{"id", kTimingIds[laneIndex]},
+				{"label", kTimingLabels[laneIndex]},
+				{"available", lane.availableFrameCount != 0U},
+				{"availableFrameCount", lane.availableFrameCount},
+				{"unavailableFrameCount", lane.unavailableFrameCount},
+				{"totalNanoseconds", lane.totalNanoseconds}});
+		}
+		return {
+			{"available", evidenceFrameCount != 0U},
+			{"frameCount", frames.size()},
+			{"completeFrameCount", completeFrameCount},
+			{"incompleteFrameCount", incompleteFrameCount},
+			{"evidenceFrameCount", evidenceFrameCount},
+			{"missingEvidenceFrameCount", missingEvidenceFrameCount},
+			{"availabilityMaskUnion", availabilityMaskUnion},
+			{"availabilityMaskIntersection", hasAvailabilityMask ? availabilityMaskIntersection : 0U},
+			{"lanes", std::move(serializedLanes)},
+			{"conservation", {
+				{"eligibleFrameCount", conservationEligibleFrameCount},
+				{"conservedFrameCount", conservedFrameCount},
+				{"unconservedFrameCount", unconservedFrameCount},
+				{"unavailableFrameCount", unavailableConservationFrameCount},
+				{"invalidDurationFrameCount", invalidDurationFrameCount},
+				{"totalFrameNanoseconds", totalConservationFrameNanoseconds},
+				{"totalAttributedNanoseconds", totalAttributedNanoseconds},
+				{"totalRemainderNanoseconds", totalRemainderNanoseconds},
+				{"maximumAbsoluteErrorNanoseconds", maximumAbsoluteConservationErrorNanoseconds},
+				{"invalidReservedLaneFrameCount", invalidReservedLaneFrameCount},
+				{"invalidReservedLaneNanoseconds", invalidReservedLaneNanoseconds}}}
+		};
 	}
 
 	EditorAutomationService::EditorAutomationService()
@@ -2280,6 +2482,78 @@ namespace TerraEngine::Editor::Automation
 		// AnimationAutomationJobs loads only sealed published snapshots here; no UI,
 		// MCP connection, or job.get request participates in capture ownership.
 		AnimationAutomationJobs(jobService).PumpActiveRecordingsFromPublishedSnapshots();
+	}
+
+	void EditorAutomationService::PumpRendererValidationMutationsAtProtectedFrame()
+	{
+		std::lock_guard lock(sparseTransformMutationMutex);
+		SparseTransformMutationState& state = sparseTransformMutation;
+		// A stop request disables new batches immediately, but the last batch may
+		// still be waiting for the declared protected scene-mutation flush. Keep
+		// pumping that one batch until its exact values are visible so benchmark
+		// evidence never mistakes an MCP/flush scheduling race for a failed commit.
+		if(state.failed || state.targets.empty()
+			|| (!state.active && state.pendingExpected.empty()))
+		{
+			return;
+		}
+
+		ObjectManager& objects = ObjectManager::instance();
+		if(!state.pendingExpected.empty())
+		{
+			// The prior frame's queue flush is proved by reading the exact values that
+			// were enqueued. A missing or mismatched target fails closed instead of
+			// reporting an uncommitted frame as benchmark evidence.
+			for(const TerraEngine::Scene::TransactionTransformUpdate& expected : state.pendingExpected)
+			{
+				const std::optional<Object> object = objects.getObject(expected.objectId);
+				const Transform* transform = object ? objects.GetComponent<Transform>(*object) : nullptr;
+				if(transform == nullptr || transform->position != expected.position
+					|| transform->rotation != expected.rotation)
+				{
+					state.failed = true;
+					state.active = false;
+					state.failureReason = "A protected sparse transform transaction did not become visible before the next editor frame.";
+					return;
+				}
+			}
+			++state.committedFrameCount;
+			state.committedMutationCount += state.pendingExpected.size();
+			state.pendingExpected.clear();
+		}
+		if(!state.active)
+		{
+			// Stop requested: the final batch is now proven, so do not enqueue a
+			// replacement batch for the next frame.
+			return;
+		}
+
+		std::vector<TerraEngine::Scene::TransactionTransformUpdate> updates;
+		updates.reserve(state.batchSize);
+		const bool displaced = ((state.enqueuedFrameCount / std::max<std::size_t>(1U,
+			state.targets.size() / state.batchSize)) & 1U) == 0U;
+		for(std::size_t index = 0U; index < state.batchSize; ++index)
+		{
+			const SparseTransformTarget& target = state.targets[(state.cursor + index) % state.targets.size()];
+			glm::vec3 position = target.baselinePosition;
+			if(displaced)
+			{
+				position.x += state.displacement;
+			}
+			updates.push_back({target.objectId, position, target.baselineRotation});
+		}
+		state.cursor = (state.cursor + state.batchSize) % state.targets.size();
+
+		TerraEngine::Scene::TransactionalMutationBuilder builder(
+			state.operationId + "-frame-" + std::to_string(state.enqueuedFrameCount + 1U),
+			TerraEngine::Scene::TransactionOrigin::Automation,
+			"RendererSparseTransformValidation");
+		builder.SetBudget({std::max<std::size_t>(state.batchSize, 1U), 1U});
+		builder.UpdateTransformBatch(objects, updates);
+		TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(std::move(builder).Build());
+		state.pendingExpected = std::move(updates);
+		++state.enqueuedFrameCount;
+		state.enqueuedMutationCount += state.pendingExpected.size();
 	}
 
 	void EditorAutomationService::RefreshAnimationImportJob(std::string_view jobId)
@@ -2553,6 +2827,9 @@ namespace TerraEngine::Editor::Automation
 		add("renderer.virtualGeometry.validationRoute.set", "renderer", MutationMode::EditorSelection, false, false, false, "route: Hardware|Compute|Indexed|Hybrid");
 		add("renderer.virtualGeometry.validationRoute.reset", "renderer", MutationMode::EditorSelection, false, false, false, "no arguments");
 		add("renderer.virtualGeometry.authoritativePick", "renderer", MutationMode::ReadOnly, false, false, false, "viewType?: Game|Scene, pixel: [x,y], request?: bool, capture?: bool");
+		add("renderer.validation.sparseTransform.start", "renderer", MutationMode::SceneMutation, true, true, false, "expectedObjectCount: integer, percentPerFrame?: number, displacement?: number");
+		add("renderer.validation.sparseTransform.status", "renderer", MutationMode::ReadOnly, true, true, false, "operationId?: string");
+		add("renderer.validation.sparseTransform.stop", "renderer", MutationMode::SceneMutation, true, true, false, "operationId: string");
 		add("renderer.recovery.safe_save_project", "renderer", MutationMode::ProjectMutation, true, false, false, "reason?: string");
 		add("diagnostics.get_summary", "diagnostics", MutationMode::ReadOnly, false, false, false, "includeDetails?: bool, surface?: string");
 	}
@@ -3490,25 +3767,26 @@ namespace TerraEngine::Editor::Automation
 			nlohmann::json gpuPresentationJson = nullptr;
 			if (gpuPresentation)
 			{
+				const GpuAnimationPlan& plan = gpuPresentation->plan;
+				const std::vector<GpuAnimationWorkPacket>& workPackets =
+					plan.WorkPackets();
 				// Keep backward compatibility with the representative first packet,
 				// while the bounded packet list below lets diagnostics associate every
 				// animated draw with its exact offsets and playback cursor.
 				nlohmann::json firstPacket = nullptr;
 				nlohmann::json packets = nlohmann::json::array();
-				if (!gpuPresentation->plan.workPackets.empty()
-					&& !gpuPresentation->plan.renderIdentities.empty())
+				if (!workPackets.empty() && plan.RenderIdentityCount() != 0U)
 				{
 					const GpuAnimationWorkPacket& packet =
-						gpuPresentation->plan.workPackets.front();
+						workPackets.front();
 					const GpuAnimationRenderIdentity& identity =
-						gpuPresentation->plan.renderIdentities.front();
+						plan.RenderIdentity(0U);
 					nlohmann::json generation = nullptr;
 					if (packet.generationRecordIndex
-						< gpuPresentation->plan.generationRecords.size())
+						< plan.GenerationRecordCount())
 					{
 						const GpuAnimationGenerationRecord& record =
-							gpuPresentation->plan.generationRecords[
-								packet.generationRecordIndex];
+							plan.GenerationRecord(packet.generationRecordIndex);
 						generation = {
 							{"instanceSlot", record.instanceSlot},
 							{"instanceGeneration", record.instanceGeneration},
@@ -3527,7 +3805,7 @@ namespace TerraEngine::Editor::Automation
 						{"stageMask", packet.stageMask},
 						{"jointCount", packet.jointCount},
 						{"morphCount", packet.morphCount},
-						{"sampleTick", packet.sampleTick},
+						{"sampleTick", plan.SampleTick(0U)},
 						{"localPoseOffsetBytes", packet.localPoseOffsetBytes},
 						{"modelPoseOffsetBytes", packet.modelPoseOffsetBytes},
 						{"paletteOffsetBytes", packet.paletteOffsetBytes},
@@ -3545,25 +3823,24 @@ namespace TerraEngine::Editor::Automation
 					};
 				}
 				for (std::size_t packetIndex = 0U;
-					packetIndex < gpuPresentation->plan.workPackets.size()
+					packetIndex < workPackets.size()
 						&& packets.size() < maximumItems;
 					++packetIndex)
 				{
-					if (packetIndex >= gpuPresentation->plan.renderIdentities.size())
+					if (packetIndex >= plan.RenderIdentityCount())
 					{
 						break;
 					}
 					const GpuAnimationWorkPacket& packet =
-						gpuPresentation->plan.workPackets[packetIndex];
+						workPackets[packetIndex];
 					const GpuAnimationRenderIdentity& identity =
-						gpuPresentation->plan.renderIdentities[packetIndex];
+						plan.RenderIdentity(packetIndex);
 					nlohmann::json generation = nullptr;
 					if (packet.generationRecordIndex
-						< gpuPresentation->plan.generationRecords.size())
+						< plan.GenerationRecordCount())
 					{
 						const GpuAnimationGenerationRecord& record =
-							gpuPresentation->plan.generationRecords[
-								packet.generationRecordIndex];
+							plan.GenerationRecord(packet.generationRecordIndex);
 						generation = {
 							{"instanceSlot", record.instanceSlot},
 							{"instanceGeneration", record.instanceGeneration},
@@ -3588,7 +3865,7 @@ namespace TerraEngine::Editor::Automation
 						{"jointCount", packet.jointCount},
 						{"morphCount", packet.morphCount},
 						{"paletteEntryCount", packet.paletteEntryCount},
-						{"sampleTick", packet.sampleTick},
+						{"sampleTick", plan.SampleTick(packetIndex)},
 						{"scratchOffsetBytes", packet.scratchOffsetBytes},
 						{"localPoseOffsetBytes", packet.localPoseOffsetBytes},
 						{"modelPoseOffsetBytes", packet.modelPoseOffsetBytes},
@@ -3619,16 +3896,16 @@ namespace TerraEngine::Editor::Automation
 						static_cast<std::uint32_t>(
 							gpuPresentation->planStatus)},
 					{"safeFallback", gpuPresentation->safeFallback},
-					{"planGeneration", gpuPresentation->plan.generation},
+					{"planGeneration", plan.generation},
 					{"workPacketCount",
-						gpuPresentation->plan.workPackets.size()},
+						workPackets.size()},
 					{"dispatchCommandCount",
-						gpuPresentation->plan.dispatchCommands.size()},
+						plan.DispatchCommands().size()},
 					{"ownerMappingCount",
-						gpuPresentation->ownerObjectMappings.size()},
+						gpuPresentation->OwnerObjectMappings().size()},
 					{"packets", std::move(packets)},
 					{"packetsTruncated",
-						gpuPresentation->plan.workPackets.size()
+						workPackets.size()
 							> maximumItems},
 					{"firstPacket", std::move(firstPacket)}
 				};
@@ -4763,6 +5040,9 @@ namespace TerraEngine::Editor::Automation
 		if (operation == AutomationOperation("renderer.virtualGeometry.validationRoute.set")) return HandleRendererVirtualGeometryValidationRouteSet(arguments, requestId);
 		if (operation == AutomationOperation("renderer.virtualGeometry.validationRoute.reset")) return HandleRendererVirtualGeometryValidationRouteReset(arguments, requestId);
 		if (operation == AutomationOperation("renderer.virtualGeometry.authoritativePick")) return HandleRendererVirtualGeometryAuthoritativePick(arguments, requestId);
+		if (operation == AutomationOperation("renderer.validation.sparseTransform.start")) return HandleRendererSparseTransformStart(arguments, requestId);
+		if (operation == AutomationOperation("renderer.validation.sparseTransform.status")) return HandleRendererSparseTransformStatus(arguments, requestId);
+		if (operation == AutomationOperation("renderer.validation.sparseTransform.stop")) return HandleRendererSparseTransformStop(arguments, requestId);
 		if (operation == AutomationOperation("renderer.recovery.safe_save_project"))
 		{
 			std::string error;
@@ -5330,8 +5610,13 @@ namespace TerraEngine::Editor::Automation
 				&& editorContext->editorProfiler != nullptr
 				? editorContext->editorProfiler->GetEditorFrameTiming()
 				: EditorProfilerFrameTiming{};
+			const TerraEngine::Profiling::ProfilerLatestEngineFrameTiming engineTiming =
+				TerraEngine::Profiling::Profiler::Instance().GetLatestEngineFrameTiming();
 			return BuildSuccess(requestId, "Updated profiler window visibility.", {
 				{"visible", window->IsVisible()},
+				{"engineFrameIndex", engineTiming.frameIndex},
+				{"engineCpuTimeMs", engineTiming.durationMs},
+				{"engineCpuTimeValid", engineTiming.valid},
 				{"editorFrameIndex", frameTiming.frameIndex},
 				{"editorFrameTimeMs", frameTiming.frameTimeMs},
 				{"profilerWindowDrawFrameIndex", frameTiming.profilerWindowDrawFrameIndex},
@@ -5914,9 +6199,12 @@ namespace TerraEngine::Editor::Automation
 			if (operation == AutomationOperation("profiler.capture.summary"))
 			{
 				EditorProfilerCaptureSummary summary;
+				TerraEngine::Profiling::ProfilerCaptureDocument document;
 				std::string error;
 				const std::string artifactId = arguments.value("artifactId", std::string{});
 				if (!editorContext->editorProfiler->SummarizeCaptureById(artifactId, summary, error))
+					return BuildError(requestId, ErrorCategory::MissingTarget, error, artifactId);
+				if (!editorContext->editorProfiler->ReadCaptureDocumentById(artifactId, document, error))
 					return BuildError(requestId, ErrorCategory::MissingTarget, error, artifactId);
 				nlohmann::json streams = nlohmann::json::array();
 				for (const auto& stream : summary.timingStreams)
@@ -5952,6 +6240,7 @@ namespace TerraEngine::Editor::Automation
 					{"recoveredIncompleteTail", summary.recoveredIncompleteTail}, {"timingStreams", streams},
 					{"stageTimings", serializeMetrics(summary.stageTimings)}, {"protectedBoundaryTimings", serializeMetrics(summary.protectedBoundaryTimings)},
 					{"presentationWaitTimings", serializeMetrics(summary.presentationWaitTimings)}, {"responsivenessTimings", serializeMetrics(summary.responsivenessTimings)},
+					{"framePublication", SummarizeFramePublicationEvidence(document.frames)},
 					{"workerHistories", workers}, {"workVolumes", {{"measuredTickCount", summary.workVolumes.measuredTickCount}, {"totalBodies", summary.workVolumes.totalBodies},
 						{"activeBodies", summary.workVolumes.activeBodies}, {"examinedBodies", summary.workVolumes.examinedBodies}, {"extractedBodies", summary.workVolumes.extractedBodies},
 						{"convertedBodies", summary.workVolumes.convertedBodies}, {"changedBodies", summary.workVolumes.changedBodies}, {"publishedBodies", summary.workVolumes.publishedBodies}}}
@@ -8175,6 +8464,26 @@ namespace TerraEngine::Editor::Automation
 		{
 			return BuildError(requestId, ErrorCategory::Validation, "Custom camera forward direction must be non-zero.");
 		}
+		// glm::lookAt requires an up direction independent from forward.  MCP
+		// callers commonly use world-up, so a camera aimed straight up/down would
+		// otherwise produce a degenerate basis and invalid capture matrices.
+		const glm::vec3 normalizedForward = glm::normalize(forward);
+		glm::vec3 normalizedUp = glm::normalize(up);
+		bool upFallbackApplied = false;
+		if (std::abs(glm::dot(normalizedForward, normalizedUp)) > 0.999f)
+		{
+			// Select the world axis least parallel to the requested forward vector;
+			// crossing twice gives a deterministic perpendicular, unit-length up.
+			const glm::vec3 axis = std::abs(normalizedForward.x) <= std::abs(normalizedForward.y)
+				&& std::abs(normalizedForward.x) <= std::abs(normalizedForward.z)
+				? glm::vec3(1.0f, 0.0f, 0.0f)
+				: (std::abs(normalizedForward.y) <= std::abs(normalizedForward.z)
+					? glm::vec3(0.0f, 1.0f, 0.0f)
+					: glm::vec3(0.0f, 0.0f, 1.0f));
+			const glm::vec3 side = glm::normalize(glm::cross(normalizedForward, axis));
+			normalizedUp = glm::normalize(glm::cross(side, normalizedForward));
+			upFallbackApplied = true;
+		}
 
 		const glm::uvec2 size(validation["width"].get<std::uint32_t>(), validation["height"].get<std::uint32_t>());
 		RenderViewType captureViewType = RenderViewType::Game;
@@ -8236,7 +8545,7 @@ namespace TerraEngine::Editor::Automation
 		request.allowBackendFallback = validation["allowBackendFallback"].get<bool>();
 		request.timeoutMs = validation["timeoutMs"].get<std::uint32_t>();
 		request.cameraWorldPosition = *position;
-		request.viewMatrix = glm::lookAt(*position, *position + glm::normalize(forward), glm::normalize(up));
+		request.viewMatrix = glm::lookAt(*position, *position + normalizedForward, normalizedUp);
 		if (projection == "orthographic")
 		{
 			const float halfHeight = orthographicHeight * 0.5f;
@@ -8257,8 +8566,9 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json result = BuildCaptureSuccessEnvelope(*this, requestId, capture);
 		result["data"]["camera"] = {
 			{"position", SerializeVec3(*position)},
-			{"forward", SerializeVec3(glm::normalize(forward))},
-			{"up", SerializeVec3(glm::normalize(up))},
+			{"forward", SerializeVec3(normalizedForward)},
+			{"up", SerializeVec3(normalizedUp)},
+			{"upFallbackApplied", upFallbackApplied},
 			{"projection", projection},
 			{"verticalFovDegrees", fov},
 			{"orthographicHeight", orthographicHeight},
@@ -8577,6 +8887,12 @@ namespace TerraEngine::Editor::Automation
 		};
 		nlohmann::json data = {
 			{"viewType", ToString(stats.viewType)},
+			{"outputKind", static_cast<std::uint32_t>(stats.outputKind)},
+			{"outputId", stats.outputId},
+			{"dedicatedCaptureOutput", stats.dedicatedCaptureOutput},
+			{"publicationFrameId", stats.publicationFrameId},
+			{"publicationGeneration", stats.publicationGeneration},
+			{"rendererSessionGeneration", stats.rendererSessionGeneration},
 			{"valid", stats.valid},
 			// Shadow selection has current immutable diagnostics but intentionally
 			// no per-view GPU timestamp/readback slot. Make that boundary explicit
@@ -8825,6 +9141,163 @@ namespace TerraEngine::Editor::Automation
 			{"requested", request},
 			{"captureTarget", captureTarget},
 			{"authoritative", SerializeAuthoritativeVisibilityPick(state)}
+		});
+	}
+
+	nlohmann::json EditorAutomationService::HandleRendererSparseTransformStart(
+		const nlohmann::json& arguments,
+		const std::string& requestId)
+	{
+		if(!arguments.contains("expectedObjectCount")
+			|| !arguments["expectedObjectCount"].is_number_integer())
+		{
+			return BuildError(requestId, ErrorCategory::Validation,
+				"expectedObjectCount must be a positive integer.");
+		}
+		const std::int64_t requestedCount = arguments["expectedObjectCount"].get<std::int64_t>();
+		const double requestedPercent = arguments.value("percentPerFrame", 1.0);
+		const double requestedDisplacement = arguments.value("displacement", 0.01);
+		if(requestedCount < 1 || requestedCount > 100000
+			|| !std::isfinite(requestedPercent) || requestedPercent <= 0.0
+			|| requestedPercent > 100.0
+			|| !std::isfinite(requestedDisplacement) || requestedDisplacement <= 0.0
+			|| requestedDisplacement > 10.0)
+		{
+			return BuildError(requestId, ErrorCategory::Validation,
+				"Sparse transform bounds are invalid.");
+		}
+
+		std::lock_guard lock(sparseTransformMutationMutex);
+		if(sparseTransformMutation.active)
+		{
+			return BuildError(requestId, ErrorCategory::Conflict,
+				"A sparse transform validation operation is already active.");
+		}
+
+		ObjectManager& objects = ObjectManager::instance();
+		std::vector<SparseTransformTarget> targets;
+		for(const Object& object : objects.getObjectsWithComponentsIncludingInactive<Transform, MeshRenderComponent>())
+		{
+			if(!objects.isObjectStatic(object))
+			{
+				continue;
+			}
+			const Transform* transform = objects.GetComponent<Transform>(object);
+			if(transform == nullptr)
+			{
+				continue;
+			}
+			targets.push_back({objects.getUUID(object), transform->position, transform->rotation});
+		}
+		std::sort(targets.begin(), targets.end(), [](const SparseTransformTarget& left,
+			const SparseTransformTarget& right) {
+			return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
+		});
+		if(targets.size() != static_cast<std::size_t>(requestedCount))
+		{
+			return BuildError(requestId, ErrorCategory::Conflict,
+				"The active scene does not contain the exact requested static renderable population.");
+		}
+
+		SparseTransformMutationState next;
+		next.active = true;
+		next.operationId = "renderer-sparse-transform-" + std::to_string(nextTransactionId++);
+		next.percentPerFrame = static_cast<float>(requestedPercent);
+		next.displacement = static_cast<float>(requestedDisplacement);
+		next.targets = std::move(targets);
+		next.batchSize = std::max<std::size_t>(1U, static_cast<std::size_t>(std::ceil(
+			static_cast<double>(next.targets.size()) * requestedPercent / 100.0)));
+		sparseTransformMutation = std::move(next);
+		return BuildSuccess(requestId, "Started protected sparse transform validation.", {
+			{"operationId", sparseTransformMutation.operationId},
+			{"active", true},
+			{"objectCount", sparseTransformMutation.targets.size()},
+			{"percentPerFrame", sparseTransformMutation.percentPerFrame},
+			{"batchSize", sparseTransformMutation.batchSize},
+			{"visibilityBoundary", "protected_scene_mutation_flush"}
+		});
+	}
+
+	nlohmann::json EditorAutomationService::HandleRendererSparseTransformStatus(
+		const nlohmann::json& arguments,
+		const std::string& requestId)
+	{
+		std::lock_guard lock(sparseTransformMutationMutex);
+		const SparseTransformMutationState& state = sparseTransformMutation;
+		const std::string requestedId = arguments.value("operationId", std::string{});
+		if(!requestedId.empty() && requestedId != state.operationId)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget,
+				"Sparse transform validation operation was not found.");
+		}
+		return BuildSuccess(requestId, "Read sparse transform validation status.", {
+			{"operationId", state.operationId}, {"active", state.active},
+			{"failed", state.failed}, {"failureReason", state.failureReason},
+			{"objectCount", state.targets.size()}, {"batchSize", state.batchSize},
+			{"percentPerFrame", state.percentPerFrame},
+			{"enqueuedFrameCount", state.enqueuedFrameCount},
+			{"committedFrameCount", state.committedFrameCount},
+			{"enqueuedMutationCount", state.enqueuedMutationCount},
+			{"committedMutationCount", state.committedMutationCount},
+			{"pendingMutationCount", state.pendingExpected.size()},
+			{"visibilityBoundary", "protected_scene_mutation_flush"}
+		});
+	}
+
+	nlohmann::json EditorAutomationService::HandleRendererSparseTransformStop(
+		const nlohmann::json& arguments,
+		const std::string& requestId)
+	{
+		if(!arguments.contains("operationId") || !arguments["operationId"].is_string())
+		{
+			return BuildError(requestId, ErrorCategory::Validation,
+				"operationId is required.");
+		}
+		std::lock_guard lock(sparseTransformMutationMutex);
+		SparseTransformMutationState& state = sparseTransformMutation;
+		if(arguments["operationId"].get<std::string>() != state.operationId)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget,
+				"Sparse transform validation operation was not found.");
+		}
+		// Disable production first. If the current protected flush already made
+		// the final batch visible, finalize it synchronously; otherwise leave the
+		// exact expectations intact for the next protected-frame pump. Callers use
+		// the status operation to wait for pendingMutationCount to reach zero.
+		state.active = false;
+		if(!state.pendingExpected.empty() && !state.failed)
+		{
+			ObjectManager& objects = ObjectManager::instance();
+			bool finalBatchVisible = true;
+			for(const TerraEngine::Scene::TransactionTransformUpdate& expected : state.pendingExpected)
+			{
+				const std::optional<Object> object = objects.getObject(expected.objectId);
+				const Transform* transform = object ? objects.GetComponent<Transform>(*object) : nullptr;
+				if(transform == nullptr || transform->position != expected.position
+					|| transform->rotation != expected.rotation)
+				{
+					finalBatchVisible = false;
+					break;
+				}
+			}
+			if(finalBatchVisible)
+			{
+				++state.committedFrameCount;
+				state.committedMutationCount += state.pendingExpected.size();
+				state.pendingExpected.clear();
+			}
+		}
+		return BuildSuccess(requestId, "Requested protected sparse transform validation stop.", {
+			{"operationId", state.operationId}, {"active", false},
+			{"failed", state.failed}, {"failureReason", state.failureReason},
+			{"objectCount", state.targets.size()}, {"batchSize", state.batchSize},
+			{"percentPerFrame", state.percentPerFrame},
+			{"enqueuedFrameCount", state.enqueuedFrameCount},
+			{"committedFrameCount", state.committedFrameCount},
+			{"enqueuedMutationCount", state.enqueuedMutationCount},
+			{"committedMutationCount", state.committedMutationCount},
+			{"pendingMutationCount", state.pendingExpected.size()},
+			{"visibilityBoundary", "protected_scene_mutation_flush"}
 		});
 	}
 

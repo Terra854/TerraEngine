@@ -1370,7 +1370,11 @@ void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, c
 		++m_MarkerPreferenceGeneration;
 	}
 
-	const TerraEngine::Scene::SceneChangePacket changePacket = objectManager.PublishSceneChangePacket();
+	// The scheduler publishes one immutable packet at the protected frame
+	// boundary.  The Scene View must only observe that retained packet; draining
+	// here would make editor overlays disagree with renderer worker preparation.
+	const std::shared_ptr<const TerraEngine::Scene::SceneChangePacket> changePacket =
+		objectManager.LoadPublishedSceneChangePacketShared();
 	const bool rebuildAll = m_MarkerSceneGeneration != objectManager.GetSceneGeneration()
 		|| m_MarkerSpatialSnapshot == nullptr
 		|| categoryVisibilityChanged;
@@ -1393,7 +1397,10 @@ void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, c
 	}
 	else
 	{
-		invalidation = m_MarkerPipeline.ApplySceneChanges(changePacket);
+		if(changePacket != nullptr)
+		{
+			invalidation = m_MarkerPipeline.ApplySceneChanges(*changePacket);
+		}
 	}
 
 	// Selection is editor state rather than scene state. Refresh only the old and
@@ -3056,9 +3063,12 @@ void SceneViewWindow::DrawAnimationSceneHandles(
 	}
 
 	const TerraEngine::UUID objectId = ObjectManager::instance().getUUID(*selectedObject);
-	const std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose> published =
-		TerraEngine::Animation::AnimationSystem::Instance()
-			.LoadPublishedAnimatorPoseForObject(objectId);
+	const auto animator = TerraEngine::Animation::AnimationSystem::Instance()
+		.ResolveAnimatorForObject(objectId);
+	const std::shared_ptr<const TerraEngine::Animation::AnimationAuthorityFrame> authority =
+		TerraEngine::Animation::AnimationSystem::Instance().LoadPublishedAuthorityFrame();
+	const TerraEngine::Animation::AnimationAuthorityRow* published = authority
+		? authority->Find(animator) : nullptr;
 	if(!published || !published->snapshot || !published->snapshot->pose
 		|| !published->snapshot->pose->IsSealed())
 	{
@@ -3114,12 +3124,12 @@ void SceneViewWindow::DrawAnimationSceneHandles(
 	std::vector<NativeAnimationRagdollSnapshot> ragdollSnapshots;
 	std::uint32_t ragdollCount = 0U;
 	AnimationStatus ragdollStatus = TerraEngine::Animation::AnimationSystem::Instance()
-		.CopyRagdollSnapshots(published->animator, {}, ragdollCount);
+		.CopyRagdollSnapshots(published->key.Handle(), {}, ragdollCount);
 	if(ragdollStatus == AnimationStatus::BufferTooSmall && ragdollCount > 0U)
 	{
 		ragdollSnapshots.resize(ragdollCount);
 		ragdollStatus = TerraEngine::Animation::AnimationSystem::Instance()
-			.CopyRagdollSnapshots(published->animator, ragdollSnapshots, ragdollCount);
+			.CopyRagdollSnapshots(published->key.Handle(), ragdollSnapshots, ragdollCount);
 	}
 	const bool ragdollActive = ragdollStatus == AnimationStatus::Ok
 		&& std::any_of(ragdollSnapshots.begin(), ragdollSnapshots.end(),
@@ -3201,7 +3211,7 @@ void SceneViewWindow::DrawAnimationSceneHandles(
 
 	TerraEngine::Animation::AnimationSocketReadSnapshot sockets;
 	if(TerraEngine::Animation::AnimationAttachmentSnapshotPublisher::Instance()
-		.CopySocketSnapshot(published->animator, sockets))
+		.CopySocketSnapshot(published->key.Handle(), sockets))
 	{
 		for(const TerraEngine::Animation::AnimationAttachmentTransformSnapshot& socket : sockets.sockets)
 		{
@@ -3222,12 +3232,12 @@ void SceneViewWindow::DrawAnimationSceneHandles(
 	std::vector<NativeAnimationProceduralGoalCommand> goals;
 	std::uint32_t goalCount = 0U;
 	AnimationStatus goalStatus = TerraEngine::Animation::AnimationSystem::Instance()
-		.CopyProceduralGoals(published->animator, {}, goalCount);
+		.CopyProceduralGoals(published->key.Handle(), {}, goalCount);
 	if(goalStatus == AnimationStatus::BufferTooSmall && goalCount > 0U)
 	{
 		goals.resize(goalCount);
 		goalStatus = TerraEngine::Animation::AnimationSystem::Instance()
-			.CopyProceduralGoals(published->animator, goals, goalCount);
+			.CopyProceduralGoals(published->key.Handle(), goals, goalCount);
 	}
 	if(goalStatus == AnimationStatus::Ok)
 	{

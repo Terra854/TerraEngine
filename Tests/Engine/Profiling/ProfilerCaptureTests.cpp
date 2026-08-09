@@ -517,6 +517,31 @@ namespace TerraEngine::Tests {
 			profiler.Clear();
 		});
 
+		registry.Add("Engine.Profiler.LatestEngineTimingExcludesIdleEditorWork", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			const auto rawFrameStarted = std::chrono::steady_clock::now();
+			profiler.BeginLatestEngineFrameTiming();
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			const bool editorBoundary = profiler.BeginEditorWork();
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			profiler.EndEditorWork(editorBoundary);
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			profiler.PublishLatestEngineFrameTiming();
+			const double rawFrameMs = std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - rawFrameStarted).count();
+			const ProfilerLatestEngineFrameTiming latest = profiler.GetLatestEngineFrameTiming();
+
+			context.Expect(latest.valid,
+				"The capture-independent Engine CPU clock must publish while the profiler is idle.");
+			context.Expect(latest.durationMs + 10.0 < rawFrameMs,
+				"The idle Engine CPU clock must exclude the protected EditorSystem interval.");
+			context.Expect(latest.frameIndex != 0u,
+				"Each capture-independent Engine CPU publication must advance its stable frame index.");
+		});
+
 		registry.Add("Engine.Profiler.SceneViewAndPresentationStreamsRemainExplicit", [](TestContext& context) {
 			using namespace TerraEngine::Profiling;
 

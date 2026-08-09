@@ -88,9 +88,14 @@ struct SwapChainSupportDetails {
 // GPU buffer wrapper that keeps the VMA allocation alongside the VkBuffer.
 // struct VulkanBuffer groups related state and operations so callers have one documented contract.
 struct VulkanBuffer {
-	VkBuffer buffer;
-	VmaAllocation allocation;
-	VkDeviceSize size;
+	VkBuffer buffer = VK_NULL_HANDLE;
+	VmaAllocation allocation = VK_NULL_HANDLE;
+	VkDeviceSize size = 0U;
+	// Host-visible frame-slot buffers stay mapped for their complete allocation
+	// lifetime. This removes repeated VMA map/unmap bookkeeping from animation,
+	// instance, and other per-frame uploads while explicit flushes still make
+	// non-coherent memory visible to the GPU.
+	void* mappedData = nullptr;
 };
 
 // Conventional graphics shaders read this one 64-byte record through global
@@ -256,6 +261,11 @@ struct VulkanContext::Impl {
 	// same protected boundary, so recursion is intentional; external resource
 	// invalidation and editor callbacks wait until the complete transition ends.
 	mutable std::recursive_mutex deviceStateMutex;
+	// The protected frame boundary retains the complete immutable producer root.
+	// Recording code resolves all per-view inputs from this pointer and must never
+	// observe a later RenderSystem construction buffer.
+	std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication>
+		activeRenderFramePublication;
 	// Vulkan queue handles are externally synchronized objects. Asset uploads
 	// can submit from worker threads while the coordinator submits/presents an
 	// editor frame, so every queue operation and device-wide idle boundary must
@@ -482,7 +492,10 @@ struct VulkanContext::Impl {
 	static constexpr uint32_t MAX_BINDLESS_BUFFERS = 1024;
 	static constexpr uint32_t MAX_BINDLESS_MATERIALS = 1024;
 	static constexpr uint32_t INVALID_BINDLESS_BUFFER_INDEX = std::numeric_limits<std::uint32_t>::max();
-	static constexpr uint32_t MAX_BINDLESS_DRAWS = 4096;
+	// Indirect command storage grows from this modest initial allocation. It is
+	// deliberately not a draw limit: each frame slot appends the exact command
+	// count for every queued view and expands when that count requires it.
+	static constexpr std::size_t INITIAL_INDIRECT_DRAW_COMMAND_CAPACITY = 1024u;
 	static constexpr uint32_t MAX_GLOBAL_LIGHTS = 1024;
 	static constexpr uint32_t MAX_LIGHT_CLUSTERS = kLightingClusterDimX * kLightingClusterDimY * kLightingClusterDimZ;
 	static constexpr uint32_t MAX_LIGHT_INDEX_ENTRIES = MAX_LIGHT_CLUSTERS * MAX_GLOBAL_LIGHTS;
@@ -590,6 +603,10 @@ struct VulkanContext::Impl {
 		std::vector<VulkanBuffer> clusterDepthSSBOs;
 	std::vector<VulkanBuffer> lightAnalysisSSBOs;
 				std::vector<VulkanBuffer> indirectDrawBuffers;
+				// BeginFrame resets only the fence-proven idle slot. During a frame,
+				// Scene, Game, and capture views append disjoint command ranges here.
+				std::array<std::size_t, MAX_FRAMES_IN_FLIGHT>
+					indirectDrawCommandCounts{};
 				// Each reusable frame slot owns its uploaded crowd records.  A single
 				// bindless index is republished only for the fence-proven idle slot,
 				// which keeps one view's instance stream from racing another in flight.
@@ -1068,6 +1085,10 @@ struct VulkanContext::Impl {
 	std::uint64_t backendFrameSerial = 0u;
 	std::uint64_t rendererRecoveryFrameSerial = 0u;
 	std::uint64_t renderSessionGeneration = 1u;
+	// Swapchain recreation replaces render-pass, framebuffer, and extent-bound
+	// objects without constructing a new Vulkan device. Publications record this
+	// identity so the backend can reject roots prepared for retired objects.
+	std::uint64_t backendResourceGeneration = 1u;
 	ClusterValidationSnapshot previousClusterValidationSnapshot{};
 	bool previousClusterValidationSnapshotValid = false;
 	std::filesystem::path clusterValidationCapturePath = std::filesystem::path("Tools") / "LightingValidation" / "results" / "latest-cluster-validation.json";
@@ -1110,7 +1131,9 @@ struct VulkanContext::Impl {
 	
 		void PublishVirtualGeometryGpuPacketResources(
 			VkCommandBuffer commandBuffer,
-			const FrameRenderData& frameData,
+			const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
+			const TerraEngine::Renderer::RenderFramePublication& publication,
+			std::uint32_t publicationViewIndex,
 			RenderViewType viewType,
 			std::uint32_t viewId,
 			std::uint64_t frameId,
@@ -1123,7 +1146,8 @@ struct VulkanContext::Impl {
 		void DestroyVulkanVirtualGeometryExecutorPipeline();
 		bool EnsureVulkanVirtualGeometryProductionDecodePipeline();
 		void DestroyVulkanVirtualGeometryProductionDecodePipeline();
-		void PrepareVulkanVirtualGeometryProductionDecode(const FrameRenderData& frameData);
+		void PrepareVulkanVirtualGeometryProductionDecode(
+			const TerraEngine::Renderer::RenderViewPresentationInput& presentation);
 		void CompleteVulkanVirtualGeometryProductionDecode(std::uint32_t frameIndex);
 	bool EnsureVulkanVirtualGeometryVisibilityPipelines();
 	VkPipeline EnsureVulkanVirtualGeometryCompositePipeline(
@@ -1139,10 +1163,16 @@ struct VulkanContext::Impl {
 	uint32_t GetSnapshotLightIndexOffset(uint32_t slotIndex) const { return slotIndex * MAX_LIGHT_INDEX_ENTRIES; }
 	// GetSnapshotClusterDepthOffset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	uint32_t GetSnapshotClusterDepthOffset(uint32_t slotIndex) const { return slotIndex * kLightingClusterDimX * kLightingClusterDimY; }
-	// GetSnapshotIndirectDrawOffset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	uint32_t GetSnapshotIndirectDrawOffset(uint32_t slotIndex) const { return slotIndex * MAX_BINDLESS_DRAWS; }
+	// ReserveIndirectDrawCommands returns a non-overlapping current-frame range
+	// after growing the slot's backing allocation when the real command count
+	// exceeds retained capacity. Call it before recording a view's commands.
+	bool ReserveIndirectDrawCommands(
+		std::size_t commandCount,
+		std::uint32_t& commandOffset);
 	void UpdateFrameCullingData(uint32_t statsSlotIndex, const FrameCullingDataGPU& frameData);
-	LightBudgetApplicationResult ApplyFrameLightBudgets(const FrameRenderData& frameData, RenderViewType viewType);
+	LightBudgetApplicationResult ApplyFrameLightBudgets(
+		const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
+		RenderViewType viewType);
 	MeshletCullingCountersGPU ReadMeshletCounters(uint32_t statsSlotIndex) const;
 	uint32_t GetStatsSlotIndex(uint32_t frameIndex, VulkanContext::ViewType view) const;
 	void RecordPendingStats(uint32_t statsSlotIndex, const RenderStatsSnapshot& snapshot);
@@ -1299,6 +1329,8 @@ struct VulkanContext::Impl {
 		std::array<VulkanBuffer, TerraEngine::Animation::kGpuAnimationDescriptorBindingCount> buffers{};
 		std::array<VkDeviceSize, TerraEngine::Animation::kGpuAnimationDescriptorBindingCount> capacities{};
 		TerraEngine::Renderer::Vulkan::VulkanAnimationDescriptorSetPlan descriptorPlan{};
+		TerraEngine::Renderer::Vulkan::VulkanAnimationComputeUploadPlan
+			computeUploadPlan{};
 		std::uint32_t planGeneration = 0U;
 		std::uint32_t rendererGeneration = 0U;
 		std::uint64_t frameId = 0U;
@@ -1318,11 +1350,10 @@ struct VulkanContext::Impl {
 		// same animator/layout sequence. A changed packet order or cooked generation
 		// forces the local-pose buffer back to its stateless bind-pose sentinel.
 		std::vector<VulkanAnimationPoseHistoryIdentity> poseHistoryIdentities;
-		// Frame-slot scratch survives its fence cycle. These vectors are rebuilt
-		// every active frame, so retaining capacity avoids two allocator round trips
-		// without sharing writable upload memory between in-flight frames.
+		// Frame-slot scratch survives its fence cycle. The pose-history vector is
+		// rebuilt every active frame, so retaining capacity avoids allocator traffic.
+		// The graphics bridge is authored directly in its persistently mapped buffer.
 		std::vector<VulkanAnimationPoseHistoryIdentity> poseHistoryScratch;
-		std::vector<VulkanGpuAnimationGraphicsRecord> graphicsBridgeScratch;
 		// Retaining the immutable cooked payload proves both content identity and
 		// lifetime for frame-slot upload reuse. A buffer growth or renderer recovery
 		// clears this owner before any later plan can skip its resident upload.
@@ -1365,6 +1396,10 @@ struct VulkanContext::Impl {
 	TerraEngine::Renderer::Vulkan::VulkanAnimationComputePipelines animationComputePipelines{};
 	TerraEngine::Renderer::Vulkan::VulkanAnimationCommandPlan pendingAnimationCommandPlan{};
 	std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan> pendingAnimationImmutablePlan;
+	// A renderer-side permutation proof allows grouped instance records to use
+	// their sealed packet selectors directly instead of resolving every command
+	// back through persistent/dynamic pages a second time.
+	bool pendingAnimationFullImmutablePlanCoverage = false;
 	std::uint64_t pendingAnimationFrameId = 0U;
 	bool animationComputeRecordedForCurrentFrame = false;
 	bool animationComputeSubmissionMarkedForCurrentFrame = false;
@@ -1616,9 +1651,13 @@ struct VulkanContext::Impl {
 	};
 
 	void CreateSceneViewGridPipeline(VkRenderPass renderPass);
-	void RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRenderData& frameData, VkExtent2D renderExtent);
+	void RenderSceneViewGrid(VkCommandBuffer cmd,
+		const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
+		VkExtent2D renderExtent);
 	void CreateSkyBackgroundPipeline(VkRenderPass renderPass);
-	void RenderSkyBackground(VkCommandBuffer cmd, const FrameRenderData& frameData, VkExtent2D renderExtent);
+	void RenderSkyBackground(VkCommandBuffer cmd,
+		const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
+		VkExtent2D renderExtent);
 
 	// UI Rendering
 	VkPipeline staticUiPipeline = VK_NULL_HANDLE;
@@ -1716,7 +1755,8 @@ struct VulkanContext::Impl {
 	VulkanBuffer CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, const char* name = nullptr);
 	void DestroyBufferImmediate(VulkanBuffer& buffer);
 	void RetireBuffer(VulkanBuffer& buffer);
-	void PublishVirtualGeometryDecodedPageResources(const FrameRenderData& frameData);
+	void PublishVirtualGeometryDecodedPageResources(
+		const TerraEngine::Renderer::RenderViewPresentationInput& presentation);
 	bool PublishVulkanAnimationResources(const TerraEngine::Animation::GpuAnimationPlan& plan, std::uint32_t rendererGeneration);
 	bool PublishVulkanCpuAnimationResources(
 		const TerraEngine::Renderer::CpuAnimationDeformationPlan& plan);

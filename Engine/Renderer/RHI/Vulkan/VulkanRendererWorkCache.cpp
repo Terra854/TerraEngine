@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <limits>
 #include <unordered_set>
 
 namespace TerraEngine::Renderer::Vulkan {
@@ -22,247 +23,81 @@ namespace {
 		return static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(id));
 	}
 
-	std::uint64_t HashResourceRecords(const std::vector<RenderFrameResourceRecord>& records)
+	std::uint64_t HashDescriptorSignature(
+		const RenderFramePublication& publication, std::uint32_t viewId)
 	{
-		std::uint64_t signature = 1469598103934665603ull;
-		for (const RenderFrameResourceRecord& record : records)
-		{
-			HashCombine(signature, HashUuid(record.resourceId));
-			HashCombine(signature, record.resident ? 1u : 0u);
-			HashCombine(signature, record.usingFallback ? 1u : 0u);
-		}
-		return signature;
-	}
-
-	std::uint64_t HashVirtualGeometryRange(const VirtualGeometryDrawRange& range)
-	{
-		std::uint64_t signature = 1469598103934665603ull;
-		HashCombine(signature, range.selectedLodIndex);
-		HashCombine(signature, range.meshletOffset);
-		HashCombine(signature, range.meshletCount);
-		HashCombine(signature, range.virtualGeometryActive ? 1u : 0u);
-		HashCombine(signature, range.failOpen ? 1u : 0u);
-		HashCombine(signature, range.hiZSelfOcclusionGuardPassed ? 1u : 0u);
-		HashCombine(signature, range.hiZNearPlaneGuardPassed ? 1u : 0u);
-		HashCombine(signature, range.hiZThinGeometryGuardPassed ? 1u : 0u);
-		HashCombine(signature, static_cast<std::uint64_t>(std::hash<std::string>{}(range.hiZInactiveReason)));
-		HashCombine(signature, range.selectedClusterOffset);
-		HashCombine(signature, range.selectedClusterCount);
-		HashCombine(signature, range.pageNeedOffset);
-		HashCombine(signature, range.pageNeedCount);
-		HashCombine(signature, range.pageId);
-		HashCombine(signature, range.fallbackPageId);
-		HashCombine(signature, static_cast<std::uint64_t>(range.payloadSource));
-		HashCombine(signature, static_cast<std::uint64_t>(range.emittedSource));
-		HashCombine(signature, range.pagePayloadByteOffset);
-		HashCombine(signature, range.pagePayloadByteSize);
-		HashCombine(signature, range.payloadBufferIndex);
-		HashCombine(signature, range.payloadDescriptorIndex);
-		return signature;
-	}
-
-	template<typename State>
-	void HashVirtualGeometryPacketTables(std::uint64_t& signature, const State& state)
-	{
-		for (const VirtualGeometryClusterPacket& packet : state.ClusterPackets())
-		{
-			HashCombine(signature, packet.packetId);
-			HashCombine(signature, packet.viewId);
-			HashCombine(signature, static_cast<std::uint64_t>(packet.viewType));
-			HashCombine(signature, HashUuid(packet.objectId));
-			HashCombine(signature, HashUuid(packet.meshId));
-			HashCombine(signature, HashUuid(packet.materialId));
-			HashCombine(signature, packet.selectedLod);
-			HashCombine(signature, packet.clusterId);
-			HashCombine(signature, packet.meshletOffset);
-			HashCombine(signature, packet.meshletCount);
-			HashCombine(signature, packet.pageId);
-			HashCombine(signature, packet.fallbackPageId);
-			HashCombine(signature, static_cast<std::uint64_t>(packet.payloadSource));
-			HashCombine(signature, static_cast<std::uint64_t>(packet.emittedSource));
-			HashCombine(signature, packet.pagePayloadByteOffset);
-			HashCombine(signature, packet.pagePayloadByteSize);
-			HashCombine(signature, packet.payloadBufferIndex);
-			HashCombine(signature, packet.payloadDescriptorIndex);
-			HashCombine(signature, static_cast<std::uint64_t>(std::hash<std::string>{}(packet.fallbackReason)));
-			HashCombine(signature, packet.debugIdentity);
-		}
-		for (const ClusterWorkBatch& batch : state.ClusterBatches())
-		{
-			HashCombine(signature, batch.batchId);
-			HashCombine(signature, batch.viewId);
-			HashCombine(signature, HashUuid(batch.meshId));
-			HashCombine(signature, HashUuid(batch.materialId));
-			HashCombine(signature, batch.packetOffset);
-			HashCombine(signature, batch.packetCount);
-			HashCombine(signature, batch.selectedMeshlets);
-			HashCombine(signature, batch.submittedMeshlets);
-			HashCombine(signature, static_cast<std::uint64_t>(batch.fallbackMode));
-		}
-		for (const CompactedVisibilitySet& compaction : state.CompactionResults())
-		{
-			HashCombine(signature, compaction.viewId);
-			HashCombine(signature, compaction.candidatePackets);
-			HashCombine(signature, compaction.visiblePackets);
-			HashCombine(signature, compaction.submittedBatches);
-			HashCombine(signature, static_cast<std::uint64_t>(compaction.source));
-		}
-		for (const GpuVirtualGeometryPacketRecord& packet : state.GpuPacketRecords())
-		{
-			HashCombine(signature, packet.packetId);
-			HashCombine(signature, packet.viewId);
-			HashCombine(signature, static_cast<std::uint64_t>(packet.viewType));
-			HashCombine(signature, packet.frameId);
-			HashCombine(signature, HashUuid(packet.objectId));
-			HashCombine(signature, HashUuid(packet.meshId));
-			HashCombine(signature, HashUuid(packet.materialId));
-			HashCombine(signature, packet.selectedLod);
-			HashCombine(signature, packet.clusterId);
-			HashCombine(signature, packet.meshletOffset);
-			HashCombine(signature, packet.meshletCount);
-			HashCombine(signature, packet.pageId);
-			HashCombine(signature, packet.fallbackPageId);
-			HashCombine(signature, static_cast<std::uint64_t>(packet.payloadSource));
-			HashCombine(signature, static_cast<std::uint64_t>(packet.emittedSource));
-			HashCombine(signature, packet.pagePayloadByteOffset);
-			HashCombine(signature, packet.pagePayloadByteSize);
-			HashCombine(signature, packet.payloadBufferIndex);
-			HashCombine(signature, packet.payloadDescriptorIndex);
-			HashCombine(signature, static_cast<std::uint64_t>(std::hash<std::string>{}(packet.fallbackReason)));
-			HashCombine(signature, packet.debugIdentity);
-			HashCombine(signature, packet.flags);
-		}
-		for (const GpuVirtualGeometryBatchDescriptor& batch : state.GpuBatchDescriptors())
-		{
-			HashCombine(signature, batch.batchId);
-			HashCombine(signature, batch.viewId);
-			HashCombine(signature, batch.frameId);
-			HashCombine(signature, batch.packetOffset);
-			HashCombine(signature, batch.packetCount);
-			HashCombine(signature, HashUuid(batch.meshId));
-			HashCombine(signature, HashUuid(batch.materialId));
-			HashCombine(signature, batch.selectedMeshlets);
-			HashCombine(signature, batch.submittedMeshlets);
-			HashCombine(signature, static_cast<std::uint64_t>(batch.debugMode));
-			HashCombine(signature, static_cast<std::uint64_t>(batch.fallbackMode));
-			HashCombine(signature, batch.flags);
-		}
-		for (const GpuVirtualGeometryPacketFrameSet& frameSet : state.GpuPacketFrameSets())
-		{
-			HashCombine(signature, frameSet.viewId);
-			HashCombine(signature, frameSet.frameId);
-			HashCombine(signature, frameSet.packetOffset);
-			HashCombine(signature, frameSet.packetCount);
-			HashCombine(signature, frameSet.batchOffset);
-			HashCombine(signature, frameSet.batchCount);
-			HashCombine(signature, frameSet.generatedSubmissionOffset);
-			HashCombine(signature, frameSet.generatedSubmissionCount);
-			HashCombine(signature, static_cast<std::uint64_t>(frameSet.validity));
-		}
-		for (const GpuPacketCompactionDispatch& dispatch : state.GpuCompactionDispatches())
-		{
-			HashCombine(signature, dispatch.dispatchId);
-			HashCombine(signature, dispatch.viewId);
-			HashCombine(signature, dispatch.frameId);
-			HashCombine(signature, dispatch.candidatePacketCount);
-			HashCombine(signature, dispatch.candidateBatchCount);
-			HashCombine(signature, dispatch.outputCapacity);
-			HashCombine(signature, static_cast<std::uint64_t>(dispatch.hiZBaselineState));
-			HashCombine(signature, dispatch.failOpenOnInvalid ? 1u : 0u);
-		}
-		for (const GeneratedVirtualGeometrySubmissionRecord& submission : state.GeneratedSubmissions())
-		{
-			HashCombine(signature, submission.recordId);
-			HashCombine(signature, submission.viewId);
-			HashCombine(signature, submission.frameId);
-			HashCombine(signature, submission.batchId);
-			HashCombine(signature, submission.packetOffset);
-			HashCombine(signature, submission.packetCount);
-			HashCombine(signature, submission.indirectTaskCount);
-			HashCombine(signature, HashUuid(submission.materialId));
-			HashCombine(signature, HashUuid(submission.meshId));
-			HashCombine(signature, submission.counterOffset);
-			HashCombine(signature, static_cast<std::uint64_t>(submission.source));
-			HashCombine(signature, static_cast<std::uint64_t>(submission.validationState));
-		}
-		for (const VirtualGeometryCounterReadbackRecord& readback : state.GpuCounterReadbacks())
-		{
-			HashCombine(signature, readback.viewId);
-			HashCombine(signature, readback.frameId);
-			HashCombine(signature, static_cast<std::uint64_t>(readback.source));
-			HashCombine(signature, readback.latencyFrames);
-			HashCombine(signature, readback.candidatePackets);
-			HashCombine(signature, readback.compactedPackets);
-			HashCombine(signature, readback.submittedBatches);
-		}
-	}
-
-	std::uint64_t HashVirtualGeometryBatchPacketSignature(const RenderFrameSnapshot& snapshot)
-	{
-		std::uint64_t signature = snapshot.frameId ^ snapshot.resourceRevision;
-		for (const VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
-		{
-			HashVirtualGeometryPacketTables(signature, state);
-		}
-		for (const VirtualGeometryViewVisibilitySnapshot& state : snapshot.virtualGeometryVisibilitySnapshots)
-		{
-			HashVirtualGeometryPacketTables(signature, state);
-		}
-		return signature;
-	}
-
-	std::uint64_t HashRenderableRecords(const std::vector<RenderFrameRenderableRecord>& records)
-	{
-		std::uint64_t signature = 1099511628211ull;
-		for (const RenderFrameRenderableRecord& record : records)
-		{
-			// Pipeline keys depend only on immutable mesh/material state. Object ids,
-			// transforms, and virtual-geometry draw ranges are payload data; hashing
-			// them invalidated and slowed the cache without changing a pipeline key.
-			HashCombine(signature, HashUuid(record.meshId));
-			HashCombine(signature, HashUuid(record.materialId));
-		}
-		return signature;
-	}
-
-	std::uint64_t HashDescriptorSignature(const RenderFrameSnapshot& snapshot, std::uint32_t viewId)
-	{
-		std::uint64_t signature = snapshot.resourceRevision;
+		std::uint64_t signature = publication.resourcePreparation.generation;
+		HashCombine(signature, publication.rendererSessionGeneration);
+		HashCombine(signature, publication.backendResourceGeneration);
 		HashCombine(signature, viewId);
-		HashCombine(signature, HashResourceRecords(snapshot.materials));
-		HashCombine(signature, HashResourceRecords(snapshot.textures));
+		for(const RenderResourcePreparationRecord& resource :
+			publication.resourcePreparation.records)
+		{
+			HashCombine(signature, HashUuid(resource.resourceId));
+			HashCombine(signature, resource.resourceGeneration);
+			HashCombine(signature, resource.resident ? 1u : 0u);
+		}
 		return signature;
 	}
 
-	std::uint64_t HashPipelineSignature(const RenderFrameSnapshot& snapshot)
+	std::uint64_t HashPipelineSignature(const RenderFramePublication& publication)
 	{
-		std::uint64_t signature = snapshot.resourceRevision;
-		HashCombine(signature, HashRenderableRecords(snapshot.renderables));
+		std::uint64_t signature = publication.resourcePreparation.generation;
+		HashCombine(signature, publication.rendererSessionGeneration);
+		HashCombine(signature, publication.backendResourceGeneration);
+		if(publication.persistent != nullptr)
+		{
+			for(const std::shared_ptr<const RenderPersistentPage>& page :
+				publication.persistent->pages)
+			{
+				if(page == nullptr)
+				{
+					continue;
+				}
+				for(const RenderPersistentSlot& slot : page->slots)
+				{
+					HashCombine(signature, HashUuid(slot.meshId));
+					HashCombine(signature, HashUuid(slot.materialId));
+					HashCombine(signature, slot.packetTemplateIdentity);
+				}
+			}
+		}
 		return signature;
 	}
 
-	std::uint64_t HashUploadSignature(const RenderFrameSnapshot& snapshot)
+	std::uint64_t HashUploadSignature(const RenderFramePublication& publication)
 	{
-		std::uint64_t signature = snapshot.resourceRevision;
-		HashCombine(signature, HashResourceRecords(snapshot.meshes));
-		HashCombine(signature, HashResourceRecords(snapshot.textures));
+		std::uint64_t signature = publication.resourcePreparation.generation;
+		HashCombine(signature, publication.rendererSessionGeneration);
+		HashCombine(signature, publication.backendResourceGeneration);
+		for(const RenderResourcePreparationRecord& resource :
+			publication.resourcePreparation.records)
+		{
+			HashCombine(signature, HashUuid(resource.resourceId));
+			HashCombine(signature, resource.resourceGeneration);
+			HashCombine(signature, resource.resident ? 1u : 0u);
+		}
 		return signature;
 	}
 
-	std::uint64_t HashPersistentPacketSignature(const RenderFrameRenderableRecord& record)
+	std::uint64_t HashPersistentPacketSignature(const RenderFramePublication& publication,
+		const RenderPersistentSlot& slot)
 	{
-		std::uint64_t signature = HashUuid(record.meshId);
-		HashCombine(signature, HashUuid(record.materialId));
-		HashCombine(signature, record.taskShaderCullingEnabled ? 1u : 0u);
-		HashCombine(signature, HashVirtualGeometryRange(record.virtualGeometry));
+		std::uint64_t signature = HashUuid(slot.meshId);
+		HashCombine(signature, publication.rendererSessionGeneration);
+		HashCombine(signature, publication.backendResourceGeneration);
+		HashCombine(signature, HashUuid(slot.materialId));
+		HashCombine(signature, slot.packetTemplateIdentity);
+		HashCombine(signature, slot.routeTemplate);
 		return signature;
 	}
 }
 
-	CachedDescriptorBindingPlan VulkanRendererPreparationCache::GetDescriptorPlan(const RenderFrameSnapshot& snapshot, std::uint32_t viewId)
+	CachedDescriptorBindingPlan VulkanRendererPreparationCache::GetDescriptorPlan(
+		const RenderFramePublication& publication, std::uint32_t viewId)
 	{
 		CachedDescriptorBindingPlan result;
-		result.signature = HashDescriptorSignature(snapshot, viewId);
+		result.signature = HashDescriptorSignature(publication, viewId);
 		if (const auto existing = descriptorPlanCache.find(result.signature); existing != descriptorPlanCache.end())
 		{
 			result.plan = existing->second;
@@ -270,16 +105,17 @@ namespace {
 			return result;
 		}
 
-		result.plan = BuildDescriptorBindingPlan(snapshot, viewId);
+		result.plan = BuildDescriptorBindingPlan(publication, viewId);
 		descriptorPlanCache[result.signature] = result.plan;
 		TrimCachesIfNeeded();
 		return result;
 	}
 
-	CachedPipelineStateKeyPlan VulkanRendererPreparationCache::GetPipelineStateKeys(const RenderFrameSnapshot& snapshot)
+	CachedPipelineStateKeyPlan VulkanRendererPreparationCache::GetPipelineStateKeys(
+		const RenderFramePublication& publication)
 	{
 		CachedPipelineStateKeyPlan result;
-		result.signature = HashPipelineSignature(snapshot);
+		result.signature = HashPipelineSignature(publication);
 		if (const auto existing = pipelineKeyCache.find(result.signature); existing != pipelineKeyCache.end())
 		{
 			result.keys = existing->second;
@@ -287,16 +123,17 @@ namespace {
 			return result;
 		}
 
-		result.keys = BuildPipelineStateKeys(snapshot);
+		result.keys = BuildPipelineStateKeys(publication);
 		pipelineKeyCache[result.signature] = result.keys;
 		TrimCachesIfNeeded();
 		return result;
 	}
 
-	CachedUploadPreparationPlan VulkanRendererPreparationCache::GetUploadPlan(const RenderFrameSnapshot& snapshot)
+	CachedUploadPreparationPlan VulkanRendererPreparationCache::GetUploadPlan(
+		const RenderFramePublication& publication)
 	{
 		CachedUploadPreparationPlan result;
-		result.signature = HashUploadSignature(snapshot);
+		result.signature = HashUploadSignature(publication);
 		if (const auto existing = uploadPlanCache.find(result.signature); existing != uploadPlanCache.end())
 		{
 			result.plan = existing->second;
@@ -304,7 +141,7 @@ namespace {
 		}
 		else
 		{
-			result.plan = BuildUploadPreparationPlan(snapshot);
+			result.plan = BuildUploadPreparationPlan(publication);
 			uploadPlanCache[result.signature] = result.plan;
 			TrimCachesIfNeeded();
 		}
@@ -320,26 +157,42 @@ namespace {
 		return result;
 	}
 
-	PersistentRenderPacketCacheStats VulkanRendererPreparationCache::RefreshPersistentRenderPackets(const RenderFrameSnapshot& snapshot)
+	PersistentRenderPacketCacheStats VulkanRendererPreparationCache::RefreshPersistentRenderPackets(
+		const RenderFramePublication& publication)
 	{
 		PersistentRenderPacketCacheStats stats;
-		stats.packetCount = snapshot.renderables.size();
 		std::unordered_set<TerraEngine::UUID> aliveObjects;
-		aliveObjects.reserve(snapshot.renderables.size());
-
-		for (const RenderFrameRenderableRecord& renderable : snapshot.renderables)
+		if(publication.persistent == nullptr)
 		{
-			aliveObjects.insert(renderable.objectId);
-			const std::uint64_t signature = HashPersistentPacketSignature(renderable);
-			const auto existing = persistentRenderPacketSignatures.find(renderable.objectId);
-			if (existing != persistentRenderPacketSignatures.end() && existing->second == signature)
+			return stats;
+		}
+		for(const std::shared_ptr<const RenderPersistentPage>& page :
+			publication.persistent->pages)
+		{
+			if(page == nullptr)
 			{
-				++stats.cacheHits;
+				continue;
 			}
-			else
+			for(const RenderPersistentSlot& slot : page->slots)
 			{
-				++stats.cacheMisses;
-				persistentRenderPacketSignatures[renderable.objectId] = signature;
+				if(!slot.IsComplete())
+				{
+					continue;
+				}
+				++stats.packetCount;
+				aliveObjects.insert(slot.objectId);
+				const std::uint64_t signature = HashPersistentPacketSignature(publication, slot);
+				const auto existing = persistentRenderPacketSignatures.find(slot.objectId);
+				if(existing != persistentRenderPacketSignatures.end()
+					&& existing->second == signature)
+				{
+					++stats.cacheHits;
+				}
+				else
+				{
+					++stats.cacheMisses;
+					persistentRenderPacketSignatures[slot.objectId] = signature;
+				}
 			}
 		}
 
@@ -387,55 +240,142 @@ namespace {
 	}
 
 	VulkanRendererPreparationSummary VulkanRendererPreparationCache::BuildFramePreparation(
-		const RenderFrameSnapshot& snapshot,
+		const RenderFramePublication& publication,
 		const std::vector<RenderPassNode>& passes,
 		const BackendCapabilityProfile& capabilities,
 		bool collectPersistentPacketDiagnostics)
 	{
+		PrepareForBackendGeneration(publication);
 		VulkanRendererPreparationSummary summary;
-		summary.frameId = snapshot.frameId;
-		for (const RenderFrameViewRequest& view : snapshot.viewRequests)
+		summary.frameId = publication.frameId;
+		for(const RenderViewSelection& view : publication.views)
 		{
-			CachedDescriptorBindingPlan descriptorPlan = GetDescriptorPlan(snapshot, view.outputId);
+			CachedDescriptorBindingPlan descriptorPlan = GetDescriptorPlan(
+				publication, view.outputId);
 			summary.cacheLookupCount += 1u;
 			summary.cacheHitCount += descriptorPlan.cacheHit ? 1u : 0u;
 			summary.descriptorPlans.push_back(std::move(descriptorPlan));
 		}
 
-		summary.pipelineKeys = GetPipelineStateKeys(snapshot);
+		summary.pipelineKeys = GetPipelineStateKeys(publication);
 		summary.cacheLookupCount += 1u;
 		summary.cacheHitCount += summary.pipelineKeys.cacheHit ? 1u : 0u;
 
-		summary.uploadPlan = GetUploadPlan(snapshot);
+		summary.uploadPlan = GetUploadPlan(publication);
 		summary.cacheLookupCount += 1u;
 		summary.cacheHitCount += summary.uploadPlan.cacheHit ? 1u : 0u;
 
 		summary.transitionPlans.reserve(passes.size());
 		for (const RenderPassNode& pass : passes)
 		{
-			summary.transitionPlans.push_back(BuildResourceTransitionPlan(snapshot.frameId, pass));
+			summary.transitionPlans.push_back(BuildResourceTransitionPlan(
+				publication.frameId, pass));
 		}
 
 		if(collectPersistentPacketDiagnostics)
 		{
-			summary.renderPacketCache = RefreshPersistentRenderPackets(snapshot);
+			summary.renderPacketCache = RefreshPersistentRenderPackets(publication);
 		}
 		else
 		{
 			// Packet-cache scans exist only to report hit/miss diagnostics. Preserve
 			// the useful population count while keeping the compact production path
 			// free of an otherwise redundant O(instance-count) hash/map pass.
-			summary.renderPacketCache.packetCount = snapshot.renderables.size();
+			if(publication.persistent != nullptr)
+			{
+				for(const std::shared_ptr<const RenderPersistentPage>& page :
+					publication.persistent->pages)
+				{
+					summary.renderPacketCache.packetCount += page != nullptr
+						? page->slots.size() : 0u;
+				}
+			}
 		}
-		summary.visibilityPlan = BuildVisibilityPreparationPlan(snapshot, capabilities);
-		summary.indirectDrawPlan = BuildIndirectDrawPreparationPlan(snapshot, capabilities);
-		summary.shadowPlan = BuildShadowRecordingPreparationPlan(snapshot, capabilities);
-		summary.shaderMaterialPlan = BuildShaderMaterialPreparationPlan(snapshot, capabilities);
-		summary.uiPlan = BuildUiGeometryPreparationPlan(snapshot, capabilities);
-		summary.retiredResources = RetireCompletedResources(snapshot.frameId > 2u ? snapshot.frameId - 2u : 0u);
+		for(std::size_t viewIndex = 0u; viewIndex < publication.views.size(); ++viewIndex)
+		{
+			const RenderViewSelection& view = publication.views[viewIndex];
+			summary.visibilityPlan.renderableCount += view.VisibleOrdinals().size();
+			summary.indirectDrawPlan.drawCount += view.VisibleOrdinals().size();
+			summary.indirectDrawPlan.instancePayloadCount += view.VisibleOrdinals().size();
+			if(viewIndex >= publication.presentationInputs.size())
+			{
+				continue;
+			}
+			const RenderViewPresentationInput& input = publication.presentationInputs[viewIndex];
+			summary.visibilityPlan.lightCount += input.lightCandidates.size();
+			summary.shadowPlan.shadowLightCount += input.shadowDrawLists.size();
+			summary.uiPlan.viewCount += 1u;
+			summary.indirectDrawPlan.virtualGeometryGpuPacketRecordCount +=
+				input.VirtualGeometryPackets().size();
+			summary.indirectDrawPlan.virtualGeometryGpuBatchDescriptorCount +=
+				input.VirtualGeometryBatches().size();
+			summary.indirectDrawPlan.virtualGeometryGpuPacketFrameSetCount +=
+				input.VirtualGeometryFrameSets().size();
+			summary.indirectDrawPlan.virtualGeometryGpuCompactionDispatchCount +=
+				input.VirtualGeometryCompactionDispatches().size();
+			summary.indirectDrawPlan.virtualGeometryGeneratedSubmissionCount +=
+				input.VirtualGeometryGeneratedSubmissions().size();
+			summary.indirectDrawPlan.virtualGeometryCounterReadbackCount +=
+				input.VirtualGeometryCounterReadbacks().size();
+		}
+		const std::size_t workload = summary.visibilityPlan.renderableCount
+			+ summary.visibilityPlan.lightCount;
+		summary.visibilityPlan.workerEligible = capabilities.supportsParallelCulling
+			&& workload >= kParallelPreparationThreshold;
+		summary.visibilityPlan.chunkCount = summary.visibilityPlan.workerEligible
+			? std::min<std::size_t>(std::max<std::uint32_t>(1u,
+				capabilities.maxRecordingWorkers), workload)
+			: 1u;
+		summary.indirectDrawPlan.gpuDrivenEligible =
+			capabilities.supportsParallelRecording
+			&& summary.indirectDrawPlan.drawCount != 0u;
+		summary.indirectDrawPlan.gpuPacketBuffersEligible =
+			capabilities.supportsVirtualGeometryGpuPacketBuffers
+			&& summary.indirectDrawPlan.virtualGeometryGpuPacketRecordCount != 0u;
+		summary.indirectDrawPlan.gpuCompactionEligible =
+			capabilities.supportsVirtualGeometryGpuCompaction
+			&& summary.indirectDrawPlan.gpuPacketBuffersEligible;
+		summary.indirectDrawPlan.generatedSubmissionEligible =
+			capabilities.supportsVirtualGeometryGeneratedSubmissions
+			&& summary.indirectDrawPlan.gpuCompactionEligible;
+		summary.indirectDrawPlan.counterReadbackEligible =
+			capabilities.supportsVirtualGeometryCounterReadback
+			&& summary.indirectDrawPlan.virtualGeometryGpuPacketRecordCount != 0u;
+		summary.shadowPlan.workerEligible = capabilities.supportsParallelRecording
+			&& summary.shadowPlan.shadowLightCount != 0u;
+		summary.shadowPlan.secondaryRecordingCount = summary.shadowPlan.workerEligible
+			? summary.shadowPlan.shadowLightCount : 0u;
+		summary.shaderMaterialPlan.materialCount = summary.pipelineKeys.keys.size();
+		summary.shaderMaterialPlan.shaderVariantCount = summary.pipelineKeys.keys.size();
+		summary.shaderMaterialPlan.workerEligible = capabilities.supportsParallelRecording
+			&& summary.shaderMaterialPlan.materialCount != 0u;
+		summary.uiPlan.workerEligible = capabilities.supportsParallelRecording
+			&& summary.uiPlan.viewCount != 0u;
+		summary.retiredResources = RetireCompletedResources(
+			publication.frameId > 2u ? publication.frameId - 2u : 0u);
 		summary.waitingRetirements.assign(pendingRetirements.begin(), pendingRetirements.end());
 		summary.diagnostics = DrainThreadDiagnostics();
 		return summary;
+	}
+
+	void VulkanRendererPreparationCache::PrepareForBackendGeneration(
+		const RenderFramePublication& publication)
+	{
+		if (observedRendererSessionGeneration == publication.rendererSessionGeneration
+			&& observedBackendResourceGeneration == publication.backendResourceGeneration) {
+			return;
+		}
+		// These plans contain only values, but pipeline keys and upload/retirement
+		// decisions are meaningful only for one backend object generation. Drop all
+		// retained plans before preparing against a newly recovered backend.
+		descriptorPlanCache.clear();
+		pipelineKeyCache.clear();
+		uploadPlanCache.clear();
+		persistentRenderPacketSignatures.clear();
+		pendingUploadPlans.clear();
+		pendingRetirements.clear();
+		observedRendererSessionGeneration = publication.rendererSessionGeneration;
+		observedBackendResourceGeneration = publication.backendResourceGeneration;
 	}
 
 	void VulkanRendererPreparationCache::TrimCachesIfNeeded()
@@ -462,12 +402,21 @@ namespace {
 	}
 
 	VisibilityPreparationPlan BuildVisibilityPreparationPlan(
-		const RenderFrameSnapshot& snapshot,
+		const RenderFramePublication& publication,
 		const BackendCapabilityProfile& capabilities)
 	{
 		VisibilityPreparationPlan plan;
-		plan.renderableCount = snapshot.renderables.size();
-		plan.lightCount = snapshot.lights.size();
+		// Each selected ordinal resolves through the sealed topology/dynamic roots.
+		// The publication deliberately owns no copied renderable table, so this count
+		// preserves the per-view workload without reopening the worker snapshot.
+		for (const RenderViewSelection& view : publication.views)
+		{
+			plan.renderableCount += view.VisibleOrdinals().size();
+		}
+		for (const RenderViewPresentationInput& input : publication.presentationInputs)
+		{
+			plan.lightCount += input.lightCandidates.size();
+		}
 		const std::size_t workload = plan.renderableCount + plan.lightCount;
 		plan.workerEligible = capabilities.supportsParallelCulling && workload >= kParallelPreparationThreshold;
 		plan.chunkCount = plan.workerEligible ? std::min<std::size_t>(std::max<std::uint32_t>(1u, capabilities.maxRecordingWorkers), workload) : 1u;
@@ -475,38 +424,57 @@ namespace {
 	}
 
 	IndirectDrawPreparationPlan BuildIndirectDrawPreparationPlan(
-		const RenderFrameSnapshot& snapshot,
+		const RenderFramePublication& publication,
 		const BackendCapabilityProfile& capabilities)
 	{
 		IndirectDrawPreparationPlan plan;
-		plan.drawCount = snapshot.renderables.size();
-		plan.instancePayloadCount = snapshot.renderables.size();
-		for (const VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
+		std::uint64_t signature = publication.frameId ^ publication.resourcePreparation.generation;
+		for (const RenderViewSelection& view : publication.views)
 		{
-			plan.virtualGeometryClusterPacketCount += state.ClusterPackets().size();
-			plan.virtualGeometryBatchCount += state.ClusterBatches().size();
-			plan.virtualGeometryCompactionResultCount += state.CompactionResults().size();
-			plan.virtualGeometryGpuPacketRecordCount += state.GpuPacketRecords().size();
-			plan.virtualGeometryGpuBatchDescriptorCount += state.GpuBatchDescriptors().size();
-			plan.virtualGeometryGpuPacketFrameSetCount += state.GpuPacketFrameSets().size();
-			plan.virtualGeometryGpuCompactionDispatchCount += state.GpuCompactionDispatches().size();
-			plan.virtualGeometryGeneratedSubmissionCount += state.GeneratedSubmissions().size();
-			plan.virtualGeometryCounterReadbackCount += state.GpuCounterReadbacks().size();
+			plan.drawCount += view.VisibleOrdinals().size();
+			plan.instancePayloadCount += view.VisibleOrdinals().size();
+			HashCombine(signature, view.generation);
+			for (const RenderSlotGenerationKey& key : view.VisibleOrdinals())
+			{
+				HashCombine(signature, key.ordinal);
+				HashCombine(signature, key.lifetimeGeneration);
+			}
 		}
-		for (const VirtualGeometryViewVisibilitySnapshot& state : snapshot.virtualGeometryVisibilitySnapshots)
+		for (const RenderViewPresentationInput& input : publication.presentationInputs)
 		{
-			plan.virtualGeometryClusterPacketCount += state.clusterPackets.size();
-			plan.virtualGeometryBatchCount += state.clusterBatches.size();
-			plan.virtualGeometryCompactionResultCount += state.compactionResults.size();
-			plan.virtualGeometryGpuPacketRecordCount += state.GpuPacketRecords().size();
-			plan.virtualGeometryGpuBatchDescriptorCount += state.GpuBatchDescriptors().size();
-			plan.virtualGeometryGpuPacketFrameSetCount += state.GpuPacketFrameSets().size();
-			plan.virtualGeometryGpuCompactionDispatchCount += state.GpuCompactionDispatches().size();
-			plan.virtualGeometryGeneratedSubmissionCount += state.GeneratedSubmissions().size();
-			plan.virtualGeometryCounterReadbackCount += state.GpuCounterReadbacks().size();
+			const auto& packets = input.VirtualGeometryPackets();
+			const auto& batches = input.VirtualGeometryBatches();
+			plan.virtualGeometryClusterPacketCount += packets.size();
+			plan.virtualGeometryBatchCount += batches.size();
+			plan.virtualGeometryGpuPacketRecordCount += packets.size();
+			plan.virtualGeometryGpuBatchDescriptorCount += batches.size();
+			plan.virtualGeometryGpuPacketFrameSetCount += input.VirtualGeometryFrameSets().size();
+			plan.virtualGeometryGpuCompactionDispatchCount += input.VirtualGeometryCompactionDispatches().size();
+			plan.virtualGeometryGeneratedSubmissionCount += input.VirtualGeometryGeneratedSubmissions().size();
+			plan.virtualGeometryCounterReadbackCount += input.VirtualGeometryCounterReadbacks().size();
+			// Packet evidence is intentionally part of the compact publication. Hash
+			// the immutable records rather than trusting a producer-provided summary
+			// token so a changed debug identity or buffer binding invalidates Vulkan
+			// preparation deterministically.
+			for (const GpuVirtualGeometryPacketRecord& packet : packets)
+			{
+				HashCombine(signature, packet.packetId);
+				HashCombine(signature, packet.debugIdentity);
+				HashCombine(signature, packet.flags);
+				HashCombine(signature, packet.payloadBufferIndex);
+				HashCombine(signature, packet.payloadDescriptorIndex);
+			}
+			for (const GpuVirtualGeometryBatchDescriptor& batch : batches)
+			{
+				HashCombine(signature, batch.batchId);
+				HashCombine(signature, static_cast<std::uint64_t>(batch.debugMode));
+				HashCombine(signature, batch.flags);
+			}
+			HashCombine(signature, input.virtualGeometryPacketEvidenceSignature);
+			HashCombine(signature, input.virtualGeometryVisibilitySetupSignature);
 		}
-		plan.virtualGeometryBatchPacketSignature = HashVirtualGeometryBatchPacketSignature(snapshot);
-		plan.gpuDrivenEligible = capabilities.supportsParallelRecording && !snapshot.renderables.empty();
+		plan.virtualGeometryBatchPacketSignature = signature;
+		plan.gpuDrivenEligible = capabilities.supportsParallelRecording && plan.drawCount != 0u;
 		plan.gpuPacketBuffersEligible = capabilities.supportsVirtualGeometryGpuPacketBuffers
 			&& plan.virtualGeometryClusterPacketCount > 0u;
 		plan.gpuCompactionEligible = capabilities.supportsVirtualGeometryGpuCompaction
@@ -515,6 +483,47 @@ namespace {
 			&& plan.gpuCompactionEligible;
 		plan.counterReadbackEligible = capabilities.supportsVirtualGeometryCounterReadback
 			&& (plan.virtualGeometryGpuPacketRecordCount > 0u || plan.virtualGeometryClusterPacketCount > 0u);
+		return plan;
+	}
+
+	IndirectDrawBufferCapacityPlan PlanIndirectDrawBufferCapacity(
+		std::size_t currentCommandCapacity,
+		std::size_t usedCommandCount,
+		std::size_t requestedCommandCount)
+	{
+		IndirectDrawBufferCapacityPlan plan{};
+		// An overflowing command count would wrap push-constant offsets and make
+		// two views address the same indirect record. Reject it before choosing a
+		// new allocation so the caller cannot publish a partial command stream.
+		if (usedCommandCount > std::numeric_limits<std::size_t>::max()
+			- requestedCommandCount)
+		{
+			return plan;
+		}
+
+		plan.commandOffset = usedCommandCount;
+		plan.requiredCommandCount = usedCommandCount + requestedCommandCount;
+		plan.targetCommandCapacity = currentCommandCapacity;
+		if (plan.targetCommandCapacity < plan.requiredCommandCount)
+		{
+			// Geometric growth amortizes large crowds while retaining the exact
+			// requested floor. This is an initial allocation policy, not a draw cap.
+			plan.targetCommandCapacity = std::max<std::size_t>(
+				currentCommandCapacity, 1024u);
+			while (plan.targetCommandCapacity < plan.requiredCommandCount)
+			{
+				if (plan.targetCommandCapacity
+					> std::numeric_limits<std::size_t>::max() / 2u)
+				{
+					plan.targetCommandCapacity = plan.requiredCommandCount;
+					break;
+				}
+				plan.targetCommandCapacity *= 2u;
+			}
+			plan.requiresGrowth = true;
+		}
+
+		plan.valid = true;
 		return plan;
 	}
 
@@ -592,42 +601,62 @@ namespace {
 	}
 
 	ShadowRecordingPreparationPlan BuildShadowRecordingPreparationPlan(
-		const RenderFrameSnapshot& snapshot,
+		const RenderFramePublication& publication,
 		const BackendCapabilityProfile& capabilities)
 	{
 		ShadowRecordingPreparationPlan plan;
-		for (const RenderFrameLightRecord& light : snapshot.lights)
+		for (const RenderViewPresentationInput& input : publication.presentationInputs)
 		{
-			if (!light.castsShadows)
+			for (const ShadowDrawList& shadow : input.shadowDrawLists)
 			{
-				continue;
+				// One shadow list is already split by target face/cascade. Its item
+				// count is the sealed secondary-recording workload Vulkan must own.
+				++plan.shadowLightCount;
+				plan.secondaryRecordingCount += std::max<std::size_t>(1u, shadow.stableOrdinals.size());
 			}
-			++plan.shadowLightCount;
-			plan.secondaryRecordingCount += light.lightType == 1u ? 6u : 1u;
 		}
 		plan.workerEligible = capabilities.supportsParallelShadowRecording && capabilities.supportsSecondaryRecording && plan.secondaryRecordingCount > 1u;
 		return plan;
 	}
 
 	ShaderMaterialPreparationPlan BuildShaderMaterialPreparationPlan(
-		const RenderFrameSnapshot& snapshot,
+		const RenderFramePublication& publication,
 		const BackendCapabilityProfile& capabilities)
 	{
 		ShaderMaterialPreparationPlan plan;
-		plan.materialCount = snapshot.materials.size();
-		plan.shaderVariantCount = snapshot.materials.size();
+		std::unordered_set<TerraEngine::UUID> materials;
+		if (publication.persistent != nullptr)
+		{
+			for (const std::shared_ptr<const RenderPersistentPage>& page : publication.persistent->pages)
+			{
+				if (page == nullptr)
+				{
+					continue;
+				}
+				for (const RenderPersistentSlot& slot : page->slots)
+				{
+					if (slot.IsComplete())
+					{
+						materials.insert(slot.materialId);
+					}
+				}
+			}
+		}
+		plan.materialCount = materials.size();
+		plan.shaderVariantCount = plan.materialCount;
 		plan.workerEligible = capabilities.supportsParallelPipelineStatePreparation && plan.materialCount >= kParallelPreparationThreshold;
 		return plan;
 	}
 
 	UiGeometryPreparationPlan BuildUiGeometryPreparationPlan(
-		const RenderFrameSnapshot& snapshot,
+		const RenderFramePublication& publication,
 		const BackendCapabilityProfile& capabilities)
 	{
 		UiGeometryPreparationPlan plan;
-		for (const RenderFrameViewRequest& view : snapshot.viewRequests)
+		for (const RenderViewPresentationInput& input : publication.presentationInputs)
 		{
-			if (view.viewType == RenderViewType::Game || view.viewType == RenderViewType::Scene)
+			if (input.output.diagnosticsView == RenderViewType::Game
+				|| input.output.diagnosticsView == RenderViewType::Scene)
 			{
 				++plan.viewCount;
 				plan.estimatedVertexCount += 6u;

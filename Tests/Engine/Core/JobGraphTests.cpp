@@ -384,6 +384,59 @@ namespace TerraEngine::Tests {
 			}
 		});
 
+		registry.Add("Engine.JobGraph.CompletionDrivenDispatchDoesNotWaitForSlowSibling", [](TestContext& context) {
+			ThreadPoolSession session;
+			TerraEngine::Scheduling::JobGraph graph("completion-driven", "Completion Driven");
+			std::atomic_bool slowStarted = false;
+			std::atomic_bool slowFinished = false;
+			std::atomic_bool dependentRanBeforeSlowFinished = false;
+
+			auto fast = MakeJob("Fast", TerraEngine::Scheduling::JobGraphExecutionPolicy::WorkerEligible);
+			fast.work = [&slowStarted](TerraEngine::Scheduling::JobGraphContext&) {
+				while (!slowStarted.load(std::memory_order_acquire))
+				{
+					std::this_thread::yield();
+				}
+			};
+			const auto fastHandle = graph.AddJob(std::move(fast));
+
+			auto slow = MakeJob("Slow", TerraEngine::Scheduling::JobGraphExecutionPolicy::WorkerEligible);
+			slow.work = [&slowStarted, &slowFinished](TerraEngine::Scheduling::JobGraphContext&) {
+				slowStarted.store(true, std::memory_order_release);
+				std::this_thread::sleep_for(std::chrono::milliseconds(60));
+				slowFinished.store(true, std::memory_order_release);
+			};
+			graph.AddJob(std::move(slow));
+
+			auto dependent = MakeJob("FastDependent", TerraEngine::Scheduling::JobGraphExecutionPolicy::WorkerEligible);
+			dependent.dependencies = { fastHandle };
+			dependent.work = [&slowFinished, &dependentRanBeforeSlowFinished](TerraEngine::Scheduling::JobGraphContext&) {
+				dependentRanBeforeSlowFinished.store(
+					!slowFinished.load(std::memory_order_acquire), std::memory_order_release);
+			};
+			graph.AddJob(std::move(dependent));
+
+			const TerraEngine::Scheduling::JobGraphSummary& summary = graph.Execute();
+			context.Expect(summary.valid && summary.completed,
+				"Completion-driven fixture should execute successfully.");
+			context.Expect(dependentRanBeforeSlowFinished.load(std::memory_order_acquire),
+				"A fast dependency chain should continue while an unrelated slow sibling remains active.");
+			context.Expect(summary.completionDrivenDispatchCount >= 1u,
+				"Structured diagnostics should count worker work dispatched from an early completion.");
+			context.Expect(summary.dependencyWaveCount >= 2u
+				&& summary.peakConcurrentWorkerCount >= 2u
+				&& summary.criticalPathDurationNs != 0u,
+				"Scheduler diagnostics should expose wave depth, concurrency, and measured critical path.");
+			context.Expect(std::all_of(summary.jobs.begin(), summary.jobs.end(),
+				[](const TerraEngine::Scheduling::JobGraphResultEntry& entry) {
+					return entry.kind != TerraEngine::Scheduling::JobGraphNodeKind::Job
+						|| entry.executionPolicy
+							!= TerraEngine::Scheduling::JobGraphExecutionPolicy::WorkerEligible
+						|| entry.completionSequence != 0u;
+				}),
+				"Every completed worker result must retain its observed completion sequence.");
+		});
+
 		registry.Add("Engine.JobGraph.SchedulerLoweringPreservesPhasesSystemsAndFlushes", [](TestContext& context) {
 			FakeSystem scene("SceneSystem");
 			FakeSystem render("RenderSystem");

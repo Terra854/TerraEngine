@@ -11,6 +11,7 @@
 
 #include <glm/gtc/quaternion.hpp>
 
+#include <atomic>
 #include <stdexcept>
 
 namespace
@@ -326,11 +327,29 @@ TerraEngine::Scene::SceneChangePacket ObjectManager::PublishSceneChangePacket()
 	sortByObjectId(transformChanged); sortHierarchy(hierarchyChanged); sortByObjectId(boundsChanged);
 	pendingSceneChanges.clear();
 
-	return TerraEngine::Scene::SceneChangePacket::Create(
+	TerraEngine::Scene::SceneChangePacket packet = TerraEngine::Scene::SceneChangePacket::Create(
 		sceneGeneration,
 		++sceneChangePublicationRevision,
 		std::move(added), std::move(removed), std::move(metadataChanged), std::move(componentChanged),
 		std::move(transformChanged), std::move(hierarchyChanged), std::move(boundsChanged));
+	std::atomic_store_explicit(
+		&publishedSceneChangePacket,
+		std::make_shared<const TerraEngine::Scene::SceneChangePacket>(packet),
+		std::memory_order_release);
+	return packet;
+}
+
+TerraEngine::Scene::SceneChangePacket ObjectManager::LoadPublishedSceneChangePacket() const
+{
+	const std::shared_ptr<const TerraEngine::Scene::SceneChangePacket> packet =
+		LoadPublishedSceneChangePacketShared();
+	return packet != nullptr ? *packet : TerraEngine::Scene::SceneChangePacket{};
+}
+
+std::shared_ptr<const TerraEngine::Scene::SceneChangePacket>
+	ObjectManager::LoadPublishedSceneChangePacketShared() const noexcept
+{
+	return std::atomic_load_explicit(&publishedSceneChangePacket, std::memory_order_acquire);
 }
 
 void ObjectManager::invalidateRuntimeActiveMembership()
@@ -1441,6 +1460,13 @@ void ObjectManager::clear()
 	componentValueMutationRevisions.clear();
 	}
 	pendingSceneChanges.clear();
+	// A packet from the previous scene lifetime must never be observed while the
+	// next scene is loading. The following protected frame capture publishes an
+	// empty/new-scene packet with the advanced generation when appropriate.
+	std::atomic_store_explicit(
+		&publishedSceneChangePacket,
+		std::shared_ptr<const TerraEngine::Scene::SceneChangePacket>{},
+		std::memory_order_release);
 	registry.clear();
 	metadataMap.clear();
 	parentMap.clear();

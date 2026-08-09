@@ -374,8 +374,19 @@ public:
 	std::uint64_t GetHierarchyRevision() const { return hierarchyRevision; }
 	// Capture all exact changes committed since the prior publication. This
 	// mutates only the protected-side journal; workers receive the returned
-	// immutable packet and must never call this method themselves.
+	// immutable packet and must never call this method themselves. The method
+	// also updates the shared frame packet so every consumer observes the same
+	// publication instead of independently draining the journal.
 	TerraEngine::Scene::SceneChangePacket PublishSceneChangePacket();
+	// Load the last packet captured at a protected frame boundary. The atomic
+	// shared-owner load is safe for worker preparation and does not touch live
+	// object/component storage.
+	TerraEngine::Scene::SceneChangePacket LoadPublishedSceneChangePacket() const;
+	// Acquire the retained immutable packet without copying its change arrays.
+	// Renderer and editor preparation keep this owner for the whole frame so a
+	// later protected publication cannot invalidate their exact scene delta.
+	std::shared_ptr<const TerraEngine::Scene::SceneChangePacket>
+		LoadPublishedSceneChangePacketShared() const noexcept;
 	std::uint64_t GetSceneGeneration() const { return sceneGeneration; }
 	std::uint64_t GetObjectTransformRevision(const Object& object) const;
 	std::uint64_t GetObjectSpatialRevision(const Object& object) const;
@@ -418,6 +429,10 @@ private:
 		std::uint32_t kinds = 0;
 	};
 	std::unordered_map<TerraEngine::UUID, PendingSceneChange> pendingSceneChanges;
+	// PublishSceneChangePacket atomically replaces this immutable value. A
+	// shared pointer is used so in-flight readers retain the exact scene delta
+	// even when the next protected boundary publishes another packet.
+	std::shared_ptr<const TerraEngine::Scene::SceneChangePacket> publishedSceneChangePacket;
 	std::uint64_t nextObjectGeneration = 1;
 	bool bulkPublicationActive = false;
 	bool bulkPublicationChanged = false;

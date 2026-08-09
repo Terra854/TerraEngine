@@ -30,9 +30,10 @@ namespace TerraEngine::Tests
 			const auto dynamic = BuildDynamicRenderFrameState(snapshot, topology, view, 8u);
 			context.Expect(dynamic.valid, "Shared submission preparation must publish a complete dynamic state.");
 			context.Expect(!dynamic.groups.empty(), "Compatible repeated instances must form an executable group.");
-			context.Expect(!dynamic.fallbackCommands.empty(), "An isolated fallback member must retain its complete command.");
+			context.Expect(!dynamic.singletonOrdinals.empty(), "An isolated member must retain its stable publication ordinal.");
 			context.ExpectEqual(2u, dynamic.groups.front().instanceCount, "Grouped instance count must exclude the incompatible member.");
-			context.Expect(snapshot.renderables[2].objectId == dynamic.fallbackCommands.front().objectId, "Fallback command must retain the isolated object's identity.");
+			context.ExpectEqual<std::uint32_t>(2u, dynamic.singletonOrdinals.front(),
+				"The isolated member must resolve to the original immutable snapshot row.");
 		});
 	}
 }

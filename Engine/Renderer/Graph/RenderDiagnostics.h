@@ -3,8 +3,8 @@
 #pragma once
 
 #include "RenderFrameBreakdown.h"
+#include "RenderGraph.h"
 #include "RenderWorkerTaskGroup.h"
-#include "RenderSubmissionPlan.h"
 #include "Core/Export.h"
 #include "Renderer/RenderTypes.h"
 #include "Renderer/RendererRecovery.h"
@@ -365,6 +365,10 @@ namespace TerraEngine::Renderer {
 	struct RenderDiagnosticsSummary
 	{
 		std::uint64_t frameId = 0u;
+		// These identities name the exact sealed root behind diagnostics, avoiding
+		// ambiguity when a delayed backend receipt follows presentation recovery.
+		std::uint64_t publicationGeneration = 0u;
+		std::uint64_t rendererSessionGeneration = 0u;
 		std::size_t workerPacketCount = 0u;
 		std::size_t serialPacketCount = 0u;
 		std::size_t skippedPacketCount = 0u;
@@ -451,10 +455,5 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API std::vector<VirtualGeometryViewDiagnosticsSnapshot> LatestVirtualGeometryDiagnosticsSnapshots();
 	TERRAENGINE_API void PublishBackendResourceResidencySnapshot(BackendResourceResidencySnapshot snapshot);
 	TERRAENGINE_API BackendResourceResidencySnapshot LatestBackendResourceResidencySnapshot();
-	TERRAENGINE_API RenderDiagnosticsSummary BuildRenderDiagnosticsSummary(
-		const RenderFrameSnapshot& snapshot,
-		const RenderWorkPacketPlan& packetPlan,
-		const RenderSubmissionPlan& submissionPlan,
-		const BackendCapabilityProfile& capabilities);
 
 }

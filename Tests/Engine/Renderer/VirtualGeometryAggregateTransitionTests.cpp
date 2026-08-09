@@ -1,43 +1,54 @@
 #include "TestHarness.h"
-#include "VirtualGeometryAssemblyBuilder.h"
-#include "VirtualGeometryFoliageCurveBuilder.h"
-#include "VirtualGeometryVoxelBuilder.h"
+
+#include "Renderer/VirtualGeometry/Geometry/VirtualGeometryRepresentations.h"
+
 namespace TerraEngine::Tests
 {
-	void RegisterVirtualGeometryAggregateTransitionTests(TestRegistry &r)
+	namespace
 	{
-		r.Add("VirtualGeometry.Aggregate.AssemblyStableOrder",
-			[](TestContext &c)
-			{
-				 auto a = TerraEngine::Editor::BuildVirtualGeometryAssemblyCandidates({ 3, 1, 2 });
-				c.Expect(a.size() == 3 && a[0].Valid() && a[0].sourceElementCount == 1, "Assembly prototypes are deterministic and covered.");
-				const auto transition = TerraEngine::Renderer::BuildVirtualGeometryAggregateTransition(a[0], a[1]);
-				c.Expect(transition.fromId == a[0].stableId && transition.toId == a[1].stableId, "Transitions retain stable aggregate identities.");
+		TerraEngine::Renderer::VirtualGeometryAggregateRepresentation MakeAggregate(
+			std::uint64_t stableId, float error)
+		{
+			using namespace TerraEngine::Renderer;
+			VirtualGeometryAggregateRepresentation aggregate{};
+			aggregate.kind = VirtualGeometryAggregateKind::Assembly;
+			aggregate.stableId = stableId;
+			aggregate.canonicalError = error;
+			aggregate.completeFallbackCoverage = true;
+			aggregate.sourceElementCount = 64u;
+			aggregate.coverageRatio = 1.0f;
+			aggregate.sharedStorageIdentity = 7u;
+			aggregate.generationIdentity = 11u;
+			aggregate.productionValidated = true;
+			aggregate.atomicTransitionReady = true;
+			return aggregate;
+		}
+	}
+
+	void RegisterVirtualGeometryAggregateTransitionTests(TestRegistry& registry)
+	{
+		registry.Add("Renderer.VirtualGeometryAggregateTransition.AcceptsCompleteGeometricReplacement",
+			[](TestContext& context) {
+				using namespace TerraEngine::Renderer;
+				const auto detailed = MakeAggregate(100u, 0.25f);
+				const auto coarse = MakeAggregate(200u, 2.0f);
+				const VirtualGeometryAggregateTransition transition =
+					BuildVirtualGeometryAggregateTransition(detailed, coarse);
+				context.Expect(!transition.failOpen && transition.fromId == 100u
+					&& transition.toId == 200u && transition.error == 2.0f,
+					"A complete coarser representation must replace geometry atomically without a traditional whole-mesh LOD fallback.");
 			});
 
-		r.Add("VirtualGeometry.Aggregate.SpecializedBuildersRemainDistinctAndCovered",
-			[](TestContext &c)
-			{
-				const auto foliage =
-					TerraEngine::Editor::BuildVirtualGeometryFoliageCurveCandidate(
-						17u, false);
-				const auto curve =
-					TerraEngine::Editor::BuildVirtualGeometryFoliageCurveCandidate(
-						17u, true);
-				const auto voxel =
-					TerraEngine::Editor::BuildVirtualGeometryVoxelCandidate(
-						17u, false);
-				const auto impostor =
-					TerraEngine::Editor::BuildVirtualGeometryVoxelCandidate(
-						17u, true);
-				c.Expect(
-					foliage.Valid() && curve.Valid()
-						&& voxel.Valid() && impostor.Valid(),
-					"Every specialized aggregate builder must publish complete fallback coverage.");
-				c.Expect(
-					foliage.stableId != curve.stableId
-						&& voxel.stableId != impostor.stableId,
-					"Domain salts must keep specialized representations distinct for one source identity.");
+		registry.Add("Renderer.VirtualGeometryAggregateTransition.IncompleteTargetFailsOpen",
+			[](TestContext& context) {
+				using namespace TerraEngine::Renderer;
+				const auto detailed = MakeAggregate(300u, 0.5f);
+				auto incomplete = MakeAggregate(400u, 4.0f);
+				incomplete.completeFallbackCoverage = false;
+				const VirtualGeometryAggregateTransition transition =
+					BuildVirtualGeometryAggregateTransition(detailed, incomplete);
+				context.Expect(transition.failOpen && transition.fromId == detailed.stableId,
+					"An incomplete transition target must keep the last complete geometric coverage instead of producing holes or black output.");
 			});
 	}
-} // namespace TerraEngine::Tests
+}

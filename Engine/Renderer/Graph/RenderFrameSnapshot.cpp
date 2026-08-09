@@ -943,50 +943,7 @@ namespace TerraEngine::Renderer {
 
 	bool ValidateAnimationRenderGenerationRecord(const AnimationRenderGenerationRecord& record)
 	{
-		if (record.source == AnimationRenderEvaluationSource::None)
-		{
-			return record.stableInstanceId == 0U
-				&& record.poseGeneration == 0U
-				&& record.morphGeneration == 0U
-				&& record.paletteGeneration == 0U
-				&& record.deformationContentIdLow == 0U
-				&& record.deformationContentIdHigh == 0U
-				&& record.gpuWorkPacketCount == 0U
-				&& !record.complete
-				&& !record.safeFallback;
-		}
-
-		if (record.stableInstanceId == 0U
-			|| record.deformablePayloadGeneration == 0U
-			|| record.rendererGeneration == 0U)
-		{
-			return false;
-		}
-		if((record.deformationContentIdLow == 0U)
-			!= (record.deformationContentIdHigh == 0U))
-		{
-			return false;
-		}
-		if (record.source == AnimationRenderEvaluationSource::SafeFallback)
-		{
-			return record.safeFallback && !record.complete
-				&& record.gpuWorkPacketCount == 0U;
-		}
-		if (record.programGeneration == 0U
-			|| !record.complete || record.safeFallback
-			|| record.poseGeneration == 0U
-			|| record.morphGeneration == 0U
-			|| record.paletteGeneration == 0U)
-		{
-			return false;
-		}
-		if (record.source == AnimationRenderEvaluationSource::CpuPose)
-		{
-			return record.gpuWorkPacketCount == 0U && record.gpuStageMask == 0U;
-		}
-		return record.animationPlanGeneration != 0U
-			&& record.gpuWorkPacketCount != 0U
-			&& record.gpuStageMask != 0U;
+		return record.IsComplete();
 	}
 
 	void AnimatedObjectVisibilitySnapshot::BuildVisibleObjectLookup() noexcept
@@ -2503,18 +2460,31 @@ namespace TerraEngine::Renderer {
 		result.rendererGeneration = snapshot.renderables.empty()
 			? 0u
 			: snapshot.renderables.front().invalidation.renderer;
-		if (!snapshot.valid || !topology.valid
-			|| topology.records.size() != snapshot.renderables.size()
-			|| result.frameGeneration == 0u)
+		if (!snapshot.valid || !topology.valid || result.frameGeneration == 0u)
 		{
 			return result;
+		}
+		// Persistent slots may contain holes after removals, and surviving objects
+		// deliberately keep their old ordinal. Build one transient owner lookup only
+		// when this frame-owned grouping sidecar is requested; indexing the topology
+		// by the snapshot order would redirect a recycled slot to the wrong object.
+		std::unordered_map<TerraEngine::UUID, const PersistentRenderTopologyRecord*>
+			topologyByObject;
+		topologyByObject.reserve(snapshot.renderables.size());
+		for(const PersistentRenderTopologyRecord& record : topology.records)
+		{
+			// Keep incomplete records addressable so the dynamic sidecar can isolate
+			// that exact stable slot onto the established singleton fallback. Only a
+			// missing object identity is unusable; group-key completeness is evaluated
+			// below without discarding the owner.
+			if(record.objectId != TerraEngine::EMPTY_UUID)
+				topologyByObject.emplace(record.objectId, &record);
 		}
 
 		struct Candidate
 		{
 			SharedRenderGroupKey key{};
 			RenderInstanceRecord instance{};
-			DrawCommand fallback{};
 			std::uint32_t stableOrdinal = 0u;
 			bool canGroup = false;
 		};
@@ -2535,9 +2505,16 @@ namespace TerraEngine::Renderer {
 		for (std::uint32_t ordinal = 0u; ordinal < snapshot.renderables.size(); ++ordinal)
 		{
 			const RenderFrameRenderableRecord& renderable = snapshot.renderables[ordinal];
+			const auto topologyRecord = topologyByObject.find(renderable.objectId);
+			if(topologyRecord == topologyByObject.end())
+			{
+				// An incomplete persistent identity is omitted atomically. Publication
+				// validation reports it rather than manufacturing a transient ordinal.
+				continue;
+			}
 			Candidate candidate{};
 			candidate.key = BuildSharedRenderGroupKey(renderable, view);
-			candidate.stableOrdinal = topology.records[ordinal].stableOrdinal;
+			candidate.stableOrdinal = topologyRecord->second->stableOrdinal;
 			candidate.instance.modelMatrix = renderable.modelMatrix;
 			candidate.instance.objectIdentity = packUuid(renderable.objectId);
 			candidate.instance.animationSelectors = glm::uvec4(
@@ -2553,22 +2530,6 @@ namespace TerraEngine::Renderer {
 			candidate.instance.materialAndTexture[RenderInstanceRecord::kInstanceFlagsWord] =
 				(renderable.usingFallback ? 1u : 0u)
 				| (renderable.virtualGeometry.failOpen ? 2u : 0u);
-			candidate.fallback.meshId = renderable.meshId;
-			candidate.fallback.materialId = renderable.materialId;
-			candidate.fallback.objectId = renderable.objectId;
-			candidate.fallback.modelMatrix = renderable.modelMatrix;
-			candidate.fallback.geometryRoute = renderable.geometryRouteDecision.selected;
-			candidate.fallback.selectedVirtualLod = renderable.virtualGeometry.selectedLodIndex;
-			candidate.fallback.virtualMeshletOffset = renderable.virtualGeometry.meshletOffset;
-			candidate.fallback.virtualMeshletCount = renderable.virtualGeometry.meshletCount;
-			candidate.fallback.virtualGeometryPageId = renderable.virtualGeometry.pageId;
-			candidate.fallback.virtualGeometryFallbackPageId = renderable.virtualGeometry.fallbackPageId;
-			candidate.fallback.virtualGeometryPayloadSource = renderable.virtualGeometry.payloadSource;
-			candidate.fallback.virtualGeometryEmittedSource = renderable.virtualGeometry.emittedSource;
-			candidate.fallback.virtualGeometryPagePayloadByteOffset = renderable.virtualGeometry.pagePayloadByteOffset;
-			candidate.fallback.virtualGeometryPagePayloadByteSize = renderable.virtualGeometry.pagePayloadByteSize;
-			candidate.fallback.virtualGeometryPayloadBufferIndex = renderable.virtualGeometry.payloadBufferIndex;
-			candidate.fallback.virtualGeometryPayloadDescriptorIndex = renderable.virtualGeometry.payloadDescriptorIndex;
 			candidate.canGroup = candidate.key.IsComplete()
 				&& !renderable.usingFallback
 				&& !renderable.virtualGeometry.failOpen;
@@ -2612,9 +2573,9 @@ namespace TerraEngine::Renderer {
 			}
 			else
 			{
-				// A failed key is isolated. It never shares an instance range with a
-				// neighbouring compatible group and continues through DrawCommand.
-				result.fallbackCommands.push_back(candidates[begin].fallback);
+				// A failed key is isolated. Its stable ordinal resolves directly against
+				// the retained snapshot/publication without rebuilding a fallback command.
+				result.singletonOrdinals.push_back(candidates[begin].stableOrdinal);
 			}
 			begin = executable ? end : begin + 1u;
 		}

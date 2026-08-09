@@ -1,5 +1,7 @@
 #include "TestHarness.h"
 
+#include "RendererThreadingTestFixtures.h"
+
 #include "Renderer/Graph/RenderWorkPacket.h"
 #include "Renderer/RHI/Vulkan/VulkanCommandRecording.h"
 #include "Renderer/RHI/Vulkan/VulkanDescriptorPlanning.h"
@@ -10,6 +12,10 @@
 
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
+#include <limits>
+#include <memory>
+#include <span>
 #include <string>
 
 namespace TerraEngine::Tests {
@@ -42,6 +48,181 @@ namespace TerraEngine::Tests {
 				&& TerraEngine::Renderer::Vulkan::
 					ShouldRefreshVulkanAnimationBindlessBuffer(true, true),
 				"Stable frame-slot descriptors stay untouched, while first publication and buffer replacement refresh them.");
+		});
+
+		registry.Add("Renderer.VulkanRecording.FrameUploadsReusePersistentMappings", [](TestContext& context) {
+			const std::filesystem::path implPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContextImpl.h";
+			const std::filesystem::path resourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContextResources.cpp";
+			const std::filesystem::path contextPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
+			std::ifstream implStream(implPath, std::ios::binary);
+			std::ifstream resourceStream(resourcePath, std::ios::binary);
+			std::ifstream contextStream(contextPath, std::ios::binary);
+			const std::string implementation{ std::istreambuf_iterator<char>(implStream), {} };
+			const std::string resources{ std::istreambuf_iterator<char>(resourceStream), {} };
+			const std::string contextSource{ std::istreambuf_iterator<char>(contextStream), {} };
+
+			// Host-visible frame resources are updated every frame. Keeping their VMA
+			// allocations mapped removes repeated driver bookkeeping, while every path
+			// must retain an explicit flush for non-coherent memory. The animation bridge
+			// is authored in its final allocation so it does not build and copy a second
+			// crowd-sized vector first.
+			context.Expect(implementation.find("void* mappedData = nullptr;") != std::string::npos
+				&& resources.find("VMA_ALLOCATION_CREATE_MAPPED_BIT") != std::string::npos
+				&& resources.find("void* mapped = buffer.mappedData;") != std::string::npos
+				&& resources.find("vmaFlushAllocation(allocator, buffer.allocation, offset, size);")
+					!= std::string::npos
+				&& resources.find("VulkanGpuAnimationGraphicsRecord* bridgeRecords")
+					!= std::string::npos
+				&& implementation.find(
+					"std::vector<VulkanGpuAnimationGraphicsRecord> graphicsBridgeScratch")
+					== std::string::npos
+				&& contextSource.find("void* mapped = instanceBuffer.mappedData;")
+					!= std::string::npos,
+				"Animation and grouped-instance frame uploads must reuse persistent mappings and write the graphics bridge directly.");
+		});
+
+		registry.Add("Renderer.VulkanRecording.ComputeUploadKeepsOnlyDispatchedSources", [](TestContext& context) {
+			TerraEngine::Animation::GpuAnimationPlan plan{};
+			plan.generation = 7U;
+			plan.generationRecords.resize(3U);
+			plan.workPackets.resize(3U);
+			for(std::uint32_t index = 0U; index < 3U; ++index) {
+				plan.workPackets[index].stableInstanceId = 100U + index;
+				plan.workPackets[index].generationRecordIndex = index;
+				plan.workPackets[index].paletteOffsetBytes = 1024U * index;
+			}
+			const auto appendDispatch = [&plan](std::uint32_t packetIndex,
+				std::uint32_t stage) {
+				TerraEngine::Animation::GpuAnimationDispatchRecord record{};
+				record.stableInstanceId = plan.workPackets[packetIndex].stableInstanceId;
+				record.workPacketIndex = packetIndex;
+				record.generationRecordIndex = packetIndex;
+				record.stage = stage;
+				record.elementCount = 1U;
+				plan.dispatchRecords.push_back(record);
+			};
+			appendDispatch(0U, 0U);
+			appendDispatch(0U, 1U);
+			appendDispatch(2U, 0U);
+
+			TerraEngine::Renderer::Vulkan::VulkanAnimationComputeUploadPlan upload{};
+			const bool built = TerraEngine::Renderer::Vulkan::
+				BuildVulkanAnimationComputeUploadPlan(plan, upload);
+			const bool compactShapeValid = built && upload.valid
+				&& upload.generationRecords.size() == 2U
+				&& upload.workPackets.size() == 2U
+				&& upload.dispatchRecords.size() == 3U;
+			context.Expect(compactShapeValid,
+				"Only packets that own actual compute dispatches should enter the frame upload.");
+			if(compactShapeValid) {
+				context.Expect(upload.workPackets[0U].stableInstanceId == 100U
+					&& upload.workPackets[1U].stableInstanceId == 102U
+					&& upload.workPackets[1U].paletteOffsetBytes == 2048U
+					&& upload.dispatchRecords[0U].workPacketIndex == 0U
+					&& upload.dispatchRecords[1U].workPacketIndex == 0U
+					&& upload.dispatchRecords[2U].workPacketIndex == 1U
+					&& upload.dispatchRecords[2U].generationRecordIndex == 1U,
+					"Compaction must preserve source order and output offsets while remapping every compute index consistently.");
+			}
+		});
+
+		registry.Add("Renderer.VulkanRecording.ComputeUploadReusesImmutableDispatchTopology", [](TestContext& context) {
+			auto staticPlan = std::make_shared<TerraEngine::Animation::GpuAnimationPlan>();
+			staticPlan->generation = 10U;
+			staticPlan->generationRecords.resize(2U);
+			staticPlan->workPackets.resize(2U);
+			for(std::uint32_t index = 0U; index < 2U; ++index) {
+				staticPlan->workPackets[index].stableInstanceId = 500U + index;
+				staticPlan->workPackets[index].generationRecordIndex = index;
+				TerraEngine::Animation::GpuAnimationDispatchRecord record{};
+				record.stableInstanceId = staticPlan->workPackets[index].stableInstanceId;
+				record.workPacketIndex = index;
+				record.generationRecordIndex = index;
+				record.stage = 0U;
+				record.elementCount = 1U;
+				staticPlan->dispatchRecords.push_back(record);
+			}
+
+			TerraEngine::Animation::GpuAnimationPlan frame{};
+			frame.generation = 11U;
+			frame.retainedStaticPlan = staticPlan;
+			frame.dynamicGenerationRecords = staticPlan->generationRecords;
+			frame.dynamicSampleTicks = {3U, 7U};
+			frame.dynamicRenderIdentities.resize(2U);
+			TerraEngine::Renderer::Vulkan::VulkanAnimationComputeUploadPlan upload{};
+			context.Expect(TerraEngine::Renderer::Vulkan::
+				BuildVulkanAnimationComputeUploadPlan(frame, upload)
+				&& !upload.topologyReused,
+				"A frame slot must build compact dispatch topology on first publication.");
+
+			const auto* retainedDispatchBytes = upload.dispatchRecords.data();
+			frame.generation = 12U;
+			frame.dynamicSampleTicks = {4U, 8U};
+			++frame.dynamicGenerationRecords[0U].workGeneration;
+			context.Expect(TerraEngine::Renderer::Vulkan::
+				BuildVulkanAnimationComputeUploadPlan(frame, upload)
+				&& upload.topologyReused
+				&& upload.dispatchRecords.data() == retainedDispatchBytes
+				&& upload.workPackets[0U].sampleTick == 4U
+				&& upload.workPackets[1U].sampleTick == 8U,
+				"An exact retained static owner must refresh dynamic rows without rebuilding dispatch records.");
+		});
+
+		registry.Add("Renderer.VulkanRecording.HiZReusesSealedVisibilitySignature", [](TestContext& context) {
+			const std::filesystem::path contextPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
+			std::ifstream contextStream(contextPath, std::ios::binary);
+			const std::string source{ std::istreambuf_iterator<char>(contextStream), {} };
+
+			// A sealed visibility result has already visited every command and folded
+			// world, resource, route, LOD, and view identity into one signature. Vulkan
+			// should consume that proof directly; only legacy/incomplete publications
+			// pay for a second full command-resolution scan.
+			context.Expect(source.find(
+				"publicationPresentation->virtualGeometryPacketEvidenceSignature != 0U")
+					!= std::string::npos
+				&& source.find(
+					"? publicationPresentation->virtualGeometryPacketEvidenceSignature")
+					!= std::string::npos
+				&& source.find(": BuildVulkanHiZDepthSceneSignature(commandResolver);")
+					!= std::string::npos,
+				"Hi-Z diagnostics must reuse sealed visibility identity and keep only a fail-open legacy scan.");
+		});
+
+		registry.Add("Renderer.VulkanRecording.GrowsIndirectCommandRangesWithoutOverwritingViews", [](TestContext& context) {
+			// A crowd can append a large shadow list after its main-pass commands.
+			// The second reservation must start after the first instead of reusing a
+			// fixed snapshot slice, even when their combined size exceeds 4,096.
+			const auto mainPass = TerraEngine::Renderer::Vulkan::
+				PlanIndirectDrawBufferCapacity(4096u, 0u, 2000u);
+			const auto shadowPass = TerraEngine::Renderer::Vulkan::
+				PlanIndirectDrawBufferCapacity(
+					mainPass.targetCommandCapacity,
+					mainPass.requiredCommandCount,
+					6000u);
+
+			context.Expect(mainPass.valid && shadowPass.valid,
+				"Valid command counts should produce append reservations.");
+			context.ExpectEqual(static_cast<std::size_t>(0u),
+				mainPass.commandOffset,
+				"The first view should begin at the frame-slot command origin.");
+			context.ExpectEqual(static_cast<std::size_t>(2000u),
+				shadowPass.commandOffset,
+				"Shadow commands must append after the main-pass range.");
+			context.Expect(shadowPass.requiresGrowth
+				&& shadowPass.targetCommandCapacity >= 8000u,
+				"Crowd command storage must grow beyond the former fixed 4,096-command slice.");
+
+			const auto overflow = TerraEngine::Renderer::Vulkan::
+				PlanIndirectDrawBufferCapacity(
+					64u,
+					std::numeric_limits<std::size_t>::max(),
+					1u);
+			context.Expect(!overflow.valid,
+				"Overflowing command counts must be rejected before offsets can alias.");
 		});
 
 		registry.Add("Renderer.VulkanRecording.AnimationBackendReceiptRequiresRecordedSubmittedWork", [](TestContext& context) {
@@ -80,7 +261,7 @@ namespace TerraEngine::Tests {
 				std::istreambuf_iterator<char>()};
 			const std::size_t beginFrame = source.find("rhi->BeginFrame();");
 			const std::size_t consumePlan = source.find(
-				"rhi->ConsumeRenderSubmissionPlan(renderSubmissionPlan)");
+				"rhi->ConsumeRenderFramePublication(renderFramePublicationStore.Load())");
 			context.Expect(beginFrame != std::string::npos
 					&& consumePlan != std::string::npos
 					&& beginFrame < consumePlan,
@@ -88,57 +269,105 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Renderer.VulkanRecording.BuildsWorkerBatchesFromPackets", [](TestContext& context) {
-			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
-			snapshot.frameId = 5u;
-			TerraEngine::Renderer::RenderWorkPacketPlan packetPlan;
-			TerraEngine::Renderer::RenderWorkPacket packet;
-			packet.packetId = "draw.0";
-			packet.passId = "draw";
-			packet.executionPolicy = TerraEngine::Renderer::RenderPacketExecutionPolicy::Worker;
-			packetPlan.packets.push_back(packet);
+			TerraEngine::Renderer::RenderFramePublication publication;
+			publication.frameId = 5u;
+			publication.generation = 1u;
+			TerraEngine::Renderer::RenderViewSelection view;
+			view.outputId = 2u;
+			view.generation = 1u;
+			view.visibleOrdinals.push_back({ 0u, 1u });
+			publication.views.push_back(view);
+			publication.submissionRanges.push_back({
+				TerraEngine::Renderer::RenderSubmissionRoute::Direct, 0u, 0u, 1u, 1u, true });
 			TerraEngine::Renderer::BackendCapabilityProfile profile;
 			profile.supportsParallelRecording = true;
 
-			const auto plan = TerraEngine::Renderer::BuildBackendRecordingBatchPlan(snapshot, packetPlan, profile, TerraEngine::Renderer::RenderBackendWorkKind::Geometry);
-			const auto vulkanPlan = TerraEngine::Renderer::Vulkan::BuildVulkanRecordingBatchPlan(snapshot, packetPlan, profile, TerraEngine::Renderer::RenderBackendWorkKind::Geometry);
-			context.ExpectEqual(static_cast<std::size_t>(1u), plan.workerBatchCount, "Worker packets should become worker recording batches.");
-			context.ExpectEqual(plan.workerBatchCount, vulkanPlan.workerBatchCount, "Vulkan batch planning should preserve backend-neutral worker counts.");
-			context.Expect(plan.batches.front().batchId.find("geometry") != std::string::npos, "Batch ids should include deterministic work kind names.");
+			const auto vulkanPlan = TerraEngine::Renderer::Vulkan::BuildVulkanRecordingBatchPlan(
+				publication, profile, TerraEngine::Renderer::RenderBackendWorkKind::Geometry);
+			context.ExpectEqual(static_cast<std::size_t>(1u), vulkanPlan.workerBatchCount,
+				"Typed publication ranges should become worker recording batches.");
+			context.Expect(vulkanPlan.batches.front().batchId.find("geometry") != std::string::npos,
+				"Batch ids should include deterministic work kind names.");
 		});
 
 		registry.Add("Renderer.VulkanRecording.PreparesImmutableBackendPlans", [](TestContext& context) {
-			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
-			snapshot.frameId = 6u;
-			snapshot.resourceRevision = 77u;
-			snapshot.materials.push_back({ TerraEngine::GenerateUUID(), "mat", true, false });
-			snapshot.textures.push_back({ TerraEngine::GenerateUUID(), "tex", false, true });
-			snapshot.renderables.push_back({ TerraEngine::GenerateUUID(), TerraEngine::GenerateUUID(), TerraEngine::GenerateUUID() });
+			using namespace TerraEngine::Renderer;
+			auto publication = std::make_shared<RenderFramePublication>();
+			publication->frameId = 6u;
+			publication->resourcePreparation.generation = 77u;
+			RenderResourcePreparationRecord resident{};
+			resident.resourceId = TerraEngine::GenerateUUID();
+			resident.resourceGeneration = 1u;
+			resident.resident = true;
+			RenderResourcePreparationRecord pending{};
+			pending.resourceId = TerraEngine::GenerateUUID();
+			pending.resourceGeneration = 1u;
+			pending.resident = false;
+			publication->resourcePreparation = BuildRenderResourcePreparationTable(
+				std::span<const RenderResourcePreparationRecord>(&resident, 1u), 77u);
+			publication->resourcePreparation.records.push_back(pending);
+			std::sort(publication->resourcePreparation.records.begin(),
+				publication->resourcePreparation.records.end(), [](const auto& left, const auto& right) {
+					return TerraEngine::ToHexString(left.resourceId)
+						< TerraEngine::ToHexString(right.resourceId);
+				});
+			for(std::size_t index = 0u; index < publication->resourcePreparation.records.size(); ++index)
+				publication->resourcePreparation.records[index].preparationIndex =
+					static_cast<std::uint32_t>(index);
+			auto persistent = std::make_shared<RenderPersistentPage>();
+			persistent->generation = 1u;
+			RenderPersistentSlot slot{};
+			slot.key = { 0u, 1u };
+			slot.objectId = TerraEngine::GenerateUUID();
+			slot.meshId = TerraEngine::GenerateUUID();
+			slot.materialId = TerraEngine::GenerateUUID();
+			slot.meshGeneration = slot.materialGeneration = slot.resourceGeneration = 1u;
+			slot.packetTemplateIdentity = 1u;
+			slot.occupied = true;
+			persistent->slots.push_back(slot);
+			auto persistentRoot = std::make_shared<RenderPersistentTopologyRoot>();
+			persistentRoot->generation = 1u;
+			persistentRoot->pages.push_back(std::move(persistent));
+			publication->persistent = std::move(persistentRoot);
 
-			const auto descriptors = TerraEngine::Renderer::Vulkan::BuildDescriptorBindingPlan(snapshot, 2u);
-			const auto uploads = TerraEngine::Renderer::Vulkan::BuildUploadPreparationPlan(snapshot);
-			const auto keys = TerraEngine::Renderer::Vulkan::BuildPipelineStateKeys(snapshot);
+			const auto descriptors = TerraEngine::Renderer::Vulkan::BuildDescriptorBindingPlan(*publication, 2u);
+			const auto uploads = TerraEngine::Renderer::Vulkan::BuildUploadPreparationPlan(*publication);
+			const auto keys = TerraEngine::Renderer::Vulkan::BuildPipelineStateKeys(*publication);
 
 			context.ExpectEqual(static_cast<std::uint64_t>(6u), descriptors.frameId, "Descriptor plans should carry immutable frame identity.");
-			context.ExpectEqual(static_cast<std::uint64_t>(77u), uploads.resourceRevision, "Upload plans should preserve resource revisions.");
-			context.ExpectEqual(static_cast<std::size_t>(1u), keys.size(), "Pipeline keys should be generated from snapshot renderables.");
+			context.ExpectEqual(static_cast<std::uint64_t>(77u), uploads.resourceRevision, "Upload plans should preserve publication resource generations.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), uploads.payloads.size(), "Only nonresident publication resources require upload payloads.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), keys.size(), "Pipeline keys should be generated from retained publication topology.");
 		});
 
 		registry.Add("Renderer.VulkanRecording.CollapsesInstancedPipelineStateKeys", [](TestContext& context) {
-			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
+			using namespace TerraEngine::Renderer;
+			auto publication = std::make_shared<RenderFramePublication>();
+			auto page = std::make_shared<RenderPersistentPage>();
+			page->generation = 1u;
 			const TerraEngine::UUID sharedMesh = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID sharedMaterial = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID secondMaterial = TerraEngine::GenerateUUID();
 			// Two instances share one complete pipeline identity. A third material
 			// requires one additional key, independent of how many objects use it.
-			snapshot.renderables.push_back({
-				TerraEngine::GenerateUUID(), sharedMesh, sharedMaterial });
-			snapshot.renderables.push_back({
-				TerraEngine::GenerateUUID(), sharedMesh, sharedMaterial });
-			snapshot.renderables.push_back({
-				TerraEngine::GenerateUUID(), sharedMesh, secondMaterial });
+			for(std::size_t index = 0u; index < 3u; ++index) {
+				RenderPersistentSlot slot{};
+				slot.key = { static_cast<std::uint32_t>(index), 1u };
+				slot.objectId = TerraEngine::GenerateUUID();
+				slot.meshId = sharedMesh;
+				slot.materialId = index == 2u ? secondMaterial : sharedMaterial;
+				slot.meshGeneration = slot.materialGeneration = slot.resourceGeneration = 1u;
+				slot.packetTemplateIdentity = index + 1u;
+				slot.occupied = true;
+				page->slots.push_back(slot);
+			}
+			auto persistentRoot = std::make_shared<RenderPersistentTopologyRoot>();
+			persistentRoot->generation = 1u;
+			persistentRoot->pages.push_back(std::move(page));
+			publication->persistent = std::move(persistentRoot);
 
 			const auto keys =
-				TerraEngine::Renderer::Vulkan::BuildPipelineStateKeys(snapshot);
+				TerraEngine::Renderer::Vulkan::BuildPipelineStateKeys(*publication);
 			context.ExpectEqual(static_cast<std::size_t>(2u), keys.size(),
 				"Instanced draws must share one immutable pipeline-state key.");
 		});
@@ -332,7 +561,10 @@ namespace TerraEngine::Tests {
 			profile.supportsPacketLocalDiagnostics = true;
 			profile.supportsRenderTaskGroups = true;
 
-			const auto plan = TerraEngine::Renderer::Vulkan::BuildVulkanRendererThreadingPlan(snapshot, profile);
+			auto publication = BuildRendererThreadingPublication(snapshot);
+			publication.rendererSessionGeneration = 1u;
+			publication.backendResourceGeneration = 1u;
+			const auto plan = TerraEngine::Renderer::Vulkan::BuildVulkanRendererThreadingPlan(publication, profile);
 			// ImplementationStage adds four explicit animation stages: two worker-safe planning
 			// stages and two protected recording/completion stages. Keeping them in
 			// this count makes scheduler ownership changes visible to diagnostics.
@@ -362,12 +594,17 @@ namespace TerraEngine::Tests {
 			profile.supportsParallelUiPreparation = true;
 			profile.maxRecordingWorkers = 4u;
 			const std::vector<TerraEngine::Renderer::RenderPassNode> passes = TerraEngine::Renderer::BuildDefaultRenderPasses(snapshot, profile);
+			const auto publication = BuildRendererThreadingPublication(snapshot);
 
 			TerraEngine::Renderer::Vulkan::VulkanRendererPreparationCache cache;
-			const auto first = cache.BuildFramePreparation(snapshot, passes, profile);
-			const auto second = cache.BuildFramePreparation(snapshot, passes, profile);
+			const auto first = cache.BuildFramePreparation(publication, passes, profile);
+			const auto second = cache.BuildFramePreparation(publication, passes, profile);
 			const auto compact = cache.BuildFramePreparation(
-				snapshot, passes, profile, false);
+				publication, passes, profile, false);
+			auto recoveredPublication = publication;
+			recoveredPublication.backendResourceGeneration = 2u;
+			const auto recovered = cache.BuildFramePreparation(
+				recoveredPublication, passes, profile);
 
 			context.ExpectEqual(static_cast<std::size_t>(0u), first.cacheHitCount, "The first frame should populate preparation caches.");
 			context.Expect(second.cacheHitCount >= 3u, "Stable frames should reuse descriptor, pipeline, and upload preparation caches.");
@@ -377,6 +614,36 @@ namespace TerraEngine::Tests {
 				"Compact preparation should retain the packet population count.");
 			context.ExpectEqual(static_cast<std::size_t>(0u), compact.renderPacketCache.cacheHits,
 				"Compact preparation must skip diagnostic-only persistent packet scans.");
+			context.ExpectEqual(static_cast<std::size_t>(0u), recovered.cacheHitCount,
+				"A successful presentation recovery must rebuild value-only preparation caches.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), recovered.renderPacketCache.cacheMisses,
+				"Persistent packet signatures must not survive a backend resource generation change.");
+		});
+
+		registry.Add("Renderer.VulkanRecording.StatsKeepPublicationAndCaptureProvenanceSeparate", [](TestContext& context) {
+			const std::filesystem::path vulkanPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
+			std::ifstream stream(vulkanPath, std::ios::binary);
+			const std::string source{ std::istreambuf_iterator<char>(stream), {} };
+
+			// Game and capture share a camera type but not an output target. Capture-
+			// only tools still need renderer counters, so the delayed snapshot carries
+			// both the sealed publication and exact output provenance.
+			RenderStatsSnapshot stats{};
+			stats.outputKind = RenderOutputKind::OffscreenTexture;
+			stats.outputId = 9000u;
+			stats.dedicatedCaptureOutput = true;
+			stats.publicationFrameId = 17u;
+			stats.publicationGeneration = 23u;
+			stats.rendererSessionGeneration = 5u;
+			context.Expect(stats.outputKind == RenderOutputKind::OffscreenTexture
+				&& stats.outputId == 9000u && stats.dedicatedCaptureOutput
+				&& stats.publicationFrameId == 17u
+				&& stats.publicationGeneration == 23u
+				&& stats.rendererSessionGeneration == 5u
+				&& source.find("pendingStats.publicationFrameId = publication->frameId;") != std::string::npos
+				&& source.find("pendingStats.dedicatedCaptureOutput = renderingDedicatedCaptureTarget;") != std::string::npos,
+				"Delayed stats must retain publication and exact output identity for visible and dedicated capture targets.");
 		});
 
 		registry.Add("Renderer.VulkanRecording.GroupedInstancesUseWholeStreamBoundsAndSnapshotIdentity", [](TestContext& context) {
@@ -451,7 +718,7 @@ namespace TerraEngine::Tests {
 			// frames. Its typed pick must retain its own table/frame rather than fail
 			// merely because the latest Game frame advanced before automation polled.
 			context.Expect(renderSystem.find("latestGameCaptureIdentitySnapshot") != std::string::npos
-				&& renderSystem.find("completedGameCaptureIdentitySnapshot.frameId = prepared.frame.frameId") != std::string::npos
+				&& renderSystem.find("completedGameCaptureIdentitySnapshot.frameId =\n\t\t\t\t\tprepared.selection.generation") != std::string::npos
 				&& renderSystem.find("result.dedicatedCaptureTarget") != std::string::npos
 				&& renderSystem.find("identityTable.begin()") != std::string::npos
 				&& vulkan.find("rendered target metadata does not match the request") != std::string::npos,
@@ -471,11 +738,13 @@ namespace TerraEngine::Tests {
 			profile.supportsParallelRecording = true;
 			profile.maxRecordingWorkers = 2u;
 			const std::vector<TerraEngine::Renderer::RenderPassNode> passes = TerraEngine::Renderer::BuildDefaultRenderPasses(snapshot, profile);
+			const auto firstPublication = BuildRendererThreadingPublication(snapshot);
 
 			TerraEngine::Renderer::Vulkan::VulkanRendererPreparationCache cache;
-			const auto first = cache.BuildFramePreparation(snapshot, passes, profile);
+			const auto first = cache.BuildFramePreparation(firstPublication, passes, profile);
 			snapshot.resourceRevision = 2u;
-			const auto second = cache.BuildFramePreparation(snapshot, passes, profile);
+			const auto secondPublication = BuildRendererThreadingPublication(snapshot);
+			const auto second = cache.BuildFramePreparation(secondPublication, passes, profile);
 
 			cache.EnqueueResourceForRetirement({ 7u, 21u, "old-buffer" });
 			const auto tooEarly = cache.RetireCompletedResources(20u);
@@ -507,11 +776,12 @@ namespace TerraEngine::Tests {
 			profile.supportsParallelUiPreparation = true;
 			profile.maxRecordingWorkers = 8u;
 
-			const auto visibility = TerraEngine::Renderer::Vulkan::BuildVisibilityPreparationPlan(snapshot, profile);
-			const auto indirect = TerraEngine::Renderer::Vulkan::BuildIndirectDrawPreparationPlan(snapshot, profile);
-			const auto shadows = TerraEngine::Renderer::Vulkan::BuildShadowRecordingPreparationPlan(snapshot, profile);
-			const auto shaderMaterials = TerraEngine::Renderer::Vulkan::BuildShaderMaterialPreparationPlan(snapshot, profile);
-			const auto ui = TerraEngine::Renderer::Vulkan::BuildUiGeometryPreparationPlan(snapshot, profile);
+			const auto publication = BuildRendererThreadingPublication(snapshot);
+			const auto visibility = TerraEngine::Renderer::Vulkan::BuildVisibilityPreparationPlan(publication, profile);
+			const auto indirect = TerraEngine::Renderer::Vulkan::BuildIndirectDrawPreparationPlan(publication, profile);
+			const auto shadows = TerraEngine::Renderer::Vulkan::BuildShadowRecordingPreparationPlan(publication, profile);
+			const auto shaderMaterials = TerraEngine::Renderer::Vulkan::BuildShaderMaterialPreparationPlan(publication, profile);
+			const auto ui = TerraEngine::Renderer::Vulkan::BuildUiGeometryPreparationPlan(publication, profile);
 
 			context.Expect(visibility.workerEligible, "Large visibility and light assignment work should be worker eligible.");
 			context.Expect(indirect.gpuDrivenEligible, "Renderable snapshots should be convertible into GPU-driven indirect draw preparation.");

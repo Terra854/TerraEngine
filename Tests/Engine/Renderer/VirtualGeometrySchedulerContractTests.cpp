@@ -35,12 +35,12 @@ namespace TerraEngine::Tests
 			[](TestContext &context)
 			{
 				const auto workloads = RenderSystem::Instance().DeclareFrameWorkloads(0.0F);
-				const auto *snapshot = FindWorkload(workloads, "RenderSnapshot");
+				const auto *snapshot = FindWorkload(workloads, "RenderPublicationCapture");
 				const auto *prepare = FindWorkload(workloads, "VirtualGeometryPrepare");
 				const auto *commit = FindWorkload(workloads, "BackendCommit");
 				const auto *publication = FindWorkload(workloads, "RenderPublication");
 
-				context.Expect(snapshot != nullptr, "RenderSystem must protect exact live-state capture in RenderSnapshot.");
+				context.Expect(snapshot != nullptr, "RenderSystem must protect immutable publication capture.");
 				context.Expect(prepare != nullptr, "RenderSystem must expose worker-safe virtual geometry preparation.");
 				context.Expect(commit != nullptr, "RenderSystem must protect device command ownership in BackendCommit.");
 				context.Expect(publication != nullptr, "RenderSystem must expose a protected render publication boundary.");
@@ -48,7 +48,7 @@ namespace TerraEngine::Tests
 					return;
 
 				context.Expect(snapshot->mainThreadRequired && !snapshot->workerEligible,
-					"RenderSnapshot must stay protected because it captures live scene and renderer generations.");
+					"Render publication capture must stay protected because it seals scene and renderer generations.");
 				context.Expect(prepare->workerEligible && !prepare->mainThreadRequired,
 					"VirtualGeometryPrepare must be an actual worker-safe workload rather than metadata-only "
 					"worker intent.");
@@ -110,9 +110,9 @@ namespace TerraEngine::Tests
 				context.Expect(summary.systems.size() == 2U && summary.systems.front() == "VirtualGeometryStreamingSystem",
 					"The streaming publisher must be ordered before RenderSystem in the render phase.");
 				const auto workloads = scheduler.BuildFrameWorkloadDeclarations(0.0F);
-				const auto *snapshot = FindWorkload(workloads, "RenderSnapshot");
+				const auto *snapshot = FindWorkload(workloads, "RenderPublicationCapture");
 				context.Expect(snapshot != nullptr && Contains(snapshot->explicitDependencies, "VirtualGeometryStreamingSystem/Render/PagePublish"),
-					"RenderSnapshot must wait for the protected page publication descriptor, not a scene-mutation flush.");
+					"Render publication capture must wait for the protected page publication descriptor.");
 			});
 		registry.Add("VirtualGeometry.Scheduler.RoutePreparationAndSuppressionExecute",
 			[](TestContext &context)

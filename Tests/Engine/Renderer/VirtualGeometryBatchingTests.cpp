@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "Renderer/Graph/RenderDiagnostics.h"
+#include "Renderer/Graph/RenderFramePublication.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Renderer/RenderSystem.h"
 #include "Renderer/RHI/Vulkan/VulkanRendererWorkCache.h"
@@ -9,6 +10,7 @@
 
 #include <iterator>
 #include <limits>
+#include <span>
 
 namespace TerraEngine::Tests {
 namespace {
@@ -56,6 +58,60 @@ namespace {
 		compaction.submittedBatches = 1u;
 		state.compactionResults.push_back(compaction);
 		return state;
+	}
+
+	// Vulkan preparation consumes only publication roots and compact per-view
+	// evidence.  Keep snapshot authoring in these focused VG tests, but translate
+	// it explicitly at the test boundary instead of retaining a snapshot backend
+	// overload.
+	TerraEngine::Renderer::RenderFramePublication MakePreparationPublication(
+		const TerraEngine::Renderer::RenderFrameSnapshot& snapshot)
+	{
+		using namespace TerraEngine::Renderer;
+		RenderFramePublication publication;
+		publication.frameId = snapshot.frameId;
+		publication.resourcePreparation.generation = std::max<std::uint64_t>(1u,
+			snapshot.resourceRevision);
+		for (const VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
+		{
+			RenderViewSelection view;
+			view.outputKind = state.outputKind;
+			view.viewType = state.viewType;
+			view.outputId = state.outputId;
+			view.generation = std::max<std::uint64_t>(1u, state.viewGeneration);
+			if (!snapshot.renderables.empty())
+			{
+				view.visibleOrdinals.push_back({ 0u, 1u });
+				view.selectedLods.push_back(0u);
+				view.routeSelectors.push_back(0u);
+				view.packetTemplateIdentities.push_back(1u);
+				view.tintSelectors.push_back(0u);
+				view.editorTints.push_back(glm::vec4(0.0f));
+			}
+			RenderViewPresentationInput input;
+			input.output.kind = state.outputKind;
+			input.output.diagnosticsView = state.viewType;
+			input.output.outputId = state.outputId;
+			input.virtualGeometryPackets = state.GpuPacketRecords();
+			if (input.virtualGeometryPackets.empty())
+			{
+				input.virtualGeometryPackets = RenderSystem::BuildGpuVirtualGeometryPacketRecords(
+					state.ClusterPackets(), snapshot.frameId, state.debugVisualizationMode);
+			}
+			input.virtualGeometryBatches = state.GpuBatchDescriptors();
+			if (input.virtualGeometryBatches.empty())
+			{
+				input.virtualGeometryBatches = RenderSystem::BuildGpuVirtualGeometryBatchDescriptors(
+					input.virtualGeometryPackets, snapshot.frameId, state.debugVisualizationMode);
+			}
+			input.virtualGeometryFrameSets = state.GpuPacketFrameSets();
+			input.virtualGeometryCompactionDispatches = state.GpuCompactionDispatches();
+			input.virtualGeometryGeneratedSubmissions = state.GeneratedSubmissions();
+			input.virtualGeometryCounterReadbacks = state.GpuCounterReadbacks();
+			publication.views.push_back(std::move(view));
+			publication.presentationInputs.push_back(std::move(input));
+		}
+		return publication;
 	}
 	}
 
@@ -331,7 +387,10 @@ namespace {
 			snapshot.geometryRouteDecisions.push_back(routeDecision);
 
 			const std::vector<TerraEngine::Renderer::Vulkan::VirtualGeometryPagePayloadUploadRecord> records =
-				TerraEngine::Renderer::Vulkan::BuildVirtualGeometryPagePayloadUploadPlan(snapshot, RenderViewType::Game, state.outputId);
+				TerraEngine::Renderer::Vulkan::BuildVirtualGeometryPagePayloadUploadPlan(
+					std::vector<TerraEngine::Renderer::VirtualGeometryPagePayloadSelection>{ {
+						state.viewType, state.outputId, state.ResidentPagePayloads(), state.ClusterPackets() } },
+					RenderViewType::Game, state.outputId);
 
 			context.ExpectEqual(static_cast<std::size_t>(1u), records.size(), "A selected virtual-geometry route should publish its complete fallback-page binding.");
 			context.Expect(records.front().accepted, "Resident fallback page payloads should be accepted by upload planning.");
@@ -364,7 +423,10 @@ namespace {
 			snapshot.geometryRouteDecisions.push_back(routeDecision);
 
 			const std::vector<TerraEngine::Renderer::Vulkan::VirtualGeometryPagePayloadUploadRecord> records =
-				TerraEngine::Renderer::Vulkan::BuildVirtualGeometryPagePayloadUploadPlan(snapshot, RenderViewType::Game, state.outputId);
+				TerraEngine::Renderer::Vulkan::BuildVirtualGeometryPagePayloadUploadPlan(
+					std::vector<TerraEngine::Renderer::VirtualGeometryPagePayloadSelection>{ {
+						state.viewType, state.outputId, state.ResidentPagePayloads(), state.ClusterPackets() } },
+					RenderViewType::Game, state.outputId);
 
 			context.ExpectEqual(static_cast<std::size_t>(1u), records.size(), "The upload plan should retain one rejected diagnostic row for an incomplete physical binding.");
 			context.Expect(!records.front().accepted, "Resident page uploads must be rejected until a physical page descriptor binding exists.");
@@ -611,10 +673,12 @@ namespace {
 			TerraEngine::Renderer::BackendCapabilityProfile capabilities;
 			capabilities.supportsParallelRecording = true;
 			capabilities.supportsVirtualGeometryGpuPacketBuffers = true;
+			const auto firstPublication = MakePreparationPublication(first);
+			const auto secondPublication = MakePreparationPublication(second);
 			const TerraEngine::Renderer::Vulkan::IndirectDrawPreparationPlan firstPlan =
-				TerraEngine::Renderer::Vulkan::BuildIndirectDrawPreparationPlan(first, capabilities);
+				TerraEngine::Renderer::Vulkan::BuildIndirectDrawPreparationPlan(firstPublication, capabilities);
 			const TerraEngine::Renderer::Vulkan::IndirectDrawPreparationPlan secondPlan =
-				TerraEngine::Renderer::Vulkan::BuildIndirectDrawPreparationPlan(second, capabilities);
+				TerraEngine::Renderer::Vulkan::BuildIndirectDrawPreparationPlan(secondPublication, capabilities);
 
 			context.Expect(
 				TerraEngine::Renderer::BuildSnapshotDeterministicHash(first) != TerraEngine::Renderer::BuildSnapshotDeterministicHash(second),
@@ -664,9 +728,10 @@ namespace {
 			snapshot.virtualGeometryViewSelections.push_back(MakeBatchedSelectionState());
 			TerraEngine::Renderer::BackendCapabilityProfile capabilities;
 			capabilities.supportsParallelRecording = true;
+			const auto publication = MakePreparationPublication(snapshot);
 
 			const TerraEngine::Renderer::Vulkan::IndirectDrawPreparationPlan plan =
-				TerraEngine::Renderer::Vulkan::BuildIndirectDrawPreparationPlan(snapshot, capabilities);
+				TerraEngine::Renderer::Vulkan::BuildIndirectDrawPreparationPlan(publication, capabilities);
 
 			context.ExpectEqual(static_cast<std::size_t>(1u), plan.virtualGeometryClusterPacketCount, "Vulkan prep should count VG packet tables.");
 			context.ExpectEqual(static_cast<std::size_t>(1u), plan.virtualGeometryBatchCount, "Vulkan prep should count VG batch tables.");
@@ -703,9 +768,10 @@ namespace {
 			capabilities.supportsVirtualGeometryGpuCompaction = true;
 			capabilities.supportsVirtualGeometryGeneratedSubmissions = true;
 			capabilities.supportsVirtualGeometryCounterReadback = true;
+			const auto publication = MakePreparationPublication(snapshot);
 
 			const TerraEngine::Renderer::Vulkan::IndirectDrawPreparationPlan plan =
-				TerraEngine::Renderer::Vulkan::BuildIndirectDrawPreparationPlan(snapshot, capabilities);
+				TerraEngine::Renderer::Vulkan::BuildIndirectDrawPreparationPlan(publication, capabilities);
 
 			context.ExpectEqual(static_cast<std::size_t>(1u), plan.virtualGeometryGpuPacketRecordCount, "Vulkan prep should count GPU packet records.");
 			context.ExpectEqual(static_cast<std::size_t>(1u), plan.virtualGeometryGpuBatchDescriptorCount, "Vulkan prep should count GPU batch descriptors.");

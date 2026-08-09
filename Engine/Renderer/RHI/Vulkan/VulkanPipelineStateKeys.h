@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "Renderer/Graph/RenderFrameSnapshot.h"
+#include "Renderer/Graph/RenderFramePublication.h"
 #include "Resource/MaterialRuntimeContract.h"
 #include "Core/Export.h"
 
@@ -32,6 +32,7 @@ namespace TerraEngine::Renderer::Vulkan {
 		const TerraEngine::UUID& meshId,
 		const MaterialCapabilitySignature& capability,
 		bool usesConventionalVisibilityIdentity = false);
-	TERRAENGINE_API std::vector<PipelineStateKey> BuildPipelineStateKeys(const RenderFrameSnapshot& snapshot);
+	TERRAENGINE_API std::vector<PipelineStateKey> BuildPipelineStateKeys(
+		const RenderFramePublication& publication);
 
 }

@@ -1147,7 +1147,7 @@ the requested result directory, then removes the disposable scene.
 	-ValidationScenePath 'Assets/Scenes/.terra-validation/DenseAnimatedVGSoak5m.tescene' `
 	-OutputDirectory 'Tests/Fixtures/RendererPerformanceBaseline/results/soak/dense-animated-vg-5m' `
 	-ValidationCameraPosition 0.0,0.5,1.0 -ValidationCameraTarget 0.0,0.5,0.0 `
-	-SoakDurationSeconds 300 -SoakSampleIntervalSeconds 10 -McpPort 43129 `
+	-SoakDurationSeconds 300 -SoakSampleIntervalSeconds 10 -McpPort 43155 `
 	-ValidationRoute hardware -RepresentationRoute virtual-hardware `
 	-PrefabRequestedAnimationMode 1 -EnterPlayMode -ExpectAnimatedChange
 ```
@@ -1155,15 +1155,16 @@ the requested result directory, then removes the disposable scene.
 The Profiler idle-overhead gate uses the same installed editor, project,
 disposable dense-animation scene, and fixed port for both sides of every pair.
 It alternates closed/open-idle order, records unlimited frame history, and
-requires each pair's median frame-time delta to remain within two percent. Run
-five 60-second pairs and retain the generated summaries and manifest:
+reports every pair for diagnosis, then requires the median matched-pair Engine
+CPU median and p95 deltas to remain within two percent. Run five 60-second pairs
+and retain the generated summaries and manifest:
 
 ```powershell
 & .\Tools\Profiling\MeasureProfilerIdleOverhead.ps1 `
 	-InstalledEditor 'out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe' `
 	-Project 'C:\Users\benti\Desktop\TerraEngine-Projects\New Animated Project' `
 	-OutputDirectory 'Tests/Fixtures/RendererPerformanceBaseline/results/profiler' `
-	-PairCount 5 -CaptureDurationSeconds 60 -McpPort 43129
+	-PairCount 5 -CaptureDurationSeconds 60 -McpPort 43155
 ```
 
 For a standalone long-capture coherence check, run the visual harness with
@@ -1392,3 +1393,59 @@ Remove-Item Env:TERRAENGINE_CURRENT_PROJECT_ROOT
 `Assets/Scenes/Scene.tescene` must retain SHA-256
 `C15F9DCC784BA4ACF027D7C01D22DE8D65A20C3B4044931E7C9488FDF3AFD673`; the dense
 animated validation scene is authored separately.
+
+### Frame-publication profiler and tooling
+
+The dependency-free tooling under `Tools/FramePublication` is installed with
+the build. Validate a clean checkout without creating evidence:
+
+Record `$framePubCameraHash` from the installed editor's read-only camera/diagnostic
+response (for example the `camera.capture_custom` live-visual summary
+`cameraHash` field). This is distinct from the scene file hash and must not be
+inferred or substituted.
+
+```powershell
+.\Tools\FramePublication\CaptureFramePublicationPerformance.ps1 `
+	-Project 'C:/Users/benti/Desktop/TerraEngine-Projects/New Animated Project' `
+	-Scene 'C:/Users/benti/Desktop/TerraEngine-Projects/New Animated Project/Assets/Scenes/Scene.tescene' `
+	-CameraHash '<recorded-camera-sha256>' `
+	-Manifest '.\Tools\FramePublication\workloads.json' `
+	-OutputDirectory '.\out\evidence\frame-publication' -DryRun
+```
+
+The command requires all six canonical scenarios, complete timing sources, the
+fixed scene/camera identity, and a 30-second/120-frame warmup. Capture mode
+requires five 60-second runs and preserves raw artifacts; unavailable timing is
+reported as missing. `CompareFramePublicationPerformance.ps1` refuses any
+identity mismatch rather than backfilling from the current machine. Contract
+and soak scripts similarly fail when no configured executable can produce real
+samples, so no fabricated evidence is accepted.
+
+If the preserved baseline has `status: incomparable` or no identity, comparison
+writes `comparable: false` with an explicit reason and exits nonzero; it never
+backfills identity from the current machine.
+
+After installation, run the native contract executable through the wrapper:
+
+```powershell
+& '.\Tools\FramePublication\RunFramePublicationContracts.ps1' `
+	-InstallRoot '.\out\install\RelWithDebInfo' `
+	-Manifest '.\Tools\FramePublication\workloads.json' `
+	-OutputDirectory '.\out\evidence\frame-publication\contracts'
+```
+
+Start exactly one installed editor for live capture. Provide the recorded camera
+hash; the tool refuses to infer it or use multiple editor processes:
+
+```powershell
+& '.\Tools\FramePublication\CaptureFramePublicationPerformance.ps1' `
+	-Project $framePubProject -Scene $framePubScene -CameraHash $framePubCameraHash `
+	-Manifest '.\Tools\FramePublication\workloads.json' `
+	-InstallRoot '.\out\install\RelWithDebInfo' `
+	-OutputDirectory '.\out\evidence\frame-publication\candidate' -Runs 5 -WarmupSeconds 30 -DurationSeconds 60
+```
+
+Compare only complete five-run bundles with matching identity. Finish with the
+installed five-minute soak using `-DurationSeconds 300 -SampleIntervalSeconds 1`;
+the soak retains one-second resource, generation, reuse, rejection, and present
+samples and fails closed on missing adapters or incomplete evidence.

@@ -81,6 +81,23 @@ namespace TerraEngine::EditorTests
 
 	void RegisterProfilerWindowTests(TestRegistry& registry)
 	{
+		registry.Add("ProfilerWindow.CompletedSessionCache.DefersDetailedRebuild", [](TestContext& context) {
+			const std::string source = ReadProfilerWindowSource();
+			context.Expect(source.find("sampleAnalysisValid") != std::string::npos
+				&& source.find("selectedFrame") != std::string::npos,
+				"Completed-session detail must remain cached until selection changes.");
+		});
+		registry.Add("ProfilerWindow.FramePublicationEvidence.DisplaysGenerationsAndOutcomes", [](TestContext& context) {
+			const std::string source = ReadProfilerWindowSource();
+			context.Expect(source.find("Frame Publication Evidence") != std::string::npos
+				&& source.find("Generations:") != std::string::npos
+				&& source.find("Outcomes:") != std::string::npos
+				&& source.find("Animation evaluation") != std::string::npos
+				&& source.find("Backend preparation") != std::string::npos
+				&& source.find("Uninstrumented remainder") != std::string::npos
+				&& source.find("Reconciliation:") != std::string::npos,
+				"Profiler window must display frame publication generations, outcomes, and disjoint wall-time reconciliation.");
+		});
 		registry.Add("ProfilerWindow.SampleHierarchy.ValidatesParentsAndRebuildsPresentationDepth", [](TestContext& context) {
 			using TerraEngine::EditorProfiling::BuildProfilerSampleHierarchy;
 			using TerraEngine::EditorProfiling::ProfilerSampleDisplayName;

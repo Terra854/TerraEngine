@@ -3,6 +3,7 @@
 #include "TestHarness.h"
 
 #include "Animation/AnimationSystem.h"
+#include "Animation/AnimationPresentationSystem.h"
 #include "Animation/Assets/SkeletonAsset.h"
 #include "Renderer/RenderSystem.h"
 
@@ -37,10 +38,11 @@ namespace TerraEngine::Tests {
 			request.componentGeneration = 3U;
 			request.skeletonGeneration = 4U;
 			request.skeletonCompatibilityFingerprint = 0x123456789abcdef0ULL;
+			request.presentationFrame = std::make_shared<AnimationPresentationFrame>();
 			return request;
 		}
 
-		std::shared_ptr<const PublishedAnimatorPose> MakePublishedPose(
+		std::shared_ptr<AnimationAuthorityRow> MakeAuthorityRow(
 			const AnimationRenderBindingRequest& request,
 			AnimationGeneration poseGeneration = 7U,
 			float modelTranslationX = 0.0F,
@@ -73,10 +75,14 @@ namespace TerraEngine::Tests {
 			snapshot->playback.latestStatus = AnimationStatus::Ok;
 			snapshot->pose = std::move(poseBuffer);
 
-			auto publication = std::make_shared<PublishedAnimatorPose>();
-			publication->animator = animator;
+			auto publication = std::make_shared<AnimationAuthorityRow>();
+			publication->key = {animator.slotIndex, animator.generation, 1U};
 			publication->ownerObjectId = request.animatorObjectId;
+			publication->objectGeneration = request.animatorObjectGeneration;
 			publication->componentGeneration = request.componentGeneration;
+			publication->sourceGeneration = request.animationAuthorityGeneration;
+			publication->poseGeneration = poseGeneration;
+			publication->authorityPublicationGeneration = request.animationAuthorityGeneration;
 			publication->skeleton = skeleton;
 			auto skeletonAsset = std::make_shared<SkeletonAsset>();
 			skeletonAsset->assetId.value = request.skeletonAssetId;
@@ -99,7 +105,7 @@ namespace TerraEngine::Tests {
 			publication->skeletonCompatibilityFingerprint =
 				request.skeletonCompatibilityFingerprint;
 			publication->status = AnimationStatus::Ok;
-			publication->safePose = false;
+			publication->safeFallback = false;
 			publication->snapshot = std::move(snapshot);
 			return publication;
 		}
@@ -108,21 +114,21 @@ namespace TerraEngine::Tests {
 	void RegisterAnimationRenderFallbackTests(TestRegistry& registry) {
 		registry.Add("Animation.RenderFallback.ValidCurrentPoseKeepsImmutablePublication", [](TestContext& context) {
 			AnimationRenderBindingRequest request = MakeRequest();
-			request.currentPose = MakePublishedPose(request);
-			const std::shared_ptr<const PublishedAnimatorPose> expectedOwner = request.currentPose;
+			const std::shared_ptr<AnimationAuthorityRow> expectedOwner = MakeAuthorityRow(request);
+			request.authorityRow = expectedOwner.get();
 
 			const AnimationRenderBinding result = RenderSystem::ResolveAnimationRenderBinding(request);
-			request.currentPose.reset();
 			context.Expect(result.status == AnimationRenderBindingStatus::Ready
 				&& result.source == AnimationRenderPoseSource::CpuPose
-				&& result.HasCpuPose() && result.pose == expectedOwner
+				&& result.HasCpuPose() && result.authorityRow == expectedOwner.get()
 				&& result.posePublicationGeneration == 7U && !result.safePose,
 				"A fully matching publication should remain alive through the copied draw binding.");
 		});
 
 		registry.Add("Animation.RenderFallback.CurrentMismatchFailsClosedToBindPose", [](TestContext& context) {
 			AnimationRenderBindingRequest request = MakeRequest();
-			request.currentPose = MakePublishedPose(request);
+			const std::shared_ptr<AnimationAuthorityRow> current = MakeAuthorityRow(request);
+			request.authorityRow = current.get();
 
 			AnimationRenderBindingRequest stale = request;
 			++stale.componentGeneration;
@@ -144,13 +150,14 @@ namespace TerraEngine::Tests {
 
 		registry.Add("Animation.RenderFallback.SafeCurrentPoseNeverUsesHeldData", [](TestContext& context) {
 			AnimationRenderBindingRequest request = MakeRequest();
-			request.currentPose = MakePublishedPose(request);
+			const std::shared_ptr<AnimationAuthorityRow> current = MakeAuthorityRow(request);
+			request.authorityRow = current.get();
 			request.heldBinding = RenderSystem::ResolveAnimationRenderBinding(request);
 
-			auto safePose = std::make_shared<PublishedAnimatorPose>(*request.currentPose);
+			auto safePose = std::make_shared<AnimationAuthorityRow>(*current);
 			safePose->status = AnimationStatus::NotReady;
-			safePose->safePose = true;
-			request.currentPose = std::move(safePose);
+			safePose->safeFallback = true;
+			request.authorityRow = safePose.get();
 			request.fallbackPolicy = AnimationRenderFallbackPolicy::HoldLastCompatiblePose;
 
 			const AnimationRenderBinding result = RenderSystem::ResolveAnimationRenderBinding(request);
@@ -162,9 +169,10 @@ namespace TerraEngine::Tests {
 
 		registry.Add("Animation.RenderFallback.HoldLastRequiresExactCompleteIdentity", [](TestContext& context) {
 			AnimationRenderBindingRequest request = MakeRequest();
-			request.currentPose = MakePublishedPose(request);
+			const std::shared_ptr<AnimationAuthorityRow> current = MakeAuthorityRow(request);
+			request.authorityRow = current.get();
 			request.heldBinding = RenderSystem::ResolveAnimationRenderBinding(request);
-			request.currentPose.reset();
+			request.authorityRow = nullptr;
 			request.fallbackPolicy = AnimationRenderFallbackPolicy::HoldLastCompatiblePose;
 
 			const AnimationRenderBinding held = RenderSystem::ResolveAnimationRenderBinding(request);
@@ -195,13 +203,14 @@ namespace TerraEngine::Tests {
 
 		registry.Add("Animation.RenderFallback.HeldPublicationCannotHideSafeState", [](TestContext& context) {
 			AnimationRenderBindingRequest request = MakeRequest();
-			request.currentPose = MakePublishedPose(request);
+			const std::shared_ptr<AnimationAuthorityRow> current = MakeAuthorityRow(request);
+			request.authorityRow = current.get();
 			request.heldBinding = RenderSystem::ResolveAnimationRenderBinding(request);
-			auto safePublication = std::make_shared<PublishedAnimatorPose>(*request.heldBinding.pose);
+			auto safePublication = std::make_shared<AnimationAuthorityRow>(*current);
 			safePublication->status = AnimationStatus::NotReady;
-			safePublication->safePose = true;
-			request.heldBinding.pose = std::move(safePublication);
-			request.currentPose.reset();
+			safePublication->safeFallback = true;
+			request.heldBinding.authorityRow = safePublication.get();
+			request.authorityRow = nullptr;
 			request.fallbackPolicy = AnimationRenderFallbackPolicy::HoldLastCompatiblePose;
 
 			const AnimationRenderBinding result = RenderSystem::ResolveAnimationRenderBinding(request);
@@ -212,12 +221,12 @@ namespace TerraEngine::Tests {
 
 		registry.Add("Animation.RenderFallback.MalformedPublicationIsAtomicBindPose", [](TestContext& context) {
 			AnimationRenderBindingRequest request = MakeRequest();
-			const std::shared_ptr<const PublishedAnimatorPose> valid = MakePublishedPose(request);
-			auto malformed = std::make_shared<PublishedAnimatorPose>(*valid);
+			const std::shared_ptr<AnimationAuthorityRow> valid = MakeAuthorityRow(request);
+			auto malformed = std::make_shared<AnimationAuthorityRow>(*valid);
 			auto malformedSnapshot = std::make_shared<AnimationSnapshot>(*valid->snapshot);
 			++malformedSnapshot->publicationGeneration;
 			malformed->snapshot = std::move(malformedSnapshot);
-			request.currentPose = std::move(malformed);
+			request.authorityRow = malformed.get();
 
 			const AnimationRenderBinding result = RenderSystem::ResolveAnimationRenderBinding(request);
 			context.Expect(result.status == AnimationRenderBindingStatus::InvalidPose
@@ -228,10 +237,10 @@ namespace TerraEngine::Tests {
 
 		registry.Add("Animation.RenderFallback.CpuPoseBuildsChangingGraphicsPalette", [](TestContext& context) {
 			const AnimationRenderBindingRequest request = MakeRequest();
-			const std::shared_ptr<const PublishedAnimatorPose> first =
-				MakePublishedPose(request, 7U, 0.0F, 0.25F);
-			const std::shared_ptr<const PublishedAnimatorPose> second =
-				MakePublishedPose(request, 8U, 2.0F, 0.75F);
+			const std::shared_ptr<AnimationAuthorityRow> first =
+				MakeAuthorityRow(request, 7U, 0.0F, 0.25F);
+			const std::shared_ptr<AnimationAuthorityRow> second =
+				MakeAuthorityRow(request, 8U, 2.0F, 0.75F);
 			const std::array<std::uint32_t, 1U> paletteJoints{0U};
 			const std::array<std::uint64_t, 1U> morphTargetIds{9001U};
 			const auto firstDeformation =

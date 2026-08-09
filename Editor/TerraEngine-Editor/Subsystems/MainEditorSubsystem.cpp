@@ -1609,6 +1609,11 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 void MainEditorSubsystem::OnProjectOpened() {
 	if (!ctx || !ctx->projectManager->HasActiveProject()) return;
 	auto& animationSystem = TerraEngine::Animation::AnimationSystem::Instance();
+	// Opening a project begins a new scene identity even when the previous project
+	// closed without an engine shutdown.  Retire its immutable animation roots
+	// before authoring code can schedule the first frame for this project.
+	(void)animationSystem.NotifyLifecycleInvalidation(
+		TerraEngine::Animation::AnimationLifecycleBoundary::Scene);
 	animationSystem.SetAuthoredComponentPlaybackEnabled(true);
 	animationSystem.SetAuthoredComponentPlaybackAdvancing(false);
 
@@ -2586,6 +2591,11 @@ bool MainEditorSubsystem::StartPlayMode()
 	}
 	if(ctx != nullptr && ctx->engine != nullptr)
 		ctx->engine->ResetFrameTimer();
+	// The world is now live, so no entry failure can leave an otherwise valid edit
+	// publication unnecessarily retired.  This boundary prevents completed edit
+	// work from becoming visible after Play Mode owns the simulation clock.
+	(void)TerraEngine::Animation::AnimationSystem::Instance()
+		.NotifyLifecycleInvalidation(TerraEngine::Animation::AnimationLifecycleBoundary::PlayMode);
 	// Entering Play Mode invalidates stopped edit-domain bindings. Their next
 	// protected synchronization starts each authored default clip atomically.
 	TerraEngine::Animation::AnimationSystem::Instance()
@@ -2631,6 +2641,11 @@ void MainEditorSubsystem::StopPlayMode()
 
 	// Route every stop request through one helper so toolbar clicks and
 	// Application.Quit() both restore the same cached pre-play scene snapshot.
+	// Retire the running-world authority before physics and scene restoration can
+	// reuse object slots.  The next edit-domain frame publishes a fresh tick-zero
+	// pose instead of exposing a retained Play Mode root.
+	(void)TerraEngine::Animation::AnimationSystem::Instance()
+		.NotifyLifecycleInvalidation(TerraEngine::Animation::AnimationLifecycleBoundary::PlayMode);
 	// Stop and drain provider work before restoring or destroying authored
 	// objects. Runtime body handles never survive across editor play sessions.
 	TerraEngine::Physics::PhysicsSystem::Instance().StopWorld();
@@ -3714,6 +3729,11 @@ void MainEditorSubsystem::DrawScriptCompilationModal() {
 // MainEditorSubsystem::CloseCurrentProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::CloseCurrentProject() {
 	// Tear down provider state before scene unload and ObjectManager clearing.
+	// A project switch can preserve the process-wide AnimationSystem singleton.
+	// Advance the scene identity first so old authority and presentation roots are
+	// not available while the outgoing scene is being released.
+	(void)TerraEngine::Animation::AnimationSystem::Instance()
+		.NotifyLifecycleInvalidation(TerraEngine::Animation::AnimationLifecycleBoundary::Scene);
 	TerraEngine::Physics::PhysicsSystem::Instance().StopWorld();
 	ScriptingSystem::Instance().SetRunning(false);
 	TerraEngine::Animation::AnimationSystem::Instance()

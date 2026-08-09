@@ -236,24 +236,21 @@ namespace TerraEngine::Renderer::Vulkan {
 		return plan;
 	}
 
-	UploadPreparationPlan BuildUploadPreparationPlan(const RenderFrameSnapshot& snapshot, std::size_t payloadBudget)
+	UploadPreparationPlan BuildUploadPreparationPlan(
+		const RenderFramePublication& publication, std::size_t payloadBudget)
 	{
 		UploadPreparationPlan plan;
-		plan.frameId = snapshot.frameId;
-		plan.resourceRevision = snapshot.resourceRevision;
-		plan.cancellationToken = { snapshot.frameId, snapshot.resourceRevision, snapshot.frameId, "upload-plan" };
-		for (const RenderFrameResourceRecord& mesh : snapshot.meshes)
+		plan.frameId = publication.frameId;
+		plan.resourceRevision = publication.resourcePreparation.generation;
+		plan.cancellationToken = { publication.frameId,
+			publication.resourcePreparation.generation, publication.frameId, "upload-plan" };
+		for(const RenderResourcePreparationRecord& resource :
+			publication.resourcePreparation.records)
 		{
-			if (!mesh.resident)
+			if(!resource.resident)
 			{
-				plan.payloads.push_back("mesh:" + TerraEngine::ToHexString(mesh.resourceId));
-			}
-		}
-		for (const RenderFrameResourceRecord& texture : snapshot.textures)
-		{
-			if (!texture.resident)
-			{
-				plan.payloads.push_back("texture:" + TerraEngine::ToHexString(texture.resourceId));
+				plan.payloads.push_back("resource:" + TerraEngine::ToHexString(
+					resource.resourceId));
 			}
 		}
 		plan.budget = { RenderWorkBudgetCategory::Upload, payloadBudget, plan.payloads.size(), RenderBudgetOverflowPolicy::Delay, "upload-payloads" };
@@ -330,39 +327,15 @@ namespace TerraEngine::Renderer::Vulkan {
 	}
 
 	std::vector<VirtualGeometryPagePayloadUploadRecord> BuildVirtualGeometryPagePayloadUploadPlan(
-		const RenderFrameSnapshot& snapshot,
+		std::span<const VirtualGeometryPagePayloadSelection> selections,
 		RenderViewType viewType,
 		std::uint32_t viewId)
 	{
 		std::vector<VirtualGeometryPagePayloadUploadRecord> records;
-		const auto usesVirtualGeometry = [](GeometryRoute route)
-		{
-			return route == GeometryRoute::VirtualGeometryHardware
-				|| route == GeometryRoute::VirtualGeometryCompute;
-		};
-		// Ordinary frames retain only the compact route attached to each renderable.
-		// Detailed route decisions remain an optional diagnostics envelope, while
-		// standalone tests and tools may still provide that envelope without a
-		// renderable table, so accept either source.
-		const bool hasVirtualGeometryRoute = std::any_of(
-			snapshot.renderables.begin(), snapshot.renderables.end(),
-			[&usesVirtualGeometry](const RenderFrameRenderableRecord& renderable)
-			{
-				return usesVirtualGeometry(renderable.geometryRouteDecision.selected);
-			}) || std::any_of(
-			snapshot.geometryRouteDecisions.begin(), snapshot.geometryRouteDecisions.end(),
-			[&usesVirtualGeometry](const GeometryRouteDecision& decision)
-			{
-				return usesVirtualGeometry(decision.selected);
-			});
-		if(!hasVirtualGeometryRoute)
-		{
-			// Direct batches still use ordinary mesh/material upload planning above.
-			// They must not acquire a VG page payload, descriptor row, or residency
-			// record merely because a previous frame used a virtual representation.
-			return records;
-		}
-		for (const VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
+		// A caller passes only selections that already chose a virtual-geometry
+		// route. This value-only boundary avoids reopening a snapshot just to infer
+		// whether the backend should upload a page payload.
+		for (const VirtualGeometryPagePayloadSelection& state : selections)
 		{
 			if (state.viewType != viewType)
 			{
@@ -415,12 +388,11 @@ namespace TerraEngine::Renderer::Vulkan {
 				records.push_back(std::move(record));
 			};
 
-			for (const VirtualGeometryPagePayloadRecord& payload :
-				state.ResidentPagePayloads())
+			for (const VirtualGeometryPagePayloadRecord& payload : state.residentPayloads)
 			{
 				appendRecord(payload);
 			}
-			if (!state.ResidentPagePayloads().empty())
+			if (!state.residentPayloads.empty())
 			{
 				continue;
 			}
@@ -429,7 +401,7 @@ namespace TerraEngine::Renderer::Vulkan {
 			// packet records. Convert those packet labels into the same upload
 			// contract so backend planning never has to infer source identity
 			// from draw commands or live mesh state.
-			for (const VirtualGeometryClusterPacket& packet : state.ClusterPackets())
+			for (const VirtualGeometryClusterPacket& packet : state.clusterPackets)
 			{
 				VirtualGeometryPagePayloadRecord payload;
 				payload.meshId = packet.meshId;

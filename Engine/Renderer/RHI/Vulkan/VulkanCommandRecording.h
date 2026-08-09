@@ -9,6 +9,7 @@
 #include "Animation/Gpu/GpuAnimationPlan.h"
 #include "Renderer/Graph/RenderGraph.h"
 #include "Renderer/Graph/RenderWorkPacket.h"
+#include "Renderer/Graph/RenderFramePublication.h"
 #include "Renderer/VirtualGeometry/Selection/VirtualGeometryGpuPlan.h"
 #include "VulkanCommonIncludes.h"
 #include "VulkanVirtualGeometryExecutor.h"
@@ -19,11 +20,21 @@
 #include <vector>
 
 namespace TerraEngine::Renderer::Vulkan {
+	// Vulkan consumes only ranges belonging to one validated view. This compact
+	// plan retains neutral range identities and never reconstructs scene objects.
+	struct VulkanPublishedRangePlan
+	{
+		std::vector<RenderSubmissionRange> ranges;
+		bool valid = false;
+	};
+
+	TERRAENGINE_API VulkanPublishedRangePlan BuildVulkanPublishedRangePlan(
+		const RenderFramePublication& publication,
+		std::uint32_t viewIndex);
 
 	TERRAENGINE_API std::string DescribeBackendLocalState(RenderAccessMode accessMode, RenderStage stage);
 	TERRAENGINE_API BackendRecordingBatchPlan BuildVulkanRecordingBatchPlan(
-		const RenderFrameSnapshot& snapshot,
-		const RenderWorkPacketPlan& packetPlan,
+		const RenderFramePublication& publication,
 		const BackendCapabilityProfile& capabilities,
 		RenderBackendWorkKind workKind);
 
@@ -45,7 +56,7 @@ namespace TerraEngine::Renderer::Vulkan {
 	};
 
 	TERRAENGINE_API VulkanRendererThreadingPlan BuildVulkanRendererThreadingPlan(
-		const RenderFrameSnapshot& snapshot,
+		const RenderFramePublication& publication,
 		const BackendCapabilityProfile& capabilities);
 
 	// This value plan bridges immutable renderer preparation to Vulkan's existing

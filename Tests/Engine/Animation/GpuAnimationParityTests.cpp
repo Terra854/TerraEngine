@@ -524,5 +524,51 @@ namespace TerraEngine::Tests {
 					!= parameterDivergent.evaluationSourcePacketIndices.front(),
 				"A parameter fingerprint change must split shared evaluation even when generations collide.");
 		});
+
+		registry.Add("Animation.GpuParity.HeterogeneousTicksKeepDeformationAndPacketsSeparate",
+			[](TestContext& context) {
+				const ParityFixture fixture = MakeParityFixture(context);
+				CpuClipEvaluationResult cpuEarly;
+				CpuClipEvaluationResult gpuEarly;
+				CpuClipEvaluationResult cpuLate;
+				CpuClipEvaluationResult gpuLate;
+				context.Expect(EvaluateCpuReference(fixture.view, 2, false, cpuEarly)
+						== AnimationStatus::Ok
+					&& EmulateShaderContract(fixture.view, 2, false, gpuEarly)
+						== AnimationStatus::Ok
+					&& EvaluateCpuReference(fixture.view, 8, false, cpuLate)
+						== AnimationStatus::Ok
+					&& EmulateShaderContract(fixture.view, 8, false, gpuLate)
+						== AnimationStatus::Ok,
+					"Two heterogeneous animation ticks must be available to compare CPU and GPU deformation contracts.");
+				ExpectSampleParity(context, cpuEarly, gpuEarly);
+				ExpectSampleParity(context, cpuLate, gpuLate);
+
+				GpuAnimationWorkRequest early = MakeParityPlanRequest();
+				early.stableInstanceId = 301U;
+				early.stableSubmissionOrdinal = 1U;
+				early.generations.instanceSlot = 301U;
+				early.sampleTick = 2U;
+				GpuAnimationWorkRequest late = early;
+				late.stableInstanceId = 302U;
+				late.stableSubmissionOrdinal = 2U;
+				late.generations.instanceSlot = 302U;
+				late.generations.instanceGeneration = 2U;
+				late.generations.workGeneration = 2U;
+				late.sampleTick = 8U;
+				GpuAnimationArena scratch{GpuAnimationArenaKind::Scratch, 4096U};
+				GpuAnimationArena palette{GpuAnimationArenaKind::Palette, 4096U};
+				GpuAnimationPlan plan;
+				const std::array<GpuAnimationWorkRequest, 2U> requests{early, late};
+				context.Expect(BuildGpuAnimationPlan(requests, 41U, scratch, palette, plan)
+						== GpuAnimationPlanStatus::Ok
+					&& plan.workPackets.size() == requests.size()
+					&& plan.evaluationSourcePacketIndices.size() == requests.size()
+					&& plan.evaluationSourcePacketIndices[0U]
+						!= plan.evaluationSourcePacketIndices[1U]
+					&& plan.workPackets[0U].paletteOffsetBytes
+						!= plan.workPackets[1U].paletteOffsetBytes,
+					"Heterogeneous deformation samples must publish distinct immutable packets instead of reusing another owner's palette.");
+		});
 	}
 }

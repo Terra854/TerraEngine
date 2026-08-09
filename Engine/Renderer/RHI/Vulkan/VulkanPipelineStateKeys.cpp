@@ -31,10 +31,10 @@ namespace TerraEngine::Renderer::Vulkan {
 			seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
 		}
 
-		MaterialCapabilitySignature MakeSnapshotFallbackCapability(
+		MaterialCapabilitySignature MakePublicationFallbackCapability(
 			const TerraEngine::UUID& materialId)
 		{
-			// RenderFrameSnapshot intentionally stores immutable resource identities,
+			// RenderFramePublication intentionally stores immutable resource identities,
 			// not live Material objects. Until a loader supplies an optional TMVG
 			// signature, use one typed indexed bin that is safe for every material.
 			MaterialCapabilitySignature capability{};
@@ -76,25 +76,44 @@ namespace TerraEngine::Renderer::Vulkan {
 		return key;
 	}
 
-	std::vector<PipelineStateKey> BuildPipelineStateKeys(const RenderFrameSnapshot& snapshot)
+	std::vector<PipelineStateKey> BuildPipelineStateKeys(
+		const RenderFramePublication& publication)
 	{
 		std::vector<PipelineStateKey> keys;
 		std::unordered_set<PipelineStateIdentity, PipelineStateIdentityHash>
 			uniqueIdentities;
-		uniqueIdentities.reserve(snapshot.renderables.size());
-		keys.reserve(std::min(snapshot.renderables.size(), snapshot.materials.size()));
-		for (const RenderFrameRenderableRecord& renderable : snapshot.renderables)
+		std::size_t slotCount = 0u;
+		if(publication.persistent != nullptr)
 		{
-			// Pipeline state is shared by every instance with the same immutable
-			// mesh/material identity. Instance transforms, LOD ranges, and object ids
-			// are draw payloads and must not create duplicate pipeline keys.
-			if(!uniqueIdentities.emplace(PipelineStateIdentity{
-				renderable.materialId, renderable.meshId }).second) {
+			for(const std::shared_ptr<const RenderPersistentPage>& page :
+				publication.persistent->pages)
+			{
+				slotCount += page != nullptr ? page->slots.size() : 0u;
+			}
+		}
+		uniqueIdentities.reserve(slotCount);
+		keys.reserve(slotCount);
+		if(publication.persistent == nullptr)
+		{
+			return keys;
+		}
+		for(const std::shared_ptr<const RenderPersistentPage>& page :
+			publication.persistent->pages)
+		{
+			if(page == nullptr)
+			{
 				continue;
 			}
-			keys.push_back(BuildPipelineStateKey(renderable.materialId,
-				renderable.meshId,
-				MakeSnapshotFallbackCapability(renderable.materialId)));
+			for(const RenderPersistentSlot& slot : page->slots)
+			{
+				if(!slot.IsComplete() || !uniqueIdentities.emplace(
+					PipelineStateIdentity{slot.materialId, slot.meshId}).second)
+				{
+					continue;
+				}
+				keys.push_back(BuildPipelineStateKey(slot.materialId, slot.meshId,
+					MakePublicationFallbackCapability(slot.materialId)));
+			}
 		}
 		std::stable_sort(keys.begin(), keys.end(), [](const PipelineStateKey& left, const PipelineStateKey& right) {
 			return left.sortKey < right.sortKey;

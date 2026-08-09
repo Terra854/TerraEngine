@@ -4,6 +4,10 @@
 
 #include "Profiling/PerformanceTelemetry.h"
 
+#include <filesystem>
+#include <fstream>
+#include <nlohmann/json.hpp>
+
 namespace TerraEngine::Tests
 {
 namespace
@@ -23,6 +27,11 @@ TelemetryDuration UnavailableDuration(const char* reason)
 
 void RegisterPerformanceTelemetryTests(TestRegistry& registry)
 {
+	registry.Add("Profiling.PerformanceTelemetryComparabilityFailsClosed", [](TestContext& context) {
+		const auto measured = AvailableDuration(10U);
+		const auto unavailable = UnavailableDuration("clock unavailable");
+		context.Expect(measured.availability != unavailable.availability, "Unavailable timing must remain distinct from measured zero.");
+	});
 	registry.Add("Profiling.PerformanceTelemetryValidatesPhysicsAndSceneViewStages", [](TestContext& context) {
 		PerformanceStageRecord physics{PerformanceStageDomain::Physics, "Physics.Extract", AvailableDuration(45000u), "physics extraction", 1000u, false};
 		PerformanceStageRecord sceneView{PerformanceStageDomain::SceneView, "SceneView.Density", AvailableDuration(12000u), "marker density", 800u, true};
@@ -67,6 +76,52 @@ void RegisterPerformanceTelemetryTests(TestRegistry& registry)
 		volume.publishedBodyCount = 601u;
 		volume.changedBodyCount = 600u;
 		context.Expect(!ValidatePhysicsWorkVolumeRecord(volume).valid, "Published physics bodies cannot exceed changed bodies.");
+	});
+
+	registry.Add("Profiling.PerformanceTelemetryFramePublicationComparisonFailsClosed", [](TestContext& context) {
+		const std::filesystem::path toolRoot =
+			std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Tools" / "FramePublication";
+		std::ifstream manifestStream(toolRoot / "workloads.json");
+		context.Expect(manifestStream.good(),
+			"The canonical workload manifest must be readable for comparison tests.");
+		if(!manifestStream) return;
+		nlohmann::json manifest;
+		manifestStream >> manifest;
+		context.Expect(manifest.value("measuredRuns", 0) == 5
+			&& manifest.value("durationSeconds", 0) == 60,
+			"Comparable evidence requires exactly five 60-second measured runs.");
+		context.Expect(manifest["warmup"].value("minimumSeconds", 0) >= 30
+			&& manifest["warmup"].value("minimumFrames", 0) >= 120,
+			"Comparable evidence requires both the wall-clock and completed-frame warmup gates.");
+		context.Expect(manifest["timingSources"].size() == 4,
+			"The manifest must declare every timing source used by the paired report.");
+		for(const auto& scenario : manifest["scenarios"])
+		{
+			context.Expect(scenario.contains("routeMix")
+				&& scenario.contains("animationPolicy")
+				&& scenario.contains("specialistMask")
+				&& scenario.contains("seed"),
+				"Each workload must carry route, animation, specialist, and seed identity without later backfill.");
+		}
+
+		std::ifstream comparisonStream(
+			toolRoot / "CompareFramePublicationPerformance.ps1");
+		const std::string comparisonSource{
+			std::istreambuf_iterator<char>(comparisonStream),
+			std::istreambuf_iterator<char>()};
+		context.Expect(comparisonSource.find("PSObject.Properties[$field]")
+				!= std::string::npos
+			&& comparisonSource.find("$field (missing)") != std::string::npos,
+			"Missing identity fields must be reported rather than inferred or compared as two null values.");
+		context.Expect(comparisonSource.find("warmup (missing or incomplete)")
+				!= std::string::npos
+			&& comparisonSource.find("timing source '$source' (missing)")
+				!= std::string::npos,
+			"Warmup and timing-source availability must participate in fail-closed comparability.");
+		context.Expect(comparisonSource.find("no identity or delta was backfilled")
+			!= std::string::npos,
+			"An incomparable historical baseline must remain explicit and must not be backfilled.");
 	});
 }
 }

@@ -6,14 +6,18 @@
 
 #include "TestHarness.h"
 
+#include "Renderer/Backend/RenderBackendWork.h"
+#include "Renderer/Graph/RenderFramePublication.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
-#include "Renderer/Graph/RenderWorkPacket.h"
 #include "Renderer/RenderSystem.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
+#include <string>
 
 namespace TerraEngine::Tests
 {
@@ -95,6 +99,8 @@ namespace TerraEngine::Tests
 		{
 			auto plan = std::make_shared<TerraEngine::Animation::GpuAnimationPlan>();
 			plan->generation = 21U;
+			plan->topologyInputSignature = 0x2100U;
+			plan->topologyRendererGeneration = 17U;
 			TerraEngine::Animation::GpuAnimationGenerationRecord generation{};
 			generation.rendererGeneration = 17U;
 			plan->generationRecords.push_back(generation);
@@ -103,6 +109,9 @@ namespace TerraEngine::Tests
 			packet.generationRecordIndex = 0U;
 			packet.stageMask = TerraEngine::Animation::kGpuAnimationAllStageMask;
 			plan->workPackets.push_back(packet);
+			TerraEngine::Animation::GpuAnimationRenderIdentity renderIdentity{};
+			renderIdentity.meshId = MakeAnimatedViewTestUuid(1U);
+			plan->renderIdentities.push_back(renderIdentity);
 			return plan;
 		}
 
@@ -115,6 +124,42 @@ namespace TerraEngine::Tests
 			generation.gpuWorkPacketCount = 1U;
 			generation.gpuStageMask = TerraEngine::Animation::kGpuAnimationAllStageMask;
 			generation.source = AnimationRenderEvaluationSource::GpuVisual;
+		}
+
+		TerraEngine::Renderer::RenderDynamicStateRoot BuildDynamicState(
+			const TerraEngine::Renderer::RenderFrameSnapshot& snapshot)
+		{
+			using namespace TerraEngine::Renderer;
+			RenderDynamicStateRoot root{};
+			root.generation = snapshot.frameId;
+			root.rendererSessionGeneration = 1u;
+			auto page = std::make_shared<RenderDynamicPage>();
+			page->generation = snapshot.frameId;
+			page->lanes.reserve(snapshot.renderables.size());
+			for(const RenderFrameRenderableRecord& renderable : snapshot.renderables)
+			{
+				RenderDynamicLane lane{};
+				// Mirror the production publication boundary: tests retain only the
+				// immutable values consumed by backend animation work.
+				lane.animation.stableInstanceId = renderable.animation.stableInstanceId;
+				lane.animation.poseGeneration = renderable.animation.poseGeneration;
+				lane.animation.paletteGeneration = renderable.animation.paletteGeneration;
+				lane.animation.deformablePayloadGeneration =
+					renderable.animation.deformablePayloadGeneration;
+				lane.animation.programGeneration = renderable.animation.programGeneration;
+				lane.animation.animationPlanGeneration =
+					renderable.animation.animationPlanGeneration;
+				lane.animation.rendererGeneration = renderable.animation.rendererGeneration;
+				lane.animation.firstGpuWorkPacket = renderable.animation.firstGpuWorkPacket;
+				lane.animation.gpuWorkPacketCount = renderable.animation.gpuWorkPacketCount;
+				lane.animation.gpuStageMask = renderable.animation.gpuStageMask;
+				lane.animation.source = static_cast<std::uint8_t>(renderable.animation.source);
+				lane.animation.complete = renderable.animation.complete;
+				lane.occupied = true;
+				page->lanes.push_back(std::move(lane));
+			}
+			root.pages.push_back(std::move(page));
+			return root;
 		}
 
 		TerraEngine::Renderer::AnimationRenderBindingRequest BuildGpuVisualBindingRequest()
@@ -287,7 +332,8 @@ namespace TerraEngine::Tests
 			snapshot.renderables.push_back(second);
 			const TerraEngine::Renderer::AnimationBackendWorkPlan work =
 				TerraEngine::Renderer::BuildAnimationBackendWorkPlan(
-					snapshot, BuildGpuAnimationPlanFixture());
+					snapshot.frameId, BuildDynamicState(snapshot),
+					BuildGpuAnimationPlanFixture());
 
 			context.Expect(work.valid && work.ranges.size() == 1U
 				&& work.gpuAnimatorCount == 1U && work.immutablePlan != nullptr,
@@ -303,7 +349,8 @@ namespace TerraEngine::Tests
 			snapshot.renderables.push_back(conflicting);
 			const TerraEngine::Renderer::AnimationBackendWorkPlan work =
 				TerraEngine::Renderer::BuildAnimationBackendWorkPlan(
-					snapshot, BuildGpuAnimationPlanFixture());
+					snapshot.frameId, BuildDynamicState(snapshot),
+					BuildGpuAnimationPlanFixture());
 
 			context.Expect(!work.valid && work.ranges.empty() && work.immutablePlan == nullptr
 				&& !work.rejectionReason.empty(),
@@ -325,6 +372,12 @@ namespace TerraEngine::Tests
 
 		registry.Add("Renderer.AnimationView.PageCapabilitySurvivesPoseBindingResolution", [](TestContext& context) {
 			using namespace TerraEngine::Renderer;
+			const std::filesystem::path renderSystemPath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+					/ "Engine" / "Renderer" / "RenderSystem.cpp";
+			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
+			const std::string renderSystemSource{
+				std::istreambuf_iterator<char>(renderSystemStream), {} };
 			auto request = BuildGpuVisualBindingRequest();
 			request.gpuVisualIdentity = BuildGpuVisualIdentity();
 			const AnimationRenderBinding legacy =
@@ -342,16 +395,225 @@ namespace TerraEngine::Tests
 
 			context.Expect(
 				legacy.RequiresOwnerMeshDeformationFallback()
+					&& legacy.RequiresVirtualGeometryOwnerFallbackVisibility(true)
+					&& !legacy.RequiresVirtualGeometryOwnerFallbackVisibility(false)
 					&& pageLocal.pageLocalDeformationAvailable
 					&& !pageLocal.RequiresOwnerMeshDeformationFallback()
+					&& !pageLocal.RequiresVirtualGeometryOwnerFallbackVisibility(true)
 					&& !legacy.IsComputeRasterDeformationSafe()
 					&& pageLocal.IsComputeRasterDeformationSafe()
 					&& !bindPose.RequiresOwnerMeshDeformationFallback()
 					&& bindPose.IsComputeRasterDeformationSafe()
 					&& !safePose.RequiresOwnerMeshDeformationFallback()
 					&& safePose.IsComputeRasterDeformationSafe()
-					&& !staticBinding.RequiresOwnerMeshDeformationFallback(),
+					&& !staticBinding.RequiresOwnerMeshDeformationFallback()
+					&& renderSystemSource.find(
+						"RequiresVirtualGeometryOwnerFallbackVisibility(") != std::string::npos,
 				"Pose binding must preserve demanded-page compute eligibility while a rejected page state retains fail-open owner coverage.");
+		});
+
+		registry.Add("Renderer.AnimationView.DenseGpuWorkRetainsFullImmutablePlan",
+			[](TestContext& context)
+		{
+			auto snapshot = BuildAllViewSnapshot();
+			MakeSnapshotGpuDriven(snapshot);
+			const TerraEngine::Renderer::AnimationBackendWorkPlan work =
+				TerraEngine::Renderer::BuildAnimationBackendWorkPlan(
+					snapshot.frameId, BuildDynamicState(snapshot),
+					BuildGpuAnimationPlanFixture());
+
+			context.Expect(work.valid && work.fullImmutablePlanCoverage
+				&& work.ranges.empty() && work.gpuAnimatorCount == 1U
+				&& work.rendererGeneration == 17U
+				&& work.immutablePlan != nullptr,
+				"A complete one-to-one GPU crowd must retain its immutable plan without duplicating packet ranges.");
+		});
+
+		registry.Add("Renderer.AnimationView.DenseProducerProofSkipsDynamicLaneScan",
+			[](TestContext& context)
+		{
+			const auto immutablePlan = BuildGpuAnimationPlanFixture();
+			const TerraEngine::Renderer::AnimationBackendWorkPlan work =
+				TerraEngine::Renderer::BuildDenseAnimationBackendWorkPlan(
+					101U, 1U, immutablePlan);
+			context.Expect(work.valid && work.fullImmutablePlanCoverage
+				&& work.ranges.empty() && work.gpuAnimatorCount == 1U
+				&& work.rendererGeneration == 17U
+				&& work.immutablePlan == immutablePlan,
+				"A sealed one-owner/one-packet topology must publish backend work without reopening renderer dynamic pages.");
+
+			const TerraEngine::Renderer::AnimationBackendWorkPlan rejected =
+				TerraEngine::Renderer::BuildDenseAnimationBackendWorkPlan(
+					102U, 2U, immutablePlan);
+			context.Expect(!rejected.valid && rejected.immutablePlan == nullptr
+				&& !rejected.rejectionReason.empty(),
+				"A mismatched producer owner count must reject the O(1) coverage proof atomically.");
+		});
+
+		registry.Add("Renderer.AnimationView.VisibleCacheInvalidatesEmptyPreReadyOwnerFallback", [](TestContext& context) {
+			const std::filesystem::path renderSystemPath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+					/ "Engine" / "Renderer" / "RenderSystem.cpp";
+			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
+			const std::string renderSystemSource{
+				std::istreambuf_iterator<char>(renderSystemStream), {} };
+			const std::size_t visibilitySignature = renderSystemSource.find(
+				"std::uint64_t renderableVisibilitySignature = renderableWorldSignature;");
+			const std::size_t ownerFallbackAdmission = renderSystemSource.find(
+				"RequiresVirtualGeometryOwnerFallbackVisibility(", visibilitySignature);
+			const std::size_t unboundedPoseInvalidation = renderSystemSource.find(
+				"if(requiresUnboundedCoarseVisibility)", ownerFallbackAdmission);
+			const std::size_t poseGenerationToken = renderSystemSource.find(
+				"binding.posePublicationGeneration", unboundedPoseInvalidation);
+			const std::size_t visibleCacheKey = renderSystemSource.find(
+				"std::uint64_t signature = BuildVisibleCommandCacheKey(",
+				poseGenerationToken);
+			const std::size_t visibleAdmissionArgument = renderSystemSource.find(
+				"renderableVisibilitySignature,", visibleCacheKey);
+			const std::size_t topologyGenerationArgument = renderSystemSource.find(
+				"HashCombine(signature, retainedRenderTopology.topology.generation);",
+				visibleCacheKey);
+			const std::size_t authoritativeReuseCounter = renderSystemSource.find(
+				"viewEvidenceReuseHits =\n\t\t\tviewEvidenceReused ? 1u : 0u;",
+				topologyGenerationArgument);
+
+			context.Expect(visibilitySignature != std::string::npos
+				&& ownerFallbackAdmission != std::string::npos
+				&& unboundedPoseInvalidation != std::string::npos
+				&& poseGenerationToken != std::string::npos
+				&& visibleCacheKey != std::string::npos
+				&& visibleAdmissionArgument != std::string::npos
+				&& topologyGenerationArgument != std::string::npos
+				&& authoritativeReuseCounter != std::string::npos,
+				"A visible-command cache entry made before animation becomes ready must hash owner-fallback admission state, while pose generations invalidate only unbounded legacy deformation that lacks a conservative envelope.");
+		});
+
+		registry.Add("Renderer.AnimationView.CaptureSelectionReuseKeepsReadbackIdentitySeparate", [](TestContext& context) {
+			const std::filesystem::path renderSystemPath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+					/ "Engine" / "Renderer" / "RenderSystem.cpp";
+			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
+			const std::string source{
+				std::istreambuf_iterator<char>(renderSystemStream), {} };
+			const std::size_t cacheKeyBegin = source.find(
+				"std::uint64_t BuildVisibleCommandCacheKey(");
+			const std::size_t cacheKeyEnd = source.find("return seed;", cacheKeyBegin);
+			const std::string cacheKeyBody = cacheKeyBegin == std::string::npos
+				|| cacheKeyEnd == std::string::npos
+				? std::string{}
+				: source.substr(cacheKeyBegin, cacheKeyEnd - cacheKeyBegin);
+
+			context.Expect(!cacheKeyBody.empty()
+				&& cacheKeyBody.find("captureRequestIdentity") == std::string::npos
+				&& source.find("submittedCaptureReadbackRequests.push_back(")
+					!= std::string::npos
+				&& source.find("result.requestId = request.requestId;")
+					!= std::string::npos
+				&& source.find(
+					"result.targetGeneration != resolvedSnapshot.targetGeneration")
+					!= std::string::npos,
+				"Repeated identical captures should reuse geometry selection while asynchronous readback retains request and target-generation ownership.");
+		});
+
+		registry.Add("Renderer.AnimationView.GroupedCacheInvalidatesEmptyPreReadyAnimation", [](TestContext& context) {
+			const std::filesystem::path renderSystemPath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+					/ "Engine" / "Renderer" / "RenderSystem.cpp";
+			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
+			const std::string renderSystemSource{
+				std::istreambuf_iterator<char>(renderSystemStream), {} };
+			const std::size_t compatibilityHash = renderSystemSource.find(
+				"const auto dynamicCompatibilityHash");
+			const std::size_t animationReadyBit = renderSystemSource.find(
+				"combine(command.HasCompleteGpuAnimation() ? 1u : 0u);",
+				compatibilityHash);
+			const std::size_t membershipLookup = renderSystemSource.find(
+				"GroupedSubmissionMembershipCacheRecord& membershipCache",
+				compatibilityHash);
+
+			context.Expect(compatibilityHash != std::string::npos
+				&& animationReadyBit != std::string::npos
+				&& membershipLookup != std::string::npos
+				&& animationReadyBit < membershipLookup,
+				"A grouped-submission cache populated before GPU animation readiness must rebuild when complete packet identity becomes available.");
+		});
+
+		registry.Add("Renderer.AnimationView.GroupedSceneContextRetainsSharedTint", [](TestContext& context) {
+			const std::filesystem::path renderSystemPath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+					/ "Engine" / "Renderer" / "RenderSystem.cpp";
+			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
+			const std::string renderSystemSource{
+				std::istreambuf_iterator<char>(renderSystemStream), {} };
+			const std::size_t compatibility = renderSystemSource.find(
+				"&& a.editorTint == b.editorTint;");
+			const std::size_t tintHash = renderSystemSource.find(
+				"combine(std::bit_cast<std::uint32_t>(command.editorTint.x));",
+				compatibility);
+			const std::size_t instanceTint = renderSystemSource.find(
+				"record.editorTint = command.editorTint;", tintHash);
+
+			context.Expect(compatibility != std::string::npos
+				&& tintHash != std::string::npos
+				&& instanceTint != std::string::npos,
+				"Scene context objects with the same tint must remain group-compatible while distinct tint groups retain exact instance evidence.");
+		});
+
+		registry.Add("Renderer.AnimationView.OwnerFallbackRetainsGroupedMeshTaskEligibility", [](TestContext& context) {
+			using namespace TerraEngine::Renderer;
+			RenderItemRecord command{};
+			command.geometryRoute = GeometryRoute::VirtualGeometryFallback;
+			context.Expect(command.UsesGroupableMeshTaskRoute()
+				&& !command.UsesVirtualGeometryRoute(),
+				"A correctness-preserving owner fallback must remain groupable without being mislabeled as page-local virtual geometry.");
+
+			command.geometryRoute = GeometryRoute::VirtualGeometryHardware;
+			context.Expect(command.UsesGroupableMeshTaskRoute()
+				&& command.UsesVirtualGeometryRoute(),
+				"The hardware virtual-geometry route must remain in both its page-local and grouped task families.");
+		});
+
+		registry.Add("Renderer.AnimationView.DedicatedCaptureCollectsWithoutAuthoredCamera", [](TestContext& context) {
+			const std::filesystem::path renderSystemPath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+					/ "Engine" / "Renderer" / "RenderSystem.cpp";
+			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
+			const std::string renderSystemSource{
+				std::istreambuf_iterator<char>(renderSystemStream), {} };
+			const std::size_t queuedCaptureState = renderSystemSource.find(
+				"bool hasQueuedDedicatedCapture = false;");
+			const std::size_t renderableCollection = renderSystemSource.find(
+				"Render.CollectRenderables", queuedCaptureState);
+			const std::size_t admission = renderSystemSource.find(
+				"&& !hasQueuedDedicatedCapture", renderableCollection);
+
+			context.Expect(queuedCaptureState != std::string::npos
+				&& renderableCollection != std::string::npos
+				&& admission != std::string::npos,
+				"A queued custom dedicated capture must collect renderables even when the scene has no authored or Scene View camera.");
+		});
+
+		registry.Add("Renderer.AnimationView.DiagnosticsUseSealedDeformationPublication", [](TestContext& context) {
+			const std::filesystem::path renderSystemPath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+					/ "Engine" / "Renderer" / "RenderSystem.cpp";
+			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
+			const std::string renderSystemSource{
+				std::istreambuf_iterator<char>(renderSystemStream), {} };
+			const std::size_t transfer = renderSystemSource.find(
+				"backendWork->deformationWork = std::move(selectedDeformation.immutablePlan);");
+			const std::size_t diagnostics = renderSystemSource.find(
+				"BuildVirtualGeometryViewDiagnosticsFromSnapshot(", transfer);
+			const std::size_t sealedRoot = renderSystemSource.find(
+				"sealedPublication->backendWork->deformationWork.get()", diagnostics);
+			const std::size_t staleRoot = renderSystemSource.find(
+				"selectedDeformation.immutablePlan.get()", diagnostics);
+
+			context.Expect(transfer != std::string::npos
+				&& diagnostics != std::string::npos
+				&& sealedRoot != std::string::npos
+				&& (staleRoot == std::string::npos || staleRoot > sealedRoot),
+				"Post-seal diagnostics must inspect the retained backend deformation root, never the moved-from selection candidate.");
 		});
 
 		registry.Add("Renderer.AnimationView.ActiveDeformationUsesProvenCpuBroadphaseEnvelope", [](TestContext& context) {
@@ -494,6 +756,21 @@ namespace TerraEngine::Tests
 				baseline.viewRequests.front(), baseline.renderables);
 			context.ExpectEqual(baseline.viewRequests.front().viewGeneration, copiedView.viewGeneration,
 				"Worker visibility state must copy the exact camera generation without changing deformation identity.");
+		});
+
+		registry.Add("Renderer.AnimationView.GpuCrowdSkipsEmptyCpuDeformationScan", [](TestContext& context) {
+			const std::filesystem::path rendererPath =
+				std::filesystem::path(__FILE__).parent_path().parent_path()
+					.parent_path().parent_path()
+					/ "Engine" / "Renderer" / "RenderSystem.cpp";
+			std::ifstream stream(rendererPath, std::ios::binary);
+			const std::string source(
+				std::istreambuf_iterator<char>(stream), {});
+			context.Expect(source.find("hasCpuDeformationCandidates")
+					!= std::string::npos
+				&& source.find("std::span<RenderableEntry> cpuDeformationCandidates")
+					!= std::string::npos,
+				"Collection must carry the final CPU-deformation candidate proof so an all-GPU crowd does not get rescanned.");
 		});
 	}
 }

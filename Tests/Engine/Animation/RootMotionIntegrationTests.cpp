@@ -2,6 +2,7 @@
 
 #include "TestHarness.h"
 
+#include "AnimationAuthorityTestHelpers.h"
 #include "Animation/AnimationSystem.h"
 #include "Animation/Runtime/RootMotion.h"
 #include "AnimationClipCompiler.h"
@@ -479,8 +480,8 @@ namespace TerraEngine::Tests {
 				"The Play command and all four animation workloads must complete in one scheduler frame.");
 
 			const Transform* transform = objects.GetComponent<Transform>(object);
-			const std::shared_ptr<const PublishedAnimatorPose> published =
-				system.LoadPublishedAnimatorPose(handle);
+			const PinnedAnimationAuthorityRow published =
+				PinnedAnimationAuthorityRow::ForAnimator(system, handle);
 			std::vector<AnimationRootMotionApplicationResult> results;
 			AnimationRootMotionResultPublisher::Instance().CopyForAnimator(handle, results);
 			const auto automatic = std::find_if(results.begin(), results.end(), [](const auto& result) {
@@ -577,8 +578,8 @@ namespace TerraEngine::Tests {
 			context.Expect(system.SubmitCommand(play).status == AnimationStatus::Queued
 				&& ExecuteRootMotionFrame(system, "worker-root-motion-source"),
 				"The source publication must become immutable before the worker submits its request.");
-			const std::shared_ptr<const PublishedAnimatorPose> published =
-				system.LoadPublishedAnimatorPose(handle);
+			const PinnedAnimationAuthorityRow published =
+				PinnedAnimationAuthorityRow::ForAnimator(system, handle);
 			const std::optional<AnimationRootMotionDelta> delta = published && published->snapshot
 				&& published->snapshot->pose
 				? published->snapshot->pose->RootMotionDelta()

@@ -51,5 +51,27 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(static_cast<std::size_t>(2u), summary.rendererRecoveryDiagnostics.recentRenderPhases.size(), "Recovery diagnostics should retain recent backend phases.");
 			context.Expect(summary.rendererRecoveryDiagnostics.recentRenderPhases.back().find("submit game view") != std::string::npos, "Recent phase entries should retain the backend submit label.");
 		});
+
+		registry.Add("RendererRecovery.Diagnostics.RejectsStaleResourcesAfterSessionChange", [](TestContext& context) {
+			using namespace TerraEngine::Renderer;
+			const RendererRecoverySnapshot previous = MakeLatchedRendererDeviceLoss();
+			const RendererRecoverySnapshot recovered = MakeActiveRecoverySnapshot(8u);
+			context.Expect(CanAcceptRecoveredGpuResources(previous, recovered),
+				"Recovery must accept recreated backend resources only when a newer active session follows the latched session.");
+			const RendererRecoverySnapshot stale = MakeActiveRecoverySnapshot(previous.renderSessionGeneration);
+			context.Expect(!CanAcceptRecoveredGpuResources(previous, stale),
+				"Recovery must reject backend resources that reuse the latched session generation.");
+			context.Expect(!IsRendererGenerationCurrent(previous, 8u),
+				"A stale renderer root must be rejected when a newer session generation is active.");
+		});
+
+		registry.Add("RendererRecovery.Diagnostics.ActiveGenerationAllowsNormalSubmission", [](TestContext& context) {
+			using namespace TerraEngine::Renderer;
+			const RendererRecoverySnapshot active = MakeActiveRecoverySnapshot(12u);
+			context.Expect(CanSubmitNormalGpuWork(active) && IsRendererGenerationCurrent(active, 12u),
+				"A recreated active session may resume normal submission only at its exact generation.");
+			context.Expect(!IsRendererGenerationCurrent(active, 11u),
+				"Older frame-slot/cache generations must remain stale after recovery.");
+		});
 	}
 }

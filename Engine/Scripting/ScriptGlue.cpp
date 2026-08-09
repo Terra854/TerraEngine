@@ -786,9 +786,17 @@ namespace {
 		return info->status;
 	}
 
+	const TerraEngine::Animation::AnimationAuthorityRow* LoadAuthorityRow(
+		TerraEngine::Animation::AnimatorInstanceHandle animator,
+		std::shared_ptr<const TerraEngine::Animation::AnimationAuthorityFrame>& authority)
+	{
+		authority = TerraEngine::Animation::AnimationSystem::Instance().LoadPublishedAuthorityFrame();
+		return authority && authority->IsValid() ? authority->Find(animator) : nullptr;
+	}
+
 	bool CopyOrMaterializeCurrentSocketSnapshot(
 		TerraEngine::Animation::AnimatorInstanceHandle animator,
-		const std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose>& published,
+		const TerraEngine::Animation::AnimationAuthorityRow* published,
 		TerraEngine::Animation::AnimationSocketReadSnapshot& output)
 	{
 		using namespace TerraEngine::Animation;
@@ -799,8 +807,8 @@ namespace {
 		const auto isCurrent = [&](const AnimationSocketReadSnapshot& snapshot) {
 			return published && published->snapshot && published->snapshot->pose
 				&& snapshot.animator == animator
-				&& snapshot.poseGeneration == published->snapshot->publicationGeneration
-				&& snapshot.publicationGeneration == published->snapshot->publicationGeneration
+			&& snapshot.poseGeneration == published->poseGeneration
+			&& snapshot.publicationGeneration == published->poseGeneration
 				&& snapshot.sourceTick == published->snapshot->tick
 				&& snapshot.skeleton == published->skeleton;
 		};
@@ -824,7 +832,7 @@ namespace {
 		request.sourceObjectGeneration = published->objectGeneration;
 		request.sourceComponentGeneration = published->componentGeneration;
 		request.sourceTick = published->snapshot->tick;
-		request.publicationGeneration = published->snapshot->publicationGeneration;
+		request.publicationGeneration = published->poseGeneration;
 		request.sourceObjectWorldTransform = published->sourceObjectWorldTransform;
 		request.pose = published->snapshot->pose;
 		request.skeleton = published->skeletonAsset;
@@ -849,14 +857,13 @@ namespace {
 
 	NativeAnimationEvent MakeNativeAnimationEvent(
 		const TerraEngine::Animation::AnimationEventRecord& source,
-		const TerraEngine::Animation::PublishedAnimatorPose& owner) noexcept
+		const TerraEngine::Animation::AnimationAuthorityFrame& authority) noexcept
 	{
+		using namespace TerraEngine::Animation;
 		NativeAnimationEvent event{};
 		event.header = AnimationHeader(NativeAnimationRecordKind::Event, sizeof(event));
 		event.animator = AnimationFromHandle(source.identity.animator);
 		event.clipAssetId = AnimationFromUuid(source.identity.clipAssetId.value);
-		event.controllerAssetId = AnimationFromUuid(owner.controller.assetId.value);
-		event.controllerGeneration = owner.controller.generation;
 		event.controllerStateId = source.identity.stateInstanceId;
 		event.sourceStateId = source.sourceStateId;
 		event.eventId = source.identity.eventId;
@@ -866,15 +873,15 @@ namespace {
 		event.payloadType = static_cast<std::uint32_t>(source.payloadType);
 		event.direction = static_cast<std::int32_t>(source.direction);
 		event.historical = source.historical ? 1U : 0U;
-		event.clipGeneration = owner.clip.generation;
-		event.poseGeneration = owner.snapshot ? owner.snapshot->publicationGeneration : 0U;
 		event.producerOrder = source.producerOrder;
 		event.correlationId = source.correlationId;
-		event.publicationGeneration =
-			TerraEngine::Animation::AnimationSystem::Instance().AuthorityPublicationGeneration();
-		// V1 authored clips use a stable numeric event identity rather than a
-		// separate retained name. Exposing that identity as the default tag keeps
-		// tag filtering deterministic without borrowing asset string storage.
+		event.publicationGeneration = authority.authorityGeneration;
+		if(const AnimationAuthorityRow* row = authority.Find(source.identity.animator)) {
+			event.controllerAssetId = AnimationFromUuid(row->controller.assetId.value);
+			event.controllerGeneration = row->controller.generation;
+			event.clipGeneration = row->clip.generation;
+			event.poseGeneration = row->poseGeneration;
+		}
 		const std::string tag = std::to_string(source.identity.eventId);
 		CopyBoundedAnimationText(event.tag, sizeof(event.tag), tag);
 		CopyBoundedAnimationText(event.payload, sizeof(event.payload), source.payload);
@@ -1261,8 +1268,8 @@ extern "C" {
 			result->reasonMask = static_cast<std::uint32_t>(NativeAnimationCapabilityReason::Available);
 			break;
 		case NativeAnimationCapability::BoneRead: {
-			const std::shared_ptr<const PublishedAnimatorPose> published =
-				AnimationSystem::Instance().LoadPublishedAnimatorPose(handle);
+			std::shared_ptr<const AnimationAuthorityFrame> authority;
+			const AnimationAuthorityRow* published = LoadAuthorityRow(handle, authority);
 			if(!published || !published->snapshot || !published->snapshot->pose
 				|| !published->snapshot->pose->IsSealed()) {
 				result->status = NativeAnimationStatus::NotReady;
@@ -1274,7 +1281,7 @@ extern "C" {
 			const std::span<const AnimationTransform> local = pose.LocalTransforms();
 			const std::span<const AnimationTransform> model = pose.ModelTransforms();
 			const bool currentCpuPose = pose.Generation().animator == handle
-				&& pose.Generation().poseGeneration == published->snapshot->publicationGeneration
+				&& pose.Generation().poseGeneration == published->poseGeneration
 				&& model.size() == local.size()
 				&& model.size() == published->jointStableIds.size();
 			if(!currentCpuPose) {
@@ -1311,8 +1318,8 @@ extern "C" {
 					NativeAnimationCapabilityReason::Available);
 				break;
 			}
-			const std::shared_ptr<const PublishedAnimatorPose> published =
-				AnimationSystem::Instance().LoadPublishedAnimatorPose(handle);
+			std::shared_ptr<const AnimationAuthorityFrame> authority;
+			const AnimationAuthorityRow* published = LoadAuthorityRow(handle, authority);
 			AnimationSocketReadSnapshot socketSnapshot;
 			const bool currentSnapshot = CopyOrMaterializeCurrentSocketSnapshot(
 				handle, published, socketSnapshot);
@@ -1339,8 +1346,8 @@ extern "C" {
 			break;
 		}
 		case NativeAnimationCapability::RootMotion: {
-			const std::shared_ptr<const PublishedAnimatorPose> published =
-				AnimationSystem::Instance().LoadPublishedAnimatorPose(handle);
+			std::shared_ptr<const AnimationAuthorityFrame> authority;
+			const AnimationAuthorityRow* published = LoadAuthorityRow(handle, authority);
 			if(!published || !published->snapshot || !published->snapshot->pose
 				|| !published->snapshot->pose->RootMotionDelta()) {
 				result->status = NativeAnimationStatus::NotReady;
@@ -1351,8 +1358,8 @@ extern "C" {
 			const AnimationRootMotionDelta& delta =
 				*published->snapshot->pose->RootMotionDelta();
 			if(delta.animator != handle || delta.generation == 0U
-				|| delta.generation != published->snapshot->publicationGeneration
-				|| published->authorityPublicationGeneration == 0U) {
+				|| delta.generation != published->poseGeneration
+				|| published->sourceGeneration == 0U) {
 				result->status = NativeAnimationStatus::NotReady;
 				result->reasonMask = static_cast<std::uint32_t>(
 					NativeAnimationCapabilityReason::AnimatorNotReady);
@@ -1422,8 +1429,8 @@ extern "C" {
 		if(snapshotStatus != NativeAnimationStatus::Ok) return snapshotStatus;
 		if(animator == nullptr) return NativeAnimationStatus::InvalidArgument;
 		const AnimatorInstanceHandle handle = AnimationToHandle(*animator);
-		const std::shared_ptr<const PublishedAnimatorPose> published =
-			AnimationSystem::Instance().LoadPublishedAnimatorPose(handle);
+		std::shared_ptr<const AnimationAuthorityFrame> authority;
+		const AnimationAuthorityRow* published = LoadAuthorityRow(handle, authority);
 		*snapshot = {};
 		snapshot->header = AnimationHeader(NativeAnimationRecordKind::StateSnapshot, sizeof(*snapshot));
 		snapshot->animator = *animator;
@@ -1445,7 +1452,7 @@ extern "C" {
 		snapshot->transitionProgress = source.playback.transitionProgress;
 		snapshot->effectiveSpeed = source.playback.effectiveSpeed;
 		snapshot->loopCount = source.playback.loopCount;
-		snapshot->publicationGeneration = AnimationSystem::Instance().AuthorityPublicationGeneration();
+		snapshot->publicationGeneration = authority->authorityGeneration;
 		snapshot->layerCount = static_cast<std::uint32_t>(source.playback.activeLayers.size());
 		snapshot->parameterCount = static_cast<std::uint32_t>(source.playback.parameters.size());
 		snapshot->curveCount = static_cast<std::uint32_t>(source.pose->CurveValues().size());
@@ -1590,7 +1597,8 @@ extern "C" {
 			FillAnimationBufferInfo(*info, NativeAnimationStatus::StaleHandle, 0U, 0U, 0, 0U);
 			return info->status;
 		}
-		const std::shared_ptr<const PublishedAnimatorPose> published = AnimationSystem::Instance().LoadPublishedAnimatorPose(handle);
+		std::shared_ptr<const AnimationAuthorityFrame> authority;
+		const AnimationAuthorityRow* published = LoadAuthorityRow(handle, authority);
 		if(!published || !published->snapshot || !published->snapshot->pose) {
 			FillAnimationBufferInfo(*info, NativeAnimationStatus::NotReady, 0U, 0U, 0, 0U);
 			return info->status;
@@ -1599,17 +1607,17 @@ extern "C" {
 		const std::span<const AnimationTransform> local = published->snapshot->pose->LocalTransforms();
 		if(model.size() != local.size() || model.size() != published->jointStableIds.size()) {
 			FillAnimationBufferInfo(*info, NativeAnimationStatus::InvalidEnvelope, 0U, 0U,
-				published->snapshot->tick, AnimationSystem::Instance().AuthorityPublicationGeneration());
+				published->snapshot->tick, authority->authorityGeneration);
 			return info->status;
 		}
 		if(model.size() > capacity) {
 			FillAnimationBufferInfo(*info, NativeAnimationStatus::BufferTooSmall, model.size(), 0U,
-				published->snapshot->tick, AnimationSystem::Instance().AuthorityPublicationGeneration());
+				published->snapshot->tick, authority->authorityGeneration);
 			return info->status;
 		}
 		if(!model.empty() && values == nullptr) {
 			FillAnimationBufferInfo(*info, NativeAnimationStatus::InvalidArgument, model.size(), 0U,
-				published->snapshot->tick, AnimationSystem::Instance().AuthorityPublicationGeneration());
+				published->snapshot->tick, authority->authorityGeneration);
 			return info->status;
 		}
 		for(std::size_t index = 0U; index < model.size(); ++index) {
@@ -1617,13 +1625,13 @@ extern "C" {
 			bone.header = AnimationHeader(NativeAnimationRecordKind::BoneSnapshot, sizeof(bone));
 			bone.stableId = published->jointStableIds[index];
 			bone.jointIndex = static_cast<std::uint32_t>(index);
-			bone.poseGeneration = published->snapshot->publicationGeneration;
+			bone.poseGeneration = published->poseGeneration;
 			bone.localTransform = AnimationFromTransform(local[index]);
 			bone.modelTransform = AnimationFromTransform(model[index]);
 			values[index] = bone;
 		}
 		FillAnimationBufferInfo(*info, NativeAnimationStatus::Ok, model.size(), model.size(),
-			published->snapshot->tick, AnimationSystem::Instance().AuthorityPublicationGeneration());
+			published->snapshot->tick, authority->authorityGeneration);
 		return info->status;
 	}
 
@@ -1642,8 +1650,8 @@ extern "C" {
 			FillAnimationBufferInfo(*info, NativeAnimationStatus::StaleHandle, 0U, 0U, 0, 0U);
 			return info->status;
 		}
-		const std::shared_ptr<const PublishedAnimatorPose> published =
-			AnimationSystem::Instance().LoadPublishedAnimatorPose(handle);
+		std::shared_ptr<const AnimationAuthorityFrame> authority;
+		const AnimationAuthorityRow* published = LoadAuthorityRow(handle, authority);
 		AnimationSocketReadSnapshot socketSnapshot;
 		if(!CopyOrMaterializeCurrentSocketSnapshot(handle, published, socketSnapshot)) {
 			FillAnimationBufferInfo(*info, NativeAnimationStatus::NotReady, 0U, 0U, 0, 0U);
@@ -1678,16 +1686,17 @@ extern "C" {
 			FillAnimationBufferInfo(*info, NativeAnimationStatus::StaleHandle, 0U, 0U, 0, 0U);
 			return info->status;
 		}
-		const std::shared_ptr<const PublishedAnimatorPose> published = AnimationSystem::Instance().LoadPublishedAnimatorPose(handle);
+		std::shared_ptr<const AnimationAuthorityFrame> authority;
+		const AnimationAuthorityRow* published = LoadAuthorityRow(handle, authority);
 		if(!published || !published->snapshot || !published->snapshot->pose) {
 			FillAnimationBufferInfo(*info, NativeAnimationStatus::NotReady, 0U, 0U, 0, 0U);
 			return info->status;
 		}
 		return CopyAnimationSpan<NativeAnimationEvent, AnimationEventRecord>(
 			published->snapshot->pose->Events(), values, capacity, info, published->snapshot->tick,
-			AnimationSystem::Instance().AuthorityPublicationGeneration(),
-			[&published](const AnimationEventRecord& source, std::uint32_t) {
-				return MakeNativeAnimationEvent(source, *published);
+			authority->authorityGeneration,
+			[&authority](const AnimationEventRecord& source, std::uint32_t) {
+				return MakeNativeAnimationEvent(source, *authority);
 			});
 	}
 
@@ -1699,33 +1708,21 @@ extern "C" {
 		using namespace TerraEngine::Animation;
 		const NativeAnimationStatus infoStatus = ValidateAnimationRecord(info, NativeAnimationRecordKind::BufferInfo);
 		if(infoStatus != NativeAnimationStatus::Ok) return infoStatus;
-		std::vector<std::shared_ptr<const PublishedAnimatorPose>> published;
-		AnimationSystem::Instance().CopyPublishedAnimatorPoses(published);
-		try {
-			std::vector<NativeAnimationEvent> batch;
-			std::int64_t sourceTick = 0;
-			for(const std::shared_ptr<const PublishedAnimatorPose>& owner : published) {
-				if(!owner || !owner->snapshot || !owner->snapshot->pose) continue;
-				sourceTick = std::max(sourceTick, owner->snapshot->tick);
-				for(const AnimationEventRecord& event : owner->snapshot->pose->Events()) {
-					batch.push_back(MakeNativeAnimationEvent(event, *owner));
-				}
-			}
-			std::sort(batch.begin(), batch.end(), [](const NativeAnimationEvent& left, const NativeAnimationEvent& right) {
-				if(left.sourceTick != right.sourceTick) return left.sourceTick < right.sourceTick;
-				if(left.animator.slotIndex != right.animator.slotIndex) return left.animator.slotIndex < right.animator.slotIndex;
-				if(left.animator.generation != right.animator.generation) return left.animator.generation < right.animator.generation;
-				if(left.producerOrder != right.producerOrder) return left.producerOrder < right.producerOrder;
-				return left.correlationId < right.correlationId;
-			});
-			return CopyAnimationSpan<NativeAnimationEvent, NativeAnimationEvent>(
-				batch, values, capacity, info, sourceTick,
-				AnimationSystem::Instance().AuthorityPublicationGeneration(),
-				[](const NativeAnimationEvent& source, std::uint32_t) { return source; });
-		} catch(const std::bad_alloc&) {
-			FillAnimationBufferInfo(*info, NativeAnimationStatus::InternalError, 0U, 0U, 0, 0U);
+		const std::shared_ptr<const AnimationAuthorityFrame> authority =
+			AnimationSystem::Instance().LoadPublishedAuthorityFrame();
+		if(!authority || !authority->IsValid() || !authority->sidecars) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::NotReady, 0U, 0U, 0, 0U);
 			return info->status;
 		}
+		// Events were deterministically ordered while the candidate was sealed.  The
+		// scripting boundary therefore copies only the sparse event sidecar and never
+		// scans every animator or materializes a temporary crowd-wide batch.
+		return CopyAnimationSpan<NativeAnimationEvent, AnimationEventRecord>(
+			authority->sidecars->events, values, capacity, info,
+			static_cast<std::int64_t>(authority->frameId), authority->authorityGeneration,
+			[&authority](const AnimationEventRecord& source, std::uint32_t) {
+				return MakeNativeAnimationEvent(source, *authority);
+			});
 	}
 
 	NativeAnimationStatus Native_Animation_ApplyRootMotion(

@@ -2,6 +2,7 @@
 
 #include "TestHarness.h"
 
+#include "AnimationAuthorityTestHelpers.h"
 #include "Animation/AnimationSystem.h"
 #include "Animation/Assets/AnimationClipAsset.h"
 #include "Animation/Assets/AnimationControllerAsset.h"
@@ -302,8 +303,8 @@ namespace TerraEngine::Tests {
 				context.Expect(ExecuteBindingFrame(animation),
 					"The production AnimationSystem declaration must create, bind, and evaluate the authored component.");
 				const AnimatorInstanceHandle firstHandle = animation.ResolveAnimatorForObject(objectId);
-				const std::shared_ptr<const PublishedAnimatorPose> published =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow published =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				const AnimatorPlaybackStateSnapshot initialPlayback =
 					animation.LoadAnimatorPlaybackState(firstHandle);
 				context.Expect(firstHandle.IsValid()
@@ -356,8 +357,8 @@ namespace TerraEngine::Tests {
 				context.Expect(activeHandle.IsValid() && activeHandle != oneShotHandle
 					&& !animation.IsAnimatorInstanceAlive(oneShotHandle),
 					"An authored component-generation change must retire the prior loop-policy instance.");
-				const std::shared_ptr<const PublishedAnimatorPose> beforeReload =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow beforeReload =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				const AnimationGeneration skeletonBeforeReload =
 					resources.GetAnimationAssetRuntimeGeneration(skeletonId, AssetType::Skeleton);
 				const AnimationGeneration clipBeforeReload =
@@ -367,7 +368,7 @@ namespace TerraEngine::Tests {
 				context.Expect(!resources.ReloadAnimationClip(clipId)
 					&& resources.GetAnimationAssetRuntimeGeneration(
 						clipId, AssetType::AnimationClip) == clipBeforeReload
-					&& animation.LoadPublishedAnimatorPoseForObject(objectId) == beforeReload,
+					&& PinnedAnimationAuthorityRow::ForObject(animation, objectId) == beforeReload,
 					"A malformed replacement must retain the last complete clip generation and animator publication.");
 				(void)WriteBindingAsset("component-binding.teanim", clipBytes);
 				context.Expect(resources.ReloadSkeleton(skeletonId) && resources.ReloadAnimationClip(clipId),
@@ -380,8 +381,8 @@ namespace TerraEngine::Tests {
 					"Reload must advance cache generations monotonically rather than reusing a stable UUID generation.");
 				context.Expect(ExecuteBindingFrame(animation),
 					"The next protected frame must bind the coherent reloaded dependency pair.");
-				const std::shared_ptr<const PublishedAnimatorPose> afterReload =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow afterReload =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				const AnimatorPlaybackStateSnapshot reloadedPlayback =
 					animation.LoadAnimatorPlaybackState(activeHandle);
 				context.Expect(animation.ResolveAnimatorForObject(objectId) == activeHandle
@@ -403,8 +404,8 @@ namespace TerraEngine::Tests {
 				const AnimationGeneration clipAfterClipOnlyReload =
 					resources.GetAnimationAssetRuntimeGeneration(
 						clipId, AssetType::AnimationClip);
-				const std::shared_ptr<const PublishedAnimatorPose> clipOnlyReloaded =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow clipOnlyReloaded =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				const AnimatorPlaybackStateSnapshot clipOnlyReloadedPlayback =
 					animation.LoadAnimatorPlaybackState(activeHandle);
 				context.Expect(clipAfterClipOnlyReload > clipBeforeClipOnlyReload
@@ -426,10 +427,10 @@ namespace TerraEngine::Tests {
 				context.Expect(clipTombstone > clipAfterReload && skeletonTombstone > skeletonAfterReload
 					&& ExecuteBindingFrame(animation),
 					"Deleting a cooked dependency must publish a tombstone before the next frame observes it.");
-				const std::shared_ptr<const PublishedAnimatorPose> tombstoned =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow tombstoned =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				context.Expect(tombstoned && tombstoned != afterReload
-					&& tombstoned->status == AnimationStatus::MissingAsset && tombstoned->safePose
+					&& tombstoned->status == AnimationStatus::MissingAsset && tombstoned->safeFallback
 					&& afterReload && afterReload->clip.generation < clipTombstone
 					&& afterReload->skeleton.generation < skeletonTombstone,
 					"The deleted publication must retire the last valid generation and expose an explicit safe-pose tombstone state.");
@@ -437,8 +438,8 @@ namespace TerraEngine::Tests {
 					&& resources.LoadAnimationClip(clipPath, skeleton.compatibilityFingerprint) == clipId
 					&& ExecuteBindingFrame(animation),
 					"Reloading deleted same-GUID assets must restore a fresh, complete binding at the protected boundary.");
-				const std::shared_ptr<const PublishedAnimatorPose> afterDeleteReload =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow afterDeleteReload =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				context.Expect(afterDeleteReload && afterDeleteReload->status == AnimationStatus::Ok
 					&& afterDeleteReload->skeleton.generation > skeletonTombstone
 					&& afterDeleteReload->clip.generation > clipTombstone,
@@ -530,7 +531,7 @@ namespace TerraEngine::Tests {
 				const std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> dormant =
 					animation.DeclareFrameWorkloads(1.0F / 60.0F);
 				context.Expect(dormant.empty() && !animation.IsAnimatorInstanceAlive(autoplayHandle)
-					&& !animation.LoadPublishedAnimatorPoseForObject(objectId),
+					&& !PinnedAnimationAuthorityRow::ForObject(animation, objectId),
 					"The next protected declaration must retire a removed component handle and its immutable publication.");
 
 				animation.Shutdown();
@@ -606,17 +607,17 @@ namespace TerraEngine::Tests {
 				AnimationFixedTick lastPlaybackTick =
 					animation.LoadAnimatorPlaybackState(streamingHandle).absoluteTick;
 				bool playbackRegressed = false;
-				const std::shared_ptr<const PublishedAnimatorPose> fallback =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow fallback =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				const auto fallbackModel = fallback && fallback->snapshot && fallback->snapshot->pose
 					? fallback->snapshot->pose->ModelTransforms()
 					: std::span<const AnimationTransform>{};
-				context.Expect(component != nullptr && fallback && fallback->safePose
+				context.Expect(component != nullptr && fallback && fallback->safeFallback
 					&& fallbackModel.size() == 1U
 					&& fallbackModel[0U].translation.x == 0.0F,
 					"Worker-owned bytes must remain invisible until a later protected synchronization publishes the immutable residency snapshot.");
 
-				std::shared_ptr<const PublishedAnimatorPose> resident;
+				PinnedAnimationAuthorityRow resident;
 				std::size_t publicationFrames = 0U;
 				for(; publicationFrames < 128U; ++publicationFrames) {
 					std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -626,7 +627,7 @@ namespace TerraEngine::Tests {
 					playbackRegressed = playbackRegressed
 						|| playback.absoluteTick < lastPlaybackTick;
 					lastPlaybackTick = playback.absoluteTick;
-					resident = animation.LoadPublishedAnimatorPoseForObject(objectId);
+					resident = PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 					const auto model = resident && resident->snapshot && resident->snapshot->pose
 						? resident->snapshot->pose->ModelTransforms()
 						: std::span<const AnimationTransform>{};
@@ -861,14 +862,14 @@ namespace TerraEngine::Tests {
 				const UUID objectId = objects.getUUID(object);
 				context.Expect(blockerRunning && ExecuteBindingFrame(animation),
 					"The protected bind must queue streaming without waiting for its blocked worker.");
-				const std::shared_ptr<const PublishedAnimatorPose> initial =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow initial =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				const bool completeDataVisible = component != nullptr && initial
-					&& initial->status == AnimationStatus::Ok && !initial->safePose
+					&& initial->status == AnimationStatus::Ok && !initial->safeFallback
 					&& !initial->streamedClipPayloadsActive;
 
 				AnimationCommand playFromData;
-				if(initial) playFromData.target = initial->animator;
+				if(initial) playFromData.target = initial->key.Handle();
 				playFromData.kind = AnimationCommandKind::Play;
 				playFromData.producerId = 501U;
 				playFromData.producerSequence = 1U;
@@ -878,8 +879,8 @@ namespace TerraEngine::Tests {
 					animation.SubmitCommand(playFromData);
 				context.Expect(ExecuteBindingFrame(animation),
 					"Gameplay authority must keep evaluating while segment IO is blocked.");
-				const std::shared_ptr<const PublishedAnimatorPose> dataPose =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow dataPose =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				const std::optional<AnimationRootMotionDelta> dataRoot =
 					dataPose && dataPose->snapshot && dataPose->snapshot->pose
 					? dataPose->snapshot->pose->RootMotionDelta()
@@ -887,17 +888,17 @@ namespace TerraEngine::Tests {
 
 				releaseBlocker.set_value();
 				blockerCompletion.wait();
-				std::shared_ptr<const PublishedAnimatorPose> streamedPose;
+				PinnedAnimationAuthorityRow streamedPose;
 				std::size_t publicationFrames = 0U;
 				for(; publicationFrames < 128U; ++publicationFrames) {
 					std::this_thread::sleep_for(std::chrono::milliseconds(1));
 					if(!ExecuteBindingFrame(animation)) break;
-					streamedPose = animation.LoadPublishedAnimatorPoseForObject(objectId);
+					streamedPose = PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 					if(streamedPose && streamedPose->streamedClipPayloadsActive) break;
 				}
 
 				AnimationCommand playFromStream = playFromData;
-				if(streamedPose) playFromStream.target = streamedPose->animator;
+				if(streamedPose) playFromStream.target = streamedPose->key.Handle();
 				playFromStream.producerSequence = 2U;
 				playFromStream.correlationId = 2U;
 				playFromStream.idempotencyKey = 2U;
@@ -905,8 +906,8 @@ namespace TerraEngine::Tests {
 					animation.SubmitCommand(playFromStream);
 				context.Expect(ExecuteBindingFrame(animation),
 					"The promoted immutable segment must remain usable by the next fixed tick.");
-				const std::shared_ptr<const PublishedAnimatorPose> promoted =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow promoted =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				const std::optional<AnimationRootMotionDelta> streamRoot =
 					promoted && promoted->snapshot && promoted->snapshot->pose
 					? promoted->snapshot->pose->RootMotionDelta()
@@ -915,7 +916,7 @@ namespace TerraEngine::Tests {
 				context.Expect(completeDataVisible
 					&& dataPlayReceipt.status == AnimationStatus::Queued
 					&& dataPose && dataPose->status == AnimationStatus::Ok
-					&& !dataPose->safePose && !dataPose->streamedClipPayloadsActive
+					&& !dataPose->safeFallback && !dataPose->streamedClipPayloadsActive
 					&& dataRoot.has_value()
 					&& BindingNear(dataRoot->localTranslation.x, 1.0F)
 					&& BindingNear(dataRoot->localYawRadians, 0.1F)
@@ -923,7 +924,7 @@ namespace TerraEngine::Tests {
 					&& streamedPose->streamedClipPayloadsActive
 					&& streamPlayReceipt.status == AnimationStatus::Queued
 					&& promoted && promoted->status == AnimationStatus::Ok
-					&& !promoted->safePose && promoted->streamedClipPayloadsActive
+					&& !promoted->safeFallback && promoted->streamedClipPayloadsActive
 					&& streamRoot.has_value()
 					&& BindingNear(streamRoot->localTranslation.x,
 						dataRoot ? dataRoot->localTranslation.x : 0.0F)
@@ -1237,10 +1238,10 @@ namespace TerraEngine::Tests {
 				context.Expect(ExecuteBindingFrame(animation),
 					"The first protected frame must schedule the registered controller without waiting for IO.");
 				const AnimatorInstanceHandle handle = animation.ResolveAnimatorForObject(objectId);
-				const std::shared_ptr<const PublishedAnimatorPose> pending =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow pending =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				context.Expect(component != nullptr && handle.IsValid() && pending
-					&& pending->status == AnimationStatus::MissingAsset && pending->safePose,
+					&& pending->status == AnimationStatus::MissingAsset && pending->safeFallback,
 					"An unloaded dependency graph must remain an explicit safe pose while its first request is pending.");
 
 				const auto hasAnimatorNeed = [&](const UUID& assetId) {
@@ -1254,11 +1255,11 @@ namespace TerraEngine::Tests {
 				context.Expect(hasAnimatorNeed(controller.assetId.value),
 					"The authored controller must publish an object-owned active runtime need immediately.");
 
-				std::shared_ptr<const PublishedAnimatorPose> resident;
+				PinnedAnimationAuthorityRow resident;
 				std::size_t activationFrames = 0U;
 				for(; activationFrames < 256U; ++activationFrames) {
 					if(!ExecuteBindingFrame(animation)) break;
-					resident = animation.LoadPublishedAnimatorPoseForObject(objectId);
+					resident = PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 					if(resident && resident->status == AnimationStatus::Ok
 						&& resident->clip.assetId == clip.assetId) break;
 					std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1290,17 +1291,17 @@ namespace TerraEngine::Tests {
 					"Explicit eviction must publish generation tombstones while retaining registered reload paths.");
 				context.Expect(ExecuteBindingFrame(animation),
 					"The next protected frame must observe eviction and begin bounded reactivation.");
-				const std::shared_ptr<const PublishedAnimatorPose> evicted =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow evicted =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				context.Expect(evicted && evicted->status == AnimationStatus::MissingAsset
-					&& evicted->safePose,
+					&& evicted->safeFallback,
 					"At least one dependency must remain unavailable under the one-request budget, preserving safe-pose authority.");
 
-				std::shared_ptr<const PublishedAnimatorPose> reactivated;
+				PinnedAnimationAuthorityRow reactivated;
 				std::size_t reactivationFrames = 0U;
 				for(; reactivationFrames < 256U; ++reactivationFrames) {
 					if(!ExecuteBindingFrame(animation)) break;
-					reactivated = animation.LoadPublishedAnimatorPoseForObject(objectId);
+					reactivated = PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 					if(reactivated && reactivated->status == AnimationStatus::Ok) break;
 					std::this_thread::sleep_for(std::chrono::milliseconds(1));
 				}
@@ -1420,10 +1421,10 @@ namespace TerraEngine::Tests {
 				// makes the exact entry-frame contract observable without a scheduler
 				// advance racing the assertion on the same frame.
 				animation.SetAuthoredComponentPlaybackAdvancing(false);
-				std::shared_ptr<const PublishedAnimatorPose> idlePublication;
+				PinnedAnimationAuthorityRow idlePublication;
 				for(std::size_t attempt = 0U; attempt < 32U; ++attempt) {
 					if(!ExecuteBindingFrame(animation)) break;
-					idlePublication = animation.LoadPublishedAnimatorPoseForObject(objectId);
+					idlePublication = PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 					if(idlePublication && idlePublication->status == AnimationStatus::Ok
 						&& idlePublication->clip.assetId == idle.assetId) break;
 					std::this_thread::yield();
@@ -1445,15 +1446,15 @@ namespace TerraEngine::Tests {
 				// its already compiled controller. The replacement then exposed a
 				// reference/frame-zero pose for several asynchronous compile frames.
 				animation.SetAuthoredComponentPlaybackAdvancing(true);
-				const std::shared_ptr<const PublishedAnimatorPose> playBoundaryPose =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow playBoundaryPose =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				context.Expect(animation.ResolveAnimatorForObject(objectId) == handle
 					&& playBoundaryPose == idlePublication,
 					"Changing the edit/play clock domain must retain the last complete controller pose until the protected replacement frame is ready.");
 				context.Expect(ExecuteBindingFrame(animation),
 					"The first Play Mode frame must restart the already compiled controller without a dependency gap.");
-				const std::shared_ptr<const PublishedAnimatorPose> firstPlayingPose =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow firstPlayingPose =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				const AnimatorPlaybackStateSnapshot firstPlayingPlayback =
 					animation.LoadAnimatorPlaybackState(handle);
 				context.Expect(animation.ResolveAnimatorForObject(objectId) == handle
@@ -1464,14 +1465,14 @@ namespace TerraEngine::Tests {
 					"The first advancing frame must begin from the authored controller frame without publishing frame zero or a NotReady safe pose.");
 
 				animation.SetAuthoredComponentPlaybackAdvancing(false);
-				const std::shared_ptr<const PublishedAnimatorPose> stopBoundaryPose =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow stopBoundaryPose =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				context.Expect(animation.ResolveAnimatorForObject(objectId) == handle
 					&& stopBoundaryPose == firstPlayingPose
 					&& ExecuteBindingFrame(animation),
 					"Stopping must retain the last complete pose until the authored start pose replaces it at the next protected frame.");
-				const std::shared_ptr<const PublishedAnimatorPose> firstStoppedPose =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow firstStoppedPose =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				const AnimatorPlaybackStateSnapshot firstStoppedPlayback =
 					animation.LoadAnimatorPlaybackState(handle);
 				context.Expect(animation.ResolveAnimatorForObject(objectId) == handle
@@ -1491,8 +1492,8 @@ namespace TerraEngine::Tests {
 					"The first frame after an authored scene restoration must evaluate without waiting for another controller compilation.");
 				const AnimatorInstanceHandle restoredHandle =
 					animation.ResolveAnimatorForObject(objectId);
-				const std::shared_ptr<const PublishedAnimatorPose> restoredPose =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow restoredPose =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				const AnimatorPlaybackStateSnapshot restoredPlayback =
 					animation.LoadAnimatorPlaybackState(restoredHandle);
 				context.Expect(restoredHandle.IsValid()
@@ -1561,8 +1562,8 @@ namespace TerraEngine::Tests {
 					frame < transitionSamples.size(); ++frame) {
 					context.Expect(ExecuteBindingFrame(animation),
 						"Every authored transition tick must publish through the production coordinator.");
-					const std::shared_ptr<const PublishedAnimatorPose> transitionPose =
-						animation.LoadPublishedAnimatorPoseForObject(objectId);
+					const PinnedAnimationAuthorityRow transitionPose =
+						PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 					transitionSamples[frame] = transitionPose
 						&& transitionPose->snapshot
 						&& transitionPose->snapshot->pose
@@ -1572,8 +1573,8 @@ namespace TerraEngine::Tests {
 							->LocalTransforms().front().translation.x
 						: std::numeric_limits<float>::quiet_NaN();
 				}
-				const std::shared_ptr<const PublishedAnimatorPose> actionPublication =
-					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const PinnedAnimationAuthorityRow actionPublication =
+					PinnedAnimationAuthorityRow::ForObject(animation, objectId);
 				context.Expect(actionPublication && actionPublication->status == AnimationStatus::Ok
 					&& actionPublication->clip.assetId == action.assetId
 					&& actionPublication->snapshot
@@ -1635,8 +1636,8 @@ namespace TerraEngine::Tests {
 				context.Expect(ExecuteBindingFrame(animation),
 					"The procedural production fixture must publish an initial immutable pose.");
 				const AnimatorInstanceHandle handle = animation.ResolveAnimatorForObject(objectId);
-				const std::shared_ptr<const PublishedAnimatorPose> before =
-					animation.LoadPublishedAnimatorPose(handle);
+				const PinnedAnimationAuthorityRow before =
+					PinnedAnimationAuthorityRow::ForAnimator(animation, handle);
 
 				NativeAnimationProceduralGoalCommand goal{};
 				goal.header = {static_cast<std::uint32_t>(sizeof(goal)),
@@ -1671,8 +1672,8 @@ namespace TerraEngine::Tests {
 				context.Expect(queued.status == NativeAnimationStatus::Queued
 					&& ExecuteBindingFrame(animation) && ExecuteBindingFrame(animation),
 					"A validated gameplay goal must activate only after its protected receipt boundary and evaluate on the following frame.");
-				const std::shared_ptr<const PublishedAnimatorPose> after =
-					animation.LoadPublishedAnimatorPose(handle);
+				const PinnedAnimationAuthorityRow after =
+					PinnedAnimationAuthorityRow::ForAnimator(animation, handle);
 				std::uint32_t requiredCount = 0U;
 				const AnimationStatus countStatus = animation.CopyProceduralResults(
 					handle, {}, requiredCount);

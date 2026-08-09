@@ -830,6 +830,37 @@ bool ValidateProfilerRenderOptimizationEvidence(const ProfilerRenderOptimization
 	return true;
 }
 
+bool ValidateProfilerFramePublicationEvidence(const ProfilerFramePublicationEvidence& evidence) noexcept
+{
+	if (evidence.schemaVersion != ProfilerFramePublicationEvidence::kSchemaVersion
+		|| evidence.viewCount > ProfilerFramePublicationEvidence::kMaximumViews)
+	{
+		return false;
+	}
+	for (std::size_t index = 0; index < evidence.viewCount; ++index)
+	{
+		if (evidence.views[index].valid && evidence.views[index].frameGeneration != evidence.frameGeneration)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+bool ValidateProfilerDisjointTimingBuckets(const std::array<std::uint64_t, 8U>& buckets, const std::uint64_t frameNanoseconds, const std::uint64_t toleranceNanoseconds) noexcept
+{
+	std::uint64_t total = 0U;
+	for (const std::uint64_t bucket : buckets)
+	{
+		if (bucket > frameNanoseconds || total > frameNanoseconds - bucket)
+		{
+			return false;
+		}
+		total += bucket;
+	}
+	return total <= frameNanoseconds && frameNanoseconds - total <= toleranceNanoseconds;
+}
+
 // MakeTimestampForFileName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string MakeTimestampForFileName()
 {
@@ -1036,6 +1067,12 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 				&& !ValidateProfilerRenderOptimizationEvidence(*frame.renderOptimization))
 			{
 				outError = "Profiler capture contains invalid renderer optimization evidence.";
+				return false;
+			}
+			if (frame.framePublication.has_value()
+				&& !ValidateProfilerFramePublicationEvidence(*frame.framePublication))
+			{
+				outError = "Profiler capture contains invalid frame-publication evidence.";
 				return false;
 			}
 			if (frame.animationTelemetry
@@ -2025,6 +2062,16 @@ nlohmann::json PackFrameV2(const ProfilerFrameRecord& frame, const ProfilerCaptu
 		// optional per-group rows remain outside this fixed capture contract.
 		result["o"] = PackRenderOptimizationV2(*frame.renderOptimization);
 	}
+	if (frame.framePublication.has_value())
+	{
+		const auto& e = *frame.framePublication;
+		nlohmann::json packed = nlohmann::json::array({e.schemaVersion,e.availabilityMask,e.frameGeneration,e.sceneGeneration,
+			e.renderSessionGeneration,e.topologyGeneration,e.dynamicGeneration,e.authorityGeneration,e.presentationGeneration,
+			e.renderOutcome,e.animationOutcome,e.rejectionReason,e.persistentReuseCount,e.persistentRebuildCount,e.dynamicReuseCount,
+			e.dynamicRebuildCount,e.authorityReuseCount,e.authorityRebuildCount,e.viewSelectionReuseCount,e.viewSelectionRebuildCount,e.viewCount});
+		packed.push_back(e.disjointTimingNanoseconds);
+		result["f"] = std::move(packed);
+	}
 	// Timing lanes are compact, bounded frame evidence. Persist them at every
 	// detail level so an aggregate or unsampled frame remains useful after the
 	// capture is saved and loaded.
@@ -2196,6 +2243,29 @@ bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& s
 				return false;
 			}
 			out.renderOptimization = std::move(evidence);
+		}
+		if (const auto it = json.find("f"); it != json.end())
+		{
+			if (!it->is_array() || it->size() != 22u || !(*it)[21].is_array() || (*it)[21].size() != 8u)
+			{
+				error = "Profiler v2 has malformed frame-publication evidence.";
+				return false;
+			}
+			ProfilerFramePublicationEvidence e;
+			e.schemaVersion=(*it)[0].get<std::uint32_t>(); e.availabilityMask=(*it)[1].get<std::uint64_t>();
+			e.frameGeneration=(*it)[2].get<std::uint64_t>(); e.sceneGeneration=(*it)[3].get<std::uint64_t>();
+			e.renderSessionGeneration=(*it)[4].get<std::uint64_t>(); e.topologyGeneration=(*it)[5].get<std::uint64_t>();
+			e.dynamicGeneration=(*it)[6].get<std::uint64_t>(); e.authorityGeneration=(*it)[7].get<std::uint64_t>();
+			e.presentationGeneration=(*it)[8].get<std::uint64_t>(); e.renderOutcome=(*it)[9].get<std::uint32_t>();
+			e.animationOutcome=(*it)[10].get<std::uint32_t>(); e.rejectionReason=(*it)[11].get<std::uint32_t>();
+			e.persistentReuseCount=(*it)[12].get<std::uint32_t>(); e.persistentRebuildCount=(*it)[13].get<std::uint32_t>();
+			e.dynamicReuseCount=(*it)[14].get<std::uint32_t>(); e.dynamicRebuildCount=(*it)[15].get<std::uint32_t>();
+			e.authorityReuseCount=(*it)[16].get<std::uint32_t>(); e.authorityRebuildCount=(*it)[17].get<std::uint32_t>();
+			e.viewSelectionReuseCount=(*it)[18].get<std::uint32_t>(); e.viewSelectionRebuildCount=(*it)[19].get<std::uint32_t>();
+			e.viewCount=(*it)[20].get<std::uint32_t>();
+			for (std::size_t index=0; index<8; ++index) e.disjointTimingNanoseconds[index]=(*it)[21][index].get<std::uint64_t>();
+			if (!ValidateProfilerFramePublicationEvidence(e)) { error="Profiler v2 contains invalid frame-publication evidence."; return false; }
+			out.framePublication=std::move(e);
 		}
 		if (const auto it = json.find("t"); it != json.end()) for (const auto& value : *it)
 		{

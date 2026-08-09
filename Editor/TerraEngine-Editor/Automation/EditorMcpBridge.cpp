@@ -280,6 +280,13 @@ namespace TerraEngine::Editor::Automation
 		service.PumpAnimationRecordingsAtProtectedFrame();
 	}
 
+	void EditorMcpBridge::PumpRendererValidationMutationsAtProtectedFrame()
+	{
+		// The service produces one typed transaction from a retained target set.
+		// Transport requests only start or inspect the operation; they never pace it.
+		service.PumpRendererValidationMutationsAtProtectedFrame();
+	}
+
 	void EditorMcpBridge::SetMainEditor(MainEditorSubsystem* editor)
 	{
 		std::lock_guard lifecycleLock(lifecycleMutex);

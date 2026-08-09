@@ -6,6 +6,8 @@ namespace TerraEngine::Tests {
 	void RegisterAnimationAssetFormatTests(TestRegistry& registry);
 	void RegisterAnimationCodecTests(TestRegistry& registry);
 	void RegisterAnimationFormatContractTests(TestRegistry& registry);
+	void RegisterAnimationAuthorityPublicationContractTests(TestRegistry& registry);
+	void RegisterAnimationAuthorityPageTests(TestRegistry& registry);
 	void RegisterAnimationSchedulerContractTests(TestRegistry& registry);
 	void RegisterAnimationMutationContractTests(TestRegistry& registry);
 	void RegisterAnimationDormantPerformanceTests(TestRegistry& registry);
@@ -82,6 +84,8 @@ namespace TerraEngine::Tests {
 		RegisterAnimationAssetFormatTests(registry);
 		RegisterAnimationCodecTests(registry);
 		RegisterAnimationFormatContractTests(registry);
+		RegisterAnimationAuthorityPublicationContractTests(registry);
+		RegisterAnimationAuthorityPageTests(registry);
 		RegisterAnimationSchedulerContractTests(registry);
 		RegisterAnimationMutationContractTests(registry);
 		RegisterAnimationDormantPerformanceTests(registry);

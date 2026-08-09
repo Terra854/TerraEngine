@@ -89,7 +89,7 @@ namespace TerraEngine::Tests {
 			};
 
 			const std::vector<Resource::VirtualGeometryPageNeedInput> inputs =
-				Resource::BuildVirtualGeometryPageNeedInputsFromSelectionStates({ state }, { catalog }, 2.0f);
+				Resource::BuildVirtualGeometryPageNeedInputsFromSelectionStates(state.pageNeeds, { catalog }, 2.0f);
 
 			context.ExpectEqual(static_cast<std::size_t>(1u), inputs.size(), "Visible page needs should become worker-safe streaming inputs.");
 			context.Expect(inputs.front().assetId == assetId, "The streaming input should keep the virtual-geometry mesh id.");

@@ -42,17 +42,17 @@ namespace TerraEngine::Tests
 		registry.Add("VirtualGeometry.DirectRoute.DrawCommandsBypassVirtualSelection",
 			[](TestContext& context)
 			{
-				DrawCommand direct{};
+				RenderItemRecord direct{};
 				direct.geometryRoute = Renderer::GeometryRoute::DirectMeshlet;
 				context.Expect(!direct.UsesVirtualGeometryRoute(),
 					"Page-less direct-resident meshes must remain conventional indexed draws.");
 
-				DrawCommand hardware{};
+				RenderItemRecord hardware{};
 				hardware.geometryRoute = Renderer::GeometryRoute::VirtualGeometryHardware;
 				context.Expect(hardware.UsesVirtualGeometryRoute(),
 					"Hardware virtual geometry must enter view-local VG selection.");
 
-				DrawCommand compute{};
+				RenderItemRecord compute{};
 				compute.geometryRoute = Renderer::GeometryRoute::VirtualGeometryCompute;
 				context.Expect(compute.UsesVirtualGeometryRoute(),
 					"Compute virtual geometry must enter view-local VG selection.");

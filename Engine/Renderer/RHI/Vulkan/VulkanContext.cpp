@@ -173,16 +173,19 @@ namespace
 		}
 	}
 
-	std::uint64_t BuildVulkanHiZDepthSceneSignature(const FrameRenderData& frameData)
+	std::uint64_t BuildVulkanHiZDepthSceneSignature(
+		const TerraEngine::Renderer::RenderViewCommandResolver& commands)
 	{
 		std::uint64_t signature = 1469598103934665603ull;
-		HashVulkanHiZDepthSignatureValue(signature, static_cast<std::uint64_t>(frameData.commands.size()));
+		HashVulkanHiZDepthSignatureValue(signature, static_cast<std::uint64_t>(commands.Count()));
 		std::unordered_map<TerraEngine::UUID, std::uint64_t> materialSignatures;
 		materialSignatures.reserve(std::min<std::size_t>(
-			frameData.commands.size(), 64U));
+			commands.Count(), 64U));
 
-		for (const DrawCommand& command : frameData.commands)
+		for(std::size_t commandIndex = 0u; commandIndex < commands.Count(); ++commandIndex)
 		{
+			RenderItemRecord command{};
+			if(!commands.Resolve(commandIndex, command)) continue;
 			// Hi-Z is a previous-frame acceleration structure. Record the exact
 			// depth-producing draw identity that created it for diagnostics, but
 			// do not use this signature as a hard gate: interactive movement
@@ -589,21 +592,26 @@ namespace
 	}
 
 	// ShouldResetTemporalViewState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	bool ShouldResetTemporalViewState(bool stateValid, const glm::vec3& lastCameraWorldPosition, const glm::mat4& lastProjectionMatrix, const FrameRenderData& frameData)
+	bool ShouldResetTemporalViewState(bool stateValid,
+		const glm::vec3& lastCameraWorldPosition,
+		const glm::mat4& lastProjectionMatrix,
+		const TerraEngine::Renderer::RenderViewPresentationInput& presentation)
 	{
 		if (!stateValid)
 		{
 			return false;
 		}
 
-		const float cameraDistance = glm::length(frameData.cameraWorldPosition - lastCameraWorldPosition);
+		const float cameraDistance = glm::length(
+			presentation.cameraWorldPosition - lastCameraWorldPosition);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (cameraDistance > kTemporalResetDistance)
 		{
 			return true;
 		}
 
-		return !MatricesApproximatelyEqual(frameData.projectionMatrix, lastProjectionMatrix, kTemporalResetMatrixEpsilon);
+		return !MatricesApproximatelyEqual(presentation.projectionMatrix,
+			lastProjectionMatrix, kTemporalResetMatrixEpsilon);
 	}
 
 	// ComputeDirectionalShadowCenter is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -750,23 +758,26 @@ namespace
 }
 
 // VulkanContext::Impl::ApplyFrameLightBudgets is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFrameLightBudgets(const FrameRenderData& frameData, RenderViewType viewType)
+VulkanContext::Impl::LightBudgetApplicationResult
+VulkanContext::Impl::ApplyFrameLightBudgets(
+	const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
+	RenderViewType viewType)
 {
 	LightBudgetApplicationResult result{};
 	result.diagnostics.viewType = viewType;
-	result.diagnostics.activePreset = frameData.activePreset;
-	result.diagnostics.customOverrideActive = frameData.customOverrideActive;
-	result.diagnostics.candidateLightCount = static_cast<std::uint32_t>(std::min<std::size_t>(frameData.lightCandidates.size(), static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
-	result.diagnostics.uploadedLightBudget = std::min(frameData.settings.maxUploadedLights, MAX_GLOBAL_LIGHTS);
-	result.diagnostics.retainedLightBudget = std::min(frameData.settings.maxDynamicLights, result.diagnostics.uploadedLightBudget);
-	result.diagnostics.shadowLightBudget = std::min(frameData.settings.maxShadowLights, std::min(result.diagnostics.retainedLightBudget, MAX_SHADOW_RESOURCE_SLOTS));
-	result.diagnostics.specialLightBudget = std::min(frameData.settings.maxAreaLights, result.diagnostics.retainedLightBudget);
+	result.diagnostics.activePreset = presentation.activePreset;
+	result.diagnostics.customOverrideActive = presentation.customOverrideActive;
+	result.diagnostics.candidateLightCount = static_cast<std::uint32_t>(std::min<std::size_t>(presentation.lightCandidates.size(), static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
+	result.diagnostics.uploadedLightBudget = std::min(presentation.settings.maxUploadedLights, MAX_GLOBAL_LIGHTS);
+	result.diagnostics.retainedLightBudget = std::min(presentation.settings.maxDynamicLights, result.diagnostics.uploadedLightBudget);
+	result.diagnostics.shadowLightBudget = std::min(presentation.settings.maxShadowLights, std::min(result.diagnostics.retainedLightBudget, MAX_SHADOW_RESOURCE_SLOTS));
+	result.diagnostics.specialLightBudget = std::min(presentation.settings.maxAreaLights, result.diagnostics.retainedLightBudget);
 	result.diagnostics.gpuAssistActive = (lightAnalysisComputePipeline != VK_NULL_HANDLE);
 
 	const std::uint32_t viewIndex = (viewType == RenderViewType::Scene) ? 1u : 0u;
 	ViewLightingTemporalState& viewState = lightingTemporalStateByView[viewIndex];
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ShouldResetTemporalViewState(viewState.valid, viewState.lastCameraWorldPosition, viewState.lastProjectionMatrix, frameData))
+	if (ShouldResetTemporalViewState(viewState.valid, viewState.lastCameraWorldPosition, viewState.lastProjectionMatrix, presentation))
 	{
 		viewState.lights.clear();
 		viewState.previousShadowOwners.fill(TerraEngine::EMPTY_UUID);
@@ -776,7 +787,7 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 	const std::uint64_t frameSerial = viewState.frameSerial;
 
 	const GpuLightAnalysisViewSnapshot previousGpuAnalysis = GetLatestGpuLightAnalysis(viewType);
-	const std::array<glm::vec4, 6> frustumPlanes = BuildFrustumPlanes(frameData.projectionMatrix * frameData.viewMatrix);
+	const std::array<glm::vec4, 6> frustumPlanes = BuildFrustumPlanes(presentation.projectionMatrix * presentation.viewMatrix);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (previousGpuAnalysis.valid)
 	{
@@ -791,12 +802,12 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 	};
 
 	std::vector<UploadScoredCandidate> uploadScores;
-	uploadScores.reserve(frameData.lightCandidates.size());
+	uploadScores.reserve(presentation.lightCandidates.size());
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (std::size_t candidateIndex = 0; candidateIndex < frameData.lightCandidates.size(); ++candidateIndex)
+	for (std::size_t candidateIndex = 0; candidateIndex < presentation.lightCandidates.size(); ++candidateIndex)
 	{
 		UploadScoredCandidate entry{};
-		entry.score = ComputeSceneInfluenceScore(frameData.lightCandidates[candidateIndex], frameData.cameraWorldPosition, frustumPlanes);
+		entry.score = ComputeSceneInfluenceScore(presentation.lightCandidates[candidateIndex], presentation.cameraWorldPosition, frustumPlanes);
 		entry.originalIndex = candidateIndex;
 		uploadScores.push_back(entry);
 	}
@@ -821,7 +832,7 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const UploadScoredCandidate& uploadScore : uploadScores)
 	{
-		result.uploadedCandidates.push_back(frameData.lightCandidates[uploadScore.originalIndex]);
+		result.uploadedCandidates.push_back(presentation.lightCandidates[uploadScore.originalIndex]);
 	}
 	result.diagnostics.uploadedLightCount = static_cast<std::uint32_t>(result.uploadedCandidates.size());
 	result.diagnostics.uploadedReductionOccurred = result.diagnostics.uploadedLightCount < result.diagnostics.candidateLightCount;
@@ -839,9 +850,9 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 		const FrameLightCandidate& candidate = result.uploadedCandidates[uploadedIndex];
 		ScoredCandidate scored{};
 		scored.uploadedIndex = uploadedIndex;
-		scored.screenInfluence = ComputeProjectedScreenInfluence(candidate, frameData.viewMatrix, frameData.projectionMatrix, frustumPlanes);
+		scored.screenInfluence = ComputeProjectedScreenInfluence(candidate, presentation.viewMatrix, presentation.projectionMatrix, frustumPlanes);
 		scored.gpuVisibilityScore = 0.0f;
-		scored.baseScore = ComputeSceneInfluenceScore(candidate, frameData.cameraWorldPosition, frustumPlanes);
+		scored.baseScore = ComputeSceneInfluenceScore(candidate, presentation.cameraWorldPosition, frustumPlanes);
 		scored.baseScore += scored.screenInfluence * 4000.0f;
 
 		const auto gpuIt = previousGpuAnalysis.recordsByLightId.find(candidate.lightId);
@@ -1257,9 +1268,9 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 	}
 
 	viewState.previousShadowOwners = currentShadowOwners;
-	viewState.lastCameraWorldPosition = frameData.cameraWorldPosition;
-	viewState.lastViewMatrix = frameData.viewMatrix;
-	viewState.lastProjectionMatrix = frameData.projectionMatrix;
+	viewState.lastCameraWorldPosition = presentation.cameraWorldPosition;
+	viewState.lastViewMatrix = presentation.viewMatrix;
+	viewState.lastProjectionMatrix = presentation.projectionMatrix;
 	viewState.valid = true;
 
 	result.diagnostics.valid = true;
@@ -1596,6 +1607,7 @@ void VulkanContext::BeginFrame() {
 	impl->recordedAnimationDispatchCountForCurrentFrame = 0U;
 	impl->pendingAnimationCommandPlan = {};
 	impl->pendingAnimationImmutablePlan.reset();
+	impl->pendingAnimationFullImmutablePlanCoverage = false;
 	impl->pendingCpuAnimationPlan.reset();
 	impl->pendingAnimationFrameId = 0U;
 	impl->activeAnimationGraphicsBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
@@ -1768,6 +1780,11 @@ void VulkanContext::BeginFrame() {
 		}
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
 			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
+		}
+		if (impl->currentFrame < impl->indirectDrawCommandCounts.size()) {
+			// The waited fence proves every indirect range recorded by this slot is
+			// idle. Reset only now so other in-flight slots retain their commands.
+			impl->indirectDrawCommandCounts[impl->currentFrame] = 0u;
 		}
 		impl->activeRenderSnapshot = {};
 		impl->pendingRenderSnapshotDiagnostics = {};
@@ -2141,7 +2158,9 @@ void VulkanContext::Impl::CreateSceneViewGridPipeline(VkRenderPass renderPass) {
 }
 
 // VulkanContext::Impl::RenderSceneViewGrid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRenderData& frameData, VkExtent2D renderExtent) {
+void VulkanContext::Impl::RenderSceneViewGrid(VkCommandBuffer cmd,
+	const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
+	VkExtent2D renderExtent) {
 	if (sceneViewGridPipeline == VK_NULL_HANDLE) return;
 
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sceneViewGridPipeline);
@@ -2161,10 +2180,10 @@ void VulkanContext::Impl::RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRe
 	vkCmdSetScissor(cmd, 0, 1, &scissor);
 
 	GridPushConstants push{};
-	push.view = frameData.viewMatrix;
-	push.proj = frameData.projectionMatrix;
-	push.inverseView = glm::inverse(frameData.viewMatrix);
-	push.inverseProj = glm::inverse(frameData.projectionMatrix);
+	push.view = presentation.viewMatrix;
+	push.proj = presentation.projectionMatrix;
+	push.inverseView = glm::inverse(presentation.viewMatrix);
+	push.inverseProj = glm::inverse(presentation.projectionMatrix);
 
 	vkCmdPushConstants(cmd, sceneViewGridPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(GridPushConstants), &push);
 
@@ -2380,9 +2399,11 @@ void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
 }
 
 // VulkanContext::Impl::RenderSkyBackground is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd, const FrameRenderData& frameData, VkExtent2D renderExtent)
+void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd,
+	const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
+	VkExtent2D renderExtent)
 {
-	if (!frameData.sky.renderBackground || skyBackgroundPipeline == VK_NULL_HANDLE || skyBackgroundPipelineLayout == VK_NULL_HANDLE)
+	if (!presentation.sky.renderBackground || skyBackgroundPipeline == VK_NULL_HANDLE || skyBackgroundPipelineLayout == VK_NULL_HANDLE)
 	{
 		return;
 	}
@@ -2404,46 +2425,46 @@ void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd, const FrameRe
 	scissor.extent = renderExtent;
 	vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-	const glm::mat4 inverseViewMatrix = glm::inverse(frameData.viewMatrix);
+	const glm::mat4 inverseViewMatrix = glm::inverse(presentation.viewMatrix);
 	const glm::quat cameraOrientation = glm::normalize(glm::quat_cast(glm::mat3(inverseViewMatrix)));
-	const bool orthographicProjection = std::abs(frameData.projectionMatrix[3][3]) > 0.5f;
+	const bool orthographicProjection = std::abs(presentation.projectionMatrix[3][3]) > 0.5f;
 	// Orthographic projection scale is a zoom value, not a perspective FOV.
 	// Keep the procedural sky from stretching as the Scene View ortho size changes.
-	const float tanHalfFovX = orthographicProjection ? 1.0f : 1.0f / std::max(std::abs(frameData.projectionMatrix[0][0]), 0.0001f);
-	const float tanHalfFovY = orthographicProjection ? 1.0f : 1.0f / std::max(std::abs(frameData.projectionMatrix[1][1]), 0.0001f);
+	const float tanHalfFovX = orthographicProjection ? 1.0f : 1.0f / std::max(std::abs(presentation.projectionMatrix[0][0]), 0.0001f);
+	const float tanHalfFovY = orthographicProjection ? 1.0f : 1.0f / std::max(std::abs(presentation.projectionMatrix[1][1]), 0.0001f);
 
 	SkyPushConstants push{};
 	push.cameraOrientation = glm::vec4(cameraOrientation.x, cameraOrientation.y, cameraOrientation.z, cameraOrientation.w);
-	push.horizonTintIntensity = glm::vec4(frameData.sky.horizonTint, frameData.sky.intensity);
-	push.zenithTintExposure = glm::vec4(frameData.sky.zenithTint, frameData.sky.exposure);
-	push.groundTintPadding = glm::vec4(frameData.sky.groundTint, 0.0f);
-	push.sunDirectionTextureIndex = glm::vec4(frameData.sky.sunDirection, 0.0f);
+	push.horizonTintIntensity = glm::vec4(presentation.sky.horizonTint, presentation.sky.intensity);
+	push.zenithTintExposure = glm::vec4(presentation.sky.zenithTint, presentation.sky.exposure);
+	push.groundTintPadding = glm::vec4(presentation.sky.groundTint, 0.0f);
+	push.sunDirectionTextureIndex = glm::vec4(presentation.sky.sunDirection, 0.0f);
 	std::uint32_t skyFlags = 0u;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (frameData.sky.hasTexture)
+	if (presentation.sky.hasTexture)
 	{
 		skyFlags |= 1u;
 	}
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (frameData.sky.forceBlack)
+	if (presentation.sky.forceBlack)
 	{
 		skyFlags |= 2u;
 	}
-	if (frameData.sceneViewOrthographic)
+	if (presentation.sceneViewOrthographic)
 	{
 		// Scene View orthographic mode still uses the sky pipeline, but the
 		// shader switches to a screen-space editor gradient instead of world sky.
 		skyFlags |= 4u;
 	}
-	push.skyParams = glm::vec4(tanHalfFovX, tanHalfFovY, glm::radians(frameData.sky.rotationOffsetDegrees), static_cast<float>(skyFlags));
-	push.editorTint = frameData.editorContextTint;
+	push.skyParams = glm::vec4(tanHalfFovX, tanHalfFovY, glm::radians(presentation.sky.rotationOffsetDegrees), static_cast<float>(skyFlags));
+	push.editorTint = presentation.editorContextTint;
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (frameData.sky.hasTexture)
+	if (presentation.sky.hasTexture)
 	{
-		EnsureTexture(frameData.sky.textureId);
+		EnsureTexture(presentation.sky.textureId);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (const auto textureIndexIt = textureIndexMap.find(frameData.sky.textureId); textureIndexIt != textureIndexMap.end())
+		if (const auto textureIndexIt = textureIndexMap.find(presentation.sky.textureId); textureIndexIt != textureIndexMap.end())
 		{
 			push.sunDirectionTextureIndex.w = static_cast<float>(textureIndexIt->second);
 		}
@@ -3117,24 +3138,9 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 }
 
 // VulkanContext::RenderFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::RenderFrame(const FrameRenderData& frameData, const RenderOutputRequest& outputRequest) {
-	const ViewType view = (outputRequest.diagnosticsView == RenderViewType::Scene)
-		? ViewType::Scene
-		: ViewType::Game;
-	RenderFrame(frameData, view, outputRequest);
-}
-
-// VulkanContext::RenderFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view) {
-	RenderOutputRequest outputRequest{};
-	outputRequest.kind = (view == ViewType::Scene) ? RenderOutputKind::SceneView : RenderOutputKind::GameView;
-	outputRequest.priority = RenderOutputPriority::Required;
-	outputRequest.diagnosticsView = (view == ViewType::Scene) ? RenderViewType::Scene : RenderViewType::Game;
-	RenderFrame(frameData, view, outputRequest);
-}
-
-// VulkanContext::RenderFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest) {
+void VulkanContext::RenderFrame(
+	std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> publication,
+	std::uint32_t publicationIndex) {
 	// Measure lock contention separately from backend work. A long RenderFrame
 	// sample can otherwise make a blocked caller look like expensive rendering.
 	std::unique_lock<std::recursive_mutex> stateLock(impl->deviceStateMutex, std::defer_lock);
@@ -3153,10 +3159,31 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		return;
 	}
 
+	if(publication == nullptr || publicationIndex >= publication->views.size()
+		|| publicationIndex >= publication->presentationInputs.size()) return;
+	if(publication->rendererSessionGeneration != impl->renderSessionGeneration
+		|| publication->backendResourceGeneration != impl->backendResourceGeneration) {
+		// Direct callers must obey the same stale-root rule as the normal sealed
+		// publication path; otherwise a resize could bind retired framebuffer data.
+		return;
+	}
+	const TerraEngine::Renderer::RenderViewSelection& selection = publication->views[publicationIndex];
+	const TerraEngine::Renderer::RenderViewPresentationInput& presentation =
+		publication->presentationInputs[publicationIndex];
+	if(!presentation.Matches(selection)) return;
+	const TerraEngine::Renderer::RenderViewCommandResolver commandResolver =
+		TerraEngine::Renderer::MakeRenderViewCommandResolver(*publication, publicationIndex);
+	if(commandResolver.Count() == 0u && !selection.VisibleOrdinals().empty()) return;
+	impl->activeRenderFramePublication = publication;
 	const auto renderFrameStart = BackendClock::now();
 	const uint32_t currentFrame = impl->currentFrame;
-	const RenderViewType renderViewType = (view == ViewType::Scene) ? RenderViewType::Scene : RenderViewType::Game;
-	const std::uint32_t diagnosticViewId = outputRequest.outputId;
+	const ViewType view = selection.viewType == RenderViewType::Scene ? ViewType::Scene : ViewType::Game;
+	const RenderViewType renderViewType = selection.viewType;
+	const RenderOutputRequest& outputRequest = presentation.output;
+	const std::uint32_t diagnosticViewId = selection.outputId;
+	const TerraEngine::Renderer::RenderViewPresentationInput*
+		publicationPresentation = &presentation;
+	const std::uint32_t publicationViewIndex = publicationIndex;
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (currentFrame >= impl->pendingPrimaryCommandBuffers.size()) {
@@ -3388,10 +3415,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			return hash;
 		}
 	};
-	std::size_t drawResourceUpperBound = frameData.commands.size();
-	for(const ShadowDrawList& shadowDrawList : frameData.shadowDrawLists)
+	std::size_t drawResourceUpperBound = commandResolver.Count();
+	for(const ShadowDrawList& shadowDrawList : presentation.shadowDrawLists)
 	{
-		drawResourceUpperBound += shadowDrawList.commands.size();
+		drawResourceUpperBound += shadowDrawList.stableOrdinals.size();
 	}
 	std::unordered_set<DrawResourcePreparationKey, DrawResourcePreparationKeyHash>
 		preparedDrawResourceKeys;
@@ -3402,7 +3429,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	TerraEngine::UUID lastPreparationMaterialId = TerraEngine::EMPTY_UUID;
 	Material* lastPreparationMaterial = nullptr;
 	std::optional<DrawResourcePreparationKey> lastPreparedResourceKey;
-	const auto PrepareDrawResources = [&](const DrawCommand& command,
+	const auto PrepareDrawResources = [&](const RenderItemRecord& command,
 		VkRenderPass preparationPass) {
 		Material* material = nullptr;
 		if(command.materialId == lastPreparationMaterialId)
@@ -3428,8 +3455,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			&& defaultTaskPipelineAvailable
 			&& !command.animationBinding.RequiresOwnerMeshDeformationFallback()
 			&& !(impl->pendingAnimationImmutablePlan != nullptr
-				&& impl->pendingAnimationImmutablePlan->workPackets.size() > 1u
-				&& command.animationBinding.gpu.IsComplete())) {
+				&& impl->pendingAnimationImmutablePlan->WorkPackets().size() > 1u
+				&& command.HasCompleteGpuAnimation())) {
 			// Owner-mesh CPU/GPU deformation does not publish current per-meshlet
 			// bounds to the task stage. Keep those draws on the mesh-only route so
 			// the graphics pass fails open over the complete selected range without
@@ -3488,32 +3515,41 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	{
 		TERRAENGINE_PROFILE_SCOPE("Vulkan: RenderFrame Prepare Draw Resources", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const auto descriptorStart = BackendClock::now();
-		if(!frameData.commands.empty()
-			&& !frameData.drawResourcePreparationCommandIndices.empty())
+		if(commandResolver.Count() != 0u
+			&& !presentation.drawResourcePreparationCommandIndices.empty())
 		{
 			for(const std::uint32_t commandIndex :
-				frameData.drawResourcePreparationCommandIndices)
+				presentation.drawResourcePreparationCommandIndices)
 			{
-				if(commandIndex < frameData.commands.size())
+				if(commandIndex < commandResolver.Count())
 				{
-					PrepareDrawResources(
-						frameData.commands[commandIndex], currentPass);
+					RenderItemRecord command{};
+					if(commandResolver.Resolve(commandIndex, command)) {
+						PrepareDrawResources(command, currentPass);
+					}
 				}
 			}
 		}
 		else
 		{
-			// Hand-built or legacy frame payloads may not publish the compact
-			// sidecar. Their complete command list remains the safe fallback.
-			for(const DrawCommand& command : frameData.commands)
+			// The resolver always returns a local value backed by sealed roots, so
+			// this fallback stays safe without a copied command collection.
+			for(std::size_t commandIndex = 0u; commandIndex < commandResolver.Count(); ++commandIndex)
 			{
-				PrepareDrawResources(command, currentPass);
+				RenderItemRecord command{};
+				if(commandResolver.Resolve(commandIndex, command)) {
+					PrepareDrawResources(command, currentPass);
+				}
 			}
 		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const ShadowDrawList& shadowDrawList : frameData.shadowDrawLists) {
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-			for (const DrawCommand& command : shadowDrawList.commands) {
+		for (const ShadowDrawList& shadowDrawList : presentation.shadowDrawLists) {
+			for(std::size_t itemIndex = 0u;
+				itemIndex < shadowDrawList.stableOrdinals.size(); ++itemIndex) {
+				RenderItemRecord command{};
+				if(!TerraEngine::Renderer::ResolveShadowDrawListItem(
+					*publication, shadowDrawList, itemIndex, command)) {
+					continue;
+				}
 				// Shadow virtual geometry arrives as light-view draw commands with
 				// virtualMeshletOffset/Count already selected by RenderSystem. The
 				// backend prepares the same mesh-shader resources as the camera path,
@@ -3523,9 +3559,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (frameData.sky.hasTexture && frameData.sky.textureId != TerraEngine::EMPTY_UUID)
+		if (presentation.sky.hasTexture && presentation.sky.textureId != TerraEngine::EMPTY_UUID)
 		{
-			impl->EnsureTexture(frameData.sky.textureId);
+			impl->EnsureTexture(presentation.sky.textureId);
 		}
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
 			impl->pendingBackendFrameBreakdown,
@@ -3751,7 +3787,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// Conventional render passes clear color, typed identity, depth, and the
 	// optional VRS attachment in that declared attachment order.
 	std::array<VkClearValue, 4> clearValues{};
-	if (view == ViewType::Scene && frameData.sceneViewOrthographic)
+	if (view == ViewType::Scene && presentation.sceneViewOrthographic)
 	{
 		clearValues[0].color = {{0.36f, 0.43f, 0.50f, 1.0f}};
 	}
@@ -3770,7 +3806,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 	// Create Grid Pipeline if needed (lazy init).
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (view == ViewType::Scene && frameData.sceneViewGridVisible) {
+	if (view == ViewType::Scene && presentation.sceneViewGridVisible) {
 		impl->CreateSceneViewGridPipeline(renderPassInfo.renderPass);
 	}
 	impl->CreateSkyBackgroundPipeline(renderPassInfo.renderPass);
@@ -3785,7 +3821,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	renderSnapshot.clusterDataOffset = impl->GetSnapshotClusterDataOffset(snapshotSlotIndex);
 	renderSnapshot.lightIndexOffset = impl->GetSnapshotLightIndexOffset(snapshotSlotIndex);
 	renderSnapshot.clusterDepthOffset = impl->GetSnapshotClusterDepthOffset(snapshotSlotIndex);
-	renderSnapshot.indirectDrawOffset = impl->GetSnapshotIndirectDrawOffset(snapshotSlotIndex);
+	// The indirect range cannot be selected from the view slot: shadow casters
+	// are appended after ordinary draw preparation. Reserve the exact range once
+	// both lists are complete, immediately before the upload below.
+	renderSnapshot.indirectDrawOffset = 0u;
 	renderSnapshot.state = RenderSnapshotState::Acquired;
 	renderSnapshot.valid = true;
 	impl->activeRenderSnapshot = renderSnapshot;
@@ -3796,13 +3835,13 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		TERRAENGINE_PROFILE_SCOPE(
 			"Vulkan: Publish Virtual Geometry Decoded Pages",
 			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		impl->PublishVirtualGeometryDecodedPageResources(frameData);
+		impl->PublishVirtualGeometryDecodedPageResources(presentation);
 	}
 	{
 		TERRAENGINE_PROFILE_SCOPE(
 			"Vulkan: Prepare Virtual Geometry Production Decode",
 			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		impl->PrepareVulkanVirtualGeometryProductionDecode(frameData);
+		impl->PrepareVulkanVirtualGeometryProductionDecode(presentation);
 		if(impl->currentFrame < impl->virtualGeometryProductionDecodeResourcesByFrame.size()) {
 			auto& decodeResources = impl->virtualGeometryProductionDecodeResourcesByFrame[impl->currentFrame];
 			if(decodeResources.plan.valid && !decodeResources.completionPending) {
@@ -3833,7 +3872,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		impl->PublishVirtualGeometryGpuPacketResources(
 			cmd,
-			frameData,
+			*publicationPresentation,
+			*impl->activeRenderFramePublication,
+			publicationViewIndex,
 			renderViewType,
 			diagnosticViewId,
 			impl->backendFrameSerial,
@@ -3844,16 +3885,19 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	}
 	beginCommandRecordingPhase(
 		"Vulkan: Primary Record Virtual Geometry Compute");
-	const auto& virtualGeometryGpuPackets = frameData.VirtualGeometryGpuPackets();
-	const auto& virtualGeometryGpuBatches = frameData.VirtualGeometryGpuBatches();
+	const auto& virtualGeometryGpuPackets =
+		publicationPresentation->VirtualGeometryPackets();
+	const auto& virtualGeometryGpuBatches =
+		publicationPresentation->VirtualGeometryBatches();
 	const auto& virtualGeometryGeneratedSubmissions =
-		frameData.VirtualGeometryGeneratedSubmissions();
+		publicationPresentation->VirtualGeometryGeneratedSubmissions();
 	const bool hasDirectGeometryCommands = std::any_of(
-		frameData.commands.begin(),
-		frameData.commands.end(),
-		[](const DrawCommand& command)
+		impl->activeRenderFramePublication->submissionRanges.begin(),
+		impl->activeRenderFramePublication->submissionRanges.end(),
+		[publicationViewIndex](const TerraEngine::Renderer::RenderSubmissionRange& range)
 		{
-			return command.geometryRoute == TerraEngine::Renderer::GeometryRoute::DirectMeshlet;
+			return range.viewIndex == publicationViewIndex
+				&& range.route == TerraEngine::Renderer::RenderSubmissionRoute::Direct;
 		});
 	const bool hasVirtualGeometryTimestampWork = !virtualGeometryGpuPackets.empty()
 		|| !virtualGeometryGpuBatches.empty()
@@ -4014,7 +4058,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// lighting receives a predictable retained-light list and an independent
 	// shadow subset while the lightweight GPU analysis path observes a larger
 	// uploaded candidate set for the next frame.
-	const VulkanContext::Impl::LightBudgetApplicationResult budgetResult = impl->ApplyFrameLightBudgets(frameData, renderViewType);
+	const VulkanContext::Impl::LightBudgetApplicationResult budgetResult =
+		impl->ApplyFrameLightBudgets(*publicationPresentation, renderViewType);
 	const uint32_t requestedShadowSlotCount = std::min(budgetResult.diagnostics.shadowLightBudget, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
 	VulkanContext::Impl::ShadowResourceRequest requestedShadowResources{};
 	requestedShadowResources.directionalCount = std::min(budgetResult.diagnostics.allocatedDirectionalRegionCount, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
@@ -4248,8 +4293,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			// texture index, otherwise every shadowed light samples slot zero.
 			const uint32_t shadowSlotIndex = static_cast<uint32_t>(std::clamp(assignedShadowSlot, 0.0f, static_cast<float>(VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS - 1u)));
 			if (lightType == 0u) {
-				const glm::mat4 lightViewProjection = BuildDirectionalShadowViewProjection(light, frameData.cameraWorldPosition);
-				const glm::vec3 snappedShadowCenter = ComputeDirectionalShadowCenter(light, frameData.cameraWorldPosition);
+				const glm::mat4 lightViewProjection = BuildDirectionalShadowViewProjection(light, presentation.cameraWorldPosition);
+				const glm::vec3 snappedShadowCenter = ComputeDirectionalShadowCenter(light, presentation.cameraWorldPosition);
 				light.positionAndType.x = snappedShadowCenter.x;
 				light.positionAndType.y = snappedShadowCenter.y;
 				light.positionAndType.z = snappedShadowCenter.z;
@@ -4452,7 +4497,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 	EnsureLightingComputePipelines();
 
-	const glm::mat4 currentViewProjection = frameData.projectionMatrix * frameData.viewMatrix;
+	const glm::mat4 currentViewProjection = presentation.projectionMatrix * presentation.viewMatrix;
 	VulkanContext::Impl::ViewDepthHistoryState& depthHistory = impl->depthHistoryByView[viewIndex];
 	const bool firstPrimaryPassForFrame = useMainCommandBuffer;
 	const bool aoDepthHistorySlotReady = impl->currentFrame < depthHistory.ambientOcclusionDepthByFrame.size()
@@ -4479,7 +4524,15 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		impl->desiredHiZExtentByView[hiZViewIndex] = glm::uvec2(hiZTargetWidth, hiZTargetHeight);
 	}
 	const std::uint64_t hiZProjectionSignature = BuildVulkanHiZProjectionSignature(currentViewProjection);
-	const std::uint64_t hiZDepthSceneSignature = BuildVulkanHiZDepthSceneSignature(frameData);
+	// Visibility preparation already hashes the exact view, world/resource
+	// revisions, selected route/LOD evidence, and stable command membership. Reuse
+	// that sealed proof for Hi-Z diagnostics instead of resolving and hashing every
+	// visible command again on the protected Vulkan recording path. Legacy callers
+	// without publication evidence retain the complete fail-open scan.
+	const std::uint64_t hiZDepthSceneSignature =
+		publicationPresentation->virtualGeometryPacketEvidenceSignature != 0U
+			? publicationPresentation->virtualGeometryPacketEvidenceSignature
+			: BuildVulkanHiZDepthSceneSignature(commandResolver);
 	VulkanHiZ& currentFrameHiZ = impl->CurrentHiZ(hiZViewIndex);
 	VulkanHiZ& writableFrameHiZ = impl->WritableHiZForFrame(hiZViewIndex, impl->currentFrame);
 	const VulkanHiZHistoryMetadata& readableHiZHistory = impl->readableHiZHistoryByViewFrame[hiZViewIndex][impl->currentFrame];
@@ -4536,7 +4589,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 	FrameCullingDataGPU analysisCullingData{};
 	analysisCullingData.frustumPlanes = BuildFrustumPlanes(currentViewProjection);
-	analysisCullingData.cameraPositionAndEpsilon = glm::vec4(frameData.cameraWorldPosition, std::max(frameData.cullingEpsilon, 0.0001f));
+	analysisCullingData.cameraPositionAndEpsilon = glm::vec4(presentation.cameraWorldPosition, std::max(presentation.cullingEpsilon, 0.0001f));
 	analysisCullingData.clusterGridAndLightCount = glm::uvec4(
 		kLightingClusterDimX,
 		kLightingClusterDimY,
@@ -4547,16 +4600,16 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		100.0f,
 		static_cast<float>(hiZTargetWidth),
 		static_cast<float>(hiZTargetHeight));
-	analysisCullingData.viewMatrix = frameData.viewMatrix;
-	analysisCullingData.invProjection = glm::inverse(frameData.projectionMatrix);
+	analysisCullingData.viewMatrix = presentation.viewMatrix;
+	analysisCullingData.invProjection = glm::inverse(presentation.projectionMatrix);
 	analysisCullingData.renderSettings0 = glm::uvec4(
-		frameData.settings.shadowResolution,
-		frameData.settings.shadowFilteringSize,
+		presentation.settings.shadowResolution,
+		presentation.settings.shadowFilteringSize,
 		budgetResult.diagnostics.retainedLightBudget,
-		frameData.settings.enableLTC ? 1u : 0u);
+		presentation.settings.enableLTC ? 1u : 0u);
 	analysisCullingData.renderSettings1 = glm::uvec4(
-		frameData.settings.enableIBL ? 1u : 0u,
-		frameData.settings.anisotropicFiltering,
+		presentation.settings.enableIBL ? 1u : 0u,
+		presentation.settings.anisotropicFiltering,
 		budgetResult.diagnostics.shadowLightBudget,
 		budgetResult.diagnostics.uploadedLightBudget);
 	// Upload artist-facing indirect and contact-darkening controls separately
@@ -4568,14 +4621,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	constexpr bool kEnableRuntimeScreenSpaceAo = true;
 	const bool screenSpaceAoActive = kEnableRuntimeScreenSpaceAo && aoDepthHistoryMatchesView;
 	const float aoQualityForFrame = screenSpaceAoActive
-		? static_cast<float>(frameData.settings.ambientOcclusionQuality)
+		? static_cast<float>(presentation.settings.ambientOcclusionQuality)
 		: 0.0f;
 	analysisCullingData.renderSettings2 = glm::vec4(
-		frameData.settings.indirectStrength,
-		frameData.settings.ambientOcclusionStrength,
+		presentation.settings.indirectStrength,
+		presentation.settings.ambientOcclusionStrength,
 		aoQualityForFrame,
 		hiZOcclusionActive ? 1.0f : 0.0f);
-	analysisCullingData.globalTaskCullingEnabled = (frameData.globalTaskShaderCullingEnabled && impl->globalTaskShaderCullingEnabled) ? 1u : 0u;
+	analysisCullingData.globalTaskCullingEnabled = (presentation.globalTaskShaderCullingEnabled && impl->globalTaskShaderCullingEnabled) ? 1u : 0u;
 	analysisCullingData.taskShaderSupported = impl->taskShaderSupported ? 1u : 0u;
 
 	FrameCullingDataGPU cullingData = analysisCullingData;
@@ -4698,8 +4751,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 	// Prepare Indirect Buffer
 	std::size_t shadowCommandSourceCount = 0u;
-	for (const ShadowDrawList& shadowDrawList : frameData.shadowDrawLists) {
-		shadowCommandSourceCount += shadowDrawList.commands.size();
+	for (const ShadowDrawList& shadowDrawList : presentation.shadowDrawLists) {
+		shadowCommandSourceCount += shadowDrawList.stableOrdinals.size();
 	}
 	// RenderFrame is serialized by the backend state mutex. Thread-local scratch
 	// retains the large crowd capacities without sharing mutable command bytes
@@ -4708,7 +4761,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	indirectCommands.clear();
 	// Reserve both the main-view commands and the light-specific shadow lists so
 	// per-light culling does not thrash the indirect-command buffer on CPU.
-	indirectCommands.reserve(frameData.commands.size() + shadowCommandSourceCount);
+	indirectCommands.reserve(commandResolver.Count() + shadowCommandSourceCount);
 
 	if (screenSpaceAoActive) {
 		const bool generatedAmbientOcclusion = impl->GenerateAmbientOcclusion(cmd, cullingData, snapshotSlotIndex, aoDepthHistoryView);
@@ -4818,38 +4871,97 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	};
 	thread_local std::vector<PreparedDraw> prepared;
 	prepared.clear();
-	prepared.reserve(frameData.commands.size());
+	prepared.reserve(commandResolver.Count());
 	// Validate and publish the whole crowd stream before any grouped command is
 	// suppressed. A malformed range, capacity overflow, allocation failure, or
 	// descriptor publication failure leaves every original command available for
 	// ordinary per-object recording in this same frame.
 	thread_local std::vector<std::int32_t> groupedSubmissionByCommand;
-	groupedSubmissionByCommand.assign(frameData.commands.size(), -1);
+	groupedSubmissionByCommand.assign(commandResolver.Count(), -1);
 	thread_local std::vector<std::uint8_t> groupedCommandSuppressed;
-	groupedCommandSuppressed.assign(frameData.commands.size(), 0u);
+	groupedCommandSuppressed.assign(commandResolver.Count(), 0u);
+	const auto groupedRecordMatchesRepresentative = [](
+		const RenderInstanceRecord& member,
+		const RenderItemRecord& representative) {
+		// These are exactly the values still shared through one push packet. The
+		// packet/page byte selectors intentionally remain per-instance and therefore
+		// are not equal. RenderSystem sealed every compared lane transactionally.
+		return member.materialAndTexture[
+				RenderInstanceRecord::kMaterialSelectorWord]
+				== representative.materialIndex
+			&& member.materialAndTexture[
+				RenderInstanceRecord::kTextureSelectorWord]
+				== representative.textureIndex
+			&& member.objectIdentity[
+				RenderInstanceRecord::kGeometryRouteWord]
+				== static_cast<std::uint32_t>(representative.geometryRoute)
+			&& member.objectIdentity[
+				RenderInstanceRecord::kVirtualGeometryFlagsWord]
+				== representative.virtualGeometryFlags
+			&& member.objectIdentity[
+				RenderInstanceRecord::kCompatibilityPolicyWord]
+				== RenderInstanceRecord::PackCompatibilityPolicy(
+					representative.taskShaderCullingEnabled,
+					static_cast<std::uint32_t>(
+						representative.animationBinding.source),
+					representative.animationBinding.
+						RequiresConservativeCoarseVisibility())
+			&& member.geometrySelectors[
+				RenderInstanceRecord::kSelectedLodWord]
+				== representative.selectedVirtualLod
+			&& member.geometrySelectors[
+				RenderInstanceRecord::kMeshletCountWord]
+				== representative.virtualMeshletCount
+			&& member.virtualGeometryPayloadSelectors.x
+				== static_cast<std::uint32_t>(
+					representative.virtualGeometryPayloadSource)
+			&& member.editorTint == representative.editorTint;
+	};
+	thread_local std::vector<RenderItemRecord> groupedRepresentatives;
+	groupedRepresentatives.clear();
+	groupedRepresentatives.reserve(presentation.groupedSubmissions.size());
 	bool groupedInstanceStreamReady = false;
-	if(frameData.renderOptimization.valid != 0u
-		&& !frameData.groupedSubmissions.empty()
-		&& !frameData.groupedInstanceRecords.empty()) {
+	if(presentation.renderOptimization.valid != 0u
+		&& !presentation.groupedSubmissions.empty()
+		&& !presentation.groupedInstanceRecords.empty()) {
 		bool complete = true;
+		std::size_t coveredInstanceCount = 0u;
 		for(std::size_t submissionIndex = 0u;
-			submissionIndex < frameData.groupedSubmissions.size(); ++submissionIndex) {
+			submissionIndex < presentation.groupedSubmissions.size(); ++submissionIndex) {
 			const GroupedRenderSubmission& submission =
-				frameData.groupedSubmissions[submissionIndex];
+				presentation.groupedSubmissions[submissionIndex];
 			const SharedRenderGroup& group = submission.group;
 			if(!group.executable || !group.key.IsComplete()
-				|| submission.representativeCommandIndex >= frameData.commands.size()
-				|| group.instanceCount < 2u || group.firstInstance
-					> frameData.groupedInstanceRecords.size()
-				|| group.instanceCount > frameData.groupedInstanceRecords.size()
+				|| submission.representativeCommandIndex >= commandResolver.Count()
+				|| group.instanceCount < 2u
+				|| group.firstInstance != coveredInstanceCount
+				|| group.firstInstance
+					> presentation.groupedInstanceRecords.size()
+				|| group.instanceCount > presentation.groupedInstanceRecords.size()
 					- group.firstInstance) {
 				complete = false;
 				break;
 			}
+			RenderItemRecord representative{};
+			if(!commandResolver.Resolve(
+					submission.representativeCommandIndex, representative)
+				|| group.key.meshId != representative.meshId
+				|| group.key.materialId != representative.materialId
+				|| group.key.geometryRoute != static_cast<std::uint32_t>(
+					representative.geometryRoute))
+			{
+				complete = false;
+				break;
+			}
+			groupedRepresentatives.push_back(std::move(representative));
+			coveredInstanceCount += group.instanceCount;
 			groupedSubmissionByCommand[submission.representativeCommandIndex] =
 				static_cast<std::int32_t>(submissionIndex);
 		}
-		const std::size_t recordCount = frameData.groupedInstanceRecords.size();
+		const std::size_t recordCount = presentation.groupedInstanceRecords.size();
+		complete = complete && coveredInstanceCount == recordCount
+			&& groupedRepresentatives.size()
+				== presentation.groupedSubmissions.size();
 		const bool sizeRepresentable = recordCount <=
 			std::numeric_limits<VkDeviceSize>::max() / sizeof(RenderInstanceRecord);
 		const VkDeviceSize requiredBytes = sizeRepresentable
@@ -4889,10 +5001,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		std::vector<PreparedDraw> draws;
 	};
 	thread_local std::vector<PreparedShadowList> preparedShadowLists;
-	if(preparedShadowLists.size() > frameData.shadowDrawLists.size()) {
-		preparedShadowLists.resize(frameData.shadowDrawLists.size());
+	if(preparedShadowLists.size() > presentation.shadowDrawLists.size()) {
+		preparedShadowLists.resize(presentation.shadowDrawLists.size());
 	}
-	while(preparedShadowLists.size() < frameData.shadowDrawLists.size()) {
+	while(preparedShadowLists.size() < presentation.shadowDrawLists.size()) {
 		preparedShadowLists.emplace_back();
 	}
 	for(PreparedShadowList& preparedList : preparedShadowLists) {
@@ -4927,8 +5039,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		PrimitiveEstimateKeyHash> primitiveEstimateCache;
 	primitiveEstimateCache.clear();
 	primitiveEstimateCache.reserve(std::min<std::size_t>(
-		frameData.commands.size(), 128U));
-	const auto estimateSelectedPrimitives = [&](const DrawCommand& command,
+		commandResolver.Count(), 128U));
+	const auto estimateSelectedPrimitives = [&](const RenderItemRecord& command,
 		std::uint32_t fallbackPrimitiveCount,
 		std::uint32_t meshletOffset,
 		std::uint32_t meshletCount) {
@@ -4947,15 +5059,21 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	RenderStatsSnapshot pendingStats{};
 	const auto groupedRecordingBegin = std::chrono::steady_clock::now();
 	pendingStats.viewType = (view == ViewType::Scene) ? RenderViewType::Scene : RenderViewType::Game;
+	pendingStats.outputKind = outputRequest.kind;
+	pendingStats.outputId = outputRequest.outputId;
+	pendingStats.dedicatedCaptureOutput = renderingDedicatedCaptureTarget;
+	pendingStats.publicationFrameId = publication->frameId;
+	pendingStats.publicationGeneration = publication->generation;
+	pendingStats.rendererSessionGeneration = publication->rendererSessionGeneration;
 	pendingStats.renderSize = glm::uvec2(hiZTargetWidth, hiZTargetHeight);
-	pendingStats.frameTimeMs = SafeFrameTimeMs(frameData.deltaTimeSeconds);
+	pendingStats.frameTimeMs = SafeFrameTimeMs(presentation.deltaTimeSeconds);
 	pendingStats.fps = pendingStats.frameTimeMs > 0.0f ? (1000.0f / pendingStats.frameTimeMs) : 0.0f;
 	pendingStats.valid = true;
-	pendingStats.optimization = frameData.renderOptimization;
+	pendingStats.optimization = presentation.renderOptimization;
 	pendingStats.optimization.instanceStreamCapacityBytes = static_cast<std::uint32_t>(
 		std::min<VkDeviceSize>(impl->groupedInstanceCapacities[currentFrame],
 			std::numeric_limits<std::uint32_t>::max()));
-	if(!groupedInstanceStreamReady && !frameData.groupedSubmissions.empty()) {
+	if(!groupedInstanceStreamReady && !presentation.groupedSubmissions.empty()) {
 		pendingStats.optimization.fallbackAllocationFailureCount = 1u;
 	}
 	std::uint32_t recordedGroupedInstanceCount = 0u;
@@ -5008,7 +5126,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		materialLookupCache;
 	materialLookupCache.clear();
 	materialLookupCache.reserve(std::min<std::size_t>(
-		frameData.commands.size(), 128u));
+		commandResolver.Count(), 128u));
 	TerraEngine::UUID lastMaterialId = TerraEngine::EMPTY_UUID;
 	Material* lastMaterial = nullptr;
 	const auto ResolveMaterial = [&](const TerraEngine::UUID& materialId) -> Material* {
@@ -5043,7 +5161,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			&& mesh.meshletCount != 0u;
 	};
 	const auto ResolveCanonicalGraphicsGroup =
-		[&](const DrawCommand& command)
+		[&](const RenderItemRecord& command)
 			-> std::optional<std::uint32_t>
 	{
 		if(!impl->deformationComputeRecordedForCurrentFrame
@@ -5056,15 +5174,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		{
 			return std::nullopt;
 		}
-		const TerraEngine::Renderer::AnimationRenderBinding& binding =
+		const TerraEngine::Renderer::PublishedAnimationRenderBinding& binding =
 			command.animationBinding;
 		const std::uint64_t stableInstanceId =
-			binding.gpu.IsComplete()
-				? binding.gpu.stableInstanceId
-				: (static_cast<std::uint64_t>(
-					binding.animatorSlotIndex)
-						<< 32u)
-					| binding.animatorGeneration;
+			command.animation.stableInstanceId;
 		const auto& resources =
 			impl->deformationFrameResources[impl->currentFrame];
 		if(!resources.live
@@ -5095,7 +5208,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			: std::nullopt;
 	};
 	const auto RequiresConservativeDeformableVisibility =
-		[&](const DrawCommand& command,
+		[&](const RenderItemRecord& command,
 			const std::optional<std::uint32_t>& canonicalGroup)
 	{
 		// Canonical deformation publishes current dynamic cluster bounds. Legacy
@@ -5104,7 +5217,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 				RequiresOwnerMeshDeformationFallback()
 			&& !canonicalGroup.has_value();
 	};
-	const auto ApplyAnimationGraphicsBridge = [&](const DrawCommand& command,
+	const auto ApplyAnimationGraphicsBridge = [&](const RenderItemRecord& command,
 		PushConstants& push, bool preferOwnerPalette,
 		const std::optional<std::uint32_t>& resolvedCanonicalGroup) {
 		// Static and rejected animation draws publish invalid bridge fields. A
@@ -5112,7 +5225,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		// follows the separately generation-checked compute bridge below.
 		push.meshDataIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 		push.textureIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
-		const TerraEngine::Renderer::AnimationRenderBinding& binding =
+		const TerraEngine::Renderer::PublishedAnimationRenderBinding& binding =
 			command.animationBinding;
 		const std::optional<std::uint32_t> canonicalGroup = preferOwnerPalette
 			? std::nullopt
@@ -5142,8 +5255,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 				record = impl->pendingCpuAnimationPlan->records[
 					binding.cpuDeformationRecordIndex];
 			const std::uint64_t stableInstanceId =
-				(static_cast<std::uint64_t>(binding.animatorSlotIndex) << 32U)
-				| static_cast<std::uint64_t>(binding.animatorGeneration);
+				command.animation.stableInstanceId;
 			if(resources.live
 				&& resources.frameId
 					== impl->pendingCpuAnimationPlan->frameId
@@ -5153,13 +5265,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 					== impl->activeCpuAnimationGraphicsBufferIndex
 				&& record.IsComplete()
 				&& record.stableInstanceId == stableInstanceId
-				&& record.meshId == binding.meshId
-				&& record.poseGeneration
-					== binding.posePublicationGeneration
+				&& record.meshId == command.meshId
+				&& record.poseGeneration == command.animation.poseGeneration
 				&& record.deformablePayloadGeneration
 					== binding.deformablePayloadGeneration
 				&& record.rendererGeneration
-					== binding.invalidation.renderer
+					== command.animation.rendererGeneration
 				&& record.skeletonCompatibilityFingerprint
 					== binding.skeletonCompatibilityFingerprint
 				&& record.data == binding.cpuDeformation) {
@@ -5170,8 +5281,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 				return;
 			}
 		}
-		const TerraEngine::Renderer::AnimationGpuRenderBinding& gpu = command.animationBinding.gpu;
-		if (!gpu.IsComplete()
+		const RenderItemRecord::PublishedAnimationGeneration& gpu =
+			command.animation;
+		if (!command.HasCompleteGpuAnimation()
 			|| impl->activeAnimationGraphicsBufferIndex == VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX
 			|| impl->currentFrame >= impl->animationFrameResources.size())
 		{
@@ -5185,48 +5297,47 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			impl->animationFrameResources[impl->currentFrame];
 		if (!resources.live
 			|| resources.graphicsBridgeBindlessIndex != impl->activeAnimationGraphicsBufferIndex
-			|| resources.planGeneration != gpu.planGeneration
+			|| resources.planGeneration != gpu.animationPlanGeneration
 			|| resources.rendererGeneration != gpu.rendererGeneration
 			|| impl->pendingAnimationImmutablePlan == nullptr
-			|| impl->pendingAnimationImmutablePlan->generation != gpu.planGeneration
-			|| impl->pendingAnimationImmutablePlan->renderIdentities.size()
-				!= impl->pendingAnimationImmutablePlan->workPackets.size()
-			|| gpu.workPacketIndex >= impl->pendingAnimationImmutablePlan->workPackets.size())
+			|| impl->pendingAnimationImmutablePlan->generation
+				!= gpu.animationPlanGeneration
+			|| impl->pendingAnimationImmutablePlan->RenderIdentityCount()
+				!= impl->pendingAnimationImmutablePlan->WorkPackets().size()
+			|| gpu.firstGpuWorkPacket
+				>= impl->pendingAnimationImmutablePlan->WorkPackets().size())
 		{
 			return;
 		}
 		const TerraEngine::Animation::GpuAnimationWorkPacket& packet =
-			impl->pendingAnimationImmutablePlan->workPackets[gpu.workPacketIndex];
+			impl->pendingAnimationImmutablePlan->WorkPackets()[
+				gpu.firstGpuWorkPacket];
 		const TerraEngine::Animation::GpuAnimationRenderIdentity& renderIdentity =
-			impl->pendingAnimationImmutablePlan->renderIdentities[gpu.workPacketIndex];
-		if (packet.generationRecordIndex >= impl->pendingAnimationImmutablePlan->generationRecords.size())
+			impl->pendingAnimationImmutablePlan->RenderIdentity(
+				gpu.firstGpuWorkPacket);
+		if (packet.generationRecordIndex >= impl->pendingAnimationImmutablePlan->GenerationRecordCount())
 		{
 			return;
 		}
 		const TerraEngine::Animation::GpuAnimationGenerationRecord& generation =
-			impl->pendingAnimationImmutablePlan->generationRecords[packet.generationRecordIndex];
-		const bool packetIdentityMatches = packet.stableInstanceId == gpu.stableInstanceId
-			&& packet.stableSubmissionOrdinal == gpu.stableSubmissionOrdinal
-			&& packet.stageMask == gpu.stageMask
-			&& generation.instanceSlot == gpu.instanceSlot
-			&& generation.instanceGeneration == gpu.instanceGeneration
-			&& generation.componentGeneration == gpu.componentGeneration
-			&& generation.skeletonGeneration == gpu.skeletonGeneration
-			&& generation.meshGeneration == gpu.meshGeneration
-			&& generation.resourceGeneration == gpu.resourceGeneration
+			impl->pendingAnimationImmutablePlan->GenerationRecord(packet.generationRecordIndex);
+		const bool packetIdentityMatches =
+			packet.stableInstanceId == gpu.stableInstanceId
+			&& packet.stageMask == gpu.gpuStageMask
 			&& generation.rendererGeneration == gpu.rendererGeneration
-			&& generation.sceneGeneration == gpu.sceneGeneration
-			&& generation.workGeneration == gpu.workGeneration
+			&& generation.workGeneration == gpu.poseGeneration
 			&& generation.programGeneration == gpu.programGeneration
-			&& renderIdentity == gpu.renderIdentity
-			&& renderIdentity.meshId == command.animationBinding.meshId
+			&& renderIdentity.meshId == command.meshId
 			&& renderIdentity.deformablePayloadGeneration
 				== command.animationBinding.deformablePayloadGeneration
 			&& renderIdentity.skeletonCompatibilityFingerprint
 				== command.animationBinding.skeletonCompatibilityFingerprint
 			&& TerraEngine::Animation::HasGpuAnimationFlag(packet.flags,
 				TerraEngine::Animation::GpuAnimationWorkFlag::HybridCpuAuthority)
-				== gpu.hybridCpuAuthority;
+				== (static_cast<TerraEngine::Renderer::AnimationRenderEvaluationSource>(
+					gpu.source)
+					== TerraEngine::Renderer::AnimationRenderEvaluationSource::
+						HybridAuthoritative);
 		if (!packetIdentityMatches)
 		{
 			// An in-range packet index is not sufficient identity: deterministic
@@ -5236,7 +5347,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		}
 
 		push.meshDataIndex = impl->activeAnimationGraphicsBufferIndex;
-		push.textureIndex = gpu.workPacketIndex;
+		push.textureIndex = gpu.firstGpuWorkPacket;
 	};
 	// Resolve the exact animation bridge for every grouped owner before the
 	// second (authoritative) stream publication. The first allocation/upload
@@ -5244,6 +5355,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// boundary that prevents one animator from borrowing its representative's
 	// palette record.
 	const auto instanceStreamUploadBegin = std::chrono::steady_clock::now();
+	const bool useSealedDenseGroupedAnimationSelectors =
+		groupedInstanceStreamReady
+		&& impl->pendingAnimationFullImmutablePlanCoverage
+		&& impl->pendingAnimationImmutablePlan != nullptr
+		&& impl->activeAnimationGraphicsBufferIndex
+			!= VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 	{
 		TERRAENGINE_PROFILE_SCOPE(
 			"Vulkan: Prepare Grouped Instance Stream",
@@ -5252,71 +5369,113 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			// Validate the backend-owned selectors in compact ordinary memory first.
 			// Once every record succeeds, upload the authoritative stream once and patch
 			// only the two words that cannot be known before backend publication.
+			const bool useSealedDenseSelectors =
+				useSealedDenseGroupedAnimationSelectors;
 			thread_local std::vector<glm::uvec2> resolvedAnimationSelectors;
-			try {
-				resolvedAnimationSelectors.resize(
-					frameData.groupedInstanceRecords.size());
-			} catch(const std::bad_alloc&) {
-				groupedInstanceStreamReady = false;
+			if(!useSealedDenseSelectors) {
+				try {
+					resolvedAnimationSelectors.resize(
+						presentation.groupedInstanceRecords.size());
+				} catch(const std::bad_alloc&) {
+					groupedInstanceStreamReady = false;
+				}
 			}
 			bool resolvedEveryAnimatedRecord = groupedInstanceStreamReady;
-			for(std::size_t recordIndex = 0U;
+			for(std::size_t submissionIndex = 0u;
 				resolvedEveryAnimatedRecord
-					&& recordIndex < frameData.groupedInstanceRecords.size(); ++recordIndex) {
-				const RenderInstanceRecord& record =
-					frameData.groupedInstanceRecords[recordIndex];
-				const uint32_t sourceCommandIndex = record.materialAndTexture[
-					RenderInstanceRecord::kPickingIdentityWord];
-				if(sourceCommandIndex >= frameData.commands.size()) {
-					resolvedEveryAnimatedRecord = false;
-					break;
-				}
-				const DrawCommand& source = frameData.commands[sourceCommandIndex];
-				if(!source.animationBinding.gpu.IsComplete()) {
+					&& submissionIndex < presentation.groupedSubmissions.size();
+				++submissionIndex) {
+				const SharedRenderGroup& group =
+					presentation.groupedSubmissions[submissionIndex].group;
+				const RenderItemRecord& representative =
+					groupedRepresentatives[submissionIndex];
+				for(std::uint32_t instance = 0u;
+					resolvedEveryAnimatedRecord && instance < group.instanceCount;
+					++instance) {
+					const std::size_t recordIndex = group.firstInstance + instance;
+					const RenderInstanceRecord& record =
+						presentation.groupedInstanceRecords[recordIndex];
+					const std::uint32_t sourceCommandIndex =
+						record.materialAndTexture[
+							RenderInstanceRecord::kPickingIdentityWord];
+					if(sourceCommandIndex >= commandResolver.Count()
+						|| !groupedRecordMatchesRepresentative(
+							record, representative)) {
+						resolvedEveryAnimatedRecord = false;
+						break;
+					}
+					if(useSealedDenseSelectors) {
+						// Full coverage proves that every dynamic lane names exactly one
+						// packet in the immutable plan. Recheck the compact generation tuple
+						// carried by this presentation record, then publish its packet index.
+						const std::uint32_t packetIndex = record.animationSelectors.x;
+						if(record.animationSelectors.y
+								!= impl->pendingAnimationImmutablePlan->generation
+							|| record.animationSelectors.z
+								!= impl->pendingAnimationCommandPlan.rendererGeneration
+							|| packetIndex >= impl->pendingAnimationImmutablePlan->
+								WorkPackets().size()) {
+							resolvedEveryAnimatedRecord = false;
+						}
+						continue;
+					}
+					RenderItemRecord source{};
+					if(!commandResolver.Resolve(sourceCommandIndex, source)) {
+						resolvedEveryAnimatedRecord = false;
+						break;
+					}
+					if(!source.HasCompleteGpuAnimation()) {
+						resolvedAnimationSelectors[recordIndex] = glm::uvec2(
+							VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX);
+						continue;
+					}
+					const std::optional<std::uint32_t> canonicalGroup =
+						ResolveCanonicalGraphicsGroup(source);
+					PushConstants animationPush{};
+					ApplyAnimationGraphicsBridge(source, animationPush,
+						RequiresConservativeDeformableVisibility(
+							source, canonicalGroup), canonicalGroup);
+					if(animationPush.meshDataIndex
+							== VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX
+						|| animationPush.textureIndex
+							== VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX) {
+						resolvedEveryAnimatedRecord = false;
+						break;
+					}
 					resolvedAnimationSelectors[recordIndex] = glm::uvec2(
-						VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX);
-					continue;
+						animationPush.meshDataIndex, animationPush.textureIndex);
 				}
-				const std::optional<std::uint32_t> canonicalGroup =
-					ResolveCanonicalGraphicsGroup(source);
-				PushConstants animationPush{};
-				ApplyAnimationGraphicsBridge(source, animationPush,
-					RequiresConservativeDeformableVisibility(source, canonicalGroup),
-					canonicalGroup);
-				if(animationPush.meshDataIndex
-					== VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX
-					|| animationPush.textureIndex
-					== VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX) {
-					resolvedEveryAnimatedRecord = false;
-					break;
-				}
-				resolvedAnimationSelectors[recordIndex] = glm::uvec2(
-					animationPush.meshDataIndex, animationPush.textureIndex);
 			}
 			VulkanBuffer& instanceBuffer = impl->groupedInstanceBuffers[currentFrame];
-			void* mapped = nullptr;
+			void* mapped = instanceBuffer.mappedData;
+			const bool temporaryMapping = mapped == nullptr;
 			const VkDeviceSize bytes = static_cast<VkDeviceSize>(
-				frameData.groupedInstanceRecords.size() * sizeof(RenderInstanceRecord));
+				presentation.groupedInstanceRecords.size() * sizeof(RenderInstanceRecord));
 			if(resolvedEveryAnimatedRecord) {
-				if(vmaMapMemory(impl->allocator, instanceBuffer.allocation, &mapped)
-					!= VK_SUCCESS || mapped == nullptr) {
+				if((temporaryMapping
+						&& vmaMapMemory(impl->allocator, instanceBuffer.allocation, &mapped)
+							!= VK_SUCCESS)
+					|| mapped == nullptr) {
 					resolvedEveryAnimatedRecord = false;
 				}
 				else {
-					std::memcpy(mapped, frameData.groupedInstanceRecords.data(),
+					std::memcpy(mapped, presentation.groupedInstanceRecords.data(),
 						static_cast<std::size_t>(bytes));
 					RenderInstanceRecord* uploadedRecords =
 						static_cast<RenderInstanceRecord*>(mapped);
-					for(std::size_t recordIndex = 0u;
-						recordIndex < resolvedAnimationSelectors.size(); ++recordIndex)
-					{
-						uploadedRecords[recordIndex].animationSelectors.x =
-							resolvedAnimationSelectors[recordIndex].x;
-						uploadedRecords[recordIndex].animationSelectors.y =
-							resolvedAnimationSelectors[recordIndex].y;
+					if(!useSealedDenseSelectors) {
+						for(std::size_t recordIndex = 0u;
+							recordIndex < resolvedAnimationSelectors.size(); ++recordIndex) {
+							uploadedRecords[recordIndex].animationSelectors.x =
+								resolvedAnimationSelectors[recordIndex].x;
+							uploadedRecords[recordIndex].animationSelectors.y =
+								resolvedAnimationSelectors[recordIndex].y;
+						}
 					}
 					vmaFlushAllocation(impl->allocator, instanceBuffer.allocation, 0u, bytes);
-					vmaUnmapMemory(impl->allocator, instanceBuffer.allocation);
+					if(temporaryMapping) {
+						vmaUnmapMemory(impl->allocator, instanceBuffer.allocation);
+					}
 				}
 			}
 			if(resolvedEveryAnimatedRecord) {
@@ -5384,10 +5543,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// resources. Resolve that static envelope once per exact pass/route key; the
 	// following loop still builds unique model and animation push data per owner.
 	staticDrawPreparationCache.reserve(std::min<std::size_t>(
-		frameData.commands.size() + frameData.shadowDrawLists.size(), 128U));
+		commandResolver.Count() + presentation.shadowDrawLists.size(), 128U));
 	std::optional<StaticDrawPreparationKey> lastStaticPreparationKey;
 	std::optional<StaticDrawPreparation> lastStaticPreparation;
-	const auto ResolveStaticDrawPreparation = [&](const DrawCommand& command,
+	const auto ResolveStaticDrawPreparation = [&](const RenderItemRecord& command,
 		TerraEngine::UUID requestedCollectionId,
 		VkRenderPass renderPass,
 		std::uint32_t materialFlags) -> const StaticDrawPreparation*
@@ -5483,11 +5642,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::uint32_t commandIndex = 0u;
-		commandIndex < frameData.commands.size(); ++commandIndex) {
+		commandIndex < commandResolver.Count(); ++commandIndex) {
 		if(groupedCommandSuppressed[commandIndex] != 0u) {
 			continue;
 		}
-		const DrawCommand& command = frameData.commands[commandIndex];
+		RenderItemRecord command{};
+		if(!commandResolver.Resolve(commandIndex, command)) continue;
 		Material* material = ResolveMaterial(command.materialId);
 		if (!material) continue;
 
@@ -5509,8 +5669,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			&& groupedSubmissionByCommand[commandIndex] >= 0;
 		const bool multiOwnerCanonicalFallback =
 			impl->pendingAnimationImmutablePlan != nullptr
-			&& impl->pendingAnimationImmutablePlan->workPackets.size() > 1u
-			&& command.animationBinding.gpu.IsComplete()
+			&& impl->pendingAnimationImmutablePlan->WorkPackets().size() > 1u
+			&& command.HasCompleteGpuAnimation()
 			&& !canonicalGraphicsAvailable;
 
 		// Route default materials through the task pipeline whenever supported.
@@ -5552,7 +5712,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			RequiresConservativeDeformableVisibility(command, canonicalGraphicsGroup);
 		const bool activeTaskCulling = kEnableGpuMeshletCulling
 			&& staticPreparation->hasTaskStage
-			&& frameData.globalTaskShaderCullingEnabled
+			&& presentation.globalTaskShaderCullingEnabled
 			&& impl->globalTaskShaderCullingEnabled
 			&& command.taskShaderCullingEnabled
 			&& staticPreparation->hasMeshletBounds
@@ -5591,7 +5751,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.vrsActive = 0u; 
 		push.taskCullingEnabled = activeTaskCulling ? 1u : 0u;
 		push.statsSlotIndex = statsSlotIndex;
-		push.cullingEpsilon = std::max(frameData.cullingEpsilon, 0.0001f);
+		push.cullingEpsilon = std::max(presentation.cullingEpsilon, 0.0001f);
 		push.lightDataOffset = renderSnapshot.lightDataOffset;
 		push.clusterDataOffset = renderSnapshot.clusterDataOffset;
 		push.lightIndexOffset = renderSnapshot.lightIndexOffset;
@@ -5634,51 +5794,22 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			? command.virtualMeshletCount
 			: ownerMeshletCount;
 		const GroupedRenderSubmission* groupedSubmission = nullptr;
-		const auto memberMatchesRepresentative = [&](const DrawCommand& member) {
-			// Compare only data that the shared push packet still reads. The instance
-			// stream carries each member's packet descriptor, page identity/bytes,
-			// meshlet offset, and exact animation bridge, so requiring those values
-			// here would reject a valid page-local crowd before its per-instance task
-			// shader can consume them. Meshlet count remains shared because it sets
-			// the fixed task-group stride used to address every member safely.
-			return member.meshId == command.meshId
-				&& member.materialId == command.materialId
-				&& member.materialIndex == command.materialIndex
-				&& member.textureIndex == command.textureIndex
-				&& member.geometryRoute == command.geometryRoute
-				&& member.virtualMeshletCount == command.virtualMeshletCount
-				&& member.selectedVirtualLod == command.selectedVirtualLod
-				&& member.virtualGeometryFlags == command.virtualGeometryFlags
-				&& member.virtualGeometryPayloadSource == command.virtualGeometryPayloadSource
-				&& member.taskShaderCullingEnabled == command.taskShaderCullingEnabled
-				&& member.animationBinding.source == command.animationBinding.source
-				&& member.animationBinding.RequiresConservativeCoarseVisibility()
-					== command.animationBinding.RequiresConservativeCoarseVisibility()
-				&& member.editorTint == glm::vec4(0.0f);
-		};
 		if(groupedInstanceStreamReady
 			&& groupedSubmissionByCommand[commandIndex] >= 0
-			&& (command.geometryRoute
-				== TerraEngine::Renderer::GeometryRoute::DirectMeshlet
-				|| command.UsesVirtualGeometryRoute())
+			&& command.UsesGroupableMeshTaskRoute()
 			&& staticPreparation->hasTaskStage) {
-			const GroupedRenderSubmission& candidate = frameData.groupedSubmissions[
+			const GroupedRenderSubmission& candidate = presentation.groupedSubmissions[
 				static_cast<std::size_t>(groupedSubmissionByCommand[commandIndex])];
 			const SharedRenderGroup& group = candidate.group;
 			const uint32_t baseTaskGroups = (selectedMeshletCount + 31u) / 32u;
 			const bool taskCountFits = baseTaskGroups != 0u
 				&& group.instanceCount <= std::numeric_limits<uint32_t>::max()
 					/ baseTaskGroups;
-			bool membersMatch = taskCountFits;
-			for(uint32_t instance = 0u; membersMatch && instance < group.instanceCount;
-				++instance) {
-				const RenderInstanceRecord& record = frameData.groupedInstanceRecords[
-					group.firstInstance + instance];
-				const uint32_t memberCommandIndex =
-					record.materialAndTexture[RenderInstanceRecord::kPickingIdentityWord];
-				membersMatch = memberCommandIndex < frameData.commands.size()
-					&& memberMatchesRepresentative(frameData.commands[memberCommandIndex]);
-			}
+			const bool membersMatch = taskCountFits
+				&& group.key.meshId == command.meshId
+				&& group.key.materialId == command.materialId
+				&& group.key.geometryRoute
+					== static_cast<std::uint32_t>(command.geometryRoute);
 			if(membersMatch) {
 				groupedSubmission = &candidate;
 			}
@@ -5728,10 +5859,21 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.virtualGeometryPacketDescriptorIndex = command.virtualGeometryPacketDescriptorIndex;
 		push.editorTint = command.editorTint;
 		if(groupedSubmission != nullptr) {
-			// The tint lane is zero for every eligible group and is therefore a
-			// bounded runtime-only selector channel. This retains each proven VG
-			// packet/page selector in its existing push fields.
-			push.virtualGeometryFlags |= 0x80000000u;
+			// Every member has the representative's exact tint, validated above, so
+			// the shared push constant preserves Scene prefab-context coloring while
+			// per-instance selectors remain in the transient stream.
+			constexpr std::uint32_t kRenderInstanceGroupedFlag = 0x80000000u;
+			constexpr std::uint32_t kRenderInstanceSharedAnimationBufferFlag =
+				0x40000000u;
+			push.virtualGeometryFlags |= kRenderInstanceGroupedFlag;
+			if(useSealedDenseGroupedAnimationSelectors)
+			{
+				// Every dense member uses the same frame-owned animation bridge buffer.
+				// Keep its packet index immutable in the instance record and publish the
+				// common buffer selector once through the representative push packet.
+				push.virtualGeometryFlags |=
+					kRenderInstanceSharedAnimationBufferFlag;
+			}
 			// Grouped mesh work never consumes the representative model transform;
 			// retain tint/VG fields and carry the transient stream locator in GLM
 			// column 3. The HLSL ABI reads it as model[0..3].w because HLSL's
@@ -5741,7 +5883,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 				std::bit_cast<float>(groupedSubmission->group.firstInstance),
 				std::bit_cast<float>(groupedSubmission->group.instanceCount),
 				std::bit_cast<float>(static_cast<std::uint32_t>(
-					frameData.groupedInstanceRecords.size())));
+					presentation.groupedInstanceRecords.size())));
 		}
 
 		PreparedDraw draw{};
@@ -5793,7 +5935,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			taskGroupCount *= groupedSubmission->group.instanceCount;
 			for(uint32_t instance = 0u;
 				instance < groupedSubmission->group.instanceCount; ++instance) {
-				const uint32_t memberCommandIndex = frameData.groupedInstanceRecords[
+				const uint32_t memberCommandIndex = presentation.groupedInstanceRecords[
 					groupedSubmission->group.firstInstance + instance]
 					.materialAndTexture[RenderInstanceRecord::kPickingIdentityWord];
 				if(memberCommandIndex != commandIndex) {
@@ -5846,18 +5988,24 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for(std::size_t shadowListIndex = 0U;
-		shadowListIndex < frameData.shadowDrawLists.size(); ++shadowListIndex) {
+		shadowListIndex < presentation.shadowDrawLists.size(); ++shadowListIndex) {
 		const ShadowDrawList& shadowDrawList =
-			frameData.shadowDrawLists[shadowListIndex];
+			presentation.shadowDrawLists[shadowListIndex];
 		PreparedShadowList& preparedList =
 			preparedShadowLists[shadowListIndex];
 		preparedList.lightId = shadowDrawList.lightId;
-		preparedList.draws.reserve(shadowDrawList.commands.size());
+		preparedList.draws.reserve(shadowDrawList.stableOrdinals.size());
 
 		// The renderer already asked the spatial index for one list per light.
 		// Rebuilding the shadow draws from that list preserves the culling win
 		// all the way through pipeline selection and indirect submission.
-		for (const DrawCommand& command : shadowDrawList.commands) {
+		for(std::size_t itemIndex = 0u;
+			itemIndex < shadowDrawList.stableOrdinals.size(); ++itemIndex) {
+			RenderItemRecord command{};
+			if(!TerraEngine::Renderer::ResolveShadowDrawListItem(
+				*publication, shadowDrawList, itemIndex, command)) {
+				continue;
+			}
 			Material* material = ResolveMaterial(command.materialId);
 			if (material == nullptr || !shadowResourcesReady || !ShouldMaterialCastShadow(material->shadowBehavior)) {
 				continue;
@@ -5878,8 +6026,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 					|| !command.animationBinding.
 						RequiresOwnerMeshDeformationFallback())
 				&& !(impl->pendingAnimationImmutablePlan != nullptr
-					&& impl->pendingAnimationImmutablePlan->workPackets.size() > 1u
-					&& command.animationBinding.gpu.IsComplete()
+					&& impl->pendingAnimationImmutablePlan->WorkPackets().size() > 1u
+					&& command.HasCompleteGpuAnimation()
 					&& !canonicalGraphicsGroup.has_value())) {
 				// Shadow rendering follows the same immutable deformation policy
 				// as the visible pass. Canonical page payloads require a task
@@ -5924,7 +6072,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			shadowDraw.push.vrsActive = 2u;
 			shadowDraw.push.taskCullingEnabled = 0u;
 			shadowDraw.push.statsSlotIndex = statsSlotIndex;
-			shadowDraw.push.cullingEpsilon = std::max(frameData.cullingEpsilon, 0.0001f);
+			shadowDraw.push.cullingEpsilon = std::max(presentation.cullingEpsilon, 0.0001f);
 			shadowDraw.push.lightDataOffset = renderSnapshot.lightDataOffset;
 			shadowDraw.push.clusterDataOffset = renderSnapshot.clusterDataOffset;
 			shadowDraw.push.lightIndexOffset = renderSnapshot.lightIndexOffset;
@@ -6001,14 +6149,17 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			pendingStats.optimization.fallbackInstanceCount;
 		pendingStats.optimization.avoidedSubmissionCount = recordedGroupedInstanceCount
 			- recordedGroupedSubmissionCount;
-		if(recordedGroupedSubmissionCount == 0u && !frameData.groupedSubmissions.empty()
+		if(recordedGroupedSubmissionCount == 0u && !presentation.groupedSubmissions.empty()
 			&& groupedInstanceStreamReady) {
 			pendingStats.optimization.rejectedUnsupportedVariantCount =
 				static_cast<std::uint32_t>(std::min<std::size_t>(
-					frameData.groupedSubmissions.size(),
+					presentation.groupedSubmissions.size(),
 					std::numeric_limits<std::uint32_t>::max()));
 		}
 	}
+	// Capture-only automation has no visible Game View to populate another slot.
+	// Publish its counters with explicit output provenance so diagnostics remain
+	// available without pretending the offscreen target was an editor viewport.
 	impl->RecordPendingStats(statsSlotIndex, pendingStats);
 
 	// Shadow-map rendering and the main scene pass both consume the same
@@ -6016,18 +6167,72 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// indirect draws, otherwise the shadow map can render stale or empty draw
 	// commands and blockers will not occlude the light.
 	if (!indirectCommands.empty()) {
-		void* data = nullptr;
-		vmaMapMemory(impl->allocator, impl->indirectDrawBuffers[impl->currentFrame].allocation, &data);
-		auto* snapshotIndirectCommands = static_cast<VkDrawMeshTasksIndirectCommandEXT*>(data) + renderSnapshot.indirectDrawOffset;
-		std::memcpy(snapshotIndirectCommands, indirectCommands.data(), indirectCommands.size() * sizeof(VkDrawMeshTasksIndirectCommandEXT));
-		// The indirect command buffer is ordinary mapped CPU_TO_GPU memory, not a
-		// staging upload. Release and exported builds can land this allocation in
-		// non-coherent memory, so flush the snapshot range before shadow/main
-		// passes consume it through vkCmdDrawMeshTasksIndirectEXT.
-		const VkDeviceSize indirectByteOffset = static_cast<VkDeviceSize>(renderSnapshot.indirectDrawOffset) * sizeof(VkDrawMeshTasksIndirectCommandEXT);
-		const VkDeviceSize indirectByteSize = static_cast<VkDeviceSize>(indirectCommands.size()) * sizeof(VkDrawMeshTasksIndirectCommandEXT);
-		vmaFlushAllocation(impl->allocator, impl->indirectDrawBuffers[impl->currentFrame].allocation, indirectByteOffset, indirectByteSize);
-		vmaUnmapMemory(impl->allocator, impl->indirectDrawBuffers[impl->currentFrame].allocation);
+		const auto rejectIndirectGeometry = [&]() {
+			// The primary command buffer is already recording by this point. Keep it
+			// structurally valid and reject every consumer of this range together, so
+			// no main or shadow pass can reference stale indirect commands.
+			prepared.clear();
+			for (PreparedShadowList& preparedList : preparedShadowLists) {
+				preparedList.draws.clear();
+			}
+			indirectCommands.clear();
+			pendingStats.drawCalls = 0u;
+			pendingStats.triangleCount = 0u;
+			pendingStats.meshletsTotal = 0u;
+			pendingStats.meshletsDispatched = 0u;
+			impl->RecordPendingStats(statsSlotIndex, pendingStats);
+		};
+		std::uint32_t indirectDrawOffset = 0u;
+		if (!impl->ReserveIndirectDrawCommands(
+			indirectCommands.size(), indirectDrawOffset)) {
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Vulkan could not reserve a non-overlapping indirect command range; "
+					"omitting geometry from this view while preserving its valid background and overlays.");
+			rejectIndirectGeometry();
+		} else {
+			renderSnapshot.indirectDrawOffset = indirectDrawOffset;
+			// Draw preparation runs before the complete shadow list is known. Patch
+			// the final range into every prepared command together so secondary main
+			// recording and primary shadow recording address the same uploaded bytes.
+			for (PreparedDraw& draw : prepared) {
+				draw.push.indirectDrawOffset = indirectDrawOffset;
+			}
+			for (PreparedShadowList& preparedList : preparedShadowLists) {
+				for (PreparedDraw& draw : preparedList.draws) {
+					draw.push.indirectDrawOffset = indirectDrawOffset;
+				}
+			}
+			const VulkanBuffer& indirectDrawBuffer = impl->indirectDrawBuffers[impl->currentFrame];
+			void* data = nullptr;
+			const VkResult mapResult = vmaMapMemory(
+				impl->allocator, indirectDrawBuffer.allocation, &data);
+			if (mapResult != VK_SUCCESS || data == nullptr) {
+				TERRAENGINE_LOG(LogLevel::Error,
+					"Vulkan could not map the indirect command range; omitting geometry from this view.");
+				rejectIndirectGeometry();
+			} else {
+				auto* snapshotIndirectCommands =
+					static_cast<VkDrawMeshTasksIndirectCommandEXT*>(data) + renderSnapshot.indirectDrawOffset;
+				std::memcpy(snapshotIndirectCommands, indirectCommands.data(),
+					indirectCommands.size() * sizeof(VkDrawMeshTasksIndirectCommandEXT));
+				// The indirect command buffer is ordinary mapped CPU_TO_GPU memory, not a
+				// staging upload. Release and exported builds can land this allocation in
+				// non-coherent memory, so flush the snapshot range before shadow/main
+				// passes consume it through vkCmdDrawMeshTasksIndirectEXT.
+				const VkDeviceSize indirectByteOffset = static_cast<VkDeviceSize>(renderSnapshot.indirectDrawOffset)
+					* sizeof(VkDrawMeshTasksIndirectCommandEXT);
+				const VkDeviceSize indirectByteSize = static_cast<VkDeviceSize>(indirectCommands.size())
+					* sizeof(VkDrawMeshTasksIndirectCommandEXT);
+				const VkResult flushResult = vmaFlushAllocation(impl->allocator,
+					indirectDrawBuffer.allocation, indirectByteOffset, indirectByteSize);
+				vmaUnmapMemory(impl->allocator, indirectDrawBuffer.allocation);
+				if (flushResult != VK_SUCCESS) {
+					TERRAENGINE_LOG(LogLevel::Error,
+						"Vulkan could not flush the indirect command range; omitting geometry from this view.");
+					rejectIndirectGeometry();
+				}
+			}
+		}
 	}
 
 	const auto HashCombine = [](std::uint64_t& seed, std::uint64_t value) {
@@ -6738,7 +6943,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (frameData.sky.renderBackground)
+	if (presentation.sky.renderBackground)
 	{
 		const size_t workerIndex = secondaryBuffers.size();
 		impl->EnsureWorkerPools(impl->currentFrame, workerIndex + 1);
@@ -6763,7 +6968,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			begin.pInheritanceInfo = &inherit;
 
 			vkBeginCommandBuffer(skyCmd, &begin);
-			impl->RenderSkyBackground(skyCmd, frameData, renderPassInfo.renderArea.extent);
+			impl->RenderSkyBackground(skyCmd, *publicationPresentation,
+				renderPassInfo.renderArea.extent);
 			vkEndCommandBuffer(skyCmd);
 			secondaryBuffers.insert(secondaryBuffers.begin(), skyCmd);
 		}
@@ -6771,7 +6977,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 	// Render grid (Scene View only).
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (view == ViewType::Scene && frameData.sceneViewGridVisible) {
+	if (view == ViewType::Scene && presentation.sceneViewGridVisible) {
 		const size_t workerIndex = secondaryBuffers.size();
 		impl->EnsureWorkerPools(impl->currentFrame, workerIndex + 1);
 
@@ -6795,7 +7001,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			begin.pInheritanceInfo = &inherit;
 
 			vkBeginCommandBuffer(gridCmd, &begin);
-			impl->RenderSceneViewGrid(gridCmd, frameData, renderPassInfo.renderArea.extent);
+			impl->RenderSceneViewGrid(gridCmd, *publicationPresentation,
+				renderPassInfo.renderArea.extent);
 			vkEndCommandBuffer(gridCmd);
 			secondaryBuffers.push_back(gridCmd);
 		}
@@ -6828,7 +7035,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 			vkBeginCommandBuffer(uiCmd, &begin);
 			impl->CreateUIPipelines(renderPassInfo.renderPass);
-			impl->RenderUI(uiCmd, frameData.uiBatch);
+			impl->RenderUI(uiCmd, publicationPresentation->uiBatch);
 			vkEndCommandBuffer(uiCmd);
 			secondaryBuffers.push_back(uiCmd);
 		}
@@ -6912,8 +7119,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		// Direct meshes may legitimately publish no VG packets. The renderer still
 		// owns one immutable frame snapshot, so always stamp its explicit frame id
 		// instead of substituting a backend-only serial that automation cannot map.
-		identityTarget.identityFrameId = frameData.frameId != 0u
-			? frameData.frameId : impl->backendFrameSerial;
+		identityTarget.identityFrameId = publication->frameId != 0u
+			? publication->frameId : impl->backendFrameSerial;
 		identityTarget.identityRendererGeneration = impl->renderSessionGeneration;
 	}
 	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.mainpass.end" : "game.mainpass.end");
@@ -6929,8 +7136,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	if (kEnableRuntimeScreenSpaceAo
 		&& !impl->editorMode
 		&& firstPrimaryPassForFrame
-		&& frameData.settings.ambientOcclusionStrength > 0.001f
-		&& frameData.settings.ambientOcclusionQuality > 0u) {
+		&& presentation.settings.ambientOcclusionStrength > 0.001f
+		&& presentation.settings.ambientOcclusionQuality > 0u) {
 		impl->StoreAmbientOcclusionDepthHistory(cmd, activeDepthImage, viewIndex, currentViewProjection);
 	}
 	// Generate the pyramid after scene depth is complete. Its task-shader
@@ -6963,15 +7170,16 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		{ TerraEngine::Renderer::BackendFrameCostCategory::ViewSubmission, TerraEngine::Renderer::BackendSubmitStage::ViewSubmit, renderViewType, diagnosticViewId, "View Submission", false, true },
 		ElapsedMilliseconds(renderFrameStart));
 	std::uint64_t passSetHash = 1469598103934665603ull;
-	HashCombine(passSetHash, static_cast<std::uint64_t>(frameData.commands.size()));
-	HashCombine(passSetHash, static_cast<std::uint64_t>(frameData.shadowDrawLists.size()));
-	HashCombine(passSetHash, static_cast<std::uint64_t>(frameData.uiBatch.staticQuads.size()));
-	HashCombine(passSetHash, static_cast<std::uint64_t>(frameData.uiBatch.textRuns.size()));
+	HashCombine(passSetHash, static_cast<std::uint64_t>(
+		impl->activeRenderFramePublication->submissionRanges.size()));
+	HashCombine(passSetHash, static_cast<std::uint64_t>(publicationPresentation->shadowDrawLists.size()));
+	HashCombine(passSetHash, static_cast<std::uint64_t>(publicationPresentation->uiBatch.staticQuads.size()));
+	HashCombine(passSetHash, static_cast<std::uint64_t>(publicationPresentation->uiBatch.textRuns.size()));
 
 	std::uint64_t cameraHash = 1469598103934665603ull;
-	HashMat4(cameraHash, frameData.viewMatrix);
-	HashMat4(cameraHash, frameData.projectionMatrix);
-	HashVec4(cameraHash, glm::vec4(frameData.cameraWorldPosition, 1.0f));
+	HashMat4(cameraHash, publicationPresentation->viewMatrix);
+	HashMat4(cameraHash, publicationPresentation->projectionMatrix);
+	HashVec4(cameraHash, glm::vec4(publicationPresentation->cameraWorldPosition, 1.0f));
 
 	std::uint64_t targetHash = 1469598103934665603ull;
 	HashCombine(targetHash, static_cast<std::uint64_t>(outputRequest.kind));
@@ -6981,7 +7189,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	HashCombine(targetHash, static_cast<std::uint64_t>(outputRequest.targetSize.y));
 
 	std::uint64_t overlayHash = 1469598103934665603ull;
-	HashVec4(overlayHash, frameData.editorContextTint);
+	HashVec4(overlayHash, presentation.editorContextTint);
 	std::string sharedWorkKey = std::to_string(passSetHash) + ":"
 		+ std::to_string(cameraHash) + ":"
 		+ std::to_string(targetHash);
@@ -8468,9 +8676,51 @@ TerraEngine::Renderer::BackendCapabilityProfile VulkanContext::GetBackendCapabil
 	return profile;
 }
 
-bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::RenderSubmissionPlan& plan)
+bool VulkanContext::ConsumeRenderFramePublication(
+	std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> publication)
 {
-	TERRAENGINE_PROFILE_SCOPE("Vulkan: Consume Render Submission Plan", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+	TERRAENGINE_PROFILE_SCOPE("Vulkan: Consume Render Frame Publication",
+		TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+	if(publication == nullptr
+		|| publication->frameId == 0u || publication->generation == 0u
+		|| publication->rendererSessionGeneration == 0u
+		|| publication->backendResourceGeneration == 0u
+		|| publication->persistent == nullptr || publication->dynamic == nullptr
+		|| publication->views.size() != publication->presentationInputs.size()
+		|| publication->backendWork == nullptr)
+	{
+		TERRAENGINE_LOG(LogLevel::Error,
+			"Vulkan rejected an incomplete immutable render frame publication.");
+		return false;
+	}
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	if(!impl->initialized || impl->deviceLost
+		|| publication->rendererSessionGeneration != impl->renderSessionGeneration
+		|| publication->backendResourceGeneration != impl->backendResourceGeneration)
+	{
+		// Never let stale roots reach descriptor/work-plan preparation: that path
+		// can allocate against a render pass or frame slot retired by recovery.
+		TERRAENGINE_LOG(LogLevel::Warning,
+			"Vulkan rejected a stale render publication. frame=" << publication->frameId
+				<< ", session=" << publication->rendererSessionGeneration
+				<< ", backendResources=" << publication->backendResourceGeneration);
+		return false;
+	}
+	if(!ConsumePublishedWorkPlans(*publication->backendWork))
+	{
+		return false;
+	}
+	// Retain the root before descriptor and command preparation.  This is the
+	// sole backend-visible owner for view selections and presentation inputs.
+	impl->activeRenderFramePublication = std::move(publication);
+	return true;
+}
+
+bool VulkanContext::ConsumePublishedWorkPlans(
+	const TerraEngine::Renderer::RenderBackendWorkPublication& plan)
+{
+	TERRAENGINE_PROFILE_SCOPE("Vulkan: Consume Published Work Plans",
+		TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 	std::unique_lock<std::recursive_mutex> stateLock(impl->deviceStateMutex, std::defer_lock);
 	{
 		// Expose lock contention separately from resource publication. A long wait
@@ -8542,7 +8792,9 @@ bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::Ren
 			plan.deformationWork;
 		return true;
 	};
-	const bool hasGpuAnimationWork = !plan.animationWork.ranges.empty();
+	const bool hasGpuAnimationWork =
+		plan.animationWork.fullImmutablePlanCoverage
+		|| !plan.animationWork.ranges.empty();
 	const bool hasCpuAnimationWork =
 		plan.animationWork.cpuDeformationPlan != nullptr;
 	if(!hasGpuAnimationWork && !hasCpuAnimationWork)
@@ -8581,10 +8833,16 @@ bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::Ren
 	std::uint32_t rendererGeneration = 0u;
 	{
 		TERRAENGINE_PROFILE_SCOPE("Vulkan: Validate GPU Animation Plan", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		if (!immutablePlan || immutablePlan->generation == 0U || immutablePlan->workPackets.empty()) return false;
-		rendererGeneration = plan.animationWork.ranges.front().rendererGeneration;
+		if (!immutablePlan || immutablePlan->generation == 0U || immutablePlan->WorkPackets().empty()) return false;
+		rendererGeneration = plan.animationWork.rendererGeneration;
 		if (rendererGeneration == 0U) return false;
-		for (const TerraEngine::Renderer::AnimationBackendWorkRange& range : plan.animationWork.ranges)
+		if(plan.animationWork.fullImmutablePlanCoverage)
+		{
+			if(plan.animationWork.gpuAnimatorCount
+				!= immutablePlan->WorkPackets().size()) return false;
+		}
+		for (const TerraEngine::Renderer::AnimationBackendWorkRange& range
+			: plan.animationWork.ranges)
 		{
 			const std::size_t firstPacket = range.firstGpuWorkPacket;
 			const std::size_t packetCount = range.gpuWorkPacketCount;
@@ -8592,8 +8850,8 @@ bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::Ren
 				|| range.rendererGeneration != rendererGeneration
 				|| range.paletteGeneration == 0U
 				|| packetCount == 0U
-				|| firstPacket > immutablePlan->workPackets.size()
-				|| packetCount > immutablePlan->workPackets.size() - firstPacket)
+				|| firstPacket > immutablePlan->WorkPackets().size()
+				|| packetCount > immutablePlan->WorkPackets().size() - firstPacket)
 			{
 				return false;
 			}
@@ -8622,6 +8880,9 @@ bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::Ren
 
 	impl->pendingAnimationCommandPlan = commandPlan;
 	impl->pendingAnimationImmutablePlan = immutablePlan;
+	impl->pendingAnimationFullImmutablePlanCoverage =
+		plan.animationWork.fullImmutablePlanCoverage
+		&& plan.animationWork.cpuOrFallbackAnimatorCount == 0U;
 	impl->pendingAnimationFrameId = plan.animationWork.frameId;
 	return PublishDeformation();
 }
@@ -9225,6 +9486,27 @@ bool VulkanContext::QueueConventionalVisibilityIdentityReadback(
 	return true;
 }
 
+std::optional<TerraEngine::Renderer::ConventionalVisibilityIdentityTargetMetadata>
+VulkanContext::GetConventionalVisibilityIdentityTargetMetadata(
+	RenderViewType viewType, bool dedicatedCaptureTarget) const
+{
+	if(!impl) return std::nullopt;
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	const Impl::OffscreenResources& target = dedicatedCaptureTarget
+		? impl->captureView
+		: (viewType == RenderViewType::Scene ? impl->sceneView : impl->gameView);
+	TerraEngine::Renderer::ConventionalVisibilityIdentityTargetMetadata metadata{};
+	metadata.viewType = viewType;
+	metadata.frameId = target.identityFrameId;
+	metadata.rendererGeneration = target.identityRendererGeneration;
+	metadata.targetGeneration = target.generation;
+	metadata.dedicatedCaptureTarget = dedicatedCaptureTarget;
+	return metadata.IsComplete()
+		? std::optional<TerraEngine::Renderer::ConventionalVisibilityIdentityTargetMetadata>(
+			metadata)
+		: std::nullopt;
+}
+
 void VulkanContext::Impl::DestroyConventionalVisibilityIdentityReadbackRequestResources(
 	VulkanConventionalVisibilityIdentityReadbackRequest& request)
 {
@@ -9367,6 +9649,13 @@ TerraEngine::Renderer::RendererRecoverySnapshot VulkanContext::GetLatestRenderer
 	}
 	std::lock_guard<std::mutex> lock(impl->statsMutex);
 	return impl->latestRendererRecoverySnapshot;
+}
+
+std::uint64_t VulkanContext::GetBackendResourceGeneration() const
+{
+	if (!impl) return 1u;
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	return impl->backendResourceGeneration;
 }
 
 void VulkanContext::PublishRendererRecoverySnapshot(TerraEngine::Renderer::RendererRecoverySnapshot snapshot)

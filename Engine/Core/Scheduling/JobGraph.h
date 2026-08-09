@@ -124,6 +124,8 @@ namespace TerraEngine::Scheduling {
 		std::uint64_t queueDurationNs = 0;
 		std::uint64_t runDurationNs = 0;
 		std::uint64_t coordinatorWaitDurationNs = 0;
+		std::uint32_t dependencyWave = 0;
+		std::uint64_t completionSequence = 0;
 	};
 
 	struct JobGraphDependencyEdge {
@@ -151,6 +153,11 @@ namespace TerraEngine::Scheduling {
 		std::uint64_t coordinatorWaitTimeNs = 0;
 		std::uint64_t workerTimeNs = 0;
 		std::uint64_t protectedTimeNs = 0;
+		std::uint64_t criticalPathDurationNs = 0;
+		std::size_t dependencyWaveCount = 0;
+		std::size_t workerCompletionWakeCount = 0;
+		std::size_t completionDrivenDispatchCount = 0;
+		std::size_t peakConcurrentWorkerCount = 0;
 		double workerUtilization = 0.0;
 		std::string formatted;
 	};

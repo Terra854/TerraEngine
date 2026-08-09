@@ -404,6 +404,9 @@ std::shared_future<void> ResourceManager::ReloadTexture(const TerraEngine::UUID&
 		{
 			std::unique_lock lock(textureCache.mutex);
 			textureCache.resources[id] = std::move(texture);
+			// The release increment follows the cache swap, making this asynchronous
+			// publication visible atomically to the next renderer frame boundary.
+			m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);
 		}
 	});
 

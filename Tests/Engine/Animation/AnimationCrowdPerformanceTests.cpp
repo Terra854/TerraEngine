@@ -181,6 +181,34 @@ namespace TerraEngine::Tests {
 			std::vector<FrameTailV1> pairedRuns;
 		};
 
+		enum class CrowdVariation : std::uint8_t { Shared, PhaseOffset, MixedClip, Heterogeneous };
+
+		struct CrowdAnimatorScenario
+		{
+			std::uint32_t clip = 0U;
+			std::uint32_t phaseTick = 0U;
+			CrowdVariation variation = CrowdVariation::Shared;
+		};
+
+		std::vector<CrowdAnimatorScenario> BuildCrowdScenario(CrowdVariation variation)
+		{
+			std::vector<CrowdAnimatorScenario> animators;
+			animators.reserve(4000U);
+			for (std::uint32_t index = 0U; index < 4000U; ++index)
+			{
+				// The four profiles isolate sharing, phase, clip selection, and all
+				// combined variation while remaining reproducible across worker counts.
+				CrowdAnimatorScenario scenario;
+				scenario.variation = variation;
+				scenario.clip = variation == CrowdVariation::Shared || variation == CrowdVariation::PhaseOffset
+					? 0U : (variation == CrowdVariation::MixedClip ? index % 4U : (index * 17U) % 29U);
+				scenario.phaseTick = variation == CrowdVariation::Shared ? 0U
+					: (variation == CrowdVariation::PhaseOffset ? index % 60U : (index * 37U) % 240U);
+				animators.push_back(scenario);
+			}
+			return animators;
+		}
+
 		bool ValidateTail(const FrameTailV1& tail)
 		{
 			return tail.sampleCount > 0U && std::isfinite(tail.medianMilliseconds)
@@ -215,7 +243,8 @@ namespace TerraEngine::Tests {
 			for (const FrameTailV1& tail : result.pairedRuns)
 			{
 				if (!ValidateTail(tail)) { return false; }
-				if (result.profileId == "crowd-1000" && tail.worstAnimationAttributedMilliseconds > 50.0) { return false; }
+				if ((result.profileId == "crowd-1000" || result.profileId == "crowd-4000")
+					&& tail.worstAnimationAttributedMilliseconds > 50.0) { return false; }
 			}
 			if (result.profileId == "crowd-1000")
 			{
@@ -231,6 +260,14 @@ namespace TerraEngine::Tests {
 					&& result.counters.jointsPerAnimator == 256U
 					&& result.counters.gameCaptureViews == 2U
 					&& result.counters.shadowViews >= 1U;
+			}
+			if (result.profileId == "crowd-4000")
+			{
+				return result.counters.activeAnimators == 4000U
+					&& result.counters.jointsPerAnimator == 100U
+					&& result.counters.blendedClipsPerAnimator == 2U
+					&& result.counters.gameCaptureViews == 1U
+					&& result.counters.shadowViews == 1U;
 			}
 			return false;
 		}
@@ -310,6 +347,40 @@ namespace TerraEngine::Tests {
 			result.pairedRuns[0U] = FrameTailV1{3600U, 10.0, 12.0, 14.0, 51.0, 50.01};
 			context.Expect(!ValidateScaleBenchmark(result, true),
 				"A crowd animation frame above 50 milliseconds must fail.");
+		});
+
+		registry.Add("Animation.CrowdPerformance.FourThousandDeterministicVariations", [](TestContext& context) {
+			const auto shared = BuildCrowdScenario(CrowdVariation::Shared);
+			const auto phaseOffset = BuildCrowdScenario(CrowdVariation::PhaseOffset);
+			const auto mixedClip = BuildCrowdScenario(CrowdVariation::MixedClip);
+			const auto heterogeneous = BuildCrowdScenario(CrowdVariation::Heterogeneous);
+			const auto repeatedHeterogeneous = BuildCrowdScenario(CrowdVariation::Heterogeneous);
+			const bool heterogeneousRepeatable = std::equal(heterogeneous.begin(), heterogeneous.end(),
+				repeatedHeterogeneous.begin(), [](const CrowdAnimatorScenario& left,
+					const CrowdAnimatorScenario& right) {
+					return left.clip == right.clip && left.phaseTick == right.phaseTick
+						&& left.variation == right.variation;
+				});
+			context.Expect(shared.size() == 4000U && phaseOffset.size() == 4000U
+				&& mixedClip.size() == 4000U && heterogeneous.size() == 4000U
+				&& shared.front().clip == shared.back().clip && shared.front().phaseTick == 0U
+				&& phaseOffset[1U].phaseTick != phaseOffset[0U].phaseTick
+				&& mixedClip[0U].clip != mixedClip[1U].clip
+				&& heterogeneous[17U].clip != heterogeneous[18U].clip
+				&& heterogeneous[17U].phaseTick != heterogeneous[18U].phaseTick
+				&& heterogeneousRepeatable,
+				"All four 4,000-animator stress populations must preserve their intended sharing and variation identities.");
+
+			ScaleBenchmarkResultV1 result;
+			result.profileId = "crowd-4000";
+			result.timedAcceptanceAttempted = true;
+			result.referenceIdentityMatched = true;
+			result.memoryBoundedAfterWarmup = true;
+			result.updatesPerSecond = 60.0;
+			result.counters = ScaleCountersV1{4000U, 100U, 2U, 1000U, 2000U, 1000U, 1U, 1U, 0U, 0U, 512U, 1024U};
+			result.pairedRuns.assign(5U, FrameTailV1{3600U, 10.0, 12.0, 14.0, 16.0, 50.0});
+			context.Expect(ValidateScaleBenchmark(result, true),
+				"The 4,000-animator mixed-mode result must use the same fail-closed tail and bounded-memory schema.");
 		});
 
 		registry.Add("Animation.CrowdPerformance.ProfilerSummaryCarriesMixedModeMemoryAndViews", [](TestContext& context) {

@@ -222,6 +222,10 @@ namespace TerraEngine::Animation {
 	};
 
 	inline constexpr std::uint32_t kGpuAnimationAllWorkFlags = 0x7ffU;
+	// Visibility suspension changes independently for every animator and frame. It
+	// belongs in the uploaded generation sidecar, not immutable packet topology.
+	inline constexpr std::uint32_t
+		kGpuAnimationGenerationFlagSuspendVisualEvaluation = 0x1U;
 
 	// Output flags participate in the deterministic compatibility key. Work with
 	// different output obligations cannot accidentally share a renderer batch.
@@ -718,6 +722,33 @@ namespace TerraEngine::Animation {
 		std::uint64_t arenaEpoch_ = 0U;
 	};
 
+	// Dynamic lanes keep the existing shader ABI intact while separating storage
+	// lifetime from the immutable dispatch topology. Presentation may recycle a
+	// lane root only after every published reader releases it; a live publication
+	// therefore remains immutable without forcing three fresh vector allocations
+	// for every warmed crowd frame.
+	struct GpuAnimationPlanDynamicLanes {
+		std::vector<GpuAnimationGenerationRecord> generationRecords;
+		std::vector<std::uint32_t> sampleTicks;
+		std::vector<GpuAnimationRenderIdentity> renderIdentities;
+
+		[[nodiscard]] bool HasParallelLengths(std::size_t packetCount) const noexcept
+		{
+			return generationRecords.size() == packetCount
+				&& sampleTicks.size() == packetCount
+				&& renderIdentities.size() == packetCount;
+		}
+
+		// Clearing preserves capacity. The presentation recycler calls this only
+		// while it is the sole owner, after all renderer/backend readers retire.
+		void ResetForReuse() noexcept
+		{
+			generationRecords.clear();
+			sampleTicks.clear();
+			renderIdentities.clear();
+		}
+	};
+
 	struct GpuAnimationPlan {
 		std::uint32_t generation = 0U;
 		// A cached topology is reusable only under the exact same safety bounds.
@@ -734,6 +765,10 @@ namespace TerraEngine::Animation {
 		std::shared_ptr<const GpuAnimationResidentPayloads> sharedResidentPayloads;
 		std::vector<GpuAnimationGenerationRecord> generationRecords;
 		std::vector<GpuAnimationWorkPacket> workPackets;
+		// Cold construction records packet indices in stable owner order. Producers
+		// use this immutable lookup to write dynamic lanes during their existing
+		// sealing pass even when worker completion order changes between frames.
+		std::vector<std::uint32_t> stablePacketIndices;
 		// Every owner keeps a packet and generation record, but identical visual
 		// evaluation inputs can point at one earlier packet's scratch/palette output.
 		// The dispatch builder emits work only for source packets, avoiding duplicate
@@ -747,10 +782,115 @@ namespace TerraEngine::Animation {
 		std::vector<GpuAnimationBatch> batches;
 		std::vector<GpuAnimationStageSpan> stageSpans;
 		GpuAnimationPlanDiagnostics diagnostics{};
+		// A warmed frame owns only its changing generation/tick lanes. The original
+		// complete plan remains immutable and is retained through this root, avoiding
+		// megabyte-scale copies of packets, dispatch records, and batch topology.
+		std::shared_ptr<const GpuAnimationPlan> retainedStaticPlan;
+		std::shared_ptr<const GpuAnimationPlanDynamicLanes> retainedDynamicLanes;
+		std::vector<GpuAnimationGenerationRecord> dynamicGenerationRecords;
+		std::vector<std::uint32_t> dynamicSampleTicks;
+		std::vector<GpuAnimationRenderIdentity> dynamicRenderIdentities;
+		// Presentation hashes every topology-defining lowering input while the
+		// immutable input array is already cache-hot. A matching non-zero value lets
+		// a warm shared-payload crowd refresh only generation/tick lanes; sample time
+		// and per-frame work generations are deliberately excluded from this proof.
+		std::uint64_t topologyInputSignature = 0U;
+		// Presentation computes this exact invalidation key once for a newly built
+		// topology. Warm refreshes retain the scalar lanes and skip rescanning every
+		// owner packet merely to rediscover the same immutable identity.
+		std::uint64_t topologyMembershipGeneration = 0U;
+		std::uint64_t topologyResourceGeneration = 0U;
+		std::uint64_t topologyProgramGeneration = 0U;
+		std::uint64_t topologySceneGeneration = 0U;
+		std::uint64_t topologyRendererGeneration = 0U;
+
+		[[nodiscard]] const std::vector<GpuAnimationWorkPacket>& WorkPackets() const noexcept
+		{
+			return retainedStaticPlan ? retainedStaticPlan->WorkPackets() : workPackets;
+		}
+		[[nodiscard]] const std::vector<std::uint32_t>& StablePacketIndices() const noexcept
+		{
+			return retainedStaticPlan
+				? retainedStaticPlan->StablePacketIndices() : stablePacketIndices;
+		}
+		[[nodiscard]] bool FindWorkPacketIndex(
+			std::uint64_t stableInstanceId,
+			std::uint32_t stableSubmissionOrdinal,
+			std::uint32_t& outputIndex) const noexcept;
+		[[nodiscard]] const std::vector<std::uint32_t>& EvaluationSourcePacketIndices() const noexcept
+		{
+			return retainedStaticPlan
+				? retainedStaticPlan->EvaluationSourcePacketIndices()
+				: evaluationSourcePacketIndices;
+		}
+		[[nodiscard]] const std::vector<GpuAnimationDispatchRecord>& DispatchRecords() const noexcept
+		{
+			return retainedStaticPlan ? retainedStaticPlan->DispatchRecords() : dispatchRecords;
+		}
+		[[nodiscard]] const std::vector<GpuAnimationDispatchCommand>& DispatchCommands() const noexcept
+		{
+			return retainedStaticPlan ? retainedStaticPlan->DispatchCommands() : dispatchCommands;
+		}
+		[[nodiscard]] const std::vector<GpuAnimationBatch>& Batches() const noexcept
+		{
+			return retainedStaticPlan ? retainedStaticPlan->Batches() : batches;
+		}
+		[[nodiscard]] const std::vector<GpuAnimationStageSpan>& StageSpans() const noexcept
+		{
+			return retainedStaticPlan ? retainedStaticPlan->StageSpans() : stageSpans;
+		}
+		[[nodiscard]] const GpuAnimationGenerationRecord& GenerationRecord(std::size_t index) const noexcept
+		{
+			if(retainedDynamicLanes) return retainedDynamicLanes->generationRecords[index];
+			return dynamicGenerationRecords.empty()
+				? (retainedStaticPlan ? retainedStaticPlan->GenerationRecord(index) : generationRecords[index])
+				: dynamicGenerationRecords[index];
+		}
+		[[nodiscard]] const GpuAnimationRenderIdentity& RenderIdentity(std::size_t index) const noexcept
+		{
+			if(retainedDynamicLanes) return retainedDynamicLanes->renderIdentities[index];
+			return dynamicRenderIdentities.empty()
+				? (retainedStaticPlan ? retainedStaticPlan->RenderIdentity(index) : renderIdentities[index])
+				: dynamicRenderIdentities[index];
+		}
+		[[nodiscard]] std::size_t GenerationRecordCount() const noexcept
+		{
+			if(retainedDynamicLanes) return retainedDynamicLanes->generationRecords.size();
+			if(!dynamicGenerationRecords.empty()) return dynamicGenerationRecords.size();
+			return retainedStaticPlan
+				? retainedStaticPlan->GenerationRecordCount() : generationRecords.size();
+		}
+		[[nodiscard]] std::size_t RenderIdentityCount() const noexcept
+		{
+			if(retainedDynamicLanes) return retainedDynamicLanes->renderIdentities.size();
+			if(!dynamicRenderIdentities.empty()) return dynamicRenderIdentities.size();
+			return retainedStaticPlan
+				? retainedStaticPlan->RenderIdentityCount() : renderIdentities.size();
+		}
+		[[nodiscard]] std::uint32_t SampleTick(std::size_t index) const noexcept
+		{
+			if(retainedDynamicLanes) return retainedDynamicLanes->sampleTicks[index];
+			return dynamicSampleTicks.empty()
+				? (retainedStaticPlan ? retainedStaticPlan->SampleTick(index) : workPackets[index].sampleTick)
+				: dynamicSampleTicks[index];
+		}
+		[[nodiscard]] GpuAnimationWorkPacket ResolvedWorkPacket(std::size_t index) const noexcept
+		{
+			GpuAnimationWorkPacket packet = WorkPackets()[index];
+			packet.sampleTick = SampleTick(index);
+			return packet;
+		}
+		[[nodiscard]] GpuAnimationDispatchCommand ResolvedDispatchCommand(std::size_t index) const noexcept
+		{
+			GpuAnimationDispatchCommand command = DispatchCommands()[index];
+			command.pushConstants.planGeneration = generation;
+			return command;
+		}
 
 		[[nodiscard]] const GpuAnimationResidentPayloads& ResidentPayloads() const noexcept
 		{
-			return sharedResidentPayloads ? *sharedResidentPayloads : residentPayloads;
+			if (sharedResidentPayloads) return *sharedResidentPayloads;
+			return retainedStaticPlan ? retainedStaticPlan->ResidentPayloads() : residentPayloads;
 		}
 
 		void Clear() noexcept;
@@ -862,7 +1002,29 @@ namespace TerraEngine::Animation {
 		GpuAnimationArena& paletteArena,
 		const GpuAnimationPlan& previous,
 		GpuAnimationPlan& output,
-		const GpuAnimationPlanLimits& limits = {}) noexcept;
+		const GpuAnimationPlanLimits& limits = {},
+		std::shared_ptr<const GpuAnimationPlan> previousOwner = {},
+		const std::shared_ptr<GpuAnimationPlanDynamicLanes>& dynamicLaneScratch = {}) noexcept;
+
+	// Presentation already owns immutable lowering inputs and a retained atlas.
+	// This callback form lets it validate and relocate one request at a time inside
+	// the transactional refresh, avoiding a second crowd-sized request vector.
+	using GpuAnimationWorkRequestProducer = bool(*)(
+		std::size_t requestIndex,
+		GpuAnimationWorkRequest& output,
+		void* context) noexcept;
+	[[nodiscard]] TERRAENGINE_API bool TryRefreshGeneratedGpuAnimationPlan(
+		std::size_t requestCount,
+		GpuAnimationWorkRequestProducer producer,
+		void* producerContext,
+		std::uint32_t planGeneration,
+		GpuAnimationArena& scratchArena,
+		GpuAnimationArena& paletteArena,
+		const GpuAnimationPlan& previous,
+		GpuAnimationPlan& output,
+		const GpuAnimationPlanLimits& limits = {},
+		std::shared_ptr<const GpuAnimationPlan> previousOwner = {},
+		const std::shared_ptr<GpuAnimationPlanDynamicLanes>& dynamicLaneScratch = {}) noexcept;
 
 	// Shared helpers keep CPU tests, shaders, and renderer validation on one rule.
 	[[nodiscard]] TERRAENGINE_API std::uint32_t GpuAnimationStageElementCount(

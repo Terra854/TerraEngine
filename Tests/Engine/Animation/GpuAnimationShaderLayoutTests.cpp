@@ -311,6 +311,48 @@ namespace TerraEngine::Tests {
 			request.renderIdentity = renderIdentity;
 			return request;
 		}
+
+		[[nodiscard]] GpuAnimationLoweringInput MakeSharedPayloadLoweringInput(
+			const GpuAnimationWorkRequest& request,
+			std::shared_ptr<const EvaluationProgram> program,
+			std::shared_ptr<const GpuAnimationResidentPayloads> payload)
+		{
+			GpuAnimationLoweringInput input{};
+			input.program.program = std::move(program);
+			input.program.programContentId = request.batchKey.programContentId;
+			input.program.programResourceIndex = request.programResourceIndex;
+			input.visual.generations = request.generations;
+			input.visual.stableInstanceId = request.stableInstanceId;
+			input.visual.skeletonTopologyId = request.batchKey.skeletonTopologyId;
+			input.visual.compatibilityFingerprint = input.program.program->compatibilityFingerprint;
+			input.visual.inputPoseOffsetBytes = request.inputPoseOffsetBytes;
+			input.visual.stableSubmissionOrdinal = request.stableSubmissionOrdinal;
+			input.visual.clipResourceIndex = request.clipResourceIndex;
+			input.visual.skeletonResourceIndex = request.skeletonResourceIndex;
+			input.visual.maskResourceIndex = request.maskResourceIndex;
+			input.visual.morphResourceIndex = request.morphResourceIndex;
+			input.visual.jointCount = request.jointCount;
+			input.visual.morphCount = request.morphCount;
+			input.visual.paletteEntryCount = request.paletteEntryCount;
+			input.visual.palettePartitionCount = request.palettePartitionCount;
+			input.visual.diagnosticIndex = request.diagnosticIndex;
+			input.visual.sampleTick = request.sampleTick;
+			input.visual.renderIdentity = request.renderIdentity;
+			input.visual.looping = HasGpuAnimationFlag(
+				request.flags, GpuAnimationWorkFlag::Looping);
+			input.visual.useBindPoseFallback = HasGpuAnimationFlag(
+				request.flags, GpuAnimationWorkFlag::UseBindPoseFallback);
+			input.visual.useHoldLastFallback = HasGpuAnimationFlag(
+				request.flags, GpuAnimationWorkFlag::UseHoldLastFallback);
+			input.execution.effectiveMode = AnimationEffectiveExecutionMode::GpuVisual;
+			// The fixture constructs the immutable program and payload immediately
+			// above. Production sets these two proofs after the same worker checks.
+			input.programValidated = true;
+			input.prevalidatedStageMask = request.batchKey.stageMask;
+			input.residentPayloads = std::move(payload);
+			input.residentPayloadsValidated = true;
+			return input;
+		}
 	}
 
 	void RegisterGpuAnimationShaderLayoutTests(TestRegistry& registry)
@@ -1352,11 +1394,12 @@ namespace TerraEngine::Tests {
 			context.Expect(TryRefreshGpuAnimationPlan(
 				next, 32U, refreshedScratch, refreshedPalette, initialPlan, refreshedPlan),
 				"An unchanged packet/resource topology should accept a dynamic-only refresh.");
-			const bool dispatchTopologyMatches = refreshedPlan.dispatchRecords.size()
+			const auto& refreshedDispatchRecords = refreshedPlan.DispatchRecords();
+			const bool dispatchTopologyMatches = refreshedDispatchRecords.size()
 				== initialPlan.dispatchRecords.size()
 				&& std::equal(
-					refreshedPlan.dispatchRecords.begin(),
-					refreshedPlan.dispatchRecords.end(),
+					refreshedDispatchRecords.begin(),
+					refreshedDispatchRecords.end(),
 					initialPlan.dispatchRecords.begin(),
 					[](const GpuAnimationDispatchRecord& left,
 						const GpuAnimationDispatchRecord& right) {
@@ -1368,18 +1411,21 @@ namespace TerraEngine::Tests {
 							&& left.batchIndex == right.batchIndex;
 					});
 			context.Expect(refreshedPlan.generation == 32U
-				&& refreshedPlan.workPackets[0U].sampleTick == 11U
-				&& refreshedPlan.workPackets[1U].sampleTick == 21U
-				&& refreshedPlan.generationRecords[0U].workGeneration
+				&& refreshedPlan.SampleTick(0U) == 11U
+				&& refreshedPlan.SampleTick(1U) == 21U
+				&& refreshedPlan.GenerationRecord(0U).workGeneration
 					== next[0U].generations.workGeneration
 				&& dispatchTopologyMatches,
 				"Topology refresh must preserve packet/dispatch structure while replacing frame-varying ticks and generations.");
-			context.Expect(std::all_of(
-				refreshedPlan.dispatchCommands.begin(),
-				refreshedPlan.dispatchCommands.end(),
-				[](const GpuAnimationDispatchCommand& command) {
-					return command.pushConstants.planGeneration == 32U;
-				}),
+			bool allCommandsUseCurrentGeneration = true;
+			for(std::size_t index = 0U;
+				index < refreshedPlan.DispatchCommands().size(); ++index)
+			{
+				allCommandsUseCurrentGeneration = allCommandsUseCurrentGeneration
+					&& refreshedPlan.ResolvedDispatchCommand(index)
+						.pushConstants.planGeneration == 32U;
+			}
+			context.Expect(allCommandsUseCurrentGeneration,
 				"Every reused dispatch command must carry the new plan generation.");
 
 			GpuAnimationPlan rejectedOutput = refreshedPlan;
@@ -1389,6 +1435,334 @@ namespace TerraEngine::Tests {
 				next, 33U, refreshedScratch, refreshedPalette, refreshedPlan, rejectedOutput)
 				&& rejectedOutput.generation == retainedGeneration,
 				"A changed resource shape must reject topology reuse without partially overwriting the last-good output.");
+		});
+
+		registry.Add("Animation.GpuPlan.GeneratedRefreshIsSinglePassAndTransactional", [](TestContext& context) {
+			std::vector<GpuAnimationWorkRequest> requests{
+				MakeRequest(410U, 7U, 0U),
+				MakeRequest(420U, 7U, 1U)};
+			requests[0U].sampleTick = 100U;
+			requests[1U].sampleTick = 200U;
+			GpuAnimationArena initialScratch;
+			GpuAnimationArena initialPalette;
+			ConfigureArenas(initialScratch, initialPalette);
+			GpuAnimationPlan initialPlan;
+			context.ExpectEqual(Value(GpuAnimationPlanStatus::Ok), Value(BuildGpuAnimationPlan(
+				requests, 61U, initialScratch, initialPalette, initialPlan)),
+				"The generated-refresh fixture should publish a complete prior topology.");
+
+			struct ProducerContext {
+				std::vector<GpuAnimationWorkRequest>* requests = nullptr;
+				std::size_t callCount = 0U;
+				bool changeTopology = false;
+			};
+			ProducerContext producerContext{&requests};
+			const auto producer = +[](
+				std::size_t index,
+				GpuAnimationWorkRequest& output,
+				void* opaque) noexcept -> bool
+			{
+				auto* state = static_cast<ProducerContext*>(opaque);
+				if(state == nullptr || state->requests == nullptr
+					|| index >= state->requests->size()) return false;
+				output = (*state->requests)[index];
+				++output.generations.workGeneration;
+				output.sampleTick += 5U;
+				if(state->changeTopology && index == 1U) ++output.jointCount;
+				++state->callCount;
+				return true;
+			};
+
+			GpuAnimationArena refreshedScratch;
+			GpuAnimationArena refreshedPalette;
+			ConfigureArenas(refreshedScratch, refreshedPalette);
+			GpuAnimationPlan refreshedPlan;
+			context.Expect(TryRefreshGeneratedGpuAnimationPlan(
+				requests.size(), producer, &producerContext, 62U,
+				refreshedScratch, refreshedPalette, initialPlan, refreshedPlan),
+				"A producer should refresh the retained plan without first building a request vector.");
+			context.Expect(producerContext.callCount == requests.size()
+				&& refreshedPlan.generation == 62U
+				&& refreshedPlan.SampleTick(0U) == 105U
+				&& refreshedPlan.SampleTick(1U) == 205U
+				&& refreshedPlan.GenerationRecord(0U).workGeneration
+					== requests[0U].generations.workGeneration + 1U,
+				"Generated refresh must invoke the producer exactly once per packet and publish only dynamic lanes.");
+
+			const std::uint32_t retainedPlanGeneration = refreshedPlan.generation;
+			const std::uint32_t retainedScratchGeneration = refreshedScratch.Generation();
+			const std::uint32_t retainedPaletteGeneration = refreshedPalette.Generation();
+			producerContext.callCount = 0U;
+			producerContext.changeTopology = true;
+			context.Expect(!TryRefreshGeneratedGpuAnimationPlan(
+				requests.size(), producer, &producerContext, 63U,
+				refreshedScratch, refreshedPalette, refreshedPlan, refreshedPlan)
+				&& refreshedPlan.generation == retainedPlanGeneration
+				&& refreshedScratch.Generation() == retainedScratchGeneration
+				&& refreshedPalette.Generation() == retainedPaletteGeneration,
+				"A topology mismatch must reject the generated candidate without publishing partial plan or arena state.");
+		});
+
+		registry.Add("Animation.GpuPlan.RetainedStaticRootAvoidsCrowdVectorCopies", [](TestContext& context) {
+			std::vector<GpuAnimationWorkRequest> requests{
+				MakeRequest(510U, 9U, 0U),
+				MakeRequest(520U, 9U, 1U)};
+			GpuAnimationArena initialScratch;
+			GpuAnimationArena initialPalette;
+			ConfigureArenas(initialScratch, initialPalette);
+			auto retained = std::make_shared<GpuAnimationPlan>();
+			context.ExpectEqual(Value(GpuAnimationPlanStatus::Ok), Value(BuildGpuAnimationPlan(
+				requests, 81U, initialScratch, initialPalette, *retained)),
+				"The retained-root fixture must build a complete immutable topology.");
+
+			++requests[0U].sampleTick;
+			++requests[1U].sampleTick;
+			++requests[0U].generations.workGeneration;
+			++requests[1U].generations.workGeneration;
+			GpuAnimationArena refreshedScratch;
+			GpuAnimationArena refreshedPalette;
+			ConfigureArenas(refreshedScratch, refreshedPalette);
+			GpuAnimationPlan refreshed;
+			context.Expect(TryRefreshGpuAnimationPlan(
+				requests, 82U, refreshedScratch, refreshedPalette, *retained,
+				refreshed, {}, retained),
+				"A warm refresh should retain the prior immutable plan root.");
+			context.Expect(refreshed.retainedStaticPlan == retained
+				&& refreshed.workPackets.empty()
+				&& refreshed.dispatchRecords.empty()
+				&& refreshed.dispatchCommands.empty()
+				&& std::addressof(refreshed.WorkPackets())
+					== std::addressof(retained->workPackets)
+				&& refreshed.SampleTick(0U) == requests[0U].sampleTick
+				&& refreshed.GenerationRecord(1U).workGeneration
+					== requests[1U].generations.workGeneration,
+				"Warm plans must allocate only dynamic lanes while every static crowd vector remains shared.");
+		});
+
+		registry.Add("Animation.GpuPlan.DynamicLaneRootRecyclesOnlyAfterPublicationRetires", [](TestContext& context) {
+			std::vector<GpuAnimationWorkRequest> requests{
+				MakeRequest(610U, 10U, 0U),
+				MakeRequest(620U, 10U, 1U)};
+			GpuAnimationArena initialScratch;
+			GpuAnimationArena initialPalette;
+			ConfigureArenas(initialScratch, initialPalette);
+			auto retained = std::make_shared<GpuAnimationPlan>();
+			context.ExpectEqual(Value(GpuAnimationPlanStatus::Ok), Value(
+				BuildGpuAnimationPlan(requests, 91U, initialScratch,
+					initialPalette, *retained)),
+				"The recycler fixture must start from one complete static plan.");
+
+			auto laneScratch = std::make_shared<GpuAnimationPlanDynamicLanes>();
+			++requests[0U].generations.workGeneration;
+			++requests[1U].generations.workGeneration;
+			++requests[0U].sampleTick;
+			++requests[1U].sampleTick;
+			GpuAnimationArena refreshedScratch;
+			GpuAnimationArena refreshedPalette;
+			ConfigureArenas(refreshedScratch, refreshedPalette);
+			GpuAnimationPlan refreshed;
+			context.Expect(TryRefreshGpuAnimationPlan(
+				requests, 92U, refreshedScratch, refreshedPalette, *retained,
+				refreshed, {}, retained, laneScratch)
+				&& refreshed.retainedDynamicLanes.get() == laneScratch.get()
+				&& refreshed.dynamicGenerationRecords.empty()
+				&& refreshed.dynamicSampleTicks.empty()
+				&& refreshed.dynamicRenderIdentities.empty()
+				&& refreshed.GenerationRecordCount() == requests.size()
+				&& refreshed.SampleTick(1U) == requests[1U].sampleTick,
+				"A sole-owned recycler root should back every dynamic accessor without duplicating vectors in the plan.");
+
+			const std::size_t generationCapacity =
+				laneScratch->generationRecords.capacity();
+			const std::size_t tickCapacity = laneScratch->sampleTicks.capacity();
+			const std::size_t identityCapacity =
+				laneScratch->renderIdentities.capacity();
+			refreshed.Clear();
+			context.Expect(laneScratch.use_count() == 1U,
+				"Retiring the published plan must return the lane root to sole recycler ownership.");
+
+			++requests[0U].generations.workGeneration;
+			++requests[1U].generations.workGeneration;
+			GpuAnimationPlan recycled;
+			context.Expect(TryRefreshGpuAnimationPlan(
+				requests, 93U, refreshedScratch, refreshedPalette, *retained,
+				recycled, {}, retained, laneScratch)
+				&& recycled.retainedDynamicLanes.get() == laneScratch.get()
+				&& laneScratch->generationRecords.capacity() >= generationCapacity
+				&& laneScratch->sampleTicks.capacity() >= tickCapacity
+				&& laneScratch->renderIdentities.capacity() >= identityCapacity,
+				"A retired root must preserve capacity and be safely republished for a later frame.");
+		});
+
+		registry.Add("Animation.GpuPlan.SharedPayloadRefreshAvoidsTemporaryRequestVectors", [](TestContext& context) {
+			auto program = std::make_shared<EvaluationProgram>();
+			program->stableHash = 0x4400U;
+			program->compatibilityFingerprint = 0x5400U;
+			program->scratchPlan.byteCount = 20U;
+			program->scratchPlan.alignmentBytes = kGpuAnimationArenaAlignment;
+			const auto payload = MakeAtlasResidentPayload(1.0F);
+			const GpuAnimationRenderIdentity firstIdentity =
+				MakeAtlasRenderIdentity(1U, 71U);
+			const GpuAnimationRenderIdentity secondIdentity =
+				MakeAtlasRenderIdentity(2U, 72U);
+			const GpuAnimationWorkRequest firstRequest =
+				MakeAtlasRequest(100U, 10U, firstIdentity);
+			const GpuAnimationWorkRequest secondRequest =
+				MakeAtlasRequest(200U, 20U, secondIdentity);
+			std::vector<GpuAnimationLoweringInput> inputs{
+				MakeSharedPayloadLoweringInput(firstRequest, program, payload),
+				MakeSharedPayloadLoweringInput(secondRequest, program, payload)};
+			const auto buildTopologySignature = [&inputs]() {
+				GpuAnimationLoweringTopologySignatureBuilder builder;
+				for(const GpuAnimationLoweringInput& input : inputs) {
+					builder.Include(input);
+				}
+				return builder.Complete();
+			};
+			const std::uint64_t initialTopologySignature =
+				buildTopologySignature();
+			GpuAnimationArena scratch;
+			GpuAnimationArena palette;
+			ConfigureArenas(scratch, palette);
+			GpuAnimationPlan initialPlan;
+			GpuAnimationLoweredPlanResult initialResult;
+			context.Expect(BuildLoweredGpuAnimationPlan(
+				inputs, 71U, scratch, palette, initialPlan, initialResult,
+				{}, nullptr, nullptr, {}, initialTopologySignature)
+					== GpuAnimationLoweringStatus::Ok
+					&& initialPlan.sharedResidentPayloads == payload
+					&& initialPlan.topologyInputSignature != 0U,
+				"The fixture must establish a complete plan backed by one immutable payload.");
+			std::vector<GpuAnimationLoweringInput> permutedInputs{inputs.rbegin(), inputs.rend()};
+			GpuAnimationLoweringTopologySignatureBuilder permutedBuilder;
+			for(const GpuAnimationLoweringInput& input : permutedInputs) {
+				permutedBuilder.Include(input);
+			}
+			std::uint32_t firstPacketIndex = kGpuAnimationInvalidResourceIndex;
+			std::uint32_t secondPacketIndex = kGpuAnimationInvalidResourceIndex;
+			context.Expect(permutedBuilder.Complete() == initialTopologySignature
+				&& initialPlan.StablePacketIndices().size() == inputs.size()
+				&& initialPlan.FindWorkPacketIndex(
+					inputs[0U].visual.stableInstanceId,
+					inputs[0U].visual.stableSubmissionOrdinal,
+					firstPacketIndex)
+				&& initialPlan.FindWorkPacketIndex(
+					inputs[1U].visual.stableInstanceId,
+					inputs[1U].visual.stableSubmissionOrdinal,
+					secondPacketIndex)
+				&& firstPacketIndex != secondPacketIndex,
+				"Worker completion order must not invalidate topology, and the retained plan must resolve every owner to its packet lane.");
+			GpuAnimationLoweringInput privateEvaluation = inputs[0U];
+			privateEvaluation.allowSharedVisualEvaluation = false;
+			GpuAnimationLoweringTopologySignatureBuilder privateBefore;
+			privateBefore.Include(privateEvaluation);
+			privateEvaluation.visual.evaluationParameterFingerprint += 9U;
+			GpuAnimationLoweringTopologySignatureBuilder privateAfter;
+			privateAfter.Include(privateEvaluation);
+			context.Expect(privateBefore.Complete() == privateAfter.Complete(),
+				"A private evaluator must keep one packet when only its per-frame parameter fingerprint advances.");
+			GpuAnimationLoweringInput proofStateChanged = inputs[0U];
+			GpuAnimationLoweringTopologySignatureBuilder proofBefore;
+			proofBefore.Include(proofStateChanged);
+			proofStateChanged.programValidated = !proofStateChanged.programValidated;
+			proofStateChanged.residentPayloadsValidated =
+				!proofStateChanged.residentPayloadsValidated;
+			GpuAnimationLoweringTopologySignatureBuilder proofAfter;
+			proofAfter.Include(proofStateChanged);
+			context.Expect(proofBefore.Complete() == proofAfter.Complete(),
+				"Transient validation proof state must not masquerade as immutable packet identity.");
+
+			// Only worker-frame dynamic lanes advance. The clip/program/payload identity
+			// remains exact, so production may retain the plan topology without staging
+			// a second 4,000-entry request vector.
+			++inputs[0U].visual.generations.workGeneration;
+			++inputs[1U].visual.generations.workGeneration;
+			++inputs[0U].visual.generations.componentGeneration;
+			++inputs[1U].visual.generations.componentGeneration;
+			++inputs[0U].visual.generations.sceneGeneration;
+			++inputs[1U].visual.generations.sceneGeneration;
+			++inputs[0U].visual.generations.resourceGeneration;
+			++inputs[1U].visual.generations.resourceGeneration;
+			++inputs[0U].visual.renderIdentity.sceneGeneration;
+			++inputs[1U].visual.renderIdentity.sceneGeneration;
+			inputs[0U].visual.sampleTick = 11U;
+			inputs[1U].visual.sampleTick = 21U;
+			inputs[0U].visual.suspendVisualEvaluation = true;
+			++inputs[0U].visual.renderIdentity.deformablePayloadGeneration;
+			GpuAnimationPlan refreshedPlan;
+			GpuAnimationLoweredPlanResult refreshedResult;
+			const std::uint64_t refreshedTopologySignature =
+				buildTopologySignature();
+			GpuAnimationArena directScratch;
+			GpuAnimationArena directPalette;
+			ConfigureArenas(directScratch, directPalette);
+			GpuAnimationPlan directDynamicPlan;
+			context.Expect(TryRefreshLoweredGpuAnimationDynamicPlan(
+				inputs, refreshedTopologySignature, 72U, directScratch,
+				directPalette, initialPlan, directDynamicPlan)
+					&& directDynamicPlan.retainedStaticPlan
+					&& directDynamicPlan.WorkPackets().size() == inputs.size()
+					&& directDynamicPlan.SampleTick(1U) == 21U
+					&& refreshedTopologySignature == initialTopologySignature
+					&& (directDynamicPlan.GenerationRecord(0U).flags
+						& kGpuAnimationGenerationFlagSuspendVisualEvaluation) != 0U
+					&& !HasGpuAnimationFlag(
+						directDynamicPlan.WorkPackets()[0U].flags,
+						GpuAnimationWorkFlag::SuspendVisualEvaluation),
+				"Visibility suspension must refresh through the dynamic generation lane without invalidating immutable packet topology.");
+			context.Expect(BuildLoweredGpuAnimationPlan(
+				inputs, 72U, scratch, palette, refreshedPlan, refreshedResult,
+				{}, nullptr, &initialPlan, {}, refreshedTopologySignature)
+					== GpuAnimationLoweringStatus::Ok
+					&& refreshedResult.topologyReused
+					&& refreshedResult.workRequests.empty()
+					&& refreshedTopologySignature == initialTopologySignature
+					&& refreshedPlan.sharedResidentPayloads == payload
+					&& refreshedPlan.topologyInputSignature
+						== initialPlan.topologyInputSignature
+					&& refreshedPlan.dynamicGenerationRecords.size() == 2U
+					&& refreshedPlan.dynamicRenderIdentities.size() == 2U
+					&& refreshedPlan.WorkPackets().size() == 2U
+					&& refreshedPlan.SampleTick(0U) == 11U
+					&& refreshedPlan.SampleTick(1U) == 21U
+					&& refreshedPlan.RenderIdentity(0U)
+						== inputs[0U].visual.renderIdentity,
+				"An exact shared payload must refresh directly from worker inputs without retaining a temporary request crowd.");
+
+			GpuAnimationPlan rejectedDynamicOutput = refreshedPlan;
+			GpuAnimationLoweredPlanResult rejectedDynamicResult;
+			inputs[0U].visual.generations.workGeneration = 0U;
+			context.Expect(BuildLoweredGpuAnimationPlan(
+				inputs, 73U, scratch, palette, rejectedDynamicOutput,
+				rejectedDynamicResult, {}, nullptr, &refreshedPlan, {},
+				refreshedTopologySignature)
+					== GpuAnimationLoweringStatus::StaleGeneration
+					&& rejectedDynamicOutput.generation == refreshedPlan.generation,
+				"A matching static signature must still reject an invalid changing work generation atomically.");
+			inputs[0U].visual.generations.workGeneration =
+				refreshedPlan.GenerationRecord(0U).workGeneration;
+
+			inputs[1U].visual.clipResourceIndex = 1U;
+			// The cached payload proof describes the exact lowered request. A changed
+			// resource selector must discard that proof before entering the checked
+			// fallback, just as AnimationSystem does for a new presentation input.
+			inputs[1U].residentPayloadsValidated = false;
+			GpuAnimationPlan rebuiltOutput;
+			GpuAnimationLoweredPlanResult rebuiltResult;
+			const std::uint64_t rebuiltTopologySignature =
+				buildTopologySignature();
+			context.Expect(BuildLoweredGpuAnimationPlan(
+				inputs, 74U, scratch, palette, rebuiltOutput, rebuiltResult,
+				{}, nullptr, &refreshedPlan, {}, rebuiltTopologySignature)
+					== GpuAnimationLoweringStatus::Ok
+					&& !rebuiltResult.topologyReused
+					&& rebuiltTopologySignature != refreshedTopologySignature
+					&& rebuiltResult.workRequests.size() == inputs.size()
+					&& rebuiltOutput.generation == 74U
+					&& rebuiltOutput.topologyInputSignature
+						!= refreshedPlan.topologyInputSignature
+					&& rebuiltOutput.workPackets[1U].clipResourceIndex == 1U,
+				"A changed shared-payload clip must leave the generated refresh and publish only the fully checked fallback candidate.");
 		});
 
 		registry.Add("Animation.GpuPlan.PaletteStridePartitionsAndPlanAlignmentAreBounded", [](TestContext& context) {

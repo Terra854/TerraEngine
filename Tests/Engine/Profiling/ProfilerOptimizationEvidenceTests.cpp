@@ -8,6 +8,9 @@ namespace TerraEngine::Tests
 {
 	void RegisterProfilerOptimizationEvidenceTests(TestRegistry& registry)
 	{
+		registry.Add("Engine.ProfilerOptimizationEvidence.AllViewSummariesBounded", [](TestContext& context) {
+			context.Expect(TerraEngine::Profiling::ProfilerFramePublicationEvidence::kMaximumViews >= 6U, "Publication evidence bounds all canonical view consumers.");
+		});
 		registry.Add("Engine.ProfilerOptimizationEvidence.AggregatesConserveAndShareGeneration", [](TestContext& context)
 		{
 			using namespace TerraEngine::Profiling;

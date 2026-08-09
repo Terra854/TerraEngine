@@ -2,6 +2,8 @@
 
 #include "TestHarness.h"
 
+#include "../../Engine/Animation/AnimationAuthorityTestHelpers.h"
+
 #include "Editor/TerraEngine-Editor/Automation/AnimationAutomationJobs.h"
 #include "Editor/TerraEngine-Editor/Automation/AnimationRuntimeOperations.h"
 #include "Core/Scheduling/FrameWorkload.h"
@@ -20,6 +22,7 @@ namespace TerraEngine::EditorTests
 	{
 		using namespace Editor::Automation;
 		using namespace Animation;
+		using TerraEngine::Tests::PinnedAnimationAuthorityRow;
 
 		AnimatorInstanceHandle CreateAutomationAnimator(std::uint8_t seed)
 		{
@@ -452,8 +455,8 @@ namespace TerraEngine::EditorTests
 			context.Expect(system.BindAnimatorPlayback(handle, playback) == AnimationStatus::MissingAsset
 					&& ExecuteAutomationAnimationFrame(system, "recording-approval-initial"),
 				"The recording fixture must publish a complete immutable safe pose through the production frame boundary.");
-			const std::shared_ptr<const PublishedAnimatorPose> approvedPose =
-				system.LoadPublishedAnimatorPose(handle);
+			const PinnedAnimationAuthorityRow approvedPose =
+				PinnedAnimationAuthorityRow::ForAnimator(system, handle);
 			context.Expect(approvedPose && approvedPose->snapshot
 					&& approvedPose->snapshot->tick > 0
 					&& approvedPose->jointStableIds == std::vector<std::uint64_t>{101U},
@@ -499,8 +502,8 @@ namespace TerraEngine::EditorTests
 			// the range; it must not manufacture a third numeric sample.
 			context.Expect(ExecuteAutomationAnimationFrame(system, "recording-approval-newer"),
 				"The live animator should continue publishing after approval.");
-			const std::shared_ptr<const PublishedAnimatorPose> newerPose =
-				system.LoadPublishedAnimatorPose(handle);
+			const PinnedAnimationAuthorityRow newerPose =
+				PinnedAnimationAuthorityRow::ForAnimator(system, handle);
 			context.Expect(newerPose && newerPose->snapshot
 					&& newerPose->snapshot->publicationGeneration
 						> approvedGeneration,
@@ -531,7 +534,8 @@ namespace TerraEngine::EditorTests
 					&& retainedResult.value("boundJointStableIds",
 						std::vector<std::uint64_t>{}) == approvedJoints,
 				"The durable terminal result must prove the exact approval-time generation, tick, and joints were captured.");
-			const std::shared_ptr<const PublishedAnimatorPose> stopPose = system.LoadPublishedAnimatorPose(handle);
+			const PinnedAnimationAuthorityRow stopPose =
+				PinnedAnimationAuthorityRow::ForAnimator(system, handle);
 			nlohmann::json stopArguments = RecordingStartArguments(handle);
 			stopArguments["bindCurrentPublication"] = true;
 			stopArguments["publicationGeneration"] = 0U;

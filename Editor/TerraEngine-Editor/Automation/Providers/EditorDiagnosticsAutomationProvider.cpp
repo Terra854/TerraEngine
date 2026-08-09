@@ -175,7 +175,7 @@ namespace TerraEngine::Editor::Automation
 	std::vector<AutomationCapabilityRegistration> EditorDiagnosticsAutomationProvider::GetCapabilities()
 	{
 		std::vector<AutomationCapabilityRegistration> capabilities;
-		capabilities.reserve(18);
+		capabilities.reserve(21);
 		capabilities.push_back(MakeRegistration(resolveHandler, "activity.list", "activity", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, false));
 		capabilities.push_back(MakeRegistration(resolveHandler, "game_view.capture", "capture", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "camera.capture_object", "capture", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, true, true));
@@ -191,6 +191,9 @@ namespace TerraEngine::Editor::Automation
 			capabilities.push_back(MakeRegistration(resolveHandler, "diagnostics.snapshot", "diagnostics", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
 			capabilities.push_back(MakeRegistration(resolveHandler, "capture.provenance", "capture", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.virtualGeometry.authoritativePick", "renderer", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
+		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.validation.sparseTransform.start", "renderer", MutationMode::SceneMutation, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, false));
+		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.validation.sparseTransform.status", "renderer", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, true, true, false));
+		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.validation.sparseTransform.stop", "renderer", MutationMode::SceneMutation, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, false));
 		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.recovery.safe_save_project", "renderer", MutationMode::ProjectMutation, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, false, false));
 		capabilities.push_back(MakeRegistration(resolveHandler, "diagnostics.get_summary", "diagnostics", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, false));
 		capabilities.push_back(MakeRegistration(resolveHandler, "jobs.list", "jobs", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, false));

@@ -501,6 +501,7 @@ namespace TerraEngine::Animation {
 		sharedResidentPayloads.reset();
 		generationRecords.clear();
 		workPackets.clear();
+		stablePacketIndices.clear();
 		evaluationSourcePacketIndices.clear();
 		renderIdentities.clear();
 		dispatchRecords.clear();
@@ -508,6 +509,40 @@ namespace TerraEngine::Animation {
 		batches.clear();
 		stageSpans.clear();
 		diagnostics = {};
+		retainedStaticPlan.reset();
+		retainedDynamicLanes.reset();
+		dynamicGenerationRecords.clear();
+		dynamicSampleTicks.clear();
+		dynamicRenderIdentities.clear();
+		topologyInputSignature = 0U;
+		topologyMembershipGeneration = 0U;
+		topologyResourceGeneration = 0U;
+		topologyProgramGeneration = 0U;
+		topologySceneGeneration = 0U;
+		topologyRendererGeneration = 0U;
+	}
+
+	bool GpuAnimationPlan::FindWorkPacketIndex(
+		std::uint64_t stableInstanceId,
+		std::uint32_t stableSubmissionOrdinal,
+		std::uint32_t& outputIndex) const noexcept
+	{
+		const auto& packets = WorkPackets();
+		const auto& indices = StablePacketIndices();
+		const auto found = std::lower_bound(
+			indices.begin(), indices.end(),
+			std::pair{stableInstanceId, stableSubmissionOrdinal},
+			[&packets](std::uint32_t packetIndex, const auto& identity) noexcept {
+				const GpuAnimationWorkPacket& packet = packets[packetIndex];
+				return std::pair{packet.stableInstanceId, packet.stableSubmissionOrdinal}
+					< identity;
+			});
+		if(found == indices.end()) return false;
+		const GpuAnimationWorkPacket& packet = packets[*found];
+		if(packet.stableInstanceId != stableInstanceId
+			|| packet.stableSubmissionOrdinal != stableSubmissionOrdinal) return false;
+		outputIndex = *found;
+		return true;
 	}
 
 	GpuAnimationPlanStatus ComputeGpuAnimationPrefixOffsets(
@@ -911,6 +946,25 @@ namespace TerraEngine::Animation {
 				}
 			}
 
+			// Dynamic producers are free to finish in a different order next frame.
+			// Build one immutable owner-to-packet index now so warmed publication can
+			// scatter changing lanes directly into packet order without relowering.
+			temporaryPlan.stablePacketIndices.resize(temporaryPlan.workPackets.size());
+			std::iota(
+				temporaryPlan.stablePacketIndices.begin(),
+				temporaryPlan.stablePacketIndices.end(), 0U);
+			std::sort(
+				temporaryPlan.stablePacketIndices.begin(),
+				temporaryPlan.stablePacketIndices.end(),
+				[&temporaryPlan](std::uint32_t left, std::uint32_t right) noexcept {
+					const GpuAnimationWorkPacket& leftPacket = temporaryPlan.workPackets[left];
+					const GpuAnimationWorkPacket& rightPacket = temporaryPlan.workPackets[right];
+					return std::pair{leftPacket.stableInstanceId,
+						leftPacket.stableSubmissionOrdinal}
+						< std::pair{rightPacket.stableInstanceId,
+							rightPacket.stableSubmissionOrdinal};
+				});
+
 			std::uint64_t maximumElementsPerDispatch = 0U;
 			if(!CheckedGpuMultiply(
 				limits.maximumGroupsX,
@@ -1102,60 +1156,294 @@ namespace TerraEngine::Animation {
 		}
 	}
 
-	bool TryRefreshGpuAnimationPlan(
-		std::span<const GpuAnimationWorkRequest> requests,
+        bool TryRefreshGpuAnimationPlan(
+            std::span<const GpuAnimationWorkRequest> requests,
+            std::uint32_t planGeneration, GpuAnimationArena &scratchArena,
+            GpuAnimationArena &paletteArena, const GpuAnimationPlan &previous,
+            GpuAnimationPlan &output,
+            const GpuAnimationPlanLimits &limits,
+            std::shared_ptr<const GpuAnimationPlan> previousOwner,
+            const std::shared_ptr<GpuAnimationPlanDynamicLanes>&
+                dynamicLaneScratch) noexcept {
+          const auto &previousPackets = previous.WorkPackets();
+          const auto &previousEvaluationSources =
+              previous.EvaluationSourcePacketIndices();
+          const auto &previousBatches = previous.Batches();
+          if (planGeneration == 0U || previous.generation == 0U ||
+              previous.buildLimits != limits ||
+              scratchArena.Kind() != GpuAnimationArenaKind::Scratch ||
+              paletteArena.Kind() != GpuAnimationArenaKind::Palette ||
+              !IsPlanLimitConfigurationValid(limits) ||
+              requests.size() != previousPackets.size() ||
+              previousEvaluationSources.size() != previousPackets.size() ||
+              requests.size() != previous.GenerationRecordCount() ||
+              requests.size() != previous.RenderIdentityCount() ||
+              (previousOwner && previousOwner.get() != &previous) ||
+              requests.size() > limits.maximumPackets) {
+            return false;
+          }
+
+          try {
+            std::size_t batchIndex = 0U;
+            std::uint32_t batchEnd =
+                previousBatches.empty()
+                    ? 0U
+                    : previousBatches.front().firstWorkPacket +
+                          previousBatches.front().workPacketCount;
+            for (std::size_t packetIndex = 0U; packetIndex < requests.size();
+                 ++packetIndex) {
+              while (batchIndex < previousBatches.size() &&
+                     packetIndex >= batchEnd) {
+                ++batchIndex;
+                if (batchIndex < previousBatches.size()) {
+                  batchEnd = previousBatches[batchIndex].firstWorkPacket +
+                             previousBatches[batchIndex].workPacketCount;
+                }
+              }
+              if (batchIndex >= previousBatches.size())
+                return false;
+
+              const GpuAnimationWorkRequest &request = requests[packetIndex];
+              const GpuAnimationWorkPacket &packet =
+                  previousPackets[packetIndex];
+              const GpuAnimationBatch &batch = previousBatches[batchIndex];
+              if (!IsGpuAnimationGenerationRecordValid(request.generations) ||
+                  !IsRequestValid(request, limits) ||
+                  request.palettePartitionCount >
+                      limits.maximumPalettePartitions ||
+                  request.batchKey != batch.key ||
+                  MakeGpuAnimationBatchGenerationKey(request.generations) !=
+                      batch.generationKey ||
+                  request.stableInstanceId != packet.stableInstanceId ||
+                  request.stableSubmissionOrdinal !=
+                      packet.stableSubmissionOrdinal ||
+                  request.inputPoseOffsetBytes != packet.inputPoseOffsetBytes ||
+                  request.clipResourceIndex != packet.clipResourceIndex ||
+                  request.programResourceIndex != packet.programResourceIndex ||
+                  request.skeletonResourceIndex !=
+                      packet.skeletonResourceIndex ||
+                  request.maskResourceIndex != packet.maskResourceIndex ||
+                  request.morphResourceIndex != packet.morphResourceIndex ||
+                  request.jointCount != packet.jointCount ||
+                  request.morphCount != packet.morphCount ||
+                  request.paletteEntryCount != packet.paletteEntryCount ||
+                  request.palettePartitionCount !=
+                      packet.palettePartitionCount ||
+                  request.flags != packet.flags ||
+                  (request.diagnosticIndex & 0x7fffffffU) !=
+                      packet.diagnosticIndex ||
+                  previousEvaluationSources[packetIndex] >
+                      packetIndex) {
+                return false;
+              }
+
+              ScratchLayout layout{};
+              if (!BuildScratchLayout(request, layout) ||
+                  layout.totalSizeBytes != packet.scratchSizeBytes) {
+                return false;
+              }
+              // Exact stable request and batch fields above prove this packet
+              // retains the already checked arena layout. Replaying 4,000
+              // offset allocations merely rediscovers the immutable offsets in
+              // the prior valid plan; bounds below are enough to reject a
+              // smaller replacement arena atomically.
+              if (packet.scratchOffsetBytes > scratchArena.CapacityBytes() ||
+                  layout.totalSizeBytes > scratchArena.CapacityBytes() -
+                                              packet.scratchOffsetBytes ||
+                  packet.localPoseOffsetBytes !=
+                      packet.scratchOffsetBytes + layout.localPoseOffsetBytes ||
+                  packet.modelPoseOffsetBytes !=
+                      packet.scratchOffsetBytes + layout.modelPoseOffsetBytes ||
+                  packet.morphOutputOffsetBytes !=
+                      packet.scratchOffsetBytes +
+                          layout.morphOutputOffsetBytes) {
+                return false;
+              }
+
+              if (request.paletteEntryCount != 0U) {
+                std::uint64_t paletteSizeBytes = 0U;
+                if (!CheckedGpuMultiply(request.paletteEntryCount,
+                                        kGpuAnimationPaletteStride,
+                                        paletteSizeBytes) ||
+                    packet.paletteOffsetBytes > paletteArena.CapacityBytes() ||
+                    paletteSizeBytes > paletteArena.CapacityBytes() -
+                                           packet.paletteOffsetBytes) {
+                  return false;
+                }
+              } else if (packet.paletteOffsetBytes != 0U) {
+                return false;
+              }
+            }
+
+            GpuAnimationPlan refreshed;
+            refreshed.generation = planGeneration;
+            refreshed.buildLimits = previous.buildLimits;
+            refreshed.diagnostics = previous.diagnostics;
+			refreshed.topologyInputSignature = previous.topologyInputSignature;
+			refreshed.topologyMembershipGeneration = previous.topologyMembershipGeneration;
+			refreshed.topologyResourceGeneration = previous.topologyResourceGeneration;
+			refreshed.topologyProgramGeneration = previous.topologyProgramGeneration;
+			refreshed.topologySceneGeneration = previous.topologySceneGeneration;
+			refreshed.topologyRendererGeneration = previous.topologyRendererGeneration;
+            refreshed.retainedStaticPlan = previous.retainedStaticPlan
+                ? previous.retainedStaticPlan
+                : (previousOwner ? std::move(previousOwner)
+                                 : std::make_shared<GpuAnimationPlan>(previous));
+            std::shared_ptr<GpuAnimationPlanDynamicLanes> dynamicLanes;
+            if(dynamicLaneScratch && dynamicLaneScratch.use_count() == 1U) {
+              dynamicLanes = dynamicLaneScratch;
+              dynamicLanes->ResetForReuse();
+            }
+            auto& generationRecords = dynamicLanes
+              ? dynamicLanes->generationRecords
+              : refreshed.dynamicGenerationRecords;
+            auto& sampleTicks = dynamicLanes
+              ? dynamicLanes->sampleTicks
+              : refreshed.dynamicSampleTicks;
+            auto& renderIdentities = dynamicLanes
+              ? dynamicLanes->renderIdentities
+              : refreshed.dynamicRenderIdentities;
+            generationRecords.resize(requests.size());
+            sampleTicks.resize(requests.size());
+            renderIdentities.resize(requests.size());
+            for (std::size_t packetIndex = 0U; packetIndex < requests.size();
+                 ++packetIndex) {
+              const GpuAnimationWorkRequest &request = requests[packetIndex];
+              generationRecords[packetIndex] = request.generations;
+              sampleTicks[packetIndex] = request.sampleTick;
+              renderIdentities[packetIndex] = request.renderIdentity;
+            }
+			if(dynamicLanes) {
+				refreshed.retainedDynamicLanes = std::move(dynamicLanes);
+			}
+
+            // BeginGeneration still validates epoch exhaustion and publishes
+            // the new frame identity. No allocation cursor is required because
+            // every reused packet carries an exact previously validated offset.
+            GpuAnimationArena refreshedScratch = scratchArena;
+            GpuAnimationArena refreshedPalette = paletteArena;
+            if (refreshedScratch.BeginGeneration(planGeneration) !=
+                    GpuAnimationPlanStatus::Ok ||
+                refreshedPalette.BeginGeneration(planGeneration) !=
+                    GpuAnimationPlanStatus::Ok) {
+              return false;
+            }
+            output = std::move(refreshed);
+            scratchArena = std::move(refreshedScratch);
+            paletteArena = std::move(refreshedPalette);
+            return true;
+          } catch (const std::bad_alloc &) {
+            return false;
+          } catch (...) {
+            return false;
+          }
+        }
+
+	bool TryRefreshGeneratedGpuAnimationPlan(
+		std::size_t requestCount,
+		GpuAnimationWorkRequestProducer producer,
+		void* producerContext,
 		std::uint32_t planGeneration,
 		GpuAnimationArena& scratchArena,
 		GpuAnimationArena& paletteArena,
 		const GpuAnimationPlan& previous,
 		GpuAnimationPlan& output,
-		const GpuAnimationPlanLimits& limits) noexcept
+		const GpuAnimationPlanLimits& limits,
+		std::shared_ptr<const GpuAnimationPlan> previousOwner,
+		const std::shared_ptr<GpuAnimationPlanDynamicLanes>&
+			dynamicLaneScratch) noexcept
 	{
-		if(planGeneration == 0U
-			|| previous.generation == 0U
+		const auto& previousPackets = previous.WorkPackets();
+		const auto& previousEvaluationSources = previous.EvaluationSourcePacketIndices();
+		const auto& previousBatches = previous.Batches();
+		if(producer == nullptr || planGeneration == 0U || previous.generation == 0U
 			|| previous.buildLimits != limits
 			|| scratchArena.Kind() != GpuAnimationArenaKind::Scratch
 			|| paletteArena.Kind() != GpuAnimationArenaKind::Palette
 			|| !IsPlanLimitConfigurationValid(limits)
-			|| requests.size() != previous.workPackets.size()
-			|| previous.evaluationSourcePacketIndices.size() != previous.workPackets.size()
-			|| requests.size() != previous.generationRecords.size()
-			|| requests.size() != previous.renderIdentities.size()
-			|| requests.size() > limits.maximumPackets) {
+			|| requestCount != previousPackets.size()
+			|| previousEvaluationSources.size() != previousPackets.size()
+			|| requestCount != previous.GenerationRecordCount()
+			|| requestCount != previous.RenderIdentityCount()
+			|| (previousOwner && previousOwner.get() != &previous)
+			|| requestCount > limits.maximumPackets) {
 			return false;
 		}
 
 		try {
+			// Begin both replacement epochs before copying the prior immutable plan.
+			// A failed epoch leaves the caller's plan and arenas untouched.
 			GpuAnimationArena refreshedScratch = scratchArena;
 			GpuAnimationArena refreshedPalette = paletteArena;
-			if(refreshedScratch.BeginGeneration(planGeneration) != GpuAnimationPlanStatus::Ok
-				|| refreshedPalette.BeginGeneration(planGeneration) != GpuAnimationPlanStatus::Ok) {
+			if(refreshedScratch.BeginGeneration(planGeneration)
+					!= GpuAnimationPlanStatus::Ok
+				|| refreshedPalette.BeginGeneration(planGeneration)
+					!= GpuAnimationPlanStatus::Ok) {
 				return false;
 			}
 
+			// The candidate is private until every generated request validates. This
+			// permits one pass to update dynamic lanes without exposing partial output
+			// or retaining a second vector of 4,000 full request records.
+			GpuAnimationPlan refreshed;
+			refreshed.generation = planGeneration;
+			refreshed.buildLimits = previous.buildLimits;
+			refreshed.diagnostics = previous.diagnostics;
+			refreshed.topologyInputSignature = previous.topologyInputSignature;
+			refreshed.topologyMembershipGeneration = previous.topologyMembershipGeneration;
+			refreshed.topologyResourceGeneration = previous.topologyResourceGeneration;
+			refreshed.topologyProgramGeneration = previous.topologyProgramGeneration;
+			refreshed.topologySceneGeneration = previous.topologySceneGeneration;
+			refreshed.topologyRendererGeneration = previous.topologyRendererGeneration;
+			refreshed.retainedStaticPlan = previous.retainedStaticPlan
+				? previous.retainedStaticPlan
+				: (previousOwner ? std::move(previousOwner)
+					: std::make_shared<GpuAnimationPlan>(previous));
+			std::shared_ptr<GpuAnimationPlanDynamicLanes> dynamicLanes;
+			if(dynamicLaneScratch && dynamicLaneScratch.use_count() == 1U) {
+				dynamicLanes = dynamicLaneScratch;
+				dynamicLanes->ResetForReuse();
+			}
+			auto& generationRecords = dynamicLanes
+				? dynamicLanes->generationRecords
+				: refreshed.dynamicGenerationRecords;
+			auto& sampleTicks = dynamicLanes
+				? dynamicLanes->sampleTicks
+				: refreshed.dynamicSampleTicks;
+			auto& renderIdentities = dynamicLanes
+				? dynamicLanes->renderIdentities
+				: refreshed.dynamicRenderIdentities;
+			generationRecords.resize(requestCount);
+			sampleTicks.resize(requestCount);
+			renderIdentities.resize(requestCount);
 			std::size_t batchIndex = 0U;
-			std::uint32_t batchEnd = previous.batches.empty()
+			std::uint32_t batchEnd = previousBatches.empty()
 				? 0U
-				: previous.batches.front().firstWorkPacket
-					+ previous.batches.front().workPacketCount;
-			for(std::size_t packetIndex = 0U; packetIndex < requests.size(); ++packetIndex) {
-				while(batchIndex < previous.batches.size() && packetIndex >= batchEnd) {
+				: previousBatches.front().firstWorkPacket
+					+ previousBatches.front().workPacketCount;
+			for(std::size_t packetIndex = 0U; packetIndex < requestCount;
+				++packetIndex) {
+				while(batchIndex < previousBatches.size()
+					&& packetIndex >= batchEnd) {
 					++batchIndex;
-					if(batchIndex < previous.batches.size()) {
-						batchEnd = previous.batches[batchIndex].firstWorkPacket
-							+ previous.batches[batchIndex].workPacketCount;
+					if(batchIndex < previousBatches.size()) {
+						batchEnd = previousBatches[batchIndex].firstWorkPacket
+							+ previousBatches[batchIndex].workPacketCount;
 					}
 				}
-				if(batchIndex >= previous.batches.size()) return false;
+				if(batchIndex >= previousBatches.size()) return false;
 
-				const GpuAnimationWorkRequest& request = requests[packetIndex];
-				const GpuAnimationWorkPacket& packet = previous.workPackets[packetIndex];
-				const GpuAnimationBatch& batch = previous.batches[batchIndex];
+				GpuAnimationWorkRequest request{};
+				if(!producer(packetIndex, request, producerContext)) return false;
+				const GpuAnimationWorkPacket& packet =
+					previousPackets[packetIndex];
+				const GpuAnimationBatch& batch = previousBatches[batchIndex];
 				if(!IsGpuAnimationGenerationRecordValid(request.generations)
 					|| !IsRequestValid(request, limits)
 					|| request.palettePartitionCount > limits.maximumPalettePartitions
 					|| request.batchKey != batch.key
-					|| MakeGpuAnimationBatchGenerationKey(request.generations) != batch.generationKey
+					|| MakeGpuAnimationBatchGenerationKey(request.generations)
+						!= batch.generationKey
 					|| request.stableInstanceId != packet.stableInstanceId
 					|| request.stableSubmissionOrdinal != packet.stableSubmissionOrdinal
 					|| request.inputPoseOffsetBytes != packet.inputPoseOffsetBytes
@@ -1169,25 +1457,19 @@ namespace TerraEngine::Animation {
 					|| request.paletteEntryCount != packet.paletteEntryCount
 					|| request.palettePartitionCount != packet.palettePartitionCount
 					|| request.flags != packet.flags
-					|| (request.diagnosticIndex & 0x7fffffffU) != packet.diagnosticIndex
-					|| previous.evaluationSourcePacketIndices[packetIndex] > packetIndex) {
+					|| (request.diagnosticIndex & 0x7fffffffU)
+						!= packet.diagnosticIndex
+					|| request.renderIdentity != previous.RenderIdentity(packetIndex)
+					|| previousEvaluationSources[packetIndex] > packetIndex) {
 					return false;
 				}
 
 				ScratchLayout layout{};
 				if(!BuildScratchLayout(request, layout)
-					|| layout.totalSizeBytes != packet.scratchSizeBytes) {
-					return false;
-				}
-				const std::uint32_t scratchAlignment = std::max({
-					kGpuAnimationArenaAlignment,
-					limits.scratchAlignmentBytes,
-					request.scratchAlignmentBytes});
-				GpuAnimationArenaAllocation scratchAllocation{};
-				if(refreshedScratch.Allocate(
-						layout.totalSizeBytes, scratchAlignment, scratchAllocation)
-						!= GpuAnimationPlanStatus::Ok
-					|| scratchAllocation.offsetBytes != packet.scratchOffsetBytes
+					|| layout.totalSizeBytes != packet.scratchSizeBytes
+					|| packet.scratchOffsetBytes > scratchArena.CapacityBytes()
+					|| layout.totalSizeBytes > scratchArena.CapacityBytes()
+						- packet.scratchOffsetBytes
 					|| packet.localPoseOffsetBytes != packet.scratchOffsetBytes
 						+ layout.localPoseOffsetBytes
 					|| packet.modelPoseOffsetBytes != packet.scratchOffsetBytes
@@ -1199,38 +1481,27 @@ namespace TerraEngine::Animation {
 
 				if(request.paletteEntryCount != 0U) {
 					std::uint64_t paletteSizeBytes = 0U;
-					GpuAnimationArenaAllocation paletteAllocation{};
-					if(!CheckedGpuMultiply(
-							request.paletteEntryCount,
-							kGpuAnimationPaletteStride,
-							paletteSizeBytes)
-						|| refreshedPalette.Allocate(
-							paletteSizeBytes,
-							kGpuAnimationArenaAlignment,
-							paletteAllocation) != GpuAnimationPlanStatus::Ok
-						|| paletteAllocation.offsetBytes != packet.paletteOffsetBytes) {
+					if(!CheckedGpuMultiply(request.paletteEntryCount,
+							kGpuAnimationPaletteStride, paletteSizeBytes)
+						|| packet.paletteOffsetBytes > paletteArena.CapacityBytes()
+						|| paletteSizeBytes > paletteArena.CapacityBytes()
+							- packet.paletteOffsetBytes) {
 						return false;
 					}
 				} else if(packet.paletteOffsetBytes != 0U) {
 					return false;
 				}
-			}
 
-			GpuAnimationPlan refreshed = previous;
-			refreshed.generation = planGeneration;
-			for(std::size_t packetIndex = 0U; packetIndex < requests.size(); ++packetIndex) {
-				const GpuAnimationWorkRequest& request = requests[packetIndex];
-				refreshed.generationRecords[packetIndex] = request.generations;
-				refreshed.workPackets[packetIndex].sampleTick = request.sampleTick;
-				refreshed.renderIdentities[packetIndex] = request.renderIdentity;
+				generationRecords[packetIndex] = request.generations;
+				sampleTicks[packetIndex] = request.sampleTick;
+				renderIdentities[packetIndex] = request.renderIdentity;
 			}
-			for(GpuAnimationDispatchCommand& command : refreshed.dispatchCommands) {
-				command.pushConstants.planGeneration = planGeneration;
+			if(dynamicLanes) {
+				refreshed.retainedDynamicLanes = std::move(dynamicLanes);
 			}
-
 			output = std::move(refreshed);
-			scratchArena = refreshedScratch;
-			paletteArena = refreshedPalette;
+			scratchArena = std::move(refreshedScratch);
+			paletteArena = std::move(refreshedPalette);
 			return true;
 		} catch(const std::bad_alloc&) {
 			return false;
@@ -1239,26 +1510,28 @@ namespace TerraEngine::Animation {
 		}
 	}
 
-	bool GpuAnimationTopology::IsComplete() const noexcept
-	{
-		if(!generations.IsComplete() || topologyGeneration == 0U
-			|| owners.empty() || dispatchTemplates.empty()) {
-			return false;
-		}
-		for(std::size_t index = 0U; index < owners.size(); ++index) {
-			if(!owners[index].IsComplete()
-				|| (index != 0U && !(owners[index - 1U] < owners[index]))) {
-				// Strict owner order rejects duplicate or non-deterministic mappings.
-				return false;
-			}
-		}
-		for(const GpuAnimationDispatchTemplate& dispatch : dispatchTemplates) {
-			if(!dispatch.IsComplete()) return false;
-		}
-		return true;
-	}
+        bool GpuAnimationTopology::IsComplete() const noexcept {
+          if (!generations.IsComplete() || topologyGeneration == 0U ||
+              owners.empty() || dispatchTemplates.empty()) {
+            return false;
+          }
+          for (std::size_t index = 0U; index < owners.size(); ++index) {
+            if (!owners[index].IsComplete() ||
+                (index != 0U && !(owners[index - 1U] < owners[index]))) {
+              // Strict owner order rejects duplicate or non-deterministic
+              // mappings.
+              return false;
+            }
+          }
+          for (const GpuAnimationDispatchTemplate &dispatch :
+               dispatchTemplates) {
+            if (!dispatch.IsComplete())
+              return false;
+          }
+          return true;
+        }
 
-	bool GpuAnimationTopologyDynamicState::IsCompleteFor(
+        bool GpuAnimationTopologyDynamicState::IsCompleteFor(
 		const GpuAnimationTopology& topology) const noexcept
 	{
 		return frameGeneration != 0U && topology.IsComplete()
@@ -1274,22 +1547,22 @@ namespace TerraEngine::Animation {
 		GpuAnimationTopology& output) noexcept
 	{
 		if(!generations.IsComplete() || topologyGeneration == 0U
-			|| plan.workPackets.empty() || plan.dispatchCommands.empty()) {
+			|| plan.WorkPackets().empty() || plan.DispatchCommands().empty()) {
 			return false;
 		}
 		try {
 			GpuAnimationTopology candidate;
 			candidate.generations = generations;
 			candidate.topologyGeneration = topologyGeneration;
-			candidate.owners.reserve(plan.workPackets.size());
-			for(std::uint32_t index = 0U; index < plan.workPackets.size(); ++index) {
-				const GpuAnimationWorkPacket& packet = plan.workPackets[index];
+			candidate.owners.reserve(plan.WorkPackets().size());
+			for(std::uint32_t index = 0U; index < plan.WorkPackets().size(); ++index) {
+				const GpuAnimationWorkPacket& packet = plan.WorkPackets()[index];
 				candidate.owners.push_back({packet.stableInstanceId,
 					packet.stableSubmissionOrdinal, index});
 			}
 			std::sort(candidate.owners.begin(), candidate.owners.end());
-			candidate.dispatchTemplates.reserve(plan.stageSpans.size());
-			for(const GpuAnimationStageSpan& span : plan.stageSpans) {
+			candidate.dispatchTemplates.reserve(plan.StageSpans().size());
+			for(const GpuAnimationStageSpan& span : plan.StageSpans()) {
 				if(span.dispatchRecordCount == 0U) continue;
 				candidate.dispatchTemplates.push_back({span.firstDispatchRecord,
 					span.dispatchRecordCount, span.stage, span.barrierFlags});
@@ -1311,7 +1584,7 @@ namespace TerraEngine::Animation {
 		GpuAnimationTopologyDynamicState& output) noexcept
 	{
 		if(frameGeneration == 0U || !topology.IsComplete()
-			|| plan.workPackets.size() != topology.owners.size()) {
+			|| plan.WorkPackets().size() != topology.owners.size()) {
 			return false;
 		}
 		try {
@@ -1321,13 +1594,13 @@ namespace TerraEngine::Animation {
 			candidate.sampleTicks.reserve(topology.owners.size());
 			candidate.outputOffsets.reserve(topology.owners.size());
 			for(const GpuAnimationTopologyOwner& owner : topology.owners) {
-				if(owner.workPacketIndex >= plan.workPackets.size()) return false;
-				const GpuAnimationWorkPacket& packet = plan.workPackets[owner.workPacketIndex];
+				if(owner.workPacketIndex >= plan.WorkPackets().size()) return false;
+				const GpuAnimationWorkPacket& packet = plan.WorkPackets()[owner.workPacketIndex];
 				if(packet.stableInstanceId != owner.stableInstanceId
 					|| packet.stableSubmissionOrdinal != owner.stableSubmissionOrdinal) {
 					return false;
 				}
-				candidate.sampleTicks.push_back(packet.sampleTick);
+				candidate.sampleTicks.push_back(plan.SampleTick(owner.workPacketIndex));
 				candidate.outputOffsets.push_back(packet.paletteOffsetBytes);
 			}
 			if(!candidate.IsCompleteFor(topology)) return false;

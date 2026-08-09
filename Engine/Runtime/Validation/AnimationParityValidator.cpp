@@ -70,7 +70,7 @@ namespace {
 			}, parameter.value);
 		}
 	}
-	std::string HashPose(const Animation::PublishedAnimatorPose& owner) {
+	std::string HashPose(const Animation::AnimationAuthorityRow& owner) {
 		const auto& snapshot = *owner.snapshot;
 		CanonicalHash hash;
 		for (const auto byte : owner.ownerObjectId) hash.Add(static_cast<std::uint64_t>(byte));
@@ -118,7 +118,7 @@ namespace {
 		}
 		return hash.Finish();
 	}
-	std::string HashState(const Animation::PublishedAnimatorPose& pose) {
+	std::string HashState(const Animation::AnimationAuthorityRow& pose) {
 		CanonicalHash hash;
 		for (const auto byte : pose.ownerObjectId) hash.Add(static_cast<std::uint64_t>(byte));
 		AddHandle(hash, pose.controller); AddHandle(hash, pose.clip); AddHandle(hash, pose.skeleton);
@@ -146,7 +146,7 @@ namespace {
 	}
 }
 
-AnimationParityAnimatorDigest ComputeAnimationParityAnimatorDigest(const Animation::PublishedAnimatorPose& pose) {
+AnimationParityAnimatorDigest ComputeAnimationParityAnimatorDigest(const Animation::AnimationAuthorityRow& pose) {
 	AnimationParityAnimatorDigest digest;
 	if (!pose.snapshot || !pose.snapshot->pose) return digest;
 	digest.stateHash = HashState(pose);
@@ -167,29 +167,43 @@ nlohmann::json AnimationParityReport::ToJson() const {
 
 bool CaptureAnimationParityTick(
 	const Animation::AnimationSystem& animation, std::uint32_t tickIndex, AnimationParityReport& report) {
-	std::vector<std::shared_ptr<const Animation::PublishedAnimatorPose>> poses;
-	animation.CopyPublishedAnimatorPoses(poses);
-	if (poses.empty()) {
+	const std::shared_ptr<const Animation::AnimationAuthorityFrame> authority =
+		animation.LoadPublishedAuthorityFrame();
+	if (!authority || !authority->IsValid() || !authority->pages) {
 		report.diagnostic = "The mounted startup scene published zero animators.";
 		return false;
 	}
-	report.animatorCount = static_cast<std::uint32_t>(poses.size());
+	std::size_t animatorCount = 0U;
+	for(const auto& page : *authority->pages) if(page) {
+		for(const Animation::AnimationAuthorityRow& pose : page->rows) {
+			// A pinned authority root may intentionally outlive component retirement so
+			// in-flight readers remain safe. Parity evidence counts only generation-valid
+			// live animators and never mistakes a retired immutable row for scene output.
+			if(animation.IsAnimatorInstanceAlive(pose.key.Handle())) ++animatorCount;
+		}
+	}
+	if(animatorCount == 0U) {
+		report.diagnostic = "The mounted startup scene published zero animators.";
+		return false;
+	}
+	report.animatorCount = static_cast<std::uint32_t>(animatorCount);
 	nlohmann::json frame = { {"tickIndex", tickIndex}, {"animators", nlohmann::json::array()} };
-	for (const auto& pose : poses) {
-		if (!pose || pose->safePose || pose->status != Animation::AnimationStatus::Ok
-			|| pose->objectGeneration == 0U || pose->componentGeneration == 0U
-			|| !pose->snapshot || !pose->snapshot->pose || !pose->snapshot->pose->IsSealed()) {
+	for(const auto& page : *authority->pages) if(page) for(const Animation::AnimationAuthorityRow& pose : page->rows) {
+		if(!animation.IsAnimatorInstanceAlive(pose.key.Handle())) continue;
+		if (pose.safeFallback || pose.status != Animation::AnimationStatus::Ok
+			|| pose.objectGeneration == 0U || pose.componentGeneration == 0U
+			|| !pose.snapshot || !pose.snapshot->pose || !pose.snapshot->pose->IsSealed()) {
 			report.diagnostic = "A published animator pose was missing, safe, invalid, or unsealed.";
 			return false;
 		}
-		const auto digest = ComputeAnimationParityAnimatorDigest(*pose);
+		const auto digest = ComputeAnimationParityAnimatorDigest(pose);
 		frame["animators"].push_back({
-			{"ownerObjectId", ToHexString(pose->ownerObjectId)},
-			{"effectiveExecutionMode", static_cast<std::uint32_t>(pose->effectiveExecutionMode)},
-			{"status", std::string(Animation::ToString(pose->status))},
+			{"ownerObjectId", ToHexString(pose.ownerObjectId)},
+			{"effectiveExecutionMode", static_cast<std::uint32_t>(pose.effectiveExecutionMode)},
+			{"status", std::string(Animation::ToString(pose.status))},
 			{"stateHash", digest.stateHash}, {"poseHash", digest.poseHash},
-			{"eventCount", pose->snapshot->pose->Events().size()},
-			{"rootMotion", pose->snapshot->pose->RootMotionDelta().has_value()}
+			{"eventCount", pose.snapshot->pose->Events().size()},
+			{"rootMotion", pose.snapshot->pose->RootMotionDelta().has_value()}
 		});
 	}
 	report.ticks.push_back(std::move(frame));

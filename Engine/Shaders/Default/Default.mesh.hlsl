@@ -140,6 +140,7 @@ struct StableVisibilityPrimitive
 static const uint kVirtualGeometryFlagTaskPayloadValid = 0x40u;
 static const uint kVirtualGeometryFlagOwnerPaletteDeformation = 0x80u;
 static const uint kRenderInstanceGroupedFlag = 0x80000000u;
+static const uint kRenderInstanceSharedAnimationBufferFlag = 0x40000000u;
 static const uint kMeshletCullFlagFrustum = 1u;
 static const uint kMeshletCullFlagCone = 2u;
 static const uint kMeshletCullFlagUnavailable = 4u;
@@ -1251,8 +1252,15 @@ void main(
 			asuint(SceneUniforms.model[3].w), instanceRecord)) {
 				gMeshShaderModelMatrix = instanceRecord.modelMatrix;
 				gMeshShaderObjectIdentity = instanceRecord.objectIdentity;
-				gMeshShaderAnimationBufferIndex = instanceRecord.animationSelectors.x;
-				gMeshShaderAnimationRecordIndex = instanceRecord.animationSelectors.y;
+				const bool sharedAnimationBuffer =
+					(SceneUniforms.virtualGeometryFlags
+						& kRenderInstanceSharedAnimationBufferFlag) != 0u;
+				gMeshShaderAnimationBufferIndex = sharedAnimationBuffer
+					? SceneUniforms.meshDataIndex
+					: instanceRecord.animationSelectors.x;
+				gMeshShaderAnimationRecordIndex = sharedAnimationBuffer
+					? instanceRecord.animationSelectors.x
+					: instanceRecord.animationSelectors.y;
 			}
 		}
 		gMeshShaderGpuDeformationAvailable =

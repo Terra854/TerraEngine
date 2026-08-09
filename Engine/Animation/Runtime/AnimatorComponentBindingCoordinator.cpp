@@ -2852,9 +2852,10 @@ namespace TerraEngine::Animation {
 				// crossfade duration, both of which advance on the unwrapped clock.
 				binding.playback.loop = component.loopDefaultClip;
 				// The component stores an easy-to-author unsigned frame, while the
-				// runtime clock uses signed fixed ticks. Clamp against the resolved
-				// entry/direct clip so shortening either clip during reimport is safe.
-				binding.initialPlaybackTick = ClampAnimatorInitialPlaybackTick(
+				// runtime clock uses signed fixed ticks. Resolve against the active
+				// entry/direct clip so reimport stays safe while looping phase offsets
+				// wrap instead of collapsing every late instance to one terminal pose.
+				binding.initialPlaybackTick = ResolveAnimatorInitialPlaybackTick(
 					static_cast<AnimationFixedTick>(component.defaultClipStartFrame),
 					binding.playback.durationTicks,
 					binding.playback.loop);
@@ -3771,6 +3772,7 @@ namespace TerraEngine::Animation {
 				bool playOnBind = false;
 			};
 			std::vector<PendingDirectClipFullBind> pendingDirectClipFullBinds;
+			std::vector<AnimatorInstanceHandle> replacedAnimatorHandles;
 			std::map<ClipStreamPayloadKey, ClipStreamRetainAdjustment>
 				clipStreamRetainAdjustments;
 			// Reserve before touching live coordinator entries. A crowd-wide stream
@@ -3778,6 +3780,7 @@ namespace TerraEngine::Animation {
 			// its protected bookkeeping.
 			pendingDirectClipRefreshes.reserve(reconciliationObjects.size());
 			pendingDirectClipFullBinds.reserve(reconciliationObjects.size());
+			replacedAnimatorHandles.reserve(reconciliationObjects.size());
 			// Prefab crowds commonly contain thousands of byte-identical authored
 			// components. Cache the ResourceManager observations and exact render-mesh
 			// validation per unique signature for this protected pass; every instance
@@ -3963,9 +3966,7 @@ namespace TerraEngine::Animation {
 					(void)resources.ReleaseStreamingNeedsForObject(
 						ownerObjectId,
 						TerraEngine::Resource::StreamingNeedType::RuntimeExplicit);
-					if(animation.InvalidateAnimatorInstance(existing->second.handle)) {
-						++summary.invalidatedCount;
-					}
+					replacedAnimatorHandles.push_back(existing->second.handle);
 					impl_->entries.erase(existing);
 					existing = impl_->entries.end();
 				}
@@ -4495,6 +4496,13 @@ namespace TerraEngine::Animation {
 					existing->second.retainedClipStreams,
 					ownerObjectId);
 			}
+			if(!replacedAnimatorHandles.empty()) {
+				// Object/component generations are replaced as one authored snapshot.
+				// Retire their prior runtime handles with one lifecycle advance instead of
+				// clearing presentation once per member of a prefab crowd.
+				summary.invalidatedCount +=
+					animation.InvalidateAnimatorInstances(replacedAnimatorHandles);
+			}
 			if(!pendingDirectClipFullBinds.empty()) {
 				TERRAENGINE_PROFILE_SCOPE(
 					"Animation: Bind Full Animator Playback Batch",
@@ -4608,15 +4616,15 @@ namespace TerraEngine::Animation {
 					"Animation: Retire Removed Animator Bindings",
 					TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				if(staleEntryScanRequired) {
+					std::vector<AnimatorInstanceHandle> staleHandles;
+					staleHandles.reserve(impl_->entries.size());
 					for(auto iterator = impl_->entries.begin();
 						iterator != impl_->entries.end();) {
 						if(seen.contains(iterator->first)) {
 							++iterator;
 							continue;
 						}
-						if(animation.InvalidateAnimatorInstance(iterator->second.handle)) {
-							++summary.invalidatedCount;
-						}
+						staleHandles.push_back(iterator->second.handle);
 						ReleaseClipStreamRetains(
 							impl_->clipStreaming, iterator->second.retainedClipStreams);
 						(void)resources.ReleaseStreamingNeedsForObject(
@@ -4624,6 +4632,8 @@ namespace TerraEngine::Animation {
 							TerraEngine::Resource::StreamingNeedType::RuntimeExplicit);
 						iterator = impl_->entries.erase(iterator);
 					}
+					summary.invalidatedCount +=
+						animation.InvalidateAnimatorInstances(staleHandles);
 				}
 			}
 			{
@@ -4765,15 +4775,27 @@ namespace TerraEngine::Animation {
 
 	void AnimatorComponentBindingCoordinator::InvalidateAll(AnimationSystem& animation) noexcept
 	{
-		for(auto& [ownerObjectId, entry] : impl_->entries) {
-			if(impl_->resources != nullptr) {
-				(void)impl_->resources->ReleaseStreamingNeedsForObject(
-					ownerObjectId,
-					TerraEngine::Resource::StreamingNeedType::RuntimeExplicit);
+		try {
+			std::vector<AnimatorInstanceHandle> handles;
+			handles.reserve(impl_->entries.size());
+			for(auto& [ownerObjectId, entry] : impl_->entries) {
+				if(impl_->resources != nullptr) {
+					(void)impl_->resources->ReleaseStreamingNeedsForObject(
+						ownerObjectId,
+						TerraEngine::Resource::StreamingNeedType::RuntimeExplicit);
+				}
+				ReleaseClipStreamRetains(
+					impl_->clipStreaming, entry.retainedClipStreams);
+				handles.push_back(entry.handle);
 			}
-			ReleaseClipStreamRetains(
-				impl_->clipStreaming, entry.retainedClipStreams);
-			(void)animation.InvalidateAnimatorInstance(entry.handle);
+			(void)animation.InvalidateAnimatorInstances(handles);
+		} catch(const std::bad_alloc&) {
+			// Shutdown cannot retain live handles merely because the batch scratch
+			// vector could not be allocated. Preserve the scalar fail-safe path.
+			for(auto& [ownerObjectId, entry] : impl_->entries) {
+				(void)ownerObjectId;
+				(void)animation.InvalidateAnimatorInstance(entry.handle);
+			}
 		}
 		for(auto& [key, job] : impl_->clipStreaming.pendingReads) {
 			(void)key;

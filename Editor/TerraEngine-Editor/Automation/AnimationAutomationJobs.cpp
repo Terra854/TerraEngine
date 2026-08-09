@@ -639,9 +639,11 @@ namespace TerraEngine::Editor::Automation
 			// discard staged output, and complete the durable job as canceled.
 			return PumpRecording(jobId, nullptr);
 		}
-		const std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose> published =
-			TerraEngine::Animation::AnimationSystem::Instance().LoadPublishedAnimatorPose(binding.animator);
-		if(!published || !published->snapshot || published->animator != binding.animator
+		const std::shared_ptr<const TerraEngine::Animation::AnimationAuthorityFrame> authority =
+			TerraEngine::Animation::AnimationSystem::Instance().LoadPublishedAuthorityFrame();
+		const TerraEngine::Animation::AnimationAuthorityRow* published = authority
+			? authority->Find(binding.animator) : nullptr;
+		if(!published || !published->snapshot || published->key.Handle() != binding.animator
 			|| published->skeleton.assetId != expectedSkeleton
 			|| published->skeletonCompatibilityFingerprint != expectedCompatibility
 			|| published->jointStableIds != binding.jointStableIds)

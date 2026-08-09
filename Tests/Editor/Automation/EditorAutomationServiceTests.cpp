@@ -7,9 +7,12 @@
 #include "EditorContext.h"
 #include "AssetDatabase.h"
 #include "Components/CameraComponent.h"
+#include "Components/MeshRenderComponent.h"
+#include "Components/Transform.h"
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Scene/SceneManager.h"
+#include "Engine/Scene/SceneMutationQueue.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "ProjectManager.h"
 #include "UndoRedoSystem.h"
@@ -108,6 +111,12 @@ namespace TerraEngine::EditorTests
 			context.Expect(service.FindCapability("game_view.capture") != nullptr, "Game View capture should be registered.");
 			context.Expect(service.FindCapability("camera.capture_object") != nullptr, "Camera object capture should be registered.");
 			context.Expect(service.FindCapability("camera.capture_custom") != nullptr, "Custom camera capture should be registered.");
+			context.Expect(service.FindCapability("renderer.validation.sparseTransform.start") != nullptr,
+				"Protected sparse transform validation start should be registered.");
+			context.Expect(service.FindCapability("renderer.validation.sparseTransform.status") != nullptr,
+				"Protected sparse transform validation status should be registered.");
+			context.Expect(service.FindCapability("renderer.validation.sparseTransform.stop") != nullptr,
+				"Protected sparse transform validation stop should be registered.");
 			const AssistantCapability* virtualGeometryStats = service.FindCapability("renderer.virtualGeometry.stats");
 			context.Expect(virtualGeometryStats != nullptr, "Virtual geometry renderer stats should be registered.");
 			if (virtualGeometryStats != nullptr)
@@ -138,6 +147,65 @@ namespace TerraEngine::EditorTests
 				"vg-stats-missing-renderer");
 			context.Expect(!missingRenderer.value("ok", true), "Virtual geometry stats should fail clearly without a renderer.");
 			context.ExpectEqual(missingRenderer["error"].value("category", std::string()), std::string("missing_target"), "Missing renderer should use the missing-target error category.");
+		});
+
+		registry.Add("Editor.Automation.Service.SparseTransformValidationUsesProtectedTypedBatches", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			TerraEngine::Scene::SceneMutationQueue::Instance().Clear();
+			for(std::size_t index = 0U; index < 100U; ++index)
+			{
+				Object object = objects.createObject("Static Validation " + std::to_string(index));
+				objects.AddComponent<Transform>(object);
+				objects.AddComponent<MeshRenderComponent>(object);
+				objects.setObjectStatic(object, true);
+			}
+
+			EditorAutomationService service;
+			const nlohmann::json started = service.HandleTool(
+				"renderer.validation.sparseTransform.start",
+				{{"expectedObjectCount", 100}, {"percentPerFrame", 1.0}, {"displacement", 0.01}},
+				WriteMode::WritesEnabled,
+				"sparse-start");
+			context.Expect(started.value("ok", false), "Sparse validation should accept the exact static population.");
+			if(started.value("ok", false))
+			{
+				service.PumpRendererValidationMutationsAtProtectedFrame();
+				const TerraEngine::Scene::SceneMutationBatchResult first =
+					TerraEngine::Scene::SceneMutationQueue::Instance().Apply(objects, "SparseValidationTest.First");
+				context.Expect(first.applied, "The first typed sparse transform batch should commit.");
+				service.PumpRendererValidationMutationsAtProtectedFrame();
+				const nlohmann::json stopped = service.HandleTool(
+					"renderer.validation.sparseTransform.stop",
+					{{"operationId", started["data"]["operationId"]}},
+					WriteMode::WritesEnabled,
+					"sparse-stop");
+				context.Expect(stopped.value("ok", false), "Sparse validation should accept a stop request before the final flush.");
+				if(stopped.value("ok", false))
+				{
+					context.ExpectEqual(stopped["data"].value("batchSize", 0U), static_cast<std::size_t>(1U),
+						"One percent of one hundred objects should be one typed transform update.");
+					context.ExpectEqual(stopped["data"].value("pendingMutationCount", 0U), static_cast<std::size_t>(1U),
+						"The stop response should retain the unflushed final batch for protected verification.");
+					const TerraEngine::Scene::SceneMutationBatchResult second =
+						TerraEngine::Scene::SceneMutationQueue::Instance().Apply(objects, "SparseValidationTest.Second");
+					context.Expect(second.applied, "The final typed sparse transform batch should commit after stop.");
+					service.PumpRendererValidationMutationsAtProtectedFrame();
+					const nlohmann::json drained = service.HandleTool(
+						"renderer.validation.sparseTransform.status",
+						{{"operationId", started["data"]["operationId"]}},
+						WriteMode::ReadOnly,
+						"sparse-status-drained");
+					context.ExpectEqual(drained["data"].value("committedFrameCount", 0ULL), 2ULL,
+						"Both protected frame batches should be proven visible.");
+					context.ExpectEqual(drained["data"].value("committedMutationCount", 0ULL), 2ULL,
+						"Committed evidence should conserve exact mutation count.");
+					context.ExpectEqual(drained["data"].value("pendingMutationCount", 1U), static_cast<std::size_t>(0U),
+						"The inactive validator should drain the final batch without enqueueing another one.");
+				}
+			}
+			TerraEngine::Scene::SceneMutationQueue::Instance().Clear();
+			objects.clear();
 		});
 
 		registry.Add("Editor.Automation.Service.ReadOnlySceneListingWorksWithoutProject", [](TestContext& context) {
@@ -387,6 +455,34 @@ namespace TerraEngine::EditorTests
 				}
 			}
 			context.Expect(sawCaptureScheduler, "Capture diagnostics should expose scheduler declaration details after a capture.");
+		});
+
+		registry.Add("Editor.Automation.Service.CustomCameraParallelUpUsesFiniteFallback", [](TestContext& context) {
+			EditorAutomationService service;
+			for (const nlohmann::json& target : {
+				nlohmann::json::array({0.0f, 2.0f, 5.0f}),
+				nlohmann::json::array({0.0f, -2.0f, 5.0f}) })
+			{
+				const nlohmann::json result = service.HandleTool(
+					"camera.capture_custom",
+					{{"position", nlohmann::json::array({0.0f, 0.0f, 5.0f})},
+					 {"target", target}, {"up", nlohmann::json::array({0.0f, 1.0f, 0.0f})},
+					 {"width", 64u}, {"height", 64u}},
+					WriteMode::ReadOnly, "capture-parallel-up");
+				context.Expect(result.value("ok", false),
+					"Parallel and antiparallel custom cameras should still capture successfully.");
+				if (!result.value("ok", false)) continue;
+				const nlohmann::json& camera = result["data"]["camera"];
+				const auto finite = [](const nlohmann::json& vector) {
+					return vector.is_array() && vector.size() == 3u
+						&& std::isfinite(vector[0].get<float>())
+						&& std::isfinite(vector[1].get<float>())
+						&& std::isfinite(vector[2].get<float>());
+				};
+				context.Expect(finite(camera["forward"]) && finite(camera["up"])
+					&& camera.value("upFallbackApplied", false),
+					"A collinear camera basis must report finite forward/up vectors and explicit fallback provenance.");
+			}
 		});
 
 		registry.Add("Editor.Automation.Service.CameraObjectCaptureIncludesDisabledAuthoredCameras", [](TestContext& context) {

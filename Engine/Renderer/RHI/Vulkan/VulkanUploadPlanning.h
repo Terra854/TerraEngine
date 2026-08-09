@@ -2,11 +2,14 @@
 
 #pragma once
 
+#include "Renderer/Graph/RenderFramePublication.h"
 #include "Renderer/Graph/RenderGraph.h"
+#include "Renderer/VirtualGeometry/Selection/RenderViewSelectionData.h"
 #include "Core/Export.h"
 
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -112,10 +115,13 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::string rejectionReason;
 	};
 
-	TERRAENGINE_API UploadPreparationPlan BuildUploadPreparationPlan(const RenderFrameSnapshot& snapshot, std::size_t payloadBudget = 64u);
+	// Upload preparation reads the sealed compact resource table. Worker snapshot
+	// ownership ends before Vulkan receives this immutable publication.
+	TERRAENGINE_API UploadPreparationPlan BuildUploadPreparationPlan(
+		const RenderFramePublication& publication, std::size_t payloadBudget = 64u);
 	TERRAENGINE_API VirtualGeometryPageUploadPublication PlanVirtualGeometryPageUploadPublication(const GeometryPageRuntime& page);
 	TERRAENGINE_API VirtualGeometryPageRetirementPlan PlanVirtualGeometryPageRetirement(const GeometryPageRuntime& page, std::uint64_t frameId, std::uint64_t safeFrameLag = 2u);
-	TERRAENGINE_API std::vector<VirtualGeometryPagePayloadUploadRecord> BuildVirtualGeometryPagePayloadUploadPlan(const RenderFrameSnapshot& snapshot, RenderViewType viewType = RenderViewType::Game, std::uint32_t viewId = std::numeric_limits<std::uint32_t>::max());
+	TERRAENGINE_API std::vector<VirtualGeometryPagePayloadUploadRecord> BuildVirtualGeometryPagePayloadUploadPlan(std::span<const VirtualGeometryPagePayloadSelection> selections, RenderViewType viewType = RenderViewType::Game, std::uint32_t viewId = std::numeric_limits<std::uint32_t>::max());
 	// Page-local stream bytes depend on packet geometry and page bindings, but
 	// not on the advancing frame id. This signature lets a frame slot retain its
 	// already uploaded buffer until one of those shader-visible inputs changes.

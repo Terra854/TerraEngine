@@ -2,6 +2,9 @@
 
 #include "Renderer/RHI/Vulkan/VulkanFrameDiagnostics.h"
 
+#include <filesystem>
+#include <fstream>
+
 namespace TerraEngine::Tests {
 
 	void RegisterVulkanFrameDiagnosticsTests(TestRegistry& registry)
@@ -43,6 +46,21 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::uint64_t>(63u), item.frameId, "Vulkan view submit helper should preserve the frame id.");
 			context.ExpectEqual(static_cast<std::uint32_t>(9u), item.viewId, "Vulkan view submit helper should preserve the view id.");
 			context.ExpectEqual(std::string("scene-view"), item.sharedWorkKey, "Vulkan view submit helper should preserve the reuse key.");
+		});
+
+		registry.Add("Renderer.VulkanFrameDiagnostics.RetainsLatestValidViewStats", [](TestContext& context) {
+			std::ifstream source(std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp");
+			const std::string text((std::istreambuf_iterator<char>(source)), {});
+			const std::size_t publish = text.find("std::lock_guard<std::mutex> lock(statsMutex);",
+				text.find("void VulkanContext::Impl::PublishCompletedFrameStats"));
+			context.Expect(publish != std::string::npos,
+				"Completed Vulkan statistics must publish under the diagnostics lock.");
+			if(publish == std::string::npos) return;
+			const std::string region = text.substr(publish, 1400U);
+			context.Expect(region.find("if(gameSnapshot.valid)") != std::string::npos
+				&& region.find("if(sceneSnapshot.valid)") != std::string::npos,
+				"An empty completed slot must not erase the latest valid Game or Scene statistics.");
 		});
 	}
 

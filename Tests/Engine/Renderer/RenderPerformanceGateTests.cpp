@@ -30,6 +30,31 @@ namespace TerraEngine::Tests {
 			context.Expect(gate.diagnostic.find("max") != std::string::npos, "Virtual geometry gate diagnostics should explain the threshold direction.");
 		});
 
+		registry.Add("Renderer.PerformanceGate.MixedRouteCountConservationIsDeterministic", [](TestContext& context) {
+			// Performance gates consume typed prepared counts, not wall-clock samples.
+			// This makes the 4k direct/dense-VG contract stable on every test machine.
+			const PerformanceGateResult direct = TerraEngine::Renderer::EvaluateVirtualGeometryPerformanceGate(
+				"mixed-direct-count", "framepub-4000-mixed", "directInstances", 2000.0f,
+				2000.0f, "instances", false);
+			const PerformanceGateResult dense = TerraEngine::Renderer::EvaluateVirtualGeometryPerformanceGate(
+				"mixed-dense-count", "framepub-4000-mixed", "denseInstances", 2000.0f,
+				2000.0f, "instances", false);
+			context.Expect(direct.status == VirtualGeometryPerformanceGateStatus::Pass
+				&& dense.status == VirtualGeometryPerformanceGateStatus::Pass
+				&& direct.actual + dense.actual == 4000.0f,
+				"Mixed direct/dense-VG prepared counts must conserve the deterministic 4k population.");
+		});
+
+		registry.Add("Renderer.PerformanceGate.StaticReuseCountGateAvoidsTimingClaims", [](TestContext& context) {
+			const PerformanceGateResult reuse = TerraEngine::Renderer::EvaluateVirtualGeometryPerformanceGate(
+				"static-reuse-count", "framepub-10000-static-reuse", "reusedInstances",
+				10000.0f, 10000.0f, "instances", false);
+			context.Expect(reuse.status == VirtualGeometryPerformanceGateStatus::Pass
+				&& reuse.actual == 10000.0f
+				&& reuse.diagnostic.find("actual") != std::string::npos,
+				"The 10k static reuse gate must assert exact copied-instance count without a flaky duration threshold.");
+		});
+
 		registry.Add("Renderer.WorldTransformCache.ReusesStableHierarchyAndInvalidatesChangedBranches", [](TestContext& context) {
 			auto& objects = ObjectManager::instance();
 			objects.clear();

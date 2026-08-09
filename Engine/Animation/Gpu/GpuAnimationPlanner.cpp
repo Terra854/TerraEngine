@@ -141,6 +141,90 @@ namespace TerraEngine::Animation {
 				|| mode == AnimationEffectiveExecutionMode::HybridAuthoritative;
 		}
 
+		void MixTopologyIdentity(std::uint64_t& hash, std::uint64_t value) noexcept
+		{
+			// FNV-1a over typed scalar lanes is deterministic inside one runtime
+			// session and cheap enough to compute while presentation inputs are hot.
+			hash ^= value;
+			hash *= 1099511628211ULL;
+		}
+
+		void MixLoweringTopologyInput(
+			std::uint64_t& hash,
+			const GpuAnimationLoweringInput& input) noexcept
+		{
+				const GpuAnimationGenerationRecord& generation = input.visual.generations;
+				// Shared-pointer addresses describe temporary ownership, not executable
+				// topology. Stable content IDs, resource indices, compatibility, and
+				// generations below are the authoritative invalidation proof.
+				MixTopologyIdentity(hash, input.program.programContentId);
+				MixTopologyIdentity(hash, input.program.programResourceIndex);
+				MixTopologyIdentity(hash, input.visual.stableInstanceId);
+				MixTopologyIdentity(hash, input.visual.skeletonTopologyId);
+				MixTopologyIdentity(hash, input.visual.compatibilityFingerprint);
+				MixTopologyIdentity(hash, input.visual.inputPoseOffsetBytes);
+				// Raw parameters and sample ticks change every frame. AnimationSystem
+				// separately proves that every retained evaluation-sharing group preserves
+				// equality; hashing raw values here would invalidate an unchanged partition.
+				MixTopologyIdentity(hash, input.visual.stableSubmissionOrdinal);
+				MixTopologyIdentity(hash, input.visual.clipResourceIndex);
+				MixTopologyIdentity(hash, input.visual.skeletonResourceIndex);
+				MixTopologyIdentity(hash, input.visual.maskResourceIndex);
+				MixTopologyIdentity(hash, input.visual.morphResourceIndex);
+				MixTopologyIdentity(hash, input.visual.jointCount);
+				MixTopologyIdentity(hash, input.visual.morphCount);
+				MixTopologyIdentity(hash, input.visual.paletteEntryCount);
+				MixTopologyIdentity(hash, input.visual.palettePartitionCount);
+				MixTopologyIdentity(hash, input.visual.diagnosticIndex);
+				MixTopologyIdentity(hash, generation.instanceSlot);
+				MixTopologyIdentity(hash, generation.instanceGeneration);
+				// Component publication advances with the authored playback state and is
+				// consumed from the dynamic generation record. It does not change packet
+				// layout, batching, resource selectors, or stable owner identity.
+				MixTopologyIdentity(hash, generation.programGeneration);
+				MixTopologyIdentity(hash, generation.controllerGeneration);
+				MixTopologyIdentity(hash, generation.skeletonGeneration);
+				MixTopologyIdentity(hash, generation.clipGeneration);
+				MixTopologyIdentity(hash, generation.meshGeneration);
+				// The shader-visible residency/output epoch advances as dynamic buffers
+				// rotate. Immutable clip/skeleton selectors and their asset generations
+				// already invalidate the retained payload topology when content changes.
+				MixTopologyIdentity(hash, generation.rendererGeneration);
+				// Scene publication advances independently of packet layout. The current
+				// value travels in the dynamic generation lane and is validated again by
+				// renderer publication; it is not an immutable animation resource epoch.
+				MixTopologyIdentity(hash, generation.flags
+					& ~kGpuAnimationGenerationFlagSuspendVisualEvaluation);
+				// Render identity contains the current deformation payload generation.
+				// It advances with animation output and belongs in the dynamic sidecar,
+				// All other identity lanes remain part of the immutable proof.
+				MixTopologyIdentity(hash, static_cast<std::uint64_t>(
+					std::hash<TerraEngine::UUID>{}(input.visual.renderIdentity.meshId)));
+				MixTopologyIdentity(hash, input.visual.renderIdentity.meshHeaderVersion);
+				MixTopologyIdentity(hash, input.visual.renderIdentity.rendererGeneration);
+				// The render identity's scene publication is the matching dynamic half of
+				// the generation record above, not a mesh/topology selector.
+				MixTopologyIdentity(hash,
+					input.visual.renderIdentity.skeletonCompatibilityFingerprint);
+				// The retained plan owns the validated resident payload. Reconstructed
+				// shared_ptr control blocks with identical resource generations must not
+				// force packet topology to rebuild.
+				MixTopologyIdentity(hash, input.prevalidatedStageMask);
+				MixTopologyIdentity(hash, static_cast<std::uint32_t>(input.execution.effectiveMode));
+				// Validation booleans are transient proof state, not packet identity.
+				// Warm adoption checks them directly before accepting the retained root.
+				std::uint64_t flags = input.allowSharedVisualEvaluation ? 1ULL : 0ULL;
+				flags |= input.visual.looping ? 1ULL << 1U : 0ULL;
+				flags |= input.visual.reverse ? 1ULL << 2U : 0ULL;
+				flags |= input.visual.useBindPoseFallback ? 1ULL << 3U : 0ULL;
+				flags |= input.visual.useHoldLastFallback ? 1ULL << 4U : 0ULL;
+				flags |= input.visual.hasRootMotion ? 1ULL << 5U : 0ULL;
+				flags |= input.visual.allowVisualProcedural ? 1ULL << 6U : 0ULL;
+				flags |= input.visual.allowVisualRagdoll ? 1ULL << 7U : 0ULL;
+				MixTopologyIdentity(hash, flags);
+				MixTopologyIdentity(hash, input.visual.ragdollTableOffsetBytes);
+		}
+
 		[[nodiscard]] bool AppendAlignedPayloadBytes(
 			std::vector<std::uint8_t>& destination,
 			const std::uint8_t* source,
@@ -470,6 +554,37 @@ namespace TerraEngine::Animation {
 		}
 	}
 
+	void GpuAnimationLoweringTopologySignatureBuilder::Include(
+		const GpuAnimationLoweringInput& input) noexcept
+	{
+		std::uint64_t inputHash = 1469598103934665603ULL;
+		MixLoweringTopologyInput(inputHash, input);
+		// Finalize each member before the commutative reduction so permutations of
+		// the same proven inputs produce one signature, while duplicate/replaced
+		// members perturb all three accumulators.
+		inputHash ^= inputHash >> 30U;
+		inputHash *= 0xbf58476d1ce4e5b9ULL;
+		inputHash ^= inputHash >> 27U;
+		inputHash *= 0x94d049bb133111ebULL;
+		inputHash ^= inputHash >> 31U;
+		xor_ ^= inputHash;
+		sum_ += inputHash;
+		productSum_ += inputHash * (inputHash | 1ULL);
+		++count_;
+	}
+
+	std::uint64_t GpuAnimationLoweringTopologySignatureBuilder::Complete() const noexcept
+	{
+		std::uint64_t completed = 1469598103934665603ULL;
+		// Include cardinality and every commutative lane at the boundary so an empty,
+		// truncated, reordered, or duplicate source cannot inherit another topology.
+		MixTopologyIdentity(completed, count_);
+		MixTopologyIdentity(completed, xor_);
+		MixTopologyIdentity(completed, sum_);
+		MixTopologyIdentity(completed, productSum_);
+		return completed == 0U ? 1U : completed;
+	}
+
 	bool ValidateGpuAnimationResidentPayloads(
 		const GpuAnimationWorkRequest& request,
 		const GpuAnimationResidentPayloads& payloads) noexcept
@@ -532,6 +647,13 @@ namespace TerraEngine::Animation {
 			| static_cast<std::uint32_t>(GpuAnimationOutputFlag::Palette);
 		if(input.visual.morphCount != 0U) staged.batchKey.outputFlags |= static_cast<std::uint32_t>(GpuAnimationOutputFlag::MorphWeights);
 		staged.generations = input.visual.generations;
+		if(input.visual.suspendVisualEvaluation) {
+			staged.generations.flags |=
+				kGpuAnimationGenerationFlagSuspendVisualEvaluation;
+		} else {
+			staged.generations.flags &=
+				~kGpuAnimationGenerationFlagSuspendVisualEvaluation;
+		}
 		// The final reserved generation lane is a bounded byte offset only for the
 		// ragdoll stage. Clear caller data in every other mode so it cannot become a
 		// hidden identity or accidental address-like shader input.
@@ -571,10 +693,6 @@ namespace TerraEngine::Animation {
 			staged.flags |= static_cast<std::uint32_t>(GpuAnimationWorkFlag::AllowVisualProcedural);
 		}
 		if(input.visual.allowVisualRagdoll) staged.flags |= static_cast<std::uint32_t>(GpuAnimationWorkFlag::AllowRagdollVisual);
-		if(input.visual.suspendVisualEvaluation) {
-			staged.flags |= static_cast<std::uint32_t>(
-				GpuAnimationWorkFlag::SuspendVisualEvaluation);
-		}
 		output = staged;
 		return GpuAnimationLoweringStatus::Ok;
 	}
@@ -1058,6 +1176,154 @@ namespace TerraEngine::Animation {
 		}
 	}
 
+	namespace {
+		[[nodiscard]] bool TryRefreshValidatedSharedPayloadPlan(
+			std::span<const GpuAnimationLoweringInput> inputs,
+			std::uint64_t topologyInputSignature,
+			std::uint32_t planGeneration,
+			GpuAnimationArena& scratchArena,
+			GpuAnimationArena& paletteArena,
+			const GpuAnimationPlan& previous,
+			GpuAnimationPlan& output,
+			const GpuAnimationPlanLimits& limits,
+			std::shared_ptr<const GpuAnimationPlan> previousOwner,
+			const std::shared_ptr<GpuAnimationPlanDynamicLanes>&
+				dynamicLaneScratch) noexcept
+		{
+			const auto& packets = previous.WorkPackets();
+			const std::size_t inputCount = inputs.size();
+			if(topologyInputSignature == 0U
+				|| previous.topologyInputSignature != topologyInputSignature
+				|| planGeneration == 0U || previous.generation == 0U
+				|| previous.buildLimits != limits
+				|| scratchArena.Kind() != GpuAnimationArenaKind::Scratch
+				|| paletteArena.Kind() != GpuAnimationArenaKind::Palette
+				|| inputCount != packets.size()
+				|| inputCount != previous.GenerationRecordCount()
+				|| inputCount != previous.RenderIdentityCount()
+				|| (previousOwner && previousOwner.get() != &previous)
+				|| inputCount > limits.maximumPackets) {
+				return false;
+			}
+
+			try {
+				GpuAnimationArena refreshedScratch = scratchArena;
+				GpuAnimationArena refreshedPalette = paletteArena;
+				if(refreshedScratch.BeginGeneration(planGeneration)
+						!= GpuAnimationPlanStatus::Ok
+					|| refreshedPalette.BeginGeneration(planGeneration)
+						!= GpuAnimationPlanStatus::Ok) {
+					return false;
+				}
+
+				GpuAnimationPlan refreshed;
+				refreshed.generation = planGeneration;
+				refreshed.buildLimits = previous.buildLimits;
+				refreshed.diagnostics = previous.diagnostics;
+				refreshed.topologyInputSignature = topologyInputSignature;
+				refreshed.topologyMembershipGeneration = previous.topologyMembershipGeneration;
+				refreshed.topologyResourceGeneration = previous.topologyResourceGeneration;
+				refreshed.topologyProgramGeneration = previous.topologyProgramGeneration;
+				refreshed.topologySceneGeneration = previous.topologySceneGeneration;
+				refreshed.topologyRendererGeneration = previous.topologyRendererGeneration;
+				refreshed.retainedStaticPlan = previous.retainedStaticPlan
+					? previous.retainedStaticPlan
+					: (previousOwner ? std::move(previousOwner)
+						: std::make_shared<GpuAnimationPlan>(previous));
+				std::shared_ptr<GpuAnimationPlanDynamicLanes> dynamicLanes;
+				if(dynamicLaneScratch && dynamicLaneScratch.use_count() == 1U) {
+					dynamicLanes = dynamicLaneScratch;
+					dynamicLanes->ResetForReuse();
+				}
+				auto& generationRecords = dynamicLanes
+					? dynamicLanes->generationRecords
+					: refreshed.dynamicGenerationRecords;
+				auto& sampleTicks = dynamicLanes
+					? dynamicLanes->sampleTicks
+					: refreshed.dynamicSampleTicks;
+				auto& renderIdentities = dynamicLanes
+					? dynamicLanes->renderIdentities
+					: refreshed.dynamicRenderIdentities;
+				generationRecords.resize(inputCount);
+				sampleTicks.resize(inputCount);
+				renderIdentities.resize(inputCount);
+
+				for(std::size_t packetIndex = 0U; packetIndex < inputs.size(); ++packetIndex) {
+					const GpuAnimationLoweringInput& input = inputs[packetIndex];
+					const GpuAnimationWorkPacket& packet = packets[packetIndex];
+					// topologyInputSignature was produced while these exact immutable
+					// inputs were captured and includes payload owner, stable identity,
+					// submission order, resource selectors, shape, execution mode, and
+					// every batch generation. Rechecking those fields here would turn the
+					// proof back into a second 4,000-row topology scan. Only changing lanes
+					// and the compact destination ordinal still require per-frame checks.
+					if(!IsGpuExecutionMode(input.execution.effectiveMode)
+						|| !IsGpuAnimationGenerationRecordValid(input.visual.generations)
+						|| !IsGpuAnimationRenderIdentityValid(input.visual.renderIdentity)
+						|| input.residentPayloads
+							!= previous.sharedResidentPayloads
+						|| packet.generationRecordIndex >= inputs.size()) {
+						return false;
+					}
+
+					GpuAnimationGenerationRecord publishedGeneration =
+						input.visual.generations;
+					if(input.visual.suspendVisualEvaluation) {
+						publishedGeneration.flags |=
+							kGpuAnimationGenerationFlagSuspendVisualEvaluation;
+					} else {
+						publishedGeneration.flags &=
+							~kGpuAnimationGenerationFlagSuspendVisualEvaluation;
+					}
+					publishedGeneration.reserved = input.visual.allowVisualRagdoll
+						? input.visual.ragdollTableOffsetBytes : 0U;
+					generationRecords[packet.generationRecordIndex] =
+						publishedGeneration;
+					sampleTicks[packetIndex] = input.visual.sampleTick;
+					renderIdentities[packetIndex] =
+						input.visual.renderIdentity;
+				}
+				if(dynamicLanes) {
+					refreshed.retainedDynamicLanes = std::move(dynamicLanes);
+				}
+
+				output = std::move(refreshed);
+				scratchArena = std::move(refreshedScratch);
+				paletteArena = std::move(refreshedPalette);
+				return true;
+			} catch(const std::bad_alloc&) {
+				return false;
+			} catch(...) {
+				return false;
+			}
+		}
+	}
+
+	bool TryRefreshLoweredGpuAnimationDynamicPlan(
+		std::span<const GpuAnimationLoweringInput> inputs,
+		std::uint64_t topologyInputSignature,
+		std::uint32_t planGeneration,
+		GpuAnimationArena& scratchArena,
+		GpuAnimationArena& paletteArena,
+		const GpuAnimationPlan& previous,
+		GpuAnimationPlan& output,
+		const GpuAnimationPlanLimits& limits,
+		std::shared_ptr<const GpuAnimationPlan> previousOwner,
+		const std::shared_ptr<GpuAnimationPlanDynamicLanes>&
+			dynamicLaneScratch) noexcept
+	{
+		if(!previous.sharedResidentPayloads
+			|| previous.WorkPackets().size() != inputs.size()
+			|| !TryRefreshValidatedSharedPayloadPlan(
+				inputs, topologyInputSignature, planGeneration, scratchArena,
+				paletteArena, previous, output, limits,
+				std::move(previousOwner), dynamicLaneScratch)) {
+			return false;
+		}
+		output.sharedResidentPayloads = previous.sharedResidentPayloads;
+		return true;
+	}
+
 	GpuAnimationLoweringStatus BuildLoweredGpuAnimationPlan(
 		std::span<const GpuAnimationLoweringInput> inputs,
 		std::uint32_t planGeneration,
@@ -1067,10 +1333,178 @@ namespace TerraEngine::Animation {
 		GpuAnimationLoweredPlanResult& result,
 		const GpuAnimationPlanLimits& limits,
 		GpuAnimationFrameAtlasCache* atlasCache,
-		const GpuAnimationPlan* previousPlan) noexcept
+		const GpuAnimationPlan* previousPlan,
+		std::shared_ptr<const GpuAnimationPlan> previousPlanOwner,
+		std::uint64_t precomputedTopologyInputSignature,
+		const std::shared_ptr<GpuAnimationPlanDynamicLanes>&
+			dynamicLaneScratch) noexcept
 	{
 		result = {};
 		try {
+			std::uint64_t topologyInputSignature =
+				precomputedTopologyInputSignature;
+			if(topologyInputSignature == 0U) {
+				GpuAnimationLoweringTopologySignatureBuilder signatureBuilder;
+				for(const GpuAnimationLoweringInput& input : inputs) {
+					signatureBuilder.Include(input);
+				}
+				topologyInputSignature = signatureBuilder.Complete();
+			}
+
+			// The normal warmed crowd keeps both topology and one immutable cooked
+			// payload unchanged. Validate those cheap identities first, then update
+			// only work generations and sample ticks. Any mismatch leaves the caller's
+			// plan and arenas untouched and falls through to the complete checked path.
+			if(previousPlan != nullptr && !inputs.empty()
+				&& previousPlan->sharedResidentPayloads
+				&& previousPlan->topologyInputSignature == topologyInputSignature
+				&& previousPlan->WorkPackets().size() == inputs.size()
+				&& TryRefreshLoweredGpuAnimationDynamicPlan(
+					inputs, topologyInputSignature, planGeneration, scratchArena,
+					paletteArena, *previousPlan, output, limits,
+					previousPlanOwner, dynamicLaneScratch)) {
+				result.planStatus = GpuAnimationPlanStatus::Ok;
+				result.topologyReused = true;
+				result.status = GpuAnimationLoweringStatus::Ok;
+				return result.status;
+			}
+
+			// A warmed heterogeneous crowd already owns one validated atlas entry per
+			// input. Lower directly into relocated requests and validate them against
+			// the immutable prior plan instead of first materializing an intermediate
+			// atlas-entry vector, rescanning that vector, and then moving every request
+			// into a second allocation. Any ownership, resource-shape, or topology
+			// mismatch leaves every output untouched and falls through to the complete
+			// transactional builder below.
+			if(previousPlan != nullptr && atlasCache != nullptr
+				&& atlasCache->residentPayloads
+				&& previousPlan->sharedResidentPayloads == atlasCache->residentPayloads
+				&& atlasCache->entries.size() == inputs.size()
+				&& previousPlan->WorkPackets().size() == inputs.size()) {
+				struct CachedAtlasRefreshContext {
+					std::span<const GpuAnimationLoweringInput> inputs;
+					const GpuAnimationFrameAtlasCache* cache = nullptr;
+				};
+				CachedAtlasRefreshContext refreshContext{inputs, atlasCache};
+				const auto requestProducer = +[](
+					std::size_t index,
+					GpuAnimationWorkRequest& request,
+					void* context) noexcept -> bool
+				{
+					const auto* refresh =
+						static_cast<const CachedAtlasRefreshContext*>(context);
+					if(refresh == nullptr || refresh->cache == nullptr
+						|| index >= refresh->inputs.size()
+						|| index >= refresh->cache->entries.size()) {
+						return false;
+					}
+
+					const GpuAnimationLoweringInput& input = refresh->inputs[index];
+					if(LowerGpuAnimationWorkRequest(input, request)
+							!= GpuAnimationLoweringStatus::Ok
+						|| !input.residentPayloads
+						|| (!input.residentPayloadsValidated
+							&& !ValidateGpuAnimationResidentPayloads(
+								request, *input.residentPayloads))) {
+						return false;
+					}
+
+					const GpuAnimationFrameAtlasCacheEntry& cached =
+						refresh->cache->entries[index];
+					if(cached.sourcePayload.lock() != input.residentPayloads
+						|| !IsRelocatableSingleClipRequest(request, *input.residentPayloads)
+						|| cached.sourceProgramResourceIndex != request.programResourceIndex
+						|| cached.sourceSkeletonResourceIndex != request.skeletonResourceIndex
+						|| cached.sourceMorphResourceIndex != request.morphResourceIndex
+						|| cached.jointCount != request.jointCount
+						|| cached.morphCount != request.morphCount
+						|| cached.paletteEntryCount != request.paletteEntryCount) {
+						return false;
+					}
+
+					// The retained atlas owns immutable payload storage. Only these absolute
+					// resource offsets are rewritten; per-frame ticks and generations remain
+					// those produced from the current presentation input.
+					request.clipResourceIndex = cached.relocatedClipResourceIndex;
+					request.programResourceIndex = cached.relocatedProgramResourceIndex;
+					request.skeletonResourceIndex = cached.relocatedSkeletonResourceIndex;
+					request.morphResourceIndex = cached.relocatedMorphResourceIndex;
+					return true;
+				};
+
+				if(TryRefreshGeneratedGpuAnimationPlan(
+					inputs.size(), requestProducer, &refreshContext, planGeneration,
+					scratchArena, paletteArena, *previousPlan, output, limits,
+					previousPlanOwner, dynamicLaneScratch)) {
+					output.sharedResidentPayloads = atlasCache->residentPayloads;
+					output.topologyInputSignature = topologyInputSignature;
+					result.planStatus = GpuAnimationPlanStatus::Ok;
+					result.topologyReused = true;
+					result.status = GpuAnimationLoweringStatus::Ok;
+					return result.status;
+				}
+			}
+
+			// The usual crowd case already shares one immutable cooked payload.  Do
+			// the same one-pass refresh as the retained atlas path above instead of
+			// first allocating an atlas-entry vector and then allocating a second
+			// request vector only to prove that every entry names that same payload.
+			// The generated refresh still compares every lowered request with the
+			// prior immutable packet, so a changed clip, program, or resource layout
+			// rejects this candidate and falls through to the complete builder below.
+			if(previousPlan != nullptr && !inputs.empty()
+				&& previousPlan->sharedResidentPayloads
+				&& previousPlan->WorkPackets().size() == inputs.size()
+				&& std::all_of(inputs.begin(), inputs.end(), [previousPlan](
+					const GpuAnimationLoweringInput& input) {
+					return input.residentPayloads == previousPlan->sharedResidentPayloads;
+				})) {
+				struct SharedPayloadRefreshContext {
+					std::span<const GpuAnimationLoweringInput> inputs;
+					const std::shared_ptr<const GpuAnimationResidentPayloads>* payload = nullptr;
+				};
+				const std::shared_ptr<const GpuAnimationResidentPayloads>& sharedPayload =
+					previousPlan->sharedResidentPayloads;
+				SharedPayloadRefreshContext refreshContext{inputs, &sharedPayload};
+				const auto requestProducer = +[](
+					std::size_t index,
+					GpuAnimationWorkRequest& request,
+					void* context) noexcept -> bool
+				{
+					const auto* refresh =
+						static_cast<const SharedPayloadRefreshContext*>(context);
+					if(refresh == nullptr || refresh->payload == nullptr
+						|| index >= refresh->inputs.size()) {
+						return false;
+					}
+
+					const GpuAnimationLoweringInput& input = refresh->inputs[index];
+					if(input.residentPayloads != *refresh->payload
+						|| LowerGpuAnimationWorkRequest(input, request)
+							!= GpuAnimationLoweringStatus::Ok) {
+						return false;
+					}
+					// AnimationSystem normally supplies this proof. Direct callers retain
+					// the complete payload validation before their request can reuse the
+					// prior plan.
+					return input.residentPayloadsValidated
+						|| ValidateGpuAnimationResidentPayloads(
+							request, **refresh->payload);
+				};
+
+				if(TryRefreshGeneratedGpuAnimationPlan(
+					inputs.size(), requestProducer, &refreshContext, planGeneration,
+					scratchArena, paletteArena, *previousPlan, output, limits,
+					previousPlanOwner, dynamicLaneScratch)) {
+					output.sharedResidentPayloads = sharedPayload;
+					output.topologyInputSignature = topologyInputSignature;
+					result.planStatus = GpuAnimationPlanStatus::Ok;
+					result.topologyReused = true;
+					result.status = GpuAnimationLoweringStatus::Ok;
+					return result.status;
+				}
+			}
+
 			std::vector<GpuAnimationFrameAtlasEntry> atlasEntries;
 			atlasEntries.reserve(inputs.size());
 			for(const GpuAnimationLoweringInput& input : inputs) {
@@ -1206,7 +1640,9 @@ namespace TerraEngine::Animation {
 					paletteArena,
 					*previousPlan,
 					output,
-					limits);
+					limits,
+					previousPlanOwner,
+					dynamicLaneScratch);
 			const GpuAnimationPlanStatus planStatus = topologyReused
 				? GpuAnimationPlanStatus::Ok
 				: BuildGpuAnimationPlan(
@@ -1220,6 +1656,7 @@ namespace TerraEngine::Animation {
 			}
 			output.residentPayloads = std::move(payloadCopy);
 			output.sharedResidentPayloads = std::move(sharedPayload);
+			output.topologyInputSignature = topologyInputSignature;
 			result.workRequests = std::move(stagedRequests);
 			result.status = GpuAnimationLoweringStatus::Ok;
 			return result.status;

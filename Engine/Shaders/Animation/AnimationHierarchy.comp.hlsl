@@ -7,7 +7,7 @@ void main(uint3 id : SV_DispatchThreadID)
 	TeAnimationGpuDispatchRecord dispatch; TeAnimationGpuWorkPacket packet; uint joint;
 	if (!TeResolveWork(id.x, TE_ANIMATION_GPU_STAGE_HIERARCHY, dispatch, packet, joint)) return;
 	if (!TeValidatePacket(dispatch, packet, joint, TE_ANIMATION_GPU_STAGE_HIERARCHY) || joint >= packet.jointCount) return;
-	if ((packet.flags & TE_ANIMATION_GPU_WORK_SUSPEND_VISUAL_EVALUATION) != 0u) return;
+	if (TeVisualEvaluationSuspended(packet)) return;
 	uint skeletonBytes; gAnimationSkeleton.GetDimensions(skeletonBytes);
 	// A skeleton directory is four uints per resource: parent-table byte offset,
 	// per-joint depth-table byte offset, level count, and palette-table offset.

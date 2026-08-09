@@ -19,6 +19,21 @@ namespace TerraEngine::EditorTests
 
 	void RegisterProfilerIdleOverheadTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.ProfilerIdleOverhead.MedianAndP95Gate", [](TestContext& context) {
+			const std::string window = ReadSource("Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp");
+			const std::string runner = ReadSource("Tools/Profiling/MeasureProfilerIdleOverhead.ps1");
+			context.Expect(window.find("Timing Distribution") != std::string::npos
+				&& window.find("ProfilerWindowRefreshInterval") != std::string::npos,
+				"Idle overhead measurements must use cached, throttled timing distribution updates.");
+			context.Expect(runner.find("medianDeltaPercent") != std::string::npos
+				&& runner.find("p95DeltaPercent") != std::string::npos
+				&& runner.find("median-of-paired-median-and-p95-deltas") != std::string::npos
+				&& runner.find("Abs($aggregateP95DeltaPercent)") != std::string::npos,
+				"The installed idle-overhead gate must independently enforce the median matched-pair median and p95 deltas.");
+			context.Expect(runner.find("ValidationCameraPosition = @(3.0, 0.0, 0.75)") != std::string::npos
+				&& runner.find("ValidationCameraTarget = @(0.0, 0.0, 0.75)") != std::string::npos,
+				"The single-character idle-overhead visual gate must use the proven close validation framing.");
+		});
 		registry.Add("Editor.ProfilerIdleOverhead.UsesImmutableSnapshotsWhenIdle", [](TestContext& context)
 		{
 			const std::string window = ReadSource("Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp");
@@ -38,21 +53,22 @@ namespace TerraEngine::EditorTests
 			context.Expect(service.find("Opening profiler capture") != std::string::npos && service.find("Loaded capture") != std::string::npos, "Selected-session loading must remain an explicit completed-capture transition.");
 		});
 
-		registry.Add("Editor.ProfilerIdleOverhead.UsesEditorWallDeltaWithoutRecording", [](TestContext& context)
+		registry.Add("Editor.ProfilerIdleOverhead.UsesEngineCpuWithoutRecording", [](TestContext& context)
 		{
 			const std::string automation = ReadSource("Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp");
-			const std::string editorSystem = ReadSource("Editor/TerraEngine-Editor/Core/EditorSystem.cpp");
+			const std::string engine = ReadSource("Engine/Core/MainEngine.cpp");
 			const std::string scheduler = ReadSource("Engine/Core/Scheduling/SystemScheduler.cpp");
 			const std::string harness = ReadSource("Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
-			context.Expect(automation.find("editorFrameTimeMs") != std::string::npos
-				&& editorSystem.find("ImGui::GetIO().DeltaTime") != std::string::npos
-				&& editorSystem.find("EditorProfilerTiming") != std::string::npos,
-				"Idle-overhead automation must expose the editor host wall delta rather than game-only profiler timing.");
+			context.Expect(automation.find("engineCpuTimeMs") != std::string::npos
+				&& engine.find("BeginLatestEngineFrameTiming") != std::string::npos
+				&& engine.find("PublishLatestEngineFrameTiming") != std::string::npos,
+				"Idle-overhead automation must expose Engine::Update timing without requiring an active capture.");
 			context.Expect(scheduler.find("{ \"EditorProfilerTiming\"") != std::string::npos,
 				"The profiler timing resource must be registered so installed editor startup validation succeeds.");
 			context.Expect(harness.find("profilerState = 'idle'") != std::string::npos
-				&& harness.find("timingSource = 'ImGuiIO.DeltaTime'") != std::string::npos,
-				"The installed harness must measure the window while profiler recording remains idle.");
+				&& harness.find("timingSource = 'Engine::Update editor-excluded wall duration'") != std::string::npos
+				&& harness.find("hostFrameTiming") != std::string::npos,
+				"The installed harness must gate Engine CPU while retaining host-frame timing as diagnostic context.");
 		});
 
 		registry.Add("Editor.ProfilerIdleOverhead.AttributesWindowCpuWorkSeparately", [](TestContext& context)

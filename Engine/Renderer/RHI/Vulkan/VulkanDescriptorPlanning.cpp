@@ -15,7 +15,10 @@ namespace TerraEngine::Renderer::Vulkan {
 		[[nodiscard]] bool ValidatePlanRecords(const Animation::GpuAnimationPlan& plan)
 		{
 			if(plan.generation == 0U) return false;
-			for(const Animation::GpuAnimationDispatchCommand& command : plan.dispatchCommands) {
+			for(std::size_t commandIndex = 0U;
+				commandIndex < plan.DispatchCommands().size(); ++commandIndex) {
+				const Animation::GpuAnimationDispatchCommand command =
+					plan.ResolvedDispatchCommand(commandIndex);
 				if(command.groupCountX == 0U || command.groupCountX > Animation::kGpuAnimationMaximumGroupsX
 					|| command.pushConstants.planGeneration != plan.generation
 					|| !Animation::IsGpuAnimationStageValueValid(command.pushConstants.stage)) return false;
@@ -24,19 +27,20 @@ namespace TerraEngine::Renderer::Vulkan {
 		}
 	}
 
-	DescriptorBindingPlan BuildDescriptorBindingPlan(const RenderFrameSnapshot& snapshot, std::uint32_t viewId)
+	DescriptorBindingPlan BuildDescriptorBindingPlan(
+		const RenderFramePublication& publication, std::uint32_t viewId)
 	{
 		DescriptorBindingPlan plan;
-		plan.frameId = snapshot.frameId;
+		plan.frameId = publication.frameId;
 		plan.viewId = viewId;
-		plan.records.reserve(snapshot.materials.size() + snapshot.textures.size());
-		for (const RenderFrameResourceRecord& material : snapshot.materials)
+		plan.records.reserve(publication.resourcePreparation.records.size());
+		for (const RenderResourcePreparationRecord& resource :
+			publication.resourcePreparation.records)
 		{
-			plan.records.push_back("material:" + TerraEngine::ToHexString(material.resourceId));
-		}
-		for (const RenderFrameResourceRecord& texture : snapshot.textures)
-		{
-			plan.records.push_back("texture:" + TerraEngine::ToHexString(texture.resourceId));
+			// Type-specific descriptor layouts belong to the persistent packet
+			// template. This common table only establishes one stable resource row.
+			plan.records.push_back("resource:" + TerraEngine::ToHexString(
+				resource.resourceId));
 		}
 		plan.fallbackReason = plan.coordinatorOwnedAllocator ? "Descriptor allocator mutation remains coordinator-owned." : "";
 		return plan;
@@ -46,7 +50,7 @@ namespace TerraEngine::Renderer::Vulkan {
 	{
 		VulkanAnimationDescriptorSetPlan output;
 		output.planGeneration = plan.generation;
-		output.hasWork = !plan.dispatchCommands.empty();
+		output.hasWork = !plan.DispatchCommands().empty();
 		if(!output.hasWork) {
 			// A zero-work animation frame intentionally changes no Vulkan state.
 			output.valid = true;
@@ -70,9 +74,9 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::uint64_t generationBytes = 0U;
 		std::uint64_t packetBytes = 0U;
 		std::uint64_t dispatchBytes = 0U;
-		if(!AddBytes(0U, plan.generationRecords.size(), sizeof(Animation::GpuAnimationGenerationRecord), generationBytes)
-			|| !AddBytes(0U, plan.workPackets.size(), sizeof(Animation::GpuAnimationWorkPacket), packetBytes)
-			|| !AddBytes(0U, plan.dispatchRecords.size(), sizeof(Animation::GpuAnimationDispatchRecord), dispatchBytes)) {
+		if(!AddBytes(0U, plan.GenerationRecordCount(), sizeof(Animation::GpuAnimationGenerationRecord), generationBytes)
+			|| !AddBytes(0U, plan.WorkPackets().size(), sizeof(Animation::GpuAnimationWorkPacket), packetBytes)
+			|| !AddBytes(0U, plan.DispatchRecords().size(), sizeof(Animation::GpuAnimationDispatchRecord), dispatchBytes)) {
 			output.rejectionReason = "Animation frame-upload range overflows uint64.";
 			return output;
 		}
@@ -95,7 +99,7 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::uint64_t morphBytes = 0U;
 		std::uint64_t boundsBytes = 0U;
 		std::uint64_t diagnosticBytes = 0U;
-		for(const Animation::GpuAnimationWorkPacket& packet : plan.workPackets) {
+		for(const Animation::GpuAnimationWorkPacket& packet : plan.WorkPackets()) {
 			auto accumulate = [](std::uint64_t offset, std::uint64_t count, std::uint64_t stride, std::uint64_t& total) {
 				std::uint64_t candidate = 0U;
 				return AddBytes(offset, count, stride, candidate) && (total = std::max(total, candidate), true);
@@ -120,6 +124,118 @@ namespace TerraEngine::Renderer::Vulkan {
 		configure(Binding::Diagnostics, VulkanAnimationDescriptorAccess::ReadWrite, VulkanAnimationDescriptorSource::ComputeOutput, diagnosticBytes);
 		output.valid = true;
 		return output;
+	}
+
+	bool BuildVulkanAnimationComputeUploadPlan(
+		const Animation::GpuAnimationPlan& plan,
+		VulkanAnimationComputeUploadPlan& output) noexcept
+	{
+		output.topologyReused = false;
+		const bool canReuseTopology = output.valid
+			&& plan.retainedStaticPlan
+			&& output.retainedStaticPlan == plan.retainedStaticPlan
+			&& output.compactSourcePacketIndices.size() == output.workPackets.size()
+			&& output.generationRecords.size() == output.workPackets.size()
+			&& output.dispatchRecords.size() == plan.DispatchRecords().size();
+		if(canReuseTopology) {
+			// Validate every dynamic source before modifying the retained slot. Pointer
+			// identity proves the packet/dispatch layout, while these checks prevent a
+			// malformed generation publication from partially replacing the last-good
+			// upload plan.
+			for(const std::uint32_t sourcePacketIndex
+				: output.compactSourcePacketIndices) {
+				if(sourcePacketIndex >= plan.WorkPackets().size()) return false;
+				const Animation::GpuAnimationWorkPacket& sourcePacket =
+					plan.WorkPackets()[sourcePacketIndex];
+				if(sourcePacket.generationRecordIndex
+					>= plan.GenerationRecordCount()) return false;
+			}
+			for(std::size_t compactIndex = 0U;
+				compactIndex < output.compactSourcePacketIndices.size(); ++compactIndex) {
+				const std::uint32_t sourcePacketIndex =
+					output.compactSourcePacketIndices[compactIndex];
+				const Animation::GpuAnimationWorkPacket& sourcePacket =
+					plan.WorkPackets()[sourcePacketIndex];
+				Animation::GpuAnimationWorkPacket compactPacket =
+					plan.ResolvedWorkPacket(sourcePacketIndex);
+				compactPacket.generationRecordIndex =
+					static_cast<std::uint32_t>(compactIndex);
+				output.workPackets[compactIndex] = compactPacket;
+				output.generationRecords[compactIndex] =
+					plan.GenerationRecord(sourcePacket.generationRecordIndex);
+			}
+			output.topologyReused = true;
+			return true;
+		}
+
+		output.valid = false;
+		output.generationRecords.clear();
+		output.workPackets.clear();
+		output.dispatchRecords.clear();
+		output.packetRemapScratch.clear();
+		output.compactSourcePacketIndices.clear();
+		output.retainedStaticPlan.reset();
+		if(plan.generation == 0U || plan.DispatchRecords().empty()
+			|| plan.WorkPackets().empty() || plan.GenerationRecordCount() == 0U) return false;
+
+		try {
+			constexpr std::uint32_t invalidIndex =
+				std::numeric_limits<std::uint32_t>::max();
+			output.packetRemapScratch.assign(plan.WorkPackets().size(), invalidIndex);
+			const std::size_t maximumSourceCount = std::min(
+				plan.WorkPackets().size(), plan.DispatchRecords().size());
+			output.generationRecords.reserve(maximumSourceCount);
+			output.workPackets.reserve(maximumSourceCount);
+			output.dispatchRecords.reserve(plan.DispatchRecords().size());
+			output.compactSourcePacketIndices.reserve(maximumSourceCount);
+
+			for(const Animation::GpuAnimationDispatchRecord& sourceDispatch
+				: plan.DispatchRecords()) {
+				if(sourceDispatch.workPacketIndex >= plan.WorkPackets().size()) return false;
+				const Animation::GpuAnimationWorkPacket& sourcePacket =
+					plan.WorkPackets()[sourceDispatch.workPacketIndex];
+				if(sourcePacket.generationRecordIndex >= plan.GenerationRecordCount()
+					|| sourceDispatch.generationRecordIndex
+						!= sourcePacket.generationRecordIndex
+					|| sourceDispatch.stableInstanceId != sourcePacket.stableInstanceId) {
+					return false;
+				}
+
+				std::uint32_t compactPacketIndex =
+					output.packetRemapScratch[sourceDispatch.workPacketIndex];
+				if(compactPacketIndex == invalidIndex) {
+					if(output.workPackets.size()
+						>= static_cast<std::size_t>(invalidIndex)) return false;
+					compactPacketIndex = static_cast<std::uint32_t>(
+						output.workPackets.size());
+					output.packetRemapScratch[sourceDispatch.workPacketIndex] =
+						compactPacketIndex;
+					Animation::GpuAnimationWorkPacket compactPacket =
+						plan.ResolvedWorkPacket(sourceDispatch.workPacketIndex);
+					compactPacket.generationRecordIndex = compactPacketIndex;
+					output.generationRecords.push_back(
+						plan.GenerationRecord(sourcePacket.generationRecordIndex));
+					output.workPackets.push_back(compactPacket);
+					output.compactSourcePacketIndices.push_back(
+						sourceDispatch.workPacketIndex);
+				}
+
+				Animation::GpuAnimationDispatchRecord compactDispatch = sourceDispatch;
+				compactDispatch.workPacketIndex = compactPacketIndex;
+				compactDispatch.generationRecordIndex = compactPacketIndex;
+				output.dispatchRecords.push_back(compactDispatch);
+			}
+		} catch(...) {
+			// Scratch allocation failure rejects this backend candidate before any
+			// mapped buffer is changed; the prior frame-slot contents remain private.
+			return false;
+		}
+		output.valid = !output.workPackets.empty()
+			&& output.generationRecords.size() == output.workPackets.size()
+			&& output.compactSourcePacketIndices.size() == output.workPackets.size()
+			&& output.dispatchRecords.size() == plan.DispatchRecords().size();
+		if(output.valid) output.retainedStaticPlan = plan.retainedStaticPlan;
+		return output.valid;
 	}
 
 	bool CanReuseVulkanAnimationResidentPayloadUpload(

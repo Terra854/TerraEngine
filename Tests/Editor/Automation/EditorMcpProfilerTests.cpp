@@ -219,6 +219,104 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(std::uint64_t(30u), summary.workVolumes.publishedBodies, "Work-volume summary should preserve the published-body count.");
 		});
 
+		registry.Add("Editor.MCP.Profiler.FramePublicationAggregateKeepsLanesAvailabilityAndConservation", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+			auto evidenceFor = [](std::uint64_t availabilityMask,
+				const std::array<std::uint64_t, 8U>& timings) {
+				ProfilerFramePublicationEvidence evidence;
+				evidence.availabilityMask = availabilityMask;
+				evidence.disjointTimingNanoseconds = timings;
+				return evidence;
+			};
+
+			ProfilerFrameRecord complete;
+			complete.frameIndex = 1U;
+			complete.durationMs = 10.0;
+			complete.framePublication = evidenceFor(0x7fU,
+				{1'000'000U, 1'000'000U, 1'000'000U, 1'000'000U,
+					1'000'000U, 1'000'000U, 0U, 4'000'000U});
+			ProfilerFrameRecord missing;
+			missing.frameIndex = 2U;
+			missing.durationMs = 20.0;
+			ProfilerFrameRecord dynamicUnavailable;
+			dynamicUnavailable.frameIndex = 3U;
+			dynamicUnavailable.durationMs = 8.0;
+			dynamicUnavailable.framePublication = evidenceFor(0x7dU,
+				{1'000'000U, 999'000U, 1'000'000U, 1'000'000U,
+					1'000'000U, 1'000'000U, 0U, 2'000'000U});
+
+			const nlohmann::json aggregate =
+				EditorAutomationService::SummarizeFramePublicationEvidence(
+					{complete, missing, dynamicUnavailable});
+			context.Expect(aggregate.value("available", false),
+				"A capture with publication records should report aggregate availability.");
+			context.ExpectEqual(std::uint64_t(2U), aggregate.value("evidenceFrameCount", 0U),
+				"Only frames that carried optional publication evidence should count as measured.");
+			context.ExpectEqual(std::uint64_t(1U), aggregate.value("missingEvidenceFrameCount", 0U),
+				"Frames without publication evidence must remain distinguishable from zero-time frames.");
+			context.ExpectEqual(std::uint64_t(0x7fU), aggregate.value("availabilityMaskUnion", 0U),
+				"The union should retain every lane observed during the capture.");
+			context.ExpectEqual(std::uint64_t(0x7dU), aggregate.value("availabilityMaskIntersection", 0U),
+				"The intersection should expose a lane that was unavailable in one measured frame.");
+
+			const nlohmann::json& lanes = aggregate["lanes"];
+			context.ExpectEqual(std::size_t(7U), lanes.size(),
+				"Automation should expose all seven public disjoint lanes, excluding the reserved slot.");
+			context.ExpectEqual(std::string("persistent_state"), lanes[0].value("id", std::string{}),
+				"The first aggregate lane should retain the persistent-state identity.");
+			context.ExpectEqual(std::string("uninstrumented_remainder"), lanes[6].value("id", std::string{}),
+				"The final aggregate lane should expose the explicit profiler-owned remainder.");
+			context.ExpectEqual(std::uint64_t(1U), lanes[1].value("availableFrameCount", 0U),
+				"A masked-out dynamic lane must not be folded into an observed zero duration.");
+			context.ExpectEqual(std::uint64_t(2U), lanes[1].value("unavailableFrameCount", 0U),
+				"Missing evidence and an unavailable lane should both remain visible to automation.");
+
+			const nlohmann::json& conservation = aggregate["conservation"];
+			context.ExpectEqual(std::uint64_t(1U), conservation.value("eligibleFrameCount", 0U),
+				"Conservation should evaluate only frames with all seven public lanes available.");
+			context.ExpectEqual(std::uint64_t(1U), conservation.value("conservedFrameCount", 0U),
+				"The known six phases plus explicit remainder should reconcile to the full frame clock.");
+			context.ExpectEqual(std::uint64_t(4'000'000U), conservation.value("totalRemainderNanoseconds", 0U),
+				"The aggregate should preserve the uninstrumented remainder instead of hiding it in a total.");
+			context.ExpectEqual(std::uint64_t(0U), conservation.value("maximumAbsoluteErrorNanoseconds", 1U),
+				"A reconciled frame should have no aggregate conservation error.");
+		});
+
+		registry.Add("Editor.MCP.Profiler.FramePublicationAggregateExcludesIncompleteFramesFromConservation", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+			ProfilerFramePublicationEvidence evidence;
+			evidence.availabilityMask = 0x7fU;
+			evidence.disjointTimingNanoseconds = {
+				1'000'000U, 1'000'000U, 1'000'000U, 1'000'000U,
+				1'000'000U, 1'000'000U, 0U, 4'000'000U};
+
+			ProfilerFrameRecord completed;
+			completed.frameIndex = 1U;
+			completed.durationMs = 10.0;
+			completed.complete = true;
+			completed.framePublication = evidence;
+			ProfilerFrameRecord interrupted = completed;
+			interrupted.frameIndex = 2U;
+			interrupted.complete = false;
+
+			const nlohmann::json aggregate =
+				EditorAutomationService::SummarizeFramePublicationEvidence({completed, interrupted});
+			context.ExpectEqual(std::uint64_t(1U), aggregate.value("completeFrameCount", 0U),
+				"The aggregate should report the complete selected frame separately.");
+			context.ExpectEqual(std::uint64_t(1U), aggregate.value("incompleteFrameCount", 0U),
+				"An interrupted capture tail must remain visible to automation clients.");
+			context.ExpectEqual(std::uint64_t(2U), aggregate["lanes"][0].value("availableFrameCount", 0U),
+				"Incomplete frames should retain their per-lane evidence instead of being discarded.");
+
+			const nlohmann::json& conservation = aggregate["conservation"];
+			context.ExpectEqual(std::uint64_t(1U), conservation.value("eligibleFrameCount", 0U),
+				"Only the naturally completed frame should participate in conservation.");
+			context.ExpectEqual(std::uint64_t(1U), conservation.value("conservedFrameCount", 0U),
+				"The completed frame should still reconcile against the profiler-owned clock.");
+			context.ExpectEqual(std::uint64_t(10'000'000U), conservation.value("totalFrameNanoseconds", 0U),
+				"Interrupted frames must not inflate conservation frame-time totals.");
+		});
+
 		registry.Add("Editor.MCP.Profiler.NoProjectProducesUnavailableState", [](TestContext& context) {
 			EditorAutomationService service;
 			for (const std::string_view operation : {"profiler.capture.start", "profiler.capture.list"})

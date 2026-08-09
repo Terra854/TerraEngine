@@ -638,6 +638,13 @@ public:
 	{
 		return m_AnimationBindingResourceRevision.load(std::memory_order_acquire);
 	}
+	// Renderer snapshots consume this publication token at their protected frame
+	// boundary. It changes only after a mesh, material, or texture payload has
+	// replaced its cache entry, so failed reloads leave retained GPU plans valid.
+	[[nodiscard]] std::uint64_t GetRendererResourcePublicationGeneration() const noexcept
+	{
+		return m_RendererResourcePublicationGeneration.load(std::memory_order_acquire);
+	}
 	// A retained runtime generation may describe a deletion or eviction
 	// tombstone. This lightweight query distinguishes that state from an actual
 	// immutable payload without copying a potentially large clip or database.
@@ -964,6 +971,10 @@ private:
 	// Keeping this narrower than the general resource cache prevents texture and
 	// material streaming from waking the expensive binding synchronization path.
 	std::atomic_uint64_t m_AnimationBindingResourceRevision{1U};
+	// Keep renderer asset publication separate from animation bindings: textures
+	// and materials must invalidate draw preparation without waking the expensive
+	// animator binding coordinator.
+	std::atomic_uint64_t m_RendererResourcePublicationGeneration{1U};
 
 	ResourceCache<Material> materialCache;
 	ResourceCache<Mesh> meshCache;

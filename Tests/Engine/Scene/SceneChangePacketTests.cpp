@@ -21,6 +21,10 @@ namespace TerraEngine::Tests {
 
 	void RegisterSceneChangePacketTests(TestRegistry& registry)
 	{
+		registry.Add("Scene.ChangePacket.InvalidationKindsCoverPublicationDependencies", [](TestContext& context) {
+			using TerraEngine::Scene::SceneChangeKind;
+			context.Expect(static_cast<unsigned>(SceneChangeKind::Bounds) == 6U, "Change packets expose stable bounds/hierarchy/transform/component invalidation kinds.");
+		});
 		registry.Add("Engine.SceneChangePacket.PublishesExactAddedMetadataComponentTransformBoundsSets", [](TestContext& context) {
 			ObjectManager& objects = ObjectManager::instance();
 			objects.clear();

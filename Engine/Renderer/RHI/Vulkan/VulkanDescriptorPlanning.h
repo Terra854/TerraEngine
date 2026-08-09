@@ -4,7 +4,7 @@
 
 #include "Animation/Gpu/GpuAnimationPlan.h"
 #include "Renderer/Deformation/AnimatedVirtualGeometryRuntime.h"
-#include "Renderer/Graph/RenderFrameSnapshot.h"
+#include "Renderer/Graph/RenderFramePublication.h"
 #include "Core/Export.h"
 
 #include <array>
@@ -25,7 +25,10 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::string fallbackReason;
 	};
 
-	TERRAENGINE_API DescriptorBindingPlan BuildDescriptorBindingPlan(const RenderFrameSnapshot& snapshot, std::uint32_t viewId);
+	// Descriptor planning consumes only sealed resource identities. The backend
+	// never needs the worker-only scene snapshot to reserve descriptor records.
+	TERRAENGINE_API DescriptorBindingPlan BuildDescriptorBindingPlan(
+		const RenderFramePublication& publication, std::uint32_t viewId);
 
 	// The animation descriptor set is intentionally expressed without Vulkan
 	// handles. Worker preparation can validate the frozen ABI, calculate bounded
@@ -71,6 +74,29 @@ namespace TerraEngine::Renderer::Vulkan {
 	// perform no allocation, upload, descriptor mutation, or queue submission.
 	TERRAENGINE_API VulkanAnimationDescriptorSetPlan BuildVulkanAnimationDescriptorSetPlan(
 		const Animation::GpuAnimationPlan& plan);
+
+	// Shared animation evaluation retains one immutable owner packet per character
+	// for graphics identity, but compute dispatches reference only evaluation-source
+	// packets. This upload plan compacts those referenced packet/generation rows and
+	// remaps dispatch records without changing command ranges or output offsets.
+	struct VulkanAnimationComputeUploadPlan
+	{
+		std::vector<Animation::GpuAnimationGenerationRecord> generationRecords;
+		std::vector<Animation::GpuAnimationWorkPacket> workPackets;
+		std::vector<Animation::GpuAnimationDispatchRecord> dispatchRecords;
+		std::vector<std::uint32_t> packetRemapScratch;
+		// These compact source ordinals and their immutable owner let a completed
+		// frame slot refresh only generation/tick lanes. Dispatch topology is kept
+		// byte-for-byte until animation membership or cooked resources change.
+		std::vector<std::uint32_t> compactSourcePacketIndices;
+		std::shared_ptr<const Animation::GpuAnimationPlan> retainedStaticPlan;
+		bool topologyReused = false;
+		bool valid = false;
+	};
+
+	[[nodiscard]] TERRAENGINE_API bool BuildVulkanAnimationComputeUploadPlan(
+		const Animation::GpuAnimationPlan& plan,
+		VulkanAnimationComputeUploadPlan& output) noexcept;
 
 	// Resident payload objects are immutable and may be shared by every plan that
 	// references the same cooked animation data. Reuse is valid only when the

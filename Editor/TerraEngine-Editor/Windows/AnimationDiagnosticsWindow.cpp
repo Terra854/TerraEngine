@@ -87,7 +87,8 @@ namespace {
 	struct CopiedRuntimeDiagnostics final {
 		AnimationProductionIntegrationSnapshot integration;
 		std::optional<AnimationDetailedDiagnosticsSnapshot> detailed;
-		std::vector<std::shared_ptr<const PublishedAnimatorPose>> poses;
+		std::shared_ptr<const AnimationAuthorityFrame> authority;
+		std::size_t authorityRowCount = 0U;
 	};
 
 	AnimationDiagnosticsStatus CollectRuntimeRows(
@@ -133,11 +134,12 @@ namespace {
 			std::numeric_limits<float>::lowest()};
 		bool hasBounds = false;
 		AnimationSystem& animation = AnimationSystem::Instance();
-		for(const std::shared_ptr<const PublishedAnimatorPose>& publication : runtime.poses) {
-			if(!publication) continue;
-			if(publication->safePose) ++safePoseCount;
-			if(publication->snapshot && publication->snapshot->pose) {
-				const PoseBuffer& pose = *publication->snapshot->pose;
+		if(runtime.authority && runtime.authority->pages) for(const auto& page : *runtime.authority->pages) {
+			if(!page) continue;
+			for(const AnimationAuthorityRow& publication : page->rows) {
+			if(publication.safeFallback) ++safePoseCount;
+			if(publication.snapshot && publication.snapshot->pose) {
+				const PoseBuffer& pose = *publication.snapshot->pose;
 				publishedJointCount += pose.Layout().jointCount;
 				publishedMorphCount += pose.Layout().morphCount;
 				publishedCurveCount += pose.Layout().curveCount;
@@ -155,37 +157,38 @@ namespace {
 			}
 
 			proceduralResultCount += CountPublishedRecords<NativeAnimationProceduralResultSnapshot>(
-				publication->animator,
+				publication.key.Handle(),
 				[&animation](AnimatorInstanceHandle animator,
 					std::span<NativeAnimationProceduralResultSnapshot> destination,
 					std::uint32_t& requiredCount) {
 					return animation.CopyProceduralResults(animator, destination, requiredCount);
 				});
 			retargetSnapshotCount += CountPublishedRecords<NativeAnimationRetargetSnapshot>(
-				publication->animator,
+				publication.key.Handle(),
 				[&animation](AnimatorInstanceHandle animator,
 					std::span<NativeAnimationRetargetSnapshot> destination,
 					std::uint32_t& requiredCount) {
 					return animation.CopyRetargetSnapshots(animator, destination, requiredCount);
 				});
 			motionMatchSnapshotCount += CountPublishedRecords<NativeAnimationMotionMatchSnapshot>(
-				publication->animator,
+				publication.key.Handle(),
 				[&animation](AnimatorInstanceHandle animator,
 					std::span<NativeAnimationMotionMatchSnapshot> destination,
 					std::uint32_t& requiredCount) {
 					return animation.CopyMotionMatchSnapshots(animator, destination, requiredCount);
 				});
 			ragdollSnapshotCount += CountPublishedRecords<NativeAnimationRagdollSnapshot>(
-				publication->animator,
+				publication.key.Handle(),
 				[&animation](AnimatorInstanceHandle animator,
 					std::span<NativeAnimationRagdollSnapshot> destination,
 					std::uint32_t& requiredCount) {
 					return animation.CopyRagdollSnapshots(animator, destination, requiredCount);
 				});
 		}
+		}
 
 		append(AnimationDiagnosticsCategory::Pose, "Immutable pose publications",
-			FormatCount(runtime.poses.size()) + " poses, " + FormatCount(publishedJointCount)
+			FormatCount(runtime.authorityRowCount) + " poses, " + FormatCount(publishedJointCount)
 			+ " joints, " + FormatCount(publishedMorphCount) + " morphs, "
 			+ FormatCount(publishedCurveCount) + " curves, " + FormatCount(safePoseCount)
 			+ " safe-pose fallbacks");
@@ -279,7 +282,12 @@ AnimationDiagnosticsWindow::RefreshPublishedSnapshots(bool rendererAvailable) no
 		CopiedRuntimeDiagnostics runtime;
 		runtime.integration = AnimationSystem::Instance().ReadProductionIntegrationSnapshot();
 		runtime.detailed = AcquireAnimationDetailedDiagnosticsSnapshot();
-		AnimationSystem::Instance().CopyPublishedAnimatorPoses(runtime.poses);
+		runtime.authority = AnimationSystem::Instance().LoadPublishedAuthorityFrame();
+		if(runtime.authority && runtime.authority->pages) {
+			for(const auto& page : *runtime.authority->pages) {
+				if(page) runtime.authorityRowCount += page->rows.size();
+			}
+		}
 		const std::uint64_t sourceGeneration = std::max<std::uint64_t>(1U,
 			std::max(summary->frameIndex,
 				AnimationSystem::Instance().AuthorityPublicationGeneration()));

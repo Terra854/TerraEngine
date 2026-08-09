@@ -18,6 +18,9 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	deviceLost = false;
 	deviceLostLogged = false;
 	++renderSessionGeneration;
+	// A newly initialized Vulkan device never shares presentation-compatible
+	// objects with its predecessor, even if an embedding host reuses this context.
+	++backendResourceGeneration;
 	{
 		std::lock_guard<std::mutex> lock(statsMutex);
 		latestRendererRecoverySnapshot = TerraEngine::Renderer::MakeActiveRecoverySnapshot(renderSessionGeneration);
@@ -3466,6 +3469,11 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	}
 
 	editorCompletionTracker.SetPresentationGeneration(presentationLifecycle.Generation());
+	// The complete candidate is now active. Advance only after every dependent
+	// object has been created, so a failed candidate leaves existing publications
+	// valid and the next frame can retry against the prior generation.
+	++backendResourceGeneration;
+	activeRenderFramePublication.reset();
 	RetirePresentationResourceBundle(std::move(activeBundle), presentationLifecycle.Generation());
 	CollectCompletedPresentationResourceBundles();
 	if (activeVrs.view != VK_NULL_HANDLE) activeVrs.Destroy(device, allocator);

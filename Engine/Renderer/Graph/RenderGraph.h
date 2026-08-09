@@ -252,15 +252,6 @@ namespace TerraEngine::Renderer {
 		std::vector<RenderGraphValidationDiagnostic> diagnostics;
 	};
 
-	struct RenderWorkPacketPlan
-	{
-		std::vector<RenderWorkPacket> packets;
-		std::size_t workerPacketCount = 0u;
-		std::size_t serialPacketCount = 0u;
-		std::size_t skippedPacketCount = 0u;
-		std::vector<std::string> serializedReasons;
-	};
-
 	TERRAENGINE_API std::string ToString(RenderWorkPolicy policy);
 	TERRAENGINE_API std::string ToString(RenderPacketExecutionPolicy policy);
 	TERRAENGINE_API std::string ToString(RenderFailurePolicy policy);
@@ -277,6 +268,5 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API std::uint64_t HashPreparedDrawPacketSignature(const PreparedDrawPacketSignature& signature);
 	TERRAENGINE_API RenderGraphValidationResult ValidateRenderGraph(const std::vector<RenderPassNode>& passes);
 	TERRAENGINE_API std::vector<RenderPassNode> BuildDefaultRenderPasses(const RenderFrameSnapshot& snapshot, const BackendCapabilityProfile& capabilities);
-	TERRAENGINE_API RenderWorkPacketPlan BuildRenderWorkPacketPlan(const RenderFrameSnapshot& snapshot, const std::vector<RenderPassNode>& passes, const BackendCapabilityProfile& capabilities);
 
 }

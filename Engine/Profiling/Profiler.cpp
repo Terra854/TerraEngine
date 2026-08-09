@@ -46,6 +46,59 @@ std::string CurrentThreadLabel()
 	return stream.str();
 }
 
+// MergeWorkloadWallTimeNanoseconds converts partition-level scheduler evidence
+// into one coordinator wall span. Absolute endpoints are clipped to the current
+// profiler frame, then overlapping workers are unioned instead of summed.
+std::uint64_t MergeWorkloadWallTimeNanoseconds(
+	const std::vector<WorkloadExecutionRecord>& records,
+	std::initializer_list<std::string_view> workloadNames,
+	std::uint64_t frameBeginNanoseconds,
+	std::uint64_t frameEndNanoseconds)
+{
+	std::vector<std::pair<std::uint64_t, std::uint64_t>> intervals;
+	for (const WorkloadExecutionRecord& record : records)
+	{
+		const bool selected = std::any_of(workloadNames.begin(), workloadNames.end(),
+			[&record](const std::string_view name)
+			{
+				return record.workloadName == name;
+			});
+		if (!selected || record.runStartNanoseconds == 0U
+			|| record.runEndNanoseconds <= record.runStartNanoseconds)
+		{
+			continue;
+		}
+		const std::uint64_t begin = std::max(frameBeginNanoseconds,
+			record.runStartNanoseconds);
+		const std::uint64_t end = std::min(frameEndNanoseconds,
+			record.runEndNanoseconds);
+		if (end > begin)
+		{
+			intervals.emplace_back(begin, end);
+		}
+	}
+	std::sort(intervals.begin(), intervals.end());
+	std::uint64_t total = 0U;
+	if (intervals.empty())
+	{
+		return total;
+	}
+	std::uint64_t mergedBegin = intervals.front().first;
+	std::uint64_t mergedEnd = intervals.front().second;
+	for (std::size_t index = 1U; index < intervals.size(); ++index)
+	{
+		if (intervals[index].first <= mergedEnd)
+		{
+			mergedEnd = std::max(mergedEnd, intervals[index].second);
+			continue;
+		}
+		total += mergedEnd - mergedBegin;
+		mergedBegin = intervals[index].first;
+		mergedEnd = intervals[index].second;
+	}
+	return total + mergedEnd - mergedBegin;
+}
+
 // CalculateSampleCoverageMs merges nested and overlapping samples before
 // reporting a total. Grouping by thread produces CPU work (parallel lanes add),
 // while one shared group produces elapsed wall coverage for the frame.
@@ -981,6 +1034,47 @@ void Profiler::EndFrame()
 	// portion of the frame. Editor UI time is internal subtraction bookkeeping.
 	currentFrame->durationMs =
 		NanosecondsToMilliseconds(wallDurationNanoseconds - excludedEditorNanoseconds);
+	if(currentFrame->framePublication.has_value())
+	{
+		// Producers report disjoint known spans. The profiler owns the complete
+		// frame clock, so it fills the final bucket with the explicit uninstrumented
+		// remainder instead of pretending missing work cost zero.
+		auto& buckets = currentFrame->framePublication->disjointTimingNanoseconds;
+		const std::uint64_t engineNanoseconds = static_cast<std::uint64_t>(
+			wallDurationNanoseconds - excludedEditorNanoseconds);
+		const std::uint64_t frameBegin = static_cast<std::uint64_t>(
+			std::max<std::int64_t>(0, frameStartNanoseconds));
+		const std::uint64_t frameEnd = frameBegin + engineNanoseconds;
+		// Animation partitions may execute in parallel. Their scheduler endpoints
+		// are merged into wall coverage once; worker CPU sums remain nested detail.
+		buckets[3] = MergeWorkloadWallTimeNanoseconds(
+			workloadExecutionSnapshot,
+			{"PlanAnimationEvaluation", "FinalizeAnimationWorkPlan",
+				"EvaluateCompleteAnimation", "EvaluateCompactGpuVisualAnimation",
+				"SealAnimationAuthority", "CommitPublishedAnimationEvaluationCache"},
+			frameBegin, frameEnd);
+		const std::uint64_t animationPublicationNanoseconds =
+			MergeWorkloadWallTimeNanoseconds(
+				workloadExecutionSnapshot,
+				{"PublishAnimationAuthority", "FinalizePublishedAnimationAuthority"},
+				frameBegin, frameEnd);
+		buckets[4] = std::min(engineNanoseconds,
+			buckets[4] + std::min(animationPublicationNanoseconds,
+				engineNanoseconds - std::min(engineNanoseconds, buckets[4])));
+		std::uint64_t measuredNanoseconds = 0u;
+		for(std::size_t index = 0u; index + 1u < buckets.size(); ++index)
+		{
+			if(buckets[index] > engineNanoseconds - std::min(
+				engineNanoseconds, measuredNanoseconds))
+			{
+				measuredNanoseconds = engineNanoseconds;
+				break;
+			}
+			measuredNanoseconds += buckets[index];
+		}
+		buckets.back() = engineNanoseconds - std::min(
+			engineNanoseconds, measuredNanoseconds);
+	}
 	AddOrReplaceTimingStreamSample(*currentFrame, MakeTimingSample(
 		"engine_cpu",
 		"Engine CPU",
@@ -1315,22 +1409,28 @@ void Profiler::RecordSceneViewStages(std::span<const PerformanceStageRecord> sta
 
 bool Profiler::BeginEditorWork()
 {
+	const bool latestTimingActive = latestEngineFrameStartNanoseconds != 0;
+	if (latestTimingActive && latestEditorWorkDepth++ == 0u)
+	{
+		latestEditorWorkStartNanoseconds = SteadyNowNanoseconds();
+	}
+
 	if (!frameRecordingActive.load(std::memory_order_acquire))
 	{
-		return false;
+		return latestTimingActive;
 	}
 
 	const std::uint64_t sessionGeneration = hotPath->sessionGeneration.load(std::memory_order_acquire);
 	const std::uint64_t frameToken = hotPath->activeFrameToken.load(std::memory_order_acquire);
 	if (frameToken == 0u)
 	{
-		return false;
+		return latestTimingActive;
 	}
 
 	ProfilerThreadBuffer* buffer = AcquireThreadBuffer(*hotPath, frameToken);
 	if (!buffer)
 	{
-		return false;
+		return latestTimingActive;
 	}
 	PrepareThreadBufferForFrame(*buffer, sessionGeneration, frameToken);
 	if (buffer->editorWorkDepth++ == 0u)
@@ -1356,6 +1456,12 @@ void Profiler::EndEditorWork(bool active)
 	{
 		return;
 	}
+	if (latestEditorWorkDepth != 0u && --latestEditorWorkDepth == 0u)
+	{
+		latestExcludedEditorNanoseconds += std::max<std::int64_t>(
+			0,
+			SteadyNowNanoseconds() - latestEditorWorkStartNanoseconds);
+	}
 
 	if (t_profilerThreadBinding.owner != hotPath.get() || !t_profilerThreadBinding.buffer)
 	{
@@ -1378,6 +1484,20 @@ void Profiler::EndEditorWork(bool active)
 	const std::int64_t durationNanoseconds =
 		std::max<std::int64_t>(0, SteadyNowNanoseconds() - buffer.editorWorkStartNanoseconds);
 	hotPath->excludedEditorNanoseconds.fetch_add(durationNanoseconds, std::memory_order_relaxed);
+}
+
+void Profiler::RecordFramePublicationEvidence(const ProfilerFramePublicationEvidence& evidence)
+{
+	if (!frameRecordingActive.load(std::memory_order_acquire)
+		|| !ValidateProfilerFramePublicationEvidence(evidence))
+	{
+		return;
+	}
+	std::lock_guard<std::mutex> lock(mutex);
+	if (state == ProfilerSessionState::Recording && currentFrame.has_value())
+	{
+		currentFrame->framePublication = evidence;
+	}
 }
 
 void Profiler::RecordEditorStages(std::span<const ProfilerEditorStageTiming> stages)
@@ -1852,6 +1972,73 @@ bool Profiler::IsFrameRecordingActive() const noexcept
 std::uint64_t Profiler::GetSnapshotRevision() const noexcept
 {
 	return snapshotRevision.load(std::memory_order_acquire);
+}
+
+void Profiler::BeginLatestEngineFrameTiming() noexcept
+{
+	// Reset before sampling the start so a previous interrupted editor interval
+	// can never leak into the next host frame.
+	latestExcludedEditorNanoseconds = 0;
+	latestEditorWorkStartNanoseconds = 0;
+	latestEditorWorkDepth = 0u;
+	latestEngineFrameStartNanoseconds = SteadyNowNanoseconds();
+}
+
+void Profiler::PublishLatestEngineFrameTiming() noexcept
+{
+	const std::int64_t nowNanoseconds = SteadyNowNanoseconds();
+	if (latestEngineFrameStartNanoseconds == 0)
+	{
+		return;
+	}
+	if (latestEditorWorkDepth != 0u)
+	{
+		// Engine shutdown or an exception may interrupt the paired editor scope.
+		// Close the outer interval here so the public clock remains conservative
+		// and the next frame begins from a clean depth.
+		latestExcludedEditorNanoseconds += std::max<std::int64_t>(
+			0,
+			nowNanoseconds - latestEditorWorkStartNanoseconds);
+		latestEditorWorkDepth = 0u;
+	}
+	const std::int64_t wallNanoseconds = std::max<std::int64_t>(
+		0,
+		nowNanoseconds - latestEngineFrameStartNanoseconds);
+	const std::int64_t excludedNanoseconds = std::clamp<std::int64_t>(
+		latestExcludedEditorNanoseconds,
+		0,
+		wallNanoseconds);
+	const double durationMs = NanosecondsToMilliseconds(
+		wallNanoseconds - excludedNanoseconds);
+	latestEngineFrameStartNanoseconds = 0;
+
+	// The odd/even sequence makes the two atomic fields one coherent snapshot.
+	latestEngineFrameSequence.fetch_add(1u, std::memory_order_acq_rel);
+	latestEngineFrameDurationMs.store(durationMs, std::memory_order_relaxed);
+	latestEngineFrameSequence.fetch_add(1u, std::memory_order_release);
+}
+
+ProfilerLatestEngineFrameTiming Profiler::GetLatestEngineFrameTiming() const noexcept
+{
+	ProfilerLatestEngineFrameTiming result;
+	std::uint64_t sequence = 0u;
+	for (;;)
+	{
+		sequence = latestEngineFrameSequence.load(std::memory_order_acquire);
+		if ((sequence & 1u) != 0u)
+		{
+			continue;
+		}
+		result.durationMs = latestEngineFrameDurationMs.load(std::memory_order_relaxed);
+		if (sequence == latestEngineFrameSequence.load(std::memory_order_acquire))
+		{
+			break;
+		}
+	}
+	result.frameIndex = sequence / 2u;
+	result.valid = result.frameIndex != 0u && std::isfinite(result.durationMs)
+		&& result.durationMs >= 0.0;
+	return result;
 }
 
 // Profiler::NowMs is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

@@ -84,13 +84,26 @@ namespace TerraEngine::Scheduling {
 	inline constexpr const char kResourceAnimationRecordingSamples[] = "AnimationRecordingSamples";
 	inline constexpr const char kResourceAnimationPresentationPrepared[] = "AnimationPresentationPrepared";
 	inline constexpr const char kResourceAnimationPresentationPlan[] = "AnimationPresentationPlan";
+	// The authority root is the pre-physics gameplay publication. Presentation
+	// is a distinct post-physics product that strongly references that exact
+	// authority generation; neither name represents a compatibility path.
+	inline constexpr const char kResourceAnimationAuthorityPages[] = "AnimationAuthorityPages";
+	inline constexpr const char kResourceAnimationFrameSidecars[] = "AnimationFrameSidecars";
+	inline constexpr const char kResourceAnimationAuthorityFrame[] = "AnimationAuthorityFrame";
+	inline constexpr const char kResourceAnimationEvaluationCache[] = "AnimationEvaluationCache";
+	inline constexpr const char kResourceAnimationPresentationFrame[] = "AnimationPresentationFrame";
 
 	// Virtual geometry resource names are centralized here so RenderSystem,
 	// tests, and diagnostics all describe the same scheduler handoff. The names
 	// are plain strings because the scheduler validates declarations before any
 	// renderer-specific type system is available during startup.
 	inline constexpr const char kResourceVirtualGeometryQualityProfile[] = "VirtualGeometryQualityProfile";
-	inline constexpr const char kResourceRenderFrameSnapshot[] = "RenderFrameSnapshot";
+	inline constexpr const char kResourceSceneChangePublication[] = "SceneChangePublication";
+	inline constexpr const char kResourcePersistentRenderSceneState[] = "PersistentRenderSceneState";
+	inline constexpr const char kResourceDynamicRenderFrameState[] = "DynamicRenderFrameState";
+	inline constexpr const char kResourceRenderViewSelections[] = "RenderViewSelections";
+	inline constexpr const char kResourceRenderFramePublication[] = "RenderFramePublication";
+	inline constexpr const char kResourceProfilerFramePublicationEvidence[] = "ProfilerFramePublicationEvidence";
 	// Retained topology is immutable across compatible generations. Workers write
 	// only frame-owned sidecars and groups before protected backend publication.
 	inline constexpr const char kResourcePersistentRenderTopology[] = "PersistentRenderTopology";

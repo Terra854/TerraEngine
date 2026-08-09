@@ -1165,6 +1165,77 @@ void ProfilerWindow::DrawFrameDetails()
 		ImGui::TextDisabled("Counts are captured with this frame; grouped and fallback instances must conserve the visible population.");
 		ImGui::TreePop();
 	}
+	if (selectedFrame->framePublication.has_value()
+		&& ImGui::TreeNodeEx("Frame Publication Evidence", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		const auto& evidence = *selectedFrame->framePublication;
+		ImGui::Text("Schema %u; availability 0x%llx; views %u", evidence.schemaVersion,
+			static_cast<unsigned long long>(evidence.availabilityMask), evidence.viewCount);
+		ImGui::Text("Generations: frame %llu scene %llu topology %llu authority %llu presentation %llu",
+			static_cast<unsigned long long>(evidence.frameGeneration),
+			static_cast<unsigned long long>(evidence.sceneGeneration),
+			static_cast<unsigned long long>(evidence.topologyGeneration),
+			static_cast<unsigned long long>(evidence.authorityGeneration),
+			static_cast<unsigned long long>(evidence.presentationGeneration));
+		ImGui::Text("Outcomes: render %u animation %u rejection %u", evidence.renderOutcome,
+			evidence.animationOutcome, evidence.rejectionReason);
+		ImGui::Text("Reuse/rebuild: persistent %u/%u dynamic %u/%u authority %u/%u views %u/%u",
+			evidence.persistentReuseCount, evidence.persistentRebuildCount,
+			evidence.dynamicReuseCount, evidence.dynamicRebuildCount,
+			evidence.authorityReuseCount, evidence.authorityRebuildCount,
+			evidence.viewSelectionReuseCount, evidence.viewSelectionRebuildCount);
+		// Only coordinator-owned wall spans appear in this table. Worker samples stay
+		// available in the hierarchy as explanatory detail, but are never added to
+		// their enclosing phase because parallel ranges would inflate frame time.
+		constexpr std::array<const char*, 7U> kTimingNames{
+			"Persistent state maintenance",
+			"Dynamic refresh",
+			"View selection",
+			"Animation evaluation",
+			"Protected publication",
+			"Backend preparation",
+			"Uninstrumented remainder"
+		};
+		constexpr std::array<std::size_t, 7U> kTimingIndices{0U, 1U, 2U, 3U, 4U, 5U, 7U};
+		const double frameNanoseconds = std::max(0.0, selectedFrame->durationMs * 1000000.0);
+		std::uint64_t attributedNanoseconds = 0U;
+		if (ImGui::BeginTable("ProfilerFramePublicationDisjointTimings", 3,
+			ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+		{
+			ImGui::TableSetupColumn("Disjoint phase");
+			ImGui::TableSetupColumn("Wall time", ImGuiTableColumnFlags_WidthFixed, 100.0F);
+			ImGui::TableSetupColumn("% frame", ImGuiTableColumnFlags_WidthFixed, 80.0F);
+			ImGui::TableHeadersRow();
+			for (std::size_t row = 0U; row < kTimingNames.size(); ++row)
+			{
+				const std::uint64_t nanoseconds =
+					evidence.disjointTimingNanoseconds[kTimingIndices[row]];
+				attributedNanoseconds += nanoseconds;
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted(kTimingNames[row]);
+				ImGui::TableSetColumnIndex(1);
+				ImGui::Text("%.3f ms", static_cast<double>(nanoseconds) / 1000000.0);
+				ImGui::TableSetColumnIndex(2);
+				ImGui::Text("%.1f%%", frameNanoseconds > 0.0
+					? static_cast<double>(nanoseconds) * 100.0 / frameNanoseconds : 0.0);
+			}
+			ImGui::EndTable();
+		}
+		const double reconciliationErrorPercent = frameNanoseconds > 0.0
+			? std::abs(static_cast<double>(attributedNanoseconds) - frameNanoseconds)
+				* 100.0 / frameNanoseconds : 0.0;
+		ImGui::Text("Reconciliation: %.3f / %.3f ms (error %.2f%%)",
+			static_cast<double>(attributedNanoseconds) / 1000000.0,
+			selectedFrame->durationMs, reconciliationErrorPercent);
+		if (evidence.disjointTimingNanoseconds[6] != 0U)
+		{
+			ImGui::TextColored(ImVec4(1.0F, 0.45F, 0.25F, 1.0F),
+				"Invalid reserved timing lane: %.3f ms",
+				static_cast<double>(evidence.disjointTimingNanoseconds[6]) / 1000000.0);
+		}
+		ImGui::TreePop();
+	}
 
 	const ScriptingSystem::ScriptingFrameResult& scriptingResult = ScriptingSystem::Instance().GetLatestScriptingFrameResult();
 	if (scriptingResult.frameId != 0 && ImGui::TreeNodeEx("Scripting Dispatch Counters", ImGuiTreeNodeFlags_DefaultOpen))

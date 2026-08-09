@@ -18,7 +18,7 @@ void main(uint3 id : SV_DispatchThreadID)
 	TeAnimationGpuDispatchRecord dispatch; TeAnimationGpuWorkPacket packet; uint joint;
 	if (!TeResolveWork(id.x, TE_ANIMATION_GPU_STAGE_BLEND, dispatch, packet, joint)) return;
 	if (!TeValidatePacket(dispatch, packet, joint, TE_ANIMATION_GPU_STAGE_BLEND) || joint >= packet.jointCount) return;
-	if ((packet.flags & TE_ANIMATION_GPU_WORK_SUSPEND_VISUAL_EVALUATION) != 0u) return;
+	if (TeVisualEvaluationSuspended(packet)) return;
 	TeAnimationPose pose; if (!TeLoadLocalPose(packet.localPoseOffsetBytes.x + joint * 48u, pose)) { pose = TeIdentityPose(); TeReport(dispatch, packet, TE_ANIMATION_GPU_DIAGNOSTIC_BIND_POSE_FALLBACK, joint, 0u); }
 	uint programBytes; gAnimationProgram.GetDimensions(programBytes); const uint header = packet.programResourceIndex * 64u + 16u;
 	if (!TeRangeValid(programBytes, header, 4u)) { TeReport(dispatch, packet, TE_ANIMATION_GPU_DIAGNOSTIC_MISSING_RESOURCE, joint, 0u); TeStoreLocalPose(packet.localPoseOffsetBytes.x + joint * 48u, pose); return; }

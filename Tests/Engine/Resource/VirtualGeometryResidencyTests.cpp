@@ -195,12 +195,12 @@ namespace TerraEngine::Tests
 			};
 
 			const std::vector<Resource::VirtualGeometryPageNeedInput> inputs =
-				Resource::BuildVirtualGeometryPageNeedInputsFromSelectionStates({ state }, { catalog }, 2.0f);
+				Resource::BuildVirtualGeometryPageNeedInputsFromSelectionStates(state.pageNeeds, { catalog }, 2.0f);
 			const std::vector<Resource::VirtualGeometryPageRequestPacket> packets =
 				Resource::BuildVirtualGeometryPageRequestPackets(inputs, Resource::MakeDefaultStreamingPolicy());
 
 			context.ExpectEqual(static_cast<std::size_t>(1u), inputs.size(), "Render selection snapshots should become page need inputs.");
-			context.ExpectEqual(std::string("Game:2"), inputs.front().viewId, "Snapshot adapter should preserve view ownership in a stable string.");
+			context.ExpectEqual(std::string("published-selection"), inputs.front().viewId, "Published page selections should use a stable worker-owned request identity.");
 			context.ExpectEqual(static_cast<std::size_t>(2u), packets.size(), "Async handoff should request desired and fallback pages when neither is resident.");
 			context.Expect(packets.front().fallbackRequest, "Fallback request should sort first because it protects visibility.");
 			context.ExpectEqual(0u, packets.front().pageId, "Fallback packet should target the fallback page.");

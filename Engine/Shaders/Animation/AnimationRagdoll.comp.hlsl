@@ -108,7 +108,7 @@ void main(uint3 id : SV_DispatchThreadID)
 	if (!TeResolveWork(id.x, TE_ANIMATION_GPU_STAGE_RAGDOLL, dispatch, packet, joint)) return;
 	if (!TeValidatePacket(dispatch, packet, joint, TE_ANIMATION_GPU_STAGE_RAGDOLL)
 		|| joint >= packet.jointCount) return;
-	if ((packet.flags & TE_ANIMATION_GPU_WORK_SUSPEND_VISUAL_EVALUATION) != 0u) return;
+	if (TeVisualEvaluationSuspended(packet)) return;
 	if ((packet.flags & TE_ANIMATION_GPU_WORK_ALLOW_RAGDOLL_VISUAL) == 0u
 		|| (packet.flags & TE_ANIMATION_GPU_WORK_DETERMINISTIC_REFERENCE) != 0u) return;
 

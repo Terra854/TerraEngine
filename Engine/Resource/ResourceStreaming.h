@@ -23,7 +23,7 @@
 #include "Core/Export.h"
 #include "Core/Scheduling/FrameWorkload.h"
 #include "File Formats/TerraEngineMeshFile.h"
-#include "Renderer/Graph/RenderFrameSnapshot.h"
+#include "Renderer/VirtualGeometry/Selection/RenderViewSelectionData.h"
 #include "Utilities/UUID.h"
 
 namespace TerraEngine::Resource
@@ -468,7 +468,7 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API std::int32_t PriorityClassBias(StreamingPriorityClass priorityClass);
 	TERRAENGINE_API bool ValidatePreloadRule(const PreloadRule& rule, std::string* reason = nullptr);
 	TERRAENGINE_API std::vector<StreamingNeed> EvaluatePreloadRules(const std::vector<PreloadRule>& rules, double nowSeconds = 0.0);
-	TERRAENGINE_API std::vector<VirtualGeometryPageNeedInput> BuildVirtualGeometryPageNeedInputsFromSelectionStates(const std::vector<TerraEngine::Renderer::VirtualGeometryViewSelectionState>& states, const std::vector<VirtualGeometryPageCatalogEntry>& catalogs, float preloadBias = 1.0f);
+	TERRAENGINE_API std::vector<VirtualGeometryPageNeedInput> BuildVirtualGeometryPageNeedInputsFromSelectionStates(std::span<const TerraEngine::Renderer::VirtualGeometryPageNeedRecord> pageNeeds, const std::vector<VirtualGeometryPageCatalogEntry>& catalogs, float preloadBias = 1.0f);
 	TERRAENGINE_API std::vector<StreamingNeed> BuildVirtualGeometryPageStreamingNeeds(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy, double nowSeconds = 0.0);
 	TERRAENGINE_API VirtualGeometryPageRequestPlan BuildVirtualGeometryPageRequestPlan(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy);
 	TERRAENGINE_API std::vector<VirtualGeometryPageRequestPacket> BuildVirtualGeometryPageRequestPackets(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy);

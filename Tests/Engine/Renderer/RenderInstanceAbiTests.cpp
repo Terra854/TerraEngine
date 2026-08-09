@@ -108,6 +108,27 @@ namespace TerraEngine::Tests {
 				"The shader must reconstruct HLSL rows from the four contiguous GLM columns.");
 		});
 
+		registry.Add("Renderer.InstanceAbi.PacksExactGroupedCompatibilityPolicy", [](TestContext& context) {
+			using RenderInstanceRecord = ::RenderInstanceRecord;
+			const std::uint32_t packed = RenderInstanceRecord::PackCompatibilityPolicy(
+				true, 7u, true);
+			context.Expect((packed & RenderInstanceRecord::kTaskCullingPolicyBit) != 0u,
+				"The compact proof must preserve task-culling policy.");
+			context.Expect((packed & RenderInstanceRecord::kConservativeVisibilityPolicyBit) != 0u,
+				"The compact proof must preserve conservative visibility policy.");
+			context.ExpectEqual<std::uint32_t>(7u,
+				(packed >> RenderInstanceRecord::kAnimationSourcePolicyShift)
+					& RenderInstanceRecord::kAnimationSourcePolicyMask,
+				"The compact proof must preserve the exact animation source.");
+			const std::string backend = ReadShader(
+				"Engine/Renderer/RHI/Vulkan/VulkanContext.cpp");
+			context.Expect(backend.find("groupedRecordMatchesRepresentative")
+					!= std::string::npos
+				&& backend.find("commandResolver.Resolve(memberCommandIndex, member)")
+					== std::string::npos,
+				"Grouped validation must inspect sealed compact lanes instead of rebuilding every command.");
+		});
+
 		registry.Add("Renderer.SharedSubmission.KeepsIndependentInstanceSelectors", [](TestContext& context) {
 			auto snapshot = MakeRendererThreadingSnapshot(40u, 2u);
 			MakeGroupable(snapshot);
@@ -140,11 +161,10 @@ namespace TerraEngine::Tests {
 			const auto dynamic = TerraEngine::Renderer::BuildDynamicRenderFrameState(snapshot, topology, {}, 41u);
 			context.ExpectEqual<std::size_t>(1u, dynamic.groups.size(),
 				"The compatible peers should still receive one group.");
-			context.ExpectEqual<std::size_t>(1u, dynamic.fallbackCommands.size(),
+			context.ExpectEqual<std::size_t>(1u, dynamic.singletonOrdinals.size(),
 				"Only the incomplete key may take the established fallback path.");
-			context.ExpectEqual(TerraEngine::ToHexString(snapshot.renderables[1].objectId),
-				TerraEngine::ToHexString(dynamic.fallbackCommands.front().objectId),
-				"Fallback work must retain the rejected owner's identity.");
+			context.ExpectEqual<std::uint32_t>(1u, dynamic.singletonOrdinals.front(),
+				"Fallback work must retain the rejected owner's stable ordinal.");
 		});
 
 		registry.Add("Renderer.SharedSubmission.RejectsPartialStreamPublication", [](TestContext& context) {
@@ -168,6 +188,13 @@ namespace TerraEngine::Tests {
 				"Animated grouped meshlets must resolve a record-specific graphics bridge.");
 			context.Expect(meshShader.find("instanceRecord.animationSelectors.x") != std::string::npos,
 				"The mesh stage must consume the stream's per-instance bridge buffer selector.");
+			context.Expect(meshShader.find("kRenderInstanceSharedAnimationBufferFlag")
+					!= std::string::npos
+				&& meshShader.find("? SceneUniforms.meshDataIndex")
+					!= std::string::npos
+				&& taskShader.find("groupedSharedAnimationBuffer")
+					!= std::string::npos,
+				"Dense grouped animation must publish one shared buffer selector while retaining each packet index.");
 			context.Expect(taskShader.find("instanceIndices[kTaskBatchSize]") != std::string::npos,
 				"Task payloads must carry the owning instance selector to mesh workgroups.");
 			context.Expect(taskShader.find("!groupedInstances") != std::string::npos,

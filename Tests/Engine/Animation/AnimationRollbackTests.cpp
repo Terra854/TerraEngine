@@ -194,6 +194,8 @@ namespace TerraEngine::Tests {
 			AnimationRollbackResult output;
 			output.status = AnimationStatus::Ok;
 			output.snapshot = Start(88);
+			output.snapshot.publicationGeneration = 91U;
+			output.snapshot.generations = {101U, 102U, 103U, 104U, 105U, 106U, 107U};
 			const AnimationRollbackResult lastGood = output;
 			AnimationRollback rollback;
 			const AnimationStatus status = rollback.Resimulate(start, 6, {},
@@ -204,8 +206,10 @@ namespace TerraEngine::Tests {
 					produced.fingerprint.programAsset += 1U;
 					return AnimationStatus::Ok;
 				}, output);
-			context.Expect(status == AnimationStatus::DeterminismViolation && output == lastGood,
-				"A mismatched asset/program publication from a resimulation step must reject atomically.");
+			context.Expect(status == AnimationStatus::DeterminismViolation && output == lastGood
+				&& output.snapshot.publicationGeneration == 91U
+				&& output.snapshot.generations == lastGood.snapshot.generations,
+				"A mismatched asset/program publication must reject atomically and retain every last-good generation.");
 		});
 	}
 }

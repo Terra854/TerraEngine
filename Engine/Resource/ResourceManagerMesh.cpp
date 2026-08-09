@@ -1754,6 +1754,9 @@ void ResourceManager::ReloadMesh(const TerraEngine::UUID& id)
 		CacheLoadedMeshBounds(id, mesh.get());
 		std::unique_lock lock(meshCache.mutex);
 		meshCache.resources[id] = std::move(mesh);
+		// Publish only the completed cache replacement. Readers that captured the
+		// previous generation retain their immutable plan until the next boundary.
+		m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);
 	}
 }
 

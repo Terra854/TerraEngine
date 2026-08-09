@@ -2,12 +2,22 @@
 
 #include "TestHarness.h"
 
+#include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iterator>
 #include <string>
 
 namespace TerraEngine::Tests {
 	namespace {
+		std::string StripSourceWhitespace(std::string text)
+		{
+			text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char character) {
+				return std::isspace(character) != 0;
+			}), text.end());
+			return text;
+		}
+
 		std::string ReadAnimationSystemSource()
 		{
 			const std::string path = std::string(TERRAENGINE_SOURCE_DIR)
@@ -31,16 +41,17 @@ namespace TerraEngine::Tests {
 			};
 			const std::size_t admission = source.find("const bool compactCaptureProven");
 			const std::size_t consumerProof = source.rfind(
-				"const AnimationResolvedConsumerRequirements compactConsumers", admission);
+				"const AnimationResolvedConsumerRequirements", admission);
 			const std::size_t compactAppend = source.find("candidateCompactGpuVisualCaptures.append", admission);
 			const std::size_t mappingAppend = source.find("candidateInputWorkIndices.push_back", admission);
 			const std::size_t broadBindingCopy = source.find("item.binding = record->binding", admission);
-			const std::size_t broadControllerCopy = source.find("item.candidateGraphState = record->graphState", admission);
+			const std::size_t broadControllerCopy = source.find("item.candidateGraphState", admission);
 			const std::size_t broadParameterCopy = source.find("item.parameters = record->parameters", admission);
 			const std::string admissionProof = consumerProof != std::string::npos
 				&& compactAppend != std::string::npos && compactAppend > consumerProof
 				? source.substr(consumerProof, compactAppend - consumerProof)
 				: std::string{};
+			const std::string compactAdmissionProof = StripSourceWhitespace(admissionProof);
 
 			context.Expect(admission != std::string::npos && compactAppend > admission
 				&& mappingAppend > compactAppend
@@ -53,40 +64,40 @@ namespace TerraEngine::Tests {
 				&& broadBindingCopy > mappingAppend && broadControllerCopy > mappingAppend
 				&& broadParameterCopy > mappingAppend,
 				"Broad binding, controller, and parameter copies must occur only after compact admission continues.");
-			context.Expect(admissionProof.find("compactConsumerClosureProven") != std::string::npos
-				&& admissionProof.find("frameConsumerReadView.Resolve") != std::string::npos
-				&& admissionProof.find("compactConsumers.attribution.empty()") != std::string::npos
-				&& admissionProof.find("compactRootMotionRequiresCpuAuthority") != std::string::npos
-				&& admissionProof.find("RequiresCpuRootMotionAuthority") != std::string::npos
-				&& admissionProof.find("!liveBinding.clip->rootMotion.enabled") == std::string::npos
+			context.Expect(compactAdmissionProof.find("compactConsumerClosureProven") != std::string::npos
+				&& compactAdmissionProof.find("frameConsumerReadView.Resolve") != std::string::npos
+				&& compactAdmissionProof.find("compactConsumers.attribution.empty()") != std::string::npos
+				&& compactAdmissionProof.find("compactRootMotionRequiresCpuAuthority") != std::string::npos
+				&& compactAdmissionProof.find("RequiresCpuRootMotionAuthority") != std::string::npos
+				&& compactAdmissionProof.find("!liveBinding.clip->rootMotion.enabled") == std::string::npos
 				&& source.find("hasContinuitySource = previous.initialized", admission) != std::string::npos
-				&& admissionProof.find("HasExactGpuPresentationFor") == std::string::npos
-				&& admissionProof.find("residencyGeneration != 0U") != std::string::npos
-				&& admissionProof.find("evaluationGenerations.rendererGeneration != 0U")
+				&& compactAdmissionProof.find("HasExactGpuPresentationFor") == std::string::npos
+				&& compactAdmissionProof.find("residencyGeneration!=0U") != std::string::npos
+				&& compactAdmissionProof.find("evaluationGenerations.rendererGeneration!=0U")
 					== std::string::npos
-				&& admissionProof.find("evaluationGenerations.deterministicGeneration != 0U")
+				&& compactAdmissionProof.find("evaluationGenerations.deterministicGeneration!=0U")
 					== std::string::npos
-				&& admissionProof.find("record->executionModeState.initialized")
+				&& compactAdmissionProof.find("record->executionModeState.initialized")
 					!= std::string::npos
-				&& admissionProof.find("record->executionModeState.effectiveMode")
+				&& compactAdmissionProof.find("record->executionModeState.effectiveMode")
 					!= std::string::npos
-				&& admissionProof.find("== AnimationEffectiveExecutionMode::GpuVisual")
+				&& compactAdmissionProof.find("==AnimationEffectiveExecutionMode::GpuVisual")
 					!= std::string::npos
-				&& admissionProof.find("compactPolicyEligible") != std::string::npos
-				&& admissionProof.find("gpu.rendererAvailable") != std::string::npos
-				&& admissionProof.find("gpu.animationCapabilityAvailable") != std::string::npos
-				&& admissionProof.find("gpu.resourcesResident") != std::string::npos
-				&& admissionProof.find("gpu.evaluationHealthy") != std::string::npos
-				&& admissionProof.find("std::isfinite(gpu.requiredBudget)")
+				&& compactAdmissionProof.find("compactPolicyEligible") != std::string::npos
+				&& compactAdmissionProof.find("gpu.rendererAvailable") != std::string::npos
+				&& compactAdmissionProof.find("gpu.animationCapabilityAvailable") != std::string::npos
+				&& compactAdmissionProof.find("gpu.resourcesResident") != std::string::npos
+				&& compactAdmissionProof.find("gpu.evaluationHealthy") != std::string::npos
+				&& compactAdmissionProof.find("std::isfinite(gpu.requiredBudget)")
 					!= std::string::npos
-				&& admissionProof.find("gpu.requiredBudget <= gpu.availableBudget")
+				&& compactAdmissionProof.find("gpu.requiredBudget<=gpu.availableBudget")
 					!= std::string::npos
-				&& admissionProof.find("modeState.effectiveReason") != std::string::npos
-				&& admissionProof.find("modeState.modeEnteredTick") != std::string::npos
-				&& admissionProof.find("!modeState.promotionPending") != std::string::npos
-				&& admissionProof.find("compactModeProven") != std::string::npos
-				&& admissionProof.find("frameSceneGeneration != 0U") != std::string::npos
-				&& admissionProof.find("gpuFastBinding->visual.renderIdentity.rendererGeneration != 0U")
+				&& compactAdmissionProof.find("modeState.effectiveReason") != std::string::npos
+				&& compactAdmissionProof.find("modeState.modeEnteredTick") != std::string::npos
+				&& compactAdmissionProof.find("!modeState.promotionPending") != std::string::npos
+				&& compactAdmissionProof.find("compactModeProven") != std::string::npos
+				&& compactAdmissionProof.find("frameSceneGeneration!=0U") != std::string::npos
+				&& compactAdmissionProof.find("gpuFastBinding->visual.renderIdentity.rendererGeneration!=0U")
 					!= std::string::npos
 				&& source.find("compactPreCopyCaptureCount.fetch_add", admission) != std::string::npos,
 				"Compact admission must resolve only matching consumers, prove every live GPU-mode input explicitly, retain the complete path through promotion or demotion, and preserve resource, scene, bind-pose continuity, and observable pre-copy proof.");
@@ -115,20 +126,22 @@ namespace TerraEngine::Tests {
 				"Complete and both compact planners must share one representable frame-identity stamp before GPU lowering, then copy the protected exclusion proof into the fail-closed compact input.");
 		});
 
-		registry.Add("Animation.CompactCapture.CohortsVisibilityAndContiguousPartitions", [](TestContext& context) {
+		registry.Add("Animation.CompactCapture.CohortsPresentationAndContiguousPartitions", [](TestContext& context) {
 			const std::string source = ReadAnimationSystemSource();
+			const std::string compactSource = StripSourceWhitespace(source);
 			context.Expect(source.find("struct CompactGpuVisualCohort") != std::string::npos
 				&& source.find("std::vector<std::size_t> cohortIndices") != std::string::npos
 				&& source.find("std::vector<CompactGpuVisualCohort> cohorts") != std::string::npos
 				&& source.find("cohortLookup.equal_range(fingerprint)") != std::string::npos
 				&& source.find("cohorts[candidate->second].Matches(record)") != std::string::npos,
 				"Compact GPU captures must share immutable facts across both adjacent and interleaved cohort members without trusting a hash collision.");
-			context.Expect(source.find("std::vector<std::uint8_t> presentationVisible")
+			context.Expect(source.find("presentationVisible") == std::string::npos
+				&& source.find("candidateCompactGpuVisualCaptures.append(")
 					!= std::string::npos
-				&& source.find("compact.presentationVisible[compactIndex] == 0U")
+				&& source.find("std::move(compact.gpuLowerings[compactIndex])")
 					!= std::string::npos,
-				"Protected capture visibility must keep compact owners out of presentation when no output is active.");
-			context.Expect(source.find("|| visibility->hasActiveView") != std::string::npos
+				"Compact owners must enter presentation even after a prior no-view snapshot, because a custom capture can become visible after animation capture.");
+			context.Expect(compactSource.find("||visibility->hasActiveView") != std::string::npos
 				&& source.find("visibility->Contains(input.descriptor.ownerObjectId)")
 					== std::string::npos,
 				"An active multi-view frame must fail open so a newly queued capture cannot render compact owners in bind pose.");
@@ -176,5 +189,28 @@ namespace TerraEngine::Tests {
 					!= std::string::npos,
 				"Every promoted owner must adopt independent cursors from one prepared cohort template.");
 		});
+
+		registry.Add("Animation.DirectClipRefresh.GpuOnlyPriorRecoversAfterAssetPublication",
+			[](TestContext& context) {
+				const std::string source = ReadAnimationSystemSource();
+				const std::size_t preparation = source.find("PrepareRuntimeRootCandidate(");
+				const std::size_t retainedGuard = source.find(
+					"const bool preservesPrior", preparation);
+				const std::size_t playbackCommit = source.find(
+					"record->playback = item.playback", retainedGuard);
+				const std::size_t poseCommit = source.find(
+					"record->poseGeneration = preservesPrior", playbackCommit);
+				const std::string retainedValidation = retainedGuard != std::string::npos
+					&& playbackCommit != std::string::npos
+					? source.substr(retainedGuard, playbackCommit - retainedGuard)
+					: std::string{};
+
+				context.Expect(retainedValidation.find(
+						"item.selectedPublication->poseGeneration") != std::string::npos
+					&& retainedValidation.find(
+						"item.selectedPublication->snapshot == nullptr") == std::string::npos
+					&& poseCommit != std::string::npos,
+					"A retained GPU-only authority row must recover after an asset publication without requiring a CPU snapshot or advancing its owner pose generation.");
+			});
 	}
 }

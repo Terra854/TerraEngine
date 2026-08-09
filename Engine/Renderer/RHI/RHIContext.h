@@ -8,7 +8,7 @@
 
 #include "RHIDefinitions.h"
 #include "Renderer/RenderTypes.h"
-#include "Renderer/Graph/RenderSubmissionPlan.h"
+#include "Renderer/Graph/RenderFramePublication.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/RendererRecovery.h"
 #include "Renderer/VirtualGeometry/Diagnostics/VirtualGeometryReplay.h"
@@ -16,6 +16,8 @@
 
 #include <string>
 #include <string_view>
+#include <memory>
+#include <optional>
 #include <vector>
 
 class WindowSystem;
@@ -28,13 +30,8 @@ public:
 
 	virtual void Initialize(WindowSystem& windowSystem) = 0;
 	virtual void BeginFrame() = 0;
-	virtual void RenderFrame(const FrameRenderData& frameData) = 0;
+	virtual void RenderFrame(std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> publication, std::uint32_t viewIndex) = 0;
 	// RenderFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	virtual void RenderFrame(const FrameRenderData& frameData, const RenderOutputRequest& outputRequest)
-	{
-		(void)outputRequest;
-		RenderFrame(frameData);
-	}
 	virtual void EndFrame() = 0;
 	// SetGlobalTaskShaderCullingEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual void SetGlobalTaskShaderCullingEnabled(bool enabled) {}
@@ -43,11 +40,9 @@ public:
 	virtual TerraEngine::Renderer::BackendCapabilityProfile GetBackendCapabilityProfile() const
 	{
 		TerraEngine::Renderer::BackendCapabilityProfile profile;
-		// Unknown backends start conservative: workers may prepare immutable
-		// data, but final ownership transitions stay coordinator-owned until the
-		// backend explicitly proves a stronger contract. New APIs such as DX12
-		// should fill this profile from their real queue and lifetime rules
-		// instead of changing high-level render graph code.
+		// Unknown backends start conservative: workers may prepare immutable data,
+		// while final ownership transitions stay coordinator-owned until a backend
+		// explicitly proves stronger queue and lifetime rules.
 		profile.requiredSerialBoundaries = { "final-submit", "present", "swapchain", "recovery", "resource-retire" };
 		profile.queueCapabilities = {
 			{ "transfer", TerraEngine::Renderer::RenderBackendQueueMode::Serial, false, "Default backend profile uses a single safe queue." },
@@ -57,12 +52,21 @@ public:
 		};
 		return profile;
 	}
-	// Backends consume a validated plan only at the coordinator boundary. The
-	// current Vulkan path still records from FrameRenderData, so this hook is a
-	// compatibility bridge for tests and future RHI implementations.
-	virtual bool ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::RenderSubmissionPlan& plan)
+	// A sealed publication is the backend-neutral counterpart to the execution
+	// plan.  Backends retain this immutable root at their protected frame-slot
+	// boundary and later resolve per-view selections without consulting live
+	// scene or editor state.
+	virtual bool ConsumeRenderFramePublication(
+		std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> publication)
 	{
-		return plan.valid;
+		// Full selector/page validation is completed by SealRenderFramePublication
+		// before the store exposes this root. Repeating a crowd scan at the protected
+		// backend boundary would make submission scale with scene population twice.
+		return publication != nullptr && publication->frameId != 0u
+			&& publication->generation != 0u
+			&& publication->rendererSessionGeneration != 0u
+			&& publication->persistent != nullptr && publication->dynamic != nullptr
+			&& publication->views.size() == publication->presentationInputs.size();
 	}
 	// Capture readback is a protected GPU-boundary operation. Backends that can
 	// copy rendered color targets into CPU-visible memory override this method;
@@ -91,6 +95,12 @@ public:
 		const TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackRequest&)
 	{
 		return false;
+	}
+	virtual std::optional<TerraEngine::Renderer::ConventionalVisibilityIdentityTargetMetadata>
+		GetConventionalVisibilityIdentityTargetMetadata(
+			RenderViewType, bool) const
+	{
+		return std::nullopt;
 	}
 	virtual std::vector<TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackResult>
 		PollConventionalVisibilityIdentityReadbacks()
@@ -173,6 +183,10 @@ public:
 	{
 		return TerraEngine::Renderer::MakeActiveRecoverySnapshot();
 	}
+	// This identity changes when a backend replaces presentation-compatible GPU
+	// objects while retaining its renderer session. The conservative default is
+	// stable so backends without explicit presentation recovery remain usable.
+	virtual std::uint64_t GetBackendResourceGeneration() const { return 1u; }
 	virtual void PublishRendererRecoverySnapshot(TerraEngine::Renderer::RendererRecoverySnapshot snapshot) { (void)snapshot; }
 	// InvalidateMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual void InvalidateMaterial(const TerraEngine::UUID& materialId) {}

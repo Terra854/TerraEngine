@@ -56,6 +56,8 @@ namespace TerraEngine::EditorTests
 				&& source.find("if (drawChildren)") != std::string::npos
 				&& source.find("ImGui::TreePop()") != std::string::npos,
 				"Virtualized open rows must still balance ImGui tree pushes with TreePop.");
+			context.Expect(source.find("if (!prefabAuthoredOverride.has_value() && prefabLink != nullptr)") != std::string::npos,
+				"Flattened rows must consume cached prefab membership instead of reparsing prefab JSON while drawing.");
 		});
 	}
 }

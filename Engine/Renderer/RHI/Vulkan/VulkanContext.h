@@ -24,18 +24,20 @@ public:
 	void Initialize(WindowSystem& windowSystem) override;
 	void BeginFrame() override;
 	// RenderFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	void RenderFrame(const FrameRenderData& frameData) override {
-		RenderFrame(frameData, ViewType::Game);
-	}
-	void RenderFrame(const FrameRenderData& frameData, const RenderOutputRequest& outputRequest) override;
+	void RenderFrame(std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> publication, std::uint32_t viewIndex) override;
 	void EndFrame() override;
 	void SetGlobalTaskShaderCullingEnabled(bool enabled) override;
 	TerraEngine::Renderer::BackendCapabilityProfile GetBackendCapabilityProfile() const override;
-	bool ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::RenderSubmissionPlan& plan) override;
+	bool ConsumeRenderFramePublication(
+		std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> publication) override;
 	TerraEngine::Renderer::RenderCaptureResult ReadbackCapture(const TerraEngine::Renderer::RenderCaptureRequest& request) override;
 	std::vector<TerraEngine::Renderer::RenderCaptureResult> PollCaptureReadbacks() override;
 	bool QueueConventionalVisibilityIdentityReadback(
 		const TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackRequest& request) override;
+	std::optional<TerraEngine::Renderer::ConventionalVisibilityIdentityTargetMetadata>
+		GetConventionalVisibilityIdentityTargetMetadata(
+			RenderViewType viewType,
+			bool dedicatedCaptureTarget) const override;
 	std::vector<TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackResult>
 		PollConventionalVisibilityIdentityReadbacks() override;
 	std::vector<TerraEngine::Renderer::VirtualGeometryBackendExecutionReceipt>
@@ -52,6 +54,7 @@ public:
 	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const override;
 	RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const override;
 	TerraEngine::Renderer::RendererRecoverySnapshot GetLatestRendererRecoverySnapshot() const override;
+	std::uint64_t GetBackendResourceGeneration() const override;
 	void PublishRendererRecoverySnapshot(TerraEngine::Renderer::RendererRecoverySnapshot snapshot) override;
 	struct LiveGpuSubmissionBoundary
 	{
@@ -79,8 +82,6 @@ public:
 
 	void Resize(int width, int height, ViewType view = ViewType::Game);
 
-	virtual void RenderFrame(const FrameRenderData& frameData, ViewType view);
-	virtual void RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest);
 
 	// Editor / ImGui Integration
 	// struct EditorHandles groups related state and operations so callers have one documented contract.
@@ -126,6 +127,11 @@ public:
 		std::uint64_t finalUseSerial);
 
 private:
+	// Publishes the compute/deformation work sealed inside a frame publication.
+	// Keeping this helper private prevents a second externally callable frame
+	// hand-off from drifting away from the immutable publication root.
+	bool ConsumePublishedWorkPlans(
+		const TerraEngine::Renderer::RenderBackendWorkPublication& plan);
 	// struct Impl groups related state and operations so callers have one documented contract.
 	struct Impl;
 	std::unique_ptr<Impl> impl;

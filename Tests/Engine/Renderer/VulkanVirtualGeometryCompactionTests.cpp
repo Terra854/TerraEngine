@@ -2,6 +2,7 @@
 #include "Renderer/VirtualGeometry/Selection/VirtualGeometryGpuPlan.h"
 #include "Renderer/RHI/Vulkan/VulkanCommandRecording.h"
 #include "Renderer/RHI/Vulkan/VulkanVirtualGeometryExecutor.h"
+#include "Renderer/Graph/RenderFramePublication.h"
 #include "TestHarness.h"
 
 #include <filesystem>
@@ -159,8 +160,8 @@ namespace TerraEngine::Tests
 		r.Add("Vulkan.VirtualGeometry.VisibilityPreparationIsDemandDriven",
 			[](TestContext &context)
 			{
-				FrameRenderData frameData{};
-				context.Expect(!frameData.virtualGeometryVisibilityDiagnosticsRequested,
+				Renderer::RenderViewPresentationInput presentation{};
+				context.Expect(!presentation.virtualGeometryVisibilityDiagnosticsRequested,
 					"Ordinary dense VG frames must not pay for the diagnostic compute-visibility mirror.");
 
 				const std::filesystem::path sourcePath =
@@ -173,7 +174,7 @@ namespace TerraEngine::Tests
 				const std::size_t productionGate = source.find(
 					"productionComputeRasterRequested");
 				const std::size_t gate = source.find(
-					"if(!frameData.virtualGeometryVisibilityDiagnosticsRequested",
+					"if(!presentation.virtualGeometryVisibilityDiagnosticsRequested",
 					productionGate);
 				const std::size_t gpuSetup = source.find(
 					"thread_local std::vector<VirtualGeometryRasterPacketSetupUpload>");

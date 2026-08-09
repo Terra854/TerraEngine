@@ -2,6 +2,8 @@
 
 #include "TestHarness.h"
 
+#include "AnimationAuthorityTestHelpers.h"
+#include "Animation/AnimationPresentationSystem.h"
 #include "Animation/AnimationSystem.h"
 #include "Animation/Runtime/AnimatorPlayback.h"
 #include "Core/Scheduling/FrameWorkload.h"
@@ -115,18 +117,18 @@ namespace TerraEngine::Tests {
 				"Playback controls must wait for a checked clip-time configuration instead of treating a default cursor as a valid point clip.");
 		});
 
-		registry.Add("Animation.Playback.AuthoredStartTickUsesDistinctLoopEndpoint", [](TestContext& context) {
+		registry.Add("Animation.Playback.AuthoredStartTickWrapsLoopingClips", [](TestContext& context) {
 			context.Expect(
-				ClampAnimatorInitialPlaybackTick(60, 60, true) == 59
-				&& ClampAnimatorInitialPlaybackTick(75, 60, true) == 59,
-				"A looping authored start tick must saturate at duration minus one so its maximum cannot resolve as the next loop's tick zero.");
+				ResolveAnimatorInitialPlaybackTick(60, 60, true) == 0
+				&& ResolveAnimatorInitialPlaybackTick(75, 60, true) == 15,
+				"A looping authored start tick must wrap through the resolved duration so large phase offsets remain distributed.");
 			context.Expect(
-				ClampAnimatorInitialPlaybackTick(60, 60, false) == 60
-				&& ClampAnimatorInitialPlaybackTick(75, 60, false) == 60,
+				ResolveAnimatorInitialPlaybackTick(60, 60, false) == 60
+				&& ResolveAnimatorInitialPlaybackTick(75, 60, false) == 60,
 				"A one-shot authored start tick must retain the exact final endpoint.");
 			context.Expect(
-				ClampAnimatorInitialPlaybackTick(-1, 60, true) == 0
-				&& ClampAnimatorInitialPlaybackTick(1, 0, true) == 0,
+				ResolveAnimatorInitialPlaybackTick(-1, 60, true) == 0
+				&& ResolveAnimatorInitialPlaybackTick(1, 0, true) == 0,
 				"Authored start ticks must saturate safely at zero for negative requests and point clips.");
 		});
 
@@ -204,9 +206,9 @@ namespace TerraEngine::Tests {
 			context.Expect(ExecuteAnimationFrame(system, 1.0F / 60.0F, "animation-safe-pose"),
 				"The scheduler should complete a degraded animator through the normal boundaries.");
 
-			const std::shared_ptr<const PublishedAnimatorPose> published =
-				system.LoadPublishedAnimatorPose(handle);
-			context.Expect(published && published->safePose
+			const PinnedAnimationAuthorityRow published =
+				PinnedAnimationAuthorityRow::ForAnimator(system, handle);
+			context.Expect(published && published->safeFallback
 				&& published->status == AnimationStatus::MissingAsset
 				&& published->componentGeneration == descriptor.componentGeneration
 				&& published->skeleton.generation == binding.skeletonGeneration
@@ -218,7 +220,7 @@ namespace TerraEngine::Tests {
 				&& published->snapshot->pose->LocalTransforms()[0].translation
 					== binding.skeleton->joints[0].localBindTransform.translation,
 				"Missing dependencies must publish the complete compatible reference pose.");
-			context.Expect(system.LoadPublishedAnimatorPoseForObject(descriptor.ownerObjectId) == published,
+			context.Expect(PinnedAnimationAuthorityRow::ForObject(system, descriptor.ownerObjectId) == published,
 				"Owner-object lookup must return the same generation bundle used by handle lookup.");
 			(void)system.InvalidateAnimatorInstance(handle);
 		});
@@ -243,7 +245,7 @@ namespace TerraEngine::Tests {
 				TerraEngine::Scheduling::ExecuteFrameWorkloadsCompatibility(
 					std::move(staleFrame), "animation-stale-lifecycle");
 			context.Expect(stalePlan.valid && stalePlan.completed
-				&& !system.LoadPublishedAnimatorPose(replacement)
+				&& !PinnedAnimationAuthorityRow::ForAnimator(system, replacement)
 				&& system.AuthorityPublicationGeneration() == generationBeforeStaleWork,
 				"Descriptors retained across a reload must fail closed instead of targeting the reused slot.");
 			context.Expect(replacement.slotIndex == original.slotIndex
@@ -253,7 +255,8 @@ namespace TerraEngine::Tests {
 
 			context.Expect(ExecuteAnimationFrame(system, 1.0F / 60.0F, "animation-reloaded"),
 				"A newly declared frame should publish the replacement generation normally.");
-			context.Expect(system.LoadPublishedAnimatorPose(replacement) != nullptr,
+			context.Expect(static_cast<bool>(
+				PinnedAnimationAuthorityRow::ForAnimator(system, replacement)),
 				"Only replacement-session work may become visible after reload.");
 			system.Shutdown();
 			context.Expect(!system.IsAnimatorInstanceAlive(replacement)
@@ -266,6 +269,100 @@ namespace TerraEngine::Tests {
 			(void)system.InvalidateAnimatorInstance(restored);
 		});
 
+		registry.Add("Animation.Playback.LifecycleInvalidationRetiresAuthorityBeforeReplacement", [](TestContext& context) {
+			AnimationSystem& system = AnimationSystem::Instance();
+			system.Initialize();
+			const AnimatorInstanceDescriptor descriptor = MakeDescriptor(37U);
+			const AnimatorInstanceHandle handle = system.CreateAnimatorInstance(descriptor);
+			AnimatorPlaybackBinding binding;
+			binding.skeleton = MakeReferenceSkeleton();
+			(void)system.BindAnimatorPlayback(handle, binding);
+			context.Expect(ExecuteAnimationFrame(system, 1.0F / 60.0F,
+				"animation-lifecycle-retire-baseline"),
+				"The lifecycle fixture needs one complete authority root before retirement.");
+			const std::shared_ptr<const AnimationAuthorityFrame> before =
+				system.LoadPublishedAuthorityFrame();
+			const std::uint64_t generationBefore = system.AuthorityPublicationGeneration();
+			context.Expect(before && before->IsValid(),
+				"The baseline frame must expose a structurally valid immutable authority root.");
+
+			// Scene replacement is a lifecycle event, not an ordinary evaluation error.
+			// A fresh reader must therefore see no old root between the invalidation and
+			// the first complete replacement frame.
+			context.Expect(system.NotifyLifecycleInvalidation(
+				AnimationLifecycleBoundary::Scene) == AnimationStatus::Ok
+				&& !system.LoadPublishedAuthorityFrame()
+				&& system.AuthorityPublicationGeneration() > generationBefore,
+				"Scene invalidation must retire the old authority root and advance its public evidence atomically.");
+
+			context.Expect(ExecuteAnimationFrame(system, 1.0F / 60.0F,
+				"animation-lifecycle-retire-replacement"),
+				"A live animator should publish a fresh root after the lifecycle boundary.");
+			const std::shared_ptr<const AnimationAuthorityFrame> replacement =
+				system.LoadPublishedAuthorityFrame();
+			context.Expect(replacement && replacement->IsValid() && replacement != before
+				&& replacement->authorityGeneration > generationBefore,
+				"Only a newly sealed authority generation may become visible after lifecycle retirement.");
+			(void)system.InvalidateAnimatorInstance(handle);
+		});
+
+		registry.Add("Animation.Playback.LifecycleInvalidationRetiresPublishedPresentationRoot",
+			[](TestContext& context) {
+				AnimationSystem& system = AnimationSystem::Instance();
+				AnimationPresentationSystem& presentation =
+					AnimationPresentationSystem::Instance();
+				// Reset only the presentation singleton's submitted-source stream. The
+				// fixture then publishes through the ordinary worker/protected workloads.
+				presentation.Shutdown();
+				presentation.Initialize();
+				system.Initialize();
+				const AnimatorInstanceHandle handle = system.CreateAnimatorInstance(MakeDescriptor(47U));
+				AnimatorPlaybackBinding binding;
+				binding.skeleton = MakeReferenceSkeleton();
+				(void)system.BindAnimatorPlayback(handle, binding);
+				const bool authorityComplete = ExecuteAnimationFrame(system, 1.0F / 60.0F,
+					"animation-presentation-lifecycle-authority");
+				std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> workloads =
+					presentation.DeclareFrameWorkloads(1.0F / 60.0F);
+				const TerraEngine::Scheduling::FrameExecutionPlan presentationPlan =
+					TerraEngine::Scheduling::ExecuteFrameWorkloadsCompatibility(
+						std::move(workloads), "animation-presentation-lifecycle-publish");
+				const std::shared_ptr<const AnimationPresentationFrame> before =
+					presentation.LoadPublishedAnimationPresentationFrame();
+				context.Expect(authorityComplete && presentationPlan.valid && presentationPlan.completed
+					&& before && before->IsValid(),
+					"The fixture must publish one complete post-physics presentation root before lifecycle retirement.");
+
+				const AnimationStatus invalidated = system.NotifyLifecycleInvalidation(
+					AnimationLifecycleBoundary::Scene);
+				context.Expect(invalidated == AnimationStatus::Ok
+					&& !system.LoadPublishedAuthorityFrame()
+					&& !presentation.LoadPublishedGpuAnimationPresentationPlan()
+					&& !presentation.LoadPublishedAnimationPresentationFrame(),
+					"Scene invalidation must atomically retire authority and both presentation roots before replacement work.");
+				(void)system.InvalidateAnimatorInstance(handle);
+			});
+
+		registry.Add("Animation.Playback.BatchInvalidationRetiresCrowdAtomically", [](TestContext& context) {
+			AnimationSystem& system = AnimationSystem::Instance();
+			system.Initialize();
+			std::array<AnimatorInstanceHandle, 3U> handles{
+				system.CreateAnimatorInstance(MakeDescriptor(61U)),
+				system.CreateAnimatorInstance(MakeDescriptor(62U)),
+				system.CreateAnimatorInstance(MakeDescriptor(63U))};
+			const std::array<AnimatorInstanceHandle, 4U> request{
+				handles[0], handles[1], handles[1], handles[2]};
+			context.Expect(system.InvalidateAnimatorInstances(request) == handles.size(),
+				"A crowd retirement must invalidate each unique live handle exactly once.");
+			context.Expect(std::none_of(handles.begin(), handles.end(),
+				[&system](AnimatorInstanceHandle handle) {
+					return system.IsAnimatorInstanceAlive(handle);
+				}),
+				"The batch boundary must not leave a partially live runtime crowd.");
+			context.Expect(system.InvalidateAnimatorInstances(request) == 0U,
+				"Repeating a stale batch must be an idempotent no-op.");
+		});
+
 		registry.Add("Animation.Playback.PausedPlayModeRetainsPublicationUntilExplicitStep", [](TestContext& context) {
 			AnimationSystem& system = AnimationSystem::Instance();
 			ScriptingSystem& scripting = ScriptingSystem::Instance();
@@ -276,7 +373,8 @@ namespace TerraEngine::Tests {
 			context.Expect(system.BindAnimatorPlayback(handle, binding) == AnimationStatus::MissingAsset
 				&& ExecuteAnimationFrame(system, 1.0F / 60.0F, "animation-paused-baseline"),
 				"A safe-pose binding must first publish a generation that procedural input can target.");
-			const std::shared_ptr<const PublishedAnimatorPose> baseline = system.LoadPublishedAnimatorPose(handle);
+			const PinnedAnimationAuthorityRow baseline =
+				PinnedAnimationAuthorityRow::ForAnimator(system, handle);
 			if(!baseline || !baseline->snapshot) {
 				context.Expect(false, "The paused-playback fixture requires a published baseline pose.");
 				(void)system.InvalidateAnimatorInstance(handle);
@@ -291,7 +389,7 @@ namespace TerraEngine::Tests {
 				system.DeclareFrameWorkloads(1.0F / 240.0F);
 			context.Expect(pausedWorkloads.empty()
 				&& system.AuthorityPublicationGeneration() == publicationBeforePause
-				&& system.LoadPublishedAnimatorPose(handle) == baseline,
+				&& PinnedAnimationAuthorityRow::ForAnimator(system, handle) == baseline,
 				"Paused Play Mode must retain animator membership and its immutable publication without declaring evaluation work.");
 
 			const NativeAnimationProceduralGoalCommand goal = MakePausedProceduralGoal(

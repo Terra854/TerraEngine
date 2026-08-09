@@ -590,8 +590,12 @@ void HierarchyWindow::DrawEntityNode(
 	PrefabLinkComponent* prefabLink = ObjectManager::instance().GetComponent<PrefabLinkComponent>(*object);
 	std::unordered_set<TerraEngine::UUID> localPrefabSourceObjectIds;
 	const std::unordered_set<TerraEngine::UUID>* activePrefabSourceObjectIds = prefabSourceObjectIds;
-	if (prefabLink != nullptr)
+	if (!prefabAuthoredOverride.has_value() && prefabLink != nullptr)
 	{
+		// Recursive callers need the prefab membership set for their descendants.
+		// Flattened hierarchy rows already carry that resolved result in
+		// prefabAuthoredOverride, so reopening and reparsing the prefab file here
+		// would repeat disk I/O for every visible prefab root on every editor frame.
 		localPrefabSourceObjectIds = LoadPrefabSourceObjectIds(*prefabLink);
 		activePrefabSourceObjectIds = &localPrefabSourceObjectIds;
 	}

@@ -35,6 +35,16 @@ struct ProfilerEditorStageTiming
 	std::uint64_t workItemCount = 1u;
 };
 
+// This lock-free scalar is available even while capture recording is idle. It
+// lets automation measure Engine::Update itself without folding editor UI,
+// compositor, or presentation time into the engine performance gate.
+struct ProfilerLatestEngineFrameTiming
+{
+	std::uint64_t frameIndex = 0u;
+	double durationMs = 0.0;
+	bool valid = false;
+};
+
 // class Profiler groups related state and operations so callers have one documented contract.
 class Profiler
 {
@@ -76,12 +86,22 @@ public:
 	// worker preparation reaches its protected boundary. Invalid or over-limit
 	// detail is rejected atomically and never replaces an earlier complete record.
 	void RecordAnimationTelemetry(const ProfilerAnimationFrameTelemetry& telemetry);
+	// Renderer/animation owners publish one immutable, typed evidence snapshot at
+	// the protected boundary; inactive captures take the cheap atomic fast path.
+	void RecordFramePublicationEvidence(const ProfilerFramePublicationEvidence& evidence);
 	// Copy value-only editor stage telemetry into the current capture frame.
 	// The profiler never retains the Scene View window or its mutable caches.
 	void RecordSceneViewStages(std::span<const PerformanceStageRecord> stages);
 	// Editor-only timings use a dedicated typed domain and never become ordinary
 	// CPU samples. Publishing one bounded batch avoids one profiler lock per stage.
 	void RecordEditorStages(std::span<const ProfilerEditorStageTiming> stages);
+	// The live Engine CPU clock follows the same editor-exclusion contract as a
+	// recorded capture, but remains available while recording is disabled. The
+	// engine owns the begin/publish pair and EditorSystem contributes only its
+	// outer protected interval through BeginEditorWork/EndEditorWork.
+	void BeginLatestEngineFrameTiming() noexcept;
+	void PublishLatestEngineFrameTiming() noexcept;
+	[[nodiscard]] ProfilerLatestEngineFrameTiming GetLatestEngineFrameTiming() const noexcept;
 	void RecordTaskQueued();
 	bool RecordTaskStarted(const char* taskLabel);
 	void RecordTaskFinished(bool sampleActive);
@@ -153,5 +173,16 @@ private:
 	std::atomic_bool markerRecordingActive = false;
 	std::atomic_bool taskRecordingActive = false;
 	std::atomic_uint64_t snapshotRevision = 1u;
+	// Even values are stable snapshots; odd values mean the single producer is
+	// replacing the duration. Dividing a stable value by two yields frame index.
+	std::atomic_uint64_t latestEngineFrameSequence = 0u;
+	std::atomic<double> latestEngineFrameDurationMs = 0.0;
+	// These values have one producer: the main thread that runs Engine::Update
+	// and the protected EditorSystem boundary. Readers consume only the published
+	// atomic snapshot above, so the in-progress clock needs no synchronization.
+	std::int64_t latestEngineFrameStartNanoseconds = 0;
+	std::int64_t latestExcludedEditorNanoseconds = 0;
+	std::int64_t latestEditorWorkStartNanoseconds = 0;
+	std::uint32_t latestEditorWorkDepth = 0u;
 };
 }

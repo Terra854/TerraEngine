@@ -198,6 +198,7 @@ static const uint kHiZViewCount = 2u;
 static const uint kVirtualGeometryFlagConeCullingSafe = 0x20u;
 static const uint kVirtualGeometryFlagOwnerPaletteDeformation = 0x80u;
 static const uint kRenderInstanceGroupedFlag = 0x80000000u;
+static const uint kRenderInstanceSharedAnimationBufferFlag = 0x40000000u;
 static const uint kVirtualGeometryDebugModeShift = 8u;
 static const uint kVirtualGeometryDebugModeMask = 0xFFu;
 static const uint kInvalidVirtualGeometryBufferIndex = 0xFFFFFFFFu;
@@ -1228,6 +1229,9 @@ void main(uint3 groupId : SV_GroupID)
 {
 	const bool groupedInstances =
 		(SceneUniforms.virtualGeometryFlags & kRenderInstanceGroupedFlag) != 0u;
+	const bool groupedSharedAnimationBuffer = groupedInstances
+		&& (SceneUniforms.virtualGeometryFlags
+			& kRenderInstanceSharedAnimationBufferFlag) != 0u;
 	// GLM stores the transient locator in column 3. HLSL matrix indexing returns
 	// a row even for column_major storage, so read the fourth element of rows
 	// 0/1/2 rather than model[3].x/y/z. Mixing those conventions turns a valid
@@ -1263,9 +1267,15 @@ void main(uint3 groupId : SV_GroupID)
 	// fail-open fallback for an impossible/stale stream; it is never culling proof
 	// for another crowd member.
 	const uint animationBufferIndex = groupedInstances && groupedInstanceRecordValid
-		? groupedInstanceRecord.animationSelectors.x : SceneUniforms.meshDataIndex;
+		? (groupedSharedAnimationBuffer
+			? SceneUniforms.meshDataIndex
+			: groupedInstanceRecord.animationSelectors.x)
+		: SceneUniforms.meshDataIndex;
 	const uint animationRecordIndex = groupedInstances && groupedInstanceRecordValid
-		? groupedInstanceRecord.animationSelectors.y : SceneUniforms.textureIndex;
+		? (groupedSharedAnimationBuffer
+			? groupedInstanceRecord.animationSelectors.x
+			: groupedInstanceRecord.animationSelectors.y)
+		: SceneUniforms.textureIndex;
 	const uint packetDescriptorIndexForInstance = groupedInstances && groupedInstanceRecordValid
 		? groupedInstanceRecord.geometrySelectors.y
 		: SceneUniforms.virtualGeometryPacketDescriptorIndex;

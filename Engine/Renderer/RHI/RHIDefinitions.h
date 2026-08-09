@@ -63,6 +63,24 @@ namespace TerraEngine::Renderer {
 		std::string rejectionReason;
 	};
 
+	// RenderSystem snapshots this value before queueing an asynchronous identity
+	// copy. The generation tuple is backend-neutral even though the current owner
+	// is Vulkan, so completion can reject a resized/recreated target explicitly.
+	struct ConventionalVisibilityIdentityTargetMetadata
+	{
+		RenderViewType viewType = static_cast<RenderViewType>(1u);
+		std::uint64_t frameId = 0u;
+		std::uint64_t rendererGeneration = 0u;
+		std::uint64_t targetGeneration = 0u;
+		bool dedicatedCaptureTarget = false;
+
+		[[nodiscard]] bool IsComplete() const noexcept
+		{
+			return frameId != 0u && rendererGeneration != 0u
+				&& targetGeneration != 0u;
+		}
+	};
+
 	enum class RenderBackendQueueMode
 	{
 		Parallel,

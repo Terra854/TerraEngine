@@ -12,9 +12,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <exception>
 #include <future>
 #include <map>
+#include <mutex>
 #include <queue>
 #include <sstream>
 #include <stdexcept>
@@ -131,6 +134,8 @@ namespace TerraEngine::Scheduling {
 			std::uint64_t queueDurationNs = 0;
 			std::uint64_t runDurationNs = 0;
 			std::uint64_t coordinatorWaitDurationNs = 0;
+			std::uint32_t dependencyWave = 0;
+			std::uint64_t completionSequence = 0;
 			std::chrono::steady_clock::time_point enqueuedAt;
 			JobGraphWork work;
 		};
@@ -378,6 +383,8 @@ namespace TerraEngine::Scheduling {
 				entry.queueDurationNs = node.queueDurationNs;
 				entry.runDurationNs = node.runDurationNs;
 				entry.coordinatorWaitDurationNs = node.coordinatorWaitDurationNs;
+				entry.dependencyWave = node.dependencyWave;
+				entry.completionSequence = node.completionSequence;
 				if (node.kind == JobGraphNodeKind::Job)
 				{
 					if (node.executionPolicy == JobGraphExecutionPolicy::WorkerEligible)
@@ -583,7 +590,12 @@ namespace TerraEngine::Scheduling {
 			<< " inline=" << summary.inlineJobCount
 			<< " rejected=" << summary.rejectedJobCount
 			<< " fallback=" << summary.fallbackJobCount
-			<< " blocked=" << summary.blockedDependencyCount << '\n';
+			<< " blocked=" << summary.blockedDependencyCount
+			<< " waves=" << summary.dependencyWaveCount << '\n';
+		// Completion order, wake count, peak concurrency, and measured critical path
+		// remain available as typed summary fields and profiler telemetry. They are
+		// intentionally omitted from this deterministic topology report because
+		// operating-system worker completion order and clock values vary between runs.
 
 		stream << "Task groups:";
 		for (const JobGraphResultEntry& entry : summary.taskGroups)
@@ -892,6 +904,8 @@ namespace TerraEngine::Scheduling {
 			impl->nodes[index].queueDurationNs = 0u;
 			impl->nodes[index].runDurationNs = 0u;
 			impl->nodes[index].coordinatorWaitDurationNs = 0u;
+			impl->nodes[index].dependencyWave = 0u;
+			impl->nodes[index].completionSequence = 0u;
 		}
 
 		std::vector<int> remainingDependencies(impl->nodes.size(), 0);
@@ -904,6 +918,41 @@ namespace TerraEngine::Scheduling {
 			outgoing[before].push_back(after);
 			incoming[after].push_back(before);
 			++remainingDependencies[after];
+		}
+		// Compute stable dependency-wave and critical-path traversal order once from
+		// the already validated DAG. Runtime completion order may vary, but these
+		// identifiers stay deterministic and let profiler evidence distinguish a
+		// wide wave from an actual serial dependency chain.
+		std::vector<int> topologyIndegree = remainingDependencies;
+		std::priority_queue<std::size_t, std::vector<std::size_t>, std::greater<std::size_t>> topologyReady;
+		for (std::size_t index = 0; index < topologyIndegree.size(); ++index)
+		{
+			if (topologyIndegree[index] == 0)
+			{
+				topologyReady.push(index);
+			}
+		}
+		std::vector<std::size_t> topologicalOrder;
+		topologicalOrder.reserve(impl->nodes.size());
+		std::size_t dependencyWaveCount = 0u;
+		while (!topologyReady.empty())
+		{
+			const std::size_t index = topologyReady.top();
+			topologyReady.pop();
+			topologicalOrder.push_back(index);
+			dependencyWaveCount = std::max(
+				dependencyWaveCount,
+				static_cast<std::size_t>(impl->nodes[index].dependencyWave) + 1u);
+			for (const std::size_t dependent : outgoing[index])
+			{
+				impl->nodes[dependent].dependencyWave = std::max(
+					impl->nodes[dependent].dependencyWave,
+					impl->nodes[index].dependencyWave + 1u);
+				if (--topologyIndegree[dependent] == 0)
+				{
+					topologyReady.push(dependent);
+				}
+			}
 		}
 
 		JobGraphContext context;
@@ -924,12 +973,15 @@ namespace TerraEngine::Scheduling {
 			}
 		}
 
-		auto completeNode = [&](std::size_t index, JobGraphNodeState state) {
+		std::vector<bool> unlockedByWorkerCompletion(impl->nodes.size(), false);
+		auto completeNode = [&](std::size_t index, JobGraphNodeState state, bool workerCompletion = false) {
 			impl->nodes[index].state = state;
 			for (std::size_t dependent : outgoing[index])
 			{
 				if (--remainingDependencies[dependent] == 0)
 				{
+					unlockedByWorkerCompletion[dependent] = workerCompletion
+						|| unlockedByWorkerCompletion[index];
 					readyQueue.push(dependent);
 				}
 			}
@@ -958,39 +1010,26 @@ namespace TerraEngine::Scheduling {
 			std::shared_ptr<Task<void>> task;
 			std::future<void> future;
 		};
-		std::vector<std::size_t> ready;
-		ready.reserve(impl->nodes.size());
+		struct WorkerCompletionState {
+			std::mutex mutex;
+			std::condition_variable condition;
+			std::deque<std::size_t> completedIndices;
+		};
+		const auto completionState = std::make_shared<WorkerCompletionState>();
 		std::vector<RunningWorker> runningWorkers;
 		runningWorkers.reserve(impl->nodes.size());
 
 		std::size_t terminalCount = 0;
+		std::size_t workerCompletionWakeCount = 0u;
+		std::size_t completionDrivenDispatchCount = 0u;
+		std::size_t peakConcurrentWorkerCount = 0u;
+		std::uint64_t completionSequence = 0u;
 		while (terminalCount < impl->nodes.size())
 		{
-			ready.clear();
 			while (!readyQueue.empty())
 			{
-				ready.push_back(readyQueue.top());
+				const std::size_t index = readyQueue.top();
 				readyQueue.pop();
-			}
-
-			if (ready.empty())
-			{
-				for (std::size_t index = 0; index < impl->nodes.size(); ++index)
-				{
-					if (!IsTerminal(impl->nodes[index].state))
-					{
-						completeNode(index, JobGraphNodeState::Blocked);
-						++terminalCount;
-						impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Execution, impl->nodes[index].name, "Graph execution stalled before this node became ready.", "Inspect earlier dependency failures or validation gaps.");
-					}
-				}
-				break;
-			}
-
-			runningWorkers.clear();
-
-			for (std::size_t index : ready)
-			{
 				Impl::Node& node = impl->nodes[index];
 				if (node.kind == JobGraphNodeKind::Job && node.requiresSuccessfulDependencies && dependencyFailed(index))
 				{
@@ -1008,7 +1047,9 @@ namespace TerraEngine::Scheduling {
 				}
 				if (node.kind == JobGraphNodeKind::TaskGroup)
 				{
-					completeNode(index, dependencyFailed(index) ? JobGraphNodeState::Blocked : JobGraphNodeState::Completed);
+					completeNode(index,
+						dependencyFailed(index) ? JobGraphNodeState::Blocked : JobGraphNodeState::Completed,
+						unlockedByWorkerCompletion[index]);
 					++terminalCount;
 					continue;
 				}
@@ -1022,7 +1063,9 @@ namespace TerraEngine::Scheduling {
 							impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Mutation, node.name, "Mutation barrier completed with pending mutations.", "Flush or reject pending SceneMutationQueue requests before crossing this barrier.");
 						}
 					}
-					completeNode(index, dependencyFailed(index) ? JobGraphNodeState::Blocked : JobGraphNodeState::Completed);
+					completeNode(index,
+						dependencyFailed(index) ? JobGraphNodeState::Blocked : JobGraphNodeState::Completed,
+						unlockedByWorkerCompletion[index]);
 					++terminalCount;
 					continue;
 				}
@@ -1030,22 +1073,43 @@ namespace TerraEngine::Scheduling {
 				node.state = JobGraphNodeState::Ready;
 				if (node.executionPolicy == JobGraphExecutionPolicy::WorkerEligible)
 				{
+					if (unlockedByWorkerCompletion[index] && !runningWorkers.empty())
+					{
+						++completionDrivenDispatchCount;
+					}
 					node.state = JobGraphNodeState::Running;
 					node.enqueuedAt = std::chrono::steady_clock::now();
 					node.dispatchCount = 1u;
-					auto task = ThreadPool::instance().createTask([this, index, context, &workerTimeNs]() mutable {
+					auto task = ThreadPool::instance().createTask([this, index, context, &workerTimeNs, completionState]() mutable {
 						const auto start = std::chrono::steady_clock::now();
 						Impl::Node& workerNode = impl->nodes[index];
 						workerNode.queueDurationNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(start - workerNode.enqueuedAt).count());
 						WorkerSafetyScope workerSafetyScope(workerNode.name);
 						TERRAENGINE_PROFILE_TASK_SCOPE("JobGraph::WorkerJob", TerraEngine::Profiling::ProfilerModuleId::TaskExecution, workerNode.profilingLabel.c_str());
-						if (workerNode.work)
+						const auto publishCompletion = [&]() {
+							const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+								std::chrono::steady_clock::now() - start).count();
+							workerNode.runDurationNs = static_cast<std::uint64_t>(elapsed);
+							workerTimeNs.fetch_add(workerNode.runDurationNs, std::memory_order_relaxed);
+							{
+								std::scoped_lock completionLock(completionState->mutex);
+								completionState->completedIndices.push_back(index);
+							}
+							completionState->condition.notify_one();
+						};
+						try
 						{
-							workerNode.work(context);
+							if (workerNode.work)
+							{
+								workerNode.work(context);
+							}
+							publishCompletion();
 						}
-						const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-						workerNode.runDurationNs = static_cast<std::uint64_t>(elapsed);
-						workerTimeNs.fetch_add(workerNode.runDurationNs, std::memory_order_relaxed);
+						catch (...)
+						{
+							publishCompletion();
+							throw;
+						}
 					});
 					RunningWorker worker;
 					worker.index = index;
@@ -1053,14 +1117,7 @@ namespace TerraEngine::Scheduling {
 					worker.task = std::move(task);
 					ThreadPool::instance().enqueue(worker.task, node.usefulWorkItemCount);
 					runningWorkers.push_back(std::move(worker));
-				}
-			}
-
-			for (std::size_t index : ready)
-			{
-				Impl::Node& node = impl->nodes[index];
-				if (node.kind != JobGraphNodeKind::Job || node.executionPolicy == JobGraphExecutionPolicy::WorkerEligible || IsTerminal(node.state))
-				{
+					peakConcurrentWorkerCount = std::max(peakConcurrentWorkerCount, runningWorkers.size());
 					continue;
 				}
 				try
@@ -1086,31 +1143,83 @@ namespace TerraEngine::Scheduling {
 				++terminalCount;
 			}
 
+			if (terminalCount == impl->nodes.size())
 			{
-				// Keep coordinator stalls distinct from graph dispatch and protected
-				// work. A single scope per dependency wave avoids per-job profiler
-				// overhead while still exposing the actual synchronization cost.
+				break;
+			}
+
+			if (runningWorkers.empty())
+			{
+				for (std::size_t index = 0; index < impl->nodes.size(); ++index)
+				{
+					if (!IsTerminal(impl->nodes[index].state))
+					{
+						completeNode(index, JobGraphNodeState::Blocked);
+						++terminalCount;
+						impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Execution, impl->nodes[index].name, "Graph execution stalled before this node became ready.", "Inspect earlier dependency failures or validation gaps.");
+					}
+				}
+				break;
+			}
+
+			{
+				// Wait for one completion, then immediately dispatch work unlocked by
+				// that worker while unrelated workers remain active. The old bulk-wave
+				// join delayed short dependency chains behind the slowest sibling.
 				TERRAENGINE_PROFILE_SCOPE("JobGraph: Coordinator Wait",
 					TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
-				for (RunningWorker& worker : runningWorkers)
+				const auto waitStart = std::chrono::steady_clock::now();
+				std::size_t completedIndex = 0u;
 				{
-					Impl::Node& node = impl->nodes[worker.index];
-					try
-					{
-						const auto start = std::chrono::steady_clock::now();
-						worker.future.get();
-						const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-						node.coordinatorWaitDurationNs = static_cast<std::uint64_t>(elapsed);
-						coordinatorWaitTimeNs += node.coordinatorWaitDurationNs;
-						completeNode(worker.index, JobGraphNodeState::Completed);
-					}
-					catch (...)
-					{
-						completeNode(worker.index, JobGraphNodeState::Failed);
-						impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Execution, node.name, "Job threw during worker execution: " + ExceptionMessage() + ".", "Fix the job body or catch expected failures inside the job.");
-					}
-					++terminalCount;
+					std::unique_lock completionLock(completionState->mutex);
+					completionState->condition.wait(completionLock, [&]() {
+						return !completionState->completedIndices.empty();
+					});
+					completedIndex = completionState->completedIndices.front();
+					completionState->completedIndices.pop_front();
 				}
+				const auto waitElapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+					std::chrono::steady_clock::now() - waitStart).count();
+				++workerCompletionWakeCount;
+				const auto completedWorker = std::find_if(
+					runningWorkers.begin(), runningWorkers.end(), [&](const RunningWorker& worker) {
+						return worker.index == completedIndex;
+					});
+				if (completedWorker == runningWorkers.end())
+				{
+					impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Execution, "", "Worker completion did not match an active graph node.", "Inspect ThreadPool completion ownership and graph lifetime handling.");
+					continue;
+				}
+				Impl::Node& node = impl->nodes[completedIndex];
+				node.coordinatorWaitDurationNs += static_cast<std::uint64_t>(waitElapsed);
+				coordinatorWaitTimeNs += static_cast<std::uint64_t>(waitElapsed);
+				try
+				{
+					completedWorker->future.get();
+					node.completionSequence = ++completionSequence;
+					completeNode(completedIndex, JobGraphNodeState::Completed, true);
+				}
+				catch (...)
+				{
+					node.completionSequence = ++completionSequence;
+					completeNode(completedIndex, JobGraphNodeState::Failed, true);
+					impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Execution, node.name, "Job threw during worker execution: " + ExceptionMessage() + ".", "Fix the job body or catch expected failures inside the job.");
+				}
+				runningWorkers.erase(completedWorker);
+				++terminalCount;
+			}
+		}
+
+		std::vector<std::uint64_t> criticalPathByNode(impl->nodes.size(), 0u);
+		std::uint64_t criticalPathDurationNs = 0u;
+		for (const std::size_t index : topologicalOrder)
+		{
+			criticalPathByNode[index] += impl->nodes[index].runDurationNs;
+			criticalPathDurationNs = std::max(criticalPathDurationNs, criticalPathByNode[index]);
+			for (const std::size_t dependent : outgoing[index])
+			{
+				criticalPathByNode[dependent] = std::max(
+					criticalPathByNode[dependent], criticalPathByNode[index]);
 			}
 		}
 
@@ -1118,10 +1227,19 @@ namespace TerraEngine::Scheduling {
 		impl->latestSummary.workerTimeNs = workerTimeNs.load(std::memory_order_relaxed);
 		impl->latestSummary.protectedTimeNs = protectedTimeNs;
 		impl->latestSummary.coordinatorWaitTimeNs = coordinatorWaitTimeNs;
+		impl->latestSummary.criticalPathDurationNs = criticalPathDurationNs;
+		impl->latestSummary.dependencyWaveCount = dependencyWaveCount;
+		impl->latestSummary.workerCompletionWakeCount = workerCompletionWakeCount;
+		impl->latestSummary.completionDrivenDispatchCount = completionDrivenDispatchCount;
+		impl->latestSummary.peakConcurrentWorkerCount = peakConcurrentWorkerCount;
 		const std::uint64_t totalMeasuredTimeNs = impl->latestSummary.workerTimeNs + impl->latestSummary.protectedTimeNs + impl->latestSummary.coordinatorWaitTimeNs;
 		impl->latestSummary.workerUtilization = totalMeasuredTimeNs == 0
 			? 0.0
 			: static_cast<double>(impl->latestSummary.workerTimeNs) / static_cast<double>(totalMeasuredTimeNs);
+		if (options.formatSummary)
+		{
+			impl->latestSummary.formatted = FormatJobGraphSummary(impl->latestSummary);
+		}
 		return impl->latestSummary;
 	}
 

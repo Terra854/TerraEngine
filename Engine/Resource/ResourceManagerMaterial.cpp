@@ -323,5 +323,8 @@ void ResourceManager::ReloadMaterial(const TerraEngine::UUID& id)
 	{
 		std::unique_lock lock(materialCache.mutex);
 		materialCache.resources[id] = std::move(material);
+		// A material becomes renderer-visible only after its complete payload has
+		// replaced the cached value; malformed reloads intentionally publish nothing.
+		m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);
 	}
 }

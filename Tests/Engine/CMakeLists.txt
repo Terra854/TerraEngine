@@ -64,6 +64,7 @@ add_executable(TerraEngine-EngineTests
 	Core/ObjectManagerTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Core/JobGraphTests.cpp
 	Core/SystemSchedulerTests.cpp
+	Core/FramePublicationSchedulerContractTests.cpp
 	Core/TransformTaskGraphTests.cpp
 	Performance/PerformanceTestFixtures.cpp
 	Performance/PerformanceBaselineTests.cpp
@@ -113,6 +114,8 @@ add_executable(TerraEngine-EngineTests
 	Profiling/ProfilerCaptureTests.cpp
 	Profiling/ProfilerCaptureV2Tests.cpp
 	Profiling/ProfilerOptimizationEvidenceTests.cpp
+	Profiling/ProfilerFramePublicationEvidenceTests.cpp
+	Profiling/FramePublicationToolContractTests.cpp
 	Profiling/ProfilerCaptureLevelTests.cpp
 	Profiling/ProfilerCapturePerformanceTests.cpp
 	Profiling/ProfilerPerformanceSummaryTests.cpp
@@ -140,15 +143,12 @@ add_executable(TerraEngine-EngineTests
 	Resource/VirtualGeometryProductionFormatTests.cpp
 	Resource/VirtualGeometryResourceTests.cpp
 	Resource/VirtualGeometryResidencyTests.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/MockRenderBackendTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedRenderViewTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedVirtualGeometryAbiTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedVirtualGeometryRuntimeTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedVirtualGeometrySchedulerTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/DeformableVirtualGeometryTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererThreadingTestFixtures.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderBackendCompatibilityTests.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderBackendDiagnosticsOverheadTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderBackendStageTimingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderBackendStallDiagnosticsTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderBudgetDiagnosticsTests.cpp
@@ -156,28 +156,27 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderCaptureEncodingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderCaptureQueueTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderDeferredRetirementTests.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderDiagnosticsTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderRuntimeLayoutTests.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderFailureContainmentTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderDiagnosticsTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererDeviceLossLatchTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererRecoveryDiagnosticsTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderFrameBreakdownTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderFrameSnapshotTests.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderGraphContractTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderFramePublicationContractTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderDynamicPageTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderViewPublicationTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderPublicationFailureTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderPublicationSourceGuardTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderGraphThreadingContractTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderPassValidationStressTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderPerformanceGateTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderPreparationCacheTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderInstanceAbiTests.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderQueueReadinessTests.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderRandomizedSchedulingTests.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderResourceCancellationTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderResourceReadinessTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderStreamingNeedTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderShadowParallelParityTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSmallSceneOverheadTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSnapshotContractTests.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSubmissionOwnershipTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryBatchingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryAggregateContractTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryAggregateTransitionTests.cpp
@@ -194,7 +193,6 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHardeningTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHiZTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryGpuTimingTests.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryGpuDrivenPerformanceTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryInstanceTraversalTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryMultiViewTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryPageStreamingTests.cpp
@@ -243,7 +241,6 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedVirtualGeometryLodTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedVirtualGeometryPerformanceTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderWorkerTaskGroupTests.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSubmissionPlanTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/LiveGpuSubmissionBoundaryTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderTestRegistration.cpp
 	# Virtual geometry renderer tests will be registered here as each
@@ -252,8 +249,6 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderUiPreparationTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderUploadBudgetTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderViewSubmitReuseTests.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderWorkerSafetyTests.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderWorkSchedulingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanFrameDiagnosticsTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanVirtualGeometryTimingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanImageReadbackTests.cpp
@@ -262,7 +257,6 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/EditorFrameCompletionTrackerTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanRecordingSchedulingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanThreadLocalContextTests.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanStaleBatchTests.cpp
 	# Animation ABI and managed parity tests live with the scripting boundary
 	# instead of the recursively discovered native Animation tests, so list them
 	# explicitly.
@@ -285,6 +279,7 @@ add_executable(TerraEngine-EngineTests
 	Scene/SceneSerializationTests.cpp
 	Scene/SceneGraphRuntimeTests.cpp
 	Scene/SceneChangePacketTests.cpp
+	Scene/FrameSceneChangePublicationTests.cpp
 	Scene/SceneMutationQueueTests.cpp
 	Scene/TransactionalMutationTestFixtures.cpp
 	Scene/TransactionalMutationTests.cpp

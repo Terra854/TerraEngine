@@ -29,7 +29,8 @@
 #include "Utilities/UUID.h"
 
 namespace TerraEngine::Animation {
-	struct PublishedAnimatorPose;
+	struct AnimationAuthorityRow;
+	struct AnimationPresentationFrame;
 }
 
 enum class RenderViewType : std::uint8_t
@@ -177,7 +178,7 @@ namespace TerraEngine::Renderer {
 	};
 
 	// One record ties immutable CPU output to the exact mesh and renderer
-	// lifetimes that accepted it. Record indices are copied into DrawCommand, so
+	// lifetimes that accepted it. Record indices are copied into RenderItemRecord, so
 	// every Scene/Game/shadow view reuses one frame upload.
 	struct CpuAnimationDeformationRecord
 	{
@@ -262,9 +263,9 @@ namespace TerraEngine::Renderer {
 		}
 	};
 
-	// A DrawCommand copies this result. Keeping the publication bundle alive
-	// guarantees that all pose spans remain valid until the protected render
-	// submission has finished consuming the command.
+	// A sealed dynamic render lane retains this value. Keeping the publication
+	// bundle alive guarantees that all pose spans remain valid until protected
+	// render submission has finished consuming the selected instance.
 	struct AnimationRenderBinding
 	{
 		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
@@ -286,7 +287,12 @@ namespace TerraEngine::Renderer {
 		bool safePose = true;
 		RenderInvalidationGenerationRecord invalidation;
 		AnimationGpuRenderBinding gpu;
-		std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose> pose;
+		// The presentation root owns the row's page lifetime.  The raw row pointer
+		// is therefore stable for the binding's complete immutable lifetime without
+		// reviving the removed per-animator pose publication type.
+		std::shared_ptr<const TerraEngine::Animation::AnimationPresentationFrame>
+			presentationFrame;
+		const TerraEngine::Animation::AnimationAuthorityRow* authorityRow = nullptr;
 		std::shared_ptr<const CpuAnimationDeformationData> cpuDeformation;
 		std::uint32_t cpuDeformationRecordIndex =
 			std::numeric_limits<std::uint32_t>::max();
@@ -296,7 +302,8 @@ namespace TerraEngine::Renderer {
 
 		[[nodiscard]] bool HasCpuPose() const noexcept
 		{
-			return pose != nullptr && status == AnimationRenderBindingStatus::Ready
+			return presentationFrame != nullptr && authorityRow != nullptr
+				&& status == AnimationRenderBindingStatus::Ready
 				&& !safePose && source != AnimationRenderPoseSource::BindPose;
 		}
 
@@ -340,6 +347,16 @@ namespace TerraEngine::Renderer {
 				&& RequiresConservativeCoarseVisibility();
 		}
 
+		[[nodiscard]] bool RequiresVirtualGeometryOwnerFallbackVisibility(
+			bool usesVirtualGeometry) const noexcept
+		{
+			// An owner-mesh fallback is the only complete geometry proof when an
+			// active deformable virtual-geometry page is unavailable. Do not let a
+			// stale or under-conservative CPU envelope reject that fallback before
+			// it can reach the protected draw path.
+			return usesVirtualGeometry && RequiresOwnerMeshDeformationFallback();
+		}
+
 		[[nodiscard]] bool IsComputeRasterDeformationSafe() const noexcept
 		{
 			// Conservative CPU broadphase visibility keeps an animated owner in the
@@ -350,8 +367,77 @@ namespace TerraEngine::Renderer {
 		}
 	};
 
-	// The resolver receives only protected-boundary values. currentPose is one
-	// immutable AnimationSystem publication; heldBinding includes the full mesh
+	// Protected renderer publication does not need the worker-facing animator,
+	// skeleton, presentation-frame, or authority-row owners after a binding has
+	// been resolved. Keep only the fallback flags and the optional CPU deformation
+	// owner here; the adjacent AnimationRenderGenerationRecord carries the exact
+	// GPU plan, packet, renderer, palette, and stable-instance identities. This
+	// prevents every animated object from copying the same wide identity envelope
+	// twice while preserving all stale-generation checks at backend consumption.
+	struct PublishedAnimationRenderBinding
+	{
+		std::uint64_t animationAuthorityGeneration = 0U;
+		std::uint64_t posePublicationGeneration = 0U;
+		std::uint64_t deformablePayloadGeneration = 0U;
+		std::uint64_t skeletonCompatibilityFingerprint = 0U;
+		AnimationRenderPoseSource source = AnimationRenderPoseSource::BindPose;
+		AnimationRenderBindingStatus status = AnimationRenderBindingStatus::MissingPose;
+		std::shared_ptr<const CpuAnimationDeformationData> cpuDeformation;
+		std::uint32_t cpuDeformationRecordIndex =
+			std::numeric_limits<std::uint32_t>::max();
+		bool safePose = true;
+		bool pageLocalDeformationAvailable = false;
+
+		PublishedAnimationRenderBinding() = default;
+
+		explicit PublishedAnimationRenderBinding(
+			const AnimationRenderBinding& binding) noexcept
+			: animationAuthorityGeneration(binding.animationAuthorityGeneration),
+			  posePublicationGeneration(binding.posePublicationGeneration),
+			  deformablePayloadGeneration(binding.deformablePayloadGeneration),
+			  skeletonCompatibilityFingerprint(
+				  binding.skeletonCompatibilityFingerprint),
+			  source(binding.source),
+			  status(binding.status),
+			  cpuDeformation(binding.cpuDeformation),
+			  cpuDeformationRecordIndex(binding.cpuDeformationRecordIndex),
+			  safePose(binding.safePose),
+			  pageLocalDeformationAvailable(
+				  binding.pageLocalDeformationAvailable)
+		{
+		}
+
+		[[nodiscard]] bool HasCpuDeformation() const noexcept
+		{
+			return status == AnimationRenderBindingStatus::Ready && !safePose
+				&& source != AnimationRenderPoseSource::BindPose
+				&& cpuDeformation != nullptr && cpuDeformation->IsComplete()
+				&& cpuDeformationRecordIndex
+					!= std::numeric_limits<std::uint32_t>::max();
+		}
+
+		[[nodiscard]] bool RequiresConservativeCoarseVisibility() const noexcept
+		{
+			return deformablePayloadGeneration != 0U
+				&& posePublicationGeneration != 0U
+				&& status == AnimationRenderBindingStatus::Ready && !safePose
+				&& source != AnimationRenderPoseSource::BindPose;
+		}
+
+		[[nodiscard]] bool RequiresOwnerMeshDeformationFallback() const noexcept
+		{
+			return !pageLocalDeformationAvailable
+				&& RequiresConservativeCoarseVisibility();
+		}
+
+		[[nodiscard]] bool IsComputeRasterDeformationSafe() const noexcept
+		{
+			return !RequiresOwnerMeshDeformationFallback();
+		}
+	};
+
+	// The resolver receives only protected-boundary values. authorityRow belongs
+	// to one immutable presentation root; heldBinding includes the full mesh
 	// identity that originally accepted its pose, so a mesh recook cannot reuse a
 	// compatible-looking pointer from another deformable payload generation.
 	struct AnimationRenderBindingRequest
@@ -378,7 +464,9 @@ namespace TerraEngine::Renderer {
 			expectedGpuRenderIdentity{};
 		AnimationRenderFallbackPolicy fallbackPolicy = AnimationRenderFallbackPolicy::BindPose;
 		RenderInvalidationGenerationRecord invalidation;
-		std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose> currentPose;
+		std::shared_ptr<const TerraEngine::Animation::AnimationPresentationFrame>
+			presentationFrame;
+		const TerraEngine::Animation::AnimationAuthorityRow* authorityRow = nullptr;
 		// Render collection may resolve this copied identity from the immutable
 		// presentation envelope before it asks the CPU pose cache. It is optional
 		// because CPU and safe-fallback animation do not have GPU packet work.
@@ -2419,8 +2507,8 @@ inline SceneRenderSettings SanitizeSceneRenderSettings(const SceneRenderSettings
 	return sanitized;
 }
 
-// struct DrawCommand groups related state and operations so callers have one documented contract.
-struct DrawCommand
+// struct RenderItemRecord groups related state and operations so callers have one documented contract.
+struct RenderItemRecord
 {
 	TerraEngine::UUID meshId;
 	TerraEngine::UUID materialId;
@@ -2440,7 +2528,29 @@ struct DrawCommand
 		TerraEngine::Renderer::GeometryRoute::DirectMeshlet;
 	// Animation binding is a copied, immutable generation bundle. Static meshes
 	// leave it at the bind-pose default and pay no animation-system lookup cost.
-	TerraEngine::Renderer::AnimationRenderBinding animationBinding{};
+	// The generation record owns GPU packet identity; the compact binding keeps
+	// only CPU fallback ownership and flags not represented by that record.
+	struct PublishedAnimationGeneration
+	{
+		std::uint64_t stableInstanceId = 0U;
+		std::uint64_t poseGeneration = 0U;
+		std::uint64_t paletteGeneration = 0U;
+		std::uint64_t deformablePayloadGeneration = 0U;
+		std::uint64_t programGeneration = 0U;
+		std::uint64_t animationPlanGeneration = 0U;
+		std::uint64_t rendererGeneration = 0U;
+		std::uint32_t firstGpuWorkPacket = 0U;
+		std::uint32_t gpuWorkPacketCount = 0U;
+		std::uint32_t gpuStageMask = 0U;
+		// Stored as the renderer-neutral AnimationRenderEvaluationSource value. This
+		// public command type intentionally does not include selection-layer headers.
+		std::uint8_t source = 0U;
+		bool complete = false;
+
+		bool operator==(const PublishedAnimationGeneration&) const = default;
+	};
+	PublishedAnimationGeneration animation{};
+	TerraEngine::Renderer::PublishedAnimationRenderBinding animationBinding{};
 	// Editor-only tint is submitted per draw so Scene View context modes can
 	// de-emphasize surrounding objects without changing runtime materials.
 	glm::vec4 editorTint = glm::vec4(0.0f);
@@ -2479,14 +2589,79 @@ struct DrawCommand
 		return geometryRoute == TerraEngine::Renderer::GeometryRoute::VirtualGeometryHardware
 			|| geometryRoute == TerraEngine::Renderer::GeometryRoute::VirtualGeometryCompute;
 	}
+
+	[[nodiscard]] bool UsesGroupableMeshTaskRoute() const noexcept
+	{
+		// Correctness fallback still draws the complete owner mesh through the
+		// ordinary task/mesh pipeline when that pipeline is available. Vulkan keeps
+		// the final stage-capability check; this predicate only prevents the shared
+		// instance planner from rejecting an otherwise compatible owner cohort.
+		return geometryRoute == TerraEngine::Renderer::GeometryRoute::DirectMeshlet
+			|| UsesVirtualGeometryRoute()
+			|| geometryRoute == TerraEngine::Renderer::GeometryRoute::VirtualGeometryFallback;
+	}
+
+	[[nodiscard]] bool HasCompleteGpuAnimation() const noexcept
+	{
+		return animation.complete
+			&& (animation.source == 2U || animation.source == 3U)
+			&& animation.gpuWorkPacketCount != 0U
+			&& animation.stableInstanceId != 0U
+			&& animation.animationPlanGeneration != 0U
+			&& animation.rendererGeneration != 0U;
+	}
 };
 
-// Each shadow-casting light receives its own filtered draw list so shadow
-// passes only visit meshes that can actually intersect that light's coverage.
+// A view lane contains only selectors that genuinely vary after persistent
+// mesh/material membership and the frame-owned transform lane are known. The
+// complete object, mesh, material, and model state stays in the publication
+// roots, so additional camera and shadow views do not copy it.
+struct RenderViewCommandLane
+{
+	std::uint32_t materialIndex = 0u;
+	std::uint32_t meshDataIndex = 0u;
+	std::uint32_t textureIndex = 0u;
+	std::uint32_t virtualMeshletOffset = 0u;
+	std::uint32_t virtualMeshletCount = 0u;
+	std::uint32_t virtualGeometryFlags = 0u;
+	std::uint32_t selectedVirtualClusterOffset = 0u;
+	std::uint32_t selectedVirtualClusterCount = 0u;
+	std::uint32_t selectedVirtualPageNeedOffset = 0u;
+	std::uint32_t selectedVirtualPageNeedCount = 0u;
+	std::uint32_t virtualGeometryPageId = 0u;
+	std::uint32_t virtualGeometryFallbackPageId = 0xffffffffu;
+	VirtualGeometryPagePayloadSource virtualGeometryPayloadSource =
+		VirtualGeometryPagePayloadSource::Unknown;
+	VirtualGeometryEmittedPageSource virtualGeometryEmittedSource =
+		VirtualGeometryEmittedPageSource::None;
+	std::uint64_t virtualGeometryPagePayloadByteOffset = 0u;
+	std::uint64_t virtualGeometryPagePayloadByteSize = 0u;
+	std::uint32_t virtualGeometryPayloadBufferIndex = 0xffffffffu;
+	std::uint32_t virtualGeometryPayloadDescriptorIndex = 0xffffffffu;
+	std::uint32_t virtualGeometryPacketDescriptorIndex = 0xffffffffu;
+	bool taskShaderCullingEnabled = true;
+};
+
+// Each shadow-casting light retains only stable publication ordinals and its
+// light-view selectors. Vulkan resolves one local item at a time from the
+// sealed persistent/dynamic roots; no crowd-sized shadow command copy crosses
+// the protected backend boundary.
 struct ShadowDrawList
 {
 	TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
-	std::vector<DrawCommand> commands;
+	std::uint64_t topologyGeneration = 0u;
+	std::vector<std::uint32_t> stableOrdinals;
+	std::vector<std::uint32_t> selectedLods;
+	std::vector<std::uint32_t> routeSelectors;
+	std::vector<glm::vec4> editorTints;
+	std::vector<RenderViewCommandLane> commandLanes;
+
+	[[nodiscard]] bool HasParallelLengths() const noexcept
+	{
+		const std::size_t count = stableOrdinals.size();
+		return selectedLods.size() == count && routeSelectors.size() == count
+			&& editorTints.size() == count && commandLanes.size() == count;
+	}
 };
 
 // struct PushConstants groups related state and operations so callers have one documented contract.
@@ -2710,6 +2885,29 @@ struct alignas(16) RenderInstanceRecord
 	static constexpr std::uint32_t kTextureSelectorWord = 1u;
 	static constexpr std::uint32_t kPickingIdentityWord = 2u;
 	static constexpr std::uint32_t kInstanceFlagsWord = 3u;
+	// The shader consumes only objectIdentity.x. The remaining CPU-owned words
+	// carry an exact compatibility proof so Vulkan can validate grouped members
+	// without reconstructing every full RenderItemRecord at the backend boundary.
+	static constexpr std::uint32_t kObjectIdentityWord = 0u;
+	static constexpr std::uint32_t kGeometryRouteWord = 1u;
+	static constexpr std::uint32_t kVirtualGeometryFlagsWord = 2u;
+	static constexpr std::uint32_t kCompatibilityPolicyWord = 3u;
+	static constexpr std::uint32_t kTaskCullingPolicyBit = 1u << 0u;
+	static constexpr std::uint32_t kConservativeVisibilityPolicyBit = 1u << 1u;
+	static constexpr std::uint32_t kAnimationSourcePolicyShift = 8u;
+	static constexpr std::uint32_t kAnimationSourcePolicyMask = 0xffu;
+
+	[[nodiscard]] static constexpr std::uint32_t PackCompatibilityPolicy(
+		bool taskShaderCullingEnabled,
+		std::uint32_t animationSource,
+		bool conservativeVisibility) noexcept
+	{
+		return (taskShaderCullingEnabled ? kTaskCullingPolicyBit : 0u)
+			| (conservativeVisibility
+				? kConservativeVisibilityPolicyBit : 0u)
+			| ((animationSource & kAnimationSourcePolicyMask)
+				<< kAnimationSourcePolicyShift);
+	}
 	// ABI words used by geometrySelectors.
 	static constexpr std::uint32_t kSelectedLodWord = 0u;
 	static constexpr std::uint32_t kPacketDescriptorWord = 1u;
@@ -2736,15 +2934,13 @@ struct SharedRenderGroup
 	SharedRenderGroupKey key{};
 	std::uint32_t firstInstance = 0u;
 	std::uint32_t instanceCount = 0u;
-	std::uint32_t firstFallbackCommand = 0u;
-	std::uint32_t fallbackCommandCount = 0u;
 	std::uint64_t topologyGeneration = 0u;
 	std::uint64_t viewGeneration = 0u;
 	RenderGroupRejectionReason rejectionReason = RenderGroupRejectionReason::None;
 	bool executable = false;
 };
 
-// One live submission points back at its representative DrawCommand while the
+// One live submission points back at its representative RenderItemRecord while the
 // contiguous record range supplies the values that must remain per instance.
 // Keeping this bridge in the immutable frame payload lets the Vulkan boundary
 // validate all records before it suppresses any ordinary draw commands.
@@ -2787,7 +2983,10 @@ struct DynamicRenderFrameState
 	std::uint64_t rendererGeneration = 0u;
 	std::vector<RenderInstanceRecord> instances;
 	std::vector<SharedRenderGroup> groups;
-	std::vector<DrawCommand> fallbackCommands;
+	// Unsupported group combinations retain only the stable source ordinal. The
+	// immutable snapshot/publication owns mesh, material, transform, and route data;
+	// carrying another complete command here would duplicate that authority.
+	std::vector<std::uint32_t> singletonOrdinals;
 	bool valid = false;
 };
 
@@ -3033,8 +3232,8 @@ struct VirtualGeometryRetainedGpuEvidence
 	std::vector<VirtualGeometryGpuFallbackRecord> fallbackRecords;
 };
 
-// struct FrameRenderData groups related state and operations so callers have one documented contract.
-struct FrameRenderData
+// struct RenderViewBuildState groups related state and operations so callers have one documented contract.
+struct RenderViewBuildState
 {
 	// Every view submitted from this value shares one immutable frame identity.
 	// Vulkan stamps it beside the typed visibility attachment so direct meshes
@@ -3051,16 +3250,13 @@ struct FrameRenderData
 	RenderSettings settings;
 	FrameSkyData sky;
 	std::vector<FrameLightCandidate> lightCandidates;
-	std::vector<DrawCommand> commands;
-	// The ordinary command vector remains the authoritative fallback path. A
-	// grouped submission references one representative command plus these
-	// complete per-instance records, so an upload/validation failure can render
-	// every original command without reconstructing scene data.
+	// Grouped submission records refer to the compact command-lane indices sealed
+	// into RenderViewPresentationInput. This preparation value never retains a
+	// second full per-view command collection.
 	std::vector<RenderInstanceRecord> groupedInstanceRecords;
 	std::vector<GroupedRenderSubmission> groupedSubmissions;
-	// Resource preparation needs one command per compatible group plus every
-	// ungrouped fallback. The complete command vector remains draw authority; this
-	// sidecar only avoids resolving identical mesh/material resources per instance.
+	// Resource preparation needs one selector per compatible group plus every
+	// singleton. Vulkan resolves those indices from the sealed publication roots.
 	std::vector<std::uint32_t> drawResourcePreparationCommandIndices;
 	RenderOptimizationSummary renderOptimization{};
 	// These vectors are immutable per-view mirrors of selected virtual geometry
@@ -3141,7 +3337,7 @@ struct FrameRenderData
 		// record and the owning frame-slot fence completes.
 		std::vector<VirtualGeometryDecodedPageUploadRecord> virtualGeometryDecodedPageUploads;
 		// Scene View can request a whole-view authoring tint for non-mesh passes
-	// such as sky and grid while individual DrawCommand tint preserves the
+	// such as sky and grid while individual RenderItemRecord tint preserves the
 	// focused prefab branch at normal color.
 	glm::vec4 editorContextTint = glm::vec4(0.0f);
 	// Scene View overlays can hide the editor grid without changing authored
@@ -3173,9 +3369,10 @@ struct RenderOutputRequest
 // struct RenderSnapshotHandle groups related state and operations so callers have one documented contract.
 struct RenderSnapshotHandle
 {
-	// A handle points at one fixed slice inside every per-frame GPU buffer that
-	// can change while views are queued. Offsets are element offsets, not byte
-	// offsets, so shaders can add them directly to structured-buffer indices.
+	// A handle points at one fixed slice inside each fixed-stride per-frame GPU
+	// buffer. The indirect-draw offset is resolved later from the frame-slot
+	// append allocator because shadows add commands after view setup. All offsets
+	// remain element offsets so shaders can add them to structured-buffer indices.
 	std::uint32_t slotIndex = 0u;
 	std::uint32_t statsSlotIndex = 0u;
 	std::uint32_t lightDataOffset = 0u;
@@ -3289,6 +3486,19 @@ static_assert(sizeof(MeshletCullingCountersGPU) == 48, "Meshlet counter payload 
 struct RenderStatsSnapshot
 {
 	RenderViewType viewType = RenderViewType::Game;
+	// Camera-family outputs share a Scene/Game diagnostic class, but captures are
+	// distinct targets. Carry the exact output identity so automation and the
+	// profiler can consume capture-only runs without attributing them to a visible
+	// editor viewport.
+	RenderOutputKind outputKind = RenderOutputKind::GameView;
+	std::uint32_t outputId = 0u;
+	bool dedicatedCaptureOutput = false;
+	// Backend stats are delayed until their frame slot completes. Preserve the
+	// sealed publication identity so profilers never attribute old GPU counters
+	// to a newer Game or Scene frame after presentation recovery.
+	std::uint64_t publicationFrameId = 0u;
+	std::uint64_t publicationGeneration = 0u;
+	std::uint64_t rendererSessionGeneration = 0u;
 	// The renderer writes this aggregate only after the complete frame candidate
 	// is accepted. Its fixed-size layout keeps profiler sampling allocation-free.
 	RenderOptimizationSummary optimization{};

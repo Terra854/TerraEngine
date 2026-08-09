@@ -189,7 +189,7 @@ namespace TerraEngine::EditorTests {
 			context.Expect(sceneView.find("RenderSystem::Instance().SetVirtualGeometryDebugVisualizationMode(RenderViewType::Scene") != std::string::npos, "Scene View mode changes should publish directly to RenderSystem in the same GUI event.");
 			context.Expect(renderSystem.find("virtualGeometryDebugModes[BuildVirtualGeometryDebugModeKey(viewType, outputId)] = normalized") != std::string::npos, "RenderSystem should store view-local debug modes immediately instead of waiting for camera movement.");
 			context.Expect(renderSystem.find("viewVirtualGeometryQuality.debugVisualizationMode = GetVirtualGeometryDebugVisualizationMode(viewType, outputId)") != std::string::npos, "Visible-command preparation should read the latest view-local visualizer mode each frame.");
-			const std::size_t routeLoop = renderSystem.find("for (DrawCommand& command : commands)");
+			const std::size_t routeLoop = renderSystem.find("for (RenderItemRecord& command : commands)");
 			const std::size_t debugStamp = renderSystem.find("command.virtualGeometryFlags |= debugMode << kVirtualGeometryDebugModeShift", routeLoop);
 			const std::size_t routeGuard = renderSystem.find("!command.UsesVirtualGeometryRoute()", routeLoop);
 			context.Expect(routeLoop != std::string::npos

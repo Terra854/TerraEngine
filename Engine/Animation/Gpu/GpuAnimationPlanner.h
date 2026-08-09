@@ -103,6 +103,40 @@ namespace TerraEngine::Animation {
 		bool allowSharedVisualEvaluation = false;
 	};
 
+	// Producers already visit every lowering input while assembling the immutable
+	// presentation frame. Extending this signature during that mandatory pass lets
+	// the planner validate a retained topology without scanning the crowd twice.
+	class TERRAENGINE_API GpuAnimationLoweringTopologySignatureBuilder {
+	public:
+		void Include(const GpuAnimationLoweringInput& input) noexcept;
+		[[nodiscard]] std::uint64_t Complete() const noexcept;
+
+	private:
+		// Worker completion order is not a topology property. Three independent
+		// commutative accumulators retain a strong 64-bit set fingerprint without
+		// sorting the crowd or making the protected publisher order-dependent.
+		std::uint64_t xor_ = 0U;
+		std::uint64_t sum_ = 0U;
+		std::uint64_t productSum_ = 0U;
+		std::uint64_t count_ = 0U;
+	};
+
+	// The producer already computed topologyInputSignature while assembling the
+	// immutable presentation input. An exact prior signature permits a warm frame
+	// to publish only generation/tick/render-identity lanes without taking the
+	// mutable atlas-cache lock. Any mismatch returns false without replacing output.
+	[[nodiscard]] TERRAENGINE_API bool TryRefreshLoweredGpuAnimationDynamicPlan(
+		std::span<const GpuAnimationLoweringInput> inputs,
+		std::uint64_t topologyInputSignature,
+		std::uint32_t planGeneration,
+		GpuAnimationArena& scratchArena,
+		GpuAnimationArena& paletteArena,
+		const GpuAnimationPlan& previous,
+		GpuAnimationPlan& output,
+		const GpuAnimationPlanLimits& limits = {},
+		std::shared_ptr<const GpuAnimationPlan> previousOwner = {},
+		const std::shared_ptr<GpuAnimationPlanDynamicLanes>& dynamicLaneScratch = {}) noexcept;
+
 	struct GpuAnimationLoweringResult {
 		GpuAnimationLoweringStatus status = GpuAnimationLoweringStatus::InvalidArgument;
 		GpuAnimationWorkRequest request{};
@@ -110,8 +144,9 @@ namespace TerraEngine::Animation {
 	};
 
 	// One result describes a complete transactional lowering attempt. workRequests
-	// is retained for diagnostics and tests; it is empty when every animator used
-	// the mandatory CPU deterministic/fallback path.
+	// is retained for diagnostics and tests after a full topology build. A warmed
+	// retained-plan refresh leaves it empty because production has already validated
+	// and published the requests without materializing a duplicate diagnostic vector.
 	struct GpuAnimationLoweredPlanResult {
 		GpuAnimationLoweringStatus status = GpuAnimationLoweringStatus::InvalidArgument;
 		GpuAnimationPlanStatus planStatus = GpuAnimationPlanStatus::InvalidArgument;
@@ -202,5 +237,8 @@ namespace TerraEngine::Animation {
 		GpuAnimationLoweredPlanResult& result,
 		const GpuAnimationPlanLimits& limits = {},
 		GpuAnimationFrameAtlasCache* atlasCache = nullptr,
-		const GpuAnimationPlan* previousPlan = nullptr) noexcept;
+		const GpuAnimationPlan* previousPlan = nullptr,
+		std::shared_ptr<const GpuAnimationPlan> previousPlanOwner = {},
+		std::uint64_t precomputedTopologyInputSignature = 0U,
+		const std::shared_ptr<GpuAnimationPlanDynamicLanes>& dynamicLaneScratch = {}) noexcept;
 }

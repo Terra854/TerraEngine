@@ -6,7 +6,7 @@
 #include <stdexcept>
 
 namespace TerraEngine::Tests {
-	static Animation::PublishedAnimatorPose MakeDigestPose(float x = 1.0F, std::uint64_t state = 99U, std::uint64_t publication = 13U) {
+	static Animation::AnimationAuthorityRow MakeDigestPose(float x = 1.0F, std::uint64_t state = 99U, std::uint64_t publication = 13U) {
 		auto buffer = std::make_shared<Animation::PoseBuffer>();
 		Animation::AnimationPoseGeneration generation;
 		generation.animator = {0U, 1U};
@@ -23,12 +23,12 @@ namespace TerraEngine::Tests {
 		if (buffer->Seal() != Animation::AnimationStatus::Ok) {
 			throw std::runtime_error("Parity digest fixture could not seal a valid pose.");
 		}
-		Animation::PublishedAnimatorPose pose;
+		Animation::AnimationAuthorityRow pose;
 		pose.ownerObjectId[0] = 1U;
 		pose.controller.assetId.value[0] = 2U;
 		pose.clip.assetId.value[0] = 3U;
 		pose.skeleton.assetId.value[0] = 4U;
-		pose.objectGeneration = 10U; pose.componentGeneration = 11U; pose.authorityPublicationGeneration = 12U;
+		pose.objectGeneration = 10U; pose.componentGeneration = 11U;
 		auto snapshot = std::make_shared<Animation::AnimationSnapshot>();
 		snapshot->publicationGeneration = publication; snapshot->tick = 4; snapshot->pose = buffer;
 		snapshot->playback.currentStateId = state;
@@ -80,7 +80,7 @@ namespace TerraEngine::Tests {
 		registry.Add("Engine.AnimationParity.DigestIgnoresRunLocalGenerations", [](TestContext& context) {
 			auto pose = MakeDigestPose();
 			const auto before = Runtime::ComputeAnimationParityAnimatorDigest(pose);
-			pose.objectGeneration = 900U; pose.componentGeneration = 901U; pose.authorityPublicationGeneration = 902U;
+			pose.objectGeneration = 900U; pose.componentGeneration = 901U;
 			pose.snapshot = MakeDigestPose(1.0F, 99U, 903U).snapshot;
 			pose.controller.generation = 904U;
 			pose.clip.generation = 905U;

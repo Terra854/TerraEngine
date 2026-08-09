@@ -654,17 +654,15 @@ namespace TerraEngine::Resource
 	}
 
 	std::vector<VirtualGeometryPageNeedInput> BuildVirtualGeometryPageNeedInputsFromSelectionStates(
-		const std::vector<TerraEngine::Renderer::VirtualGeometryViewSelectionState>& states,
+		std::span<const TerraEngine::Renderer::VirtualGeometryPageNeedRecord> pageNeeds,
 		const std::vector<VirtualGeometryPageCatalogEntry>& catalogs,
 		float preloadBias)
 	{
 		const float finitePreloadBias = std::isfinite(preloadBias) ? std::clamp(preloadBias, 0.0f, 16.0f) : 1.0f;
 		std::vector<VirtualGeometryPageNeedInput> inputs;
-		for (const TerraEngine::Renderer::VirtualGeometryViewSelectionState& state : states)
+		for (const TerraEngine::Renderer::VirtualGeometryPageNeedRecord& need : pageNeeds)
 		{
-			const std::string viewId = std::string(::ToString(state.viewType)) + ":" + std::to_string(state.outputId);
-			for (const TerraEngine::Renderer::VirtualGeometryPageNeedRecord& need : state.pageNeeds)
-			{
+			const std::string viewId = "published-selection";
 				const VirtualGeometryPageCatalogEntry* catalog = FindPageCatalog(catalogs, need.meshId);
 				if (catalog == nullptr || catalog->pages.empty())
 				{
@@ -694,8 +692,7 @@ namespace TerraEngine::Resource
 				input.desiredPayloadSource = need.desiredPayloadSource;
 				input.fallbackPayloadSource = need.fallbackPayloadSource;
 				input.pages = catalog->pages;
-				inputs.push_back(std::move(input));
-			}
+			inputs.push_back(std::move(input));
 		}
 		return inputs;
 	}

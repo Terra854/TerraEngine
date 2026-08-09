@@ -9,6 +9,7 @@
 #include "Animation/Runtime/AnimationCommandQueue.h"
 #include "Animation/Runtime/AdvancedAnimationCommandStore.h"
 #include "Animation/Runtime/AnimationCancellation.h"
+#include "Animation/Runtime/AnimationAuthorityPublication.h"
 #include "Animation/Runtime/AnimationEvaluationCache.h"
 #include "Animation/Runtime/AnimationFallback.h"
 #include "Animation/Runtime/AnimationMemory.h"
@@ -259,51 +260,6 @@ namespace TerraEngine::Animation {
 		bool cancellationRequested = false;
 	};
 
-	// Render/gameplay consumers receive one copied generation bundle. Checking a
-	// single pointer prevents a mesh from combining a new pose with an old clip,
-	// skeleton, component, or safe-pose diagnostic generation.
-	struct PublishedAnimatorPose {
-		AnimatorInstanceHandle animator;
-		UUID ownerObjectId = EMPTY_UUID;
-		AnimationGeneration objectGeneration = 0U;
-		AnimationGeneration componentGeneration = 0U;
-		AnimationTransform sourceObjectWorldTransform{};
-		bool sourceObjectWorldTransformCaptured = false;
-		std::uint64_t authorityPublicationGeneration = 0U;
-		// Visual-only synchronized clones retain their own publication and animator
-		// generations, while this content identity lets renderer preparation reuse
-		// the exact same model-space pose without rebuilding every mesh palette.
-		std::uint64_t visualPoseContentIdLow = 0U;
-		std::uint64_t visualPoseContentIdHigh = 0U;
-		AnimationAssetHandle controller;
-		AnimationAssetHandle clip;
-		AnimationAssetHandle skeleton;
-		// CPU deformation keeps the exact immutable skeleton generation beside
-		// the pose. Render workers can build skinning matrices without reopening
-		// ResourceManager while a hot reload may replace the live asset.
-		std::shared_ptr<const SkeletonAsset> skeletonAsset;
-		std::vector<std::uint64_t> jointStableIds;
-		AnimationCompatibilityFingerprint skeletonCompatibilityFingerprint = 0U;
-		AnimationExecutionPolicy requestedExecutionPolicy = AnimationExecutionPolicy::Auto;
-		AnimationEffectiveExecutionMode effectiveExecutionMode =
-			AnimationEffectiveExecutionMode::CpuDeterministicFallback;
-		AnimatorRootMotionPolicy rootMotionPolicy = AnimatorRootMotionPolicy::Ignore;
-		AnimatorUpdatePolicy updatePolicy = AnimatorUpdatePolicy::EveryFrame;
-		AnimatorEventPolicy eventPolicy = AnimatorEventPolicy::Dispatch;
-		AnimatorCullingPolicy cullingPolicy = AnimatorCullingPolicy::Automatic;
-		AnimationStatus status = AnimationStatus::NotReady;
-		bool safePose = true;
-		// This copied diagnostic distinguishes the exact immutable streamed view
-		// from the complete DATA fallback used while gameplay-critical segments
-		// are still arriving. It never exposes the payload or mutable residency.
-		bool streamedClipPayloadsActive = false;
-		// The accounting lease shares the immutable pose's lifetime. Long-lived
-		// readers and hold-last fallback therefore remain visible to the bounded
-		// PosePool budget instead of disappearing at the next frame capture.
-		std::shared_ptr<const AnimationMemoryLease> poseMemoryReservation;
-		std::shared_ptr<const AnimationSnapshot> snapshot;
-	};
-
 	class TERRAENGINE_API AnimationSystem final : public SystemsBase {
 	public:
 		static AnimationSystem& Instance();
@@ -323,6 +279,11 @@ namespace TerraEngine::Animation {
 		// request lifecycle changes without receiving mutable store access.
 		[[nodiscard]] AnimatorInstanceHandle CreateAnimatorInstance(AnimatorInstanceDescriptor descriptor);
 		[[nodiscard]] bool InvalidateAnimatorInstance(AnimatorInstanceHandle handle);
+		// Scene reconciliation commonly retires thousands of component-owned handles
+		// together. The batch path copies runtime ownership once, advances lifecycle
+		// identity once, and retires the complete set as one protected transaction.
+		[[nodiscard]] std::size_t InvalidateAnimatorInstances(
+			std::span<const AnimatorInstanceHandle> handles);
 		// Standalone runtimes enable authored playback by default. The editor
 		// disables it outside Play Mode so a stopped scene has no component-owned
 		// runtime palette and renders the mesh's authored bind geometry.
@@ -341,7 +302,8 @@ namespace TerraEngine::Animation {
 		[[nodiscard]] bool IsAuthoredComponentPlaybackAdvancing() const noexcept;
 		// Scene, script, renderer, physics, device, and Play Mode owners call this
 		// only from their protected lifecycle boundary. It invalidates in-flight
-		// tokens and optional reuse without granting access to animation internals.
+		// tokens and retires authority, sidecar, and pending-frame roots so fresh
+		// consumers cannot acquire a result from the previous lifecycle identity.
 		[[nodiscard]] AnimationStatus NotifyLifecycleInvalidation(
 			AnimationLifecycleBoundary boundary);
 		[[nodiscard]] bool IsAnimatorInstanceAlive(AnimatorInstanceHandle handle) const;
@@ -448,14 +410,8 @@ namespace TerraEngine::Animation {
 			std::uint32_t& requiredCount) const;
 		[[nodiscard]] AnimatorInstanceHandle ResolveAnimatorForObject(
 			const UUID& ownerObjectId) const noexcept;
-		void CopyPublishedAnimatorPoses(
-			std::vector<std::shared_ptr<const PublishedAnimatorPose>>& output) const;
 		[[nodiscard]] std::shared_ptr<const AnimationSnapshot> LoadAnimatorSnapshot(
 			AnimatorInstanceHandle handle) const noexcept;
-		[[nodiscard]] std::shared_ptr<const PublishedAnimatorPose> LoadPublishedAnimatorPose(
-			AnimatorInstanceHandle handle) const noexcept;
-		[[nodiscard]] std::shared_ptr<const PublishedAnimatorPose> LoadPublishedAnimatorPoseForObject(
-			const UUID& ownerObjectId) const noexcept;
 		[[nodiscard]] AnimatorPlaybackStateSnapshot LoadAnimatorPlaybackState(
 			AnimatorInstanceHandle handle) const noexcept;
 		[[nodiscard]] std::size_t PendingCommandCount() const;
@@ -467,6 +423,10 @@ namespace TerraEngine::Animation {
 		[[nodiscard]] std::size_t ScheduledAnimatorCount() const noexcept;
 		[[nodiscard]] std::size_t PublishedAnimatorCount() const noexcept;
 		[[nodiscard]] std::uint64_t AuthorityPublicationGeneration() const noexcept;
+		// Gameplay and scripting read one immutable pre-physics authority root.
+		// This replaces per-record pose loads and independent generation assembly.
+		[[nodiscard]] std::shared_ptr<const AnimationAuthorityFrame>
+			LoadPublishedAuthorityFrame() const noexcept;
 		[[nodiscard]] AnimationProductionIntegrationSnapshot
 			ReadProductionIntegrationSnapshot() const noexcept;
 

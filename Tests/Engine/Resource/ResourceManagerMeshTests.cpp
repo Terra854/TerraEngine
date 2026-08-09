@@ -158,5 +158,42 @@ namespace TerraEngine::Tests
 			context.Expect(vulkanSource.find("owner mesh buffers are skipped for page-local virtual geometry") != std::string::npos, "Vulkan uploads should skip full owner buffers for page-local virtual geometry.");
 			context.Expect(vulkanSource.find("vulkan mesh cache hit with page-local virtual geometry owner placeholders") != std::string::npos, "Vulkan cache hits should preserve the page-local placeholder diagnostic.");
 		});
+
+		registry.Add("Resource.Manager.RendererReloadsPublishOnlyCompletedPayloads", [](TestContext& context) {
+			ResourceManager& resourceManager = ResourceManager::Instance();
+			const std::uint64_t failedReloadGeneration =
+				resourceManager.GetRendererResourcePublicationGeneration();
+			const TerraEngine::UUID unknownId = TerraEngine::GenerateUUID();
+			resourceManager.ReloadMesh(unknownId);
+			resourceManager.ReloadMaterial(unknownId);
+			resourceManager.ReloadTexture(unknownId).get();
+			context.ExpectEqual(failedReloadGeneration,
+				resourceManager.GetRendererResourcePublicationGeneration(),
+				"Reload requests without a completed cache payload must not publish a new renderer resource generation.");
+
+			const std::string header = ReadSourceFile("Engine/Resource/ResourceManager.h");
+			const std::string mesh = ReadSourceFile("Engine/Resource/ResourceManagerMesh.cpp");
+			const std::string material = ReadSourceFile("Engine/Resource/ResourceManagerMaterial.cpp");
+			const std::string texture = ReadSourceFile("Engine/Resource/ResourceManagerTexture.cpp");
+			const std::string publication =
+				"m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);";
+
+			context.Expect(header.find("GetRendererResourcePublicationGeneration")
+					!= std::string::npos
+				&& header.find("std::atomic_uint64_t m_RendererResourcePublicationGeneration{1U}")
+					!= std::string::npos,
+				"ResourceManager must expose a monotonic renderer-only publication generation.");
+			context.Expect(mesh.find("meshCache.resources[id] = std::move(mesh);")
+					< mesh.find(publication)
+				&& material.find("materialCache.resources[id] = std::move(material);")
+					< material.find(publication)
+				&& texture.find("textureCache.resources[id] = std::move(texture);")
+					< texture.find(publication),
+				"Mesh, material, and texture reloads must advance renderer publication only after replacing a complete cache payload.");
+			context.Expect(mesh.find("if (mesh)") < mesh.find(publication)
+				&& material.find("if (material)") < material.find(publication)
+				&& texture.find("if (texture)") < texture.find(publication),
+				"Reload failures must not advance the renderer publication generation.");
+		});
 	}
 }

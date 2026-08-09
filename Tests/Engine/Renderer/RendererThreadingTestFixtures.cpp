@@ -31,6 +31,116 @@ namespace TerraEngine::Tests {
 		return snapshot;
 	}
 
+	TerraEngine::Renderer::RenderFramePublication BuildRendererThreadingPublication(
+		const TerraEngine::Renderer::RenderFrameSnapshot& snapshot)
+	{
+		using namespace TerraEngine::Renderer;
+		RenderFramePublication publication;
+		publication.frameId = snapshot.frameId;
+		publication.generation = std::max<std::uint64_t>(1u, snapshot.frameId);
+		publication.rendererSessionGeneration = 1u;
+		publication.sceneGeneration = std::max<std::uint64_t>(1u, snapshot.sceneRevision);
+
+		auto persistent = std::make_shared<RenderPersistentTopologyRoot>();
+		persistent->generation = publication.generation;
+		persistent->rendererSessionGeneration = publication.rendererSessionGeneration;
+		auto persistentPage = std::make_shared<RenderPersistentPage>();
+		persistentPage->generation = publication.generation;
+		auto dynamic = std::make_shared<RenderDynamicStateRoot>();
+		dynamic->generation = publication.generation;
+		dynamic->rendererSessionGeneration = publication.rendererSessionGeneration;
+		auto dynamicPage = std::make_shared<RenderDynamicPage>();
+		dynamicPage->generation = publication.generation;
+
+		for (std::size_t index = 0u; index < snapshot.renderables.size(); ++index)
+		{
+			const RenderFrameRenderableRecord& renderable = snapshot.renderables[index];
+			RenderPersistentSlot slot;
+			slot.key = { static_cast<std::uint32_t>(index), 1u };
+			slot.objectId = renderable.objectId;
+			slot.meshId = renderable.meshId;
+			slot.materialId = renderable.materialId;
+			slot.meshGeneration = 1u;
+			slot.materialGeneration = 1u;
+			slot.resourceGeneration = std::max<std::uint64_t>(1u, snapshot.resourceRevision);
+			slot.packetTemplateIdentity = static_cast<std::uint64_t>(index) + 1u;
+			slot.occupied = true;
+			persistentPage->slots.push_back(slot);
+
+			RenderDynamicLane lane;
+			lane.key = slot.key;
+			lane.occupied = true;
+			dynamicPage->lanes.push_back(lane);
+			dynamicPage->changedLanes.push_back(true);
+		}
+		persistent->pages.push_back(std::move(persistentPage));
+		dynamic->pages.push_back(std::move(dynamicPage));
+		publication.persistent = std::move(persistent);
+		publication.dynamic = std::move(dynamic);
+
+		for (const RenderFrameViewRequest& request : snapshot.viewRequests)
+		{
+			RenderViewSelection selection;
+			selection.outputKind = request.outputKind;
+			selection.viewType = request.viewType;
+			selection.outputId = request.outputId;
+			selection.generation = std::max<std::uint64_t>(1u, request.viewGeneration);
+			RenderViewPresentationInput input;
+			input.output.kind = request.outputKind;
+			input.output.diagnosticsView = request.viewType;
+			input.output.outputId = request.outputId;
+			for (std::size_t index = 0u; index < snapshot.renderables.size(); ++index)
+			{
+				selection.visibleOrdinals.push_back({ static_cast<std::uint32_t>(index), 1u });
+				selection.selectedLods.push_back(0u);
+				selection.routeSelectors.push_back(0u);
+				selection.packetTemplateIdentities.push_back(index + 1u);
+				selection.tintSelectors.push_back(0u);
+				selection.editorTints.push_back(glm::vec4(0.0f));
+			}
+			for (const RenderFrameLightRecord& light : snapshot.lights)
+			{
+				FrameLightCandidate candidate;
+				candidate.lightId = light.lightId;
+				input.lightCandidates.push_back(candidate);
+				if (light.castsShadows)
+				{
+					const std::size_t faceCount = light.lightType == 1u ? 6u : 1u;
+					for (std::size_t face = 0u; face < faceCount; ++face)
+					{
+						ShadowDrawList shadow;
+						shadow.lightId = light.lightId;
+						shadow.stableOrdinals = { 0u };
+						shadow.selectedLods = { 0u };
+						shadow.routeSelectors = { 0u };
+						shadow.editorTints = { glm::vec4(0.0f) };
+						shadow.commandLanes.resize(1u);
+						input.shadowDrawLists.push_back(std::move(shadow));
+					}
+				}
+			}
+			publication.views.push_back(std::move(selection));
+			publication.presentationInputs.push_back(std::move(input));
+		}
+
+		std::vector<RenderResourcePreparationRecord> resources;
+		const auto appendResources = [&resources, &snapshot](const auto& source)
+		{
+			for (const RenderFrameResourceRecord& resource : source)
+			{
+				resources.push_back({ resource.resourceId,
+					std::max<std::uint64_t>(1u, snapshot.resourceRevision), 0u,
+					resource.resident, resource.usingFallback });
+			}
+		};
+		appendResources(snapshot.meshes);
+		appendResources(snapshot.materials);
+		appendResources(snapshot.textures);
+		publication.resourcePreparation = BuildRenderResourcePreparationTable(resources,
+			std::max<std::uint64_t>(1u, snapshot.resourceRevision));
+		return publication;
+	}
+
 	TerraEngine::Renderer::BackendCapabilityProfile MakeThreadedRendererProfile()
 	{
 		TerraEngine::Renderer::BackendCapabilityProfile profile;

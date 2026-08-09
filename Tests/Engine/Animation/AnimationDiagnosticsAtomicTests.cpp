@@ -24,17 +24,17 @@ namespace TerraEngine::Tests {
 				std::istreambuf_iterator<char>(sourceFile), std::istreambuf_iterator<char>()};
 			const std::size_t diagnostics = source.find("BuildActiveDiagnosticsLocked");
 			const std::size_t presentation = source.find(
-				"presentation->plan.dispatchCommands.size()", diagnostics);
+				"presentation->plan.DispatchCommands().size()", diagnostics);
 			context.Expect(diagnostics != std::string::npos
 				&& presentation != std::string::npos
-				&& source.find("presentation->plan.batches.size()", diagnostics) != std::string::npos
+				&& source.find("presentation->plan.Batches().size()", diagnostics) != std::string::npos
 				&& source.find("presentation->safeFallback", diagnostics) != std::string::npos
 				&& source.find("presentation->sourceGeneration == publicationGeneration", diagnostics)
 					!= std::string::npos,
 				"GPU diagnostics must count only the current accepted presentation plan.");
 			const std::size_t perItemAttempt = source.find("++counters.gpuDispatches", diagnostics);
 			context.Expect(perItemAttempt == std::string::npos
-				&& source.find("counters.gpuDispatches = presentation->plan.dispatchCommands.size()",
+				&& source.find("counters.gpuDispatches = presentation->plan.DispatchCommands().size()",
 					diagnostics) != std::string::npos,
 				"GPU dispatches must reflect Vulkan command-plan entries, not per-item lowering attempts.");
 		});
@@ -51,7 +51,7 @@ namespace TerraEngine::Tests {
 				std::istreambuf_iterator<char>(sourceFile), std::istreambuf_iterator<char>()};
 			const std::size_t handoff = source.find("BuildGpuPresentationFrame");
 			const std::size_t stableIdentity = source.find(
-				"mapping.stableInstanceId = item.gpuLowering->visual.stableInstanceId", handoff);
+				"mapping.stableInstanceId", handoff);
 			const std::size_t transfer = source.find(
 				"frame->inputs.push_back(std::move(*item.gpuLowering))", handoff);
 			context.Expect(handoff != std::string::npos

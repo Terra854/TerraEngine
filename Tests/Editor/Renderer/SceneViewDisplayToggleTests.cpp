@@ -18,9 +18,9 @@ namespace TerraEngine::EditorTests
 			const std::string renderSystemHeader = ReadSceneViewOverlaySourceForTest("Engine/Renderer/RenderSystem.h");
 			context.Expect(renderSystemHeader.find("SetSceneViewGridVisible") != std::string::npos, "Scene View grid toggle should reach the renderer.");
 			const std::string vulkanSource = ReadSceneViewOverlaySourceForTest("Engine/Renderer/RHI/Vulkan/VulkanContext.cpp");
-			context.Expect(vulkanSource.find("view == ViewType::Scene && frameData.sceneViewGridVisible") != std::string::npos, "Vulkan grid pass should respect Scene View grid visibility.");
+			context.Expect(vulkanSource.find("view == ViewType::Scene && presentation.sceneViewGridVisible") != std::string::npos, "Vulkan grid pass should respect the sealed Scene View grid visibility.");
 			context.Expect(vulkanSource.find("orthographicProjection ? 1.0f") != std::string::npos, "Orthographic Scene View sky should not stretch from ortho zoom.");
-			context.Expect(vulkanSource.find("frameData.sceneViewOrthographic") != std::string::npos, "Scene View orthographic mode should reach Vulkan rendering decisions.");
+			context.Expect(vulkanSource.find("presentation.sceneViewOrthographic") != std::string::npos, "Scene View orthographic mode should reach Vulkan through the immutable presentation input.");
 			context.Expect(vulkanSource.find("skyFlags |= 4u") != std::string::npos, "Scene View orthographic mode should select the editor background shader path.");
 			const std::string skyShaderSource = ReadSceneViewOverlaySourceForTest("Engine/Shaders/Sky/SkyBackground.frag.hlsl");
 			context.Expect(skyShaderSource.find("BuildSceneViewOrthographicBackground") != std::string::npos, "Scene View orthographic mode should use a dedicated editor gradient.");

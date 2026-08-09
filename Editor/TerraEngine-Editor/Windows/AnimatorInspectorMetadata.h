@@ -60,14 +60,14 @@ namespace TerraEngine::Editor::Animation
 		TerraEngine::Animation::AnimationFixedTick clipDurationTicks,
 		bool loop = false) noexcept
 	{
-		// A looped clip's exact duration aliases tick zero. Use the shared runtime
-		// rule here so the Inspector never advertises that alias as a selectable
-		// maximum while one-shot clips still expose their true final endpoint.
+		// A looped clip's exact duration aliases tick zero. The editable maximum is
+		// therefore one tick below the duration, even though the runtime resolver
+		// wraps larger authored values modulo the duration. One-shot clips retain
+		// their exact final endpoint because they do not wrap.
+		const TerraEngine::Animation::AnimationFixedTick safeDuration =
+			std::max<TerraEngine::Animation::AnimationFixedTick>(clipDurationTicks, 0);
 		const TerraEngine::Animation::AnimationFixedTick maximumDistinctTick =
-			TerraEngine::Animation::ClampAnimatorInitialPlaybackTick(
-				clipDurationTicks,
-				clipDurationTicks,
-				loop);
+			loop && safeDuration > 0 ? safeDuration - 1 : safeDuration;
 		const std::uint64_t nonNegativeDuration = maximumDistinctTick > 0
 			? static_cast<std::uint64_t>(maximumDistinctTick)
 			: 0U;

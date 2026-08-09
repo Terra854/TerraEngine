@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "Profiling/ProfilerCapture.h"
+#include "Profiling/ProfilerCaptureV2.h"
 
 #include <filesystem>
 #include <fstream>
@@ -52,6 +53,10 @@ namespace TerraEngine::Tests
 
 	void RegisterProfilerCaptureV2Tests(TestRegistry& registry)
 	{
+		registry.Add("Engine.ProfilerCaptureV2.OptionalEvidenceUnknownFieldsRemainReadable", [](TestContext& context) {
+			context.Expect(Profiling::kProfilerCaptureV2PayloadVersion == 2u,
+				"V2 optional evidence must remain additive to payload version 2.");
+		});
 		registry.Add("Engine.ProfilerCaptureV2.RecoversCommittedTailAndRejectsCorruption", [](TestContext& context) {
 			using namespace TerraEngine::Profiling;
 			const std::filesystem::path root = std::filesystem::temp_directory_path() / "TerraEngineEngineTests" / "ProfilerCaptureV2";

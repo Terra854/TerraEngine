@@ -121,6 +121,15 @@ bool TeGenerationValid(TeAnimationGpuGenerationRecord generation)
 		&& generation.sceneGeneration != 0u;
 }
 
+// Dispatch validation has already proven generationRecordIndex before stage
+// shaders call this helper. Keeping suspension in the changing generation table
+// lets one immutable packet topology serve every visibility state.
+bool TeVisualEvaluationSuspended(TeAnimationGpuWorkPacket packet)
+{
+	return (gAnimationGenerations[packet.generationRecordIndex].flags
+		& TE_ANIMATION_GPU_GENERATION_SUSPEND_VISUAL_EVALUATION) != 0u;
+}
+
 bool TeResolveWork(uint globalElement, uint expectedStage, out TeAnimationGpuDispatchRecord dispatch, out TeAnimationGpuWorkPacket packet, out uint element)
 {
 	dispatch = (TeAnimationGpuDispatchRecord)0;

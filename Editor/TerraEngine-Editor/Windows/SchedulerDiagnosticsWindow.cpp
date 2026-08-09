@@ -466,7 +466,7 @@ void SchedulerDiagnosticsWindow::DrawExecutionTelemetrySummary()
 	{
 		ImGui::TextDisabled("Waiting for workload decision records.");
 	}
-	else if (ImGui::BeginTable("SchedulerDiagnosticsExecutionRecords", 11, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+	else if (ImGui::BeginTable("SchedulerDiagnosticsExecutionRecords", 13, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
 	{
 		ImGui::TableSetupColumn("Workload");
 		ImGui::TableSetupColumn("Active");
@@ -478,6 +478,8 @@ void SchedulerDiagnosticsWindow::DrawExecutionTelemetrySummary()
 		ImGui::TableSetupColumn("Queue");
 		ImGui::TableSetupColumn("Dispatch");
 		ImGui::TableSetupColumn("Useful");
+		ImGui::TableSetupColumn("Wave");
+		ImGui::TableSetupColumn("Complete #");
 		ImGui::TableSetupColumn("Run ms");
 		ImGui::TableHeadersRow();
 		for (const TerraEngine::Profiling::WorkloadExecutionRecord& record : plan.executionRecords)
@@ -504,6 +506,10 @@ void SchedulerDiagnosticsWindow::DrawExecutionTelemetrySummary()
 			ImGui::TableSetColumnIndex(9);
 			ImGui::Text("%llu", static_cast<unsigned long long>(record.usefulWorkItemCount));
 			ImGui::TableSetColumnIndex(10);
+			ImGui::Text("%u", record.dependencyWave);
+			ImGui::TableSetColumnIndex(11);
+			ImGui::Text("%llu", static_cast<unsigned long long>(record.completionSequence));
+			ImGui::TableSetColumnIndex(12);
 			if (record.runDuration.availability == TerraEngine::Profiling::TelemetryAvailability::Available)
 			{
 				ImGui::Text("%.3f", static_cast<double>(record.runDuration.nanoseconds) / 1000000.0);

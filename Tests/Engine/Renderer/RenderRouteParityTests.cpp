@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "Renderer/Graph/RenderFrameSnapshot.h"
+#include "Renderer/RHI/Vulkan/VulkanCommandRecording.h"
 #include "Renderer/VirtualGeometry/VirtualGeometryTypes.h"
 
 namespace TerraEngine::Tests
@@ -48,6 +49,42 @@ namespace TerraEngine::Tests
 			second.virtualGeometryActive = true;
 			context.Expect(first.selectedLodIndex != second.selectedLodIndex,
 				"Per-owner LOD transitions must not snap as a shared group.");
+		});
+
+		registry.Add("Renderer.RouteParity.SealedRangesRetainDirectDenseAndAnimatedRoutes",
+			[](TestContext& context)
+		{
+			using namespace TerraEngine::Renderer;
+			RenderFramePublication publication{};
+			publication.generation = 9u;
+			publication.views.push_back({});
+			RenderViewSelection& view = publication.views.front();
+			view.generation = 3u;
+			for(std::uint32_t ordinal = 0u; ordinal < 4u; ++ordinal)
+			{
+				view.visibleOrdinals.push_back({ ordinal, 2u });
+				view.selectedLods.push_back(ordinal);
+				view.routeSelectors.push_back(ordinal);
+				view.packetTemplateIdentities.push_back(100u + ordinal);
+				view.tintSelectors.push_back(0u);
+				view.editorTints.push_back(glm::vec4(0.0f));
+			}
+			// Route type is publication data. Vulkan must not infer or collapse it
+			// while lowering compact ranges into backend recording work.
+			publication.submissionRanges = {
+				{ RenderSubmissionRoute::Direct, 0u, 0u, 1u, 100u, true },
+				{ RenderSubmissionRoute::VirtualGeometry, 0u, 1u, 1u, 101u, true },
+				{ RenderSubmissionRoute::Skinned, 0u, 2u, 1u, 102u, true },
+				{ RenderSubmissionRoute::Capture, 0u, 3u, 1u, 103u, true }
+			};
+			const Vulkan::VulkanPublishedRangePlan plan =
+				Vulkan::BuildVulkanPublishedRangePlan(publication, 0u);
+			context.Expect(plan.valid && plan.ranges.size() == 4u
+				&& plan.ranges[0].route == RenderSubmissionRoute::Direct
+				&& plan.ranges[1].route == RenderSubmissionRoute::VirtualGeometry
+				&& plan.ranges[2].route == RenderSubmissionRoute::Skinned
+				&& plan.ranges[3].route == RenderSubmissionRoute::Capture,
+				"Direct, dense-VG, animated, and capture routes must remain typed and ordered through backend lowering.");
 		});
 	}
 }

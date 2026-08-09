@@ -7,8 +7,11 @@
 #include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <tuple>
@@ -255,6 +258,14 @@ namespace TerraEngine::Scheduling {
 			summary.workerPreparationTimeNs = plan.migrationSummary.workerPreparationTimeNs;
 			summary.protectedCommitTimeNs = plan.migrationSummary.protectedCommitTimeNs;
 			summary.coordinatorWaitTimeNs = plan.migrationSummary.coordinatorWaitTimeNs;
+			summary.criticalPathTimeNs = plan.migrationSummary.criticalPathTimeNs;
+			summary.dependencyWaveCount = plan.migrationSummary.dependencyWaveCount;
+			summary.workerCompletionWakeCount =
+				plan.migrationSummary.workerCompletionWakeCount;
+			summary.completionDrivenDispatchCount =
+				plan.migrationSummary.completionDrivenDispatchCount;
+			summary.peakConcurrentWorkerCount =
+				plan.migrationSummary.peakConcurrentWorkerCount;
 			summary.workerUtilization = plan.migrationSummary.workerUtilization;
 			if (formatSummary)
 			{
@@ -263,11 +274,28 @@ namespace TerraEngine::Scheduling {
 			plan.migrationSummary = std::move(summary);
 		}
 
+		// PartitionWallTiming is allocated only when detailed execution evidence is
+		// requested. Each callback owns its pair of atomics, allowing the coordinator
+		// to merge parallel ranges later without adding a shared hot-path lock.
+		struct PartitionWallTiming
+		{
+			std::atomic_uint64_t startNanoseconds = 0U;
+			std::atomic_uint64_t endNanoseconds = 0U;
+		};
+
+		std::uint64_t SteadyClockNanoseconds() noexcept
+		{
+			return static_cast<std::uint64_t>(
+				std::chrono::duration_cast<std::chrono::nanoseconds>(
+					std::chrono::steady_clock::now().time_since_epoch()).count());
+		}
+
 		struct ScheduledPartition
 		{
 			std::size_t resultIndex = 0u;
 			FrameWorkloadPartition partition;
 			std::string jobName;
+			std::shared_ptr<PartitionWallTiming> wallTiming;
 		};
 
 		TerraEngine::Profiling::WorkloadExecutionPath ToTelemetryPath(FrameWorkloadExecutionPolicy policy)
@@ -312,7 +340,8 @@ namespace TerraEngine::Scheduling {
 			const FrameWorkloadResult& result,
 			const FrameWorkloadPartition& partition,
 			const JobGraphResultEntry* entry,
-			bool completed)
+			bool completed,
+			const PartitionWallTiming* wallTiming = nullptr)
 		{
 			if (plan.executionRecords.size() >= TerraEngine::Profiling::kMaximumWorkloadExecutionRecordsPerFrame)
 			{
@@ -354,6 +383,8 @@ namespace TerraEngine::Scheduling {
 			{
 				record.dispatchCount = entry->dispatchCount;
 				record.usefulWorkItemCount = entry->usefulWorkItemCount;
+				record.dependencyWave = entry->dependencyWave;
+				record.completionSequence = entry->completionSequence;
 				record.queueDuration.availability = TerraEngine::Profiling::TelemetryAvailability::Available;
 				record.queueDuration.nanoseconds = entry->queueDurationNs;
 				record.queueDuration.unavailableReason.clear();
@@ -363,6 +394,13 @@ namespace TerraEngine::Scheduling {
 				record.coordinatorWaitDuration.availability = TerraEngine::Profiling::TelemetryAvailability::Available;
 				record.coordinatorWaitDuration.nanoseconds = entry->coordinatorWaitDurationNs;
 				record.coordinatorWaitDuration.unavailableReason.clear();
+			}
+			if (wallTiming != nullptr)
+			{
+				record.runStartNanoseconds =
+					wallTiming->startNanoseconds.load(std::memory_order_acquire);
+				record.runEndNanoseconds =
+					wallTiming->endNanoseconds.load(std::memory_order_acquire);
 			}
 			plan.executionRecords.push_back(std::move(record));
 		}
@@ -398,7 +436,7 @@ namespace TerraEngine::Scheduling {
 				{
 					AppendExecutionRecord(plan, result, scheduled.partition,
 						entry == entriesByName.end() ? nullptr : entry->second,
-						completed);
+						completed, scheduled.wallTiming.get());
 				}
 			}
 			for (std::size_t resultIndex = 0; resultIndex < plan.results.size(); ++resultIndex)
@@ -428,6 +466,14 @@ namespace TerraEngine::Scheduling {
 			plan.migrationSummary.workerPreparationTimeNs = summary.workerTimeNs;
 			plan.migrationSummary.protectedCommitTimeNs = summary.protectedTimeNs;
 			plan.migrationSummary.coordinatorWaitTimeNs = summary.coordinatorWaitTimeNs;
+			plan.migrationSummary.criticalPathTimeNs = summary.criticalPathDurationNs;
+			plan.migrationSummary.dependencyWaveCount = summary.dependencyWaveCount;
+			plan.migrationSummary.workerCompletionWakeCount =
+				summary.workerCompletionWakeCount;
+			plan.migrationSummary.completionDrivenDispatchCount =
+				summary.completionDrivenDispatchCount;
+			plan.migrationSummary.peakConcurrentWorkerCount =
+				summary.peakConcurrentWorkerCount;
 			plan.migrationSummary.workerUtilization = summary.workerUtilization;
 		}
 	}
@@ -629,6 +675,11 @@ namespace TerraEngine::Scheduling {
 			<< " workerPrepNs=" << summary.workerPreparationTimeNs
 			<< " protectedCommitNs=" << summary.protectedCommitTimeNs
 			<< " coordinatorWaitNs=" << summary.coordinatorWaitTimeNs
+			<< " criticalPathNs=" << summary.criticalPathTimeNs
+			<< " dependencyWaves=" << summary.dependencyWaveCount
+			<< " completionWakes=" << summary.workerCompletionWakeCount
+			<< " completionDispatches=" << summary.completionDrivenDispatchCount
+			<< " peakWorkers=" << summary.peakConcurrentWorkerCount
 			<< " workerUtilization=" << summary.workerUtilization
 			<< " activeInvalidations=" << summary.activeMembershipInvalidationCount
 			<< " staleReferences=" << summary.staleObjectHandleCount
@@ -1228,6 +1279,9 @@ namespace TerraEngine::Scheduling {
 					prepared.partition = partition;
 					prepared.descriptorGeneration = result.declaration.stableDescriptorGeneration;
 					JobGraphJobDeclaration& job = prepared.declaration;
+					const std::shared_ptr<PartitionWallTiming> wallTiming =
+						options.collectExecutionRecords
+							? std::make_shared<PartitionWallTiming>() : nullptr;
 					job.name = result.declaration.stableDescriptorId + "#"
 						+ std::to_string(partition.partitionIndex);
 					job.executionPolicy = result.executionPolicy == FrameWorkloadExecutionPolicy::WorkerSafe
@@ -1248,17 +1302,65 @@ namespace TerraEngine::Scheduling {
 					job.usefulWorkItemCount = partition.itemEnd - partition.itemBegin;
 					if (result.declaration.rangeWork)
 					{
-						job.work = [rangeWork = result.declaration.rangeWork, partition](JobGraphContext& context) {
-							rangeWork(partition, context);
+						job.work = [rangeWork = result.declaration.rangeWork, partition,
+							wallTiming](JobGraphContext& context) {
+							if (wallTiming != nullptr)
+							{
+								wallTiming->startNanoseconds.store(
+									SteadyClockNanoseconds(), std::memory_order_release);
+							}
+							try
+							{
+								rangeWork(partition, context);
+							}
+							catch (...)
+							{
+								if (wallTiming != nullptr)
+								{
+									wallTiming->endNanoseconds.store(
+										SteadyClockNanoseconds(), std::memory_order_release);
+								}
+								throw;
+							}
+							if (wallTiming != nullptr)
+							{
+								wallTiming->endNanoseconds.store(
+									SteadyClockNanoseconds(), std::memory_order_release);
+							}
 						};
 					}
 					else
 					{
-						job.work = result.declaration.work;
+						job.work = [work = result.declaration.work,
+							wallTiming](JobGraphContext& context) {
+							if (wallTiming != nullptr)
+							{
+								wallTiming->startNanoseconds.store(
+									SteadyClockNanoseconds(), std::memory_order_release);
+							}
+							try
+							{
+								if (work) work(context);
+							}
+							catch (...)
+							{
+								if (wallTiming != nullptr)
+								{
+									wallTiming->endNanoseconds.store(
+										SteadyClockNanoseconds(), std::memory_order_release);
+								}
+								throw;
+							}
+							if (wallTiming != nullptr)
+							{
+								wallTiming->endNanoseconds.store(
+									SteadyClockNanoseconds(), std::memory_order_release);
+							}
+						};
 					}
 					preparedJobs.push_back(std::move(prepared));
 					scheduledPartitions.push_back({ resultIndex, partition,
-						preparedJobs.back().declaration.name });
+						preparedJobs.back().declaration.name, wallTiming });
 				}
 			}
 
@@ -1454,6 +1556,12 @@ namespace TerraEngine::Scheduling {
 				for (const FrameWorkloadPartition& partition : partitions)
 				{
 					TERRAENGINE_PROFILE_TASK_SCOPE("FrameWorkload::CompatibilityJob", TerraEngine::Profiling::ProfilerModuleId::CpuEngine, result.declaration.workloadName.c_str());
+					PartitionWallTiming wallTiming;
+					if (options.collectExecutionRecords)
+					{
+						wallTiming.startNanoseconds.store(
+							SteadyClockNanoseconds(), std::memory_order_release);
+					}
 					if (result.declaration.rangeWork)
 					{
 						result.declaration.rangeWork(partition, context);
@@ -1462,12 +1570,18 @@ namespace TerraEngine::Scheduling {
 					{
 						result.declaration.work(context);
 					}
+					if (options.collectExecutionRecords)
+					{
+						wallTiming.endNanoseconds.store(
+							SteadyClockNanoseconds(), std::memory_order_release);
+					}
 					JobGraphResultEntry entry;
 					entry.dispatchCount = 1u;
 					entry.usefulWorkItemCount = partition.itemEnd - partition.itemBegin;
 					if (options.collectExecutionRecords)
 					{
-						AppendExecutionRecord(plan, result, partition, &entry, true);
+						AppendExecutionRecord(plan, result, partition, &entry, true,
+							&wallTiming);
 					}
 				}
 				result.completed = true;

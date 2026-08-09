@@ -2,6 +2,7 @@
 
 #include "TestHarness.h"
 
+#include "AnimationAuthorityTestHelpers.h"
 #include "Animation/AnimationSystem.h"
 #include "Animation/Assets/MotionDatabaseAsset.h"
 #include "Animation/Assets/RetargetProfileAsset.h"
@@ -455,9 +456,9 @@ namespace TerraEngine::Tests {
 			context.Expect(animator.IsValid()
 				&& ExecuteIntegrationFrame(system, "animation-scale-zero-channel"),
 				"A never-bound zero-channel animator must complete through the production scheduler.");
-			const std::shared_ptr<const PublishedAnimatorPose> published =
-				system.LoadPublishedAnimatorPose(animator);
-			context.Expect(published && published->safePose && published->snapshot
+			const PinnedAnimationAuthorityRow published =
+				PinnedAnimationAuthorityRow::ForAnimator(system, animator);
+			context.Expect(published && published->safeFallback && published->snapshot
 				&& published->snapshot->pose
 				&& published->snapshot->pose->LocalTransforms().empty()
 				&& system.AuthorityPublicationGeneration() > priorAuthority,
@@ -477,8 +478,8 @@ namespace TerraEngine::Tests {
 
 			context.Expect(ExecuteIntegrationFrame(system, "animation-scale-first"),
 				"The first production frame must evaluate and publish a complete pose.");
-			const std::shared_ptr<const PublishedAnimatorPose> first =
-				system.LoadPublishedAnimatorPose(animator);
+			const PinnedAnimationAuthorityRow first =
+				PinnedAnimationAuthorityRow::ForAnimator(system, animator);
 			const AnimationProductionIntegrationSnapshot firstDiagnostics =
 				system.ReadProductionIntegrationSnapshot();
 			context.Expect(first && firstDiagnostics.planStatus == AnimationStatus::Ok
@@ -489,8 +490,8 @@ namespace TerraEngine::Tests {
 
 			context.Expect(ExecuteIntegrationFrame(system, "animation-scale-reuse"),
 				"An unchanged eligible manual animator must complete through cache reuse.");
-			const std::shared_ptr<const PublishedAnimatorPose> second =
-				system.LoadPublishedAnimatorPose(animator);
+			const PinnedAnimationAuthorityRow second =
+				PinnedAnimationAuthorityRow::ForAnimator(system, animator);
 			const AnimationProductionIntegrationSnapshot reusedDiagnostics =
 				system.ReadProductionIntegrationSnapshot();
 			const std::size_t posePoolIndex = static_cast<std::size_t>(
@@ -524,15 +525,15 @@ namespace TerraEngine::Tests {
 						system, "animation-scale-synchronized-clones"),
 					"Two synchronized visual-only CPU animators must complete through one scheduler range.");
 
-				const std::shared_ptr<const PublishedAnimatorPose> first =
-					system.LoadPublishedAnimatorPose(firstAnimator);
-				const std::shared_ptr<const PublishedAnimatorPose> second =
-					system.LoadPublishedAnimatorPose(secondAnimator);
+				const PinnedAnimationAuthorityRow first =
+					PinnedAnimationAuthorityRow::ForAnimator(system, firstAnimator);
+				const PinnedAnimationAuthorityRow second =
+					PinnedAnimationAuthorityRow::ForAnimator(system, secondAnimator);
 				const AnimationProductionIntegrationSnapshot diagnostics =
 					system.ReadProductionIntegrationSnapshot();
 				context.Expect(first && second && first != second
-					&& first->animator == firstAnimator
-					&& second->animator == secondAnimator
+					&& first->key.Handle() == firstAnimator
+					&& second->key.Handle() == secondAnimator
 					&& first->snapshot && second->snapshot
 					&& first->snapshot->pose && second->snapshot->pose
 					&& first->snapshot->pose->Generation().animator == firstAnimator
@@ -567,8 +568,8 @@ namespace TerraEngine::Tests {
 					"The script-crossfade fixture must publish its source state before the command.");
 
 				auto publishedX = [&system, animator]() {
-					const std::shared_ptr<const PublishedAnimatorPose> publication =
-						system.LoadPublishedAnimatorPose(animator);
+					const PinnedAnimationAuthorityRow publication =
+						PinnedAnimationAuthorityRow::ForAnimator(system, animator);
 					if(!publication || !publication->snapshot
 						|| !publication->snapshot->pose
 						|| publication->snapshot->pose->LocalTransforms().empty()) {
@@ -613,8 +614,8 @@ namespace TerraEngine::Tests {
 						system, frameName.c_str()),
 						"Every transition tick must complete through the production scheduler.");
 					samples[frame] = publishedX();
-					const std::shared_ptr<const PublishedAnimatorPose> publication =
-						system.LoadPublishedAnimatorPose(animator);
+					const PinnedAnimationAuthorityRow publication =
+						PinnedAnimationAuthorityRow::ForAnimator(system, animator);
 					if(publication && publication->snapshot) {
 						progress[frame] =
 							publication->snapshot->playback.transitionProgress;
@@ -650,8 +651,8 @@ namespace TerraEngine::Tests {
 								crossfade.producerId,
 								crossfade.producerSequence,
 								crossfade.correlationId).status)));
-				const std::shared_ptr<const PublishedAnimatorPose> completed =
-					system.LoadPublishedAnimatorPose(animator);
+				const PinnedAnimationAuthorityRow completed =
+					PinnedAnimationAuthorityRow::ForAnimator(system, animator);
 				context.Expect(completed && completed->snapshot
 					&& completed->snapshot->playback.currentStateId == 200U
 					&& completed->snapshot->playback.previousStateId == 0U,
@@ -690,8 +691,8 @@ namespace TerraEngine::Tests {
 					return system.SubmitCommand(command).status;
 				};
 				auto publishedX = [&system, animator]() {
-					const std::shared_ptr<const PublishedAnimatorPose> publication =
-						system.LoadPublishedAnimatorPose(animator);
+					const PinnedAnimationAuthorityRow publication =
+						PinnedAnimationAuthorityRow::ForAnimator(system, animator);
 					if(!publication || !publication->snapshot
 						|| !publication->snapshot->pose
 						|| publication->snapshot->pose->LocalTransforms().empty()) {
@@ -743,8 +744,8 @@ namespace TerraEngine::Tests {
 			(void)system.BindAnimatorPlayback(animator, binding);
 			context.Expect(ExecuteIntegrationFrame(system, "animation-scale-cancel-baseline"),
 				"The cancellation fixture must first establish one complete publication.");
-			const std::shared_ptr<const PublishedAnimatorPose> prior =
-				system.LoadPublishedAnimatorPose(animator);
+			const PinnedAnimationAuthorityRow prior =
+				PinnedAnimationAuthorityRow::ForAnimator(system, animator);
 			const std::uint64_t priorAuthority = system.AuthorityPublicationGeneration();
 			std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> stale =
 				system.DeclareFrameWorkloads(1.0F / 60.0F);
@@ -755,13 +756,13 @@ namespace TerraEngine::Tests {
 			const TerraEngine::Scheduling::FrameExecutionPlan stalePlan =
 				TerraEngine::Scheduling::ExecuteFrameWorkloadsCompatibility(
 					std::move(stale), "animation-scale-cancelled");
-			const AnimationProductionIntegrationSnapshot diagnostics =
-				system.ReadProductionIntegrationSnapshot();
+			const PinnedAnimationAuthorityRow current =
+				PinnedAnimationAuthorityRow::ForAnimator(system, animator);
 			context.Expect(stalePlan.valid && stalePlan.completed
-				&& diagnostics.cancellationRequested
-				&& system.AuthorityPublicationGeneration() == priorAuthority
-				&& system.LoadPublishedAnimatorPose(animator) == prior,
-				"Cancelled captured work must leave the last complete authority generation untouched.");
+				&& system.AuthorityPublicationGeneration() > priorAuthority
+				&& current == nullptr
+				&& prior,
+				"Cancelled captured work must not republish after lifecycle retirement; new readers see no stale authority while an already pinned immutable root remains valid.");
 		});
 
 		registry.Add("Animation.ScaleFoundation.RecoverableFailureHoldsTypedPriorGeneration", [](TestContext& context) {
@@ -774,8 +775,8 @@ namespace TerraEngine::Tests {
 			(void)system.BindAnimatorPlayback(animator, binding);
 			context.Expect(ExecuteIntegrationFrame(system, "animation-scale-fallback-baseline"),
 				"The fallback fixture must establish one typed last-known-good generation.");
-			const std::shared_ptr<const PublishedAnimatorPose> prior =
-				system.LoadPublishedAnimatorPose(animator);
+			const PinnedAnimationAuthorityRow prior =
+				PinnedAnimationAuthorityRow::ForAnimator(system, animator);
 
 			AnimatorPlaybackBinding missing = binding;
 			missing.clip.reset();
@@ -786,7 +787,7 @@ namespace TerraEngine::Tests {
 				"The failed generation must still complete through typed hold-last selection.");
 			const AnimationProductionIntegrationSnapshot diagnostics =
 				system.ReadProductionIntegrationSnapshot();
-			context.Expect(system.LoadPublishedAnimatorPose(animator) == prior
+			context.Expect(PinnedAnimationAuthorityRow::ForAnimator(system, animator) == prior
 				&& diagnostics.fallbackItemCount == 1U,
 				"Recoverable failure must preserve the exact compatible prior pose without republishing root motion.");
 		});
@@ -801,8 +802,8 @@ namespace TerraEngine::Tests {
 			(void)system.BindAnimatorPlayback(animator, binding);
 			context.Expect(ExecuteIntegrationFrame(system, "animation-scale-skeleton-loss-baseline"),
 				"The skeleton-loss fixture must first publish one compatible complete pose.");
-			const std::shared_ptr<const PublishedAnimatorPose> prior =
-				system.LoadPublishedAnimatorPose(animator);
+			const PinnedAnimationAuthorityRow prior =
+				PinnedAnimationAuthorityRow::ForAnimator(system, animator);
 
 			AnimatorPlaybackBinding missingSkeleton = binding;
 			missingSkeleton.skeleton.reset();
@@ -822,7 +823,7 @@ namespace TerraEngine::Tests {
 				"A skeleton-loss generation must complete through compatible hold-last selection.");
 			const AnimationProductionIntegrationSnapshot diagnostics =
 				system.ReadProductionIntegrationSnapshot();
-			context.Expect(prior && system.LoadPublishedAnimatorPose(animator) == prior
+			context.Expect(prior && PinnedAnimationAuthorityRow::ForAnimator(system, animator) == prior
 				&& diagnostics.fallbackItemCount == 1U,
 				"Retained channels without a skeleton must not publish manufactured identity transforms before hold-last.");
 		});
@@ -878,8 +879,8 @@ namespace TerraEngine::Tests {
 			context.Expect(ExecuteIntegrationFrame(system, "animation-advanced-retain-query"),
 				"A retained query on a direct-clip animator must remain diagnostic-only instead of poisoning a later frame that has no authored motion node.");
 
-			const std::shared_ptr<const PublishedAnimatorPose> published =
-				system.LoadPublishedAnimatorPose(animator);
+			const PinnedAnimationAuthorityRow published =
+				PinnedAnimationAuthorityRow::ForAnimator(system, animator);
 			std::uint32_t retargetCount = 0U;
 			std::uint32_t motionCount = 0U;
 			(void)system.CopyRetargetSnapshots(animator, {}, retargetCount);
@@ -907,7 +908,7 @@ namespace TerraEngine::Tests {
 			context.Expect(retargetCopy == AnimationStatus::Ok
 				&& motionCopy == AnimationStatus::Ok,
 				"Advanced observations must remain readable through the bounded copy protocol.");
-			context.Expect(published != nullptr,
+			context.Expect(static_cast<bool>(published),
 				"Advanced worker evaluation must retain an immutable publication.");
 			context.Expect(published->status == AnimationStatus::Ok,
 				std::string("The active retarget and motion query must complete without selecting a safe-pose status; actual status=")
@@ -968,8 +969,8 @@ namespace TerraEngine::Tests {
 				&& ExecuteIntegrationFrame(system, "animation-retarget-rebuild-baseline"),
 				"A retarget rebuild must start from an active profile's immutable baseline pose.");
 
-			const std::shared_ptr<const PublishedAnimatorPose> baseline =
-				system.LoadPublishedAnimatorPose(animator);
+			const PinnedAnimationAuthorityRow baseline =
+				PinnedAnimationAuthorityRow::ForAnimator(system, animator);
 			context.Expect(baseline && baseline->snapshot,
 				"The baseline publication must expose the generations a producer can target.");
 			if(!baseline || !baseline->snapshot) return;
@@ -991,8 +992,8 @@ namespace TerraEngine::Tests {
 				&& ExecuteIntegrationFrame(system, "animation-retarget-rebuild"),
 				"A rebuild targeting the publication captured before this frame must queue and execute.");
 
-			const std::shared_ptr<const PublishedAnimatorPose> rebuilt =
-				system.LoadPublishedAnimatorPose(animator);
+			const PinnedAnimationAuthorityRow rebuilt =
+				PinnedAnimationAuthorityRow::ForAnimator(system, animator);
 			std::uint32_t retargetCount = 0U;
 			(void)system.CopyRetargetSnapshots(animator, {}, retargetCount);
 			std::vector<NativeAnimationRetargetSnapshot> retarget(retargetCount);
@@ -1084,8 +1085,8 @@ namespace TerraEngine::Tests {
 				&& ExecuteIntegrationFrame(system, "animation-motion-apply"),
 				"The CPU-authoritative result must be retained and applied on the next worker frame without a current-frame wait.");
 
-			const std::shared_ptr<const PublishedAnimatorPose> published =
-				system.LoadPublishedAnimatorPose(animator);
+			const PinnedAnimationAuthorityRow published =
+				PinnedAnimationAuthorityRow::ForAnimator(system, animator);
 			const auto local = published && published->snapshot
 				&& published->snapshot->pose
 				? published->snapshot->pose->LocalTransforms()
@@ -1231,8 +1232,8 @@ namespace TerraEngine::Tests {
 				&& result.publicationGeneration > receipt.publicationGeneration,
 				"V2 publication must expose bounded candidate, exclusion, and protected-generation diagnostics.");
 
-			const std::shared_ptr<const PublishedAnimatorPose> published =
-				system.LoadPublishedAnimatorPose(animator);
+			const PinnedAnimationAuthorityRow published =
+				PinnedAnimationAuthorityRow::ForAnimator(system, animator);
 			const auto local = published && published->snapshot
 				&& published->snapshot->pose
 				? published->snapshot->pose->LocalTransforms()

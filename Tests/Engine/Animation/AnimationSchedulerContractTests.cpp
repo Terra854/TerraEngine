@@ -359,8 +359,8 @@ namespace TerraEngine::Tests {
 			const std::vector<FrameWorkloadDeclaration> animationWorkloads = animationSystem.DeclareFrameWorkloads(1.0F / 60.0F);
 			const std::vector<FrameWorkloadDeclaration> presentationWorkloads = presentationSystem.DeclareFrameWorkloads(1.0F / 60.0F);
 
-			context.ExpectEqual(static_cast<std::size_t>(6U), animationWorkloads.size(),
-				"AnimationSystem must expose capture, planning, single-plan finalization, sibling complete/compact evaluation, and publication.");
+			context.ExpectEqual(static_cast<std::size_t>(9U), animationWorkloads.size(),
+				"AnimationSystem must expose capture, planning, finalization, sibling evaluation, sealing, constant-time publication, worker cache commit, and sparse finalization.");
 			context.ExpectEqual(static_cast<std::size_t>(2U), presentationWorkloads.size(),
 				"AnimationPresentationSystem must expose worker preparation and protected publication.");
 			const FrameWorkloadDeclaration* capture = FindWorkload(animationWorkloads, "CaptureAnimationInputs");
@@ -368,20 +368,30 @@ namespace TerraEngine::Tests {
 			const FrameWorkloadDeclaration* finalize = FindWorkload(animationWorkloads, "FinalizeAnimationWorkPlan");
 			const FrameWorkloadDeclaration* evaluate = FindWorkload(animationWorkloads, "EvaluateCompleteAnimation");
 			const FrameWorkloadDeclaration* evaluateCompact = FindWorkload(animationWorkloads, "EvaluateCompactGpuVisualAnimation");
+			const FrameWorkloadDeclaration* seal = FindWorkload(animationWorkloads, "SealAnimationAuthority");
 			const FrameWorkloadDeclaration* publish = FindWorkload(animationWorkloads, "PublishAnimationAuthority");
+			const FrameWorkloadDeclaration* commitCache = FindWorkload(
+				animationWorkloads, "CommitPublishedAnimationEvaluationCache");
+			const FrameWorkloadDeclaration* finalizePublished = FindWorkload(
+				animationWorkloads, "FinalizePublishedAnimationAuthority");
 			const FrameWorkloadDeclaration* preparePresentation = FindWorkload(presentationWorkloads, "PrepareAnimationPresentation");
 			const FrameWorkloadDeclaration* publishPresentation = FindWorkload(presentationWorkloads, "PublishAnimationPresentation");
 			context.Expect(capture != nullptr && plan != nullptr && finalize != nullptr
-				&& evaluate != nullptr && evaluateCompact != nullptr && publish != nullptr
+				&& evaluate != nullptr && evaluateCompact != nullptr && seal != nullptr
+				&& publish != nullptr && commitCache != nullptr
+				&& finalizePublished != nullptr
 				&& preparePresentation != nullptr && publishPresentation != nullptr,
 				"Every frozen animation workload name must be declared.");
 			if(capture == nullptr || plan == nullptr || finalize == nullptr
-				|| evaluate == nullptr || evaluateCompact == nullptr || publish == nullptr
+				|| evaluate == nullptr || evaluateCompact == nullptr || seal == nullptr
+				|| publish == nullptr || commitCache == nullptr
+				|| finalizePublished == nullptr
 				|| preparePresentation == nullptr || publishPresentation == nullptr) {
 				return;
 			}
 			for(const FrameWorkloadDeclaration& workload : animationWorkloads) {
 				const std::size_t expectedItems = workload.workloadName == "FinalizeAnimationWorkPlan"
+					|| workload.workloadName == "SealAnimationAuthority"
 					? 1U : 256U;
 				context.ExpectEqual(expectedItems, workload.estimatedWorkItemCount,
 					"Per-animator stages must freeze membership while finalization remains one atomic plan build.");
@@ -399,10 +409,21 @@ namespace TerraEngine::Tests {
 				TerraEngine::Scheduling::FrameWorkloadPartitionPolicy::Single);
 			ExpectWorkerWorkload(context, *evaluate);
 			ExpectWorkerWorkload(context, *evaluateCompact);
+			ExpectWorkerWorkload(context, *seal,
+				TerraEngine::Scheduling::FrameWorkloadPartitionPolicy::Single);
 			ExpectProtectedWorkload(context, *publish);
 			context.Expect(publish->phaseKind == TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit
 				&& publish->sameFrameVisibilityRequired,
 				"Authority publication must be a same-frame protected handoff to physics.");
+			ExpectWorkerWorkload(context, *commitCache,
+				TerraEngine::Scheduling::FrameWorkloadPartitionPolicy::Single);
+			context.Expect(commitCache->sameFrameVisibilityRequired,
+				"The accepted generation's cache commit must finish before sparse finalization consumes the token.");
+			ExpectProtectedWorkload(context, *finalizePublished);
+			context.Expect(finalizePublished->phaseKind
+				== TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit
+				&& finalizePublished->sameFrameVisibilityRequired,
+				"The accepted token finalizer must remain ordered after the constant-time authority exchange.");
 
 			ExpectWorkerWorkload(context, *preparePresentation,
 				TerraEngine::Scheduling::FrameWorkloadPartitionPolicy::Single);
@@ -425,10 +446,18 @@ namespace TerraEngine::Tests {
 			context.Expect(Contains(evaluate->reads, TerraEngine::Scheduling::kResourceAnimationWorkPackets)
 				&& Contains(evaluate->writes, TerraEngine::Scheduling::kResourceAnimationAuthoritativeOutputs),
 				"Authoritative evaluation must write only prepared output owned by its frame workload.");
-			context.Expect(Contains(publish->reads, TerraEngine::Scheduling::kResourceAnimationAuthoritativeOutputs)
-				&& Contains(publish->writes, TerraEngine::Scheduling::kResourceAnimationPhysicsHandoffQueue)
-				&& Contains(publish->writes, TerraEngine::Scheduling::kResourceAnimationManagedCallbackBatches),
-				"Protected authority publication must feed typed physics and copied managed handoffs.");
+			context.Expect(Contains(seal->reads, TerraEngine::Scheduling::kResourceAnimationAuthoritativeOutputs)
+				&& Contains(seal->writes, TerraEngine::Scheduling::kResourceAnimationAuthorityPages)
+				&& Contains(seal->writes, TerraEngine::Scheduling::kResourceAnimationFrameSidecars)
+				&& Contains(publish->reads, TerraEngine::Scheduling::kResourceAnimationAuthorityPages)
+				&& Contains(publish->reads, TerraEngine::Scheduling::kResourceAnimationFrameSidecars)
+				&& Contains(publish->writes, TerraEngine::Scheduling::kResourceAnimationAuthorityFrame)
+				&& Contains(commitCache->reads, TerraEngine::Scheduling::kResourceAnimationAuthorityFrame)
+				&& Contains(commitCache->writes, TerraEngine::Scheduling::kResourceAnimationEvaluationCache)
+				&& Contains(finalizePublished->reads, TerraEngine::Scheduling::kResourceAnimationFrameSidecars)
+				&& Contains(finalizePublished->writes, TerraEngine::Scheduling::kResourceAnimationPhysicsHandoffQueue)
+				&& Contains(finalizePublished->writes, TerraEngine::Scheduling::kResourceAnimationManagedCallbackBatches),
+				"Workers must seal typed authority pages and sidecars before a constant-time root exchange hands the accepted token to specialist finalization.");
 			context.Expect(Contains(preparePresentation->reads, "PhysicsPublishedSnapshots")
 				&& Contains(preparePresentation->writes, TerraEngine::Scheduling::kResourceAnimationPresentationPrepared),
 				"Presentation preparation must consume immutable current-step physics snapshots.");
@@ -444,8 +473,16 @@ namespace TerraEngine::Tests {
 			context.Expect(!evaluate->explicitDependencies.empty()
 				&& finalize->stableDescriptorId == evaluate->explicitDependencies.front(),
 				"Authoritative evaluation must wait for the immutable plan.");
-			context.Expect(!publish->explicitDependencies.empty() && evaluate->stableDescriptorId == publish->explicitDependencies.front(),
-				"Authority publication must wait for all worker evaluation.");
+			context.Expect(!seal->explicitDependencies.empty()
+				&& !publish->explicitDependencies.empty()
+				&& seal->stableDescriptorId == publish->explicitDependencies.front(),
+				"Authority publication must wait for the sealed result of all worker evaluation.");
+			context.Expect(!commitCache->explicitDependencies.empty()
+				&& publish->stableDescriptorId == commitCache->explicitDependencies.front()
+				&& !finalizePublished->explicitDependencies.empty()
+				&& commitCache->stableDescriptorId
+					== finalizePublished->explicitDependencies.front(),
+				"Worker cache commit and sparse finalization must remain ordered after the accepted authority root.");
 			context.Expect(!publishPresentation->explicitDependencies.empty()
 				&& preparePresentation->stableDescriptorId == publishPresentation->explicitDependencies.front(),
 				"Presentation publication must wait for worker preparation.");

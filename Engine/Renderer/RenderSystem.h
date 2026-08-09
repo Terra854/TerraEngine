@@ -28,6 +28,7 @@
 #include "Components/MeshRenderComponent.h"
 #include "Components/LightComponent.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
+#include "Renderer/Graph/RenderFramePublication.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Renderer/RenderTypes.h"
 #include "Renderer/RendererRecoveryPolicy.h"
@@ -43,6 +44,8 @@
 // RenderableEntry retains a protected-boundary pointer without exposing the
 // complete mesh payload through this already broad system header.
 struct Mesh;
+struct RenderSystemLifetimeState;
+struct RenderFrameExecution;
 
 namespace TerraEngine::Renderer
 {
@@ -105,7 +108,7 @@ public:
 	RenderSystem& operator=(const RenderSystem&) = delete;
 	RenderSystem(RenderSystem&&) = delete;
 	RenderSystem& operator=(RenderSystem&&) = delete;
-	~RenderSystem() override = default;
+	~RenderSystem() override;
 
 	void Initialize() override;
 	void Update(float deltaTime) override;
@@ -113,10 +116,9 @@ public:
 	bool RequestsEngineShutdown() const override;
 	std::string SystemName() override;
 	TerraEngine::Scheduling::SystemDeclaration SchedulerDeclaration() override;
-	// Split the renderer's frame contract into scheduler-visible boundaries. The
-	// current renderer still executes its established frame body at the protected
-	// snapshot boundary while later virtual-geometry work replaces those internal
-	// sections with the typed plans named by these descriptors.
+	// Split one frame across protected capture, worker preparation, backend commit,
+	// and publication. A lifetime-owned continuation preserves immutable local
+	// state between callbacks without rebuilding frame commands.
 	std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> DeclareFrameWorkloads(float deltaTime) override;
 
 	void ReloadMaterial(const TerraEngine::UUID& materialId);
@@ -211,7 +213,7 @@ public:
 	// no renderer or live scene state is accessed.
 	static std::shared_ptr<const TerraEngine::Renderer::CpuAnimationDeformationData>
 		BuildCpuAnimationDeformation(
-			const TerraEngine::Animation::PublishedAnimatorPose& publication,
+			const TerraEngine::Animation::AnimationAuthorityRow& authorityRow,
 			std::span<const std::uint32_t> paletteJoints,
 			std::span<const std::uint64_t> morphTargetIds) noexcept;
 	static TerraEngine::Renderer::VirtualGeometryDrawRange SelectVirtualGeometryLodRange(const VirtualGeometryAssetRuntime& asset, const VirtualGeometryQualityProfile& quality, float projectedRadiusPixels, bool taskShaderCullingEnabled, bool boundsValid);
@@ -338,6 +340,7 @@ public:
 
 private:
 	RenderSystem();
+	RenderFrameExecution BuildFrameExecution(float deltaTime);
 	void ApplyQualityPreset(QualityPreset preset, bool persistProjectSettings);
 	void ApplyQueuedRuntimeRenderSettings();
 	void CompleteCapture(TerraEngine::Renderer::RenderCaptureResult result);
@@ -349,6 +352,10 @@ private:
 	void ApplyRenderDiagnosticsRequest();
 	void ReportFatalRendererRecoveryFailure(TerraEngine::Renderer::RendererRecoverySnapshot snapshot);
 	std::unique_ptr<RHIContext> rhi;
+	// Large retained preparation caches are defined in the implementation file so
+	// this public header does not expose backend or view-cache details. Ownership
+	// still follows this RenderSystem instance and is released on shutdown.
+	std::unique_ptr<RenderSystemLifetimeState> lifetimeState;
 	ObjectManager& objManager = ObjectManager::instance();
 	bool initialized = false;
 	bool taskShaderCullingEnabled = true;
@@ -390,7 +397,10 @@ private:
 		std::uint64_t meshIdentity = 0U;
 		std::uint64_t materialIdentity = 0U;
 		bool isStatic = false;
-		MeshRenderComponent mesh;
+		// Membership cache storage is stable for the complete protected frame
+		// execution. Borrow its authored mesh component instead of copying the same
+		// UUIDs and flags into another crowd-sized transient array every frame.
+		const MeshRenderComponent* mesh = nullptr;
 		// The pointer is consumed only inside this protected frame capture. It never
 		// enters a worker packet, and resource publication cannot change until the
 		// boundary ends, so later snapshot assembly can avoid another mesh lookup.
@@ -428,6 +438,25 @@ private:
 	// reuse. Readers continue to observe latestRenderFrameSnapshot atomically;
 	// only the renderer coordinator can access this recycled construction buffer.
 	TerraEngine::Renderer::RenderFrameSnapshot recycledRenderFrameSnapshot{};
+	// The sealed root is the backend-neutral hand-off for the current renderer
+	// session.  It is exchanged only at RenderSystem's protected publication
+	// boundary; Vulkan readers retain an immutable shared root instead of scene
+	// objects, editor windows, or frame-local construction buffers.
+	TerraEngine::Renderer::RenderFramePublicationStore renderFramePublicationStore;
+	// The renderer owns retained immutable roots for its full lifetime. Stable
+	// topology pages and unchanged dynamic pages are shared into later frames;
+	// no function-static cache can leak state between renderer instances.
+	std::shared_ptr<const TerraEngine::Renderer::RenderPersistentTopologyRoot>
+		retainedPersistentTopologyRoot;
+	std::shared_ptr<const TerraEngine::Renderer::RenderDynamicStateRoot>
+		retainedDynamicStateRoot;
+	// Dynamic pages are rebuilt for active GPU animation, but their allocations
+	// can be reused only after the last sealed publication releases them.
+	TerraEngine::Renderer::RenderDynamicPageRecyclePool dynamicPageRecyclePool;
+	// This renderer-owned proof covers every source that can alter a dynamic
+	// lane. It lets a stable scene retain the complete immutable root without
+	// changing the backend-neutral publication value or its aggregate layout.
+	std::uint64_t retainedDynamicStateSourceSignature = 0u;
 	// Worker route preparation publishes only copied counters here. Protected
 	// backend/publication stages consume a snapshot of these records, never a
 	// live mesh or resource-manager object.
@@ -454,15 +483,25 @@ private:
 	{
 		std::uint64_t frameId = 0u;
 		std::uint64_t rendererGeneration = 0u;
+		std::uint64_t targetGeneration = 0u;
+		std::uint32_t outputId = 0u;
 		std::vector<TerraEngine::Renderer::ConventionalVisibilityIdentityRecord> table;
 
 		[[nodiscard]] bool IsUsable() const noexcept
 		{
-			return frameId != 0u && !table.empty();
+			return frameId != 0u && rendererGeneration != 0u
+				&& targetGeneration != 0u && !table.empty();
 		}
 	};
 	CaptureConventionalVisibilityIdentitySnapshot latestGameCaptureIdentitySnapshot;
 	CaptureConventionalVisibilityIdentitySnapshot latestSceneCaptureIdentitySnapshot;
+	// A queued asynchronous pick retains its own immutable identity and packet
+	// evidence. Later captures or viewport frames cannot overwrite the ownership
+	// tuple before the fence-completed result is resolved.
+	CaptureConventionalVisibilityIdentitySnapshot pendingGameIdentitySnapshot;
+	CaptureConventionalVisibilityIdentitySnapshot pendingSceneIdentitySnapshot;
+	std::vector<GpuVirtualGeometryPacketRecord> pendingGameIdentityVisibilityRecords;
+	std::vector<GpuVirtualGeometryPacketRecord> pendingSceneIdentityVisibilityRecords;
 	std::optional<VirtualGeometryVisibilityPick> latestSceneAuthoritativeIdentityPick;
 	std::optional<VirtualGeometryVisibilityPick> latestGameAuthoritativeIdentityPick;
 	glm::uvec2 latestSceneAuthoritativeIdentityPixel = glm::uvec2(0u);

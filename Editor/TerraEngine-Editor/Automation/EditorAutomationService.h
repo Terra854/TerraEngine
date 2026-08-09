@@ -17,6 +17,7 @@
 #include "../Subsystems/MainEditorSubsystem.h"
 
 #include "Engine/Core/Object/Object.h"
+#include "Engine/Scene/TransactionalMutation.h"
 
 #include <chrono>
 #include <functional>
@@ -28,8 +29,15 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/vec3.hpp>
 
 struct EditorContext;
+
+namespace TerraEngine::Profiling
+{
+	struct ProfilerFrameRecord;
+}
 
 namespace TerraEngine::Editor::Automation
 {
@@ -65,6 +73,16 @@ namespace TerraEngine::Editor::Automation
 		// snapshots for a frame. Keeping the call explicit prevents request polling
 		// from becoming the accidental owner of recorder capture progress.
 		void PumpAnimationRecordingsAtProtectedFrame();
+		// Renderer validation can request a bounded sparse transform workload. The
+		// protected editor frame owns transaction creation so network polling never
+		// determines how many scene changes become visible in a rendered frame.
+		void PumpRendererValidationMutationsAtProtectedFrame();
+		// Condenses optional frame-publication evidence into a stable automation
+		// payload. The result retains unavailable lanes, incomplete frames, and
+		// reconciliation facts instead of treating absent instrumentation as
+		// measured zero time.
+		[[nodiscard]] static nlohmann::json SummarizeFramePublicationEvidence(
+			const std::vector<TerraEngine::Profiling::ProfilerFrameRecord>& frames);
 
 		nlohmann::json HandleTool(std::string_view name, const nlohmann::json& arguments, WriteMode writeMode, const std::string& requestId);
 		nlohmann::json BuildSuccess(std::string_view requestId, std::string_view message, nlohmann::json data = nlohmann::json::object()) const;
@@ -150,6 +168,9 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json HandleRendererVirtualGeometryValidationRouteSet(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleRendererVirtualGeometryValidationRouteReset(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleRendererVirtualGeometryAuthoritativePick(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleRendererSparseTransformStart(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleRendererSparseTransformStatus(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleRendererSparseTransformStop(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleDiagnosticsGetSummary(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json ExecuteProviderHandler(std::uint64_t operation, std::string_view operationName, const nlohmann::json& arguments, WriteMode writeMode, const std::string& requestId);
 		void RefreshPhysicsCookJob(std::string_view jobId);
@@ -236,6 +257,33 @@ namespace TerraEngine::Editor::Automation
 		std::uint64_t animationAutomationProjectGeneration = 0U;
 		std::uint64_t animationAutomationGeneration = 1U;
 		std::uint64_t nextTransactionId = 1u;
+		struct SparseTransformTarget
+		{
+			TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+			glm::vec3 baselinePosition{0.0F};
+			glm::quat baselineRotation{1.0F, 0.0F, 0.0F, 0.0F};
+		};
+		struct SparseTransformMutationState
+		{
+			bool active = false;
+			bool failed = false;
+			std::string operationId;
+			std::string failureReason;
+			float percentPerFrame = 1.0F;
+			float displacement = 0.01F;
+			std::size_t batchSize = 0U;
+			std::size_t cursor = 0U;
+			std::uint64_t enqueuedFrameCount = 0U;
+			std::uint64_t committedFrameCount = 0U;
+			std::uint64_t enqueuedMutationCount = 0U;
+			std::uint64_t committedMutationCount = 0U;
+			std::vector<SparseTransformTarget> targets;
+			std::vector<TerraEngine::Scene::TransactionTransformUpdate> pendingExpected;
+		};
+		// Tool dispatch and the protected frame pump can be reached from different
+		// bridge phases. One mutex keeps lifecycle and exact evidence coherent.
+		std::mutex sparseTransformMutationMutex;
+		SparseTransformMutationState sparseTransformMutation;
 		PrefabAuthoringService prefabAuthoringService;
 	};
 }

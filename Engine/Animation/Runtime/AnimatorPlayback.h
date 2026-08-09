@@ -13,25 +13,26 @@
 
 namespace TerraEngine::Animation {
 	// A looping timeline owns the distinct local ticks [0, duration - 1].
-	// The exact duration is the next loop's tick zero, so accepting it as an
-	// authored start pose would make an Inspector value at "max" appear to wrap.
-	// One-shot playback keeps the exact duration because its final pose is a
-	// stable endpoint rather than an alias.
-	[[nodiscard]] constexpr AnimationFixedTick ClampAnimatorInitialPlaybackTick(
+	// Start ticks outside that interval therefore wrap through the resolved clip
+	// duration. This keeps generated crowds phase-distributed even when their
+	// authored offsets exceed one loop. One-shot playback instead preserves the
+	// final endpoint by clamping, because it has no next loop to resolve into.
+	[[nodiscard]] constexpr AnimationFixedTick ResolveAnimatorInitialPlaybackTick(
 		AnimationFixedTick requestedTick,
 		AnimationFixedTick durationTicks,
 		bool loop) noexcept {
 		const AnimationFixedTick safeDuration = std::max<AnimationFixedTick>(
 			durationTicks,
 			0);
-		const AnimationFixedTick maximumDistinctTick =
-			loop && safeDuration > 0
-				? safeDuration - 1
-				: safeDuration;
+		if(loop && safeDuration > 0) {
+			// Preserve a non-negative authored cursor before reducing it to this
+			// clip's local timeline. This also maps an exact duration to tick zero.
+			return std::max<AnimationFixedTick>(requestedTick, 0) % safeDuration;
+		}
 		return std::clamp<AnimationFixedTick>(
 			requestedTick,
 			0,
-			maximumDistinctTick);
+			safeDuration);
 	}
 
 	enum class AnimatorPlaybackRunState : std::uint8_t {

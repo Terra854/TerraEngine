@@ -109,6 +109,70 @@ namespace TerraEngine::Tests
 				"Only an exact visible-command cache hit may reuse prior virtual-geometry validation; cache misses must retain CPU-oracle validation.");
 		});
 
+		registry.Add("Renderer.PersistentTopology.StaticReuseRetainsPublicationOrdinals", [](TestContext& context)
+		{
+			const std::string source = ReadRendererSource("Engine/Renderer/RenderSystem.cpp");
+			const std::size_t reuseBranch = source.find("reuseOrderedBaseCommands");
+			const std::size_t visibleCacheMaterialization = source.find(
+				"materializeCachedCommands");
+			context.Expect(reuseBranch != std::string::npos
+				&& visibleCacheMaterialization != std::string::npos
+				&& source.find("renderableDrawCommands[index].conventionalVisibilityIdentityIndex =",
+					reuseBranch) != std::string::npos
+				&& source.find("renderFrameSnapshot.renderables[index]\n\t\t\t\t\t\t.conventionalVisibilityIdentityIndex",
+					reuseBranch) != std::string::npos,
+				"Static draw-command reuse must restore each canonical visibility ordinal before cached views republish compact selectors; otherwise direct-only crowds resolve no backend draws.");
+		});
+
+		registry.Add("Renderer.PersistentTopology.StaticSnapshotProvidesCompleteBaselineGenerations", [](TestContext& context)
+		{
+			const std::string source = ReadRendererSource("Engine/Renderer/RenderSystem.cpp");
+			const std::size_t snapshotRow = source.find(
+				"RenderFrameRenderableRecord& snapshotRenderable");
+			const std::size_t animationOverride = source.find(
+				"snapshotRenderable.invalidation = binding.invalidation");
+			context.Expect(snapshotRow != std::string::npos
+				&& animationOverride != std::string::npos
+				&& source.find("snapshotRenderable.invalidation.asset =", snapshotRow)
+					!= std::string::npos
+				&& source.find("snapshotRenderable.invalidation.material =", snapshotRow)
+					!= std::string::npos
+				&& source.find("snapshotRenderable.invalidation.renderer =", snapshotRow)
+					!= std::string::npos
+				&& source.find("snapshotRenderable.invalidation.residency =", snapshotRow)
+					!= std::string::npos
+				&& source.find("snapshotRenderable.invalidation.asset =", snapshotRow)
+					< animationOverride,
+				"Every static snapshot row must initialize asset, material, renderer, and residency generations before an optional animation binding overrides them; otherwise direct-only topology slots are incomplete and publish no draws.");
+		});
+
+		registry.Add("Renderer.HotReload.InvalidatesSnapshotTopologyDynamicAndVisibleCaches", [](TestContext& context)
+		{
+			const std::string renderer = ReadRendererSource("Engine/Renderer/RenderSystem.cpp");
+			const std::string publication = ReadRendererSource(
+				"Engine/Renderer/Graph/RenderFramePublication.h");
+			context.Expect(renderer.find(
+				"resourceManager.GetRendererResourcePublicationGeneration()")
+					!= std::string::npos
+				&& renderer.find(
+					"retainedRenderTopology.resourceRevision == renderFrameSnapshot.resourceRevision")
+					!= std::string::npos
+				&& renderer.find("policyState.geometryGeneration = renderFrameSnapshot.resourceRevision")
+					!= std::string::npos
+				&& renderer.find("HashCombine(seed, rendererResourceGeneration)")
+					!= std::string::npos,
+				"A successful renderer-resource reload must reach the immutable snapshot, retained topology, virtual-geometry history, and visible-command cache keys.");
+			context.Expect(publication.find("std::uint64_t resourceGeneration = 0u;")
+					!= std::string::npos
+				&& renderer.find("lane.resourceGeneration")
+					!= std::string::npos
+				&& renderer.find("renderable.invalidation.residency")
+					!= std::string::npos
+				&& renderer.find("left.resourceGeneration == right.resourceGeneration")
+					!= std::string::npos,
+				"Dynamic COW pages must reject lanes whose renderer resource generation changed even when transforms remain stable.");
+		});
+
 		registry.Add("Renderer.DeformationSelection.ReusesVisibilityAndMeshPageShapes", [](TestContext& context)
 		{
 			const std::string renderer = ReadRendererSource("Engine/Renderer/RenderSystem.cpp");

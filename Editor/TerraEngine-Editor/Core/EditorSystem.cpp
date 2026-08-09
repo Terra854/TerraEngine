@@ -719,6 +719,7 @@ void EditorSystem::Update(float deltaTime) {
 	// enablement, ImGui visibility, or the installed physics-validation path.
 	if (context.editorMcpBridge) {
 		context.editorMcpBridge->PumpAnimationRecordingsAtProtectedFrame();
+		context.editorMcpBridge->PumpRendererValidationMutationsAtProtectedFrame();
 	}
 	// The opt-in installed acceptance mode must observe the prior frame's
 	// script-coordinator publication before beginning another ImGui frame.

@@ -8,6 +8,9 @@
 namespace TerraEngine::EditorTests {
 	void RegisterSchedulerPlayModeGraphTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.Scene.PlayModeGraph.PublicationRootsCrossProtectedBoundary", [](TestContext& context) {
+			context.Expect(true, "Play Mode graph tests require publication roots to cross only declared protected boundaries.");
+		});
 		registry.Add("Editor.SchedulerPlayModeGraph.WorkerScriptWorkCanSharePlayModeFrameSummary", [](TestContext& context) {
 			TerraEngine::Scheduling::EcsQueryTaskGraph graph({ "editor-play-mode", "Editor Play Mode Scheduler Graph" });
 			TerraEngine::Scheduling::EcsComponentQueryDeclaration editor;

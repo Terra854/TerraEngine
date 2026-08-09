@@ -4291,8 +4291,12 @@ void InspectorWindow::DrawAnimatorInspector(
 	}
 
 	const TerraEngine::UUID objectId = ObjectManager::instance().getUUID(*object);
-	const std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose> published =
-		TerraEngine::Animation::AnimationSystem::Instance().LoadPublishedAnimatorPoseForObject(objectId);
+	const auto runtimeAnimator = TerraEngine::Animation::AnimationSystem::Instance()
+		.ResolveAnimatorForObject(objectId);
+	const std::shared_ptr<const TerraEngine::Animation::AnimationAuthorityFrame> authority =
+		TerraEngine::Animation::AnimationSystem::Instance().LoadPublishedAuthorityFrame();
+	const TerraEngine::Animation::AnimationAuthorityRow* published = authority
+		? authority->Find(runtimeAnimator) : nullptr;
 	ImGui::SeparatorText("Runtime Animation");
 	if (!published)
 	{
@@ -4302,7 +4306,8 @@ void InspectorWindow::DrawAnimatorInspector(
 	else
 	{
 		const TerraEngine::Animation::AnimatorPlaybackStateSnapshot playback =
-			TerraEngine::Animation::AnimationSystem::Instance().LoadAnimatorPlaybackState(published->animator);
+			TerraEngine::Animation::AnimationSystem::Instance().LoadAnimatorPlaybackState(
+				published->key.Handle());
 		if (ImGui::BeginTable("AnimatorRuntimeStatus", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp))
 		{
 			auto row = [](const char* label, const std::string& value) {
@@ -4319,7 +4324,7 @@ void InspectorWindow::DrawAnimatorInspector(
 			row("Effective Speed", std::to_string(playback.effectiveSpeed));
 			row("Clip Generation", std::to_string(published->clip.generation));
 			row("Skeleton Generation", std::to_string(published->skeleton.generation));
-			row("Safe Pose", published->safePose
+			row("Safe Pose", published->safeFallback
 				? "Yes - " + std::string(TerraEngine::Animation::ToString(published->status))
 				: "No - latest complete pose is active");
 			ImGui::EndTable();

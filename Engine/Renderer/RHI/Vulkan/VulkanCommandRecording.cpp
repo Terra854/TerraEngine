@@ -2,6 +2,7 @@
 #include "VulkanDescriptorPlanning.h"
 #include "Profiling/ProfilerScope.h"
 
+#include <algorithm>
 #include <limits>
 
 namespace TerraEngine::Renderer::Vulkan {
@@ -91,6 +92,36 @@ namespace TerraEngine::Renderer::Vulkan {
 		}
 	}
 
+	VulkanPublishedRangePlan BuildVulkanPublishedRangePlan(
+		const RenderFramePublication& publication,
+		std::uint32_t viewIndex)
+	{
+		VulkanPublishedRangePlan plan{};
+		if(viewIndex >= publication.views.size()) return plan;
+		const RenderViewSelection& view = publication.views[viewIndex];
+		if(!view.HasParallelLengths()) return plan;
+		for(const RenderSubmissionRange& range : publication.submissionRanges)
+		{
+			if(range.viewIndex != viewIndex) continue;
+			if(!range.IsComplete()
+				|| range.firstSelection > view.VisibleOrdinals().size()
+				|| range.selectionCount
+					> view.VisibleOrdinals().size() - range.firstSelection)
+				return {};
+			const auto templateBegin = view.PacketTemplateIdentities().begin()
+				+ range.firstSelection;
+			const auto templateEnd = templateBegin + range.selectionCount;
+			if(std::any_of(templateBegin, templateEnd,
+				[&range](std::uint64_t identity) {
+					return identity != range.packetTemplateIdentity;
+				}))
+				return {};
+			plan.ranges.push_back(range);
+		}
+		plan.valid = !plan.ranges.empty() || view.VisibleOrdinals().empty();
+		return plan;
+	}
+
 	std::string DescribeBackendLocalState(RenderAccessMode accessMode, RenderStage stage)
 	{
 		// Keep this as text for now so tests can validate the portability
@@ -125,24 +156,54 @@ namespace TerraEngine::Renderer::Vulkan {
 	}
 
 	BackendRecordingBatchPlan BuildVulkanRecordingBatchPlan(
-		const RenderFrameSnapshot& snapshot,
-		const RenderWorkPacketPlan& packetPlan,
+		const RenderFramePublication& publication,
 		const BackendCapabilityProfile& capabilities,
 		RenderBackendWorkKind workKind)
 	{
-		// Vulkan can translate worker-eligible renderer packets into secondary
-		// recording batches, but the result intentionally remains expressed as
-		// backend-neutral batch metadata. Actual command-buffer allocation and
-		// queue submission stay owned by VulkanContext at the coordinator edge.
-		return BuildBackendRecordingBatchPlan(snapshot, packetPlan, capabilities, workKind);
+		BackendRecordingBatchPlan plan;
+		// Ranges already passed sealing and identify the exact compact selection
+		// span. Vulkan can therefore form worker batches without rebuilding an
+		// intermediate frame packet collection or reading scene-owned state.
+		for(const RenderSubmissionRange& range : publication.submissionRanges)
+		{
+			if(!range.IsComplete() || range.viewIndex >= publication.views.size())
+			{
+				continue;
+			}
+			const RenderViewSelection& view = publication.views[range.viewIndex];
+			BackendRecordingBatch batch;
+			batch.batchId = "publication-" + std::to_string(publication.generation)
+				+ ".view-" + std::to_string(view.outputId)
+				+ "." + ToString(workKind);
+			batch.frameId = publication.frameId;
+			batch.viewId = view.outputId;
+			batch.passId = "sealed-range";
+			batch.workKind = workKind;
+			batch.begin = range.firstSelection;
+			batch.end = range.firstSelection + range.selectionCount;
+			batch.workerEligible = capabilities.supportsParallelRecording;
+			if(batch.workerEligible)
+			{
+				++plan.workerBatchCount;
+			}
+			else
+			{
+				++plan.serialBatchCount;
+				batch.fallbackReason =
+					"The Vulkan capability profile requires sealed-range recording on the coordinator.";
+				plan.serializedReasons.push_back(batch.fallbackReason);
+			}
+			plan.batches.push_back(std::move(batch));
+		}
+		return plan;
 	}
 
 	VulkanRendererThreadingPlan BuildVulkanRendererThreadingPlan(
-		const RenderFrameSnapshot& snapshot,
+		const RenderFramePublication& publication,
 		const BackendCapabilityProfile& capabilities)
 	{
 		VulkanRendererThreadingPlan plan;
-		plan.frameId = snapshot.frameId;
+		plan.frameId = publication.frameId;
 		auto addStage = [&](std::string stageId, RenderBackendWorkKind workKind, bool supported, bool coordinatorOwned, std::string coordinatorReason = {}) {
 			VulkanRendererThreadingStage stage;
 			stage.stageId = std::move(stageId);
@@ -277,7 +338,7 @@ namespace TerraEngine::Renderer::Vulkan {
 		VulkanAnimationCommandPlan output;
 		output.planGeneration = plan.generation;
 		output.rendererGeneration = rendererGeneration;
-		output.hasWork = !plan.dispatchCommands.empty();
+		output.hasWork = !plan.DispatchCommands().empty();
 		if(!output.hasWork) {
 			// Do not create a command, barrier, descriptor bind, or submission when
 			// no animator selected GPU visual evaluation this frame.
@@ -289,10 +350,13 @@ namespace TerraEngine::Renderer::Vulkan {
 			return output;
 		}
 
-		output.dispatches.reserve(plan.dispatchCommands.size());
+		output.dispatches.reserve(plan.DispatchCommands().size());
 		std::uint32_t previousStage = 0U;
 		bool hasPreviousStage = false;
-		for(const Animation::GpuAnimationDispatchCommand& command : plan.dispatchCommands) {
+		for(std::size_t commandIndex = 0U;
+			commandIndex < plan.DispatchCommands().size(); ++commandIndex) {
+			const Animation::GpuAnimationDispatchCommand command =
+				plan.ResolvedDispatchCommand(commandIndex);
 			const std::uint32_t stage = command.pushConstants.stage;
 			if(!Animation::IsGpuAnimationStageValueValid(stage)
 				|| command.pushConstants.planGeneration != plan.generation
@@ -310,7 +374,7 @@ namespace TerraEngine::Renderer::Vulkan {
 			previousStage = stage;
 			hasPreviousStage = true;
 		}
-		for(const Animation::GpuAnimationStageSpan& span : plan.stageSpans) {
+		for(const Animation::GpuAnimationStageSpan& span : plan.StageSpans()) {
 			if(span.commandCount == 0U || !Animation::IsGpuAnimationStageValueValid(span.stage)) continue;
 			if(span.barrierFlags != 0U) output.barriers.push_back({ span.stage, span.barrierFlags });
 		}

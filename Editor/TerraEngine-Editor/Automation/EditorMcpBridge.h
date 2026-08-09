@@ -40,6 +40,7 @@ namespace TerraEngine::Editor::Automation
 		// forwarder lets that owner advance durable recordings even when the MCP
 		// listener is disabled, disconnected, or has no queued requests.
 		void PumpAnimationRecordingsAtProtectedFrame();
+		void PumpRendererValidationMutationsAtProtectedFrame();
 		void SetMainEditor(MainEditorSubsystem* mainEditor);
 		void SetSelectionCallbacks(std::function<std::optional<entt::entity>()> getter, std::function<void(std::optional<entt::entity>)> setter);
 

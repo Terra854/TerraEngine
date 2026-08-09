@@ -6,6 +6,7 @@
 
 #include "SystemScheduler.h"
 
+#include "Core/Object/ObjectManager.h"
 #include "Core/SystemBase.h"
 #include "EcsQueryTaskGraph.h"
 #include "JobGraph.h"
@@ -226,6 +227,7 @@ namespace TerraEngine::Scheduling {
 			{ "Window", "Native window and swapchain-facing platform state.", "" },
 			{ "Input", "Input backend and per-frame input state.", "" },
 			{ "SceneGraph", "Hierarchy and transform visibility for scene objects.", "Refined by safe transform and scene graph jobs in Part 3." },
+			{ kResourceSceneChangePublication, "One immutable generation-scoped scene delta captured at the protected frame boundary.", "Renderer and editor workers share this retained packet; no consumer independently drains ObjectManager." },
 			{ "HierarchySnapshot", "Immutable parent-before-child hierarchy data published for worker readers.", "Prepared from SceneGraph before transform and layout jobs run." },
 			{ "DirtyTransformState", "Dirty transform roots and expanded branch state used to limit worker transform work.", "Prepared from SceneGraph before transform work units are planned." },
 			{ "TransformWorkUnits", "Depth-ordered transform propagation batches that worker jobs can execute independently.", "Consumes hierarchy and dirty transform inputs before runtime layout publication." },
@@ -259,6 +261,11 @@ namespace TerraEngine::Scheduling {
 			{ kResourceAnimationRecordingSamples, "Prepared bounded recording samples sourced from authoritative and presentation data.", "Recording publication remains generation-checked and protected." },
 			{ kResourceAnimationPresentationPrepared, "Worker-owned ragdoll, recording, and visual presentation preparation.", "The prepared value is not render-visible until PublishAnimationPresentation completes." },
 			{ kResourceAnimationPresentationPlan, "Immutable generation-labeled render-facing animation presentation plan.", "UI and Render read only the complete plan published at the protected presentation boundary." },
+			{ kResourceAnimationAuthorityPages, "Worker-final immutable animation authority pages for one candidate generation.", "Each page is written once before sealing; unchanged pages retain prior immutable ownership." },
+			{ kResourceAnimationFrameSidecars, "Sparse exact-generation events, callbacks, root motion, physics, attachments, rollback, diagnostics, completions, and GPU candidates.", "Only participating animators contribute entries; scene effects remain typed transactions." },
+			{ kResourceAnimationAuthorityFrame, "Atomic pre-physics animation gameplay authority root.", "Protected publication validates a sealed candidate and exchanges one root without crowd traversal or allocation." },
+			{ kResourceAnimationEvaluationCache, "Generation-keyed animation evaluation acceleration state.", "A worker commits optional cache entries only after the matching authority root is accepted; rejection leaves the cache unchanged." },
+			{ kResourceAnimationPresentationFrame, "Atomic post-physics animation presentation root.", "The root strongly references its exact authority and physics generations for renderer and scripting consumers." },
 			{ "PhysicsSettingsUpdateQueue", "Validated project or packaged-runtime physics settings awaiting protected application.", "Read only at a declared physics boundary before a world is created or rebuilt." },
 			{ "PhysicsSettings", "The active immutable gravity, fixed-step, layer, solver, query, and diagnostic configuration.", "Published through a protected settings boundary and read by physics workloads." },
 			{ "PhysicsAuthoringSnapshot", "Immutable hierarchy-resolved physics component and project-settings input.", "Written at PhysicsSnapshot and read by worker preparation." },
@@ -299,7 +306,11 @@ namespace TerraEngine::Scheduling {
 			{ "EditorAutomationQueue", "Immutable queued MCP/editor automation requests awaiting worker preparation or protected commit.", "Prepared without mutating live editor or scene state." },
 			{ "EditorAutomationSession", "Capability, job, idempotency, approval, activity, and structured-log state retained for the current editor session.", "Worker readers consume immutable snapshots; publication remains protected." },
 			{ kResourceVirtualGeometryQualityProfile, "Renderer-owned virtual geometry quality, LOD, Hi-Z, debug visualization, and budget settings.", "Read by render preparation when choosing cluster packet detail and page request pressure." },
-			{ kResourceRenderFrameSnapshot, "Exact immutable scene, view, renderer, geometry, residency, and completed-readback inputs for one frame.", "Written only by the protected RenderSnapshot workload and consumed by worker-safe renderer preparation." },
+			{ kResourcePersistentRenderSceneState, "Generation-keyed immutable render topology and backend-neutral packet templates.", "Camera, transform, pose, LOD, tint, and backend handles are intentionally excluded." },
+			{ kResourceDynamicRenderFrameState, "Copy-on-write transform, animation binding, material override, bounds, and lifecycle pages.", "Changed lanes are worker-prepared against one exact persistent topology generation." },
+			{ kResourceRenderViewSelections, "Compact stable-ordinal selections for Scene, Game, runtime, capture, picking, shadow, and visualizer views.", "Each selection names one exact topology and dynamic generation." },
+			{ kResourceRenderFramePublication, "Canonical sealed renderer frame root shared by all views and the backend.", "Validation failure publishes no partial view, range, frame-slot resource, or generation." },
+			{ kResourceProfilerFramePublicationEvidence, "Optional generation, reuse, rejection, multi-view, and disjoint timing evidence.", "Missing values stay unavailable and complete top-level spans reconcile to the profiler frame clock." },
 			{ kResourcePersistentRenderTopology, "Immutable deterministic renderable membership, stable compatibility inputs, and executable group templates.", "The topology owns values and immutable handles only; workers never retain live scene or component references." },
 			{ kResourceDynamicRenderInstanceCandidates, "Frame-owned transforms, animation bindings, visibility, LOD, route, and identity sidecars.", "Disjoint worker ranges remain private until complete generation validation." },
 			{ kResourceRenderCompatibilityGroups, "Exact-key compatible visible-model ranges prepared for shared submission.", "Hashes locate candidates, while complete equality accepts group membership." },
@@ -1468,6 +1479,14 @@ namespace TerraEngine::Scheduling {
 		// entire call as a coordinator wait and protected-inline region, which made
 		// every system appear as a child of waits that had not actually occurred.
 		TERRAENGINE_PROFILE_SCOPE("SystemScheduler::ExecuteFrameWorkloads", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		{
+			// Capture the scene journal once while the protected caller still owns
+			// live object/component storage. Every renderer/editor worker receives
+			// the retained immutable packet, so no consumer can drain a different
+			// subset of same-frame changes.
+			TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Publish Scene Changes", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			(void)ObjectManager::instance().PublishSceneChangePacket();
+		}
 		std::vector<FrameWorkloadDeclaration> workloads;
 		{
 			TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Build Frame Workloads", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);

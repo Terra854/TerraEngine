@@ -191,6 +191,11 @@ namespace TerraEngine::Scheduling {
 		std::uint64_t workerPreparationTimeNs = 0;
 		std::uint64_t protectedCommitTimeNs = 0;
 		std::uint64_t coordinatorWaitTimeNs = 0;
+		std::uint64_t criticalPathTimeNs = 0;
+		std::size_t dependencyWaveCount = 0;
+		std::size_t workerCompletionWakeCount = 0;
+		std::size_t completionDrivenDispatchCount = 0;
+		std::size_t peakConcurrentWorkerCount = 0;
 		double workerUtilization = 0.0;
 		std::size_t activeMembershipInvalidationCount = 0;
 		std::size_t staleObjectHandleCount = 0;

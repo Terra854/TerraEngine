@@ -456,9 +456,11 @@ namespace TerraEngine::Editor::Automation
 			binding.animator = *target;
 			binding.expectedPublicationGeneration = arguments.value("publicationGeneration", 0U);
 			const bool bindCurrent = arguments.value("bindCurrentPublication", false);
-			std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose> boundPose;
+			std::shared_ptr<const TerraEngine::Animation::AnimationAuthorityFrame> boundAuthority;
+			const TerraEngine::Animation::AnimationAuthorityRow* boundPose = nullptr;
 			if(bindCurrent) {
-				boundPose = AnimationSystem::Instance().LoadPublishedAnimatorPose(*target);
+				boundAuthority = AnimationSystem::Instance().LoadPublishedAuthorityFrame();
+				boundPose = boundAuthority ? boundAuthority->Find(*target) : nullptr;
 				if(!boundPose || !boundPose->snapshot) return Fail(ErrorCategory::StaleTarget, "No immutable published animator pose is available for current binding.");
 				binding.expectedPublicationGeneration = boundPose->snapshot->publicationGeneration;
 				binding.jointStableIds = boundPose->jointStableIds;
@@ -487,7 +489,10 @@ namespace TerraEngine::Editor::Automation
 			// Even explicit caller bindings must resolve to one current immutable approval
 			// pose. The recorder retains that value as sample zero and never reads live
 			// animation storage while the durable job is active.
-			if(!boundPose) boundPose = AnimationSystem::Instance().LoadPublishedAnimatorPose(*target);
+			if(!boundPose) {
+				boundAuthority = AnimationSystem::Instance().LoadPublishedAuthorityFrame();
+				boundPose = boundAuthority ? boundAuthority->Find(*target) : nullptr;
+			}
 			if(!boundPose || !boundPose->snapshot
 				|| boundPose->snapshot->publicationGeneration != binding.expectedPublicationGeneration
 				|| boundPose->snapshot->tick != descriptor.firstTick
@@ -853,9 +858,11 @@ namespace TerraEngine::Editor::Automation
 			return {{"slotIndex", target.slotIndex}, {"generation", target.generation}};
 		}
 
-		nlohmann::json SerializePublishedGenerations(
-			const std::shared_ptr<const PublishedAnimatorPose>& published)
+		nlohmann::json SerializePublishedGenerations(AnimatorInstanceHandle target)
 		{
+			const std::shared_ptr<const AnimationAuthorityFrame> authority =
+				AnimationSystem::Instance().LoadPublishedAuthorityFrame();
+			const AnimationAuthorityRow* published = authority ? authority->Find(target) : nullptr;
 			if(!published || !published->snapshot)
 			{
 				return {{"available", false}};
@@ -1202,7 +1209,7 @@ namespace TerraEngine::Editor::Automation
 			AutomationDispatchResult result;
 			result.ok = true;
 			result.message = "Read copied procedural goal and result publications.";
-			result.data = {{"target", SerializeRuntimeTarget(*target)}, {"currentPublication", SerializePublishedGenerations(system.LoadPublishedAnimatorPose(*target))},
+			result.data = {{"target", SerializeRuntimeTarget(*target)}, {"currentPublication", SerializePublishedGenerations(*target)},
 				{"activeGoals", SerializeBoundedTail(goals, maximumItems, SerializeProceduralGoal)},
 				{"activeGoalCount", goals.size()}, {"activeGoalsTruncated", goals.size() > maximumItems},
 				{"results", SerializeBoundedTail(results, maximumItems, SerializeProceduralResult)},
@@ -1231,7 +1238,7 @@ namespace TerraEngine::Editor::Automation
 			AutomationDispatchResult result;
 			result.ok = true;
 			result.message = "Read copied retarget publications.";
-			result.data = {{"target", SerializeRuntimeTarget(*target)}, {"currentPublication", SerializePublishedGenerations(system.LoadPublishedAnimatorPose(*target))},
+			result.data = {{"target", SerializeRuntimeTarget(*target)}, {"currentPublication", SerializePublishedGenerations(*target)},
 				{"snapshots", SerializeBoundedTail(snapshots, maximumItems, SerializeRetargetSnapshot)},
 				{"snapshotCount", snapshots.size()}, {"snapshotsTruncated", snapshots.size() > maximumItems},
 				{"visibilityBoundary", "immutable_retarget_store_copies"}};

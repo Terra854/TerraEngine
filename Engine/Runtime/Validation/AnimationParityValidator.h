@@ -46,7 +46,7 @@ struct AnimationParityAnimatorDigest final {
 };
 
 [[nodiscard]] AnimationParityAnimatorDigest ComputeAnimationParityAnimatorDigest(
-	const Animation::PublishedAnimatorPose& pose);
+	const Animation::AnimationAuthorityRow& pose);
 
 // Stable FNV-1a helper used by tests and canonical report payloads.
 [[nodiscard]] std::string CanonicalAnimationParityHash(std::string_view bytes);

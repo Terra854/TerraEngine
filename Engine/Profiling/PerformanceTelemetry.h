@@ -123,6 +123,11 @@ struct WorkloadExecutionRecord
 	std::uint64_t queueDepthAtStart = 0u;
 	std::uint64_t dispatchCount = 0u;
 	std::uint64_t usefulWorkItemCount = 0u;
+	// Dependency wave is the deterministic topological level. Completion sequence
+	// is the actual runtime order in which the coordinator observed finished work;
+	// together they expose whether an unlocked path progressed behind a slow sibling.
+	std::uint32_t dependencyWave = 0u;
+	std::uint64_t completionSequence = 0u;
 	std::uint64_t partitionIndex = 0u;
 	std::uint64_t partitionCount = 0u;
 	std::uint64_t itemBegin = 0u;
@@ -134,6 +139,11 @@ struct WorkloadExecutionRecord
 	TelemetryDuration ownershipWaitDuration;
 	TelemetryDuration flushDuration;
 	TelemetryDuration publicationDuration;
+	// These steady-clock endpoints are retained only for the live frame. The
+	// profiler merges overlapping partitions before attributing wall time, so
+	// parallel worker ranges never become additive sibling frame costs.
+	std::uint64_t runStartNanoseconds = 0u;
+	std::uint64_t runEndNanoseconds = 0u;
 };
 
 // A frame may declare many fine-grained ranges. Bounding retained decision

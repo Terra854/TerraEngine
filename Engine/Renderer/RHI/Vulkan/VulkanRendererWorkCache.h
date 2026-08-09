@@ -14,6 +14,7 @@
 #include "Core/Export.h"
 #include "Utilities/UUID.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <span>
@@ -81,9 +82,21 @@ namespace TerraEngine::Renderer::Vulkan {
 		bool counterReadbackEligible = false;
 	};
 
+	// This value-only plan keeps command-buffer capacity decisions testable without
+	// constructing a Vulkan device. Command offsets are counted in indirect-command
+	// records so callers can convert them to bytes only at the Vulkan boundary.
+	struct IndirectDrawBufferCapacityPlan
+	{
+		std::size_t commandOffset = 0u;
+		std::size_t requiredCommandCount = 0u;
+		std::size_t targetCommandCapacity = 0u;
+		bool requiresGrowth = false;
+		bool valid = false;
+	};
+
 	// The protected Vulkan owner validates this value-only plan before allocating
 	// a frame-slot buffer. A rejected plan publishes no partial grouped range;
-	// its callers retain the pre-existing per-model DrawCommand route.
+	// its callers retain the pre-existing per-model RenderItemRecord route.
 	struct GroupedInstanceStreamPlan
 	{
 		std::uint64_t frameGeneration = 0u;
@@ -156,22 +169,27 @@ namespace TerraEngine::Renderer::Vulkan {
 	class TERRAENGINE_API VulkanRendererPreparationCache
 	{
 	public:
-		CachedDescriptorBindingPlan GetDescriptorPlan(const RenderFrameSnapshot& snapshot, std::uint32_t viewId);
-		CachedPipelineStateKeyPlan GetPipelineStateKeys(const RenderFrameSnapshot& snapshot);
-		CachedUploadPreparationPlan GetUploadPlan(const RenderFrameSnapshot& snapshot);
-		PersistentRenderPacketCacheStats RefreshPersistentRenderPackets(const RenderFrameSnapshot& snapshot);
+		CachedDescriptorBindingPlan GetDescriptorPlan(
+			const RenderFramePublication& publication, std::uint32_t viewId);
+		CachedPipelineStateKeyPlan GetPipelineStateKeys(
+			const RenderFramePublication& publication);
+		CachedUploadPreparationPlan GetUploadPlan(
+			const RenderFramePublication& publication);
+		PersistentRenderPacketCacheStats RefreshPersistentRenderPackets(
+			const RenderFramePublication& publication);
 		void EnqueueResourceForRetirement(FrameResourceRetirement retirement);
 		std::vector<FrameResourceRetirement> RetireCompletedResources(std::uint64_t completedFrameId);
 		std::size_t PendingRetirementCount() const;
 		void PushThreadDiagnostic(std::uint32_t workerId, std::string message);
 		std::vector<ThreadDiagnosticRecord> DrainThreadDiagnostics();
 		VulkanRendererPreparationSummary BuildFramePreparation(
-			const RenderFrameSnapshot& snapshot,
+			const RenderFramePublication& publication,
 			const std::vector<RenderPassNode>& passes,
 			const BackendCapabilityProfile& capabilities,
 			bool collectPersistentPacketDiagnostics = true);
 
 	private:
+		void PrepareForBackendGeneration(const RenderFramePublication& publication);
 		void TrimCachesIfNeeded();
 
 		std::unordered_map<std::uint64_t, DescriptorBindingPlan> descriptorPlanCache;
@@ -181,14 +199,20 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::deque<UploadPreparationPlan> pendingUploadPlans;
 		std::deque<FrameResourceRetirement> pendingRetirements;
 		std::vector<ThreadDiagnosticRecord> threadDiagnostics;
+		std::uint64_t observedRendererSessionGeneration = 0u;
+		std::uint64_t observedBackendResourceGeneration = 0u;
 	};
 
 	TERRAENGINE_API VisibilityPreparationPlan BuildVisibilityPreparationPlan(
-		const RenderFrameSnapshot& snapshot,
+		const RenderFramePublication& publication,
 		const BackendCapabilityProfile& capabilities);
 	TERRAENGINE_API IndirectDrawPreparationPlan BuildIndirectDrawPreparationPlan(
-		const RenderFrameSnapshot& snapshot,
+		const RenderFramePublication& publication,
 		const BackendCapabilityProfile& capabilities);
+	TERRAENGINE_API IndirectDrawBufferCapacityPlan PlanIndirectDrawBufferCapacity(
+		std::size_t currentCommandCapacity,
+		std::size_t usedCommandCount,
+		std::size_t requestedCommandCount);
 	TERRAENGINE_API GroupedInstanceStreamPlan BuildGroupedInstanceStreamPlan(
 		const DynamicRenderFrameState& dynamicState,
 		std::size_t maximumInstanceCapacity,
@@ -205,13 +229,13 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::size_t maximumInstanceCapacity,
 		std::uint64_t currentRendererGeneration);
 	TERRAENGINE_API ShadowRecordingPreparationPlan BuildShadowRecordingPreparationPlan(
-		const RenderFrameSnapshot& snapshot,
+		const RenderFramePublication& publication,
 		const BackendCapabilityProfile& capabilities);
 	TERRAENGINE_API ShaderMaterialPreparationPlan BuildShaderMaterialPreparationPlan(
-		const RenderFrameSnapshot& snapshot,
+		const RenderFramePublication& publication,
 		const BackendCapabilityProfile& capabilities);
 	TERRAENGINE_API UiGeometryPreparationPlan BuildUiGeometryPreparationPlan(
-		const RenderFrameSnapshot& snapshot,
+		const RenderFramePublication& publication,
 		const BackendCapabilityProfile& capabilities);
 
 }
