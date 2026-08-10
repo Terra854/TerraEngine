@@ -344,7 +344,7 @@ namespace TerraEngine::Tests {
 				request.flags, GpuAnimationWorkFlag::UseBindPoseFallback);
 			input.visual.useHoldLastFallback = HasGpuAnimationFlag(
 				request.flags, GpuAnimationWorkFlag::UseHoldLastFallback);
-			input.execution.effectiveMode = AnimationEffectiveExecutionMode::GpuVisual;
+			input.effectiveMode = AnimationEffectiveExecutionMode::GpuVisual;
 			// The fixture constructs the immutable program and payload immediately
 			// above. Production sets these two proofs after the same worker checks.
 			input.programValidated = true;
@@ -375,9 +375,10 @@ namespace TerraEngine::Tests {
 		registry.Add("Animation.GpuShaderLayout.SharedHlslAbiMatchesFrozenConstants", [](TestContext& context) {
 			const std::string hlsl = ReadAnimationGpuAbi();
 			context.Expect(!hlsl.empty(), "The shared HLSL ABI file must be present in Engine/Shaders/Animation.");
-			for(const std::string_view token : std::array<std::string_view, 30U>{
+			for(const std::string_view token : std::array<std::string_view, 31U>{
 				"#define TE_ANIMATION_GPU_DESCRIPTOR_SET 1u",
-				"#define TE_ANIMATION_GPU_DESCRIPTOR_BINDING_COUNT 15u",
+				"#define TE_ANIMATION_GPU_DESCRIPTOR_BINDING_COUNT 16u",
+				"#define TE_ANIMATION_GPU_DESCRIPTOR_SAMPLE_TICKS 15u",
 				"#define TE_ANIMATION_GPU_STAGE_PROCEDURAL 3u",
 				"#define TE_ANIMATION_GPU_STAGE_RAGDOLL 4u",
 				"#define TE_ANIMATION_GPU_GENERATION_RECORD_BYTES 64u",
@@ -482,10 +483,10 @@ namespace TerraEngine::Tests {
 				"Global bindless resources must remain at descriptor set zero.");
 			context.ExpectEqual(1U, kGpuAnimationDescriptorSet,
 				"Animation resources must remain at descriptor set one.");
-			context.ExpectEqual(15U, kGpuAnimationDescriptorBindingCount,
-				"The version-one descriptor set must expose all fifteen frozen bindings.");
+			context.ExpectEqual(16U, kGpuAnimationDescriptorBindingCount,
+				"The descriptor set must expose the appended dynamic sample-tick lane.");
 
-			const std::array<std::uint32_t, 15U> descriptorValues{
+			const std::array<std::uint32_t, 16U> descriptorValues{
 				Value(GpuAnimationDescriptorBinding::GenerationRecords),
 				Value(GpuAnimationDescriptorBinding::WorkPackets),
 				Value(GpuAnimationDescriptorBinding::DispatchRecords),
@@ -500,7 +501,8 @@ namespace TerraEngine::Tests {
 				Value(GpuAnimationDescriptorBinding::PaletteMatrices),
 				Value(GpuAnimationDescriptorBinding::MorphOutputs),
 				Value(GpuAnimationDescriptorBinding::BoundsOutputs),
-				Value(GpuAnimationDescriptorBinding::Diagnostics)};
+				Value(GpuAnimationDescriptorBinding::Diagnostics),
+				Value(GpuAnimationDescriptorBinding::SampleTicks)};
 			for(std::uint32_t index = 0U; index < descriptorValues.size(); ++index) {
 				context.ExpectEqual(index, descriptorValues[index],
 					"Animation descriptor bindings must remain contiguous and append-only.");
@@ -1621,6 +1623,18 @@ namespace TerraEngine::Tests {
 			};
 			const std::uint64_t initialTopologySignature =
 				buildTopologySignature();
+			GpuAnimationLoweringTopologySignatureBuilder preparedBuilder;
+			for(const GpuAnimationLoweringInput& input : inputs) {
+				preparedBuilder.IncludePrepared(
+					input.program.programContentId,
+					input.program.programResourceIndex,
+					input.visual,
+					input.prevalidatedStageMask,
+					input.effectiveMode,
+					input.allowSharedVisualEvaluation);
+			}
+			context.Expect(preparedBuilder.Complete() == initialTopologySignature,
+				"Narrow prepared visual lanes must produce the exact same topology proof as complete lowering inputs.");
 			GpuAnimationArena scratch;
 			GpuAnimationArena palette;
 			ConfigureArenas(scratch, palette);

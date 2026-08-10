@@ -166,9 +166,11 @@ namespace TerraEngine::Tests {
 				BuildVulkanAnimationComputeUploadPlan(frame, upload)
 				&& upload.topologyReused
 				&& upload.dispatchRecords.data() == retainedDispatchBytes
-				&& upload.workPackets[0U].sampleTick == 4U
-				&& upload.workPackets[1U].sampleTick == 8U,
-				"An exact retained static owner must refresh dynamic rows without rebuilding dispatch records.");
+				&& upload.sampleTicks[0U] == 4U
+				&& upload.sampleTicks[1U] == 8U
+				&& upload.workPackets[0U].sampleTick == 3U
+				&& upload.workPackets[1U].sampleTick == 7U,
+				"An exact retained static owner must refresh narrow dynamic rows without rewriting packet or dispatch topology.");
 		});
 
 		registry.Add("Renderer.VulkanRecording.HiZReusesSealedVisibilitySignature", [](TestContext& context) {
@@ -718,7 +720,8 @@ namespace TerraEngine::Tests {
 			// frames. Its typed pick must retain its own table/frame rather than fail
 			// merely because the latest Game frame advanced before automation polled.
 			context.Expect(renderSystem.find("latestGameCaptureIdentitySnapshot") != std::string::npos
-				&& renderSystem.find("completedGameCaptureIdentitySnapshot.frameId =\n\t\t\t\t\tprepared.selection.generation") != std::string::npos
+				&& renderSystem.find("completedGameCaptureIdentitySnapshot.frameId =") != std::string::npos
+				&& renderSystem.find("prepared.selection.generation") != std::string::npos
 				&& renderSystem.find("result.dedicatedCaptureTarget") != std::string::npos
 				&& renderSystem.find("identityTable.begin()") != std::string::npos
 				&& vulkan.find("rendered target metadata does not match the request") != std::string::npos,

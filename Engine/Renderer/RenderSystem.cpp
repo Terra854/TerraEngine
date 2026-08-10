@@ -4506,6 +4506,10 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	// later builder does not rescan a completely GPU-driven crowd to rediscover
 	// that its output would be empty.
 	bool hasCpuDeformationCandidates = false;
+	// Successful CPU deformation records are normally a tiny exception inside a
+	// GPU-resident crowd. Preserve their renderable indices so dynamic publication
+	// can copy only the affected 256-lane pages instead of reopening every page.
+	std::vector<std::uint32_t> cpuDeformationRenderableIndices;
 	// Reuse the previous protected snapshot's cardinality as a conservative capacity
 	// hint. Large animated crowds otherwise grow this frame-arena vector several
 	// times before reaching the same stable entity count on every frame.
@@ -5383,6 +5387,13 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		binding.deformationContentIdHigh = deformation->contentIdHigh;
 		binding.cpuDeformationRecordIndex = static_cast<std::uint32_t>(
 			cpuDeformationPlan->records.size());
+		const std::size_t renderableIndex = static_cast<std::size_t>(
+			std::addressof(entry) - renderables.data());
+		if(renderableIndex < renderables.size()
+			&& renderableIndex <= std::numeric_limits<std::uint32_t>::max()) {
+			cpuDeformationRenderableIndices.push_back(
+				static_cast<std::uint32_t>(renderableIndex));
+		}
 		cpuDeformationPlan->records.push_back({
 			BuildStableAnimationInstanceId(binding, entry.objectId),
 			binding.meshId,
@@ -7179,13 +7190,12 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	// their independent publication generation so retained visible/shadow command
 	// evidence cannot outlive the payload that supplied its selectors.
 	HashCombine(renderableSubmissionSignature, renderFrameSnapshot.resourceRevision);
-	// CPU deformation is the only animated render payload that still lives inside
-	// geometry lanes. A producer-sealed GPU topology can therefore advance through
-	// its separate root whenever the captured renderables contain no CPU bridge.
-	// Animators without a renderable may still exist; they are safe extra compute
-	// packets and must not disable the dense path for the visible crowd.
+	// A producer-sealed GPU topology always advances through its separate root.
+	// CPU deformation remains a sparse companion plan and refreshes only the pages
+	// that own those exceptional lanes; it must not disable dense publication for
+	// the thousands of GPU-resident owners in the same frame.
 	const bool hasDenseAnimationPublication =
-		hasDenseAnimationTopologyCandidate && !hasCpuDeformationCandidates;
+		hasDenseAnimationTopologyCandidate;
 	const std::unordered_map<TerraEngine::UUID, std::size_t>&
 		renderableCommandIndices =
 			renderableFrameIdentityCache.indicesByObjectId;
@@ -10719,13 +10729,64 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				&& retainedDynamicStateRoot->rendererSessionGeneration
 					== publicationSessionGeneration
 				? retainedDynamicStateRoot : nullptr;
-		const bool retainCompleteDynamicRoot = previousDynamicRoot != nullptr
+		const bool reusableDynamicBase = previousDynamicRoot != nullptr
 			&& retainedDynamicStateSourceSignature == dynamicSourceSignature
 			&& previousDynamicRoot->pages.size() == publication->persistent->pages.size();
+		std::vector<std::uint32_t> currentCpuDynamicPageIndices;
+		bool cpuPageMappingComplete = true;
+		if(hasDenseAnimationPublication) {
+			currentCpuDynamicPageIndices.reserve(
+				cpuDeformationRenderableIndices.size());
+			for(const std::uint32_t renderableIndex :
+				cpuDeformationRenderableIndices) {
+				if(renderableIndex >= retainedRenderTopology.orderedSlotKeys.size()) {
+					cpuPageMappingComplete = false;
+					break;
+				}
+				const TerraEngine::Renderer::RenderSlotGenerationKey key =
+					retainedRenderTopology.orderedSlotKeys[renderableIndex];
+				if(!key.IsValid()) {
+					cpuPageMappingComplete = false;
+					break;
+				}
+				currentCpuDynamicPageIndices.push_back(
+					key.ordinal
+						/ TerraEngine::Renderer::kRenderPublicationPageCapacity);
+			}
+			std::sort(currentCpuDynamicPageIndices.begin(),
+				currentCpuDynamicPageIndices.end());
+			currentCpuDynamicPageIndices.erase(std::unique(
+				currentCpuDynamicPageIndices.begin(),
+				currentCpuDynamicPageIndices.end()),
+				currentCpuDynamicPageIndices.end());
+		}
+		const bool retainCompleteDynamicRoot = reusableDynamicBase
+			&& cpuPageMappingComplete
+			&& currentCpuDynamicPageIndices.empty()
+			&& retainedCpuDynamicPageIndices.empty();
 		std::vector<std::shared_ptr<const TerraEngine::Renderer::RenderDynamicPage>>
 			preparedDynamicPages(publication->persistent->pages.size());
 		std::vector<std::uint8_t> changedDynamicPages(
 			publication->persistent->pages.size(), 0U);
+		std::vector<std::uint8_t> pagesRequiringDynamicRefresh(
+			publication->persistent->pages.size(), reusableDynamicBase ? 0U : 1U);
+		if(reusableDynamicBase) {
+			preparedDynamicPages = previousDynamicRoot->pages;
+			const auto markCpuPages = [&pagesRequiringDynamicRefresh](
+				const std::vector<std::uint32_t>& pageIndices) noexcept {
+				for(const std::uint32_t pageIndex : pageIndices) {
+					if(pageIndex < pagesRequiringDynamicRefresh.size()) {
+						pagesRequiringDynamicRefresh[pageIndex] = 1U;
+					}
+				}
+			};
+			markCpuPages(retainedCpuDynamicPageIndices);
+			markCpuPages(currentCpuDynamicPageIndices);
+		}
+		if(!cpuPageMappingComplete) {
+			std::fill(pagesRequiringDynamicRefresh.begin(),
+				pagesRequiringDynamicRefresh.end(), 1U);
+		}
 		// Keep a few retired page sets ready for the asynchronous backend without
 		// allowing an unusually slow consumer to turn this cache into unbounded
 		// retained memory. Acquire itself refuses to hand out any page still owned
@@ -10744,6 +10805,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
                       [&](std::size_t pageBegin, std::size_t pageEnd) {
                         for (std::size_t pageIndex = pageBegin;
                              pageIndex < pageEnd; ++pageIndex) {
+						  if(pagesRequiringDynamicRefresh[pageIndex] == 0U)
+							continue;
                           const std::shared_ptr<
                               const TerraEngine::Renderer::RenderPersistentPage>
                               &persistentPage =
@@ -10898,6 +10961,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
                                      changedDynamicPages.end(), 1U));
                   retainedDynamicStateRoot = dynamicRoot;
                   retainedDynamicStateSourceSignature = dynamicSourceSignature;
+				  retainedCpuDynamicPageIndices =
+					  std::move(currentCpuDynamicPageIndices);
                   publication->dynamic = std::move(dynamicRoot);
                 } else {
                   // The source signature includes topology, transforms,
@@ -10907,6 +10972,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
                   publication->receipt.changedDynamicPages = 0U;
                   publication->dynamic = previousDynamicRoot;
                   retainedDynamicStateRoot = previousDynamicRoot;
+				  retainedCpuDynamicPageIndices =
+					  std::move(currentCpuDynamicPageIndices);
                 }
                 TerraEngine::Renderer::AnimationBackendWorkPlan animationBackendWork;
 		{
@@ -10922,6 +10989,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		}
 		if(cpuDeformationPlan != nullptr)
 		{
+			animationBackendWork.cpuOrFallbackAnimatorCount =
+				cpuDeformationPlan->records.size();
 			animationBackendWork.cpuDeformationPlan = std::move(cpuDeformationPlan);
 		}
 		const bool backendWorkValid = activeRenderFrameId != 0u
@@ -11846,6 +11915,7 @@ void RenderSystem::Shutdown()
 		renderFramePublicationStore.SessionGeneration() + 1u);
 	retainedPersistentTopologyRoot.reset();
 	retainedDynamicStateRoot.reset();
+	retainedCpuDynamicPageIndices.clear();
 	dynamicPageRecyclePool.Clear();
 	retainedDynamicStateSourceSignature = 0u;
 	// Release every retained topology/view/backend cache with the renderer
@@ -13007,6 +13077,7 @@ void RenderSystem::Clear()
 		renderFramePublicationStore.SessionGeneration() + 1u);
 	retainedPersistentTopologyRoot.reset();
 	retainedDynamicStateRoot.reset();
+	retainedCpuDynamicPageIndices.clear();
 	dynamicPageRecyclePool.Clear();
 	retainedDynamicStateSourceSignature = 0u;
 	lifetimeState = std::make_unique<RenderSystemLifetimeState>();

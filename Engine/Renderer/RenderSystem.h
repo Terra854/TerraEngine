@@ -450,6 +450,10 @@ private:
 		retainedPersistentTopologyRoot;
 	std::shared_ptr<const TerraEngine::Renderer::RenderDynamicStateRoot>
 		retainedDynamicStateRoot;
+	// Mixed GPU/CPU animation refreshes only pages that contain a CPU deformation
+	// lane. Retaining the preceding set makes a GPU-to-CPU or CPU-to-GPU transition
+	// replace both sides of the ownership change without scanning the full crowd.
+	std::vector<std::uint32_t> retainedCpuDynamicPageIndices;
 	// Dynamic pages are rebuilt for active GPU animation, but their allocations
 	// can be reused only after the last sealed publication releases them.
 	TerraEngine::Renderer::RenderDynamicPageRecyclePool dynamicPageRecyclePool;

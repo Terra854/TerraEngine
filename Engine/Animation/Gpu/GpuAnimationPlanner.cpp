@@ -151,31 +151,36 @@ namespace TerraEngine::Animation {
 
 		void MixLoweringTopologyInput(
 			std::uint64_t& hash,
-			const GpuAnimationLoweringInput& input) noexcept
+			std::uint64_t programContentId,
+			std::uint32_t programResourceIndex,
+			const GpuAnimationVisualInput& visual,
+			std::uint32_t prevalidatedStageMask,
+			AnimationEffectiveExecutionMode effectiveMode,
+			bool allowSharedVisualEvaluation) noexcept
 		{
-				const GpuAnimationGenerationRecord& generation = input.visual.generations;
+				const GpuAnimationGenerationRecord& generation = visual.generations;
 				// Shared-pointer addresses describe temporary ownership, not executable
 				// topology. Stable content IDs, resource indices, compatibility, and
 				// generations below are the authoritative invalidation proof.
-				MixTopologyIdentity(hash, input.program.programContentId);
-				MixTopologyIdentity(hash, input.program.programResourceIndex);
-				MixTopologyIdentity(hash, input.visual.stableInstanceId);
-				MixTopologyIdentity(hash, input.visual.skeletonTopologyId);
-				MixTopologyIdentity(hash, input.visual.compatibilityFingerprint);
-				MixTopologyIdentity(hash, input.visual.inputPoseOffsetBytes);
+				MixTopologyIdentity(hash, programContentId);
+				MixTopologyIdentity(hash, programResourceIndex);
+				MixTopologyIdentity(hash, visual.stableInstanceId);
+				MixTopologyIdentity(hash, visual.skeletonTopologyId);
+				MixTopologyIdentity(hash, visual.compatibilityFingerprint);
+				MixTopologyIdentity(hash, visual.inputPoseOffsetBytes);
 				// Raw parameters and sample ticks change every frame. AnimationSystem
 				// separately proves that every retained evaluation-sharing group preserves
 				// equality; hashing raw values here would invalidate an unchanged partition.
-				MixTopologyIdentity(hash, input.visual.stableSubmissionOrdinal);
-				MixTopologyIdentity(hash, input.visual.clipResourceIndex);
-				MixTopologyIdentity(hash, input.visual.skeletonResourceIndex);
-				MixTopologyIdentity(hash, input.visual.maskResourceIndex);
-				MixTopologyIdentity(hash, input.visual.morphResourceIndex);
-				MixTopologyIdentity(hash, input.visual.jointCount);
-				MixTopologyIdentity(hash, input.visual.morphCount);
-				MixTopologyIdentity(hash, input.visual.paletteEntryCount);
-				MixTopologyIdentity(hash, input.visual.palettePartitionCount);
-				MixTopologyIdentity(hash, input.visual.diagnosticIndex);
+				MixTopologyIdentity(hash, visual.stableSubmissionOrdinal);
+				MixTopologyIdentity(hash, visual.clipResourceIndex);
+				MixTopologyIdentity(hash, visual.skeletonResourceIndex);
+				MixTopologyIdentity(hash, visual.maskResourceIndex);
+				MixTopologyIdentity(hash, visual.morphResourceIndex);
+				MixTopologyIdentity(hash, visual.jointCount);
+				MixTopologyIdentity(hash, visual.morphCount);
+				MixTopologyIdentity(hash, visual.paletteEntryCount);
+				MixTopologyIdentity(hash, visual.palettePartitionCount);
+				MixTopologyIdentity(hash, visual.diagnosticIndex);
 				MixTopologyIdentity(hash, generation.instanceSlot);
 				MixTopologyIdentity(hash, generation.instanceGeneration);
 				// Component publication advances with the authored playback state and is
@@ -199,30 +204,30 @@ namespace TerraEngine::Animation {
 				// It advances with animation output and belongs in the dynamic sidecar,
 				// All other identity lanes remain part of the immutable proof.
 				MixTopologyIdentity(hash, static_cast<std::uint64_t>(
-					std::hash<TerraEngine::UUID>{}(input.visual.renderIdentity.meshId)));
-				MixTopologyIdentity(hash, input.visual.renderIdentity.meshHeaderVersion);
-				MixTopologyIdentity(hash, input.visual.renderIdentity.rendererGeneration);
+					std::hash<TerraEngine::UUID>{}(visual.renderIdentity.meshId)));
+				MixTopologyIdentity(hash, visual.renderIdentity.meshHeaderVersion);
+				MixTopologyIdentity(hash, visual.renderIdentity.rendererGeneration);
 				// The render identity's scene publication is the matching dynamic half of
 				// the generation record above, not a mesh/topology selector.
 				MixTopologyIdentity(hash,
-					input.visual.renderIdentity.skeletonCompatibilityFingerprint);
+					visual.renderIdentity.skeletonCompatibilityFingerprint);
 				// The retained plan owns the validated resident payload. Reconstructed
 				// shared_ptr control blocks with identical resource generations must not
 				// force packet topology to rebuild.
-				MixTopologyIdentity(hash, input.prevalidatedStageMask);
-				MixTopologyIdentity(hash, static_cast<std::uint32_t>(input.execution.effectiveMode));
+				MixTopologyIdentity(hash, prevalidatedStageMask);
+				MixTopologyIdentity(hash, static_cast<std::uint32_t>(effectiveMode));
 				// Validation booleans are transient proof state, not packet identity.
 				// Warm adoption checks them directly before accepting the retained root.
-				std::uint64_t flags = input.allowSharedVisualEvaluation ? 1ULL : 0ULL;
-				flags |= input.visual.looping ? 1ULL << 1U : 0ULL;
-				flags |= input.visual.reverse ? 1ULL << 2U : 0ULL;
-				flags |= input.visual.useBindPoseFallback ? 1ULL << 3U : 0ULL;
-				flags |= input.visual.useHoldLastFallback ? 1ULL << 4U : 0ULL;
-				flags |= input.visual.hasRootMotion ? 1ULL << 5U : 0ULL;
-				flags |= input.visual.allowVisualProcedural ? 1ULL << 6U : 0ULL;
-				flags |= input.visual.allowVisualRagdoll ? 1ULL << 7U : 0ULL;
+				std::uint64_t flags = allowSharedVisualEvaluation ? 1ULL : 0ULL;
+				flags |= visual.looping ? 1ULL << 1U : 0ULL;
+				flags |= visual.reverse ? 1ULL << 2U : 0ULL;
+				flags |= visual.useBindPoseFallback ? 1ULL << 3U : 0ULL;
+				flags |= visual.useHoldLastFallback ? 1ULL << 4U : 0ULL;
+				flags |= visual.hasRootMotion ? 1ULL << 5U : 0ULL;
+				flags |= visual.allowVisualProcedural ? 1ULL << 6U : 0ULL;
+				flags |= visual.allowVisualRagdoll ? 1ULL << 7U : 0ULL;
 				MixTopologyIdentity(hash, flags);
-				MixTopologyIdentity(hash, input.visual.ragdollTableOffsetBytes);
+				MixTopologyIdentity(hash, visual.ragdollTableOffsetBytes);
 		}
 
 		[[nodiscard]] bool AppendAlignedPayloadBytes(
@@ -557,8 +562,32 @@ namespace TerraEngine::Animation {
 	void GpuAnimationLoweringTopologySignatureBuilder::Include(
 		const GpuAnimationLoweringInput& input) noexcept
 	{
+		IncludePrepared(
+			input.program.programContentId,
+			input.program.programResourceIndex,
+			input.visual,
+			input.prevalidatedStageMask,
+			input.effectiveMode,
+			input.allowSharedVisualEvaluation);
+	}
+
+	void GpuAnimationLoweringTopologySignatureBuilder::IncludePrepared(
+		std::uint64_t programContentId,
+		std::uint32_t programResourceIndex,
+		const GpuAnimationVisualInput& visual,
+		std::uint32_t prevalidatedStageMask,
+		AnimationEffectiveExecutionMode effectiveMode,
+		bool allowSharedVisualEvaluation) noexcept
+	{
 		std::uint64_t inputHash = 1469598103934665603ULL;
-		MixLoweringTopologyInput(inputHash, input);
+		MixLoweringTopologyInput(
+			inputHash,
+			programContentId,
+			programResourceIndex,
+			visual,
+			prevalidatedStageMask,
+			effectiveMode,
+			allowSharedVisualEvaluation);
 		// Finalize each member before the commutative reduction so permutations of
 		// the same proven inputs produce one signature, while duplicate/replaced
 		// members perturb all three accumulators.
@@ -600,7 +629,7 @@ namespace TerraEngine::Animation {
 		const GpuAnimationLoweringInput& input,
 		GpuAnimationWorkRequest& output) noexcept
 	{
-		if(!IsGpuExecutionMode(input.execution.effectiveMode)) {
+		if(!IsGpuExecutionMode(input.effectiveMode)) {
 			// CPU fallback may still produce authoritative output, but it must never
 			// create visual GPU work or force a readback to reconstruct a pose.
 			return GpuAnimationLoweringStatus::CpuFallbackNoGpuWork;
@@ -686,7 +715,7 @@ namespace TerraEngine::Animation {
 		if(input.visual.useHoldLastFallback) staged.flags |= static_cast<std::uint32_t>(GpuAnimationWorkFlag::UseHoldLastFallback);
 		if(input.visual.hasRootMotion) staged.flags |= static_cast<std::uint32_t>(GpuAnimationWorkFlag::HasRootMotion);
 		if(input.visual.morphCount != 0U) staged.flags |= static_cast<std::uint32_t>(GpuAnimationWorkFlag::HasMorph);
-		if(input.execution.effectiveMode == AnimationEffectiveExecutionMode::HybridAuthoritative) {
+		if(input.effectiveMode == AnimationEffectiveExecutionMode::HybridAuthoritative) {
 			staged.flags |= static_cast<std::uint32_t>(GpuAnimationWorkFlag::HybridCpuAuthority);
 		}
 		if((staged.batchKey.stageMask & GpuAnimationStageMask(GpuAnimationStage::Procedural)) != 0U) {
@@ -1257,7 +1286,7 @@ namespace TerraEngine::Animation {
 					// every batch generation. Rechecking those fields here would turn the
 					// proof back into a second 4,000-row topology scan. Only changing lanes
 					// and the compact destination ordinal still require per-frame checks.
-					if(!IsGpuExecutionMode(input.execution.effectiveMode)
+					if(!IsGpuExecutionMode(input.effectiveMode)
 						|| !IsGpuAnimationGenerationRecordValid(input.visual.generations)
 						|| !IsGpuAnimationRenderIdentityValid(input.visual.renderIdentity)
 						|| input.residentPayloads

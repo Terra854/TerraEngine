@@ -74,9 +74,11 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::uint64_t generationBytes = 0U;
 		std::uint64_t packetBytes = 0U;
 		std::uint64_t dispatchBytes = 0U;
+		std::uint64_t sampleTickBytes = 0U;
 		if(!AddBytes(0U, plan.GenerationRecordCount(), sizeof(Animation::GpuAnimationGenerationRecord), generationBytes)
 			|| !AddBytes(0U, plan.WorkPackets().size(), sizeof(Animation::GpuAnimationWorkPacket), packetBytes)
-			|| !AddBytes(0U, plan.DispatchRecords().size(), sizeof(Animation::GpuAnimationDispatchRecord), dispatchBytes)) {
+			|| !AddBytes(0U, plan.DispatchRecords().size(), sizeof(Animation::GpuAnimationDispatchRecord), dispatchBytes)
+			|| !AddBytes(0U, plan.WorkPackets().size(), sizeof(std::uint32_t), sampleTickBytes)) {
 			output.rejectionReason = "Animation frame-upload range overflows uint64.";
 			return output;
 		}
@@ -86,6 +88,8 @@ namespace TerraEngine::Renderer::Vulkan {
 			VulkanAnimationDescriptorSource::FrameUpload, packetBytes);
 		configure(Binding::DispatchRecords, VulkanAnimationDescriptorAccess::ReadOnly,
 			VulkanAnimationDescriptorSource::FrameUpload, dispatchBytes);
+		configure(Binding::SampleTicks, VulkanAnimationDescriptorAccess::ReadOnly,
+			VulkanAnimationDescriptorSource::FrameUpload, sampleTickBytes);
 		configure(Binding::ProgramWords, VulkanAnimationDescriptorAccess::ReadOnly, VulkanAnimationDescriptorSource::ResidentInput, 0U);
 		configure(Binding::PackedClipBytes, VulkanAnimationDescriptorAccess::ReadOnly, VulkanAnimationDescriptorSource::ResidentInput, 0U);
 		configure(Binding::SkeletonTables, VulkanAnimationDescriptorAccess::ReadOnly, VulkanAnimationDescriptorSource::ResidentInput, 0U);
@@ -136,6 +140,7 @@ namespace TerraEngine::Renderer::Vulkan {
 			&& output.retainedStaticPlan == plan.retainedStaticPlan
 			&& output.compactSourcePacketIndices.size() == output.workPackets.size()
 			&& output.generationRecords.size() == output.workPackets.size()
+			&& output.sampleTicks.size() == output.workPackets.size()
 			&& output.dispatchRecords.size() == plan.DispatchRecords().size();
 		if(canReuseTopology) {
 			// Validate every dynamic source before modifying the retained slot. Pointer
@@ -156,13 +161,11 @@ namespace TerraEngine::Renderer::Vulkan {
 					output.compactSourcePacketIndices[compactIndex];
 				const Animation::GpuAnimationWorkPacket& sourcePacket =
 					plan.WorkPackets()[sourcePacketIndex];
-				Animation::GpuAnimationWorkPacket compactPacket =
-					plan.ResolvedWorkPacket(sourcePacketIndex);
-				compactPacket.generationRecordIndex =
-					static_cast<std::uint32_t>(compactIndex);
-				output.workPackets[compactIndex] = compactPacket;
+				// Packet bytes are topology-owned and already resident in this frame
+				// slot. Refresh only the generation and sample lanes that can change.
 				output.generationRecords[compactIndex] =
 					plan.GenerationRecord(sourcePacket.generationRecordIndex);
+				output.sampleTicks[compactIndex] = plan.SampleTick(sourcePacketIndex);
 			}
 			output.topologyReused = true;
 			return true;
@@ -170,6 +173,7 @@ namespace TerraEngine::Renderer::Vulkan {
 
 		output.valid = false;
 		output.generationRecords.clear();
+		output.sampleTicks.clear();
 		output.workPackets.clear();
 		output.dispatchRecords.clear();
 		output.packetRemapScratch.clear();
@@ -185,6 +189,7 @@ namespace TerraEngine::Renderer::Vulkan {
 			const std::size_t maximumSourceCount = std::min(
 				plan.WorkPackets().size(), plan.DispatchRecords().size());
 			output.generationRecords.reserve(maximumSourceCount);
+			output.sampleTicks.reserve(maximumSourceCount);
 			output.workPackets.reserve(maximumSourceCount);
 			output.dispatchRecords.reserve(plan.DispatchRecords().size());
 			output.compactSourcePacketIndices.reserve(maximumSourceCount);
@@ -215,6 +220,8 @@ namespace TerraEngine::Renderer::Vulkan {
 					compactPacket.generationRecordIndex = compactPacketIndex;
 					output.generationRecords.push_back(
 						plan.GenerationRecord(sourcePacket.generationRecordIndex));
+					output.sampleTicks.push_back(
+						plan.SampleTick(sourceDispatch.workPacketIndex));
 					output.workPackets.push_back(compactPacket);
 					output.compactSourcePacketIndices.push_back(
 						sourceDispatch.workPacketIndex);
@@ -232,6 +239,7 @@ namespace TerraEngine::Renderer::Vulkan {
 		}
 		output.valid = !output.workPackets.empty()
 			&& output.generationRecords.size() == output.workPackets.size()
+			&& output.sampleTicks.size() == output.workPackets.size()
 			&& output.compactSourcePacketIndices.size() == output.workPackets.size()
 			&& output.dispatchRecords.size() == plan.DispatchRecords().size();
 		if(output.valid) output.retainedStaticPlan = plan.retainedStaticPlan;

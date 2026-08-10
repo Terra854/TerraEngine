@@ -450,6 +450,31 @@ namespace TerraEngine::Tests
 				"A mismatched producer owner count must reject the O(1) coverage proof atomically.");
 		});
 
+		registry.Add("Renderer.AnimationView.MixedCpuFallbackRetainsDenseGpuPages",
+			[](TestContext& context)
+		{
+			const std::filesystem::path renderSystemPath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+					/ "Engine" / "Renderer" / "RenderSystem.cpp";
+			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
+			const std::string renderSystemSource{
+				std::istreambuf_iterator<char>(renderSystemStream), {} };
+			const bool denseIgnoresSparseCpuCount = renderSystemSource.find(
+				"const bool hasDenseAnimationPublication =\n\t\thasDenseAnimationTopologyCandidate;")
+				!= std::string::npos;
+			const bool currentCpuPagesMapped = renderSystemSource.find(
+				"currentCpuDynamicPageIndices.push_back(") != std::string::npos;
+			const bool priorCpuPagesRetired = renderSystemSource.find(
+				"markCpuPages(retainedCpuDynamicPageIndices);") != std::string::npos;
+			const bool unaffectedPagesSkipped = renderSystemSource.find(
+				"if(pagesRequiringDynamicRefresh[pageIndex] == 0U)")
+				!= std::string::npos;
+
+			context.Expect(denseIgnoresSparseCpuCount && currentCpuPagesMapped
+				&& priorCpuPagesRetired && unaffectedPagesSkipped,
+				"Sparse CPU deformation must refresh its current and prior pages while a mixed crowd keeps producer-sealed GPU publication dense.");
+		});
+
 		registry.Add("Renderer.AnimationView.VisibleCacheInvalidatesEmptyPreReadyOwnerFallback", [](TestContext& context) {
 			const std::filesystem::path renderSystemPath =
 				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
@@ -474,7 +499,7 @@ namespace TerraEngine::Tests
 				"HashCombine(signature, retainedRenderTopology.topology.generation);",
 				visibleCacheKey);
 			const std::size_t authoritativeReuseCounter = renderSystemSource.find(
-				"viewEvidenceReuseHits =\n\t\t\tviewEvidenceReused ? 1u : 0u;",
+				"target.renderOptimization.viewEvidenceReuseHits =",
 				topologyGenerationArgument);
 
 			context.Expect(visibilitySignature != std::string::npos

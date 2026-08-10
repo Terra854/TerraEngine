@@ -69,7 +69,7 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::string rejectionReason;
 	};
 
-	// Calculates all fifteen append-only descriptor bindings. A plan without
+	// Calculates all append-only descriptor bindings. A plan without
 	// dispatch work is deliberately valid but inactive, allowing the caller to
 	// perform no allocation, upload, descriptor mutation, or queue submission.
 	TERRAENGINE_API VulkanAnimationDescriptorSetPlan BuildVulkanAnimationDescriptorSetPlan(
@@ -82,6 +82,10 @@ namespace TerraEngine::Renderer::Vulkan {
 	struct VulkanAnimationComputeUploadPlan
 	{
 		std::vector<Animation::GpuAnimationGenerationRecord> generationRecords;
+		// This is the complete changing playback lane. Work packets remain static
+		// after topology validation, reducing a 144-byte-per-owner upload to four
+		// bytes per evaluated owner on warmed frames.
+		std::vector<std::uint32_t> sampleTicks;
 		std::vector<Animation::GpuAnimationWorkPacket> workPackets;
 		std::vector<Animation::GpuAnimationDispatchRecord> dispatchRecords;
 		std::vector<std::uint32_t> packetRemapScratch;

@@ -47,6 +47,9 @@ struct TeAnimationAffine {
 [[vk::binding(TE_ANIMATION_GPU_DESCRIPTOR_MORPH_OUTPUTS, TE_ANIMATION_GPU_DESCRIPTOR_SET)]] RWByteAddressBuffer gAnimationMorphOutputs;
 [[vk::binding(TE_ANIMATION_GPU_DESCRIPTOR_BOUNDS_OUTPUTS, TE_ANIMATION_GPU_DESCRIPTOR_SET)]] RWByteAddressBuffer gAnimationBounds;
 [[vk::binding(TE_ANIMATION_GPU_DESCRIPTOR_DIAGNOSTICS, TE_ANIMATION_GPU_DESCRIPTOR_SET)]] RWByteAddressBuffer gAnimationDiagnostics;
+// Playback advances independently of immutable packet topology. The CPU uploads
+// this compact lane every frame while retaining packet and dispatch buffers.
+[[vk::binding(TE_ANIMATION_GPU_DESCRIPTOR_SAMPLE_TICKS, TE_ANIMATION_GPU_DESCRIPTOR_SET)]] StructuredBuffer<uint> gAnimationSampleTicks;
 
 [[vk::push_constant]] ConstantBuffer<TeAnimationGpuPushConstants> gAnimationPush;
 
@@ -175,6 +178,14 @@ bool TeResolveWork(uint globalElement, uint expectedStage, out TeAnimationGpuDis
 		}
 		dispatch = value;
 		packet = gAnimationWorkPackets[value.workPacketIndex];
+		uint sampleTickCount;
+		uint sampleTickStride;
+		gAnimationSampleTicks.GetDimensions(sampleTickCount, sampleTickStride);
+		if (value.workPacketIndex >= sampleTickCount)
+		{
+			return false;
+		}
+		packet.sampleTick = gAnimationSampleTicks[value.workPacketIndex];
 		element = absoluteElement - value.elementOffset.x;
 		return packet.resourceLayoutId == 1u && packet.generationRecordIndex == value.generationRecordIndex;
 	}

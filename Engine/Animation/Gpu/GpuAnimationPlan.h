@@ -46,10 +46,14 @@ namespace TerraEngine::Animation {
 		PaletteMatrices = 11U,
 		MorphOutputs = 12U,
 		BoundsOutputs = 13U,
-		Diagnostics = 14U
+		Diagnostics = 14U,
+		// Sampling ticks are the only per-frame work-packet field. Keeping them in
+		// a narrow dynamic lane lets the backend retain the 144-byte packet table
+		// on the GPU while playback advances.
+		SampleTicks = 15U
 	};
 
-	inline constexpr std::uint32_t kGpuAnimationDescriptorBindingCount = 15U;
+	inline constexpr std::uint32_t kGpuAnimationDescriptorBindingCount = 16U;
 
 	// Resident inputs are copied into the immutable frame plan before it crosses
 	// the renderer boundary.  Keeping the bytes here avoids retaining a span into

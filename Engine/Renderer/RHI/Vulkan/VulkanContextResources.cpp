@@ -2950,8 +2950,12 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 		computeUpload = resources.computeUploadPlan;
 	const std::size_t dispatchBindingIndex = static_cast<std::size_t>(
 		Binding::DispatchRecords);
+	const std::size_t workPacketBindingIndex = static_cast<std::size_t>(
+		Binding::WorkPackets);
 	const bool reuseDispatchUpload = computeUpload.topologyReused
 		&& !bufferReallocated[dispatchBindingIndex];
+	const bool reuseWorkPacketUpload = computeUpload.topologyReused
+		&& !bufferReallocated[workPacketBindingIndex];
 	const auto upload = [this, &resources](Binding binding, const void* bytes, VkDeviceSize size) {
 		if(size == 0U) return true;
 		return WriteMappedBuffer(allocator, resources.buffers[static_cast<std::size_t>(binding)], bytes, size);
@@ -2962,9 +2966,13 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 		if(!upload(Binding::GenerationRecords, computeUpload.generationRecords.data(),
 			static_cast<VkDeviceSize>(computeUpload.generationRecords.size()
 				* sizeof(TerraEngine::Animation::GpuAnimationGenerationRecord)))
-			|| !upload(Binding::WorkPackets, computeUpload.workPackets.data(),
-				static_cast<VkDeviceSize>(computeUpload.workPackets.size()
-					* sizeof(TerraEngine::Animation::GpuAnimationWorkPacket)))
+			|| !upload(Binding::SampleTicks, computeUpload.sampleTicks.data(),
+				static_cast<VkDeviceSize>(computeUpload.sampleTicks.size()
+					* sizeof(std::uint32_t)))
+			|| (!reuseWorkPacketUpload
+				&& !upload(Binding::WorkPackets, computeUpload.workPackets.data(),
+					static_cast<VkDeviceSize>(computeUpload.workPackets.size()
+						* sizeof(TerraEngine::Animation::GpuAnimationWorkPacket))))
 			|| (!reuseDispatchUpload
 				&& !upload(Binding::DispatchRecords, computeUpload.dispatchRecords.data(),
 					static_cast<VkDeviceSize>(computeUpload.dispatchRecords.size()
@@ -3060,41 +3068,47 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 			resources.graphicsBridgeCapacityBytes = bridgeBytes;
 			graphicsBridgeReallocated = true;
 		}
-		void* mappedBridge = resources.graphicsBridgeBuffer.mappedData;
-		const bool temporaryBridgeMapping = mappedBridge == nullptr;
-		if((temporaryBridgeMapping
-				&& vmaMapMemory(allocator,
-					resources.graphicsBridgeBuffer.allocation,
-					&mappedBridge) != VK_SUCCESS)
-			|| mappedBridge == nullptr) {
-			RetireVulkanAnimationFrameResources(resources);
-			return false;
-		}
-		VulkanGpuAnimationGraphicsRecord* bridgeRecords =
-			static_cast<VulkanGpuAnimationGraphicsRecord*>(mappedBridge);
-		for(std::size_t packetIndex = 0U; packetIndex < plan.WorkPackets().size(); ++packetIndex) {
-			const TerraEngine::Animation::GpuAnimationWorkPacket& packet = plan.WorkPackets()[packetIndex];
-			VulkanGpuAnimationGraphicsRecord& record = bridgeRecords[packetIndex];
-			record = {};
-			record.planGeneration = plan.generation;
-			record.rendererGeneration = rendererGeneration;
-			record.workPacketIndex = static_cast<std::uint32_t>(packetIndex);
-			record.generationRecordIndex = packet.generationRecordIndex;
-			record.paletteMatricesBindlessIndex = resources.paletteMatricesBindlessIndex;
-			record.morphOutputsBindlessIndex = resources.morphOutputsBindlessIndex;
-			record.paletteOffsetBytes = packet.paletteOffsetBytes;
-			record.morphOutputOffsetBytes = packet.morphOutputOffsetBytes;
-			record.jointCount = packet.jointCount;
-			record.morphCount = packet.morphCount;
-			record.paletteEntryCount = packet.paletteEntryCount;
-			record.flags = packet.flags;
-			record.stageMask = packet.stageMask;
-			record.validMarker = 1U;
-		}
-		vmaFlushAllocation(allocator, resources.graphicsBridgeBuffer.allocation,
-			0U, bridgeBytes);
-		if(temporaryBridgeMapping) {
-			vmaUnmapMemory(allocator, resources.graphicsBridgeBuffer.allocation);
+		const bool reuseGraphicsBridgeUpload = computeUpload.topologyReused
+			&& !graphicsBridgeReallocated
+			&& resources.graphicsBridgeBindlessIndex
+				!= INVALID_BINDLESS_BUFFER_INDEX;
+		if(!reuseGraphicsBridgeUpload) {
+			void* mappedBridge = resources.graphicsBridgeBuffer.mappedData;
+			const bool temporaryBridgeMapping = mappedBridge == nullptr;
+			if((temporaryBridgeMapping
+					&& vmaMapMemory(allocator,
+						resources.graphicsBridgeBuffer.allocation,
+						&mappedBridge) != VK_SUCCESS)
+				|| mappedBridge == nullptr) {
+				RetireVulkanAnimationFrameResources(resources);
+				return false;
+			}
+			VulkanGpuAnimationGraphicsRecord* bridgeRecords =
+				static_cast<VulkanGpuAnimationGraphicsRecord*>(mappedBridge);
+			for(std::size_t packetIndex = 0U; packetIndex < plan.WorkPackets().size(); ++packetIndex) {
+				const TerraEngine::Animation::GpuAnimationWorkPacket& packet = plan.WorkPackets()[packetIndex];
+				VulkanGpuAnimationGraphicsRecord& record = bridgeRecords[packetIndex];
+				record = {};
+				record.planGeneration = plan.generation;
+				record.rendererGeneration = rendererGeneration;
+				record.workPacketIndex = static_cast<std::uint32_t>(packetIndex);
+				record.generationRecordIndex = packet.generationRecordIndex;
+				record.paletteMatricesBindlessIndex = resources.paletteMatricesBindlessIndex;
+				record.morphOutputsBindlessIndex = resources.morphOutputsBindlessIndex;
+				record.paletteOffsetBytes = packet.paletteOffsetBytes;
+				record.morphOutputOffsetBytes = packet.morphOutputOffsetBytes;
+				record.jointCount = packet.jointCount;
+				record.morphCount = packet.morphCount;
+				record.paletteEntryCount = packet.paletteEntryCount;
+				record.flags = packet.flags;
+				record.stageMask = packet.stageMask;
+				record.validMarker = 1U;
+			}
+			vmaFlushAllocation(allocator, resources.graphicsBridgeBuffer.allocation,
+				0U, bridgeBytes);
+			if(temporaryBridgeMapping) {
+				vmaUnmapMemory(allocator, resources.graphicsBridgeBuffer.allocation);
+			}
 		}
 		const bool hasPublishedBridgeIndex =
 			resources.graphicsBridgeBindlessIndex != INVALID_BINDLESS_BUFFER_INDEX;

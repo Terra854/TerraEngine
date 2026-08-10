@@ -42,14 +42,20 @@ namespace TerraEngine::Tests {
 			const std::size_t admission = source.find("const bool compactCaptureProven");
 			const std::size_t consumerProof = source.rfind(
 				"const AnimationResolvedConsumerRequirements", admission);
+			const std::size_t dynamicProof = source.rfind(
+				"const bool compactModeProven", admission);
 			const std::size_t compactAppend = source.find("candidateCompactGpuVisualCaptures.append", admission);
 			const std::size_t mappingAppend = source.find("candidateInputWorkIndices.push_back", admission);
 			const std::size_t broadBindingCopy = source.find("item.binding = record->binding", admission);
 			const std::size_t broadControllerCopy = source.find("item.candidateGraphState", admission);
 			const std::size_t broadParameterCopy = source.find("item.parameters = record->parameters", admission);
-			const std::string admissionProof = consumerProof != std::string::npos
-				&& compactAppend != std::string::npos && compactAppend > consumerProof
-				? source.substr(consumerProof, compactAppend - consumerProof)
+			const std::size_t admissionProofBegin = consumerProof != std::string::npos
+				&& dynamicProof != std::string::npos
+				? std::min(consumerProof, dynamicProof) : std::string::npos;
+			const std::string admissionProof = admissionProofBegin != std::string::npos
+				&& compactAppend != std::string::npos
+				&& compactAppend > admissionProofBegin
+				? source.substr(admissionProofBegin, compactAppend - admissionProofBegin)
 				: std::string{};
 			const std::string compactAdmissionProof = StripSourceWhitespace(admissionProof);
 
@@ -77,9 +83,11 @@ namespace TerraEngine::Tests {
 					== std::string::npos
 				&& compactAdmissionProof.find("evaluationGenerations.deterministicGeneration!=0U")
 					== std::string::npos
-				&& compactAdmissionProof.find("record->executionModeState.initialized")
+				&& source.rfind("FindCompactRuntimeState", admission)
 					!= std::string::npos
-				&& compactAdmissionProof.find("record->executionModeState.effectiveMode")
+				&& compactAdmissionProof.find("modeState.initialized")
+					!= std::string::npos
+				&& compactAdmissionProof.find("modeState.effectiveMode")
 					!= std::string::npos
 				&& compactAdmissionProof.find("==AnimationEffectiveExecutionMode::GpuVisual")
 					!= std::string::npos
@@ -138,9 +146,11 @@ namespace TerraEngine::Tests {
 			context.Expect(source.find("presentationVisible") == std::string::npos
 				&& source.find("candidateCompactGpuVisualCaptures.append(")
 					!= std::string::npos
-				&& source.find("std::move(compact.gpuLowerings[compactIndex])")
+				&& source.find("std::vector<GpuAnimationVisualInput> gpuPresentationVisuals")
+					!= std::string::npos
+				&& source.find("materializeCompactLowering(compact, compactIndex)")
 					!= std::string::npos,
-				"Compact owners must enter presentation even after a prior no-view snapshot, because a custom capture can become visible after animation capture.");
+				"Compact owners must enter presentation even after a prior no-view snapshot, while warm frames retain only narrow visual lanes and cold topology builds reconstruct complete lowering inputs.");
 			context.Expect(compactSource.find("||visibility->hasActiveView") != std::string::npos
 				&& source.find("visibility->Contains(input.descriptor.ownerObjectId)")
 					== std::string::npos,
@@ -159,6 +169,76 @@ namespace TerraEngine::Tests {
 				&& source.find("candidate.use_count() == 1U") != std::string::npos,
 				"GPU presentation publication must recycle retired immutable frame storage safely.");
 		});
+
+		registry.Add("Animation.CompactCapture.PublishesPartitionedScalarRootsAndRetainsWarmEnvelope",
+			[](TestContext& context) {
+				const std::string source = ReadAnimationSystemSource();
+				const std::size_t commitBegin = source.find(
+					"bool CommitPublishedEvaluationCacheEntries(");
+				const std::size_t commitEnd = source.find(
+					"bool ApplySealedSpecialistSidecars(", commitBegin);
+				const std::string commitRegion = commitBegin != std::string::npos
+					&& commitEnd != std::string::npos
+					? source.substr(commitBegin, commitEnd - commitBegin) : std::string{};
+				context.Expect(source.find("kMinimumParallelCompactCaptureRows = 8192U")
+						!= std::string::npos
+					&& source.find("kCompactCaptureRowsPerTask = 1024U")
+						!= std::string::npos
+					&& source.find("proveCompactRange(0U") != std::string::npos
+					&& source.find("captureFutures") != std::string::npos
+					&& source.find("consumerClosureProven") != std::string::npos
+					&& source.find("&& !frameHasConsumerDeclarations") == std::string::npos,
+					"Large eventless crowds must prove compact admission in disjoint worker ranges before deterministic SoA assembly.");
+				context.Expect(source.find("const bool stableGpuVisualProof")
+						!= std::string::npos
+					&& source.find("executionDecision.nextState.continuity = continuity")
+						!= std::string::npos
+					&& source.find("ResolveAnimationExecutionMode(request, previous)")
+						!= std::string::npos,
+					"A protected compact admission proof must refresh stable GPU-visual continuity without re-running generic policy closure, while retaining a fail-closed resolver fallback.");
+				context.Expect(source.find("struct CompactExecutionDecision")
+						!= std::string::npos
+					&& source.find("std::vector<CompactExecutionDecision>")
+						!= std::string::npos,
+					"Compact planning must retain only its mode, reason, and next state instead of copying generic consumer and transition records for every visual owner.");
+				context.Expect(source.find("kMinimumParallelCompactRuntimeRows = 8192U")
+						!= std::string::npos
+					&& source.find("Animation: Build Compact Runtime Root Serial")
+						!= std::string::npos
+					&& source.find("availableWorkerCount <= 1U") != std::string::npos,
+					"Typical compact crowds must avoid task and future coordination while retaining parallel root construction for genuinely large populations.");
+				context.Expect(source.find("struct CompactRuntimeState") != std::string::npos
+					&& source.find("nextCompactRuntimeRoot->at(handle.slotIndex)")
+						!= std::string::npos
+					&& source.find("bindingContentGeneration = current->contentGeneration")
+						!= std::string::npos
+					&& source.find("const bool retainedCompactAdmissionProof")
+						!= std::string::npos
+					&& source.find("compactRuntimeState->bindingContentGeneration")
+						!= std::string::npos
+					&& source.find("!compactAdmissionHasExternalWork")
+						!= std::string::npos
+					&& source.find("compactRuntimeStates.store(") != std::string::npos
+					&& source.find("CompactRuntimeState& state = nextCompact->at(handle.slotIndex)")
+						!= std::string::npos
+					&& source.find("specialistSidecars->compactRuntime.push_back")
+						== std::string::npos
+					&& commitRegion.find("record.playback = update.playback")
+						== std::string::npos,
+					"Compact playback progress and immutable admission proof must publish as one generation-checked scalar root instead of post-publication per-record writes.");
+				context.Expect(source.find("class RuntimeRecordRoot") != std::string::npos
+					&& source.find("kPageCapacity = 128U") != std::string::npos
+					&& source.find("pages_[pageIndex].use_count() != 1U")
+						!= std::string::npos
+					&& source.find("next->Set(handle.slotIndex, std::move(record))")
+						!= std::string::npos,
+					"Sparse complete-mode exceptions must clone only their runtime pages before the transactional root swap.");
+				context.Expect(source.find("const bool deferStableEnvelope")
+						!= std::string::npos
+					&& source.find("if(!deferStableEnvelope)") != std::string::npos
+					&& source.find("if(deferStableEnvelope)") != std::string::npos,
+					"A warmed retained topology must skip the broad input envelope and rebuild it only after a failed topology proof.");
+			});
 
 		registry.Add("Animation.BindingBatch.ReusesImmutableAuthoredDefaults", [](TestContext& context) {
 			const std::string source = ReadAnimationSystemSource();

@@ -81,7 +81,11 @@ namespace TerraEngine::Animation {
 	struct GpuAnimationLoweringInput {
 		GpuAnimationProgramInput program;
 		GpuAnimationVisualInput visual;
-		AnimationExecutionModeDecision execution;
+		// Policy resolution stays with AnimationSystem. GPU lowering consumes only
+		// the selected mode, so carrying consumer vectors, transition history, and a
+		// second continuity token through every crowd packet wastes cache bandwidth.
+		AnimationEffectiveExecutionMode effectiveMode =
+			AnimationEffectiveExecutionMode::CpuDeterministicFallback;
 		// A producer may reuse a successful validation only for the exact same
 		// immutable EvaluationProgram object inside one worker-owned batch. Direct
 		// callers keep the checked default so untrusted programs are never accepted.
@@ -109,6 +113,16 @@ namespace TerraEngine::Animation {
 	class TERRAENGINE_API GpuAnimationLoweringTopologySignatureBuilder {
 	public:
 		void Include(const GpuAnimationLoweringInput& input) noexcept;
+		// Compact animation rows keep immutable program and payload ownership once
+		// per cohort. This overload hashes the same topology fields without forcing
+		// every warmed instance to reconstruct a wide lowering object first.
+		void IncludePrepared(
+			std::uint64_t programContentId,
+			std::uint32_t programResourceIndex,
+			const GpuAnimationVisualInput& visual,
+			std::uint32_t prevalidatedStageMask,
+			AnimationEffectiveExecutionMode effectiveMode,
+			bool allowSharedVisualEvaluation) noexcept;
 		[[nodiscard]] std::uint64_t Complete() const noexcept;
 
 	private:
