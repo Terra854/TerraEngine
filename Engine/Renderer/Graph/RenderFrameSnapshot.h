@@ -9,6 +9,13 @@ namespace TerraEngine::Renderer
 	struct RenderFrameSnapshot
 	{
 		std::uint64_t frameId = 0u;
+		// This signature covers only inputs that can change the persistent renderable
+		// records below. View/camera generations are deliberately excluded. The two
+		// renderer construction buffers retain their own signature, allowing a warm
+		// frame to reuse vector storage and values without borrowing the published
+		// buffer currently visible to diagnostics.
+		std::uint64_t renderableSourceSignature = 0u;
+		bool reusableRenderableRecords = false;
 		std::vector<RenderFrameViewRequest> viewRequests;
 		std::vector<RenderFrameRenderableRecord> renderables;
 		std::vector<ConventionalVisibilityIdentityRecord> conventionalVisibilityIdentityTable;

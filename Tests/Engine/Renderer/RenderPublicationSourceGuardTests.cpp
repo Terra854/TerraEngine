@@ -110,17 +110,56 @@ namespace TerraEngine::Tests
 				&& vulkan.find("backendWorkPlan") == std::string::npos,
 				"A sealed frame must carry only compact backend work, not a copied render-graph plan.");
 			context.Expect(renderSystem.find(
-					"snapshotRenderable.animationBinding = std::move(entry.animationBinding)")
+					"snapshotRenderable.animationBinding = entry.animationBinding")
 						!= std::string::npos
+				&& renderSystem.find("if(!reuseRenderableRecords)")
+					!= std::string::npos
 				&& renderSystem.find(
 					"renderFrameSnapshot.renderables[index].animationBinding")
 						!= std::string::npos,
-				"Snapshot assembly must transfer each complete animation binding once and make downstream stages consume that immutable owner.");
+				"A rebuilt snapshot must retain complete bindings, while stable frames skip the entire record-copy loop and consume the immutable owner.");
+			context.Expect(renderSystem.find("const bool applyDelta =")
+					!= std::string::npos
+				&& renderSystem.find("protectedSceneChanges->ComponentChanged()")
+					!= std::string::npos
+				&& renderSystem.find("renderableMembershipCache.erase(existing)")
+					!= std::string::npos,
+				"Validated scene-change packets must patch render membership instead of forcing a complete ECS scan for every edit.");
+			context.Expect(renderSystem.find(
+					"lane.transformGeneration =") != std::string::npos
+				&& renderSystem.find("renderable.transformGeneration")
+					!= std::string::npos
+				&& renderSystem.find("sparseTransformRefresh")
+					!= std::string::npos,
+				"Dynamic pages must use object-local propagated transform generations and sparse matrix refreshes.");
 			context.Expect(renderSystem.find(
 					"taskIndex = 1u; taskIndex < workerCount") != std::string::npos
 				&& renderSystem.find(
 					"work(0U, std::min(itemCount, chunkSize))") != std::string::npos,
 				"Chunked renderer work must use the current scheduler worker for one range rather than queueing every range back into the same pool.");
+			const std::string suspendMarker = "co_await std::suspend_always{};";
+			const std::size_t firstWorkerBoundary = renderSystem.find(suspendMarker);
+			const std::size_t secondWorkerBoundary = renderSystem.find(
+				suspendMarker, firstWorkerBoundary + suspendMarker.size());
+			const std::size_t protectedExchangeBoundary = renderSystem.find(
+				suspendMarker, secondWorkerBoundary + suspendMarker.size());
+			const std::string workerPreparation = firstWorkerBoundary != std::string::npos
+				&& protectedExchangeBoundary != std::string::npos
+				? renderSystem.substr(firstWorkerBoundary,
+					protectedExchangeBoundary - firstWorkerBoundary) : std::string{};
+			context.Expect(!workerPreparation.empty()
+				&& workerPreparation.find("objManager.") == std::string::npos
+				&& workerPreparation.find("objectManager.") == std::string::npos
+				&& workerPreparation.find("resourceManager.") == std::string::npos
+				&& workerPreparation.find("ResourceManager::Instance()")
+					== std::string::npos
+				&& workerPreparation.find("rhi->") == std::string::npos
+				&& workerPreparation.find("::Instance()") == std::string::npos,
+				"Worker renderer phases must consume captured immutable roots without reopening live engine singletons.");
+			context.Expect(renderSystem.find(
+					"resourceManager.PublishVisibleStreamingTouches")
+					> protectedExchangeBoundary,
+				"Visible streaming mutations must publish only after the protected exchange boundary.");
 			const std::size_t consumePublication = vulkan.find(
 				"VulkanContext::ConsumeRenderFramePublication");
 			const std::size_t consumeWork = vulkan.find(

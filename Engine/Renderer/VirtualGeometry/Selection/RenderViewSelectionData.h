@@ -266,6 +266,10 @@
 		// GPU identity, leaving one compact backend binding beside this generation
 		// record for every object rather than one copy per output view.
 		AnimationRenderBinding animationBinding;
+		// This object-local generation advances only when its propagated world
+		// transform changes. Dynamic publication can therefore copy one affected
+		// page instead of treating the global frame/view generation as a transform.
+		std::uint64_t transformGeneration = 0u;
 	};
 
 	// A compact lookup table lets a conventional raster identity resolve direct

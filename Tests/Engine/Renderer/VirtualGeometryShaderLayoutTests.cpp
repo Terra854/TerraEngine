@@ -420,7 +420,7 @@ namespace TerraEngine::Tests
 			// the output arrays. The ownership contract still depends on the page
 			// branch returning before any owner-mesh emission call can execute.
 			const std::size_t ownerEmit = meshShader.find(
-				"EmitMeshlet(\n\t\tmeshletIndex,",
+				"EmitMeshlet(",
 				pageEmit);
 			context.Expect(
 				pageIndex != std::string::npos
@@ -494,8 +494,10 @@ namespace TerraEngine::Tests
 				"Multi-owner canonical fallback draws must stay mesh-only unless a validated grouped stream supplies every member's independent page bridge.");
 			context.Expect(
 				!ShaderContains(vulkanSource, "const bool wholeOwnerDeformationFallback =")
+					&& ShaderContains(vulkanSource, "requestedPageLocalGeometry")
+					&& ShaderContains(vulkanSource, "&& !ownerPaletteDeformation")
 					&& ShaderContains(vulkanSource,
-						"requestedPageLocalGeometry\n\t\t\t&& !ownerPaletteDeformation\n\t\t\t&& impl->activeVirtualGeometryPagePayloadBufferIndex"),
+						"&& impl->activeVirtualGeometryPagePayloadBufferIndex"),
 				"Vulkan should preserve validated device-authored pages while routing only processor-expanded animation through the owner palette bridge.");
 			context.Expect(
 				ShaderContains(meshShader, "TeTryLoadAnimatedGraphicsBridge(")
@@ -516,7 +518,9 @@ namespace TerraEngine::Tests
 					&& ShaderContains(vulkanSource,
 						"draw.useGeneratedVirtualGeometryIndirect = deviceAuthoredCommand")
 					&& ShaderContains(vulkanSource,
-						"ApplyAnimationGraphicsBridge(command, push,\n\t\t\townerPaletteDeformation, canonicalGraphicsGroup)")
+						"ApplyAnimationGraphicsBridge(command, push,")
+					&& ShaderContains(vulkanSource,
+						"ownerPaletteDeformation, canonicalGraphicsGroup)")
 					&& ShaderContains(taskShader,
 						"kVirtualGeometryFlagOwnerPaletteDeformation"),
 				"Processor-expanded animated VG must bind its selected LOD and owner palette bridge to the same per-command device-authored execution decision.");

@@ -181,6 +181,37 @@ namespace TerraEngine::Tests {
 				"Capacity failure must reject the entire optimized stream before publication.");
 		});
 
+		registry.Add("Renderer.SharedSubmission.UploadsOnlyDirtyInstanceRanges", [](TestContext& context) {
+			using RenderInstanceRecord = ::RenderInstanceRecord;
+			std::array<RenderInstanceRecord, 6u> previous{};
+			std::array<RenderInstanceRecord, 6u> current = previous;
+			const auto unchanged = TerraEngine::Renderer::Vulkan::
+				BuildGroupedInstanceDirtyPlan(previous, current, false);
+			context.Expect(unchanged.ranges.empty() && unchanged.dirtyRecordCount == 0u,
+				"A fence-proven unchanged frame slot should publish no host writes.");
+
+			current[1u].modelMatrix[3u].x = 4.0f;
+			current[2u].editorTint.y = 0.5f;
+			current[5u].geometrySelectors.z = 9u;
+			const auto sparse = TerraEngine::Renderer::Vulkan::
+				BuildGroupedInstanceDirtyPlan(previous, current, false);
+			context.ExpectEqual<std::size_t>(2u, sparse.ranges.size(),
+				"Adjacent dirty records should coalesce into one mapped byte range.");
+			context.ExpectEqual<std::size_t>(3u, sparse.dirtyRecordCount,
+				"Only records with GPU-visible changes should be uploaded.");
+			context.ExpectEqual<std::size_t>(1u, sparse.ranges[0u].firstRecord,
+				"The first sparse range should retain its exact stream offset.");
+			context.ExpectEqual<std::size_t>(2u, sparse.ranges[0u].recordCount,
+				"The first sparse range should cover both adjacent records.");
+
+			const auto replaced = TerraEngine::Renderer::Vulkan::
+				BuildGroupedInstanceDirtyPlan(previous, current, true);
+			context.Expect(replaced.completeReplacement
+				&& replaced.ranges.size() == 1u
+				&& replaced.dirtyRecordCount == current.size(),
+				"A replaced Vulkan allocation must receive one complete initialized stream.");
+		});
+
 		registry.Add("Renderer.SharedSubmission.AnimatedMeshShaderUsesPerInstanceBridge", [](TestContext& context) {
 			const std::string meshShader = ReadShader("Engine/Shaders/Default/Default.mesh.hlsl");
 			const std::string taskShader = ReadShader("Engine/Shaders/Default/Default.task.hlsl");

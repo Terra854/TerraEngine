@@ -49,6 +49,11 @@ namespace TerraEngine::Tests
 
 				context.Expect(snapshot->mainThreadRequired && !snapshot->workerEligible,
 					"Render publication capture must stay protected because it seals scene and renderer generations.");
+				context.Expect(Contains(snapshot->writes,
+					TerraEngine::Scheduling::kResourceRenderCaptureInputs)
+					&& !Contains(snapshot->writes,
+						TerraEngine::Scheduling::kResourcePersistentRenderSceneState),
+					"Protected capture must publish immutable inputs without performing persistent topology lowering.");
 				context.Expect(prepare->workerEligible && !prepare->mainThreadRequired,
 					"VirtualGeometryPrepare must be an actual worker-safe workload rather than metadata-only "
 					"worker intent.");
@@ -128,6 +133,11 @@ namespace TerraEngine::Tests
 					"GeometryRoutePrepare must execute immutable route scoring on workers.");
 				context.Expect(Contains(routePrepare->writes, "GeometryRouteDecisions"),
 					"Route preparation must publish typed route decisions.");
+				context.Expect(Contains(routePrepare->reads,
+					TerraEngine::Scheduling::kResourceRenderCaptureInputs)
+					&& Contains(routePrepare->writes,
+						TerraEngine::Scheduling::kResourcePersistentRenderSceneState),
+					"The route worker must lower protected capture inputs into persistent renderer state.");
 				context.Expect(Contains(vgPrepare->reads, "GeometryRouteDecisions"),
 					"VG traversal must consume route decisions rather than re-evaluate live policy.");
 				context.Expect(Contains(routePrepare->writes, "DirectMeshletBatches"),

@@ -99,6 +99,10 @@ namespace TerraEngine::Scheduling {
 	// renderer-specific type system is available during startup.
 	inline constexpr const char kResourceVirtualGeometryQualityProfile[] = "VirtualGeometryQualityProfile";
 	inline constexpr const char kResourceSceneChangePublication[] = "SceneChangePublication";
+	// Protected capture owns only immutable values borrowed by the following
+	// renderer workers. Keeping this resource separate from the persistent and
+	// dynamic roots makes scheduler diagnostics reflect the real ownership split.
+	inline constexpr const char kResourceRenderCaptureInputs[] = "RenderCaptureInputs";
 	inline constexpr const char kResourcePersistentRenderSceneState[] = "PersistentRenderSceneState";
 	inline constexpr const char kResourceDynamicRenderFrameState[] = "DynamicRenderFrameState";
 	inline constexpr const char kResourceRenderViewSelections[] = "RenderViewSelections";

@@ -612,6 +612,11 @@ struct VulkanContext::Impl {
 				// which keeps one view's instance stream from racing another in flight.
 				std::array<VulkanBuffer, MAX_FRAMES_IN_FLIGHT> groupedInstanceBuffers{};
 				std::array<VkDeviceSize, MAX_FRAMES_IN_FLIGHT> groupedInstanceCapacities{};
+				// Each CPU mirror belongs to the same fence-proven frame slot as its
+				// buffer. It is updated only after a complete successful upload, so a
+				// later frame can safely identify unchanged and sparse dirty ranges.
+				std::array<std::vector<RenderInstanceRecord>, MAX_FRAMES_IN_FLIGHT>
+					groupedInstanceUploadMirrors{};
 				std::uint32_t groupedInstanceBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 				// GPU virtual geometry packet buffers are owned per frame slot
 				// and per view. The public frame snapshot stores value records;
@@ -1301,6 +1306,11 @@ struct VulkanContext::Impl {
 	VulkanImage defaultMaterialMaskTexture;
 	std::vector<std::vector<VkCommandPool>> workerCommandPools; // Per-frame command pools for worker threads
 	std::vector<std::vector<std::vector<VkCommandBuffer>>> workerCommandBuffers; // Per-frame, per-worker secondary command buffers
+	// Exact signatures are attached to individual fence-owned secondary buffers.
+	// A buffer remains reusable only while its render-pass inheritance, pipelines,
+	// descriptors, push constants, and indirect-buffer identities are unchanged.
+	std::unordered_map<VkCommandBuffer, std::uint64_t>
+		reusableSecondaryCommandSignatures;
 	// Track additional primary command buffers allocated when rendering multiple
 	// cameras per frame so they can be freed after the frame fence completes.
 	std::vector<std::vector<VkCommandBuffer>> extraPrimaryCommandBuffers;

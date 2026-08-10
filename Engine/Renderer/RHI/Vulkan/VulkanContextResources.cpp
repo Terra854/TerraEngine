@@ -5019,6 +5019,7 @@ void VulkanContext::Impl::DestroyWorkerPools() {
 	}
 	workerCommandPools.clear();
 	workerCommandBuffers.clear();
+	reusableSecondaryCommandSignatures.clear();
 }
 
 // VulkanContext::Impl::EnsureWorkerPools is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

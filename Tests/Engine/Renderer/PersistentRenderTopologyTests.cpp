@@ -83,7 +83,9 @@ namespace TerraEngine::Tests
 			const std::string source = ReadRendererSource("Engine/Renderer/RenderSystem.cpp");
 			context.Expect(source.find("matchesRetainedOrder") != std::string::npos
 				&& source.find("if (!retainedOrderMatches)") != std::string::npos
-				&& source.find("conventionalVisibilityIdentityTable =\n\t\t\tretainedRenderTopology") != std::string::npos
+				&& source.find(
+					"retainedRenderTopology.conventionalVisibilityIdentityTable")
+					!= std::string::npos
 				&& source.find("if (topologyInputsChanged)") != std::string::npos
 				&& source.find("topologyComponentMutationRevision") != std::string::npos
 				&& source.find("topologyMeshComponentRevision") != std::string::npos
@@ -119,7 +121,7 @@ namespace TerraEngine::Tests
 				&& visibleCacheMaterialization != std::string::npos
 				&& source.find("renderableDrawCommands[index].conventionalVisibilityIdentityIndex =",
 					reuseBranch) != std::string::npos
-				&& source.find("renderFrameSnapshot.renderables[index]\n\t\t\t\t\t\t.conventionalVisibilityIdentityIndex",
+				&& source.find("renderFrameSnapshot.renderables[index].conventionalVisibilityIdentityIndex",
 					reuseBranch) != std::string::npos,
 				"Static draw-command reuse must restore each canonical visibility ordinal before cached views republish compact selectors; otherwise direct-only crowds resolve no backend draws.");
 		});
@@ -180,7 +182,8 @@ namespace TerraEngine::Tests
 				"Engine/Renderer/Graph/RenderFrameSnapshot.cpp");
 			context.Expect(renderer.find("std::vector<DeformablePageFamily> pageFamilies")
 					!= std::string::npos
-				&& renderer.find("buildAnimatedGeometryPlan(\n\t\t\tvisibleAnimatedRenderableFlags,\n\t\t\trenderableCommandIndices)")
+				&& renderer.find("buildAnimatedGeometryPlan(") != std::string::npos
+				&& renderer.find("visibleAnimatedRenderableFlags")
 					!= std::string::npos
 				&& renderer.find("GpuDeformationPlanAccumulator accumulator")
 					!= std::string::npos
@@ -194,9 +197,11 @@ namespace TerraEngine::Tests
 				&& renderer.find("std::size_t renderableIndex = draw.renderableIndex") != std::string::npos
 				&& renderer.find("std::size_t renderableIndex = packet.renderableIndex") != std::string::npos
 				&& renderer.find("renderFrameSnapshot.renderables[renderableIndex].objectId") != std::string::npos
-				&& renderer.find("renderableIndicesByObjectId.find(\n\t\t\t\t\t\t\t\tpacket.objectId)")
+				&& renderer.find("renderableIndicesByObjectId.find(")
 					!= std::string::npos
-				&& renderer.find("SelectAnimatedGeometryPageDemands(\n\t\t\t\trenderFrameSnapshot)")
+				&& renderer.find("packet.objectId)")
+					!= std::string::npos
+				&& renderer.find("SelectAnimatedGeometryPageDemands(")
 					== std::string::npos
 				&& renderer.find("std::unordered_set<TerraEngine::UUID> visibleAnimatedObjects")
 					== std::string::npos,

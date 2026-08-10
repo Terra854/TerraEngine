@@ -21,6 +21,7 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	// A newly initialized Vulkan device never shares presentation-compatible
 	// objects with its predecessor, even if an embedding host reuses this context.
 	++backendResourceGeneration;
+	reusableSecondaryCommandSignatures.clear();
 	{
 		std::lock_guard<std::mutex> lock(statsMutex);
 		latestRendererRecoverySnapshot = TerraEngine::Renderer::MakeActiveRecoverySnapshot(renderSessionGeneration);
@@ -1021,6 +1022,10 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		DestroyBufferImmediate(buffer);
 	}
 	groupedInstanceCapacities.fill(0u);
+	for (std::vector<RenderInstanceRecord>& mirror : groupedInstanceUploadMirrors)
+	{
+		mirror.clear();
+	}
 	if (groupedInstanceBufferIndex != INVALID_BINDLESS_BUFFER_INDEX)
 	{
 		freeBufferIndices.push_back(groupedInstanceBufferIndex);
@@ -3473,6 +3478,7 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	// object has been created, so a failed candidate leaves existing publications
 	// valid and the next frame can retry against the prior generation.
 	++backendResourceGeneration;
+	reusableSecondaryCommandSignatures.clear();
 	activeRenderFramePublication.reset();
 	RetirePresentationResourceBundle(std::move(activeBundle), presentationLifecycle.Generation());
 	CollectCompletedPresentationResourceBundles();

@@ -22,6 +22,39 @@ namespace TerraEngine::Tests {
 
 	void RegisterVulkanRecordingSchedulingTests(TestRegistry& registry)
 	{
+		registry.Add("Renderer.VulkanRecording.SecondaryReuseRequiresExactGenerationAndFence", [](TestContext& context) {
+			TerraEngine::Renderer::Vulkan::SecondaryCommandReuseIdentity identity{};
+			identity.rendererSessionGeneration = 11u;
+			identity.backendResourceGeneration = 12u;
+			identity.renderPassIdentity = 13u;
+			identity.framebufferIdentity = 14u;
+			identity.commandSignature = 15u;
+			identity.width = 1920u;
+			identity.height = 1080u;
+			const std::uint64_t original = TerraEngine::Renderer::Vulkan::
+				BuildSecondaryCommandReuseSignature(identity);
+			context.Expect(TerraEngine::Renderer::Vulkan::CanReuseSecondaryCommands(
+				original, original, true),
+				"An exact secondary recording may be reused only after its frame-slot fence completes.");
+			context.Expect(!TerraEngine::Renderer::Vulkan::CanReuseSecondaryCommands(
+				original, original, false),
+				"An in-flight frame slot must never expose its retained command buffer.");
+
+			++identity.backendResourceGeneration;
+			const std::uint64_t recovered = TerraEngine::Renderer::Vulkan::
+				BuildSecondaryCommandReuseSignature(identity);
+			context.Expect(!TerraEngine::Renderer::Vulkan::CanReuseSecondaryCommands(
+				original, recovered, true),
+				"Swapchain or backend recovery must invalidate inherited Vulkan commands.");
+			--identity.backendResourceGeneration;
+			++identity.commandSignature;
+			const std::uint64_t changedDraws = TerraEngine::Renderer::Vulkan::
+				BuildSecondaryCommandReuseSignature(identity);
+			context.Expect(!TerraEngine::Renderer::Vulkan::CanReuseSecondaryCommands(
+				original, changedDraws, true),
+				"Changed pipelines, descriptors, push values, or indirect ranges must force rerecording.");
+		});
+
 		registry.Add("Renderer.VulkanRecording.ReusesOnlyExactResidentAnimationPayload", [](TestContext& context) {
 			auto first = std::make_shared<TerraEngine::Animation::GpuAnimationResidentPayloads>();
 			first->programWords = {1u, 2u};

@@ -23,6 +23,7 @@
 #include "VulkanContextImpl.h"
 #include "VulkanFrameDiagnostics.h"
 #include "VulkanReadbackConversion.h"
+#include "VulkanRendererWorkCache.h"
 #include "Renderer/RenderCaptureEncoding.h"
 #include "Profiling/ProfilerScope.h"
 #include "ThreadPool/ThreadPool.h"
@@ -1856,6 +1857,26 @@ void VulkanContext::BeginFrame() {
 				if (frameUsage[poolIndex] == 0u
 					|| framePools[poolIndex] == VK_NULL_HANDLE)
 				{
+					continue;
+				}
+				bool ownsReusableSecondary = false;
+				if(poolIndex < impl->workerCommandBuffers[impl->currentFrame].size())
+				{
+					for(const VkCommandBuffer secondary :
+						impl->workerCommandBuffers[impl->currentFrame][poolIndex])
+					{
+						if(impl->reusableSecondaryCommandSignatures.contains(secondary))
+						{
+							ownsReusableSecondary = true;
+							break;
+						}
+					}
+				}
+				if(ownsReusableSecondary)
+				{
+					// The frame fence already proved this pool idle. Preserve cached
+					// recordings; non-cached buffers in the same pool are reset
+					// individually immediately before their next recording.
 					continue;
 				}
 				const VkResult workerResetResult = vkResetCommandPool(
@@ -4921,6 +4942,7 @@ void VulkanContext::RenderFrame(
 	groupedRepresentatives.clear();
 	groupedRepresentatives.reserve(presentation.groupedSubmissions.size());
 	bool groupedInstanceStreamReady = false;
+	bool groupedInstanceAllocationReplaced = false;
 	if(presentation.renderOptimization.valid != 0u
 		&& !presentation.groupedSubmissions.empty()
 		&& !presentation.groupedInstanceRecords.empty()) {
@@ -4978,6 +5000,8 @@ void VulkanContext::RenderFrame(
 						VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
 						VMA_MEMORY_USAGE_CPU_TO_GPU, "Grouped Render Instance Stream");
 					capacity = growth;
+					groupedInstanceAllocationReplaced = true;
+					impl->groupedInstanceUploadMirrors[currentFrame].clear();
 				}
 				if(impl->groupedInstanceBufferIndex
 					== VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX) {
@@ -5409,8 +5433,9 @@ void VulkanContext::RenderFrame(
 						// packet in the immutable plan. Recheck the compact generation tuple
 						// carried by this presentation record, then publish its packet index.
 						const std::uint32_t packetIndex = record.animationSelectors.x;
-						if(record.animationSelectors.y
-								!= impl->pendingAnimationImmutablePlan->generation
+						if((record.animationSelectors.y != 0u
+								&& record.animationSelectors.y
+									!= impl->pendingAnimationImmutablePlan->generation)
 							|| record.animationSelectors.z
 								!= impl->pendingAnimationCommandPlan.rendererGeneration
 							|| packetIndex >= impl->pendingAnimationImmutablePlan->
@@ -5447,35 +5472,77 @@ void VulkanContext::RenderFrame(
 				}
 			}
 			VulkanBuffer& instanceBuffer = impl->groupedInstanceBuffers[currentFrame];
-			void* mapped = instanceBuffer.mappedData;
-			const bool temporaryMapping = mapped == nullptr;
 			const VkDeviceSize bytes = static_cast<VkDeviceSize>(
 				presentation.groupedInstanceRecords.size() * sizeof(RenderInstanceRecord));
 			if(resolvedEveryAnimatedRecord) {
-				if((temporaryMapping
-						&& vmaMapMemory(impl->allocator, instanceBuffer.allocation, &mapped)
-							!= VK_SUCCESS)
-					|| mapped == nullptr) {
+				thread_local std::vector<RenderInstanceRecord> resolvedRecords;
+				std::span<const RenderInstanceRecord> uploadRecords =
+					presentation.groupedInstanceRecords;
+				if(!useSealedDenseSelectors) {
+					try {
+						resolvedRecords.assign(presentation.groupedInstanceRecords.begin(),
+							presentation.groupedInstanceRecords.end());
+					}
+					catch(const std::bad_alloc&) {
+						resolvedEveryAnimatedRecord = false;
+					}
+					for(std::size_t recordIndex = 0u;
+						resolvedEveryAnimatedRecord
+							&& recordIndex < resolvedAnimationSelectors.size(); ++recordIndex) {
+						resolvedRecords[recordIndex].animationSelectors.x =
+							resolvedAnimationSelectors[recordIndex].x;
+						resolvedRecords[recordIndex].animationSelectors.y =
+							resolvedAnimationSelectors[recordIndex].y;
+					}
+					uploadRecords = resolvedRecords;
+				}
+
+				std::vector<RenderInstanceRecord>& mirror =
+					impl->groupedInstanceUploadMirrors[currentFrame];
+				const TerraEngine::Renderer::Vulkan::GroupedInstanceDirtyPlan dirtyPlan =
+					TerraEngine::Renderer::Vulkan::BuildGroupedInstanceDirtyPlan(
+					mirror, uploadRecords, groupedInstanceAllocationReplaced);
+				void* mapped = instanceBuffer.mappedData;
+				const bool temporaryMapping = mapped == nullptr;
+				if(resolvedEveryAnimatedRecord && !dirtyPlan.ranges.empty()
+					&& ((temporaryMapping
+							&& vmaMapMemory(impl->allocator, instanceBuffer.allocation, &mapped)
+								!= VK_SUCCESS)
+						|| mapped == nullptr)) {
 					resolvedEveryAnimatedRecord = false;
 				}
+				for(const TerraEngine::Renderer::Vulkan::GroupedInstanceDirtyRange& range :
+					dirtyPlan.ranges) {
+					if(!resolvedEveryAnimatedRecord) {
+						break;
+					}
+					const VkDeviceSize byteOffset = static_cast<VkDeviceSize>(
+						range.firstRecord * sizeof(RenderInstanceRecord));
+					const VkDeviceSize byteCount = static_cast<VkDeviceSize>(
+						range.recordCount * sizeof(RenderInstanceRecord));
+					std::memcpy(static_cast<std::byte*>(mapped) + byteOffset,
+						uploadRecords.data() + range.firstRecord,
+						static_cast<std::size_t>(byteCount));
+					if(vmaFlushAllocation(impl->allocator, instanceBuffer.allocation,
+						byteOffset, byteCount) != VK_SUCCESS) {
+						resolvedEveryAnimatedRecord = false;
+					}
+				}
+				if(temporaryMapping && mapped != nullptr) {
+					vmaUnmapMemory(impl->allocator, instanceBuffer.allocation);
+				}
+				if(resolvedEveryAnimatedRecord) {
+					try {
+						mirror.assign(uploadRecords.begin(), uploadRecords.end());
+					}
+					catch(const std::bad_alloc&) {
+						// Rendering remains correct after a successful upload. Dropping only
+						// this optimization proof forces a complete refresh for the slot.
+						mirror.clear();
+					}
+				}
 				else {
-					std::memcpy(mapped, presentation.groupedInstanceRecords.data(),
-						static_cast<std::size_t>(bytes));
-					RenderInstanceRecord* uploadedRecords =
-						static_cast<RenderInstanceRecord*>(mapped);
-					if(!useSealedDenseSelectors) {
-						for(std::size_t recordIndex = 0u;
-							recordIndex < resolvedAnimationSelectors.size(); ++recordIndex) {
-							uploadedRecords[recordIndex].animationSelectors.x =
-								resolvedAnimationSelectors[recordIndex].x;
-							uploadedRecords[recordIndex].animationSelectors.y =
-								resolvedAnimationSelectors[recordIndex].y;
-						}
-					}
-					vmaFlushAllocation(impl->allocator, instanceBuffer.allocation, 0u, bytes);
-					if(temporaryMapping) {
-						vmaUnmapMemory(impl->allocator, instanceBuffer.allocation);
-					}
+					mirror.clear();
 				}
 			}
 			if(resolvedEveryAnimatedRecord) {
@@ -6238,6 +6305,13 @@ void VulkanContext::RenderFrame(
 	const auto HashCombine = [](std::uint64_t& seed, std::uint64_t value) {
 		seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
 	};
+	const auto HashBytes = [&](std::uint64_t& seed, const void* data,
+		std::size_t byteCount) {
+		const auto* bytes = static_cast<const std::uint8_t*>(data);
+		for(std::size_t byteIndex = 0u; byteIndex < byteCount; ++byteIndex) {
+			HashCombine(seed, bytes[byteIndex]);
+		}
+	};
 	const auto HashFloat = [&](std::uint64_t& seed, float value) {
 		std::uint32_t bits = 0u;
 		std::memcpy(&bits, &value, sizeof(bits));
@@ -6727,6 +6801,7 @@ void VulkanContext::RenderFrame(
 				impl->currentFrame, workerIndex);
 			if(composite != VK_NULL_HANDLE)
 			{
+				impl->reusableSecondaryCommandSignatures.erase(composite);
 				vkResetCommandBuffer(composite, 0u);
 				VkCommandBufferInheritanceInfo inheritance{};
 				inheritance.sType =
@@ -6814,10 +6889,64 @@ void VulkanContext::RenderFrame(
 		impl->EnsureWorkerPools(impl->currentFrame, workerCount);
 		std::vector<std::future<VkCommandBuffer>> futures;
 		futures.reserve(workerCount);
+		std::vector<VkCommandBuffer> futureSecondaryBuffers;
+		std::vector<std::uint64_t> futureSecondarySignatures;
+		futureSecondaryBuffers.reserve(workerCount);
+		futureSecondarySignatures.reserve(workerCount);
 		// The scratch vector belongs to the render thread's thread-local storage.
 		// Worker jobs must capture that exact storage explicitly; resolving the
 		// thread-local name on a worker would select the worker's empty instance.
 		const std::vector<PreparedDraw>* preparedForRecording = &prepared;
+		const auto BuildSecondaryRangeSignature = [&](VkRenderPass renderPass,
+			VkFramebuffer framebuffer, VkExtent2D renderExtent,
+			std::size_t start, std::size_t end) {
+			std::uint64_t signature = 1469598103934665603ull;
+			HashCombine(signature, impl->backendResourceGeneration);
+			HashCombine(signature, impl->activeRenderFramePublication != nullptr
+				? impl->activeRenderFramePublication->rendererSessionGeneration : 0u);
+			HashCombine(signature, std::hash<VkRenderPass>{}(renderPass));
+			HashCombine(signature, std::hash<VkFramebuffer>{}(framebuffer));
+			HashCombine(signature, renderExtent.width);
+			HashCombine(signature, renderExtent.height);
+			HashCombine(signature, computeCompositeReady ? 1u : 0u);
+			HashCombine(signature, start);
+			HashCombine(signature, end);
+			HashCombine(signature, std::hash<VkBuffer>{}(
+				impl->indirectDrawBuffers[impl->currentFrame].buffer));
+			HashCombine(signature, std::hash<VkBuffer>{}(
+				impl->latestVirtualGeometryExecutorResources.generatedSubmissionBuffer));
+			for(std::size_t drawIndex = start; drawIndex < end; ++drawIndex) {
+				const PreparedDraw& draw = prepared[drawIndex];
+				HashCombine(signature, std::hash<VkPipeline>{}(draw.pipeline));
+				HashCombine(signature, std::hash<VkPipelineLayout>{}(draw.pipelineLayout));
+				HashCombine(signature, draw.meshletCount);
+				HashCombine(signature, draw.pushConstantRangeCount);
+				for(std::uint32_t rangeIndex = 0u;
+					rangeIndex < draw.pushConstantRangeCount; ++rangeIndex) {
+					const VkPushConstantRange& range = draw.pushConstantRanges[rangeIndex];
+					HashCombine(signature, range.stageFlags);
+					HashCombine(signature, range.offset);
+					HashCombine(signature, range.size);
+				}
+				for(const VkDescriptorSet descriptor : draw.descriptorSets) {
+					HashCombine(signature, std::hash<VkDescriptorSet>{}(descriptor));
+				}
+				HashBytes(signature, &draw.push, sizeof(draw.push));
+				HashCombine(signature, draw.indirectBufferIndex);
+				HashCombine(signature, draw.useGeneratedVirtualGeometryIndirect ? 1u : 0u);
+				HashCombine(signature, draw.generatedVirtualGeometryIndirectIndex);
+				HashCombine(signature, static_cast<std::uint32_t>(draw.rasterRoute));
+			}
+			return TerraEngine::Renderer::Vulkan::BuildSecondaryCommandReuseSignature({
+				impl->activeRenderFramePublication != nullptr
+					? impl->activeRenderFramePublication->rendererSessionGeneration : 0u,
+				impl->backendResourceGeneration,
+				std::hash<VkRenderPass>{}(renderPass),
+				std::hash<VkFramebuffer>{}(framebuffer),
+				signature,
+				renderExtent.width,
+				renderExtent.height });
+		};
 		auto recordSecondaryRange = [this, computeCompositeReady, preparedForRecording](VkCommandBuffer secondary, VkRenderPass renderPass, VkFramebuffer framebuffer, VkExtent2D renderExtent, size_t start, size_t end) -> VkCommandBuffer {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (secondary == VK_NULL_HANDLE) return VK_NULL_HANDLE;
@@ -6839,7 +6968,9 @@ void VulkanContext::RenderFrame(
 			begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
 			begin.pInheritanceInfo = &inherit;
 
-			vkBeginCommandBuffer(secondary, &begin);
+			if(vkBeginCommandBuffer(secondary, &begin) != VK_SUCCESS) {
+				return VK_NULL_HANDLE;
+			}
 			VkViewport viewport{};
 			viewport.x = 0.0f;
 			viewport.y = 0.0f;
@@ -6905,8 +7036,8 @@ void VulkanContext::RenderFrame(
 					: static_cast<VkDeviceSize>(draw.push.indirectDrawOffset + draw.indirectBufferIndex) * sizeof(VkDrawMeshTasksIndirectCommandEXT);
 				vkCmdDrawMeshTasksIndirectEXT(secondary, commandBuffer, offset, 1, draw.useGeneratedVirtualGeometryIndirect ? 16u : sizeof(VkDrawMeshTasksIndirectCommandEXT));
 			}
-			vkEndCommandBuffer(secondary);
-			return secondary;
+			return vkEndCommandBuffer(secondary) == VK_SUCCESS
+				? secondary : VK_NULL_HANDLE;
 		};
 
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
@@ -6919,9 +7050,21 @@ void VulkanContext::RenderFrame(
 			const VkExtent2D renderExtent = renderPassInfo.renderArea.extent;
 			const uint32_t frameIndex = currentFrame;
 			VkCommandBuffer secondary = impl->AcquireWorkerCommandBuffer(frameIndex, taskIndex);
+			const std::uint64_t secondarySignature = BuildSecondaryRangeSignature(
+				renderPass, framebuffer, renderExtent, start, end);
+			const auto cachedSecondary =
+				impl->reusableSecondaryCommandSignatures.find(secondary);
+			if(cachedSecondary != impl->reusableSecondaryCommandSignatures.end()
+				&& TerraEngine::Renderer::Vulkan::CanReuseSecondaryCommands(
+					cachedSecondary->second, secondarySignature, true)) {
+				secondaryBuffers.push_back(secondary);
+				continue;
+			}
+			impl->reusableSecondaryCommandSignatures.erase(secondary);
 			if (workerCount == 1u) {
 				if (VkCommandBuffer recorded = recordSecondaryRange(secondary, renderPass, framebuffer, renderExtent, start, end); recorded != VK_NULL_HANDLE) {
 					secondaryBuffers.push_back(recorded);
+					impl->reusableSecondaryCommandSignatures[recorded] = secondarySignature;
 				}
 			}
 			else {
@@ -6929,15 +7072,23 @@ void VulkanContext::RenderFrame(
 					return recordSecondaryRange(secondary, renderPass, framebuffer, renderExtent, start, end);
 				});
 				futures.push_back(task->getFuture());
+				futureSecondaryBuffers.push_back(secondary);
+				futureSecondarySignatures.push_back(secondarySignature);
 				ThreadPool::instance().enqueue(task);
 			}
 		}
 
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (auto& future : futures) {
-			VkCommandBuffer secondary = future.get();
+		for (std::size_t futureIndex = 0u; futureIndex < futures.size(); ++futureIndex) {
+			VkCommandBuffer secondary = futures[futureIndex].get();
 			if (secondary != VK_NULL_HANDLE) {
 				secondaryBuffers.push_back(secondary);
+				impl->reusableSecondaryCommandSignatures[secondary] =
+					futureSecondarySignatures[futureIndex];
+			}
+			else if(futureIndex < futureSecondaryBuffers.size()) {
+				impl->reusableSecondaryCommandSignatures.erase(
+					futureSecondaryBuffers[futureIndex]);
 			}
 		}
 	}
@@ -6951,6 +7102,7 @@ void VulkanContext::RenderFrame(
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (skyCmd != VK_NULL_HANDLE)
 		{
+			impl->reusableSecondaryCommandSignatures.erase(skyCmd);
 			vkResetCommandBuffer(skyCmd, 0);
 
 			VkCommandBufferInheritanceInfo inherit{};
@@ -6984,6 +7136,7 @@ void VulkanContext::RenderFrame(
 		VkCommandBuffer gridCmd = impl->AcquireWorkerCommandBuffer(impl->currentFrame, workerIndex);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (gridCmd != VK_NULL_HANDLE) {
+			impl->reusableSecondaryCommandSignatures.erase(gridCmd);
 			vkResetCommandBuffer(gridCmd, 0);
 
 			VkCommandBufferInheritanceInfo inherit{};
@@ -7017,6 +7170,7 @@ void VulkanContext::RenderFrame(
 		VkCommandBuffer uiCmd = impl->AcquireWorkerCommandBuffer(impl->currentFrame, workerIndex);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (uiCmd != VK_NULL_HANDLE) {
+			impl->reusableSecondaryCommandSignatures.erase(uiCmd);
 			vkResetCommandBuffer(uiCmd, 0);
 
 			VkCommandBufferInheritanceInfo inherit{};
@@ -10784,6 +10938,9 @@ void VulkanContext::Impl::ClearResources() {
 		DestroyBufferImmediate(buffer);
 	}
 	groupedInstanceCapacities.fill(0u);
+	for(std::vector<RenderInstanceRecord>& mirror : groupedInstanceUploadMirrors) {
+		mirror.clear();
+	}
 	if(groupedInstanceBufferIndex != INVALID_BINDLESS_BUFFER_INDEX) {
 		freeBufferIndices.push_back(groupedInstanceBufferIndex);
 		groupedInstanceBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;

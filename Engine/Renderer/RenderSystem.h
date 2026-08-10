@@ -44,6 +44,7 @@
 // RenderableEntry retains a protected-boundary pointer without exposing the
 // complete mesh payload through this already broad system header.
 struct Mesh;
+struct Material;
 struct RenderSystemLifetimeState;
 struct RenderFrameExecution;
 
@@ -396,6 +397,7 @@ private:
 		std::uint64_t objectIdentity = 0U;
 		std::uint64_t meshIdentity = 0U;
 		std::uint64_t materialIdentity = 0U;
+		std::uint64_t transformGeneration = 0U;
 		bool isStatic = false;
 		// Membership cache storage is stable for the complete protected frame
 		// execution. Borrow its authored mesh component instead of copying the same
@@ -409,6 +411,21 @@ private:
 		// signature, visibility, or draw preparation sees the renderable.
 		TerraEngine::Renderer::AnimationRenderBinding animationBinding{};
 	};
+	// The protected renderer owns this capture cache exclusively. Stable static and
+	// fully GPU-visual scenes retain already validated membership/resource pointers
+	// and packet topology; current pose generations remain in the separately sealed
+	// animation presentation root. CPU, hybrid, or fallback bindings deliberately
+	// disable reuse because they retain frame-specific authority ownership.
+	std::vector<RenderableEntry> retainedRenderableEntries;
+	// These tables are captured beside retainedRenderableEntries while resource
+	// publication is protected. Worker preparation may dereference the immutable
+	// payloads, but it never re-enters ResourceManager or observes a mixed reload.
+	std::unordered_map<TerraEngine::UUID, const Mesh*> retainedRuntimeMeshResources;
+	std::unordered_map<TerraEngine::UUID, const Material*> retainedRuntimeMaterialResources;
+	std::unordered_map<TerraEngine::UUID, TerraEngine::Scene::SpatialAABB>
+		retainedMeshLocalBounds;
+	std::uint64_t retainedRenderableCaptureSourceSignature = 0U;
+	bool retainedRenderableEntriesReusable = false;
 	// struct LightEntry groups related state and operations so callers have one documented contract.
 	struct LightEntry
 	{
@@ -584,6 +601,8 @@ private:
 	std::uint64_t renderableMembershipSceneGeneration = 0U;
 	std::uint64_t renderableMembershipComponentRevision = 0U;
 	std::uint64_t renderableMembershipHierarchyRevision = 0U;
+	std::uint64_t renderableMembershipActiveRevision = 0U;
+	std::uint64_t renderableMembershipPacketRevision = 0U;
 	// World matrices are index-aligned with the stable membership order above.
 	// Skinning changes vertex data without changing object transforms, so a static
 	// crowd can reuse these matrices until the protected spatial revision changes.

@@ -111,6 +111,37 @@ namespace TerraEngine::Renderer::Vulkan {
 		bool requiresCompleteFallback = false;
 	};
 
+	// A dirty range names one contiguous run of grouped-instance records whose
+	// bytes differ from the fence-proven CPU mirror for the current frame slot.
+	// Keeping the decision value-only makes sparse upload behavior testable
+	// without constructing a Vulkan device or mapping GPU memory.
+	struct GroupedInstanceDirtyRange
+	{
+		std::size_t firstRecord = 0u;
+		std::size_t recordCount = 0u;
+	};
+
+	struct GroupedInstanceDirtyPlan
+	{
+		std::vector<GroupedInstanceDirtyRange> ranges;
+		std::size_t dirtyRecordCount = 0u;
+		bool completeReplacement = false;
+	};
+
+	// Vulkan handles are converted to stable value identities before entering this
+	// backend-neutral contract. Every field can invalidate inherited secondary
+	// commands; the frame-slot fence remains a separate runtime safety proof.
+	struct SecondaryCommandReuseIdentity
+	{
+		std::uint64_t rendererSessionGeneration = 0u;
+		std::uint64_t backendResourceGeneration = 0u;
+		std::uint64_t renderPassIdentity = 0u;
+		std::uint64_t framebufferIdentity = 0u;
+		std::uint64_t commandSignature = 0u;
+		std::uint32_t width = 0u;
+		std::uint32_t height = 0u;
+	};
+
 	struct ShadowRecordingPreparationPlan
 	{
 		std::size_t shadowLightCount = 0u;
@@ -217,6 +248,16 @@ namespace TerraEngine::Renderer::Vulkan {
 		const DynamicRenderFrameState& dynamicState,
 		std::size_t maximumInstanceCapacity,
 		std::uint64_t currentRendererGeneration);
+	TERRAENGINE_API GroupedInstanceDirtyPlan BuildGroupedInstanceDirtyPlan(
+		std::span<const RenderInstanceRecord> previous,
+		std::span<const RenderInstanceRecord> current,
+		bool allocationReplaced);
+	TERRAENGINE_API std::uint64_t BuildSecondaryCommandReuseSignature(
+		const SecondaryCommandReuseIdentity& identity);
+	TERRAENGINE_API bool CanReuseSecondaryCommands(
+		std::uint64_t previousSignature,
+		std::uint64_t currentSignature,
+		bool frameSlotFenceComplete);
 	// The renderer already owns the dynamic instance and group arrays. This view
 	// overload validates them in place so a large crowd is not copied into a second
 	// temporary DynamicRenderFrameState merely to inspect counts and ranges.

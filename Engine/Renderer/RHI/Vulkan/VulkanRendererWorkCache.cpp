@@ -1,6 +1,7 @@
 #include "VulkanRendererWorkCache.h"
 
 #include <algorithm>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <unordered_set>
@@ -92,6 +93,74 @@ namespace {
 		return signature;
 	}
 }
+
+	GroupedInstanceDirtyPlan BuildGroupedInstanceDirtyPlan(
+		std::span<const RenderInstanceRecord> previous,
+		std::span<const RenderInstanceRecord> current,
+		bool allocationReplaced)
+	{
+		GroupedInstanceDirtyPlan plan;
+		plan.completeReplacement = allocationReplaced
+			|| previous.size() != current.size();
+		if(current.empty())
+		{
+			return plan;
+		}
+		if(plan.completeReplacement)
+		{
+			plan.ranges.push_back({ 0u, current.size() });
+			plan.dirtyRecordCount = current.size();
+			return plan;
+		}
+
+		std::size_t rangeStart = current.size();
+		for(std::size_t index = 0u; index < current.size(); ++index)
+		{
+			// RenderInstanceRecord is a fixed initialized shader ABI record. A byte
+			// comparison therefore catches every GPU-visible lane without inventing
+			// field-specific invalidation rules that could silently go stale.
+			const bool changed = std::memcmp(&previous[index], &current[index],
+				sizeof(RenderInstanceRecord)) != 0;
+			if(changed && rangeStart == current.size())
+			{
+				rangeStart = index;
+			}
+			if(!changed && rangeStart != current.size())
+			{
+				plan.ranges.push_back({ rangeStart, index - rangeStart });
+				plan.dirtyRecordCount += index - rangeStart;
+				rangeStart = current.size();
+			}
+		}
+		if(rangeStart != current.size())
+		{
+			plan.ranges.push_back({ rangeStart, current.size() - rangeStart });
+			plan.dirtyRecordCount += current.size() - rangeStart;
+		}
+		return plan;
+	}
+
+	std::uint64_t BuildSecondaryCommandReuseSignature(
+		const SecondaryCommandReuseIdentity& identity)
+	{
+		std::uint64_t signature = 1469598103934665603ull;
+		HashCombine(signature, identity.rendererSessionGeneration);
+		HashCombine(signature, identity.backendResourceGeneration);
+		HashCombine(signature, identity.renderPassIdentity);
+		HashCombine(signature, identity.framebufferIdentity);
+		HashCombine(signature, identity.commandSignature);
+		HashCombine(signature, identity.width);
+		HashCombine(signature, identity.height);
+		return signature;
+	}
+
+	bool CanReuseSecondaryCommands(std::uint64_t previousSignature,
+		std::uint64_t currentSignature, bool frameSlotFenceComplete)
+	{
+		return frameSlotFenceComplete
+			&& previousSignature != 0u
+			&& previousSignature == currentSignature;
+	}
 
 	CachedDescriptorBindingPlan VulkanRendererPreparationCache::GetDescriptorPlan(
 		const RenderFramePublication& publication, std::uint32_t viewId)
