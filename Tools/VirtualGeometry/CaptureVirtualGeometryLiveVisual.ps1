@@ -48,11 +48,20 @@ param(
 	# Specialized overhead runners can measure the profiler's idle window without
 	# creating and selecting a capture between paired conditions.
 	[switch]$SkipProfilerCapture,
+	# Matched recording comparisons collect the same bounded 100 ms closed-window
+	# Engine::Update stream as the disabled control, while the Journal is active.
+	[switch]$ProfilerMatchedOverheadMeasurement,
 	[ValidateRange(0, 3600)]
 	[int]$WarmupSeconds = 0,
 	[switch]$ProfilerWindowVisibleDuringCapture,
+	# When set, keep the window closed while recording starts and open it at the
+	# requested elapsed second. -1 preserves the historical start-visible behavior.
+	[ValidateRange(-1, 3600)]
+	[int]$ProfilerWindowOpenAtSeconds = -1,
 	[ValidateRange(0, 3600)]
 	[int]$ProfilerIdleMeasurementDurationSeconds = 0,
+	[ValidateRange(0, 3600)]
+	[int]$ProfilerHealthCheckpointIntervalSeconds = 0,
 	[ValidateRange(10, 1000)]
 	[int]$ProfilerIdleMeasurementIntervalMilliseconds = 100,
 	[switch]$ProfilerIdleMeasurementWindowVisible,
@@ -111,6 +120,27 @@ function Get-PropertyValue($Value, [string]$Name)
 		return $null
 	}
 	return $property.Value
+}
+
+function Get-TimedVisibilityWindow([object[]]$Samples, [string]$Label)
+{
+	$values = @($Samples | Where-Object { $_.valid } | ForEach-Object { [double]$_.engineCpuTimeMs } | Sort-Object)
+	if($values.Count -lt 30)
+	{
+		return [ordered]@{
+			status = 'unavailable'
+			label = $Label
+			sampleCount = $values.Count
+			reason = 'Fewer than 30 valid Engine CPU timing samples were published.'
+		}
+	}
+	$p95Index = [Math]::Min($values.Count - 1, [Math]::Max(0, [int][Math]::Ceiling($values.Count * 0.95) - 1))
+	return [ordered]@{
+		status = 'measured'; label = $Label; sampleCount = $values.Count
+		metric = 'engine-cpu-time'; timingSource = 'Engine::Update editor-excluded wall duration'
+		medianMs = $values[[int][Math]::Floor(($values.Count - 1) * 0.50)]
+		p95Ms = $values[$p95Index]; maximumMs = $values[-1]
+	}
 }
 
 $editorPath = Resolve-RepoPath $InstalledEditor
@@ -1456,9 +1486,56 @@ try
 		}
 		$representationRouteOverrideActive = $true
 	}
-	$scene = Invoke-McpTool 'scene.list_objects' ([ordered]@{
-		includeComponents = $true
-	})
+	# Authored benchmark scenes can contain thousands of objects. Components are
+	# not used by this capture (the result is only summarized as an object count),
+	# and serializing every component can exceed the bounded MCP response budget
+	# before the profiler even starts. Keep the richer component listing for
+	# disposable validation scenes, while authored ScenePath captures request the
+	# smallest read-only listing and still retain the pre/post scene hash guard.
+	# The scene listing is paged by the editor at 256 objects. Walk every page
+	# and retain only the exact count needed by the evidence summary; this keeps
+	# large authored scenes bounded while detecting missing or repeated pages.
+	$sceneObjectCount = 0
+	$sceneOffset = 0
+	$scenePageCount = 0
+	$sceneIncludeComponents = [string]::IsNullOrWhiteSpace($ScenePath)
+	do
+	{
+		$scenePage = Invoke-McpTool 'scene.list_objects' ([ordered]@{
+			includeComponents = $sceneIncludeComponents
+			offset = $sceneOffset
+			limit = 256
+		})
+		$sceneData = Get-PropertyValue $scenePage 'data'
+		$sceneObjects = Get-PropertyValue $sceneData 'objects'
+		if($null -eq $sceneObjects -or $sceneObjects -is [string])
+		{
+			throw 'scene.list_objects returned no bounded objects page.'
+		}
+		$pageCount = @($sceneObjects).Count
+		$pageReturned = Get-PropertyValue $sceneData 'returned'
+		if($null -eq $pageReturned -or [int]$pageReturned -ne $pageCount -or $pageCount -gt 256)
+		{
+			throw 'scene.list_objects returned an invalid page count.'
+		}
+		$sceneObjectCount += $pageCount
+		$scenePageCount++
+		$sceneHasMore = [bool](Get-PropertyValue $sceneData 'hasMore')
+		if($sceneHasMore)
+		{
+			$nextOffset = Get-PropertyValue $sceneData 'nextOffset'
+			if($null -eq $nextOffset -or [int]$nextOffset -le $sceneOffset)
+			{
+				throw 'scene.list_objects returned a non-advancing nextOffset.'
+			}
+			$sceneOffset = [int]$nextOffset
+		}
+		if($scenePageCount -gt 100000)
+		{
+			throw 'scene.list_objects exceeded the bounded page limit.'
+		}
+	}
+	while($sceneHasMore)
 	$sceneViewVisualizationEvidence = $null
 	if(-not [string]::IsNullOrWhiteSpace($SceneViewVisualization))
 	{
@@ -1484,10 +1561,27 @@ try
 			# CleanupValidationScene removes this exact file after the editor exits.
 			$playSceneSave = Invoke-McpTool 'scene.save'
 		}
-		$playEnter = Invoke-McpTool 'play.enter' ([ordered]@{
-			expectedState = 'stopped'
-			correlationId = 'virtual-geometry-live-enter'
+		# Play transitions are published at a protected frame boundary. The request
+		# can therefore lose an optimistic-state race while still reaching the exact
+		# requested state. Accept only that idempotent success; every other rejection
+		# remains a hard live-test failure.
+		$playEnterReply = Invoke-McpRpc 'tools/call' ([ordered]@{
+			name = 'play.enter'
+			arguments = [ordered]@{
+				expectedState = 'stopped'
+				correlationId = 'virtual-geometry-live-enter'
+			}
 		})
+		$playEnter = Get-McpEnvelope $playEnterReply 'play.enter'
+		if(-not [bool](Get-PropertyValue $playEnter 'ok'))
+		{
+			$currentState = [string](Get-PropertyValue (Get-PropertyValue $playEnter 'data') 'currentState')
+			$errorCategory = [string](Get-PropertyValue (Get-PropertyValue $playEnter 'error') 'category')
+			if($currentState -ne 'playing' -or $errorCategory -ne 'conflict')
+			{
+				throw "MCP tool 'play.enter' failed before reaching the playing state."
+			}
+		}
 		$playEntered = $true
 		# Let the protected play transition publish its runtime scene and advance
 		# animation at least one fixed tick before collecting diagnostics.
@@ -1832,7 +1926,11 @@ try
 	$shadowEvidence = New-UnavailableEvidence 'shadow-diagnostics' 'Shadow-view diagnostics are not advertised by this editor.'
 	$editorWindowEvidence = New-UnavailableEvidence 'editor-window-screenshot' 'No editor-window screenshot operation is advertised.'
 	$profilerEvidence = New-UnavailableEvidence 'profiler-open-responsiveness' 'Profiler capture operations are not advertised.'
+	$profilerWindowEvidence = [ordered]@{ status = 'not-requested'; openAtSeconds = $ProfilerWindowOpenAtSeconds }
+	$profilerTimingWindowEvidence = $null
 	$profilerIdleEvidence = New-UnavailableEvidence 'profiler-open-idle-overhead' 'Profiler idle measurement was not requested.'
+	$matchedOverheadEvidence = New-UnavailableEvidence 'profiler-matched-recording-overhead' 'Matched recording overhead measurement was not requested.'
+	$profilerHealthCheckpoints = [Collections.Generic.List[object]]::new()
 	if($tools -contains 'renderer.virtualGeometry.authoritativePick')
 	{
 		try
@@ -1990,6 +2088,15 @@ try
 					if($pairOpenFirst) { @($true, $false) } else { @($false, $true) }
 				} else { @([bool]$ProfilerIdleMeasurementWindowVisible) }
 				$idleConditionEvidence = [ordered]@{}
+				$idleConditionSamples = @{
+					closed = [Collections.Generic.List[object]]::new()
+					openIdle = [Collections.Generic.List[object]]::new()
+				}
+				$idleConditionBlocks = @{ closed = [Collections.Generic.List[object]]::new(); openIdle = [Collections.Generic.List[object]]::new() }
+				$idleBlockCount = if($ProfilerIdlePairedMeasurement) { [Math]::Max(1, [int][Math]::Ceiling($ProfilerIdleMeasurementDurationSeconds / 10.0)) } else { 1 }
+				$idleBlockDurationSeconds = if($ProfilerIdlePairedMeasurement) { [double]$ProfilerIdleMeasurementDurationSeconds / $idleBlockCount } else { [double]$ProfilerIdleMeasurementDurationSeconds }
+			for($idleBlock = 0; $idleBlock -lt $idleBlockCount; ++$idleBlock)
+			{
 			foreach($idleWindowVisible in $idleMeasurementStates)
 			{
 			try
@@ -2003,7 +2110,7 @@ try
 				Start-Sleep -Milliseconds 250
 				$idleWatch = [Diagnostics.Stopwatch]::StartNew()
 				$idleSamples = [Collections.Generic.List[object]]::new()
-				while($idleWatch.Elapsed.TotalSeconds -lt $ProfilerIdleMeasurementDurationSeconds)
+				while($idleWatch.Elapsed.TotalSeconds -lt $idleBlockDurationSeconds)
 				{
 					$timingSample = Invoke-McpTool 'profiler.window.visibility.set' ([ordered]@{
 						visible = [bool]$idleWindowVisible
@@ -2141,17 +2248,66 @@ try
 				}
 				catch { }
 			}
-				$idleConditionName = if($idleWindowVisible) { 'openIdle' } else { 'closed' }
-				$idleConditionEvidence[$idleConditionName] = $profilerIdleEvidence
+			$idleConditionName = if($idleWindowVisible) { 'openIdle' } else { 'closed' }
+			$idleConditionEvidence[$idleConditionName] = $profilerIdleEvidence
+			if($profilerIdleEvidence.status -eq 'measured') {
+				$idleConditionSamples[$idleConditionName].AddRange($idleSamples.ToArray())
+				$blockValues = @($idleSamples | ForEach-Object { [double]$_.engineCpuTimeMs } | Sort-Object)
+				$blockP95 = [int][Math]::Min($blockValues.Count - 1, [Math]::Ceiling($blockValues.Count * 0.95) - 1)
+				$idleConditionBlocks[$idleConditionName].Add([ordered]@{
+					block = $idleBlock; sampleCount = $blockValues.Count
+					medianMs = $blockValues[[int][Math]::Floor(($blockValues.Count - 1) * 0.50)]
+					p95Ms = $blockValues[$blockP95]
+				})
 			}
-				if($ProfilerIdlePairedMeasurement)
-				{
-					$idlePairEvidence.Add([ordered]@{
-						pair = $idlePairIndex
-						order = @($idleMeasurementStates | ForEach-Object { if($_) { 'open-idle' } else { 'closed' } })
-						conditions = $idleConditionEvidence
+			}
+			}
+			# Collapse the interleaved blocks into one condition record so the
+			# paired gate compares samples collected throughout the same workload
+			# phases, while transition frames remain excluded by each block settle.
+			foreach($conditionName in @('closed','openIdle')) {
+				$bucket = $idleConditionSamples[$conditionName]
+				if($bucket.Count -gt 0) {
+					$orderedTimes = @($bucket | ForEach-Object { [double]$_.engineCpuTimeMs } | Sort-Object)
+					$medIndex = [int][Math]::Floor(($orderedTimes.Count - 1) * 0.50)
+					$p95Index = [int][Math]::Min($orderedTimes.Count - 1, [Math]::Ceiling($orderedTimes.Count * 0.95) - 1)
+					$merged = $idleConditionEvidence[$conditionName]
+					$merged.sampleCount = $bucket.Count
+					$merged.medianMs = $orderedTimes[$medIndex]
+					$merged.p95Ms = $orderedTimes[$p95Index]
+					$merged.minimumMs = $orderedTimes[0]
+					$merged.maximumMs = $orderedTimes[-1]
+					$merged.durationSeconds = [double]$ProfilerIdleMeasurementDurationSeconds
+					$merged.samples = @($bucket)
+					$merged.blocks = @($idleConditionBlocks[$conditionName])
+				}
+			}
+			if($ProfilerIdlePairedMeasurement)
+			{
+				# A single-condition idle sample has no matched counterpart. Build
+				# paired deltas only for the explicit AB/BA experiment.
+				$pairedBlockDeltas = [Collections.Generic.List[object]]::new()
+				$closedBlocks = @($idleConditionBlocks.closed); $openBlocks = @($idleConditionBlocks.openIdle)
+				if($closedBlocks.Count -ne $openBlocks.Count -or $closedBlocks.Count -eq 0) { throw 'Interleaved profiler idle blocks are missing or unequal between conditions.' }
+				for($blockIndex = 0; $blockIndex -lt $closedBlocks.Count; ++$blockIndex) {
+					$closedBlock = $closedBlocks[$blockIndex]; $openBlock = $openBlocks[$blockIndex]
+					$pairedBlockDeltas.Add([ordered]@{
+						block = $blockIndex
+						medianDeltaPercent = (($openBlock.medianMs - $closedBlock.medianMs) / $closedBlock.medianMs) * 100.0
+						p95DeltaPercent = (($openBlock.p95Ms - $closedBlock.p95Ms) / $closedBlock.p95Ms) * 100.0
 					})
 				}
+				$pairMedianDeltas = @($pairedBlockDeltas | ForEach-Object medianDeltaPercent | Sort-Object)
+				$pairP95Deltas = @($pairedBlockDeltas | ForEach-Object p95DeltaPercent | Sort-Object)
+				$idlePairEvidence.Add([ordered]@{
+					pair = $idlePairIndex
+					order = @($idleMeasurementStates | ForEach-Object { if($_) { 'open-idle' } else { 'closed' } })
+					conditions = $idleConditionEvidence
+					blockDeltas = @($pairedBlockDeltas)
+					medianDeltaPercent = $pairMedianDeltas[[int][Math]::Floor(($pairMedianDeltas.Count - 1) * 0.50)]
+					p95DeltaPercent = $pairP95Deltas[[int][Math]::Floor(($pairP95Deltas.Count - 1) * 0.50)]
+				})
+			}
 			}
 			if($ProfilerIdlePairedMeasurement)
 			{
@@ -2175,6 +2331,10 @@ try
 		$profilerWatch = [Diagnostics.Stopwatch]::StartNew()
 		$profilerStarted = $false
 		$profilerStopRequested = $false
+	$profilerHealthBefore = $null
+	$profilerHealthAfter = $null
+	$finishCaptureSubmissionMilliseconds = $null
+	$finishMcpRoundTripMilliseconds = $null
 	try
 	{
 		if($SparseTransformMutation)
@@ -2191,10 +2351,11 @@ try
 			}
 			$sparseTransformOperationActive = $true
 		}
+		$openLater = $ProfilerWindowOpenAtSeconds -ge 0
 		if($tools -contains 'profiler.window.visibility.set')
 		{
 			Invoke-McpTool 'profiler.window.visibility.set' ([ordered]@{
-				visible = [bool]$ProfilerWindowVisibleDuringCapture
+				visible = [bool]($ProfilerWindowVisibleDuringCapture -and -not $openLater)
 			}) | Out-Null
 			# Allow the requested layout to become the completed immutable UI state
 			# before measurement begins.
@@ -2202,16 +2363,128 @@ try
 		}
 		# A zero bound deliberately selects unlimited history for coherence
 			# and soak validation; short visual smokes retain the bounded default.
-			$profilerStart = Invoke-McpTool 'profiler.capture.start' ([ordered]@{
+		$profilerStart = Invoke-McpTool 'profiler.capture.start' ([ordered]@{
 				captureLevel = 'sampled'
 				maxFrames = $ProfilerMaxFrames
 				sampleIntervalFrames = 1
 			})
-			$profilerStarted = $true
-			Start-Sleep -Milliseconds ([Math]::Max(
-				$ProfilerCaptureDurationSeconds * 1000,
-				$StreamingSettleMilliseconds))
-			$profilerStop = Invoke-McpTool 'profiler.capture.stop'
+		$profilerStarted = $true
+		if($tools -contains 'profiler.capture.health') {
+			$profilerHealthBefore = Invoke-McpTool 'profiler.capture.health'
+		}
+		$captureStart = [Diagnostics.Stopwatch]::StartNew()
+		$nextHealthCheckpointSeconds = if($ProfilerHealthCheckpointIntervalSeconds -gt 0) { [double]$ProfilerHealthCheckpointIntervalSeconds } else { [double]::PositiveInfinity }
+		if($ProfilerMatchedOverheadMeasurement)
+		{
+			if($openLater) { throw 'Matched recording overhead measurement cannot be combined with timed profiler-window opening.' }
+			if($tools -notcontains 'profiler.window.visibility.set') { throw 'Matched recording overhead requires profiler.window.visibility.set.' }
+			Invoke-McpTool 'profiler.window.visibility.set' ([ordered]@{ visible = $false }) | Out-Null
+			Start-Sleep -Milliseconds 250
+			$matchedWatch = [Diagnostics.Stopwatch]::StartNew()
+			$matchedSamples = [Collections.Generic.List[object]]::new()
+			while($matchedWatch.Elapsed.TotalSeconds -lt $ProfilerCaptureDurationSeconds)
+			{
+				$timing = Invoke-McpTool 'profiler.window.visibility.set' ([ordered]@{ visible = $false })
+				$ms = [double](Get-PropertyValue $timing.data 'engineCpuTimeMs')
+				$valid = [bool](Get-PropertyValue $timing.data 'engineCpuTimeValid') -and $ms -ge 0.0 -and -not [double]::IsNaN($ms) -and -not [double]::IsInfinity($ms)
+				if($valid) { $matchedSamples.Add([ordered]@{ elapsedMilliseconds = $matchedWatch.Elapsed.TotalMilliseconds; engineFrameIndex = [UInt64](Get-PropertyValue $timing.data 'engineFrameIndex'); engineCpuTimeMs = $ms; valid = $true }) }
+				Start-Sleep -Milliseconds 100
+			}
+			$matchedWatch.Stop()
+			if($matchedSamples.Count -eq 0) { throw 'Matched recording overhead produced no valid Engine CPU samples.' }
+			$matchedValues = @($matchedSamples | ForEach-Object { [double]$_.engineCpuTimeMs } | Sort-Object)
+			$matchedP95Index = [int][Math]::Min($matchedValues.Count - 1, [Math]::Ceiling($matchedValues.Count * 0.95) - 1)
+			$matchedOverheadEvidence = [ordered]@{
+				status = 'measured'; kind = 'profiler-matched-recording-overhead'; profilerState = 'recording'; windowVisible = $false
+				metric = 'engine-cpu-time'; timingSource = 'Engine::Update editor-excluded wall duration'; sampleIntervalMilliseconds = 100
+				durationSeconds = $matchedWatch.Elapsed.TotalSeconds; sampleCount = $matchedValues.Count
+				medianMs = $matchedValues[[int][Math]::Floor(($matchedValues.Count - 1) * 0.50)]; p95Ms = $matchedValues[$matchedP95Index]
+				samples = @($matchedSamples)
+			}
+		}
+		if($openLater)
+		{
+			if($tools -notcontains 'profiler.window.visibility.set') { throw 'Timed profiler-window opening requires profiler.window.visibility.set.' }
+			$pairedWindows = [Collections.Generic.List[object]]::new()
+			while($captureStart.Elapsed.TotalSeconds -lt $ProfilerWindowOpenAtSeconds)
+			{
+				Start-Sleep -Milliseconds 100
+			}
+			for($windowPair = 0; $windowPair -lt 5; ++$windowPair)
+			{
+				# Every condition gets its own one-second settle. This avoids counting
+				# the completed frame from the visibility request itself and keeps each
+				# pair comparable even when the workload is changing.
+				Invoke-McpTool 'profiler.window.visibility.set' ([ordered]@{ visible = $false }) | Out-Null
+				Start-Sleep -Milliseconds 1000
+				$closedSamples = [Collections.Generic.List[object]]::new()
+				$closedDeadline = [DateTime]::UtcNow.AddSeconds(10)
+				while($closedSamples.Count -lt 30 -and [DateTime]::UtcNow -lt $closedDeadline)
+				{
+					$timing = Invoke-McpTool 'profiler.window.visibility.set' ([ordered]@{ visible = $false })
+					$ms = [double](Get-PropertyValue $timing.data 'engineCpuTimeMs')
+					$valid = [bool](Get-PropertyValue $timing.data 'engineCpuTimeValid') -and $ms -ge 0.0 -and -not [double]::IsNaN($ms) -and -not [double]::IsInfinity($ms)
+					if($valid){$closedSamples.Add([ordered]@{engineCpuTimeMs=$ms;valid=$true})}
+					Start-Sleep -Milliseconds 100
+				}
+				$openRequest = [Diagnostics.Stopwatch]::StartNew(); $openResult = Invoke-McpTool 'profiler.window.visibility.set' ([ordered]@{ visible = $true }); $openRequest.Stop(); Start-Sleep -Milliseconds 1000
+				$openSamples = [Collections.Generic.List[object]]::new()
+				$openDeadline = [DateTime]::UtcNow.AddSeconds(10)
+				while($openSamples.Count -lt 30 -and [DateTime]::UtcNow -lt $openDeadline)
+				{
+					$timing = Invoke-McpTool 'profiler.window.visibility.set' ([ordered]@{ visible = $true })
+					$ms = [double](Get-PropertyValue $timing.data 'engineCpuTimeMs'); $valid = [bool](Get-PropertyValue $timing.data 'engineCpuTimeValid') -and $ms -ge 0.0 -and -not [double]::IsNaN($ms) -and -not [double]::IsInfinity($ms)
+					if($valid){$openSamples.Add([ordered]@{engineCpuTimeMs=$ms;valid=$true})}; Start-Sleep -Milliseconds 100
+				}
+				$closedWindow = Get-TimedVisibilityWindow $closedSamples.ToArray() "closed-pair-$($windowPair + 1)"; $openWindow = Get-TimedVisibilityWindow $openSamples.ToArray() "open-pair-$($windowPair + 1)"
+				if($closedWindow.status -ne 'measured' -or $openWindow.status -ne 'measured'){throw 'Timed profiler-window pair did not produce 30 valid samples per condition.'}
+				if([double]$closedWindow.medianMs -le 0.0 -or [double]$closedWindow.p95Ms -le 0.0 -or [double]$openWindow.medianMs -lt 0.0 -or [double]$openWindow.p95Ms -lt 0.0){throw 'Timed profiler-window pair published non-positive timing statistics.'}
+				$pairedWindows.Add([ordered]@{pair=$windowPair + 1;closed=$closedWindow;open=$openWindow;latencyMilliseconds=$openRequest.Elapsed.TotalMilliseconds;response=$openResult.data;medianDeltaPercent=(($openWindow.medianMs-$closedWindow.medianMs)/$closedWindow.medianMs)*100.0;p95DeltaPercent=(($openWindow.p95Ms-$closedWindow.p95Ms)/$closedWindow.p95Ms)*100.0})
+			}
+			$preWindow = $pairedWindows[0].closed; $postWindow = $pairedWindows[0].open
+			$profilerWindowEvidence.preOpen = $preWindow
+			$profilerWindowEvidence.postOpen = $postWindow
+			$profilerWindowEvidence.pairedWindows = @($pairedWindows)
+			$latencies = @($pairedWindows | ForEach-Object { [double]$_.latencyMilliseconds })
+			$profilerWindowEvidence.maxVisibilityLatencyMilliseconds = [double](($latencies | Measure-Object -Maximum).Maximum)
+			$medians = @($pairedWindows | ForEach-Object { [double]$_.medianDeltaPercent } | Sort-Object)
+			$p95s = @($pairedWindows | ForEach-Object { [double]$_.p95DeltaPercent } | Sort-Object)
+			$profilerWindowEvidence.medianDeltaPercent = $medians[2]
+			$profilerWindowEvidence.p95DeltaPercent = $p95s[2]
+			$profilerWindowEvidence.visibilityRequestMilliseconds = $profilerWindowEvidence.maxVisibilityLatencyMilliseconds
+			$profilerWindowEvidence.twoPercentGate = [double]$profilerWindowEvidence.medianDeltaPercent -le 2.0 -and [double]$profilerWindowEvidence.p95DeltaPercent -le 2.0 -and $profilerWindowEvidence.maxVisibilityLatencyMilliseconds -le 1000.0
+			$profilerWindowEvidence.status = 'measured'
+		}
+		while($captureStart.Elapsed.TotalSeconds -lt [Math]::Max(
+			$ProfilerCaptureDurationSeconds,
+			$StreamingSettleMilliseconds / 1000.0))
+		{
+			if($captureStart.Elapsed.TotalSeconds -ge $nextHealthCheckpointSeconds -and $tools -contains 'profiler.capture.health') {
+				$checkpoint = Invoke-McpTool 'profiler.capture.health'
+				$profilerHealthCheckpoints.Add([ordered]@{ elapsedSeconds = $captureStart.Elapsed.TotalSeconds; health = $checkpoint })
+				$nextHealthCheckpointSeconds += [double]$ProfilerHealthCheckpointIntervalSeconds
+			}
+			Start-Sleep -Milliseconds 100
+		}
+		if($tools -contains 'profiler.capture.health') {
+			$profilerHealthAfter = Invoke-McpTool 'profiler.capture.health'
+		}
+		$profilerStopWatch = [Diagnostics.Stopwatch]::StartNew()
+		$profilerStop = Invoke-McpTool 'profiler.capture.stop'
+		$profilerStopWatch.Stop()
+		$finishMcpRoundTripMilliseconds = $profilerStopWatch.Elapsed.TotalMilliseconds
+		$finishCaptureSubmissionMilliseconds = Get-PropertyValue $profilerStop.data 'finishCaptureSubmissionMilliseconds'
+		if($null -eq $finishCaptureSubmissionMilliseconds)
+		{
+			throw 'Profiler capture stop omitted authoritative finishCaptureSubmissionMilliseconds.'
+		}
+		$finishCaptureSubmissionMilliseconds = [double]$finishCaptureSubmissionMilliseconds
+		if([double]::IsNaN($finishCaptureSubmissionMilliseconds) -or
+			[double]::IsInfinity($finishCaptureSubmissionMilliseconds) -or
+			$finishCaptureSubmissionMilliseconds -lt 0.0)
+		{
+			throw 'Profiler capture stop returned an invalid authoritative finish duration.'
+		}
 			if($sparseTransformOperationActive)
 			{
 				$sparseStop = Invoke-McpTool 'renderer.validation.sparseTransform.stop' ([ordered]@{
@@ -2270,6 +2543,12 @@ try
 			{
 				throw "Profiler persistence ended in state '$profilerJobState'."
 			}
+			# Refresh after finalization so committed count, resident permits, and
+			# finalization timing describe the terminal session rather than the
+			# last pre-stop frame.
+			if($tools -contains 'profiler.capture.health') {
+				$profilerHealthAfter = Invoke-McpTool 'profiler.capture.health'
+			}
 			# The durable stop job identifies the exact artifact it persisted. A
 			# before/after list delta is unsafe because project-open discovery is
 			# asynchronous and may publish older captures between the two reads.
@@ -2316,14 +2595,8 @@ try
 			{
 				throw "Profiler artifact '$profilerArtifactId' did not become queryable after persistence."
 			}
-			$profilerSummary = Invoke-McpTool 'profiler.capture.summary' ([ordered]@{
-				artifactId = $profilerArtifactId
-			})
-			$profilerFrameCount = [UInt64]$profilerSummary.data.summary.frameCount
-			if($profilerFrameCount -eq 0)
-			{
-				throw 'Profiler capture persisted without any completed frame samples.'
-			}
+			# V1 summaries belong to the lazily opened index, not to catalog rows.
+			# Load and validate that bounded index before requesting terminal metrics.
 			$profilerLoad = Invoke-McpTool 'profiler.capture.load' ([ordered]@{
 				artifactId = $profilerArtifactId
 			})
@@ -2350,12 +2623,52 @@ try
 					throw "Profiler recovery load ended in state '$loadState'."
 				}
 			}
+			$profilerSummary = Invoke-McpTool 'profiler.capture.summary' ([ordered]@{
+				artifactId = $profilerArtifactId
+			})
+			$profilerFrameCount = [UInt64]$profilerSummary.data.summary.frameCount
+			if($profilerFrameCount -eq 0)
+			{
+				throw 'Profiler capture persisted without any completed frame samples.'
+			}
+			# Terminal persists exact time-based first/final five-minute windows.
+			# The compact index is still paged to verify count agreement, never to
+			# approximate those windows from a fixed number of frames.
+			$summaryWindowSource = $profilerSummary.data.summary
+			$profilerTimingWindowEvidence = [pscustomobject]@{
+				first = $summaryWindowSource.firstWindow
+				final = $summaryWindowSource.finalWindow
+			}
+			if($tools -contains 'profiler.capture.index') {
+				# Index loading is lazy: the first request may acknowledge with
+				# state=queued. Poll the bounded page until total/frames are present,
+				# rather than dereferencing the acknowledgement as a completed page.
+				$indexPage = $null
+				$indexDeadline = [DateTime]::UtcNow.AddSeconds(60)
+				do {
+					$indexPage = Invoke-McpTool 'profiler.capture.index' ([ordered]@{ offset = 0; limit = 512 })
+					$indexData = Get-PropertyValue $indexPage 'data'
+					$indexTotal = Get-PropertyValue $indexData 'total'
+					$indexFrames = Get-PropertyValue $indexData 'frames'
+					if($null -eq $indexTotal -or $null -eq $indexFrames) { Start-Sleep -Milliseconds 100 }
+				} while(($null -eq $indexTotal -or $null -eq $indexFrames) -and [DateTime]::UtcNow -lt $indexDeadline)
+				if($null -eq $indexTotal -or $null -eq $indexFrames) {
+					throw 'Profiler V1 index remained queued or unavailable after the bounded 60-second wait.'
+				}
+				$totalIndexed = [int]$indexTotal
+				if([UInt64]$totalIndexed -ne $profilerFrameCount) {
+					throw 'Profiler V1 index count disagrees with its terminal summary.'
+				}
+				$profilerTimingWindowEvidence | Add-Member -NotePropertyName totalFrames -NotePropertyValue $totalIndexed
+			}
 			Start-Sleep -Milliseconds 250
 			$profilerWatch.Stop()
 			$profilerEvidence = [ordered]@{
 				status = 'measured'
 				kind = 'profiler-open-responsiveness'
 				elapsedMilliseconds = $profilerWatch.Elapsed.TotalMilliseconds
+				finishInteractiveBlockMilliseconds = $finishCaptureSubmissionMilliseconds
+				finishMcpRoundTripMilliseconds = $finishMcpRoundTripMilliseconds
 				start = $profilerStart
 				stop = $profilerStop
 				persistenceJob = $profilerJob
@@ -2363,7 +2676,11 @@ try
 				summary = $profilerSummary
 				frameCount = $profilerFrameCount
 				load = $profilerLoad
+				windowEvidence = $profilerTimingWindowEvidence
 				loadJob = $profilerLoadJob
+				window = $profilerWindowEvidence
+				healthBefore = $profilerHealthBefore
+				healthAfter = $profilerHealthAfter
 			}
 		}
 		catch
@@ -2536,7 +2853,7 @@ try
 		editor = $editorPath
 		project = $projectPath
 		mcpEndpoint = $endpoint
-		sceneObjectCount = @($scene.data.objects).Count
+		sceneObjectCount = $sceneObjectCount
 		validationScene = $validationScene
 		startupSceneSelection = if($sceneSelectedByStartup) { [ordered]@{ path = $ScenePath; method = 'Library/LastScene.txt' } } else { $null }
 		authoredScene = if($null -ne $authoredScenePath) { [ordered]@{ path = $authoredScenePath; sha256Before = $authoredSceneHashBefore } } else { $null }
@@ -2640,6 +2957,8 @@ try
 		warmupEvidence = $warmupEvidence
 		sparseTransformEvidence = $sparseTransformEvidence
 		profilerIdleEvidence = $profilerIdleEvidence
+		matchedOverheadEvidence = $matchedOverheadEvidence
+		profilerHealthCheckpoints = @($profilerHealthCheckpoints)
 		soakEvidence = $soakEvidence
 		cameraReview = [ordered]@{
 			path = $cameraReviewPath

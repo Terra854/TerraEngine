@@ -3728,6 +3728,12 @@ void MainEditorSubsystem::DrawScriptCompilationModal() {
 
 // MainEditorSubsystem::CloseCurrentProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::CloseCurrentProject() {
+	// Invalidate profiler worker results before resource teardown starts. A slow
+	// capture read/write may finish later, but its old project epoch is already
+	// unable to restore document or window state into the next project.
+	if (ctx && ctx->editorProfiler) {
+		ctx->editorProfiler->BeginProjectClose();
+	}
 	// Tear down provider state before scene unload and ObjectManager clearing.
 	// A project switch can preserve the process-wide AnimationSystem singleton.
 	// Advance the scene identity first so old authority and presentation roots are
@@ -3789,11 +3795,6 @@ void MainEditorSubsystem::CloseCurrentProject() {
 		ScriptingSystem::Instance().UpdateInspectorWatch(std::nullopt, ctx->scripting.selectionVersion);
 	}
 	
-	// Trigger callbacks BEFORE closing the project in ProjectManager
-	// so that subsystems can save data to the project directory.
-	if (ctx && ctx->editorProfiler) {
-		ctx->editorProfiler->OnProjectClosed();
-	}
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (onProjectClosed) onProjectClosed();
 

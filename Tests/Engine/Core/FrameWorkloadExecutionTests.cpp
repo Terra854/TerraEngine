@@ -60,6 +60,60 @@ namespace TerraEngine::Tests {
 				"Compact execution must avoid rebuilding optional diagnostic strings.");
 		});
 
+		registry.Add("Engine.FrameWorkload.CompletedEvidenceConstructsAvailableClocksDirectly", [](TestContext& context) {
+			auto workload = MakeWorkload("CompletedEvidence", { "Snapshot" }, { "Prepared" });
+			workload.work = [](TerraEngine::Scheduling::JobGraphContext&) {};
+
+			const auto plan = TerraEngine::Scheduling::ExecuteFrameWorkloads(
+				{ workload }, "completed-evidence");
+
+			context.Expect(plan.valid && plan.completed,
+				"A completed workload must still produce detailed scheduler evidence.");
+			context.ExpectEqual(static_cast<std::size_t>(1), plan.executionRecords.size(),
+				"The completed workload must retain exactly one execution record.");
+			if (plan.executionRecords.empty())
+			{
+				return;
+			}
+
+			const auto& record = plan.executionRecords.front();
+			context.Expect(record.queueDuration.availability
+				== TerraEngine::Profiling::TelemetryAvailability::Available
+				&& record.queueDuration.unavailableReason.empty(),
+				"Completed queue timing must remain available without a stale unavailable reason.");
+			context.Expect(record.runDuration.availability
+				== TerraEngine::Profiling::TelemetryAvailability::Available
+				&& record.runDuration.unavailableReason.empty(),
+				"Completed run timing must remain available without a stale unavailable reason.");
+			context.Expect(record.coordinatorWaitDuration.availability
+				== TerraEngine::Profiling::TelemetryAvailability::Available
+				&& record.coordinatorWaitDuration.unavailableReason.empty(),
+				"Completed coordinator timing must remain available without a stale unavailable reason.");
+			context.Expect(record.ownershipWaitDuration.availability
+				== TerraEngine::Profiling::TelemetryAvailability::Unavailable
+				&& !record.ownershipWaitDuration.unavailableReason.empty(),
+				"Unmeasured ownership timing must retain its explicit unavailable explanation.");
+		});
+
+		registry.Add("Engine.FrameWorkload.ProfilerEvidenceTransfersExactlyOnce", [](TestContext& context) {
+			auto workload = MakeWorkload("TransferEvidence", { "Snapshot" }, { "Prepared" });
+			workload.work = [](TerraEngine::Scheduling::JobGraphContext&) {};
+
+			const auto plan = TerraEngine::Scheduling::ExecuteFrameWorkloads(
+				{ workload }, "transfer-evidence");
+			auto transferred = TerraEngine::Scheduling::TakeLatestFrameWorkloadExecutionRecordsForProfiling();
+			auto repeated = TerraEngine::Scheduling::TakeLatestFrameWorkloadExecutionRecordsForProfiling();
+
+			context.Expect(plan.valid && plan.completed,
+				"The scheduler must complete before profiler evidence is transferred.");
+			context.ExpectEqual(plan.executionRecords.size(), transferred.size(),
+				"The sole profiler consumer must receive every published execution record.");
+			context.Expect(!transferred.empty() && transferred.front().workloadName == "TransferEvidence",
+				"Transferred records must preserve their stable workload identity.");
+			context.Expect(repeated.empty(),
+				"A published execution-record vector must transfer only once per scheduler frame.");
+		});
+
 		registry.Add("Engine.FrameWorkload.WriteConflictRejectedBeforeExecution", [](TestContext& context) {
 			auto first = MakeWorkload("A", {}, { "ObjectManager" });
 			auto second = MakeWorkload("B", { "ObjectManager" }, {});

@@ -1866,6 +1866,17 @@ namespace TerraEngine::Renderer {
 		return g_latestRenderDiagnostics;
 	}
 
+	RenderProfilerFrameSnapshot LatestRenderProfilerFrameSnapshot()
+	{
+		std::lock_guard<std::mutex> lock(g_renderDiagnosticsMutex);
+		// Keep this copy deliberately narrow. The profiler records these two fields
+		// for every captured frame, whereas the complete diagnostics summary owns
+		// optional vectors that are useful only to renderer/editor diagnostics.
+		return {
+			g_latestRenderDiagnostics.frameId,
+			g_latestRenderDiagnostics.presentationWaits};
+	}
+
 	std::vector<VirtualGeometryViewDiagnosticsSnapshot> LatestVirtualGeometryDiagnosticsSnapshots()
 	{
 		std::lock_guard<std::mutex> lock(g_renderDiagnosticsMutex);

@@ -1,12 +1,32 @@
 #include "TestHarness.h"
 
 #include "Profiling/ProfilerCapture.h"
+#include "Profiling/Profiler.h"
+#include "ProfilerTestSupport.h"
+#include "ThreadPool/ThreadPool.h"
 
 #include <chrono>
 #include <filesystem>
+#include <thread>
 
 namespace TerraEngine::Tests
 {
+	namespace
+	{
+		// A failed expectation still unwinds this guard. That is essential for
+		// singleton profiler tests: no queued drain may outlive its controlled
+		// ThreadPool or sink and poison the following test process.
+		class ProfilerThreadPoolCleanup
+		{
+		public:
+			~ProfilerThreadPoolCleanup()
+			{
+				Profiling::Profiler::Instance().Clear();
+				ThreadPool::instance().shutdown();
+			}
+		};
+	}
+
 	void RegisterProfilerCapturePerformanceTests(TestRegistry& registry)
 	{
 		registry.Add("Engine.ProfilerCapturePerformance.FiveSecondAggregateStaysUnderTenMiB", [](TestContext& context) {
@@ -71,6 +91,103 @@ namespace TerraEngine::Tests
 
 			std::error_code ignored;
 			std::filesystem::remove(path, ignored);
+		});
+
+		registry.Add("Engine.ProfilerCapturePerformance.LiveThirtyThousandFramesStayResidentBounded", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+			// One worker and one gated write make the producer/consumer hand-off
+			// deterministic while still exercising the real live journal path.
+			ProfilerThreadPoolCleanup cleanup;
+			ThreadPool::instance().shutdown();
+			ThreadPool::instance().initialize(1u);
+			ProfilerTestSupport::TemporaryWorkspace workspace("ProfilerThirtyThousandLive");
+			auto sink = std::make_shared<ProfilerTestSupport::ControlledJournalSink>();
+			sink->BlockWrite(2u);
+			ProfilerCaptureSettings settings;
+			// Detailed profiler frames can exceed an 8 MiB raw segment when grouped
+			// into thousand-frame batches. Keep this realistic byte-safe batch size;
+			// the controlled sink itself is scalar-bounded, so 250 such drains no
+			// longer make the fixture retain duration-scaled test data.
+			settings.maximumChunkFrames = 120u;
+			settings.maximumChunkBytes = 8u * 1024u * 1024u;
+			settings.maximumPendingBytes = 16u * 1024u * 1024u;
+			settings.residentByteBudget = 16u * 1024u * 1024u;
+			settings.maximumSealedFrameBytes = 64u * 1024u;
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			std::string error;
+			context.Expect(profiler.StartJournalRecording({}, settings,
+				workspace.Path("long-live.teprof"), error, sink),
+				"The live bounded fixture should start: " + error);
+			for (std::uint32_t frame = 0u; frame < settings.maximumChunkFrames; ++frame)
+			{
+				profiler.BeginFrame();
+				profiler.EndFrame();
+			}
+			context.Expect(sink->WaitUntilBlocked(std::chrono::seconds(2)),
+				"The injected sink must reach its controlled slow write.");
+			const ProfilerCaptureHealth blocked = profiler.GetCaptureHealth();
+			context.Expect(blocked.residentBytes <= settings.residentByteBudget
+				&& blocked.inFlightBytes > 0u,
+				"A slow sink must retain only the accounted bounded batch while producers return.");
+			sink->Release();
+			// One capture-wide allowance stays deterministic under a busy complete
+			// EngineTests process. Per-batch short spinning can starve the single
+			// worker, then turn one delayed write into hundreds of repeated timeouts.
+			const auto captureDrainDeadline = std::chrono::steady_clock::now()
+				+ std::chrono::seconds(60);
+			auto waitForCommitted = [&profiler, captureDrainDeadline](std::uint64_t expectedCommitted) {
+				while (profiler.GetCaptureHealth().committedFrameCount < expectedCommitted
+					&& std::chrono::steady_clock::now() < captureDrainDeadline)
+				{
+					// Yield the CPU long enough for a contended shared worker to reach
+					// its journal write without turning this producer-side test loop into
+					// a busy-spin scheduler competitor.
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+				return profiler.GetCaptureHealth().committedFrameCount >= expectedCommitted;
+			};
+			bool drainedEveryBatch = waitForCommitted(settings.maximumChunkFrames);
+			for (std::uint32_t frame = settings.maximumChunkFrames;
+				frame < 30000u && drainedEveryBatch; ++frame)
+			{
+				profiler.BeginFrame();
+				profiler.EndFrame();
+				// The test sink is deliberately slow but not unavailable. Allow each
+				// bounded segment to drain before producing the next one so this long
+				// fixture measures bounded residency, not intentional core overflow.
+				if ((frame + 1u) % settings.maximumChunkFrames == 0u)
+				{
+					drainedEveryBatch = waitForCommitted(frame + 1u);
+				}
+			}
+			const ProfilerJournalFinalizationTicket ticket = profiler.FinishRecording();
+			bool completed = false;
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+			while (std::chrono::steady_clock::now() < deadline)
+			{
+				completed = profiler.GetJournalFinalizationStatus(ticket).state
+					== ProfilerJournalFinalizationState::Completed;
+				if (completed)
+				{
+					break;
+				}
+				std::this_thread::yield();
+			}
+			const ProfilerCaptureHealth health = profiler.GetCaptureHealth();
+			const bool conserved = drainedEveryBatch && completed && !health.terminalFailure
+				&& health.producedFrameCount == 30000u && health.committedFrameCount == 30000u
+				&& health.residentHighWaterBytes <= settings.residentByteBudget;
+			// Tests must retire the singleton writer before the controlled pool is
+			// destroyed, even when an assertion below fails. Otherwise a queued drain
+			// could outlive its sink and turn one failed assertion into process exit.
+			context.Expect(conserved, "A long live journal must conserve compact cores while resident ownership stays duration-independent "
+				"(produced=" + std::to_string(health.producedFrameCount)
+				+ ", committed=" + std::to_string(health.committedFrameCount)
+				+ ", rejected=" + std::to_string(health.rejectedCoreFrameCount)
+				+ ", terminal=" + std::to_string(health.terminalFailure)
+				+ ", drainBatches=" + std::to_string(drainedEveryBatch)
+				+ ", completed=" + std::to_string(completed) + ").");
 		});
 	}
 }

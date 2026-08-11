@@ -36,6 +36,10 @@ namespace TerraEngine::Editor::Automation
 		void Initialize(EditorContext* context, MainEditorSubsystem* mainEditor = nullptr);
 		void Shutdown();
 		void Update(float deltaTime);
+		// Runs only transport-originated calls at the later protected editor handoff.
+		// It intentionally leaves assistant-request draining to Update(), so a late
+		// acknowledgement cannot change the established assistant-command cadence.
+		void PumpPendingTransportToolCallsAtProtectedFrame();
 		// EditorSystem owns the scheduler-protected PostFrame boundary. This narrow
 		// forwarder lets that owner advance durable recordings even when the MCP
 		// listener is disabled, disconnected, or has no queued requests.

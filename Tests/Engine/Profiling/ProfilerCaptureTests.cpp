@@ -131,6 +131,34 @@ namespace TerraEngine::Tests {
 	}
 
 	void RegisterProfilerCaptureTests(TestRegistry& registry) {
+		registry.Add("Engine.ProfilerCapture.SealedFramesAccountBytesAndCoalesceLossDeterministically", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+			ProfilerFrameRecord frame;
+			frame.frameIndex = 11u;
+			frame.durationMs = 2.0;
+			frame.samples.push_back({1u, 0u, ProfilerModuleId::CpuEngine,
+				"Optional leaf", "main", "task", 0.0, 2.0, 0u, 1u, true, false});
+			ProfilerSealedFrame sealed;
+			sealed.frame = frame;
+			sealed.ownedByteCount = EstimateProfilerFrameOwnedBytes(sealed.frame);
+			std::string error;
+			context.Expect(ValidateProfilerSealedFrame(sealed, error),
+				"A sealed frame with exact logical byte ownership should validate: " + error);
+			sealed.ownedByteCount -= 1u;
+			context.Expect(!ValidateProfilerSealedFrame(sealed, error),
+				"Under-reporting owned bytes must reject before queue admission.");
+
+			std::vector<ProfilerCaptureLossRange> ranges;
+			CoalesceProfilerCaptureLossRange(ranges, {3u, 3u,
+				ProfilerCaptureLossClass::SampleLeaves, ProfilerCaptureLossReason::QueuePressure, 2u, 10u});
+			CoalesceProfilerCaptureLossRange(ranges, {4u, 4u,
+				ProfilerCaptureLossClass::SampleLeaves, ProfilerCaptureLossReason::QueuePressure, 3u, 11u});
+			context.ExpectEqual(1u, static_cast<unsigned int>(ranges.size()),
+				"Adjacent equal loss policy records must coalesce into one deterministic range.");
+			context.ExpectEqual(5ULL, static_cast<unsigned long long>(ranges.front().discardedRecordCount),
+				"Coalesced loss counts must remain exact.");
+		});
+
 		registry.Add("Engine.ProfilerCapture.SnapshotRevisionChangesOnlyForPublishedPresentationState", [](TestContext& context) {
 			using namespace TerraEngine::Profiling;
 
@@ -191,33 +219,38 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(3ULL, durationLimited.front().frameIndex, "Duration trimming should keep the newest frame in the time window.");
 		});
 
-		registry.Add("Engine.ProfilerCapture.UnlimitedHistoryRetainsMoreThanLegacyCap", [](TestContext& context) {
+		registry.Add("Engine.ProfilerCapture.InMemoryRecordingCapsHistoryWithoutJournal", [](TestContext& context) {
 			using namespace TerraEngine::Profiling;
 
 			Profiler& profiler = Profiler::Instance();
 			profiler.Clear();
 			ProfilerCaptureMetadata metadata;
-			metadata.projectName = "Unlimited History";
+			metadata.projectName = "Bounded In-Memory History";
 			ProfilerCaptureSettings settings;
 			settings.detailLevel = ProfilerCaptureDetailLevel::Aggregate;
 			settings.maxFrames = 0u;
 			profiler.StartRecording(metadata, settings);
-			// Cross the former 2,048-frame boundary so this test detects any hidden
-			// rolling eviction in the live Profiler path, not only helper trimming.
+			// Cross both the former legacy boundary and the diagnostic cap. The public
+			// non-journal API has no durable destination, so it must never retain an
+			// unbounded detailed history merely because maxFrames was zero.
 			for (std::uint32_t frame = 0u; frame < 2050u; ++frame)
 			{
 				profiler.BeginFrame();
 				profiler.EndFrame();
 			}
-			const ProfilerCaptureDocument capture = profiler.FinishRecording();
+			const ProfilerJournalFinalizationTicket finishTicket = profiler.FinishRecording();
+			context.Expect(finishTicket.accepted
+				&& profiler.GetJournalFinalizationStatus(finishTicket).state == ProfilerJournalFinalizationState::Completed,
+				"A bounded in-memory capture should complete the asynchronous finish contract immediately.");
+			const ProfilerCaptureDocument capture = profiler.GetDocumentSnapshot();
 			context.ExpectEqual(
-				static_cast<std::size_t>(2050u),
+				static_cast<std::size_t>(512u),
 				capture.frames.size(),
-				"Unlimited recording should retain frames beyond the former 2,048-frame cap.");
+				"In-memory recording must retain only its fixed diagnostic presentation cache.");
 			context.Expect(!capture.frames.empty()
-				&& capture.frames.front().frameIndex == 0u
+				&& capture.frames.front().frameIndex == 1538u
 				&& capture.frames.back().frameIndex == 2049u,
-				"Unlimited recording should preserve the complete chronological frame range.");
+				"The bounded cache must evict only the oldest chronological frames.");
 			profiler.Clear();
 		});
 
@@ -232,14 +265,15 @@ namespace TerraEngine::Tests {
 			context.Expect(SaveCaptureDocument(document, capturePath, error), "Saving a profiler capture document should succeed: " + error);
 
 			ProfilerCaptureDocument loaded;
-			context.Expect(LoadCaptureDocument(capturePath, loaded, error), "Loading a saved profiler capture document should succeed.");
-			context.ExpectEqual(std::string("Profiler Tests"), loaded.metadata.projectName, "Profiler capture metadata should round-trip through JSON.");
+			const bool loadedCapture = LoadCaptureDocument(capturePath, loaded, error);
+			context.Expect(loadedCapture, "Loading a saved profiler capture document should succeed: " + error);
+			context.ExpectEqual(std::string("Profiler Tests"), loaded.metadata.projectName, "Profiler capture metadata should round-trip through Journal V1.");
 			context.Expect(loaded.metadata.settings.captureMode == ProfilerCaptureMode::LoadedReadOnly, "Loaded capture settings should be marked read-only.");
-			context.ExpectEqual(1u, static_cast<unsigned int>(loaded.frames.size()), "Profiler capture frames should round-trip through JSON.");
-			context.ExpectEqual(3ULL, loaded.frames.front().frameIndex, "Profiler frame indices should round-trip through JSON.");
-			context.Expect(HasSampleNamed(loaded.frames.front(), "Frame"), "Profiler samples should round-trip through JSON.");
-			context.Expect(HasSampleNamed(loaded.frames.front(), "ThreadPool Task"), "Task profiler samples should round-trip through JSON.");
-			context.ExpectEqual(2u, static_cast<unsigned int>(loaded.frames.front().timingStreams.size()), "Profiler timing streams should round-trip through JSON.");
+			context.ExpectEqual(1u, static_cast<unsigned int>(loaded.frames.size()), "Profiler capture frames should round-trip through Journal V1.");
+			context.ExpectEqual(3ULL, loaded.frames.front().frameIndex, "Profiler frame indices should round-trip through Journal V1.");
+			context.Expect(HasSampleNamed(loaded.frames.front(), "Frame"), "Profiler samples should round-trip through Journal V1.");
+			context.Expect(HasSampleNamed(loaded.frames.front(), "ThreadPool Task"), "Task profiler samples should round-trip through Journal V1.");
+			context.ExpectEqual(2u, static_cast<unsigned int>(loaded.frames.front().timingStreams.size()), "Profiler timing streams should round-trip through Journal V1.");
 
 			const ProfilerModuleSummary* taskModule = FindModule(loaded.frames.front().moduleSummaries, ProfilerModuleId::TaskExecution);
 			context.Expect(taskModule != nullptr, "Loaded captures should preserve task module summaries.");
@@ -256,60 +290,23 @@ namespace TerraEngine::Tests {
 			context.Expect(metadataArtifact.supported, "Metadata-only capture inspection should report saved captures as supported artifacts.");
 			context.ExpectEqual(std::string("Profiler Tests"), metadataArtifact.metadata.projectName, "Metadata-only inspection should preserve the saved project name.");
 			context.ExpectEqual(1ULL, metadataArtifact.frameCount, "Metadata-only inspection should expose the saved frame count.");
-			context.ExpectEqual(std::string("Ready (metadata)"), metadataArtifact.status, "Newly saved captures should place metadata before frames so sidebar refresh can stop before sample payloads.");
+			context.ExpectEqual(std::string("Ready (journal index)"), metadataArtifact.status, "Newly saved captures should expose a bounded V1 index without loading sample payloads.");
 		});
 
-		registry.Add("Engine.ProfilerCapture.LoadRejectsInvalidFormatAndUnknownModules", [](TestContext& context) {
+		registry.Add("Engine.ProfilerCapture.LoadRejectsOpaqueHistoricalFormat", [](TestContext& context) {
 			using namespace TerraEngine::Profiling;
 
 			TempProfilerWorkspace workspace;
 			std::string error;
 			ProfilerCaptureDocument loaded;
-			workspace.WriteTextFile("wrong-format.teprof", R"({
-				"format": "SomethingElse",
-				"payloadVersion": 1,
-				"frames": []
-			})");
-			context.Expect(!LoadCaptureDocument(workspace.Path("wrong-format.teprof"), loaded, error), "Profiler loading should reject files with the wrong format marker.");
-			context.Expect(error.find("not a TerraEngine profiler capture") != std::string::npos, "Wrong-format failures should report a clear diagnostic.");
-
-			workspace.WriteTextFile("editor-wall.teprof", R"({
-				"format": "TerraEngineProfilerCapture",
-				"payloadVersion": 1,
-				"metadata": {"settings": {}},
-				"frames": [{
-					"frameIndex": 0,
-					"frameStartMs": 0.0,
-					"durationMs": 1.0,
-					"complete": true,
-					"timingStreams": [{"id":"editor_wall", "scope":"editor_wall"}]
-				}]
-			})");
-			context.Expect(!LoadCaptureDocument(workspace.Path("editor-wall.teprof"), loaded, error), "Profiler loading should reject captures containing the removed Editor Wall scope.");
-			context.Expect(error.find("unknown timing stream scope: editor_wall") != std::string::npos, "Removed editor timing should fail with a clear scope diagnostic.");
-
-			workspace.WriteTextFile("unknown-module.teprof", R"({
-				"format": "TerraEngineProfilerCapture",
-				"payloadVersion": 1,
-				"metadata": {
-					"settings": {}
-				},
-				"frames": [{
-					"frameIndex": 0,
-					"frameStartMs": 0.0,
-					"durationMs": 1.0,
-					"complete": true,
-					"modules": [{
-						"moduleId": "future_module",
-						"available": true,
-						"totalMs": 1.0,
-						"metrics": []
-					}],
-					"samples": []
-				}]
-			})");
-			context.Expect(!LoadCaptureDocument(workspace.Path("unknown-module.teprof"), loaded, error), "Profiler loading should reject unknown module identifiers.");
-			context.Expect(error.find("unknown module id") != std::string::npos, "Unknown module failures should report the unsupported module id.");
+			const std::string oldFormat = "TerraEngineProfiler" "Capture";
+			const std::string oldVersionField = "payload" "Version";
+			workspace.WriteTextFile("historical.teprof",
+				"{\"format\":\"" + oldFormat + "\",\"" + oldVersionField + "\":1}");
+			context.Expect(!LoadCaptureDocument(workspace.Path("historical.teprof"), loaded, error),
+				"The V1-only loader must reject historical JSON before parsing its fields.");
+			context.Expect(error.find("Unsupported profiler capture") != std::string::npos,
+				"Historical bytes should fail at the unambiguous V1 magic check.");
 		});
 
 		registry.Add("Engine.ProfilerCapture.TimingStreamsAggregateValidAndMissingSamples", [](TestContext& context) {
@@ -647,8 +644,11 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(frames.front().frameIndex, frameList.front().frameIndex, "Frame list items should expose the recorded frame index.");
 			context.ExpectEqual(frames.front().complete, frameList.front().complete, "Frame list items should expose completion state without copying samples.");
 
-			ProfilerCaptureDocument finishedDocument = profiler.FinishRecording();
+			const ProfilerJournalFinalizationTicket finishTicket = profiler.FinishRecording();
+			const ProfilerCaptureDocument finishedDocument = profiler.GetDocumentSnapshot();
 			context.ExpectEqual(1u, static_cast<unsigned int>(finishedDocument.frames.size()), "Finishing after a complete frame should preserve recorded frames.");
+			context.Expect(profiler.GetJournalFinalizationStatus(finishTicket).state == ProfilerJournalFinalizationState::Completed,
+				"The in-memory finish ticket should report completion without copying history.");
 			context.Expect(profiler.GetState() == ProfilerSessionState::Finalizing, "Finishing a capture should transition the profiler to finalizing.");
 			profiler.Clear();
 		});
@@ -691,7 +691,10 @@ namespace TerraEngine::Tests {
 					"Detailed and compact snapshots should retain the same chronological order.");
 			}
 
-			const ProfilerCaptureDocument finished = profiler.FinishRecording();
+			const ProfilerJournalFinalizationTicket finishTicket = profiler.FinishRecording();
+			const ProfilerCaptureDocument finished = profiler.GetDocumentSnapshot();
+			context.Expect(profiler.GetJournalFinalizationStatus(finishTicket).state == ProfilerJournalFinalizationState::Completed,
+				"Rolling capture finish should use the common ticket contract.");
 			context.ExpectEqual(std::size_t(3U), finished.frames.size(),
 				"Finishing should materialize the deque-backed rolling history into the stable vector artifact schema.");
 			profiler.Clear();
@@ -752,12 +755,20 @@ namespace TerraEngine::Tests {
 				"The aggregate frame root must be explicitly marked so compact persistence can retain it.");
 			TempProfilerWorkspace aggregateWorkspace;
 			const std::filesystem::path aggregatePath = aggregateWorkspace.Path("aggregate-root.teprof");
-			ProfilerCaptureDocument aggregateDocument = profiler.FinishRecording();
+			const ProfilerJournalFinalizationTicket aggregateFinishTicket = profiler.FinishRecording();
+			context.Expect(profiler.GetJournalFinalizationStatus(aggregateFinishTicket).state
+				== ProfilerJournalFinalizationState::Completed,
+				"Aggregate in-memory capture should finish through the ticket contract.");
+			ProfilerCaptureDocument aggregateDocument = profiler.GetDocumentSnapshot();
 			std::string aggregateError;
 			context.Expect(SaveCaptureDocument(aggregateDocument, aggregatePath, aggregateError),
 				"Aggregate frame roots should save through the compact capture format: " + aggregateError);
 			ProfilerCaptureDocument loadedAggregateDocument;
-			context.Expect(LoadCaptureDocument(aggregatePath, loadedAggregateDocument, aggregateError),
+			// Evaluate the reader before constructing its diagnostic. Function-call
+			// argument evaluation order must not hide the error text on a failure.
+			const bool loadedAggregate = LoadCaptureDocument(
+				aggregatePath, loadedAggregateDocument, aggregateError);
+			context.Expect(loadedAggregate,
 				"Aggregate frame roots should load through the compact capture format: " + aggregateError);
 			context.Expect(!loadedAggregateDocument.frames.empty()
 				&& HasSampleNamed(loadedAggregateDocument.frames.front(), "Engine Frame")
@@ -1003,7 +1014,9 @@ namespace TerraEngine::Tests {
 			profiler.StartRecording(metadata, settings);
 
 			constexpr std::size_t workersPerFrame = 80u;
-			for (std::size_t frameIndex = 0u; frameIndex < 2u; ++frameIndex)
+			// Four frames prove the reusable protected-boundary scratch releases
+			// transient worker references after every merge, not only once.
+			for (std::size_t frameIndex = 0u; frameIndex < 4u; ++frameIndex)
 			{
 				profiler.BeginFrame(true);
 				std::vector<std::thread> workers;
@@ -1027,7 +1040,7 @@ namespace TerraEngine::Tests {
 			}
 
 			const std::vector<ProfilerFrameRecord> frames = profiler.GetFramesSnapshot();
-			context.ExpectEqual(std::size_t(2u), frames.size(),
+			context.ExpectEqual(std::size_t(4u), frames.size(),
 				"Both transient-worker frames should be committed.");
 			for (const ProfilerFrameRecord& frame : frames)
 			{
@@ -1255,61 +1268,5 @@ namespace TerraEngine::Tests {
 			context.Expect(profiler.GetFrameListSnapshot().empty(), "Idle instrumentation should leave the lightweight frame list empty.");
 		});
 
-		registry.Add("Engine.ProfilerCapture.V2DispatchesAtomicallyAndPreservesV1", [](TestContext& context) {
-			using namespace TerraEngine::Profiling;
-
-			TempProfilerWorkspace workspace;
-			ProfilerCaptureDocument document = MakeCaptureDocument();
-			ProfilerFrameRecord& frame = document.frames.front();
-			frame.performanceStages.push_back({
-				PerformanceStageDomain::Physics, "Physics.ProviderRead",
-				{TelemetryAvailability::Available, 1000u, {}}, "PhysicsSystem", 12u, false});
-			frame.physicsWorkVolume = PhysicsWorkVolumeRecord{1u, 12u, 8u, 12u, 8u, 8u, 4u, 4u};
-
-			std::string error;
-			const std::filesystem::path v2Path = workspace.Path("round-trip-v2.teprof");
-			context.Expect(SaveCaptureDocument(document, v2Path, error), "The default save path should write a v2 capture atomically.");
-			ProfilerCaptureDocument loadedV2;
-			context.Expect(LoadCaptureDocument(v2Path, loadedV2, error), "The v2 dispatcher should load a committed capture.");
-			context.ExpectEqual(2u, loadedV2.payloadVersion, "Default profiler saves should use payload version two.");
-			context.Expect(!loadedV2.frames.empty() && !loadedV2.frames.front().performanceStages.empty(), "V2 round trips must retain typed critical-path stages.");
-			context.Expect(!loadedV2.frames.empty() && loadedV2.frames.front().physicsWorkVolume.has_value(), "V2 round trips must retain processed-versus-published work volumes.");
-
-			document.payloadVersion = 1u;
-			const std::filesystem::path v1Path = workspace.Path("legacy-v1.teprof");
-			context.Expect(SaveCaptureDocument(document, v1Path, error), "An explicit v1 fixture write should remain available for compatibility testing.");
-			ProfilerCaptureDocument loadedV1;
-			context.Expect(LoadCaptureDocument(v1Path, loadedV1, error), "The version dispatcher must keep v1 captures readable.");
-			context.ExpectEqual(1u, loadedV1.payloadVersion, "Version dispatch must identify a v1 fixture without rewriting it.");
-		});
-
-		registry.Add("Engine.ProfilerCapture.V2RecoversCommittedChunksAndRetainsCriticalStreams", [](TestContext& context) {
-			using namespace TerraEngine::Profiling;
-
-			TempProfilerWorkspace workspace;
-			ProfilerCaptureDocument document = MakeCaptureDocument();
-			document.metadata.settings.detailLevel = ProfilerCaptureDetailLevel::Aggregate;
-			document.metadata.settings.maximumChunkFrames = 1u;
-			document.frames.front().performanceStages.push_back({
-				PerformanceStageDomain::SceneView, "SceneView.Emission",
-				{TelemetryAvailability::Available, 2000u, {}}, "SceneView", 4u, false});
-			std::string error;
-			const std::filesystem::path path = workspace.Path("recoverable-v2.teprof");
-			context.Expect(SaveCaptureDocument(document, path, error), "A v2 capture should save before tail-recovery testing.");
-			std::ifstream input(path, std::ios::binary);
-			std::string persisted((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-			const std::size_t lastLine = persisted.find_last_of('\n', persisted.size() > 1u ? persisted.size() - 2u : 0u);
-			if (lastLine != std::string::npos)
-			{
-				persisted.resize(lastLine + 1u);
-				std::ofstream output(path, std::ios::binary | std::ios::trunc);
-				output << persisted;
-			}
-			ProfilerCaptureDocument recovered;
-			context.Expect(LoadCaptureDocument(path, recovered, error), "A missing final v2 index should recover already committed chunks.");
-			context.Expect(recovered.recoveredIncompleteTail && !recovered.complete, "Recovery must explicitly report an incomplete final tail.");
-			context.Expect(!recovered.frames.empty() && recovered.frames.front().samples.empty(), "Aggregate captures should omit optional samples.");
-			context.Expect(!recovered.frames.empty() && !recovered.frames.front().performanceStages.empty(), "Aggregate captures must retain critical typed stage streams.");
-		});
 	}
 }

@@ -57,10 +57,12 @@ namespace TerraEngine::Tests
 			std::ifstream capture(root / "CaptureFramePublicationPerformance.ps1");
 			std::string captureSource((std::istreambuf_iterator<char>(capture)), {});
 			context.Expect(captureSource.find("postCaptureStats.data") != std::string::npos
-				&& captureSource.find("profilerEvidence.summary.data.summary") != std::string::npos
+				&& captureSource.find("Get-PropertyValue $document 'profilerEvidence'") != std::string::npos
+				&& captureSource.find("Get-PropertyValue $summaryEnvelope 'data'") != std::string::npos
+				&& captureSource.find("incomplete profiler summary") != std::string::npos
 				&& captureSource.find("geometryRouteCalibrationIdentity") != std::string::npos
 				&& captureSource.find("run-$run-metrics.json") != std::string::npos,
-				"Capture must extract route diagnostics and profiler timing streams per run.");
+				"Capture must extract route diagnostics and profiler timing streams per run without unsafe missing-property reads.");
 			context.Expect(captureSource.find("sparseMutationOperation") != std::string::npos,
 				"Static sparse-change capture must require an explicit one-percent mutation operation.");
 			context.Expect(captureSource.find("variantSharedClipLists") != std::string::npos

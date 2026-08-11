@@ -238,6 +238,40 @@ namespace TerraEngine::EditorTests
 			ObjectManager::instance().clear();
 		});
 
+		registry.Add("Editor.Automation.Service.SceneListingPagesDeepHierarchiesBeforeComponentDiscovery", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			// A long parent chain reproduces the hierarchy shape that previously made
+			// the recursive MCP listing consume one call frame per scene object.
+			Object current = objects.createObject("Paged hierarchy 0");
+			for (std::uint32_t index = 1u; index < 512u; ++index)
+			{
+				Object child = objects.createObject("Paged hierarchy " + std::to_string(index));
+				context.Expect(objects.setParent(child, current), "The deep listing fixture hierarchy should remain valid.");
+				current = child;
+			}
+
+			EditorAutomationService service;
+			const nlohmann::json page = service.HandleTool("scene.list_objects",
+				{{"includeComponents", true}, {"offset", 128u}, {"limit", 32u}},
+				WriteMode::ReadOnly, "scene-page-deep");
+			context.Expect(page.value("ok", false), "A deep scene listing should return a bounded page without recursive traversal.");
+			context.ExpectEqual(page["data"]["objects"].size(), std::size_t(32u),
+				"The requested scene page should contain only its bounded object count.");
+			context.Expect(page["data"].value("hasMore", false)
+				&& page["data"].value("nextOffset", 0ULL) == 160ULL,
+				"A nonterminal page should advertise the next stable matched-object offset.");
+			context.Expect(page["data"]["objects"].front().value("name", std::string{}) == "Paged hierarchy 128",
+				"Pagination must preserve the existing stable depth-first hierarchy order.");
+
+			const nlohmann::json invalidLimit = service.HandleTool("scene.list_objects",
+				{{"limit", 257u}}, WriteMode::ReadOnly, "scene-page-invalid");
+			context.Expect(!invalidLimit.value("ok", true)
+				&& invalidLimit["error"].value("category", std::string{}) == "validation",
+				"The service must reject an unbounded scene-list page before it constructs response JSON.");
+			objects.clear();
+		});
+
 		registry.Add("Editor.Automation.Service.ObjectMetadataDeleteAndUndoWork", [](TestContext& context) {
 			ObjectManager::instance().clear();
 			UndoRedoSystem::Instance().Clear();

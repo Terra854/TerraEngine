@@ -9,11 +9,19 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace TerraEngine::Profiling
 {
+// Complete journal frames may carry an opaque, fixed-record sample hand-off
+// between the protected frame boundary and the serialized journal worker. The
+// concrete storage stays private to Profiler.cpp so capture readers and writers
+// cannot accidentally depend on producer-ring representation details.
+struct ProfilerDeferredSampleStorage;
+
 // ProfilerSessionState names the supported states explicitly so serialization and switches stay readable.
 enum class ProfilerSessionState : std::uint8_t
 {
@@ -101,7 +109,19 @@ struct ProfilerCaptureSettings
 	// Chunks are bounded before writing so a long capture is recoverable even if
 	// the final chunk/index is interrupted by shutdown or a power failure.
 	std::uint32_t maximumChunkFrames = 120u;
-	std::uint64_t maximumChunkBytes = 1024u * 1024u;
+	// Eight MiB keeps recovery records bounded while allowing detailed live
+	// frames to amortize journal headers, checksums, and compression work. The
+	// queue budget remains separately bounded at 256 MiB.
+	std::uint64_t maximumChunkBytes = 8u * 1024u * 1024u;
+	// Live V1 journaling owns only a bounded amount of capture memory.  A zero
+	// value is never treated as unlimited here: callers must opt into a concrete
+	// budget so a long recording cannot silently grow with its duration.
+	std::uint64_t residentByteBudget = 256u * 1024u * 1024u;
+	// Pending sealed values are bounded independently from segment size. The
+	// larger default gives the worker enough batching headroom for dense frames
+	// while the one-quarter compact reserve still protects core evidence.
+	std::uint64_t maximumPendingBytes = 256u * 1024u * 1024u;
+	std::uint64_t maximumSealedFrameBytes = 2u * 1024u * 1024u;
 };
 
 // struct ProfilerMetric groups related state and operations so callers have one documented contract.
@@ -294,7 +314,7 @@ struct ProfilerRenderOptimizationEvidence
 	std::array<ProfilerRenderOptimizationViewSummary, 2U> views{};
 };
 
-// ProfilerFramePublicationEvidence is optional v2 evidence for one complete
+// ProfilerFramePublicationEvidence is optional journal V1 evidence for one complete
 // frame. Availability is explicit: an unavailable field is not represented as
 // a numeric zero, which keeps comparisons fail-closed when instrumentation is
 // absent on one run.
@@ -479,6 +499,112 @@ struct ProfilerFrameRecord
 	std::optional<PhysicsWorkVolumeRecord> physicsWorkVolume;
 };
 
+// ProfilerCaptureLossClass tells a reopened artifact exactly which optional
+// evidence was deliberately omitted under pressure.  It is not an error value:
+// a valid zero-duration sample remains distinguishable from unavailable or
+// intentionally discarded detail.
+enum class ProfilerCaptureLossClass : std::uint8_t
+{
+	None,
+	AnimationDetails,
+	SampleLeaves,
+	TaskContext,
+	WorkloadRanges,
+	CompactOnly,
+	CoreRejected
+};
+
+// This ordered view is the single pressure-policy contract used by live
+// sealing. Earlier tiers preserve progressively more diagnostic value; callers
+// must stop as soon as the pending-byte admission test succeeds.
+[[nodiscard]] std::span<const ProfilerCaptureLossClass>
+GetProfilerOptionalDetailSheddingOrder() noexcept;
+
+// ProfilerCaptureLossReason records why a deterministic policy was selected.
+// Persisting this value makes a saturated disk or queue debuggable after the
+// editor has restarted.
+enum class ProfilerCaptureLossReason : std::uint8_t
+{
+	None,
+	QueuePressure,
+	DestinationUnavailable,
+	CoreBudgetExceeded
+};
+
+// ProfilerCaptureLossRange coalesces adjacent frames that lost the same class
+// of optional evidence.  Counts are kept separately so tools never infer loss
+// from a missing vector or a numeric zero.
+struct ProfilerCaptureLossRange
+{
+	std::uint64_t firstFrameIndex = 0u;
+	std::uint64_t lastFrameIndex = 0u;
+	ProfilerCaptureLossClass lossClass = ProfilerCaptureLossClass::None;
+	ProfilerCaptureLossReason reason = ProfilerCaptureLossReason::None;
+	std::uint64_t discardedRecordCount = 0u;
+	std::uint64_t discardedByteCount = 0u;
+};
+
+// ProfilerSealedFrame is the immutable hand-off between the protected frame
+// boundary and journal persistence.  The owned-byte count is measured before
+// queue admission, allowing producers to reject pressure without waiting for
+// a persistence worker or relying on allocator-global statistics.
+struct ProfilerSealedFrame
+{
+	ProfilerFrameRecord frame;
+	std::shared_ptr<ProfilerDeferredSampleStorage> deferredSamples;
+	std::uint64_t ownedByteCount = 0u;
+	std::uint64_t deferredAggregationReservationBytes = 0u;
+	// Journal frames can defer only derived presentation data. These scalar inputs
+	// snapshot every mutable profiler counter needed by coverage aggregation, so
+	// the persistence worker never reads a later frame's live state.
+	bool needsDeferredAggregation = false;
+	bool cpuEngineEnabled = false;
+	bool taskExecutionEnabled = false;
+	std::uint64_t droppedSampleCount = 0u;
+	std::uint64_t truncatedSampleLabelCount = 0u;
+	std::uint64_t lateSampleCount = 0u;
+	std::uint64_t queuedTaskCount = 0u;
+	std::uint64_t startedTaskCount = 0u;
+	std::uint64_t finishedTaskCount = 0u;
+	std::vector<ProfilerCaptureLossRange> losses;
+	// Frames admitted through the reserved compact tier remain distinguishable
+	// from full-detail work. The persistence worker merges both FIFO streams by
+	// frame index, preserving chronology while preventing optional detail from
+	// consuming the bytes reserved for a later compact frame core.
+	bool compactCoreOnly = false;
+};
+
+// ProfilerCaptureHealth is a bounded live snapshot.  Every field is a scalar
+// so an open Profiler window can report recording health without copying the
+// growing frame history or any detailed sample hierarchy.
+struct ProfilerCaptureHealth
+{
+	std::uint64_t producedFrameCount = 0u;
+	std::uint64_t queuedFrameCount = 0u;
+	std::uint64_t committedFrameCount = 0u;
+	std::uint64_t residentBytes = 0u;
+	std::uint64_t residentHighWaterBytes = 0u;
+	std::uint64_t pendingBytes = 0u;
+	// In-flight bytes remain resident while a worker serializes/flushed a batch.
+	// They are not released until the write either commits or fails.
+	std::uint64_t inFlightBytes = 0u;
+	std::uint64_t droppedDetailRecordCount = 0u;
+	std::uint64_t droppedDetailByteCount = 0u;
+	std::uint64_t rejectedCoreFrameCount = 0u;
+	std::uint64_t persistenceLagFrames = 0u;
+	std::uint64_t persistenceLagHighWaterFrames = 0u;
+	std::uint64_t collectionNanoseconds = 0u;
+	std::uint64_t sealingNanoseconds = 0u;
+	std::uint64_t queueingNanoseconds = 0u;
+	std::uint64_t persistenceNanoseconds = 0u;
+	std::uint64_t finalizationNanoseconds = 0u;
+	std::uint64_t persistedBytes = 0u;
+	std::uint64_t persistenceOperationCount = 0u;
+	std::uint64_t persistenceThroughputBytesPerSecond = 0u;
+	bool destinationWritable = true;
+	bool terminalFailure = false;
+};
+
 // struct ProfilerFrameListItem keeps the editor frame list cheap to redraw.
 // It intentionally mirrors only the columns shown in the list so opening the
 // profiler window does not copy every sample string for every retained frame.
@@ -507,7 +633,8 @@ struct ProfilerCaptureArtifact
 	std::string fileName;
 	std::filesystem::path absolutePath;
 	ProfilerCaptureMetadata metadata;
-	std::uint32_t payloadVersion = 1u;
+	std::string formatIdentifier = "TerraEngineProfilerJournalV1";
+	std::uint32_t formatVersion = 1u;
 	std::uint64_t frameCount = 0u;
 	std::uint64_t committedFrameCount = 0u;
 	bool complete = true;
@@ -524,7 +651,8 @@ struct ProfilerCaptureDocument
 	std::vector<ProfilerFrameRecord> frames;
 	std::optional<std::filesystem::path> sourcePath;
 	std::string lastError;
-	std::uint32_t payloadVersion = 2u;
+	std::string formatIdentifier = "TerraEngineProfilerJournalV1";
+	std::uint32_t formatVersion = 1u;
 	std::uint64_t committedFrameCount = 0u;
 	bool complete = true;
 	bool recoveredIncompleteTail = false;
@@ -550,6 +678,31 @@ std::string MakeReadableTimestamp();
 bool AnyModuleEnabled(const ProfilerCaptureSettings& settings);
 std::vector<ProfilerModuleSummary> MakeDefaultModuleSummaries(const ProfilerCaptureSettings& settings);
 void TrimFrameBuffer(std::vector<ProfilerFrameRecord>& frames, const ProfilerCaptureSettings& settings);
+// Active animation telemetry is stored as fixed typed values while recording.
+// Snapshot/read callers invoke this presentation adapter after copying a frame,
+// so stable UI metric aliases never allocate or scan a live frame boundary.
+void MaterializeProfilerAnimationPresentationMetrics(ProfilerFrameRecord& frame);
+void MaterializeProfilerAnimationPresentationMetrics(ProfilerCaptureDocument& document);
+// The V1 journal uses these helpers before a sealed frame enters its bounded
+// queue.  They intentionally operate only on value-owned records, never live
+// profiler state or allocator-global counters.
+std::uint64_t EstimateProfilerFrameOwnedBytes(const ProfilerFrameRecord& frame) noexcept;
+bool ValidateProfilerSealedFrame(const ProfilerSealedFrame& frame, std::string& outError) noexcept;
+void CoalesceProfilerCaptureLossRange(
+	std::vector<ProfilerCaptureLossRange>& ranges,
+	const ProfilerCaptureLossRange& next);
+// The journal stores one self-contained compact frame payload per local string
+// table.  Keeping the binary envelope separate from this value codec lets the
+// journal recover a committed segment without depending on neighboring data.
+bool EncodeProfilerJournalFrame(
+	const ProfilerFrameRecord& frame,
+	const ProfilerCaptureSettings& settings,
+	std::string& outPayload,
+	std::string& outError);
+bool DecodeProfilerJournalFrame(
+	std::string_view payload,
+	ProfilerFrameRecord& outFrame,
+	std::string& outError);
 void AddOrReplaceTimingStreamSample(ProfilerFrameRecord& frame, ProfilerTimingStreamSample sample);
 std::vector<ProfilerTimingStreamAggregate> BuildTimingStreamAggregates(const std::vector<ProfilerFrameRecord>& frames, const std::optional<ProfilerFrameRecord>& selectedFrame = std::nullopt);
 bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::filesystem::path& path, std::string& outError);

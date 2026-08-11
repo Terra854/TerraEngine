@@ -4,6 +4,8 @@
 
 #include "ProfilerCaptureStore.h"
 
+#include "Engine/Profiling/ProfilerJournalV1.h"
+
 #include <algorithm>
 #include <system_error>
 
@@ -38,6 +40,28 @@ bool PathStartsWith(const std::filesystem::path& path, const std::filesystem::pa
 		}
 	}
 	return true;
+}
+
+// MakeJournalArtifact converts the bounded V1 header/index result into the
+// editor's temporary catalog bridge. It intentionally does not request a full
+// document, so listing a long capture remains independent of sample volume.
+TerraEngine::Profiling::ProfilerCaptureArtifact MakeJournalArtifact(
+	const std::filesystem::path& path,
+	const TerraEngine::Profiling::ProfilerJournalV1OpenResult& journal)
+{
+	TerraEngine::Profiling::ProfilerCaptureArtifact artifact;
+	artifact.fileName = path.filename().string();
+	artifact.absolutePath = WeaklyCanonicalOrAbsolute(path);
+	artifact.metadata = journal.metadata;
+	artifact.frameCount = journal.summary.frameCount;
+	artifact.committedFrameCount = journal.summary.frameCount;
+	artifact.complete = journal.complete;
+	artifact.recoveredIncompleteTail = journal.recoveredIncompleteTail;
+	artifact.supported = true;
+	artifact.status = journal.recoveredIncompleteTail
+		? "Recovered incomplete tail"
+		: (journal.complete ? "Ready" : "Incomplete");
+	return artifact;
 }
 }
 
@@ -84,82 +108,139 @@ std::filesystem::path ProfilerCaptureStore::GetProfilerDirectory() const
 	return root / "Profiler";
 }
 
-// ProfilerCaptureStore::SaveNewCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-bool ProfilerCaptureStore::SaveNewCapture(TerraEngine::Profiling::ProfilerCaptureDocument document, std::filesystem::path& outPath, std::string& outError) const
+bool ProfilerCaptureStore::ReserveJournalArtifact(
+	const TerraEngine::Profiling::ProfilerCaptureMetadata& metadata,
+	std::filesystem::path& outPath,
+	std::string& outError) const
 {
-	return SaveNewCaptureRetained(document, outPath, outError);
-}
-
-// ProfilerCaptureStore::SaveNewCaptureRetained serializes one caller-owned
-// document while preserving its normalized metadata for immediate selection.
-bool ProfilerCaptureStore::SaveNewCaptureRetained(TerraEngine::Profiling::ProfilerCaptureDocument& document, std::filesystem::path& outPath, std::string& outError) const
-{
+	outPath.clear();
+	outError.clear();
 	if (root.empty())
 	{
 		outError = "No project is open.";
 		return false;
 	}
-
-	const std::filesystem::path profilerDirectory = GetProfilerDirectory();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!IsPathInsideProject(profilerDirectory))
+	const std::filesystem::path directory = GetProfilerDirectory();
+	if (!IsPathInsideProject(directory))
 	{
 		outError = "Profiler directory is outside the opened project.";
 		return false;
 	}
-
-	std::error_code ec;
-	std::filesystem::create_directories(profilerDirectory, ec);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ec)
+	std::error_code error;
+	std::filesystem::create_directories(directory, error);
+	if (error)
 	{
-		outError = "Failed to create project Profiler directory: " + ec.message();
+		outError = "Failed to create project Profiler directory: " + error.message();
 		return false;
 	}
-
-	std::filesystem::path capturePath = MakeCapturePath(document);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!IsPathInsideProject(capturePath))
+	std::filesystem::path candidate = MakeJournalPath(metadata);
+	for (std::uint32_t suffix = 1u; std::filesystem::exists(candidate, error); ++suffix)
 	{
-		outError = "Profiler capture path is outside the opened project.";
+		if (error || suffix == 10000u)
+		{
+			outError = error ? error.message() : "Could not reserve a unique profiler journal filename.";
+			return false;
+		}
+		candidate = directory / (candidate.stem().string() + "-" + std::to_string(suffix) + candidate.extension().string());
+	}
+	if (!IsPathInsideProject(candidate))
+	{
+		outError = "Profiler journal path is outside the opened project.";
 		return false;
 	}
-
-	document.sourcePath = capturePath;
-	document.metadata.projectPathHint = root.string();
-	document.metadata.savedAt = TerraEngine::Profiling::MakeReadableTimestamp();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!TerraEngine::Profiling::SaveCaptureDocument(document, capturePath, outError))
-	{
-		return false;
-	}
-
-	outPath = capturePath;
+	outPath = candidate;
 	return true;
 }
 
-// ProfilerCaptureStore::LoadCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-bool ProfilerCaptureStore::LoadCapture(const std::filesystem::path& capturePath, TerraEngine::Profiling::ProfilerCaptureDocument& outDocument, std::string& outError) const
+bool ProfilerCaptureStore::ReadJournalIndex(
+	const std::filesystem::path& capturePath,
+	TerraEngine::Profiling::ProfilerJournalV1OpenResult& outResult,
+	std::string& outError) const
 {
-	if (root.empty())
+	if (root.empty() || !IsPathInsideProject(capturePath) || !PathStartsWith(capturePath, GetProfilerDirectory()))
 	{
-		outError = "No project is open.";
+		outError = "Profiler captures can only be read from the opened project's Profiler folder.";
 		return false;
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!IsPathInsideProject(capturePath) || !PathStartsWith(capturePath, GetProfilerDirectory()))
-	{
-		outError = "Profiler captures can only be loaded from the opened project's Profiler folder.";
-		return false;
-	}
+	// Finalization and catalog callers intentionally use the engine's index-only
+	// reader. It validates durable committed records without materializing the
+	// large detailed-frame payload; detail remains exclusive to the explicit
+	// ReadSelectedJournalFrame request below.
+	std::uint64_t totalFrameCount = 0u;
+	const auto result = TerraEngine::Profiling::ReadProfilerJournalV1IndexPage(
+		capturePath, 0u, 0u, outResult, totalFrameCount, outError);
+	return result == TerraEngine::Profiling::ProfilerJournalV1ResultCode::Ok
+		|| result == TerraEngine::Profiling::ProfilerJournalV1ResultCode::IncompleteTail;
+}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!TerraEngine::Profiling::LoadCaptureDocument(capturePath, outDocument, outError))
+bool ProfilerCaptureStore::ReadJournalIndexPage(
+	const std::filesystem::path& capturePath,
+	std::size_t offset,
+	std::size_t pageSize,
+	ProfilerCaptureIndexPage& outPage,
+	std::string& outError) const
+{
+	outPage = {};
+	if (root.empty() || !IsPathInsideProject(capturePath)
+		|| !PathStartsWith(capturePath, GetProfilerDirectory()))
+	{
+		outError = "Profiler captures can only be read from the opened project's Profiler folder.";
+		return false;
+	}
+	const std::size_t boundedPageSize = std::clamp<std::size_t>(
+		pageSize, 1u, kMaximumIndexPageSize);
+	const std::uint64_t engineOffset = offset == kNewestIndexPageOffset
+		? TerraEngine::Profiling::kProfilerJournalV1NewestIndexPage
+		: static_cast<std::uint64_t>(offset);
+	TerraEngine::Profiling::ProfilerJournalV1OpenResult journal;
+	std::uint64_t totalFrameCount = 0u;
+	const auto result = TerraEngine::Profiling::ReadProfilerJournalV1IndexPage(
+		capturePath,
+		engineOffset,
+		static_cast<std::uint32_t>(boundedPageSize),
+		journal,
+		totalFrameCount,
+		outError);
+	if (result != TerraEngine::Profiling::ProfilerJournalV1ResultCode::Ok
+		&& result != TerraEngine::Profiling::ProfilerJournalV1ResultCode::IncompleteTail)
 	{
 		return false;
 	}
-	outDocument.sourcePath = WeaklyCanonicalOrAbsolute(capturePath);
+	if (offset == kNewestIndexPageOffset)
+	{
+		offset = totalFrameCount == 0u ? 0u
+			: ((totalFrameCount - 1u) / boundedPageSize) * boundedPageSize;
+	}
+	offset = static_cast<std::size_t>(std::min<std::uint64_t>(offset, totalFrameCount));
+
+	outPage.metadata = std::move(journal.metadata);
+	outPage.summary = journal.summary;
+	outPage.offset = offset;
+	outPage.pageSize = boundedPageSize;
+	outPage.totalFrameCount = static_cast<std::size_t>(totalFrameCount);
+	outPage.complete = journal.complete;
+	outPage.recoveredIncompleteTail = journal.recoveredIncompleteTail;
+	outPage.frames.reserve(journal.index.size());
+	for (const auto& entry : journal.index)
+	{
+		outPage.frames.push_back({entry.frameIndex, entry.durationMs, entry.complete});
+	}
 	return true;
+}
+
+bool ProfilerCaptureStore::ReadSelectedJournalFrame(
+	const std::filesystem::path& capturePath,
+	std::uint64_t frameIndex,
+	TerraEngine::Profiling::ProfilerFrameRecord& outFrame,
+	std::string& outError) const
+{
+	if (root.empty() || !IsPathInsideProject(capturePath) || !PathStartsWith(capturePath, GetProfilerDirectory()))
+	{
+		outError = "Profiler captures can only be read from the opened project's Profiler folder.";
+		return false;
+	}
+	return TerraEngine::Profiling::ReadProfilerJournalV1SelectedFrame(capturePath, frameIndex, outFrame, outError)
+		== TerraEngine::Profiling::ProfilerJournalV1ResultCode::Ok;
 }
 
 // ProfilerCaptureStore::ListCaptures is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -208,28 +289,17 @@ std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> ProfilerCaptureStor
 			continue;
 		}
 
-		TerraEngine::Profiling::ProfilerCaptureArtifact artifact;
-		TerraEngine::Profiling::TryReadCaptureArtifactMetadata(entry.path(), artifact);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (artifact.supported)
+		TerraEngine::Profiling::ProfilerJournalV1OpenResult journal;
+		std::uint64_t totalFrameCount = 0u;
+		std::string journalError;
+		const TerraEngine::Profiling::ProfilerJournalV1ResultCode journalResult =
+			TerraEngine::Profiling::ReadProfilerJournalV1IndexPage(
+				entry.path(), 0u, 0u, journal, totalFrameCount, journalError);
+		if (journalResult == TerraEngine::Profiling::ProfilerJournalV1ResultCode::Ok
+			|| journalResult == TerraEngine::Profiling::ProfilerJournalV1ResultCode::IncompleteTail)
 		{
-			// The engine codec owns chunk validation and recovery.  The editor store
-			// preserves that verdict as metadata so listing a capture never hides a
-			// recovered final tail behind an apparently normal artifact.
-			if (artifact.status == "Ready (metadata)")
-			{
-				// "Ready (metadata)" describes the codec's fast metadata-only scan,
-				// not a distinct durable artifact state. Preserve the established editor
-				// listing contract while complete/recovery/checksum fields carry detail.
-				artifact.status = "Ready";
-			}
-			if (artifact.status.empty())
-			{
-				artifact.status = artifact.recoveredIncompleteTail
-					? "recovered_incomplete_tail"
-					: (artifact.complete ? "complete" : "incomplete");
-			}
-			captures.push_back(std::move(artifact));
+			captures.push_back(MakeJournalArtifact(entry.path(), journal));
+			continue;
 		}
 	}
 
@@ -249,10 +319,10 @@ bool ProfilerCaptureStore::IsPathInsideProject(const std::filesystem::path& path
 	return PathStartsWith(path, root);
 }
 
-// ProfilerCaptureStore::MakeCapturePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-std::filesystem::path ProfilerCaptureStore::MakeCapturePath(const TerraEngine::Profiling::ProfilerCaptureDocument& document) const
+// ProfilerCaptureStore::MakeJournalPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+std::filesystem::path ProfilerCaptureStore::MakeJournalPath(const TerraEngine::Profiling::ProfilerCaptureMetadata& metadata) const
 {
-	std::string projectName = document.metadata.projectName.empty() ? "Capture" : document.metadata.projectName;
+	std::string projectName = metadata.projectName.empty() ? "Capture" : metadata.projectName;
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (char& character : projectName)
 	{

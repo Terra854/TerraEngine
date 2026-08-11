@@ -28,18 +28,30 @@ namespace TerraEngine::EditorTests
 			context.Expect(runner.find("medianDeltaPercent") != std::string::npos
 				&& runner.find("p95DeltaPercent") != std::string::npos
 				&& runner.find("median-of-paired-median-and-p95-deltas") != std::string::npos
-				&& runner.find("Abs($aggregateP95DeltaPercent)") != std::string::npos,
-				"The installed idle-overhead gate must independently enforce the median matched-pair median and p95 deltas.");
-			context.Expect(runner.find("ValidationCameraPosition = @(3.0, 0.0, 0.75)") != std::string::npos
-				&& runner.find("ValidationCameraTarget = @(0.0, 0.0, 0.75)") != std::string::npos,
-				"The single-character idle-overhead visual gate must use the proven close validation framing.");
+				&& runner.find("$aggregateP95DeltaPercent -le 2.0") != std::string::npos
+				&& runner.find("Abs($aggregateP95DeltaPercent)") == std::string::npos,
+				"The installed idle-overhead gate must independently enforce one-sided median and p95 overhead caps.");
+			context.Expect(runner.find("ScenePath = 'Assets/Scenes/Scene.tescene'") != std::string::npos
+				&& runner.find("PrefabInstanceCount = 0") != std::string::npos
+				&& runner.find("ValidationCameraPosition = @(0.0, 1.0, 9.0)") != std::string::npos
+				&& runner.find("ValidationCameraTarget = @(0.0, 1.0, 8.0)") != std::string::npos
+				&& runner.find("authored-scene-exact-placement") != std::string::npos,
+				"Idle-overhead evidence must preserve the canonical authored scene, population, and camera identity.");
 		});
 		registry.Add("Editor.ProfilerIdleOverhead.UsesImmutableSnapshotsWhenIdle", [](TestContext& context)
 		{
 			const std::string window = ReadSource("Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp");
-			context.Expect(window.find("GetFrameListSnapshot") != std::string::npos, "Idle profiler presentation must read a bounded frame-list snapshot.");
-			context.Expect(window.find("GetSelectedFrameSnapshot") != std::string::npos, "Selected-frame presentation must use an immutable profiler snapshot.");
-			context.Expect(window.find("GetSnapshotRevision") != std::string::npos, "Idle refresh must be revision-driven rather than rebuilding history every draw.");
+			context.Expect(window.find("presentation->indexPage") != std::string::npos, "Idle profiler presentation must read one bounded V1 index page.");
+			context.Expect(window.find("service->RequestSelectedFrame") != std::string::npos, "Selected-frame presentation must request one immutable V1 detail record.");
+			context.Expect(window.find("service->GetPresentationRevision()") != std::string::npos
+				&& window.find("if (presentationChanged)") != std::string::npos
+				&& window.find("cache->presentationRevision = presentation->presentationRevision") != std::string::npos,
+				"Idle refresh must gate immutable snapshot retention on the service revision rather than rebuilding history every draw.");
+			context.Expect(window.find("cache->hasActiveProject = presentation->hasActiveProject") != std::string::npos
+				&& window.find("cache->hasActiveOperation = std::any_of") != std::string::npos
+				&& window.find("service->HasActiveProject()") == std::string::npos
+				&& window.find("service->IsBusy()") == std::string::npos,
+				"Open-idle toolbar state must reuse immutable publication fields instead of taking service locks every frame.");
 			context.Expect(window.find("kProfilerWindowRefreshInterval") != std::string::npos, "Profiler refresh must remain throttled while the window is open and idle.");
 			context.Expect(window.find("captureClipper.Begin") != std::string::npos,
 				"The idle capture browser must submit only visible saved-session rows.");
@@ -48,7 +60,7 @@ namespace TerraEngine::EditorTests
 		registry.Add("Editor.ProfilerIdleOverhead.SelectedSessionDefersDeepRefresh", [](TestContext& context)
 		{
 			const std::string service = ReadSource("Editor/TerraEngine-Editor/Profiling/EditorProfilerService.cpp");
-			context.Expect(service.find("LoadDocument") != std::string::npos, "Selecting a completed session must load an immutable document snapshot.");
+			context.Expect(service.find("ReadJournalIndex") != std::string::npos && service.find("ReadSelectedJournalFrame") != std::string::npos, "Selecting a completed session must open the V1 index and later load one selected detail record.");
 			context.Expect(service.find("ProfilerCaptureStore") != std::string::npos, "Session selection must use the capture store rather than live telemetry collection.");
 			context.Expect(service.find("Opening profiler capture") != std::string::npos && service.find("Loaded capture") != std::string::npos, "Selected-session loading must remain an explicit completed-capture transition.");
 		});

@@ -237,7 +237,7 @@ namespace TerraEngine::Tests {
 				"Disabled profiler frames must not allocate an animation aggregate by default.");
 		});
 
-		registry.Add("Animation.DiagnosticsPerformance.V2RoundTripRetainsCriticalAggregate", [](TestContext& context) {
+		registry.Add("Animation.DiagnosticsPerformance.V1RoundTripRetainsCriticalAggregate", [](TestContext& context) {
 			ProfilerCaptureDocument document;
 			document.metadata.projectName = "Animation telemetry round trip";
 			document.metadata.settings.detailLevel = ProfilerCaptureDetailLevel::Detailed;
@@ -257,7 +257,7 @@ namespace TerraEngine::Tests {
 			std::error_code removeError;
 			std::filesystem::remove(path, removeError);
 			context.Expect(opened && loaded.frames.size() == 1U && loaded.frames[0U].animationTelemetry,
-				error.empty() ? "V2 must retain the typed animation aggregate." : error);
+				error.empty() ? "Journal V1 must retain the typed animation aggregate." : error);
 			if (opened && loaded.frames.size() == 1U && loaded.frames[0U].animationTelemetry)
 			{
 				const ProfilerAnimationFrameTelemetry& retained = *loaded.frames[0U].animationTelemetry;

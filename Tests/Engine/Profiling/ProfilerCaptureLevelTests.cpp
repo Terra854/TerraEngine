@@ -3,6 +3,7 @@
 #include "Profiling/ProfilerCapture.h"
 
 #include <filesystem>
+#include <vector>
 
 namespace TerraEngine::Tests
 {
@@ -30,6 +31,37 @@ namespace TerraEngine::Tests
 				context.Expect(!loaded.frames.empty() && (level == ProfilerCaptureDetailLevel::Detailed || loaded.frames.front().samples.empty()), "Only detailed mode should retain every optional scope at this sampled frame.");
 				std::error_code ignored;
 				std::filesystem::remove(path, ignored);
+			}
+		});
+
+		registry.Add("Engine.ProfilerCaptureLevels.PressureTiersUseStableTypedOrder", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+			const std::span<const ProfilerCaptureLossClass> order =
+				GetProfilerOptionalDetailSheddingOrder();
+			context.Expect(order.size() == 4u
+				&& order[0u] == ProfilerCaptureLossClass::AnimationDetails
+				&& order[1u] == ProfilerCaptureLossClass::SampleLeaves
+				&& order[2u] == ProfilerCaptureLossClass::TaskContext
+				&& order[3u] == ProfilerCaptureLossClass::WorkloadRanges,
+				"Pressure must shed optional families in the stable value-preserving order.");
+
+			std::vector<ProfilerCaptureLossRange> ranges;
+			for (std::size_t ordinal = 0u; ordinal < order.size(); ++ordinal)
+			{
+				const std::uint64_t frameIndex = 40u + ordinal;
+				CoalesceProfilerCaptureLossRange(ranges, {frameIndex, frameIndex,
+					order[ordinal], ProfilerCaptureLossReason::QueuePressure,
+					ordinal + 1u, (ordinal + 1u) * 10u});
+			}
+			context.Expect(ranges.size() == order.size(),
+				"Different typed pressure classes must remain independently observable loss ranges.");
+			for (std::size_t ordinal = 0u; ordinal < ranges.size(); ++ordinal)
+			{
+				context.Expect(ranges[ordinal].lossClass == order[ordinal]
+					&& ranges[ordinal].reason == ProfilerCaptureLossReason::QueuePressure
+					&& ranges[ordinal].firstFrameIndex == 40u + ordinal
+					&& ranges[ordinal].lastFrameIndex == 40u + ordinal,
+					"Each pressure tier must retain its exact class, reason, and frame range.");
 			}
 		});
 	}

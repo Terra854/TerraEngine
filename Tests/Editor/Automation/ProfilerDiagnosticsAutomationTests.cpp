@@ -45,6 +45,14 @@ namespace TerraEngine::EditorTests
 			}
 			return {};
 		}
+
+		std::string ReadBenchmarkSource()
+		{
+			std::ifstream input(std::string(TERRAENGINE_SOURCE_DIR) + "/Tools/Profiling/CaptureProfilerReworkBenchmark.ps1", std::ios::binary);
+			std::ostringstream text;
+			text << input.rdbuf();
+			return text.str();
+		}
 	}
 
 	void RegisterProfilerDiagnosticsAutomationTests(TestRegistry& registry)
@@ -54,8 +62,8 @@ namespace TerraEngine::EditorTests
 
 			context.Expect(source.find("SerializeProfilerTimingStreams") != std::string::npos, "Detailed diagnostics should expose profiler timing streams structurally.");
 			context.Expect(source.find("\"profilerTimingStreams\"") != std::string::npos, "Diagnostics summary should contain profiler timing stream data.");
-			context.Expect(source.find("SerializeProfilerCaptureEvidence") != std::string::npos, "Detailed diagnostics should expose capture-level v2 evidence structurally.");
-			context.Expect(source.find("\"profilerCaptureEvidence\"") != std::string::npos, "Diagnostics summary should contain additive v2 capture evidence.");
+			context.Expect(source.find("SerializeProfilerCaptureEvidence") != std::string::npos, "Detailed diagnostics should expose capture-level V1 evidence structurally.");
+			context.Expect(source.find("\"profilerCaptureEvidence\"") != std::string::npos, "Diagnostics summary should contain V1 capture evidence.");
 			context.Expect(source.find("\"protectedBoundaryTimings\"") != std::string::npos, "Diagnostics evidence should retain protected-boundary timing breakdowns.");
 			context.Expect(source.find("\"workVolumes\"") != std::string::npos, "Diagnostics evidence should retain processed-versus-published body counts.");
 			context.Expect(source.find("renderer.virtualGeometry.stats") != std::string::npos, "Automation should retain the structured virtual geometry stats tool.");
@@ -83,6 +91,21 @@ namespace TerraEngine::EditorTests
 			context.Expect(source.find("densityConsolidated") != std::string::npos, "Scene View state should expose density work as structured evidence.");
 			context.Expect(source.find("presentationBatches") != std::string::npos, "Scene View state should report bounded presentation batches.");
 			context.Expect(source.find("selectedExemptions") != std::string::npos, "Scene View state should prove selected objects were exempt from general budgets.");
+		});
+
+		registry.Add("ProfilerDiagnosticsAutomation.BenchmarkIdentity.PinsAllComparisonInputs", [](TestContext& context) {
+			const std::string source = ReadBenchmarkSource();
+			context.Expect(source.find("projectHash") != std::string::npos
+				&& source.find("sceneHash") != std::string::npos
+				&& source.find("objectPlacementHash") != std::string::npos
+				&& source.find("workloadHash") != std::string::npos
+				&& source.find("cameraHash") != std::string::npos
+				&& source.find("viewportHash") != std::string::npos
+				&& source.find("captureSettingsHash") != std::string::npos
+				&& source.find("installedBuildHash") != std::string::npos
+				&& source.find("durationSeconds") != std::string::npos
+				&& source.find("TerraEngineProfilerJournalV1") != std::string::npos,
+				"Profiler comparisons must pin project, scene, placement/workload, camera, viewport, build, settings, duration, and V1 format.");
 		});
 	}
 }

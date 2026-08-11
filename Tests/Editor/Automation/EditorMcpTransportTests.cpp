@@ -766,6 +766,7 @@ namespace TerraEngine::EditorTests
 			bridge.SetEnabled(true);
 			const std::uint16_t port = bridge.GetListenPort();
 			std::vector<std::string> toolResponses(8);
+			std::array<std::atomic_bool, 8> toolResponsesReady{};
 			std::vector<std::jthread> toolClients;
 			toolClients.reserve(toolResponses.size());
 			for (std::size_t index = 0; index < toolResponses.size(); ++index)
@@ -775,6 +776,9 @@ namespace TerraEngine::EditorTests
 						"{\"jsonrpc\":\"2.0\",\"id\":\"saturation-" + std::to_string(index)
 						+ "\",\"method\":\"tools/call\",\"params\":{\"name\":\"object.create\",\"arguments\":{\"name\":\"MCP Saturation "
 						+ std::to_string(index) + "\"}}}", std::chrono::seconds(5));
+					// Publish after the string write. The main test thread waits on
+					// this flag instead of reading a client-owned response string.
+					toolResponsesReady[index].store(true, std::memory_order_release);
 				});
 			}
 			const auto admissionDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -794,6 +798,18 @@ namespace TerraEngine::EditorTests
 				std::this_thread::sleep_for(std::chrono::milliseconds(1));
 			}
 			const bool canceledOneQueuedCall = bridge.BuildStatusJson().value("pendingToolCallCount", 0u) == toolResponses.size() - 1;
+			const auto canceledResponseDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+			while (!toolResponsesReady.front().load(std::memory_order_acquire)
+				&& std::chrono::steady_clock::now() < canceledResponseDeadline)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			}
+			const bool canceledResponseCompletedBeforeShutdown =
+				toolResponsesReady.front().load(std::memory_order_acquire);
+			// The cancellation updates the pending-call count before the affected
+			// ordinary worker flushes its typed HTTP response. Waiting for that one
+			// response makes shutdown prove transport behavior rather than racing
+			// socket teardown against the worker under aggregate test load.
 			bridge.SetEnabled(false);
 			for (std::jthread& client : toolClients)
 			{
@@ -816,6 +832,8 @@ namespace TerraEngine::EditorTests
 			context.Expect(cancellationResponse.find("202 Accepted") != std::string::npos,
 				"The reserved control worker should acknowledge a cancellation while all ordinary lanes are blocked.");
 			context.Expect(canceledOneQueuedCall, "The reserved cancellation should remove the matching pending tool call.");
+			context.Expect(canceledResponseCompletedBeforeShutdown,
+				"The canceled ordinary worker should flush its typed response before listener shutdown.");
 			context.Expect(toolResponses.front().find("canceled") != std::string::npos,
 				"The canceled ordinary call should receive its typed cancellation response.");
 			context.Expect(!anySaturationObjectCreated, "No saturated or canceled mutation may run after listener shutdown.");

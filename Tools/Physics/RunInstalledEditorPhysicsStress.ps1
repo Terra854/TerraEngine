@@ -87,11 +87,6 @@ param(
 	[ValidateSet("detailed", "sampled", "aggregate")]
 	[string] $CaptureLevel = "detailed",
 
-	# New recordings are v2-only. V1 compatibility is validated by loading the
-	# immutable v1 fixture; TerraEngine never rewrites a v1 artifact in place.
-	[ValidateSet("v2")]
-	[string] $CaptureVersion = "v2",
-
 	[ValidateRange(5, 5)]
 	[int] $CaptureDurationSeconds = 5,
 
@@ -284,8 +279,8 @@ function Complete-ProfilerCaptureEvidence {
 	if (-not $RunProfilerCaptureChecks) { return }
 	$summaryData = Get-PropertyValue -Object $Summary -Name "summary"
 	if ($null -eq $summaryData) { $summaryData = $Summary }
-	$reportedVersion = Get-PropertyValue -Object $Summary -Name "payloadVersion"
-	if ($null -eq $reportedVersion) { $reportedVersion = Get-PropertyValue -Object $summaryData -Name "payloadVersion" }
+	$reportedFormat = Get-PropertyValue -Object $Summary -Name "formatIdentifier"
+	if ($null -eq $reportedFormat) { $reportedFormat = Get-PropertyValue -Object $summaryData -Name "formatIdentifier" }
 	$reportedBytes = Get-PropertyValue -Object $Summary -Name "artifactBytes"
 	if ($null -eq $reportedBytes) { $reportedBytes = Get-PropertyValue -Object $summaryData -Name "artifactBytes" }
 	if ($null -eq $reportedBytes) { $reportedBytes = Get-PropertyValue -Object $summaryData -Name "artifactSizeBytes" }
@@ -303,7 +298,7 @@ function Complete-ProfilerCaptureEvidence {
 	} else { $null }
 	$profilerCapture.durationObservedMs = $observedDuration
 	$profilerCapture.durationGatePassed = $null -ne $observedDuration -and [double]$observedDuration -ge ($CaptureDurationSeconds * 1000.0)
-	$profilerCapture.versionAccepted = $null -eq $reportedVersion -or [string]$reportedVersion -eq $CaptureVersion -or [string]$reportedVersion -eq $CaptureVersion.TrimStart("v")
+	$profilerCapture.formatAccepted = [string]$reportedFormat -eq 'TerraEngineProfilerJournalV1'
 	$streamObject = Get-PropertyValue -Object $summaryData -Name "streams"
 	if ($null -eq $streamObject) { $streamObject = Get-PropertyValue -Object $summaryData -Name "timingStreams" }
 	$streamNames = @()
@@ -336,14 +331,14 @@ function Complete-ProfilerCaptureEvidence {
 	$profilerCapture.recoveryProbe = [ordered]@{ attempted = $false; supported = $false; status = "not-requested"; reason = "The public load operation is exercised by the orchestrator's truncated-tail fixture probe." }
 	$baseline = Get-PropertyValue -Object $summaryData -Name "baseline"
 	$profilerCapture.comparableBaseline = [ordered]@{
-		captureLevel = $CaptureLevel; requestedVersion = $CaptureVersion
+		captureLevel = $CaptureLevel; requestedFormat = 'TerraEngineProfilerJournalV1'
 		frameCount = Get-PropertyValue -Object $summaryData -Name "frameCount"
 		completeFrameCount = Get-PropertyValue -Object $summaryData -Name "completeFrameCount"
 		incompleteFrameCount = Get-PropertyValue -Object $summaryData -Name "incompleteFrameCount"
 		baselineReference = "Tests/Fixtures/Performance/physics-baseline-summary.json"
 		baselineFrameP95Milliseconds = if ($null -ne $baseline) { Get-PropertyValue -Object $baseline -Name "frameP95Milliseconds" } else { $null }
 	}
-	$profilerCapture.compatibility = if ($null -eq $reportedVersion) { "legacy-reader-no-version-field" } elseif ($profilerCapture.versionAccepted) { "accepted" } else { "mismatch" }
+	$profilerCapture.compatibility = if ($profilerCapture.formatAccepted) { "accepted" } else { "unsupported" }
 }
 
 function Get-ToolEnvelope {
@@ -561,9 +556,9 @@ $profilerCaptureStoppedAtMs = $null
 $profilerCaptureGateError = $null
 $profilerCapture = [ordered]@{
 	requested = [bool]$RunProfilerCaptureChecks; captureLevel = $CaptureLevel
-	requestedVersion = $CaptureVersion; durationSeconds = $CaptureDurationSeconds
+	requestedFormat = 'TerraEngineProfilerJournalV1'; durationSeconds = $CaptureDurationSeconds
 	sizeGateBytes = 10MB; sizeGatePassed = $null; artifactBytes = $null
-	versionAccepted = $null; recoveryProbe = $null; metricAvailability = $null
+	formatAccepted = $null; recoveryProbe = $null; metricAvailability = $null
 	comparableBaseline = $null; compatibility = "unknown"
 }
 $authoringWalkthrough = [ordered]@{ requested = [bool]$RunAuthoringWalkthrough; completed = $false }
@@ -1507,11 +1502,9 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 	if (-not $SkipProfilerCapture) {
 		$profilerStartArguments = [ordered]@{ correlationId = "installed-physics-stress-baseline" }
 		if ($RunProfilerCaptureChecks) {
-			# New installed builds accept additive v2 controls while legacy clients
-			# may continue omitting them. V1 artifacts remain load-only compatibility
-			# inputs and are never requested from the v2 recording operation.
+			# New recordings always request the sole fresh V1 journal format.
 			$profilerStartArguments.captureLevel = $CaptureLevel
-			$profilerStartArguments.payloadVersion = [int]$CaptureVersion.TrimStart("v")
+			$profilerStartArguments.formatIdentifier = 'TerraEngineProfilerJournalV1'
 		}
 		$profilerCaptureStart = Invoke-Tool -Name "profiler.capture.start" -Arguments $profilerStartArguments
 		$profilerCaptureStartedAtMs = Get-MonotonicMilliseconds
@@ -1708,7 +1701,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		if ($RunProfilerCaptureChecks) {
 			# Loading the just-committed artifact is a non-destructive recovery probe.
 			# Older bridges may not expose a durable load job; retain that outcome as
-			# compatibility evidence rather than turning a v1 run into a false failure.
+			# explicit unavailable evidence rather than weakening the V1 gate.
 			try {
 				$load = Invoke-Tool -Name "profiler.capture.load" -Arguments ([ordered]@{ artifactId = [string]$profilerCaptureArtifact.artifactId; correlationId = "installed-profiler-capture-recovery-probe" })
 				$loadJobId = [string]$load.data.jobId
@@ -1729,7 +1722,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 				$profilerCapture.recoveryProbe = [ordered]@{ attempted = $true; supported = $false; status = "unavailable"; reason = $_.Exception.Message }
 			}
 			if (-not $profilerCapture.durationGatePassed) { $profilerCaptureGateError = "profiler-capture profiler capture did not span the required five-second wall-clock interval." }
-			elseif (-not $profilerCapture.versionAccepted) { $profilerCaptureGateError = "profiler-capture profiler capture payload version did not match the requested v2 writer." }
+			elseif (-not $profilerCapture.formatAccepted) { $profilerCaptureGateError = "profiler-capture format was not TerraEngineProfilerJournalV1." }
 			elseif (-not $profilerCapture.metricAvailability.gatePassed) { $profilerCaptureGateError = "profiler-capture profiler summary omitted one or more required typed evidence streams." }
 			elseif (-not $profilerCapture.recoveryProbe.supported -or $profilerCapture.recoveryProbe.status -ne "succeeded") { $profilerCaptureGateError = "profiler-capture profiler committed-artifact load/recovery probe did not succeed." }
 		}

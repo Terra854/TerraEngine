@@ -12,13 +12,11 @@
 #include <future>
 #include <algorithm>
 #include <cmath>
-#include <map>
 #include <iomanip>
-#include <numeric>
 #include <sstream>
 
 using TerraEngine::Profiling::Profiler;
-using TerraEngine::Profiling::ProfilerCaptureDocument;
+using TerraEngine::Profiling::ProfilerCaptureMetadata;
 using TerraEngine::Profiling::ProfilerCaptureSettings;
 using TerraEngine::Profiling::ProfilerSessionState;
 
@@ -37,137 +35,17 @@ std::string MakeRecordingStatus(const ProfilerCaptureSettings& settings)
 	return "Recording every frame (detailed, " + std::to_string(settings.maxFrames) + "-frame rolling limit)";
 }
 
-// PercentileFromSorted deliberately interpolates between neighbouring samples.
-// This produces a stable answer for small captures instead of rounding a P95
-// to a different whole frame as capture length changes.
-double PercentileFromSorted(const std::vector<double>& sortedValues, double percentile)
-{
-	if (sortedValues.empty())
-	{
-		return 0.0;
-	}
-	const double index = std::clamp(percentile, 0.0, 1.0) * static_cast<double>(sortedValues.size() - 1u);
-	const std::size_t lower = static_cast<std::size_t>(index);
-	const std::size_t upper = std::min(lower + 1u, sortedValues.size() - 1u);
-	return sortedValues[lower] + (sortedValues[upper] - sortedValues[lower]) * (index - static_cast<double>(lower));
-}
-
-// MetricAccumulator collects only valid telemetry samples.  Availability is
-// retained separately so consumers cannot mistake a missing timing source for
-// an observed zero duration.
-struct MetricAccumulator
-{
-	EditorProfilerMetricSummary summary;
-	std::vector<double> values;
-
-	void Add(const TerraEngine::Profiling::TelemetryDuration& duration)
-	{
-		if (duration.availability != TerraEngine::Profiling::TelemetryAvailability::Available)
-		{
-			++summary.unavailableCount;
-			if (summary.unavailableReason.empty())
-			{
-				summary.unavailableReason = duration.unavailableReason;
-			}
-			return;
-		}
-		values.push_back(static_cast<double>(duration.nanoseconds) / 1'000'000.0);
-	}
-
-	[[nodiscard]] EditorProfilerMetricSummary Finalize() const
-	{
-		EditorProfilerMetricSummary result = summary;
-		result.sampleCount = values.size();
-		result.available = !values.empty();
-		if (values.empty())
-		{
-			return result;
-		}
-		std::vector<double> sorted = values;
-		std::sort(sorted.begin(), sorted.end());
-		result.median = PercentileFromSorted(sorted, 0.50);
-		result.p95 = PercentileFromSorted(sorted, 0.95);
-		result.p99 = PercentileFromSorted(sorted, 0.99);
-		result.maximum = sorted.back();
-		return result;
-	}
-};
-
-void AddDuration(
-	std::map<std::string, MetricAccumulator>& accumulators,
-	std::string id,
-	std::string label,
-	const TerraEngine::Profiling::TelemetryDuration& duration)
-{
-	MetricAccumulator& accumulator = accumulators[id];
-	if (accumulator.summary.label.empty())
-	{
-		accumulator.summary.id = id;
-		accumulator.summary.label = std::move(label);
-		accumulator.summary.unit = "ms";
-	}
-	accumulator.Add(duration);
-}
-
-std::vector<EditorProfilerMetricSummary> FinalizeMetrics(const std::map<std::string, MetricAccumulator>& accumulators)
-{
-	std::vector<EditorProfilerMetricSummary> result;
-	result.reserve(accumulators.size());
-	for (const auto& [id, accumulator] : accumulators)
-	{
-		EditorProfilerMetricSummary summary = accumulator.Finalize();
-		// The map key is stable even if a producer omitted its optional display
-		// label, which keeps automation comparisons deterministic.
-		if (summary.id.empty())
-		{
-			summary.id = id;
-		}
-		if (summary.label.empty())
-		{
-			summary.label = id;
-		}
-		result.push_back(std::move(summary));
-	}
-	return result;
-}
-
-TerraEngine::Profiling::TelemetryDuration CumulativeDurationDelta(
-	const TerraEngine::Profiling::TelemetryDuration& current,
-	const TerraEngine::Profiling::TelemetryDuration& previous)
-{
-	if (current.availability != TerraEngine::Profiling::TelemetryAvailability::Available)
-	{
-		return current;
-	}
-	if (previous.availability != TerraEngine::Profiling::TelemetryAvailability::Available)
-	{
-		return {
-			TerraEngine::Profiling::TelemetryAvailability::Unavailable,
-			0u,
-			"The previous cumulative worker sample was unavailable."
-		};
-	}
-	// A decreasing counter means ThreadPool telemetry was reset during capture.
-	// In that case the current value is precisely the work completed since reset.
-	return {
-		TerraEngine::Profiling::TelemetryAvailability::Available,
-		current.nanoseconds >= previous.nanoseconds
-			? current.nanoseconds - previous.nanoseconds
-			: current.nanoseconds,
-		{}
-	};
-}
-
-std::uint64_t CumulativeCounterDelta(std::uint64_t current, std::uint64_t previous)
-{
-	return current >= previous ? current - previous : current;
-}
 }
 
 // EditorProfilerService::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::Initialize(EditorContext& context)
 {
 	ctx = &context;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		statusText = "No project open";
+		PublishPresentationLocked();
+	}
 	OnProjectOpened();
 }
 
@@ -196,35 +74,253 @@ void EditorProfilerService::OnProjectOpened()
 		cancellationToken = std::make_shared<std::atomic_bool>(false);
 		captureStore.SetProjectRoot(ctx->projectManager->GetProjectRoot());
 		lastSavedCaptureArtifact.reset();
+		selectedCapture.reset();
+		selectedSummary.reset();
+		selectedIndexPage.reset();
+		selectedFrame.reset();
+		selectedFrameArtifactId.clear();
+		decodedDetailCache.clear();
+		pendingIndexRequest.reset();
+		pendingDetailRequest.reset();
+		activeJournalPath.reset();
+		activeSessionArtifactId.clear();
+		finalizationTicket.reset();
+		operations = {};
+		sessionAccepting = true;
+		discardedStaleCompletionCount = 0u;
+		health = {};
+		healthPublishAccumulatorSeconds = 0.0f;
 		statusText = "Profiler ready";
 		lastError.clear();
+		PublishPresentationLocked();
 	}
-	MarkPresentationChanged();
 	RefreshCaptureList();
+}
+
+// EditorProfilerService::BeginProjectClose invalidates work before the caller
+// starts destroying scene resources. A worker can finish its filesystem call,
+// but its old epoch can no longer publish a document or UI result.
+void EditorProfilerService::BeginProjectClose()
+{
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		++projectGeneration;
+		if (cancellationToken)
+		{
+			cancellationToken->store(true, std::memory_order_release);
+		}
+		captureStore.ClearProjectRoot();
+		captures.clear();
+		lastSavedCaptureArtifact.reset();
+		selectedCapture.reset();
+		selectedSummary.reset();
+		selectedIndexPage.reset();
+		selectedFrame.reset();
+		selectedFrameArtifactId.clear();
+		decodedDetailCache.clear();
+		pendingIndexRequest.reset();
+		pendingDetailRequest.reset();
+		activeJournalPath.reset();
+		activeSessionArtifactId.clear();
+		finalizationTicket.reset();
+		// Preserve cancelled terminal operation states in the no-project snapshot.
+		// A caller that polls during close can distinguish cancellation from a
+		// successful finalization without retaining any capture history.
+		for (EditorProfilerOperationStatus& operation : operations)
+		{
+			if (operation.active)
+			{
+				operation.active = false;
+				operation.state = EditorProfilerOperationState::Cancelled;
+			}
+		}
+		sessionAccepting = false;
+		health = {};
+		healthPublishAccumulatorSeconds = 0.0f;
+		statusText = "No project open";
+		lastError.clear();
+		// StartRecording holds this same lock while creating an engine journal.
+		// Clearing here closes the only gap where a newly opened project could be
+		// cleared by the outgoing project's deferred engine cleanup.
+		Profiler::Instance().Clear();
+		PublishPresentationLocked();
+	}
 }
 
 // EditorProfilerService::OnProjectClosed is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::OnProjectClosed()
 {
-	Profiler::Instance().Clear();
-	std::lock_guard<std::mutex> lock(mutex);
-	++projectGeneration;
-	if (cancellationToken)
-	{
-		cancellationToken->store(true, std::memory_order_release);
-	}
-	captureStore.ClearProjectRoot();
-	captures.clear();
-	lastSavedCaptureArtifact.reset();
-	busy = false;
-	statusText = "No project open";
-	lastError.clear();
-	MarkPresentationChanged();
+	BeginProjectClose();
 }
 
 // EditorProfilerService::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void EditorProfilerService::Update(float)
+void EditorProfilerService::Update(float deltaTime)
 {
+	std::deque<WorkerCompletion> completions;
+	{
+		std::lock_guard<std::mutex> lock(completionMutex);
+		completions.swap(pendingCompletions);
+	}
+
+	// This is the sole crossing from worker-owned file data to editor-owned
+	// profiler/session state. Keeping it on the protected EditorSystem update
+	// prevents a project close or a newer request from seeing a partial result.
+	for (WorkerCompletion& completion : completions)
+	{
+		AcceptWorkerCompletion(std::move(completion));
+	}
+
+	// A request is queued while its worker is being submitted.  The protected
+	// boundary advances it to running so automation can observe a truthful,
+	// bounded lifecycle without a worker mutating editor-owned state directly.
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		bool advanced = false;
+		for (EditorProfilerOperationStatus& operation : operations)
+		{
+			if (operation.active && operation.state == EditorProfilerOperationState::Queued)
+			{
+				operation.state = EditorProfilerOperationState::Running;
+				advanced = true;
+			}
+		}
+		if (advanced)
+		{
+			PublishPresentationLocked();
+		}
+	}
+
+	// Health is a bounded scalar snapshot, unlike frame history. Refresh it four
+	// times per second so an open Profiler remains useful during long captures
+	// without turning the UI into a per-frame consumer of mutable engine state.
+	healthPublishAccumulatorSeconds += std::max(0.0f, deltaTime);
+	if (healthPublishAccumulatorSeconds >= 0.25f)
+	{
+		healthPublishAccumulatorSeconds = 0.0f;
+		const auto liveState = Profiler::Instance().GetState();
+		if (liveState == ProfilerSessionState::Recording
+			|| liveState == ProfilerSessionState::Paused
+			|| liveState == ProfilerSessionState::Finalizing)
+		{
+			const auto liveHealth = Profiler::Instance().GetCaptureHealth();
+			std::lock_guard<std::mutex> lock(mutex);
+			// A different session can begin after project close. Do not publish its
+			// health into an editor snapshot that no longer owns a project.
+			if (sessionAccepting)
+			{
+				health = liveHealth;
+				PublishPresentationLocked();
+			}
+		}
+	}
+
+	std::optional<TerraEngine::Profiling::ProfilerJournalFinalizationTicket> ticket;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		ticket = finalizationTicket;
+	}
+	if (!ticket.has_value())
+	{
+		return;
+	}
+	const auto status = Profiler::Instance().GetJournalFinalizationStatus(*ticket);
+	std::optional<std::filesystem::path> finalizedPath;
+	ProfilerCaptureStore finalizedStore;
+	std::shared_ptr<std::atomic_bool> finalizedCancelToken;
+	std::uint64_t finalizedProjectEpoch = 0u;
+	std::uint64_t finalizedOperationId = 0u;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		if (!finalizationTicket.has_value()
+			|| finalizationTicket->journalGeneration != ticket->journalGeneration)
+		{
+			return;
+		}
+		health = status.health;
+		if (status.state == TerraEngine::Profiling::ProfilerJournalFinalizationState::Completed)
+		{
+			finalizationTicket.reset();
+			if (!activeJournalPath.has_value())
+			{
+				auto& operation = operations[static_cast<std::size_t>(EditorProfilerOperationKind::Persisting) - 1u];
+				operation.active = false;
+				operation.state = EditorProfilerOperationState::Failed;
+				lastError = "The finalized profiler journal path is unavailable.";
+				statusText = "Profiler journal finalization failed";
+			}
+			else
+			{
+				// Finalization only proves the writer reached its terminal record. Keep
+				// the persistence operation active while a worker validates the V1
+				// index and publishes the exact artifact identity used by automation.
+				finalizedPath = *activeJournalPath;
+				finalizedStore = captureStore;
+				finalizedCancelToken = cancellationToken;
+				finalizedProjectEpoch = projectGeneration;
+				finalizedOperationId = operations[static_cast<std::size_t>(
+					EditorProfilerOperationKind::Persisting) - 1u].operationId;
+				statusText = "Validating finalized profiler journal";
+				lastError.clear();
+			}
+			PublishPresentationLocked();
+		}
+		else if (status.state == TerraEngine::Profiling::ProfilerJournalFinalizationState::Failed
+			|| status.state == TerraEngine::Profiling::ProfilerJournalFinalizationState::Stale)
+		{
+			auto& operation = operations[static_cast<std::size_t>(EditorProfilerOperationKind::Persisting) - 1u];
+			operation.active = false;
+			operation.state = EditorProfilerOperationState::Failed;
+			finalizationTicket.reset();
+			lastError = status.error.empty() ? "Profiler journal finalization failed." : status.error;
+			statusText = "Profiler journal finalization failed";
+			PublishPresentationLocked();
+		}
+	}
+	if (finalizedPath.has_value())
+	{
+		std::weak_ptr<EditorProfilerService> weakSelf = weak_from_this();
+		auto task = ThreadPool::instance().createTask([
+			weakSelf,
+			store = std::move(finalizedStore),
+			cancel = std::move(finalizedCancelToken),
+			epoch = finalizedProjectEpoch,
+			operationId = finalizedOperationId,
+			path = *finalizedPath]() mutable {
+			if (cancel && cancel->load(std::memory_order_acquire)) return;
+			TerraEngine::Profiling::ProfilerJournalV1OpenResult journal;
+			std::string error;
+			if (!store.ReadJournalIndex(path, journal, error))
+			{
+				if (auto self = weakSelf.lock())
+				{
+					self->EnqueueWorkerCompletion({WorkerCompletionKind::OperationFailed,
+						EditorProfilerOperationKind::Persisting, epoch, operationId, {}, {}, std::move(error)});
+				}
+				return;
+			}
+			if (cancel && cancel->load(std::memory_order_acquire)) return;
+			TerraEngine::Profiling::ProfilerCaptureArtifact artifact;
+			artifact.fileName = path.filename().string();
+			artifact.absolutePath = path;
+			artifact.metadata = journal.metadata;
+			artifact.frameCount = journal.summary.frameCount;
+			artifact.committedFrameCount = journal.summary.frameCount;
+			artifact.complete = journal.complete;
+			artifact.recoveredIncompleteTail = journal.recoveredIncompleteTail;
+			artifact.supported = true;
+			artifact.status = journal.recoveredIncompleteTail
+				? "Recovered incomplete tail" : (journal.complete ? "Ready" : "Incomplete");
+			WorkerCompletion completion;
+			completion.kind = WorkerCompletionKind::CapturePersisted;
+			completion.operationKind = EditorProfilerOperationKind::Persisting;
+			completion.projectEpoch = epoch;
+			completion.operationId = operationId;
+			completion.savedCaptureArtifact = EditorProfilerCaptureArtifact{
+				MakeArtifactId(artifact.fileName), std::move(artifact)};
+			if (auto self = weakSelf.lock()) self->EnqueueWorkerCompletion(std::move(completion));
+		});
+		ThreadPool::instance().enqueue(task);
+	}
 }
 
 // EditorProfilerService::StartRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -248,21 +344,90 @@ void EditorProfilerService::StartRecording()
 
 void EditorProfilerService::StartRecording(const ProfilerCaptureSettings& settings)
 {
-	if (!HasActiveProject())
+	ProfilerCaptureStore storeSnapshot;
+	std::shared_ptr<std::atomic_bool> startCancelToken;
+	std::uint64_t startProjectEpoch = 0u;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		if (!sessionAccepting || !captureStore.HasProjectRoot())
+		{
+			lastError = "Open a project before profiling.";
+			statusText = lastError;
+			PublishPresentationLocked();
+			return;
+		}
+		storeSnapshot = captureStore;
+		startCancelToken = cancellationToken;
+		startProjectEpoch = projectGeneration;
+	}
+	if (startCancelToken && startCancelToken->load(std::memory_order_acquire))
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		lastError = "Open a project before profiling.";
 		statusText = lastError;
-		MarkPresentationChanged();
+		PublishPresentationLocked();
 		return;
 	}
 
-	Profiler::Instance().StartRecording(MakeMetadata(), settings);
-	std::lock_guard<std::mutex> lock(mutex);
-	lastSavedCaptureArtifact.reset();
-	statusText = MakeRecordingStatus(settings);
-	lastError.clear();
-	MarkPresentationChanged();
+	const ProfilerCaptureMetadata metadata = MakeMetadata();
+	std::filesystem::path journalPath;
+	std::string startError;
+	if (!storeSnapshot.ReserveJournalArtifact(metadata, journalPath, startError)
+		|| (startCancelToken && startCancelToken->load(std::memory_order_acquire)))
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		lastError = startError.empty() ? "Failed to reserve the profiler V1 journal." : std::move(startError);
+		statusText = "Profiler recording did not start";
+		PublishPresentationLocked();
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		if (!sessionAccepting || projectGeneration != startProjectEpoch
+			|| (startCancelToken && startCancelToken->load(std::memory_order_acquire)))
+		{
+			// Reserve is worker-safe filesystem work. Starting the engine session is
+			// serialized with project close so an outgoing epoch cannot create an
+			// orphaned capture after BeginProjectClose clears the old session.
+			return;
+		}
+		if (!Profiler::Instance().StartJournalRecording(metadata, settings, journalPath, startError))
+		{
+			lastError = startError.empty() ? "Failed to start the profiler V1 journal." : std::move(startError);
+			statusText = "Profiler recording did not start";
+			PublishPresentationLocked();
+			return;
+		}
+		// A previous finalize-validation read may still be queued. It is safe to
+		// let it finish, but it may no longer publish into this recording session.
+		// A newly accepted recording supersedes a prior finalization validation.
+		// Keep its terminal result explicit so a stale automation poll cannot
+		// mistake the superseded request for a completed capture.
+		auto& priorPersistence = operations[static_cast<std::size_t>(EditorProfilerOperationKind::Persisting) - 1u];
+		if (priorPersistence.active)
+		{
+			priorPersistence.active = false;
+			priorPersistence.state = EditorProfilerOperationState::Cancelled;
+		}
+		lastSavedCaptureArtifact.reset();
+		// A recording session has no stable journal index yet. Retaining the last
+		// loaded capture here would clone and re-sort its entire index every health
+		// publication while the new capture is running.
+		selectedCapture.reset();
+		selectedSummary.reset();
+		selectedIndexPage.reset();
+		selectedFrame.reset();
+		selectedFrameArtifactId.clear();
+		decodedDetailCache.clear();
+		pendingIndexRequest.reset();
+		pendingDetailRequest.reset();
+		activeJournalPath = std::move(journalPath);
+		activeSessionArtifactId = MakeArtifactId(activeJournalPath->filename().string());
+		finalizationTicket.reset();
+		statusText = MakeRecordingStatus(settings);
+		lastError.clear();
+		PublishPresentationLocked();
+	}
 }
 
 // EditorProfilerService::PauseRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -271,7 +436,7 @@ void EditorProfilerService::PauseRecording()
 	Profiler::Instance().PauseRecording();
 	std::lock_guard<std::mutex> lock(mutex);
 	statusText = "Paused";
-	MarkPresentationChanged();
+	PublishPresentationLocked();
 }
 
 // EditorProfilerService::ResumeRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -281,7 +446,7 @@ void EditorProfilerService::ResumeRecording()
 	const ProfilerCaptureSettings settings = Profiler::Instance().GetSettings();
 	std::lock_guard<std::mutex> lock(mutex);
 	statusText = MakeRecordingStatus(settings);
-	MarkPresentationChanged();
+	PublishPresentationLocked();
 }
 
 void EditorProfilerService::PublishEditorFrameTiming(
@@ -353,139 +518,35 @@ EditorProfilerFrameTiming EditorProfilerService::GetEditorFrameTiming() const no
 // EditorProfilerService::FinishCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool EditorProfilerService::FinishCapture()
 {
-	if (!HasActiveProject())
-	{
-		return false;
-	}
-
-	ProfilerCaptureDocument document = Profiler::Instance().FinishRecording();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (document.frames.empty())
+	std::uint64_t finishProjectEpoch = 0u;
 	{
 		std::lock_guard<std::mutex> lock(mutex);
-		lastError = "No frames were captured.";
-		statusText = lastError;
-		MarkPresentationChanged();
-		return false;
+		if (!sessionAccepting || !captureStore.HasProjectRoot()) return false;
+		finishProjectEpoch = projectGeneration;
 	}
 
-	std::uint64_t generation = 0u;
-	ProfilerCaptureStore storeSnapshot;
-	std::shared_ptr<std::atomic_bool> cancelToken;
+	const auto ticket = Profiler::Instance().FinishRecording();
+	if (!ticket.accepted)
 	{
 		std::lock_guard<std::mutex> lock(mutex);
-		generation = projectGeneration;
-		storeSnapshot = captureStore;
-		cancelToken = cancellationToken;
-		busy = true;
-		lastSavedCaptureArtifact.reset();
-		statusText = "Saving profiler capture";
-		lastError.clear();
+		lastError = "The active profiler session has no V1 journal to finalize.";
+		statusText = "Profiler finalization was rejected";
+		PublishPresentationLocked();
+		return false;
 	}
-	MarkPresentationChanged();
-
-	std::weak_ptr<EditorProfilerService> weakSelf = weak_from_this();
-	// FinishRecording transfers ownership of a potentially large bounded capture.
-	// Move it into the worker instead of retaining another full frame-history copy
-	// on the editor thread while persistence is in progress.
-	auto task = ThreadPool::instance().createTask([
-		weakSelf,
-		storeSnapshot,
-		cancelToken,
-		document = std::move(document),
-		generation]() mutable {
-		if (cancelToken && cancelToken->load(std::memory_order_acquire))
-		{
-			return;
-		}
-
-		std::filesystem::path savedPath;
-		std::string error;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!storeSnapshot.SaveNewCaptureRetained(document, savedPath, error))
-		{
-			std::shared_ptr<EditorProfilerService> self = weakSelf.lock();
-			if (!self)
-			{
-				return;
-			}
-			std::lock_guard<std::mutex> lock(self->mutex);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (generation == self->projectGeneration && (!cancelToken || !cancelToken->load(std::memory_order_acquire)))
-			{
-				self->busy = false;
-				self->lastError = error;
-				self->statusText = "Failed to save capture";
-				self->MarkPresentationChanged();
-			}
-			return;
-		}
-		if (cancelToken && cancelToken->load(std::memory_order_acquire))
-		{
-			return;
-		}
-
-		std::optional<EditorProfilerCaptureArtifact> savedCaptureArtifact;
-		TerraEngine::Profiling::ProfilerCaptureArtifact savedCapture;
-		if (TerraEngine::Profiling::TryReadCaptureArtifactMetadata(
-			savedPath, savedCapture) && savedCapture.supported) {
-			if(savedCapture.status == "Ready (metadata)") {
-				savedCapture.status = "Ready";
-			}
-			if(savedCapture.status.empty()) {
-				savedCapture.status = savedCapture.recoveredIncompleteTail
-					? "recovered_incomplete_tail"
-					: (savedCapture.complete ? "complete" : "incomplete");
-			}
-			savedCaptureArtifact = EditorProfilerCaptureArtifact{
-				MakeArtifactId(savedCapture.fileName),
-				std::move(savedCapture)
-			};
-		}
-		else {
-			error = "Saved profiler capture metadata could not be reopened.";
-		}
-		// The store retained the exact document it serialized. Transfer it directly
-		// into the profiler instead of parsing the file again and copying every frame.
-		Profiler::Instance().LoadDocument(std::move(document));
-
-		std::shared_ptr<EditorProfilerService> self = weakSelf.lock();
-		if (!self)
-		{
-			return;
-		}
-		std::lock_guard<std::mutex> lock(self->mutex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (generation == self->projectGeneration && (!cancelToken || !cancelToken->load(std::memory_order_acquire)))
-		{
-			if(savedCaptureArtifact.has_value()) {
-				const std::filesystem::path normalizedSavedPath =
-					savedCaptureArtifact->artifact.absolutePath.lexically_normal();
-				auto existing = std::find_if(
-					self->captures.begin(), self->captures.end(),
-					[&normalizedSavedPath](
-						const TerraEngine::Profiling::ProfilerCaptureArtifact& artifact) {
-						return artifact.absolutePath.lexically_normal()
-							== normalizedSavedPath;
-					});
-				if(existing != self->captures.end()) {
-					*existing = savedCaptureArtifact->artifact;
-				} else {
-					self->captures.push_back(savedCaptureArtifact->artifact);
-				}
-				std::sort(self->captures.begin(), self->captures.end(),
-					[](const auto& left, const auto& right) {
-						return left.fileName > right.fileName;
-					});
-			}
-			self->lastSavedCaptureArtifact = std::move(savedCaptureArtifact);
-			self->busy = false;
-			self->lastError = error;
-			self->statusText = "Saved and opened capture";
-			self->MarkPresentationChanged();
-		}
-	});
-	ThreadPool::instance().enqueue(task);
+	std::lock_guard<std::mutex> lock(mutex);
+	if (!sessionAccepting || projectGeneration != finishProjectEpoch)
+	{
+		// BeginProjectClose already cleared the engine capture; never attach its
+		// ticket to the project that won the lifecycle race.
+		return false;
+	}
+	(void)BeginOperationLocked(EditorProfilerOperationKind::Persisting);
+	finalizationTicket = ticket;
+	lastSavedCaptureArtifact.reset();
+	statusText = "Finalizing profiler journal";
+	lastError.clear();
+	PublishPresentationLocked();
 	return true;
 }
 
@@ -497,7 +558,7 @@ void EditorProfilerService::Clear()
 	std::lock_guard<std::mutex> lock(mutex);
 	statusText = hasProject ? "Profiler ready" : "No project open";
 	lastError.clear();
-	MarkPresentationChanged();
+	PublishPresentationLocked();
 }
 
 // EditorProfilerService::RefreshCaptureList is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -509,20 +570,21 @@ void EditorProfilerService::RefreshCaptureList()
 	}
 
 	std::uint64_t generation = 0u;
+	std::uint64_t operationId = 0u;
 	ProfilerCaptureStore storeSnapshot;
 	std::shared_ptr<std::atomic_bool> cancelToken;
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		generation = projectGeneration;
+		operationId = BeginOperationLocked(EditorProfilerOperationKind::Listing);
 		storeSnapshot = captureStore;
 		cancelToken = cancellationToken;
-		busy = true;
 		statusText = "Refreshing capture list";
+		PublishPresentationLocked();
 	}
-	MarkPresentationChanged();
 
 	std::weak_ptr<EditorProfilerService> weakSelf = weak_from_this();
-	auto task = ThreadPool::instance().createTask([weakSelf, storeSnapshot, cancelToken, generation]() {
+	auto task = ThreadPool::instance().createTask([weakSelf, storeSnapshot, cancelToken, generation, operationId]() {
 		if (cancelToken && cancelToken->load(std::memory_order_acquire))
 		{
 			return;
@@ -536,16 +598,12 @@ void EditorProfilerService::RefreshCaptureList()
 		{
 			return;
 		}
-		std::lock_guard<std::mutex> lock(self->mutex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (generation == self->projectGeneration && (!cancelToken || !cancelToken->load(std::memory_order_acquire)))
-		{
-			self->captures = std::move(refreshed);
-			self->lastError = error;
-			self->statusText = error.empty() ? "Capture list refreshed" : error;
-			self->busy = false;
-			self->MarkPresentationChanged();
-		}
+		self->EnqueueWorkerCompletion({
+			WorkerCompletionKind::CaptureList,
+			EditorProfilerOperationKind::Listing,
+			generation,
+			operationId,
+			std::move(refreshed), {}, std::move(error)});
 	});
 	ThreadPool::instance().enqueue(task);
 }
@@ -559,44 +617,42 @@ void EditorProfilerService::LoadCapture(const std::filesystem::path& capturePath
 	}
 
 	std::uint64_t generation = 0u;
+	std::uint64_t operationId = 0u;
 	ProfilerCaptureStore storeSnapshot;
 	std::shared_ptr<std::atomic_bool> cancelToken;
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		generation = projectGeneration;
+		operationId = BeginOperationLocked(EditorProfilerOperationKind::Opening);
 		storeSnapshot = captureStore;
 		cancelToken = cancellationToken;
-		busy = true;
 		statusText = "Opening profiler capture";
 		lastError.clear();
+		PublishPresentationLocked();
 	}
-	MarkPresentationChanged();
 
 	std::weak_ptr<EditorProfilerService> weakSelf = weak_from_this();
-	auto task = ThreadPool::instance().createTask([weakSelf, storeSnapshot, cancelToken, generation, capturePath]() {
+	auto task = ThreadPool::instance().createTask([weakSelf, storeSnapshot, cancelToken, generation, operationId, capturePath]() {
 		if (cancelToken && cancelToken->load(std::memory_order_acquire))
 		{
 			return;
 		}
-		ProfilerCaptureDocument document;
+		ProfilerCaptureIndexPage page;
 		std::string error;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!storeSnapshot.LoadCapture(capturePath, document, error))
+		if (!storeSnapshot.ReadJournalIndexPage(capturePath,
+			ProfilerCaptureStore::kNewestIndexPageOffset, 128u, page, error))
 		{
 			std::shared_ptr<EditorProfilerService> self = weakSelf.lock();
 			if (!self)
 			{
 				return;
 			}
-			std::lock_guard<std::mutex> lock(self->mutex);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (generation == self->projectGeneration && (!cancelToken || !cancelToken->load(std::memory_order_acquire)))
-			{
-				self->lastError = error;
-				self->statusText = "Failed to open capture";
-				self->busy = false;
-				self->MarkPresentationChanged();
-			}
+			self->EnqueueWorkerCompletion({
+				WorkerCompletionKind::OperationFailed,
+				EditorProfilerOperationKind::Opening,
+				generation,
+				operationId,
+				{}, {}, std::move(error)});
 			return;
 		}
 		if (cancelToken && cancelToken->load(std::memory_order_acquire))
@@ -604,20 +660,191 @@ void EditorProfilerService::LoadCapture(const std::filesystem::path& capturePath
 			return;
 		}
 
-		Profiler::Instance().LoadDocument(document);
 		std::shared_ptr<EditorProfilerService> self = weakSelf.lock();
 		if (!self)
 		{
 			return;
 		}
-		std::lock_guard<std::mutex> lock(self->mutex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (generation == self->projectGeneration && (!cancelToken || !cancelToken->load(std::memory_order_acquire)))
+		WorkerCompletion completion;
+		completion.kind = WorkerCompletionKind::CaptureLoaded;
+		completion.operationKind = EditorProfilerOperationKind::Opening;
+		completion.projectEpoch = generation;
+		completion.operationId = operationId;
+		completion.capturePath = capturePath;
+		EditorProfilerIndexPage editorPage;
+		editorPage.offset = page.offset;
+		editorPage.pageSize = page.pageSize;
+		editorPage.totalFrameCount = page.totalFrameCount;
+		editorPage.frames = std::move(page.frames);
+		TerraEngine::Profiling::ProfilerCaptureArtifact artifact;
+		artifact.fileName = capturePath.filename().string();
+		artifact.absolutePath = capturePath;
+		artifact.metadata = std::move(page.metadata);
+		artifact.frameCount = page.summary.frameCount;
+		artifact.committedFrameCount = page.summary.frameCount;
+		artifact.complete = page.complete;
+		artifact.recoveredIncompleteTail = page.recoveredIncompleteTail;
+		artifact.supported = true;
+		artifact.status = page.recoveredIncompleteTail ? "Recovered incomplete tail" : (page.complete ? "Ready" : "Incomplete");
+		completion.selectedCapture = EditorProfilerCaptureArtifact{MakeArtifactId(artifact.fileName), std::move(artifact)};
+		editorPage.artifactId = completion.selectedCapture->artifactId;
+		completion.indexPage = std::move(editorPage);
+		completion.selectedSummary = page.summary;
+		self->EnqueueWorkerCompletion(std::move(completion));
+	});
+	ThreadPool::instance().enqueue(task);
+}
+
+void EditorProfilerService::RequestIndexPage(std::size_t offset, std::size_t pageSize)
+{
+	ProfilerCaptureStore store;
+	std::filesystem::path path;
+	std::shared_ptr<std::atomic_bool> cancel;
+	std::uint64_t epoch = 0u;
+	std::uint64_t operation = 0u;
+	std::string artifactId;
+	const std::size_t boundedPageSize = std::clamp<std::size_t>(
+		pageSize, 1u, ProfilerCaptureStore::kMaximumIndexPageSize);
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		if (!selectedCapture.has_value()) return;
+		artifactId = selectedCapture->artifactId;
+		if (selectedIndexPage.has_value()
+			&& selectedIndexPage->artifactId == artifactId
+			&& selectedIndexPage->offset == offset
+			&& selectedIndexPage->pageSize == boundedPageSize)
 		{
-			self->statusText = "Loaded capture";
-			self->lastError.clear();
-			self->busy = false;
-			self->MarkPresentationChanged();
+			if (pendingIndexRequest.has_value()
+				&& (pendingIndexRequest->artifactId != artifactId
+					|| pendingIndexRequest->offset != offset
+					|| pendingIndexRequest->pageSize != boundedPageSize))
+			{
+				// Returning to the already published page is a newer user choice.
+				// Retire the other in-flight page so its completion cannot make the
+				// window jump back after the user navigated away from it.
+				auto& retiredOperation = operations[static_cast<std::size_t>(
+					EditorProfilerOperationKind::LoadingIndex) - 1u];
+				retiredOperation.active = false;
+				retiredOperation.state = EditorProfilerOperationState::Cancelled;
+				pendingIndexRequest.reset();
+			}
+			return;
+		}
+		if (pendingIndexRequest.has_value()
+			&& pendingIndexRequest->artifactId == artifactId
+			&& pendingIndexRequest->offset == offset
+			&& pendingIndexRequest->pageSize == boundedPageSize)
+		{
+			return;
+		}
+		store = captureStore;
+		path = selectedCapture->artifact.absolutePath;
+		cancel = cancellationToken;
+		epoch = projectGeneration;
+		operation = BeginOperationLocked(EditorProfilerOperationKind::LoadingIndex);
+		pendingIndexRequest = PendingIndexRequest{artifactId, offset, boundedPageSize};
+	}
+
+	std::weak_ptr<EditorProfilerService> weakSelf = weak_from_this();
+	auto task = ThreadPool::instance().createTask([weakSelf, store, path, cancel, epoch, operation,
+		offset, boundedPageSize, artifactId]() {
+		if (cancel && cancel->load(std::memory_order_acquire)) return;
+		ProfilerCaptureIndexPage page;
+		std::string error;
+		if (!store.ReadJournalIndexPage(path, offset, boundedPageSize, page, error))
+		{
+			if (auto self = weakSelf.lock()) self->EnqueueWorkerCompletion({
+				WorkerCompletionKind::OperationFailed, EditorProfilerOperationKind::LoadingIndex,
+				epoch, operation, {}, {}, std::move(error)});
+			return;
+		}
+		if (cancel && cancel->load(std::memory_order_acquire)) return;
+		if (auto self = weakSelf.lock())
+		{
+			WorkerCompletion completion;
+			completion.kind = WorkerCompletionKind::IndexPageLoaded;
+			completion.operationKind = EditorProfilerOperationKind::LoadingIndex;
+			completion.projectEpoch = epoch;
+			completion.operationId = operation;
+			completion.indexPage = EditorProfilerIndexPage{
+				artifactId, page.offset, page.pageSize, page.totalFrameCount, std::move(page.frames)};
+			completion.selectedArtifactId = artifactId;
+			self->EnqueueWorkerCompletion(std::move(completion));
+		}
+	});
+	ThreadPool::instance().enqueue(task);
+}
+
+void EditorProfilerService::RequestSelectedFrame(std::uint64_t frameIndex)
+{
+	ProfilerCaptureStore store;
+	std::filesystem::path path;
+	std::shared_ptr<std::atomic_bool> cancel;
+	std::uint64_t epoch = 0u;
+	std::uint64_t operation = 0u;
+	std::string artifactId;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		if (!selectedCapture.has_value()) return;
+		store = captureStore;
+		path = selectedCapture->artifact.absolutePath;
+		artifactId = selectedCapture->artifactId;
+		for (const DetailCacheEntry& cached : decodedDetailCache)
+		{
+			if (cached.artifactId == artifactId && cached.frameIndex == frameIndex)
+			{
+				if (pendingDetailRequest.has_value()
+					&& (pendingDetailRequest->artifactId != artifactId
+						|| pendingDetailRequest->frameIndex != frameIndex))
+				{
+					// A cached detail selection is still a newer choice than a
+					// different queued read. Retire that read so a late worker
+					// completion cannot replace the frame the user just selected.
+				auto& retiredOperation = operations[static_cast<std::size_t>(
+					EditorProfilerOperationKind::LoadingDetail) - 1u];
+				retiredOperation.active = false;
+				retiredOperation.state = EditorProfilerOperationState::Cancelled;
+					pendingDetailRequest.reset();
+				}
+				selectedFrame = cached.frame;
+				selectedFrameArtifactId = artifactId;
+				statusText = "Loaded selected frame";
+				lastError.clear();
+				PublishPresentationLocked();
+				return;
+			}
+		}
+		if (pendingDetailRequest.has_value()
+			&& pendingDetailRequest->artifactId == artifactId
+			&& pendingDetailRequest->frameIndex == frameIndex)
+		{
+			return;
+		}
+		cancel = cancellationToken;
+		epoch = projectGeneration;
+		operation = BeginOperationLocked(EditorProfilerOperationKind::LoadingDetail);
+		pendingDetailRequest = PendingDetailRequest{artifactId, frameIndex};
+	}
+	std::weak_ptr<EditorProfilerService> weakSelf = weak_from_this();
+	auto task = ThreadPool::instance().createTask([weakSelf, store, path, cancel, epoch, operation, frameIndex, artifactId]() {
+		if (cancel && cancel->load(std::memory_order_acquire)) return;
+		TerraEngine::Profiling::ProfilerFrameRecord frame;
+		std::string error;
+		if (!store.ReadSelectedJournalFrame(path, frameIndex, frame, error))
+		{
+			if (auto self = weakSelf.lock()) self->EnqueueWorkerCompletion({WorkerCompletionKind::OperationFailed, EditorProfilerOperationKind::LoadingDetail, epoch, operation, {}, {}, std::move(error)});
+			return;
+		}
+		if (auto self = weakSelf.lock())
+		{
+			WorkerCompletion completion;
+			completion.kind = WorkerCompletionKind::FrameLoaded;
+			completion.operationKind = EditorProfilerOperationKind::LoadingDetail;
+			completion.projectEpoch = epoch;
+			completion.operationId = operation;
+			completion.selectedFrame = std::move(frame);
+			completion.selectedArtifactId = artifactId;
+			self->EnqueueWorkerCompletion(std::move(completion));
 		}
 	});
 	ThreadPool::instance().enqueue(task);
@@ -632,6 +859,11 @@ ProfilerSessionState EditorProfilerService::GetState() const
 std::uint64_t EditorProfilerService::GetPresentationRevision() const noexcept
 {
 	return presentationRevision.load(std::memory_order_acquire);
+}
+
+std::shared_ptr<const EditorProfilerPresentationSnapshot> EditorProfilerService::GetPresentationSnapshot() const noexcept
+{
+	return std::atomic_load_explicit(&presentationSnapshot, std::memory_order_acquire);
 }
 
 // EditorProfilerService::GetStatusText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -680,28 +912,6 @@ std::optional<EditorProfilerCaptureArtifact> EditorProfilerService::GetLastSaved
 	return lastSavedCaptureArtifact;
 }
 
-bool EditorProfilerService::ReadCaptureDocumentById(
-	std::string_view artifactId,
-	ProfilerCaptureDocument& outDocument,
-	std::string& outError) const
-{
-	ProfilerCaptureStore storeSnapshot;
-	std::optional<std::filesystem::path> capturePath;
-	{
-		std::lock_guard<std::mutex> lock(mutex);
-		capturePath = FindCapturePathLocked(artifactId);
-		storeSnapshot = captureStore;
-	}
-	if (!capturePath)
-	{
-		outError = "Profiler artifact identifier is stale or unknown for the active project.";
-		return false;
-	}
-	// The store revalidates project containment immediately before reading, so a
-	// stale list entry cannot be redirected outside the project's Profiler folder.
-	return storeSnapshot.LoadCapture(*capturePath, outDocument, outError);
-}
-
 bool EditorProfilerService::RequestLoadCaptureById(std::string_view artifactId, std::string& outError)
 {
 	std::optional<std::filesystem::path> capturePath;
@@ -717,248 +927,6 @@ bool EditorProfilerService::RequestLoadCaptureById(std::string_view artifactId, 
 	LoadCapture(*capturePath);
 	outError.clear();
 	return true;
-}
-
-bool EditorProfilerService::SummarizeCaptureById(
-	std::string_view artifactId,
-	EditorProfilerCaptureSummary& outSummary,
-	std::string& outError) const
-{
-	ProfilerCaptureDocument document;
-	if (!ReadCaptureDocumentById(artifactId, document, outError))
-		return false;
-	outSummary = SummarizeDocument(std::string(artifactId), document);
-	// Filesystem length is captured once at summary creation.  It is metadata,
-	// not a stream sample, and therefore must not be inferred from decoded data.
-	{
-		std::lock_guard<std::mutex> lock(mutex);
-		for (const auto& capture : captures)
-		{
-			if (MakeArtifactId(capture.fileName) == artifactId)
-			{
-				std::error_code error;
-				outSummary.artifactSizeBytes = std::filesystem::file_size(capture.absolutePath, error);
-				if (error)
-				{
-					outSummary.artifactSizeBytes = 0u;
-				}
-				break;
-			}
-		}
-	}
-	outError.clear();
-	return true;
-}
-
-EditorProfilerCaptureSummary EditorProfilerService::SummarizeDocument(
-	std::string artifactId,
-	const ProfilerCaptureDocument& document)
-{
-	EditorProfilerCaptureSummary summary;
-	summary.artifactId = std::move(artifactId);
-	summary.frameCount = document.frames.size();
-	summary.payloadVersion = document.payloadVersion;
-	// V1 artifacts have no explicit committed-count field.  Their fully parsed
-	// frame vector is the committed boundary, preserving a useful summary for
-	// legacy captures without pretending they were rewritten as v2.
-	summary.committedFrameCount = document.committedFrameCount == 0u
-		? static_cast<std::uint64_t>(document.frames.size())
-		: document.committedFrameCount;
-	summary.captureComplete = document.complete;
-	summary.recoveredIncompleteTail = document.recoveredIncompleteTail;
-
-	std::map<std::string, MetricAccumulator> stageAccumulators;
-	std::map<std::string, MetricAccumulator> boundaryAccumulators;
-	std::map<std::string, MetricAccumulator> presentationAccumulators;
-	std::map<std::string, MetricAccumulator> responsivenessAccumulators;
-	std::vector<double> completeFrameDurations;
-	completeFrameDurations.reserve(document.frames.size());
-	struct WorkerAccumulator
-	{
-		EditorProfilerWorkerSummary summary;
-		MetricAccumulator run;
-		MetricAccumulator wait;
-		MetricAccumulator idle;
-		std::optional<TerraEngine::Profiling::WorkerTelemetryRecord> previous;
-	};
-	std::map<std::uint32_t, WorkerAccumulator> workerAccumulators;
-
-	if (!document.frames.empty())
-	{
-		summary.minimumFrameMs = document.frames.front().durationMs;
-	}
-	for (const auto& frame : document.frames)
-	{
-		summary.totalDurationMs += frame.durationMs;
-		summary.minimumFrameMs = std::min(summary.minimumFrameMs, frame.durationMs);
-		summary.maximumFrameMs = std::max(summary.maximumFrameMs, frame.durationMs);
-		if (frame.complete)
-		{
-			++summary.completeFrameCount;
-			completeFrameDurations.push_back(frame.durationMs);
-		}
-		else
-			++summary.incompleteFrameCount;
-
-		if (frame.animationOptimization.has_value() && frame.animationOptimization->valid)
-		{
-			const TerraEngine::Profiling::ProfilerAnimationOptimizationEvidence& source =
-				*frame.animationOptimization;
-			EditorProfilerAnimationOptimizationSummary& target = summary.animationOptimization;
-			++target.measuredFrameCount;
-			target.maximumActiveAnimators = std::max(target.maximumActiveAnimators, source.activeAnimators);
-			target.maximumCompactProcessed = std::max(target.maximumCompactProcessed,
-				source.compactProcessedAnimators);
-			target.maximumCompleteProcessed = std::max(target.maximumCompleteProcessed,
-				source.completeProcessedAnimators);
-			target.compactToCompleteTransitions += source.compactToCompleteTransitions;
-			target.completeToCompactTransitions += source.completeToCompactTransitions;
-			target.retainedTopologyHits += source.retainedTopologyHits;
-			target.retainedTopologyMisses += source.retainedTopologyMisses;
-			target.compactPlanGroups += source.compactPlanGroups;
-			target.compactDispatches += source.compactDispatches;
-			target.rejectedCandidates += source.rejectedCandidateCount;
-			target.fallbackReasons += std::accumulate(source.fallbackReasonCounts.begin(),
-				source.fallbackReasonCounts.end(), std::uint64_t{0U});
-			for (std::size_t timingIndex = 0U;
-				timingIndex < target.totalTimingNanoseconds.size(); ++timingIndex)
-			{
-				target.totalTimingNanoseconds[timingIndex] += source.timingNanoseconds[timingIndex];
-			}
-		}
-
-		if (frame.renderOptimization.has_value())
-		{
-			for (std::size_t viewIndex = 0U;
-				viewIndex < frame.renderOptimization->views.size(); ++viewIndex)
-			{
-				const TerraEngine::Profiling::ProfilerRenderOptimizationViewSummary& source =
-					frame.renderOptimization->views[viewIndex];
-				EditorProfilerRenderOptimizationSummary& target = summary.renderOptimization[viewIndex];
-				target.viewType = source.viewType;
-				if (!source.valid)
-				{
-					continue;
-				}
-				++target.measuredFrameCount;
-				target.maximumVisibleInstances = std::max<std::uint64_t>(target.maximumVisibleInstances, source.visibleInstanceCount);
-				target.maximumGroupedInstances = std::max<std::uint64_t>(target.maximumGroupedInstances, source.groupedInstanceCount);
-				target.maximumFallbackInstances = std::max<std::uint64_t>(target.maximumFallbackInstances, source.fallbackInstanceCount);
-				target.groupedSubmissions += source.groupedSubmissionCount;
-				target.fallbackSubmissions += source.fallbackSubmissionCount;
-				target.avoidedSubmissions += source.avoidedSubmissionCount;
-				target.topologyReuseHits += source.topologyReuseHits;
-				target.topologyInvalidations += source.topologyInvalidations;
-				target.viewEvidenceReuseHits += source.viewEvidenceReuseHits;
-				target.viewEvidenceInvalidations += source.viewEvidenceInvalidations;
-				target.rejectedCandidates += source.rejectedIncompleteKeyCount
-					+ source.rejectedUnsupportedVariantCount + source.rejectedOutOfRangeCount
-					+ source.rejectedStaleGenerationCount;
-				target.optimizationFallbacks += source.fallbackAllocationFailureCount
-					+ source.fallbackRecoveryCount;
-				target.topologyBuildNanoseconds += source.topologyBuildNanoseconds;
-				target.dynamicMaterializationNanoseconds += source.dynamicMaterializationNanoseconds;
-				target.instanceStreamUploadNanoseconds += source.instanceStreamUploadNanoseconds;
-				target.groupedCommandRecordingNanoseconds += source.groupedCommandRecordingNanoseconds;
-			}
-		}
-
-		for (const TerraEngine::Profiling::PerformanceStageRecord& stage : frame.performanceStages)
-		{
-			const char* domain = stage.domain == TerraEngine::Profiling::PerformanceStageDomain::Physics
-				? "physics"
-				: stage.domain == TerraEngine::Profiling::PerformanceStageDomain::SceneView
-				? "scene_view"
-				: "editor";
-			const std::string id = std::string(domain) + "." + stage.stageName;
-			AddDuration(stageAccumulators, id, std::string(domain) + " / " + stage.stageName, stage.duration);
-		}
-		for (const TerraEngine::Profiling::ProtectedBoundaryRecord& boundary : frame.protectedBoundaries)
-		{
-			const std::string prefix = "boundary." + boundary.boundaryName + ".";
-			AddDuration(boundaryAccumulators, prefix + "queue", boundary.boundaryName + " queue", boundary.queueDuration);
-			AddDuration(boundaryAccumulators, prefix + "ownership_wait", boundary.boundaryName + " ownership wait", boundary.ownershipWaitDuration);
-			AddDuration(boundaryAccumulators, prefix + "execution", boundary.boundaryName + " execution", boundary.executionDuration);
-			AddDuration(boundaryAccumulators, prefix + "flush", boundary.boundaryName + " flush", boundary.flushDuration);
-			AddDuration(boundaryAccumulators, prefix + "publication", boundary.boundaryName + " publication", boundary.publicationDuration);
-		}
-		for (const TerraEngine::Profiling::PresentationWaitRecord& wait : frame.presentationWaits)
-		{
-			const std::string id = "presentation." + std::to_string(static_cast<unsigned int>(wait.kind));
-			AddDuration(presentationAccumulators, id, "Presentation wait", wait.duration);
-		}
-		if (frame.responsiveness.has_value())
-		{
-			const TerraEngine::Profiling::FrameResponsivenessRecord& responsiveness = *frame.responsiveness;
-			AddDuration(responsivenessAccumulators, "responsiveness.input_to_presentation", "Input to presentation", responsiveness.inputToPresentationDuration);
-			AddDuration(responsivenessAccumulators, "responsiveness.frame", "Frame responsiveness", responsiveness.frameDuration);
-		}
-		for (const TerraEngine::Profiling::WorkerTelemetryRecord& worker : frame.workerTelemetry)
-		{
-			WorkerAccumulator& accumulator = workerAccumulators[worker.workerId];
-			accumulator.summary.workerId = worker.workerId;
-			++accumulator.summary.sampleCount;
-			accumulator.summary.maximumQueueDepth = std::max(accumulator.summary.maximumQueueDepth, worker.queueDepth);
-			if (accumulator.run.summary.label.empty())
-			{
-				accumulator.run.summary = {"worker.run", "Worker run", "ms"};
-				accumulator.wait.summary = {"worker.wait", "Worker wait", "ms"};
-				accumulator.idle.summary = {"worker.idle", "Worker idle", "ms"};
-			}
-			if (accumulator.previous.has_value())
-			{
-				// ThreadPool publishes process-lifetime cumulative counters. Convert
-				// adjacent observations into capture-local intervals before summing or
-				// calculating percentiles; the first observation is only a baseline.
-				const TerraEngine::Profiling::WorkerTelemetryRecord& previous = *accumulator.previous;
-				accumulator.summary.totalDispatchCount += CumulativeCounterDelta(worker.dispatchCount, previous.dispatchCount);
-				accumulator.summary.totalUsefulWorkItems += CumulativeCounterDelta(worker.usefulWorkItemCount, previous.usefulWorkItemCount);
-				accumulator.run.Add(CumulativeDurationDelta(worker.runDuration, previous.runDuration));
-				accumulator.wait.Add(CumulativeDurationDelta(worker.waitDuration, previous.waitDuration));
-				accumulator.idle.Add(CumulativeDurationDelta(worker.idleDuration, previous.idleDuration));
-			}
-			accumulator.previous = worker;
-		}
-		if (frame.physicsWorkVolume.has_value())
-		{
-			const TerraEngine::Profiling::PhysicsWorkVolumeRecord& volume = *frame.physicsWorkVolume;
-			++summary.workVolumes.measuredTickCount;
-			summary.workVolumes.totalBodies = std::max(summary.workVolumes.totalBodies, volume.totalBodyCount);
-			summary.workVolumes.activeBodies = std::max(summary.workVolumes.activeBodies, volume.activeBodyCount);
-			summary.workVolumes.examinedBodies = std::max(summary.workVolumes.examinedBodies, volume.examinedBodyCount);
-			summary.workVolumes.extractedBodies = std::max(summary.workVolumes.extractedBodies, volume.extractedBodyCount);
-			summary.workVolumes.convertedBodies = std::max(summary.workVolumes.convertedBodies, volume.convertedBodyCount);
-			summary.workVolumes.changedBodies = std::max(summary.workVolumes.changedBodies, volume.changedBodyCount);
-			summary.workVolumes.publishedBodies = std::max(summary.workVolumes.publishedBodies, volume.publishedBodyCount);
-		}
-	}
-	if (summary.frameCount != 0u)
-	{
-		summary.averageFrameMs = summary.totalDurationMs / static_cast<double>(summary.frameCount);
-	}
-	if (!completeFrameDurations.empty())
-	{
-		// A recovered partial tail is useful lifecycle evidence, but it must not
-		// enter timing percentiles as if it were a fully observed frame.
-		std::sort(completeFrameDurations.begin(), completeFrameDurations.end());
-		summary.frameMedianMs = PercentileFromSorted(completeFrameDurations, 0.50);
-		summary.frameP95Ms = PercentileFromSorted(completeFrameDurations, 0.95);
-		summary.frameP99Ms = PercentileFromSorted(completeFrameDurations, 0.99);
-		summary.frameWorstMs = completeFrameDurations.back();
-	}
-	summary.timingStreams = TerraEngine::Profiling::BuildTimingStreamAggregates(document.frames);
-	summary.stageTimings = FinalizeMetrics(stageAccumulators);
-	summary.protectedBoundaryTimings = FinalizeMetrics(boundaryAccumulators);
-	summary.presentationWaitTimings = FinalizeMetrics(presentationAccumulators);
-	summary.responsivenessTimings = FinalizeMetrics(responsivenessAccumulators);
-	for (auto& [workerId, accumulator] : workerAccumulators)
-	{
-		accumulator.summary.runDuration = accumulator.run.Finalize();
-		accumulator.summary.waitDuration = accumulator.wait.Finalize();
-		accumulator.summary.idleDuration = accumulator.idle.Finalize();
-		summary.workerHistories.push_back(std::move(accumulator.summary));
-	}
-	return summary;
 }
 
 std::string EditorProfilerService::MakeArtifactId(std::string_view fileName)
@@ -987,23 +955,204 @@ std::optional<std::filesystem::path> EditorProfilerService::FindCapturePathLocke
 	return std::nullopt;
 }
 
-void EditorProfilerService::MarkPresentationChanged() noexcept
+std::uint64_t EditorProfilerService::BeginOperationLocked(EditorProfilerOperationKind kind)
 {
-	presentationRevision.fetch_add(1u, std::memory_order_release);
+	const std::size_t index = static_cast<std::size_t>(kind) - 1u;
+	EditorProfilerOperationStatus& operation = operations.at(index);
+	operation.kind = kind;
+	operation.operationId = nextOperationId++;
+	operation.active = true;
+	operation.state = EditorProfilerOperationState::Queued;
+	return operation.operationId;
+}
+
+void EditorProfilerService::EnqueueWorkerCompletion(WorkerCompletion completion)
+{
+	// A worker may only transfer its immutable result into this queue. It never
+	// accesses the mutable service session, ImGui, or global Profiler instance.
+	std::lock_guard<std::mutex> lock(completionMutex);
+	pendingCompletions.push_back(std::move(completion));
+}
+
+void EditorProfilerService::PublishPresentationLocked()
+{
+	auto snapshot = std::make_shared<EditorProfilerPresentationSnapshot>();
+	snapshot->projectEpoch = projectGeneration;
+	snapshot->presentationRevision = presentationRevision.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+	snapshot->sessionState = Profiler::Instance().GetState();
+	snapshot->hasActiveProject = sessionAccepting && captureStore.HasProjectRoot();
+	snapshot->statusText = statusText;
+	snapshot->lastError = lastError;
+	snapshot->health = health;
+	snapshot->activeSessionArtifactId = activeSessionArtifactId;
+	snapshot->discardedStaleCompletionCount = discardedStaleCompletionCount;
+	snapshot->captures = captures;
+	snapshot->profilerDirectory = captureStore.GetProfilerDirectory();
+	const std::size_t persistenceIndex = static_cast<std::size_t>(
+		EditorProfilerOperationKind::Persisting) - 1u;
+	const bool persistenceActive = persistenceIndex < operations.size()
+		&& operations[persistenceIndex].active;
+	const bool liveCapture = snapshot->sessionState == ProfilerSessionState::Recording
+		|| snapshot->sessionState == ProfilerSessionState::Paused
+		|| (snapshot->sessionState == ProfilerSessionState::Finalizing && persistenceActive);
+	if (!liveCapture)
+	{
+		// Index/detail snapshots are intentionally idle-only. Health refreshes
+		// during a live capture stay scalar and cannot make ProfilerWindow rebuild
+		// an old journal's duration statistics. The engine retains Finalizing as
+		// its terminal journal state, so completed persistence must expose a later
+		// loaded capture even though that scalar state does not change again.
+		snapshot->selectedCapture = selectedCapture;
+		snapshot->selectedSummary = selectedSummary;
+		snapshot->indexPage = selectedIndexPage;
+		snapshot->selectedFrame = selectedFrame;
+		snapshot->selectedFrameArtifactId = selectedFrameArtifactId;
+	}
+	snapshot->operations = operations;
+	std::shared_ptr<const EditorProfilerPresentationSnapshot> immutableSnapshot = std::move(snapshot);
+	std::atomic_store_explicit(&presentationSnapshot, std::move(immutableSnapshot), std::memory_order_release);
+}
+
+void EditorProfilerService::AcceptWorkerCompletion(WorkerCompletion&& completion)
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	if (!sessionAccepting || completion.projectEpoch != projectGeneration)
+	{
+		// Closing/reopening intentionally abandons old work. Do not let a prior
+		// project restore either global profiler data or window presentation.
+		++discardedStaleCompletionCount;
+		return;
+	}
+
+	const std::size_t index = static_cast<std::size_t>(completion.operationKind) - 1u;
+	if (completion.operationKind == EditorProfilerOperationKind::None || index >= operations.size()
+		|| !operations[index].active || operations[index].operationId != completion.operationId)
+	{
+		// A newer request of the same kind superseded this result. A stale detail
+		// must not replace the selection requested after it was queued.
+		++discardedStaleCompletionCount;
+		return;
+	}
+	operations[index].active = false;
+	operations[index].state = completion.kind == WorkerCompletionKind::OperationFailed
+		? EditorProfilerOperationState::Failed
+		: EditorProfilerOperationState::Completed;
+	if (completion.operationKind == EditorProfilerOperationKind::LoadingIndex)
+	{
+		pendingIndexRequest.reset();
+	}
+	if (completion.operationKind == EditorProfilerOperationKind::LoadingDetail)
+	{
+		pendingDetailRequest.reset();
+	}
+
+	switch (completion.kind)
+	{
+	case WorkerCompletionKind::CaptureList:
+		captures = std::move(completion.captures);
+		lastError = std::move(completion.error);
+		statusText = lastError.empty() ? "Capture list refreshed" : lastError;
+		break;
+	case WorkerCompletionKind::CapturePersisted:
+		lastSavedCaptureArtifact = std::move(completion.savedCaptureArtifact);
+		activeJournalPath.reset();
+		activeSessionArtifactId.clear();
+		lastError.clear();
+		statusText = "Profiler journal finalized";
+		if (lastSavedCaptureArtifact.has_value())
+		{
+			const std::string& fileName = lastSavedCaptureArtifact->artifact.fileName;
+			captures.erase(std::remove_if(captures.begin(), captures.end(), [&fileName](const auto& artifact) {
+				return artifact.fileName == fileName;
+			}), captures.end());
+			captures.push_back(lastSavedCaptureArtifact->artifact);
+		}
+		break;
+	case WorkerCompletionKind::CaptureLoaded:
+		selectedCapture = std::move(completion.selectedCapture);
+		selectedSummary = std::move(completion.selectedSummary);
+		selectedIndexPage = std::move(completion.indexPage);
+		selectedFrame.reset();
+		selectedFrameArtifactId.clear();
+		lastError.clear();
+		statusText = "Loaded capture";
+		break;
+	case WorkerCompletionKind::IndexPageLoaded:
+		if (!selectedCapture.has_value()
+			|| completion.selectedArtifactId != selectedCapture->artifactId)
+		{
+			++discardedStaleCompletionCount;
+			operations[index].state = EditorProfilerOperationState::Cancelled;
+			PublishPresentationLocked();
+			return;
+		}
+		selectedIndexPage = std::move(completion.indexPage);
+		lastError.clear();
+		statusText = "Loaded profiler index page";
+		break;
+	case WorkerCompletionKind::FrameLoaded:
+		if (!selectedCapture.has_value()
+			|| completion.selectedArtifactId != selectedCapture->artifactId)
+		{
+			// An open-capture request completed after its selection changed. The
+			// operation is retired, but its frame must remain invisible.
+			++discardedStaleCompletionCount;
+			operations[index].state = EditorProfilerOperationState::Cancelled;
+			PublishPresentationLocked();
+			return;
+		}
+		selectedFrame = std::move(completion.selectedFrame);
+		selectedFrameArtifactId = completion.selectedArtifactId;
+		if (selectedFrame.has_value())
+		{
+			decodedDetailCache.push_front({completion.selectedArtifactId,
+				selectedFrame->frameIndex, *selectedFrame});
+			while (decodedDetailCache.size() > 4u)
+			{
+				decodedDetailCache.pop_back();
+			}
+		}
+		lastError.clear();
+		statusText = "Loaded selected frame";
+		break;
+	case WorkerCompletionKind::OperationFailed:
+		if (completion.operationKind == EditorProfilerOperationKind::Persisting)
+		{
+			activeJournalPath.reset();
+			activeSessionArtifactId.clear();
+		}
+		lastError = std::move(completion.error);
+		statusText = completion.operationKind == EditorProfilerOperationKind::Persisting
+			? "Failed to save capture"
+			: (completion.operationKind == EditorProfilerOperationKind::Opening
+				? "Failed to open capture" : "Failed to refresh capture list");
+		break;
+	}
+	PublishPresentationLocked();
 }
 
 // EditorProfilerService::HasActiveProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool EditorProfilerService::HasActiveProject() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
-	return captureStore.HasProjectRoot();
+	return sessionAccepting && captureStore.HasProjectRoot();
 }
 
 // EditorProfilerService::IsBusy is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool EditorProfilerService::IsBusy() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
-	return busy;
+	return std::any_of(operations.begin(), operations.end(), [](const EditorProfilerOperationStatus& operation) {
+		return operation.active;
+	});
+}
+
+bool EditorProfilerService::IsPersisting() const
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	const std::size_t persistenceIndex = static_cast<std::size_t>(
+		EditorProfilerOperationKind::Persisting) - 1u;
+	return persistenceIndex < operations.size() && operations[persistenceIndex].active;
 }
 
 // EditorProfilerService::GetProfilerDirectory is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

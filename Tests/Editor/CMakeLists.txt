@@ -92,6 +92,7 @@ add_executable(TerraEngine-EditorTests
 	Automation/EditorMcpAssetImportTests.cpp
 	Automation/EditorMcpAssetImportSafetyTests.cpp
 	Automation/ProfilerDiagnosticsAutomationTests.cpp
+	Automation/FramePublicationToolContractTests.cpp
 	Automation/RendererRecoveryAutomationTests.cpp
 	Automation/VirtualGeometryAutomationTests.cpp
 	Automation/VirtualGeometryCapabilityAutomationTests.cpp
@@ -250,7 +251,7 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Profiling/ProfilerCaptureStore.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Profiling/EditorProfilerService.cpp
 	${CMAKE_SOURCE_DIR}/Engine/Profiling/ProfilerCapture.cpp
-	${CMAKE_SOURCE_DIR}/Engine/Profiling/ProfilerCaptureV2.cpp
+	${CMAKE_SOURCE_DIR}/Engine/Profiling/ProfilerJournalV1.cpp
 )
 
 target_include_directories(TerraEngine-EditorTests

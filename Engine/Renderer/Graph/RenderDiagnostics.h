@@ -417,6 +417,17 @@ namespace TerraEngine::Renderer {
 		bool detailed = false;
 	};
 
+	// RenderProfilerFrameSnapshot is the intentionally small immutable renderer
+	// hand-off consumed once per recorded engine frame. The profiler needs only
+	// presentation waits and the matching renderer frame identity; returning the
+	// full diagnostics tree here would copy unrelated virtual-geometry, recovery,
+	// and string-heavy editor evidence into the protected profiler boundary.
+	struct RenderProfilerFrameSnapshot
+	{
+		std::uint64_t frameId = 0u;
+		std::vector<TerraEngine::Profiling::PresentationWaitRecord> presentationWaits;
+	};
+
 	TERRAENGINE_API RenderBudgetDiagnostic BuildRenderBudgetDiagnostic(const RenderWorkBudget& budget);
 	TERRAENGINE_API RenderPerformanceGateResult EvaluateRenderPerformanceGate(std::string workloadName, float baselineValue, float latestValue, float thresholdPercent);
 	TERRAENGINE_API PerformanceGateResult EvaluateVirtualGeometryPerformanceGate(std::string gateId, std::string fixtureId, std::string metricName, float threshold, float actual, std::string unit, bool lowerIsBetter, VirtualGeometryPerformanceGateSource source = VirtualGeometryPerformanceGateSource::Prepared, RenderViewType viewType = RenderViewType::Game, std::uint32_t viewId = 0u);
@@ -452,6 +463,7 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API void ClearPublishedRenderDiagnostics();
 	TERRAENGINE_API void PublishRenderDiagnostics(RenderDiagnosticsSummary summary);
 	TERRAENGINE_API RenderDiagnosticsSummary LatestRenderDiagnostics();
+	TERRAENGINE_API RenderProfilerFrameSnapshot LatestRenderProfilerFrameSnapshot();
 	TERRAENGINE_API std::vector<VirtualGeometryViewDiagnosticsSnapshot> LatestVirtualGeometryDiagnosticsSnapshots();
 	TERRAENGINE_API void PublishBackendResourceResidencySnapshot(BackendResourceResidencySnapshot snapshot);
 	TERRAENGINE_API BackendResourceResidencySnapshot LatestBackendResourceResidencySnapshot();

@@ -57,6 +57,8 @@ namespace TerraEngine::EditorTests
 
 			context.Expect(hasResource("EditorAutomationQueue"), "Scheduler resources should describe immutable queued automation work.");
 			context.Expect(hasResource("EditorAutomationSession"), "Scheduler resources should describe session-retained automation state.");
+			context.Expect(hasResource("EditorProfilerWorkerCompletions"), "Scheduler resources should register profiler worker completions before EditorSystem validation.");
+			context.Expect(hasResource("EditorProfilerHealthPublication"), "Scheduler resources should register bounded profiler health publication before EditorSystem validation.");
 
 			const std::string source = ReadEditorSystemSource();
 			context.Expect(!source.empty(), "Scheduler contract tests should read EditorSystem.cpp from the configured source root.");
@@ -96,6 +98,18 @@ namespace TerraEngine::EditorTests
 					&& service.find("AnimationAutomationJobs(jobService).CancelAllRecordings()")
 						!= std::string::npos,
 				"Destroying the shared automation service must retire every process-global recording session keyed by its job store.");
+			const std::size_t lateTransportDrain = editor.find("PumpPendingTransportToolCallsAtProtectedFrame()");
+			const std::size_t imguiRender = editor.find("ImGui::Render()");
+			context.Expect(lateTransportDrain != std::string::npos && imguiRender != std::string::npos
+					&& lateTransportDrain < imguiRender,
+				"Transport-originated durable jobs should receive a second protected drain before ImGui rendering can stall their acknowledgement.");
+			const std::size_t bridgeLateDrain = bridge.find("void EditorMcpBridge::PumpPendingTransportToolCallsAtProtectedFrame()");
+			const std::size_t bridgeAnimationPump = bridge.find("void EditorMcpBridge::PumpAnimationRecordingsAtProtectedFrame()");
+			context.Expect(bridgeLateDrain != std::string::npos
+					&& bridgeAnimationPump != std::string::npos
+					&& bridgeLateDrain < bridgeAnimationPump
+					&& bridge.find("ProcessPendingToolCalls();", bridgeLateDrain) != std::string::npos,
+				"The late scheduler drain must use the bridge's protected transport queue rather than letting a worker mutate editor state directly.");
 		});
 
 		registry.Add("Editor.Automation.Scheduler.IdleBridgeDoesNotPublishWork", [](TestContext& context) {

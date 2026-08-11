@@ -2076,14 +2076,14 @@ namespace
 			}
 			const std::size_t end = std::min(itemCount, begin + chunkSize);
 			auto task = ThreadPool::instance().createTask([begin, end, taskLabel, &work]() {
-				TERRAENGINE_PROFILE_SCOPE(taskLabel, TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
+				TERRAENGINE_PROFILE_DYNAMIC_SCOPE(taskLabel, TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
 				work(begin, end);
 			});
 			futures.push_back(task->getFuture());
 			ThreadPool::instance().enqueue(task);
 		}
 		{
-			TERRAENGINE_PROFILE_SCOPE(taskLabel,
+			TERRAENGINE_PROFILE_DYNAMIC_SCOPE(taskLabel,
 				TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
 			work(0U, std::min(itemCount, chunkSize));
 		}

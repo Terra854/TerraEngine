@@ -67,10 +67,10 @@ namespace TerraEngine::Editor::Automation
 				// these declarations explicit lets automation diagnostics explain why this
 				// operation remains safe during a running frame.
 				descriptor.description = "Read immutable scheduler decisions, conditional flush state, and bounded worker telemetry; includeDetails adds retained histories.";
-				descriptor.inputSchema = {{"type", "object"}, {"properties", {{"includeDetails", {{"type", "boolean"}, {"description", "Include bounded workload records, dependency edges, worker histories, and profiler v2 evidence."}}}}}, {"additionalProperties", true}};
+				descriptor.inputSchema = {{"type", "object"}, {"properties", {{"includeDetails", {{"type", "boolean"}, {"description", "Include bounded workload records, dependency edges, worker histories, and profiler V1 evidence."}}}}}, {"additionalProperties", true}};
 					descriptor.resultSchema = {{"type", "object"}, {"properties", {
 					{"profilerTimingStreams", {{"description", "Legacy status-aware timing stream summaries."}}},
-					{"profilerCaptureEvidence", {{"description", "Additive v2 stage, boundary, responsiveness, and work-volume summaries."}}},
+					{"profilerCaptureEvidence", {{"description", "Bounded V1 stage, boundary, responsiveness, and work-volume summaries."}}},
 					{"objectIdentity", {{"type", {"string", "null"}}}}, {"primitiveIdentity", {{"type", {"string", "null"}}}},
 					{"materialIdentity", {{"type", {"string", "null"}}}}, {"pickingIdentity", {{"type", {"string", "null"}}}},
 					{"depthIdentity", {{"type", {"string", "null"}}}}, {"routeGeneration", {{"type", {"integer", "null"}}}},

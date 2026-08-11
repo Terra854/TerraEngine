@@ -50,6 +50,25 @@ partial or stale scenarios are rerun in full:
 & .\Tools\FramePublication\CaptureFramePublicationPerformance.ps1 -Project <project> -Scene <scene> -Manifest .\Tools\FramePublication\workloads.json -InstallRoot .\out\install\RelWithDebInfo -EditorExecutable <installed-editor> -CameraHash <read-only-camera-hash> -OutputDirectory .\out\evidence\frame-publication\candidate -Resume
 ```
 
+Profiler rework comparisons use the same runner through a fixed-identity
+sidecar. The sidecar records project and scene hashes, workload-manifest and
+camera identities, installed-editor hash, viewport, warmup, duration, run
+count, and capture detail level before any live work. A dry run validates these
+inputs without launching an editor:
+
+```powershell
+& .\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 -Project <project> -Scene <scene> -Manifest .\Tools\FramePublication\workloads.json -InstallRoot .\out\install\RelWithDebInfo -EditorExecutable <installed-editor> -CameraHash <read-only-camera-hash> -OutputDirectory .\out\evidence\profiler-rework -DryRun
+```
+
+The profiler rework format is a clean V1 lineage (`TerraEngineProfilerJournalV1`)
+and is intentionally not compatible with pre-feature payloads. Run the source
+audit after install; it fails closed if legacy payload readers, writers,
+migration branches, fixtures, or documentation tokens remain:
+
+```powershell
+& .\Tools\Profiling\CheckProfilerSource.ps1 -RepositoryRoot . -InstallRoot .\out\install\RelWithDebInfo
+```
+
 Live summaries label renderer statistics as `renderer-diagnostic-readback` and
 PNG captures as `dedicated-offscreen-png-readback` in `diagnosticProvenance`.
 Their frame IDs remain separate so offscreen output cannot be mistaken for the

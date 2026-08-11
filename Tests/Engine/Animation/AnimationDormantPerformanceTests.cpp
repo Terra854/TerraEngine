@@ -175,7 +175,11 @@ namespace TerraEngine::Tests {
 			}
 			const ProfilerCaptureDocument document = profiler.GetDocumentSnapshot();
 			const std::optional<ProfilerFrameRecord> selected = profiler.GetSelectedFrameSnapshot();
-			const ProfilerCaptureDocument finished = profiler.FinishRecording();
+			const ProfilerJournalFinalizationTicket finishTicket = profiler.FinishRecording();
+			const ProfilerCaptureDocument finished = profiler.GetDocumentSnapshot();
+			context.Expect(profiler.GetJournalFinalizationStatus(finishTicket).state
+				== ProfilerJournalFinalizationState::Completed,
+				"Dormant animation diagnostics should use the non-copying finish ticket contract.");
 			context.Expect(!frames.empty(), "An opted-in profiler frame should copy the dormant animation summary.");
 			context.Expect(frames.size() == 2U && !frames.back().animationDiagnostics.has_value(),
 				"A contradictory multi-check dormant claim must be rejected without retaining typed evidence.");

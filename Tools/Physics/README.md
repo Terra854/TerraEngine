@@ -121,20 +121,21 @@ persisted and summarized.
 
 ## Profiler capture matrix
 
-Run the opt-in profiler evidence mode for each detail level and reader version:
+Run the opt-in profiler evidence mode for each detail level:
 
 ```powershell
 foreach ($level in @("detailed", "sampled", "aggregate")) {
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
         -InstallRoot out/build/RelWithDebInfo/Build `
-        -WorkRoot ("out/validation/profiler-capture/{0}-v2" -f $level) `
-        -CaptureLevel $level -CaptureVersion v2 -RunProfilerCaptureChecks -AllowLiveStress
+        -WorkRoot ("out/validation/profiler-capture/{0}-journal-v1" -f $level) `
+        -CaptureLevel $level -RunProfilerCaptureChecks -AllowLiveStress
 }
 ```
 
-New recordings accept `-CaptureVersion v2`; v1 is a load-only compatibility
-fixture and is never rewritten in place. The harness passes additive v2
-selection fields to `profiler.capture.start`, holds the recording open for five
+New recordings always use the sole `TerraEngineProfilerJournalV1` format;
+historical profiler artifacts are unsupported and are never rewritten or
+partially interpreted. The harness passes the V1 format identity to
+`profiler.capture.start`, holds the recording open for five
 wall-clock seconds, loads the committed artifact as a recovery probe, and retains
 `summary.json` plus MCP JSONL. Each summary reports
 physics, Scene View, scheduler, protected-boundary, responsiveness, presentation,

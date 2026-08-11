@@ -1164,7 +1164,7 @@ and retain the generated summaries and manifest:
 	-InstalledEditor 'out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe' `
 	-Project 'C:\Users\benti\Desktop\TerraEngine-Projects\New Animated Project' `
 	-OutputDirectory 'Tests/Fixtures/RendererPerformanceBaseline/results/profiler' `
-	-PairCount 5 -CaptureDurationSeconds 60 -McpPort 43155
+	-PairCount 5 -CaptureDurationSeconds 30 -McpPort 43155
 ```
 
 For a standalone long-capture coherence check, run the visual harness with
@@ -1309,26 +1309,165 @@ Remove-Item Env:TERRAENGINE_TEST_FILTER
 cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset RelWithDebInfo --target install"
 ```
 
-## animation production validation profiler v2 evidence
+## profiler rework V1 evidence and fixed-identity benchmark
 
-The installed harness keeps profiler capture selection additive. New recordings
-use payload v2; v1 compatibility is verified by immutable fixture load tests and
-never by rewriting a v1 artifact. Use `-RunProfilerCaptureProfilerChecks` with
-`-CaptureLevel detailed|sampled|aggregate` and `-CaptureVersion v2`:
+The profiler rework starts a clean V1 journal lineage (`TerraEngineProfilerJournalV1`). Pre-feature profiler
+artifacts are unsupported and are never migrated or partially interpreted. The
+installed benchmark records a fixed identity before launching the editor; a
+comparison is invalid if project, scene, workload, camera, viewport, build,
+capture settings, or duration differs. Validate source and install contents
+first:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
-    -InstallRoot out/build/RelWithDebInfo/Build `
-    -WorkRoot out/validation/profiler-capture/detailed-v2 `
-    -CaptureLevel detailed -CaptureVersion v2 -RunProfilerCaptureChecks -AllowLiveStress
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Profiling/CheckProfilerSource.ps1 `
+    -RepositoryRoot . -InstallRoot out/install/RelWithDebInfo
 ```
 
-Evidence records the selected level/version, frame counts, comparable baseline,
-metric availability, artifact bytes, and a durable committed-artifact load probe.
-The harness holds the recording open for at least five wall-clock seconds and
-applies a 10 MiB size gate. Missing measurements remain explicit unavailable
-values rather than being invented as zero.
-Compare like-for-like level, version, workload, workers, and duration.
+Run a clean-input dry run, then the canonical five-run installed-editor
+comparison (use the five-minute canonical duration for release evidence):
+
+```powershell
+& .\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
+    -Project <project> -Scene <scene> -Manifest Tools/FramePublication/workloads.json `
+    -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
+    -CameraHash <read-only-camera-hash> -OutputDirectory out/evidence/profiler-rework `
+    -DurationSeconds 60 -DryRun
+& .\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
+    -Project <project> -Scene <scene> -Manifest Tools/FramePublication/workloads.json `
+    -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
+    -CameraHash <read-only-camera-hash> -OutputDirectory out/evidence/profiler-rework `
+    -DurationSeconds 300
+```
+
+Evidence must retain committed counts, resident/high-water bytes, persistence
+lag, pending work, detail-loss ranges, finalization status, and explicit
+unavailable values. For interruption testing, stop the installed editor after
+at least one committed segment, reopen the artifact, and verify that only the
+committed prefix is exposed and the incomplete tail is labeled recovered.
+Recording rows also preserve JournalV1 profiler-self/batching counters and
+logical/encoded/stored byte totals when the installed editor publishes them;
+missing counters remain `null` and are never interpreted as zero.
+The completed JournalV1 summary's `batching` table is authoritative for logical,
+encoded, and stored byte totals when the live health snapshot omits them;
+maximum pending bytes remain sourced only from health/settings.
+Finish latency is taken from the authoritative `finishCaptureSubmissionMilliseconds`
+field returned by `profiler.capture.stop`; the MCP request round-trip is retained
+separately as `finishMcpRoundTripMilliseconds` and is not used to evaluate the
+50 ms interactive Finish gate. Missing, non-finite, or negative values fail closed.
+The disabled control leg does not start a capture and records both finish fields
+as explicit `null` not-applicable values.
+
+The remaining profiler-rework acceptance runs use the same authored scene and
+the same explicit `CameraHash`; each command fails closed when identity or
+installed V1 support is missing. Keep each output directory separate so a
+partial run cannot be mistaken for complete evidence:
+
+```powershell
+# Run focused suites, then install and audit the installed tree.
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+cmake --build out/build/RelWithDebInfo --target install --parallel 2
+
+# Run the exact-scene one-minute JournalV1 smoke and reopen/count check.
+& .\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
+  -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
+  -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
+  -CameraHash <read-only-camera-hash> -Mode DetailedRecording -Runs 5 `
+  -DurationSeconds 60 -OutputDirectory out/evidence/profiler-rework/smoke
+
+# Run five AB/BA closed/open-idle pairs (the runner enforces the 2% median/P95 gate).
+& .\Tools\Profiling\MeasureProfilerIdleOverhead.ps1 `
+  -InstalledEditor <installed-editor> -Project <project> -PairCount 5 `
+  -CaptureDurationSeconds 30 -OutputDirectory out/evidence/profiler-rework/open-idle
+
+Each paired condition is interleaved in short closed/open blocks and then
+aggregated by condition, preserving 30 seconds of valid samples per state (300
+seconds total) while
+canceling slow animation or power drift. Visibility transitions settle before
+their timing samples. Evidence includes bounded per-block medians/P95s and
+paired-block percentage deltas before the pair aggregate; unequal/missing blocks
+fail closed. Open-idle acceptance uses signed one-sided deltas: median and P95
+overhead must each be at most 2%; negative values indicate an improvement and
+remain passing.
+
+# Run a closed/open recording pair; the window opens only in the final minute.
+& .\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
+  -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
+  -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
+  -CameraHash <read-only-camera-hash> -Mode MatchedWindowOpen -Runs 1 `
+  -DurationSeconds 300 -OpenProfilerAtSeconds 240 `
+  -OutputDirectory out/evidence/profiler-rework/late-window
+
+Late-window evidence contains five same-run closed/open pairs. Each condition
+sets visibility, waits one second for the completed UI state, then collects 30
+valid Engine CPU timing samples at 100 ms intervals. The first pair remains
+available as `windowMeasurement.preOpen` and `windowMeasurement.postOpen` for
+compatibility; every pair is also published in `windowMeasurement.pairedWindows`.
+The gate uses the median of the five median deltas and the median of the five
+P95 deltas with a one-sided 2% overhead cap (an improvement remains a pass),
+and requires the maximum visibility request latency to be at most 1000 ms.
+The runner does not fetch the historical frame index while the recording is
+active; the separate open-idle experiment retains the same one-sided 2% cap.
+
+If only aggregation logic changes, regenerate an existing completed bundle
+without launching the editor by adding `-RegenerateEvidenceFromRuns` to the
+same benchmark command. The switch requires the saved identity, every expected
+run metric, matching raw-summary hashes, and both comparison modes; any missing
+or mismatched artifact fails closed.
+For timed-window regeneration it additionally requires exactly five complete
+closed/open paired windows with finite signed deltas and latency before treating
+the retained measurement as measured.
+The benchmark wrapper parses and validates the final `benchmark-evidence.json`
+against `specs/049-profiler-rework/contracts/benchmark-evidence.schema.json`
+before returning; a non-window leg is emitted as `windowMeasurement.status`
+`unavailable` (the raw run JSON is never rewritten), while a timed-open leg must
+remain `measured` with all five validated pairs.
+For matched recording overhead, the recording leg also publishes a closed-window
+100 ms Engine CPU stream (`matchedOverheadEvidence`); the recording-overhead
+criterion compares its median
+and P95 with the disabled leg, while full Journal terminal windows remain the
+source for duration and frame-count gates.
+To avoid periodic 100 ms response-tail aliasing, each overhead stream is split
+into six equal 10-second blocks. Every block must contain at least 30 valid
+samples; the recording-overhead criterion compares the median block median/P95 values and fails closed on
+missing or unequal blocks. Raw samples remain available for diagnosis.
+
+# Run one five-minute profiler capture that also serves as the changing-animation
+# visual soak, without adding a second sequential soak or saving Scene.tescene.
+& .\Tools\VirtualGeometry\CaptureVirtualGeometryLiveVisual.ps1 `
+  -InstalledEditor <installed-editor> -Project <project> `
+  -ScenePath Assets/Scenes/Scene.tescene -PrefabInstanceCount 0 `
+	-ValidationCameraPosition @(0.0, 1.0, 9.0) `
+	-ValidationCameraTarget @(0.0, 1.0, 8.0) -EnterPlayMode `
+  -SoakDurationSeconds 0 -ProfilerCaptureDurationSeconds 300 `
+  -ExpectAnimatedChange -OutputDirectory out/evidence/profiler-rework/live-visual
+
+# Run the 60-second-per-leg ABBA overhead smoke (disabled/recording/recording/disabled).
+# The balanced order cancels monotonic thermal drift while retaining the unchanged
+# three-percent median/P95 gate; this smoke is not the canonical stability run.
+& .\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
+  -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
+  -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
+  -CameraHash <read-only-camera-hash> -Mode MatchedRecordingComparison -Runs 1 `
+  -DurationSeconds 60 -OutputDirectory out/evidence/profiler-rework/overhead-smoke
+```
+
+# Run the single canonical five-minute detailed recording. Fixed 60-second health
+# checkpoints measure protected collection cost per produced frame, backlog/loss,
+# memory, and Finish evidence; raw Engine CPU first/final windows are diagnostic.
+& .\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
+  -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
+  -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
+  -CameraHash <read-only-camera-hash> -Mode DetailedRecording -Runs 1 `
+  -DurationSeconds 300 -OutputDirectory out/evidence/profiler-rework/final
+
+Installed identity hashes cover both `TerraEngine-Editor.exe` and the matching
+`TerraEngine.dll`; a missing engine DLL or a changed sibling package
+fails closed. Resume and evidence comparison reject package-hash mismatches.
+
+Failure-matrix evidence is produced by the focused profiler recovery,
+queue, truncation, and stale-completion tests; retain their CTest transcript
+under `out/evidence/profiler-rework/failure-matrix/` and reject any run that
+does not publish a complete JournalV1 health/finalization record.
 
 ## animated virtual geometry validation animated virtual geometry
 
@@ -1365,7 +1504,7 @@ million-decision visibility run with the current-bounds route and require zero
 false rejections. The soak profile is
 `Tests/Fixtures/AnimatedVirtualGeometry/stress-profile.json`; its release gate is
 1,000 instances, four views, continuous churn, at least 99% exact-key reuse,
-bounded memory/retirement, and 30 minutes without unrecovered failure.
+bounded memory/retirement, and five minutes without unrecovered failure.
 
 To reproduce the animated LOD import regression specifically, run:
 

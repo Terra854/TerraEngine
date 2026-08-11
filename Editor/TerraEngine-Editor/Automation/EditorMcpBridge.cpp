@@ -272,6 +272,16 @@ namespace TerraEngine::Editor::Automation
 		}
 	}
 
+	void EditorMcpBridge::PumpPendingTransportToolCallsAtProtectedFrame()
+	{
+		// HTTP workers only enqueue immutable calls. A second drain before ImGui
+		// rendering lets a just-arrived durable operation (especially profiler stop)
+		// receive its job acknowledgement without waiting through the rest of UI
+		// work or presentation. This retains the same lifecycle lock and FIFO path
+		// as Update(), while deliberately not draining assistant commands twice.
+		ProcessPendingToolCalls();
+	}
+
 	void EditorMcpBridge::PumpAnimationRecordingsAtProtectedFrame()
 	{
 		// The bridge owns the one shared automation service and durable job store.

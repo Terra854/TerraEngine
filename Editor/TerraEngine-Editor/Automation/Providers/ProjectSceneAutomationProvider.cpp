@@ -194,10 +194,12 @@ namespace TerraEngine::Editor::Automation
 			resolveHandler,
 			"scene.list_objects",
 			"scene",
-			"List root scene objects with optional component names and text filtering.",
+			"List a bounded stable page of scene objects with optional component names and text filtering.",
 			ObjectSchema({
 				{"includeComponents", {{"type", "boolean"}}},
-				{"search", {{"type", "string"}}}
+				{"search", {{"type", "string"}}},
+				{"offset", {{"type", "integer"}, {"minimum", 0}}},
+				{"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 256}, {"default", 128}}}
 			}),
 			AutomationPermission::Read,
 			AutomationApprovalPolicy::None,

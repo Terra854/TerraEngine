@@ -112,7 +112,8 @@ add_executable(TerraEngine-EngineTests
 	Physics/PhysicsLifecycleStressTests.cpp
 	Runtime/PhysicsExportRuntimeTests.cpp
 	Profiling/ProfilerCaptureTests.cpp
-	Profiling/ProfilerCaptureV2Tests.cpp
+	Profiling/ProfilerJournalV1Tests.cpp
+	Profiling/ProfilerLifecycleTests.cpp
 	Profiling/ProfilerOptimizationEvidenceTests.cpp
 	Profiling/ProfilerFramePublicationEvidenceTests.cpp
 	Profiling/FramePublicationToolContractTests.cpp
@@ -357,7 +358,19 @@ if(WIN32)
 endif()
 
 add_test(NAME Engine.SpatialUnitTests COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
-set_tests_properties(Engine.SpatialUnitTests PROPERTIES LABELS "Engine")
+# The long journal gate owns a singleton profiler plus a controlled worker pool.
+# Run it in its own process below so the aggregate registry cannot inherit test
+# state or ThreadPool history, while full CTest still executes the exact gate.
+set_tests_properties(Engine.SpatialUnitTests PROPERTIES
+	LABELS "Engine"
+	ENVIRONMENT "TERRAENGINE_TEST_EXCLUDE_FILTER=Engine.ProfilerCapturePerformance.LiveThirtyThousandFramesStayResidentBounded"
+)
+
+add_test(NAME Engine.ProfilerJournalStress COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.ProfilerJournalStress PROPERTIES
+	LABELS "Engine;Profiler;Stress;Performance"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Engine.ProfilerCapturePerformance.LiveThirtyThousandFramesStayResidentBounded"
+)
 
 # This smoke process loads TerraEngine.CSharp.dll through the real .NET host and
 # crosses the native dispatcher with public API calls. Running from the native

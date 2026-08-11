@@ -5,9 +5,11 @@
 #pragma once
 
 #include "ProfilerCaptureStore.h"
+#include "Engine/Profiling/Profiler.h"
 
 #include <array>
 #include <atomic>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -52,131 +54,107 @@ struct EditorProfilerCaptureArtifact
 	TerraEngine::Profiling::ProfilerCaptureArtifact artifact;
 };
 
-// EditorProfilerMetricSummary keeps a percentile series self-describing for
-// both the window and automation.  An unavailable source stays unavailable
-// instead of being represented as a misleading zero-millisecond sample.
-struct EditorProfilerMetricSummary
+// EditorProfilerOperationKind identifies independent asynchronous service work.
+// It deliberately replaces the old single busy flag: listing a catalog must not
+// make a finalizing capture appear complete, and vice versa.
+enum class EditorProfilerOperationKind : std::uint8_t
 {
-	std::string id;
-	std::string label;
-	std::string unit;
-	std::uint64_t sampleCount = 0u;
-	std::uint64_t unavailableCount = 0u;
-	bool available = false;
-	std::string unavailableReason;
-	double median = 0.0;
-	double p95 = 0.0;
-	double p99 = 0.0;
-	double maximum = 0.0;
+	None,
+	Listing,
+	Persisting,
+	Opening,
+	LoadingIndex,
+	LoadingDetail
 };
 
-// EditorProfilerWorkerSummary preserves a bounded aggregate for each worker.
-// The raw timeline remains inside the capture artifact, so summaries cannot
-// accidentally make durable automation results unbounded.
-struct EditorProfilerWorkerSummary
+// EditorProfilerOperationState preserves a compact terminal outcome for the
+// most recent operation of each kind.  Automation can poll that outcome by
+// identifier without retaining frame history or worker-owned payloads.
+enum class EditorProfilerOperationState : std::uint8_t
 {
-	std::uint32_t workerId = 0u;
-	std::uint64_t sampleCount = 0u;
-	std::uint64_t maximumQueueDepth = 0u;
-	std::uint64_t totalDispatchCount = 0u;
-	std::uint64_t totalUsefulWorkItems = 0u;
-	EditorProfilerMetricSummary runDuration;
-	EditorProfilerMetricSummary waitDuration;
-	EditorProfilerMetricSummary idleDuration;
+	Queued,
+	Running,
+	Completed,
+	Failed,
+	Cancelled
 };
 
-// EditorProfilerWorkVolumeSummary reports the largest observed body counts
-// for the capture.  It keeps processed-versus-published work visible without
-// requiring callers to retrieve a full per-tick trace.
-struct EditorProfilerWorkVolumeSummary
+[[nodiscard]] constexpr std::string_view ToString(EditorProfilerOperationKind kind) noexcept
 {
-	std::uint64_t measuredTickCount = 0u;
-	std::uint64_t totalBodies = 0u;
-	std::uint64_t activeBodies = 0u;
-	std::uint64_t examinedBodies = 0u;
-	std::uint64_t extractedBodies = 0u;
-	std::uint64_t convertedBodies = 0u;
-	std::uint64_t changedBodies = 0u;
-	std::uint64_t publishedBodies = 0u;
-};
+	switch (kind)
+	{
+	case EditorProfilerOperationKind::Listing: return "listing";
+	case EditorProfilerOperationKind::Persisting: return "persisting";
+	case EditorProfilerOperationKind::Opening: return "opening";
+	case EditorProfilerOperationKind::LoadingIndex: return "loading_index";
+	case EditorProfilerOperationKind::LoadingDetail: return "loading_detail";
+	case EditorProfilerOperationKind::None: break;
+	}
+	return "none";
+}
 
-// EditorProfilerRenderOptimizationSummary is a bounded whole-capture reduction
-// of the typed per-frame renderer evidence. Maxima describe scene scale while
-// totals explain whether grouping and reuse remained active throughout the run.
-struct EditorProfilerRenderOptimizationSummary
+[[nodiscard]] constexpr std::string_view ToString(EditorProfilerOperationState state) noexcept
 {
-	std::uint32_t viewType = 0U;
-	std::uint64_t measuredFrameCount = 0U;
-	std::uint64_t maximumVisibleInstances = 0U;
-	std::uint64_t maximumGroupedInstances = 0U;
-	std::uint64_t maximumFallbackInstances = 0U;
-	std::uint64_t groupedSubmissions = 0U;
-	std::uint64_t fallbackSubmissions = 0U;
-	std::uint64_t avoidedSubmissions = 0U;
-	std::uint64_t topologyReuseHits = 0U;
-	std::uint64_t topologyInvalidations = 0U;
-	std::uint64_t viewEvidenceReuseHits = 0U;
-	std::uint64_t viewEvidenceInvalidations = 0U;
-	std::uint64_t rejectedCandidates = 0U;
-	std::uint64_t optimizationFallbacks = 0U;
-	std::uint64_t topologyBuildNanoseconds = 0U;
-	std::uint64_t dynamicMaterializationNanoseconds = 0U;
-	std::uint64_t instanceStreamUploadNanoseconds = 0U;
-	std::uint64_t groupedCommandRecordingNanoseconds = 0U;
-};
+	switch (state)
+	{
+	case EditorProfilerOperationState::Queued: return "queued";
+	case EditorProfilerOperationState::Running: return "running";
+	case EditorProfilerOperationState::Completed: return "completed";
+	case EditorProfilerOperationState::Failed: return "failed";
+	case EditorProfilerOperationState::Cancelled: return "cancelled";
+	}
+	return "cancelled";
+}
 
-// Capture-wide animation evidence stays bounded regardless of recording length.
-// Peak population values and summed work/reuse counters are intentionally kept
-// separate so a developer can distinguish scale from repeated per-frame cost.
-struct EditorProfilerAnimationOptimizationSummary
-{
-	std::uint64_t measuredFrameCount = 0U;
-	std::uint64_t maximumActiveAnimators = 0U;
-	std::uint64_t maximumCompactProcessed = 0U;
-	std::uint64_t maximumCompleteProcessed = 0U;
-	std::uint64_t compactToCompleteTransitions = 0U;
-	std::uint64_t completeToCompactTransitions = 0U;
-	std::uint64_t retainedTopologyHits = 0U;
-	std::uint64_t retainedTopologyMisses = 0U;
-	std::uint64_t compactPlanGroups = 0U;
-	std::uint64_t compactDispatches = 0U;
-	std::uint64_t rejectedCandidates = 0U;
-	std::uint64_t fallbackReasons = 0U;
-	std::array<std::uint64_t, 8U> totalTimingNanoseconds{};
-};
+inline constexpr std::size_t kEditorProfilerOperationCount = 5u;
 
-// EditorProfilerCaptureSummary is intentionally bounded: it exposes aggregate
-// frame and timing-stream evidence without returning every recorded sample.
-struct EditorProfilerCaptureSummary
+// EditorProfilerIndexPage is the only history-shaped value allowed in an
+// immutable presentation. Its capacity is bounded by ProfilerCaptureStore.
+struct EditorProfilerIndexPage
 {
 	std::string artifactId;
-	std::uint64_t frameCount = 0u;
-	std::uint64_t completeFrameCount = 0u;
-	std::uint64_t incompleteFrameCount = 0u;
-	double totalDurationMs = 0.0;
-	double minimumFrameMs = 0.0;
-	double maximumFrameMs = 0.0;
-	double averageFrameMs = 0.0;
-	// Performance gates compare complete frames only. Keeping these bounded
-	// aggregates in the public summary avoids exposing the raw frame timeline.
-	double frameMedianMs = 0.0;
-	double frameP95Ms = 0.0;
-	double frameP99Ms = 0.0;
-	double frameWorstMs = 0.0;
-	std::uint32_t payloadVersion = 1u;
-	std::uint64_t committedFrameCount = 0u;
-	std::uint64_t artifactSizeBytes = 0u;
-	bool captureComplete = true;
-	bool recoveredIncompleteTail = false;
-	std::vector<TerraEngine::Profiling::ProfilerTimingStreamAggregate> timingStreams;
-	std::vector<EditorProfilerMetricSummary> stageTimings;
-	std::vector<EditorProfilerMetricSummary> protectedBoundaryTimings;
-	std::vector<EditorProfilerMetricSummary> presentationWaitTimings;
-	std::vector<EditorProfilerMetricSummary> responsivenessTimings;
-	std::vector<EditorProfilerWorkerSummary> workerHistories;
-	EditorProfilerWorkVolumeSummary workVolumes;
-	EditorProfilerAnimationOptimizationSummary animationOptimization;
-	std::array<EditorProfilerRenderOptimizationSummary, 2U> renderOptimization{};
+	std::size_t offset = 0u;
+	std::size_t pageSize = 0u;
+	std::size_t totalFrameCount = 0u;
+	std::vector<TerraEngine::Profiling::ProfilerFrameListItem> frames;
+};
+
+// EditorProfilerOperationStatus is a bounded UI/automation view of one kind of
+// work. The operation id changes for every request so late worker results can be
+// rejected even when they belong to the current project epoch.
+struct EditorProfilerOperationStatus
+{
+	EditorProfilerOperationKind kind = EditorProfilerOperationKind::None;
+	std::uint64_t operationId = 0u;
+	bool active = false;
+	EditorProfilerOperationState state = EditorProfilerOperationState::Completed;
+};
+
+// EditorProfilerPresentationSnapshot is immutable once published. The window
+// receives this small value instead of reading the mutable service catalog while
+// background workers are discovering or opening captures. Detailed V1 index and
+// frame payload fields will be added when the engine journal contract lands.
+struct EditorProfilerPresentationSnapshot
+{
+	std::uint64_t projectEpoch = 0u;
+	std::uint64_t presentationRevision = 0u;
+	TerraEngine::Profiling::ProfilerSessionState sessionState = TerraEngine::Profiling::ProfilerSessionState::Idle;
+	bool hasActiveProject = false;
+	std::string statusText;
+	std::string lastError;
+	TerraEngine::Profiling::ProfilerCaptureHealth health;
+	// The reserved V1 filename is an opaque session identity. It lets bounded
+	// health polling prove which live journal produced its counters.
+	std::string activeSessionArtifactId;
+	std::uint64_t discardedStaleCompletionCount = 0u;
+	std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> captures;
+	std::filesystem::path profilerDirectory;
+	std::optional<EditorProfilerCaptureArtifact> selectedCapture;
+	std::optional<TerraEngine::Profiling::ProfilerJournalV1Summary> selectedSummary;
+	std::optional<EditorProfilerIndexPage> indexPage;
+	std::optional<TerraEngine::Profiling::ProfilerFrameRecord> selectedFrame;
+	std::string selectedFrameArtifactId;
+	std::array<EditorProfilerOperationStatus, kEditorProfilerOperationCount> operations{};
 };
 
 // class EditorProfilerService groups related state and operations so callers have one documented contract.
@@ -186,6 +164,9 @@ public:
 	void Initialize(EditorContext& context);
 	void Shutdown();
 	void OnProjectOpened();
+	// Call before scene/resource teardown. It invalidates every queued worker
+	// completion before any outgoing-project state can be observed again.
+	void BeginProjectClose();
 	void OnProjectClosed();
 	void Update(float deltaTime);
 	void PublishEditorFrameTiming(std::uint64_t frameIndex, double frameTimeMs) noexcept;
@@ -206,6 +187,10 @@ public:
 	void Clear();
 	void RefreshCaptureList();
 	void LoadCapture(const std::filesystem::path& capturePath);
+	// A page request is asynchronous and coalesced by artifact/offset/size.
+	// Callers never obtain the journal's complete frame index.
+	void RequestIndexPage(std::size_t offset, std::size_t pageSize = 128u);
+	void RequestSelectedFrame(std::uint64_t frameIndex);
 
 	TerraEngine::Profiling::ProfilerSessionState GetState() const;
 	// This revision changes only when a user-visible profiler document, capture
@@ -213,6 +198,7 @@ public:
 	// per-frame profiling revision, so idle editor windows can avoid copying the
 	// same completed document on every host frame.
 	[[nodiscard]] std::uint64_t GetPresentationRevision() const noexcept;
+	[[nodiscard]] std::shared_ptr<const EditorProfilerPresentationSnapshot> GetPresentationSnapshot() const noexcept;
 	std::string GetStatusText() const;
 	std::string GetLastError() const;
 	std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> GetCaptureList() const;
@@ -220,28 +206,51 @@ public:
 	// The stop job consumes this exact result instead of inferring the new capture
 	// from a list delta that may race asynchronous project-open discovery.
 	std::optional<EditorProfilerCaptureArtifact> GetLastSavedCaptureArtifact() const;
-	// ReadCaptureDocumentById is a blocking worker API used by durable jobs. UI
-	// callers should use RequestLoadCaptureById, which retains asynchronous load.
-	bool ReadCaptureDocumentById(
-		std::string_view artifactId,
-		TerraEngine::Profiling::ProfilerCaptureDocument& outDocument,
-		std::string& outError) const;
 	bool RequestLoadCaptureById(std::string_view artifactId, std::string& outError);
-	bool SummarizeCaptureById(std::string_view artifactId, EditorProfilerCaptureSummary& outSummary, std::string& outError) const;
-	[[nodiscard]] static EditorProfilerCaptureSummary SummarizeDocument(
-		std::string artifactId,
-		const TerraEngine::Profiling::ProfilerCaptureDocument& document);
 	bool HasActiveProject() const;
 	bool IsBusy() const;
+	// Automation finish jobs wait only for their own terminal-index validation.
+	// Catalog refreshes or a user-selected detail read must not delay success.
+	bool IsPersisting() const;
 	std::filesystem::path GetProfilerDirectory() const;
 
 private:
+	enum class WorkerCompletionKind : std::uint8_t
+	{
+		CaptureList,
+		CapturePersisted,
+		CaptureLoaded,
+		IndexPageLoaded,
+		FrameLoaded,
+		OperationFailed
+	};
+
+	// Workers own this value until they enqueue it. Publishing is deliberately
+	// deferred to Update so workers never mutate Profiler, UI, or service state.
+	struct WorkerCompletion
+	{
+		WorkerCompletionKind kind = WorkerCompletionKind::OperationFailed;
+		EditorProfilerOperationKind operationKind = EditorProfilerOperationKind::None;
+		std::uint64_t projectEpoch = 0u;
+		std::uint64_t operationId = 0u;
+		std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> captures;
+		std::optional<EditorProfilerCaptureArtifact> savedCaptureArtifact;
+		std::string error;
+		std::optional<EditorProfilerCaptureArtifact> selectedCapture;
+		std::optional<TerraEngine::Profiling::ProfilerJournalV1Summary> selectedSummary;
+		std::filesystem::path capturePath;
+		std::optional<EditorProfilerIndexPage> indexPage;
+		std::optional<TerraEngine::Profiling::ProfilerFrameRecord> selectedFrame;
+		// A detail completion belongs to exactly one opened artifact.  Opening a
+		// different capture must never let an older read replace its selection.
+		std::string selectedArtifactId;
+	};
+
 	TerraEngine::Profiling::ProfilerCaptureMetadata MakeMetadata() const;
-	void SetBusyStatus(bool busy, std::string status);
-	// Publication is lock-free because callers already protect the associated
-	// presentation data with mutex.  Release ordering makes completed updates
-	// visible before the window observes the new revision.
-	void MarkPresentationChanged() noexcept;
+	[[nodiscard]] std::uint64_t BeginOperationLocked(EditorProfilerOperationKind kind);
+	void EnqueueWorkerCompletion(WorkerCompletion completion);
+	void PublishPresentationLocked();
+	void AcceptWorkerCompletion(WorkerCompletion&& completion);
 	[[nodiscard]] static std::string MakeArtifactId(std::string_view fileName);
 	[[nodiscard]] std::optional<std::filesystem::path> FindCapturePathLocked(std::string_view artifactId) const;
 
@@ -253,13 +262,58 @@ private:
 	// shutdown alive.
 	std::shared_ptr<std::atomic_bool> cancellationToken = std::make_shared<std::atomic_bool>(false);
 	mutable std::mutex mutex;
+	// This queue is the only service state a worker may write. EditorSystem drains
+	// it at its protected boundary before ProfilerWindow renders.
+	mutable std::mutex completionMutex;
+	std::deque<WorkerCompletion> pendingCompletions;
 	std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> captures;
 	std::optional<EditorProfilerCaptureArtifact> lastSavedCaptureArtifact;
-	bool busy = false;
+	std::array<EditorProfilerOperationStatus, kEditorProfilerOperationCount> operations{};
+	std::uint64_t nextOperationId = 1u;
+	bool sessionAccepting = false;
+	std::uint64_t discardedStaleCompletionCount = 0u;
+	std::optional<std::filesystem::path> activeJournalPath;
+	std::string activeSessionArtifactId;
+	std::optional<TerraEngine::Profiling::ProfilerJournalFinalizationTicket> finalizationTicket;
+	// The service owns one scalar health copy and publishes it only at the
+	// protected editor boundary. ProfilerWindow never polls mutable engine state.
+	TerraEngine::Profiling::ProfilerCaptureHealth health;
+	// Active recording publishes only scalar health at a bounded cadence. The
+	// Profiler window stays responsive without rebuilding frame history or
+	// taking a profiler mutex on every editor frame.
+	float healthPublishAccumulatorSeconds = 0.0f;
+	std::optional<EditorProfilerCaptureArtifact> selectedCapture;
+	std::optional<TerraEngine::Profiling::ProfilerJournalV1Summary> selectedSummary;
+	std::optional<EditorProfilerIndexPage> selectedIndexPage;
+	std::optional<TerraEngine::Profiling::ProfilerFrameRecord> selectedFrame;
+	std::string selectedFrameArtifactId;
+	struct DetailCacheEntry
+	{
+		std::string artifactId;
+		std::uint64_t frameIndex = 0u;
+		TerraEngine::Profiling::ProfilerFrameRecord frame;
+	};
+	struct PendingIndexRequest
+	{
+		std::string artifactId;
+		std::size_t offset = 0u;
+		std::size_t pageSize = 0u;
+	};
+	struct PendingDetailRequest
+	{
+		std::string artifactId;
+		std::uint64_t frameIndex = 0u;
+	};
+	std::deque<DetailCacheEntry> decodedDetailCache;
+	std::optional<PendingIndexRequest> pendingIndexRequest;
+	std::optional<PendingDetailRequest> pendingDetailRequest;
 	std::string statusText = "Idle";
 	std::string lastError;
 	std::uint64_t projectGeneration = 0u;
 	std::atomic_uint64_t presentationRevision = 1u;
+	// Atomic shared-pointer operations let UI readers retain one immutable
+	// presentation value without holding the service mutex across ImGui work.
+	std::shared_ptr<const EditorProfilerPresentationSnapshot> presentationSnapshot;
 	std::atomic_uint64_t editorFrameIndex = 0u;
 	std::atomic<double> editorFrameTimeMs = 0.0;
 	std::atomic_uint64_t profilerWindowDrawFrameIndex = 0u;

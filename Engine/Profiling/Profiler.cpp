@@ -1,6 +1,7 @@
 // Profiler.cpp — Contains the Profiler file-specific types, helper functions, and module integration code implementation for runtime profiling sessions, timing markers, capture serialization, and scope helpers.
 
 #include "Profiling/Profiler.h"
+#include "Profiling/ProfilerJournalV1.h"
 
 #include "Animation/Diagnostics/AnimationDiagnostics.h"
 #include "Core/Scheduling/FrameWorkload.h"
@@ -13,10 +14,17 @@
 #include <array>
 #include <cstring>
 #include <iterator>
+#include <limits>
 #include <numeric>
 #include <sstream>
 #include <thread>
-#include <unordered_map>
+
+#ifdef _WIN32
+	#ifndef NOMINMAX
+		#define NOMINMAX
+	#endif
+	#include <Windows.h>
+#endif
 
 namespace TerraEngine::Profiling
 {
@@ -32,6 +40,16 @@ std::int64_t SteadyNowNanoseconds()
 {
 	return std::chrono::duration_cast<std::chrono::nanoseconds>(
 		std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+std::uint64_t CompletedStageNanoseconds(std::int64_t startedAtNanoseconds)
+{
+	// A completed profiler stage must remain distinguishable from an unavailable
+	// measurement. Very small synthetic operations can begin and end inside one
+	// platform-clock tick, so attribute one nanosecond instead of publishing a
+	// misleading measured zero.
+	return static_cast<std::uint64_t>(std::max<std::int64_t>(
+		1, SteadyNowNanoseconds() - startedAtNanoseconds));
 }
 
 double NanosecondsToMilliseconds(std::int64_t nanoseconds)
@@ -99,51 +117,111 @@ std::uint64_t MergeWorkloadWallTimeNanoseconds(
 	return total + mergedEnd - mergedBegin;
 }
 
-// CalculateSampleCoverageMs merges nested and overlapping samples before
-// reporting a total. Grouping by thread produces CPU work (parallel lanes add),
-// while one shared group produces elapsed wall coverage for the frame.
-double CalculateSampleCoverageMs(
-	const std::vector<ProfilerSample>& samples,
-	ProfilerModuleId moduleId,
-	bool groupByThread)
+// SampleCoverage keeps the three derived values EndFrame needs for one module.
+// The values are computed together so detailed recording does not rebuild and
+// sort the same interval hierarchy separately for CPU work, wall coverage, and
+// sample-count diagnostics.
+struct SampleCoverage
 {
-	std::unordered_map<std::string, std::vector<std::pair<double, double>>> intervalsByLane;
+	double cpuWorkMs = 0.0;
+	double wallCoverageMs = 0.0;
+	std::size_t matchingSampleCount = 0u;
+};
+
+std::uint64_t QueueResidentBytes(const ProfilerSealedFrame& sealed)
+{
+	return sealed.ownedByteCount + sealed.deferredAggregationReservationBytes;
+}
+
+// CalculateSampleCoverage assumes samples are already ordered by start time.
+// EndFrame performs that one canonical sort before calling this helper. A
+// subsequence for any one thread is therefore ordered too, allowing every lane
+// to merge intervals in one pass without transient maps, copied thread labels,
+// or per-lane interval vectors on the protected recording path.
+SampleCoverage CalculateSampleCoverage(
+	const std::vector<ProfilerSample>& samples,
+	ProfilerModuleId moduleId)
+{
+	struct LaneCoverage
+	{
+		std::string_view label;
+		double mergedBeginMs = 0.0;
+		double mergedEndMs = 0.0;
+		double completedMs = 0.0;
+	};
+
+	// Thread-local scratch is deliberately reused by the protected EndFrame
+	// consumer. It stores non-owning views into the current frame only, and is
+	// cleared before the frame can be released, so it cannot retain capture data.
+	thread_local std::vector<LaneCoverage> lanes;
+	lanes.clear();
+	SampleCoverage result;
+	bool hasWallInterval = false;
+	double wallBeginMs = 0.0;
+	double wallEndMs = 0.0;
+
 	for (const ProfilerSample& sample : samples)
 	{
-		if (sample.moduleId != moduleId || !std::isfinite(sample.startMs)
-			|| !std::isfinite(sample.durationMs) || sample.durationMs <= 0.0)
+		if (sample.moduleId != moduleId)
 		{
 			continue;
 		}
-		intervalsByLane[groupByThread ? sample.threadLabel : std::string{}].emplace_back(
-			sample.startMs, sample.startMs + sample.durationMs);
+		++result.matchingSampleCount;
+		if (!std::isfinite(sample.startMs) || !std::isfinite(sample.durationMs)
+			|| sample.durationMs <= 0.0)
+		{
+			continue;
+		}
+		const double intervalBeginMs = sample.startMs;
+		const double intervalEndMs = sample.startMs + sample.durationMs;
+		if (!hasWallInterval)
+		{
+			wallBeginMs = intervalBeginMs;
+			wallEndMs = intervalEndMs;
+			hasWallInterval = true;
+		}
+		else if (intervalBeginMs <= wallEndMs)
+		{
+			wallEndMs = std::max(wallEndMs, intervalEndMs);
+		}
+		else
+		{
+			result.wallCoverageMs += wallEndMs - wallBeginMs;
+			wallBeginMs = intervalBeginMs;
+			wallEndMs = intervalEndMs;
+		}
+
+		const std::string_view laneLabel = sample.threadLabel;
+		auto lane = std::find_if(lanes.begin(), lanes.end(),
+			[laneLabel](const LaneCoverage& candidate) {
+				return candidate.label == laneLabel;
+			});
+		if (lane == lanes.end())
+		{
+			lanes.push_back({laneLabel, intervalBeginMs, intervalEndMs, 0.0});
+			continue;
+		}
+		if (intervalBeginMs <= lane->mergedEndMs)
+		{
+			lane->mergedEndMs = std::max(lane->mergedEndMs, intervalEndMs);
+		}
+		else
+		{
+			lane->completedMs += lane->mergedEndMs - lane->mergedBeginMs;
+			lane->mergedBeginMs = intervalBeginMs;
+			lane->mergedEndMs = intervalEndMs;
+		}
 	}
 
-	double coveredMs = 0.0;
-	for (auto& [lane, intervals] : intervalsByLane)
+	if (hasWallInterval)
 	{
-		(void)lane;
-		std::sort(intervals.begin(), intervals.end());
-		if (intervals.empty())
-		{
-			continue;
-		}
-		double mergedBeginMs = intervals.front().first;
-		double mergedEndMs = intervals.front().second;
-		for (std::size_t index = 1u; index < intervals.size(); ++index)
-		{
-			if (intervals[index].first <= mergedEndMs)
-			{
-				mergedEndMs = std::max(mergedEndMs, intervals[index].second);
-				continue;
-			}
-			coveredMs += mergedEndMs - mergedBeginMs;
-			mergedBeginMs = intervals[index].first;
-			mergedEndMs = intervals[index].second;
-		}
-		coveredMs += mergedEndMs - mergedBeginMs;
+		result.wallCoverageMs += wallEndMs - wallBeginMs;
 	}
-	return coveredMs;
+	for (const LaneCoverage& lane : lanes)
+	{
+		result.cpuWorkMs += lane.completedMs + lane.mergedEndMs - lane.mergedBeginMs;
+	}
+	return result;
 }
 
 template <std::size_t Capacity>
@@ -169,6 +247,11 @@ struct BufferedProfilerSample
 	std::uint64_t sampleId = 0u;
 	std::uint64_t parentSampleId = 0u;
 	ProfilerModuleId moduleId = ProfilerModuleId::CpuEngine;
+	// Static labels are owned by a ProfilerLiteralScope template instantiation
+	// and remain valid for the process lifetime. Dynamic names continue to use
+	// the bounded inline array below.
+	const char* stableName = nullptr;
+	std::uint16_t stableNameLength = 0u;
 	std::array<char, kProfilerSampleNameCapacity> name{};
 	std::array<char, kProfilerTaskLabelCapacity> taskLabel{};
 	std::int64_t startNanoseconds = 0;
@@ -228,6 +311,35 @@ struct ProfilerHotPathState
 	std::atomic_uint64_t nextSampleId = 1u;
 	std::atomic_uint64_t rejectedThreadBuffers = 0u;
 	std::atomic_uint64_t rejectedThreadBufferFrameToken = 0u;
+};
+
+// Deferred samples own only the bytes that can disappear when a producer ring
+// advances. Literal names retain their process-lifetime pointer, while dynamic
+// names, task labels, and thread labels share one flat byte vector. This avoids
+// thousands of small string allocations at EndFrame without allowing the
+// persistence worker to observe mutable TLS or producer storage.
+struct ProfilerDeferredSampleRecord
+{
+	std::uint64_t sampleId = 0u;
+	std::uint64_t parentSampleId = 0u;
+	ProfilerModuleId moduleId = ProfilerModuleId::CpuEngine;
+	const char* stableName = nullptr;
+	std::uint32_t nameOffset = 0u;
+	std::uint16_t nameLength = 0u;
+	std::uint32_t taskOffset = 0u;
+	std::uint16_t taskLength = 0u;
+	std::uint32_t threadOffset = 0u;
+	std::uint16_t threadLength = 0u;
+	double startMs = 0.0;
+	double durationMs = 0.0;
+	std::uint32_t depth = 0u;
+	bool complete = true;
+};
+
+struct ProfilerDeferredSampleStorage
+{
+	std::vector<ProfilerDeferredSampleRecord> samples;
+	std::vector<char> text;
 };
 
 namespace
@@ -435,40 +547,6 @@ void AddOrReplaceMetric(ProfilerModuleSummary& module, std::string name, double 
 	module.metrics.push_back({std::move(name), value, std::move(unit)});
 }
 
-// MaterializeAnimationDiagnosticsMetrics restores the established capture
-// schema on an outward-facing copy. Retained dormant frames deliberately keep
-// these facts typed so recording them never allocates metric strings or scans
-// the module metric vector.
-void MaterializeAnimationDiagnosticsMetrics(ProfilerFrameRecord& frame)
-{
-	if (!frame.animationDiagnostics.has_value())
-	{
-		return;
-	}
-
-	ProfilerModuleSummary* module = FindModule(frame.moduleSummaries, ProfilerModuleId::CpuEngine);
-	if (module == nullptr)
-	{
-		return;
-	}
-
-	const ProfilerAnimationDiagnosticsFacts& facts = *frame.animationDiagnostics;
-	AddOrReplaceMetric(*module, "Animation.SchedulerMembershipChecks", static_cast<double>(facts.schedulerMembershipChecks), "count");
-	AddOrReplaceMetric(*module, "Animation.Dormant", facts.dormant ? 1.0 : 0.0, "boolean");
-	AddOrReplaceMetric(*module, "Animation.BaselineIdentityMatched", facts.baselineIdentityMatched ? 1.0 : 0.0, "boolean");
-}
-
-// MaterializeAnimationDiagnosticsMetrics makes a public document self
-// contained before it is returned or saved, without changing compact retained
-// frames in the profiler session.
-void MaterializeAnimationDiagnosticsMetrics(ProfilerCaptureDocument& document)
-{
-	for (ProfilerFrameRecord& frame : document.frames)
-	{
-		MaterializeAnimationDiagnosticsMetrics(frame);
-	}
-}
-
 ProfilerTimingStreamSample MakeTimingSample(
 	std::string id,
 	std::string label,
@@ -654,53 +732,6 @@ bool ShouldRetainAnimationDetails(
 	return false;
 }
 
-// AddAnimationTelemetryMetrics exposes the aggregate counters to existing UI
-// consumers. The typed record remains authoritative for availability and stage
-// attribution; these names are presentation aliases, not acceptance evidence.
-void AddAnimationTelemetryMetrics(
-	ProfilerModuleSummary& module,
-	const ProfilerAnimationFrameSummary& summary)
-{
-	AddOrReplaceMetric(module, "Animation.AvailableEvidenceMask", static_cast<double>(summary.availableEvidenceMask), "bitmask");
-	AddOrReplaceMetric(module, "Animation.ActiveAnimators", static_cast<double>(summary.activeAnimators), "count");
-	AddOrReplaceMetric(module, "Animation.EvaluatedAnimators", static_cast<double>(summary.evaluatedAnimators), "count");
-	AddOrReplaceMetric(module, "Animation.CpuAnimators", static_cast<double>(summary.cpuAnimators), "count");
-	AddOrReplaceMetric(module, "Animation.GpuVisualAnimators", static_cast<double>(summary.gpuVisualAnimators), "count");
-	AddOrReplaceMetric(module, "Animation.HybridAuthoritativeAnimators", static_cast<double>(summary.hybridAnimators), "count");
-	AddOrReplaceMetric(module, "Animation.WorkerCount", static_cast<double>(summary.workerCount), "count");
-	AddOrReplaceMetric(module, "Animation.WorkerJobs", static_cast<double>(summary.workerJobs), "count");
-	AddOrReplaceMetric(module, "Animation.WorkerUsefulItems", static_cast<double>(summary.workerUsefulItems), "count");
-	AddOrReplaceMetric(module, "Animation.WorkerBusy", static_cast<double>(summary.workerBusyNanoseconds), "nanoseconds");
-	AddOrReplaceMetric(module, "Animation.WorkerCapacity", static_cast<double>(summary.workerCapacityNanoseconds), "nanoseconds");
-	AddOrReplaceMetric(module, "Animation.SampledJoints", static_cast<double>(summary.sampledJoints), "count");
-	AddOrReplaceMetric(module, "Animation.BlendedTracks", static_cast<double>(summary.blendedTracks), "count");
-	AddOrReplaceMetric(module, "Animation.EvaluatedGraphNodes", static_cast<double>(summary.evaluatedGraphNodes), "count");
-	AddOrReplaceMetric(module, "Animation.MotionMatchingCandidates", static_cast<double>(summary.motionMatchingCandidates), "count");
-	AddOrReplaceMetric(module, "Animation.IkChains", static_cast<double>(summary.ikChains), "count");
-	AddOrReplaceMetric(module, "Animation.RagdollBodies", static_cast<double>(summary.ragdollBodies), "count");
-	AddOrReplaceMetric(module, "Animation.GpuEvaluatedJoints", static_cast<double>(summary.gpuEvaluatedJoints), "count");
-	AddOrReplaceMetric(module, "Animation.GpuBatches", static_cast<double>(summary.gpuBatches), "count");
-	AddOrReplaceMetric(module, "Animation.FrameArenaBytes", static_cast<double>(summary.frameArenaBytes), "bytes");
-	AddOrReplaceMetric(module, "Animation.FrameArenaHighWaterBytes", static_cast<double>(summary.frameArenaHighWaterBytes), "bytes");
-	AddOrReplaceMetric(module, "Animation.PoseCacheBytes", static_cast<double>(summary.poseCacheBytes), "bytes");
-	AddOrReplaceMetric(module, "Animation.PoseCacheHighWaterBytes", static_cast<double>(summary.poseCacheHighWaterBytes), "bytes");
-	AddOrReplaceMetric(module, "Animation.GpuResidentBytes", static_cast<double>(summary.gpuResidentBytes), "bytes");
-	AddOrReplaceMetric(module, "Animation.GpuResidentHighWaterBytes", static_cast<double>(summary.gpuResidentHighWaterBytes), "bytes");
-	AddOrReplaceMetric(module, "Animation.GpuTransferBytes", static_cast<double>(summary.gpuTransferBytes), "bytes");
-	AddOrReplaceMetric(module, "Animation.GpuReadbackBytes", static_cast<double>(summary.gpuReadbackBytes), "bytes");
-	AddOrReplaceMetric(module, "Animation.CompletePoseReadbackBytes", static_cast<double>(summary.completePoseReadbackBytes), "bytes");
-	AddOrReplaceMetric(module, "Animation.BoundedMetadataReadbackBytes", static_cast<double>(summary.boundedMetadataReadbackBytes), "bytes");
-	AddOrReplaceMetric(module, "Animation.GpuWaits", static_cast<double>(summary.gpuWaitCount), "count");
-	AddOrReplaceMetric(module, "Animation.SchedulerWaits", static_cast<double>(summary.schedulerWaitCount), "count");
-	AddOrReplaceMetric(module, "Animation.ProtectedBoundaryStalls", static_cast<double>(summary.protectedBoundaryStallCount), "count");
-	AddOrReplaceMetric(module, "Animation.PoseCacheHits", static_cast<double>(summary.poseCacheHits), "count");
-	AddOrReplaceMetric(module, "Animation.PoseCacheMisses", static_cast<double>(summary.poseCacheMisses), "count");
-	AddOrReplaceMetric(module, "Animation.ClipCacheHits", static_cast<double>(summary.clipCacheHits), "count");
-	AddOrReplaceMetric(module, "Animation.ClipCacheMisses", static_cast<double>(summary.clipCacheMisses), "count");
-	AddOrReplaceMetric(module, "Animation.ResidencyHits", static_cast<double>(summary.residencyHits), "count");
-	AddOrReplaceMetric(module, "Animation.ResidencyMisses", static_cast<double>(summary.residencyMisses), "count");
-}
-
 // Viewport CPU timing must come from profiler scopes instead of renderer frame
 // stats. RenderStatsSnapshot::frameTimeMs mirrors the view's frame delta and can
 // be much larger than the CPU work done by the viewport submission itself.
@@ -713,6 +744,114 @@ bool IsViewportCpuSubmitSample(const ProfilerSample& sample)
 	return sample.name == "RenderSystem: Submit Scene View"
 		|| sample.name == "RenderSystem: Submit Game View Cameras"
 		|| sample.name == "RenderSystem: Submit Blank Game View";
+}
+
+std::uint32_t AppendDeferredText(
+	ProfilerDeferredSampleStorage& storage,
+	const char* text,
+	std::uint16_t length)
+{
+	if (text == nullptr || length == 0u)
+	{
+		return 0u;
+	}
+	const std::uint32_t offset = static_cast<std::uint32_t>(storage.text.size());
+	storage.text.insert(storage.text.end(), text, text + length);
+	return offset;
+}
+
+std::string_view DeferredText(
+	const ProfilerDeferredSampleStorage& storage,
+	std::uint32_t offset,
+	std::uint16_t length)
+{
+	if (length == 0u || offset > storage.text.size()
+		|| length > storage.text.size() - offset)
+	{
+		return {};
+	}
+	return std::string_view(storage.text.data() + offset, length);
+}
+
+std::uint64_t EstimateDeferredSampleOwnedBytes(
+	const std::shared_ptr<ProfilerDeferredSampleStorage>& storage) noexcept
+{
+	if (!storage)
+	{
+		return 0u;
+	}
+	// Count retained capacities rather than logical sizes: these are the actual
+	// allocations kept resident until the journal worker finishes the frame.
+	return sizeof(ProfilerDeferredSampleStorage)
+		+ storage->samples.capacity() * sizeof(ProfilerDeferredSampleRecord)
+		+ storage->text.capacity() * sizeof(char);
+}
+
+bool IsViewportCpuSubmitSample(
+	const ProfilerDeferredSampleStorage& storage,
+	const ProfilerDeferredSampleRecord& sample)
+{
+	if (sample.moduleId != ProfilerModuleId::CpuEngine)
+	{
+		return false;
+	}
+	const std::string_view name = sample.stableName != nullptr
+		? std::string_view(sample.stableName, sample.nameLength)
+		: DeferredText(storage, sample.nameOffset, sample.nameLength);
+	return name == "RenderSystem: Submit Scene View"
+		|| name == "RenderSystem: Submit Game View Cameras"
+		|| name == "RenderSystem: Submit Blank Game View";
+}
+
+bool TryMeasureViewportCpuMilliseconds(
+	const ProfilerDeferredSampleStorage& storage,
+	double& viewportCpuMs)
+{
+	viewportCpuMs = 0.0;
+	bool foundViewportSubmit = false;
+	for (const ProfilerDeferredSampleRecord& sample : storage.samples)
+	{
+		if (!IsViewportCpuSubmitSample(storage, sample))
+		{
+			continue;
+		}
+		foundViewportSubmit = true;
+		viewportCpuMs += std::max(0.0, sample.durationMs);
+	}
+	return foundViewportSubmit;
+}
+
+void MaterializeDeferredSamples(ProfilerSealedFrame& sealed)
+{
+	if (!sealed.deferredSamples)
+	{
+		return;
+	}
+	const ProfilerDeferredSampleStorage& storage = *sealed.deferredSamples;
+	sealed.frame.samples.reserve(sealed.frame.samples.size() + storage.samples.size());
+	for (const ProfilerDeferredSampleRecord& deferred : storage.samples)
+	{
+		ProfilerSample sample;
+		sample.sampleId = deferred.sampleId;
+		sample.parentSampleId = deferred.parentSampleId;
+		sample.moduleId = deferred.moduleId;
+		const std::string_view name = deferred.stableName != nullptr
+			? std::string_view(deferred.stableName, deferred.nameLength)
+			: DeferredText(storage, deferred.nameOffset, deferred.nameLength);
+		sample.name.assign(name.begin(), name.end());
+		const std::string_view threadLabel = DeferredText(
+			storage, deferred.threadOffset, deferred.threadLength);
+		sample.threadLabel.assign(threadLabel.begin(), threadLabel.end());
+		const std::string_view taskLabel = DeferredText(
+			storage, deferred.taskOffset, deferred.taskLength);
+		sample.taskLabel.assign(taskLabel.begin(), taskLabel.end());
+		sample.startMs = deferred.startMs;
+		sample.durationMs = deferred.durationMs;
+		sample.depth = deferred.depth;
+		sample.complete = deferred.complete;
+		sealed.frame.samples.push_back(std::move(sample));
+	}
+	sealed.deferredSamples.reset();
 }
 
 bool TryMeasureViewportCpuMilliseconds(const ProfilerFrameRecord& frame, double& viewportCpuMs)
@@ -742,9 +881,21 @@ Profiler& Profiler::Instance()
 Profiler::Profiler()
 	: hotPath(std::make_unique<ProfilerHotPathState>())
 {
+	journalWorker = std::thread(&Profiler::JournalWorkerMain, this);
 }
 
-Profiler::~Profiler() = default;
+Profiler::~Profiler()
+{
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		journalWorkerStopping = true;
+	}
+	journalWorkerCondition.notify_one();
+	if (journalWorker.joinable())
+	{
+		journalWorker.join();
+	}
+}
 
 // Profiler::StartRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::StartRecording(const ProfilerCaptureMetadata& metadata, const ProfilerCaptureSettings& requestedSettings)
@@ -763,6 +914,13 @@ void Profiler::StartRecording(const ProfilerCaptureMetadata& metadata, const Pro
 	DiscardPublishedThreadData(*hotPath);
 	settings = requestedSettings;
 	settings.captureMode = ProfilerCaptureMode::LiveRolling;
+	// The public in-memory entry point intentionally has no unlimited mode.
+	// Project/editor recording uses StartJournalRecording, whose worker-backed
+	// journal is the only path permitted to span an arbitrary duration.
+	settings.maxFrames = settings.maxFrames == 0u
+		? static_cast<std::uint32_t>(kMaximumInMemoryDiagnosticFrames)
+		: std::min(settings.maxFrames,
+			static_cast<std::uint32_t>(kMaximumInMemoryDiagnosticFrames));
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!AnyModuleEnabled(settings))
 	{
@@ -775,8 +933,20 @@ void Profiler::StartRecording(const ProfilerCaptureMetadata& metadata, const Pro
 	document.metadata.startedAt = document.metadata.startedAt.empty() ? MakeReadableTimestamp() : document.metadata.startedAt;
 	document.frames.clear();
 	retainedFrames.clear();
+	journalWriter.reset();
+	journalCoreQueue.clear();
+	journalDetailQueue.clear();
+	journalHealth = {};
+	journalDrainScheduled = false;
+	journalDrainForced = false;
+	journalTerminalFailure = false;
+	journalFinalizeRequested = false;
+	journalPartialFrameEndingNanoseconds.reset();
+	journalFinalizationCompleted = false;
+	++journalGeneration;
 	document.sourcePath.reset();
 	currentFrame.reset();
+	currentDeferredSamples.reset();
 	selectedFrameIndex.reset();
 	sessionStart = std::chrono::steady_clock::now();
 	nextFrameIndex = 0u;
@@ -793,6 +963,40 @@ void Profiler::StartRecording(const ProfilerCaptureMetadata& metadata, const Pro
 	snapshotRevision.fetch_add(1u, std::memory_order_release);
 }
 
+bool Profiler::StartJournalRecording(
+	const ProfilerCaptureMetadata& metadata,
+	const ProfilerCaptureSettings& requestedSettings,
+	const std::filesystem::path& artifactPath,
+	std::string& outError,
+	std::shared_ptr<ProfilerJournalV1Sink> sink)
+{
+	outError.clear();
+	ProfilerCaptureMetadata journalMetadata = metadata;
+	journalMetadata.settings = requestedSettings;
+	auto writer = std::make_shared<ProfilerJournalV1Writer>(std::move(sink));
+	if (writer->Open(artifactPath, journalMetadata, outError) != ProfilerJournalV1ResultCode::Ok)
+	{
+		return false;
+	}
+
+	// StartRecording resets producer generations and current-frame state before
+	// publishing the writer.  No frame can reach EndFrame until this call returns,
+	// so the small hand-off below cannot expose a half-open journal session.
+	StartRecording(journalMetadata, requestedSettings);
+	std::lock_guard<std::mutex> lock(mutex);
+	// StartRecording caps only its no-sink diagnostic cache. A journal session
+	// never retains that cache, so preserve the caller's journal-facing frame
+	// policy in its metadata instead of reporting the diagnostic cap.
+	settings.maxFrames = requestedSettings.maxFrames;
+	document.metadata.settings.maxFrames = requestedSettings.maxFrames;
+	journalWriter = std::move(writer);
+	document.sourcePath = artifactPath;
+	journalHealth.destinationWritable = true;
+	statusText = "Recording to profiler journal V1";
+	snapshotRevision.fetch_add(1u, std::memory_order_release);
+	return true;
+}
+
 // Profiler::PauseRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::PauseRecording()
 {
@@ -804,6 +1008,10 @@ void Profiler::PauseRecording()
 		markerRecordingActive.store(false, std::memory_order_release);
 		taskRecordingActive.store(false, std::memory_order_release);
 		FinalizePartialFrameLocked();
+		// A pause is an explicit durability boundary: do not strand a partial
+		// worker batch merely because it has not reached the normal size target.
+		journalDrainForced = true;
+		ScheduleJournalDrainLocked();
 		state = ProfilerSessionState::Paused;
 		statusText = "Paused";
 		UpdateFastRecordingFlagsLocked();
@@ -825,25 +1033,76 @@ void Profiler::ResumeRecording()
 	}
 }
 
-// Profiler::FinishRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-ProfilerCaptureDocument Profiler::FinishRecording()
+ProfilerJournalFinalizationTicket Profiler::FinishRecording()
 {
 	std::lock_guard<std::mutex> lock(mutex);
+	ProfilerJournalFinalizationTicket ticket;
+	if (journalFinalizationCompleted.load(std::memory_order_acquire) || journalTerminalFailure
+		|| (state != ProfilerSessionState::Recording && state != ProfilerSessionState::Paused))
+	{
+		return ticket;
+	}
 	frameRecordingActive.store(false, std::memory_order_release);
 	markerRecordingActive.store(false, std::memory_order_release);
 	taskRecordingActive.store(false, std::memory_order_release);
-	FinalizePartialFrameLocked();
-
-	document.metadata.savedAt = MakeReadableTimestamp();
-	document.metadata.settings.captureMode = ProfilerCaptureMode::FinalizingToArtifact;
-	state = ProfilerSessionState::Finalizing;
-	statusText = "Finalizing capture";
+	ticket = {journalGeneration, true};
+	if (journalWriter)
+	{
+		// Finishing must publish its ticket promptly even when the incomplete frame
+		// contains thousands of worker samples. Capture the exact visible boundary
+		// and close this thread's editor interval now; the serialized drain worker
+		// later performs the expensive merge, aggregation, and sealed-frame copy.
+		journalPartialFrameEndingNanoseconds = SteadyNowNanoseconds();
+		CloseInterruptedEditorWorkLocked(*journalPartialFrameEndingNanoseconds);
+		state = ProfilerSessionState::Finalizing;
+		statusText = "Finalizing profiler journal V1";
+		journalFinalizeRequested = true;
+		ScheduleJournalDrainLocked();
+	}
+	else
+	{
+		// A bounded in-memory session has no persistence worker. Preserve its
+		// immediate-completion contract, including an interrupted partial frame.
+		FinalizePartialFrameLocked();
+		document.metadata.savedAt = MakeReadableTimestamp();
+		document.metadata.settings.captureMode = ProfilerCaptureMode::FinalizingToArtifact;
+		state = ProfilerSessionState::Finalizing;
+		// In-memory sessions are deliberately bounded diagnostic/test sessions.
+		// Their frames are already sealed in retainedFrames, so finishing needs no
+		// history copy or worker I/O and the common ticket completes immediately.
+		statusText = "Capture finalized";
+		journalFinalizationCompleted.store(true, std::memory_order_release);
+	}
 	UpdateFastRecordingFlagsLocked();
 	snapshotRevision.fetch_add(1u, std::memory_order_release);
-	ProfilerCaptureDocument snapshot = document;
-	snapshot.frames.assign(retainedFrames.begin(), retainedFrames.end());
-	MaterializeAnimationDiagnosticsMetrics(snapshot);
-	return snapshot;
+	return ticket;
+}
+
+ProfilerJournalFinalizationStatus Profiler::GetJournalFinalizationStatus(
+	ProfilerJournalFinalizationTicket ticket) const
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	ProfilerJournalFinalizationStatus status;
+	status.ticket = ticket;
+	status.health = journalHealth;
+	status.error = lastError;
+	if (!ticket.accepted || ticket.journalGeneration != journalGeneration)
+	{
+		status.state = ProfilerJournalFinalizationState::Stale;
+	}
+	else if (journalTerminalFailure)
+	{
+		status.state = ProfilerJournalFinalizationState::Failed;
+	}
+	else if (journalFinalizationCompleted.load(std::memory_order_acquire))
+	{
+		status.state = ProfilerJournalFinalizationState::Completed;
+	}
+	else
+	{
+		status.state = ProfilerJournalFinalizationState::Draining;
+	}
+	return status;
 }
 
 // Profiler::Clear is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -859,7 +1118,19 @@ void Profiler::Clear()
 	DiscardPublishedThreadData(*hotPath);
 	document = {};
 	retainedFrames.clear();
+	journalWriter.reset();
+	journalCoreQueue.clear();
+	journalDetailQueue.clear();
+	journalHealth = {};
+	journalDrainScheduled = false;
+	journalDrainForced = false;
+	journalTerminalFailure = false;
+	journalFinalizeRequested = false;
+	journalPartialFrameEndingNanoseconds.reset();
+	journalFinalizationCompleted = false;
+	++journalGeneration;
 	currentFrame.reset();
+	currentDeferredSamples.reset();
 	selectedFrameIndex.reset();
 	queuedTaskCount = 0u;
 	startedTaskCount = 0u;
@@ -895,6 +1166,17 @@ void Profiler::LoadDocument(ProfilerCaptureDocument&& loadedDocument)
 	DiscardPublishedThreadData(*hotPath);
 	document = std::move(loadedDocument);
 	retainedFrames.clear();
+	journalWriter.reset();
+	journalCoreQueue.clear();
+	journalDetailQueue.clear();
+	journalHealth = {};
+	journalDrainScheduled = false;
+	journalDrainForced = false;
+	journalTerminalFailure = false;
+	journalFinalizeRequested = false;
+	journalPartialFrameEndingNanoseconds.reset();
+	journalFinalizationCompleted = false;
+	++journalGeneration;
 	retainedFrames.insert(
 		retainedFrames.end(),
 		std::make_move_iterator(document.frames.begin()),
@@ -909,6 +1191,7 @@ void Profiler::LoadDocument(ProfilerCaptureDocument&& loadedDocument)
 	settings = document.metadata.settings;
 	settings.captureMode = ProfilerCaptureMode::LoadedReadOnly;
 	currentFrame.reset();
+	currentDeferredSamples.reset();
 	selectedFrameIndex = retainedFrames.empty() ? std::optional<std::uint64_t>{} : std::optional<std::uint64_t>{retainedFrames.front().frameIndex};
 	state = ProfilerSessionState::Loaded;
 	statusText = "Loaded capture";
@@ -936,6 +1219,7 @@ void Profiler::BeginFrame(bool playModeActive)
 		hotPath->activeFrameToken.store(0u, std::memory_order_release);
 		hotPath->excludedEditorNanoseconds.store(0, std::memory_order_release);
 		currentFrame.reset();
+		currentDeferredSamples.reset();
 		statusText = "Recording (waiting for Play Mode)";
 		UpdateFastRecordingFlagsLocked();
 		return;
@@ -964,6 +1248,7 @@ void Profiler::BeginFrame(bool playModeActive)
 	const std::uint64_t frameToken =
 		hotPath->nextFrameToken.fetch_add(1u, std::memory_order_relaxed);
 	currentFrame = std::move(frame);
+	currentDeferredSamples.reset();
 	queuedTaskCount = 0u;
 	startedTaskCount = 0u;
 	finishedTaskCount = 0u;
@@ -986,9 +1271,14 @@ void Profiler::EndFrame()
 	{
 		return;
 	}
+	// Measure the profiler's complete collection cost, including immutable
+	// subsystem snapshots acquired before the protected frame boundary. This
+	// scalar is accumulated only for journal sessions and never becomes a sample
+	// inside the frame being measured, avoiding recursive instrumentation.
+	const std::int64_t collectionStartNanoseconds = SteadyNowNanoseconds();
 	const auto physicsSnapshot = TerraEngine::Physics::AcquirePhysicsDiagnosticsSnapshot();
 	std::vector<WorkloadExecutionRecord> workloadExecutionSnapshot =
-		TerraEngine::Scheduling::LatestFrameWorkloadExecutionRecordsForProfiling();
+		TerraEngine::Scheduling::TakeLatestFrameWorkloadExecutionRecordsForProfiling();
 	thread_local std::vector<WorkerTelemetryRecord> workerCounterScratch;
 	workerCounterScratch.clear();
 	workerCounterScratch.reserve(ThreadPool::instance().getThreadCount());
@@ -1004,8 +1294,11 @@ void Profiler::EndFrame()
 				AvailableTelemetryDuration(worker.waitNanoseconds),
 				AvailableTelemetryDuration(worker.idleNanoseconds)});
 		});
-	const TerraEngine::Renderer::RenderDiagnosticsSummary renderDiagnostics =
-		TerraEngine::Renderer::LatestRenderDiagnostics();
+	// The complete renderer diagnostics tree can contain large optional editor
+	// vectors. Recorded frames need only the immutable presentation waits and
+	// renderer identity, so avoid copying unrelated render diagnostics here.
+	const TerraEngine::Renderer::RenderProfilerFrameSnapshot renderDiagnostics =
+		TerraEngine::Renderer::LatestRenderProfilerFrameSnapshot();
 
 	std::lock_guard<std::mutex> lock(mutex);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1082,9 +1375,15 @@ void Profiler::EndFrame()
 		ProfilerTimingStreamSource::ProfilerClock,
 		ProfilerTimingStreamStatus::Valid,
 		currentFrame->durationMs));
-	MergeThreadSamplesForFrameLocked(sessionGeneration, frameToken);
+	// A durable complete frame owns a compact fixed-record hand-off. Producer
+	// rings are still consumed at this protected boundary, but heap-owned sample
+	// strings and hierarchy materialization run later on the journal worker.
+	MergeThreadSamplesForFrameLocked(sessionGeneration, frameToken, journalWriter != nullptr);
 	double viewportCpuMs = 0.0;
-	if (TryMeasureViewportCpuMilliseconds(*currentFrame, viewportCpuMs))
+	const bool measuredViewportCpu = currentDeferredSamples
+		? TryMeasureViewportCpuMilliseconds(*currentDeferredSamples, viewportCpuMs)
+		: TryMeasureViewportCpuMilliseconds(*currentFrame, viewportCpuMs);
+	if (measuredViewportCpu)
 	{
 		AddOrReplaceTimingStreamSample(*currentFrame, MakeTimingSample(
 			"viewport_cpu",
@@ -1197,7 +1496,18 @@ void Profiler::EndFrame()
 		frameRoot.retainInAggregate = true;
 		currentFrame->samples.push_back(std::move(frameRoot));
 	}
-	AggregateSamplesForFrame(*currentFrame);
+	// Durable journal frames transfer their immutable hierarchy to the dedicated
+	// persistence worker. In-memory frames still aggregate here for immediate UI
+	// inspection, and partial frames retain their established protected behavior.
+	if (!journalWriter)
+	{
+		AggregateSamplesForFrame(*currentFrame);
+	}
+	if (journalWriter)
+	{
+		journalHealth.collectionNanoseconds += CompletedStageNanoseconds(
+			collectionStartNanoseconds);
+	}
 	CommitCurrentFrameLocked();
 	hotPath->activeFrameToken.store(0u, std::memory_order_release);
 	UpdateFastRecordingFlagsLocked();
@@ -1262,11 +1572,9 @@ void Profiler::RecordAnimationTelemetry(const ProfilerAnimationFrameTelemetry& t
 		retained->details = telemetry.details;
 	}
 
-	ProfilerModuleSummary* module = FindModule(currentFrame->moduleSummaries, ProfilerModuleId::CpuEngine);
-	if (module != nullptr)
-	{
-		AddAnimationTelemetryMetrics(*module, retained->summary);
-	}
+	// Do not materialize the stable string aliases on this protected path. The
+	// typed summary above is complete every-frame evidence; copied snapshots and
+	// journal reads recreate the aliases after leaving the recording mutex.
 	currentFrame->animationDiagnostics = ProfilerAnimationDiagnosticsFacts{
 		retained->summary.schedulerMembershipChecks,
 		false,
@@ -1331,8 +1639,6 @@ void Profiler::RecordAnimationDiagnostics(const TerraEngine::Animation::Animatio
 	{
 		return;
 	}
-	AddAnimationTelemetryMetrics(*module, currentFrame->animationTelemetry->summary);
-
 	// Active captures retain the full fixed summary. Detailed per-instance history
 	// remains a separate opt-in path and cannot grow this bounded metric set.
 	AddOrReplaceMetric(*module, "Animation.SchedulerMembershipChecks", static_cast<double>(counters.schedulerMembershipChecks), "count");
@@ -1545,6 +1851,25 @@ void Profiler::RecordEditorStages(std::span<const ProfilerEditorStageTiming> sta
 // Profiler::BeginSample is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool Profiler::BeginSample(const char* name, ProfilerModuleId moduleId, const char* taskLabel)
 {
+	return BeginSampleImpl(name, 0u, false, moduleId, taskLabel);
+}
+
+bool Profiler::BeginStaticSample(
+	const char* name,
+	std::size_t nameLength,
+	ProfilerModuleId moduleId,
+	const char* taskLabel)
+{
+	return BeginSampleImpl(name, nameLength, true, moduleId, taskLabel);
+}
+
+bool Profiler::BeginSampleImpl(
+	const char* name,
+	std::size_t nameLength,
+	bool stableName,
+	ProfilerModuleId moduleId,
+	const char* taskLabel)
+{
 	if (!markerRecordingActive.load(std::memory_order_acquire))
 	{
 		return false;
@@ -1599,8 +1924,20 @@ bool Profiler::BeginSample(const char* name, ProfilerModuleId moduleId, const ch
 		? 0u
 		: buffer->openSamples[buffer->openSampleCount - 1u].sample.sampleId;
 	opened.sample.moduleId = moduleId;
-	const bool nameTruncated =
-		CopyInlineText(opened.sample.name, name, "Unnamed Sample");
+	bool nameTruncated = false;
+	if(stableName && name != nullptr)
+	{
+		const std::size_t retainedLength = std::min<std::size_t>(
+			nameLength,
+			kProfilerSampleNameCapacity - 1u);
+		opened.sample.stableName = name;
+		opened.sample.stableNameLength = static_cast<std::uint16_t>(retainedLength);
+		nameTruncated = retainedLength != nameLength;
+	}
+	else
+	{
+		nameTruncated = CopyInlineText(opened.sample.name, name, "Unnamed Sample");
+	}
 	const bool taskTruncated =
 		CopyInlineText(opened.sample.taskLabel, taskLabel, "");
 	if (nameTruncated || taskTruncated)
@@ -1847,7 +2184,7 @@ ProfilerCaptureDocument Profiler::GetDocumentSnapshot() const
 			snapshot.frames.push_back(*currentFrame);
 		}
 	}
-	MaterializeAnimationDiagnosticsMetrics(snapshot);
+	MaterializeProfilerAnimationPresentationMetrics(snapshot);
 	return snapshot;
 }
 
@@ -1891,7 +2228,7 @@ std::vector<ProfilerFrameRecord> Profiler::GetFramesSnapshot() const
 	}
 	for (ProfilerFrameRecord& frame : frames)
 	{
-		MaterializeAnimationDiagnosticsMetrics(frame);
+		MaterializeProfilerAnimationPresentationMetrics(frame);
 	}
 	return frames;
 }
@@ -1931,7 +2268,7 @@ std::optional<ProfilerFrameRecord> Profiler::GetSelectedFrameSnapshot() const
 	}
 	if (snapshot.has_value())
 	{
-		MaterializeAnimationDiagnosticsMetrics(*snapshot);
+		MaterializeProfilerAnimationPresentationMetrics(*snapshot);
 	}
 	return snapshot;
 }
@@ -1955,6 +2292,14 @@ std::string Profiler::GetStatusText() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return statusText;
+}
+
+ProfilerCaptureHealth Profiler::GetCaptureHealth() const
+{
+	// Health is a compact scalar copy, intentionally unlike document snapshots.
+	// It is safe for an open editor window to poll while producers append frames.
+	std::lock_guard<std::mutex> lock(mutex);
+	return journalHealth;
 }
 
 // Profiler::IsCapturing is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2053,11 +2398,17 @@ void Profiler::CommitCurrentFrameLocked()
 	{
 		return;
 	}
+	if (journalWriter)
+	{
+		CommitCurrentFrameToJournalLocked();
+		return;
+	}
 
 	// Move the string-heavy detailed record instead of duplicating every sample
 	// allocation at the protected frame boundary.
 	retainedFrames.push_back(std::move(*currentFrame));
 	currentFrame.reset();
+	currentDeferredSamples.reset();
 
 	// Zero means the user requested the complete capture. A non-zero value keeps
 	// the existing rolling policy for explicitly bounded recording clients.
@@ -2081,7 +2432,498 @@ void Profiler::CommitCurrentFrameLocked()
 	}
 }
 
-void Profiler::FinalizePartialFrameLocked()
+void Profiler::CommitCurrentFrameToJournalLocked()
+{
+	if (!currentFrame.has_value() || !journalWriter)
+	{
+		return;
+	}
+
+	const std::int64_t sealingStartNanoseconds = SteadyNowNanoseconds();
+	ProfilerSealedFrame sealed;
+	sealed.frame = std::move(*currentFrame);
+	sealed.deferredSamples = std::move(currentDeferredSamples);
+	currentFrame.reset();
+	sealed.needsDeferredAggregation = true;
+	sealed.cpuEngineEnabled = settings.cpuEngineEnabled;
+	sealed.taskExecutionEnabled = settings.taskExecutionEnabled;
+	sealed.droppedSampleCount = droppedSampleCount;
+	sealed.truncatedSampleLabelCount = truncatedSampleLabelCount;
+	sealed.lateSampleCount = lateSampleCount;
+	sealed.queuedTaskCount = queuedTaskCount;
+	sealed.startedTaskCount = startedTaskCount;
+	sealed.finishedTaskCount = finishedTaskCount;
+	sealed.ownedByteCount = EstimateProfilerFrameOwnedBytes(sealed.frame)
+		+ EstimateDeferredSampleOwnedBytes(sealed.deferredSamples);
+	// Aggregation appends a fixed, bounded set of derived metric aliases. Reserve
+	// before queue admission so worker-side materialization cannot oversubscribe
+	// the resident budget; the reservation remains charged until commit.
+	sealed.deferredAggregationReservationBytes = 4096u;
+	++journalHealth.producedFrameCount;
+	// Optional detail may consume only the non-reserved portion of the pending
+	// budget. One maximum-sized compact frame (capped at one quarter of the
+	// queue) always remains admissible when the destination is making progress.
+	const std::uint64_t compactReserveBytes = std::min(
+		settings.maximumSealedFrameBytes,
+		settings.maximumPendingBytes / 4u);
+	const std::uint64_t detailAdmissionLimit =
+		settings.maximumPendingBytes - compactReserveBytes;
+
+	// Pressure shedding is deterministic: every optional family is examined in
+	// the same order, preserving timing/core evidence before sample detail.
+	auto recordLoss = [&sealed](ProfilerCaptureLossClass lossClass, std::uint64_t records, std::uint64_t bytes) {
+		if (records != 0u || bytes != 0u)
+		{
+			sealed.losses.push_back({sealed.frame.frameIndex, sealed.frame.frameIndex,
+				lossClass, ProfilerCaptureLossReason::QueuePressure, records, bytes});
+		}
+	};
+	auto shedOptionalDetail = [&]() {
+		if (QueueResidentBytes(sealed) + journalHealth.pendingBytes <= detailAdmissionLimit)
+		{
+			return;
+		}
+		for (const ProfilerCaptureLossClass lossClass : GetProfilerOptionalDetailSheddingOrder())
+		{
+			if (QueueResidentBytes(sealed) + journalHealth.pendingBytes <= detailAdmissionLimit)
+			{
+				break;
+			}
+			switch (lossClass)
+			{
+			case ProfilerCaptureLossClass::AnimationDetails:
+				if (sealed.frame.animationTelemetry && !sealed.frame.animationTelemetry->details.empty())
+				{
+					const std::uint64_t records = sealed.frame.animationTelemetry->details.size();
+					const std::uint64_t bytes = records * sizeof(ProfilerAnimationDetailRecord);
+					auto reduced = std::make_shared<ProfilerAnimationFrameTelemetry>(*sealed.frame.animationTelemetry);
+					reduced->details.clear();
+					sealed.frame.animationTelemetry = std::move(reduced);
+					recordLoss(lossClass, records, bytes);
+				}
+				break;
+			case ProfilerCaptureLossClass::SampleLeaves:
+				{
+					const auto firstLeaf = std::remove_if(sealed.frame.samples.begin(), sealed.frame.samples.end(),
+						[](const ProfilerSample& sample) { return !sample.retainInAggregate; });
+					std::uint64_t records = static_cast<std::uint64_t>(sealed.frame.samples.end() - firstLeaf);
+					sealed.frame.samples.erase(firstLeaf, sealed.frame.samples.end());
+					const std::uint64_t deferredBytes =
+						EstimateDeferredSampleOwnedBytes(sealed.deferredSamples);
+					if (sealed.deferredSamples)
+					{
+						records += sealed.deferredSamples->samples.size();
+						sealed.deferredSamples.reset();
+					}
+					recordLoss(lossClass, records, deferredBytes);
+				}
+				break;
+			case ProfilerCaptureLossClass::TaskContext:
+				{
+					std::uint64_t bytes = 0u;
+					for (ProfilerSample& sample : sealed.frame.samples)
+					{
+						bytes += sample.threadLabel.size() + sample.taskLabel.size();
+						sample.threadLabel.clear();
+						sample.taskLabel.clear();
+					}
+					recordLoss(lossClass, 0u, bytes);
+				}
+				break;
+			case ProfilerCaptureLossClass::WorkloadRanges:
+				if (!sealed.frame.workloadExecutions.empty())
+				{
+					const std::uint64_t records = sealed.frame.workloadExecutions.size();
+					sealed.frame.workloadExecutions.clear();
+					recordLoss(lossClass, records, 0u);
+				}
+				break;
+			default:
+				break;
+			}
+			// Re-measure after every tier. A smaller frame must not lose later
+			// optional families merely because an earlier tier was sufficient.
+			sealed.ownedByteCount = EstimateProfilerFrameOwnedBytes(sealed.frame)
+				+ EstimateDeferredSampleOwnedBytes(sealed.deferredSamples);
+		}
+		sealed.ownedByteCount = EstimateProfilerFrameOwnedBytes(sealed.frame)
+			+ EstimateDeferredSampleOwnedBytes(sealed.deferredSamples);
+	};
+
+	const std::uint64_t maximumAcceptedBytes = std::min(
+		settings.maximumSealedFrameBytes, settings.maximumChunkBytes);
+	const bool requiresCompactTier = QueueResidentBytes(sealed) > maximumAcceptedBytes
+		|| QueueResidentBytes(sealed) + journalHealth.pendingBytes > detailAdmissionLimit;
+	if (requiresCompactTier)
+	{
+		shedOptionalDetail();
+	}
+	sealed.compactCoreOnly = requiresCompactTier;
+	if (QueueResidentBytes(sealed) > maximumAcceptedBytes
+		|| QueueResidentBytes(sealed) + journalHealth.pendingBytes > settings.maximumPendingBytes)
+	{
+		++journalHealth.rejectedCoreFrameCount;
+		journalHealth.terminalFailure = true;
+		journalTerminalFailure = true;
+		statusText = "Profiler journal rejected compact frame core";
+		journalHealth.sealingNanoseconds += CompletedStageNanoseconds(
+			sealingStartNanoseconds);
+		return;
+	}
+
+	for (const ProfilerCaptureLossRange& loss : sealed.losses)
+	{
+		journalHealth.droppedDetailRecordCount += loss.discardedRecordCount;
+		journalHealth.droppedDetailByteCount += loss.discardedByteCount;
+	}
+	journalHealth.pendingBytes += QueueResidentBytes(sealed);
+	journalHealth.residentBytes = journalHealth.pendingBytes;
+	journalHealth.residentHighWaterBytes = std::max(
+		journalHealth.residentHighWaterBytes, journalHealth.residentBytes);
+	journalHealth.queuedFrameCount = journalCoreQueue.size() + journalDetailQueue.size() + 1u;
+	journalHealth.persistenceLagFrames = journalHealth.producedFrameCount - journalHealth.committedFrameCount;
+	journalHealth.persistenceLagHighWaterFrames = std::max(
+		journalHealth.persistenceLagHighWaterFrames, journalHealth.persistenceLagFrames);
+	journalHealth.sealingNanoseconds += CompletedStageNanoseconds(
+		sealingStartNanoseconds);
+	const std::int64_t queueingStartNanoseconds = SteadyNowNanoseconds();
+	if (sealed.compactCoreOnly)
+	{
+		journalCoreQueue.push_back(std::move(sealed));
+	}
+	else
+	{
+		journalDetailQueue.push_back(std::move(sealed));
+	}
+	ScheduleJournalDrainLocked();
+	journalHealth.queueingNanoseconds += CompletedStageNanoseconds(
+		queueingStartNanoseconds);
+}
+
+void Profiler::ScheduleJournalDrainLocked()
+{
+	if (journalDrainScheduled || !journalWriter
+		|| (journalCoreQueue.empty() && journalDetailQueue.empty() && !journalFinalizeRequested))
+	{
+		return;
+	}
+	const std::size_t targetFrames = std::max<std::size_t>(1u, settings.maximumChunkFrames);
+	const std::size_t queuedFrames = journalCoreQueue.size() + journalDetailQueue.size();
+	const std::uint64_t compactReserveBytes = std::min(
+		settings.maximumSealedFrameBytes,
+		settings.maximumPendingBytes / 4u);
+	// Start a drain no later than one quarter of the pending-byte budget. The
+	// compact reserve remains the lower bound for deliberately small test or
+	// custom queues. With the default 256 MiB queue, ordinary frames reach the
+	// 120-frame target before this byte threshold, while unusually large frames
+	// still leave three quarters of the queue available for shared-pool scheduling
+	// delay and compact-core admission.
+	const std::uint64_t earlyDrainBytes = std::max<std::uint64_t>(
+		1u, std::max(compactReserveBytes, settings.maximumPendingBytes / 4u));
+	if (!journalFinalizeRequested && !journalDrainForced && queuedFrames < targetFrames
+		&& journalHealth.pendingBytes < earlyDrainBytes)
+	{
+		// Owned memory and encoded journal bytes are different quantities. Batch
+		// scheduling therefore waits for the frame target, an explicit lifecycle
+		// boundary, or actual resident pressure; the worker/writer decides the exact
+		// encoded byte boundary without making the producer serialize frames.
+		return;
+	}
+	journalDrainScheduled = true;
+	journalWorkerCondition.notify_one();
+}
+
+void Profiler::JournalWorkerMain()
+{
+#ifdef _WIN32
+	// Persistence is throughput work, never a frame-critical task. Background
+	// mode lowers this thread's CPU, I/O, and memory scheduling priority together,
+	// allowing animation/render jobs to preempt journal encoding without changing
+	// the captured detail or durability contract. Other platforms keep their
+	// native scheduler behavior when an equivalent portable control is absent.
+	const HANDLE workerThread = GetCurrentThread();
+	if (!SetThreadPriority(workerThread, THREAD_MODE_BACKGROUND_BEGIN))
+	{
+		SetThreadPriority(workerThread, THREAD_PRIORITY_LOWEST);
+	}
+#endif
+	for (;;)
+	{
+		std::uint64_t generation = 0u;
+		{
+			std::unique_lock<std::mutex> lock(mutex);
+			journalWorkerCondition.wait(lock, [this]() {
+				return journalWorkerStopping || journalDrainScheduled;
+			});
+			if (journalWorkerStopping)
+			{
+				return;
+			}
+			generation = journalGeneration;
+		}
+		DrainJournalQueue(generation);
+	}
+}
+
+void Profiler::DrainJournalQueue(std::uint64_t expectedJournalGeneration)
+{
+	std::vector<ProfilerSealedFrame> batch;
+	std::shared_ptr<ProfilerJournalV1Writer> writer;
+	bool finalizeOnly = false;
+	std::size_t committedBatchCount = 0u;
+	ProfilerCaptureHealth healthForFinalization;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		if (expectedJournalGeneration != journalGeneration || !journalWriter)
+		{
+			return;
+		}
+		writer = journalWriter;
+		if (state == ProfilerSessionState::Finalizing)
+		{
+			// Finish intentionally reaches this worker before sealing an interrupted
+			// journal frame. The action-time value was captured on the interactive
+			// thread, so delayed task scheduling cannot inflate the recorded duration.
+			if (currentFrame.has_value())
+			{
+				const std::int64_t partialCollectionStartedAt = SteadyNowNanoseconds();
+				FinalizePartialFrameLocked(journalPartialFrameEndingNanoseconds);
+				// A deferred partial frame still merges thread-owned evidence and
+				// aggregates compact module facts. Attribute that worker work to the
+				// same collection stage EndFrame uses for a complete frame.
+				journalHealth.collectionNanoseconds += CompletedStageNanoseconds(
+					partialCollectionStartedAt);
+			}
+			journalPartialFrameEndingNanoseconds.reset();
+			// Formatting a human-readable timestamp can consult locale/time-zone
+			// state. It is metadata only, so perform it on the drain worker rather
+			// than extending the Finish ticket's protected critical section.
+			if (document.metadata.savedAt.empty())
+			{
+				document.metadata.savedAt = MakeReadableTimestamp();
+			}
+			document.metadata.settings.captureMode = ProfilerCaptureMode::FinalizingToArtifact;
+		}
+		finalizeOnly = journalCoreQueue.empty() && journalDetailQueue.empty()
+			&& journalFinalizeRequested;
+		const std::size_t maximumFrames = std::max<std::size_t>(1u, settings.maximumChunkFrames);
+		auto nextQueue = [this]() -> std::deque<ProfilerSealedFrame>* {
+			if (journalCoreQueue.empty())
+			{
+				return &journalDetailQueue;
+			}
+			if (journalDetailQueue.empty())
+			{
+				return &journalCoreQueue;
+			}
+			return journalCoreQueue.front().frame.frameIndex
+				< journalDetailQueue.front().frame.frameIndex
+				? &journalCoreQueue
+				: &journalDetailQueue;
+		};
+		while ((!journalCoreQueue.empty() || !journalDetailQueue.empty())
+			&& batch.size() < maximumFrames)
+		{
+			std::deque<ProfilerSealedFrame>* sourceQueue = nextQueue();
+			batch.push_back(std::move(sourceQueue->front()));
+			journalHealth.inFlightBytes += QueueResidentBytes(batch.back());
+			sourceQueue->pop_front();
+		}
+		journalHealth.queuedFrameCount = journalCoreQueue.size() + journalDetailQueue.size();
+		if (journalCoreQueue.empty() && journalDetailQueue.empty())
+		{
+			journalDrainForced = false;
+		}
+		// pendingBytes includes queued plus in-flight sealed values.  Do not
+		// release a permit merely because a worker claimed the batch: serialization
+		// and flush still own the same memory until the result is known.
+		journalHealth.residentBytes = journalHealth.pendingBytes;
+		healthForFinalization = journalHealth;
+	}
+
+	// Sorting scope ancestry and deriving coverage aliases are pure work over an
+	// immutable sealed frame. Keep it on the serialized persistence owner for
+	// complete journal frames; partial and in-memory frames were already handled
+	// at their protected boundary.
+	for (ProfilerSealedFrame& sealed : batch)
+	{
+		if (!sealed.needsDeferredAggregation)
+		{
+			continue;
+		}
+		// QueueResidentBytes is the permit granted at admission. Materializing
+		// derived metrics changes the split between actual frame bytes and the
+		// conservative reservation, but must never change that permit while the
+		// frame is in flight; otherwise commit could release bytes owned by a later
+		// queued frame. The fixed reservation is intentionally larger than the
+		// bounded metric set emitted by AggregateSamplesForFrame.
+		const std::uint64_t admittedBytes = QueueResidentBytes(sealed);
+		MaterializeDeferredSamples(sealed);
+		AggregateSamplesForFrame(sealed.frame, &sealed);
+		sealed.needsDeferredAggregation = false;
+		sealed.ownedByteCount = EstimateProfilerFrameOwnedBytes(sealed.frame);
+		sealed.deferredAggregationReservationBytes = admittedBytes > sealed.ownedByteCount
+			? admittedBytes - sealed.ownedByteCount
+			: 0u;
+	}
+
+	std::string error;
+	const std::int64_t persistenceStartNanoseconds = SteadyNowNanoseconds();
+	if (finalizeOnly)
+	{
+		// The drain job is the sole writer owner. Copy the last bounded scalar
+		// health snapshot immediately before Terminal so reopen never requires
+		// reconstructing profiler overhead from detailed frame history.
+		writer->UpdateProfilerSelfSummary(healthForFinalization);
+	}
+	ProfilerJournalV1ResultCode result = ProfilerJournalV1ResultCode::Ok;
+	if (finalizeOnly)
+	{
+		result = writer->Finalize(!journalTerminalFailure, error);
+	}
+	else
+	{
+		// Exact encoded size is known only on this worker. Try the largest bounded
+		// chronological prefix; if its encoded payload exceeds the configured
+		// segment bound, halve it until one valid segment fits. Failed size probes
+		// perform no writes, and the untouched suffix returns to its original tier.
+		committedBatchCount = batch.size();
+		while (committedBatchCount != 0u)
+		{
+			error.clear();
+			result = writer->AppendCommittedSegment(
+				std::span<const ProfilerSealedFrame>(batch.data(), committedBatchCount), error);
+			if (result != ProfilerJournalV1ResultCode::InvalidInput || committedBatchCount == 1u)
+			{
+				break;
+			}
+			committedBatchCount = (committedBatchCount + 1u) / 2u;
+		}
+	}
+	const std::uint64_t persistenceDurationNanoseconds = CompletedStageNanoseconds(
+		persistenceStartNanoseconds);
+	std::lock_guard<std::mutex> lock(mutex);
+	if (expectedJournalGeneration != journalGeneration || writer != journalWriter)
+	{
+		return;
+	}
+	if (result == ProfilerJournalV1ResultCode::Ok && finalizeOnly)
+	{
+		journalHealth.finalizationNanoseconds += persistenceDurationNanoseconds;
+		journalFinalizeRequested = false;
+		journalPartialFrameEndingNanoseconds.reset();
+		journalHealth.committedFrameCount = writer->GetSummary().frameCount;
+		journalHealth.persistenceLagFrames = 0u;
+		statusText = "Profiler journal V1 finalized";
+		// Publish completion only after every final health scalar is visible. A
+		// status poll that observes Completed is entitled to read the completed
+		// finalization duration, rather than racing this protected update.
+		journalFinalizationCompleted.store(true, std::memory_order_release);
+	}
+	else if (result == ProfilerJournalV1ResultCode::Ok)
+	{
+		std::uint64_t committedBytes = 0u;
+		for (std::size_t frameIndex = 0u; frameIndex < committedBatchCount; ++frameIndex)
+		{
+			committedBytes += QueueResidentBytes(batch[frameIndex]);
+		}
+		// Frames beyond the exact encoded segment boundary were never presented
+		// to the writer. Return them to their original tiers before publishing the
+		// committed prefix, preserving the next worker's chronological merge.
+		for (std::size_t frameIndex = batch.size(); frameIndex > committedBatchCount; --frameIndex)
+		{
+			ProfilerSealedFrame& frame = batch[frameIndex - 1u];
+			journalHealth.inFlightBytes -= std::min(journalHealth.inFlightBytes,
+				QueueResidentBytes(frame));
+			if (frame.compactCoreOnly)
+			{
+				journalCoreQueue.push_front(std::move(frame));
+			}
+			else
+			{
+				journalDetailQueue.push_front(std::move(frame));
+			}
+		}
+		journalHealth.pendingBytes -= std::min(journalHealth.pendingBytes, committedBytes);
+		journalHealth.inFlightBytes -= std::min(journalHealth.inFlightBytes, committedBytes);
+		journalHealth.residentBytes = journalHealth.pendingBytes;
+		journalHealth.queuedFrameCount = journalCoreQueue.size() + journalDetailQueue.size();
+		journalHealth.committedFrameCount += committedBatchCount;
+		journalHealth.persistenceLagFrames = journalHealth.producedFrameCount - journalHealth.committedFrameCount;
+		journalHealth.persistenceLagHighWaterFrames = std::max(
+			journalHealth.persistenceLagHighWaterFrames, journalHealth.persistenceLagFrames);
+		journalHealth.persistenceNanoseconds += persistenceDurationNanoseconds;
+		// Resident bytes describe sealed in-memory ownership. Persisted bytes are
+		// artifact evidence, so report the writer's compressed on-disk records.
+		journalHealth.persistedBytes += writer->GetLastStoredSegmentBytes();
+		++journalHealth.persistenceOperationCount;
+		journalHealth.persistenceThroughputBytesPerSecond = journalHealth.persistenceNanoseconds == 0u
+			? 0u
+			: static_cast<std::uint64_t>((static_cast<long double>(journalHealth.persistedBytes)
+				* 1000000000.0L) / static_cast<long double>(journalHealth.persistenceNanoseconds));
+	}
+	else
+	{
+		// Keep the failed compact evidence resident until lifecycle code chooses
+		// an explicit terminal outcome.  Dropping it here would make a writable
+		// destination retry indistinguishable from intentional evidence loss.
+		for (auto frame = batch.rbegin(); frame != batch.rend(); ++frame)
+		{
+			journalHealth.inFlightBytes -= std::min(journalHealth.inFlightBytes,
+				QueueResidentBytes(*frame));
+			if (frame->compactCoreOnly)
+			{
+				journalCoreQueue.push_front(std::move(*frame));
+			}
+			else
+			{
+				journalDetailQueue.push_front(std::move(*frame));
+			}
+		}
+		journalHealth.queuedFrameCount = journalCoreQueue.size() + journalDetailQueue.size();
+		journalHealth.residentBytes = journalHealth.pendingBytes;
+		journalHealth.destinationWritable = false;
+		journalHealth.terminalFailure = true;
+		journalTerminalFailure = true;
+		lastError = error;
+		statusText = "Profiler journal persistence failed";
+	}
+	journalDrainScheduled = false;
+	if (!journalTerminalFailure)
+	{
+		ScheduleJournalDrainLocked();
+	}
+}
+
+void Profiler::CloseInterruptedEditorWorkLocked(std::int64_t endingNanoseconds)
+{
+	// Finish runs on the protected editor thread. It is the only thread allowed
+	// to inspect and close that thread's TLS editor interval; worker-side sealing
+	// later consumes only already-published atomic evidence.
+	const std::uint64_t sessionGeneration =
+		hotPath->sessionGeneration.load(std::memory_order_acquire);
+	const std::uint64_t frameToken =
+		hotPath->activeFrameToken.load(std::memory_order_acquire);
+	if (t_profilerThreadBinding.owner != hotPath.get()
+		|| !t_profilerThreadBinding.buffer)
+	{
+		return;
+	}
+	ProfilerThreadBuffer& buffer = *t_profilerThreadBinding.buffer;
+	if (buffer.boundSessionGeneration != sessionGeneration
+		|| buffer.boundFrameToken != frameToken || buffer.editorWorkDepth == 0u)
+	{
+		return;
+	}
+	const std::int64_t interruptedEditorNanoseconds = std::max<std::int64_t>(
+		0, endingNanoseconds - buffer.editorWorkStartNanoseconds);
+	buffer.editorWorkDepth = 0u;
+	hotPath->excludedEditorNanoseconds.fetch_add(
+		interruptedEditorNanoseconds,
+		std::memory_order_acq_rel);
+}
+
+void Profiler::FinalizePartialFrameLocked(std::optional<std::int64_t> endingNanoseconds)
 {
 	if (!currentFrame.has_value())
 	{
@@ -2095,28 +2937,11 @@ void Profiler::FinalizePartialFrameLocked()
 		hotPath->activeFrameToken.load(std::memory_order_acquire);
 	const std::int64_t frameStartNanoseconds =
 		hotPath->activeFrameStartNanoseconds.load(std::memory_order_acquire);
-	const std::int64_t nowNanoseconds = SteadyNowNanoseconds();
-	std::int64_t interruptedEditorNanoseconds = 0;
-	if (t_profilerThreadBinding.owner == hotPath.get()
-		&& t_profilerThreadBinding.buffer)
-	{
-		ProfilerThreadBuffer& buffer = *t_profilerThreadBinding.buffer;
-		if (buffer.boundSessionGeneration == sessionGeneration
-			&& buffer.boundFrameToken == frameToken
-			&& buffer.editorWorkDepth != 0u)
-		{
-			// Pause/Finish are invoked from EditorSystem's protected ImGui
-			// boundary on this same thread. Close only its own TLS interval at the
-			// action time; never inspect another producer's non-atomic stack state.
-			interruptedEditorNanoseconds += std::max<std::int64_t>(
-				0,
-				nowNanoseconds - buffer.editorWorkStartNanoseconds);
-			buffer.editorWorkDepth = 0u;
-		}
-	}
-	hotPath->excludedEditorNanoseconds.fetch_add(
-		interruptedEditorNanoseconds,
-		std::memory_order_acq_rel);
+	const std::int64_t nowNanoseconds = endingNanoseconds.value_or(SteadyNowNanoseconds());
+	// Pause seals locally, while Finish may use the worker after recording the
+	// action-time close above. Calling this in both cases is harmless because a
+	// previously closed interval has depth zero.
+	CloseInterruptedEditorWorkLocked(nowNanoseconds);
 	const std::int64_t wallDurationNanoseconds =
 		std::max<std::int64_t>(0, nowNanoseconds - frameStartNanoseconds);
 	const std::int64_t excludedEditorNanoseconds = std::clamp<std::int64_t>(
@@ -2156,14 +2981,21 @@ void Profiler::FinalizePartialFrameLocked()
 
 void Profiler::MergeThreadSamplesForFrameLocked(
 	std::uint64_t sessionGeneration,
-	std::uint64_t frameToken)
+	std::uint64_t frameToken,
+	bool deferSampleMaterialization)
 {
 	if (!currentFrame.has_value() || frameToken == 0u)
 	{
 		return;
 	}
 
-	std::vector<std::shared_ptr<ProfilerThreadBuffer>> buffers;
+	// EndFrame runs once for every detailed capture frame. Keep this caller-local
+	// reference array so repeatedly snapshotting the fixed thread registry does
+	// not ask the allocator for a new small vector as a long recording ages. The
+	// array is cleared after reclamation below: retaining these shared pointers
+	// would otherwise make exited transient worker buffers look still alive.
+	thread_local std::vector<std::shared_ptr<ProfilerThreadBuffer>> buffers;
+	buffers.clear();
 	{
 		// Thread enrollment is rare and separate from the scope hot path. Copy
 		// strong references at the protected boundary so transient workers that
@@ -2188,8 +3020,30 @@ void Profiler::MergeThreadSamplesForFrameLocked(
 
 		const std::uint64_t readSequence = buffer->readSequence.load(std::memory_order_relaxed);
 		const std::uint64_t writeSequence = buffer->writeSequence.load(std::memory_order_acquire);
-		currentFrame->samples.reserve(
-			currentFrame->samples.size() + static_cast<std::size_t>(writeSequence - readSequence));
+		if (deferSampleMaterialization && !currentDeferredSamples)
+		{
+			currentDeferredSamples = std::make_shared<ProfilerDeferredSampleStorage>();
+		}
+		if (deferSampleMaterialization)
+		{
+			currentDeferredSamples->samples.reserve(
+				currentDeferredSamples->samples.size()
+				+ static_cast<std::size_t>(writeSequence - readSequence));
+		}
+		else
+		{
+			currentFrame->samples.reserve(
+				currentFrame->samples.size() + static_cast<std::size_t>(writeSequence - readSequence));
+		}
+		std::uint32_t deferredThreadOffset = 0u;
+		const std::uint16_t deferredThreadLength = static_cast<std::uint16_t>(
+			std::min<std::size_t>(buffer->threadLabel.size(),
+				std::numeric_limits<std::uint16_t>::max()));
+		if (deferSampleMaterialization && deferredThreadLength != 0u)
+		{
+			deferredThreadOffset = AppendDeferredText(
+				*currentDeferredSamples, buffer->threadLabel.data(), deferredThreadLength);
+		}
 		for (std::uint64_t sequence = readSequence; sequence < writeSequence; ++sequence)
 		{
 			const BufferedProfilerSample& buffered =
@@ -2200,22 +3054,66 @@ void Profiler::MergeThreadSamplesForFrameLocked(
 				continue;
 			}
 
-			ProfilerSample sample;
-			sample.sampleId = buffered.sampleId;
-			sample.parentSampleId = buffered.parentSampleId;
-			sample.moduleId = buffered.moduleId;
-			sample.name = buffered.name.data();
-			sample.threadLabel = buffer->threadLabel;
-			sample.taskLabel = buffered.taskLabel.data();
-			sample.startMs = std::min(
-				currentFrame->durationMs,
-				NanosecondsToMilliseconds(buffered.startNanoseconds));
-			sample.durationMs = std::min(
-				NanosecondsToMilliseconds(buffered.durationNanoseconds),
-				std::max(0.0, currentFrame->durationMs - sample.startMs));
-			sample.depth = buffered.depth;
-			sample.complete = buffered.complete;
-			currentFrame->samples.push_back(std::move(sample));
+			if (deferSampleMaterialization)
+			{
+				ProfilerDeferredSampleRecord sample;
+				sample.sampleId = buffered.sampleId;
+				sample.parentSampleId = buffered.parentSampleId;
+				sample.moduleId = buffered.moduleId;
+				sample.stableName = buffered.stableName;
+				sample.nameLength = buffered.stableName != nullptr
+					? buffered.stableNameLength
+					: static_cast<std::uint16_t>(std::strlen(buffered.name.data()));
+				if (buffered.stableName == nullptr && sample.nameLength != 0u)
+				{
+					sample.nameOffset = AppendDeferredText(
+						*currentDeferredSamples, buffered.name.data(), sample.nameLength);
+				}
+				sample.taskLength = static_cast<std::uint16_t>(
+					std::strlen(buffered.taskLabel.data()));
+				if (sample.taskLength != 0u)
+				{
+					sample.taskOffset = AppendDeferredText(
+						*currentDeferredSamples, buffered.taskLabel.data(), sample.taskLength);
+				}
+				sample.threadOffset = deferredThreadOffset;
+				sample.threadLength = deferredThreadLength;
+				sample.startMs = std::min(
+					currentFrame->durationMs,
+					NanosecondsToMilliseconds(buffered.startNanoseconds));
+				sample.durationMs = std::min(
+					NanosecondsToMilliseconds(buffered.durationNanoseconds),
+					std::max(0.0, currentFrame->durationMs - sample.startMs));
+				sample.depth = buffered.depth;
+				sample.complete = buffered.complete;
+				currentDeferredSamples->samples.push_back(sample);
+			}
+			else
+			{
+				ProfilerSample sample;
+				sample.sampleId = buffered.sampleId;
+				sample.parentSampleId = buffered.parentSampleId;
+				sample.moduleId = buffered.moduleId;
+				if(buffered.stableName != nullptr)
+				{
+					sample.name.assign(buffered.stableName, buffered.stableNameLength);
+				}
+				else
+				{
+					sample.name = buffered.name.data();
+				}
+				sample.threadLabel = buffer->threadLabel;
+				sample.taskLabel = buffered.taskLabel.data();
+				sample.startMs = std::min(
+					currentFrame->durationMs,
+					NanosecondsToMilliseconds(buffered.startNanoseconds));
+				sample.durationMs = std::min(
+					NanosecondsToMilliseconds(buffered.durationNanoseconds),
+					std::max(0.0, currentFrame->durationMs - sample.startMs));
+				sample.depth = buffered.depth;
+				sample.complete = buffered.complete;
+				currentFrame->samples.push_back(std::move(sample));
+			}
 		}
 		buffer->readSequence.store(writeSequence, std::memory_order_release);
 		if (buffer->diagnosticFrameToken.load(std::memory_order_acquire) == frameToken)
@@ -2229,15 +3127,18 @@ void Profiler::MergeThreadSamplesForFrameLocked(
 	// Retire only buffers that were part of this merge, are now drained, and no
 	// longer have a TLS owner. A thread that enrolled concurrently is absent from
 	// the local snapshot and cannot be mistaken for an exited worker.
+	// A lambda cannot directly capture thread-local storage, so preserve the
+	// same non-owning view through this automatic pointer for the predicate.
+	const auto* mergedBuffers = &buffers;
 	std::lock_guard<std::mutex> registryLock(hotPath->registryMutex);
 	hotPath->registeredBuffers.erase(
 		std::remove_if(
 			hotPath->registeredBuffers.begin(),
 			hotPath->registeredBuffers.end(),
-			[&buffers](const std::shared_ptr<ProfilerThreadBuffer>& registeredBuffer) {
+			[mergedBuffers](const std::shared_ptr<ProfilerThreadBuffer>& registeredBuffer) {
 				const bool merged = std::any_of(
-					buffers.begin(),
-					buffers.end(),
+					mergedBuffers->begin(),
+					mergedBuffers->end(),
 					[&registeredBuffer](const std::shared_ptr<ProfilerThreadBuffer>& candidate) {
 						return candidate.get() == registeredBuffer.get();
 					});
@@ -2247,51 +3148,30 @@ void Profiler::MergeThreadSamplesForFrameLocked(
 						== registeredBuffer->writeSequence.load(std::memory_order_acquire);
 			}),
 		hotPath->registeredBuffers.end());
+	// Drop strong references only after the registry made its liveness decision.
+	// Capacity remains with this calling thread for the next EndFrame, but no
+	// transient profiler buffer survives solely because of the allocation cache.
+	buffers.clear();
 }
 
 // Profiler::AggregateSamplesForFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void Profiler::AggregateSamplesForFrame(ProfilerFrameRecord& frame) const
+void Profiler::AggregateSamplesForFrame(
+	ProfilerFrameRecord& frame,
+	const ProfilerSealedFrame* sealed) const
 {
-	for (ProfilerModuleSummary& module : frame.moduleSummaries)
-	{
-		// totalMs is CPU work rather than a sum of inclusive nodes. Nested samples
-		// overlap by design, so summing every duration made a fully instrumented
-		// hierarchy look progressively more expensive as detail was added.
-		module.totalMs = CalculateSampleCoverageMs(frame.samples, module.moduleId, true);
-		module.available = module.totalMs > 0.0;
-	}
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ProfilerModuleSummary* engineCpu = FindModule(frame.moduleSummaries, ProfilerModuleId::CpuEngine))
-	{
-		engineCpu->available = settings.cpuEngineEnabled;
-		const double capturedWallMs = CalculateSampleCoverageMs(frame.samples, ProfilerModuleId::CpuEngine, false);
-		AddOrReplaceMetric(*engineCpu, "Frame duration", frame.durationMs, "ms");
-		AddOrReplaceMetric(*engineCpu, "Captured wall time", capturedWallMs, "ms");
-		AddOrReplaceMetric(*engineCpu, "Captured CPU work", engineCpu->totalMs, "ms");
-		AddOrReplaceMetric(*engineCpu, "Scope coverage", frame.durationMs > 0.0 ? capturedWallMs * 100.0 / frame.durationMs : 0.0, "%");
-		AddOrReplaceMetric(*engineCpu, "Uncovered frame time", std::max(0.0, frame.durationMs - capturedWallMs), "ms");
-		AddOrReplaceMetric(*engineCpu, "Engine sample count", static_cast<double>(std::count_if(frame.samples.begin(), frame.samples.end(), [](const ProfilerSample& sample) {
-			return sample.moduleId == ProfilerModuleId::CpuEngine;
-		})), "count");
-		AddOrReplaceMetric(*engineCpu, "Profiler dropped scopes", static_cast<double>(droppedSampleCount), "count");
-		AddOrReplaceMetric(*engineCpu, "Profiler truncated labels", static_cast<double>(truncatedSampleLabelCount), "count");
-		AddOrReplaceMetric(*engineCpu, "Profiler late scopes", static_cast<double>(lateSampleCount), "count");
-	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ProfilerModuleSummary* tasks = FindModule(frame.moduleSummaries, ProfilerModuleId::TaskExecution))
-	{
-		tasks->available = settings.taskExecutionEnabled;
-		const double capturedWallMs = CalculateSampleCoverageMs(frame.samples, ProfilerModuleId::TaskExecution, false);
-		AddOrReplaceMetric(*tasks, "Captured wall time", capturedWallMs, "ms");
-		AddOrReplaceMetric(*tasks, "Parallel CPU work", tasks->totalMs, "ms");
-		AddOrReplaceMetric(*tasks, "Queued tasks", static_cast<double>(queuedTaskCount), "count");
-		AddOrReplaceMetric(*tasks, "Started tasks", static_cast<double>(startedTaskCount), "count");
-		AddOrReplaceMetric(*tasks, "Finished tasks", static_cast<double>(finishedTaskCount), "count");
-	}
-
+	// A journal worker receives these immutable values with the sealed frame;
+	// ordinary/in-memory callers retain the current protected-frame semantics.
+	const bool cpuEngineEnabled = sealed == nullptr ? settings.cpuEngineEnabled : sealed->cpuEngineEnabled;
+	const bool taskExecutionEnabled = sealed == nullptr ? settings.taskExecutionEnabled : sealed->taskExecutionEnabled;
+	const std::uint64_t droppedSamples = sealed == nullptr ? droppedSampleCount : sealed->droppedSampleCount;
+	const std::uint64_t truncatedLabels = sealed == nullptr ? truncatedSampleLabelCount : sealed->truncatedSampleLabelCount;
+	const std::uint64_t lateSamples = sealed == nullptr ? lateSampleCount : sealed->lateSampleCount;
+	const std::uint64_t queuedTasks = sealed == nullptr ? queuedTaskCount : sealed->queuedTaskCount;
+	const std::uint64_t startedTasks = sealed == nullptr ? startedTaskCount : sealed->startedTaskCount;
+	const std::uint64_t finishedTasks = sealed == nullptr ? finishedTaskCount : sealed->finishedTaskCount;
 	const auto sampleOrder = [](const ProfilerSample& left, const ProfilerSample& right) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		// Start order gives the coverage pass a monotonic interval stream. Depth is
+		// the stable tie breaker retained by the timeline presentation contract.
 		if (left.startMs == right.startMs)
 		{
 			return left.depth < right.depth;
@@ -2305,6 +3185,53 @@ void Profiler::AggregateSamplesForFrame(ProfilerFrameRecord& frame) const
 	{
 		std::sort(frame.samples.begin(), frame.samples.end(), sampleOrder);
 	}
+
+	const SampleCoverage engineCpuCoverage = CalculateSampleCoverage(
+		frame.samples, ProfilerModuleId::CpuEngine);
+	const SampleCoverage taskCoverage = CalculateSampleCoverage(
+		frame.samples, ProfilerModuleId::TaskExecution);
+	for (ProfilerModuleSummary& module : frame.moduleSummaries)
+	{
+		// totalMs is CPU work rather than a sum of inclusive nodes. Nested samples
+		// overlap by design, so summing every duration made a fully instrumented
+		// hierarchy look progressively more expensive as detail was added.
+		const SampleCoverage coverage = module.moduleId == ProfilerModuleId::CpuEngine
+			? engineCpuCoverage
+			: module.moduleId == ProfilerModuleId::TaskExecution
+				? taskCoverage
+				: CalculateSampleCoverage(frame.samples, module.moduleId);
+		module.totalMs = coverage.cpuWorkMs;
+		module.available = module.totalMs > 0.0;
+	}
+
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	if (ProfilerModuleSummary* engineCpu = FindModule(frame.moduleSummaries, ProfilerModuleId::CpuEngine))
+	{
+		engineCpu->available = cpuEngineEnabled;
+		AddOrReplaceMetric(*engineCpu, "Frame duration", frame.durationMs, "ms");
+		AddOrReplaceMetric(*engineCpu, "Captured wall time", engineCpuCoverage.wallCoverageMs, "ms");
+		AddOrReplaceMetric(*engineCpu, "Captured CPU work", engineCpu->totalMs, "ms");
+		AddOrReplaceMetric(*engineCpu, "Scope coverage", frame.durationMs > 0.0
+			? engineCpuCoverage.wallCoverageMs * 100.0 / frame.durationMs : 0.0, "%");
+		AddOrReplaceMetric(*engineCpu, "Uncovered frame time", std::max(0.0,
+			frame.durationMs - engineCpuCoverage.wallCoverageMs), "ms");
+		AddOrReplaceMetric(*engineCpu, "Engine sample count",
+			static_cast<double>(engineCpuCoverage.matchingSampleCount), "count");
+		AddOrReplaceMetric(*engineCpu, "Profiler dropped scopes", static_cast<double>(droppedSamples), "count");
+		AddOrReplaceMetric(*engineCpu, "Profiler truncated labels", static_cast<double>(truncatedLabels), "count");
+		AddOrReplaceMetric(*engineCpu, "Profiler late scopes", static_cast<double>(lateSamples), "count");
+	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	if (ProfilerModuleSummary* tasks = FindModule(frame.moduleSummaries, ProfilerModuleId::TaskExecution))
+	{
+		tasks->available = taskExecutionEnabled;
+		AddOrReplaceMetric(*tasks, "Captured wall time", taskCoverage.wallCoverageMs, "ms");
+		AddOrReplaceMetric(*tasks, "Parallel CPU work", tasks->totalMs, "ms");
+		AddOrReplaceMetric(*tasks, "Queued tasks", static_cast<double>(queuedTasks), "count");
+		AddOrReplaceMetric(*tasks, "Started tasks", static_cast<double>(startedTasks), "count");
+		AddOrReplaceMetric(*tasks, "Finished tasks", static_cast<double>(finishedTasks), "count");
+	}
+
 }
 
 // Profiler::UpdateFastRecordingFlagsLocked is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

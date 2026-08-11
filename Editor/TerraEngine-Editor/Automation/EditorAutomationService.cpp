@@ -1597,72 +1597,70 @@ namespace TerraEngine::Editor::Automation
 			};
 		}
 
-		nlohmann::json SerializeProfilerTimingStreams()
+		// Diagnostics may expose only the one explicitly requested frame.  The V1
+		// catalog/index contract deliberately has no whole-session frame snapshot.
+		nlohmann::json SerializeProfilerTimingStreams(const EditorProfilerPresentationSnapshot* presentation)
 		{
-			const std::vector<TerraEngine::Profiling::ProfilerFrameRecord> frames =
-				TerraEngine::Profiling::Profiler::Instance().GetFramesSnapshot();
-			const std::optional<TerraEngine::Profiling::ProfilerFrameRecord> selectedFrame =
-				TerraEngine::Profiling::Profiler::Instance().GetSelectedFrameSnapshot();
-			nlohmann::json streams = nlohmann::json::array();
-			for (const TerraEngine::Profiling::ProfilerTimingStreamAggregate& stream :
-				TerraEngine::Profiling::BuildTimingStreamAggregates(frames, selectedFrame))
+			if (presentation == nullptr || !presentation->selectedFrame.has_value())
 			{
-				// Automation receives the same status-aware timing contract as
-				// the Profiler UI, so agents do not scrape overlay text or treat
-				// unavailable GPU timing as a real zero.
-				streams.push_back({
-					{"id", stream.id},
-					{"label", stream.label},
-					{"scope", TerraEngine::Profiling::ToString(stream.scope)},
-					{"source", TerraEngine::Profiling::ToString(stream.source)},
-					{"selectedStatus", TerraEngine::Profiling::ToString(stream.selectedStatus)},
-					{"selectedMilliseconds", stream.selectedMilliseconds},
-					{"selectedStatusReason", stream.selectedStatusReason},
-					{"samples", stream.sampleCount},
-					{"missing", stream.missingCount},
-					{"meanMs", stream.meanMs},
-					{"medianMs", stream.medianMs},
-					{"p90Ms", stream.p90Ms},
-					{"p95Ms", stream.p95Ms},
-					{"p99Ms", stream.p99Ms},
-					{"minMs", stream.minMs},
-					{"maxMs", stream.maxMs},
-					{"stdDevMs", stream.stdDevMs}
-				});
+				return {{"available", false}, {"timingStreams", nlohmann::json::array()},
+					{"protectedBoundaryTimings", nlohmann::json::array()}, {"workVolumes", nlohmann::json::object()}};
 			}
-			return streams;
+
+			const auto& frame = *presentation->selectedFrame;
+			nlohmann::json timingStreams = nlohmann::json::array();
+			for (const auto& stream : frame.timingStreams)
+			{
+				timingStreams.push_back({{"id", stream.id}, {"label", stream.label},
+					{"status", TerraEngine::Profiling::ToString(stream.status)},
+					{"milliseconds", stream.milliseconds}, {"reason", stream.statusReason}});
+			}
+			const auto serializeDuration = [](const TerraEngine::Profiling::TelemetryDuration& duration) {
+				return nlohmann::json{{"available", duration.availability
+					== TerraEngine::Profiling::TelemetryAvailability::Available},
+					{"nanoseconds", duration.nanoseconds}, {"reason", duration.unavailableReason}};
+			};
+			nlohmann::json protectedBoundaryTimings = nlohmann::json::array();
+			for (const auto& boundary : frame.protectedBoundaries)
+			{
+				protectedBoundaryTimings.push_back({{"name", boundary.boundaryName},
+					{"queue", serializeDuration(boundary.queueDuration)},
+					{"ownershipWait", serializeDuration(boundary.ownershipWaitDuration)},
+					{"execution", serializeDuration(boundary.executionDuration)},
+					{"flush", serializeDuration(boundary.flushDuration)},
+					{"publication", serializeDuration(boundary.publicationDuration)}});
+			}
+			nlohmann::json workVolumes = nlohmann::json::object();
+			if (frame.physicsWorkVolume.has_value())
+			{
+				const auto& volume = *frame.physicsWorkVolume;
+				workVolumes["physics"] = {{"tick", volume.tick}, {"total", volume.totalBodyCount},
+					{"active", volume.activeBodyCount}, {"examined", volume.examinedBodyCount},
+					{"extracted", volume.extractedBodyCount}, {"converted", volume.convertedBodyCount},
+					{"changed", volume.changedBodyCount}, {"published", volume.publishedBodyCount}};
+			}
+			return {{"available", true}, {"frameIndex", frame.frameIndex}, {"durationMs", frame.durationMs},
+				{"timingStreams", std::move(timingStreams)},
+				{"protectedBoundaryTimings", std::move(protectedBoundaryTimings)},
+				{"workVolumes", std::move(workVolumes)}};
 		}
 
-		// SerializeProfilerCaptureEvidence intentionally reads the retained
-		// profiler document rather than live subsystem state.  Diagnostics
-		// automation can therefore compare a saved/recovered capture with the
-		// same availability semantics shown in the Profiler window.
-		nlohmann::json SerializeProfilerCaptureEvidence()
+		// The persisted V1 summary is a fixed-size artifact header.  It supplies
+		// capture evidence without decoding or copying the complete frame history.
+		nlohmann::json SerializeProfilerCaptureEvidence(const EditorProfilerPresentationSnapshot* presentation)
 		{
-			const TerraEngine::Profiling::ProfilerCaptureDocument document =
-				TerraEngine::Profiling::Profiler::Instance().GetDocumentSnapshot();
-			const EditorProfilerCaptureSummary summary = EditorProfilerService::SummarizeDocument(
-				"live", document);
-			const auto metrics = [](const std::vector<EditorProfilerMetricSummary>& values) {
-				nlohmann::json result = nlohmann::json::array();
-				for (const EditorProfilerMetricSummary& value : values)
-				{
-					result.push_back({{"id", value.id}, {"unit", value.unit}, {"available", value.available},
-						{"unavailableReason", value.unavailableReason}, {"median", value.median}, {"p95", value.p95},
-						{"p99", value.p99}, {"maximum", value.maximum}, {"sampleCount", value.sampleCount},
-						{"unavailableCount", value.unavailableCount}});
-				}
-				return result;
-			};
-			return {
-				{"payloadVersion", summary.payloadVersion}, {"committedFrameCount", summary.committedFrameCount},
-				{"complete", summary.captureComplete}, {"recoveredIncompleteTail", summary.recoveredIncompleteTail},
-				{"stageTimings", metrics(summary.stageTimings)}, {"protectedBoundaryTimings", metrics(summary.protectedBoundaryTimings)},
-				{"presentationWaitTimings", metrics(summary.presentationWaitTimings)}, {"responsivenessTimings", metrics(summary.responsivenessTimings)},
-				{"framePublication", EditorAutomationService::SummarizeFramePublicationEvidence(document.frames)},
-				{"workVolumes", {{"totalBodies", summary.workVolumes.totalBodies}, {"examinedBodies", summary.workVolumes.examinedBodies},
-					{"extractedBodies", summary.workVolumes.extractedBodies}, {"changedBodies", summary.workVolumes.changedBodies}, {"publishedBodies", summary.workVolumes.publishedBodies}}}
-			};
+			if (presentation == nullptr || !presentation->selectedSummary.has_value())
+			{
+				return {{"formatIdentifier", "TerraEngineProfilerJournalV1"}, {"formatVersion", 1u}, {"available", false}};
+			}
+
+			const auto& summary = *presentation->selectedSummary;
+			return {{"formatIdentifier", "TerraEngineProfilerJournalV1"}, {"formatVersion", 1u}, {"available", true},
+				{"committedFrameCount", summary.frameCount}, {"completeFrameCount", summary.completeFrameCount},
+				{"committedSegmentCount", summary.committedSegmentCount}, {"totalDurationNanoseconds", summary.totalDurationNanoseconds},
+				{"droppedDetailRecords", summary.droppedDetailRecordCount}, {"droppedDetailBytes", summary.droppedDetailByteCount},
+				{"recoveredIncompleteTail", presentation->selectedCapture.has_value()
+					&& presentation->selectedCapture->artifact.recoveredIncompleteTail}};
 		}
 
 		nlohmann::json SerializeVirtualGeometryClusterSummary(const VirtualGeometryClusterSummaryMetadata& summary)
@@ -2788,7 +2786,8 @@ namespace TerraEngine::Editor::Automation
 		add("editor.commands.invoke", "editor_commands", MutationMode::ProjectMutation, false, false, false, "commandId");
 		add("scene.open", "scene", MutationMode::SceneMutation, true, false, true, "path: project-relative scene path");
 		add("scene.save", "scene", MutationMode::SceneMutation, true, true, false, "path?: project-relative scene path");
-		add("scene.list_objects", "scene", MutationMode::ReadOnly, false, false, false, "includeComponents?: bool, search?: string");
+		add("scene.list_objects", "scene", MutationMode::ReadOnly, false, false, false,
+			"includeComponents?: bool, search?: string, offset?: uint, limit?: 1..256");
 		add("object.create", "object", MutationMode::SceneMutation, false, false, false, "name: string, parent?: target, select?: bool");
 		add("object.delete", "object", MutationMode::Destructive, false, true, true, "object: uuid|entity|name");
 		add("object.select", "object", MutationMode::EditorSelection, false, true, false, "object: uuid|entity|name");
@@ -5209,7 +5208,10 @@ namespace TerraEngine::Editor::Automation
 			if (jobId == activeProfilerCaptureJobId && editorContext != nullptr && editorContext->editorProfiler)
 			{
 				EditorProfilerService& profiler = *editorContext->editorProfiler;
-				if (profiler.IsBusy())
+				// The stop job owns only journal finalization and its bounded index
+				// validation. A catalog refresh or selected-frame request is unrelated
+				// work and must not hold this durable completion hostage.
+				if (profiler.IsPersisting())
 				{
 					(void)jobService.SetState(jobId, AutomationJobState::Running, "saving_capture");
 					(void)jobService.PublishProgress(jobId, 0.75, "saving_capture");
@@ -6161,21 +6163,196 @@ namespace TerraEngine::Editor::Automation
 		if (IsOperationOneOf(operation, {
 			AutomationOperation("profiler.capture.start"), AutomationOperation("profiler.capture.stop"),
 			AutomationOperation("profiler.capture.list"), AutomationOperation("profiler.capture.load"),
-			AutomationOperation("profiler.capture.summary")}))
+			AutomationOperation("profiler.capture.summary"), AutomationOperation("profiler.capture.health"),
+			AutomationOperation("profiler.capture.index"), AutomationOperation("profiler.capture.detail"),
+			AutomationOperation("profiler.capture.operation")}))
 		{
 			if (editorContext == nullptr || !editorContext->editorProfiler) return BuildError(requestId, ErrorCategory::Unavailable, "Editor profiler service is unavailable.");
+			const std::shared_ptr<const EditorProfilerPresentationSnapshot> presentation = editorContext->editorProfiler->GetPresentationSnapshot();
+			if (!presentation) return BuildError(requestId, ErrorCategory::Unavailable, "Profiler presentation is not ready.");
+			if (operation == AutomationOperation("profiler.capture.health"))
+			{
+				const auto& health = presentation->health;
+				return BuildSuccess(requestId, "Read bounded profiler health.", {{"formatIdentifier", "TerraEngineProfilerJournalV1"}, {"formatVersion", 1u},
+					{"projectEpoch", presentation->projectEpoch}, {"state", TerraEngine::Profiling::ToString(presentation->sessionState)},
+					{"sessionArtifactId", presentation->activeSessionArtifactId},
+					{"producedFrames", health.producedFrameCount}, {"queuedFrames", health.queuedFrameCount}, {"committedFrames", health.committedFrameCount},
+					{"residentBytes", health.residentBytes}, {"residentHighWaterBytes", health.residentHighWaterBytes}, {"pendingBytes", health.pendingBytes},
+					{"inFlightBytes", health.inFlightBytes}, {"persistenceLagFrames", health.persistenceLagFrames},
+					{"persistenceLagHighWaterFrames", health.persistenceLagHighWaterFrames},
+					{"collectionNanoseconds", health.collectionNanoseconds}, {"sealingNanoseconds", health.sealingNanoseconds},
+					{"queueingNanoseconds", health.queueingNanoseconds}, {"persistenceNanoseconds", health.persistenceNanoseconds},
+					{"finalizationNanoseconds", health.finalizationNanoseconds}, {"persistedBytes", health.persistedBytes},
+					{"persistenceOperationCount", health.persistenceOperationCount},
+					{"persistenceThroughputBytesPerSecond", health.persistenceThroughputBytesPerSecond},
+					{"droppedDetailRecords", health.droppedDetailRecordCount},
+					{"droppedDetailBytes", health.droppedDetailByteCount}, {"rejectedCoreFrames", health.rejectedCoreFrameCount},
+					{"destinationWritable", health.destinationWritable}, {"terminalFailure", health.terminalFailure}, {"lastError", presentation->lastError}});
+			}
+			if (operation == AutomationOperation("profiler.capture.operation"))
+			{
+				std::optional<std::uint64_t> requestedOperationId;
+				if (arguments.contains("operationId"))
+				{
+					const nlohmann::json& requested = arguments["operationId"];
+					if ((!requested.is_number_unsigned() && !requested.is_number_integer())
+						|| (requested.is_number_integer() && requested.get<std::int64_t>() <= 0))
+					{
+						return BuildError(requestId, ErrorCategory::Validation,
+							"operationId must be a positive integer.");
+					}
+					requestedOperationId = requested.get<std::uint64_t>();
+				}
+				auto serializeOperation = [](const EditorProfilerOperationStatus& item) {
+					return nlohmann::json{{"operationId", item.operationId}, {"active", item.active},
+						{"kind", ToString(item.kind)}, {"state", ToString(item.state)}};
+				};
+				nlohmann::json operations = nlohmann::json::array();
+				const EditorProfilerOperationStatus* requestedOperation = nullptr;
+				for (const auto& item : presentation->operations)
+				{
+					if (item.operationId != 0u)
+					{
+						operations.push_back(serializeOperation(item));
+					}
+					if (requestedOperationId.has_value() && item.operationId == *requestedOperationId)
+					{
+						requestedOperation = &item;
+					}
+				}
+				if (requestedOperationId.has_value() && requestedOperation == nullptr)
+				{
+					return BuildError(requestId, ErrorCategory::MissingTarget,
+						"Profiler operation identifier is stale or unknown for the active project.");
+				}
+				// A sealed catalog artifact is authoritative after persistence; live
+				// health is authoritative during recording. Neither path opens frame
+				// history, so polling remains a scalar V1 operation.
+				const std::uint64_t selectedCommittedFrames = presentation->selectedCapture.has_value()
+					? presentation->selectedCapture->artifact.committedFrameCount : 0u;
+				const std::uint64_t committedFrames = std::max(
+					presentation->health.committedFrameCount, selectedCommittedFrames);
+				const bool recoveredIncompleteTail = presentation->selectedCapture.has_value()
+					&& presentation->selectedCapture->artifact.recoveredIncompleteTail;
+				const bool persistenceActive = std::any_of(
+					presentation->operations.begin(), presentation->operations.end(),
+					[](const EditorProfilerOperationStatus& item) {
+						return item.kind == EditorProfilerOperationKind::Persisting && item.active;
+					});
+				const bool completedCapture = presentation->selectedCapture.has_value()
+					&& presentation->selectedCapture->artifact.complete;
+				const char* finalizationState = presentation->health.terminalFailure
+					? "failed"
+					: ((presentation->sessionState == TerraEngine::Profiling::ProfilerSessionState::Finalizing
+						|| persistenceActive) ? "finalizing"
+						: (recoveredIncompleteTail ? "recovered_incomplete_tail"
+							: (completedCapture ? "completed" : "idle")));
+				nlohmann::json response = {
+					{"formatIdentifier", "TerraEngineProfilerJournalV1"}, {"formatVersion", 1u},
+					{"projectEpoch", presentation->projectEpoch}, {"operations", std::move(operations)},
+					{"finalization", {{"state", finalizationState}, {"committedFrameCount", committedFrames},
+						{"recoveredIncompleteTail", recoveredIncompleteTail},
+						{"terminalFailure", presentation->health.terminalFailure}, {"lastError", presentation->lastError}}},
+					{"status", presentation->statusText}, {"lastError", presentation->lastError}};
+				if (requestedOperation != nullptr)
+				{
+					response["operation"] = serializeOperation(*requestedOperation);
+				}
+				return BuildSuccess(requestId, "Read bounded profiler operation state.", std::move(response));
+			}
+			if (operation == AutomationOperation("profiler.capture.index"))
+			{
+				auto readBoundedUnsigned = [&arguments, &requestId, this](std::string_view name,
+					std::uint64_t fallback, std::uint64_t maximum, std::uint64_t& outValue) -> std::optional<nlohmann::json> {
+					const std::string key(name);
+					if (!arguments.contains(key))
+					{
+						outValue = fallback;
+						return std::nullopt;
+					}
+					const nlohmann::json& value = arguments[key];
+					if ((!value.is_number_unsigned() && !value.is_number_integer())
+						|| (value.is_number_integer() && value.get<std::int64_t>() < 0))
+					{
+						return BuildError(requestId, ErrorCategory::Validation,
+							std::string(name) + " must be a non-negative integer.");
+					}
+					const std::uint64_t parsed = value.get<std::uint64_t>();
+					if (parsed > maximum)
+					{
+						return BuildError(requestId, ErrorCategory::Validation,
+							std::string(name) + " exceeds its bounded profiler request limit.");
+					}
+					outValue = parsed;
+					return std::nullopt;
+				};
+				std::uint64_t requestedOffset = 0u;
+				std::uint64_t requestedLimit = 128u;
+				if (const auto error = readBoundedUnsigned("offset", 0u,
+					static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()), requestedOffset); error.has_value()) return *error;
+				if (const auto error = readBoundedUnsigned("limit", 128u, 512u, requestedLimit); error.has_value()
+					|| requestedLimit == 0u) return error.has_value() ? *error
+						: BuildError(requestId, ErrorCategory::Validation, "limit must be at least one.");
+				const std::size_t offset = static_cast<std::size_t>(requestedOffset);
+				const std::size_t limit = static_cast<std::size_t>(requestedLimit);
+				const auto& page = presentation->indexPage;
+				if (!page.has_value() || page->offset != offset || page->pageSize != limit)
+				{
+					// Index history is page-owned. Queue a bounded read instead of
+					// retaining a full journal list merely to answer this request.
+					editorContext->editorProfiler->RequestIndexPage(offset, limit);
+					return BuildSuccess(requestId, "Queued profiler index page.",
+						{{"formatIdentifier", "TerraEngineProfilerJournalV1"}, {"formatVersion", 1u},
+							{"projectEpoch", presentation->projectEpoch}, {"state", "queued"},
+							{"offset", offset}, {"limit", limit}});
+				}
+				nlohmann::json frames = nlohmann::json::array();
+				for (const auto& frame : page->frames)
+					frames.push_back({{"frameIndex", frame.frameIndex}, {"durationMs", frame.durationMs}, {"complete", frame.complete}});
+				return BuildSuccess(requestId, "Read profiler index page.",
+					{{"formatIdentifier", "TerraEngineProfilerJournalV1"}, {"formatVersion", 1u},
+						{"projectEpoch", presentation->projectEpoch}, {"state", "completed"},
+						{"offset", page->offset}, {"total", page->totalFrameCount}, {"frames", frames}});
+			}
+			if (operation == AutomationOperation("profiler.capture.detail"))
+			{
+				if (!arguments.contains("frameIndex")
+					|| (!arguments["frameIndex"].is_number_unsigned()
+						&& !arguments["frameIndex"].is_number_integer())
+					|| (arguments["frameIndex"].is_number_integer()
+						&& arguments["frameIndex"].get<std::int64_t>() < 0))
+				{
+					return BuildError(requestId, ErrorCategory::Validation,
+						"frameIndex must be a non-negative integer.");
+				}
+				const std::uint64_t frameIndex = arguments["frameIndex"].get<std::uint64_t>();
+				if (!presentation->selectedFrame.has_value() || presentation->selectedFrame->frameIndex != frameIndex)
+				{
+					editorContext->editorProfiler->RequestSelectedFrame(frameIndex);
+					return BuildSuccess(requestId, "Queued profiler frame detail.",
+						{{"formatIdentifier", "TerraEngineProfilerJournalV1"}, {"formatVersion", 1u},
+							{"projectEpoch", presentation->projectEpoch}, {"state", "queued"},
+							{"frameIndex", frameIndex}});
+				}
+				const auto& frame = *presentation->selectedFrame;
+				return BuildSuccess(requestId, "Read selected profiler frame detail.",
+					{{"formatIdentifier", "TerraEngineProfilerJournalV1"}, {"formatVersion", 1u},
+						{"projectEpoch", presentation->projectEpoch}, {"state", "completed"},
+						{"frameIndex", frame.frameIndex}, {"durationMs", frame.durationMs},
+						{"complete", frame.complete}, {"sampleCount", frame.samples.size()},
+						{"timingStreamCount", frame.timingStreams.size()}});
+			}
 			if (operation == AutomationOperation("profiler.capture.list"))
 			{
 				nlohmann::json artifacts = nlohmann::json::array();
 				for (const auto& item : editorContext->editorProfiler->GetAutomationCaptureList())
 				{
-					// Artifact facts are additive.  Existing clients may continue to
-					// use name/frameCount/status while v2-aware clients can distinguish
-					// a recovered tail from a complete capture without reading files.
+					// Catalog facts distinguish a recovered tail from a complete V1
+					// capture without loading detailed frame payloads.
 					artifacts.push_back({
 						{"artifactId", item.artifactId}, {"name", item.artifact.fileName},
 						{"frameCount", item.artifact.frameCount}, {"status", item.artifact.status},
-						{"payloadVersion", item.artifact.payloadVersion}, {"committedFrameCount", item.artifact.committedFrameCount},
+						{"formatIdentifier", "TerraEngineProfilerJournalV1"}, {"formatVersion", 1u}, {"committedFrameCount", item.artifact.committedFrameCount},
 						{"complete", item.artifact.complete}, {"recoveredIncompleteTail", item.artifact.recoveredIncompleteTail},
 						{"captureLevel", TerraEngine::Profiling::ToString(item.artifact.metadata.settings.detailLevel)},
 						{"maximumChunkFrames", item.artifact.metadata.settings.maximumChunkFrames},
@@ -6198,53 +6375,72 @@ namespace TerraEngine::Editor::Automation
 			}
 			if (operation == AutomationOperation("profiler.capture.summary"))
 			{
-				EditorProfilerCaptureSummary summary;
-				TerraEngine::Profiling::ProfilerCaptureDocument document;
-				std::string error;
-				const std::string artifactId = arguments.value("artifactId", std::string{});
-				if (!editorContext->editorProfiler->SummarizeCaptureById(artifactId, summary, error))
-					return BuildError(requestId, ErrorCategory::MissingTarget, error, artifactId);
-				if (!editorContext->editorProfiler->ReadCaptureDocumentById(artifactId, document, error))
-					return BuildError(requestId, ErrorCategory::MissingTarget, error, artifactId);
-				nlohmann::json streams = nlohmann::json::array();
-				for (const auto& stream : summary.timingStreams)
+				if (presentation->selectedSummary.has_value())
 				{
-					streams.push_back({{"id", stream.id}, {"label", stream.label}, {"samples", stream.sampleCount}, {"missing", stream.missingCount}, {"meanMs", stream.meanMs}, {"p95Ms", stream.p95Ms}, {"maxMs", stream.maxMs}});
-				}
-				const auto serializeMetrics = [](const std::vector<EditorProfilerMetricSummary>& metrics) {
-					nlohmann::json result = nlohmann::json::array();
-					for (const EditorProfilerMetricSummary& metric : metrics)
+					const auto& summary = *presentation->selectedSummary;
+					const double averageFrameMs = summary.frameCount == 0u ? 0.0
+						: static_cast<double>(summary.totalDurationNanoseconds)
+							/ static_cast<double>(summary.frameCount) / 1000000.0;
+					nlohmann::json batching = {
+						{"available", summary.committedSegmentCount != 0u},
+						{"logicalInputBytes", summary.logicalInputBytes},
+						{"encodedPayloadBytes", summary.encodedPayloadBytes},
+						{"storedSegmentBytes", summary.storedSegmentBytes},
+						{"persistenceOperationCount", summary.persistenceOperationCount}};
+					if (summary.committedSegmentCount != 0u)
 					{
-						result.push_back({{"id", metric.id}, {"label", metric.label}, {"unit", metric.unit},
-							{"available", metric.available}, {"unavailableReason", metric.unavailableReason},
-							{"sampleCount", metric.sampleCount}, {"unavailableCount", metric.unavailableCount},
-							{"median", metric.median}, {"p95", metric.p95}, {"p99", metric.p99}, {"maximum", metric.maximum}});
+						batching["framesPerPersistenceOperation"] = summary.persistenceOperationCount == 0u
+							? nlohmann::json(nullptr)
+							: nlohmann::json(static_cast<double>(summary.frameCount)
+								/ static_cast<double>(summary.persistenceOperationCount));
+						batching["storedToEncodedRatio"] = summary.encodedPayloadBytes == 0u
+							? nlohmann::json(nullptr)
+							: nlohmann::json(static_cast<double>(summary.storedSegmentBytes)
+								/ static_cast<double>(summary.encodedPayloadBytes));
 					}
-					return result;
-				};
-				nlohmann::json workers = nlohmann::json::array();
-				for (const EditorProfilerWorkerSummary& worker : summary.workerHistories)
-				{
-					workers.push_back({{"workerId", worker.workerId}, {"sampleCount", worker.sampleCount}, {"maximumQueueDepth", worker.maximumQueueDepth},
-						{"totalDispatchCount", worker.totalDispatchCount}, {"totalUsefulWorkItems", worker.totalUsefulWorkItems},
-						{"run", serializeMetrics({worker.runDuration})}, {"wait", serializeMetrics({worker.waitDuration})}, {"idle", serializeMetrics({worker.idleDuration})}});
+					else
+					{
+						batching["framesPerPersistenceOperation"] = nullptr;
+						batching["storedToEncodedRatio"] = nullptr;
+					}
+					nlohmann::json boundedSummary = {
+						{"formatIdentifier", "TerraEngineProfilerJournalV1"}, {"formatVersion", 1u},
+						{"frameCount", summary.frameCount}, {"committedFrameCount", summary.frameCount},
+						{"completeFrameCount", summary.completeFrameCount},
+						{"complete", presentation->selectedCapture.has_value()
+							&& presentation->selectedCapture->artifact.complete},
+						{"committedSegmentCount", summary.committedSegmentCount},
+						{"totalDurationNanoseconds", summary.totalDurationNanoseconds},
+						{"averageFrameMs", averageFrameMs},
+						{"frameMedianMs", static_cast<double>(summary.finalEngineCpuWindowMedianNanoseconds) / 1000000.0},
+						{"frameP95Ms", static_cast<double>(summary.finalEngineCpuWindowP95Nanoseconds) / 1000000.0},
+						{"firstWindow", {
+							{"count", summary.firstEngineCpuWindowSampleCount},
+							{"totalNanoseconds", summary.firstEngineCpuWindowTotalNanoseconds},
+							{"medianMs", static_cast<double>(summary.firstEngineCpuWindowMedianNanoseconds) / 1000000.0},
+							{"p95Ms", static_cast<double>(summary.firstEngineCpuWindowP95Nanoseconds) / 1000000.0}}},
+						{"finalWindow", {
+							{"count", summary.finalEngineCpuWindowSampleCount},
+							{"totalNanoseconds", summary.finalEngineCpuWindowTotalNanoseconds},
+							{"medianMs", static_cast<double>(summary.finalEngineCpuWindowMedianNanoseconds) / 1000000.0},
+							{"p95Ms", static_cast<double>(summary.finalEngineCpuWindowP95Nanoseconds) / 1000000.0}}},
+						{"droppedDetailRecords", summary.droppedDetailRecordCount},
+						{"droppedDetailBytes", summary.droppedDetailByteCount},
+						{"batching", std::move(batching)},
+						{"profilerSelf", {
+							{"collectionNanoseconds", summary.profilerCollectionNanoseconds},
+							{"sealingNanoseconds", summary.profilerSealingNanoseconds},
+							{"queueingNanoseconds", summary.profilerQueueingNanoseconds},
+							{"persistenceNanoseconds", summary.profilerPersistenceNanoseconds},
+							{"persistedBytes", summary.persistedBytes},
+							{"persistenceOperationCount", summary.persistenceOperationCount},
+							{"persistenceThroughputBytesPerSecond", summary.persistenceThroughputBytesPerSecond},
+							{"persistenceLagHighWaterFrames", summary.persistenceLagHighWaterFrames}}}
+					};
+					return BuildSuccess(requestId, "Read bounded V1 profiler summary.",
+						{{"summary", std::move(boundedSummary)}});
 				}
-				return BuildSuccess(requestId, "Summarized profiler capture.", {{"summary", {
-					{"artifactId", summary.artifactId}, {"frameCount", summary.frameCount}, {"completeFrameCount", summary.completeFrameCount},
-					{"incompleteFrameCount", summary.incompleteFrameCount}, {"totalDurationMs", summary.totalDurationMs},
-					{"minimumFrameMs", summary.minimumFrameMs}, {"maximumFrameMs", summary.maximumFrameMs}, {"averageFrameMs", summary.averageFrameMs},
-					{"frameMedianMs", summary.frameMedianMs}, {"frameP95Ms", summary.frameP95Ms},
-					{"frameP99Ms", summary.frameP99Ms}, {"frameWorstMs", summary.frameWorstMs},
-					{"payloadVersion", summary.payloadVersion}, {"committedFrameCount", summary.committedFrameCount},
-					{"artifactSizeBytes", summary.artifactSizeBytes}, {"complete", summary.captureComplete},
-					{"recoveredIncompleteTail", summary.recoveredIncompleteTail}, {"timingStreams", streams},
-					{"stageTimings", serializeMetrics(summary.stageTimings)}, {"protectedBoundaryTimings", serializeMetrics(summary.protectedBoundaryTimings)},
-					{"presentationWaitTimings", serializeMetrics(summary.presentationWaitTimings)}, {"responsivenessTimings", serializeMetrics(summary.responsivenessTimings)},
-					{"framePublication", SummarizeFramePublicationEvidence(document.frames)},
-					{"workerHistories", workers}, {"workVolumes", {{"measuredTickCount", summary.workVolumes.measuredTickCount}, {"totalBodies", summary.workVolumes.totalBodies},
-						{"activeBodies", summary.workVolumes.activeBodies}, {"examinedBodies", summary.workVolumes.examinedBodies}, {"extractedBodies", summary.workVolumes.extractedBodies},
-						{"convertedBodies", summary.workVolumes.convertedBodies}, {"changedBodies", summary.workVolumes.changedBodies}, {"publishedBodies", summary.workVolumes.publishedBodies}}}
-				}}});
+				return BuildError(requestId, ErrorCategory::Unavailable, "Load a V1 profiler capture before requesting its summary.");
 			}
 			if (operation == AutomationOperation("profiler.capture.start"))
 			{
@@ -6257,8 +6453,6 @@ namespace TerraEngine::Editor::Automation
 					else if (captureLevel == "sampled") settings.detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Sampled;
 					else if (captureLevel == "aggregate") settings.detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Aggregate;
 					else return BuildError(requestId, ErrorCategory::Validation, "captureLevel must be detailed, sampled, or aggregate.");
-					if (arguments.value("payloadVersion", 2u) != 2u)
-						return BuildError(requestId, ErrorCategory::Validation, "New recording produces v2 captures; v1 remains load-compatible only.");
 					settings.maximumChunkFrames = arguments.value("maximumChunkFrames", settings.maximumChunkFrames);
 					settings.maximumChunkBytes = arguments.value("maximumChunkBytes", settings.maximumChunkBytes);
 					settings.sampleIntervalFrames = arguments.value("sampleIntervalFrames", settings.sampleIntervalFrames);
@@ -6296,7 +6490,7 @@ namespace TerraEngine::Editor::Automation
 				if (job.jobId.empty()) return BuildError(requestId, ErrorCategory::QueueFull, "Profiler job queue is full.");
 				(void)jobService.CompleteSucceeded(job.jobId, {{"state", "recording"}});
 				return BuildSuccess(requestId, "Started profiler capture.", {{"jobId", job.jobId}, {"state", "succeeded"},
-					{"captureLevel", TerraEngine::Profiling::ToString(settings.detailLevel)}, {"payloadVersion", 2u},
+					{"captureLevel", TerraEngine::Profiling::ToString(settings.detailLevel)}, {"formatIdentifier", "TerraEngineProfilerJournalV1"}, {"formatVersion", 1u},
 					{"bounds", {{"maximumChunkFrames", settings.maximumChunkFrames}, {"maximumChunkBytes", settings.maximumChunkBytes}, {"sampleIntervalFrames", settings.sampleIntervalFrames}, {"maxFrames", settings.maxFrames}}}});
 			}
 			if (operation == AutomationOperation("profiler.capture.stop"))
@@ -6316,15 +6510,26 @@ namespace TerraEngine::Editor::Automation
 				const AutomationJobSnapshot job = jobService.Create({"profiler", std::string(operationName), requestId, arguments.value("correlationId", requestId), {}, false});
 				if (job.jobId.empty()) return BuildError(requestId, ErrorCategory::QueueFull, "Profiler job queue is full.");
 				activeProfilerCaptureJobId = job.jobId;
-				if (!editorContext->editorProfiler->FinishCapture())
+				// This measures only the protected service handoff (seal plus durable
+				// ticket creation). It deliberately excludes MCP queue/HTTP latency and
+				// asynchronous journal draining, so a slow client response is diagnosable
+				// without misattributing it to journal finalization.
+				const auto finishSubmissionStarted = std::chrono::steady_clock::now();
+				const bool finishAccepted = editorContext->editorProfiler->FinishCapture();
+				const double finishCaptureSubmissionMilliseconds = std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() - finishSubmissionStarted).count();
+				if (!finishAccepted)
 				{
 					const std::string error = editorContext->editorProfiler->GetLastError();
 					(void)jobService.CompleteFailed(job.jobId, {{"error", error}});
 					activeProfilerCaptureJobId.clear();
 					return BuildSuccess(requestId, "Profiler capture contained no runtime frames.",
-						{{"jobId", job.jobId}, {"state", "failed"}, {"error", error}});
+						{{"jobId", job.jobId}, {"state", "failed"}, {"error", error},
+							{"finishCaptureSubmissionMilliseconds", finishCaptureSubmissionMilliseconds}});
 				}
-				return BuildSuccess(requestId, "Accepted profiler capture persistence.", {{"jobId", job.jobId}, {"state", "queued"}, {"pollTool", "jobs.get"}});
+				return BuildSuccess(requestId, "Accepted profiler capture persistence.",
+					{{"jobId", job.jobId}, {"state", "queued"}, {"pollTool", "jobs.get"},
+						{"finishCaptureSubmissionMilliseconds", finishCaptureSubmissionMilliseconds}});
 			}
 			return BuildError(requestId, ErrorCategory::UnsupportedCapability, "Profiler operation is not registered.");
 		}
@@ -6617,8 +6822,16 @@ namespace TerraEngine::Editor::Automation
 		const nlohmann::json parallelFrame = SerializeParallelFrameDiagnostics(engine, includeDetails);
 		const nlohmann::json mutationDiagnostics = SerializeMutationDiagnostics();
 		const TerraEngine::Renderer::RenderDiagnosticsSummary renderDiagnostics = RenderSystem::Instance().GetLatestRenderGraphDiagnostics();
-		const nlohmann::json profilerTimingStreams = includeDetails ? SerializeProfilerTimingStreams() : nlohmann::json::array();
-		const nlohmann::json profilerCaptureEvidence = includeDetails ? SerializeProfilerCaptureEvidence() : nlohmann::json::object();
+		const std::shared_ptr<const EditorProfilerPresentationSnapshot> profilerPresentation =
+			editorContext != nullptr && editorContext->editorProfiler
+				? editorContext->editorProfiler->GetPresentationSnapshot()
+				: nullptr;
+		const nlohmann::json profilerTimingStreams = includeDetails
+			? SerializeProfilerTimingStreams(profilerPresentation.get())
+			: nlohmann::json::array();
+		const nlohmann::json profilerCaptureEvidence = includeDetails
+			? SerializeProfilerCaptureEvidence(profilerPresentation.get())
+			: nlohmann::json::object();
 		nlohmann::json virtualGeometryGateJson = nlohmann::json::array();
 		std::uint32_t virtualGeometryGateFailures = 0u;
 		std::uint32_t virtualGeometryGateUnsupported = 0u;
@@ -7091,21 +7304,73 @@ namespace TerraEngine::Editor::Automation
 
 	nlohmann::json EditorAutomationService::HandleSceneListObjects(const nlohmann::json& arguments, const std::string& requestId)
 	{
+		// Scene listings cross the MCP transport as one JSON message. Keep every
+		// response bounded so a dense scene cannot monopolize the protected editor
+		// boundary or cause the client to disconnect while serializing a huge tree.
+		constexpr std::uint64_t kDefaultPageSize = 128u;
+		constexpr std::uint64_t kMaximumPageSize = 256u;
+		auto readNonNegativeInteger = [&](std::string_view name, std::uint64_t defaultValue,
+			std::uint64_t& outValue) -> bool {
+			const auto value = arguments.find(std::string(name));
+			if (value == arguments.end())
+			{
+				outValue = defaultValue;
+				return true;
+			}
+			if (value->is_number_unsigned())
+			{
+				outValue = value->get<std::uint64_t>();
+				return true;
+			}
+			if (value->is_number_integer())
+			{
+				const std::int64_t signedValue = value->get<std::int64_t>();
+				if (signedValue >= 0)
+				{
+					outValue = static_cast<std::uint64_t>(signedValue);
+					return true;
+				}
+			}
+			return false;
+		};
+
 		const bool includeComponents = arguments.value("includeComponents", false);
 		const std::string search = arguments.value("search", "");
+		std::uint64_t offset = 0u;
+		std::uint64_t limit = kDefaultPageSize;
+		if (!readNonNegativeInteger("offset", 0u, offset)
+			|| !readNonNegativeInteger("limit", kDefaultPageSize, limit)
+			|| limit == 0u || limit > kMaximumPageSize)
+		{
+			return BuildError(requestId, ErrorCategory::Validation,
+				"scene.list_objects requires offset >= 0 and limit in the range [1, 256].");
+		}
 		nlohmann::json objects = nlohmann::json::array();
 		ObjectManager& objectManager = ObjectManager::instance();
 		std::vector<Object> roots = objectManager.getRootObjects();
 		objectManager.SortObjectsByStableId(roots);
 		std::unordered_set<entt::entity> visited;
-		std::function<void(Object)> appendHierarchy = [&](Object object)
+		std::vector<Object> pending;
+		pending.reserve(roots.size());
+		// Push in reverse because the explicit LIFO worklist preserves the existing
+		// stable depth-first order without consuming one native stack frame per
+		// authored hierarchy level.
+		for (auto root = roots.rbegin(); root != roots.rend(); ++root)
 		{
+			pending.push_back(*root);
+		}
+		std::uint64_t matchedCount = 0u;
+		bool hasMore = false;
+		while (!pending.empty())
+		{
+			const Object object = pending.back();
+			pending.pop_back();
 			// A malformed hierarchy must not make an automation read recurse
-			// forever. Normal hierarchy writes reject cycles, while this guard
-			// keeps the diagnostic surface safe if externally-authored data is bad.
+			// forever. The visited set also covers malformed cycles now that traversal
+			// is iterative rather than recursive.
 			if (!visited.insert(object.EntityId()).second)
 			{
-				return;
+				continue;
 			}
 			const bool matches = search.empty()
 				|| ContainsCaseInsensitive(objectManager.getObjectName(object), search)
@@ -7113,20 +7378,38 @@ namespace TerraEngine::Editor::Automation
 				|| ContainsCaseInsensitive(objectManager.getObjectLayer(object), search);
 			if (matches)
 			{
-				objects.push_back(SerializeObjectSummary(object.EntityId(), includeComponents));
+				if (matchedCount >= offset)
+				{
+					if (objects.size() >= limit)
+					{
+						hasMore = true;
+						break;
+					}
+					// Component discovery is intentionally deferred until an object is
+					// inside the requested page. Large filtered-out ranges therefore do
+					// not pay one registry scan per object.
+					objects.push_back(SerializeObjectSummary(object.EntityId(), includeComponents));
+				}
+				++matchedCount;
 			}
 			// Children are returned in stable UUID order by ObjectManager, which
-			// makes complete scene listings deterministic across entity allocation.
-			for (Object child : objectManager.getChildren(object))
+			// makes pages deterministic across entity allocation. Reverse insertion
+			// keeps the first child at the front of the depth-first traversal.
+			std::vector<Object> children = objectManager.getChildren(object);
+			for (auto child = children.rbegin(); child != children.rend(); ++child)
 			{
-				appendHierarchy(child);
+				pending.push_back(*child);
 			}
-		};
-		for (Object root : roots)
-		{
-			appendHierarchy(root);
 		}
-		return BuildSuccess(requestId, "Listed scene objects.", {{"objects", objects}});
+		const std::uint64_t returned = static_cast<std::uint64_t>(objects.size());
+		return BuildSuccess(requestId, "Listed scene objects.", {
+			{"objects", std::move(objects)},
+			{"offset", offset},
+			{"limit", limit},
+			{"returned", returned},
+			{"hasMore", hasMore},
+			{"nextOffset", hasMore ? offset + returned : 0u}
+		});
 	}
 
 	nlohmann::json EditorAutomationService::HandleSceneSave(const nlohmann::json& arguments, const std::string& requestId)

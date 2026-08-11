@@ -6,12 +6,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 struct RenderStatsSnapshot;
@@ -24,6 +26,9 @@ namespace TerraEngine::Animation
 namespace TerraEngine::Profiling
 {
 struct ProfilerHotPathState;
+struct ProfilerDeferredSampleStorage;
+class ProfilerJournalV1Writer;
+class ProfilerJournalV1Sink;
 
 // EditorSystem batches these fixed records and publishes them once at the end
 // of its protected update. Literal names avoid temporary string allocation in
@@ -45,16 +50,61 @@ struct ProfilerLatestEngineFrameTiming
 	bool valid = false;
 };
 
+enum class ProfilerJournalFinalizationState : std::uint8_t
+{
+	None,
+	Draining,
+	Completed,
+	Failed,
+	Stale
+};
+
+// A ticket is a generation-validated observation handle.  It lets editor
+// callers poll completion without retaining or copying the recorded history.
+struct ProfilerJournalFinalizationTicket
+{
+	std::uint64_t journalGeneration = 0u;
+	bool accepted = false;
+};
+
+struct ProfilerJournalFinalizationStatus
+{
+	ProfilerJournalFinalizationTicket ticket;
+	ProfilerJournalFinalizationState state = ProfilerJournalFinalizationState::None;
+	ProfilerCaptureHealth health;
+	std::string error;
+};
+
 // class Profiler groups related state and operations so callers have one documented contract.
 class Profiler
 {
 public:
 	static Profiler& Instance();
 
+	// StartRecording is retained for small diagnostic and unit-test sessions that
+	// do not have a project artifact destination. Its retained presentation cache
+	// is deliberately capped; durable or duration-unbounded recording must use
+	// StartJournalRecording below.
 	void StartRecording(const ProfilerCaptureMetadata& metadata, const ProfilerCaptureSettings& settings);
+	// StartJournalRecording opens the sole V1 artifact before producers become
+	// active. StartRecording remains the in-memory diagnostic/test session API;
+	// editor capture persistence always reserves and opens a V1 journal instead.
+	bool StartJournalRecording(
+		const ProfilerCaptureMetadata& metadata,
+		const ProfilerCaptureSettings& settings,
+		const std::filesystem::path& artifactPath,
+		std::string& outError,
+		std::shared_ptr<ProfilerJournalV1Sink> sink = {});
 	void PauseRecording();
 	void ResumeRecording();
-	ProfilerCaptureDocument FinishRecording();
+	// Finishing always returns a generation-validated ticket. Journal sessions
+	// drain asynchronously; bounded in-memory diagnostic sessions complete the
+	// same ticket immediately. Callers that explicitly need an in-memory test
+	// snapshot may request it after completion instead of making Finish copy the
+	// entire retained history on the interactive thread.
+	[[nodiscard]] ProfilerJournalFinalizationTicket FinishRecording();
+	[[nodiscard]] ProfilerJournalFinalizationStatus GetJournalFinalizationStatus(
+		ProfilerJournalFinalizationTicket ticket) const;
 	void Clear();
 	void LoadDocument(const ProfilerCaptureDocument& document);
 	// Persistence workers transfer their retained capture into the profiler so a
@@ -72,6 +122,14 @@ public:
 	bool BeginEditorWork();
 	void EndEditorWork(bool active);
 	bool BeginSample(const char* name, ProfilerModuleId moduleId, const char* taskLabel = nullptr);
+	// Literal scope names have program lifetime. Keeping that identity in the
+	// producer ring avoids copying the same label bytes thousands of times while
+	// preserving the dynamic API for caller-owned strings.
+	bool BeginStaticSample(
+		const char* name,
+		std::size_t nameLength,
+		ProfilerModuleId moduleId,
+		const char* taskLabel = nullptr);
 	void EndSample();
 	void RecordRenderStats(const RenderStatsSnapshot& gameStats, const RenderStatsSnapshot& sceneStats);
 	// Animation publishes one fixed-size copied summary at its protected frame
@@ -116,6 +174,7 @@ public:
 	std::optional<std::filesystem::path> GetSourcePath() const;
 	std::string GetLastError() const;
 	std::string GetStatusText() const;
+	[[nodiscard]] ProfilerCaptureHealth GetCaptureHealth() const;
 	bool IsCapturing() const;
 	// Scheduler hot paths use this atomic observation after BeginFrame. Unlike
 	// IsCapturing(), it takes no document mutex and is true only while the current
@@ -126,24 +185,53 @@ public:
 	std::uint64_t GetSnapshotRevision() const noexcept;
 
 private:
+	// A non-journal caller has no durable sink to drain into. Keep its inspection
+	// cache small and fixed so this compatibility entry point cannot silently
+	// recreate the old duration-scaled live capture ownership.
+	static constexpr std::size_t kMaximumInMemoryDiagnosticFrames = 512u;
 	Profiler();
 	~Profiler();
 
 	double NowMs() const;
 	// Pause and Finish are protected scheduler-boundary operations. When either
 	// interrupts a live frame, retain the elapsed measurements as one explicitly
-	// partial record instead of publishing zero-duration samples.
-	void FinalizePartialFrameLocked();
+	// partial record instead of publishing zero-duration samples.  A journal
+	// Finish supplies its action-time timestamp later from the drain worker so
+	// merging a dense frame never delays interactive ticket publication.
+	void FinalizePartialFrameLocked(std::optional<std::int64_t> endingNanoseconds = std::nullopt);
+	// Only the interactive caller can close its thread-local editor interval.
+	// Keep this tiny action-time accounting separate from the potentially large
+	// worker-side sample merge performed by FinalizePartialFrameLocked.
+	void CloseInterruptedEditorWorkLocked(std::int64_t endingNanoseconds);
+	bool BeginSampleImpl(
+		const char* name,
+		std::size_t nameLength,
+		bool stableName,
+		ProfilerModuleId moduleId,
+		const char* taskLabel);
 	// Completed frames move into a deque-backed rolling history. Removing the
 	// oldest detailed frame is therefore constant-time and never shifts every
 	// retained string/vector payload on the editor thread.
 	void CommitCurrentFrameLocked();
-	void MergeThreadSamplesForFrameLocked(std::uint64_t sessionGeneration, std::uint64_t frameToken);
+	void MergeThreadSamplesForFrameLocked(
+		std::uint64_t sessionGeneration,
+		std::uint64_t frameToken,
+		bool deferSampleMaterialization = false);
 	void RebuildCurrentFrameModules();
-	void AggregateSamplesForFrame(ProfilerFrameRecord& frame) const;
+	void AggregateSamplesForFrame(ProfilerFrameRecord& frame, const ProfilerSealedFrame* sealed = nullptr) const;
 	void UpdateFastRecordingFlagsLocked();
+	void CommitCurrentFrameToJournalLocked();
+	void ScheduleJournalDrainLocked();
+	void DrainJournalQueue(std::uint64_t expectedJournalGeneration);
+	void JournalWorkerMain();
 
 	mutable std::mutex mutex;
+	// Journal compression and durable I/O are deliberately isolated from the
+	// shared frame-job pool. This serialized owner cannot displace animation,
+	// rendering, or physics tasks while a slow destination is flushing.
+	std::condition_variable journalWorkerCondition;
+	std::thread journalWorker;
+	bool journalWorkerStopping = false;
 	// Scope producers write only to thread-owned fixed buffers. The opaque state
 	// keeps those implementation details out of every translation unit that
 	// includes the public profiler API.
@@ -153,8 +241,36 @@ private:
 	// live retention uses a deque so every-frame eviction stays O(1).
 	ProfilerCaptureDocument document;
 	std::deque<ProfilerFrameRecord> retainedFrames;
+	// The journal owns two sealed FIFO tiers. Full-detail frames may use only the
+	// optional admission budget; compact frames can also use the reserved core
+	// budget. The worker merges their fronts by frame index so persistence remains
+	// strictly chronological without letting optional data starve critical data.
+	std::shared_ptr<ProfilerJournalV1Writer> journalWriter;
+	std::deque<ProfilerSealedFrame> journalCoreQueue;
+	std::deque<ProfilerSealedFrame> journalDetailQueue;
+	ProfilerCaptureHealth journalHealth;
+	bool journalDrainScheduled = false;
+	// Pause/finish force the partial batch out of worker ownership. Ordinary
+	// frames wait for the configured batch bound to avoid one I/O operation per
+	// frame while keeping producer work nonblocking.
+	bool journalDrainForced = false;
+	bool journalTerminalFailure = false;
+	bool journalFinalizeRequested = false;
+	// Finish records the exact protected-boundary time, then lets the drain worker
+	// seal any incomplete journal frame.  This preserves partial-frame duration
+	// semantics without sorting/allocating detailed samples on the UI thread.
+	std::optional<std::int64_t> journalPartialFrameEndingNanoseconds;
+	// The drain worker publishes terminal durability before it reacquires the
+	// main profiler mutex. This prevents a frame-rate status poll from starving
+	// the worker after the terminal record is already safely on disk.
+	std::atomic_bool journalFinalizationCompleted{false};
+	std::uint64_t journalGeneration = 0u;
 	ProfilerCaptureSettings settings;
 	std::optional<ProfilerFrameRecord> currentFrame;
+	// Complete journal frames copy fixed producer records into one flat owned
+	// hand-off. The dedicated writer later creates strings and derived hierarchy;
+	// partial and in-memory frames keep their immediate presentation semantics.
+	std::shared_ptr<ProfilerDeferredSampleStorage> currentDeferredSamples;
 	std::optional<std::uint64_t> selectedFrameIndex;
 	std::chrono::steady_clock::time_point sessionStart{};
 	std::uint64_t nextFrameIndex = 0u;

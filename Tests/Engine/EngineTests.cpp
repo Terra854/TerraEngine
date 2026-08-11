@@ -83,7 +83,8 @@ namespace TerraEngine::Tests {
 	void RegisterDerivedSceneCacheTests(TestRegistry& registry);
 	void RegisterBulkScenePublicationTests(TestRegistry& registry);
 	void RegisterProfilerCaptureTests(TestRegistry& registry);
-	void RegisterProfilerCaptureV2Tests(TestRegistry& registry);
+	void RegisterProfilerJournalV1Tests(TestRegistry& registry);
+	void RegisterProfilerLifecycleTests(TestRegistry& registry);
 	void RegisterProfilerOptimizationEvidenceTests(TestRegistry& registry);
 	void RegisterProfilerFramePublicationEvidenceTests(TestRegistry& registry);
 	void RegisterFramePublicationToolContractTests(TestRegistry& registry);
@@ -371,7 +372,8 @@ int main() {
 	TerraEngine::Tests::RegisterDerivedSceneCacheTests(registry);
 	TerraEngine::Tests::RegisterBulkScenePublicationTests(registry);
 	TerraEngine::Tests::RegisterProfilerCaptureTests(registry);
-	TerraEngine::Tests::RegisterProfilerCaptureV2Tests(registry);
+	TerraEngine::Tests::RegisterProfilerJournalV1Tests(registry);
+	TerraEngine::Tests::RegisterProfilerLifecycleTests(registry);
 	TerraEngine::Tests::RegisterProfilerOptimizationEvidenceTests(registry);
 	TerraEngine::Tests::RegisterProfilerFramePublicationEvidenceTests(registry);
 	TerraEngine::Tests::RegisterFramePublicationToolContractTests(registry);

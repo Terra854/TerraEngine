@@ -216,7 +216,7 @@ set(ENGINE_SOURCES
 	Engine/ThreadPool/ThreadPool.cpp
 	Engine/Profiling/Profiler.cpp
 	Engine/Profiling/ProfilerCapture.cpp
-	Engine/Profiling/ProfilerCaptureV2.cpp
+	Engine/Profiling/ProfilerJournalV1.cpp
 	Engine/Profiling/PerformanceBaseline.cpp
 	Engine/Profiling/PerformanceTelemetry.cpp
 	Engine/Renderer/RenderCaptureEncoding.cpp

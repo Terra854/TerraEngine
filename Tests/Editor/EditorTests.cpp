@@ -106,6 +106,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterEditorMcpAssetImportTests(TestRegistry& registry);
 	void RegisterEditorMcpAssetImportSafetyTests(TestRegistry& registry);
 	void RegisterProfilerDiagnosticsAutomationTests(TestRegistry& registry);
+	void RegisterFramePublicationToolContractTests(TestRegistry& registry);
 	void RegisterRendererRecoveryAutomationTests(TestRegistry& registry);
 	void RegisterVirtualGeometryAutomationTests(TestRegistry& registry);
 	void RegisterVirtualGeometryCapabilityAutomationTests(TestRegistry& registry);
@@ -299,6 +300,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterEditorMcpAssetImportTests(registry);
 	TerraEngine::EditorTests::RegisterEditorMcpAssetImportSafetyTests(registry);
 	TerraEngine::EditorTests::RegisterProfilerDiagnosticsAutomationTests(registry);
+	TerraEngine::EditorTests::RegisterFramePublicationToolContractTests(registry);
 	TerraEngine::EditorTests::RegisterRendererRecoveryAutomationTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryAutomationTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryCapabilityAutomationTests(registry);

@@ -31,57 +31,6 @@ namespace TerraEngine::EditorTests
 
 	void RegisterEditorMcpProfilerTests(TestRegistry& registry)
 	{
-		registry.Add("Editor.MCP.Profiler.ServiceBuildsBoundedCaptureSummary", [](TestContext& context) {
-			TerraEngine::Profiling::ProfilerCaptureDocument document;
-			document.frames = {
-				{.frameIndex = 1u, .durationMs = 10.0, .complete = true},
-				{.frameIndex = 2u, .durationMs = 30.0, .complete = false}
-			};
-			const EditorProfilerCaptureSummary summary = EditorProfilerService::SummarizeDocument("profiler-test", document);
-			context.ExpectEqual(std::uint64_t(2), summary.frameCount, "The owning service should summarize every captured frame.");
-			context.ExpectEqual(std::uint64_t(1), summary.completeFrameCount, "Complete and incomplete frames should remain distinguishable.");
-			context.ExpectEqual(std::uint64_t(1), summary.incompleteFrameCount, "Incomplete capture evidence should not be silently discarded.");
-			context.ExpectEqual(20.0, summary.averageFrameMs, "The summary should publish a bounded average instead of raw samples.");
-			context.ExpectEqual(10.0, summary.minimumFrameMs, "The summary should retain the minimum frame duration.");
-			context.ExpectEqual(30.0, summary.maximumFrameMs, "The summary should retain the maximum frame duration.");
-			context.ExpectEqual(10.0, summary.frameMedianMs, "Frame percentiles should include complete frames only.");
-			context.ExpectEqual(10.0, summary.frameP95Ms, "An incomplete tail must not inflate the complete-frame p95.");
-			context.ExpectEqual(10.0, summary.frameP99Ms, "An incomplete tail must not inflate the complete-frame p99.");
-			context.ExpectEqual(10.0, summary.frameWorstMs, "The bounded performance maximum should exclude incomplete frames.");
-		});
-
-		registry.Add("Editor.MCP.Profiler.WorkerSummaryUsesCaptureLocalDeltas", [](TestContext& context) {
-			using namespace TerraEngine::Profiling;
-			auto available = [](std::uint64_t nanoseconds) {
-				return TelemetryDuration{TelemetryAvailability::Available, nanoseconds, {}};
-			};
-			auto worker = [&](std::uint64_t queueDepth, std::uint64_t dispatches, std::uint64_t usefulItems, std::uint64_t run, std::uint64_t wait, std::uint64_t idle) {
-				return WorkerTelemetryRecord{7u, queueDepth, dispatches, usefulItems, available(run), available(wait), available(idle)};
-			};
-
-			ProfilerCaptureDocument document;
-			ProfilerFrameRecord first{.frameIndex = 1u, .durationMs = 1.0, .complete = true};
-			first.workerTelemetry.push_back(worker(1u, 100u, 1'000u, 10'000u, 2'000u, 5'000u));
-			ProfilerFrameRecord second{.frameIndex = 2u, .durationMs = 1.0, .complete = true};
-			second.workerTelemetry.push_back(worker(4u, 103u, 1'030u, 10'300u, 2'100u, 5'400u));
-			ProfilerFrameRecord third{.frameIndex = 3u, .durationMs = 1.0, .complete = true};
-			third.workerTelemetry.push_back(worker(2u, 108u, 1'080u, 10'800u, 2'250u, 6'000u));
-			document.frames = {first, second, third};
-
-			const EditorProfilerCaptureSummary summary = EditorProfilerService::SummarizeDocument("worker-deltas", document);
-			context.ExpectEqual(std::size_t(1u), summary.workerHistories.size(), "One captured worker should produce one bounded worker summary.");
-			if (!summary.workerHistories.empty())
-			{
-				const EditorProfilerWorkerSummary& result = summary.workerHistories.front();
-				context.ExpectEqual(std::uint64_t(8u), result.totalDispatchCount, "Capture totals must subtract the pre-capture cumulative dispatch baseline.");
-				context.ExpectEqual(std::uint64_t(80u), result.totalUsefulWorkItems, "Useful work totals must contain only work observed during the capture.");
-				context.ExpectEqual(std::uint64_t(4u), result.maximumQueueDepth, "Queue depth remains an instantaneous maximum rather than a delta.");
-				context.ExpectEqual(std::uint64_t(2u), result.runDuration.sampleCount, "Three cumulative observations should produce two duration intervals.");
-				context.Expect(result.runDuration.maximum > 0.00049 && result.runDuration.maximum < 0.00051,
-					"Worker run percentiles should use the largest per-interval delta, not the process-lifetime total.");
-			}
-		});
-
 		registry.Add("Editor.MCP.Profiler.DiscoveryCoversCaptureLifecycle", [](TestContext& context) {
 			EditorAutomationService service;
 			const std::array<std::string_view, 5> operations{
@@ -133,6 +82,11 @@ namespace TerraEngine::EditorTests
 					context.Expect(capability->descriptor.execution.protectedCommit, "Profiler recording transitions should cross a protected editor boundary.");
 					context.Expect(SchemaHasProperty(capability->descriptor.resultSchema, "jobId"), "Profiler transitions should return a durable job identifier.");
 					context.Expect(SchemaHasProperty(capability->descriptor.resultSchema, "state"), "Profiler jobs should return their initial state.");
+					if (operation == "profiler.capture.stop")
+					{
+						context.Expect(SchemaHasProperty(capability->descriptor.resultSchema, "finishCaptureSubmissionMilliseconds"),
+							"Profiler stop should separate protected ticket submission time from asynchronous journal finalization and MCP dispatch latency.");
+					}
 				}
 			}
 		});
@@ -155,16 +109,38 @@ namespace TerraEngine::EditorTests
 			}
 		});
 
-		registry.Add("Editor.MCP.Profiler.V2OptionsAndSummariesRemainAdditive", [](TestContext& context) {
+		registry.Add("Editor.MCP.Profiler.V1OptionsAndSummariesRemainAdditive", [](TestContext& context) {
 			EditorAutomationService service;
 			const auto start = FindProfilerCapability(service, "profiler.capture.start");
 			const auto list = FindProfilerCapability(service, "profiler.capture.list");
 			const auto summaryCapability = FindProfilerCapability(service, "profiler.capture.summary");
-			context.Expect(start.has_value() && list.has_value() && summaryCapability.has_value(), "Profiler v2 operations should preserve the legacy capture lifecycle tools.");
+			context.Expect(start.has_value() && list.has_value() && summaryCapability.has_value(), "Profiler V1 operations should expose the capture lifecycle tools.");
+			context.Expect(FindProfilerCapability(service, "profiler.capture.health").has_value()
+				&& FindProfilerCapability(service, "profiler.capture.index").has_value()
+				&& FindProfilerCapability(service, "profiler.capture.detail").has_value()
+				&& FindProfilerCapability(service, "profiler.capture.operation").has_value(),
+				"Profiler automation must expose bounded health, index, selected-detail, and operation reads.");
+			if (const auto health = FindProfilerCapability(service, "profiler.capture.health"); health.has_value())
+			{
+				context.Expect(SchemaHasProperty(health->descriptor.resultSchema, "sessionArtifactId"),
+					"Bounded health must identify the active V1 journal without exposing a filesystem path.");
+				context.Expect(health->descriptor.resultSchema["properties"]["formatIdentifier"].value("const", std::string{}) == "TerraEngineProfilerJournalV1"
+					&& health->descriptor.resultSchema["properties"]["formatVersion"].value("const", 0u) == 1u
+					&& health->descriptor.resultSchema["properties"]["projectEpoch"].value("minimum", 1u) == 0u,
+					"Bounded health must retain both V1 identity and its lifecycle epoch.");
+			}
 			if (start.has_value())
 			{
 				context.Expect(SchemaHasProperty(start->descriptor.inputSchema, "captureLevel"), "Capture start should accept an optional detail level.");
-				context.Expect(SchemaHasProperty(start->descriptor.inputSchema, "payloadVersion"), "Capture start should declare its emitted capture version.");
+				const std::string legacyVersionSelector = "payload" "Version";
+				context.Expect(!SchemaHasProperty(start->descriptor.inputSchema, legacyVersionSelector), "Capture start must not expose a legacy format selector.");
+				const std::string legacyCaptureSelector = "Capture" "Version";
+				context.Expect(!SchemaHasProperty(start->descriptor.inputSchema, legacyCaptureSelector), "Capture start must not expose an alternate capture-version selector.");
+				context.Expect(SchemaHasProperty(start->descriptor.resultSchema, "formatIdentifier")
+					&& SchemaHasProperty(start->descriptor.resultSchema, "formatVersion")
+					&& start->descriptor.resultSchema["properties"]["formatIdentifier"].value("const", std::string{}) == "TerraEngineProfilerJournalV1"
+					&& start->descriptor.resultSchema["properties"]["formatVersion"].value("const", 0u) == 1u,
+					"Capture start results must identify exactly the fixed V1 journal format and version.");
 				context.Expect(SchemaHasProperty(start->descriptor.inputSchema, "maximumChunkFrames"), "Capture start should accept a bounded chunk-frame limit.");
 				context.Expect(SchemaHasProperty(start->descriptor.inputSchema, "maxFrames"), "Capture start should expose an optional explicit rolling-history limit.");
 				if (SchemaHasProperty(start->descriptor.inputSchema, "maxFrames"))
@@ -179,7 +155,7 @@ namespace TerraEngine::EditorTests
 						"Profiler discovery should document zero as the unlimited-history sentinel.");
 				}
 				context.Expect(SchemaHasProperty(start->descriptor.resultSchema, "bounds"), "Capture start should return effective bounds without changing durable job fields.");
-				context.Expect(SchemaHasProperty(start->descriptor.resultSchema, "jobId"), "V2 capture start must retain the existing durable job identifier.");
+				context.Expect(SchemaHasProperty(start->descriptor.resultSchema, "jobId"), "V1 capture start must return its durable job identifier.");
 			}
 			if (list.has_value())
 			{
@@ -189,34 +165,56 @@ namespace TerraEngine::EditorTests
 			{
 				context.Expect(SchemaHasProperty(summaryCapability->descriptor.resultSchema, "summary"), "Capture summary should remain a structured read-only result.");
 			}
+			const auto index = FindProfilerCapability(service, "profiler.capture.index");
+			const auto detail = FindProfilerCapability(service, "profiler.capture.detail");
+			const auto operation = FindProfilerCapability(service, "profiler.capture.operation");
+			context.Expect(index.has_value() && detail.has_value() && operation.has_value(),
+				"Bounded index, detail, and operation contracts should remain discoverable.");
+			if (index.has_value())
+			{
+				const auto& properties = index->descriptor.inputSchema["properties"];
+				context.Expect(properties["offset"].value("type", std::string{}) == "integer"
+					&& properties["offset"].value("minimum", 1u) == 0u
+					&& properties["limit"].value("type", std::string{}) == "integer"
+					&& properties["limit"].value("minimum", 0u) == 1u
+					&& properties["limit"].value("maximum", 0u) == 512u
+					&& index->descriptor.resultSchema["properties"]["formatVersion"].value("const", 0u) == 1u
+					&& SchemaHasProperty(index->descriptor.resultSchema, "projectEpoch"),
+					"Profiler index requests must advertise bounded non-negative page inputs.");
+			}
+			if (detail.has_value())
+			{
+				const auto& properties = detail->descriptor.inputSchema["properties"];
+				context.Expect(properties["frameIndex"].value("type", std::string{}) == "integer"
+					&& properties["frameIndex"].value("minimum", 1u) == 0u
+					&& detail->descriptor.resultSchema["properties"]["formatIdentifier"].value("const", std::string{}) == "TerraEngineProfilerJournalV1"
+					&& SchemaHasProperty(detail->descriptor.resultSchema, "projectEpoch"),
+					"Profiler detail requests must expose one non-negative journal frame identity.");
+			}
+			if (operation.has_value())
+			{
+				const auto& inputProperties = operation->descriptor.inputSchema["properties"];
+				const auto& resultProperties = operation->descriptor.resultSchema["properties"];
+				context.Expect(inputProperties["operationId"].value("type", std::string{}) == "integer"
+					&& inputProperties["operationId"].value("minimum", 0u) == 1u
+					&& resultProperties["formatIdentifier"].value("const", std::string{}) == "TerraEngineProfilerJournalV1"
+					&& resultProperties["formatVersion"].value("const", 0u) == 1u
+					&& SchemaHasProperty(operation->descriptor.resultSchema, "operation")
+					&& SchemaHasProperty(operation->descriptor.resultSchema, "finalization"),
+					"Profiler operation polling must remain V1-only and expose one bounded terminal/finalization result.");
+			}
 		});
 
-		registry.Add("Editor.MCP.Profiler.TypedSummaryKeepsUnavailableTelemetryDistinct", [](TestContext& context) {
-			using namespace TerraEngine::Profiling;
-			ProfilerCaptureDocument document;
-			document.payloadVersion = 2u;
-			document.committedFrameCount = 2u;
-			document.complete = false;
-			document.recoveredIncompleteTail = true;
-			ProfilerFrameRecord first;
-			first.frameIndex = 1u;
-			first.durationMs = 10.0;
-			first.performanceStages.push_back({PerformanceStageDomain::Physics, "provider_reads", {TelemetryAvailability::Available, 10'000'000u, {}}, {}, 10u, false});
-			first.performanceStages.push_back({PerformanceStageDomain::SceneView, "projection", {TelemetryAvailability::Unavailable, 0u, "Scene View hidden"}, {}, 0u, false});
-			first.physicsWorkVolume = PhysicsWorkVolumeRecord{1u, 100u, 80u, 70u, 60u, 50u, 40u, 30u};
-			ProfilerFrameRecord second = first;
-			second.frameIndex = 2u;
-			second.durationMs = 30.0;
-			second.performanceStages.front().duration.nanoseconds = 30'000'000u;
-			document.frames = {first, second};
-
-			const EditorProfilerCaptureSummary summary = EditorProfilerService::SummarizeDocument("v2-summary", document);
-			context.ExpectEqual(std::uint32_t(2u), summary.payloadVersion, "Typed summaries should retain the capture payload version.");
-			context.Expect(summary.recoveredIncompleteTail, "Recovery state should be visible instead of silently discarding tail evidence.");
-			context.ExpectEqual(std::size_t(2u), summary.stageTimings.size(), "Physics and Scene View typed stages should have separate bounded summary rows.");
-			context.Expect(summary.stageTimings.front().available, "Valid physics stage timings should remain available.");
-			context.Expect(summary.stageTimings.back().unavailableCount > 0u, "Unavailable Scene View timing should remain unavailable rather than becoming zero milliseconds.");
-			context.ExpectEqual(std::uint64_t(30u), summary.workVolumes.publishedBodies, "Work-volume summary should preserve the published-body count.");
+		registry.Add("Editor.MCP.Profiler.OperationStatesExposeTerminalLifecycle", [](TestContext& context) {
+			// These names are part of the bounded operation-polling contract.  A
+			// project close may publish Cancelled while a worker completion is stale,
+			// so automation must never confuse it with a successful finalization.
+			context.Expect(ToString(EditorProfilerOperationState::Queued) == "queued"
+				&& ToString(EditorProfilerOperationState::Running) == "running"
+				&& ToString(EditorProfilerOperationState::Completed) == "completed"
+				&& ToString(EditorProfilerOperationState::Failed) == "failed"
+				&& ToString(EditorProfilerOperationState::Cancelled) == "cancelled",
+				"Profiler operation polling must preserve all bounded lifecycle states.");
 		});
 
 		registry.Add("Editor.MCP.Profiler.FramePublicationAggregateKeepsLanesAvailabilityAndConservation", [](TestContext& context) {

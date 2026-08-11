@@ -4392,7 +4392,7 @@ namespace TerraEngine::Animation {
 									: !inserted->second.binding.clip->events.empty()
 										? "Animation: Direct Cohort Rejected Authored Events"
 										: "Animation: Direct Cohort Rejected Advanced Policy";
-								TERRAENGINE_PROFILE_SCOPE(reason,
+								TERRAENGINE_PROFILE_DYNAMIC_SCOPE(reason,
 									TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 							}
 							if(directCohortEligible) {

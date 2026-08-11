@@ -713,6 +713,13 @@ void EditorSystem::Update(float deltaTime) {
 	// Keep this idempotent fallback so future delayed-startup paths still open
 	// the requested project before the editor chooses between hub and workspace UI.
 	ProcessStartupProjectOpen();
+	if (context.editorProfiler)
+	{
+		// Profiler filesystem workers only enqueue epoch-tagged immutable results.
+		// Accept them at this protected boundary before any profiler window can
+		// render, so close/switch invalidation and UI publication are atomic.
+		context.editorProfiler->Update(deltaTime);
+	}
 	// Animation authority has already published through the scheduler by the time
 	// this protected PostFrame system runs. Advance durable recorder sessions before
 	// any editor-only early return so capture never depends on MCP polling, listener
@@ -843,6 +850,16 @@ void EditorSystem::Update(float deltaTime) {
 		TERRAENGINE_PROFILE_SCOPE("EditorSystem: Managed Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		editorStages.Measure("Editor.ManagedUpdate", [&]() {
 			managedUpdate(deltaTime);
+		});
+	}
+
+	if (context.editorMcpBridge) {
+		// A transport call can arrive immediately after the first MCP drain. Give
+		// it one more protected handoff before potentially long ImGui rendering and
+		// Vulkan presentation, while keeping assistant-command dispatch once/frame.
+		TERRAENGINE_PROFILE_SCOPE("EditorSystem: MCP Transport Late Drain", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		editorStages.Measure("Editor.McpTransportLateDrain", [&]() {
+			context.editorMcpBridge->PumpPendingTransportToolCallsAtProtectedFrame();
 		});
 	}
 
@@ -987,14 +1004,15 @@ TerraEngine::Scheduling::SystemDeclaration EditorSystem::SchedulerDeclaration() 
 	declaration.writes = {
 		"EditorUiPresentation", "ViewportTextureRegistry", "EditorSubmissionCompletion",
 		"EditorDiagnostics", "EditorAutomationState", "EditorAutomationSession",
-		"SceneMutationQueue", "EditorProfilerTiming"
+		"SceneMutationQueue", "EditorProfilerTiming", "EditorProfilerWorkerCompletions",
+		"EditorProfilerHealthPublication"
 	};
 	declaration.mainThread = true;
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::Protected;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Automation schema validation, immutable request preparation, reference-impact scans, log filtering, and editor subsystem snapshots may run on workers; ImGui context mutation remains protected.";
-	declaration.protectedCommit = "Immutable animation recording capture, prepared automation request commit at post_editor_automation_flush, SceneMutationQueue publication, project and Play Mode transitions, ImGui frame mutation, checked Vulkan backend recording, descriptor mutation, acquire, submit, present, and retirement publication.";
+	declaration.safeSubwork = "Automation schema validation, immutable request preparation, reference-impact scans, log filtering, editor subsystem snapshots, and profiler journal/index/detail workers may run on workers; workers only enqueue epoch-tagged profiler completions and never mutate Profiler or ImGui.";
+	declaration.protectedCommit = "Immutable animation recording capture, protected drain of EditorProfilerWorkerCompletions, bounded EditorProfilerHealthPublication, prepared automation request commit at post_editor_automation_flush, SceneMutationQueue publication, project and Play Mode transitions, ImGui frame mutation, checked Vulkan backend recording, descriptor mutation, acquire, submit, present, and retirement publication.";
 	declaration.protectedReason = declaration.protectedCommit;
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;

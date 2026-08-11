@@ -334,10 +334,12 @@ namespace TerraEngine::Scheduling {
 		std::vector<FrameWorkloadDeclaration> workloads,
 		std::string frameId = "frame",
 		FrameWorkloadExecutionOptions options = {});
-	// Returns a bounded value copy from the most recently completed scheduler
-	// execution. The profiler consumes it after the protected frame boundary;
-	// callbacks and mutable workload inputs are never retained here.
-	TERRAENGINE_API std::vector<TerraEngine::Profiling::WorkloadExecutionRecord> LatestFrameWorkloadExecutionRecordsForProfiling();
+	// Transfers the bounded records from the most recently completed scheduler
+	// execution to the profiler. The profiler is the sole consumer, so moving the
+	// published vector avoids a second deep copy of per-partition diagnostic text.
+	// A second take before the next scheduler publication intentionally returns
+	// an empty vector; callbacks and mutable workload inputs are never retained.
+	TERRAENGINE_API std::vector<TerraEngine::Profiling::WorkloadExecutionRecord> TakeLatestFrameWorkloadExecutionRecordsForProfiling();
 	TERRAENGINE_API std::vector<FrameWorkloadPartition> BuildDeterministicWorkloadPartitions(std::size_t itemCount, std::size_t targetItemsPerPartition, std::size_t maximumPartitionCount = 0);
 	TERRAENGINE_API void AddArchitectureDiagnostic(std::vector<ArchitectureDiagnostic>& diagnostics, ArchitectureDiagnosticSeverity severity, ArchitectureDiagnosticCode code, std::string workloadName, std::string resourceName, std::string message, std::string action);
 

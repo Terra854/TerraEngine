@@ -373,28 +373,38 @@ namespace TerraEngine::Scheduling {
 			record.itemBegin = partition.itemBegin;
 			record.itemEnd = partition.itemEnd;
 			record.sameFrameVisibilityRequired = result.declaration.sameFrameVisibilityRequired;
-			record.queueDuration = unavailableDuration;
-			record.runDuration = unavailableDuration;
-			record.coordinatorWaitDuration = unavailableDuration;
-			record.ownershipWaitDuration = unavailableDuration;
-			record.flushDuration = unavailableDuration;
-			record.publicationDuration = unavailableDuration;
+			// Completed graph entries always provide these three clocks.  Construct
+			// their available values directly instead of allocating an unavailable
+			// explanation and immediately clearing it on every recorded partition.
+			// The fallback still carries the same explicit reason for incomplete paths.
 			if (entry != nullptr)
 			{
 				record.dispatchCount = entry->dispatchCount;
 				record.usefulWorkItemCount = entry->usefulWorkItemCount;
 				record.dependencyWave = entry->dependencyWave;
 				record.completionSequence = entry->completionSequence;
-				record.queueDuration.availability = TerraEngine::Profiling::TelemetryAvailability::Available;
-				record.queueDuration.nanoseconds = entry->queueDurationNs;
-				record.queueDuration.unavailableReason.clear();
-				record.runDuration.availability = TerraEngine::Profiling::TelemetryAvailability::Available;
-				record.runDuration.nanoseconds = entry->runDurationNs;
-				record.runDuration.unavailableReason.clear();
-				record.coordinatorWaitDuration.availability = TerraEngine::Profiling::TelemetryAvailability::Available;
-				record.coordinatorWaitDuration.nanoseconds = entry->coordinatorWaitDurationNs;
-				record.coordinatorWaitDuration.unavailableReason.clear();
+				record.queueDuration = {
+					TerraEngine::Profiling::TelemetryAvailability::Available,
+					entry->queueDurationNs,
+					{}};
+				record.runDuration = {
+					TerraEngine::Profiling::TelemetryAvailability::Available,
+					entry->runDurationNs,
+					{}};
+				record.coordinatorWaitDuration = {
+					TerraEngine::Profiling::TelemetryAvailability::Available,
+					entry->coordinatorWaitDurationNs,
+					{}};
 			}
+			else
+			{
+				record.queueDuration = unavailableDuration;
+				record.runDuration = unavailableDuration;
+				record.coordinatorWaitDuration = unavailableDuration;
+			}
+			record.ownershipWaitDuration = unavailableDuration;
+			record.flushDuration = unavailableDuration;
+			record.publicationDuration = unavailableDuration;
 			if (wallTiming != nullptr)
 			{
 				record.runStartNanoseconds =
@@ -1610,9 +1620,9 @@ namespace TerraEngine::Scheduling {
 		return plan;
 	}
 
-	std::vector<TerraEngine::Profiling::WorkloadExecutionRecord> LatestFrameWorkloadExecutionRecordsForProfiling()
+	std::vector<TerraEngine::Profiling::WorkloadExecutionRecord> TakeLatestFrameWorkloadExecutionRecordsForProfiling()
 	{
 		std::lock_guard<std::mutex> lock(g_ProfilingExecutionRecordsMutex);
-		return g_ProfilingExecutionRecords;
+		return std::move(g_ProfilingExecutionRecords);
 	}
 }

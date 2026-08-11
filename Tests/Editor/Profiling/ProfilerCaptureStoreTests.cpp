@@ -1,11 +1,14 @@
 #include "TestHarness.h"
 
 #include "ProfilerCaptureStore.h"
+#include "Profiling/ProfilerJournalV1.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -52,38 +55,6 @@ namespace TerraEngine::EditorTests {
 			std::filesystem::path outsideRoot_;
 		};
 
-		TerraEngine::Profiling::ProfilerCaptureDocument MakeProfilerDocument(const std::string& projectName) {
-			using namespace TerraEngine::Profiling;
-
-			ProfilerCaptureDocument document;
-			document.payloadVersion = 2u;
-			document.committedFrameCount = 1u;
-			document.complete = true;
-			document.metadata.terraEngineVersion = "unit-test";
-			document.metadata.projectName = projectName;
-			document.metadata.scenePath = "Scenes/Test.tescene";
-			document.metadata.startedAt = "2026-05-29 12:00:00";
-			document.metadata.savedAt = "2026-05-29 12:00:01";
-			document.metadata.settings.maxFrames = 32U;
-
-			ProfilerModuleSummary module;
-			module.moduleId = ProfilerModuleId::CpuEngine;
-			module.available = true;
-			module.totalMs = 3.0;
-			module.metrics.push_back({"Frame duration", 3.0, "ms"});
-
-			ProfilerFrameRecord frame;
-			frame.frameIndex = 7U;
-			frame.frameStartMs = 21.0;
-			frame.durationMs = 3.0;
-			frame.complete = true;
-			frame.moduleSummaries.push_back(module);
-			frame.samples.push_back({1U, 0U, ProfilerModuleId::CpuEngine, "Editor Frame", "main", "", 0.0, 3.0, 0U, 1U, true});
-			document.frames.push_back(std::move(frame));
-
-			return document;
-		}
-
 		bool FileNameStartsWith(const std::filesystem::path& path, const std::string& prefix) {
 			const std::string fileName = path.filename().string();
 			return fileName.rfind(prefix, 0U) == 0U;
@@ -94,6 +65,25 @@ namespace TerraEngine::EditorTests {
 				return artifact.fileName == fileName;
 			});
 		}
+
+		bool WriteSingleFrameJournal(const std::filesystem::path& path, std::string projectName,
+			std::uint64_t frameIndex, std::string& error)
+		{
+			using namespace TerraEngine::Profiling;
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = std::move(projectName);
+			metadata.settings.maximumChunkFrames = 1u;
+			ProfilerJournalV1Writer writer;
+			if (writer.Open(path, metadata, error) != ProfilerJournalV1ResultCode::Ok) return false;
+			ProfilerSealedFrame sealed;
+			sealed.frame.frameIndex = frameIndex;
+			sealed.frame.durationMs = 3.0;
+			sealed.frame.complete = true;
+			sealed.ownedByteCount = EstimateProfilerFrameOwnedBytes(sealed.frame);
+			return writer.AppendCommittedSegment(std::span<const ProfilerSealedFrame>(&sealed, 1u), error)
+				== ProfilerJournalV1ResultCode::Ok
+				&& writer.Finalize(true, error) == ProfilerJournalV1ResultCode::Ok;
+		}
 	}
 
 	void RegisterProfilerCaptureStoreTests(TestRegistry& registry) {
@@ -101,60 +91,48 @@ namespace TerraEngine::EditorTests {
 			ProfilerCaptureStore store;
 			std::filesystem::path outputPath;
 			std::string error;
-			TerraEngine::Profiling::ProfilerCaptureDocument loaded;
+			ProfilerCaptureIndexPage page;
 
 			context.Expect(!store.HasProjectRoot(), "A default capture store should start without an open project.");
 			context.Expect(store.GetProfilerDirectory().empty(), "A default capture store should not expose a profiler directory.");
 			context.Expect(!store.IsPathInsideProject(std::filesystem::temp_directory_path()), "Path checks should fail when no project is open.");
-			context.Expect(!store.SaveNewCapture(MakeProfilerDocument("No Project"), outputPath, error), "Saving should fail when no project is open.");
-			context.ExpectEqual(std::string("No project is open."), error, "Save failures without a project should report a clear diagnostic.");
-			context.Expect(!store.LoadCapture(std::filesystem::temp_directory_path() / "missing.teprof", loaded, error), "Loading should fail when no project is open.");
-			context.ExpectEqual(std::string("No project is open."), error, "Load failures without a project should report a clear diagnostic.");
+			context.Expect(!store.ReadJournalIndexPage(std::filesystem::temp_directory_path() / "missing.teprof", 0u, 16u, page, error), "V1 page reads should fail when no project is open.");
+			context.Expect(error.find("Profiler captures can only be read") != std::string::npos, "No-project page reads should report the project containment constraint.");
 
 			const std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> captures = store.ListCaptures(error);
 			context.Expect(captures.empty(), "Listing captures without a project should return an empty list.");
 			context.Expect(error.empty(), "Listing captures without a project should not report a filesystem error.");
 		});
 
-		registry.Add("Editor.ProfilerCaptureStore.SaveNewCaptureWritesAndLoadsProjectCapture", [](TestContext& context) {
+		registry.Add("Editor.ProfilerCaptureStore.ReserveJournalKeepsProjectOwnership", [](TestContext& context) {
 			TempProfilerProject project;
 			ProfilerCaptureStore store(project.Root());
 			std::filesystem::path outputPath;
 			std::string error;
 
-			const TerraEngine::Profiling::ProfilerCaptureDocument document = MakeProfilerDocument(R"(Project:Bad/Name?)");
-			context.Expect(store.SaveNewCapture(document, outputPath, error), "Saving a capture inside an open project should succeed.");
-			context.Expect(std::filesystem::exists(outputPath), "Saving a capture should create a profiler artifact on disk.");
-			context.Expect(store.IsPathInsideProject(outputPath), "Saved capture paths should stay inside the open project.");
-			context.Expect(outputPath.parent_path().filename() == "Profiler", "Saved captures should be placed under the project Profiler directory.");
-			context.Expect(FileNameStartsWith(outputPath, "Project_Bad_Name_-"), "Capture file names should sanitize invalid project-name characters.");
-
-			TerraEngine::Profiling::ProfilerCaptureDocument loaded;
-			context.Expect(store.LoadCapture(outputPath, loaded, error), "Saved project captures should load through the capture store.");
-			context.ExpectEqual(std::string(R"(Project:Bad/Name?)"), loaded.metadata.projectName, "Capture metadata should preserve the authored project name.");
-			context.ExpectEqual(project.Root().string(), loaded.metadata.projectPathHint, "Saved captures should record the current project path hint.");
-			context.Expect(loaded.metadata.settings.captureMode == TerraEngine::Profiling::ProfilerCaptureMode::LoadedReadOnly, "Loaded captures should be marked read-only.");
-			context.Expect(loaded.sourcePath.has_value(), "Loaded captures should remember their canonical source path.");
-			context.ExpectEqual(1u, static_cast<unsigned int>(loaded.frames.size()), "Loaded captures should preserve saved frame data.");
-			context.ExpectEqual(std::string("Editor Frame"), loaded.frames.front().samples.front().name, "Loaded captures should preserve sample names.");
+			TerraEngine::Profiling::ProfilerCaptureMetadata metadata;
+			metadata.projectName = R"(Project:Bad/Name?)";
+			context.Expect(store.ReserveJournalArtifact(metadata, outputPath, error), "V1 reservation inside an open project should succeed.");
+			context.Expect(store.IsPathInsideProject(outputPath), "Reserved journal paths should stay inside the open project.");
+			context.Expect(outputPath.parent_path().filename() == "Profiler", "Reserved journals should be placed under the project Profiler directory.");
+			context.Expect(FileNameStartsWith(outputPath, "Project_Bad_Name_-"), "Journal file names should sanitize invalid project-name characters.");
 		});
 
 		registry.Add("Editor.ProfilerCaptureStore.LoadRejectsOutsideProjectAndWrongFolder", [](TestContext& context) {
 			TempProfilerProject project;
 			ProfilerCaptureStore store(project.Root());
 			std::string error;
-			TerraEngine::Profiling::ProfilerCaptureDocument loaded;
-			const TerraEngine::Profiling::ProfilerCaptureDocument document = MakeProfilerDocument("Path Checks");
+			ProfilerCaptureIndexPage page;
 			const std::filesystem::path outsidePath = project.OutsideRoot() / "outside.teprof";
 			const std::filesystem::path wrongFolderPath = project.Root() / "root-level.teprof";
 
-			context.Expect(TerraEngine::Profiling::SaveCaptureDocument(document, outsidePath, error), "The outside fixture capture should be writable.");
-			context.Expect(TerraEngine::Profiling::SaveCaptureDocument(document, wrongFolderPath, error), "The wrong-folder fixture capture should be writable.");
+			context.Expect(WriteSingleFrameJournal(outsidePath, "Path Checks", 1u, error), "The outside fixture journal should be writable.");
+			context.Expect(WriteSingleFrameJournal(wrongFolderPath, "Path Checks", 2u, error), "The wrong-folder fixture journal should be writable.");
 
-			context.Expect(!store.LoadCapture(outsidePath, loaded, error), "The store should reject captures outside the open project.");
-			context.Expect(error.find("Profiler captures can only be loaded") != std::string::npos, "Outside-project load failures should explain the Profiler folder constraint.");
-			context.Expect(!store.LoadCapture(wrongFolderPath, loaded, error), "The store should reject captures inside the project but outside the Profiler folder.");
-			context.Expect(error.find("Profiler captures can only be loaded") != std::string::npos, "Wrong-folder load failures should explain the Profiler folder constraint.");
+			context.Expect(!store.ReadJournalIndexPage(outsidePath, 0u, 16u, page, error), "The store should reject page reads outside the open project.");
+			context.Expect(error.find("Profiler captures can only be read") != std::string::npos, "Outside-project page failures should explain the Profiler folder constraint.");
+			context.Expect(!store.ReadJournalIndexPage(wrongFolderPath, 0u, 16u, page, error), "The store should reject page reads inside the project but outside the Profiler folder.");
+			context.Expect(error.find("Profiler captures can only be read") != std::string::npos, "Wrong-folder page failures should explain the Profiler folder constraint.");
 			context.Expect(!store.IsPathInsideProject(outsidePath), "Path checks should reject outside project paths.");
 			context.Expect(store.IsPathInsideProject(wrongFolderPath), "Path checks should accept project-local paths even when loading later applies a stricter folder rule.");
 		});
@@ -166,10 +144,24 @@ namespace TerraEngine::EditorTests {
 			const std::filesystem::path profilerRoot = project.ProfilerRoot();
 			std::filesystem::create_directories(profilerRoot);
 
-			context.Expect(TerraEngine::Profiling::SaveCaptureDocument(MakeProfilerDocument("First"), profilerRoot / "a-first.teprof", error), "The first listed capture fixture should be writable.");
-			context.Expect(TerraEngine::Profiling::SaveCaptureDocument(MakeProfilerDocument("Second"), profilerRoot / "z-second.teprof", error), "The second listed capture fixture should be writable.");
+			auto writeJournal = [&error](const std::filesystem::path& path, const std::string& projectName, std::uint64_t frameIndex) {
+				TerraEngine::Profiling::ProfilerCaptureMetadata metadata;
+				metadata.projectName = projectName;
+				metadata.settings.maximumChunkFrames = 1u;
+				TerraEngine::Profiling::ProfilerJournalV1Writer writer;
+				if (writer.Open(path, metadata, error) != TerraEngine::Profiling::ProfilerJournalV1ResultCode::Ok)
+					return false;
+				TerraEngine::Profiling::ProfilerSealedFrame sealed;
+				sealed.frame.frameIndex = frameIndex;
+				sealed.frame.complete = true;
+				sealed.ownedByteCount = TerraEngine::Profiling::EstimateProfilerFrameOwnedBytes(sealed.frame);
+				return writer.AppendCommittedSegment(std::span<const TerraEngine::Profiling::ProfilerSealedFrame>(&sealed, 1u), error) == TerraEngine::Profiling::ProfilerJournalV1ResultCode::Ok
+					&& writer.Finalize(true, error) == TerraEngine::Profiling::ProfilerJournalV1ResultCode::Ok;
+			};
+			context.Expect(writeJournal(profilerRoot / "a-first.teprof", "First", 1u), "The first listed V1 journal fixture should be writable: " + error);
+			context.Expect(writeJournal(profilerRoot / "z-second.teprof", "Second", 2u), "The second listed V1 journal fixture should be writable: " + error);
 			project.WriteTextFile(profilerRoot / "notes.txt", "not a capture");
-			project.WriteTextFile(profilerRoot / "broken.teprof", R"({"format":"Wrong","payloadVersion":1,"frames":[]})");
+			project.WriteTextFile(profilerRoot / "broken.teprof", "not a TerraEngine profiler journal");
 
 			const std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> captures = store.ListCaptures(error);
 
@@ -180,11 +172,117 @@ namespace TerraEngine::EditorTests {
 			context.Expect(HasArtifactNamed(captures, "a-first.teprof") && HasArtifactNamed(captures, "z-second.teprof"), "Listing should include every valid capture artifact.");
 			context.Expect(!HasArtifactNamed(captures, "broken.teprof"), "Listing should ignore unsupported .teprof files.");
 			context.ExpectEqual(1ULL, captures[0].frameCount, "Listed artifacts should expose their capture frame count.");
-			context.ExpectEqual(2u, captures[0].payloadVersion, "Capture listing should expose v2 metadata without loading all frame samples.");
+			context.ExpectEqual(std::string("Ready"), captures[0].status, "Capture listing should expose V1 index metadata without loading frame samples.");
 			context.ExpectEqual(1ULL, captures[0].committedFrameCount, "Capture listing should expose the recoverable committed-frame boundary.");
 			context.Expect(captures[0].complete && !captures[0].recoveredIncompleteTail, "A complete capture should not be presented as a recovered tail.");
 			context.ExpectEqual(std::string("Ready"), captures[0].status, "Capture listing should retain the codec's stable ready status when no recovery warning is present.");
 			context.ExpectEqual(std::string("Second"), captures[0].metadata.projectName, "Listed artifacts should expose project metadata without fully loading frames.");
+		});
+
+		registry.Add("Editor.ProfilerCaptureStore.ListCapturesReadsV1JournalIndexWithoutDocumentDecode", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+			TempProfilerProject project;
+			ProfilerCaptureStore store(project.Root());
+			const std::filesystem::path path = project.ProfilerRoot() / "indexed-v1.teprof";
+			std::filesystem::create_directories(path.parent_path());
+
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Indexed V1";
+			metadata.settings.maximumChunkFrames = 1u;
+			std::string error;
+			ProfilerJournalV1Writer writer;
+			context.Expect(writer.Open(path, metadata, error) == ProfilerJournalV1ResultCode::Ok,
+				"V1 index fixture must reserve and validate its journal header: " + error);
+			ProfilerFrameRecord frame;
+			frame.frameIndex = 9u;
+			frame.durationMs = 4.5;
+			frame.complete = true;
+			ProfilerSealedFrame sealed;
+			sealed.frame = frame;
+			sealed.ownedByteCount = EstimateProfilerFrameOwnedBytes(frame);
+			context.Expect(writer.AppendCommittedSegment(std::span<const ProfilerSealedFrame>(&sealed, 1u), error) == ProfilerJournalV1ResultCode::Ok,
+				"V1 index fixture must commit one bounded segment: " + error);
+			context.Expect(writer.Finalize(true, error) == ProfilerJournalV1ResultCode::Ok,
+				"V1 index fixture must commit a terminal record: " + error);
+
+			const std::vector<ProfilerCaptureArtifact> captures = store.ListCaptures(error);
+			context.Expect(error.empty() && captures.size() == 1u,
+				"V1 catalog listing should accept the validated journal without decoding frame detail.");
+			if (!captures.empty())
+			{
+				context.ExpectEqual(std::string("Ready"), captures.front().status,
+					"The editor catalog bridge should expose the sole V1 journal format state.");
+				context.ExpectEqual(1ULL, captures.front().committedFrameCount,
+					"The index-only listing must report the authoritative committed frame count.");
+				context.ExpectEqual(std::string("Ready"), captures.front().status,
+					"A valid V1 terminal should be displayed as a ready capture.");
+			}
+		});
+
+		registry.Add("Editor.ProfilerCaptureStore.IndexPageRetainsOnlyRequestedRows", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+			TempProfilerProject project;
+			ProfilerCaptureStore store(project.Root());
+			const std::filesystem::path path = project.ProfilerRoot() / "paged-v1.teprof";
+			std::filesystem::create_directories(path.parent_path());
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Paged V1";
+			metadata.settings.maximumChunkFrames = 8u;
+			std::string error;
+			ProfilerJournalV1Writer writer;
+			context.Expect(writer.Open(path, metadata, error) == ProfilerJournalV1ResultCode::Ok,
+				"The paged V1 fixture must open: " + error);
+			std::array<ProfilerSealedFrame, 6u> frames{};
+			for (std::size_t index = 0u; index < frames.size(); ++index)
+			{
+				frames[index].frame.frameIndex = index + 1u;
+				frames[index].frame.durationMs = static_cast<double>(index + 1u);
+				frames[index].frame.complete = true;
+				frames[index].ownedByteCount = EstimateProfilerFrameOwnedBytes(frames[index].frame);
+			}
+			context.Expect(writer.AppendCommittedSegment(frames, error) == ProfilerJournalV1ResultCode::Ok
+				&& writer.Finalize(true, error) == ProfilerJournalV1ResultCode::Ok,
+				"The paged V1 fixture must finalize: " + error);
+			ProfilerCaptureIndexPage page;
+			context.Expect(store.ReadJournalIndexPage(path, 2u, 2u, page, error),
+				"A bounded V1 index page should read without a document decode: " + error);
+			context.ExpectEqual(std::size_t(6u), page.totalFrameCount, "Page metadata should expose the total compact index count.");
+			context.ExpectEqual(std::size_t(2u), page.frames.size(), "The store must retain only the requested index-page capacity.");
+			context.ExpectEqual(std::uint64_t(3u), page.frames.front().frameIndex, "The requested offset should select the third compact frame row.");
+		});
+
+		registry.Add("Editor.ProfilerCaptureStore.SelectedFrameReadsOnlyRequestedV1Segment", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+			TempProfilerProject project;
+			ProfilerCaptureStore store(project.Root());
+			const std::filesystem::path path = project.ProfilerRoot() / "selected-frame-v1.teprof";
+			std::filesystem::create_directories(path.parent_path());
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Selected Frame V1";
+			metadata.settings.maximumChunkFrames = 2u;
+			std::string error;
+			ProfilerJournalV1Writer writer;
+			context.Expect(writer.Open(path, metadata, error) == ProfilerJournalV1ResultCode::Ok,
+				"The selected-frame fixture must open its V1 journal: " + error);
+			std::array<ProfilerSealedFrame, 2u> frames{};
+			for (std::size_t index = 0u; index < frames.size(); ++index)
+			{
+				frames[index].frame.frameIndex = 41u + index;
+				frames[index].frame.durationMs = 6.0 + static_cast<double>(index);
+				frames[index].frame.complete = true;
+				frames[index].ownedByteCount = EstimateProfilerFrameOwnedBytes(frames[index].frame);
+			}
+			context.Expect(writer.AppendCommittedSegment(frames, error) == ProfilerJournalV1ResultCode::Ok
+				&& writer.Finalize(true, error) == ProfilerJournalV1ResultCode::Ok,
+				"The selected-frame fixture must commit one readable V1 segment: " + error);
+
+			ProfilerFrameRecord selected;
+			context.Expect(store.ReadSelectedJournalFrame(path, 42u, selected, error),
+				"The store must read one requested V1 frame without exposing the full journal: " + error);
+			context.ExpectEqual(std::uint64_t(42u), selected.frameIndex,
+				"The selected-frame read must return exactly the requested frame from its committed segment.");
+			context.ExpectEqual(7.0, selected.durationMs,
+				"The selected-frame reader must retain the requested frame payload instead of an index-only substitute.");
 		});
 
 		registry.Add("Editor.ProfilerCaptureStore.ListCapturesStopsWhenCancelled", [](TestContext& context) {
@@ -194,7 +292,7 @@ namespace TerraEngine::EditorTests {
 			const std::filesystem::path profilerRoot = project.ProfilerRoot();
 			std::filesystem::create_directories(profilerRoot);
 
-			context.Expect(TerraEngine::Profiling::SaveCaptureDocument(MakeProfilerDocument("Cancel"), profilerRoot / "cancel.teprof", error), "The cancellation fixture capture should be writable.");
+			context.Expect(WriteSingleFrameJournal(profilerRoot / "cancel.teprof", "Cancel", 1u, error), "The cancellation fixture journal should be writable.");
 
 			std::atomic_bool cancelRequested = true;
 			const std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> captures = store.ListCaptures(error, [&cancelRequested]() {

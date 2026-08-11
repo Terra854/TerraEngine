@@ -239,58 +239,6 @@ const char* TimingAggregateValue(const ProfilerTimingStreamAggregate& aggregate,
 	return buffer;
 }
 
-// DrawEvidenceMetrics renders unit-tagged capture summaries.  Each row carries
-// its availability so absent optional streams stay distinguishable from a
-// valid zero-duration stage.
-void DrawEvidenceMetrics(const char* tableId, const std::vector<EditorProfilerMetricSummary>& metrics)
-{
-	if (metrics.empty())
-	{
-		ImGui::TextDisabled("No stream was recorded at this capture level.");
-		return;
-	}
-	if (!ImGui::BeginTable(tableId, 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
-	{
-		return;
-	}
-	ImGui::TableSetupColumn("Stream", ImGuiTableColumnFlags_WidthStretch, 2.0f);
-	ImGui::TableSetupColumn("Median");
-	ImGui::TableSetupColumn("P95");
-	ImGui::TableSetupColumn("P99");
-	ImGui::TableSetupColumn("Maximum");
-	ImGui::TableSetupColumn("Samples");
-	ImGui::TableSetupColumn("Availability", ImGuiTableColumnFlags_WidthStretch, 1.5f);
-	ImGui::TableHeadersRow();
-	for (const EditorProfilerMetricSummary& metric : metrics)
-	{
-		ImGui::TableNextRow();
-		ImGui::TableSetColumnIndex(0);
-		ImGui::TextUnformatted(metric.label.c_str());
-		ImGui::TableSetColumnIndex(1);
-		ImGui::Text(metric.available ? "%.3f %s" : "n/a", metric.median, metric.unit.c_str());
-		ImGui::TableSetColumnIndex(2);
-		ImGui::Text(metric.available ? "%.3f %s" : "n/a", metric.p95, metric.unit.c_str());
-		ImGui::TableSetColumnIndex(3);
-		ImGui::Text(metric.available ? "%.3f %s" : "n/a", metric.p99, metric.unit.c_str());
-		ImGui::TableSetColumnIndex(4);
-		ImGui::Text(metric.available ? "%.3f %s" : "n/a", metric.maximum, metric.unit.c_str());
-		ImGui::TableSetColumnIndex(5);
-		ImGui::Text("%llu valid / %llu unavailable",
-			static_cast<unsigned long long>(metric.sampleCount),
-			static_cast<unsigned long long>(metric.unavailableCount));
-		ImGui::TableSetColumnIndex(6);
-		if (metric.available)
-		{
-			ImGui::TextUnformatted("available");
-		}
-		else
-		{
-			ImGui::TextUnformatted(metric.unavailableReason.empty() ? "unavailable" : metric.unavailableReason.c_str());
-		}
-	}
-	ImGui::EndTable();
-}
-
 // DrawDisclosureControl is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool DrawDisclosureControl(bool hasChildren, bool isOpen)
 {
@@ -467,10 +415,22 @@ struct ProfilerWindowCache
 	// engine revision, it remains stable while the idle host loop advances.
 	std::uint64_t presentationRevision = 0u;
 	ProfilerSessionState state = ProfilerSessionState::Idle;
+	// The immutable service snapshot owns these values. Keeping them beside the
+	// cached catalog lets an open idle window draw its toolbar without taking the
+	// service mutex or allocating status/error strings on every ImGui frame.
+	bool hasActiveProject = false;
+	bool hasActiveOperation = false;
+	std::string statusText;
+	std::string lastError;
 	ProfilerCaptureSettings settings;
 	std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> captures;
 	std::filesystem::path profilerDirectory;
 	std::vector<ProfilerFrameListItem> frames;
+	std::size_t indexPageOffset = 0u;
+	std::size_t indexPageSize = 128u;
+	std::size_t indexTotalFrameCount = 0u;
+	std::optional<TerraEngine::Profiling::ProfilerJournalV1Summary> journalSummary;
+	std::optional<EditorProfilerCaptureArtifact> selectedCapture;
 	std::vector<ProfilerFrameListItem> sortedFrames;
 	FrameDurationStats frameDurationStats;
 	// Detailed frame payloads remain outside the live refresh path until the user
@@ -480,6 +440,7 @@ struct ProfilerWindowCache
 	std::optional<ProfilerFrameRecord> selectedFrame;
 	bool frameOrderDirty = true;
 	bool sampleAnalysisValid = false;
+	std::string sampleAnalysisArtifactId;
 	std::uint64_t sampleAnalysisFrameIndex = 0u;
 	ProfilerModuleId sampleAnalysisModule = ProfilerModuleId::CpuEngine;
 	ProfilerDiagnosticAnalysis diagnosticAnalysis;
@@ -488,11 +449,6 @@ struct ProfilerWindowCache
 	std::array<char, 128u> sampleSearch{};
 	float minimumSampleDurationMs = 0.05f;
 	bool showUninstrumentedRows = true;
-	bool captureEvidenceOpenLastFrame = false;
-	bool captureEvidenceValid = false;
-	EditorProfilerCaptureSummary captureEvidenceSummary;
-	TerraEngine::Profiling::ProfilerCaptureDetailLevel captureEvidenceDetailLevel =
-		TerraEngine::Profiling::ProfilerCaptureDetailLevel::Aggregate;
 	bool timingDistributionOpenLastFrame = false;
 	bool timingDistributionValid = false;
 	std::vector<ProfilerTimingStreamAggregate> timingStreams;
@@ -564,16 +520,75 @@ void ProfilerWindow::RefreshLiveSnapshot()
 	}
 
 	const auto now = std::chrono::steady_clock::now();
+	// The scalar revision is cheap to acquire on every open-idle frame. Retain
+	// the shared immutable snapshot only after a protected service publication,
+	// avoiding reference-count traffic and catalog fields when nothing changed.
 	const std::uint64_t serviceRevision = service->GetPresentationRevision();
 	const bool presentationChanged = cache->presentationRevision != serviceRevision;
 	if (presentationChanged)
 	{
-		// Capture metadata changes only after an asynchronous service operation or
-		// a toolbar action. Cache it here so the idle UI never copies file entries
-		// or repeatedly locks the capture store just to draw an empty list.
-		cache->captures = service->GetCaptureList();
-		cache->profilerDirectory = service->GetProfilerDirectory();
-		cache->presentationRevision = serviceRevision;
+		const std::shared_ptr<const EditorProfilerPresentationSnapshot> presentation =
+			service->GetPresentationSnapshot();
+		if (!presentation)
+		{
+			return;
+		}
+		// The service publishes one immutable catalog value from its protected
+		// completion boundary. Retaining it here avoids racing worker discovery or
+		// taking the service mutex while ImGui is drawing virtualized rows.
+		cache->hasActiveProject = presentation->hasActiveProject;
+		cache->hasActiveOperation = std::any_of(
+			presentation->operations.begin(), presentation->operations.end(),
+			[](const EditorProfilerOperationStatus& operation) {
+				return operation.active;
+			});
+		cache->statusText = presentation->statusText;
+		cache->lastError = presentation->lastError;
+		cache->state = presentation->sessionState;
+		cache->captures = presentation->captures;
+		cache->profilerDirectory = presentation->profilerDirectory;
+		if (presentation->selectedCapture.has_value())
+		{
+			cache->journalSummary = presentation->selectedSummary;
+			cache->selectedCapture = presentation->selectedCapture;
+			if (presentation->indexPage.has_value())
+			{
+				cache->frames = presentation->indexPage->frames;
+				cache->indexPageOffset = presentation->indexPage->offset;
+				cache->indexPageSize = presentation->indexPage->pageSize;
+				cache->indexTotalFrameCount = presentation->indexPage->totalFrameCount;
+			}
+			else
+			{
+				cache->frames.clear();
+				cache->indexPageOffset = 0u;
+				cache->indexTotalFrameCount = 0u;
+			}
+			cache->frameDurationStats = BuildFrameDurationStats(cache->frames);
+			cache->frameOrderDirty = true;
+			cache->selectedFrame = presentation->selectedFrame;
+		}
+		else
+		{
+			// A project close or a failed capture open publishes no selected artifact.
+			// Clear every cached detail so an old project's rows cannot remain visible
+			// while the immutable service snapshot is already empty.
+			cache->journalSummary.reset();
+			cache->selectedCapture.reset();
+			cache->frames.clear();
+			cache->indexPageOffset = 0u;
+			cache->indexTotalFrameCount = 0u;
+			cache->sortedFrames.clear();
+			cache->frameDurationStats = {};
+			cache->frameOrderDirty = true;
+			cache->pinnedFrameIndex.reset();
+			cache->selectedFrame.reset();
+		}
+		// The revision can advance immediately before its shared pointer is
+		// published. Remember the snapshot's own identity so that narrow window
+		// is retried next frame instead of accidentally treating an older snapshot
+		// as the newest protected publication.
+		cache->presentationRevision = presentation->presentationRevision;
 	}
 
 	if (now >= cache->nextProfilerRefresh)
@@ -601,13 +616,12 @@ void ProfilerWindow::RefreshLiveSnapshot()
 			const std::optional<std::uint64_t> previousSelectedFrameIndex = cache->selectedFrame.has_value()
 				? std::optional<std::uint64_t>{cache->selectedFrame->frameIndex}
 				: std::nullopt;
-			if (!liveCapture)
+			if (!liveCapture && !cache->selectedCapture.has_value())
 			{
-				// Frame presentation is a post-capture operation. Copy and analyze the
-				// complete history only after Finish (or after loading another capture),
-				// never while Recording or Paused can still append more frames.
-				cache->frames = profiler.GetFrameListSnapshot();
-				cache->frameDurationStats = BuildFrameDurationStats(cache->frames);
+				// V1 capture history is exposed only through a selected journal index.
+				// An idle global profiler is not a second document source for this UI.
+				cache->frames.clear();
+				cache->frameDurationStats = {};
 				cache->frameOrderDirty = true;
 			}
 			else if (previousState != cache->state && cache->state == ProfilerSessionState::Recording)
@@ -628,21 +642,18 @@ void ProfilerWindow::RefreshLiveSnapshot()
 				shouldCopySelectedFrame = !cache->selectedFrame.has_value()
 					|| cache->selectedFrame->frameIndex != *cache->pinnedFrameIndex;
 			}
-			else if (!liveCapture)
+			else if (!liveCapture && !cache->selectedCapture.has_value())
 			{
 				// Loaded and completed captures retain the established default frame
 				// selection. Active recording has no selectable rows because the Frames
 				// subwindow remains deferred until the capture is finalized.
-				shouldCopySelectedFrame = true;
+				shouldCopySelectedFrame = false;
 			}
 			else
 			{
 				cache->selectedFrame.reset();
 			}
-			if (shouldCopySelectedFrame)
-			{
-				cache->selectedFrame = profiler.GetSelectedFrameSnapshot();
-			}
+			if (shouldCopySelectedFrame) cache->selectedFrame.reset();
 			const std::optional<std::uint64_t> refreshedSelectedFrameIndex = cache->selectedFrame.has_value()
 				? std::optional<std::uint64_t>{cache->selectedFrame->frameIndex}
 				: std::nullopt;
@@ -657,7 +668,6 @@ void ProfilerWindow::RefreshLiveSnapshot()
 				// Loading, clearing, pausing, or finishing changes the document as a
 				// whole. Refresh an expanded evidence panel once for those discrete
 				// events, while ordinary recorded frames remain explicitly cached.
-				cache->captureEvidenceValid = false;
 				cache->timingDistributionValid = false;
 				cache->sampleAnalysisValid = false;
 			}
@@ -695,6 +705,8 @@ void ProfilerWindow::RefreshLiveSnapshot()
 void ProfilerWindow::RefreshSampleAnalysis(const ProfilerFrameRecord& frame)
 {
 	if (cache->sampleAnalysisValid
+		&& cache->selectedCapture.has_value()
+		&& cache->sampleAnalysisArtifactId == cache->selectedCapture->artifactId
 		&& cache->sampleAnalysisFrameIndex == frame.frameIndex
 		&& cache->sampleAnalysisModule == selectedModule)
 	{
@@ -704,6 +716,8 @@ void ProfilerWindow::RefreshSampleAnalysis(const ProfilerFrameRecord& frame)
 	// Build hierarchy, scheduler context, hot rows, and timeline lanes once for
 	// the cached selected frame. Every diagnostic view shares this immutable work.
 	cache->diagnosticAnalysis = BuildProfilerDiagnosticAnalysis(frame, selectedModule);
+	cache->sampleAnalysisArtifactId = cache->selectedCapture.has_value()
+		? cache->selectedCapture->artifactId : std::string{};
 	cache->sampleAnalysisFrameIndex = frame.frameIndex;
 	cache->sampleAnalysisModule = selectedModule;
 	cache->sampleAnalysisValid = true;
@@ -718,7 +732,7 @@ void ProfilerWindow::OnGui()
 		service = owner->GetContext()->editorProfiler.get();
 	}
 	ScopedProfilerWindowDrawTiming drawTiming(service);
-	if (service != nullptr && service->HasActiveProject())
+	if (service != nullptr)
 	{
 		RefreshLiveSnapshot();
 	}
@@ -727,19 +741,37 @@ void ProfilerWindow::OnGui()
 	ImGui::Separator();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (service == nullptr || !service->HasActiveProject())
+	if (service == nullptr || !cache->hasActiveProject)
 	{
 		ImGui::TextDisabled("Open a project to use the profiler.");
 		return;
 	}
 
-	const std::string status = service->GetStatusText();
-	ImGui::Text("Status: %s", status.c_str());
-	const std::string error = service->GetLastError();
+	ImGui::Text("Status: %s", cache->statusText.c_str());
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!error.empty())
+	if (!cache->lastError.empty())
 	{
-		ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f), "%s", error.c_str());
+		ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f), "%s", cache->lastError.c_str());
+	}
+	// Capture navigation is useful before a selection exists, but frame rows and
+	// diagnostic panels belong to one immutable selected session. Returning here
+	// prevents an empty project from looking like a zero-valued profiler capture.
+	if (!cache->selectedCapture.has_value())
+	{
+		const bool captureSessionActive = cache->state == ProfilerSessionState::Recording
+			|| cache->state == ProfilerSessionState::Paused
+			|| cache->state == ProfilerSessionState::Finalizing;
+		if (captureSessionActive)
+		{
+			// Live presentation deliberately withholds a selected journal until its
+			// writer has completed. Avoid building saved-capture rows that cannot be
+			// opened yet, which keeps recording-time UI work independent of catalog size.
+			ImGui::TextDisabled("Capture browsing resumes after recording finalizes.");
+			return;
+		}
+		DrawCaptureList();
+		ImGui::TextDisabled("Select a project capture to inspect its frame index and details.");
+		return;
 	}
 
 	constexpr ImGuiTableFlags layoutFlags = ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Resizable | ImGuiTableFlags_NoSavedSettings;
@@ -766,16 +798,20 @@ void ProfilerWindow::DrawToolbar()
 {
 	EditorProfilerService* service = owner && owner->GetContext() ? owner->GetContext()->editorProfiler.get() : nullptr;
 	const bool hasService = service != nullptr;
-	const bool hasProject = hasService && service->HasActiveProject();
-	const bool busy = hasService && service->IsBusy();
+	const bool hasProject = cache->hasActiveProject;
+	const bool busy = cache->hasActiveOperation;
 	const ProfilerSessionState state = cache->state;
 	const bool canUseProject = hasProject && !busy;
 	const bool recording = state == ProfilerSessionState::Recording;
 	const bool paused = state == ProfilerSessionState::Paused;
+	const bool captureSessionActive = recording || paused || state == ProfilerSessionState::Finalizing;
 	const bool hasFrames = !cache->frames.empty();
 	const char* unavailableReason = !hasService
 		? "Profiler service is not available."
 		: (!hasProject ? "Open a project before recording profiler captures." : (busy ? "Profiler service is finishing another action." : ""));
+	const char* browseUnavailableReason = captureSessionActive
+		? "Capture browsing resumes after recording finalizes."
+		: unavailableReason;
 
 	DrawToolbarGroupLabel("Live");
 	if (ToolbarButton(recording ? "Recording Every Frame" : "Record Every Frame", canUseProject && !recording, unavailableReason))
@@ -804,7 +840,7 @@ void ProfilerWindow::DrawToolbar()
 	ImGui::TextDisabled("|");
 	ImGui::SameLine();
 	DrawToolbarGroupLabel("Captures");
-	if (ToolbarButton("Refresh", canUseProject, unavailableReason))
+	if (ToolbarButton("Refresh", canUseProject && !captureSessionActive, browseUnavailableReason))
 	{
 		service->RefreshCaptureList();
 	}
@@ -886,10 +922,38 @@ void ProfilerWindow::DrawFrameList()
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (frames.empty())
 	{
-		ImGui::TextDisabled("No frames captured.");
+		ImGui::TextDisabled(cache->indexTotalFrameCount == 0u
+			? "No frames captured."
+			: "Loading the requested frame-index page.");
 		ImGui::EndChild();
 		return;
 	}
+	// Navigation requests at most one bounded page. It deliberately never walks
+	// or sorts the history that is outside the page currently visible to ImGui.
+	const bool hasPreviousPage = cache->indexPageOffset > 0u;
+	const bool hasNextPage = cache->indexPageOffset + frames.size() < cache->indexTotalFrameCount;
+	if (ImGui::Button("Previous Page") && hasPreviousPage)
+	{
+		const std::size_t previousOffset = cache->indexPageOffset > cache->indexPageSize
+			? cache->indexPageOffset - cache->indexPageSize : 0u;
+		if (EditorProfilerService* service = owner && owner->GetContext()
+			? owner->GetContext()->editorProfiler.get() : nullptr)
+		{
+			service->RequestIndexPage(previousOffset, cache->indexPageSize);
+		}
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Next Page") && hasNextPage)
+	{
+		if (EditorProfilerService* service = owner && owner->GetContext()
+			? owner->GetContext()->editorProfiler.get() : nullptr)
+		{
+			service->RequestIndexPage(cache->indexPageOffset + frames.size(), cache->indexPageSize);
+		}
+	}
+	ImGui::SameLine();
+	ImGui::TextDisabled("Frames %zu-%zu of %zu", cache->indexPageOffset + 1u,
+		cache->indexPageOffset + frames.size(), cache->indexTotalFrameCount);
 	const FrameDurationStats& stats = cache->frameDurationStats;
 	if (!frames.empty())
 	{
@@ -978,7 +1042,11 @@ void ProfilerWindow::DrawFrameList()
 		cache->pinnedFrameIndex = *requestedFrameSelection;
 		cache->selectedFrame.reset();
 		cache->sampleAnalysisValid = false;
-		Profiler::Instance().SelectFrame(*requestedFrameSelection);
+		if (EditorProfilerService* service = owner && owner->GetContext() ? owner->GetContext()->editorProfiler.get() : nullptr)
+		{
+			// V1 detail is loaded asynchronously from only the selected journal frame.
+			service->RequestSelectedFrame(*requestedFrameSelection);
+		}
 	}
 	ImGui::EndChild();
 }
@@ -1329,213 +1397,74 @@ void ProfilerWindow::DrawFrameDetails()
 void ProfilerWindow::DrawCaptureEvidenceSummary()
 {
 	ImGui::SeparatorText("Capture Evidence");
-	// Whole-capture synthesis deep-copies and scans every retained typed stream.
-	// Open it once with the profiler session, then retain the cached result across
-	// redraws so the default-expanded presentation does not repeat the scan.
-	const bool captureEvidenceOpen = ImGui::TreeNodeEx("Whole Capture Analysis", ImGuiTreeNodeFlags_DefaultOpen);
-	if (!captureEvidenceOpen)
+	if (cache->journalSummary.has_value())
 	{
-		cache->captureEvidenceOpenLastFrame = false;
-		ImGui::TextDisabled("%s capture; expand to aggregate retained evidence.",
-			TerraEngine::Profiling::ToString(cache->settings.detailLevel));
+		const auto& summary = *cache->journalSummary;
+		ImGui::Text("V1 journal: %llu committed frames, %llu complete, %llu segments",
+			static_cast<unsigned long long>(summary.frameCount),
+			static_cast<unsigned long long>(summary.completeFrameCount),
+			static_cast<unsigned long long>(summary.committedSegmentCount));
+		ImGui::Text("%s capture", TerraEngine::Profiling::ToString(cache->settings.detailLevel));
+		ImGui::Text("Duration %.3f ms  Dropped detail: %llu records / %llu B",
+			static_cast<double>(summary.totalDurationNanoseconds) / 1000000.0,
+			static_cast<unsigned long long>(summary.droppedDetailRecordCount),
+			static_cast<unsigned long long>(summary.droppedDetailByteCount));
+		ImGui::Text("Profiler cost: collect %.3f ms  seal %.3f ms  queue %.3f ms  persist %.3f ms",
+			static_cast<double>(summary.profilerCollectionNanoseconds) / 1000000.0,
+			static_cast<double>(summary.profilerSealingNanoseconds) / 1000000.0,
+			static_cast<double>(summary.profilerQueueingNanoseconds) / 1000000.0,
+			static_cast<double>(summary.profilerPersistenceNanoseconds) / 1000000.0);
+		ImGui::Text("Persistence: %llu B in %llu operations, %llu B/s; peak lag %llu frames",
+			static_cast<unsigned long long>(summary.persistedBytes),
+			static_cast<unsigned long long>(summary.persistenceOperationCount),
+			static_cast<unsigned long long>(summary.persistenceThroughputBytesPerSecond),
+			static_cast<unsigned long long>(summary.persistenceLagHighWaterFrames));
+		if (summary.committedSegmentCount != 0u
+			&& summary.persistenceOperationCount != 0u
+			&& summary.encodedPayloadBytes != 0u)
+		{
+			const double framesPerOperation = summary.persistenceOperationCount == 0u
+				? 0.0
+				: static_cast<double>(summary.frameCount)
+					/ static_cast<double>(summary.persistenceOperationCount);
+			const double storedRatio = summary.encodedPayloadBytes == 0u
+				? 0.0
+				: static_cast<double>(summary.storedSegmentBytes)
+					/ static_cast<double>(summary.encodedPayloadBytes);
+			ImGui::Text("Batching: %.2f frames/op; logical %llu B, encoded %llu B, stored %llu B (%.3fx)",
+				framesPerOperation,
+				static_cast<unsigned long long>(summary.logicalInputBytes),
+				static_cast<unsigned long long>(summary.encodedPayloadBytes),
+				static_cast<unsigned long long>(summary.storedSegmentBytes),
+				storedRatio);
+		}
+		ImGui::Text("Engine CPU first/final 5 min: median %.3f / %.3f ms, P95 %.3f / %.3f ms",
+			static_cast<double>(summary.firstEngineCpuWindowMedianNanoseconds) / 1000000.0,
+			static_cast<double>(summary.finalEngineCpuWindowMedianNanoseconds) / 1000000.0,
+			static_cast<double>(summary.firstEngineCpuWindowP95Nanoseconds) / 1000000.0,
+			static_cast<double>(summary.finalEngineCpuWindowP95Nanoseconds) / 1000000.0);
+		if (cache->selectedCapture && cache->selectedCapture->artifact.recoveredIncompleteTail)
+			ImGui::TextColored(ImVec4(1.0f, 0.80f, 0.25f, 1.0f), "Recovery warning: recovered incomplete tail; only committed segments are shown.");
+		// V1 keeps capture-wide history bounded. Domains that do not yet publish a
+		// persisted scalar aggregate remain explicit unavailable sections rather
+		// than silently disappearing or being synthesized by rescanning all frames.
+		static constexpr std::array<const char*, 5u> unavailableCaptureDomains = {
+			"Physics, Scene View, and Editor Stages",
+			"Protected Boundary Breakdown",
+			"Worker Timeline Summary",
+			"Renderer Optimization Summary",
+			"Physics Work Volumes"};
+		for (const char* domain : unavailableCaptureDomains)
+		{
+			if (ImGui::TreeNodeEx(domain, ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				ImGui::TextDisabled("Capture-wide aggregate unavailable; select a frame for typed evidence.");
+				ImGui::TreePop();
+			}
+		}
 		return;
 	}
-	const bool captureEvidenceOpenedThisFrame = !cache->captureEvidenceOpenLastFrame;
-	cache->captureEvidenceOpenLastFrame = true;
-	const bool refreshCaptureEvidence = ImGui::Button("Refresh Whole Capture Analysis");
-	if (captureEvidenceOpenedThisFrame || refreshCaptureEvidence)
-	{
-		cache->captureEvidenceValid = false;
-	}
-	if (!cache->captureEvidenceValid)
-	{
-		// The full document is copied only when this disclosure opens or the user
-		// explicitly refreshes it. An expanded saved layout therefore cannot scan
-		// a growing recording on every ImGui redraw.
-		const TerraEngine::Profiling::ProfilerCaptureDocument document = Profiler::Instance().GetDocumentSnapshot();
-		cache->captureEvidenceSummary = EditorProfilerService::SummarizeDocument("live", document);
-		cache->captureEvidenceDetailLevel = document.metadata.settings.detailLevel;
-		cache->captureEvidenceValid = true;
-	}
-	else
-	{
-		ImGui::SameLine();
-		ImGui::TextDisabled("cached; refresh to include newer frames");
-	}
-	const EditorProfilerCaptureSummary& summary = cache->captureEvidenceSummary;
-	ImGui::Text("v%u  %s capture  %llu committed frames  %llu B",
-		summary.payloadVersion,
-		TerraEngine::Profiling::ToString(cache->captureEvidenceDetailLevel),
-		static_cast<unsigned long long>(summary.committedFrameCount),
-		static_cast<unsigned long long>(summary.artifactSizeBytes));
-	if (summary.recoveredIncompleteTail)
-	{
-		ImGui::TextColored(ImVec4(1.0f, 0.80f, 0.25f, 1.0f), "Recovery warning: incomplete final chunk was discarded; committed frames remain readable.");
-	}
-	else if (!summary.captureComplete)
-	{
-		ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.25f, 1.0f), "Capture is incomplete and was not recoverable.");
-	}
-	else
-	{
-		ImGui::TextDisabled("Capture is complete.");
-	}
-
-	if (ImGui::TreeNodeEx("Physics, Scene View, and Editor Stages", ImGuiTreeNodeFlags_DefaultOpen))
-	{
-		DrawEvidenceMetrics("ProfilerStageEvidence", summary.stageTimings);
-		ImGui::TreePop();
-	}
-	if (ImGui::TreeNodeEx("Protected Boundary Breakdown", ImGuiTreeNodeFlags_DefaultOpen))
-	{
-		DrawEvidenceMetrics("ProfilerBoundaryEvidence", summary.protectedBoundaryTimings);
-		ImGui::TreePop();
-	}
-	if (ImGui::TreeNodeEx("Presentation and Responsiveness", ImGuiTreeNodeFlags_DefaultOpen))
-	{
-		DrawEvidenceMetrics("ProfilerPresentationWaitEvidence", summary.presentationWaitTimings);
-		DrawEvidenceMetrics("ProfilerResponsivenessEvidence", summary.responsivenessTimings);
-		ImGui::TreePop();
-	}
-	if (ImGui::TreeNodeEx("Worker Timeline Summary", ImGuiTreeNodeFlags_DefaultOpen))
-	{
-		if (summary.workerHistories.empty())
-		{
-			ImGui::TextDisabled("No worker telemetry was recorded at this capture level.");
-		}
-		else if (ImGui::BeginTable("ProfilerWorkerTimeline", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
-		{
-			ImGui::TableSetupColumn("Worker");
-			ImGui::TableSetupColumn("Run P95");
-			ImGui::TableSetupColumn("Wait P95");
-			ImGui::TableSetupColumn("Idle P95");
-			ImGui::TableSetupColumn("Max Queue");
-			ImGui::TableSetupColumn("Useful Items");
-			ImGui::TableHeadersRow();
-			for (const EditorProfilerWorkerSummary& worker : summary.workerHistories)
-			{
-				ImGui::TableNextRow();
-				ImGui::TableSetColumnIndex(0); ImGui::Text("%u", worker.workerId);
-				ImGui::TableSetColumnIndex(1); ImGui::Text(worker.runDuration.available ? "%.3f ms" : "n/a", worker.runDuration.p95);
-				ImGui::TableSetColumnIndex(2); ImGui::Text(worker.waitDuration.available ? "%.3f ms" : "n/a", worker.waitDuration.p95);
-				ImGui::TableSetColumnIndex(3); ImGui::Text(worker.idleDuration.available ? "%.3f ms" : "n/a", worker.idleDuration.p95);
-				ImGui::TableSetColumnIndex(4); ImGui::Text("%llu", static_cast<unsigned long long>(worker.maximumQueueDepth));
-				ImGui::TableSetColumnIndex(5); ImGui::Text("%llu", static_cast<unsigned long long>(worker.totalUsefulWorkItems));
-			}
-			ImGui::EndTable();
-		}
-		ImGui::TreePop();
-	}
-	if (ImGui::TreeNodeEx("Animation Optimization Summary", ImGuiTreeNodeFlags_DefaultOpen))
-	{
-		const EditorProfilerAnimationOptimizationSummary& animation = summary.animationOptimization;
-		if (animation.measuredFrameCount == 0U)
-		{
-			ImGui::TextDisabled("No frame-coherent animation optimization evidence was recorded.");
-		}
-		else
-		{
-			ImGui::Text("%llu frames; peak %llu active (%llu compact + %llu complete)",
-				static_cast<unsigned long long>(animation.measuredFrameCount),
-				static_cast<unsigned long long>(animation.maximumActiveAnimators),
-				static_cast<unsigned long long>(animation.maximumCompactProcessed),
-				static_cast<unsigned long long>(animation.maximumCompleteProcessed));
-			ImGui::Text("Transitions %llu / %llu; topology reuse %llu / %llu",
-				static_cast<unsigned long long>(animation.compactToCompleteTransitions),
-				static_cast<unsigned long long>(animation.completeToCompactTransitions),
-				static_cast<unsigned long long>(animation.retainedTopologyHits),
-				static_cast<unsigned long long>(animation.retainedTopologyMisses));
-			ImGui::Text("Plans %llu; dispatches %llu; rejected %llu; fallback reasons %llu",
-				static_cast<unsigned long long>(animation.compactPlanGroups),
-				static_cast<unsigned long long>(animation.compactDispatches),
-				static_cast<unsigned long long>(animation.rejectedCandidates),
-				static_cast<unsigned long long>(animation.fallbackReasons));
-			static constexpr std::array<const char*, 8U> kCaptureTimingLabels = {
-				"compact capture", "compact evaluation", "compact publication",
-				"complete capture", "complete evaluation", "complete publication",
-				"topology build", "topology refresh"};
-			for (std::size_t timingIndex = 0U;
-				timingIndex < animation.totalTimingNanoseconds.size(); ++timingIndex)
-			{
-				const double meanMs = static_cast<double>(
-					animation.totalTimingNanoseconds[timingIndex])
-					/ static_cast<double>(animation.measuredFrameCount) / 1000000.0;
-				ImGui::Text("%s mean %.3f ms", kCaptureTimingLabels[timingIndex], meanMs);
-			}
-		}
-		ImGui::TreePop();
-	}
-	if (ImGui::TreeNodeEx("Renderer Optimization Summary", ImGuiTreeNodeFlags_DefaultOpen))
-	{
-		if (ImGui::BeginTable("ProfilerRendererOptimizationSummary", 9,
-			ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
-		{
-			ImGui::TableSetupColumn("View");
-			ImGui::TableSetupColumn("Frames");
-			ImGui::TableSetupColumn("Peak Instances");
-			ImGui::TableSetupColumn("Submissions");
-			ImGui::TableSetupColumn("Avoided");
-			ImGui::TableSetupColumn("Mean CPU Timings");
-			ImGui::TableSetupColumn("Topology Reuse");
-			ImGui::TableSetupColumn("View Reuse");
-			ImGui::TableSetupColumn("Rejected / Fallback");
-			ImGui::TableHeadersRow();
-			for (const EditorProfilerRenderOptimizationSummary& view : summary.renderOptimization)
-			{
-				ImGui::TableNextRow();
-				ImGui::TableSetColumnIndex(0);
-				ImGui::TextUnformatted(ToString(static_cast<RenderViewType>(view.viewType)));
-				ImGui::TableSetColumnIndex(1);
-				ImGui::Text("%llu", static_cast<unsigned long long>(view.measuredFrameCount));
-				if (view.measuredFrameCount == 0U)
-				{
-					ImGui::TableSetColumnIndex(2);
-					ImGui::TextDisabled("unavailable");
-					continue;
-				}
-				ImGui::TableSetColumnIndex(2);
-				ImGui::Text("%llu = %llu grouped + %llu fallback",
-					static_cast<unsigned long long>(view.maximumVisibleInstances),
-					static_cast<unsigned long long>(view.maximumGroupedInstances),
-					static_cast<unsigned long long>(view.maximumFallbackInstances));
-				ImGui::TableSetColumnIndex(3);
-				ImGui::Text("%llu / %llu", static_cast<unsigned long long>(view.groupedSubmissions),
-					static_cast<unsigned long long>(view.fallbackSubmissions));
-				ImGui::TableSetColumnIndex(4);
-				ImGui::Text("%llu", static_cast<unsigned long long>(view.avoidedSubmissions));
-				ImGui::TableSetColumnIndex(5);
-				const double timingDivisor = static_cast<double>(view.measuredFrameCount) * 1000000.0;
-				ImGui::Text("%.3f / %.3f / %.3f / %.3f ms",
-					static_cast<double>(view.topologyBuildNanoseconds) / timingDivisor,
-					static_cast<double>(view.dynamicMaterializationNanoseconds) / timingDivisor,
-					static_cast<double>(view.instanceStreamUploadNanoseconds) / timingDivisor,
-					static_cast<double>(view.groupedCommandRecordingNanoseconds) / timingDivisor);
-				ImGui::TableSetColumnIndex(6);
-				ImGui::Text("%llu / %llu", static_cast<unsigned long long>(view.topologyReuseHits),
-					static_cast<unsigned long long>(view.topologyInvalidations));
-				ImGui::TableSetColumnIndex(7);
-				ImGui::Text("%llu / %llu", static_cast<unsigned long long>(view.viewEvidenceReuseHits),
-					static_cast<unsigned long long>(view.viewEvidenceInvalidations));
-				ImGui::TableSetColumnIndex(8);
-				ImGui::Text("%llu / %llu", static_cast<unsigned long long>(view.rejectedCandidates),
-					static_cast<unsigned long long>(view.optimizationFallbacks));
-			}
-			ImGui::EndTable();
-		}
-		ImGui::TreePop();
-	}
-	if (ImGui::TreeNodeEx("Physics Work Volumes", ImGuiTreeNodeFlags_DefaultOpen))
-	{
-		const EditorProfilerWorkVolumeSummary& volume = summary.workVolumes;
-		ImGui::Text("Ticks %llu  Total %llu  Active %llu  Examined %llu",
-			static_cast<unsigned long long>(volume.measuredTickCount), static_cast<unsigned long long>(volume.totalBodies),
-			static_cast<unsigned long long>(volume.activeBodies), static_cast<unsigned long long>(volume.examinedBodies));
-		ImGui::Text("Extracted %llu  Converted %llu  Changed %llu  Published %llu",
-			static_cast<unsigned long long>(volume.extractedBodies), static_cast<unsigned long long>(volume.convertedBodies),
-			static_cast<unsigned long long>(volume.changedBodies), static_cast<unsigned long long>(volume.publishedBodies));
-		ImGui::TreePop();
-	}
-	ImGui::TreePop();
+	ImGui::TextDisabled("No persisted capture summary is selected.");
 }
 
 void ProfilerWindow::DrawPhysicsSummary(const TerraEngine::Profiling::ProfilerFrameRecord& frame)
@@ -1643,6 +1572,16 @@ void ProfilerWindow::DrawFrameOverview(const ProfilerFrameRecord& frame)
 	const bool timingDistributionOpen = ImGui::TreeNodeEx("Timing Distribution", ImGuiTreeNodeFlags_DefaultOpen);
 	if (timingDistributionOpen)
 	{
+		if (cache->state == ProfilerSessionState::Recording
+			|| cache->state == ProfilerSessionState::Paused
+			|| cache->state == ProfilerSessionState::Finalizing)
+		{
+			// The selected frame may be a retained pre-recording selection. Do not
+			// let that stale UI state request all detailed frames from a live capture.
+			ImGui::TextDisabled("Timing distribution becomes available after finalization.");
+			ImGui::TreePop();
+			return;
+		}
 		const bool timingDistributionOpenedThisFrame = !cache->timingDistributionOpenLastFrame;
 		cache->timingDistributionOpenLastFrame = true;
 		const bool refreshTimingDistribution = ImGui::Button("Refresh Timing Distribution");
@@ -1655,9 +1594,9 @@ void ProfilerWindow::DrawFrameOverview(const ProfilerFrameRecord& frame)
 		{
 			// Aggregate the complete frame set only on explicit presentation
 			// changes. The cached table remains stable while recording grows.
-			const std::vector<ProfilerFrameRecord> fullFrames = Profiler::Instance().GetFramesSnapshot();
-			cache->timingStreams =
-				TerraEngine::Profiling::BuildTimingStreamAggregates(fullFrames, std::optional<ProfilerFrameRecord>(frame));
+			// V1 timing aggregates belong to the persisted bounded summary. Do not
+			// deep-copy every frame merely to populate an optional UI disclosure.
+			cache->timingStreams.clear();
 			cache->timingDistributionValid = true;
 		}
 		else

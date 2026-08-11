@@ -1,7 +1,7 @@
 // ProfilerCapture.cpp — Contains the Profiler Capture file-specific types, helper functions, and module integration code implementation for runtime profiling sessions, timing markers, capture serialization, and scope helpers.
 
 #include "Profiling/ProfilerCapture.h"
-#include "Profiling/ProfilerCaptureV2.h"
+#include "Profiling/ProfilerJournalV1.h"
 
 #include <algorithm>
 #include <chrono>
@@ -29,8 +29,6 @@ namespace TerraEngine::Profiling
 {
 namespace
 {
-constexpr std::uint32_t kProfilerCaptureVersion = 1u;
-
 // ModuleIdToStableName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string ModuleIdToStableName(ProfilerModuleId moduleId)
 {
@@ -191,352 +189,6 @@ std::tm ToLocalTime(std::time_t timeValue)
 	return result;
 }
 
-// SettingsToJson is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-nlohmann::json SettingsToJson(const ProfilerCaptureSettings& settings)
-{
-	return {
-		{"cpuEngineEnabled", settings.cpuEngineEnabled},
-		{"taskExecutionEnabled", settings.taskExecutionEnabled},
-		{"recordMarkers", settings.recordMarkers},
-		{"recordTaskContext", settings.recordTaskContext},
-		{"maxFrames", settings.maxFrames},
-		{"maxDurationSeconds", settings.maxDurationSeconds}
-	};
-}
-
-// SettingsFromJson is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-ProfilerCaptureSettings SettingsFromJson(const nlohmann::json& json)
-{
-	ProfilerCaptureSettings settings{};
-	settings.cpuEngineEnabled = json.value("cpuEngineEnabled", true);
-	settings.taskExecutionEnabled = json.value("taskExecutionEnabled", true);
-	settings.recordMarkers = json.value("recordMarkers", true);
-	settings.recordTaskContext = json.value("recordTaskContext", true);
-	// Zero is the durable unlimited sentinel. Preserve it when loading settings
-	// instead of silently converting an unlimited recording into a one-frame cap.
-	settings.maxFrames = json.value("maxFrames", 0u);
-	settings.maxDurationSeconds = std::max(0.0, json.value("maxDurationSeconds", 0.0));
-	return settings;
-}
-
-// SaxContainerKind names the active JSON container so the metadata reader can
-// tell top-level capture fields from similarly named fields inside frames.
-enum class SaxContainerKind
-{
-	Object,
-	Array
-};
-
-// SaxContainer stores the current object/array name and the object key that is
-// waiting for its value. Keeping this tiny stack avoids building a full JSON
-// document while scanning large profiler captures for sidebar metadata.
-struct SaxContainer
-{
-	SaxContainerKind kind = SaxContainerKind::Object;
-	std::string name;
-	std::string pendingKey;
-};
-
-// ProfilerArtifactMetadataSax streams enough capture data for the artifact
-// list. Full frame/sample validation intentionally remains in LoadCaptureDocument.
-class ProfilerArtifactMetadataSax final : public nlohmann::json_sax<nlohmann::json>
-{
-public:
-	using Base = nlohmann::json_sax<nlohmann::json>;
-	using binary_t = typename Base::binary_t;
-	using number_float_t = typename Base::number_float_t;
-	using number_integer_t = typename Base::number_integer_t;
-	using number_unsigned_t = typename Base::number_unsigned_t;
-	using string_t = typename Base::string_t;
-
-	explicit ProfilerArtifactMetadataSax(ProfilerCaptureArtifact& artifact)
-		: outArtifact(artifact)
-	{
-	}
-
-	bool null() override
-	{
-		ConsumePendingKey();
-		return true;
-	}
-
-	bool boolean(bool value) override
-	{
-		const std::string key = ConsumePendingKey();
-		if (ParentIsNamedObject("settings"))
-		{
-			if (key == "cpuEngineEnabled")
-			{
-				outArtifact.metadata.settings.cpuEngineEnabled = value;
-			}
-			else if (key == "taskExecutionEnabled")
-			{
-				outArtifact.metadata.settings.taskExecutionEnabled = value;
-			}
-			else if (key == "recordMarkers")
-			{
-				outArtifact.metadata.settings.recordMarkers = value;
-			}
-			else if (key == "recordTaskContext")
-			{
-				outArtifact.metadata.settings.recordTaskContext = value;
-			}
-		}
-		return true;
-	}
-
-	bool number_integer(number_integer_t value) override
-	{
-		if (value < 0)
-		{
-			ConsumePendingKey();
-			return true;
-		}
-		return number_unsigned(static_cast<number_unsigned_t>(value));
-	}
-
-	bool number_unsigned(number_unsigned_t value) override
-	{
-		const std::string key = ConsumePendingKey();
-		if (IsTopLevelObject() && key == "payloadVersion")
-		{
-			hasPayloadVersion = true;
-			outArtifact.payloadVersion = static_cast<std::uint32_t>(value);
-			if (outArtifact.payloadVersion != kProfilerCaptureVersion)
-			{
-				error = "Profiler capture format version is unsupported.";
-				return false;
-			}
-		}
-		else if (IsTopLevelObject() && key == "frameCount")
-		{
-			hasFrameCount = true;
-			outArtifact.frameCount = static_cast<std::uint64_t>(value);
-		}
-		else if (ParentIsNamedObject("settings") && key == "maxFrames")
-		{
-			outArtifact.metadata.settings.maxFrames = static_cast<std::uint32_t>(value);
-		}
-		return true;
-	}
-
-	bool number_float(number_float_t value, const string_t&) override
-	{
-		const std::string key = ConsumePendingKey();
-		if (ParentIsNamedObject("settings") && key == "maxDurationSeconds")
-		{
-			outArtifact.metadata.settings.maxDurationSeconds = std::max(0.0, static_cast<double>(value));
-		}
-		return true;
-	}
-
-	bool string(string_t& value) override
-	{
-		const std::string key = ConsumePendingKey();
-		if (IsTopLevelObject() && key == "format")
-		{
-			hasFormat = true;
-			if (value != "TerraEngineProfilerCapture")
-			{
-				error = "File is not a TerraEngine profiler capture.";
-				return false;
-			}
-		}
-		else if (ParentIsNamedObject("metadata"))
-		{
-			if (key == "terraEngineVersion")
-			{
-				outArtifact.metadata.terraEngineVersion = value;
-			}
-			else if (key == "projectName")
-			{
-				outArtifact.metadata.projectName = value;
-			}
-			else if (key == "projectPathHint")
-			{
-				outArtifact.metadata.projectPathHint = value;
-			}
-			else if (key == "scenePath")
-			{
-				outArtifact.metadata.scenePath = value;
-			}
-			else if (key == "startedAt")
-			{
-				outArtifact.metadata.startedAt = value;
-			}
-			else if (key == "savedAt")
-			{
-				outArtifact.metadata.savedAt = value;
-			}
-		}
-		return true;
-	}
-
-	bool binary(binary_t&) override
-	{
-		ConsumePendingKey();
-		return true;
-	}
-
-	bool start_object(std::size_t) override
-	{
-		std::string valueName = ConsumePendingKey();
-		if (!containers.empty()
-			&& containers.back().kind == SaxContainerKind::Array
-			&& containers.back().name == "frames"
-			&& containers.size() == 2u)
-		{
-			if (!hasFrameCount)
-			{
-				++outArtifact.frameCount;
-			}
-			valueName = "frame";
-		}
-		containers.push_back({SaxContainerKind::Object, std::move(valueName), {}});
-		return true;
-	}
-
-	bool key(string_t& value) override
-	{
-		if (containers.empty() || containers.back().kind != SaxContainerKind::Object)
-		{
-			error = "Profiler capture JSON contains an object key outside an object.";
-			return false;
-		}
-		containers.back().pendingKey = value;
-		return true;
-	}
-
-	bool end_object() override
-	{
-		if (containers.empty() || containers.back().kind != SaxContainerKind::Object)
-		{
-			error = "Profiler capture JSON ended an object without a matching start.";
-			return false;
-		}
-		const std::string endedName = containers.back().name;
-		containers.pop_back();
-		if (endedName == "metadata")
-		{
-			hasMetadata = true;
-		}
-		return true;
-	}
-
-	bool start_array(std::size_t elements) override
-	{
-		std::string valueName = ConsumePendingKey();
-		if (IsTopLevelObject() && valueName == "frames")
-		{
-			if (CanStopBeforeFrames())
-			{
-				completedEarly = true;
-				return false;
-			}
-			if (!hasFrameCount && elements != nlohmann::detail::unknown_size())
-			{
-				hasFrameCount = true;
-				outArtifact.frameCount = static_cast<std::uint64_t>(elements);
-			}
-		}
-		containers.push_back({SaxContainerKind::Array, std::move(valueName), {}});
-		return true;
-	}
-
-	bool end_array() override
-	{
-		if (containers.empty() || containers.back().kind != SaxContainerKind::Array)
-		{
-			error = "Profiler capture JSON ended an array without a matching start.";
-			return false;
-		}
-		const std::string endedName = containers.back().name;
-		containers.pop_back();
-		if (endedName == "frames")
-		{
-			hasFrameCount = true;
-		}
-		return true;
-	}
-
-	bool parse_error(std::size_t, const std::string&, const nlohmann::detail::exception& exception) override
-	{
-		error = exception.what();
-		return false;
-	}
-
-	bool Finish()
-	{
-		if (!hasFormat)
-		{
-			error = "File is not a TerraEngine profiler capture.";
-			return false;
-		}
-		if (!hasPayloadVersion)
-		{
-			error = "Profiler capture format version is unsupported.";
-			return false;
-		}
-		if (!hasMetadata)
-		{
-			error = "Profiler capture metadata is missing.";
-			return false;
-		}
-		if (!hasFrameCount)
-		{
-			error = "Profiler capture frame list is missing.";
-			return false;
-		}
-
-		outArtifact.metadata.settings.captureMode = ProfilerCaptureMode::LoadedReadOnly;
-		outArtifact.supported = true;
-		outArtifact.status = completedEarly ? "Ready (metadata)" : "Ready";
-		outArtifact.moduleIds = {
-			ProfilerModuleId::CpuEngine,
-			ProfilerModuleId::TaskExecution
-		};
-		return true;
-	}
-
-	ProfilerCaptureArtifact& outArtifact;
-	std::string error;
-	bool completedEarly = false;
-
-private:
-	bool IsTopLevelObject() const
-	{
-		return containers.size() == 1u && containers.back().kind == SaxContainerKind::Object;
-	}
-
-	bool ParentIsNamedObject(const char* name) const
-	{
-		return !containers.empty()
-			&& containers.back().kind == SaxContainerKind::Object
-			&& containers.back().name == name;
-	}
-
-	bool CanStopBeforeFrames() const
-	{
-		return hasFormat && hasPayloadVersion && hasMetadata && hasFrameCount;
-	}
-
-	std::string ConsumePendingKey()
-	{
-		if (containers.empty() || containers.back().kind != SaxContainerKind::Object)
-		{
-			return {};
-		}
-		std::string key = std::move(containers.back().pendingKey);
-		containers.back().pendingKey.clear();
-		return key;
-	}
-
-	std::vector<SaxContainer> containers;
-	bool hasFormat = false;
-	bool hasPayloadVersion = false;
-	bool hasMetadata = false;
-	bool hasFrameCount = false;
-};
 }
 
 // ToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -931,6 +583,163 @@ void TrimFrameBuffer(std::vector<ProfilerFrameRecord>& frames, const ProfilerCap
 	}
 }
 
+// EstimateProfilerFrameOwnedBytes counts the value-owned payload retained by a
+// sealed frame.  It deliberately counts logical string/vector contents rather
+// than allocator capacity, because capacity is implementation-specific and
+// would make queue-pressure decisions differ between otherwise identical runs.
+std::uint64_t EstimateProfilerFrameOwnedBytes(const ProfilerFrameRecord& frame) noexcept
+{
+	auto stringBytes = [](const std::string& value) -> std::uint64_t {
+		return static_cast<std::uint64_t>(value.size());
+	};
+	std::uint64_t bytes = sizeof(ProfilerFrameRecord);
+	for (const ProfilerTimingStreamSample& sample : frame.timingStreams)
+	{
+		bytes += sizeof(sample) + stringBytes(sample.id) + stringBytes(sample.label)
+			+ stringBytes(sample.statusReason);
+	}
+	for (const ProfilerModuleSummary& module : frame.moduleSummaries)
+	{
+		bytes += sizeof(module);
+		for (const ProfilerMetric& metric : module.metrics)
+		{
+			bytes += sizeof(metric) + stringBytes(metric.name) + stringBytes(metric.unit);
+		}
+	}
+	for (const ProfilerSample& sample : frame.samples)
+	{
+		bytes += sizeof(sample) + stringBytes(sample.name) + stringBytes(sample.threadLabel)
+			+ stringBytes(sample.taskLabel);
+	}
+	for (const PerformanceStageRecord& stage : frame.performanceStages)
+	{
+		bytes += sizeof(stage) + stringBytes(stage.stageName) + stringBytes(stage.workloadName)
+			+ stringBytes(stage.duration.unavailableReason);
+	}
+	for (const ProtectedBoundaryRecord& boundary : frame.protectedBoundaries)
+	{
+		bytes += sizeof(boundary) + stringBytes(boundary.boundaryName)
+			+ stringBytes(boundary.queueDuration.unavailableReason)
+			+ stringBytes(boundary.ownershipWaitDuration.unavailableReason)
+			+ stringBytes(boundary.executionDuration.unavailableReason)
+			+ stringBytes(boundary.flushDuration.unavailableReason)
+			+ stringBytes(boundary.publicationDuration.unavailableReason);
+	}
+	for (const WorkerTelemetryRecord& worker : frame.workerTelemetry)
+	{
+		bytes += sizeof(worker) + stringBytes(worker.runDuration.unavailableReason)
+			+ stringBytes(worker.waitDuration.unavailableReason)
+			+ stringBytes(worker.idleDuration.unavailableReason);
+	}
+	for (const WorkloadExecutionRecord& workload : frame.workloadExecutions)
+	{
+		bytes += sizeof(workload) + stringBytes(workload.frameId)
+			+ stringBytes(workload.descriptorId) + stringBytes(workload.ownerSystem)
+			+ stringBytes(workload.phase) + stringBytes(workload.workloadName)
+			+ stringBytes(workload.activationPredicateKey)
+			+ stringBytes(workload.queueDuration.unavailableReason)
+			+ stringBytes(workload.runDuration.unavailableReason)
+			+ stringBytes(workload.coordinatorWaitDuration.unavailableReason)
+			+ stringBytes(workload.ownershipWaitDuration.unavailableReason)
+			+ stringBytes(workload.flushDuration.unavailableReason)
+			+ stringBytes(workload.publicationDuration.unavailableReason);
+	}
+	for (const PresentationWaitRecord& wait : frame.presentationWaits)
+	{
+		bytes += sizeof(wait) + stringBytes(wait.detail)
+			+ stringBytes(wait.duration.unavailableReason);
+	}
+	if (frame.responsiveness.has_value())
+	{
+		bytes += sizeof(FrameResponsivenessRecord)
+			+ stringBytes(frame.responsiveness->inputToPresentationDuration.unavailableReason)
+			+ stringBytes(frame.responsiveness->frameDuration.unavailableReason);
+	}
+	if (frame.animationTelemetry)
+	{
+		bytes += sizeof(ProfilerAnimationFrameTelemetry)
+			+ static_cast<std::uint64_t>(frame.animationTelemetry->details.size()
+				* sizeof(ProfilerAnimationDetailRecord));
+	}
+	return bytes;
+}
+
+bool ValidateProfilerSealedFrame(const ProfilerSealedFrame& sealed, std::string& outError) noexcept
+{
+	outError.clear();
+	if (!std::isfinite(sealed.frame.durationMs) || sealed.frame.durationMs < 0.0)
+	{
+		outError = "Profiler sealed frame has an invalid duration.";
+		return false;
+	}
+	if (sealed.ownedByteCount < EstimateProfilerFrameOwnedBytes(sealed.frame))
+	{
+		outError = "Profiler sealed frame under-reports its owned bytes.";
+		return false;
+	}
+	std::uint64_t previousLastFrame = 0u;
+	bool havePrevious = false;
+	for (const ProfilerCaptureLossRange& loss : sealed.losses)
+	{
+		if (loss.lossClass == ProfilerCaptureLossClass::None
+			|| loss.reason == ProfilerCaptureLossReason::None
+			|| loss.firstFrameIndex > loss.lastFrameIndex
+			|| loss.firstFrameIndex != sealed.frame.frameIndex
+			|| loss.lastFrameIndex != sealed.frame.frameIndex)
+		{
+			outError = "Profiler sealed frame has an invalid loss range.";
+			return false;
+		}
+		if (havePrevious && loss.firstFrameIndex <= previousLastFrame)
+		{
+			outError = "Profiler sealed frame loss ranges are not strictly ordered.";
+			return false;
+		}
+		previousLastFrame = loss.lastFrameIndex;
+		havePrevious = true;
+	}
+	return true;
+}
+
+std::span<const ProfilerCaptureLossClass> GetProfilerOptionalDetailSheddingOrder() noexcept
+{
+	// Keep this typed array beside validation rather than as a local profiler
+	// lambda. Tests and future producers therefore share one stable policy and
+	// cannot accidentally reorder loss classes while refactoring the queue.
+	static constexpr std::array<ProfilerCaptureLossClass, 4u> order = {
+		ProfilerCaptureLossClass::AnimationDetails,
+		ProfilerCaptureLossClass::SampleLeaves,
+		ProfilerCaptureLossClass::TaskContext,
+		ProfilerCaptureLossClass::WorkloadRanges};
+	return order;
+}
+
+void CoalesceProfilerCaptureLossRange(
+	std::vector<ProfilerCaptureLossRange>& ranges,
+	const ProfilerCaptureLossRange& next)
+{
+	if (next.lossClass == ProfilerCaptureLossClass::None
+		|| next.reason == ProfilerCaptureLossReason::None
+		|| next.firstFrameIndex > next.lastFrameIndex)
+	{
+		return;
+	}
+	if (!ranges.empty())
+	{
+		ProfilerCaptureLossRange& previous = ranges.back();
+		if (previous.lossClass == next.lossClass && previous.reason == next.reason
+			&& previous.lastFrameIndex != std::numeric_limits<std::uint64_t>::max()
+			&& previous.lastFrameIndex + 1u == next.firstFrameIndex)
+		{
+			previous.lastFrameIndex = next.lastFrameIndex;
+			previous.discardedRecordCount += next.discardedRecordCount;
+			previous.discardedByteCount += next.discardedByteCount;
+			return;
+		}
+	}
+	ranges.push_back(next);
+}
+
 void AddOrReplaceTimingStreamSample(ProfilerFrameRecord& frame, ProfilerTimingStreamSample sample)
 {
 	if (sample.id.empty())
@@ -1050,403 +859,113 @@ std::vector<ProfilerTimingStreamAggregate> BuildTimingStreamAggregates(const std
 // SaveCaptureDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::filesystem::path& path, std::string& outError)
 {
-	// New captures use the compact v2 framing. A caller can still deliberately
-	// write a v1 fixture by setting payloadVersion to one; that compatibility
-	// escape hatch never rewrites an existing artifact in place.
-	if (document.payloadVersion >= kProfilerCaptureV2PayloadVersion)
+	// Documents use the same append-only journal as live recording.  One writer
+	// prevents an offline export from silently reintroducing a second format.
+	for (const ProfilerFrameRecord& frame : document.frames)
 	{
-		for (const ProfilerFrameRecord& frame : document.frames)
+		if (frame.animationOptimization.has_value()
+			&& !ValidateProfilerAnimationOptimizationEvidence(*frame.animationOptimization))
 		{
-			if (frame.animationOptimization.has_value()
-				&& !ValidateProfilerAnimationOptimizationEvidence(*frame.animationOptimization))
-			{
-				outError = "Profiler capture contains invalid animation optimization evidence.";
-				return false;
-			}
-			if (frame.renderOptimization.has_value()
-				&& !ValidateProfilerRenderOptimizationEvidence(*frame.renderOptimization))
-			{
-				outError = "Profiler capture contains invalid renderer optimization evidence.";
-				return false;
-			}
-			if (frame.framePublication.has_value()
-				&& !ValidateProfilerFramePublicationEvidence(*frame.framePublication))
-			{
-				outError = "Profiler capture contains invalid frame-publication evidence.";
-				return false;
-			}
-			if (frame.animationTelemetry
-				&& (!ValidateProfilerAnimationFrameTelemetry(*frame.animationTelemetry)
-				|| !frame.animationDiagnostics.has_value() || frame.animationDiagnostics->dormant
-				|| frame.animationDiagnostics->schedulerMembershipChecks
-					!= frame.animationTelemetry->summary.schedulerMembershipChecks))
-			{
-				outError = "Profiler capture contains invalid or conflicting animation telemetry.";
-				return false;
-			}
-		}
-		return SaveProfilerCaptureV2(document, path, outError);
-	}
-	try
-	{
-		nlohmann::ordered_json json;
-		json["format"] = "TerraEngineProfilerCapture";
-		json["payloadVersion"] = kProfilerCaptureVersion;
-		json["metadata"] = {
-			{"terraEngineVersion", document.metadata.terraEngineVersion},
-			{"projectName", document.metadata.projectName},
-			{"projectPathHint", document.metadata.projectPathHint},
-			{"scenePath", document.metadata.scenePath},
-			{"startedAt", document.metadata.startedAt},
-			{"savedAt", document.metadata.savedAt},
-			{"settings", SettingsToJson(document.metadata.settings)}
-		};
-		json["frameCount"] = document.frames.size();
-		json["frames"] = nlohmann::ordered_json::array();
-
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const ProfilerFrameRecord& frame : document.frames)
-		{
-			// Keep every nested value in the same ordered_json domain as the root.
-			// GCC 14 correctly treats moving a plain json value into an ordered_json
-			// array as ambiguous because both value and object-entry overloads apply.
-			nlohmann::ordered_json frameJson;
-			frameJson["frameIndex"] = frame.frameIndex;
-			frameJson["frameStartMs"] = frame.frameStartMs;
-			frameJson["durationMs"] = frame.durationMs;
-			frameJson["complete"] = frame.complete;
-			if (frame.physics.has_value())
-			{
-				const ProfilerPhysicsFrameCounters& physics = *frame.physics;
-				frameJson["physics"] = {
-					{"tick", physics.tick}, {"bodyCount", physics.bodyCount}, {"contactCount", physics.contactCount},
-					{"queryCount", physics.queryCount}, {"eventCount", physics.eventCount}, {"rejectedCount", physics.rejectedCount},
-					{"staleCount", physics.staleCount}, {"commandQueueDepth", physics.commandQueueDepth},
-					{"shapeCacheBytes", physics.shapeCacheBytes}, {"shapeCacheHits", physics.shapeCacheHits},
-					{"shapeCacheMisses", physics.shapeCacheMisses}, {"snapshotBytes", physics.snapshotBytes},
-					{"snapshotHighWaterBytes", physics.snapshotHighWaterBytes}, {"providerAllocations", physics.providerAllocations},
-					{"providerAllocationHighWater", physics.providerAllocationHighWater},
-					{"prepareMs", physics.prepareMs}, {"commitMs", physics.commitMs}, {"simulateMs", physics.simulateMs},
-					{"queryMs", physics.queryMs}, {"publishMs", physics.publishMs}
-				};
-			}
-			frameJson["timingStreams"] = nlohmann::ordered_json::array();
-			// Timing streams are stored beside modules because they answer a
-			// different question: "which clock measured this frame?" rather than
-			// "which profiler module owned these samples?"
-			for (const ProfilerTimingStreamSample& stream : frame.timingStreams)
-			{
-				frameJson["timingStreams"].push_back({
-					{"id", stream.id},
-					{"label", stream.label},
-					{"scope", TimingScopeToStableName(stream.scope)},
-					{"source", TimingSourceToStableName(stream.source)},
-					{"status", TimingStatusToStableName(stream.status)},
-					{"milliseconds", stream.milliseconds},
-					{"statusReason", stream.statusReason}
-				});
-			}
-			frameJson["modules"] = nlohmann::ordered_json::array();
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-			for (const ProfilerModuleSummary& module : frame.moduleSummaries)
-			{
-				nlohmann::ordered_json moduleJson;
-				moduleJson["moduleId"] = ModuleIdToStableName(module.moduleId);
-				moduleJson["available"] = module.available;
-				moduleJson["totalMs"] = module.totalMs;
-				moduleJson["metrics"] = nlohmann::ordered_json::array();
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-				for (const ProfilerMetric& metric : module.metrics)
-				{
-					moduleJson["metrics"].push_back({{"name", metric.name}, {"value", metric.value}, {"unit", metric.unit}});
-				}
-				frameJson["modules"].push_back(std::move(moduleJson));
-			}
-			frameJson["samples"] = nlohmann::ordered_json::array();
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-			for (const ProfilerSample& sample : frame.samples)
-			{
-				frameJson["samples"].push_back({
-					{"sampleId", sample.sampleId},
-					{"parentSampleId", sample.parentSampleId},
-					{"moduleId", ModuleIdToStableName(sample.moduleId)},
-					{"name", sample.name},
-					{"threadLabel", sample.threadLabel},
-					{"taskLabel", sample.taskLabel},
-					{"startMs", sample.startMs},
-					{"durationMs", sample.durationMs},
-					{"depth", sample.depth},
-					{"occurrenceCount", sample.occurrenceCount},
-					{"complete", sample.complete},
-					{"retainInAggregate", sample.retainInAggregate}
-				});
-			}
-			json["frames"].push_back(std::move(frameJson));
-		}
-
-		std::ofstream output(path, std::ios::binary | std::ios::trunc);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!output)
-		{
-			outError = "Failed to open profiler capture for writing.";
+			outError = "Profiler capture contains invalid animation optimization evidence.";
 			return false;
 		}
-		output << json.dump(2);
-		return true;
+		if (frame.renderOptimization.has_value()
+			&& !ValidateProfilerRenderOptimizationEvidence(*frame.renderOptimization))
+		{
+			outError = "Profiler capture contains invalid renderer optimization evidence.";
+			return false;
+		}
+		if (frame.framePublication.has_value()
+			&& !ValidateProfilerFramePublicationEvidence(*frame.framePublication))
+		{
+			outError = "Profiler capture contains invalid frame-publication evidence.";
+			return false;
+		}
+		if (frame.animationTelemetry
+			&& (!ValidateProfilerAnimationFrameTelemetry(*frame.animationTelemetry)
+			|| !frame.animationDiagnostics.has_value() || frame.animationDiagnostics->dormant
+			|| frame.animationDiagnostics->schedulerMembershipChecks
+				!= frame.animationTelemetry->summary.schedulerMembershipChecks))
+		{
+			outError = "Profiler capture contains invalid or conflicting animation telemetry.";
+			return false;
+		}
 	}
-	catch (const std::exception& exception)
+	ProfilerJournalV1Writer writer;
+	ProfilerCaptureMetadata metadata = document.metadata;
+	metadata.settings.captureMode = ProfilerCaptureMode::LiveRolling;
+	if (writer.Open(path, metadata, outError) != ProfilerJournalV1ResultCode::Ok)
 	{
-		outError = exception.what();
 		return false;
 	}
-}
+	const std::size_t framesPerSegment = std::max<std::size_t>(1u, metadata.settings.maximumChunkFrames);
+	for (std::size_t first = 0u; first < document.frames.size(); first += framesPerSegment)
+	{
+		const std::size_t count = std::min(framesPerSegment, document.frames.size() - first);
+		std::vector<ProfilerSealedFrame> sealed;
+		sealed.reserve(count);
+		for (std::size_t offset = 0u; offset < count; ++offset)
+		{
+			ProfilerSealedFrame item;
+			item.frame = document.frames[first + offset];
+			item.ownedByteCount = EstimateProfilerFrameOwnedBytes(item.frame);
+			sealed.push_back(std::move(item));
+		}
+		if (writer.AppendCommittedSegment(sealed, outError) != ProfilerJournalV1ResultCode::Ok)
+		{
+			return false;
+		}
+	}
+	return writer.Finalize(document.complete, outError) == ProfilerJournalV1ResultCode::Ok;
+	}
 
 // LoadCaptureDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool LoadCaptureDocument(const std::filesystem::path& path, ProfilerCaptureDocument& outDocument, std::string& outError)
 {
-	// V2 is line framed so a trailing partial chunk can be recovered without
-	// asking the JSON parser to accept a malformed whole-file document.
+	ProfilerJournalV1OpenResult journalResult;
+	const ProfilerJournalV1ResultCode journalCode = OpenProfilerJournalV1(
+		path, outDocument, journalResult, outError);
+	const bool accepted = journalCode == ProfilerJournalV1ResultCode::Ok
+		|| journalCode == ProfilerJournalV1ResultCode::IncompleteTail;
+	if (!accepted && outError.empty())
 	{
-		std::ifstream versionInput(path, std::ios::binary);
-		std::string firstLine;
-		if (versionInput && std::getline(versionInput, firstLine))
-		{
-			if (firstLine == "{")
-			{
-				const std::string remainder((std::istreambuf_iterator<char>(versionInput)), std::istreambuf_iterator<char>());
-				if (remainder.find("\"payloadVersion\": 2") != std::string::npos)
-				{
-					return LoadProfilerCaptureV2(path, outDocument, outError);
-				}
-			}
-			try
-			{
-				const nlohmann::json header = nlohmann::json::parse(firstLine);
-				if (header.value("payloadVersion", 0u) == kProfilerCaptureV2PayloadVersion)
-				{
-					return LoadProfilerCaptureV2(path, outDocument, outError);
-				}
-			}
-			catch (const nlohmann::json::exception&)
-			{
-				// The v1 reader below retains its detailed parse error for legacy
-				// artifacts rather than hiding it behind a version probe failure.
-			}
-		}
+		// Preserve a useful typed failure when a malformed fresh journal reaches a
+		// reader path that intentionally has no detailed parser diagnostic. Empty
+		// errors turn focused capture regressions into an unactionable failure.
+		outError = "Profiler journal V1 reader rejected the capture (code "
+			+ std::to_string(static_cast<unsigned int>(journalCode)) + ").";
 	}
-	try
-	{
-		std::ifstream input(path, std::ios::binary);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!input)
-		{
-			outError = "Failed to open profiler capture for reading.";
-			return false;
-		}
-
-		nlohmann::json json;
-		input >> json;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (json.value("format", std::string{}) != "TerraEngineProfilerCapture")
-		{
-			outError = "File is not a TerraEngine profiler capture.";
-			return false;
-		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (json.value("payloadVersion", 0u) != kProfilerCaptureVersion)
-		{
-			outError = "Profiler capture format version is unsupported.";
-			return false;
-		}
-
-		ProfilerCaptureDocument document;
-		document.payloadVersion = kProfilerCaptureVersion;
-		document.sourcePath = path;
-		const nlohmann::json metadata = json.value("metadata", nlohmann::json::object());
-		document.metadata.terraEngineVersion = metadata.value("terraEngineVersion", "unknown");
-		document.metadata.projectName = metadata.value("projectName", "");
-		document.metadata.projectPathHint = metadata.value("projectPathHint", "");
-		document.metadata.scenePath = metadata.value("scenePath", "");
-		document.metadata.startedAt = metadata.value("startedAt", "");
-		document.metadata.savedAt = metadata.value("savedAt", "");
-		document.metadata.settings = SettingsFromJson(metadata.value("settings", nlohmann::json::object()));
-		document.metadata.settings.captureMode = ProfilerCaptureMode::LoadedReadOnly;
-
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const nlohmann::json& frameJson : json.value("frames", nlohmann::json::array()))
-		{
-			ProfilerFrameRecord frame;
-			frame.frameIndex = frameJson.value("frameIndex", 0ull);
-			frame.frameStartMs = frameJson.value("frameStartMs", 0.0);
-			frame.durationMs = frameJson.value("durationMs", 0.0);
-			frame.complete = frameJson.value("complete", true);
-			if (frameJson.contains("physics") && frameJson["physics"].is_object())
-			{
-				const nlohmann::json& physicsJson = frameJson["physics"];
-				ProfilerPhysicsFrameCounters physics;
-				physics.tick = physicsJson.value("tick", 0ull);
-				physics.bodyCount = physicsJson.value("bodyCount", 0ull);
-				physics.contactCount = physicsJson.value("contactCount", 0ull);
-				physics.queryCount = physicsJson.value("queryCount", 0ull);
-				physics.eventCount = physicsJson.value("eventCount", 0ull);
-				physics.rejectedCount = physicsJson.value("rejectedCount", 0ull);
-				physics.staleCount = physicsJson.value("staleCount", 0ull);
-				physics.commandQueueDepth = physicsJson.value("commandQueueDepth", 0ull);
-				physics.shapeCacheBytes = physicsJson.value("shapeCacheBytes", 0ull);
-				physics.shapeCacheHits = physicsJson.value("shapeCacheHits", 0ull);
-				physics.shapeCacheMisses = physicsJson.value("shapeCacheMisses", 0ull);
-				physics.snapshotBytes = physicsJson.value("snapshotBytes", 0ull);
-				physics.snapshotHighWaterBytes = physicsJson.value("snapshotHighWaterBytes", 0ull);
-				physics.providerAllocations = physicsJson.value("providerAllocations", 0ull);
-				physics.providerAllocationHighWater = physicsJson.value("providerAllocationHighWater", 0ull);
-				physics.prepareMs = physicsJson.value("prepareMs", 0.0);
-				physics.commitMs = physicsJson.value("commitMs", 0.0);
-				physics.simulateMs = physicsJson.value("simulateMs", 0.0);
-				physics.queryMs = physicsJson.value("queryMs", 0.0);
-				physics.publishMs = physicsJson.value("publishMs", 0.0);
-				frame.physics = physics;
-			}
-			for (const nlohmann::json& streamJson : frameJson.value("timingStreams", nlohmann::json::array()))
-			{
-				ProfilerTimingStreamSample stream;
-				stream.id = streamJson.value("id", "");
-				stream.label = streamJson.value("label", "");
-				const std::string scopeName = streamJson.value("scope", "");
-				const std::optional<ProfilerTimingStreamScope> scope = TryTimingScopeFromStableName(scopeName);
-				if (!scope.has_value())
-				{
-					outError = "Profiler capture contains an unknown timing stream scope: " + scopeName;
-					return false;
-				}
-				stream.scope = *scope;
-				stream.source = TimingSourceFromStableName(streamJson.value("source", ""));
-				stream.status = TimingStatusFromStableName(streamJson.value("status", ""));
-				stream.milliseconds = streamJson.value("milliseconds", 0.0);
-				stream.statusReason = streamJson.value("statusReason", "");
-				AddOrReplaceTimingStreamSample(frame, std::move(stream));
-			}
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-			for (const nlohmann::json& moduleJson : frameJson.value("modules", nlohmann::json::array()))
-			{
-				ProfilerModuleSummary module;
-				const std::string moduleName = moduleJson.value("moduleId", "");
-				const std::optional<ProfilerModuleId> moduleId = TryModuleIdFromStableName(moduleName);
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (!moduleId.has_value())
-				{
-					outError = "Profiler capture contains an unknown module id: " + moduleName;
-					return false;
-				}
-				module.moduleId = *moduleId;
-				module.available = moduleJson.value("available", false);
-				module.totalMs = moduleJson.value("totalMs", 0.0);
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-				for (const nlohmann::json& metricJson : moduleJson.value("metrics", nlohmann::json::array()))
-				{
-					module.metrics.push_back({
-						metricJson.value("name", ""),
-						metricJson.value("value", 0.0),
-						metricJson.value("unit", "")
-					});
-				}
-				frame.moduleSummaries.push_back(std::move(module));
-			}
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-			for (const nlohmann::json& sampleJson : frameJson.value("samples", nlohmann::json::array()))
-			{
-				ProfilerSample sample;
-				sample.sampleId = sampleJson.value("sampleId", 0ull);
-				sample.parentSampleId = sampleJson.value("parentSampleId", 0ull);
-				const std::string moduleName = sampleJson.value("moduleId", "");
-				const std::optional<ProfilerModuleId> moduleId = TryModuleIdFromStableName(moduleName);
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (!moduleId.has_value())
-				{
-					outError = "Profiler capture contains an unknown sample module id: " + moduleName;
-					return false;
-				}
-				sample.moduleId = *moduleId;
-				sample.name = sampleJson.value("name", "");
-				sample.threadLabel = sampleJson.value("threadLabel", "");
-				sample.taskLabel = sampleJson.value("taskLabel", "");
-				sample.startMs = sampleJson.value("startMs", 0.0);
-				sample.durationMs = sampleJson.value("durationMs", 0.0);
-				sample.depth = sampleJson.value("depth", 0u);
-				sample.occurrenceCount = sampleJson.value("occurrenceCount", 1u);
-				sample.complete = sampleJson.value("complete", true);
-				sample.retainInAggregate = sampleJson.value("retainInAggregate", false);
-				frame.samples.push_back(std::move(sample));
-			}
-			document.frames.push_back(std::move(frame));
-		}
-
-		outDocument = std::move(document);
-		return true;
-	}
-	catch (const std::exception& exception)
-	{
-		outError = exception.what();
-		return false;
-	}
+	return accepted;
 }
 
-// TryReadCaptureArtifact is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+// TryReadCaptureArtifactMetadata reads the bounded journal catalog without materializing detailed frames.
 bool TryReadCaptureArtifactMetadata(const std::filesystem::path& path, ProfilerCaptureArtifact& outArtifact)
 {
-	{
-		std::ifstream versionInput(path, std::ios::binary);
-		std::string firstLine;
-		if (versionInput && std::getline(versionInput, firstLine))
-		{
-			if (firstLine == "{")
-			{
-				const std::string remainder((std::istreambuf_iterator<char>(versionInput)), std::istreambuf_iterator<char>());
-				if (remainder.find("\"payloadVersion\": 2") != std::string::npos)
-				{
-					return TryReadProfilerCaptureV2Metadata(path, outArtifact);
-				}
-			}
-			try
-			{
-				const nlohmann::json header = nlohmann::json::parse(firstLine);
-				if (header.value("payloadVersion", 0u) == kProfilerCaptureV2PayloadVersion)
-				{
-					return TryReadProfilerCaptureV2Metadata(path, outArtifact);
-				}
-			}
-			catch (const nlohmann::json::exception&)
-			{
-			}
-		}
-	}
+	ProfilerJournalV1OpenResult journalResult;
+	std::string journalError;
+	const ProfilerJournalV1ResultCode journalCode = ReadProfilerJournalV1Index(path, journalResult, journalError);
 	outArtifact = {};
 	outArtifact.absolutePath = path;
 	outArtifact.fileName = path.filename().string();
-
-	std::ifstream input(path, std::ios::binary);
-	if (!input)
+	if (journalCode != ProfilerJournalV1ResultCode::Ok
+		&& journalCode != ProfilerJournalV1ResultCode::IncompleteTail)
 	{
 		outArtifact.supported = false;
-		outArtifact.status = "Failed to open profiler capture for reading.";
+		outArtifact.status = journalError;
 		return false;
 	}
-
-	ProfilerArtifactMetadataSax sax(outArtifact);
-	const bool parsed = nlohmann::json::sax_parse(input, &sax);
-	if (!parsed && !sax.completedEarly)
-	{
-		outArtifact.supported = false;
-		outArtifact.status = sax.error.empty() ? "Failed to parse profiler capture metadata." : sax.error;
-		return false;
-	}
-	if (!sax.Finish())
-	{
-		outArtifact.supported = false;
-		outArtifact.status = sax.error;
-		return false;
-	}
+	outArtifact.metadata = std::move(journalResult.metadata);
+	outArtifact.formatIdentifier = std::string(kProfilerJournalV1FormatIdentifier);
+	outArtifact.formatVersion = kProfilerJournalV1SchemaVersion;
+	outArtifact.frameCount = journalResult.summary.frameCount;
+	outArtifact.committedFrameCount = journalResult.summary.frameCount;
+	outArtifact.complete = journalResult.complete;
+	outArtifact.recoveredIncompleteTail = journalResult.recoveredIncompleteTail;
+	outArtifact.supported = true;
+	outArtifact.status = journalResult.recoveredIncompleteTail ? "Recovered incomplete tail" : "Ready (journal index)";
+	outArtifact.moduleIds = {ProfilerModuleId::CpuEngine, ProfilerModuleId::TaskExecution};
 	return true;
-}
+	}
 
 // TryReadCaptureArtifact is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool TryReadCaptureArtifact(const std::filesystem::path& path, ProfilerCaptureArtifact& outArtifact)
@@ -1466,7 +985,8 @@ bool TryReadCaptureArtifact(const std::filesystem::path& path, ProfilerCaptureAr
 
 	outArtifact.metadata = document.metadata;
 	outArtifact.frameCount = static_cast<std::uint64_t>(document.frames.size());
-	outArtifact.payloadVersion = document.payloadVersion;
+	outArtifact.formatIdentifier = document.formatIdentifier;
+	outArtifact.formatVersion = document.formatVersion;
 	outArtifact.committedFrameCount = document.committedFrameCount == 0u
 		? static_cast<std::uint64_t>(document.frames.size())
 		: document.committedFrameCount;
@@ -1483,15 +1003,13 @@ bool TryReadCaptureArtifact(const std::filesystem::path& path, ProfilerCaptureAr
 
 namespace
 {
-// V2 is newline framed intentionally: each committed chunk is independently
-// parseable, so a process loss while writing the final line cannot invalidate
-// previously flushed evidence. This is a persistence boundary, not a live-data
-// synchronization mechanism.
-constexpr std::uint32_t kV2MaximumStringCount = 1u << 20u;
-constexpr std::uint32_t kV2MaximumFramesPerChunk = 4096u;
+// The journal frame codec uses bounded local tables, so a decoded frame never
+// depends on a global table accumulated across a long recording session.
+constexpr std::uint32_t kJournalMaximumStringCount = 1u << 20u;
+constexpr std::uint32_t kJournalMaximumFramesPerSegment = 4096u;
 
 // IsPublicAnimationDiagnosticsMetric identifies the three legacy-facing
-// profiler metrics represented by the compact typed V2 animation field.
+// profiler metrics represented by the compact typed journal animation field.
 // Keeping the names here makes the writer and reader agree on exactly which
 // records must not be stored twice for every dormant frame.
 bool IsPublicAnimationDiagnosticsMetric(std::string_view name)
@@ -1518,12 +1036,60 @@ void AddOrReplaceMetric(ProfilerModuleSummary& module, std::string name, double 
 	module.metrics.push_back({std::move(name), value, std::move(unit)});
 }
 
-// MaterializeAnimationDiagnosticsMetrics removes any legacy duplicate records
-// and recreates the three public metrics from the authoritative typed facts.
-// This lets new compact captures and old metric-based V2 captures coexist.
-void MaterializeAnimationDiagnosticsMetrics(ProfilerFrameRecord& frame)
+// AddAnimationTelemetryMetrics exposes the fixed typed animation summary as
+// the stable metric names used by existing capture readers. It runs only after
+// a frame was copied for presentation or reopened from the journal; recording
+// itself retains the compact numeric record without per-frame string churn.
+void AddAnimationTelemetryMetrics(
+	ProfilerModuleSummary& module,
+	const ProfilerAnimationFrameSummary& summary)
 {
-	if (!frame.animationDiagnostics.has_value())
+	AddOrReplaceMetric(module, "Animation.AvailableEvidenceMask", static_cast<double>(summary.availableEvidenceMask), "bitmask");
+	AddOrReplaceMetric(module, "Animation.ActiveAnimators", static_cast<double>(summary.activeAnimators), "count");
+	AddOrReplaceMetric(module, "Animation.EvaluatedAnimators", static_cast<double>(summary.evaluatedAnimators), "count");
+	AddOrReplaceMetric(module, "Animation.CpuAnimators", static_cast<double>(summary.cpuAnimators), "count");
+	AddOrReplaceMetric(module, "Animation.GpuVisualAnimators", static_cast<double>(summary.gpuVisualAnimators), "count");
+	AddOrReplaceMetric(module, "Animation.HybridAuthoritativeAnimators", static_cast<double>(summary.hybridAnimators), "count");
+	AddOrReplaceMetric(module, "Animation.WorkerCount", static_cast<double>(summary.workerCount), "count");
+	AddOrReplaceMetric(module, "Animation.WorkerJobs", static_cast<double>(summary.workerJobs), "count");
+	AddOrReplaceMetric(module, "Animation.WorkerUsefulItems", static_cast<double>(summary.workerUsefulItems), "count");
+	AddOrReplaceMetric(module, "Animation.WorkerBusy", static_cast<double>(summary.workerBusyNanoseconds), "nanoseconds");
+	AddOrReplaceMetric(module, "Animation.WorkerCapacity", static_cast<double>(summary.workerCapacityNanoseconds), "nanoseconds");
+	AddOrReplaceMetric(module, "Animation.SampledJoints", static_cast<double>(summary.sampledJoints), "count");
+	AddOrReplaceMetric(module, "Animation.BlendedTracks", static_cast<double>(summary.blendedTracks), "count");
+	AddOrReplaceMetric(module, "Animation.EvaluatedGraphNodes", static_cast<double>(summary.evaluatedGraphNodes), "count");
+	AddOrReplaceMetric(module, "Animation.MotionMatchingCandidates", static_cast<double>(summary.motionMatchingCandidates), "count");
+	AddOrReplaceMetric(module, "Animation.IkChains", static_cast<double>(summary.ikChains), "count");
+	AddOrReplaceMetric(module, "Animation.RagdollBodies", static_cast<double>(summary.ragdollBodies), "count");
+	AddOrReplaceMetric(module, "Animation.GpuEvaluatedJoints", static_cast<double>(summary.gpuEvaluatedJoints), "count");
+	AddOrReplaceMetric(module, "Animation.GpuBatches", static_cast<double>(summary.gpuBatches), "count");
+	AddOrReplaceMetric(module, "Animation.FrameArenaBytes", static_cast<double>(summary.frameArenaBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.FrameArenaHighWaterBytes", static_cast<double>(summary.frameArenaHighWaterBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.PoseCacheBytes", static_cast<double>(summary.poseCacheBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.PoseCacheHighWaterBytes", static_cast<double>(summary.poseCacheHighWaterBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.GpuResidentBytes", static_cast<double>(summary.gpuResidentBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.GpuResidentHighWaterBytes", static_cast<double>(summary.gpuResidentHighWaterBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.GpuTransferBytes", static_cast<double>(summary.gpuTransferBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.GpuReadbackBytes", static_cast<double>(summary.gpuReadbackBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.CompletePoseReadbackBytes", static_cast<double>(summary.completePoseReadbackBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.BoundedMetadataReadbackBytes", static_cast<double>(summary.boundedMetadataReadbackBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.GpuWaits", static_cast<double>(summary.gpuWaitCount), "count");
+	AddOrReplaceMetric(module, "Animation.SchedulerWaits", static_cast<double>(summary.schedulerWaitCount), "count");
+	AddOrReplaceMetric(module, "Animation.ProtectedBoundaryStalls", static_cast<double>(summary.protectedBoundaryStallCount), "count");
+	AddOrReplaceMetric(module, "Animation.PoseCacheHits", static_cast<double>(summary.poseCacheHits), "count");
+	AddOrReplaceMetric(module, "Animation.PoseCacheMisses", static_cast<double>(summary.poseCacheMisses), "count");
+	AddOrReplaceMetric(module, "Animation.ClipCacheHits", static_cast<double>(summary.clipCacheHits), "count");
+	AddOrReplaceMetric(module, "Animation.ClipCacheMisses", static_cast<double>(summary.clipCacheMisses), "count");
+	AddOrReplaceMetric(module, "Animation.ResidencyHits", static_cast<double>(summary.residencyHits), "count");
+	AddOrReplaceMetric(module, "Animation.ResidencyMisses", static_cast<double>(summary.residencyMisses), "count");
+}
+
+// MaterializeProfilerAnimationPresentationMetrics removes any legacy duplicate
+// records and recreates public aliases from the authoritative compact facts.
+// It intentionally runs after a copy leaves the protected recording boundary.
+void MaterializeProfilerAnimationPresentationMetricsImpl(ProfilerFrameRecord& frame)
+{
+	if (!frame.animationDiagnostics.has_value() && !frame.animationTelemetry)
 	{
 		return;
 	}
@@ -1535,13 +1101,20 @@ void MaterializeAnimationDiagnosticsMetrics(ProfilerFrameRecord& frame)
 			continue;
 		}
 
-		std::erase_if(module.metrics, [](const ProfilerMetric& metric) {
-			return IsPublicAnimationDiagnosticsMetric(metric.name);
-		});
-		const ProfilerAnimationDiagnosticsFacts& facts = *frame.animationDiagnostics;
-		AddOrReplaceMetric(module, "Animation.SchedulerMembershipChecks", static_cast<double>(facts.schedulerMembershipChecks), "count");
-		AddOrReplaceMetric(module, "Animation.Dormant", facts.dormant ? 1.0 : 0.0, "boolean");
-		AddOrReplaceMetric(module, "Animation.BaselineIdentityMatched", facts.baselineIdentityMatched ? 1.0 : 0.0, "boolean");
+		if (frame.animationDiagnostics.has_value())
+		{
+			std::erase_if(module.metrics, [](const ProfilerMetric& metric) {
+				return IsPublicAnimationDiagnosticsMetric(metric.name);
+			});
+			const ProfilerAnimationDiagnosticsFacts& facts = *frame.animationDiagnostics;
+			AddOrReplaceMetric(module, "Animation.SchedulerMembershipChecks", static_cast<double>(facts.schedulerMembershipChecks), "count");
+			AddOrReplaceMetric(module, "Animation.Dormant", facts.dormant ? 1.0 : 0.0, "boolean");
+			AddOrReplaceMetric(module, "Animation.BaselineIdentityMatched", facts.baselineIdentityMatched ? 1.0 : 0.0, "boolean");
+		}
+		if (frame.animationTelemetry)
+		{
+			AddAnimationTelemetryMetrics(module, frame.animationTelemetry->summary);
+		}
 		return;
 	}
 }
@@ -1567,10 +1140,10 @@ std::uint32_t Fnv1a32(const std::string& value)
 	return hash;
 }
 
-class V2StringTable final
+class JournalStringTable final
 {
 public:
-	V2StringTable()
+	JournalStringTable()
 	{
 		Intern({});
 	}
@@ -1595,28 +1168,39 @@ private:
 	std::vector<std::string> values;
 };
 
-void CollectDuration(V2StringTable& table, const TelemetryDuration& duration)
+void CollectDuration(JournalStringTable& table, const TelemetryDuration& duration)
 {
 	table.Intern(duration.unavailableReason);
 }
 
-void CollectFrameStrings(V2StringTable& table, const ProfilerFrameRecord& frame)
+bool KeepOptionalJournalData(
+	const ProfilerFrameRecord& frame,
+	const ProfilerCaptureSettings& settings);
+
+void CollectFrameStrings(
+	JournalStringTable& table,
+	const ProfilerFrameRecord& frame,
+	const ProfilerCaptureSettings& settings)
 {
+	const bool includeOptional = KeepOptionalJournalData(frame, settings);
 	for (const ProfilerTimingStreamSample& stream : frame.timingStreams)
 	{
 		table.Intern(stream.id); table.Intern(stream.label); table.Intern(stream.statusReason);
 	}
-	for (const ProfilerModuleSummary& module : frame.moduleSummaries)
+	if (includeOptional)
 	{
-		for (const ProfilerMetric& metric : module.metrics)
+		for (const ProfilerModuleSummary& module : frame.moduleSummaries)
 		{
-			// Typed facts replace these public metric records in a V2 payload, so
-			// their strings do not belong in the artifact string table either.
-			if (frame.animationDiagnostics.has_value() && IsPublicAnimationDiagnosticsMetric(metric.name))
+			for (const ProfilerMetric& metric : module.metrics)
 			{
-				continue;
+				// Typed facts replace these public metric records in a journal payload, so
+				// their strings do not belong in the artifact string table either.
+				if (frame.animationDiagnostics.has_value() && IsPublicAnimationDiagnosticsMetric(metric.name))
+				{
+					continue;
+				}
+				table.Intern(metric.name); table.Intern(metric.unit);
 			}
-			table.Intern(metric.name); table.Intern(metric.unit);
 		}
 	}
 	for (const ProfilerSample& sample : frame.samples)
@@ -1649,7 +1233,7 @@ void CollectFrameStrings(V2StringTable& table, const ProfilerFrameRecord& frame)
 	}
 }
 
-nlohmann::json PackDuration(const TelemetryDuration& duration, V2StringTable& table)
+nlohmann::json PackDuration(const TelemetryDuration& duration, JournalStringTable& table)
 {
 	return nlohmann::json::array({
 		static_cast<std::uint8_t>(duration.availability), duration.nanoseconds, table.Intern(duration.unavailableReason)});
@@ -1659,13 +1243,13 @@ bool UnpackDuration(const nlohmann::json& json, const std::vector<std::string>& 
 {
 	if (!json.is_array() || json.size() != 3u || !json[0].is_number_unsigned() || !json[1].is_number_unsigned() || !json[2].is_number_unsigned())
 	{
-		error = "Profiler v2 contains a malformed duration.";
+		error = "Profiler journal V1 frame contains a malformed duration.";
 		return false;
 	}
 	const std::size_t reasonIndex = json[2].get<std::size_t>();
 	if (reasonIndex >= strings.size())
 	{
-		error = "Profiler v2 duration references an out-of-range string.";
+		error = "Profiler journal V1 frame duration references an out-of-range string.";
 		return false;
 	}
 	out.availability = static_cast<TelemetryAvailability>(json[0].get<std::uint8_t>());
@@ -1673,7 +1257,7 @@ bool UnpackDuration(const nlohmann::json& json, const std::vector<std::string>& 
 	out.unavailableReason = strings[reasonIndex];
 	if (!ValidateTelemetryDuration(out).valid)
 	{
-		error = "Profiler v2 contains an invalid duration.";
+		error = "Profiler journal V1 frame contains an invalid duration.";
 		return false;
 	}
 	return true;
@@ -1683,19 +1267,19 @@ const std::string* StringAt(const std::vector<std::string>& strings, const nlohm
 {
 	if (!index.is_number_unsigned())
 	{
-		error = "Profiler v2 contains a non-numeric string index.";
+		error = "Profiler journal V1 frame contains a non-numeric string index.";
 		return nullptr;
 	}
 	const std::size_t value = index.get<std::size_t>();
 	if (value >= strings.size())
 	{
-		error = "Profiler v2 contains an out-of-range string index.";
+		error = "Profiler journal V1 frame contains an out-of-range string index.";
 		return nullptr;
 	}
 	return &strings[value];
 }
 
-bool KeepOptionalV2Data(const ProfilerFrameRecord& frame, const ProfilerCaptureSettings& settings)
+bool KeepOptionalJournalData(const ProfilerFrameRecord& frame, const ProfilerCaptureSettings& settings)
 {
 	if (settings.detailLevel == ProfilerCaptureDetailLevel::Detailed)
 	{
@@ -1708,7 +1292,7 @@ bool KeepOptionalV2Data(const ProfilerFrameRecord& frame, const ProfilerCaptureS
 	return false;
 }
 
-nlohmann::json PackAnimationTelemetryV2(
+nlohmann::json PackAnimationTelemetryForJournal(
 	const ProfilerAnimationFrameTelemetry& telemetry,
 	bool includeDetails)
 {
@@ -1754,7 +1338,7 @@ nlohmann::json PackAnimationTelemetryV2(
 	return result;
 }
 
-bool UnpackAnimationTelemetryV2(
+bool UnpackAnimationTelemetryForJournal(
 	const nlohmann::json& json,
 	ProfilerAnimationFrameTelemetry& out,
 	std::string& error)
@@ -1765,14 +1349,14 @@ bool UnpackAnimationTelemetryV2(
 		|| !json.contains("s") || !json.at("s").is_array()
 		|| json.at("s").size() != kProfilerAnimationStageCount)
 	{
-		error = "Profiler v2 has malformed animation telemetry.";
+		error = "Profiler journal V1 frame has malformed animation telemetry.";
 		return false;
 	}
 	for (const nlohmann::json& value : json.at("c"))
 	{
 		if (!value.is_number_unsigned())
 		{
-			error = "Profiler v2 animation telemetry has a non-unsigned counter.";
+			error = "Profiler journal V1 frame animation telemetry has a non-unsigned counter.";
 			return false;
 		}
 	}
@@ -1806,7 +1390,7 @@ bool UnpackAnimationTelemetryV2(
 		if (!stage.is_array() || stage.size() != 3U || !stage.at(0).is_number_unsigned()
 			|| !stage.at(1).is_boolean() || !stage.at(2).is_boolean())
 		{
-			error = "Profiler v2 has malformed animation stage timing.";
+			error = "Profiler journal V1 frame has malformed animation stage timing.";
 			return false;
 		}
 		summary.stageTimings[stageIndex] = ProfilerAnimationStageTiming{
@@ -1817,7 +1401,7 @@ bool UnpackAnimationTelemetryV2(
 	{
 		if (!details->is_array() || details->size() > kMaximumProfilerAnimationDetailRecordsPerFrame)
 		{
-			error = "Profiler v2 animation detail exceeds its bounded schema.";
+			error = "Profiler journal V1 frame animation detail exceeds its bounded schema.";
 			return false;
 		}
 		out.details.reserve(details->size());
@@ -1830,7 +1414,7 @@ bool UnpackAnimationTelemetryV2(
 				|| !value.at(6).is_number_unsigned() || !value.at(7).is_number_unsigned()
 				|| !value.at(8).is_boolean())
 			{
-				error = "Profiler v2 has malformed animation detail.";
+				error = "Profiler journal V1 frame has malformed animation detail.";
 				return false;
 			}
 			out.details.push_back(ProfilerAnimationDetailRecord{
@@ -1843,13 +1427,13 @@ bool UnpackAnimationTelemetryV2(
 	}
 	if (!ValidateProfilerAnimationFrameTelemetry(out))
 	{
-		error = "Profiler v2 contains invalid animation telemetry.";
+		error = "Profiler journal V1 frame contains invalid animation telemetry.";
 		return false;
 	}
 	return true;
 }
 
-nlohmann::json PackAnimationOptimizationV2(
+nlohmann::json PackAnimationOptimizationForJournal(
 	const ProfilerAnimationOptimizationEvidence& evidence)
 {
 	nlohmann::json result = nlohmann::json::array({
@@ -1874,7 +1458,7 @@ nlohmann::json PackAnimationOptimizationV2(
 	return result;
 }
 
-bool UnpackAnimationOptimizationV2(
+bool UnpackAnimationOptimizationForJournal(
 	const nlohmann::json& json,
 	ProfilerAnimationOptimizationEvidence& out,
 	std::string& error)
@@ -1885,14 +1469,14 @@ bool UnpackAnimationOptimizationV2(
 		+ ProfilerAnimationOptimizationEvidence::kTimingCount + 1U;
 	if (!json.is_array() || json.size() != kValueCount || !json.back().is_boolean())
 	{
-		error = "Profiler v2 has malformed animation optimization evidence.";
+		error = "Profiler journal V1 frame has malformed animation optimization evidence.";
 		return false;
 	}
 	for (std::size_t index = 0U; index + 1U < json.size(); ++index)
 	{
 		if (!json.at(index).is_number_unsigned())
 		{
-			error = "Profiler v2 animation optimization evidence has a non-unsigned value.";
+			error = "Profiler journal V1 frame animation optimization evidence has a non-unsigned value.";
 			return false;
 		}
 	}
@@ -1931,13 +1515,13 @@ bool UnpackAnimationOptimizationV2(
 	out.valid = json.at(index).get<bool>();
 	if (!ValidateProfilerAnimationOptimizationEvidence(out))
 	{
-		error = "Profiler v2 contains inconsistent animation optimization evidence.";
+		error = "Profiler journal V1 frame contains inconsistent animation optimization evidence.";
 		return false;
 	}
 	return true;
 }
 
-nlohmann::json PackRenderOptimizationV2(const ProfilerRenderOptimizationEvidence& evidence)
+nlohmann::json PackRenderOptimizationForJournal(const ProfilerRenderOptimizationEvidence& evidence)
 {
 	nlohmann::json result = nlohmann::json::array();
 	for (const ProfilerRenderOptimizationViewSummary& view : evidence.views)
@@ -1958,14 +1542,14 @@ nlohmann::json PackRenderOptimizationV2(const ProfilerRenderOptimizationEvidence
 	return result;
 }
 
-bool UnpackRenderOptimizationV2(
+bool UnpackRenderOptimizationForJournal(
 	const nlohmann::json& json,
 	ProfilerRenderOptimizationEvidence& out,
 	std::string& error)
 {
 	if (!json.is_array() || json.size() != out.views.size())
 	{
-		error = "Profiler v2 has malformed renderer optimization evidence.";
+		error = "Profiler journal V1 frame has malformed renderer optimization evidence.";
 		return false;
 	}
 	for (std::size_t viewIndex = 0U; viewIndex < out.views.size(); ++viewIndex)
@@ -1975,14 +1559,14 @@ bool UnpackRenderOptimizationV2(
 		if (!values.is_array() || (values.size() != 24U && !hasTimings)
 			|| !values.back().is_boolean())
 		{
-			error = "Profiler v2 has malformed renderer optimization view evidence.";
+			error = "Profiler journal V1 frame has malformed renderer optimization view evidence.";
 			return false;
 		}
 		for (std::size_t index = 0U; index + 1U < values.size(); ++index)
 		{
 			if (!values.at(index).is_number_unsigned())
 			{
-				error = "Profiler v2 renderer optimization evidence has a non-unsigned value.";
+				error = "Profiler journal V1 frame renderer optimization evidence has a non-unsigned value.";
 				return false;
 			}
 		}
@@ -2024,13 +1608,17 @@ bool UnpackRenderOptimizationV2(
 	}
 	if (!ValidateProfilerRenderOptimizationEvidence(out))
 	{
-		error = "Profiler v2 contains inconsistent renderer optimization evidence.";
+		error = "Profiler journal V1 frame contains inconsistent renderer optimization evidence.";
 		return false;
 	}
 	return true;
 }
 
-nlohmann::json PackFrameV2(const ProfilerFrameRecord& frame, const ProfilerCaptureSettings& settings, V2StringTable& table)
+nlohmann::json PackJournalFrame(
+	const ProfilerFrameRecord& frame,
+	const ProfilerCaptureSettings& settings,
+	JournalStringTable& table,
+	bool includeSampleHierarchy)
 {
 	nlohmann::json result = {
 		{"i", frame.frameIndex}, {"s", ToNanoseconds(frame.frameStartMs)},
@@ -2043,24 +1631,24 @@ nlohmann::json PackFrameV2(const ProfilerFrameRecord& frame, const ProfilerCaptu
 		const ProfilerAnimationDiagnosticsFacts& facts = *frame.animationDiagnostics;
 		result["x"] = nlohmann::json::array({facts.schedulerMembershipChecks, facts.dormant, facts.baselineIdentityMatched});
 	}
-	const bool includeOptional = KeepOptionalV2Data(frame, settings);
+	const bool includeOptional = KeepOptionalJournalData(frame, settings);
 	if (frame.animationTelemetry)
 	{
 		// Aggregate counters and stage availability are critical every-frame proof;
 		// only the bounded per-instance rows follow the optional detail policy.
-		result["y"] = PackAnimationTelemetryV2(*frame.animationTelemetry, includeOptional);
+		result["y"] = PackAnimationTelemetryForJournal(*frame.animationTelemetry, includeOptional);
 	}
 	if (frame.animationOptimization.has_value())
 	{
 		// Compact/complete conservation is aggregate evidence and therefore remains
 		// available even when a sampled capture omits per-instance detail rows.
-		result["n"] = PackAnimationOptimizationV2(*frame.animationOptimization);
+		result["n"] = PackAnimationOptimizationForJournal(*frame.animationOptimization);
 	}
 	if (frame.renderOptimization.has_value())
 	{
 		// Aggregate renderer evidence is small and required on every detail level;
 		// optional per-group rows remain outside this fixed capture contract.
-		result["o"] = PackRenderOptimizationV2(*frame.renderOptimization);
+		result["o"] = PackRenderOptimizationForJournal(*frame.renderOptimization);
 	}
 	if (frame.framePublication.has_value())
 	{
@@ -2082,12 +1670,16 @@ nlohmann::json PackFrameV2(const ProfilerFrameRecord& frame, const ProfilerCaptu
 			static_cast<std::uint8_t>(stream.scope), static_cast<std::uint8_t>(stream.source),
 			static_cast<std::uint8_t>(stream.status), ToNanoseconds(stream.milliseconds), table.Intern(stream.statusReason)}));
 	}
-	if (includeOptional)
+	// Module identity, availability, and total time are compact frame-root
+	// evidence. Keep them at every level so Terminal's incremental subsystem
+	// summary can be verified after reopening an aggregate capture; only the
+	// string-heavy presentation metrics follow the optional policy.
+	result["m"] = nlohmann::json::array();
+	for (const ProfilerModuleSummary& module : frame.moduleSummaries)
 	{
-		result["m"] = nlohmann::json::array();
-		for (const ProfilerModuleSummary& module : frame.moduleSummaries)
+		nlohmann::json metrics = nlohmann::json::array();
+		if (includeOptional)
 		{
-			nlohmann::json metrics = nlohmann::json::array();
 			for (const ProfilerMetric& metric : module.metrics)
 			{
 				// The compact typed field above is authoritative whenever it exists.
@@ -2098,13 +1690,13 @@ nlohmann::json PackFrameV2(const ProfilerFrameRecord& frame, const ProfilerCaptu
 				}
 				metrics.push_back(nlohmann::json::array({table.Intern(metric.name), metric.value, table.Intern(metric.unit)}));
 			}
-			result["m"].push_back(nlohmann::json::array({static_cast<std::uint8_t>(module.moduleId), module.available, ToNanoseconds(module.totalMs), metrics}));
 		}
+		result["m"].push_back(nlohmann::json::array({static_cast<std::uint8_t>(module.moduleId), module.available, ToNanoseconds(module.totalMs), metrics}));
 	}
 	const bool hasAggregateRoot = std::any_of(frame.samples.begin(), frame.samples.end(), [](const ProfilerSample& sample) {
 		return sample.retainInAggregate;
 	});
-	if (includeOptional || hasAggregateRoot)
+	if (includeSampleHierarchy && (includeOptional || hasAggregateRoot))
 	{
 		// Optional scopes follow the detail policy, while the single fixed
 		// aggregate root is allowed through on otherwise compact frames.
@@ -2174,18 +1766,18 @@ bool ReadArray(const nlohmann::json& parent, const char* name, std::size_t minim
 	const auto found = parent.find(name);
 	if (found == parent.end() || !found->is_array() || found->size() < minimum)
 	{
-		error = std::string("Profiler v2 contains a malformed '") + name + "' field.";
+		error = std::string("Profiler journal V1 frame contains a malformed '") + name + "' field.";
 		return false;
 	}
 	result = &*found;
 	return true;
 }
 
-bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& strings, ProfilerFrameRecord& out, std::string& error)
+bool UnpackJournalFrame(const nlohmann::json& json, const std::vector<std::string>& strings, ProfilerFrameRecord& out, std::string& error)
 {
 	if (!json.is_object() || !json.contains("i") || !json.contains("s") || !json.contains("d") || !json.contains("c"))
 	{
-		error = "Profiler v2 contains a malformed frame.";
+		error = "Profiler journal V1 frame contains a malformed frame.";
 		return false;
 	}
 	try
@@ -2197,11 +1789,11 @@ bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& s
 		if (const auto it = json.find("x"); it != json.end())
 		{
 			// Reject malformed typed facts before exposing a partially reconstructed
-			// frame. Older V2 captures simply omit this optional additive field.
+			// frame. Optional journal evidence can omit this additive field.
 			if (!it->is_array() || it->size() != 3u || !(*it)[0].is_number_unsigned()
 				|| !(*it)[1].is_boolean() || !(*it)[2].is_boolean())
 			{
-				error = "Profiler v2 has malformed compact animation diagnostics.";
+				error = "Profiler journal V1 frame has malformed compact animation diagnostics.";
 				return false;
 			}
 			out.animationDiagnostics = ProfilerAnimationDiagnosticsFacts{
@@ -2210,7 +1802,7 @@ bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& s
 		if (const auto it = json.find("y"); it != json.end())
 		{
 			ProfilerAnimationFrameTelemetry telemetry;
-			if (!UnpackAnimationTelemetryV2(*it, telemetry, error))
+			if (!UnpackAnimationTelemetryForJournal(*it, telemetry, error))
 			{
 				return false;
 			}
@@ -2220,7 +1812,7 @@ bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& s
 				|| out.animationDiagnostics->dormant
 				|| out.animationDiagnostics->schedulerMembershipChecks != telemetry.summary.schedulerMembershipChecks)
 			{
-				error = "Profiler v2 animation telemetry conflicts with compact diagnostics.";
+				error = "Profiler journal V1 frame animation telemetry conflicts with compact diagnostics.";
 				return false;
 			}
 			out.animationTelemetry =
@@ -2229,7 +1821,7 @@ bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& s
 		if (const auto it = json.find("n"); it != json.end())
 		{
 			ProfilerAnimationOptimizationEvidence evidence;
-			if (!UnpackAnimationOptimizationV2(*it, evidence, error))
+			if (!UnpackAnimationOptimizationForJournal(*it, evidence, error))
 			{
 				return false;
 			}
@@ -2238,7 +1830,7 @@ bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& s
 		if (const auto it = json.find("o"); it != json.end())
 		{
 			ProfilerRenderOptimizationEvidence evidence;
-			if (!UnpackRenderOptimizationV2(*it, evidence, error))
+			if (!UnpackRenderOptimizationForJournal(*it, evidence, error))
 			{
 				return false;
 			}
@@ -2248,7 +1840,7 @@ bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& s
 		{
 			if (!it->is_array() || it->size() != 22u || !(*it)[21].is_array() || (*it)[21].size() != 8u)
 			{
-				error = "Profiler v2 has malformed frame-publication evidence.";
+				error = "Profiler journal V1 frame has malformed frame-publication evidence.";
 				return false;
 			}
 			ProfilerFramePublicationEvidence e;
@@ -2264,12 +1856,12 @@ bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& s
 			e.viewSelectionReuseCount=(*it)[18].get<std::uint32_t>(); e.viewSelectionRebuildCount=(*it)[19].get<std::uint32_t>();
 			e.viewCount=(*it)[20].get<std::uint32_t>();
 			for (std::size_t index=0; index<8; ++index) e.disjointTimingNanoseconds[index]=(*it)[21][index].get<std::uint64_t>();
-			if (!ValidateProfilerFramePublicationEvidence(e)) { error="Profiler v2 contains invalid frame-publication evidence."; return false; }
+			if (!ValidateProfilerFramePublicationEvidence(e)) { error="Profiler journal V1 frame contains invalid frame-publication evidence."; return false; }
 			out.framePublication=std::move(e);
 		}
 		if (const auto it = json.find("t"); it != json.end()) for (const auto& value : *it)
 		{
-			if (!value.is_array() || value.size() != 7u) { error = "Profiler v2 has malformed timing data."; return false; }
+			if (!value.is_array() || value.size() != 7u) { error = "Profiler journal V1 frame has malformed timing data."; return false; }
 			const std::string* id = StringAt(strings, value[0], error); const std::string* label = StringAt(strings, value[1], error); const std::string* reason = StringAt(strings, value[6], error);
 			if (!id || !label || !reason) return false;
 			ProfilerTimingStreamSample stream{*id, *label, static_cast<ProfilerTimingStreamScope>(value[2].get<std::uint8_t>()), static_cast<ProfilerTimingStreamSource>(value[3].get<std::uint8_t>()), static_cast<ProfilerTimingStreamStatus>(value[4].get<std::uint8_t>()), ToMilliseconds(value[5].get<std::uint64_t>()), *reason};
@@ -2277,14 +1869,14 @@ bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& s
 		}
 		if (const auto it = json.find("m"); it != json.end()) for (const auto& value : *it)
 		{
-			if (!value.is_array() || value.size() != 4u || !value[3].is_array()) { error = "Profiler v2 has malformed module data."; return false; }
+			if (!value.is_array() || value.size() != 4u || !value[3].is_array()) { error = "Profiler journal V1 frame has malformed module data."; return false; }
 			ProfilerModuleSummary module{static_cast<ProfilerModuleId>(value[0].get<std::uint8_t>()), value[1].get<bool>(), ToMilliseconds(value[2].get<std::uint64_t>()), {}};
-			for (const auto& metric : value[3]) { if (!metric.is_array() || metric.size() != 3u) { error = "Profiler v2 has malformed metric data."; return false; } const std::string* name = StringAt(strings, metric[0], error); const std::string* unit = StringAt(strings, metric[2], error); if (!name || !unit) return false; module.metrics.push_back({*name, metric[1].get<double>(), *unit}); }
+			for (const auto& metric : value[3]) { if (!metric.is_array() || metric.size() != 3u) { error = "Profiler journal V1 frame has malformed metric data."; return false; } const std::string* name = StringAt(strings, metric[0], error); const std::string* unit = StringAt(strings, metric[2], error); if (!name || !unit) return false; module.metrics.push_back({*name, metric[1].get<double>(), *unit}); }
 			out.moduleSummaries.push_back(std::move(module));
 		}
 		if (const auto it = json.find("a"); it != json.end()) for (const auto& value : *it)
 		{
-			if (!value.is_array() || (value.size() != 11u && value.size() != 12u)) { error = "Profiler v2 has malformed sample data."; return false; }
+			if (!value.is_array() || (value.size() != 11u && value.size() != 12u)) { error = "Profiler journal V1 frame has malformed sample data."; return false; }
 			const std::string* name = StringAt(strings, value[3], error); const std::string* thread = StringAt(strings, value[4], error); const std::string* task = StringAt(strings, value[5], error); if (!name || !thread || !task) return false;
 			ProfilerSample sample{value[0].get<std::uint64_t>(), value[1].get<std::uint64_t>(), static_cast<ProfilerModuleId>(value[2].get<std::uint8_t>()), *name, *thread, *task, ToMilliseconds(value[6].get<std::uint64_t>()), ToMilliseconds(value[7].get<std::uint64_t>()), value[8].get<std::uint32_t>(), value[9].get<std::uint32_t>(), value[10].get<bool>()};
 			// Eleven-field records predate the aggregate frame root and therefore
@@ -2294,29 +1886,29 @@ bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& s
 		}
 		if (const auto it = json.find("p"); it != json.end())
 		{
-			if (!it->is_array() || it->size() != 20u) { error = "Profiler v2 has malformed physics counters."; return false; }
+			if (!it->is_array() || it->size() != 20u) { error = "Profiler journal V1 frame has malformed physics counters."; return false; }
 			ProfilerPhysicsFrameCounters physics;
 			physics.tick = (*it)[0].get<std::uint64_t>(); physics.bodyCount = (*it)[1].get<std::uint64_t>(); physics.contactCount = (*it)[2].get<std::uint64_t>(); physics.queryCount = (*it)[3].get<std::uint64_t>(); physics.eventCount = (*it)[4].get<std::uint64_t>(); physics.rejectedCount = (*it)[5].get<std::uint64_t>(); physics.staleCount = (*it)[6].get<std::uint64_t>(); physics.commandQueueDepth = (*it)[7].get<std::uint64_t>(); physics.shapeCacheBytes = (*it)[8].get<std::uint64_t>(); physics.shapeCacheHits = (*it)[9].get<std::uint64_t>(); physics.shapeCacheMisses = (*it)[10].get<std::uint64_t>(); physics.snapshotBytes = (*it)[11].get<std::uint64_t>(); physics.snapshotHighWaterBytes = (*it)[12].get<std::uint64_t>(); physics.providerAllocations = (*it)[13].get<std::uint64_t>(); physics.providerAllocationHighWater = (*it)[14].get<std::uint64_t>(); physics.prepareMs = ToMilliseconds((*it)[15].get<std::uint64_t>()); physics.commitMs = ToMilliseconds((*it)[16].get<std::uint64_t>()); physics.simulateMs = ToMilliseconds((*it)[17].get<std::uint64_t>()); physics.queryMs = ToMilliseconds((*it)[18].get<std::uint64_t>()); physics.publishMs = ToMilliseconds((*it)[19].get<std::uint64_t>()); out.physics = physics;
 		}
 		if (const auto it = json.find("g"); it != json.end()) for (const auto& value : *it)
 		{
-			if (!value.is_array() || value.size() != 6u) { error = "Profiler v2 has malformed stage data."; return false; } const std::string* name = StringAt(strings, value[1], error); const std::string* workload = StringAt(strings, value[3], error); if (!name || !workload) return false; PerformanceStageRecord stage; stage.domain = static_cast<PerformanceStageDomain>(value[0].get<std::uint8_t>()); stage.stageName = *name; stage.workloadName = *workload; stage.workItemCount = value[4].get<std::uint64_t>(); stage.sampled = value[5].get<bool>(); if (!UnpackDuration(value[2], strings, stage.duration, error) || !ValidatePerformanceStageRecord(stage).valid) return false; out.performanceStages.push_back(std::move(stage));
+			if (!value.is_array() || value.size() != 6u) { error = "Profiler journal V1 frame has malformed stage data."; return false; } const std::string* name = StringAt(strings, value[1], error); const std::string* workload = StringAt(strings, value[3], error); if (!name || !workload) return false; PerformanceStageRecord stage; stage.domain = static_cast<PerformanceStageDomain>(value[0].get<std::uint8_t>()); stage.stageName = *name; stage.workloadName = *workload; stage.workItemCount = value[4].get<std::uint64_t>(); stage.sampled = value[5].get<bool>(); if (!UnpackDuration(value[2], strings, stage.duration, error) || !ValidatePerformanceStageRecord(stage).valid) return false; out.performanceStages.push_back(std::move(stage));
 		}
 		if (const auto it = json.find("b"); it != json.end()) for (const auto& value : *it)
 		{
-			if (!value.is_array() || value.size() != 6u) { error = "Profiler v2 has malformed protected-boundary data."; return false; } const std::string* name = StringAt(strings, value[0], error); if (!name) return false; ProtectedBoundaryRecord boundary; boundary.boundaryName = *name; if (!UnpackDuration(value[1], strings, boundary.queueDuration, error) || !UnpackDuration(value[2], strings, boundary.ownershipWaitDuration, error) || !UnpackDuration(value[3], strings, boundary.executionDuration, error) || !UnpackDuration(value[4], strings, boundary.flushDuration, error) || !UnpackDuration(value[5], strings, boundary.publicationDuration, error) || !ValidateProtectedBoundaryRecord(boundary).valid) return false; out.protectedBoundaries.push_back(std::move(boundary));
+			if (!value.is_array() || value.size() != 6u) { error = "Profiler journal V1 frame has malformed protected-boundary data."; return false; } const std::string* name = StringAt(strings, value[0], error); if (!name) return false; ProtectedBoundaryRecord boundary; boundary.boundaryName = *name; if (!UnpackDuration(value[1], strings, boundary.queueDuration, error) || !UnpackDuration(value[2], strings, boundary.ownershipWaitDuration, error) || !UnpackDuration(value[3], strings, boundary.executionDuration, error) || !UnpackDuration(value[4], strings, boundary.flushDuration, error) || !UnpackDuration(value[5], strings, boundary.publicationDuration, error) || !ValidateProtectedBoundaryRecord(boundary).valid) return false; out.protectedBoundaries.push_back(std::move(boundary));
 		}
 		if (const auto it = json.find("w"); it != json.end()) for (const auto& value : *it)
 		{
-			if (!value.is_array() || value.size() != 7u) { error = "Profiler v2 has malformed worker telemetry."; return false; } WorkerTelemetryRecord worker; worker.workerId = value[0].get<std::uint32_t>(); worker.queueDepth = value[1].get<std::uint64_t>(); worker.dispatchCount = value[2].get<std::uint64_t>(); worker.usefulWorkItemCount = value[3].get<std::uint64_t>(); if (!UnpackDuration(value[4], strings, worker.runDuration, error) || !UnpackDuration(value[5], strings, worker.waitDuration, error) || !UnpackDuration(value[6], strings, worker.idleDuration, error) || !ValidateWorkerTelemetryRecord(worker).valid) return false; out.workerTelemetry.push_back(std::move(worker));
+			if (!value.is_array() || value.size() != 7u) { error = "Profiler journal V1 frame has malformed worker telemetry."; return false; } WorkerTelemetryRecord worker; worker.workerId = value[0].get<std::uint32_t>(); worker.queueDepth = value[1].get<std::uint64_t>(); worker.dispatchCount = value[2].get<std::uint64_t>(); worker.usefulWorkItemCount = value[3].get<std::uint64_t>(); if (!UnpackDuration(value[4], strings, worker.runDuration, error) || !UnpackDuration(value[5], strings, worker.waitDuration, error) || !UnpackDuration(value[6], strings, worker.idleDuration, error) || !ValidateWorkerTelemetryRecord(worker).valid) return false; out.workerTelemetry.push_back(std::move(worker));
 		}
 		if (const auto it = json.find("q"); it != json.end()) for (const auto& value : *it)
 		{
-			if (!value.is_array() || value.size() != 3u) { error = "Profiler v2 has malformed presentation wait data."; return false; } const std::string* detail = StringAt(strings, value[2], error); if (!detail) return false; PresentationWaitRecord wait; wait.kind = static_cast<PresentationWaitKind>(value[0].get<std::uint8_t>()); wait.detail = *detail; if (!UnpackDuration(value[1], strings, wait.duration, error) || !ValidatePresentationWaitRecord(wait).valid) return false; out.presentationWaits.push_back(std::move(wait));
+			if (!value.is_array() || value.size() != 3u) { error = "Profiler journal V1 frame has malformed presentation wait data."; return false; } const std::string* detail = StringAt(strings, value[2], error); if (!detail) return false; PresentationWaitRecord wait; wait.kind = static_cast<PresentationWaitKind>(value[0].get<std::uint8_t>()); wait.detail = *detail; if (!UnpackDuration(value[1], strings, wait.duration, error) || !ValidatePresentationWaitRecord(wait).valid) return false; out.presentationWaits.push_back(std::move(wait));
 		}
-		if (const auto it = json.find("r"); it != json.end()) { if (!it->is_array() || it->size() != 4u) { error = "Profiler v2 has malformed responsiveness data."; return false; } FrameResponsivenessRecord record; record.frameIndex = (*it)[0].get<std::uint64_t>(); record.presentationSequence = (*it)[3].get<std::uint64_t>(); if (!UnpackDuration((*it)[1], strings, record.inputToPresentationDuration, error) || !UnpackDuration((*it)[2], strings, record.frameDuration, error) || !ValidateFrameResponsivenessRecord(record).valid) return false; out.responsiveness = std::move(record); }
-		if (const auto it = json.find("v"); it != json.end()) { if (!it->is_array() || it->size() != 8u) { error = "Profiler v2 has malformed physics-volume data."; return false; } PhysicsWorkVolumeRecord volume{(*it)[0].get<std::uint64_t>(), (*it)[1].get<std::uint64_t>(), (*it)[2].get<std::uint64_t>(), (*it)[3].get<std::uint64_t>(), (*it)[4].get<std::uint64_t>(), (*it)[5].get<std::uint64_t>(), (*it)[6].get<std::uint64_t>(), (*it)[7].get<std::uint64_t>()}; if (!ValidatePhysicsWorkVolumeRecord(volume).valid) { error = "Profiler v2 has invalid physics-volume data."; return false; } out.physicsWorkVolume = volume; }
-		MaterializeAnimationDiagnosticsMetrics(out);
+		if (const auto it = json.find("r"); it != json.end()) { if (!it->is_array() || it->size() != 4u) { error = "Profiler journal V1 frame has malformed responsiveness data."; return false; } FrameResponsivenessRecord record; record.frameIndex = (*it)[0].get<std::uint64_t>(); record.presentationSequence = (*it)[3].get<std::uint64_t>(); if (!UnpackDuration((*it)[1], strings, record.inputToPresentationDuration, error) || !UnpackDuration((*it)[2], strings, record.frameDuration, error) || !ValidateFrameResponsivenessRecord(record).valid) return false; out.responsiveness = std::move(record); }
+		if (const auto it = json.find("v"); it != json.end()) { if (!it->is_array() || it->size() != 8u) { error = "Profiler journal V1 frame has malformed physics-volume data."; return false; } PhysicsWorkVolumeRecord volume{(*it)[0].get<std::uint64_t>(), (*it)[1].get<std::uint64_t>(), (*it)[2].get<std::uint64_t>(), (*it)[3].get<std::uint64_t>(), (*it)[4].get<std::uint64_t>(), (*it)[5].get<std::uint64_t>(), (*it)[6].get<std::uint64_t>(), (*it)[7].get<std::uint64_t>()}; if (!ValidatePhysicsWorkVolumeRecord(volume).valid) { error = "Profiler journal V1 frame has invalid physics-volume data."; return false; } out.physicsWorkVolume = volume; }
+		MaterializeProfilerAnimationPresentationMetricsImpl(out);
 		return true;
 	}
 	catch (const nlohmann::json::exception& exception)
@@ -2326,135 +1918,77 @@ bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& s
 	}
 }
 
-bool ReplaceV2Atomically(const std::filesystem::path& temporary, const std::filesystem::path& destination, std::string& error)
+bool EncodeProfilerJournalFrameImpl(
+	const ProfilerFrameRecord& frame,
+	const ProfilerCaptureSettings& settings,
+	std::string& outPayload,
+	std::string& outError)
 {
-#ifdef _WIN32
-	if (!MoveFileExW(temporary.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-	{
-		error = "Failed to atomically replace profiler capture output (Win32 error " + std::to_string(GetLastError()) + ").";
-		return false;
-	}
-#else
-	std::error_code renameError;
-	std::filesystem::rename(temporary, destination, renameError);
-	if (renameError)
-	{
-		error = renameError.message();
-		return false;
-	}
-#endif
-	return true;
-}
-}
-
-// The compact codec body is private to the version dispatcher. Public v2
-// entry points live in ProfilerCaptureV2.cpp, keeping the versioned module's
-// ABI and implementation boundary explicit for callers and build tooling.
-bool SaveProfilerCaptureV2Impl(const ProfilerCaptureDocument& inputDocument, const std::filesystem::path& path, std::string& outError)
-{
+	constexpr std::array<char, 4u> kFrameMagic = {'F', 'R', 'M', '1'};
+	const auto appendU32 = [](std::string& output, std::uint32_t value) {
+		for (std::size_t index = 0u; index < sizeof(value); ++index)
+		{
+			output.push_back(static_cast<char>((value >> (index * 8u)) & 0xffu));
+		}
+	};
+	const auto appendU64 = [](std::string& output, std::uint64_t value) {
+		for (std::size_t index = 0u; index < sizeof(value); ++index)
+		{
+			output.push_back(static_cast<char>((value >> (index * 8u)) & 0xffu));
+		}
+	};
 	try
 	{
-		// The v2 writer never mutates captured frames. Retaining a const reference
-		// avoids duplicating the complete bounded history immediately before the
-		// serializer walks it.
-		const ProfilerCaptureDocument& document = inputDocument;
-		V2StringTable strings;
-		strings.Intern(document.metadata.terraEngineVersion); strings.Intern(document.metadata.projectName); strings.Intern(document.metadata.projectPathHint);
-		strings.Intern(document.metadata.scenePath); strings.Intern(document.metadata.startedAt); strings.Intern(document.metadata.savedAt);
-		for (const ProfilerFrameRecord& frame : document.frames) CollectFrameStrings(strings, frame);
-		if (strings.Values().size() > kV2MaximumStringCount) { outError = "Profiler v2 string table exceeds its bounded limit."; return false; }
-
-		const std::filesystem::path temporary = path.string() + ".tmp";
-		std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-		if (!output) { outError = "Failed to open profiler v2 temporary output."; return false; }
-		const auto stringId = [&strings](const std::string& value) { return strings.Intern(value); };
-		nlohmann::json header = {{"format", "TerraEngineProfilerCapture"}, {"payloadVersion", kProfilerCaptureV2PayloadVersion},
-			{"metadata", {{"terraEngineVersion", stringId(document.metadata.terraEngineVersion)}, {"projectName", stringId(document.metadata.projectName)}, {"projectPathHint", stringId(document.metadata.projectPathHint)}, {"scenePath", stringId(document.metadata.scenePath)}, {"startedAt", stringId(document.metadata.startedAt)}, {"savedAt", stringId(document.metadata.savedAt)}}},
-			{"settings", {{"detailLevel", ToString(document.metadata.settings.detailLevel)}, {"sampleIntervalFrames", std::max(1u, document.metadata.settings.sampleIntervalFrames)}, {"maximumChunkFrames", std::clamp(document.metadata.settings.maximumChunkFrames, 1u, kV2MaximumFramesPerChunk)}, {"maximumChunkBytes", std::max<std::uint64_t>(1024u, document.metadata.settings.maximumChunkBytes)}}},
-			{"stringTable", strings.Values()}};
-		output << header.dump() << '\n';
-
-		const std::size_t framesPerChunk = std::clamp<std::size_t>(document.metadata.settings.maximumChunkFrames, 1u, kV2MaximumFramesPerChunk);
-		const std::size_t maximumChunkBytes = static_cast<std::size_t>(std::max<std::uint64_t>(1024u, document.metadata.settings.maximumChunkBytes));
-		std::uint64_t committedFrames = 0u;
-		std::uint32_t sequence = 0u;
-		std::size_t first = 0u;
-		while (first < document.frames.size())
+		JournalStringTable strings;
+		CollectFrameStrings(strings, frame, settings);
+		if (strings.Values().size() > kJournalMaximumStringCount)
 		{
-			// Serialize each packed frame exactly once and append it directly to the
-			// chunk payload. Detailed captures can contain thousands of samples per
-			// frame; retaining a JSON tree and dumping it again for the checksum and
-			// outer envelope caused capture persistence to monopolize a worker for
-			// minutes in large editor scenes.
-			std::string framePayload{"["};
-			framePayload.reserve(std::min<std::size_t>(maximumChunkBytes, 8u * 1024u * 1024u));
-			nlohmann::json previousPhysicsCounters;
-			std::size_t frameCount = 0u;
-			std::size_t end = first;
-			while (end < document.frames.size() && frameCount < framesPerChunk)
-			{
-				nlohmann::json packedFrame = PackFrameV2(document.frames[end], document.metadata.settings, strings);
-				const auto physics = packedFrame.find("p");
-				nlohmann::json nextPhysicsCounters;
-				if (physics != packedFrame.end())
-				{
-					nextPhysicsCounters = *physics;
-					if (previousPhysicsCounters.is_null())
-					{
-						// Every chunk begins with a complete baseline so tail recovery
-						// and independent chunk decoding remain deterministic.
-						packedFrame["cb"] = *physics;
-					}
-					else
-					{
-						nlohmann::json deltas = nlohmann::json::array();
-						for (std::size_t counter = 0u; counter < physics->size(); ++counter)
-						{
-							if ((*physics)[counter] != previousPhysicsCounters[counter])
-								deltas.push_back(nlohmann::json::array({counter, (*physics)[counter]}));
-						}
-						packedFrame["cd"] = std::move(deltas);
-					}
-					packedFrame.erase("p");
-				}
-
-				const std::string serializedFrame = packedFrame.dump();
-				const std::size_t candidateBytes = framePayload.size()
-					+ (frameCount == 0u ? 0u : 1u)
-					+ serializedFrame.size()
-					+ 1u;
-				// A single critical frame may exceed the soft byte target. It stays
-				// intact rather than silently losing correctness evidence; all normal
-				// chunks are otherwise split before crossing the configured bound.
-				if (frameCount != 0u && candidateBytes > maximumChunkBytes)
-				{
-					break;
-				}
-				if (frameCount != 0u)
-					framePayload.push_back(',');
-				framePayload.append(serializedFrame);
-				if (!nextPhysicsCounters.is_null())
-					previousPhysicsCounters = std::move(nextPhysicsCounters);
-				++frameCount;
-				++end;
-			}
-			framePayload.push_back(']');
-			// The frame payload is already valid compact JSON. Emit the small outer
-			// envelope around it instead of parsing or serializing that payload a
-			// second time; the checksum continues to cover the exact stored bytes.
-			output << "{\"type\":\"chunk\",\"sequence\":" << sequence++
-				<< ",\"committedFrameCount\":" << frameCount
-				<< ",\"checksum\":" << Fnv1a32(framePayload)
-				<< ",\"frames\":" << framePayload << "}\n";
-			committedFrames += static_cast<std::uint64_t>(end - first);
-			first = end;
+			outError = "Profiler journal frame has too many local strings.";
+			return false;
 		}
-		nlohmann::json index = {{"type", "finalIndex"}, {"complete", true}, {"committedFrames", committedFrames}, {"chunkCount", sequence}};
-		output << index.dump() << '\n';
-		output.flush();
-		if (!output) { outError = "Failed to flush profiler v2 capture."; return false; }
-		output.close();
-		return ReplaceV2Atomically(temporary, path, outError);
+		nlohmann::json envelope;
+		envelope["strings"] = strings.Values();
+		// Samples dominate detailed captures. Keep the smaller heterogeneous frame
+		// facts in the typed CBOR envelope, but write the regular sample rows below
+		// as fixed binary records instead of allocating one JSON array per scope.
+		envelope["frame"] = PackJournalFrame(frame, settings, strings, false);
+		// Journal V1 is a binary format. Encoding the already-typed frame DOM as
+		// CBOR avoids formatting and reparsing hundreds of thousands of decimal
+		// numbers per segment, while preserving the same strict typed schema and
+		// segment-level Zstd/integrity envelope. There is intentionally no text-JSON
+		// compatibility path: pre-feature captures are unsupported by contract.
+		const std::vector<std::uint8_t> binary = nlohmann::json::to_cbor(envelope);
+		outPayload.assign(kFrameMagic.data(), kFrameMagic.size());
+		appendU64(outPayload, static_cast<std::uint64_t>(binary.size()));
+		outPayload.append(
+			reinterpret_cast<const char*>(binary.data()), binary.size());
+
+		const bool includeOptional = KeepOptionalJournalData(frame, settings);
+		const std::uint32_t sampleCount = static_cast<std::uint32_t>(std::count_if(
+			frame.samples.begin(), frame.samples.end(), [includeOptional](const ProfilerSample& sample) {
+				return includeOptional || sample.retainInAggregate;
+			}));
+		appendU32(outPayload, sampleCount);
+		for (const ProfilerSample& sample : frame.samples)
+		{
+			if (!includeOptional && !sample.retainInAggregate)
+			{
+				continue;
+			}
+			appendU64(outPayload, sample.sampleId);
+			appendU64(outPayload, sample.parentSampleId);
+			outPayload.push_back(static_cast<char>(sample.moduleId));
+			appendU32(outPayload, strings.Intern(sample.name));
+			appendU32(outPayload, strings.Intern(sample.threadLabel));
+			appendU32(outPayload, strings.Intern(sample.taskLabel));
+			appendU64(outPayload, ToNanoseconds(sample.startMs));
+			appendU64(outPayload, ToNanoseconds(sample.durationMs));
+			appendU32(outPayload, sample.depth);
+			appendU32(outPayload, sample.occurrenceCount);
+			outPayload.push_back(sample.complete ? '\1' : '\0');
+			outPayload.push_back(sample.retainInAggregate ? '\1' : '\0');
+		}
+		return true;
 	}
 	catch (const std::exception& exception)
 	{
@@ -2463,119 +1997,171 @@ bool SaveProfilerCaptureV2Impl(const ProfilerCaptureDocument& inputDocument, con
 	}
 }
 
-bool LoadProfilerCaptureV2Impl(const std::filesystem::path& path, ProfilerCaptureDocument& outDocument, std::string& outError)
+bool DecodeProfilerJournalFrameImpl(
+	std::string_view payload,
+	ProfilerFrameRecord& outFrame,
+	std::string& outError)
 {
-	std::ifstream input(path, std::ios::binary);
-	if (!input) { outError = "Failed to open profiler v2 capture."; return false; }
-	// Early v2 fixtures used one logical JSON envelope before the production
-	// writer adopted line framing. Keep that reader immutable and additive so
-	// fixture upgrades never rewrite historical v2 files in place.
-	if (input.peek() == '{')
-	{
-		const std::string logicalText((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-		try
+	constexpr std::array<char, 4u> kFrameMagic = {'F', 'R', 'M', '1'};
+	const auto consumeU32 = [](std::string_view& input, std::uint32_t& value) {
+		if (input.size() < sizeof(value))
 		{
-			const nlohmann::json logical = nlohmann::json::parse(logicalText);
-			if (logical.value("payloadVersion", 0u) == kProfilerCaptureV2PayloadVersion && logical.contains("chunks"))
-			{
-				if (!logical.contains("stringTable") || !logical["stringTable"].is_array() || logical["stringTable"].empty()) { outError = "Profiler v2 logical fixture has an invalid string table."; return false; }
-				ProfilerCaptureDocument document;
-				document.payloadVersion = kProfilerCaptureV2PayloadVersion;
-				document.sourcePath = path;
-				document.metadata.projectName = logical.value("metadata", nlohmann::json::object()).value("captureId", "");
-				const std::string level = logical.value("settings", nlohmann::json::object()).value("detailLevel", "detailed");
-				document.metadata.settings.detailLevel = level == "sampled" ? ProfilerCaptureDetailLevel::Sampled : level == "aggregate" ? ProfilerCaptureDetailLevel::Aggregate : ProfilerCaptureDetailLevel::Detailed;
-				for (const nlohmann::json& chunk : logical["chunks"])
-				{
-					if (!chunk.is_object() || !chunk.contains("frames") || !chunk["frames"].is_array() || chunk.value("committedFrameCount", 0ull) != chunk["frames"].size()) { outError = "Profiler v2 logical fixture has an invalid committed chunk."; return false; }
-					for (const nlohmann::json& frameJson : chunk["frames"])
-					{
-						ProfilerFrameRecord frame;
-						frame.frameIndex = frameJson.value("index", 0ull);
-						frame.durationMs = ToMilliseconds(frameJson.value("durationNanoseconds", 0ull));
-						frame.complete = frameJson.value("complete", true);
-						document.frames.push_back(std::move(frame));
-					}
-				}
-				const nlohmann::json finalIndex = logical.value("finalIndex", nlohmann::json());
-				document.complete = finalIndex.is_object() && finalIndex.value("complete", false);
-				document.recoveredIncompleteTail = finalIndex.is_null() || (finalIndex.is_object() && finalIndex.value("recoveredIncompleteTail", false));
-				document.committedFrameCount = finalIndex.is_object() ? finalIndex.value("committedFrames", static_cast<std::uint64_t>(document.frames.size())) : document.frames.size();
-				if (document.committedFrameCount != document.frames.size()) { outError = "Profiler v2 logical fixture final index disagrees with frames."; return false; }
-				outDocument = std::move(document);
-				return true;
-			}
+			return false;
 		}
-		catch (const nlohmann::json::exception&)
+		value = 0u;
+		for (std::size_t index = 0u; index < sizeof(value); ++index)
 		{
-			// The line-framed fallback below reports the canonical recovery error.
+			value |= static_cast<std::uint32_t>(
+				static_cast<unsigned char>(input[index])) << (index * 8u);
 		}
-		input.clear();
-		input.seekg(0);
-	}
-	std::string line;
-	if (!std::getline(input, line)) { outError = "Profiler v2 capture is empty."; return false; }
+		input.remove_prefix(sizeof(value));
+		return true;
+	};
+	const auto consumeU64 = [](std::string_view& input, std::uint64_t& value) {
+		if (input.size() < sizeof(value))
+		{
+			return false;
+		}
+		value = 0u;
+		for (std::size_t index = 0u; index < sizeof(value); ++index)
+		{
+			value |= static_cast<std::uint64_t>(
+				static_cast<unsigned char>(input[index])) << (index * 8u);
+		}
+		input.remove_prefix(sizeof(value));
+		return true;
+	};
 	try
 	{
-		const nlohmann::json header = nlohmann::json::parse(line);
-		if (header.value("format", std::string{}) != "TerraEngineProfilerCapture" || header.value("payloadVersion", 0u) != kProfilerCaptureV2PayloadVersion) { outError = "File is not a profiler v2 capture."; return false; }
-		if (!header.contains("stringTable") || !header["stringTable"].is_array() || header["stringTable"].size() == 0u || header["stringTable"].size() > kV2MaximumStringCount) { outError = "Profiler v2 has an invalid string table."; return false; }
-		std::vector<std::string> strings;
-		strings.reserve(header["stringTable"].size());
-		for (const auto& value : header["stringTable"]) { if (!value.is_string()) { outError = "Profiler v2 string table has a non-string value."; return false; } strings.push_back(value.get<std::string>()); }
-		ProfilerCaptureDocument document;
-		document.payloadVersion = kProfilerCaptureV2PayloadVersion; document.sourcePath = path; document.complete = false;
-		const auto& metadata = header.at("metadata"); std::string stringError;
-		const std::string* engine = StringAt(strings, metadata.at("terraEngineVersion"), stringError); const std::string* project = StringAt(strings, metadata.at("projectName"), stringError); const std::string* projectPath = StringAt(strings, metadata.at("projectPathHint"), stringError); const std::string* scene = StringAt(strings, metadata.at("scenePath"), stringError); const std::string* started = StringAt(strings, metadata.at("startedAt"), stringError); const std::string* saved = StringAt(strings, metadata.at("savedAt"), stringError); if (!engine || !project || !projectPath || !scene || !started || !saved) { outError = stringError; return false; }
-		document.metadata.terraEngineVersion = *engine; document.metadata.projectName = *project; document.metadata.projectPathHint = *projectPath; document.metadata.scenePath = *scene; document.metadata.startedAt = *started; document.metadata.savedAt = *saved; document.metadata.settings.captureMode = ProfilerCaptureMode::LoadedReadOnly;
-		const auto& settings = header.at("settings"); const std::string level = settings.value("detailLevel", "detailed"); document.metadata.settings.detailLevel = level == "sampled" ? ProfilerCaptureDetailLevel::Sampled : level == "aggregate" ? ProfilerCaptureDetailLevel::Aggregate : ProfilerCaptureDetailLevel::Detailed; document.metadata.settings.sampleIntervalFrames = std::max(1u, settings.value("sampleIntervalFrames", 1u));
-		std::uint64_t expectedSequence = 0u; bool finalIndexSeen = false;
-		while (std::getline(input, line))
+		if (payload.size() < kFrameMagic.size()
+			|| !std::equal(kFrameMagic.begin(), kFrameMagic.end(), payload.begin()))
 		{
-			if (line.empty()) continue;
-			nlohmann::json item;
-			try { item = nlohmann::json::parse(line); }
-			catch (const nlohmann::json::exception&) { document.recoveredIncompleteTail = true; break; }
-			if (item.value("type", std::string{}) == "finalIndex") { finalIndexSeen = true; document.complete = item.value("complete", false); document.committedFrameCount = item.value("committedFrames", static_cast<std::uint64_t>(document.frames.size())); break; }
-			if (item.value("type", std::string{}) != "chunk" || item.value("sequence", std::numeric_limits<std::uint64_t>::max()) != expectedSequence) { outError = "Profiler v2 has a malformed or out-of-order chunk."; return false; }
-			const auto frames = item.value("frames", nlohmann::json::array()); const std::uint64_t committed = item.value("committedFrameCount", 0ull); if (!frames.is_array() || frames.size() != committed || frames.size() > kV2MaximumFramesPerChunk) { outError = "Profiler v2 has an invalid committed-frame count."; return false; }
-			if (item.value("checksum", 0u) != Fnv1a32(frames.dump())) { outError = "Profiler v2 chunk checksum mismatch."; return false; }
-			nlohmann::json previousPhysicsCounters;
-			for (const auto& sourceFrameJson : frames)
-			{
-				nlohmann::json frameJson = sourceFrameJson;
-				bool carriesPhysicsCounters = false;
-				if (const auto baseline = frameJson.find("cb"); baseline != frameJson.end())
-				{
-					if (!baseline->is_array() || baseline->size() != 20u) { outError = "Profiler v2 has an invalid counter baseline."; return false; }
-					previousPhysicsCounters = *baseline;
-					carriesPhysicsCounters = true;
-				}
-				else if (const auto deltas = frameJson.find("cd"); deltas != frameJson.end())
-				{
-					if (previousPhysicsCounters.is_null() || !deltas->is_array()) { outError = "Profiler v2 counter delta has no baseline."; return false; }
-					for (const nlohmann::json& delta : *deltas) { if (!delta.is_array() || delta.size() != 2u || !delta[0].is_number_unsigned() || delta[0].get<std::size_t>() >= previousPhysicsCounters.size()) { outError = "Profiler v2 has an invalid counter delta."; return false; } previousPhysicsCounters[delta[0].get<std::size_t>()] = delta[1]; }
-					carriesPhysicsCounters = true;
-				}
-				if (carriesPhysicsCounters) frameJson["p"] = previousPhysicsCounters;
-				ProfilerFrameRecord frame; if (!UnpackFrameV2(frameJson, strings, frame, outError)) return false; document.frames.push_back(std::move(frame));
-			}
-			++expectedSequence;
+			outError = "Profiler journal frame has an unsupported V1 payload identity.";
+			return false;
 		}
-		if (!finalIndexSeen) { document.recoveredIncompleteTail = true; document.complete = false; }
-		if (document.committedFrameCount == 0u) document.committedFrameCount = document.frames.size();
-		if (document.committedFrameCount != document.frames.size()) { outError = "Profiler v2 final index disagrees with committed frames."; return false; }
-		outDocument = std::move(document);
+		payload.remove_prefix(kFrameMagic.size());
+		std::uint64_t cborBytes = 0u;
+		if (!consumeU64(payload, cborBytes) || cborBytes > payload.size())
+		{
+			outError = "Profiler journal frame has a truncated CBOR envelope.";
+			return false;
+		}
+		const std::string_view cborPayload = payload.substr(0u, static_cast<std::size_t>(cborBytes));
+		payload.remove_prefix(static_cast<std::size_t>(cborBytes));
+		const nlohmann::json envelope = nlohmann::json::from_cbor(
+			cborPayload.begin(), cborPayload.end(), true, true);
+		const auto stringsJson = envelope.find("strings");
+		const auto frameJson = envelope.find("frame");
+		if (stringsJson == envelope.end() || frameJson == envelope.end()
+			|| !stringsJson->is_array() || stringsJson->size() > kJournalMaximumStringCount)
+		{
+			outError = "Profiler journal frame has an invalid local string table.";
+			return false;
+		}
+		std::vector<std::string> strings;
+		strings.reserve(stringsJson->size());
+		for (const nlohmann::json& value : *stringsJson)
+		{
+			if (!value.is_string())
+			{
+				outError = "Profiler journal frame local string table contains a non-string.";
+				return false;
+			}
+			strings.push_back(value.get<std::string>());
+		}
+		if (!UnpackJournalFrame(*frameJson, strings, outFrame, outError))
+		{
+			return false;
+		}
+		std::uint32_t sampleCount = 0u;
+		if (!consumeU32(payload, sampleCount) || sampleCount > kJournalMaximumStringCount)
+		{
+			outError = "Profiler journal frame has an invalid sample count.";
+			return false;
+		}
+		outFrame.samples.reserve(outFrame.samples.size() + sampleCount);
+		for (std::uint32_t sampleIndex = 0u; sampleIndex < sampleCount; ++sampleIndex)
+		{
+			ProfilerSample sample;
+			std::uint32_t nameIndex = 0u;
+			std::uint32_t threadIndex = 0u;
+			std::uint32_t taskIndex = 0u;
+			std::uint64_t startNanoseconds = 0u;
+			std::uint64_t durationNanoseconds = 0u;
+			if (!consumeU64(payload, sample.sampleId)
+				|| !consumeU64(payload, sample.parentSampleId) || payload.empty())
+			{
+				outError = "Profiler journal frame has a truncated sample identity.";
+				return false;
+			}
+			sample.moduleId = static_cast<ProfilerModuleId>(
+				static_cast<unsigned char>(payload.front()));
+			payload.remove_prefix(1u);
+			if (!consumeU32(payload, nameIndex) || !consumeU32(payload, threadIndex)
+				|| !consumeU32(payload, taskIndex)
+				|| !consumeU64(payload, startNanoseconds)
+				|| !consumeU64(payload, durationNanoseconds)
+				|| !consumeU32(payload, sample.depth)
+				|| !consumeU32(payload, sample.occurrenceCount)
+				|| payload.size() < 2u || nameIndex >= strings.size()
+				|| threadIndex >= strings.size() || taskIndex >= strings.size())
+			{
+				outError = "Profiler journal frame contains malformed sample data.";
+				return false;
+			}
+			sample.name = strings[nameIndex];
+			sample.threadLabel = strings[threadIndex];
+			sample.taskLabel = strings[taskIndex];
+			sample.startMs = ToMilliseconds(startNanoseconds);
+			sample.durationMs = ToMilliseconds(durationNanoseconds);
+			sample.complete = payload[0] != '\0';
+			sample.retainInAggregate = payload[1] != '\0';
+			payload.remove_prefix(2u);
+			outFrame.samples.push_back(std::move(sample));
+		}
+		if (!payload.empty())
+		{
+			outError = "Profiler journal frame has trailing sample bytes.";
+			return false;
+		}
 		return true;
 	}
-	catch (const std::exception& exception) { outError = exception.what(); return false; }
+	catch (const std::exception& exception)
+	{
+		outError = exception.what();
+		return false;
+	}
 }
 
-bool TryReadProfilerCaptureV2MetadataImpl(const std::filesystem::path& path, ProfilerCaptureArtifact& outArtifact)
+} // namespace
+
+void MaterializeProfilerAnimationPresentationMetrics(ProfilerFrameRecord& frame)
 {
-	ProfilerCaptureDocument document;
-	std::string error;
-	if (!LoadProfilerCaptureV2(path, document, error)) { outArtifact = {}; outArtifact.absolutePath = path; outArtifact.fileName = path.filename().string(); outArtifact.supported = false; outArtifact.status = error; return false; }
-	outArtifact = {}; outArtifact.absolutePath = path; outArtifact.fileName = path.filename().string(); outArtifact.metadata = document.metadata; outArtifact.payloadVersion = document.payloadVersion; outArtifact.frameCount = document.frames.size(); outArtifact.committedFrameCount = document.committedFrameCount; outArtifact.complete = document.complete; outArtifact.recoveredIncompleteTail = document.recoveredIncompleteTail; outArtifact.supported = true; outArtifact.status = document.recoveredIncompleteTail ? "Recovered incomplete tail" : "Ready (metadata)"; outArtifact.moduleIds = {ProfilerModuleId::CpuEngine, ProfilerModuleId::TaskExecution}; return true;
+	MaterializeProfilerAnimationPresentationMetricsImpl(frame);
+}
+
+void MaterializeProfilerAnimationPresentationMetrics(ProfilerCaptureDocument& document)
+{
+	for (ProfilerFrameRecord& frame : document.frames)
+	{
+		MaterializeProfilerAnimationPresentationMetricsImpl(frame);
+	}
+}
+
+bool EncodeProfilerJournalFrame(
+	const ProfilerFrameRecord& frame,
+	const ProfilerCaptureSettings& settings,
+	std::string& outPayload,
+	std::string& outError)
+{
+	return EncodeProfilerJournalFrameImpl(frame, settings, outPayload, outError);
+}
+
+bool DecodeProfilerJournalFrame(
+	std::string_view payload,
+	ProfilerFrameRecord& outFrame,
+	std::string& outError)
+{
+	return DecodeProfilerJournalFrameImpl(payload, outFrame, outError);
 }
 }

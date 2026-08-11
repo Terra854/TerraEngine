@@ -222,7 +222,9 @@ namespace TerraEngine::EditorTests
 			const std::string profilerSource = ReadProfilerSource();
 
 			context.Expect(source.find("ProfilerTimingStreams") != std::string::npos, "Frame details should show timing streams.");
-			context.Expect(source.find("BuildTimingStreamAggregates") != std::string::npos, "Profiler UI should use capture-level timing aggregate helpers.");
+			context.Expect(source.find("firstEngineCpuWindowMedianNanoseconds") != std::string::npos
+				&& source.find("finalEngineCpuWindowP95Nanoseconds") != std::string::npos,
+				"Profiler UI should use persisted bounded timing-window summaries.");
 			context.Expect(source.find("TimingAggregateValue") != std::string::npos && source.find("return \"n/a\"") != std::string::npos, "Unavailable timing aggregates should display n/a instead of fake zeroes.");
 			context.Expect(profilerSource.find("Viewport GPU") != std::string::npos && profilerSource.find("viewport_gpu") != std::string::npos, "GPU timing streams should be consolidated into one viewport row.");
 			context.Expect(source.find("only Play Mode frames are captured") != std::string::npos, "Frame overview should state that armed recording ignores editor-preview frames.");
@@ -234,13 +236,13 @@ namespace TerraEngine::EditorTests
 			context.Expect(source.find("ProfilerVirtualGeometryPageSourceRows") == std::string::npos, "Profiler should not duplicate VG page-source tables owned by Resource Residency.");
 		});
 
-		registry.Add("ProfilerWindow.V2Evidence.PresentsRecoveryAndTypedStreams", [](TestContext& context) {
+		registry.Add("ProfilerWindow.V1Evidence.PresentsRecoveryAndTypedStreams", [](TestContext& context) {
 			const std::string source = ReadProfilerWindowSource();
 			const std::size_t frameDetails = source.find("void ProfilerWindow::DrawFrameDetails()");
 			const std::size_t selectionGuard = source.find("if (!selectedFrame.has_value())", frameDetails);
 			const std::size_t captureEvidenceDraw = source.find("DrawCaptureEvidenceSummary();", selectionGuard);
 
-			context.Expect(source.find("DrawCaptureEvidenceSummary") != std::string::npos, "Profiler Window should render capture-level v2 evidence separately from a selected frame.");
+			context.Expect(source.find("DrawCaptureEvidenceSummary") != std::string::npos, "Profiler Window should render capture-level V1 evidence separately from a selected frame.");
 			context.Expect(frameDetails != std::string::npos
 				&& selectionGuard != std::string::npos
 				&& captureEvidenceDraw != std::string::npos
@@ -264,10 +266,6 @@ namespace TerraEngine::EditorTests
 		registry.Add("ProfilerWindow.Recording.KeepsUnlimitedDetailedCaptureAndDefersFramePresentation", [](TestContext& context) {
 			const std::string source = ReadProfilerWindowSource();
 			const std::string serviceSource = ReadEditorProfilerServiceSource();
-			const std::size_t timingDisclosure = source.find("TreeNodeEx(\"Timing Distribution\", ImGuiTreeNodeFlags_DefaultOpen)");
-			const std::size_t frameCopy = source.find("GetFramesSnapshot()", timingDisclosure);
-			const std::size_t evidenceDisclosure = source.find("TreeNodeEx(\"Whole Capture Analysis\", ImGuiTreeNodeFlags_DefaultOpen)");
-			const std::size_t documentCopy = source.find("GetDocumentSnapshot()", evidenceDisclosure);
 
 			context.Expect(serviceSource.find("detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Detailed") != std::string::npos
 				&& serviceSource.find("Thread-owned fixed buffers") != std::string::npos,
@@ -282,40 +280,29 @@ namespace TerraEngine::EditorTests
 			context.Expect(serviceSource.find("no shared profiler mutex") != std::string::npos
 				&& serviceSource.find("reports drops") != std::string::npos,
 				"The service should document why every-frame detailed capture keeps producer work bounded.");
-			context.Expect(source.find("if (!liveCapture)") != std::string::npos
+			context.Expect(source.find("if (captureActive)") != std::string::npos
 				&& source.find("Frame history will appear after the recording is finished.") != std::string::npos,
 				"The Frames subwindow should not refresh or expose rows until recording has finished.");
-			context.Expect(timingDisclosure != std::string::npos && frameCopy != std::string::npos && timingDisclosure < frameCopy,
-				"Rolling timing distributions should copy the complete capture only after the user expands them.");
-			context.Expect(evidenceDisclosure != std::string::npos && documentCopy != std::string::npos && evidenceDisclosure < documentCopy,
-				"Whole-capture evidence should be copied and summarized only after the user expands it.");
+			context.Expect(source.find("service->GetPresentationSnapshot()") != std::string::npos
+				&& source.find("journalSummary.has_value()") != std::string::npos,
+				"The V1 window must use the bounded presentation summary instead of copying retained frame history.");
 		});
 
 		registry.Add("ProfilerWindow.OpenFramePath.UsesCachedCompactSnapshots", [](TestContext& context) {
 			const std::string source = ReadProfilerWindowSource();
 
 			context.Expect(source.find("kProfilerWindowRefreshInterval") != std::string::npos
-				&& source.find("GetSnapshotRevision()") != std::string::npos
+				&& source.find("service->GetPresentationSnapshot()") != std::string::npos
 				&& source.find("now >= cache->nextProfilerRefresh") != std::string::npos,
 				"The open profiler should poll a cheap revision and rate-limit deep presentation snapshots.");
-			context.ExpectEqual(static_cast<std::size_t>(1u), CountOccurrences(source, "GetFrameListSnapshot()"),
-				"The profiler window should copy its frame list only in the snapshot refresh path.");
-			context.ExpectEqual(static_cast<std::size_t>(1u), CountOccurrences(source, "GetSelectedFrameSnapshot()"),
-				"The profiler window should copy its selected frame only in the snapshot refresh path.");
-			const std::size_t finishedCaptureGuard = source.find("if (!liveCapture)");
-			const std::size_t frameListCopy = source.find("GetFrameListSnapshot()", finishedCaptureGuard);
-			context.Expect(finishedCaptureGuard != std::string::npos
-				&& frameListCopy != std::string::npos
-				&& finishedCaptureGuard < frameListCopy,
-				"Whole-history frame copying and percentile sorting should occur only after capture activity ends.");
+			context.Expect(source.find("presentation->indexPage") != std::string::npos
+				&& source.find("service->RequestSelectedFrame") != std::string::npos,
+				"The profiler window should consume one compact V1 index page and request only the selected detail.");
 			context.Expect(source.find("const std::vector<ProfilerFrameListItem>& displayedFrames = frameIndexOrder ? frames : sortedFrames") != std::string::npos
 				&& source.find("if (!frameIndexOrder && (cache->frameOrderDirty || sortSpecs->SpecsDirty))") != std::string::npos,
 				"The default frame-index order should traverse the chronological snapshot directly and sort only explicit timing orders.");
 			const std::size_t pinGuard = source.find("cache->pinnedFrameIndex.has_value()");
-			const std::size_t selectedFrameCopy = source.find("GetSelectedFrameSnapshot()", pinGuard);
 			context.Expect(pinGuard != std::string::npos
-				&& selectedFrameCopy != std::string::npos
-				&& pinGuard < selectedFrameCopy
 				&& source.find("Frame analysis will become available after the recording is finished.") != std::string::npos,
 				"Detailed frame inspection should remain unavailable until the recording is finalized.");
 			context.ExpectEqual(static_cast<std::size_t>(1u), CountOccurrences(source, "BuildProfilerDiagnosticAnalysis(frame, selectedModule)"),
@@ -324,8 +311,8 @@ namespace TerraEngine::EditorTests
 				&& source.find("GetLatestBackendStageTimings()") != std::string::npos
 				&& source.find("GetLatestRendererRecoverySnapshot()") != std::string::npos,
 				"The profiler should read compact renderer fields instead of copying the complete diagnostics graph.");
-			context.Expect(source.find("captureEvidenceValid") != std::string::npos
-				&& source.find("Refresh Whole Capture Analysis") != std::string::npos
+			context.Expect(source.find("journalSummary.has_value()") != std::string::npos
+				&& source.find("V1 journal:") != std::string::npos
 				&& source.find("timingDistributionValid") != std::string::npos
 				&& source.find("Refresh Timing Distribution") != std::string::npos
 				&& source.find("timingDistributionFrameIndex") == std::string::npos,
@@ -346,7 +333,6 @@ namespace TerraEngine::EditorTests
 			const std::string source = ReadProfilerWindowSource();
 			const std::string serviceSource = ReadEditorProfilerServiceSource();
 			const std::size_t idleRevisionGuard = source.find("!presentationChanged && !stateChanged && !liveDataChanged");
-			const std::size_t frameListCopy = source.find("GetFrameListSnapshot()", idleRevisionGuard);
 			const std::size_t emptyFrameGuard = source.find("if (frames.empty())");
 			const std::size_t emptyFrameReturn = source.find("return;", emptyFrameGuard);
 			const std::size_t frameRowsTable = source.find("BeginTable(\"ProfilerFrameRows\"");
@@ -358,9 +344,10 @@ namespace TerraEngine::EditorTests
 				&& serviceSource.find("presentationRevision.fetch_add") != std::string::npos,
 				"The profiler service should publish a semantic presentation revision separate from engine frame activity.");
 			context.Expect(idleRevisionGuard != std::string::npos
-				&& frameListCopy != std::string::npos && idleRevisionGuard < frameListCopy,
-				"Idle engine revisions should update the cheap cache marker without copying completed frame history.");
-			context.Expect(source.find("cache->captures = service->GetCaptureList()") != std::string::npos
+				&& source.find("presentation->indexPage") != std::string::npos,
+				"Idle engine revisions should update the cheap cache marker without copying a completed capture index.");
+			context.Expect(source.find("service->GetPresentationSnapshot()") != std::string::npos
+				&& source.find("cache->captures = presentation->captures") != std::string::npos
 				&& source.find("ImGuiListClipper captureClipper") != std::string::npos
 				&& source.find("const auto& capture = cache->captures[") != std::string::npos
 				&& source.find("service->LoadCapture(capture.absolutePath)") != std::string::npos,
@@ -423,6 +410,178 @@ namespace TerraEngine::EditorTests
 				"Partial frames should remain counted as recovery evidence but must not enter live frame-time statistics.");
 			context.Expect(source.find("%zu complete  %zu partial") != std::string::npos,
 				"The live Profiler should distinguish completed timing samples from partial recovery records.");
+		});
+
+		registry.Add("ProfilerWindow.Presentation.UsesProtectedImmutableServicePublication", [](TestContext& context) {
+			const std::string serviceSource = ReadEditorProfilerServiceSource();
+			const std::string editorSource = ReadRepositorySource("Editor/TerraEngine-Editor/Core/EditorSystem.cpp");
+			const std::string mainEditorSource = ReadRepositorySource("Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp");
+			const std::size_t drain = serviceSource.find("void EditorProfilerService::Update(float deltaTime)");
+			const std::size_t accept = serviceSource.find("void EditorProfilerService::AcceptWorkerCompletion");
+			const std::size_t editorDrain = editorSource.find("context.editorProfiler->Update(deltaTime)");
+			const std::size_t editorDraw = editorSource.find("mainEditor->DrawUI()");
+			const std::size_t closeEpoch = mainEditorSource.find("editorProfiler->BeginProjectClose()");
+			const std::size_t sceneUnload = mainEditorSource.find("SceneManager::Instance().UnloadAll()");
+
+			context.Expect(serviceSource.find("completions.swap(pendingCompletions)") != std::string::npos
+				&& drain != std::string::npos && accept != std::string::npos,
+				"Workers must enqueue profiler results for the protected service drain.");
+			context.Expect(serviceSource.find("GetPresentationSnapshot") != std::string::npos
+				&& serviceSource.find("std::atomic_store_explicit(&presentationSnapshot") != std::string::npos
+				&& serviceSource.find("discardedStaleCompletionCount") != std::string::npos,
+				"Profiler presentation must be published as one immutable snapshot instead of exposing mutable worker state to ImGui.");
+			context.Expect(editorDrain != std::string::npos && editorDraw != std::string::npos && editorDrain < editorDraw,
+				"EditorSystem must drain profiler completions before profiler-window drawing begins.");
+			context.Expect(editorSource.find("EditorProfilerWorkerCompletions") != std::string::npos
+				&& editorSource.find("EditorProfilerHealthPublication") != std::string::npos,
+				"Scheduler diagnostics must declare profiler worker draining and protected health publication resources.");
+			context.Expect(closeEpoch != std::string::npos && sceneUnload != std::string::npos && closeEpoch < sceneUnload,
+				"Project close must invalidate profiler epochs before scene/resource teardown can expose stale results.");
+		});
+
+		registry.Add("ProfilerWindow.ActiveCapture.DefersWholeHistoryReads", [](TestContext& context) {
+			const std::string source = ReadProfilerWindowSource();
+			const std::string documentSnapshot = "Get" "DocumentSnapshot()";
+			const std::string framesSnapshot = "Get" "FramesSnapshot()";
+			const std::string frameListSnapshot = "Get" "FrameListSnapshot()";
+			context.Expect(source.find(documentSnapshot) == std::string::npos
+				&& source.find(framesSnapshot) == std::string::npos
+				&& source.find(frameListSnapshot) == std::string::npos,
+				"The V1 Profiler window must not use global whole-history snapshot APIs in any state.");
+		});
+
+		registry.Add("ProfilerWindow.V1Selection.RequestsOnlyTheSelectedJournalFrame", [](TestContext& context) {
+			const std::string source = ReadProfilerWindowSource();
+			const std::string service = ReadEditorProfilerServiceSource();
+			context.Expect(source.find("service->RequestSelectedFrame(*requestedFrameSelection)") != std::string::npos
+				&& service.find("ReadSelectedJournalFrame(path, frameIndex") != std::string::npos,
+				"Frame selection must request one V1 journal frame instead of adopting the full capture document.");
+			context.Expect(service.find("ReadJournalIndexPage(capturePath") != std::string::npos
+				&& service.find("completion.indexPage = std::move(editorPage)") != std::string::npos,
+				"Opening a capture must publish one bounded V1 index page before detail is requested.");
+		});
+
+		registry.Add("ProfilerWindow.V1Selection.CoalescesBoundedPagesAndDecodedDetails", [](TestContext& context) {
+			const std::string service = ReadEditorProfilerServiceSource();
+			context.Expect(service.find("pendingIndexRequest.has_value()") != std::string::npos
+				&& service.find("ReadJournalIndexPage(path, offset, boundedPageSize") != std::string::npos
+				&& service.find("decodedDetailCache.size() > 4u") != std::string::npos,
+				"V1 page requests and decoded detail must have explicit bounded ownership.");
+			context.Expect(service.find("pendingDetailRequest.has_value()") != std::string::npos
+				&& service.find("cached.artifactId == artifactId && cached.frameIndex == frameIndex") != std::string::npos,
+				"Duplicate selected-frame requests must coalesce by capture and frame identity.");
+			context.Expect(service.find("Returning to the already published page is a newer user choice.") != std::string::npos
+				&& service.find("A cached detail selection is still a newer choice") != std::string::npos
+				&& service.find("EditorProfilerOperationKind::LoadingIndex) - 1u];") != std::string::npos
+				&& service.find("EditorProfilerOperationKind::LoadingDetail) - 1u];") != std::string::npos
+				&& service.find("retiredOperation.active = false;") != std::string::npos
+				&& service.find("retiredOperation.state = EditorProfilerOperationState::Cancelled;") != std::string::npos,
+				"Selecting an already cached page or detail must cancel its different pending read before it can publish stale UI.");
+			const std::string window = ReadProfilerWindowSource();
+			context.Expect(window.find("sampleAnalysisArtifactId == cache->selectedCapture->artifactId") != std::string::npos,
+				"Derived analysis must not cross-reuse an equal frame index from another capture.");
+		});
+
+		registry.Add("ProfilerWindow.V1Presentation.HidesSessionPanelsWithoutSelection", [](TestContext& context) {
+			const std::string window = ReadProfilerWindowSource();
+			const std::size_t noSelectionGuard = window.find("if (!cache->selectedCapture.has_value())");
+			const std::size_t layout = window.find("BeginTable(\"ProfilerLayout\"");
+			context.Expect(noSelectionGuard != std::string::npos && layout != std::string::npos
+				&& noSelectionGuard < layout,
+				"An empty selected session must return before Frames and Frame Analysis panels are created.");
+		});
+
+		registry.Add("ProfilerWindow.V1Presentation.DefersCaptureBrowserWhileLive", [](TestContext& context) {
+			const std::string window = ReadProfilerWindowSource();
+			const std::size_t noSelectionGuard = window.find("if (!cache->selectedCapture.has_value())");
+			const std::size_t liveGuard = window.find("if (captureSessionActive)", noSelectionGuard);
+			const std::size_t browser = window.find("DrawCaptureList();", liveGuard);
+			context.Expect(noSelectionGuard != std::string::npos && liveGuard != std::string::npos
+				&& browser != std::string::npos && liveGuard < browser
+				&& window.find("Capture browsing resumes after recording finalizes.") != std::string::npos,
+				"A live capture must avoid building a saved-capture browser before its journal is publishable.");
+			context.Expect(window.find("ToolbarButton(\"Refresh\", canUseProject && !captureSessionActive") != std::string::npos,
+				"Refresh must not schedule catalog work while live presentation cannot open a saved capture.");
+		});
+
+		registry.Add("ProfilerWindow.V1Finalization.PublishesExactSavedArtifact", [](TestContext& context) {
+			const std::string service = ReadEditorProfilerServiceSource();
+			const std::size_t finalization = service.find("const auto status = Profiler::Instance().GetJournalFinalizationStatus(*ticket)");
+			const std::size_t finalizationEnd = service.find("// EditorProfilerService::StartRecording", finalization);
+			const std::string finalizationPath = finalization != std::string::npos && finalizationEnd != std::string::npos
+				? service.substr(finalization, finalizationEnd - finalization)
+				: std::string{};
+			context.Expect(service.find("WorkerCompletionKind::CapturePersisted") != std::string::npos
+				&& service.find("lastSavedCaptureArtifact = std::move(completion.savedCaptureArtifact)") != std::string::npos,
+				"A completed V1 writer must publish the exact validated artifact before automation can finish.");
+			context.Expect(finalizationPath.find("Validating finalized profiler journal") != std::string::npos
+				&& finalizationPath.find("ReadJournalIndex(path, journal, error)") != std::string::npos
+				&& finalizationPath.find("ReadSelectedJournalFrame") == std::string::npos
+				&& finalizationPath.find("OpenProfilerJournalV1") == std::string::npos,
+				"Terminal writer completion must validate only the bounded V1 index; detailed frame reads remain a later selection operation.");
+		});
+
+		registry.Add("ProfilerWindow.V1Finalization.AutomationWaitsOnlyForPersistence", [](TestContext& context) {
+			const std::string service = ReadEditorProfilerServiceSource();
+			const std::string automation = ReadRepositorySource("Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp");
+			const std::size_t stopJob = automation.find("jobId == activeProfilerCaptureJobId");
+			const std::size_t nextJob = automation.find("jobId == activeProfilerLoadJobId", stopJob);
+			const std::string stopPath = stopJob != std::string::npos && nextJob != std::string::npos
+				? automation.substr(stopJob, nextJob - stopJob)
+				: std::string{};
+			context.Expect(service.find("bool EditorProfilerService::IsPersisting() const") != std::string::npos
+				&& stopPath.find("profiler.IsPersisting()") != std::string::npos
+				&& stopPath.find("profiler.IsBusy()") == std::string::npos,
+				"Automation stop completion must wait only for finalization/index validation, never unrelated list or detail work.");
+		});
+
+		registry.Add("ProfilerWindow.V1Lifecycle.RejectsCrossEpochAndCrossCapturePublication", [](TestContext& context) {
+			const std::string service = ReadEditorProfilerServiceSource();
+			const std::string window = ReadProfilerWindowSource();
+			context.Expect(service.find("projectGeneration != startProjectEpoch") != std::string::npos
+				&& service.find("auto& priorPersistence = operations[static_cast<std::size_t>(EditorProfilerOperationKind::Persisting) - 1u];") != std::string::npos
+				&& service.find("priorPersistence.active = false;") != std::string::npos
+				&& service.find("priorPersistence.state = EditorProfilerOperationState::Cancelled;") != std::string::npos,
+				"Starting a new V1 recording must cancel an earlier finalize-validation completion instead of allowing it to publish.");
+			const std::size_t close = service.find("void EditorProfilerService::BeginProjectClose()");
+			const std::size_t clear = service.find("Profiler::Instance().Clear();", close);
+			const std::size_t closePublication = service.find("PublishPresentationLocked();", close);
+			context.Expect(close != std::string::npos && clear != std::string::npos
+				&& closePublication != std::string::npos && clear < closePublication,
+				"Project close must clear the engine session before publishing its empty editor epoch.");
+			context.Expect(service.find("completion.selectedArtifactId != selectedCapture->artifactId") != std::string::npos
+				&& service.find("completion.selectedArtifactId = artifactId") != std::string::npos,
+				"A selected-frame worker result must be rejected when another capture superseded its artifact.");
+			context.Expect(service.find("completion.projectEpoch != projectGeneration") != std::string::npos
+				&& service.find("operations[index].state = EditorProfilerOperationState::Cancelled;") != std::string::npos,
+				"Cross-epoch and cross-capture worker completions must remain rejected and report a cancelled terminal operation.");
+			context.Expect(window.find("cache->journalSummary.reset()") != std::string::npos
+				&& window.find("cache->frames.clear()") != std::string::npos,
+				"An empty immutable service selection must clear old-project rows from the Profiler window.");
+		});
+
+		registry.Add("ProfilerWindow.V1Health.PublishesOnlyForTheActiveProject", [](TestContext& context) {
+			const std::string service = ReadEditorProfilerServiceSource();
+			context.Expect(service.find("if (sessionAccepting)") != std::string::npos
+				&& service.find("health = {}") != std::string::npos
+				&& service.find("healthPublishAccumulatorSeconds = 0.0f") != std::string::npos,
+				"Health polling must reset across project epochs and avoid publishing an unrelated engine session.");
+		});
+
+		registry.Add("ProfilerWindow.LiveCapture.DoesNotRepublishLoadedJournalHistory", [](TestContext& context) {
+			const std::string service = ReadEditorProfilerServiceSource();
+			const std::size_t start = service.find("void EditorProfilerService::StartRecording(const ProfilerCaptureSettings& settings)");
+			const std::size_t pause = service.find("void EditorProfilerService::PauseRecording()", start);
+			const std::string startPath = start != std::string::npos && pause != std::string::npos
+				? service.substr(start, pause - start)
+				: std::string{};
+			context.Expect(startPath.find("selectedCapture.reset()") != std::string::npos
+				&& startPath.find("selectedIndexPage.reset()") != std::string::npos,
+				"Starting a capture must discard the previous loaded index before periodic health publication begins.");
+			context.Expect(service.find("const bool liveCapture = snapshot->sessionState") != std::string::npos
+				&& service.find("ProfilerSessionState::Finalizing && persistenceActive") != std::string::npos
+				&& service.find("if (!liveCapture)") != std::string::npos,
+				"Live presentation snapshots must carry scalar health only, not an old journal index or selected detail.");
 		});
 	}
 }

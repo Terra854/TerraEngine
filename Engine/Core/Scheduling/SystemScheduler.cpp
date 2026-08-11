@@ -302,6 +302,8 @@ namespace TerraEngine::Scheduling {
 			{ "ViewportTextureRegistry", "Scene and Game descriptor registration and retirement ownership.", "" },
 			{ "EditorDiagnostics", "Editor-facing UI submission and presentation diagnostics.", "" },
 			{ "EditorProfilerTiming", "Host editor frame timing sampled after ImGui begins a frame.", "Published once per editor frame so automation can measure profiler-window idle overhead without linking editor automation to ImGui internals." },
+			{ "EditorProfilerWorkerCompletions", "Epoch-tagged profiler catalog, index-page, selected-detail, and finalization results prepared by editor worker jobs.", "EditorSystem drains this queue only at its protected PostFrame boundary; workers never mutate Profiler or ImGui state." },
+			{ "EditorProfilerHealthPublication", "Bounded immutable profiler session health published for editor UI and automation readers.", "EditorSystem exchanges scalar health after draining worker completions so readers never copy live capture history." },
 			{ "EditorAutomationState", "Editor automation and MCP-visible UI state.", "" },
 			{ "EditorAutomationQueue", "Immutable queued MCP/editor automation requests awaiting worker preparation or protected commit.", "Prepared without mutating live editor or scene state." },
 			{ "EditorAutomationSession", "Capability, job, idempotency, approval, activity, and structured-log state retained for the current editor session.", "Worker readers consume immutable snapshots; publication remains protected." },

@@ -32,7 +32,7 @@ namespace TerraEngine::Tests
 			context.Expect(SaveCaptureDocument(document, path, error), "Evidence capture should save: " + error);
 			ProfilerCaptureDocument loaded;
 			context.Expect(LoadCaptureDocument(path, loaded, error), "Evidence capture should load: " + error);
-			context.Expect(loaded.frames.size() == 1U && loaded.frames[0].framePublication.has_value(), "Evidence should round-trip through v2.");
+			context.Expect(loaded.frames.size() == 1U && loaded.frames[0].framePublication.has_value(), "Evidence should round-trip through journal V1.");
 			if (!loaded.frames.empty() && loaded.frames[0].framePublication) context.ExpectEqual(77ULL, loaded.frames[0].framePublication->disjointTimingNanoseconds[2], "Timing evidence must survive round-trip.");
 			std::array<std::uint64_t, 8U> buckets{20U, 30U, 10U, 15U, 5U, 0U, 0U, 0U};
 			context.Expect(ValidateProfilerDisjointTimingBuckets(buckets, 80U, 1U), "Disjoint timing buckets should conserve within tolerance.");

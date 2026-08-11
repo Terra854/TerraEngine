@@ -160,24 +160,24 @@ namespace TerraEngine::Editor::Automation
 			return registration;
 		}
 
-		// MakeProfilerCaptureStart retains the legacy empty start request while
-		// documenting optional v2 controls.  Bounds are validated again by the
-		// service so old clients and schema-aware clients share one safe path.
+		// Capture start has one V1 schema. Bounds are validated again by the
+		// service so omitted optional controls and explicit controls share one
+		// safe path without selecting a capture format.
 		AutomationCapabilityRegistration MakeProfilerCaptureStart(const AutomationHandlerResolver& resolver)
 		{
 			auto registration = Make(
 				resolver,
 				"profiler.capture.start",
 				"profiler",
-				{"captureLevel", "payloadVersion", "maximumChunkFrames", "maximumChunkBytes", "sampleIntervalFrames", "maxFrames"},
-				{"jobId", "state", "captureLevel", "payloadVersion", "bounds"},
+				{"captureLevel", "maximumChunkFrames", "maximumChunkBytes", "sampleIntervalFrames", "maxFrames"},
+				{"jobId", "state", "captureLevel", "formatIdentifier", "formatVersion", "bounds"},
 				AutomationPermission::ProjectWrite,
 				AutomationApprovalPolicy::None,
 				true);
 			registration.descriptor.inputSchema["properties"]["captureLevel"] = {{"type", "string"}, {"enum", nlohmann::json::array({"detailed", "sampled", "aggregate"})}};
-			// The writer emits v2 only.  V1 remains readable but is never rewritten
-			// in place, avoiding a surprising format upgrade for legacy artifacts.
-			registration.descriptor.inputSchema["properties"]["payloadVersion"] = {{"type", "integer"}, {"enum", nlohmann::json::array({2})}};
+			// The journal format is a result fact, not a caller-selectable input.
+			registration.descriptor.resultSchema["properties"]["formatIdentifier"] = {{"const", "TerraEngineProfilerJournalV1"}};
+			registration.descriptor.resultSchema["properties"]["formatVersion"] = {{"const", 1u}};
 			registration.descriptor.inputSchema["properties"]["maximumChunkFrames"] = {{"type", "integer"}, {"minimum", 1}, {"maximum", 4096}};
 			registration.descriptor.inputSchema["properties"]["maximumChunkBytes"] = {{"type", "integer"}, {"minimum", 1024}, {"maximum", 8388608}};
 			registration.descriptor.inputSchema["properties"]["sampleIntervalFrames"] = {{"type", "integer"}, {"minimum", 1}, {"maximum", 1024}};
@@ -221,10 +221,44 @@ namespace TerraEngine::Editor::Automation
 
 		result.push_back(Make(resolveHandler, "profiler.window.visibility.set", "profiler", {"visible"}, {"visible", "editorFrameIndex", "editorFrameTimeMs", "profilerWindowDrawFrameIndex", "profilerWindowDrawMs", "profilerWindowDrawValid", "imguiRenderFrameIndex", "imguiRenderMs", "imguiRenderValid", "presentUiFrameIndex", "presentUiMs", "presentUiValid"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true));
 		result.push_back(MakeProfilerCaptureStart(resolveHandler));
-		result.push_back(Make(resolveHandler, "profiler.capture.stop", "profiler", {}, {"jobId", "state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true));
+		result.push_back(Make(resolveHandler, "profiler.capture.stop", "profiler", {}, {"jobId", "state", "finishCaptureSubmissionMilliseconds"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true));
 		result.push_back(Make(resolveHandler, "profiler.capture.list", "profiler", {}, {"artifacts"}, AutomationPermission::Read, AutomationApprovalPolicy::None, true));
 		result.push_back(Make(resolveHandler, "profiler.capture.load", "profiler", {"artifactId"}, {"jobId", "state"}, AutomationPermission::Read, AutomationApprovalPolicy::None, true));
 		result.push_back(Make(resolveHandler, "profiler.capture.summary", "profiler", {"artifactId"}, {"summary"}, AutomationPermission::Read, AutomationApprovalPolicy::None, true));
+		auto health = Make(resolveHandler, "profiler.capture.health", "profiler", {}, {"formatIdentifier", "formatVersion", "projectEpoch", "sessionArtifactId", "committedFrames", "residentBytes", "residentHighWaterBytes", "pendingBytes", "persistenceLagFrames", "persistenceLagHighWaterFrames", "collectionNanoseconds", "sealingNanoseconds", "queueingNanoseconds", "persistenceNanoseconds", "finalizationNanoseconds", "persistedBytes", "persistenceOperationCount", "persistenceThroughputBytesPerSecond", "droppedDetailRecords", "rejectedCoreFrames", "terminalFailure"}, AutomationPermission::Read, AutomationApprovalPolicy::None, true);
+		health.descriptor.resultSchema["properties"]["formatIdentifier"] = {{"const", "TerraEngineProfilerJournalV1"}};
+		health.descriptor.resultSchema["properties"]["formatVersion"] = {{"const", 1u}};
+		health.descriptor.resultSchema["properties"]["projectEpoch"] = {{"type", "integer"}, {"minimum", 0u}};
+		result.push_back(std::move(health));
+		auto index = Make(resolveHandler, "profiler.capture.index", "profiler", {"offset", "limit"}, {"formatIdentifier", "formatVersion", "projectEpoch", "state", "offset", "limit", "total", "frames"}, AutomationPermission::Read, AutomationApprovalPolicy::None, true);
+		// The handler may only request one bounded V1 index page.  Publishing the
+		// same limits in discovery prevents a malformed automation request from
+		// reaching the reader as an untyped or unbounded value.
+		index.descriptor.inputSchema["properties"]["offset"] = {{"type", "integer"}, {"minimum", 0u}};
+		index.descriptor.inputSchema["properties"]["limit"] = {{"type", "integer"}, {"minimum", 1u}, {"maximum", 512u}, {"default", 128u}};
+		index.descriptor.resultSchema["properties"]["formatIdentifier"] = {{"const", "TerraEngineProfilerJournalV1"}};
+		index.descriptor.resultSchema["properties"]["formatVersion"] = {{"const", 1u}};
+		index.descriptor.resultSchema["properties"]["projectEpoch"] = {{"type", "integer"}, {"minimum", 0u}};
+		index.descriptor.resultSchema["properties"]["state"] = {{"type", "string"}, {"enum", nlohmann::json::array({"queued", "completed"})}};
+		result.push_back(std::move(index));
+		auto detail = Make(resolveHandler, "profiler.capture.detail", "profiler", {"frameIndex"}, {"formatIdentifier", "formatVersion", "projectEpoch", "state", "frameIndex", "durationMs", "sampleCount"}, AutomationPermission::Read, AutomationApprovalPolicy::None, true);
+		// Frame identity is an unsigned journal ordinal, never a path or a whole
+		// history selector.  The detail handler therefore decodes one segment only.
+		detail.descriptor.inputSchema["properties"]["frameIndex"] = {{"type", "integer"}, {"minimum", 0u}};
+		detail.descriptor.inputSchema["required"] = nlohmann::json::array({"frameIndex"});
+		detail.descriptor.resultSchema["properties"]["formatIdentifier"] = {{"const", "TerraEngineProfilerJournalV1"}};
+		detail.descriptor.resultSchema["properties"]["formatVersion"] = {{"const", 1u}};
+		detail.descriptor.resultSchema["properties"]["projectEpoch"] = {{"type", "integer"}, {"minimum", 0u}};
+		detail.descriptor.resultSchema["properties"]["state"] = {{"type", "string"}, {"enum", nlohmann::json::array({"queued", "completed"})}};
+		result.push_back(std::move(detail));
+		auto operation = Make(resolveHandler, "profiler.capture.operation", "profiler", {"operationId"}, {"formatIdentifier", "formatVersion", "projectEpoch", "operation", "operations", "finalization", "status", "lastError"}, AutomationPermission::Read, AutomationApprovalPolicy::None, true);
+		// operationId is optional: omitted returns the compact current operation
+		// set, while a supplied id reads one terminal state without a history scan.
+		operation.descriptor.inputSchema["properties"]["operationId"] = {{"type", "integer"}, {"minimum", 1u}};
+		operation.descriptor.resultSchema["properties"]["formatIdentifier"] = {{"const", "TerraEngineProfilerJournalV1"}};
+		operation.descriptor.resultSchema["properties"]["formatVersion"] = {{"const", 1u}};
+		operation.descriptor.resultSchema["properties"]["projectEpoch"] = {{"type", "integer"}, {"minimum", 0u}};
+		result.push_back(std::move(operation));
 		result.push_back(Make(resolveHandler, "editor.commands.list", "editor_commands", {}, {"commands"}, AutomationPermission::Read, AutomationApprovalPolicy::None, false));
 		result.push_back(Make(resolveHandler, "editor.commands.invoke", "editor_commands", {"commandId"}, {"commandId", "completed"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, false));
 		return result;
