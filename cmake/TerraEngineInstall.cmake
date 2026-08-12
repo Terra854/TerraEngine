@@ -36,4 +36,13 @@ endfunction()
 function(terraengine_install_physics_foundation destination)
 	terraengine_install_physics_dependency_metadata("${destination}")
 	terraengine_install_physics_headers("${destination}")
+	# Keep performance validation inputs beside installed tooling for clean-tree runs.
+	install(DIRECTORY "${CMAKE_SOURCE_DIR}/Tests/Fixtures/Performance/Physics/"
+		DESTINATION "${destination}/Tests/Fixtures/Performance/Physics"
+		FILES_MATCHING PATTERN "*.json")
+	install(DIRECTORY "${CMAKE_SOURCE_DIR}/Tools/Physics/"
+		DESTINATION "${destination}/Tools/Physics"
+		FILES_MATCHING PATTERN "*.ps1" PATTERN "*.json" PATTERN "README.md")
+	install(FILES "${CMAKE_SOURCE_DIR}/specs/050-optimize-physics-runtime/contracts/physics-performance-evidence.schema.json"
+		DESTINATION "${destination}/Tools/Physics/contracts")
 endfunction()

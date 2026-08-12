@@ -6,6 +6,7 @@
 
 #include "../TestHarness.h"
 
+#include "Animation/Ragdoll/PhysicsPoseSnapshot.h"
 #include "Components/Physics/ColliderSetComponent.h"
 #include "Components/Physics/RigidBodyComponent.h"
 #include "Components/Transform.h"
@@ -14,12 +15,14 @@
 #include "Core/Scheduling/SystemScheduler.h"
 #include "Physics/PhysicsDiagnostics.h"
 #include "Physics/PhysicsAuthoringSnapshot.h"
+#include "Physics/PhysicsEvents.h"
 #include "Physics/PhysicsSystem.h"
 #include "Scene/SceneMutationQueue.h"
 #include "Scene/TransactionalMutation.h"
 #include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -101,6 +104,61 @@ namespace TerraEngine::Tests {
 			return std::any_of(declarations.begin(), declarations.end(), [workload, boundary](const auto& declaration) {
 				return declaration.workload == workload && declaration.boundary == boundary;
 			});
+		}
+
+		// This helper creates valid immutable events without a live provider. It
+		// isolates packet storage behavior from simulation timing and allocation noise.
+		Physics::PhysicsEvent MakePerformanceEvent(std::uint32_t slot) {
+			Physics::PhysicsEvent event;
+			event.world = {{8U}, 1U};
+			event.tick = 1U;
+			event.first.objectId[15] = static_cast<std::uint8_t>(slot);
+			event.first.objectGeneration = 1U;
+			event.first.componentGeneration = 1U;
+			event.first.colliderRecordId[15] = static_cast<std::uint8_t>(slot);
+			event.first.recordGeneration = 1U;
+			event.first.body = {{8U}, 1U, slot, 1U};
+			event.hasSecondParticipant = false;
+			return event;
+		}
+
+		std::uint64_t HashRagdollPoseWork(
+			std::size_t ragdollCount,
+			std::size_t bodiesPerRagdoll,
+			std::uint64_t unrelatedStaticCount,
+			std::uint64_t& visitedBodies) {
+			std::uint64_t hash = 1469598103934665603ULL;
+			visitedBodies = 0U;
+			for(std::size_t ragdoll = 0U; ragdoll < ragdollCount; ++ragdoll) {
+				Animation::RagdollGenerationStamp generation{1U, 2U, 3U, 4U,
+					static_cast<Animation::AnimationFixedTick>(ragdoll + 1U)};
+				Animation::PhysicsPoseSnapshot pose;
+				pose.generation = generation;
+				pose.completeCurrentStep = true;
+				pose.bodies.reserve(bodiesPerRagdoll);
+				std::vector<Animation::PhysicsPoseExpectedBodyGeneration> expected;
+				expected.reserve(bodiesPerRagdoll);
+				for(std::size_t body = 0U; body < bodiesPerRagdoll; ++body) {
+					const std::uint64_t identity = 1U + ragdoll * bodiesPerRagdoll + body;
+					Animation::PhysicsPoseBodySnapshot state;
+					state.bodyId = identity;
+					state.stableJointId = identity + 100000U;
+					state.bodyGeneration = 1U;
+					state.modelPose.scale = {1.0F, 1.0F, 1.0F};
+					pose.bodies.push_back(state);
+					expected.push_back({identity, 1U});
+					++visitedBodies;
+					hash ^= identity;
+					hash *= 1099511628211ULL;
+				}
+				if(Animation::ValidatePhysicsPoseSnapshot(pose, generation, expected)
+					!= Animation::AnimationStatus::Ok) return 0U;
+			}
+			// This value participates in the fixture identity but is deliberately not
+			// traversed. Ragdoll publication must scale with explicit expected handles,
+			// never with unrelated sleeping provider bodies.
+			hash ^= unrelatedStaticCount;
+			return hash * 1099511628211ULL;
 		}
 	}
 
@@ -190,6 +248,9 @@ namespace TerraEngine::Tests {
 			physics.SetEditorLifecycleControlled(true);
 			physics.Initialize();
 			context.Expect(physics.StartWorld(), "The same-pose fixture must start its isolated physics world.");
+			// Direct unit-test updates bypass SceneManager. Publish the same immutable
+			// per-frame packets that the production scheduler supplies to PhysicsSnapshot.
+			(void)objects.PublishSceneChangePacket();
 			physics.Update(physics.FixedTimeStep());
 			const std::vector<Scene::TransactionPublicationGroup> firstPublication = mutations.PendingPublicationGroups();
 			context.Expect(firstPublication.size() == 1U
@@ -203,6 +264,7 @@ namespace TerraEngine::Tests {
 				"The first same-pose publication must commit before duplicate suppression is measured.");
 			physics.OnAfterPhysicsFlush(firstFlush.transactionResults, firstFlush.publicationGroupResults);
 
+			(void)objects.PublishSceneChangePacket();
 			physics.Update(physics.FixedTimeStep());
 			// The first protected physics publication advances the authored Transform
 			// revision. One following capture consumes that revision and may rebuild the
@@ -210,6 +272,7 @@ namespace TerraEngine::Tests {
 			const auto secondFlush = mutations.Apply(objects, "physics-same-pose-second-flush");
 			physics.OnAfterPhysicsFlush(secondFlush.transactionResults, secondFlush.publicationGroupResults);
 
+			(void)objects.PublishSceneChangePacket();
 			physics.Update(physics.FixedTimeStep());
 			const std::vector<Scene::TransactionPublicationGroup> steadyPublications = mutations.PendingPublicationGroups();
 			const auto steadyDiagnostics = physics.LatestDiagnostics();
@@ -226,12 +289,25 @@ namespace TerraEngine::Tests {
 					+ ", " + std::to_string(repeated.rotation.w) + ").";
 			}
 			context.Expect(steadyPublications.empty(), steadyMessage);
+			std::string diagnosticsMessage = "The canonical unchanged frame must report zero authoring, preparation, and protected publication work.";
+			if(steadyDiagnostics) {
+				diagnosticsMessage += " reused=" + std::to_string(steadyDiagnostics->authoring.snapshotReused)
+					+ " changed=" + std::to_string(steadyDiagnostics->authoring.changedObjects)
+					+ " sceneRevision=" + std::to_string(steadyDiagnostics->authoring.scenePublicationRevision)
+					+ " constraints=" + std::to_string(steadyDiagnostics->authoring.constraintClosureCount)
+					+ " characters=" + std::to_string(steadyDiagnostics->authoring.characterClosureCount)
+					+ " preparation=" + std::to_string(steadyDiagnostics->preparation.estimatedWorkItems)
+					+ " publications=" + std::to_string(steadyDiagnostics->publication.currentEntries) + ".";
+			}
 			context.Expect(steadyDiagnostics
 				&& steadyDiagnostics->authoring.snapshotReused
 				&& steadyDiagnostics->authoring.changedObjects == 0U
+				&& steadyDiagnostics->authoring.scenePublicationRevision != 0U
+				&& steadyDiagnostics->authoring.constraintClosureCount == 0U
+				&& steadyDiagnostics->authoring.characterClosureCount == 0U
 				&& steadyDiagnostics->preparation.estimatedWorkItems == 0U
 				&& steadyDiagnostics->publication.currentEntries == 0U,
-				"The canonical unchanged frame must report zero authoring, preparation, and protected publication work.");
+				diagnosticsMessage);
 			const auto steadyFlush = mutations.Apply(objects, "physics-same-pose-steady-flush");
 			physics.OnAfterPhysicsFlush(steadyFlush.transactionResults, steadyFlush.publicationGroupResults);
 		});
@@ -417,8 +493,66 @@ namespace TerraEngine::Tests {
 				&& ContainsWorkload(*diagnostics->scheduler, "PhysicsSimulate", "provider ownership")
 				&& ContainsWorkload(*diagnostics->scheduler, "PhysicsPublicationBarrier", "Frame End"),
 				"Reduced-schedule diagnostics must expose provider ownership and the deferred Frame End publication boundary.");
+			if(diagnostics) {
+				std::array<bool, static_cast<std::size_t>(Physics::PhysicsStageKind::Count)> observedStages{};
+				for(const Physics::PhysicsStageMeasurement& stage : diagnostics->stages) {
+					const std::size_t index = static_cast<std::size_t>(stage.stage);
+					context.Expect(index < observedStages.size() && !observedStages[index],
+						"Each immutable performance record must carry one distinct stage meaning.");
+					if(index < observedStages.size()) observedStages[index] = true;
+					context.Expect(stage.availability == Physics::PhysicsMetricAvailability::Available
+						&& stage.unavailableReason == Physics::PhysicsMetricUnavailableReason::None,
+						"A stage executed by the fixed-tick fixture must report measured availability explicitly.");
+					context.Expect(!stage.allocationCountAvailable && !stage.allocationBytesAvailable
+						&& stage.allocationCount == 0U && stage.allocationBytes == 0U,
+						"Unsupported allocation evidence must carry unavailable flags; zero must not masquerade as a measurement.");
+				}
+				context.Expect(std::all_of(observedStages.begin(), observedStages.end(), [](bool observed) { return observed; }),
+					"Diagnostics must publish all eight named physics performance stages every fixed tick.");
+				context.Expect(diagnostics->quality.applied
+					&& diagnostics->quality.velocityIterations == 10U
+					&& diagnostics->quality.positionIterations == 2U,
+					"Immutable diagnostics must identify the selected default solver profile applied to the live world.");
+				context.Expect(diagnostics->jobs.submitted == diagnostics->jobs.completed + diagnostics->jobs.queued
+					&& diagnostics->jobs.activePumps == 0U && diagnostics->jobs.idle,
+					"Copied job telemetry must reconcile completed and queued work at the publication boundary.");
+			}
 			context.Expect(published && published->tick == diagnostics->tick,
 				"Readers must observe the same completed-tick diagnostics snapshot that PhysicsSystem published.");
+		});
+
+		registry.Add("Physics.Performance.EventPacketsReserveObservedBoundedVolume", [](TestContext& context) {
+			// Empty and lightly populated ticks are common. Their immutable packet must
+			// not retain the maximum event capacity merely because another tick could be busy.
+			Physics::PhysicsEventSubscriptionRegistry subscriptions;
+			subscriptions.Subscribe({});
+			const std::array<const Physics::PhysicsEventThreadLocalCollector*, 0U> noCollectors{};
+			const Physics::PhysicsEventPacket empty = Physics::PhysicsEventPacketBuilder::MergeCollectors(
+				{{8U}, 1U}, 1U, noCollectors, subscriptions.Snapshot());
+			Physics::PhysicsEventThreadLocalCollector collector(8U);
+			collector.Record(MakePerformanceEvent(1U));
+			const Physics::PhysicsEventThreadLocalCollector* oneCollector[] = {&collector};
+			const Physics::PhysicsEventPacket lowVolume = Physics::PhysicsEventPacketBuilder::MergeCollectors(
+				{{8U}, 1U}, 1U, oneCollector, subscriptions.Snapshot());
+			context.Expect(empty.events->empty() && empty.events->capacity() == 0U,
+				"An empty event tick must publish an empty immutable result without reserving the configured packet maximum.");
+			context.Expect(lowVolume.events->size() == 1U && lowVolume.events->capacity() < 4096U,
+				"A lightly populated event tick must reserve from observed bounded volume instead of the 4096-record maximum.");
+		});
+
+		registry.Add("Physics.Performance.RagdollCrowdsScaleWithExplicitBodyWork", [](TestContext& context) {
+			std::uint64_t smallVisited = 0U;
+			std::uint64_t largeVisited = 0U;
+			const std::uint64_t smallHash = HashRagdollPoseWork(64U, 16U, 8000U, smallVisited);
+			const std::uint64_t repeatedHash = HashRagdollPoseWork(64U, 16U, 8000U, largeVisited);
+			context.Expect(smallHash != 0U && smallHash == repeatedHash && smallVisited == 1024U
+				&& largeVisited == 1024U,
+				"The canonical 64x16 ragdoll fixture must retain one deterministic pose hash and visit exactly its explicit bodies.");
+
+			const std::uint64_t largeHash = HashRagdollPoseWork(128U, 16U, 8000U, largeVisited);
+			context.Expect(largeHash != 0U && largeHash != smallHash && largeVisited == 2048U
+				&& largeVisited == smallVisited * 2U,
+				"Doubling the ragdoll crowd must double bounded pose work without visiting the 8,000 unrelated sleeping statics.");
 		});
 	}
 }

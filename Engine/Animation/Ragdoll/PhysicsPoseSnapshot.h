@@ -3,9 +3,12 @@
 #include "Animation/AnimationTypes.h"
 #include "Animation/Assets/AnimationAssetTypes.h"
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <memory>
+#include <numeric>
 #include <span>
+#include <tuple>
 #include <vector>
 namespace TerraEngine::Animation {
 	inline constexpr std::size_t kRagdollSnapshotMaximumBodies = 256U;
@@ -47,16 +50,41 @@ namespace TerraEngine::Animation {
 		AnimationGeneration bodyGeneration = 0U;
 		auto operator<=>(const PhysicsPoseExpectedBodyGeneration&) const = default;
 	};
+
+	// The two index builders keep validation bounded without allocating a hash map
+	// on the fixed-step publication path. Callers keep their source arrays immutable;
+	// only these stack-local indexes are sorted to compare stable identities.
+	inline void BuildPhysicsPoseBodyOrder(
+		std::span<const PhysicsPoseBodySnapshot> bodies,
+		std::array<std::size_t, kRagdollSnapshotMaximumBodies>& order) noexcept {
+		std::iota(order.begin(), order.end(), 0U);
+		std::sort(order.begin(), order.begin() + bodies.size(), [&bodies](std::size_t left, std::size_t right) {
+			return std::tie(bodies[left].bodyId, bodies[left].stableJointId)
+				< std::tie(bodies[right].bodyId, bodies[right].stableJointId);
+		});
+	}
+
+	inline void BuildPhysicsPoseExpectedOrder(
+		std::span<const PhysicsPoseExpectedBodyGeneration> bodies,
+		std::array<std::size_t, kRagdollSnapshotMaximumBodies>& order) noexcept {
+		std::iota(order.begin(), order.end(), 0U);
+		std::sort(order.begin(), order.begin() + bodies.size(), [&bodies](std::size_t left, std::size_t right) {
+			return bodies[left].bodyId < bodies[right].bodyId;
+		});
+	}
+
 	inline AnimationStatus ValidatePhysicsPoseSnapshot(const PhysicsPoseSnapshot& value, const RagdollGenerationStamp& expected) noexcept {
 		if(!value.completeCurrentStep || !value.generation.IsValid() || value.generation != expected
 			|| value.bodies.empty() || value.bodies.size() > kRagdollSnapshotMaximumBodies) return AnimationStatus::StaleHandle;
+		std::array<std::size_t, kRagdollSnapshotMaximumBodies> order{};
+		BuildPhysicsPoseBodyOrder(value.bodies, order);
 		for(std::size_t index = 0U; index < value.bodies.size(); ++index) {
-			const PhysicsPoseBodySnapshot& body = value.bodies[index];
+			const PhysicsPoseBodySnapshot& body = value.bodies[order[index]];
 			if(body.bodyId == 0U || body.stableJointId == 0U || body.bodyGeneration == 0U
 				|| !IsFinite(body.modelPose) || !IsFinite(body.linearVelocity) || !IsFinite(body.angularVelocity)) return AnimationStatus::InvalidArgument;
-			for(std::size_t previous = 0U; previous < index; ++previous) {
-				if(value.bodies[previous].bodyId == body.bodyId
-					|| value.bodies[previous].stableJointId == body.stableJointId) return AnimationStatus::InvalidArgument;
+			if(index != 0U) {
+				const PhysicsPoseBodySnapshot& previous = value.bodies[order[index - 1U]];
+				if(previous.bodyId == body.bodyId || previous.stableJointId == body.stableJointId) return AnimationStatus::InvalidArgument;
 			}
 		}
 		return AnimationStatus::Ok;
@@ -69,10 +97,16 @@ namespace TerraEngine::Animation {
 		const AnimationStatus basic = ValidatePhysicsPoseSnapshot(value, expected);
 		if(basic != AnimationStatus::Ok) return basic;
 		if(expectedBodies.empty() || expectedBodies.size() != value.bodies.size()) return AnimationStatus::StaleHandle;
-		for(const PhysicsPoseBodySnapshot& body : value.bodies) {
-			const auto expectedBody = std::find_if(expectedBodies.begin(), expectedBodies.end(),
-				[&body](const PhysicsPoseExpectedBodyGeneration& candidate) { return candidate.bodyId == body.bodyId; });
-			if(expectedBody == expectedBodies.end() || expectedBody->bodyGeneration != body.bodyGeneration) return AnimationStatus::StaleHandle;
+		std::array<std::size_t, kRagdollSnapshotMaximumBodies> poseOrder{};
+		std::array<std::size_t, kRagdollSnapshotMaximumBodies> expectedOrder{};
+		BuildPhysicsPoseBodyOrder(value.bodies, poseOrder);
+		BuildPhysicsPoseExpectedOrder(expectedBodies, expectedOrder);
+		for(std::size_t index = 0U; index < value.bodies.size(); ++index) {
+			const PhysicsPoseBodySnapshot& body = value.bodies[poseOrder[index]];
+			const PhysicsPoseExpectedBodyGeneration& expectedBody = expectedBodies[expectedOrder[index]];
+			if(expectedBody.bodyId == 0U || expectedBody.bodyGeneration == 0U
+				|| (index != 0U && expectedBodies[expectedOrder[index - 1U]].bodyId == expectedBody.bodyId)
+				|| expectedBody.bodyId != body.bodyId || expectedBody.bodyGeneration != body.bodyGeneration) return AnimationStatus::StaleHandle;
 		}
 		return AnimationStatus::Ok;
 	}

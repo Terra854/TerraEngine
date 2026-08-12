@@ -1063,6 +1063,28 @@ if(MSVC)
 	target_compile_options(TerraEnginePhysicsGameplayStress PRIVATE /FS)
 endif()
 
+# This measurement-only executable uses the public backend boundary to produce
+# cross-revision physics evidence. It does not link provider headers or alter
+# runtime settings, so a clean installed tree can execute the same workload.
+add_executable(TerraEnginePhysicsOptimizationBenchmark
+	Tools/Physics/PhysicsOptimizationBenchmark.cpp
+)
+target_include_directories(TerraEnginePhysicsOptimizationBenchmark
+	PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+)
+target_link_libraries(TerraEnginePhysicsOptimizationBenchmark PRIVATE TerraEngine-Engine)
+# The benchmark alone adapts its read-only evidence collection to the optimized
+# runtime's additive diagnostics. Production engine targets receive no macro and
+# therefore retain identical baseline behavior.
+target_compile_definitions(TerraEnginePhysicsOptimizationBenchmark
+	PRIVATE
+		TERRAENGINE_PHYSICS_OPTIMIZED_RUNTIME=1
+)
+if(MSVC)
+	target_compile_options(TerraEnginePhysicsOptimizationBenchmark PRIVATE /FS)
+endif()
+
 # This installed-runtime fixture covers the constraint and virtual-character
 # contracts through the provider-neutral backend request boundary. It remains a
 # small engine-linked executable so the installed DLL layout is exercised too.
@@ -1464,7 +1486,10 @@ if(WIN32)
 	# on PATH or globally installed binaries.
 	add_custom_command(TARGET TerraEngine-Editor POST_BUILD
 		COMMAND ${CMAKE_COMMAND} -E copy_if_different
-			$<TARGET_RUNTIME_DLLS:TerraEngine-Editor>
+			# TerraEngine.dll is already emitted beside the editor. Copying it onto
+			# itself fails with newer CMake/MSVC launchers, so only deploy the other
+			# runtime dependencies discovered from the target graph.
+			$<FILTER:$<TARGET_RUNTIME_DLLS:TerraEngine-Editor>,EXCLUDE,.*[\\/]TerraEngine\\.dll$>
 			$<TARGET_FILE_DIR:TerraEngine-Editor>
 		COMMAND_EXPAND_LISTS
 	)
@@ -2291,6 +2316,12 @@ install(TARGETS TerraEnginePhysicsColliderCompiler
 # Install the stress executable beside TerraEngine.dll so it can validate a
 # clean installed tree without relying on build-tree paths or system packages.
 install(TARGETS TerraEnginePhysicsGameplayStress
+	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
+	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
+)
+# Keep the native evidence probe beside TerraEngine.dll so captures need no
+# build-tree path or globally-installed dependencies.
+install(TARGETS TerraEnginePhysicsOptimizationBenchmark
 	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 )

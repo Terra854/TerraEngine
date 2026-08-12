@@ -182,5 +182,17 @@ namespace TerraEngine::Tests {
 			context.Expect(scratch.Slots().empty() && scratch.ActiveItems() == 0U,
 				"Rejecting oversized work must clear the prior generation instead of exposing stale slots.");
 		});
+
+		registry.Add("Physics.PreparationPlan.UnchangedAuthoringStillCarriesCommandAndQueryWork", [](TestContext& context) {
+			PhysicsPreparationPlanOptions options;
+			options.commands = {9U};
+			options.queries = {{{1U}, 1U, 0U, 1U, 1U, 7U}};
+			const auto plan = PhysicsPreparationPlan::Build(Generation(7U, 0U), 4U, std::move(options));
+			context.Expect(plan && !plan->Empty()
+				&& plan->Data().creates.empty() && plan->Data().updates.empty()
+				&& plan->Data().dependencyRebuilds.empty()
+				&& plan->Data().commands.size() == 1U && plan->Data().queries.size() == 1U,
+				"Unchanged authoring must emit zero reconciliation work without suppressing commands or queries for the tick.");
+		});
 	}
 }

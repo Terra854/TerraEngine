@@ -1,0 +1,21 @@
+{
+	"schemaVersion": 1,
+	"fixedDeltaSeconds": 0.0166666666666667,
+	"warmupSteps": 30,
+	"measuredSteps": 100,
+	"runCount": 5,
+	"acceptanceRepetitions": 10,
+	"workers": [1, 4, "max"],
+	"qualityProfiles": [
+		{ "id": "default", "velocityIterations": 10, "positionIterations": 2 },
+		{ "id": "alternate", "velocityIterations": 20, "positionIterations": 4 }
+	],
+	"workloads": [
+		{ "id": "physics-unchanged-10000-v1", "version": 1, "population": 10000, "activeBodies": 1000, "warmupSteps": 30, "measuredSteps": 100, "seed": 5001, "description": "Unchanged 10,000-body world" },
+		{ "id": "physics-contact-pairs-4096-v1", "version": 1, "population": 4096, "activeBodies": 4096, "warmupSteps": 30, "measuredSteps": 500, "seed": 5002, "description": "2,048 isolated dynamic contact pairs" },
+		{ "id": "physics-ragdoll-crowd-64x16-v1", "version": 1, "population": 9024, "activeBodies": 1024, "warmupSteps": 30, "measuredSteps": 100, "seed": 5003, "description": "64 sixteen-body ragdolls plus statics" },
+		{ "id": "physics-ragdoll-crowd-128x16-v1", "version": 1, "population": 10048, "activeBodies": 2048, "warmupSteps": 30, "measuredSteps": 100, "seed": 5004, "description": "128 sixteen-body ragdolls plus statics" },
+		{ "id": "physics-bulk-admission-10000-v1", "version": 1, "population": 10000, "activeBodies": 10000, "warmupSteps": 0, "measuredSteps": 10, "seed": 5005, "description": "Ten fresh-world bulk admissions" },
+		{ "id": "physics-worker-large-v1", "version": 1, "population": 10000, "activeBodies": 8000, "warmupSteps": 30, "measuredSteps": 100, "seed": 5006, "description": "Worker scaling matrix with 8,000 active bodies" }
+	]
+}

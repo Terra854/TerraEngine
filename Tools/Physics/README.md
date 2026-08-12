@@ -1,5 +1,40 @@
 # Installed Editor Physics Stress Harness
 
+## Optimization evidence tooling
+
+`Tests/Fixtures/Performance/Physics/workloads.json` defines the six canonical
+workloads, deterministic seeds, fixed-step protocol, worker matrix, and quality
+profiles. Capture from an installed RelWithDebInfo tree (use `-DryRun` when
+stress probes are unavailable):
+
+```powershell
+& .\CapturePhysicsOptimizationBenchmark.ps1 -InstallRoot <install> `
+	-Manifest <repo>\Tests\Fixtures\Performance\Physics\workloads.json `
+	-OutputDirectory <repo>\out\evidence\physics-optimization\candidate -Runs 5
+```
+
+Compare only same-revision captures with `ComparePhysicsOptimizationEvidence.ps1`.
+Missing metrics remain unavailable, never zero; identity mismatches and fewer
+than five runs produce a non-zero, fail-closed result.
+
+The installed-editor runner currently provides native stage samples for the
+unchanged and worker-large scenarios. Contact, ragdoll, bulk-admission, and
+empty/low-event workload IDs remain explicitly unavailable until their native
+fixtures publish event/pose/admission allocation evidence; the capture tool does
+not substitute the generic box scene or derive event/pose hashes from a state
+hash. Warm-up steps are executed and excluded from measured per-step samples.
+
+Capture baseline and candidate into separate immutable directories. Each side
+must retain the same source revision, dirty-diff hash, installed-tree hash,
+manifest/scene hashes, hardware and power context, worker request, solver
+profile, warm-up/measured steps, and capture settings. Run at least five
+measurements per leg and ten complete lifecycle repetitions for acceptance.
+The comparator enforces the per-workload percentile thresholds, 99% sample
+coverage, deterministic state/event/pose hashes, rollback and visibility, idle
+provider work, and the 1/4/max worker matrix. Alternate solver profiles are
+compared only with the same profile; they are not required to share hashes with
+the compatible default 10/2 profile.
+
 `RunInstalledEditorPhysicsStress.ps1` is the shared installed-editor performance,
 correctness, project-readiness, and managed/automation validation harness. Its
 evidence uses stable workflow names so reports remain meaningful across engine
@@ -39,10 +74,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstall
 This executes paused, unchanged, small, and large scenarios at 1/2/4/max
 workers, compares deterministic observation hashes and scaling coverage, and
 reports the fastest successful correctness-gated configuration in
-`worker-scaling-matrix-summary.json`. Override `-ParallelPreparationThreshold` or
+`worker-scaling-matrix-summary.json`. The worker-scaling gate uses the median engine-measured
+simulation stage from the 10,000-body/8,000-active large leg; startup, MCP, and
+serial publication stages remain separately reported and are not folded into
+the provider worker-scaling metric. Override `-ParallelPreparationThreshold` or
 `-ParallelExtractionThreshold` to capture a reproducible threshold comparison.
 `-ActiveDynamicCount` may raise the dynamic-body count for an explicitly named
-overload run; the acceptance default matches `stress-fixtures.json` exactly.
+overload run; the matrix selects its committed large-leg population itself.
 For the installed authoring acceptance, add `-RunAuthoringWalkthrough`. That
 mode uses the advertised public MCP contract to create and edit an object,
 verify exact undo/redo, create and instantiate a prefab, apply and revert real

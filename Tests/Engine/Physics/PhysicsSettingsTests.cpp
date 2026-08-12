@@ -68,6 +68,25 @@ namespace TerraEngine::Tests {
 			context.Expect(!settings.Validate().accepted, "Over-budget query batches must be rejected.");
 		});
 
+		registry.Add("Engine.Physics.Settings.SolverQualityUsesProviderSafeBounds", [](TestContext& context) {
+			PhysicsSettings settings = PhysicsSettings::Defaults();
+			context.ExpectEqual(10U, settings.velocityIterations,
+				"Existing projects must retain Jolt's ten-step velocity default.");
+			context.ExpectEqual(2U, settings.positionIterations,
+				"Existing projects must retain Jolt's two-step position default.");
+			settings.velocityIterations = 2U;
+			settings.positionIterations = 255U;
+			context.Expect(settings.Validate().accepted,
+				"The documented inclusive solver bounds must be accepted.");
+			settings.velocityIterations = 1U;
+			context.Expect(settings.Validate().code == PhysicsSettingsValidationCode::InvalidVelocityIterations,
+				"Velocity iterations below Jolt's friction-safe minimum must be rejected explicitly.");
+			settings = PhysicsSettings::Defaults();
+			settings.positionIterations = 256U;
+			context.Expect(settings.Validate().code == PhysicsSettingsValidationCode::InvalidPositionIterations,
+				"Position iterations outside the provider's eight-bit range must be rejected explicitly.");
+		});
+
 		registry.Add("Engine.Physics.Settings.IncrementalPipelineDefaultsAndBounds", [](TestContext& context) {
 			PhysicsSettings settings = PhysicsSettings::Defaults();
 			context.ExpectEqual(1024U, settings.transformPublicationChunkSize,

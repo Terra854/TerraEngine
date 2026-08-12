@@ -8,6 +8,7 @@
 #include "ProjectSettingsWindow.h"
 
 #include "../Project/ProjectSettings.h"
+#include "../Project/ProjectPhysicsSettingsIO.h"
 
 #include "../Project/ProjectManager.h"
 #include "../Subsystems/MainEditorSubsystem.h"
@@ -238,61 +239,6 @@ namespace
 			{ "aggregateDiagnosticsIntervalFrames", settings.aggregateDiagnosticsIntervalFrames },
 			{ "continuousCollisionEnabled", settings.continuousCollisionEnabled }
 		};
-	}
-
-	bool TryReadPhysicsSettings(const std::filesystem::path& path, TerraEngine::Physics::PhysicsSettings& output, std::string& error)
-	{
-		if (!std::filesystem::exists(path)) return true;
-		std::ifstream input(path);
-		if (!input) { error = "Physics Settings could not be opened."; return false; }
-		try
-		{
-			nlohmann::json document;
-			input >> document;
-			TerraEngine::Physics::PhysicsSettings candidate = TerraEngine::Physics::PhysicsSettings::Defaults();
-			candidate.schemaVersion = document.value("schemaVersion", candidate.schemaVersion);
-			if (document.contains("gravity") && document["gravity"].is_array() && document["gravity"].size() == 3U)
-			{
-				candidate.gravity = { document["gravity"][0].get<float>(), document["gravity"][1].get<float>(), document["gravity"][2].get<float>() };
-			}
-			candidate.fixedTimeStep = document.value("fixedTimeStep", candidate.fixedTimeStep);
-			candidate.maxSubsteps = document.value("maxSubsteps", candidate.maxSubsteps);
-			candidate.maxAccumulatedTime = document.value("maxAccumulatedTime", candidate.maxAccumulatedTime);
-			candidate.velocityIterations = document.value("velocityIterations", candidate.velocityIterations);
-			candidate.positionIterations = document.value("positionIterations", candidate.positionIterations);
-			candidate.maxCastDistance = document.value("maxCastDistance", candidate.maxCastDistance);
-			candidate.maxShapeExtent = document.value("maxShapeExtent", candidate.maxShapeExtent);
-			candidate.maxHitsPerQuery = document.value("maxHitsPerQuery", candidate.maxHitsPerQuery);
-			candidate.maxRequestsPerBatch = document.value("maxRequestsPerBatch", candidate.maxRequestsPerBatch);
-			candidate.retainedResultTicks = document.value("retainedResultTicks", candidate.retainedResultTicks);
-			candidate.debugVisualizationEnabled = document.value("debugVisualizationEnabled", candidate.debugVisualizationEnabled);
-			candidate.retainedDebugTicks = document.value("retainedDebugTicks", candidate.retainedDebugTicks);
-			candidate.maxDebugPrimitives = document.value("maxDebugPrimitives", candidate.maxDebugPrimitives);
-			candidate.transformPublicationChunkSize = document.value("transformPublicationChunkSize", candidate.transformPublicationChunkSize);
-			candidate.providerExtractionBatchSize = document.value("providerExtractionBatchSize", candidate.providerExtractionBatchSize);
-			candidate.parallelPreparationThreshold = document.value("parallelPreparationThreshold", candidate.parallelPreparationThreshold);
-			candidate.parallelExtractionThreshold = document.value("parallelExtractionThreshold", candidate.parallelExtractionThreshold);
-			candidate.aggregateDiagnosticsIntervalFrames = document.value("aggregateDiagnosticsIntervalFrames", candidate.aggregateDiagnosticsIntervalFrames);
-			candidate.continuousCollisionEnabled = document.value("continuousCollisionEnabled", candidate.continuousCollisionEnabled);
-			if (document.contains("layers") && document["layers"].is_array() && document["layers"].size() == candidate.layers.size())
-			{
-				for (std::size_t index = 0; index < candidate.layers.size(); ++index)
-				{
-					const nlohmann::json& source = document["layers"][index];
-					auto& destination = candidate.layers[index];
-					destination.id = source.value("id", destination.id);
-					destination.name = source.value("name", destination.name);
-					destination.collisionMask = source.value("collisionMask", destination.collisionMask);
-					destination.broadPhaseGroup = source.value("broadPhaseGroup", destination.broadPhaseGroup);
-					destination.enabled = source.value("enabled", destination.enabled);
-				}
-			}
-			const auto validation = candidate.Validate();
-			if (!validation.accepted) { error = validation.message; return false; }
-			output = candidate;
-			return true;
-		}
-		catch (const std::exception& exception) { error = std::string("Physics Settings JSON is invalid: ") + exception.what(); return false; }
 	}
 
 	bool PersistPhysicsSettingsAtomically(const std::filesystem::path& projectRoot, const TerraEngine::Physics::PhysicsSettings& settings, std::string& error)
@@ -646,7 +592,8 @@ void ProjectSettingsWindow::DrawPhysicsCategory()
 	if (!m_PhysicsSettingsLoaded)
 	{
 		std::string loadError;
-		if (!TryReadPhysicsSettings(PhysicsSettingsPath(projectRoot), m_PhysicsSettings, loadError))
+		if (!TerraEngine::Editor::ProjectSettings::ReadProjectPhysicsSettings(
+			projectRoot, m_PhysicsSettings, loadError))
 		{
 			m_ValidationMessage = loadError;
 		}
@@ -661,9 +608,9 @@ void ProjectSettingsWindow::DrawPhysicsCategory()
 	int maxSubsteps = static_cast<int>(candidate.maxSubsteps);
 	if (ImGui::SliderInt("Maximum Substeps", &maxSubsteps, 1, 16)) { candidate.maxSubsteps = static_cast<std::uint32_t>(maxSubsteps); changed = true; }
 	int velocityIterations = static_cast<int>(candidate.velocityIterations);
-	if (ImGui::SliderInt("Velocity Iterations", &velocityIterations, 1, 64)) { candidate.velocityIterations = static_cast<std::uint32_t>(velocityIterations); changed = true; }
+	if (ImGui::SliderInt("Velocity Iterations", &velocityIterations, 2, 255)) { candidate.velocityIterations = static_cast<std::uint32_t>(velocityIterations); changed = true; }
 	int positionIterations = static_cast<int>(candidate.positionIterations);
-	if (ImGui::SliderInt("Position Iterations", &positionIterations, 1, 64)) { candidate.positionIterations = static_cast<std::uint32_t>(positionIterations); changed = true; }
+	if (ImGui::SliderInt("Position Iterations", &positionIterations, 1, 255)) { candidate.positionIterations = static_cast<std::uint32_t>(positionIterations); changed = true; }
 
 	ImGui::SeparatorText("Collision Layers");
 	ImGui::TextWrapped("Select a layer to edit its name and collision relationships. Stable IDs remain fixed so existing components keep their references.");

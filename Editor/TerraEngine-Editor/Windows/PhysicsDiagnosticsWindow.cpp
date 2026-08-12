@@ -126,6 +126,20 @@ void PhysicsDiagnosticsWindow::DrawCounters()
 		snapshot->rate.aggregateIntervalFrames,
 		static_cast<unsigned long long>(snapshot->rate.lastAggregateTick),
 		snapshot->rate.aggregateRefreshed ? "yes" : "no");
+	ImGui::Text("Solver quality: %u velocity / %u position iterations (settings gen %llu, world gen %llu, applied %s).",
+		snapshot->quality.velocityIterations,
+		snapshot->quality.positionIterations,
+		static_cast<unsigned long long>(snapshot->quality.settingsGeneration),
+		static_cast<unsigned long long>(snapshot->quality.worldGeneration),
+		snapshot->quality.applied ? "yes" : "no");
+	ImGui::Text("Jobs: %llu submitted / %llu complete / %llu rejected; %llu batches, %llu queue-lock acquisitions, %u/%u pumps.",
+		static_cast<unsigned long long>(snapshot->jobs.submitted),
+		static_cast<unsigned long long>(snapshot->jobs.completed),
+		static_cast<unsigned long long>(snapshot->jobs.rejected),
+		static_cast<unsigned long long>(snapshot->jobs.batchCount),
+		static_cast<unsigned long long>(snapshot->jobs.lockAcquisitionCount),
+		snapshot->jobs.activePumps,
+		snapshot->jobs.maximumActivePumps);
 }
 
 void PhysicsDiagnosticsWindow::DrawTimings()
@@ -152,6 +166,11 @@ void PhysicsDiagnosticsWindow::DrawTimings()
 	ImGui::Text("Provider allocations: %llu outstanding, %llu high-water (provider byte totals unavailable).",
 		static_cast<unsigned long long>(snapshot->memory.outstandingProviderAllocations),
 		static_cast<unsigned long long>(snapshot->memory.highWaterProviderAllocations));
+	ImGui::Text("Extraction %.3f ms; state validation %.3f ms; snapshot %.3f ms; transactions %.3f ms.",
+		snapshot->timings.extractionMs,
+		snapshot->timings.stateValidationMs,
+		snapshot->timings.snapshotConstructionMs,
+		snapshot->timings.transactionConstructionMs);
 }
 
 void PhysicsDiagnosticsWindow::DrawSchedulerDeclarations()

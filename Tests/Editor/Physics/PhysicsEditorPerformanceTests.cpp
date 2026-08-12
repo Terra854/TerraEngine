@@ -195,6 +195,9 @@ namespace TerraEngine::EditorTests {
 			for(std::uint32_t request = 0U; request < kPausedNextRequestCount; ++request) {
 				context.Expect(physics.RequestExplicitStep(),
 					"Each bounded paused Next request must be admitted before the following protected publication.");
+				// This test invokes PhysicsSystem directly, so explicitly emulate the
+				// Scene phase's immutable packet publication before each Physics phase.
+				(void)objects.PublishSceneChangePacket();
 				physics.Update(0.0F);
 				const auto flush = mutations.Apply(objects, "editor-physics-performance-next");
 				physics.OnAfterPhysicsFlush(flush.transactionResults, flush.publicationGroupResults);

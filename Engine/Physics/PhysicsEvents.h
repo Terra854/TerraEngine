@@ -145,6 +145,21 @@ namespace TerraEngine::Physics {
 		PhysicsTick retainedTicks = 2U;
 	};
 
+	// The canonical result is the sole sorted authority for one completed tick.
+	// Gameplay and diagnostic packets scan this immutable sequence into their own
+	// bounded views, so adding a diagnostic reader cannot introduce another sort.
+	struct PhysicsCanonicalEventResult {
+		PhysicsWorldHandle world;
+		PhysicsTick tick = 0U;
+		std::shared_ptr<const std::vector<PhysicsEvent>> events;
+		std::array<std::uint32_t, kPhysicsEventTypeCount> countsByType{};
+		std::uint64_t observedCount = 0U;
+		std::uint64_t validCount = 0U;
+		std::uint64_t ingressInvalidCount = 0U;
+		std::uint64_t ingressDroppedCount = 0U;
+		std::uint32_t sortCount = 0U;
+	};
+
 	struct PhysicsEventPacket {
 		PhysicsWorldHandle world;
 		PhysicsTick tick = 0U;
@@ -198,6 +213,16 @@ namespace TerraEngine::Physics {
 	// removed by the canonical ordering key before any packet is observable.
 	class TERRAENGINE_API PhysicsEventPacketBuilder final {
 	public:
+		[[nodiscard]] static PhysicsCanonicalEventResult BuildCanonical(
+			PhysicsWorldHandle world,
+			PhysicsTick tick,
+			std::span<const PhysicsEventThreadLocalCollector* const> collectors,
+			PhysicsEventPacketLimits limits = {});
+		[[nodiscard]] static PhysicsEventPacket BuildView(
+			const PhysicsCanonicalEventResult& canonical,
+			const PhysicsEventSubscriptionSnapshot& subscriptions,
+			PhysicsEventPacketLimits limits = {},
+			bool applySubscriptionFilters = true);
 		[[nodiscard]] static PhysicsEventPacket MergeCollectors(
 			PhysicsWorldHandle world,
 			PhysicsTick tick,

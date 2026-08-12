@@ -55,6 +55,64 @@ namespace TerraEngine::Tests {
 			objects.clear();
 		});
 
+		registry.Add("Physics.RigidBodyTransaction.ProviderFailureRejectsRegistrationAndScenePublication", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			const Object object = objects.createObject("Unavailable Provider Target");
+			const TerraEngine::UUID objectId = objects.getUUID(object);
+			PhysicsTransaction transaction("rigidbody-provider-unavailable");
+			transaction.sceneReadSet = TerraEngine::Scene::CaptureTransactionReadSet(objects, {objectId});
+			transaction.physicsReadSet.worldGeneration = 6U;
+			transaction.sceneWrites.push_back({.kind = TerraEngine::Scene::TransactionWriteKind::SetName,
+				.target = TerraEngine::Scene::ExistingObject(objectId), .stringValue = "Must Not Publish"});
+			transaction.physicsCommands.push_back(PhysicsCommand::MakeCreateBody(objectId, 6U));
+			PhysicsTransactionRuntimeState runtime;
+			runtime.world = PhysicsWorldHandle{PhysicsWorldId{1U}, 6U};
+			runtime.providerHealthy = false;
+			const auto bodyGenerationsBefore = runtime.bodyGenerations;
+			const auto result = CommitPhysicsTransaction(objects, runtime, transaction);
+
+			// Provider health is checked before staging or runtime-map replacement so a
+			// contained provider failure cannot leak a scene write or a new body identity.
+			context.Expect(result.state == PhysicsTransactionState::Conflicted && !result.accepted,
+				"An unavailable provider must reject the complete admission transaction before registration.");
+			context.Expect(result.providerWorldUnchanged && runtime.bodyGenerations == bodyGenerationsBefore
+				&& !result.sceneGenerationPublished && !result.physicsGenerationPublished,
+				"Provider failure must retain the prior runtime registrations and both publication generations.");
+			context.ExpectEqual(std::string("Unavailable Provider Target"), objects.getObjectName(object),
+				"Provider failure must not expose a prepared scene write while admission is rejected.");
+			objects.clear();
+		});
+
+		registry.Add("Physics.RigidBodyTransaction.DuplicateStagedIdentityRejectsWholeAdmission", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			const Object object = objects.createObject("Duplicate Staging Target");
+			const TerraEngine::UUID objectId = objects.getUUID(object);
+			PhysicsTransaction transaction("rigidbody-duplicate-staging");
+			transaction.sceneReadSet = TerraEngine::Scene::CaptureTransactionReadSet(objects, {objectId});
+			transaction.physicsReadSet.worldGeneration = 7U;
+			transaction.sceneWrites.push_back({.kind = TerraEngine::Scene::TransactionWriteKind::SetName,
+				.target = TerraEngine::Scene::ExistingObject(objectId), .stringValue = "Must Not Publish"});
+			transaction.physicsCommands.push_back(PhysicsCommand::MakeCreateBody(objectId, 7U));
+			transaction.physicsCommands.push_back(PhysicsCommand::MakeCreateBody(objectId, 7U));
+			PhysicsTransactionRuntimeState runtime;
+			runtime.world = PhysicsWorldHandle{PhysicsWorldId{1U}, 7U};
+			const auto bodyGenerationsBefore = runtime.bodyGenerations;
+			const auto result = CommitPhysicsTransaction(objects, runtime, transaction);
+
+			// A duplicate target is detected in the temporary staging map. The first
+			// command is therefore never allowed to become a partially registered body.
+			context.Expect(result.state == PhysicsTransactionState::PreflightFailed && !result.accepted,
+				"A duplicate provider identity in one admission batch must reject staging atomically.");
+			context.Expect(result.providerWorldUnchanged && runtime.bodyGenerations == bodyGenerationsBefore
+				&& !result.sceneGenerationPublished && !result.physicsGenerationPublished,
+				"Duplicate staged work must retain prior runtime registration and publication state.");
+			context.ExpectEqual(std::string("Duplicate Staging Target"), objects.getObjectName(object),
+				"A rejected duplicate staging batch must leave its prepared scene write invisible.");
+			objects.clear();
+		});
+
 		registry.Add("Physics.RigidBodyTransaction.TransformVersionConflictRollsBackProviderStaging", [](TestContext& context) {
 			ComponentRegistry::RegisterAllComponents();
 			ObjectManager& objects = ObjectManager::instance();

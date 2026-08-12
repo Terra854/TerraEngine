@@ -163,6 +163,11 @@ namespace TerraEngine::Animation {
 		const RagdollGenerationStamp& expected,
 		std::span<const PhysicsPoseExpectedBodyGeneration> expectedBodies) noexcept {
 		if(ragdollId == 0U) return AnimationStatus::InvalidArgument;
+		// Provider range completion can differ between worker counts. Seal the
+		// immutable animation-facing order before validation and publication.
+		std::sort(snapshot.bodies.begin(), snapshot.bodies.end(), [](const auto& left, const auto& right) {
+			return std::tie(left.bodyId, left.stableJointId) < std::tie(right.bodyId, right.stableJointId);
+		});
 		if(const AnimationStatus status = ValidatePhysicsPoseSnapshot(snapshot, expected, expectedBodies);
 			status != AnimationStatus::Ok) return status;
 		try {

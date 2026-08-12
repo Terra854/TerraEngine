@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace TerraEngine::Tests {
 	namespace {
@@ -146,6 +147,56 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(16, completedJobs.load(std::memory_order_acquire), "Barrier completion must observe every attached job exactly once.");
 			context.ExpectEqual(16U, adapter.Diagnostics().completed,
 				"Diagnostics must record each completed job once after the barrier and shared-pool pumps are drained.");
+		});
+
+		registry.Add("Engine.Physics.JobAdapter.BatchWaveAmortizesQueueLocksAndPumpSubmissions", [](TestContext& context) {
+			ThreadPoolSession session(4U);
+			TerraEngine::Physics::Backend::PhysicsJobAdapterConfig configuration{
+				.maxPhysicsWorkers = 4U,
+				.maxBarriers = 2U,
+				.maxJobs = 256U
+			};
+			TerraEngine::Physics::Backend::PhysicsAllocatorAdapter allocator;
+			TerraEngine::Physics::Backend::PhysicsJobAdapter adapter(ThreadPool::instance(), configuration);
+			constexpr JPH::uint jobCount = 128U;
+			std::vector<JPH::JobSystem::JobHandle> jobs;
+			jobs.reserve(jobCount);
+			std::vector<std::atomic<std::uint32_t>> results(jobCount);
+			for(std::atomic<std::uint32_t>& result : results) result.store(0U, std::memory_order_relaxed);
+			auto* barrier = adapter.CreateBarrier();
+			for(JPH::uint index = 0U; index < jobCount; ++index) {
+				jobs.push_back(adapter.CreateJob("Physics adapter batch-wave job", JPH::Color::sWhite, [&, index]() {
+					// Every job owns one deterministic output slot. Execution order may vary,
+					// but the published result remains stable across worker counts.
+					results[index].store(index + 1U, std::memory_order_release);
+				}, 1U));
+			}
+			barrier->AddJobs(jobs.data(), jobCount);
+			JPH::JobSystem::JobHandle::sRemoveDependencies(jobs.data(), jobCount);
+			adapter.WaitForJobs(barrier);
+			adapter.DestroyBarrier(barrier);
+
+			for(JPH::uint index = 0U; index < jobCount; ++index) {
+				context.ExpectEqual(index + 1U, results[index].load(std::memory_order_acquire),
+					"A provider batch wave must complete every stable output slot exactly once.");
+			}
+			const auto diagnostics = adapter.Diagnostics();
+			context.ExpectEqual(static_cast<std::uint64_t>(jobCount), diagnostics.submitted,
+				"Batch diagnostics must reconcile every submitted provider job.");
+			context.ExpectEqual(diagnostics.submitted, diagnostics.completed,
+				"A completed batch barrier must reconcile submitted and completed totals.");
+			context.ExpectEqual(1U, diagnostics.batchCount,
+				"One Jolt dependency wave must be observed as one adapter batch.");
+			context.Expect(diagnostics.lockAcquisitionCount < diagnostics.submitted,
+				"Bounded pump chunks must amortize queue locks below the provider job count.");
+			context.Expect(diagnostics.pumpSubmissionCount <= configuration.maxPhysicsWorkers,
+				"A batch wave must submit no more useful pumps than its physics worker cap.");
+			context.Expect(diagnostics.maxActivePumps <= configuration.maxPhysicsWorkers,
+				"Active pumps must remain within the configured provider share.");
+			context.ExpectEqual(0U, diagnostics.queued,
+				"No provider jobs may remain queued after the batch barrier drains.");
+			context.ExpectEqual(0U, diagnostics.activePumps,
+				"No shared-pool pump may outlive the completed batch wave.");
 		});
 
 		registry.Add("Engine.Physics.JobAdapter.BoundedConfigurationAndDiagnosticsRemainWithinCapacity", [](TestContext& context) {

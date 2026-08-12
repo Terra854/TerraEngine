@@ -168,48 +168,102 @@ namespace TerraEngine::Physics {
 		PhysicsEventPacketLimits limits,
 		bool applySubscriptionFilters)
 	{
-		PhysicsEventPacket packet;
-		packet.world = world;
-		packet.tick = tick;
-		packet.expiryTick = tick > std::numeric_limits<PhysicsTick>::max() - limits.retainedTicks
-			? std::numeric_limits<PhysicsTick>::max() : tick + limits.retainedTicks;
-		packet.subscriptionGeneration = subscriptions.generation;
-		limits.maximumEventsPerPacket = std::max<std::size_t>(1U, limits.maximumEventsPerPacket);
-		limits.maximumEventsPerCollector = std::max<std::size_t>(1U, limits.maximumEventsPerCollector);
-		std::vector<PhysicsEvent> merged;
-		merged.reserve(limits.maximumEventsPerPacket);
+		const PhysicsCanonicalEventResult canonical = BuildCanonical(world, tick, collectors, limits);
+		return BuildView(canonical, subscriptions, limits, applySubscriptionFilters);
+	}
 
+	PhysicsCanonicalEventResult PhysicsEventPacketBuilder::BuildCanonical(
+		PhysicsWorldHandle world,
+		PhysicsTick tick,
+		std::span<const PhysicsEventThreadLocalCollector* const> collectors,
+		PhysicsEventPacketLimits limits)
+	{
+		PhysicsCanonicalEventResult result;
+		result.world = world;
+		result.tick = tick;
+		limits.maximumEventsPerCollector = std::max<std::size_t>(1U, limits.maximumEventsPerCollector);
+		std::size_t observedCapacity = 0U;
+		for(const PhysicsEventThreadLocalCollector* collector : collectors) {
+			if(collector != nullptr) observedCapacity += std::min(collector->Events().size(), limits.maximumEventsPerCollector);
+		}
+		std::vector<PhysicsEvent> merged;
+		// Reserving only observed bounded ingress avoids retaining a 4096-record
+		// allocation for empty/light ticks while keeping busy ticks allocation-aware.
+		merged.reserve(observedCapacity);
 		for(const PhysicsEventThreadLocalCollector* collector : collectors) {
 			if(collector == nullptr) continue;
-			packet.droppedCount += collector->DroppedCount();
+			result.ingressDroppedCount += collector->DroppedCount();
 			std::size_t collectedCount = 0U;
 			for(const PhysicsEvent& source : collector->Events()) {
-				if(collectedCount++ == limits.maximumEventsPerCollector) {
-					++packet.droppedCount;
-					packet.overflowed = true;
+				++result.observedCount;
+				if(collectedCount++ >= limits.maximumEventsPerCollector) {
+					++result.ingressDroppedCount;
 					continue;
 				}
 				if(source.world != world || source.tick != tick || !source.IsFinite()) {
-					++packet.droppedCount;
-					continue;
-				}
-				if(applySubscriptionFilters && !AnySubscriptionMatches(source, subscriptions)) {
-					++packet.filteredCount;
-					continue;
-				}
-				if(merged.size() == limits.maximumEventsPerPacket) {
-					++packet.droppedCount;
-					packet.overflowed = true;
+					++result.ingressInvalidCount;
 					continue;
 				}
 				merged.push_back(source);
 			}
 		}
+		result.validCount = merged.size();
+		if(merged.size() > 1U) {
+			std::sort(merged.begin(), merged.end(), PhysicsEventLess);
+			result.sortCount = 1U;
+		}
+		for(const PhysicsEvent& event : merged) ++result.countsByType[EventIndex(event.type)];
+		result.events = std::make_shared<const std::vector<PhysicsEvent>>(std::move(merged));
+		return result;
+	}
 
-		std::sort(merged.begin(), merged.end(), PhysicsEventLess);
-		for(const PhysicsEvent& event : merged) ++packet.countsByType[EventIndex(event.type)];
-		packet.overflowed = packet.overflowed || packet.droppedCount != 0U;
-		packet.events = std::make_shared<const std::vector<PhysicsEvent>>(std::move(merged));
+	PhysicsEventPacket PhysicsEventPacketBuilder::BuildView(
+		const PhysicsCanonicalEventResult& canonical,
+		const PhysicsEventSubscriptionSnapshot& subscriptions,
+		PhysicsEventPacketLimits limits,
+		bool applySubscriptionFilters)
+	{
+		PhysicsEventPacket packet;
+		packet.world = canonical.world;
+		packet.tick = canonical.tick;
+		packet.expiryTick = canonical.tick > std::numeric_limits<PhysicsTick>::max() - limits.retainedTicks
+			? std::numeric_limits<PhysicsTick>::max() : canonical.tick + limits.retainedTicks;
+		packet.subscriptionGeneration = subscriptions.generation;
+		limits.maximumEventsPerPacket = std::max<std::size_t>(1U, limits.maximumEventsPerPacket);
+		packet.droppedCount = canonical.ingressDroppedCount + canonical.ingressInvalidCount;
+		const std::vector<PhysicsEvent> empty;
+		const std::vector<PhysicsEvent>& source = canonical.events != nullptr ? *canonical.events : empty;
+		std::size_t visibleCount = 0U;
+		// A gameplay view may still be the complete canonical sequence when its
+		// subscriptions accept every record; keep that shared immutable allocation.
+		bool allVisible = true;
+		for(const PhysicsEvent& event : source) {
+			const bool matches = !applySubscriptionFilters || AnySubscriptionMatches(event, subscriptions);
+			if(!matches) {
+				++packet.filteredCount;
+				allVisible = false;
+				continue;
+			}
+			++visibleCount;
+		}
+		if(allVisible && visibleCount <= limits.maximumEventsPerPacket && canonical.events != nullptr) {
+			packet.events = canonical.events;
+			packet.countsByType = canonical.countsByType;
+		} else {
+			std::vector<PhysicsEvent> view;
+			view.reserve(std::min(visibleCount, limits.maximumEventsPerPacket));
+			for(const PhysicsEvent& event : source) {
+				if(applySubscriptionFilters && !AnySubscriptionMatches(event, subscriptions)) continue;
+				if(view.size() == limits.maximumEventsPerPacket) {
+					++packet.droppedCount;
+					continue;
+				}
+				view.push_back(event);
+			}
+			for(const PhysicsEvent& event : view) ++packet.countsByType[EventIndex(event.type)];
+			packet.events = std::make_shared<const std::vector<PhysicsEvent>>(std::move(view));
+		}
+		packet.overflowed = packet.droppedCount != 0U;
 		return packet;
 	}
 

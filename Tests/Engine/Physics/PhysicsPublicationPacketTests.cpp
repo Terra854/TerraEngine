@@ -135,5 +135,39 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(targets.size(), receipt.acknowledgedEntries.size(), "Acknowledgement should cover every changed pose in the committed tick.");
 			objects.clear();
 		});
+
+		registry.Add("Physics.Publication.StaleLateChunkRetainsPriorVisiblePacketAtomically", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Scene::SceneMutationQueue queue;
+			const Physics::PhysicsWorldHandle world{{93U}, 4U};
+			const Object first = objects.createObject("Prior First");
+			const Object second = objects.createObject("Prior Second");
+			std::vector<Physics::TransformPublicationSourceRecord> firstRecords{
+				CapturePublicationRecord(objects, first, world, 0U, 1U, MakePose(1.0F, 0.0F, 0.0F), true),
+				CapturePublicationRecord(objects, second, world, 1U, 1U, MakePose(2.0F, 0.0F, 0.0F), true)};
+			const Physics::TransformPublicationPacket accepted = MakePacket(objects, world, firstRecords, 2U, 31U);
+			queue.EnqueuePublicationGroup(Physics::BuildTransformPublicationGroup(accepted));
+			const auto acceptedFlush = queue.Apply(objects, "physics-prior-packet");
+			context.Expect(acceptedFlush.publicationGroupResults.size() == 1U
+				&& acceptedFlush.publicationGroupResults.front().Committed(),
+				"The prior packet must establish visible state before rejection is measured.");
+
+			std::vector<Physics::TransformPublicationSourceRecord> replacement{
+				CapturePublicationRecord(objects, first, world, 0U, 1U, MakePose(10.0F, 0.0F, 0.0F), true),
+				CapturePublicationRecord(objects, second, world, 1U, 1U, MakePose(20.0F, 0.0F, 0.0F), true)};
+			const Physics::TransformPublicationPacket rejected = MakePacket(objects, world, replacement, 1U, 32U);
+			queue.EnqueuePublicationGroup(Physics::BuildTransformPublicationGroup(rejected));
+			objects.removeObject(second);
+			const auto rejectedFlush = queue.Apply(objects, "physics-stale-late-chunk");
+			const Transform* visibleFirst = objects.GetComponent<Transform>(first);
+			context.Expect(rejectedFlush.publicationGroupResults.size() == 1U
+				&& !rejectedFlush.publicationGroupResults.front().Committed()
+				&& rejectedFlush.publicationGroupResults.front().appliedWriteCount == 0U,
+				"A stale late publication chunk must reject the whole replacement packet before any write becomes visible.");
+			context.Expect(visibleFirst != nullptr && std::abs(visibleFirst->position.x - 1.0F) < 0.001F,
+				"Rejected publication must retain the last complete visible pose rather than exposing a partial replacement.");
+			objects.clear();
+		});
 	}
 }

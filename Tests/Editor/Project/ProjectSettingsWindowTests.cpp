@@ -134,5 +134,16 @@ namespace TerraEngine::EditorTests
 			context.Expect(projectSettingsSource.find("Advanced Collision Layer Settings") != std::string::npos,
 				"Broad-phase tuning should stay behind an advanced section.");
 		});
+
+		registry.Add("Editor.ProjectSettings.PhysicsSolverControlsMatchValidatedRanges", [](TestContext& context) {
+			const std::string projectSettingsSource =
+				ReadProjectSourceFile("Editor/TerraEngine-Editor/Windows/ProjectSettingsWindow.cpp");
+			context.Expect(projectSettingsSource.find(
+				"SliderInt(\"Velocity Iterations\", &velocityIterations, 2, 255)") != std::string::npos,
+				"The editor must not offer velocity iteration values rejected by PhysicsSettings validation.");
+			context.Expect(projectSettingsSource.find(
+				"SliderInt(\"Position Iterations\", &positionIterations, 1, 255)") != std::string::npos,
+				"The editor should expose the complete validated position iteration range.");
+		});
 	}
 }

@@ -158,6 +158,24 @@ namespace TerraEngine::Physics {
 		std::uint32_t objectCount = 0U;
 	};
 
+	struct PhysicsConstraintDependencyRange {
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::uint32_t recordBegin = 0U;
+		std::uint32_t recordCount = 0U;
+	};
+
+	// These compact lookup records let the protected preparation boundary fetch
+	// only closure members, instead of revisiting every authored joint/character.
+	struct PhysicsConstraintDescriptorIndexRecord {
+		TerraEngine::UUID recordId = TerraEngine::EMPTY_UUID;
+		std::uint32_t constraintVectorIndex = 0U;
+	};
+
+	struct PhysicsCharacterDescriptorIndexRecord {
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::uint32_t characterVectorIndex = 0U;
+	};
+
 	struct PhysicsPrimitiveShapeShareRange {
 		std::uint64_t stableRecipeHash = 0U;
 		std::uint32_t colliderBegin = 0U;
@@ -192,6 +210,13 @@ namespace TerraEngine::Physics {
 		PhysicsDescriptorIndex nextStableBodyDescriptorIndex = 0U;
 		std::vector<PhysicsAssetDependencyRange> assetDependencies;
 		std::vector<TerraEngine::UUID> assetDependentObjects;
+		// Endpoints, owners, and gear source objects map to their dependent
+		// constraint records so localized body edits need not rediscover every joint.
+		std::vector<PhysicsConstraintDependencyRange> constraintDependencies;
+		std::vector<TerraEngine::UUID> constraintDependentRecordIds;
+		std::vector<TerraEngine::UUID> characterObjects;
+		std::vector<PhysicsConstraintDescriptorIndexRecord> constraintDescriptorIndices;
+		std::vector<PhysicsCharacterDescriptorIndexRecord> characterDescriptorIndices;
 		std::vector<PhysicsPrimitiveShapeShareRange> primitiveShapeShares;
 		std::vector<std::uint32_t> primitiveShapeColliderIndices;
 	};
@@ -218,9 +243,16 @@ namespace TerraEngine::Physics {
 		bool IsValid() const noexcept { return data_ != nullptr; }
 		const PhysicsBodyDescriptorIndexRecord* FindBodyDescriptorIndex(
 			const TerraEngine::UUID& objectId) const noexcept;
+		const PhysicsConstraintDescriptor* FindConstraintDescriptor(
+			const TerraEngine::UUID& recordId) const noexcept;
+		const PhysicsCharacterDescriptor* FindCharacterDescriptor(
+			const TerraEngine::UUID& objectId) const noexcept;
 		std::vector<TerraEngine::UUID> ObjectsDependingOn(
 			const TerraEngine::UUID& assetId,
 			PhysicsAssetKind assetKind) const;
+		std::vector<TerraEngine::UUID> ConstraintsDependingOn(
+			const TerraEngine::UUID& objectId) const;
+		bool HasCharacter(const TerraEngine::UUID& objectId) const noexcept;
 
 	private:
 		explicit PhysicsAuthoringSnapshot(std::shared_ptr<const PhysicsAuthoringData> data)

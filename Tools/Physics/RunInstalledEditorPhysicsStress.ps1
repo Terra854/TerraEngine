@@ -70,9 +70,37 @@ param(
 	[ValidateRange(1, 1000000)]
 	[int] $ParallelExtractionThreshold = 512,
 
+	# Solver quality is part of the workload identity. These values are written to
+	# the disposable project before the editor starts and verified from copied
+	# runtime diagnostics on every measured step.
+	[ValidateRange(2, 255)]
+	[int] $VelocityIterations = 10,
+
+	[ValidateRange(1, 255)]
+	[int] $PositionIterations = 2,
+
 	# Runs the complete paused/unchanged/small/large x 1/2/4/max matrix and
 	# writes one recommendation report below WorkRoot.
 	[switch] $RunWorkerScalingMatrix,
+
+	# Selects a source-controlled workload identity. Only the generic unchanged
+	# and worker-large layouts can be authored by this box-only harness today;
+	# specialised contact, ragdoll, and bulk-admission fixtures fail closed.
+	[ValidateSet("physics-unchanged-10000-v1", "physics-contact-pairs-4096-v1", "physics-ragdoll-crowd-64x16-v1", "physics-ragdoll-crowd-128x16-v1", "physics-bulk-admission-10000-v1", "physics-worker-large-v1")]
+	[string] $CanonicalFixture = "physics-unchanged-10000-v1",
+
+	# Each leg owns a fresh installed editor process. The quality matrix proves
+	# the settings copied into the disposable project are observed at runtime.
+	[switch] $RunQualityProfileMatrix,
+
+	# Acceptance repetition runs exactly the ten source-controlled attempts.
+	# It emits a fail-closed aggregate-status record when the installed bridge
+	# cannot supply all fields required by the strict evidence JSON schema.
+	[switch] $RunRepeatedAcceptanceMatrix,
+
+	# Internal diagnostic legs retain their measurements in the worker report,
+	# but are never presented as a canonical acceptance fixture.
+	[switch] $AllowDiagnosticFixture,
 
 	# readiness readiness cases reuse one disposable project across clean editor
 	# launches.  The modes retain source authority: only generated cache/output
@@ -274,6 +302,75 @@ function Get-PropertyValue {
 	return $property.Value
 }
 
+function Get-CanonicalFixtureEvidence {
+	param([Parameter(Mandatory = $true)][string] $FixtureId)
+	# The manifest is the authority for identity, population, and active-body
+	# counts. Reading it here prevents command-line values from silently changing
+	# what a named acceptance fixture means.
+	$manifestPath = Join-Path $repoRoot "Tests/Fixtures/Performance/Physics/workloads.json"
+	if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+		throw "Canonical physics workload manifest was not found: '$manifestPath'."
+	}
+	$manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
+	$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+	$fixture = @($manifest.workloads | Where-Object { [string]$_.id -eq $FixtureId } | Select-Object -First 1)
+	if ($fixture.Count -ne 1) { throw "Canonical physics fixture '$FixtureId' is not declared by '$manifestPath'." }
+	$implemented = $FixtureId -in @("physics-unchanged-10000-v1", "physics-worker-large-v1")
+	return [ordered]@{
+		id = $FixtureId; version = [int]$fixture[0].version; manifestPath = $manifestPath; manifestSha256 = $manifestHash
+		population = [int]$fixture[0].population; activeBodies = [int]$fixture[0].activeBodies
+		warmupSteps = [int]$fixture[0].warmupSteps; measuredSteps = [int]$fixture[0].measuredSteps
+		seed = [int]$fixture[0].seed; description = [string]$fixture[0].description
+		availability = if ($implemented) { "available" } else { "unavailable" }
+		availabilityReason = if ($implemented) { $null } else { "The installed box-only harness cannot author the canonical contact, ragdoll, or fresh-world bulk-admission topology." }
+	}
+}
+
+function Assert-CanonicalFixtureArguments {
+	param([Parameter(Mandatory = $true)] $Fixture)
+	if ($Fixture.availability -ne "available") {
+		throw "Canonical fixture '$($Fixture.id)' is unavailable: $($Fixture.availabilityReason)"
+	}
+	if ($ObjectCount -ne [int]$Fixture.population -or $ActiveDynamicCount -ne [int]$Fixture.activeBodies -or $ExplicitStepCount -ne [int]$Fixture.measuredSteps) {
+		throw "Canonical fixture '$($Fixture.id)' requires population=$($Fixture.population), activeBodies=$($Fixture.activeBodies), and measuredSteps=$($Fixture.measuredSteps); received $ObjectCount/$ActiveDynamicCount/$ExplicitStepCount."
+	}
+}
+
+function Get-WorkerResolutionCheck {
+	param([Parameter(Mandatory = $true)] $Record)
+	$resolved = Get-PropertyValue -Object $Record.summary -Name "actualWorkerCount"
+	if ($null -eq $resolved -or [int]$resolved -lt 1) {
+		return [ordered]@{ available = $false; exact = $false; reason = "child did not report a positive resolved worker count"; resolved = $null }
+	}
+	$requested = [string]$Record.requestedWorkerCount
+	# `max` is not a wildcard in acceptance evidence: the child must resolve it to
+	# the exact hardware-concurrency value it records for the same process.
+	$expected = if ($requested -eq "max") { [int][Math]::Max(1, [Environment]::ProcessorCount) } else { [int]$requested }
+	$exact = [int]$resolved -eq $expected
+	return [ordered]@{
+		available = $true; exact = $exact; requested = $requested; resolved = [int]$resolved
+		reason = if ($exact) { $null } else { "requested $requested workers (expected $expected) but the runtime resolved $resolved" }
+	}
+}
+
+function Get-QualityEvidenceCheck {
+	param([Parameter(Mandatory = $true)] $Summary, [Parameter(Mandatory = $true)][int] $ExpectedVelocityIterations, [Parameter(Mandatory = $true)][int] $ExpectedPositionIterations)
+	$samples = @((Get-PropertyValue -Object $Summary -Name "physicsStageSamples"))
+	if ($samples.Count -eq 0) {
+		return [ordered]@{ available = $false; applied = $false; reason = "no measured physics diagnostics were retained"; verifiedSteps = 0 }
+	}
+	$invalid = @($samples | Where-Object {
+		$quality = Get-PropertyValue -Object $_ -Name "quality"
+		$null -eq $quality -or -not [bool](Get-PropertyValue -Object $quality -Name "applied") -or
+		[int](Get-PropertyValue -Object $quality -Name "velocityIterations") -ne $ExpectedVelocityIterations -or
+		[int](Get-PropertyValue -Object $quality -Name "positionIterations") -ne $ExpectedPositionIterations
+	})
+	return [ordered]@{
+		available = $true; applied = ($invalid.Count -eq 0); verifiedSteps = $samples.Count
+		reason = if ($invalid.Count -eq 0) { $null } else { "one or more measured diagnostics did not report the requested quality profile" }
+	}
+}
+
 function Complete-ProfilerCaptureEvidence {
 	param([Parameter(Mandatory = $true)] $Summary, [Parameter(Mandatory = $true)] $Artifact, [Parameter(Mandatory = $true)][string] $ArtifactRoot)
 	if (-not $RunProfilerCaptureChecks) { return }
@@ -382,6 +479,9 @@ function Invoke-WorkerScalingMatrix {
 	Assert-PathBelow -Parent $outRoot -Child $matrixRoot
 	New-Item -ItemType Directory -Force -Path $matrixRoot | Out-Null
 	$records = [System.Collections.Generic.List[object]]::new()
+	# Keep the large leg representative of a genuinely parallel physics load while
+	# retaining 1,000 kinematic bodies and at least one static body in the fixture.
+	$largeActiveCount = [Math]::Min(8000, [Math]::Max(1, $ObjectCount - 1001))
 	foreach ($scenario in @("paused", "unchanged", "small", "large")) {
 		foreach ($workers in @("1", "2", "4", "max")) {
 			$childRoot = Join-Path $matrixRoot ("{0}-workers-{1}" -f $scenario, $workers)
@@ -391,21 +491,42 @@ function Invoke-WorkerScalingMatrix {
 				"-WorkerCount", $workers, "-WorkerScalingScenario", $scenario,
 				"-ParallelPreparationThreshold", $ParallelPreparationThreshold,
 				"-ParallelExtractionThreshold", $ParallelExtractionThreshold,
+				"-VelocityIterations", $VelocityIterations,
+				"-PositionIterations", $PositionIterations,
 				"-ObjectCount", $(if ($scenario -eq "small") { 256 } else { $ObjectCount }),
-				"-ActiveDynamicCount", $(if ($scenario -eq "small") { 64 } else { $ActiveDynamicCount }),
+				"-ActiveDynamicCount", $(if ($scenario -eq "small") { 64 } elseif ($scenario -eq "large") { $largeActiveCount } else { $ActiveDynamicCount }),
 				"-AllowLiveStress"
 			)
+			# Only the 8,000-active-body leg has a canonical worker-scaling fixture.
+			# Idle and small legs remain diagnostic observations, never worker-scaling input.
+			if ($scenario -eq "large") {
+				$arguments += @("-CanonicalFixture", "physics-worker-large-v1")
+			} else {
+				$arguments += "-AllowDiagnosticFixture"
+			}
 			$child = & powershell.exe @arguments
+			$childExitCode = $LASTEXITCODE
 			$summaryFile = Join-Path $childRoot "evidence/summary.json"
 			if (Test-Path -LiteralPath $summaryFile) {
 				$summary = Get-Content -LiteralPath $summaryFile -Raw | ConvertFrom-Json
-				$records.Add([ordered]@{ scenario = $scenario; requestedWorkerCount = $workers; success = [bool]$summary.success; summaryPath = $summaryFile; summary = $summary })
+				$records.Add([ordered]@{ scenario = $scenario; requestedWorkerCount = $workers; success = ([bool]$summary.success -and $childExitCode -eq 0); childExitCode = $childExitCode; summaryPath = $summaryFile; summary = $summary })
 			} else {
-				$records.Add([ordered]@{ scenario = $scenario; requestedWorkerCount = $workers; success = $false; summaryPath = $summaryFile; error = "child summary was not produced" })
+				$records.Add([ordered]@{ scenario = $scenario; requestedWorkerCount = $workers; success = $false; childExitCode = $childExitCode; summaryPath = $summaryFile; error = "child summary was not produced" })
 			}
 		}
 	}
 	$successful = @($records | Where-Object { $_.success })
+	function Get-ScalingMetricMs {
+		param([Parameter(Mandatory = $true)] $Record)
+		# The worker-scaling gate evaluates provider work. Use the engine-measured simulation
+		# stage, matching the schema comparator, while the report retains every other
+		# stage for mixed-world total-tick and per-stage regression analysis.
+		$simulation = @($Record.summary.physicsStageSamples | ForEach-Object { [double]$_.stages.simulation })
+		if ($simulation.Count -gt 0) { return Get-Percentile -Values ([double[]]$simulation) -Percentile 50 }
+		# Paused/unchanged legs have no measured tick. Their recommendation is only
+		# informational, so retain the existing end-to-end duration as a fallback.
+		return [double]$Record.summary.monotonicDurationMs
+	}
 	$determinismByScenario = [ordered]@{}
 	foreach ($scenarioName in @("paused", "unchanged", "small", "large")) {
 		$scenarioHashes = @($successful | Where-Object { $_.scenario -eq $scenarioName } | ForEach-Object { [string]$_.summary.determinismHash } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
@@ -413,29 +534,161 @@ function Invoke-WorkerScalingMatrix {
 	}
 	$recommendationsByScenario = [ordered]@{}
 	foreach ($scenarioName in @("paused", "unchanged", "small", "large")) {
-		$fastest = $successful | Where-Object { $_.scenario -eq $scenarioName } | Sort-Object { [double]$_.summary.monotonicDurationMs } | Select-Object -First 1
+		$fastest = $successful | Where-Object { $_.scenario -eq $scenarioName } | Sort-Object { Get-ScalingMetricMs -Record $_ } | Select-Object -First 1
 		$recommendationsByScenario[$scenarioName] = if ($null -eq $fastest) { $null } else { [ordered]@{
 			requestedWorkerCount = $fastest.requestedWorkerCount; resolvedWorkerCount = $fastest.summary.actualWorkerCount
-			durationMs = $fastest.summary.monotonicDurationMs; reason = "fastest successful correctness-gated result for this workload"
+			durationMs = Get-ScalingMetricMs -Record $fastest; reason = "fastest successful correctness-gated median physics-stage result for measured workloads"
 		} }
 	}
 	# The large workload is the production stress recommendation. Per-scenario
 	# results remain available so small/idle overhead is not compared as equivalent
 	# work and cannot accidentally choose the global worker default.
-	$recommendation = $successful | Where-Object { $_.scenario -eq "large" } | Sort-Object { [double]$_.summary.monotonicDurationMs } | Select-Object -First 1
+	$recommendation = $successful | Where-Object { $_.scenario -eq "large" } | Sort-Object { Get-ScalingMetricMs -Record $_ } | Select-Object -First 1
+	$largeOne = $successful | Where-Object { $_.scenario -eq "large" -and $_.requestedWorkerCount -eq "1" } | Select-Object -First 1
+	$largeFour = $successful | Where-Object { $_.scenario -eq "large" -and $_.requestedWorkerCount -eq "4" } | Select-Object -First 1
+	$largeMax = $successful | Where-Object { $_.scenario -eq "large" -and $_.requestedWorkerCount -eq "max" } | Select-Object -First 1
+	$largeRecords = @($largeOne, $largeFour, $largeMax)
+	$largeResolutionChecks = @($largeRecords | Where-Object { $null -ne $_ } | ForEach-Object { Get-WorkerResolutionCheck -Record $_ })
+	$largeExactWorkerCounts = $largeResolutionChecks.Count -eq 3 -and @($largeResolutionChecks | Where-Object { -not $_.available -or -not $_.exact }).Count -eq 0
+	$workerScalingGate = [ordered]@{
+		available = ($null -ne $largeOne -and $null -ne $largeFour -and $null -ne $largeMax -and $largeExactWorkerCounts)
+		metric = "medianSimulationStageMs"
+		exactWorkerResolution = $largeExactWorkerCounts
+		workerResolutionChecks = $largeResolutionChecks
+		oneWorkerDurationMs = if($null -eq $largeOne){$null}else{Get-ScalingMetricMs -Record $largeOne}
+		fourWorkerDurationMs = if($null -eq $largeFour){$null}else{Get-ScalingMetricMs -Record $largeFour}
+		maximumWorkerDurationMs = if($null -eq $largeMax){$null}else{Get-ScalingMetricMs -Record $largeMax}
+		speedupFourVsOne = $null
+		maximumVsFourRatio = $null
+		passed = $false
+	}
+	if($workerScalingGate.available -and $workerScalingGate.fourWorkerDurationMs -gt 0.0) {
+		$workerScalingGate.speedupFourVsOne = $workerScalingGate.oneWorkerDurationMs / $workerScalingGate.fourWorkerDurationMs
+		$workerScalingGate.maximumVsFourRatio = $workerScalingGate.maximumWorkerDurationMs / $workerScalingGate.fourWorkerDurationMs
+		$workerScalingGate.passed = $workerScalingGate.speedupFourVsOne -ge 1.5 -and $workerScalingGate.maximumVsFourRatio -le 1.10
+	}
 	$report = [ordered]@{
 		version = 1; feature = "worker-scaling"; thresholdOverride = [ordered]@{ parallelPreparation = $ParallelPreparationThreshold; parallelExtraction = $ParallelExtractionThreshold }
 		scenarios = @("paused", "unchanged", "small", "large"); workerCounts = @("1", "2", "4", "max")
 		deterministic = ($successful.Count -eq 16 -and @($determinismByScenario.Values | Where-Object { -not $_.identical }).Count -eq 0)
-		determinismByScenario = $determinismByScenario; scalingComparable = ($successful.Count -eq 16)
+		determinismByScenario = $determinismByScenario; scalingComparable = ($successful.Count -eq 16 -and $largeExactWorkerCounts)
+		workerScalingGate = $workerScalingGate
 		recommendationsByScenario = $recommendationsByScenario
-		recommended = if ($null -eq $recommendation) { $null } else { [ordered]@{ scenario = $recommendation.scenario; requestedWorkerCount = $recommendation.requestedWorkerCount; resolvedWorkerCount = $recommendation.summary.actualWorkerCount; durationMs = $recommendation.summary.monotonicDurationMs; reason = "fastest successful correctness-gated large-workload result" } }
+		recommended = if ($null -eq $recommendation) { $null } else { [ordered]@{ scenario = $recommendation.scenario; requestedWorkerCount = $recommendation.requestedWorkerCount; resolvedWorkerCount = $recommendation.summary.actualWorkerCount; durationMs = Get-ScalingMetricMs -Record $recommendation; reason = "fastest successful correctness-gated median physics-stage large-workload result" } }
 		runs = @($records)
 	}
 	$reportPath = Join-Path $matrixRoot "worker-scaling-matrix-summary.json"
 	Write-JsonFile -Path $reportPath -Value $report -Depth 64
 	Write-Output ("worker-scaling matrix report: {0}" -f $reportPath)
-	if (-not $report.deterministic -or -not $report.scalingComparable) { throw "worker-scaling matrix did not produce 16 successful deterministic runs." }
+	if (-not $report.deterministic -or -not $report.scalingComparable -or -not $report.workerScalingGate.passed) {
+		throw "worker-scaling matrix failed determinism, completeness, or the required 1.5x / 10% limits."
+	}
+	exit 0
+}
+
+function Invoke-QualityProfileMatrix {
+	# Profiles are separate processes because the project settings are loaded at
+	# editor startup. Reusing one process would not prove that either profile was
+	# applied by the provider rather than merely requested by the harness.
+	$matrixRoot = Get-AbsolutePath -Path $WorkRoot -BasePath $repoRoot
+	Assert-PathBelow -Parent $outRoot -Child $matrixRoot
+	New-Item -ItemType Directory -Force -Path $matrixRoot | Out-Null
+	$records = [System.Collections.Generic.List[object]]::new()
+	foreach ($profile in @(
+		[ordered]@{ id = "default"; velocityIterations = 10; positionIterations = 2 },
+		[ordered]@{ id = "alternate"; velocityIterations = 20; positionIterations = 4 }
+	)) {
+		$childRoot = Join-Path $matrixRoot ("quality-" + $profile.id)
+		$arguments = @(
+			"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath,
+			"-InstallRoot", $InstallRoot, "-WorkRoot", $childRoot,
+			"-CanonicalFixture", $CanonicalFixture, "-ObjectCount", $ObjectCount,
+			"-ActiveDynamicCount", $ActiveDynamicCount, "-ExplicitStepCount", $ExplicitStepCount,
+			"-WorkerCount", $WorkerCount, "-WorkerScalingScenario", $WorkerScalingScenario,
+			"-ParallelPreparationThreshold", $ParallelPreparationThreshold,
+			"-ParallelExtractionThreshold", $ParallelExtractionThreshold,
+			"-VelocityIterations", $profile.velocityIterations,
+			"-PositionIterations", $profile.positionIterations, "-AllowLiveStress"
+		)
+		& powershell.exe @arguments
+		$childExitCode = $LASTEXITCODE
+		$summaryPath = Join-Path $childRoot "evidence/summary.json"
+		if (Test-Path -LiteralPath $summaryPath) {
+			$summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+			$quality = Get-QualityEvidenceCheck -Summary $summary -ExpectedVelocityIterations $profile.velocityIterations -ExpectedPositionIterations $profile.positionIterations
+			$records.Add([ordered]@{ profile = $profile; success = ([bool]$summary.success -and $childExitCode -eq 0 -and $quality.applied); childExitCode = $childExitCode; quality = $quality; summaryPath = $summaryPath; summary = $summary })
+		} else {
+			$records.Add([ordered]@{ profile = $profile; success = $false; childExitCode = $childExitCode; quality = [ordered]@{ available = $false; applied = $false; reason = "child summary was not produced" }; summaryPath = $summaryPath })
+		}
+	}
+	$report = [ordered]@{
+		version = 1; feature = "quality-profile"; canonicalFixture = $CanonicalFixture
+		profiles = @($records | ForEach-Object { $_.profile }); complete = (@($records | Where-Object { $_.success }).Count -eq 2)
+		# Quality performance is informative here. Correctness requires each leg to
+		# report the requested values on every measured provider diagnostics sample.
+		qualityGate = [ordered]@{ available = (@($records | Where-Object { $_.quality.available }).Count -eq 2); passed = (@($records | Where-Object { $_.success }).Count -eq 2) }
+		runs = @($records)
+	}
+	$reportPath = Join-Path $matrixRoot "quality-profile-matrix-summary.json"
+	Write-JsonFile -Path $reportPath -Value $report -Depth 64
+	Write-Output ("quality profile matrix report: {0}" -f $reportPath)
+	if (-not $report.complete) { throw "quality profile matrix did not produce two successful runtime-verified profile legs." }
+	exit 0
+}
+
+function Invoke-RepeatedAcceptanceMatrix {
+	# Preserve every child result, including failures. A repeated gate must not
+	# average away a timeout, forced shutdown, or missing evidence file.
+	$matrixRoot = Get-AbsolutePath -Path $WorkRoot -BasePath $repoRoot
+	Assert-PathBelow -Parent $outRoot -Child $matrixRoot
+	New-Item -ItemType Directory -Force -Path $matrixRoot | Out-Null
+	$records = [System.Collections.Generic.List[object]]::new()
+	for ($attempt = 1; $attempt -le 10; ++$attempt) {
+		$childRoot = Join-Path $matrixRoot ("acceptance-run-{0:d2}" -f $attempt)
+		$arguments = @(
+			"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath,
+			"-InstallRoot", $InstallRoot, "-WorkRoot", $childRoot,
+			"-CanonicalFixture", $CanonicalFixture, "-ObjectCount", $ObjectCount,
+			"-ActiveDynamicCount", $ActiveDynamicCount, "-ExplicitStepCount", $ExplicitStepCount,
+			"-WorkerCount", $WorkerCount, "-WorkerScalingScenario", $WorkerScalingScenario,
+			"-ParallelPreparationThreshold", $ParallelPreparationThreshold,
+			"-ParallelExtractionThreshold", $ParallelExtractionThreshold,
+			"-VelocityIterations", $VelocityIterations, "-PositionIterations", $PositionIterations,
+			"-AllowLiveStress"
+		)
+		& powershell.exe @arguments
+		$childExitCode = $LASTEXITCODE
+		$summaryPath = Join-Path $childRoot "evidence/summary.json"
+		if (Test-Path -LiteralPath $summaryPath) {
+			$summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+			$quality = Get-QualityEvidenceCheck -Summary $summary -ExpectedVelocityIterations $VelocityIterations -ExpectedPositionIterations $PositionIterations
+			$accepted = [bool]$summary.success -and $childExitCode -eq 0 -and -not [bool]$summary.forcedTermination -and $quality.applied
+			$records.Add([ordered]@{ attempt = $attempt; accepted = $accepted; childExitCode = $childExitCode; summaryPath = $summaryPath; forcedTermination = [bool]$summary.forcedTermination; quality = $quality; error = Get-PropertyValue -Object $summary -Name "error"; summary = $summary })
+		} else {
+			$records.Add([ordered]@{ attempt = $attempt; accepted = $false; childExitCode = $childExitCode; summaryPath = $summaryPath; forcedTermination = $null; quality = [ordered]@{ available = $false; applied = $false; reason = "child summary was not produced" }; error = "child summary was not produced" })
+		}
+	}
+	$failures = @($records | Where-Object { -not $_.accepted } | ForEach-Object {
+		if (-not [string]::IsNullOrWhiteSpace([string]$_.error)) { "attempt $($_.attempt): $($_.error)" } else { "attempt $($_.attempt): acceptance evidence was incomplete" }
+	})
+	# The published evidence schema requires independent state, event, and pose
+	# hashes. This public MCP harness currently has only its combined determinism
+	# digest, so it deliberately writes an explicit non-schema status rather than
+	# inventing three values. A future bridge can add those fields without changing
+	# the ten-run collection or failure accounting below.
+	$schemaCapabilities = [ordered]@{ stateHash = $false; eventHash = $false; poseHash = $false; supported = $false; reason = "installed public bridge does not expose independent state, event, and pose hashes" }
+	$report = [ordered]@{
+		version = 1; feature = "repeated-acceptance"; canonicalFixture = $CanonicalFixture
+		requiredRuns = 10; completedRuns = $records.Count; acceptedRuns = @($records | Where-Object { $_.accepted }).Count
+		passed = ($failures.Count -eq 0 -and $records.Count -eq 10); schemaValidAggregateAvailable = $false; schemaCapabilities = $schemaCapabilities
+		failures = $failures; runs = @($records)
+	}
+	$reportPath = Join-Path $matrixRoot "physics-performance-aggregate-status.json"
+	Write-JsonFile -Path $reportPath -Value $report -Depth 64
+	Write-Output ("repeated acceptance aggregate status: {0}" -f $reportPath)
+	if (-not $report.passed -or -not $report.schemaValidAggregateAvailable) {
+		throw "repeated acceptance did not produce a schema-valid aggregate; inspect '$reportPath'."
+	}
 	exit 0
 }
 
@@ -495,14 +748,21 @@ $resolvedInstallRoot = Get-AbsolutePath -Path $InstallRoot -BasePath $repoRoot
 $resolvedWorkRoot = Get-AbsolutePath -Path $WorkRoot -BasePath $repoRoot
 Assert-PathBelow -Parent $outRoot -Child $resolvedWorkRoot
 
-if ($RunWorkerScalingMatrix -and $RunReadinessMatrix) {
-	throw "Run the worker-scaling worker matrix and readiness readiness matrix separately so their project-reuse rules remain unambiguous."
+$matrixFlags = @([bool]$RunWorkerScalingMatrix, [bool]$RunReadinessMatrix, [bool]$RunQualityProfileMatrix, [bool]$RunRepeatedAcceptanceMatrix)
+if (@($matrixFlags | Where-Object { $_ }).Count -gt 1) {
+	throw "Run one matrix at a time so every child owns an unambiguous disposable project and evidence root."
 }
 if ($RunWorkerScalingMatrix) {
 	Invoke-WorkerScalingMatrix
 }
 if ($RunReadinessMatrix) {
 	Invoke-ReadinessMatrix
+}
+if ($RunQualityProfileMatrix) {
+	Invoke-QualityProfileMatrix
+}
+if ($RunRepeatedAcceptanceMatrix) {
+	Invoke-RepeatedAcceptanceMatrix
 }
 
 $editorDirectory = Join-Path $resolvedInstallRoot "Editor"
@@ -527,6 +787,25 @@ $preferencesPath = Join-Path $resolvedWorkRoot "editor-preferences.json"
 $evidenceRoot = Join-Path $resolvedWorkRoot "evidence"
 $rpcLogPath = Join-Path $evidenceRoot "mcp.jsonl"
 $summaryPath = Join-Path $evidenceRoot "summary.json"
+$canonicalFixtureEvidence = Get-CanonicalFixtureEvidence -FixtureId $CanonicalFixture
+if (-not $AllowDiagnosticFixture) {
+	# Produce an inspectable unavailable record before failing, so callers cannot
+	# mistake an absent file for a passing canonical fixture.
+	if ($canonicalFixtureEvidence.availability -ne "available") {
+		New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null
+		Write-JsonFile -Path $summaryPath -Value ([ordered]@{
+			success = $false; canonicalFixture = $canonicalFixtureEvidence; forcedTermination = $false
+			error = "Canonical fixture '$CanonicalFixture' is unavailable: $($canonicalFixtureEvidence.availabilityReason)"
+		}) -Depth 16
+		throw "Canonical fixture '$CanonicalFixture' is unavailable: $($canonicalFixtureEvidence.availabilityReason)"
+	}
+	Assert-CanonicalFixtureArguments -Fixture $canonicalFixtureEvidence
+} else {
+	# Diagnostic-only matrix legs retain the requested fixture identity but cannot
+	# be used by an acceptance gate when their population differs from the manifest.
+	$canonicalFixtureEvidence.availability = "unavailable"
+	$canonicalFixtureEvidence.availabilityReason = "diagnostic worker-scaling leg does not match a canonical fixture population or measured-step contract"
+}
 $projectSettingsPath = Join-Path $projectRoot "ProjectSettings/ProjectSettings.terra"
 $physicsSettingsPath = Join-Path $projectRoot "ProjectSettings/PhysicsSettings.json"
 $lastScenePath = Join-Path $projectRoot "Library/LastScene.txt"
@@ -544,6 +823,11 @@ $stageStarts = @{}
 $stageRecords = [ordered]@{}
 $latencySamples = [System.Collections.Generic.List[object]]::new()
 $diagnosticSnapshots = [System.Collections.Generic.List[object]]::new()
+$physicsStageSamples = [System.Collections.Generic.List[object]]::new()
+$qualityEvidence = [ordered]@{
+	requested = [ordered]@{ velocityIterations = $VelocityIterations; positionIterations = $PositionIterations }
+	available = $false; applied = $false; verifiedSteps = 0; reason = "measured diagnostics have not been collected"
+}
 $processMemorySamples = [System.Collections.Generic.List[object]]::new()
 $profilerCaptureStart = $null
 $profilerCaptureStop = $null
@@ -705,6 +989,8 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		providerExtractionBatchSize = 1024
 		parallelPreparationThreshold = $ParallelPreparationThreshold
 		parallelExtractionThreshold = $ParallelExtractionThreshold
+		velocityIterations = $VelocityIterations
+		positionIterations = $PositionIterations
 		aggregateDiagnosticsIntervalFrames = 30
 		continuousCollisionEnabled = $false
 		debugVisualizationEnabled = [bool]$EnablePhysicsDebugVisualization
@@ -896,7 +1182,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 	# Verify the exact available capability surface before mutating Play Mode.
 	$tools = Invoke-McpRpc -Method "tools/list"
 	$toolNames = @($tools.result.tools | ForEach-Object { $_.name })
-	$requiredTools = @("play.enter", "play.pause", "play.step", "play.exit", "physics.state", "physics.diagnostics.get", "diagnostics.get_summary", "profiler.capture.start", "profiler.capture.stop", "profiler.capture.list", "profiler.capture.summary", "jobs.get", "scene_view.state", "scene_view.settings.get", "scene_view.settings.set")
+	$requiredTools = @("play.enter", "play.pause", "play.step", "play.exit", "physics.state", "physics.diagnostics.get", "diagnostics.get_summary", "profiler.capture.start", "profiler.capture.stop", "profiler.capture.list", "profiler.capture.load", "profiler.capture.summary", "jobs.get", "scene_view.state", "scene_view.settings.get", "scene_view.settings.set")
 	if ($ReadinessMode -ne "none") {
 		# These additive read surfaces are the contract evidence for source-versus-
 		# derived startup decisions and managed-output reuse. Forced build also uses
@@ -1545,9 +1831,46 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		}
 		$finalPhysicsState = $afterStep
 		$stepPublicationSamples.Add([ordered]@{ step = $step; fromTick = $pausedTick; toTick = $afterTick; durationMs = [Math]::Max(0.0, (Get-MonotonicMilliseconds) - $stepStartMs) })
+		# Read diagnostics after this exact tick has published. The RPC executes
+		# between fixed steps, while every retained duration was measured inside its
+		# engine stage and therefore excludes editor startup, MCP, and project setup.
+		$physicsDiagnostics = Get-PhysicsSnapshot -Envelope (Invoke-Tool -Name "physics.diagnostics.get")
+		if ([UInt64]$physicsDiagnostics.tick -ne [UInt64]$afterTick) {
+			throw "Physics diagnostics for explicit step $step reported tick $($physicsDiagnostics.tick), expected $afterTick."
+		}
+		if (-not [bool]$physicsDiagnostics.data.quality.applied -or
+			[int]$physicsDiagnostics.data.quality.velocityIterations -ne $VelocityIterations -or
+			[int]$physicsDiagnostics.data.quality.positionIterations -ne $PositionIterations) {
+			throw "Physics diagnostics for explicit step $step did not report the requested $VelocityIterations/$PositionIterations quality profile."
+		}
+		$timings = $physicsDiagnostics.data.timings
+		$stageDurations = [ordered]@{
+			authoringPreparation = [double]$timings.authoringPreparationMs
+			providerCommit = [double]$timings.providerCommitMs
+			simulation = [double]$timings.simulationMs
+			extraction = [double]$timings.extractionMs
+			eventPublication = [double]$timings.eventPublicationMs
+			stateValidation = [double]$timings.stateValidationMs
+			snapshotConstruction = [double]$timings.snapshotConstructionMs
+			transactionConstruction = [double]$timings.transactionConstructionMs
+		}
+		$physicsStageSamples.Add([ordered]@{
+			step = $step; tick = [UInt64]$physicsDiagnostics.tick
+			totalDurationMs = [double](@($stageDurations.Values) | Measure-Object -Sum).Sum
+			stages = $stageDurations; quality = $physicsDiagnostics.data.quality; jobs = $physicsDiagnostics.data.jobs
+		})
+		# Keep a compact acceptance fact beside the detailed samples. The aggregate
+		# runner uses this only after every measured step verified the requested
+		# profile, so a partial diagnostics response cannot look like a quality leg.
+		$qualityEvidence.available = $true
+		$qualityEvidence.verifiedSteps = [int]$qualityEvidence.verifiedSteps + 1
 		if ($script:latencySamples.Count -lt 4096) { $script:latencySamples.Add([ordered]@{ operation = "physics.step.publication"; durationMs = $stepPublicationSamples[$stepPublicationSamples.Count - 1].durationMs; step = $step; timestamp = (Get-Date).ToString("o") }) }
 		$pausedTick = $afterTick
 		Capture-EditorProcessMemory -Phase "paused-step" -Tick $pausedTick
+	}
+	if ($measuredExplicitStepCount -gt 0) {
+		$qualityEvidence.applied = [bool]$qualityEvidence.available -and $qualityEvidence.verifiedSteps -eq $measuredExplicitStepCount
+		$qualityEvidence.reason = if ($qualityEvidence.applied) { $null } else { "not every measured step retained an exact quality diagnostic" }
 	}
 	Complete-Stage -Name "explicitStepping"
 	if ($RunColliderCookIncrementalMatrix) {
@@ -1691,6 +2014,23 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		$profilerCaptureArtifact = @($profilerAfter.data.artifacts | Where-Object { [string]$_.artifactId -eq $profilerCaptureArtifactId })
 		if ($profilerCaptureArtifact.Count -ne 1) { throw "Profiler capture stop succeeded but its exact artifact identity was not listed once." }
 		$profilerCaptureArtifact = $profilerCaptureArtifact[0]
+		# Summary reads are intentionally served from the loaded immutable journal.
+		# Load the exact artifact and wait for its durable job before asking for the
+		# summary; otherwise a fresh editor process correctly reports no active V1.
+		$load = Invoke-Tool -Name "profiler.capture.load" -Arguments ([ordered]@{ artifactId = [string]$profilerCaptureArtifact.artifactId; correlationId = "installed-profiler-capture-load" })
+		$loadJobId = [string]$load.data.jobId
+		if ([string]::IsNullOrWhiteSpace($loadJobId)) { throw "Profiler capture load did not return a durable job ID." }
+		$loadState = "queued"
+		$loadDeadline = (Get-MonotonicMilliseconds) + ($StartupTimeoutSeconds * 1000.0)
+		while ($true) {
+			$loadJob = (Invoke-Tool -Name "jobs.get" -Arguments ([ordered]@{ jobId = $loadJobId })).data.job
+			$loadState = [string]$loadJob.state
+			if ($loadState -in @("succeeded", "failed", "canceled")) { break }
+			if ((Get-MonotonicMilliseconds) -ge $loadDeadline) { $loadState = "timeout"; break }
+			Start-Sleep -Milliseconds 100
+		}
+		if ($loadState -ne "succeeded") { throw "Profiler capture load finished in '$loadState' instead of succeeded." }
+		$profilerCapture.recoveryProbe = [ordered]@{ attempted = $true; supported = $true; status = $loadState; artifactId = [string]$profilerCaptureArtifact.artifactId }
 		$profilerCaptureSummary = Invoke-Tool -Name "profiler.capture.summary" -Arguments ([ordered]@{ artifactId = [string]$profilerCaptureArtifact.artifactId })
 		$profilerCaptureSucceeded = $true
 		[void]$unavailableMetrics.Remove("profilerCaptureUnlessGeneratedByEditor")
@@ -1699,28 +2039,6 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 			$profilerCaptureGateError = "profiler-capture profiler artifact exceeded the 10 MiB five-second size gate ($($profilerCapture.artifactBytes) bytes)."
 		}
 		if ($RunProfilerCaptureChecks) {
-			# Loading the just-committed artifact is a non-destructive recovery probe.
-			# Older bridges may not expose a durable load job; retain that outcome as
-			# explicit unavailable evidence rather than weakening the V1 gate.
-			try {
-				$load = Invoke-Tool -Name "profiler.capture.load" -Arguments ([ordered]@{ artifactId = [string]$profilerCaptureArtifact.artifactId; correlationId = "installed-profiler-capture-recovery-probe" })
-				$loadJobId = [string]$load.data.jobId
-				$loadState = "queued"
-				if (-not [string]::IsNullOrWhiteSpace($loadJobId)) {
-					$loadDeadline = (Get-MonotonicMilliseconds) + ($StartupTimeoutSeconds * 1000.0)
-					while ($true) {
-						$loadJob = (Invoke-Tool -Name "jobs.get" -Arguments ([ordered]@{ jobId = $loadJobId })).data.job
-						$loadState = [string]$loadJob.state
-						if ($loadState -in @("succeeded", "failed", "canceled")) { break }
-						if ((Get-MonotonicMilliseconds) -ge $loadDeadline) { $loadState = "timeout"; break }
-						Start-Sleep -Milliseconds 100
-					}
-				}
-				$profilerCapture.recoveryProbe = [ordered]@{ attempted = $true; supported = $true; status = $loadState; artifactId = [string]$profilerCaptureArtifact.artifactId }
-			}
-			catch {
-				$profilerCapture.recoveryProbe = [ordered]@{ attempted = $true; supported = $false; status = "unavailable"; reason = $_.Exception.Message }
-			}
 			if (-not $profilerCapture.durationGatePassed) { $profilerCaptureGateError = "profiler-capture profiler capture did not span the required five-second wall-clock interval." }
 			elseif (-not $profilerCapture.formatAccepted) { $profilerCaptureGateError = "profiler-capture format was not TerraEngineProfilerJournalV1." }
 			elseif (-not $profilerCapture.metricAvailability.gatePassed) { $profilerCaptureGateError = "profiler-capture profiler summary omitted one or more required typed evidence streams." }
@@ -1811,6 +2129,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 	Write-JsonFile -Path $summaryPath -Value ([ordered]@{
 		success = $true; startedAt = $startTime.ToString("o"); completedAt = (Get-Date).ToString("o")
 		monotonicDurationMs = Get-MonotonicMilliseconds; buildConfiguration = "RelWithDebInfo"; requestedWorkerCount = $WorkerCount; actualWorkerCount = $resolvedWorkerCount; workerIdentity = $workerIdentity; thresholdOverride = [ordered]@{ parallelPreparation = $ParallelPreparationThreshold; parallelExtraction = $ParallelExtractionThreshold }; determinismHash = $determinismHash; determinismEvidence = $determinismEvidence
+		canonicalFixture = $canonicalFixtureEvidence; qualityEvidence = $qualityEvidence
 		installRoot = $resolvedInstallRoot; editorExecutable = $editorExecutable; projectRoot = $projectRoot
 		objectCount = $ObjectCount; activeDynamicCount = $dynamicCount; dynamicCount = $dynamicCount; kinematicCount = $kinematicCount; staticCount = $staticCount
 		mcpEndpoint = "http://127.0.0.1:$McpPort/mcp"; explicitStepCount = $measuredExplicitStepCount; requestedExplicitStepCount = $ExplicitStepCount
@@ -1825,7 +2144,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		managedReloadAutomationEvidenceCompleteness = $managedReloadAutomationEvidenceCompleteness
 		readiness = $readiness
 		stages = $stageRecords; automationLatency = Get-LatencySummary -Samples @($latencySamples)
-		explicitStepPublication = @($stepPublicationSamples); hardware = $hardwareEvidence
+		explicitStepPublication = @($stepPublicationSamples); physicsStageSamples = @($physicsStageSamples); hardware = $hardwareEvidence
 		profilerCapture = [ordered]@{ start = $profilerCaptureStart; stop = $profilerCaptureStop; job = $profilerCaptureJob; artifact = $profilerCaptureArtifact; summary = $profilerCaptureSummary; succeeded = $profilerCaptureSucceeded }
 		profilerEvidence = $profilerCapture
 		processMemorySamples = @($processMemorySamples)
@@ -1837,10 +2156,11 @@ catch {
 	Write-JsonFile -Path $summaryPath -Value ([ordered]@{
 		success = $false; startedAt = $startTime.ToString("o"); failedAt = (Get-Date).ToString("o")
 		monotonicDurationMs = Get-MonotonicMilliseconds; buildConfiguration = "RelWithDebInfo"; requestedWorkerCount = $WorkerCount; actualWorkerCount = $resolvedWorkerCount; workerIdentity = $workerIdentity; thresholdOverride = [ordered]@{ parallelPreparation = $ParallelPreparationThreshold; parallelExtraction = $ParallelExtractionThreshold }; determinismHash = $determinismHash
+		canonicalFixture = $canonicalFixtureEvidence; qualityEvidence = $qualityEvidence
 		installRoot = $resolvedInstallRoot; workRoot = $resolvedWorkRoot; objectCount = $ObjectCount
 		error = $_.Exception.Message; processId = if ($null -ne $process) { $process.Id } else { $null }
 		stages = $stageRecords; automationLatency = Get-LatencySummary -Samples @($latencySamples); automationLatencySamples = @($latencySamples); hardware = $hardwareEvidence
-		diagnosticsSnapshots = @($diagnosticSnapshots); artifactInventory = @()
+		diagnosticsSnapshots = @($diagnosticSnapshots); physicsStageSamples = @($physicsStageSamples); artifactInventory = @()
 		authoringWalkthrough = $authoringWalkthrough
 		colliderCookMatrix = $colliderCookMatrix
 		workerScalingScenario = $workerScalingScenarioEvidence
@@ -1881,6 +2201,9 @@ finally {
 		$summary.automationLatency = Get-LatencySummary -Samples @($latencySamples)
 		$summary.automationLatencySamples = @($latencySamples)
 		$summary.diagnosticsSnapshots = @($diagnosticSnapshots)
+		$summary.physicsStageSamples = @($physicsStageSamples)
+		$summary.canonicalFixture = $canonicalFixtureEvidence
+		$summary.qualityEvidence = $qualityEvidence
 		$summary.colliderCookMatrix = $colliderCookMatrix
 		$summary.workerScalingScenario = $workerScalingScenarioEvidence
 		$artifactInventory = @(Get-ArtifactInventory -Root $projectRoot)

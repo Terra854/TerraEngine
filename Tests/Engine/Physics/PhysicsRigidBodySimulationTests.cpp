@@ -109,6 +109,62 @@ namespace TerraEngine::Tests {
 
 	void RegisterPhysicsRigidBodySimulationTests(TestRegistry& registry)
 	{
+		registry.Add("Engine.Physics.RigidBodySimulation.AppliesSelectedSolverQualityBeforeAdmission", [](TestContext& context) {
+			ThreadPoolSession pool;
+			JoltPhysicsBackend backend{ThreadPool::instance()};
+			context.Expect(backend.Initialize().Succeeded(),
+				"The solver-quality provider fixture must initialize Jolt.");
+			PhysicsBackendWorldConfiguration configuration;
+			configuration.world = {{41U}, 1U};
+			configuration.settings = PhysicsSettings::Defaults();
+			context.Expect(backend.CreateWorld(configuration).Succeeded(),
+				"The default-quality world must be created before any body admission.");
+			auto applied = backend.AppliedSimulationQuality();
+			context.Expect(applied.applied && applied.world == configuration.world
+				&& applied.velocityIterations == 10U && applied.positionIterations == 2U,
+				"Jolt must report the compatible default 10/2 solver profile from its live world settings.");
+			context.Expect(backend.DestroyWorld(configuration.world).Succeeded(),
+				"The default-quality provider world must tear down cleanly.");
+
+			configuration.world = {{41U}, 2U};
+			configuration.settings.velocityIterations = 20U;
+			configuration.settings.positionIterations = 4U;
+			context.Expect(backend.CreateWorld(configuration).Succeeded(),
+				"A valid alternate-quality world must be created before admission.");
+			applied = backend.AppliedSimulationQuality();
+			context.Expect(applied.applied && applied.world == configuration.world
+				&& applied.velocityIterations == 20U && applied.positionIterations == 4U,
+				"Jolt must expose the selected alternate 20/4 profile from its live provider settings.");
+			backend.DestroyWorld(configuration.world);
+			backend.Shutdown();
+		});
+		registry.Add("Engine.Physics.RigidBodySimulation.OversizedAdmissionReservationIsAtomic", [](TestContext& context) {
+			ThreadPoolSession pool;
+			JoltPhysicsBackend backend{ThreadPool::instance()};
+			context.Expect(backend.Initialize().Succeeded(),
+				"The admission-capacity fixture must initialize Jolt.");
+			PhysicsBackendWorldConfiguration configuration;
+			configuration.world = {{42U}, 1U};
+			configuration.maximumBodies = 8U;
+			context.Expect(backend.CreateWorld(configuration).Succeeded(),
+				"The fixture needs a deliberately small provider world.");
+
+			PhysicsBackendPreparedAdmission prepared;
+			const PhysicsBackendResult rejected = backend.ReserveAdmission(
+				{configuration.world, 1U, 9U, 0U, 0U}, prepared);
+			context.Expect(rejected.error == PhysicsBackendErrorCode::CapacityExceeded,
+				"Reservation must fail before staging when the complete body batch exceeds capacity.");
+			context.Expect(!prepared.staging.IsValid() && prepared.reservedBodies == 0U,
+				"A rejected capacity reservation must expose no partial staging authority or reserved count.");
+			PhysicsBackendExtraction extraction;
+			extraction.world = configuration.world;
+			extraction.tick = 1U;
+			context.Expect(backend.Extract(extraction).Succeeded()
+				&& extraction.totalBodyCount == 0U && extraction.bodies.empty(),
+				"Capacity rejection must leave the provider world empty and unchanged.");
+			backend.DestroyWorld(configuration.world);
+			backend.Shutdown();
+		});
 		registry.Add("Physics.RigidBodySimulation.GravityToggleAndMassIndependentAcceleration", [](TestContext& context) {
 			Fixture fixture;
 			PhysicsForcePayload accelerationPayload;

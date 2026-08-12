@@ -47,6 +47,9 @@ namespace TerraEngine::Physics::Backend {
 		PhysicsBackendResult ReplaceWorld(
 			const PhysicsBackendWorldConfiguration& configuration,
 			PhysicsBackendStagingToken& staging) override;
+		PhysicsBackendResult ReserveAdmission(
+			const PhysicsBackendAdmissionReservation& reservation,
+			PhysicsBackendPreparedAdmission& prepared) override;
 
 		PhysicsCookResult CookShape(const PhysicsCookRequest& request) override;
 		PhysicsBackendResult CreateShape(
@@ -58,6 +61,9 @@ namespace TerraEngine::Physics::Backend {
 
 		PhysicsBackendResult CreateBody(
 			const PhysicsBodyCreateRequest& request,
+			PhysicsBackendStagingToken& staging) override;
+		PhysicsBackendResult CreateBodies(
+			std::span<const PhysicsBodyCreateRequest> requests,
 			PhysicsBackendStagingToken& staging) override;
 		PhysicsBackendResult UpdateBody(const PhysicsBodyUpdateRequest& request) override;
 		PhysicsBackendResult DestroyBody(PhysicsBodyHandle handle) override;
@@ -81,7 +87,15 @@ namespace TerraEngine::Physics::Backend {
 		PhysicsBackendResult Extract(
 			const PhysicsBackendExtractionRequest& request,
 			PhysicsBackendExtraction& extraction) const override;
+		PhysicsBackendResult Extract(
+			const PhysicsBackendFixedStepWorkProfile& profile,
+			PhysicsBackendExtraction& extraction,
+			PhysicsBackendExtractionToken& token) const override;
+		PhysicsBackendResult AcknowledgeExtraction(PhysicsBackendExtractionToken token) override;
+		PhysicsBackendResult AbortExtraction(PhysicsBackendExtractionToken token) override;
 		PhysicsBackendExtractionCapabilities ExtractionCapabilities() const noexcept override;
+		PhysicsBackendJobTelemetry JobTelemetry() const noexcept override;
+		PhysicsBackendSimulationQuality AppliedSimulationQuality() const noexcept override;
 
 		PhysicsBackendResult CommitStaging(PhysicsBackendStagingToken staging) override;
 		PhysicsBackendResult RollbackStaging(PhysicsBackendStagingToken staging) override;

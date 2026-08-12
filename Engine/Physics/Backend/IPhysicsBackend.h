@@ -17,6 +17,7 @@
 #include <array>
 #include <limits>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -342,6 +343,78 @@ namespace TerraEngine::Physics {
 			std::uint32_t maximumBatchSize = 1U;
 		};
 
+		// Backend job telemetry contains copied scalar facts only. Providers that do
+		// not use the shared job bridge return the default unavailable/idle snapshot.
+		struct PhysicsBackendJobTelemetry {
+			std::uint64_t submitted = 0U, completed = 0U, rejected = 0U;
+			std::uint64_t batchCount = 0U, lockAcquisitionCount = 0U, pumpSubmissionCount = 0U;
+			std::uint64_t barrierWaitCount = 0U, barrierWaitMicroseconds = 0U;
+			std::uint64_t maximumBarrierWaitMicroseconds = 0U, jobExecutionMicroseconds = 0U;
+			std::uint32_t queued = 0U, activePumps = 0U, maximumActivePumps = 0U;
+			std::uint32_t workerLimit = 0U, observedWorkerThreads = 0U;
+			bool available = false;
+			bool idle = true;
+		};
+
+		struct PhysicsBackendSimulationQuality {
+			PhysicsWorldHandle world;
+			std::uint32_t velocityIterations = 0U;
+			std::uint32_t positionIterations = 0U;
+			bool applied = false;
+		};
+
+		enum class PhysicsBackendFullStateReason : std::uint8_t {
+			None,
+			InitialPublication,
+			Recovery,
+			IntegrityVerification,
+			DeclaredConsumer
+		};
+
+		enum class PhysicsBackendConsumerMask : std::uint32_t {
+			None = 0U,
+			GameplayEvents = 1U << 0U,
+			DiagnosticEvents = 1U << 1U,
+			DetailedContacts = 1U << 2U,
+			RagdollPose = 1U << 3U,
+			DebugVisualization = 1U << 4U,
+			FullProviderState = 1U << 5U
+		};
+
+		constexpr PhysicsBackendConsumerMask operator|(
+			PhysicsBackendConsumerMask left,
+			PhysicsBackendConsumerMask right) noexcept {
+			return static_cast<PhysicsBackendConsumerMask>(
+				static_cast<std::uint32_t>(left) | static_cast<std::uint32_t>(right));
+		}
+
+		struct PhysicsBackendFixedStepWorkProfile {
+			PhysicsWorldHandle world;
+			PhysicsTick tick = 0U;
+			PhysicsGeneration authoringGeneration = 0U;
+			std::uint64_t providerOrderGeneration = 0U;
+			std::uint64_t stateStoreGeneration = 0U;
+			std::vector<std::uint32_t> activeStableIndices;
+			std::vector<std::uint32_t> dirtyStableIndices;
+			std::vector<PhysicsBodyHandle> removedHandles;
+			std::vector<PhysicsBodyHandle> explicitRequiredHandles;
+			PhysicsBackendConsumerMask consumers = PhysicsBackendConsumerMask::None;
+			PhysicsBackendFullStateReason fullStateReason = PhysicsBackendFullStateReason::None;
+			PhysicsBodyStateFieldMask fields = PhysicsBodyStateFieldMask::BodyState;
+			std::uint32_t rangeSize = 1024U;
+			std::uint32_t availableWorkers = 1U;
+		};
+
+		struct PhysicsBackendExtractionToken {
+			PhysicsWorldHandle world;
+			PhysicsTick tick = 0U;
+			std::uint64_t value = 0U;
+
+			bool IsValid() const noexcept {
+				return world.IsValid() && tick != 0U && value != 0U;
+			}
+		};
+
 		struct PhysicsBackendBodyState {
 			PhysicsBodyHandle handle;
 			PhysicsPose pose;
@@ -441,6 +514,30 @@ namespace TerraEngine::Physics {
 			}
 		};
 
+		// Admission reservations are copied sizing facts. They let a provider grow
+		// staging containers once before any shape/body dependency becomes visible.
+		struct PhysicsBackendAdmissionReservation {
+			PhysicsWorldHandle world;
+			std::uint32_t shapeCount = 0U;
+			std::uint32_t bodyCount = 0U;
+			std::uint32_t constraintCount = 0U;
+			std::uint32_t characterCount = 0U;
+
+			bool IsValid() const noexcept {
+				return world.IsValid()
+					&& (shapeCount != 0U || bodyCount != 0U || constraintCount != 0U || characterCount != 0U);
+			}
+		};
+
+		struct PhysicsBackendPreparedAdmission {
+			PhysicsBackendStagingToken staging;
+			std::uint32_t reservedShapes = 0U;
+			std::uint32_t reservedBodies = 0U;
+			std::uint32_t reservedConstraints = 0U;
+			std::uint32_t reservedCharacters = 0U;
+			std::uint64_t stagingAllocationCount = 0U;
+		};
+
 		// This interface deliberately exposes broad operations rather than mirroring
 		// provider classes. Each call executes at an orchestrator-declared boundary.
 		class TERRAENGINE_API IPhysicsBackend {
@@ -454,6 +551,9 @@ namespace TerraEngine::Physics {
 			virtual PhysicsBackendResult ReplaceWorld(
 				const PhysicsBackendWorldConfiguration& configuration,
 				PhysicsBackendStagingToken& staging) = 0;
+			virtual PhysicsBackendResult ReserveAdmission(
+				const PhysicsBackendAdmissionReservation& reservation,
+				PhysicsBackendPreparedAdmission& prepared) = 0;
 
 			virtual PhysicsCookResult CookShape(const PhysicsCookRequest& request) = 0;
 			virtual PhysicsBackendResult CreateShape(
@@ -466,6 +566,19 @@ namespace TerraEngine::Physics {
 			virtual PhysicsBackendResult CreateBody(
 				const PhysicsBodyCreateRequest& request,
 				PhysicsBackendStagingToken& staging) = 0;
+			// The default preserves compatibility for providers that have only the
+			// established single-record boundary. Optimized providers may override it
+			// to retain one protected admission lock for an immutable request packet;
+			// callers still own RollbackStaging when any member is rejected.
+			virtual PhysicsBackendResult CreateBodies(
+				std::span<const PhysicsBodyCreateRequest> requests,
+				PhysicsBackendStagingToken& staging) {
+				for(const PhysicsBodyCreateRequest& request : requests) {
+					const PhysicsBackendResult result = CreateBody(request, staging);
+					if(!result.Succeeded()) return result;
+				}
+				return {};
+			}
 			virtual PhysicsBackendResult UpdateBody(const PhysicsBodyUpdateRequest& request) = 0;
 			virtual PhysicsBackendResult DestroyBody(PhysicsBodyHandle handle) = 0;
 
@@ -499,7 +612,44 @@ namespace TerraEngine::Physics {
 				extraction.tick = request.tick;
 				return Extract(extraction);
 			}
+			// Profiles and leases are additive: older providers can retain the
+			// established request path, while incremental providers keep pending state
+			// until the protected publisher explicitly acknowledges this token.
+			virtual PhysicsBackendResult Extract(
+				const PhysicsBackendFixedStepWorkProfile& profile,
+				PhysicsBackendExtraction& extraction,
+				PhysicsBackendExtractionToken& token) const {
+				PhysicsBackendExtractionRequest request;
+				request.world = profile.world;
+				request.tick = profile.tick;
+				request.fields = profile.fields;
+				request.batchSize = profile.rangeSize;
+				request.parallelThreshold = profile.rangeSize;
+				request.fullState = profile.fullStateReason != PhysicsBackendFullStateReason::None;
+				request.selection = request.fullState
+					? PhysicsBackendExtractionSelection::FullState
+					: PhysicsBackendExtractionSelection::PublicationRelevant;
+				const PhysicsBackendResult result = Extract(request, extraction);
+				if(result.Succeeded()) token = {profile.world, profile.tick, 1U};
+				return result;
+			}
+			virtual PhysicsBackendResult AcknowledgeExtraction(PhysicsBackendExtractionToken token) {
+				return token.IsValid() ? PhysicsBackendResult{}
+					: PhysicsBackendResult{PhysicsResultStatus::Rejected, PhysicsBackendErrorCode::InvalidArgument,
+						"The extraction acknowledgement token is invalid."};
+			}
+			virtual PhysicsBackendResult AbortExtraction(PhysicsBackendExtractionToken token) {
+				return token.IsValid() ? PhysicsBackendResult{}
+					: PhysicsBackendResult{PhysicsResultStatus::Rejected, PhysicsBackendErrorCode::InvalidArgument,
+						"The extraction abort token is invalid."};
+			}
 			virtual PhysicsBackendExtractionCapabilities ExtractionCapabilities() const noexcept {
+				return {};
+			}
+			virtual PhysicsBackendJobTelemetry JobTelemetry() const noexcept {
+				return {};
+			}
+			virtual PhysicsBackendSimulationQuality AppliedSimulationQuality() const noexcept {
 				return {};
 			}
 

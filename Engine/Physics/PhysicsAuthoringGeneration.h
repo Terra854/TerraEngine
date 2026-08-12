@@ -76,15 +76,38 @@ namespace TerraEngine::Physics {
 		PhysicsAssetGeneration generation = 0U;
 	};
 
+	// A fallback is explicit evidence that incremental scene continuity could not
+	// be proved. Consumers must rebuild completely instead of guessing that a
+	// missing publication meant no authored change.
+	enum class PhysicsAuthoringFallbackReason : std::uint8_t {
+		None,
+		InitialWorld,
+		WorldReplacement,
+		ScenePacketUnavailable,
+		ScenePacketInvalid,
+		ScenePacketDiscontinuity,
+		SceneGenerationChanged,
+		AssetJournalRefresh,
+		IntegrityRecovery
+	};
+
 	struct PhysicsAuthoringGenerationData {
 		PhysicsWorldHandle world;
 		PhysicsGeneration generation = 0U;
 		PhysicsGeneration snapshotGeneration = 0U;
+		std::uint64_t sceneGeneration = 0U;
+		std::uint64_t scenePublicationRevision = 0U;
+		std::uint64_t previousScenePublicationRevision = 0U;
 		std::uint64_t hierarchyGeneration = 0U;
 		std::uint64_t settingsHash = 0U;
 		PhysicsAssetGeneration assetJournalGeneration = 0U;
 		bool fullAssetRefresh = false;
+		PhysicsAuthoringFallbackReason fallbackReason = PhysicsAuthoringFallbackReason::None;
 		std::vector<PhysicsAuthoringChange> changes;
+		// Typed closure lists let preparation touch only dependent runtime families.
+		std::vector<TerraEngine::UUID> constraintRecordIds;
+		std::vector<TerraEngine::UUID> characterObjectIds;
+		std::vector<TerraEngine::UUID> removedObjectIds;
 		std::vector<PhysicsAuthoringAssetObservation> assetObservations;
 	};
 

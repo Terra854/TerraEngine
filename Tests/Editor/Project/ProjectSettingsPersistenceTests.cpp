@@ -1,5 +1,6 @@
 #include "TestHarness.h"
 #include "Editor/TerraEngine-Editor/Project/ProjectSettings.h"
+#include "Editor/TerraEngine-Editor/Project/ProjectPhysicsSettingsIO.h"
 #include "Editor/TerraEngine-Editor/Project/ProjectManager.h"
 
 #include <filesystem>
@@ -86,6 +87,45 @@ namespace TerraEngine::EditorTests
 
 	void RegisterProjectSettingsPersistenceTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.ProjectSettings.PhysicsQualityLoadsForPlayMode", [](TestContext& context) {
+			const std::filesystem::path root = std::filesystem::temp_directory_path()
+				/ "TerraEngineProjectSettings" / "PhysicsQualityLoadsForPlayMode";
+			const std::filesystem::path settingsDirectory = root / "ProjectSettings";
+			std::error_code ignored;
+			std::filesystem::remove_all(root, ignored);
+			std::filesystem::create_directories(settingsDirectory, ignored);
+
+			TerraEngine::Physics::PhysicsSettings expected =
+				TerraEngine::Physics::PhysicsSettings::Defaults();
+			nlohmann::json document = {
+				{"schemaVersion", expected.schemaVersion},
+				{"gravity", {expected.gravity.x, expected.gravity.y, expected.gravity.z}},
+				{"velocityIterations", 20U},
+				{"positionIterations", 4U},
+				{"layers", nlohmann::json::array()}
+			};
+			for (const auto& layer : expected.layers)
+			{
+				document["layers"].push_back({
+					{"id", layer.id}, {"name", layer.name},
+					{"collisionMask", layer.collisionMask},
+					{"broadPhaseGroup", layer.broadPhaseGroup}, {"enabled", layer.enabled}
+				});
+			}
+			std::ofstream(settingsDirectory / "PhysicsSettings.json") << document.dump(2);
+
+			TerraEngine::Physics::PhysicsSettings loaded;
+			std::string error;
+			context.Expect(TerraEngine::Editor::ProjectSettings::ReadProjectPhysicsSettings(
+				root, loaded, error), error.empty() ? "Play Mode should load valid project physics settings." : error);
+			context.ExpectEqual(20U, loaded.velocityIterations,
+				"Play Mode must preserve the authored velocity solver quality.");
+			context.ExpectEqual(4U, loaded.positionIterations,
+				"Play Mode must preserve the authored position solver quality.");
+
+			std::filesystem::remove_all(root, ignored);
+		});
+
 		registry.Add("Editor.ProjectSettings.ValidProjectDisplayNameRoundTrips", [](TestContext& context) {
 			::ProjectSettings settings;
 			settings.projectDisplayName = "Sample Project";

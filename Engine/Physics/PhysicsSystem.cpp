@@ -40,6 +40,11 @@ namespace TerraEngine::Physics {
 			return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 		}
 
+		std::uint64_t NanosecondsFromMilliseconds(double milliseconds) {
+			if(!std::isfinite(milliseconds) || milliseconds <= 0.0) return 0U;
+			return static_cast<std::uint64_t>(milliseconds * 1'000'000.0);
+		}
+
 		bool SamePose(const PhysicsPose& left, const PhysicsPose& right) {
 			constexpr float epsilon = 1.0e-6F;
 			// Unit quaternions q and -q encode the same orientation. Jolt may choose
@@ -186,6 +191,7 @@ namespace TerraEngine::Physics {
 		struct PendingTransformPublication {
 			TransformPublicationPacket packet;
 			std::string groupId;
+			Backend::PhysicsBackendExtractionToken extractionToken;
 		};
 
 		Impl()
@@ -206,7 +212,10 @@ namespace TerraEngine::Physics {
 			bool authoringChanged = pendingSettings.has_value() || !authoring || !authoringSceneRevisionValid;
 			if (worldActive && !authoringChanged)
 			{
-				authoringChanged = ObjectManager::instance().GetSpatialRevision() != authoringEquivalentSceneSpatialRevision
+				const auto packet = ObjectManager::instance().LoadPublishedSceneChangePacketShared();
+				authoringChanged = packet == nullptr
+					|| !packet->Validate(ObjectManager::instance().GetSceneGeneration()).valid
+					|| packet->PublicationRevision() != lastAuthoringScenePublicationRevision + 1U
 					|| !PhysicsAssetChangeJournal::Instance().SnapshotSince(observedPhysicsAssetGeneration).Empty();
 			}
 
@@ -300,6 +309,9 @@ namespace TerraEngine::Physics {
 			if(!handle.IsValid()) return true;
 			for(const PendingTransformPublication& publication : pendingTransformPublications) {
 				Scene::SceneMutationQueue::Instance().CancelPublicationGroup(publication.groupId);
+				if(publication.extractionToken.IsValid()) {
+					(void)backend->AbortExtraction(publication.extractionToken);
+				}
 			}
 			world.BeginStopping();
 			world.BeginDraining();
@@ -325,6 +337,8 @@ namespace TerraEngine::Physics {
 			authoringGeneration.reset();
 			preparationPlan.reset();
 			observedPhysicsAssetGeneration = 0U;
+			lastAuthoringSceneGeneration = 0U;
+			lastAuthoringScenePublicationRevision = 0U;
 			authoringEquivalentSceneSpatialRevision = 0U;
 			authoringSceneRevisionValid = false;
 			lastPreparedAuthoringSnapshotGeneration = 0U;
@@ -360,27 +374,58 @@ namespace TerraEngine::Physics {
 			if(!world.Handle().IsValid()) return;
 			const Clock::time_point start = Clock::now();
 			ObjectManager& objects = ObjectManager::instance();
-			const std::uint64_t sceneSpatialRevision = objects.GetSpatialRevision();
+			const std::shared_ptr<const Scene::SceneChangePacket> scenePacket =
+				objects.LoadPublishedSceneChangePacketShared();
 			const PhysicsAssetChangeSnapshot assetChanges =
 				PhysicsAssetChangeJournal::Instance().SnapshotSince(observedPhysicsAssetGeneration);
-			if(authoring && authoringSceneRevisionValid
-				&& authoringEquivalentSceneSpatialRevision == sceneSpatialRevision
-				&& assetChanges.Empty()) {
-				// A prior protected flush proved that the only intervening scene writes
-				// were this system's dynamic-body publications. Those transforms are
-				// physics-authoritative, so the immutable authoring snapshot remains valid.
-				// The prior frame already consumed its dirty list during preparation;
-				// requiring that stored list to be empty would rebuild the same bodies after
-				// every physics-authored Transform revision.
+			const bool packetValid = scenePacket != nullptr
+				&& scenePacket->Validate(objects.GetSceneGeneration()).valid;
+			const bool packetContinuous = authoring && packetValid
+				&& scenePacket->SceneGeneration() == lastAuthoringSceneGeneration
+				&& scenePacket->PublicationRevision() == lastAuthoringScenePublicationRevision + 1U;
+			const auto packetAffectsAuthoring = [this, &scenePacket]() {
+				if(scenePacket == nullptr || !authoring) return true;
+				std::unordered_set<TerraEngine::UUID> changed;
+				auto append = [this, &changed](const auto& records, bool transforms) {
+					for(const Scene::SceneObjectRevisionSnapshot& record : records) {
+						// A successful physics transform receipt already copied this exact
+						// revision into RuntimeBody. It is output feedback, not new scene
+						// authoring, so recapturing it would create a self-invalidating loop.
+						const auto runtime = runtimeBodies.find(record.objectId);
+						if(transforms && runtime != runtimeBodies.end()
+							&& runtime->second.hasPublishedPose
+							&& runtime->second.objectTransformRevision == record.transformRevision) continue;
+						changed.insert(record.objectId);
+					}
+				};
+				append(scenePacket->Added(), false); append(scenePacket->Removed(), false);
+				append(scenePacket->ComponentChanged(), false); append(scenePacket->TransformChanged(), true);
+				append(scenePacket->HierarchyChanged(), false);
+				if(changed.empty()) return false;
+				for(const PhysicsBodyDescriptor& body : authoring->Data().bodies) {
+					if(changed.contains(body.objectId) || (body.hasParent && changed.contains(body.parentObjectId))) return true;
+				}
+				for(const PhysicsConstraintDescriptor& constraint : authoring->Data().constraints) {
+					if(changed.contains(constraint.ownerObjectId) || changed.contains(constraint.firstObjectId)
+						|| changed.contains(constraint.secondObjectId)) return true;
+				}
+				return std::any_of(authoring->Data().characters.begin(), authoring->Data().characters.end(),
+					[&changed](const PhysicsCharacterDescriptor& character) { return changed.contains(character.objectId); });
+			};
+			const bool sceneAffectsPhysics = packetAffectsAuthoring();
+			if(authoring && packetContinuous && !sceneAffectsPhysics && assetChanges.Empty()) {
+				// An exact packet proves this frame changed no physics owner, ancestor,
+				// endpoint, or character. Reuse the immutable generation verbatim: no
+				// descriptor capture and no later reconciliation work are required.
 				authoringSnapshotReused = true;
+				lastAuthoringScenePublicationRevision = scenePacket->PublicationRevision();
 				diagnosticTimings.prepareMs = MillisecondsSince(start);
 				return;
 			}
 
 			const PhysicsAuthoringSnapshot* previous = authoring ? &*authoring : nullptr;
 			std::optional<PhysicsAuthoringSnapshot> captured;
-			if(authoring && authoringSceneRevisionValid
-				&& authoringEquivalentSceneSpatialRevision == sceneSpatialRevision) {
+			if(authoring && packetContinuous && !sceneAffectsPhysics) {
 				// An asset-only change reuses the immutable component snapshot. The exact
 				// dependency ranges identify which retained descriptors need rebuilding.
 				PhysicsAuthoringData retained = authoring->Data();
@@ -392,8 +437,28 @@ namespace TerraEngine::Physics {
 					objects, world.Handle(), world.Settings(), world.Timing().tick, previous);
 			}
 			if(captured) {
-				const auto generation = PhysicsAuthoringSnapshot::BuildGeneration(
+				const auto builtGeneration = PhysicsAuthoringSnapshot::BuildGeneration(
 					previous, *captured, assetChanges);
+				if(!builtGeneration) {
+					++diagnosticCounters.rejectedCount;
+					diagnosticTimings.prepareMs = MillisecondsSince(start);
+					return;
+				}
+				PhysicsAuthoringGenerationData generationData = builtGeneration->Data();
+				generationData.sceneGeneration = packetValid ? scenePacket->SceneGeneration() : 0U;
+				generationData.scenePublicationRevision = packetValid ? scenePacket->PublicationRevision() : 0U;
+				generationData.previousScenePublicationRevision = lastAuthoringScenePublicationRevision;
+				if(!authoring) generationData.fallbackReason = PhysicsAuthoringFallbackReason::InitialWorld;
+				else if(scenePacket == nullptr) generationData.fallbackReason = PhysicsAuthoringFallbackReason::ScenePacketUnavailable;
+				else if(!packetValid) generationData.fallbackReason = PhysicsAuthoringFallbackReason::ScenePacketInvalid;
+				else if(scenePacket->SceneGeneration() != lastAuthoringSceneGeneration) {
+					// A new scene can reuse a packet revision. Recording this separately
+					// makes the fail-closed full capture actionable in diagnostics.
+					generationData.fallbackReason = PhysicsAuthoringFallbackReason::SceneGenerationChanged;
+				}
+				else if(!packetContinuous) generationData.fallbackReason = PhysicsAuthoringFallbackReason::ScenePacketDiscontinuity;
+				else if(assetChanges.requiresFullRefresh) generationData.fallbackReason = PhysicsAuthoringFallbackReason::AssetJournalRefresh;
+				const auto generation = PhysicsAuthoringGeneration::Create(std::move(generationData));
 				if(!generation) {
 					++diagnosticCounters.rejectedCount;
 					diagnosticTimings.prepareMs = MillisecondsSince(start);
@@ -402,7 +467,9 @@ namespace TerraEngine::Physics {
 				authoring = std::move(*captured);
 				authoringGeneration = std::move(*generation);
 				observedPhysicsAssetGeneration = assetChanges.toGenerationInclusive;
-				authoringEquivalentSceneSpatialRevision = sceneSpatialRevision;
+				authoringEquivalentSceneSpatialRevision = objects.GetSpatialRevision();
+				lastAuthoringSceneGeneration = packetValid ? scenePacket->SceneGeneration() : 0U;
+				lastAuthoringScenePublicationRevision = packetValid ? scenePacket->PublicationRevision() : 0U;
 				authoringSceneRevisionValid = true;
 			}
 			else ++diagnosticCounters.rejectedCount;
@@ -644,6 +711,7 @@ namespace TerraEngine::Physics {
 			}
 
 			std::unordered_set<TerraEngine::UUID> bodiesToPrepare;
+			std::vector<TerraEngine::UUID> bodyPreparationOrder;
 			std::unordered_map<TerraEngine::UUID, PhysicsAuthoringChangeReason> bodyPreparationReasons;
 			const bool isNewAuthoringGeneration = authoringGeneration
 				&& lastPreparedAuthoringSnapshotGeneration != authoringGeneration->Data().snapshotGeneration;
@@ -652,6 +720,22 @@ namespace TerraEngine::Physics {
 				options.parallelThreshold = configuredSettings.parallelPreparationThreshold;
 				options.rangeSize = configuredSettings.providerExtractionBatchSize;
 				options.availableWorkerCount = std::max<std::size_t>(1U, ThreadPool::instance().getThreadCount());
+				// The immutable generation already expanded body/endpoint ownership into
+				// typed closure IDs. Convert only those records into worker-plan inputs;
+				// unrelated constraints and characters remain absent from this tick.
+				for(const TerraEngine::UUID& recordId : authoringGeneration->Data().constraintRecordIds) {
+					const PhysicsConstraintDescriptor* constraint = authoring->FindConstraintDescriptor(recordId);
+					if(constraint == nullptr) continue; // Removed records remain removal-only work.
+					options.constraintOperations.push_back({constraint->ownerObjectId,
+						constraint->ownerObjectGeneration, kInvalidPhysicsDescriptorIndex,
+						PhysicsAuthoringChangeReason::HierarchyDependency});
+				}
+				for(const TerraEngine::UUID& objectId : authoringGeneration->Data().characterObjectIds) {
+					const PhysicsCharacterDescriptor* character = authoring->FindCharacterDescriptor(objectId);
+					if(character == nullptr) continue; // Removal work does not need a live descriptor.
+					options.characterOperations.push_back({character->objectId, character->objectGeneration,
+						kInvalidPhysicsDescriptorIndex, PhysicsAuthoringChangeReason::HierarchyDependency});
+				}
 				preparationPlan = PhysicsPreparationPlan::Build(
 					*authoringGeneration,
 					plannedSteps.requests.empty() ? world.Timing().tick + 1U : plannedSteps.requests.back().tick,
@@ -662,6 +746,8 @@ namespace TerraEngine::Physics {
 						// Worker validation is deliberately value-only. Provider shapes and
 						// live scene state remain owned by the following protected commit.
 						return item.kind == PhysicsPreparationWorkKind::RemoveBody
+							|| item.kind == PhysicsPreparationWorkKind::Constraint
+							|| item.kind == PhysicsPreparationWorkKind::Character
 							|| item.operation.descriptorIndex != kInvalidPhysicsDescriptorIndex;
 					})) {
 					preparationPlan.reset();
@@ -675,10 +761,16 @@ namespace TerraEngine::Physics {
 				const PhysicsPreparationPlanData& plan = preparationPlan->Data();
 				bodiesToPrepare.reserve(plan.creates.size() + plan.updates.size()
 					+ plan.dependencyRebuilds.size());
-				const auto appendObjects = [&bodiesToPrepare, &bodyPreparationReasons](
+				bodyPreparationOrder.reserve(plan.creates.size() + plan.updates.size()
+					+ plan.dependencyRebuilds.size());
+				const auto appendObjects = [&bodiesToPrepare, &bodyPreparationOrder, &bodyPreparationReasons](
 					const std::vector<PhysicsPreparationOperation>& operations) {
 					for(const PhysicsPreparationOperation& operation : operations) {
-						bodiesToPrepare.insert(operation.objectId);
+						if(bodiesToPrepare.insert(operation.objectId).second) {
+							// Preserve the deterministic plan order while using the set only
+							// for membership checks in the dependent reconciliation below.
+							bodyPreparationOrder.push_back(operation.objectId);
+						}
 						bodyPreparationReasons[operation.objectId] = operation.reasons;
 					}
 				};
@@ -700,15 +792,18 @@ namespace TerraEngine::Physics {
 					}
 				}
 			}
-			std::unordered_map<TerraEngine::UUID, std::vector<PhysicsColliderDescriptor>> collidersByObject;
-			collidersByObject.reserve(bodiesToPrepare.size());
-			for(const PhysicsColliderDescriptor& collider : authoring->Data().colliders) {
-				if(collider.enabled && bodiesToPrepare.contains(collider.objectId)) {
-					collidersByObject[collider.objectId].push_back(collider);
-				}
+			if(!isNewAuthoringGeneration) {
+				// The fixed step, commands, queries, and extraction still proceed, but
+				// an unchanged immutable authoring generation owns no body/collider/
+				// constraint/character reconciliation work. Returning here is what
+				// keeps sleeping large worlds proportional to real changes.
+				diagnosticTimings.prepareMs += MillisecondsSince(start);
+				return;
 			}
-			for(const PhysicsBodyDescriptor& body : authoring->Data().bodies) {
-				if(!bodiesToPrepare.contains(body.objectId)) continue;
+			for(const TerraEngine::UUID& objectId : bodyPreparationOrder) {
+				const PhysicsBodyDescriptorIndexRecord* descriptor = authoring->FindBodyDescriptorIndex(objectId);
+				if(descriptor == nullptr) continue; // A removal has no current body descriptor.
+				const PhysicsBodyDescriptor& body = authoring->Data().bodies[descriptor->bodyVectorIndex];
 				const auto reasons = bodyPreparationReasons.find(body.objectId);
 				const auto runtime = runtimeBodies.find(body.objectId);
 				if(reasons != bodyPreparationReasons.end()
@@ -726,11 +821,16 @@ namespace TerraEngine::Physics {
 					// script-authored change to send back to the provider.
 					continue;
 				}
-				const auto colliders = collidersByObject.find(body.objectId);
-				if(colliders != collidersByObject.end() && !colliders->second.empty()) {
+				if(descriptor->colliderCount > 0U) {
 					PreparedBody prepared;
 					prepared.body = body;
-					prepared.colliders = std::move(colliders->second);
+					prepared.colliders.reserve(descriptor->colliderCount);
+					for(std::uint32_t index = descriptor->colliderBegin;
+						index < descriptor->colliderBegin + descriptor->colliderCount; ++index) {
+						const PhysicsColliderDescriptor& collider = authoring->Data().colliders[index];
+						if(collider.enabled) prepared.colliders.push_back(collider);
+					}
+					if(prepared.colliders.empty()) continue;
 					prepared.shapeRecipe = MakeShapeRecipeLocked(prepared.colliders, prepared.diagnostic);
 					prepared.material = ResolveBodyMaterialLocked(prepared.colliders, prepared.diagnostic);
 					preparedBodies.push_back(std::move(prepared));
@@ -740,38 +840,28 @@ namespace TerraEngine::Physics {
 			for(const PreparedBody& prepared : preparedBodies) rebuildingBodies.insert(prepared.body.objectId);
 			for(const TerraEngine::UUID& objectId : preparedRemovals) rebuildingBodies.insert(objectId);
 
-			std::unordered_set<TerraEngine::UUID> presentConstraints;
 			std::unordered_set<TerraEngine::UUID> rebuildingConstraints;
-			for(const PhysicsConstraintDescriptor& constraint : authoring->Data().constraints) {
-				presentConstraints.insert(constraint.recordId);
-				const auto live = runtimeConstraints.find(constraint.recordId);
-				const bool endpointRebuilt = rebuildingBodies.contains(constraint.firstObjectId)
-					|| rebuildingBodies.contains(constraint.secondObjectId);
+			for(const TerraEngine::UUID& recordId : authoringGeneration->Data().constraintRecordIds) {
+				const PhysicsConstraintDescriptor* constraint = authoring->FindConstraintDescriptor(recordId);
+				if(constraint == nullptr) {
+					if(runtimeConstraints.contains(recordId)) preparedConstraintRemovals.push_back(recordId);
+					continue;
+				}
+				const auto live = runtimeConstraints.find(constraint->recordId);
+				const bool endpointRebuilt = rebuildingBodies.contains(constraint->firstObjectId)
+					|| rebuildingBodies.contains(constraint->secondObjectId);
 				if(live == runtimeConstraints.end()
-					|| live->second.ownerObjectGeneration != constraint.ownerObjectGeneration
-					|| live->second.componentGeneration != constraint.componentGeneration
-					|| live->second.recordGeneration != constraint.recordGeneration
-					|| live->second.resetGeneration != constraint.resetGeneration
+					|| live->second.ownerObjectGeneration != constraint->ownerObjectGeneration
+					|| live->second.componentGeneration != constraint->componentGeneration
+					|| live->second.recordGeneration != constraint->recordGeneration
+					|| live->second.resetGeneration != constraint->resetGeneration
 					|| endpointRebuilt) {
-					preparedConstraints.push_back(constraint);
-					rebuildingConstraints.insert(constraint.recordId);
+					preparedConstraints.push_back(*constraint);
+					rebuildingConstraints.insert(constraint->recordId);
 				}
 			}
-			// Gear constraints retain provider references to their two authored hinge
-			// records. Rebuild a gear whenever either hinge is replaced, even when the
-			// gear's own serialized generation is unchanged.
-			for(const PhysicsConstraintDescriptor& constraint : authoring->Data().constraints) {
-				if(constraint.kind != PhysicsConstraintKind::Gear
-					|| rebuildingConstraints.contains(constraint.recordId)
-					|| (!rebuildingConstraints.contains(constraint.firstGearConstraintId)
-						&& !rebuildingConstraints.contains(constraint.secondGearConstraintId))) continue;
-				preparedConstraints.push_back(constraint);
-				rebuildingConstraints.insert(constraint.recordId);
-			}
-			for(const auto& [recordId, live] : runtimeConstraints) {
-				(void)live;
-				if(!presentConstraints.contains(recordId)) preparedConstraintRemovals.push_back(recordId);
-			}
+			// The immutable closure already includes transitive gear dependents, so no
+			// all-constraint scan is necessary after endpoint work is selected.
 			// Gear records depend on their authored hinge records, so commit all other
 			// kinds first while preserving authored order inside each group.
 			std::stable_sort(preparedConstraints.begin(), preparedConstraints.end(),
@@ -779,19 +869,18 @@ namespace TerraEngine::Physics {
 					return left.kind != PhysicsConstraintKind::Gear && right.kind == PhysicsConstraintKind::Gear;
 				});
 
-			std::unordered_set<TerraEngine::UUID> presentCharacters;
-			for(const PhysicsCharacterDescriptor& character : authoring->Data().characters) {
-				presentCharacters.insert(character.objectId);
-				const auto live = runtimeCharacters.find(character.objectId);
-				if(live == runtimeCharacters.end()
-					|| live->second.objectGeneration != character.objectGeneration
-					|| live->second.componentGeneration != character.componentGeneration) {
-					preparedCharacters.push_back(character);
+			for(const TerraEngine::UUID& objectId : authoringGeneration->Data().characterObjectIds) {
+				const PhysicsCharacterDescriptor* character = authoring->FindCharacterDescriptor(objectId);
+				if(character == nullptr) {
+					if(runtimeCharacters.contains(objectId)) preparedCharacterRemovals.push_back(objectId);
+					continue;
 				}
-			}
-			for(const auto& [objectId, live] : runtimeCharacters) {
-				(void)live;
-				if(!presentCharacters.contains(objectId)) preparedCharacterRemovals.push_back(objectId);
+				const auto live = runtimeCharacters.find(character->objectId);
+				if(live == runtimeCharacters.end()
+					|| live->second.objectGeneration != character->objectGeneration
+					|| live->second.componentGeneration != character->componentGeneration) {
+					preparedCharacters.push_back(*character);
+				}
 			}
 			// Dirty records describe work for one immutable snapshot generation. Keep
 			// the snapshot available to worker jobs, but do not replay its rebuild set
@@ -1445,6 +1534,15 @@ namespace TerraEngine::Physics {
 			std::unordered_map<TerraEngine::UUID, PhysicsConstraintHandle> stagedConstraintHandles;
 			bool transactionRejected = false;
 			std::string transactionDiagnostic;
+			// The complete typed closure is known before provider staging. Reserve all
+			// engine-owned containers once so a 10,000-body admission does not grow
+			// maps and rollback vectors record by record inside the protected phase.
+			stagedBodies.reserve(preparedBodies.size());
+			stagedConstraints.reserve(preparedConstraints.size());
+			stagedCharacters.reserve(preparedCharacters.size());
+			registeredConstraintHandles.reserve(preparedConstraints.size());
+			stagedBodyHandles.reserve(preparedBodies.size());
+			stagedConstraintHandles.reserve(preparedConstraints.size());
 
 			const auto rejectTransaction = [&](std::string diagnostic) {
 				if(transactionRejected) return;
@@ -1488,6 +1586,27 @@ namespace TerraEngine::Physics {
 					world.Release(body.runtime.shape);
 				}
 			};
+
+			const std::size_t admissionItemCount = preparedBodies.size()
+				+ preparedConstraints.size() + preparedCharacters.size();
+			if(admissionItemCount != 0U) {
+				Backend::PhysicsBackendAdmissionReservation reservation;
+				reservation.world = world.Handle();
+				reservation.shapeCount = static_cast<std::uint32_t>(preparedBodies.size());
+				reservation.bodyCount = static_cast<std::uint32_t>(preparedBodies.size());
+				reservation.constraintCount = static_cast<std::uint32_t>(preparedConstraints.size());
+				reservation.characterCount = static_cast<std::uint32_t>(preparedCharacters.size());
+				Backend::PhysicsBackendPreparedAdmission preparedAdmission;
+				const Backend::PhysicsBackendResult reserved = backend->ReserveAdmission(
+					reservation, preparedAdmission);
+				if(!reserved.Succeeded()) rejectTransaction(reserved.message);
+				else staging = preparedAdmission.staging;
+			}
+			// Shapes must be staged before their bodies, but the body records themselves
+			// are independent until constraints bind them. Keep that immutable packet so
+			// providers can admit a large unconstrained body wave under one boundary.
+			std::vector<Backend::PhysicsBodyCreateRequest> bodyAdmissionPacket;
+			bodyAdmissionPacket.reserve(preparedBodies.size());
 
 			for(const PreparedBody& prepared : preparedBodies) {
 				if(transactionRejected) break;
@@ -1553,7 +1672,7 @@ namespace TerraEngine::Physics {
 					request.enabled = prepared.body.enabled;
 					request.sensor = std::all_of(prepared.colliders.begin(), prepared.colliders.end(),
 						[](const PhysicsColliderDescriptor& collider) { return collider.trigger; });
-					result = backend->CreateBody(request, staging);
+					bodyAdmissionPacket.push_back(std::move(request));
 				}
 				if(!result.Succeeded()) {
 					// Track both handles before rolling back so provider and engine handle
@@ -1590,6 +1709,15 @@ namespace TerraEngine::Physics {
 				runtime.parentTransformRevision = prepared.body.parentTransformRevision;
 				stagedBodies.push_back({prepared.body.objectId, runtime});
 				stagedBodyHandles[prepared.body.objectId] = newBody;
+			}
+
+			if(!transactionRejected && !bodyAdmissionPacket.empty()) {
+				const Backend::PhysicsBackendResult result = backend->CreateBodies(bodyAdmissionPacket, staging);
+				if(!result.Succeeded()) {
+					// The provider retains staged ownership until rollback, including every
+					// member before the rejected request, so no partial runtime can publish.
+					rejectTransaction(result.message);
+				}
 			}
 
 			for(const PhysicsConstraintDescriptor& prepared : preparedConstraints) {
@@ -1879,7 +2007,27 @@ namespace TerraEngine::Physics {
 
 		void PublishRagdollExtractionLocked() {
 			if(runtimeRagdolls.empty() || extraction.tick == 0U) return;
-			for(auto& [ragdollId, ragdoll] : runtimeRagdolls) {
+			// Build one bounded lookup for this immutable extraction. A ragdoll may
+			// contain many bodies, so repeatedly scanning all extracted state would turn
+			// a crowd into quadratic protected-boundary work.
+			std::unordered_map<PhysicsSlotIndex, const Backend::PhysicsBackendBodyState*> extractionBySlot;
+			extractionBySlot.reserve(extraction.bodies.size());
+			for(const Backend::PhysicsBackendBodyState& state : extraction.bodies) {
+				const auto [entry, inserted] = extractionBySlot.emplace(state.handle.slotIndex, &state);
+				// A duplicate provider slot is invalid evidence. Store a null marker so
+				// every affected ragdoll rejects atomically instead of selecting one record.
+				if(!inserted) entry->second = nullptr;
+			}
+			std::vector<std::uint64_t> ragdollIds;
+			ragdollIds.reserve(runtimeRagdolls.size());
+			for(const auto& [ragdollId, ragdoll] : runtimeRagdolls) {
+				if(ragdoll.active && ragdoll.profile) ragdollIds.push_back(ragdollId);
+			}
+			std::sort(ragdollIds.begin(), ragdollIds.end());
+			for(const std::uint64_t ragdollId : ragdollIds) {
+				auto runtime = runtimeRagdolls.find(ragdollId);
+				if(runtime == runtimeRagdolls.end()) continue;
+				RuntimeRagdoll& ragdoll = runtime->second;
 				if(!ragdoll.active || !ragdoll.profile) continue;
 				Animation::PhysicsPoseSnapshot snapshot;
 				snapshot.generation = ragdoll.generation;
@@ -1892,13 +2040,12 @@ namespace TerraEngine::Physics {
 				bool complete = true;
 				for(std::size_t index = 0U; index < ragdoll.bodies.size(); ++index) {
 					const RuntimeRagdollBody& runtimeBody = ragdoll.bodies[index];
-					const auto extracted = std::find_if(extraction.bodies.begin(), extraction.bodies.end(),
-						[&runtimeBody](const Backend::PhysicsBackendBodyState& state) {
-							return state.handle == runtimeBody.body;
-						});
+					const auto indexed = extractionBySlot.find(runtimeBody.body.slotIndex);
+					const Backend::PhysicsBackendBodyState* extracted = indexed == extractionBySlot.end()
+						? nullptr : indexed->second;
 					const TerraEngine::UUID expectedObjectId = MakeRagdollRuntimeUuid(
 						ragdollId, runtimeBody.bodyId, 1U);
-					if(extracted == extraction.bodies.end()
+					if(extracted == nullptr || extracted->handle != runtimeBody.body
 						|| extracted->objectId != expectedObjectId
 						|| extracted->objectGeneration != ragdoll.generation.publicationGeneration
 						|| extracted->componentGeneration != ragdoll.generation.profileGeneration
@@ -1949,7 +2096,9 @@ namespace TerraEngine::Physics {
 
 		void ExtractLocked() {
 			if(completedSteps.empty()) return;
+			const Clock::time_point extractionStart = Clock::now();
 			extraction = {};
+			extractionToken = {};
 			preparedBodyStateBatch.reset();
 			preparedTransformSources.clear();
 			Backend::PhysicsBackendExtractionRequest request;
@@ -1970,15 +2119,50 @@ namespace TerraEngine::Physics {
 			request.batchSize = configuredSettings.providerExtractionBatchSize;
 			request.parallelThreshold = configuredSettings.parallelExtractionThreshold;
 			// Ragdoll presentation consumes every mapped body even when sleeping or
-			// offscreen. Full extraction preserves physics authority; it is enabled only
-			// while at least one bounded ragdoll runtime exists.
-			request.fullState = world.AcquireCompleteBodyState() == nullptr || !runtimeRagdolls.empty();
+			// offscreen. Those bodies are appended as explicit handles, so ragdolls do
+			// not turn an otherwise incremental frame into a full provider-world read.
+			request.fullState = world.AcquireCompleteBodyState() == nullptr;
 			request.selection = request.fullState
 				? Backend::PhysicsBackendExtractionSelection::FullState
 				: Backend::PhysicsBackendExtractionSelection::PublicationRelevant;
+			if(!request.fullState) {
+				for(const auto& [ragdollId, ragdoll] : runtimeRagdolls) {
+					(void)ragdollId;
+					if(!ragdoll.active) continue;
+					for(const RuntimeRagdollBody& body : ragdoll.bodies) request.explicitHandles.push_back(body.body);
+				}
+				std::sort(request.explicitHandles.begin(), request.explicitHandles.end());
+				request.explicitHandles.erase(std::unique(request.explicitHandles.begin(), request.explicitHandles.end()),
+					request.explicitHandles.end());
+			}
 			request.allowParallelReads = true;
 			request.drainEvents = true;
-			const Backend::PhysicsBackendResult result = backend->Extract(request, extraction);
+			Backend::PhysicsBackendResult result;
+			if(!request.fullState) {
+				// A normal tick asks the provider for a retryable lease. The profile is
+				// value-only; Jolt owns its active/dirty membership until publication
+				// acknowledges it at the protected boundary below.
+				Backend::PhysicsBackendFixedStepWorkProfile profile;
+				profile.world = request.world;
+				profile.tick = request.tick;
+				profile.fields = request.fields;
+				profile.rangeSize = request.batchSize;
+				profile.explicitRequiredHandles = request.explicitHandles;
+				// Ragdoll and event readers are explicit immutable consumers of this
+				// lease, making provider selection and acknowledgement diagnostics clear.
+				profile.consumers = Backend::PhysicsBackendConsumerMask::GameplayEvents
+					| Backend::PhysicsBackendConsumerMask::DiagnosticEvents;
+				if(!request.explicitHandles.empty()) {
+					profile.consumers = profile.consumers | Backend::PhysicsBackendConsumerMask::RagdollPose;
+				}
+				profile.availableWorkers = static_cast<std::uint32_t>(
+					std::max<std::size_t>(1U, ThreadPool::instance().getThreadCount()));
+				result = backend->Extract(profile, extraction, extractionToken);
+			} else {
+				// Initial and recovery publication retain the established complete-state
+				// compatibility path until their full-world consumer has an incremental page.
+				result = backend->Extract(request, extraction);
+			}
 			if(!result.Succeeded()) {
 				AppendCommandResult(0U, PhysicsResultStatus::ProviderFailure, request.tick, result.message);
 				extraction.bodies.clear();
@@ -2030,6 +2214,7 @@ namespace TerraEngine::Physics {
 			}
 			if(result.Succeeded()) PublishRagdollExtractionLocked();
 			ExecutePreparedQueriesLocked();
+			diagnosticTimings.extractionMs = MillisecondsSince(extractionStart);
 		}
 
 		Backend::PhysicsBackendQueryRequest MakeBackendQueryRequest(const PhysicsQueryRequest& request) const {
@@ -2193,16 +2378,20 @@ namespace TerraEngine::Physics {
 			}
 
 			Scene::TransactionPublicationGroup group = BuildTransformPublicationGroup(packet);
-			pendingTransformPublications.push_back({packet, group.groupId});
+			pendingTransformPublications.push_back({packet, group.groupId, extractionToken});
 			Scene::SceneMutationQueue::Instance().EnqueuePublicationGroup(std::move(group));
 		}
 
 		void PublishLocked() {
 			const Clock::time_point start = Clock::now();
 			if(completedSteps.empty()) return;
+			bool statePublicationAccepted = !preparedBodyStateBatch.has_value();
 			if(preparedBodyStateBatch) {
+				const Clock::time_point validationStart = Clock::now();
 				const auto publication = world.PublishPreparedBodyStates(*preparedBodyStateBatch);
+				diagnosticTimings.stateValidationMs = MillisecondsSince(validationStart);
 				if(publication) {
+					statePublicationAccepted = true;
 					latestIncrementalBodies = publication->complete;
 					// The flat compatibility view is materialized only when a legacy
 					// caller asks for it, so unchanged pages remain shared in the hot path.
@@ -2210,12 +2399,15 @@ namespace TerraEngine::Physics {
 					lastStatePagesReused = publication->pagesReused;
 					lastStatePagesCopied = publication->pagesCopied;
 					++stateStorePublicationCount;
+					const Clock::time_point transactionStart = Clock::now();
 					PublishTransformTransactionsLocked(*publication);
+					diagnosticTimings.transactionConstructionMs = MillisecondsSince(transactionStart);
 				} else {
 					++stateStoreRejectedBatchCount;
 					++diagnosticCounters.rejectedCount;
 				}
 			}
+			const Clock::time_point snapshotStart = Clock::now();
 			latestCommands = std::make_shared<const PhysicsCommandResultSnapshot>(PhysicsCommandResultSnapshot{
 				world.Handle(), extraction.tick,
 				std::make_shared<const std::vector<PhysicsCommandResult>>(commandResults)});
@@ -2300,6 +2492,7 @@ namespace TerraEngine::Physics {
 				TerraEngine::Animation::AnimationRootMotionResultPublisher::Instance().ObservePhysicsResults(
 					*latestCommands, latestIncrementalBodies, latestCharacters);
 			}
+			diagnosticTimings.snapshotConstructionMs = MillisecondsSince(snapshotStart);
 
 			std::vector<PhysicsEvent> currentEvents;
 			currentEvents.reserve(extraction.events.size() + breakEvents.size());
@@ -2472,6 +2665,25 @@ namespace TerraEngine::Physics {
 				packet->queries = std::move(queries);
 				PublishedPhysicsDebugPackets().Publish(std::move(packet));
 			}
+			if(extractionToken.IsValid()) {
+				const bool deferredToTransactionReceipt = std::any_of(
+					pendingTransformPublications.begin(), pendingTransformPublications.end(),
+					[this](const PendingTransformPublication& publication) {
+						return publication.extractionToken.world == extractionToken.world
+							&& publication.extractionToken.tick == extractionToken.tick
+							&& publication.extractionToken.value == extractionToken.value;
+					});
+				const Backend::PhysicsBackendResult leaseResult = deferredToTransactionReceipt
+					? Backend::PhysicsBackendResult{}
+					: (statePublicationAccepted
+						? backend->AcknowledgeExtraction(extractionToken)
+						: backend->AbortExtraction(extractionToken));
+				if(!leaseResult.Succeeded()) {
+					AppendCommandResult(0U, PhysicsResultStatus::ProviderFailure, extraction.tick,
+						"The provider rejected the protected extraction lease transition.");
+				}
+				extractionToken = {};
+			}
 			diagnosticTimings.publishMs = MillisecondsSince(start);
 		}
 
@@ -2521,6 +2733,12 @@ namespace TerraEngine::Physics {
 				authoringDiagnostics.authoringGeneration = data.generation;
 				authoringDiagnostics.snapshotGeneration = data.snapshotGeneration;
 				authoringDiagnostics.assetJournalGeneration = data.assetJournalGeneration;
+				authoringDiagnostics.sceneGeneration = data.sceneGeneration;
+				authoringDiagnostics.scenePublicationRevision = data.scenePublicationRevision;
+				authoringDiagnostics.constraintClosureCount = data.constraintRecordIds.size();
+				authoringDiagnostics.characterClosureCount = data.characterObjectIds.size();
+				authoringDiagnostics.removalClosureCount = data.removedObjectIds.size();
+				authoringDiagnostics.fallbackReason = static_cast<std::uint8_t>(data.fallbackReason);
 				authoringDiagnostics.changedObjects = authoringSnapshotReused ? 0U : data.changes.size();
 				authoringDiagnostics.assetObservations = authoringSnapshotReused ? 0U : data.assetObservations.size();
 				authoringDiagnostics.fullAssetRefresh = !authoringSnapshotReused && data.fullAssetRefresh;
@@ -2626,6 +2844,48 @@ namespace TerraEngine::Physics {
 			diagnostics.memory = memory;
 			diagnostics.cache = cache;
 			diagnostics.queues = diagnosticQueues;
+			const auto stage = [](PhysicsStageKind kind, double milliseconds, std::uint64_t workItems) {
+				PhysicsStageMeasurement measurement;
+				measurement.stage = kind;
+				measurement.availability = PhysicsMetricAvailability::Available;
+				measurement.unavailableReason = PhysicsMetricUnavailableReason::None;
+				measurement.durationNanoseconds = NanosecondsFromMilliseconds(milliseconds);
+				measurement.workItems = workItems;
+				return measurement;
+			};
+			diagnostics.stages = {
+				stage(PhysicsStageKind::AuthoringPreparation, diagnosticTimings.prepareMs, preparationDiagnostics.estimatedWorkItems),
+				stage(PhysicsStageKind::ProviderCommit, diagnosticTimings.commitMs, diagnosticCounters.commandCount),
+				stage(PhysicsStageKind::Simulation, diagnosticTimings.simulateMs, completedSteps.size()),
+				stage(PhysicsStageKind::Extraction, diagnosticTimings.extractionMs, extractionDiagnostics.examinedBodies),
+				stage(PhysicsStageKind::EventPublication, diagnosticTimings.eventPublishMs, extraction.events.size()),
+				stage(PhysicsStageKind::StateValidation, diagnosticTimings.stateValidationMs, extractionDiagnostics.convertedBodies),
+				stage(PhysicsStageKind::SnapshotConstruction, diagnosticTimings.snapshotConstructionMs, extractionDiagnostics.changedBodies),
+				stage(PhysicsStageKind::TransactionConstruction, diagnosticTimings.transactionConstructionMs, publicationDiagnostics.currentEntries)};
+			const Backend::PhysicsBackendSimulationQuality appliedQuality = backend->AppliedSimulationQuality();
+			diagnostics.quality.settingsSchemaVersion = configuredSettings.schemaVersion;
+			diagnostics.quality.settingsGeneration = settingsGeneration;
+			diagnostics.quality.worldGeneration = appliedQuality.world.worldGeneration;
+			diagnostics.quality.velocityIterations = appliedQuality.velocityIterations;
+			diagnostics.quality.positionIterations = appliedQuality.positionIterations;
+			diagnostics.quality.applied = appliedQuality.applied;
+			const Backend::PhysicsBackendJobTelemetry jobTelemetry = backend->JobTelemetry();
+			diagnostics.jobs.submitted = jobTelemetry.submitted;
+			diagnostics.jobs.completed = jobTelemetry.completed;
+			diagnostics.jobs.rejected = jobTelemetry.rejected;
+			diagnostics.jobs.batchCount = jobTelemetry.batchCount;
+			diagnostics.jobs.lockAcquisitionCount = jobTelemetry.lockAcquisitionCount;
+			diagnostics.jobs.pumpSubmissionCount = jobTelemetry.pumpSubmissionCount;
+			diagnostics.jobs.barrierWaitCount = jobTelemetry.barrierWaitCount;
+			diagnostics.jobs.barrierWaitMicroseconds = jobTelemetry.barrierWaitMicroseconds;
+			diagnostics.jobs.maximumBarrierWaitMicroseconds = jobTelemetry.maximumBarrierWaitMicroseconds;
+			diagnostics.jobs.jobExecutionMicroseconds = jobTelemetry.jobExecutionMicroseconds;
+			diagnostics.jobs.queued = jobTelemetry.queued;
+			diagnostics.jobs.activePumps = jobTelemetry.activePumps;
+			diagnostics.jobs.maximumActivePumps = jobTelemetry.maximumActivePumps;
+			diagnostics.jobs.workerLimit = jobTelemetry.workerLimit;
+			diagnostics.jobs.observedWorkerThreads = jobTelemetry.observedWorkerThreads;
+			diagnostics.jobs.idle = jobTelemetry.idle;
 			diagnostics.authoring = std::move(authoringDiagnostics);
 			diagnostics.preparation = std::move(preparationDiagnostics);
 			diagnostics.extraction = extractionDiagnostics;
@@ -2666,10 +2926,12 @@ namespace TerraEngine::Physics {
 
 			for(const PendingTransformPublication& publication : pendingTransformPublications) {
 				const auto result = resultsByGroup.find(publication.groupId);
+				bool publicationAccepted = false;
 				if(result != resultsByGroup.end()) {
 					const TransformPublicationReceipt receipt =
 						MakeTransformPublicationReceipt(publication.packet, *result->second);
 					if(receipt.Accepted()) {
+						publicationAccepted = true;
 						++publicationDiagnostics.acceptedPackets;
 						publicationDiagnostics.acknowledgedEntries += receipt.acknowledgedEntries.size();
 						publicationDiagnostics.lastFailure.clear();
@@ -2684,15 +2946,23 @@ namespace TerraEngine::Physics {
 									ObjectManager::instance().GetObjectTransformRevision(*object);
 							}
 						}
-						continue;
 					}
 				}
-				{
+				if(!publicationAccepted) {
 					// Leave lastPublishedPose unchanged so the next extraction retries a
 					// rejected write even if the provider body has already gone to sleep.
 					++diagnosticCounters.rejectedCount;
 					++publicationDiagnostics.rejectedPackets;
 					publicationDiagnostics.lastFailure = "Transform publication did not commit at its declared boundary.";
+				}
+				if(publication.extractionToken.IsValid()) {
+					const Backend::PhysicsBackendResult leaseResult = publicationAccepted
+						? backend->AcknowledgeExtraction(publication.extractionToken)
+						: backend->AbortExtraction(publication.extractionToken);
+					if(!leaseResult.Succeeded()) {
+						++diagnosticCounters.rejectedCount;
+						publicationDiagnostics.lastFailure = "The provider rejected the extraction lease receipt transition.";
+					}
 				}
 			}
 			pendingTransformPublications.clear();
@@ -2721,6 +2991,8 @@ namespace TerraEngine::Physics {
 		PhysicsPreparationScratch preparationScratch;
 		PhysicsAssetGeneration observedPhysicsAssetGeneration = 0U;
 		std::uint64_t authoringEquivalentSceneSpatialRevision = 0U;
+		std::uint64_t lastAuthoringSceneGeneration = 0U;
+		std::uint64_t lastAuthoringScenePublicationRevision = 0U;
 		bool authoringSceneRevisionValid = false;
 		PhysicsGeneration lastPreparedAuthoringSnapshotGeneration = 0U;
 		bool authoringSnapshotReused = false;
@@ -2739,6 +3011,7 @@ namespace TerraEngine::Physics {
 		std::vector<PhysicsFixedStepRequest> pendingFlushSteps;
 		std::vector<PendingTransformPublication> pendingTransformPublications;
 		Backend::PhysicsBackendExtraction extraction;
+		Backend::PhysicsBackendExtractionToken extractionToken;
 		std::optional<IncrementalBodyStateUpdateBatch> preparedBodyStateBatch;
 		std::vector<TransformPublicationSourceRecord> preparedTransformSources;
 		std::uint64_t nextTransformPublicationGroupId = 0U;

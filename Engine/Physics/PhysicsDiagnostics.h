@@ -2,6 +2,7 @@
 
 #include "PhysicsTypes.h"
 
+#include <array>
 #include <cstdint>
 #include <cstddef>
 #include <memory>
@@ -80,7 +81,68 @@ namespace TerraEngine::Physics {
 	};
 	struct PhysicsDiagnosticsTimings {
 		double prepareMs = 0.0, commitMs = 0.0, simulateMs = 0.0, queryMs = 0.0;
-		double eventPublishMs = 0.0, publishMs = 0.0;
+		double extractionMs = 0.0, eventPublishMs = 0.0, stateValidationMs = 0.0;
+		double snapshotConstructionMs = 0.0, transactionConstructionMs = 0.0, publishMs = 0.0;
+	};
+
+	// Stage availability is explicit so an unsupported provider counter cannot be
+	// mistaken for a measured zero by the profiler or installed evidence tools.
+	enum class PhysicsMetricAvailability : std::uint8_t {
+		Available,
+		Unavailable,
+		NotApplicable
+	};
+
+	enum class PhysicsMetricUnavailableReason : std::uint8_t {
+		None,
+		ProviderDoesNotReportBytes,
+		StageDidNotRun,
+		CounterNotSupported
+	};
+
+	enum class PhysicsStageKind : std::uint8_t {
+		AuthoringPreparation,
+		ProviderCommit,
+		Simulation,
+		Extraction,
+		EventPublication,
+		StateValidation,
+		SnapshotConstruction,
+		TransactionConstruction,
+		Count
+	};
+
+	struct PhysicsStageMeasurement {
+		PhysicsStageKind stage = PhysicsStageKind::AuthoringPreparation;
+		PhysicsMetricAvailability availability = PhysicsMetricAvailability::NotApplicable;
+		PhysicsMetricUnavailableReason unavailableReason = PhysicsMetricUnavailableReason::StageDidNotRun;
+		std::uint64_t durationNanoseconds = 0U;
+		std::uint64_t workItems = 0U;
+		std::uint64_t allocationCount = 0U;
+		std::uint64_t allocationBytes = 0U;
+		bool allocationCountAvailable = false;
+		bool allocationBytesAvailable = false;
+	};
+
+	struct PhysicsSimulationQualityDiagnostics {
+		std::uint32_t settingsSchemaVersion = 0U;
+		std::uint64_t settingsGeneration = 0U;
+		PhysicsGeneration worldGeneration = 0U;
+		std::uint32_t velocityIterations = 0U;
+		std::uint32_t positionIterations = 0U;
+		bool applied = false;
+	};
+
+	// This is a copied provider-neutral view of the shared-pool bridge. Mutable
+	// provider jobs, barriers, and thread objects never cross this boundary.
+	struct PhysicsJobTelemetry {
+		std::uint64_t submitted = 0U, completed = 0U, rejected = 0U;
+		std::uint64_t batchCount = 0U, lockAcquisitionCount = 0U, pumpSubmissionCount = 0U;
+		std::uint64_t barrierWaitCount = 0U, barrierWaitMicroseconds = 0U;
+		std::uint64_t maximumBarrierWaitMicroseconds = 0U, jobExecutionMicroseconds = 0U;
+		std::uint32_t queued = 0U, activePumps = 0U, maximumActivePumps = 0U;
+		std::uint32_t workerLimit = 0U, observedWorkerThreads = 0U;
+		bool idle = true;
 	};
 	struct PhysicsDiagnosticsMemory {
 		// Jolt's free callback does not report allocation sizes, so live byte totals
@@ -110,10 +172,14 @@ namespace TerraEngine::Physics {
 	// readers never retain an authoring snapshot, provider range, or transaction.
 	struct PhysicsAuthoringDiagnostics {
 		std::uint64_t authoringGeneration = 0U, snapshotGeneration = 0U, assetJournalGeneration = 0U;
+		std::uint64_t sceneGeneration = 0U, scenePublicationRevision = 0U;
 		std::uint64_t changedObjects = 0U, added = 0U, removed = 0U, transforms = 0U;
 		std::uint64_t bodyComponents = 0U, colliderComponents = 0U, hierarchyDependencies = 0U;
 		std::uint64_t colliderAssets = 0U, materialAssets = 0U, settings = 0U, lifecycle = 0U;
-		std::uint64_t assetObservations = 0U;
+		std::uint64_t assetObservations = 0U, constraintClosureCount = 0U;
+		std::uint64_t characterClosureCount = 0U, removalClosureCount = 0U;
+		// Mirrors PhysicsAuthoringFallbackReason without retaining authoring state.
+		std::uint8_t fallbackReason = 0U;
 		bool snapshotReused = false;
 		bool fullAssetRefresh = false;
 	};
@@ -170,6 +236,9 @@ namespace TerraEngine::Physics {
 		PhysicsDiagnosticsMemory memory;
 		PhysicsDiagnosticsCache cache;
 		PhysicsDiagnosticsQueues queues;
+		std::array<PhysicsStageMeasurement, static_cast<std::size_t>(PhysicsStageKind::Count)> stages{};
+		PhysicsSimulationQualityDiagnostics quality;
+		PhysicsJobTelemetry jobs;
 		PhysicsAuthoringDiagnostics authoring;
 		PhysicsPreparationDiagnostics preparation;
 		PhysicsExtractionDiagnostics extraction;

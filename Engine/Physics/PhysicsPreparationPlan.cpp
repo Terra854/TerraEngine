@@ -16,7 +16,8 @@ namespace TerraEngine::Physics {
 
 		bool ValidateOperations(
 			std::vector<PhysicsPreparationOperation>& operations,
-			bool removals) {
+			bool removals,
+			bool allowNoDescriptor = false) {
 			std::sort(operations.begin(), operations.end(), LessOperation);
 			for(std::size_t index = 0U; index < operations.size(); ++index) {
 				const PhysicsPreparationOperation& operation = operations[index];
@@ -25,7 +26,7 @@ namespace TerraEngine::Physics {
 					|| (index > 0U && operations[index - 1U].objectId == operation.objectId)) {
 					return false;
 				}
-				if(removals != (operation.descriptorIndex == kInvalidPhysicsDescriptorIndex)
+				if((!allowNoDescriptor && removals != (operation.descriptorIndex == kInvalidPhysicsDescriptorIndex))
 					|| (!removals && operation.objectGeneration == 0U)) {
 					return false;
 				}
@@ -109,8 +110,8 @@ namespace TerraEngine::Physics {
 		data.characters = std::move(options.characterOperations);
 		data.commands = std::move(options.commands);
 		data.queries = std::move(options.queries);
-		if(!ValidateOperations(data.constraints, false)
-			|| !ValidateOperations(data.characters, false)) {
+		if(!ValidateOperations(data.constraints, false, true)
+			|| !ValidateOperations(data.characters, false, true)) {
 			return std::nullopt;
 		}
 
@@ -168,8 +169,8 @@ namespace TerraEngine::Physics {
 			|| !ValidateOperations(value.removals, true)
 			|| !ValidateOperations(value.updates, false)
 			|| !ValidateOperations(value.dependencyRebuilds, false)
-			|| !ValidateOperations(value.constraints, false)
-			|| !ValidateOperations(value.characters, false)) {
+			|| !ValidateOperations(value.constraints, false, true)
+			|| !ValidateOperations(value.characters, false, true)) {
 			return std::nullopt;
 		}
 

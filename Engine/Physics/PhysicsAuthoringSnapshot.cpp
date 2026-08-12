@@ -255,6 +255,85 @@ namespace TerraEngine::Physics {
 					static_cast<std::uint32_t>(end - begin)});
 				begin = end;
 			}
+
+			struct ConstraintDependency {
+				TerraEngine::UUID objectId;
+				TerraEngine::UUID recordId;
+			};
+			std::vector<ConstraintDependency> constraintDependencies;
+			std::unordered_map<TerraEngine::UUID, const PhysicsConstraintDescriptor*> constraintsByRecord;
+			constraintsByRecord.reserve(data.constraints.size());
+			for(const PhysicsConstraintDescriptor& constraint : data.constraints) {
+				constraintsByRecord.emplace(constraint.recordId, &constraint);
+			}
+			for(const PhysicsConstraintDescriptor& constraint : data.constraints) {
+				// A constraint rebuilds when its owner or either concrete endpoint changes.
+				constraintDependencies.push_back({constraint.ownerObjectId, constraint.recordId});
+				if(constraint.firstObjectId != TerraEngine::EMPTY_UUID)
+					constraintDependencies.push_back({constraint.firstObjectId, constraint.recordId});
+				if(constraint.secondObjectId != TerraEngine::EMPTY_UUID)
+					constraintDependencies.push_back({constraint.secondObjectId, constraint.recordId});
+				if(constraint.kind == PhysicsConstraintKind::Gear) {
+					// A gear retains provider references to two source constraints. Expand
+					// their owner/endpoints here, so changing either source body rebuilds
+					// the gear without a later scan across all constraint records.
+					for(const TerraEngine::UUID sourceId : {constraint.firstGearConstraintId,
+						constraint.secondGearConstraintId}) {
+						const auto source = constraintsByRecord.find(sourceId);
+						if(source == constraintsByRecord.end()) continue;
+						for(const TerraEngine::UUID objectId : {source->second->ownerObjectId,
+							source->second->firstObjectId, source->second->secondObjectId}) {
+							if(objectId != TerraEngine::EMPTY_UUID)
+								constraintDependencies.push_back({objectId, constraint.recordId});
+						}
+					}
+				}
+			}
+			std::sort(constraintDependencies.begin(), constraintDependencies.end(),
+				[](const ConstraintDependency& left, const ConstraintDependency& right) {
+					return std::tie(left.objectId, left.recordId) < std::tie(right.objectId, right.recordId);
+				});
+			constraintDependencies.erase(std::unique(constraintDependencies.begin(), constraintDependencies.end(),
+				[](const ConstraintDependency& left, const ConstraintDependency& right) {
+					return left.objectId == right.objectId && left.recordId == right.recordId;
+				}), constraintDependencies.end());
+			data.constraintDependencies.clear();
+			data.constraintDependentRecordIds.clear();
+			for(std::size_t begin = 0U; begin < constraintDependencies.size();) {
+				std::size_t end = begin + 1U;
+				while(end < constraintDependencies.size()
+					&& constraintDependencies[end].objectId == constraintDependencies[begin].objectId) ++end;
+				const std::uint32_t recordBegin = static_cast<std::uint32_t>(data.constraintDependentRecordIds.size());
+				for(std::size_t index = begin; index < end; ++index)
+					data.constraintDependentRecordIds.push_back(constraintDependencies[index].recordId);
+				data.constraintDependencies.push_back({constraintDependencies[begin].objectId, recordBegin,
+					static_cast<std::uint32_t>(end - begin)});
+				begin = end;
+			}
+			data.characterObjects.clear();
+			data.characterDescriptorIndices.clear();
+			data.characterDescriptorIndices.reserve(data.characters.size());
+			for(std::uint32_t index = 0U; index < data.characters.size(); ++index) {
+				data.characterObjects.push_back(data.characters[index].objectId);
+				data.characterDescriptorIndices.push_back({data.characters[index].objectId, index});
+			}
+			std::sort(data.characterObjects.begin(), data.characterObjects.end());
+			data.characterObjects.erase(std::unique(data.characterObjects.begin(), data.characterObjects.end()), data.characterObjects.end());
+			data.constraintDescriptorIndices.clear();
+			data.constraintDescriptorIndices.reserve(data.constraints.size());
+			for(std::uint32_t index = 0U; index < data.constraints.size(); ++index) {
+				data.constraintDescriptorIndices.push_back({data.constraints[index].recordId, index});
+			}
+			std::sort(data.constraintDescriptorIndices.begin(), data.constraintDescriptorIndices.end(),
+				[](const PhysicsConstraintDescriptorIndexRecord& left,
+					const PhysicsConstraintDescriptorIndexRecord& right) {
+					return left.recordId < right.recordId;
+				});
+			std::sort(data.characterDescriptorIndices.begin(), data.characterDescriptorIndices.end(),
+				[](const PhysicsCharacterDescriptorIndexRecord& left,
+					const PhysicsCharacterDescriptorIndexRecord& right) {
+					return left.objectId < right.objectId;
+				});
 		}
 
 		std::uint64_t CombineTransformRevision(
@@ -334,7 +413,11 @@ namespace TerraEngine::Physics {
 		if(!data.world.IsValid() || data.snapshotGeneration == 0 || !data.settings.Validate().accepted) {
 			return std::nullopt;
 		}
-		if(data.bodyDescriptorIndices.empty() && !data.bodies.empty()) {
+		if((data.bodyDescriptorIndices.empty() && !data.bodies.empty())
+			|| (!data.constraints.empty() && data.constraintDependencies.empty())
+			|| data.constraintDescriptorIndices.size() != data.constraints.size()
+			|| data.characterDescriptorIndices.size() != data.characters.size()
+			|| (!data.characters.empty() && data.characterObjects.empty())) {
 			BuildSnapshotIndexes(data, previous);
 		}
 		for(const PhysicsBodyDescriptor& body : data.bodies) {
@@ -420,6 +503,28 @@ namespace TerraEngine::Physics {
 		if(!std::is_sorted(data.bodyPresence.begin(), data.bodyPresence.end())
 			|| std::adjacent_find(data.bodyPresence.begin(), data.bodyPresence.end()) != data.bodyPresence.end()) {
 			return std::nullopt;
+		}
+		if(data.constraintDescriptorIndices.size() != data.constraints.size()
+			|| data.characterDescriptorIndices.size() != data.characters.size()) {
+			return std::nullopt;
+		}
+		for(std::size_t index = 0U; index < data.constraintDescriptorIndices.size(); ++index) {
+			const PhysicsConstraintDescriptorIndexRecord& record = data.constraintDescriptorIndices[index];
+			if(record.recordId == TerraEngine::EMPTY_UUID
+				|| record.constraintVectorIndex >= data.constraints.size()
+				|| data.constraints[record.constraintVectorIndex].recordId != record.recordId
+				|| (index > 0U && data.constraintDescriptorIndices[index - 1U].recordId >= record.recordId)) {
+				return std::nullopt;
+			}
+		}
+		for(std::size_t index = 0U; index < data.characterDescriptorIndices.size(); ++index) {
+			const PhysicsCharacterDescriptorIndexRecord& record = data.characterDescriptorIndices[index];
+			if(record.objectId == TerraEngine::EMPTY_UUID
+				|| record.characterVectorIndex >= data.characters.size()
+				|| data.characters[record.characterVectorIndex].objectId != record.objectId
+				|| (index > 0U && data.characterDescriptorIndices[index - 1U].objectId >= record.objectId)) {
+				return std::nullopt;
+			}
 		}
 		std::uint32_t expectedDependentObjectBegin = 0U;
 		for(std::size_t index = 0U; index < data.assetDependencies.size(); ++index) {
@@ -796,6 +901,51 @@ namespace TerraEngine::Physics {
 		return objects;
 	}
 
+	const PhysicsConstraintDescriptor* PhysicsAuthoringSnapshot::FindConstraintDescriptor(
+		const TerraEngine::UUID& recordId) const noexcept {
+		if(data_ == nullptr) return nullptr;
+		const auto found = std::lower_bound(data_->constraintDescriptorIndices.begin(),
+			data_->constraintDescriptorIndices.end(), recordId,
+			[](const PhysicsConstraintDescriptorIndexRecord& record, const TerraEngine::UUID& id) {
+				return record.recordId < id;
+			});
+		return found != data_->constraintDescriptorIndices.end() && found->recordId == recordId
+			? &data_->constraints[found->constraintVectorIndex]
+			: nullptr;
+	}
+
+	const PhysicsCharacterDescriptor* PhysicsAuthoringSnapshot::FindCharacterDescriptor(
+		const TerraEngine::UUID& objectId) const noexcept {
+		if(data_ == nullptr) return nullptr;
+		const auto found = std::lower_bound(data_->characterDescriptorIndices.begin(),
+			data_->characterDescriptorIndices.end(), objectId,
+			[](const PhysicsCharacterDescriptorIndexRecord& record, const TerraEngine::UUID& id) {
+				return record.objectId < id;
+			});
+		return found != data_->characterDescriptorIndices.end() && found->objectId == objectId
+			? &data_->characters[found->characterVectorIndex]
+			: nullptr;
+	}
+
+	std::vector<TerraEngine::UUID> PhysicsAuthoringSnapshot::ConstraintsDependingOn(
+		const TerraEngine::UUID& objectId) const {
+		std::vector<TerraEngine::UUID> records;
+		if(data_ == nullptr || objectId == TerraEngine::EMPTY_UUID) return records;
+		const auto found = std::lower_bound(data_->constraintDependencies.begin(), data_->constraintDependencies.end(), objectId,
+			[](const PhysicsConstraintDependencyRange& range, const TerraEngine::UUID& id) {
+				return range.objectId < id;
+			});
+		if(found == data_->constraintDependencies.end() || found->objectId != objectId) return records;
+		records.assign(data_->constraintDependentRecordIds.begin() + found->recordBegin,
+			data_->constraintDependentRecordIds.begin() + found->recordBegin + found->recordCount);
+		return records;
+	}
+
+	bool PhysicsAuthoringSnapshot::HasCharacter(const TerraEngine::UUID& objectId) const noexcept {
+		return data_ != nullptr && std::binary_search(data_->characterObjects.begin(),
+			data_->characterObjects.end(), objectId);
+	}
+
 	std::optional<PhysicsAuthoringGeneration> PhysicsAuthoringSnapshot::BuildGeneration(
 		const PhysicsAuthoringSnapshot* previous,
 		const PhysicsAuthoringSnapshot& current,
@@ -818,6 +968,13 @@ namespace TerraEngine::Physics {
 		generation.world = current.Data().world;
 		generation.generation = current.Data().snapshotGeneration;
 		generation.snapshotGeneration = current.Data().snapshotGeneration;
+		generation.sceneGeneration = std::max<std::uint64_t>(1U, current.Data().sceneGeneration);
+		// Snapshot callers that do not yet provide a published packet retain a
+		// monotonic local revision. PhysicsSystem supplies the authoritative packet
+		// revision before it commits the generation to a live world.
+		generation.scenePublicationRevision = current.Data().snapshotGeneration;
+		generation.previousScenePublicationRevision = retainedPrevious != nullptr
+			? retainedPrevious->Data().snapshotGeneration : 0U;
 		generation.hierarchyGeneration = current.Data().hierarchyGeneration;
 		generation.settingsHash = HashSettings(current.Data().settings);
 		generation.assetJournalGeneration = assetChanges.toGenerationInclusive;
@@ -939,6 +1096,22 @@ namespace TerraEngine::Physics {
 		for(auto& [objectId, change] : changes) {
 			(void)objectId;
 			generation.changes.push_back(change);
+			if(HasAnyReason(change.reasons, PhysicsAuthoringChangeReason::Removed)) {
+				generation.removedObjectIds.push_back(change.objectId);
+			}
+		}
+
+		// Constraint and character descriptors are separate runtime families. Their
+		// compact typed closure is built once with the immutable snapshot, avoiding
+		// a later all-collection reconciliation scan in PhysicsPrepare.
+		for(const auto& [objectId, change] : changes) {
+			const PhysicsAuthoringSnapshot& closureSnapshot = HasAnyReason(change.reasons,
+				PhysicsAuthoringChangeReason::Removed) && retainedPrevious != nullptr
+				? *retainedPrevious : current;
+			const std::vector<TerraEngine::UUID> dependentConstraints = closureSnapshot.ConstraintsDependingOn(objectId);
+			generation.constraintRecordIds.insert(generation.constraintRecordIds.end(),
+				dependentConstraints.begin(), dependentConstraints.end());
+			if(closureSnapshot.HasCharacter(objectId)) generation.characterObjectIds.push_back(objectId);
 		}
 		return PhysicsAuthoringGeneration::Create(std::move(generation));
 	}

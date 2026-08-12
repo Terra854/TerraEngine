@@ -214,6 +214,27 @@ namespace TerraEngine::Tests {
 				"Animation must be able to advance from an older observed tick to the latest compatible immutable step.");
 		});
 
+		registry.Add("Animation.Ragdoll.PhysicsPosePublicationCanonicalizesCompleteHandleOrder", [](TestContext& context) {
+			RagdollPhysicsBridge bridge;
+			const RagdollGenerationStamp expected = ValidGeneration();
+			PhysicsPoseSnapshot unordered = RuntimePose(expected);
+			std::swap(unordered.bodies[0U], unordered.bodies[1U]);
+			const std::array<PhysicsPoseExpectedBodyGeneration, 2U> expectedBodies{{
+				{100U, 1U}, {200U, 1U}}};
+			context.Expect(bridge.PublishCurrentStepPose(88U, unordered, expected, expectedBodies) == AnimationStatus::Ok,
+				"A complete pose with every expected provider handle may arrive in extraction order and must still publish.");
+			const auto published = bridge.AcquireCurrentStepPose(88U, expected);
+			context.Expect(published != nullptr && published->bodies.size() == expectedBodies.size()
+				&& published->bodies[0U].bodyId == 100U && published->bodies[1U].bodyId == 200U,
+				"Complete pose publication must canonicalize body-handle order once so animation hashes do not depend on provider extraction order.");
+
+			PhysicsPoseSnapshot foreign = RuntimePose(expected);
+			foreign.bodies.back().bodyId = 300U;
+			context.Expect(bridge.PublishCurrentStepPose(88U, foreign, expected, expectedBodies) == AnimationStatus::StaleHandle
+				&& bridge.AcquireCurrentStepPose(88U, expected) == published,
+				"A foreign or incomplete expected-handle set must reject atomically without replacing the prior complete pose.");
+		});
+
 		registry.Add("Animation.Ragdoll.PhysicsBoundaryRejectsIncompleteProviderBindingAtomically", [](TestContext& context) {
 			RagdollPhysicsBridge bridge;
 			RagdollPhysicsRequest activate;

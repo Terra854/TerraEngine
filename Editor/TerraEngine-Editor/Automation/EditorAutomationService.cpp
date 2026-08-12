@@ -4369,6 +4369,7 @@ namespace TerraEngine::Editor::Automation
 		{
 			if (!diagnostics) return succeed("Physics diagnostics are not published yet.", snapshot(nlohmann::json::object()));
 			nlohmann::json scheduler = nlohmann::json::array();
+			nlohmann::json stages = nlohmann::json::array();
 			if (diagnostics->scheduler)
 			{
 				// Diagnostics are published data, so copying their scheduler declaration
@@ -4381,6 +4382,18 @@ namespace TerraEngine::Editor::Automation
 						{"boundary", declaration.boundary}, {"workerSafe", declaration.workerSafe}
 					});
 				}
+			}
+			// Stage records remain copied values. Automation clients never receive a
+			// provider handle or a reference to mutable profiler storage.
+			for (const PhysicsStageMeasurement& stage : diagnostics->stages)
+			{
+				stages.push_back({
+					{"kind", static_cast<std::uint32_t>(stage.stage)}, {"durationNanoseconds", stage.durationNanoseconds},
+					{"workItems", stage.workItems}, {"allocationCount", stage.allocationCount}, {"allocationBytes", stage.allocationBytes},
+					{"allocationCountAvailable", stage.allocationCountAvailable}, {"allocationBytesAvailable", stage.allocationBytesAvailable},
+					{"availability", static_cast<std::uint32_t>(stage.availability)},
+					{"unavailableReason", static_cast<std::uint32_t>(stage.unavailableReason)}
+				});
 			}
 			return succeed("Read immutable physics diagnostics.", snapshot({
 				{"counters", {{"bodies", diagnostics->counters.bodyCount}, {"shapes", diagnostics->counters.shapeCount}, {"constraints", diagnostics->counters.constraintCount}, {"characters", diagnostics->counters.characterCount}, {"contacts", diagnostics->counters.contactCount}, {"rejected", diagnostics->counters.rejectedCount}, {"stale", diagnostics->counters.staleCount}}},
@@ -4426,6 +4439,24 @@ namespace TerraEngine::Editor::Automation
 				{"rate", {
 					{"aggregateIntervalFrames", diagnostics->rate.aggregateIntervalFrames}, {"lastAggregateTick", diagnostics->rate.lastAggregateTick},
 					{"aggregateRefreshed", diagnostics->rate.aggregateRefreshed}, {"currentHealthPublished", diagnostics->rate.currentHealthPublished}}},
+				{"timings", {
+					{"authoringPreparationMs", diagnostics->timings.prepareMs}, {"providerCommitMs", diagnostics->timings.commitMs},
+					{"simulationMs", diagnostics->timings.simulateMs}, {"extractionMs", diagnostics->timings.extractionMs},
+					{"queryMs", diagnostics->timings.queryMs}, {"eventPublicationMs", diagnostics->timings.eventPublishMs},
+					{"stateValidationMs", diagnostics->timings.stateValidationMs}, {"snapshotConstructionMs", diagnostics->timings.snapshotConstructionMs},
+					{"transactionConstructionMs", diagnostics->timings.transactionConstructionMs}, {"publicationMs", diagnostics->timings.publishMs}}},
+				{"quality", {
+					{"settingsSchemaVersion", diagnostics->quality.settingsSchemaVersion}, {"settingsGeneration", diagnostics->quality.settingsGeneration},
+					{"worldGeneration", diagnostics->quality.worldGeneration}, {"velocityIterations", diagnostics->quality.velocityIterations},
+					{"positionIterations", diagnostics->quality.positionIterations}, {"applied", diagnostics->quality.applied}}},
+				{"jobs", {
+					{"submitted", diagnostics->jobs.submitted}, {"completed", diagnostics->jobs.completed}, {"rejected", diagnostics->jobs.rejected},
+					{"batches", diagnostics->jobs.batchCount}, {"lockAcquisitions", diagnostics->jobs.lockAcquisitionCount}, {"pumpSubmissions", diagnostics->jobs.pumpSubmissionCount},
+					{"barrierWaits", diagnostics->jobs.barrierWaitCount}, {"barrierWaitMicroseconds", diagnostics->jobs.barrierWaitMicroseconds},
+					{"maximumBarrierWaitMicroseconds", diagnostics->jobs.maximumBarrierWaitMicroseconds}, {"jobExecutionMicroseconds", diagnostics->jobs.jobExecutionMicroseconds},
+					{"queued", diagnostics->jobs.queued}, {"activePumps", diagnostics->jobs.activePumps}, {"maximumActivePumps", diagnostics->jobs.maximumActivePumps},
+					{"workerLimit", diagnostics->jobs.workerLimit}, {"observedWorkerThreads", diagnostics->jobs.observedWorkerThreads}, {"idle", diagnostics->jobs.idle}}},
+				{"stages", std::move(stages)},
 				{"scheduler", std::move(scheduler)}
 			}));
 		}

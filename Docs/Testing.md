@@ -1,5 +1,49 @@
 # TerraEngine Testing
 
+## Physics optimization evidence
+
+The physics performance workflow is install-tree based. Configure and install a
+`RelWithDebInfo` build, then run capture against the repository-owned workload
+manifest. `-DryRun` validates discovery without claiming a baseline.
+
+```powershell
+cmake --fresh --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target install
+& .\Tools\Physics\CapturePhysicsOptimizationBenchmark.ps1 -InstallRoot .\out\build\RelWithDebInfo\Build `
+	-Manifest .\Tests\Fixtures\Performance\Physics\workloads.json `
+	-OutputDirectory .\out\evidence\physics-optimization\candidate -Runs 5 -DryRun
+```
+
+Use the comparator for baseline/candidate evidence; unavailable or incomparable
+results must remain failures rather than being interpreted as zero regressions.
+
+The complete native and installed acceptance sequence is:
+
+```powershell
+cmake --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor `
+	TerraEnginePhysicsColliderCompiler TerraEngineModelPackageCompiler `
+	TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Export
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+	-R "Physics|TransactionalMutation|SystemScheduler|Editor\.Automation|Editor\.Export|SceneRuntimeParity" --output-on-failure
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+cmake --build --preset RelWithDebInfo --target install
+& .\out\build\RelWithDebInfo\Build\Engine\TerraEnginePhysicsGameplayStress.exe
+& .\out\build\RelWithDebInfo\Build\Engine\TerraEnginePhysicsConstraintCharacterStress.exe
+& .\Tools\Physics\RunInstalledEditorPhysicsStress.ps1 `
+	-InstallRoot .\out\build\RelWithDebInfo\Build `
+	-WorkRoot .\out\validation\physics-optimization\installed `
+	-RunWorkerScalingMatrix -RunProfilerCaptureChecks -CaptureLevel detailed `
+	-CaptureDurationSeconds 5 -AllowLiveStress
+```
+
+The worker matrix is an acceptance gate: the median engine-measured simulation
+stage at four workers must be at least 1.5x faster than one worker on the
+10,000-body/8,000-active large leg, and the maximum-worker leg must be no more
+than 10% slower than four. Other fixed-step stages remain separate mixed-workload
+regression evidence. The script exits nonzero when either limit, deterministic
+hashes, stage-sample coverage, or any child run fails.
+
 ## Production virtual-geometry gates
 
 From a clean checkout, compile and run the focused contract registrations before

@@ -35,6 +35,10 @@ namespace TerraEngine::Physics::Backend {
 		std::uint64_t submitted = 0;
 		std::uint64_t completed = 0;
 		std::uint64_t rejected = 0;
+		std::uint64_t batchCount = 0;
+		std::uint64_t lockAcquisitionCount = 0;
+		std::uint64_t pumpSubmissionCount = 0;
+		std::uint64_t barrierWaitCount = 0;
 		std::uint32_t queued = 0;
 		std::uint32_t activePumps = 0;
 		std::uint32_t maxActivePumps = 0;
@@ -90,7 +94,7 @@ namespace TerraEngine::Physics::Backend {
 		void FreeJob(Job* job) override;
 
 	private:
-		void QueueOne(Job* job);
+		void QueueBatch(Job* const* jobs, JPH::uint jobCount);
 		void SubmitPump();
 		void PumpJobs();
 		std::uint32_t EffectiveWorkerLimit() const noexcept;
@@ -103,6 +107,10 @@ namespace TerraEngine::Physics::Backend {
 		std::atomic<std::uint64_t> submitted{0};
 		std::atomic<std::uint64_t> completed{0};
 		std::atomic<std::uint64_t> rejected{0};
+		std::atomic<std::uint64_t> batchCount{0};
+		std::atomic<std::uint64_t> lockAcquisitionCount{0};
+		std::atomic<std::uint64_t> pumpSubmissionCount{0};
+		std::atomic<std::uint64_t> barrierWaitCount{0};
 		std::atomic<std::uint32_t> queued{0};
 		std::atomic<std::uint32_t> maximumActivePumps{0};
 		std::atomic<std::uint64_t> barrierWaitMicroseconds{0};

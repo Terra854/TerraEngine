@@ -9,6 +9,14 @@ namespace TerraEngine::Physics {
 			|| value.snapshotGeneration == 0U || value.settingsHash == 0U) {
 			return std::nullopt;
 		}
+		if(value.fallbackReason == PhysicsAuthoringFallbackReason::None
+			&& (value.sceneGeneration != 0U || value.scenePublicationRevision != 0U)) {
+			if(value.sceneGeneration == 0U || value.scenePublicationRevision == 0U
+				|| (value.previousScenePublicationRevision != 0U
+					&& value.scenePublicationRevision != value.previousScenePublicationRevision + 1U)) {
+				return std::nullopt;
+			}
+		}
 
 		std::sort(value.changes.begin(), value.changes.end(),
 			[](const PhysicsAuthoringChange& left, const PhysicsAuthoringChange& right) {
@@ -43,6 +51,17 @@ namespace TerraEngine::Physics {
 					&& value.assetObservations[index - 1U].assetId == observation.assetId)) {
 				return std::nullopt;
 			}
+		}
+
+		const auto validateClosure = [](std::vector<TerraEngine::UUID>& values) {
+			std::sort(values.begin(), values.end());
+			return std::all_of(values.begin(), values.end(), [](const TerraEngine::UUID& value) {
+				return value != TerraEngine::EMPTY_UUID;
+			}) && std::adjacent_find(values.begin(), values.end()) == values.end();
+		};
+		if(!validateClosure(value.constraintRecordIds) || !validateClosure(value.characterObjectIds)
+			|| !validateClosure(value.removedObjectIds)) {
+			return std::nullopt;
 		}
 
 		return PhysicsAuthoringGeneration(

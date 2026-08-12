@@ -2,6 +2,7 @@
 
 #include "../TestHarness.h"
 
+#include "Physics/Backend/JoltPhysicsBackend.h"
 #include "Physics/PhysicsDiagnostics.h"
 #include "Physics/PhysicsQueries.h"
 #include "Physics/PhysicsSettings.h"
@@ -201,5 +202,53 @@ namespace TerraEngine::Tests {
 			context.Expect(!physics.WorldHandle().IsValid(), "Final shutdown must leave no active world after all one thousand cycles.");
 			PublishedPhysicsDebugPackets().Clear();
 		});
-	}
+
+		registry.Add("Physics.LifecycleStress.TeardownRejectsPreparedWorkAndRestartHasNoOldAuthority", [](TestContext& context) {
+			PhysicsWorld world;
+			context.Expect(world.Create(PhysicsSettings::Defaults()), "The teardown retry fixture needs an active first generation.");
+			const PhysicsWorldHandle first = world.Handle();
+			const PhysicsQueryReceipt receipt = world.SubmitQuery(MakeQuery(first, 1U));
+			const PhysicsPreparedQueryBatch prepared = world.PrepareQueries(1U);
+			context.Expect(receipt.accepted && prepared.queries.size() == 1U,
+				"One immutable prepared query must exist before teardown races its completion.");
+			context.Expect(world.BeginStopping() && world.BeginDraining() == 0U && world.CompleteTeardown(),
+				"Teardown must drain the protected work boundary before it invalidates the world generation.");
+			context.Expect(world.Create(PhysicsSettings::Defaults()) && world.Handle() != first,
+				"A retry world must receive a new authority generation after teardown.");
+			context.Expect(!world.CompleteQuery(prepared.queries.front(), 1U, PhysicsResultStatus::Success, {}),
+				"A prepared completion that races teardown must not publish into the retry world.");
+			context.Expect(world.ReadQuery(receipt.handle).status == PhysicsResultStatus::StaleTarget,
+				"A rejected old completion must remain stale rather than becoming retry-world state.");
+			context.Expect(world.BeginStopping() && world.BeginDraining() == 0U && world.CompleteTeardown(),
+				"The retry world must also tear down without retaining prepared work from the failed generation.");
+		});
+
+		registry.Add("Physics.LifecycleStress.FatalProviderBarrierFailurePublishesNothingAndDrainsBeforeTeardown", [](TestContext& context) {
+			using namespace TerraEngine::Physics::Backend;
+			ThreadPoolSession pool;
+			JoltPhysicsBackend backend{ThreadPool::instance()};
+			const PhysicsWorldHandle world{{92U}, 1U};
+			PhysicsBackendWorldConfiguration configuration;
+			configuration.world = world;
+			context.Expect(backend.Initialize().Succeeded() && backend.CreateWorld(configuration).Succeeded(),
+				"The contained-provider fixture must establish one world before exercising its barrier path.");
+			context.Expect(backend.Step({world, 1U, 1.0F / 60.0F, 1U}).Succeeded(),
+				"One successful fixed step must establish that the normal provider barrier drains first.");
+
+			// This seam records the same translated fatal provider failure used by the
+			// allocator callback, without relying on an unsafe allocation failure.
+			backend.ReportFatalProviderFailureForValidation();
+			PhysicsBackendExtraction extraction;
+			extraction.world = world;
+			extraction.tick = 2U;
+			const PhysicsBackendResult rejectedStep = backend.Step({world, 2U, 1.0F / 60.0F, 1U});
+			context.Expect(rejectedStep.error == PhysicsBackendErrorCode::FatalProviderFailure
+				&& backend.Extract(extraction).error == PhysicsBackendErrorCode::FatalProviderFailure,
+				"A contained provider/barrier failure must reject simulation and extraction instead of publishing a new packet.");
+			context.Expect(backend.JobDiagnostics().queued == 0U && backend.JobDiagnostics().activePumps == 0U,
+				"Failure containment must drain every provider job before the world lifetime can end.");
+			context.Expect(backend.DestroyWorld(world).Succeeded() && backend.Shutdown().Succeeded(),
+				"A contained provider failure must still permit deterministic world teardown without outliving work.");
+		});
+}
 }

@@ -269,11 +269,14 @@ namespace TerraEngine::Physics {
 			static_cast<std::size_t>(settings.retainedResultTicks) + 1U,
 			settings.retainedResultTicks};
 		const PhysicsEventSubscriptionSnapshot subscriptions = eventSubscriptions->Snapshot();
-		PhysicsEventPacket packet = PhysicsEventPacketBuilder::MergeCollectors(
-			ActiveHandleLocked(), tick, collectors, subscriptions,
-			limits);
-		PhysicsEventPacket diagnosticPacket = PhysicsEventPacketBuilder::MergeCollectors(
-			ActiveHandleLocked(), tick, collectors, subscriptions, limits, false);
+		// One canonical sort feeds both stable consumer views. The canonical input
+		// keeps every observed event so gameplay filtering happens before its cap.
+		PhysicsEventPacketLimits canonicalLimits = limits;
+		canonicalLimits.maximumEventsPerPacket = std::max<std::size_t>(events.size(), 1U);
+		const PhysicsCanonicalEventResult canonical = PhysicsEventPacketBuilder::BuildCanonical(
+			ActiveHandleLocked(), tick, collectors, canonicalLimits);
+		PhysicsEventPacket packet = PhysicsEventPacketBuilder::BuildView(canonical, subscriptions, limits);
+		PhysicsEventPacket diagnosticPacket = PhysicsEventPacketBuilder::BuildView(canonical, subscriptions, limits, false);
 		packet.droppedCount += providerDroppedCount;
 		packet.overflowed = packet.overflowed || providerDroppedCount != 0U;
 		diagnosticPacket.droppedCount += providerDroppedCount;

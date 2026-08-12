@@ -52,6 +52,7 @@
 #include <cmath>
 #include <cstring>
 #include <cfloat>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <numbers>
@@ -62,6 +63,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -868,6 +870,11 @@ namespace TerraEngine::Physics::Backend {
 		private:
 			std::size_t maximumHits = 1U;
 		};
+
+		// A single protected admission packet may invoke the established body-staging
+		// routine repeatedly. This thread-local owner prevents recursive acquisition
+		// of the backend mutex while the outer batch keeps concurrent callers out.
+		thread_local JoltPhysicsBackend* batchAdmissionOwner = nullptr;
 	}
 
 	struct JoltPhysicsBackend::Impl {
@@ -940,11 +947,22 @@ namespace TerraEngine::Physics::Backend {
 		};
 
 		struct StagingRecord {
+			struct PreparedActivationPartition {
+				JPH::EActivation activation = JPH::EActivation::DontActivate;
+				std::vector<JPH::BodyID> bodyIds;
+				JPH::BodyInterface::AddState addState = nullptr;
+				bool prepared = false;
+			};
+
 			PhysicsWorldHandle world;
 			std::vector<std::uint64_t> shapeKeys;
 			std::vector<std::uint64_t> bodyKeys;
 			std::vector<std::uint64_t> constraintKeys;
 			std::vector<std::uint64_t> characterKeys;
+			// Unconstrained body packets prepare broad-phase insertion on background
+			// workers. Jolt may reorder each private ID array, which must remain intact
+			// until the matching finalize or abort call on the protected boundary.
+			std::vector<PreparedActivationPartition> preparedActivationPartitions;
 		};
 
 		Impl(ThreadPool& pool, JoltPhysicsBackendConfiguration configuration)
@@ -988,6 +1006,22 @@ namespace TerraEngine::Physics::Backend {
 				return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The staging token does not belong to this world.");
 			}
 			return Success();
+		}
+
+		void AbortPreparedActivationPartitions(StagingRecord& record) {
+			if(physicsSystem == nullptr) {
+				record.preparedActivationPartitions.clear();
+				return;
+			}
+			JPH::BodyInterface& bodyInterface = physicsSystem->GetBodyInterface();
+			for(auto partition = record.preparedActivationPartitions.rbegin();
+				partition != record.preparedActivationPartitions.rend(); ++partition) {
+				if(!partition->prepared || partition->bodyIds.empty()) continue;
+				bodyInterface.AddBodiesAbort(partition->bodyIds.data(),
+					static_cast<int>(partition->bodyIds.size()), partition->addState);
+				partition->prepared = false;
+			}
+			record.preparedActivationPartitions.clear();
 		}
 
 		bool NearlySame(PhysicsVector3 left, PhysicsVector3 right) {
@@ -1305,6 +1339,12 @@ namespace TerraEngine::Physics::Backend {
 		std::vector<std::uint64_t> bodyOrder;
 		std::unordered_map<std::uint64_t, std::uint32_t> bodyOrderIndices;
 		std::uint64_t bodyOrderGeneration = 1U;
+		// Only bodies changed outside ordinary active simulation need an engine-owned
+		// membership set. Jolt already owns the authoritative active-body list, so an
+		// incremental extraction visits active plus dirty bodies without scanning the
+		// complete stable body order.
+		std::unordered_set<std::uint64_t> dirtyBodyKeys;
+		JPH::BodyIDVector activeBodiesScratch;
 		std::vector<PhysicsBodyHandle> pendingRemovedBodies;
 		std::unordered_map<std::uint64_t, ConstraintRecord> constraints;
 		std::unordered_map<std::uint64_t, CharacterRecord> characters;
@@ -1320,6 +1360,19 @@ namespace TerraEngine::Physics::Backend {
 		std::vector<PhysicsEvent> pendingEvents;
 		std::uint64_t droppedEvents = 0U;
 		PhysicsTick lastEventDrainTick = 0U;
+		// A lease owns only stable engine keys and copied event values. Provider
+		// membership stays live until the protected publisher acknowledges this
+		// exact token, which makes a rejected publication safe to retry.
+		struct PendingExtractionLease {
+			PhysicsBackendExtractionToken token;
+			std::vector<std::uint64_t> bodyKeys;
+			bool includesRemovedBodies = false;
+			bool includesEvents = false;
+			std::size_t removedBodyCount = 0U;
+			std::size_t eventCount = 0U;
+		};
+		std::unordered_map<std::uint64_t, PendingExtractionLease> extractionLeases;
+		std::uint64_t nextExtractionToken = 1U;
 		bool typesRegistered = false;
 		bool initialized = false;
 		mutable std::atomic<bool> healthy{true};
@@ -1423,6 +1476,11 @@ namespace TerraEngine::Physics::Backend {
 		impl->bodies.clear();
 		impl->bodyOrder.clear();
 		impl->bodyOrderIndices.clear();
+		impl->dirtyBodyKeys.clear();
+		impl->activeBodiesScratch.clear();
+		// JPH::Array frees through Jolt's allocator callback. Release its retained
+		// capacity while that callback and the backend allocator are still alive.
+		impl->activeBodiesScratch.shrink_to_fit();
 		impl->pendingRemovedBodies.clear();
 		impl->constraints.clear();
 		impl->characters.clear();
@@ -1434,6 +1492,7 @@ namespace TerraEngine::Physics::Backend {
 		impl->pendingEvents.clear();
 		impl->droppedEvents = 0U;
 		impl->lastEventDrainTick = 0U;
+		impl->extractionLeases.clear();
 		impl->contactListener.Clear();
 		impl->physicsSystem.reset();
 		if(impl->jobAdapter != nullptr) {
@@ -1481,6 +1540,20 @@ namespace TerraEngine::Physics::Backend {
 				impl->broadPhaseLayers,
 				impl->objectVsBroadPhaseFilter,
 				impl->objectPairFilter);
+			// Project quality is provider-neutral authoring data. Apply it before any
+			// body or constraint can enter this generation so diagnostics and results
+			// describe one coherent solver profile for the world's whole lifetime.
+			JPH::PhysicsSettings providerSettings = impl->physicsSystem->GetPhysicsSettings();
+			providerSettings.mNumVelocitySteps = configuration.settings.velocityIterations;
+			providerSettings.mNumPositionSteps = configuration.settings.positionIterations;
+			// Avoid replacing Jolt's already-matching default record. This preserves the
+			// established default-world bitwise trajectory while non-default profiles
+			// still apply their explicitly authored solver quality before admission.
+			const JPH::PhysicsSettings& currentSettings = impl->physicsSystem->GetPhysicsSettings();
+			if(currentSettings.mNumVelocitySteps != providerSettings.mNumVelocitySteps
+				|| currentSettings.mNumPositionSteps != providerSettings.mNumPositionSteps) {
+				impl->physicsSystem->SetPhysicsSettings(providerSettings);
+			}
 			impl->physicsSystem->SetContactListener(&impl->contactListener);
 			impl->physicsSystem->SetBodyActivationListener(&impl->contactListener);
 			impl->contactListener.Configure(std::max<std::size_t>(
@@ -1524,6 +1597,9 @@ namespace TerraEngine::Physics::Backend {
 		impl->bodies.clear();
 		impl->bodyOrder.clear();
 		impl->bodyOrderIndices.clear();
+		impl->dirtyBodyKeys.clear();
+		impl->activeBodiesScratch.clear();
+		impl->activeBodiesScratch.shrink_to_fit();
 		impl->pendingRemovedBodies.clear();
 		impl->constraints.clear();
 		impl->characters.clear();
@@ -1535,6 +1611,7 @@ namespace TerraEngine::Physics::Backend {
 		impl->pendingEvents.clear();
 		impl->droppedEvents = 0U;
 		impl->lastEventDrainTick = 0U;
+		impl->extractionLeases.clear();
 		impl->contactListener.Clear();
 		impl->physicsSystem.reset();
 		impl->worldConfiguration = {};
@@ -1683,9 +1760,13 @@ namespace TerraEngine::Physics::Backend {
 	PhysicsBackendResult JoltPhysicsBackend::CreateBody(
 		const PhysicsBodyCreateRequest& request,
 		PhysicsBackendStagingToken& staging) {
-		std::lock_guard lock(impl->mutex);
-		const PhysicsBackendResult ready = impl->CheckReady();
-		if(!ready.Succeeded()) return ready;
+		const bool insideBatchAdmission = batchAdmissionOwner == this;
+		std::unique_lock<std::shared_mutex> lock(impl->mutex, std::defer_lock);
+		if(!insideBatchAdmission) {
+			lock.lock();
+			const PhysicsBackendResult ready = impl->CheckReady();
+			if(!ready.Succeeded()) return ready;
+		}
 		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(request.handle, impl->worldConfiguration.world)
 			|| !HandleMatchesWorld(request.shape, impl->worldConfiguration.world)
 			|| request.objectId == TerraEngine::EMPTY_UUID
@@ -1714,8 +1795,14 @@ namespace TerraEngine::Physics::Backend {
 			return Rejected(PhysicsBackendErrorCode::Unsupported,
 				"This cooked shape contains triangle-mesh geometry and can only be used by a static body.");
 		}
-		PhysicsBackendResult stagingResult = impl->EnsureStaging(staging, impl->worldConfiguration.world);
-		if(!stagingResult.Succeeded()) return stagingResult;
+		if(!insideBatchAdmission) {
+			PhysicsBackendResult stagingResult = impl->EnsureStaging(staging, impl->worldConfiguration.world);
+			if(!stagingResult.Succeeded()) return stagingResult;
+			// A later single-body mutation changes the packet's authored ordering. Abort
+			// any earlier background preparation and let CommitStaging rebuild the one
+			// canonical partition stream instead of finalizing stale shuffled ID arrays.
+			impl->AbortPreparedActivationPartitions(impl->staging.at(staging.value));
+		}
 
 		try {
 			const std::uint32_t allowedDegreesOfFreedom = request.allowedDegreesOfFreedom & 0x3FU;
@@ -1795,6 +1882,330 @@ namespace TerraEngine::Physics::Backend {
 		}
 	}
 
+	PhysicsBackendResult JoltPhysicsBackend::CreateBodies(
+		std::span<const PhysicsBodyCreateRequest> requests,
+		PhysicsBackendStagingToken& staging) {
+		if(requests.empty()) return Success("The empty body packet required no provider admission work.");
+		std::lock_guard lock(impl->mutex);
+		if(batchAdmissionOwner != nullptr) {
+			return Rejected(PhysicsBackendErrorCode::InvalidState,
+				"A nested provider body-admission packet is not supported.");
+		}
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
+		const PhysicsBackendResult stagingResult = impl->EnsureStaging(staging, impl->worldConfiguration.world);
+		if(!stagingResult.Succeeded()) return stagingResult;
+
+		struct PendingBody final {
+			const PhysicsBodyCreateRequest* request = nullptr;
+			JPH::BodyCreationSettings settings;
+			bool fullyLocked = false;
+			JPH::Body* allocatedBody = nullptr;
+		};
+		std::vector<PendingBody> pending;
+		pending.reserve(requests.size());
+		std::unordered_set<std::uint64_t> pendingKeys;
+		pendingKeys.reserve(requests.size());
+		try {
+			// Validate and materialize immutable provider settings before scheduling any
+			// allocation. Worker completion order can therefore never alter admission
+			// order, error precedence, or the authoring record that owns each body.
+			for(const PhysicsBodyCreateRequest& request : requests) {
+				if(!HandleMatchesWorld(request.handle, impl->worldConfiguration.world)
+					|| !HandleMatchesWorld(request.shape, impl->worldConfiguration.world)
+					|| request.objectId == TerraEngine::EMPTY_UUID
+					|| request.objectGeneration == 0U || request.componentGeneration == 0U
+					|| !request.pose.IsFinite() || !IsUsableRotation(request.pose.rotation)
+					|| !request.linearVelocity.IsFinite() || !request.angularVelocity.IsFinite()
+					|| request.collisionLayer >= kJoltObjectLayerCount
+					|| !impl->worldConfiguration.settings.layers[request.collisionLayer].enabled
+					|| !std::isfinite(request.mass) || request.mass <= 0.0F
+					|| !std::isfinite(request.friction) || request.friction < 0.0F
+					|| !std::isfinite(request.restitution) || request.restitution < 0.0F
+					|| !std::isfinite(request.linearDamping) || request.linearDamping < 0.0F
+					|| !std::isfinite(request.angularDamping) || request.angularDamping < 0.0F
+					|| !std::isfinite(request.maximumLinearVelocity) || request.maximumLinearVelocity <= 0.0F
+					|| !std::isfinite(request.maximumAngularVelocity) || request.maximumAngularVelocity <= 0.0F
+					|| !std::isfinite(request.gravityFactor) || request.gravityFactor < 0.0F) {
+					return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The body packet contains an invalid or stale request.");
+				}
+				const std::uint64_t bodyKey = HandleKey(request.handle);
+				const auto shape = impl->shapes.find(HandleKey(request.shape));
+				if(impl->bodies.contains(bodyKey) || !pendingKeys.insert(bodyKey).second || shape == impl->shapes.end()) {
+					return Rejected(PhysicsBackendErrorCode::InvalidState,
+						"The body packet reuses a handle or references a missing shape.");
+				}
+				if(request.motionType != PhysicsMotionType::Static && shape->second.shape->MustBeStatic()) {
+					return Rejected(PhysicsBackendErrorCode::Unsupported,
+						"This cooked shape contains triangle-mesh geometry and can only be used by a static body.");
+				}
+				const std::uint32_t allowedDegreesOfFreedom = request.allowedDegreesOfFreedom & 0x3FU;
+				const bool fullyLocked = request.motionType == PhysicsMotionType::Dynamic
+					&& allowedDegreesOfFreedom == 0U;
+				const PhysicsMotionType providerMotionType = fullyLocked
+					? PhysicsMotionType::Static
+					: request.motionType;
+				JPH::BodyCreationSettings settings(
+					shape->second.shape,
+					ToJoltPosition(request.pose.position),
+					ToJoltRotation(request.pose.rotation),
+					ToJoltMotionType(providerMotionType),
+					static_cast<JPH::ObjectLayer>(request.collisionLayer));
+				settings.mLinearVelocity = ToJoltVector(request.linearVelocity);
+				settings.mAngularVelocity = ToJoltVector(request.angularVelocity);
+				settings.mMotionQuality = ToJoltMotionQuality(request.motionQuality);
+				settings.mFriction = request.friction;
+				settings.mRestitution = request.restitution;
+				settings.mLinearDamping = request.linearDamping;
+				settings.mAngularDamping = request.angularDamping;
+				settings.mMaxLinearVelocity = request.maximumLinearVelocity;
+				settings.mMaxAngularVelocity = request.maximumAngularVelocity;
+				if(providerMotionType == PhysicsMotionType::Dynamic) {
+					settings.mAllowedDOFs = static_cast<JPH::EAllowedDOFs>(allowedDegreesOfFreedom);
+				}
+				settings.mIsSensor = request.sensor;
+				settings.mAllowSleeping = request.allowSleeping;
+				settings.mGravityFactor = request.useGravity ? request.gravityFactor : 0.0F;
+				settings.mUserData = EncodeCollisionMetadata(
+					request.collisionLayer,
+					request.collisionMask,
+					request.frictionCombine,
+					request.restitutionCombine);
+				if(request.motionType == PhysicsMotionType::Dynamic && request.mass > 0.0F) {
+					settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+					settings.mMassPropertiesOverride.mMass = request.mass;
+				}
+				pending.push_back({&request, std::move(settings), fullyLocked, nullptr});
+			}
+		} catch(const std::exception& exception) {
+			return ProviderFailure(std::string("Jolt body packet preparation failed: ") + exception.what());
+		} catch(...) {
+			return ProviderFailure("Jolt body packet preparation failed with an unknown exception.");
+		}
+
+		// Jolt explicitly permits CreateBodyWithoutID followed by AssignBodyID to
+		// decouple independent construction from its lock-protected ID registry.
+		// The slots below are disjoint and every worker joins before the protected
+		// assignment loop begins, so no task can outlive this staging transaction.
+		constexpr std::size_t kAllocationRangeSize = 64U;
+		const std::size_t rangeCount = (pending.size() + kAllocationRangeSize - 1U) / kAllocationRangeSize;
+		const std::size_t laneCount = std::min(rangeCount, impl->sharedPool.getThreadCount());
+		std::atomic<std::size_t> nextRange{0U};
+		std::atomic<bool> allocationFailed{false};
+		JPH::BodyInterface& bodies = impl->physicsSystem->GetBodyInterface();
+		auto allocateRanges = [&]() {
+			for(;;) {
+				const std::size_t rangeIndex = nextRange.fetch_add(1U, std::memory_order_relaxed);
+				if(rangeIndex >= rangeCount) return;
+				const std::size_t begin = rangeIndex * kAllocationRangeSize;
+				const std::size_t end = std::min(begin + kAllocationRangeSize, pending.size());
+				for(std::size_t index = begin; index < end; ++index) {
+					try {
+						pending[index].allocatedBody = bodies.CreateBodyWithoutID(pending[index].settings);
+						if(pending[index].allocatedBody == nullptr) allocationFailed.store(true, std::memory_order_release);
+					} catch(...) {
+						allocationFailed.store(true, std::memory_order_release);
+					}
+				}
+			}
+		};
+		std::vector<std::future<void>> futures;
+		try {
+			futures.reserve(laneCount > 0U ? laneCount - 1U : 0U);
+			for(std::size_t lane = 1U; lane < laneCount; ++lane) {
+				auto task = impl->sharedPool.createTask(allocateRanges);
+				futures.push_back(task->getFuture());
+				impl->sharedPool.enqueue(std::move(task), kAllocationRangeSize);
+			}
+		} catch(...) {
+			allocationFailed.store(true, std::memory_order_release);
+		}
+		allocateRanges();
+		for(std::future<void>& future : futures) {
+			try {
+				future.get();
+			} catch(...) {
+				allocationFailed.store(true, std::memory_order_release);
+			}
+		}
+		if(allocationFailed.load(std::memory_order_acquire)) {
+			for(PendingBody& entry : pending) {
+				if(entry.allocatedBody != nullptr) bodies.DestroyBodyWithoutID(entry.allocatedBody);
+			}
+			return Rejected(PhysicsBackendErrorCode::CapacityExceeded,
+				"Jolt could not allocate every member of the body packet.");
+		}
+
+		struct AssignedBody final {
+			std::uint64_t key = 0U;
+			JPH::BodyID id;
+		};
+		std::vector<AssignedBody> assignedBodies;
+		assignedBodies.reserve(pending.size());
+		auto discardAssigned = [&]() noexcept {
+			// Assigned bodies are still outside Jolt's broad phase. Remove them in
+			// reverse request order and restore the staging token to its pre-packet
+			// state, leaving the caller authority to roll back earlier staged records.
+			for(auto assigned = assignedBodies.rbegin(); assigned != assignedBodies.rend(); ++assigned) {
+				auto found = impl->bodies.find(assigned->key);
+				if(found != impl->bodies.end()) {
+					bodies.DestroyBody(found->second.bodyId);
+					impl->bodyIdToKey.erase(found->second.bodyId.GetIndexAndSequenceNumber());
+					impl->bodies.erase(found);
+				} else {
+					// A later map insertion can throw after AssignBodyID. Reclaim that
+					// ID directly instead of leaving an unreachable provider allocation.
+					JPH::Body* unassigned = bodies.UnassignBodyID(assigned->id);
+					if(unassigned != nullptr) bodies.DestroyBodyWithoutID(unassigned);
+				}
+			}
+			auto stagingRecord = impl->staging.find(staging.value);
+			if(stagingRecord != impl->staging.end()) {
+				stagingRecord->second.bodyKeys.erase(std::remove_if(
+					stagingRecord->second.bodyKeys.begin(), stagingRecord->second.bodyKeys.end(),
+					[&assignedBodies](std::uint64_t key) {
+						return std::find_if(assignedBodies.begin(), assignedBodies.end(),
+							[key](const AssignedBody& assigned) { return assigned.key == key; }) != assignedBodies.end();
+					}), stagingRecord->second.bodyKeys.end());
+			}
+		};
+		// Sequential ID assignment fixes the provider's observable identity order
+		// before any worker starts broad-phase preparation. Preparation may shuffle
+		// only its private per-partition ID array, never this engine-owned sequence.
+		try {
+			for(PendingBody& entry : pending) {
+				if(!bodies.AssignBodyID(entry.allocatedBody)) {
+					for(PendingBody& unassigned : pending) {
+						if(unassigned.allocatedBody != nullptr) bodies.DestroyBodyWithoutID(unassigned.allocatedBody);
+					}
+					discardAssigned();
+					return Rejected(PhysicsBackendErrorCode::CapacityExceeded,
+						"Jolt body capacity is exhausted while assigning the body packet.");
+				}
+				const PhysicsBodyCreateRequest& request = *entry.request;
+				const std::uint64_t bodyKey = HandleKey(request.handle);
+				const JPH::BodyID providerBodyId = entry.allocatedBody->GetID();
+				entry.allocatedBody = nullptr; // BodyInterface now owns the assigned body.
+				assignedBodies.push_back({bodyKey, providerBodyId});
+			}
+		} catch(...) {
+			for(PendingBody& entry : pending) {
+				if(entry.allocatedBody != nullptr && entry.allocatedBody->GetID().IsInvalid()) {
+					bodies.DestroyBodyWithoutID(entry.allocatedBody);
+				}
+			}
+			discardAssigned();
+			return ProviderFailure("Jolt body packet ID assignment failed and was rolled back before publication.");
+		}
+
+		auto& stagingRecord = impl->staging.at(staging.value);
+		impl->AbortPreparedActivationPartitions(stagingRecord);
+		if(stagingRecord.constraintKeys.empty()) {
+			for(std::size_t index = 0U; index < pending.size(); ++index) {
+				const PhysicsBodyCreateRequest& request = *pending[index].request;
+				if(!request.enabled) continue;
+				const JPH::EActivation activation = request.startAwake && request.motionType != PhysicsMotionType::Static
+					? JPH::EActivation::Activate
+					: JPH::EActivation::DontActivate;
+				if(stagingRecord.preparedActivationPartitions.empty()
+					|| stagingRecord.preparedActivationPartitions.back().activation != activation) {
+					stagingRecord.preparedActivationPartitions.push_back({activation, {}, nullptr, false});
+				}
+				stagingRecord.preparedActivationPartitions.back().bodyIds.push_back(assignedBodies[index].id);
+			}
+		}
+
+		std::atomic<std::size_t> nextPreparedPartition{0U};
+		std::atomic<bool> preparationFailed{false};
+		auto preparePartitions = [&]() {
+			for(;;) {
+				const std::size_t index = nextPreparedPartition.fetch_add(1U, std::memory_order_relaxed);
+				if(index >= stagingRecord.preparedActivationPartitions.size()) return;
+				auto& partition = stagingRecord.preparedActivationPartitions[index];
+				try {
+					partition.addState = bodies.AddBodiesPrepare(partition.bodyIds.data(),
+						static_cast<int>(partition.bodyIds.size()));
+					partition.prepared = true;
+				} catch(...) {
+					preparationFailed.store(true, std::memory_order_release);
+				}
+			}
+		};
+		std::vector<std::future<void>> preparationFutures;
+		try {
+			const std::size_t workerCount = impl->sharedPool.getThreadCount();
+			const std::size_t laneCount = workerCount > 1U
+				? std::min(stagingRecord.preparedActivationPartitions.size(), workerCount)
+				: 0U;
+			preparationFutures.reserve(laneCount);
+			for(std::size_t lane = 0U; lane < laneCount; ++lane) {
+				auto task = impl->sharedPool.createTask(preparePartitions);
+				preparationFutures.push_back(task->getFuture());
+				impl->sharedPool.enqueue(std::move(task), 1U);
+			}
+		} catch(...) {
+			preparationFailed.store(true, std::memory_order_release);
+		}
+
+		bool publicationFailed = false;
+		try {
+			// While Jolt prepares broad-phase state on worker lanes, publish the copied
+			// engine records in canonical request order. These maps remain staging-only
+			// until CommitStaging finalizes every prepared provider partition.
+			for(std::size_t index = 0U; index < pending.size(); ++index) {
+				const PendingBody& entry = pending[index];
+				const PhysicsBodyCreateRequest& request = *entry.request;
+				const std::uint64_t bodyKey = assignedBodies[index].key;
+				const JPH::BodyID providerBodyId = assignedBodies[index].id;
+				auto [bodyRecord, inserted] = impl->bodies.emplace(bodyKey, Impl::BodyRecord{
+					request.handle, request.objectId, request.objectGeneration,
+					request.componentGeneration, providerBodyId, request.mass,
+					request.motionType, request.collisionLayer, request.collisionMask,
+					request.frictionCombine, request.restitutionCombine,
+					request.sensor, entry.fullyLocked, request.startAwake, request.enabled, false, staging.value});
+				if(!inserted) {
+					publicationFailed = true;
+					break;
+				}
+				bodyRecord->second.retainedState.handle = request.handle;
+				bodyRecord->second.retainedState.pose = request.pose;
+				bodyRecord->second.retainedState.linearVelocity = request.linearVelocity;
+				bodyRecord->second.retainedState.angularVelocity = request.angularVelocity;
+				bodyRecord->second.retainedState.mass = request.mass;
+				bodyRecord->second.retainedState.awake = request.startAwake;
+				bodyRecord->second.retainedState.objectId = request.objectId;
+				bodyRecord->second.retainedState.objectGeneration = request.objectGeneration;
+				bodyRecord->second.retainedState.componentGeneration = request.componentGeneration;
+				bodyRecord->second.retainedState.fields = PhysicsBodyStateFieldMask::BodyState;
+				bodyRecord->second.retainedState.change = PhysicsBodyStateChangeMask::Created;
+				bodyRecord->second.retainedState.motionType = request.motionType;
+				bodyRecord->second.hasRetainedState = true;
+				impl->bodyIdToKey[providerBodyId.GetIndexAndSequenceNumber()] = bodyKey;
+				stagingRecord.bodyKeys.push_back(bodyKey);
+			}
+		} catch(...) {
+			publicationFailed = true;
+		}
+		for(std::future<void>& future : preparationFutures) {
+			try {
+				future.get();
+			} catch(...) {
+				preparationFailed.store(true, std::memory_order_release);
+			}
+		}
+		if(preparationFutures.empty() && !stagingRecord.preparedActivationPartitions.empty()) {
+			// A stopped or zero-worker pool cannot run a task. Keep the exact same
+			// documented prepare operation correct on the protected caller lane.
+			preparePartitions();
+		}
+		if(publicationFailed || preparationFailed.load(std::memory_order_acquire)) {
+			impl->AbortPreparedActivationPartitions(stagingRecord);
+			discardAssigned();
+			return ProviderFailure("Jolt body packet preparation or engine publication failed before visibility.");
+		}
+		return Success("The complete provider body packet was allocated in worker ranges and staged in request order.");
+	}
+
 	PhysicsBackendResult JoltPhysicsBackend::UpdateBody(const PhysicsBodyUpdateRequest& request) {
 		std::lock_guard lock(impl->mutex);
 		const PhysicsBackendResult ready = impl->CheckReady();
@@ -1833,6 +2244,7 @@ namespace TerraEngine::Physics::Backend {
 		body->second.retainedState.awake = request.wake || body->second.retainedState.awake;
 		body->second.pendingChange |= PhysicsBodyStateChangeMask::Updated;
 		if(request.wake) body->second.pendingChange |= PhysicsBodyStateChangeMask::Awakened;
+		impl->dirtyBodyKeys.insert(HandleKey(request.handle));
 		bodies.SetUserData(body->second.bodyId, EncodeCollisionMetadata(
 			request.collisionLayer,
 			request.collisionMask,
@@ -1864,6 +2276,7 @@ namespace TerraEngine::Physics::Backend {
 			impl->bodyObjectToKey.erase(indexed);
 		}
 		impl->pendingRemovedBodies.push_back(handle);
+		impl->dirtyBodyKeys.erase(HandleKey(handle));
 		impl->bodies.erase(body);
 		impl->RebuildBodyOrder();
 		return Success("The Jolt body was removed and destroyed.");
@@ -1882,6 +2295,10 @@ namespace TerraEngine::Physics::Backend {
 		if(impl->constraints.contains(key)) return Rejected(PhysicsBackendErrorCode::InvalidState, "The constraint handle is already populated.");
 		PhysicsBackendResult staged = impl->EnsureStaging(staging, impl->worldConfiguration.world);
 		if(!staged.Succeeded()) return staged;
+		// Constraints require the established sequential body insertion order. A
+		// packet may have prepared a broad-phase batch before its dependent records
+		// arrived, so release that private Jolt preparation before staging the link.
+		impl->AbortPreparedActivationPartitions(impl->staging.at(staging.value));
 		JPH::Ref<JPH::Constraint> providerConstraint;
 		PhysicsBackendResult built = impl->BuildConstraint(request, providerConstraint);
 		if(!built.Succeeded()) return built;
@@ -2211,6 +2628,16 @@ namespace TerraEngine::Physics::Backend {
 			return Rejected(PhysicsBackendErrorCode::Unsupported,
 				"This typed command is handled by a later backend story or a coarse lifecycle API.");
 		}
+		// Command-side changes must remain publishable even when the body is static or
+		// goes to sleep before extraction. Active simulation membership is supplied by
+		// Jolt; this compact set covers the complementary changed-body membership.
+		record->pendingChange |= PhysicsBodyStateChangeMask::Updated;
+		if(command.type == PhysicsCommandType::WakeBody) {
+			record->pendingChange |= PhysicsBodyStateChangeMask::Awakened;
+		} else if(command.type == PhysicsCommandType::SleepBody) {
+			record->pendingChange |= PhysicsBodyStateChangeMask::Slept;
+		}
+		impl->dirtyBodyKeys.insert(HandleKey(record->handle));
 		return impl->CheckProviderHealth()
 			? Success("The typed command was applied at the protected boundary.")
 			: ProviderFailure("Jolt reported a fatal failure while applying a command.", true);
@@ -2246,6 +2673,7 @@ namespace TerraEngine::Physics::Backend {
 				} else if(event.type == PhysicsEventType::Slept) {
 					body->pendingChange |= PhysicsBodyStateChangeMask::Slept;
 				}
+				impl->dirtyBodyKeys.insert(HandleKey(body->handle));
 			}
 			if(errors != JPH::EPhysicsUpdateError::None) {
 				return ProviderFailure("Jolt exhausted one or more configured contact/body-pair capacities.");
@@ -2483,6 +2911,205 @@ namespace TerraEngine::Physics::Backend {
 		return Extract(request, extraction);
 	}
 
+	PhysicsBackendResult JoltPhysicsBackend::ReserveAdmission(
+		const PhysicsBackendAdmissionReservation& reservation,
+		PhysicsBackendPreparedAdmission& prepared) {
+		std::lock_guard lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
+		if(!reservation.IsValid() || reservation.world != impl->worldConfiguration.world) {
+			return Rejected(PhysicsBackendErrorCode::StaleWorld,
+				"The provider admission reservation targets an invalid or stale world.");
+		}
+		// Reject impossible body capacity before creating a staging token or growing
+		// any container. This makes reservation failure atomic and prevents a hostile
+		// or accidental oversized batch from allocating memory it can never commit.
+		const std::uint64_t requestedBodies = static_cast<std::uint64_t>(impl->bodies.size())
+			+ reservation.bodyCount;
+		if(requestedBodies > impl->worldConfiguration.maximumBodies) {
+			return Rejected(PhysicsBackendErrorCode::CapacityExceeded,
+				"The provider admission reservation exceeds the active world's body capacity.");
+		}
+		PhysicsBackendStagingToken staging;
+		const PhysicsBackendResult staged = impl->EnsureStaging(staging, reservation.world);
+		if(!staged.Succeeded()) return staged;
+		auto found = impl->staging.find(staging.value);
+		if(found == impl->staging.end()) return ProviderFailure("The reserved staging record was not created.");
+		found->second.shapeKeys.reserve(reservation.shapeCount);
+		found->second.bodyKeys.reserve(reservation.bodyCount);
+		found->second.constraintKeys.reserve(reservation.constraintCount);
+		found->second.characterKeys.reserve(reservation.characterCount);
+		impl->shapes.reserve(impl->shapes.size() + reservation.shapeCount);
+		impl->bodies.reserve(impl->bodies.size() + reservation.bodyCount);
+		// These indexes become visible only after CommitStaging, but reserving their
+		// exact copied admission capacity here prevents repeated rehashes while a
+		// large transaction transfers its already-staged body identities.
+		impl->bodyIdToKey.reserve(impl->bodyIdToKey.size() + reservation.bodyCount);
+		impl->bodyObjectToKey.reserve(impl->bodyObjectToKey.size() + reservation.bodyCount);
+		impl->dirtyBodyKeys.reserve(impl->dirtyBodyKeys.size() + reservation.bodyCount);
+		impl->bodyOrder.reserve(impl->bodyOrder.size() + reservation.bodyCount);
+		impl->bodyOrderIndices.reserve(impl->bodyOrderIndices.size() + reservation.bodyCount);
+		impl->constraints.reserve(impl->constraints.size() + reservation.constraintCount);
+		impl->characters.reserve(impl->characters.size() + reservation.characterCount);
+		prepared.staging = staging;
+		prepared.reservedShapes = reservation.shapeCount;
+		prepared.reservedBodies = reservation.bodyCount;
+		prepared.reservedConstraints = reservation.constraintCount;
+		prepared.reservedCharacters = reservation.characterCount;
+		// Four staging vectors, four primary maps, and five body publication indexes
+		// are the engine-owned reservation sites intentionally changed here.
+		prepared.stagingAllocationCount = 13U;
+		return Success("Provider admission storage was reserved before staging dependencies.");
+	}
+
+	PhysicsBackendResult JoltPhysicsBackend::Extract(
+		const PhysicsBackendFixedStepWorkProfile& profile,
+		PhysicsBackendExtraction& extraction,
+		PhysicsBackendExtractionToken& token) const {
+		if(!profile.world.IsValid() || profile.tick == 0U
+			|| profile.fields == PhysicsBodyStateFieldMask::None || profile.rangeSize == 0U) {
+			return Rejected(PhysicsBackendErrorCode::InvalidArgument,
+				"The fixed-step extraction profile is invalid.");
+		}
+
+		PhysicsBackendExtractionRequest request;
+		std::vector<std::uint32_t> selectedIndices;
+		{
+			std::unique_lock lock(impl->mutex);
+			const PhysicsBackendResult ready = impl->CheckReady();
+			if(!ready.Succeeded() || impl->physicsSystem == nullptr
+				|| !HandleMatchesWorld(profile.world, impl->worldConfiguration.world)
+				|| (profile.providerOrderGeneration != 0U
+					&& profile.providerOrderGeneration != impl->bodyOrderGeneration)) {
+				return Rejected(PhysicsBackendErrorCode::StaleWorld,
+					"The extraction profile no longer matches the current provider order.");
+			}
+			selectedIndices = profile.activeStableIndices;
+			selectedIndices.insert(selectedIndices.end(), profile.dirtyStableIndices.begin(), profile.dirtyStableIndices.end());
+			// Jolt exposes its active membership directly. Combining that compact list
+			// with the provider's dirty-key index removes the former whole-world scan
+			// while retaining sleeping/static changes and caller-required bodies.
+			impl->physicsSystem->GetActiveBodies(JPH::EBodyType::RigidBody, impl->activeBodiesScratch);
+			for(const JPH::BodyID bodyId : impl->activeBodiesScratch) {
+				if(const Impl::BodyRecord* body = impl->FindBodyByJoltId(bodyId); body != nullptr) {
+					if(const auto found = impl->bodyOrderIndices.find(HandleKey(body->handle));
+						found != impl->bodyOrderIndices.end()) selectedIndices.push_back(found->second);
+				}
+			}
+			for(const std::uint64_t bodyKey : impl->dirtyBodyKeys) {
+				if(const auto found = impl->bodyOrderIndices.find(bodyKey);
+					found != impl->bodyOrderIndices.end()) selectedIndices.push_back(found->second);
+			}
+			for(const PhysicsBodyHandle handle : profile.explicitRequiredHandles) {
+				if(const auto found = impl->bodyOrderIndices.find(HandleKey(handle));
+					HandleMatchesWorld(handle, impl->worldConfiguration.world)
+					&& found != impl->bodyOrderIndices.end()) {
+					selectedIndices.push_back(found->second);
+				}
+			}
+			std::sort(selectedIndices.begin(), selectedIndices.end());
+			selectedIndices.erase(std::unique(selectedIndices.begin(), selectedIndices.end()), selectedIndices.end());
+			if(std::any_of(selectedIndices.begin(), selectedIndices.end(),
+				[this](std::uint32_t index) { return index >= impl->bodyOrder.size(); })) {
+				return Rejected(PhysicsBackendErrorCode::InvalidArgument,
+					"The extraction profile contains an out-of-range stable index.");
+			}
+		}
+
+		request.world = profile.world;
+		request.tick = profile.tick;
+		request.selection = PhysicsBackendExtractionSelection::StableRanges;
+		request.fields = profile.fields;
+		request.batchSize = profile.rangeSize;
+		request.parallelThreshold = std::max<std::uint32_t>(1U, profile.rangeSize);
+		// The retryable lease copies pending events below and erases them only after
+		// acknowledgement. The nested body read must not consume that queue first.
+		request.drainEvents = false;
+		for(std::size_t begin = 0U; begin < selectedIndices.size();) {
+			std::size_t end = begin + 1U;
+			while(end < selectedIndices.size() && selectedIndices[end] == selectedIndices[end - 1U] + 1U) ++end;
+			request.stableRanges.push_back({selectedIndices[begin], static_cast<std::uint32_t>(end - begin)});
+			begin = end;
+		}
+		if(request.stableRanges.empty()) {
+			// The request type requires one range. A no-body lease still carries
+			// removals/events, so bypass the getter path with an empty immutable result.
+			extraction = {};
+			extraction.world = profile.world;
+			extraction.tick = profile.tick;
+		} else {
+			const PhysicsBackendResult result = Extract(request, extraction);
+			if(!result.Succeeded()) return result;
+		}
+
+		std::unique_lock lock(impl->mutex);
+		if(profile.providerOrderGeneration != 0U && profile.providerOrderGeneration != impl->bodyOrderGeneration) {
+			return Rejected(PhysicsBackendErrorCode::StaleWorld,
+				"Provider order changed before the extraction lease could be retained.");
+		}
+		std::uint64_t value = impl->nextExtractionToken++;
+		if(value == 0U) value = impl->nextExtractionToken++;
+		token = {profile.world, profile.tick, value};
+		Impl::PendingExtractionLease lease;
+		lease.token = token;
+		lease.includesRemovedBodies = true;
+		lease.includesEvents = HasPhysicsBodyStateFields(profile.fields, PhysicsBodyStateFieldMask::Events);
+		lease.removedBodyCount = impl->pendingRemovedBodies.size();
+		lease.eventCount = lease.includesEvents ? impl->pendingEvents.size() : 0U;
+		for(const std::uint32_t index : selectedIndices) lease.bodyKeys.push_back(impl->bodyOrder[index]);
+		extraction.removedBodies = impl->pendingRemovedBodies;
+		if(lease.includesEvents) {
+			extraction.events = impl->pendingEvents;
+			extraction.droppedEventCount = impl->droppedEvents;
+			extraction.eventDrainPerformed = true;
+		}
+		extraction.fullState = profile.fullStateReason != PhysicsBackendFullStateReason::None;
+		extraction.providerOrderGeneration = impl->bodyOrderGeneration;
+		extraction.totalBodyCount = impl->bodyOrder.size();
+		extraction.examinedBodyCount = selectedIndices.size();
+		impl->extractionLeases.emplace(value, std::move(lease));
+		return Success("Jolt state was prepared in a retryable generation-bound extraction lease.");
+	}
+
+	PhysicsBackendResult JoltPhysicsBackend::AcknowledgeExtraction(PhysicsBackendExtractionToken token) {
+		std::unique_lock lock(impl->mutex);
+		const auto found = impl->extractionLeases.find(token.value);
+		if(!token.IsValid() || found == impl->extractionLeases.end() || found->second.token.world != token.world
+			|| found->second.token.tick != token.tick) {
+			return Rejected(PhysicsBackendErrorCode::StaleHandle, "The extraction lease is stale or already resolved.");
+		}
+		for(const std::uint64_t key : found->second.bodyKeys) {
+			if(const auto body = impl->bodies.find(key); body != impl->bodies.end()) {
+				body->second.pendingChange = PhysicsBodyStateChangeMask::None;
+				impl->dirtyBodyKeys.erase(key);
+			}
+		}
+		if(found->second.includesRemovedBodies) {
+			impl->pendingRemovedBodies.erase(impl->pendingRemovedBodies.begin(),
+				impl->pendingRemovedBodies.begin() + std::min(found->second.removedBodyCount, impl->pendingRemovedBodies.size()));
+		}
+		if(found->second.includesEvents) {
+			impl->pendingEvents.erase(impl->pendingEvents.begin(),
+				impl->pendingEvents.begin() + std::min(found->second.eventCount, impl->pendingEvents.size()));
+			if(impl->pendingEvents.empty()) impl->droppedEvents = 0U;
+			impl->lastEventDrainTick = token.tick;
+		}
+		impl->extractionLeases.erase(found);
+		return Success("The extraction lease was acknowledged after protected publication.");
+	}
+
+	PhysicsBackendResult JoltPhysicsBackend::AbortExtraction(PhysicsBackendExtractionToken token) {
+		std::unique_lock lock(impl->mutex);
+		const auto found = impl->extractionLeases.find(token.value);
+		if(!token.IsValid() || found == impl->extractionLeases.end() || found->second.token.world != token.world
+			|| found->second.token.tick != token.tick) {
+			return Rejected(PhysicsBackendErrorCode::StaleHandle, "The extraction lease is stale or already resolved.");
+		}
+		// No provider-owned pending state changed while this token was prepared.
+		impl->extractionLeases.erase(found);
+		return Success("The extraction lease was aborted and remains available for retry.");
+	}
+
 	PhysicsBackendExtractionCapabilities JoltPhysicsBackend::ExtractionCapabilities() const noexcept {
 		return {true, true, true, true, 8192U};
 	}
@@ -2545,20 +3172,32 @@ namespace TerraEngine::Physics::Backend {
 			break;
 		case PhysicsBackendExtractionSelection::ActiveBodies:
 		case PhysicsBackendExtractionSelection::PublicationRelevant:
-			extraction.examinedBodyCount = impl->bodyOrder.size();
-			for(std::uint32_t index = 0U; index < impl->bodyOrder.size(); ++index) {
-				auto found = impl->bodies.find(impl->bodyOrder[index]);
-				if(found == impl->bodies.end()) continue;
-				const bool active = bodies.IsActive(found->second.bodyId);
-				const bool changed = found->second.pendingChange != PhysicsBodyStateChangeMask::None;
-				if(active || (request.selection == PhysicsBackendExtractionSelection::PublicationRelevant && changed)) {
-					selectedIndices.push_back(index);
+			impl->physicsSystem->GetActiveBodies(JPH::EBodyType::RigidBody, impl->activeBodiesScratch);
+			for(const JPH::BodyID bodyId : impl->activeBodiesScratch) {
+				if(const Impl::BodyRecord* body = impl->FindBodyByJoltId(bodyId); body != nullptr) {
+					if(const auto found = impl->bodyOrderIndices.find(HandleKey(body->handle));
+						found != impl->bodyOrderIndices.end()) selectedIndices.push_back(found->second);
 				}
+			}
+			if(request.selection == PhysicsBackendExtractionSelection::PublicationRelevant) {
+				for(const std::uint64_t bodyKey : impl->dirtyBodyKeys) {
+					if(const auto found = impl->bodyOrderIndices.find(bodyKey);
+						found != impl->bodyOrderIndices.end()) selectedIndices.push_back(found->second);
+				}
+			}
+			// Explicit consumers such as ragdolls need sleeping mapped bodies, but
+			// they must join the incremental active/dirty selection rather than force a
+			// provider-wide state read. The stable lookup keeps this addition bounded.
+			for(const PhysicsBodyHandle handle : request.explicitHandles) {
+				if(!HandleMatchesWorld(handle, impl->worldConfiguration.world)) continue;
+				const auto found = impl->bodyOrderIndices.find(HandleKey(handle));
+				if(found != impl->bodyOrderIndices.end()) selectedIndices.push_back(found->second);
 			}
 			break;
 		}
 		std::sort(selectedIndices.begin(), selectedIndices.end());
 		selectedIndices.erase(std::unique(selectedIndices.begin(), selectedIndices.end()), selectedIndices.end());
+		extraction.examinedBodyCount = selectedIndices.size();
 		struct ExtractionRecordSnapshot {
 			std::uint32_t stableIndex = 0U;
 			PhysicsBodyHandle handle;
@@ -2679,6 +3318,7 @@ namespace TerraEngine::Physics::Backend {
 			if(request.selection == PhysicsBackendExtractionSelection::PublicationRelevant
 				|| request.selection == PhysicsBackendExtractionSelection::FullState) {
 				retained.pendingChange = PhysicsBodyStateChangeMask::None;
+				impl->dirtyBodyKeys.erase(HandleKey(retained.handle));
 			}
 		}
 		extraction.extractedBodyCount = extraction.bodies.size();
@@ -2786,16 +3426,80 @@ namespace TerraEngine::Physics::Backend {
 		if(!impl->CheckProviderHealth()) {
 			return ProviderFailure("Jolt was unhealthy before staging publication.", true);
 		}
+		auto& bodyInterface = impl->physicsSystem->GetBodyInterface();
+		if(!record->second.constraintKeys.empty()) {
+			// A constraint added after packet staging deliberately cancels background
+			// preparation. Its solver-visible insertion order remains the established
+			// sequential authored order below.
+			impl->AbortPreparedActivationPartitions(record->second);
+			// Constraint solvers are sensitive to broadphase/body insertion order.
+			// Preserve the established one-at-a-time order for dependent admissions;
+			// unconstrained bulk scenes still use Jolt's faster prepared partitions.
+			for(std::uint64_t bodyKey : record->second.bodyKeys) {
+				auto body = impl->bodies.find(bodyKey);
+				if(body == impl->bodies.end() || body->second.added || !body->second.enabled) continue;
+				bodyInterface.AddBody(body->second.bodyId,
+					body->second.startAwake && body->second.motionType != PhysicsMotionType::Static
+						? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
+			}
+		} else if(!record->second.preparedActivationPartitions.empty()) {
+			// CreateBodies already performed the documented background-safe prepare
+			// work while its caller lane built engine records. Finalize consumes those
+			// same (possibly shuffled) private ID arrays without another provider pass.
+			for(auto& partition : record->second.preparedActivationPartitions) {
+				if(!partition.prepared || partition.bodyIds.empty()) continue;
+				bodyInterface.AddBodiesFinalize(partition.bodyIds.data(),
+					static_cast<int>(partition.bodyIds.size()), partition.addState, partition.activation);
+				partition.prepared = false;
+			}
+			record->second.preparedActivationPartitions.clear();
+		} else {
+			struct ActivationPartition {
+				JPH::EActivation activation = JPH::EActivation::DontActivate;
+				std::vector<JPH::BodyID> bodies;
+			};
+			std::vector<ActivationPartition> activationPartitions;
+			activationPartitions.reserve(2U);
+			for(std::uint64_t bodyKey : record->second.bodyKeys) {
+				auto body = impl->bodies.find(bodyKey);
+				if(body == impl->bodies.end() || body->second.added || !body->second.enabled) continue;
+				const bool activate = body->second.startAwake
+					&& body->second.motionType != PhysicsMotionType::Static;
+				const JPH::EActivation activation = activate
+					? JPH::EActivation::Activate : JPH::EActivation::DontActivate;
+				// Keep contiguous activation runs in authored order. Reordering every
+				// dormant body ahead of every active body changes Jolt's broadphase insertion
+				// order and can change deterministic constrained poses even though the set of
+				// admitted bodies is identical.
+				if(activationPartitions.empty() || activationPartitions.back().activation != activation) {
+					activationPartitions.push_back({activation, {}});
+				}
+				activationPartitions.back().bodies.push_back(body->second.bodyId);
+			}
+			const auto finalizePartition = [&bodyInterface](ActivationPartition& partition) -> bool {
+				std::vector<JPH::BodyID>& bodies = partition.bodies;
+				if(bodies.empty()) return true;
+				if(bodies.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+					return false;
+				}
+				// Jolt may reorder the copied IDs during preparation. No engine identity
+				// table observes that temporary provider order; visibility begins only
+				// after the entire staging record commits below.
+				const int count = static_cast<int>(bodies.size());
+				const JPH::BodyInterface::AddState addState = bodyInterface.AddBodiesPrepare(bodies.data(), count);
+				bodyInterface.AddBodiesFinalize(bodies.data(), count, addState, partition.activation);
+				return true;
+			};
+			for(ActivationPartition& partition : activationPartitions) {
+				if(!finalizePartition(partition)) {
+					return Rejected(PhysicsBackendErrorCode::CapacityExceeded,
+						"The provider admission batch exceeds Jolt's bounded bulk-add range.");
+				}
+			}
+		}
 		for(std::uint64_t bodyKey : record->second.bodyKeys) {
 			auto body = impl->bodies.find(bodyKey);
-			if(body != impl->bodies.end() && !body->second.added && body->second.enabled) {
-				impl->physicsSystem->GetBodyInterface().AddBody(
-					body->second.bodyId,
-					body->second.startAwake && body->second.motionType != PhysicsMotionType::Static
-						? JPH::EActivation::Activate
-						: JPH::EActivation::DontActivate);
-				body->second.added = true;
-			}
+			if(body != impl->bodies.end() && body->second.enabled) body->second.added = true;
 		}
 		for(std::uint64_t constraintKey : record->second.constraintKeys) {
 			auto constraint = impl->constraints.find(constraintKey);
@@ -2850,6 +3554,7 @@ namespace TerraEngine::Physics::Backend {
 			if(body == impl->bodies.end()) continue;
 			body->second.stagingToken = 0U;
 			impl->bodyObjectToKey[body->second.objectId] = bodyKey;
+			impl->dirtyBodyKeys.insert(bodyKey);
 		}
 		if(!record->second.bodyKeys.empty()) impl->RebuildBodyOrder();
 		for(std::uint64_t constraintKey : record->second.constraintKeys) {
@@ -2874,6 +3579,9 @@ namespace TerraEngine::Physics::Backend {
 		if(record == impl->staging.end() || record->second.world != staging.world) {
 			return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The staging token was not found.");
 		}
+		// Jolt requires every background AddBodiesPrepare handle to be consumed by a
+		// matching finalize or abort call before its uncommitted body IDs are freed.
+		impl->AbortPreparedActivationPartitions(record->second);
 		for(auto constraintKey = record->second.constraintKeys.rbegin(); constraintKey != record->second.constraintKeys.rend(); ++constraintKey) {
 			auto constraint = impl->constraints.find(*constraintKey);
 			if(constraint != impl->constraints.end()) {
@@ -2894,6 +3602,7 @@ namespace TerraEngine::Physics::Backend {
 					indexed != impl->bodyObjectToKey.end() && indexed->second == *bodyKey) {
 					impl->bodyObjectToKey.erase(indexed);
 				}
+				impl->dirtyBodyKeys.erase(*bodyKey);
 				impl->bodies.erase(body);
 			}
 		}
@@ -2913,9 +3622,44 @@ namespace TerraEngine::Physics::Backend {
 	}
 
 	PhysicsBackendJobDrainDiagnostics JoltPhysicsBackend::JobDiagnostics() const noexcept {
-		if(impl->jobAdapter == nullptr) return {};
-		const PhysicsJobAdapterDiagnostics diagnostics = impl->jobAdapter->Diagnostics();
+		const PhysicsBackendJobTelemetry diagnostics = JobTelemetry();
 		return {diagnostics.queued, diagnostics.activePumps};
+	}
+
+	PhysicsBackendJobTelemetry JoltPhysicsBackend::JobTelemetry() const noexcept {
+		if(impl->jobAdapter == nullptr) return {};
+		const PhysicsJobAdapterDiagnostics source = impl->jobAdapter->Diagnostics();
+		PhysicsBackendJobTelemetry result;
+		result.submitted = source.submitted;
+		result.completed = source.completed;
+		result.rejected = source.rejected;
+		result.batchCount = source.batchCount;
+		result.lockAcquisitionCount = source.lockAcquisitionCount;
+		result.pumpSubmissionCount = source.pumpSubmissionCount;
+		result.barrierWaitCount = source.barrierWaitCount;
+		result.barrierWaitMicroseconds = source.barrierWaitMicroseconds;
+		result.maximumBarrierWaitMicroseconds = source.maximumBarrierWaitMicroseconds;
+		result.jobExecutionMicroseconds = source.jobExecutionMicroseconds;
+		result.queued = source.queued;
+		result.activePumps = source.activePumps;
+		result.maximumActivePumps = source.maxActivePumps;
+		result.workerLimit = source.workerLimit;
+		result.observedWorkerThreads = source.observedWorkerThreads;
+		result.available = true;
+		result.idle = source.queued == 0U && source.activePumps == 0U;
+		return result;
+	}
+
+	PhysicsBackendSimulationQuality JoltPhysicsBackend::AppliedSimulationQuality() const noexcept {
+		std::shared_lock lock(impl->mutex);
+		PhysicsBackendSimulationQuality result;
+		if(impl->physicsSystem == nullptr || !impl->worldConfiguration.world.IsValid()) return result;
+		const JPH::PhysicsSettings& settings = impl->physicsSystem->GetPhysicsSettings();
+		result.world = impl->worldConfiguration.world;
+		result.velocityIterations = settings.mNumVelocitySteps;
+		result.positionIterations = settings.mNumPositionSteps;
+		result.applied = true;
+		return result;
 	}
 
 	PhysicsProviderError JoltPhysicsBackend::LastProviderError() const {

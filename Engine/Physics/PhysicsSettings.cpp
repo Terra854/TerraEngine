@@ -72,6 +72,16 @@ namespace TerraEngine::Physics {
 			return Reject(PhysicsSettingsValidationCode::InvalidAccumulatorLimit,
 				"Accumulator clamp must hold at least one fixed tick and remain at or below one second.");
 		}
+		// Jolt requires at least two velocity iterations for friction and stores
+		// per-constraint iteration overrides in an eight-bit value.
+		if(velocityIterations < 2U || velocityIterations > 255U) {
+			return Reject(PhysicsSettingsValidationCode::InvalidVelocityIterations,
+				"Velocity iterations must remain between 2 and 255.");
+		}
+		if(positionIterations < 1U || positionIterations > 255U) {
+			return Reject(PhysicsSettingsValidationCode::InvalidPositionIterations,
+				"Position iterations must remain between 1 and 255.");
+		}
 
 		std::array<bool, kPhysicsCollisionLayerCount> seenIds{};
 		std::unordered_set<std::string> seenNames;
@@ -153,6 +163,8 @@ namespace TerraEngine::Physics {
 		case PhysicsSettingsValidationCode::InvalidFixedTimeStep: return "InvalidFixedTimeStep";
 		case PhysicsSettingsValidationCode::InvalidSubstepLimit: return "InvalidSubstepLimit";
 		case PhysicsSettingsValidationCode::InvalidAccumulatorLimit: return "InvalidAccumulatorLimit";
+		case PhysicsSettingsValidationCode::InvalidVelocityIterations: return "InvalidVelocityIterations";
+		case PhysicsSettingsValidationCode::InvalidPositionIterations: return "InvalidPositionIterations";
 		case PhysicsSettingsValidationCode::InvalidLayerId: return "InvalidLayerId";
 		case PhysicsSettingsValidationCode::EmptyLayerName: return "EmptyLayerName";
 		case PhysicsSettingsValidationCode::DuplicateLayerName: return "DuplicateLayerName";

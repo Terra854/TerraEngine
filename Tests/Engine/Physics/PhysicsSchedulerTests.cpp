@@ -230,6 +230,43 @@ namespace TerraEngine::Tests {
 			}
 		});
 
+		registry.Add("Physics.Scheduler.SevenPhaseDeclarationsExposeBoundaryAndWorkEvidence", [](TestContext& context) {
+			auto& physics = TerraEngine::Physics::PhysicsSystem::Instance();
+			const auto workloads = physics.DeclareFrameWorkloads(1.0F / 60.0F);
+			const auto repeatedWorkloads = physics.DeclareFrameWorkloads(1.0F / 60.0F);
+			const std::array<std::string_view, 7U> expectedNames{
+				"PhysicsSnapshot", "PhysicsPrepare", "PhysicsCommandCommit", "PhysicsSimulate",
+				"PhysicsExtract", "PhysicsPublish", "PhysicsPublicationBarrier"};
+			context.Expect(workloads.size() == expectedNames.size(),
+				"Physics must declare every stable phase even when the world is inactive so diagnostics remain inspectable.");
+			for(std::size_t index = 0U; index < expectedNames.size() && index < workloads.size(); ++index) {
+				const auto& workload = workloads[index];
+				// Worker-safe phases declare immutable subwork, while protected phases explain
+				// why their live-world boundary remains serialized on the main thread.
+				const bool hasBoundaryEvidence = workload.workerEligible
+					? !workload.safeSubwork.empty()
+					: !workload.protectedReason.empty();
+				context.Expect(workload.workloadName == expectedNames[index]
+					&& !workload.reads.empty() && !workload.writes.empty()
+					&& !workload.activationPredicateKey.empty() && hasBoundaryEvidence
+					&& !workload.stableDescriptorId.empty(),
+					"Every physics phase must expose its resources, activation predicate, boundary evidence, and stable diagnostic identity.");
+				context.Expect(workload.workerEligible != workload.mainThreadRequired,
+					"Every physics phase must state whether work is worker-safe or needs the protected main-thread boundary.");
+				context.Expect(index < repeatedWorkloads.size()
+					&& workload.active == repeatedWorkloads[index].active
+					&& workload.ready == repeatedWorkloads[index].ready
+					&& workload.estimatedWorkItemCount == repeatedWorkloads[index].estimatedWorkItemCount
+					&& workload.inlineWorkItemThreshold == repeatedWorkloads[index].inlineWorkItemThreshold,
+					"An unchanged frame must retain each phase activation, readiness, and bounded work estimate.");
+				if(index != 0U) {
+					context.Expect(std::find(workload.explicitDependencies.begin(), workload.explicitDependencies.end(),
+						workloads[index - 1U].stableDescriptorId) != workload.explicitDependencies.end(),
+						"Each declared phase must explicitly depend on its preceding physics phase.");
+				}
+			}
+		});
+
 		registry.Add("Physics.Scheduler.AfterPhysicsFlushPublishesTypedTransformBeforeUI", [](TestContext& context) {
 			ComponentRegistry::RegisterAllComponents();
 			ObjectManager& objects = ObjectManager::instance();

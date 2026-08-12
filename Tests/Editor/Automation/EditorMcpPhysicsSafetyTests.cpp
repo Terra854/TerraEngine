@@ -123,6 +123,51 @@ namespace TerraEngine::EditorTests
 				"A current failure must force an aggregate refresh for automation readers.");
 		});
 
+		registry.Add("Editor.MCP.Physics.DiagnosticsResponseOwnsCopiedPerformanceEvidence", [](TestContext& context) {
+			using namespace TerraEngine::Physics;
+			ThreadPoolSession pool;
+			auto& physics = PhysicsSystem::Instance();
+			physics.Shutdown();
+			physics.SetEditorLifecycleControlled(true);
+			physics.Initialize();
+
+			PhysicsSettings quality = PhysicsSettings::Defaults();
+			quality.velocityIterations = 20U;
+			quality.positionIterations = 4U;
+			context.Expect(physics.StartWorld(quality), "The diagnostics fixture needs an alternate-quality world.");
+			physics.Update(physics.FixedTimeStep());
+
+			EditorAutomationService service;
+			AutomationRequestContext request;
+			request.requestId = "physics-diagnostics-copy";
+			request.clientId = "physics-test";
+			request.correlationId = "physics-diagnostics-correlation";
+			request.grantedPermission = AutomationPermission::Read;
+			request.state.projectAvailable = true;
+			request.state.sceneAvailable = true;
+			request.state.playState = "playing";
+			const AutomationDispatchResult result = service.GetRegistry().Dispatch("physics.diagnostics.get", 1, request);
+			context.Expect(result.ok, "A read-only client must receive the published immutable diagnostics snapshot.");
+			const nlohmann::json copiedEvidence = result.data.at("data");
+			context.Expect(copiedEvidence.at("quality").at("velocityIterations") == 20U
+				&& copiedEvidence.at("quality").at("positionIterations") == 4U,
+				"Automation diagnostics must copy the quality profile actually installed in the world.");
+			context.Expect(copiedEvidence.at("jobs").contains("submitted")
+				&& copiedEvidence.at("jobs").contains("completed")
+				&& copiedEvidence.at("jobs").contains("idle"),
+				"Automation diagnostics must expose provider-neutral job reconciliation values.");
+			context.Expect(copiedEvidence.at("stages").is_array() && copiedEvidence.at("stages").size() == 8U,
+				"Automation diagnostics must expose every copied performance stage exactly once.");
+
+			context.Expect(physics.StopWorld(), "The diagnostics fixture must drain its world before teardown.");
+			physics.Shutdown();
+			// The response is an owned JSON value. Reading it after world teardown proves
+			// automation never retains a provider pointer or mutable diagnostics storage.
+			context.Expect(copiedEvidence.at("quality").at("velocityIterations") == 20U
+				&& copiedEvidence.at("stages").size() == 8U,
+				"The copied automation response must remain valid after the provider world is destroyed.");
+		});
+
 		registry.Add("Editor.MCP.Physics.RuntimeCommandsRequireIdempotencyAndExactGenerations", [](TestContext& context) {
 			EditorAutomationRegistry capabilityRegistry;
 			context.Expect(capabilityRegistry.RegisterProvider(MakeProvider()).registered, "Physics provider registration should succeed.");

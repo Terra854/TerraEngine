@@ -7,6 +7,7 @@
 #include "Editor/AssetCompilers/ModelPackageImporter.h"
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
+#include "../Project/ProjectPhysicsSettingsIO.h"
 #include "EditorSystem.h"
 #include "../Core/CheckedImGuiVulkanBridge.h"
 #include "ScriptCompilationSubsystem.h"
@@ -2571,6 +2572,28 @@ bool MainEditorSubsystem::StartPlayMode()
 		TERRAENGINE_LOG(LogLevel::Error,
 			"Play Mode entry rejected because simulation-essential project content is not ready.");
 		return false;
+	}
+	if (ctx != nullptr && ctx->projectManager != nullptr && ctx->projectManager->HasActiveProject())
+	{
+		// Resolve the durable project document before capturing Play Mode state or
+		// creating provider objects. This makes solver quality and every other world
+		// policy authoritative even when the Project Settings window was never opened.
+		TerraEngine::Physics::PhysicsSettings projectPhysicsSettings;
+		std::string settingsError;
+		if (!TerraEngine::Editor::ProjectSettings::ReadProjectPhysicsSettings(
+			ctx->projectManager->GetProjectRoot(), projectPhysicsSettings, settingsError))
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Play Mode entry rejected because project physics settings are invalid: " << settingsError);
+			return false;
+		}
+		if (!TerraEngine::Physics::PhysicsSystem::Instance().QueueSettingsUpdate(
+			std::move(projectPhysicsSettings)))
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Play Mode entry rejected because validated project physics settings could not be queued.");
+			return false;
+		}
 	}
 	// Commit pending authoring transactions before capturing the exact pre-play
 	// snapshot consumed and later restored by both scripting and physics.

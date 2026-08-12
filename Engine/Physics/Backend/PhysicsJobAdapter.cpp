@@ -3,6 +3,7 @@
 #include "PhysicsJobAdapter.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <future>
 #include <limits>
@@ -92,6 +93,7 @@ namespace TerraEngine::Physics::Backend {
 		}
 
 		const auto begin = std::chrono::steady_clock::now();
+		barrierWaitCount.fetch_add(1U, std::memory_order_relaxed);
 		JPH::JobSystemWithBarrier::WaitForJobs(barrier);
 		// The caller may have executed a job before a queued pump consumed its
 		// reference. Drain those pump references before the barrier can be destroyed.
@@ -138,6 +140,10 @@ namespace TerraEngine::Physics::Backend {
 		diagnostics.submitted = submitted.load(std::memory_order_acquire);
 		diagnostics.completed = completed.load(std::memory_order_acquire);
 		diagnostics.rejected = rejected.load(std::memory_order_acquire);
+		diagnostics.batchCount = batchCount.load(std::memory_order_acquire);
+		diagnostics.lockAcquisitionCount = lockAcquisitionCount.load(std::memory_order_acquire);
+		diagnostics.pumpSubmissionCount = pumpSubmissionCount.load(std::memory_order_acquire);
+		diagnostics.barrierWaitCount = barrierWaitCount.load(std::memory_order_acquire);
 		diagnostics.queued = queued.load(std::memory_order_acquire);
 		diagnostics.maxActivePumps = maximumActivePumps.load(std::memory_order_acquire);
 		diagnostics.workerLimit = EffectiveWorkerLimit();
@@ -228,13 +234,14 @@ namespace TerraEngine::Physics::Backend {
 	}
 
 	void PhysicsJobAdapter::QueueJob(Job* job) {
-		QueueOne(job);
+		batchCount.fetch_add(1U, std::memory_order_relaxed);
+		Job* jobs[] = {job};
+		QueueBatch(jobs, 1U);
 	}
 
 	void PhysicsJobAdapter::QueueJobs(Job** jobs, JPH::uint jobCount) {
-		for(JPH::uint index = 0; index < jobCount; ++index) {
-			QueueOne(jobs[index]);
-		}
+		batchCount.fetch_add(1U, std::memory_order_relaxed);
+		QueueBatch(jobs, jobCount);
 	}
 
 	void PhysicsJobAdapter::FreeJob(Job* job) {
@@ -242,35 +249,40 @@ namespace TerraEngine::Physics::Backend {
 		liveJobs.fetch_sub(1U, std::memory_order_acq_rel);
 	}
 
-	void PhysicsJobAdapter::QueueOne(Job* job) {
-		if(job == nullptr) {
-			return;
+	void PhysicsJobAdapter::QueueBatch(Job* const* jobs, JPH::uint jobCount) {
+		if(jobs == nullptr || jobCount == 0U) return;
+		std::uint32_t accepted = 0U;
+		// Acquire every provider reference before publication. The queue then owns
+		// those references as one batch until a bounded pump chunk releases them.
+		for(JPH::uint index = 0U; index < jobCount; ++index) {
+			if(jobs[index] == nullptr) continue;
+			jobs[index]->AddRef();
+			++accepted;
 		}
-
-		// The queue owns one Jolt reference. If the barrier waiter executes the job
-		// first, the pump's Execute call becomes a safe no-op before releasing it.
-		job->AddRef();
-		submitted.fetch_add(1U, std::memory_order_relaxed);
-		queued.fetch_add(1U, std::memory_order_release);
-
-		bool submitPump = false;
+		if(accepted == 0U) return;
+		submitted.fetch_add(accepted, std::memory_order_relaxed);
+		queued.fetch_add(accepted, std::memory_order_release);
+		std::uint32_t pumpsToSubmit = 0U;
 		{
+			lockAcquisitionCount.fetch_add(1U, std::memory_order_relaxed);
 			std::lock_guard<std::mutex> lock(dispatchMutex);
-			pendingJobs.push_back(job);
-			if(activePumps < EffectiveWorkerLimit()) {
+			for(JPH::uint index = 0U; index < jobCount; ++index) {
+				if(jobs[index] != nullptr) pendingJobs.push_back(jobs[index]);
+			}
+			const std::uint32_t usefulPumps = static_cast<std::uint32_t>(std::min<std::size_t>(
+				EffectiveWorkerLimit(), static_cast<std::size_t>(activePumps) + pendingJobs.size()));
+			while(activePumps < usefulPumps) {
 				++activePumps;
+				++pumpsToSubmit;
 				std::uint32_t maximum = maximumActivePumps.load(std::memory_order_relaxed);
 				while(maximum < activePumps
 					&& !maximumActivePumps.compare_exchange_weak(
 						maximum, activePumps, std::memory_order_relaxed, std::memory_order_relaxed)) {
 				}
-				submitPump = true;
 			}
 		}
-
-		if(submitPump) {
-			SubmitPump();
-		}
+		pumpSubmissionCount.fetch_add(pumpsToSubmit, std::memory_order_relaxed);
+		for(std::uint32_t pump = 0U; pump < pumpsToSubmit; ++pump) SubmitPump();
 	}
 
 	void PhysicsJobAdapter::SubmitPump() {
@@ -296,27 +308,34 @@ namespace TerraEngine::Physics::Backend {
 		}
 
 		for(;;) {
-			Job* job = nullptr;
+			constexpr std::size_t jobsPerChunk = 32U;
+			std::array<Job*, jobsPerChunk> chunk{};
+			std::size_t chunkSize = 0U;
 			{
+				lockAcquisitionCount.fetch_add(1U, std::memory_order_relaxed);
 				std::lock_guard<std::mutex> lock(dispatchMutex);
 				if(pendingJobs.empty()) {
 					--activePumps;
 					idleCondition.notify_all();
 					return;
 				}
-				job = pendingJobs.front();
-				pendingJobs.pop_front();
+				while(chunkSize < chunk.size() && !pendingJobs.empty()) {
+					chunk[chunkSize++] = pendingJobs.front();
+					pendingJobs.pop_front();
+				}
 			}
 
 			const auto begin = std::chrono::steady_clock::now();
-			job->Execute();
+			for(std::size_t index = 0U; index < chunkSize; ++index) {
+				chunk[index]->Execute();
+				chunk[index]->Release();
+			}
 			const std::uint64_t elapsed = static_cast<std::uint64_t>(
 				std::chrono::duration_cast<std::chrono::microseconds>(
 					std::chrono::steady_clock::now() - begin).count());
 			jobExecutionMicroseconds.fetch_add(elapsed, std::memory_order_relaxed);
-			job->Release();
-			completed.fetch_add(1U, std::memory_order_release);
-			queued.fetch_sub(1U, std::memory_order_acq_rel);
+			completed.fetch_add(chunkSize, std::memory_order_release);
+			queued.fetch_sub(static_cast<std::uint32_t>(chunkSize), std::memory_order_acq_rel);
 			idleCondition.notify_all();
 		}
 	}

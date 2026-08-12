@@ -29,6 +29,19 @@ namespace TerraEngine::EditorTests
 			snapshot->stateStore.pagesReused = 9U;
 			snapshot->publication.currentEntries = 10U;
 			snapshot->rate.currentHealthPublished = true;
+			snapshot->quality = {1U, 2U, 1U, 20U, 4U, true};
+			snapshot->jobs.submitted = 24U;
+			snapshot->jobs.completed = 24U;
+			snapshot->jobs.batchCount = 2U;
+			snapshot->jobs.lockAcquisitionCount = 6U;
+			snapshot->jobs.pumpSubmissionCount = 4U;
+			snapshot->jobs.idle = true;
+			for(std::size_t index = 0U; index < snapshot->stages.size(); ++index) {
+				snapshot->stages[index].stage = static_cast<Physics::PhysicsStageKind>(index);
+				snapshot->stages[index].availability = Physics::PhysicsMetricAvailability::Available;
+				snapshot->stages[index].unavailableReason = Physics::PhysicsMetricUnavailableReason::None;
+				snapshot->stages[index].durationNanoseconds = 100U + index;
+			}
 			snapshot->scheduler = std::make_shared<const std::vector<Physics::PhysicsSchedulerDeclaration>>(std::vector<Physics::PhysicsSchedulerDeclaration>{{"PhysicsStep", "FixedUpdate", "PhysicsCommands", "PhysicsSnapshots", "AfterPhysicsFlush", true}});
 			Physics::PublishPhysicsDiagnosticsSnapshot(snapshot);
 			const auto read = Physics::AcquirePhysicsDiagnosticsSnapshot();
@@ -43,6 +56,13 @@ namespace TerraEngine::EditorTests
 				&& read->publication.currentEntries == 10U
 				&& read->rate.currentHealthPublished,
 				"Every incremental stage and current health must cross the same immutable diagnostics boundary.");
+			context.Expect(read && read->quality.applied && read->quality.velocityIterations == 20U
+				&& read->quality.positionIterations == 4U && read->jobs.submitted == read->jobs.completed
+				&& read->jobs.pumpSubmissionCount == 4U && read->jobs.idle,
+				"Selected quality and complete provider-neutral job telemetry must cross the copied snapshot boundary.");
+			context.Expect(read && read->stages.front().durationNanoseconds == 100U
+				&& read->stages.back().stage == Physics::PhysicsStageKind::TransactionConstruction,
+				"All eight additive stage records must remain immutable and ordered by their declared meaning.");
 		});
 
 		registry.Add("Physics.Diagnostics.SystemDeclarationNamesProfilerScopeAndBoundaries", [](TestContext& context) {

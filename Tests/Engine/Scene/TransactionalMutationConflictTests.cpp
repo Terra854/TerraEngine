@@ -109,5 +109,32 @@ namespace TerraEngine::Tests {
 				"Rejected reparenting must preserve the externally committed hierarchy exactly.");
 			fixture.objects.clear();
 		});
-	}
+
+		registry.Add("Engine.TransactionalMutation.MixedProducerConflictRetainsPreviousCompleteVisibility", [](TestContext& context) {
+			TransactionalMutationFixture fixture = MakeTransactionalMutationFixture();
+			const Object second = fixture.objects.createObject("Second Producer Target");
+			const TerraEngine::UUID secondId = fixture.objects.getUUID(second);
+			TerraEngine::Scene::TransactionPublicationGroup group;
+			group.groupId = "mixed-producer-conflict";
+			TerraEngine::Scene::TransactionalMutationBuilder workerPrepared(
+				"mixed-producer-worker", TerraEngine::Scene::TransactionOrigin::System, "physics-worker-result");
+			workerPrepared.ObserveScene(fixture.objects).ObserveObject(fixture.objects, fixture.rootId)
+				.SetName(fixture.rootId, "Physics Must Not Publish");
+			group.chunks.push_back(std::move(workerPrepared).Build());
+			TerraEngine::Scene::TransactionalMutationBuilder automationPrepared(
+				"mixed-producer-automation", TerraEngine::Scene::TransactionOrigin::Automation, "editor-automation-result");
+			automationPrepared.ObserveScene(fixture.objects).ObserveObject(fixture.objects, secondId)
+				.SetName(secondId, "Automation Must Not Publish");
+			group.chunks.push_back(std::move(automationPrepared).Build());
+			fixture.objects.setObjectName(second, "Externally Changed");
+			const auto result = TerraEngine::Scene::CommitTransactionPublicationGroup(fixture.objects, group);
+			context.Expect(!result.Committed() && result.appliedWriteCount == 0U,
+				"A conflict from one producer must reject the complete mixed producer publication group.");
+			context.ExpectEqual(std::string("TransactionRoot"), fixture.objects.getObjectName(fixture.root),
+				"A worker-originated scene write must remain invisible when a later automation chunk conflicts.");
+			context.ExpectEqual(std::string("Externally Changed"), fixture.objects.getObjectName(second),
+				"Conflict rollback must preserve the external write that invalidated the publication group.");
+			fixture.objects.clear();
+		});
+}
 }

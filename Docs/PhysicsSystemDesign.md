@@ -1,5 +1,18 @@
 # TerraEngine Full Physics System Design
 
+## Runtime optimization evidence boundaries
+
+Physics optimization evidence is captured from the installed tree using the
+canonical workload manifest in `Tests/Fixtures/Performance/Physics`. The
+manifest fixes populations, deterministic seeds, warm-up/measured steps,
+quality profiles, and worker selections. Runtime stages publish immutable
+records; authoring preparation, extraction leases, canonical event views,
+indexed ragdoll assembly, bulk admission, and solver quality are measured
+without exposing provider objects. A lease is acknowledged only after state and
+event publication, while rejected admission batches retain the previous world.
+Missing counters are marked unavailable and comparisons fail closed on identity,
+coverage, correctness, rollback, visibility, or install mismatches.
+
 ## Purpose of This Document
 
 This document is a self-contained design brief for implementing a complete,

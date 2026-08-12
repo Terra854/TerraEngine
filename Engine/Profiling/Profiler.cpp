@@ -1422,22 +1422,28 @@ void Profiler::EndFrame()
 		counters.publishMs = physics->timings.publishMs;
 		currentFrame->physics = counters;
 
-		const auto appendPhysicsStage = [this](const char* name, double milliseconds, std::uint64_t items) {
+		const auto appendPhysicsStage = [this](const char* name,
+			const TerraEngine::Physics::PhysicsStageMeasurement& measurement) {
 			PerformanceStageRecord stage;
 			stage.domain = PerformanceStageDomain::Physics;
 			stage.stageName = name;
 			stage.workloadName = "PhysicsSystem";
-			stage.workItemCount = items;
-			stage.duration = AvailableTelemetryDuration(MillisecondsToNanoseconds(milliseconds));
+			stage.workItemCount = measurement.workItems;
+			stage.duration = measurement.availability == TerraEngine::Physics::PhysicsMetricAvailability::Available
+				? AvailableTelemetryDuration(measurement.durationNanoseconds)
+				: UnavailableTelemetryDuration(measurement.availability
+					== TerraEngine::Physics::PhysicsMetricAvailability::NotApplicable
+						? "Physics stage was not applicable for this tick."
+						: "Physics stage timing was unavailable from the active provider.");
 			currentFrame->performanceStages.push_back(std::move(stage));
 		};
-		// These independently named records preserve the physics-pipeline shape
-		// even when a backend cannot expose a finer clock for one substage.
-		appendPhysicsStage("Physics.Preparation", physics->timings.prepareMs, physics->preparation.estimatedWorkItems);
-		appendPhysicsStage("Physics.ProviderRead", physics->timings.simulateMs, physics->extraction.extractedBodies);
-		appendPhysicsStage("Physics.StateValidation", physics->timings.commitMs, physics->extraction.convertedBodies);
-		appendPhysicsStage("Physics.SnapshotConstruction", physics->timings.queryMs, physics->extraction.changedBodies);
-		appendPhysicsStage("Physics.TransactionConstruction", physics->timings.publishMs, physics->publication.currentEntries);
+		static constexpr std::array<const char*, 8U> physicsStageNames{
+			"Physics.AuthoringPreparation", "Physics.ProviderCommit", "Physics.Simulation",
+			"Physics.Extraction", "Physics.EventPublication", "Physics.StateValidation",
+			"Physics.SnapshotConstruction", "Physics.TransactionConstruction"};
+		for(std::size_t index = 0U; index < physics->stages.size(); ++index) {
+			appendPhysicsStage(physicsStageNames[index], physics->stages[index]);
+		}
 		currentFrame->physicsWorkVolume = PhysicsWorkVolumeRecord{
 			physics->tick, physics->extraction.totalBodies, physics->extraction.activeBodies,
 			physics->extraction.examinedBodies, physics->extraction.extractedBodies,

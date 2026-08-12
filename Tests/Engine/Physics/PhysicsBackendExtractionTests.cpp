@@ -186,13 +186,100 @@ namespace TerraEngine::Tests {
 				"An explicit sleeping state stays queryable and owns the first event drain for its tick.");
 			PhysicsBackendExtraction duplicateDrain = fixture.Extract(explicitRequest);
 			context.Expect(!duplicateDrain.eventDrainPerformed && duplicateDrain.events.empty(),
-				"A second extraction cannot drain provider events again for the same world tick.");
+				"The legacy request overload must retain its established exclusive event drain behavior.");
 			context.Expect(fixture.backend.ApplyCommand(PhysicsCommand::MakeWake(target)).Succeeded(),
 				"The sleeping fixture body must accept wake.");
 			explicitRequest.tick = 5U;
 			PhysicsBackendExtraction awake = fixture.Extract(explicitRequest);
 			context.Expect(awake.bodies.size() == 1U && awake.bodies.front().awake,
 				"An awakened body must immediately re-enter explicit extraction.");
+		});
+
+		registry.Add("Physics.BackendExtraction.ProfileLeaseDrainsEventsBeforeAcknowledgement", [](TestContext& context) {
+			ExtractionFixture fixture;
+			const PhysicsBodyHandle firstBody = fixture.AddBody(2U, PhysicsMotionType::Dynamic);
+			const PhysicsBodyHandle secondBody = fixture.AddBody(3U, PhysicsMotionType::Dynamic);
+			context.Expect(fixture.backend.Step({fixture.world, 8U, 1.0F / 60.0F, 1U}).Succeeded(),
+				"Overlapping dynamic fixture bodies must complete the provider step that queues contact events.");
+
+			PhysicsBackendFixedStepWorkProfile profile;
+			profile.world = fixture.world;
+			profile.tick = 9U;
+			profile.explicitRequiredHandles = {firstBody, secondBody};
+			profile.fields = PhysicsBodyStateFieldMask::Awake | PhysicsBodyStateFieldMask::Events;
+			profile.fullStateReason = PhysicsBackendFullStateReason::None;
+			PhysicsBackendExtractionToken firstToken;
+			PhysicsBackendExtraction first;
+			context.Expect(fixture.backend.Extract(profile, first, firstToken).Succeeded()
+				&& first.eventDrainPerformed && !first.events.empty(),
+				"An event-consuming profile must drain the provider stream into its retryable lease.");
+			context.Expect(fixture.backend.AcknowledgeExtraction(firstToken).Succeeded(),
+				"The protected consumer must acknowledge the lease after observing its event packet.");
+
+			profile.tick = 10U;
+			PhysicsBackendExtractionToken secondToken;
+			PhysicsBackendExtraction second;
+			context.Expect(fixture.backend.Extract(profile, second, secondToken).Succeeded()
+				&& second.eventDrainPerformed && second.events.empty(),
+				"Acknowledgement must consume the drained stream so the following profile cannot republish it.");
+			context.Expect(fixture.backend.AbortExtraction(secondToken).Succeeded(),
+				"An empty event lease must remain safely abortable at the protected boundary.");
+		});
+
+		registry.Add("Physics.BackendExtraction.UnacknowledgedIncrementalStateIsRetainedForRetry", [](TestContext& context) {
+			ExtractionFixture fixture;
+			const PhysicsBodyHandle body = fixture.AddBody(4U, PhysicsMotionType::Static);
+			PhysicsBackendFixedStepWorkProfile profile;
+			profile.world = fixture.world;
+			profile.tick = 1U;
+			profile.fields = PhysicsBodyStateFieldMask::Pose | PhysicsBodyStateFieldMask::Awake;
+			profile.rangeSize = 8U;
+			profile.dirtyStableIndices = {0U};
+
+			// The initial publication establishes the retained complete-state page. The
+			// next static-body update is then a precise retry case: it is not active,
+			// so only the provider's pending membership can preserve it for retry.
+			PhysicsBackendExtractionToken initialToken;
+			PhysicsBackendExtraction initial;
+			context.Expect(fixture.backend.Extract(profile, initial, initialToken).Succeeded(),
+				"The fixture must prepare its initial retryable extraction lease.");
+			context.Expect(initial.bodies.size() == 1U,
+				"The fixture must establish its initial incremental publication before testing retry retention.");
+			context.Expect(fixture.backend.AcknowledgeExtraction(initialToken).Succeeded(),
+				"The established initial state must acknowledge before the localized retry case begins.");
+			PhysicsBodyUpdateRequest update;
+			update.handle = body;
+			update.pose.position = {42.0F, 0.0F, 0.0F};
+			context.Expect(fixture.backend.UpdateBody(update).Succeeded(),
+				"The static fixture body must accept a generation-safe authored update.");
+
+			profile.tick = 2U;
+			profile.dirtyStableIndices = {0U};
+			PhysicsBackendExtractionToken firstToken;
+			PhysicsBackendExtraction firstAttempt;
+			context.Expect(fixture.backend.Extract(profile, firstAttempt, firstToken).Succeeded(),
+				"The changed static body must prepare an extraction lease.");
+			context.Expect(fixture.backend.AbortExtraction(firstToken).Succeeded(),
+				"A rejected protected publication must abort the lease without clearing the pending body state.");
+			PhysicsBackendExtractionToken retryToken;
+			PhysicsBackendExtraction retryAttempt;
+			context.Expect(fixture.backend.Extract(profile, retryAttempt, retryToken).Succeeded(),
+				"Aborted extraction work must remain available through a fresh retry lease.");
+			context.Expect(firstAttempt.bodies.size() == 1U
+				&& retryAttempt.bodies.size() == 1U
+				&& retryAttempt.bodies.front().handle == body
+				&& retryAttempt.bodies.front().pose.position.x == 42.0F,
+				"A publication rejection before acknowledgement must retry the same changed body without a full provider scan.");
+			context.Expect(fixture.backend.AcknowledgeExtraction(retryToken).Succeeded(),
+				"Only the accepted retry may clear the provider's pending change membership.");
+			profile.dirtyStableIndices.clear();
+			PhysicsBackendExtractionToken afterFlushToken;
+			PhysicsBackendExtraction afterFlush;
+			context.Expect(fixture.backend.Extract(profile, afterFlush, afterFlushToken).Succeeded()
+				&& afterFlush.bodies.empty(),
+				"Acknowledging only after the simulated deferred flush must clear the localized pending membership exactly once.");
+			context.Expect(fixture.backend.AbortExtraction(afterFlushToken).Succeeded(),
+				"An empty post-flush lease must remain abortable without reintroducing acknowledged body work.");
 		});
 
 		registry.Add("Physics.BackendExtraction.SafeParallelReadsAndSerialFallback", [](TestContext& context) {

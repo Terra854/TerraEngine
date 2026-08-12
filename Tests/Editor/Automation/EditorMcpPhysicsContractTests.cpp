@@ -158,7 +158,10 @@ namespace TerraEngine::EditorTests
 			if (!diagnostics) return;
 			context.Expect(diagnostics->descriptor.description.find("authoring") != std::string::npos
 				&& diagnostics->descriptor.description.find("extraction") != std::string::npos
-				&& diagnostics->descriptor.description.find("publication") != std::string::npos,
+				&& diagnostics->descriptor.description.find("publication") != std::string::npos
+				&& diagnostics->descriptor.description.find("quality") != std::string::npos
+				&& diagnostics->descriptor.description.find("job") != std::string::npos
+				&& diagnostics->descriptor.description.find("stage-availability") != std::string::npos,
 				"The additive diagnostics contract must name each bounded incremental pipeline stage.");
 			context.Expect(diagnostics->descriptor.inputSchema.value("additionalProperties", true) == false,
 				"Diagnostics requests must remain closed and bounded.");

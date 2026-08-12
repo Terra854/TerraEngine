@@ -37,6 +37,8 @@ namespace TerraEngine::Physics {
 		InvalidFixedTimeStep,
 		InvalidSubstepLimit,
 		InvalidAccumulatorLimit,
+		InvalidVelocityIterations,
+		InvalidPositionIterations,
 		InvalidLayerId,
 		EmptyLayerName,
 		DuplicateLayerName,

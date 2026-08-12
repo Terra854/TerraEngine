@@ -184,5 +184,80 @@ namespace TerraEngine::Tests {
 				&& removed->descriptorIndex == kInvalidPhysicsDescriptorIndex,
 				"A removed body must retain its exact identity without a stale live descriptor index.");
 		});
+
+		registry.Add("Physics.AuthoringIncremental.UnrelatedSnapshotMetadataDoesNotInvalidateRetainedBodies", [](TestContext& context) {
+			const auto first = Snapshot(1U, {Body(1U)}, {Collider(1U, 11U, 0xE1U)}, 1U);
+			const auto unrelatedChange = Snapshot(2U, {Body(1U)}, {Collider(1U, 11U, 0xE1U)}, 2U, &first);
+			const auto generation = PhysicsAuthoringSnapshot::BuildGeneration(&first, unrelatedChange);
+			context.Expect(generation && generation->Unchanged(),
+				"A hierarchy publication without a changed physics dependency must retain the prior immutable descriptors.");
+			context.Expect(first.FindBodyDescriptorIndex(Id(1U))->stableIndex
+				== unrelatedChange.FindBodyDescriptorIndex(Id(1U))->stableIndex,
+				"Unrelated scene metadata must not disturb a retained body's stable descriptor identity.");
+		});
+
+		registry.Add("Physics.AuthoringIncremental.TypedClosureIncludesOnlyAffectedConstraintAndCharacterOwners", [](TestContext& context) {
+			PhysicsAuthoringData firstData;
+			firstData.world = {{1U}, 1U};
+			firstData.settings = PhysicsSettings::Defaults();
+			firstData.snapshotGeneration = 1U;
+			firstData.bodies = {Body(1U), Body(2U)};
+			firstData.colliders = {Collider(1U, 11U, 0xF1U), Collider(2U, 12U, 0xF2U)};
+			PhysicsConstraintDescriptor constraint;
+			constraint.ownerObjectId = Id(1U);
+			constraint.ownerObjectGeneration = 1U;
+			constraint.componentGeneration = 1U;
+			constraint.recordId = Id(91U);
+			constraint.recordGeneration = 1U;
+			constraint.firstObjectId = Id(1U);
+			constraint.secondEndpointKind = PhysicsConstraintEndpointKind::ConnectedObject;
+			constraint.secondObjectId = Id(2U);
+			PhysicsConstraintDescriptor gear = constraint;
+			gear.recordId = Id(92U);
+			gear.kind = PhysicsConstraintKind::Gear;
+			gear.firstGearConstraintId = constraint.recordId;
+			gear.secondGearConstraintId = constraint.recordId;
+			firstData.constraints = {constraint, gear};
+			PhysicsCharacterDescriptor character;
+			character.objectId = Id(2U);
+			character.objectGeneration = 1U;
+			character.componentGeneration = 1U;
+			firstData.characters = {character};
+			auto first = PhysicsAuthoringSnapshot::Create(std::move(firstData));
+			context.Expect(first.has_value(), "The closure fixture must create its first immutable snapshot.");
+
+			PhysicsAuthoringData secondData = first->Data();
+			secondData.snapshotGeneration = 2U;
+			secondData.bodies[0].sourceTransformRevision = 2U;
+			auto second = PhysicsAuthoringSnapshot::Create(std::move(secondData), &*first);
+			const auto generation = second ? PhysicsAuthoringSnapshot::BuildGeneration(&*first, *second) : std::nullopt;
+			context.Expect(generation && generation->Data().constraintRecordIds.size() == 2U
+				&& generation->Data().constraintRecordIds[0] == Id(91U)
+				&& generation->Data().constraintRecordIds[1] == Id(92U)
+				&& generation->Data().characterObjectIds.empty(),
+				"Changing one hinge endpoint must include its direct and dependent gear closures without rebuilding an unrelated character.");
+		});
+
+		registry.Add("Physics.AuthoringIncremental.RejectsDiscontinuousPublishedSceneGeneration", [](TestContext& context) {
+			PhysicsAuthoringGenerationData discontinuous;
+			discontinuous.world = {{9U}, 1U};
+			discontinuous.generation = 3U;
+			discontinuous.snapshotGeneration = 3U;
+			discontinuous.sceneGeneration = 7U;
+			discontinuous.previousScenePublicationRevision = 40U;
+			discontinuous.scenePublicationRevision = 42U;
+			discontinuous.settingsHash = 1U;
+			context.Expect(!PhysicsAuthoringGeneration::Create(std::move(discontinuous)).has_value(),
+				"A skipped scene packet revision must fail closed rather than silently authoring from an incomplete delta.");
+
+			PhysicsAuthoringGenerationData fallback;
+			fallback.world = {{9U}, 1U};
+			fallback.generation = 3U;
+			fallback.snapshotGeneration = 3U;
+			fallback.settingsHash = 1U;
+			fallback.fallbackReason = PhysicsAuthoringFallbackReason::ScenePacketDiscontinuity;
+			context.Expect(PhysicsAuthoringGeneration::Create(std::move(fallback)).has_value(),
+				"A reason-tagged full fallback must remain valid when packet continuity cannot be proved.");
+		});
 	}
 }

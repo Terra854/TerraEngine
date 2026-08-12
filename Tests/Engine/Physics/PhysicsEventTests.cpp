@@ -3,8 +3,10 @@
 #include "../TestHarness.h"
 
 #include "Physics/PhysicsEvents.h"
+#include "Physics/PhysicsWorld.h"
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <vector>
 
@@ -45,6 +47,32 @@ namespace TerraEngine::Tests {
 			subscriptions.Subscribe(std::move(policy));
 			const PhysicsEventThreadLocalCollector* collectorPointer = &collector;
 			return PhysicsEventPacketBuilder::MergeCollectors({{9U}, 3U}, 12U, {&collectorPointer, 1U}, subscriptions.Snapshot());
+		}
+
+		// A compact deterministic fingerprint lets tests compare retained records
+		// without coupling to vector allocation addresses or callback arrival order.
+		std::uint64_t EventFingerprint(const PhysicsEventPacket& packet) {
+			std::uint64_t fingerprint = 1469598103934665603ULL;
+			for(const PhysicsEvent& event : *packet.events) {
+				fingerprint ^= static_cast<std::uint64_t>(event.type);
+				fingerprint *= 1099511628211ULL;
+				fingerprint ^= event.first.body.slotIndex;
+				fingerprint *= 1099511628211ULL;
+				fingerprint ^= event.hasSecondParticipant ? event.second.body.slotIndex : 0U;
+				fingerprint *= 1099511628211ULL;
+			}
+			return fingerprint;
+		}
+
+		PhysicsEvent RebindToWorld(PhysicsEvent event, PhysicsWorldHandle world) {
+			event.world = world;
+			event.first.body.worldId = world.worldId;
+			event.first.body.worldGeneration = world.worldGeneration;
+			if(event.hasSecondParticipant) {
+				event.second.body.worldId = world.worldId;
+				event.second.body.worldGeneration = world.worldGeneration;
+			}
+			return event;
 		}
 	}
 
@@ -139,6 +167,63 @@ namespace TerraEngine::Tests {
 			PhysicsEventThreadLocalCollector collector;
 			context.Expect(!collector.Record(stale), "A callback record with a stale participant world generation must be rejected before publication.");
 			context.Expect(collector.DroppedCount() == 1U, "Stale generation rejection must remain observable in collector diagnostics.");
+		});
+
+		registry.Add("Physics.Events.OverCapRetentionUsesOneCanonicalOrder", [](TestContext& context) {
+			// The two collectors deliberately receive inverse portions of the canonical
+			// sequence. A bounded packet must retain the same earliest records either
+			// way around; callback shard scheduling is not gameplay-observable.
+			PhysicsEventThreadLocalCollector early(8U);
+			PhysicsEventThreadLocalCollector late(8U);
+			early.Record(MakeEvent(PhysicsEventType::CollisionEnter, 1U, 2U));
+			early.Record(MakeEvent(PhysicsEventType::Contact, 1U, 2U));
+			late.Record(MakeEvent(PhysicsEventType::CollisionExit, 1U, 2U));
+			const PhysicsEventThreadLocalCollector* firstOrder[] = {&late, &early};
+			const PhysicsEventThreadLocalCollector* secondOrder[] = {&early, &late};
+			PhysicsEventSubscriptionRegistry subscriptions;
+			subscriptions.Subscribe({});
+			const PhysicsEventPacketLimits limits{2U, 8U, 3U, 2U};
+			const PhysicsEventPacket first = PhysicsEventPacketBuilder::MergeCollectors(
+				{{9U}, 3U}, 12U, firstOrder, subscriptions.Snapshot(), limits);
+			const PhysicsEventPacket second = PhysicsEventPacketBuilder::MergeCollectors(
+				{{9U}, 3U}, 12U, secondOrder, subscriptions.Snapshot(), limits);
+			context.Expect(first.events->size() == 2U && second.events->size() == 2U
+				&& first.droppedCount == 1U && second.droppedCount == 1U,
+				"A bounded contact packet must retain two records and account for exactly one over-cap record.");
+			context.Expect(EventFingerprint(first) == EventFingerprint(second)
+				&& first.events->front().type == PhysicsEventType::CollisionEnter,
+				"Over-cap retention must be selected from the canonical event order rather than collector arrival order.");
+		});
+
+		registry.Add("Physics.Events.FiltersBeforePacketCapAndSharesCanonicalWorldResult", [](TestContext& context) {
+			PhysicsEventThreadLocalCollector collector(8U);
+			collector.Record(MakeEvent(PhysicsEventType::Contact, 1U, 2U));
+			collector.Record(MakeEvent(PhysicsEventType::CollisionEnter, 1U, 2U));
+			collector.Record(MakeEvent(PhysicsEventType::CollisionStay, 1U, 2U));
+			const PhysicsEventThreadLocalCollector* collectorPointer = &collector;
+			PhysicsEventSubscriptionRegistry filteredSubscriptions;
+			PhysicsEventSubscriptionPolicy collisionsOnly;
+			collisionsOnly.categories = PhysicsEventCategory::Collision;
+			filteredSubscriptions.Subscribe(collisionsOnly);
+			const PhysicsEventPacket filtered = PhysicsEventPacketBuilder::MergeCollectors(
+				{{9U}, 3U}, 12U, {&collectorPointer, 1U}, filteredSubscriptions.Snapshot(), {1U, 8U, 3U, 2U});
+			context.Expect(filtered.events->size() == 1U && filtered.events->front().type == PhysicsEventType::CollisionEnter
+				&& filtered.filteredCount == 1U && filtered.droppedCount == 1U,
+				"Subscription filtering must occur before bounded retention so excluded contacts cannot consume gameplay capacity.");
+
+			PhysicsWorld world;
+			context.Expect(world.Create(PhysicsSettings::Defaults()), "The canonical event fixture requires an active isolated physics world.");
+			world.SubscribeEvents({});
+			const PhysicsWorldHandle active = world.Handle();
+			const std::array<PhysicsEvent, 2U> events{
+				RebindToWorld(MakeEvent(PhysicsEventType::CollisionStay, 4U, 5U), active),
+				RebindToWorld(MakeEvent(PhysicsEventType::CollisionEnter, 4U, 5U), active)};
+			const auto gameplay = world.PublishEvents(12U, events);
+			const auto diagnostic = world.AcquireDiagnosticEventPacket(12U, 12U);
+			context.Expect(gameplay != nullptr && diagnostic != nullptr
+				&& gameplay->events == diagnostic->events
+				&& gameplay->events->front().type == PhysicsEventType::CollisionEnter,
+				"Gameplay and diagnostic consumers with identical visibility must share one sorted canonical event result.");
 		});
 	}
 }
