@@ -1062,6 +1062,24 @@ namespace TerraEngine::Physics::Backend {
 			if(bodyOrderGeneration == 0U) ++bodyOrderGeneration;
 		}
 
+		void RebuildConstraintOrder() {
+			constraintOrder.clear();
+			constraintOrder.reserve(constraints.size());
+			for(const auto& [key, constraint] : constraints) {
+				if(constraint.stagingToken == 0U) constraintOrder.push_back(key);
+			}
+			std::sort(constraintOrder.begin(), constraintOrder.end());
+		}
+
+		void RebuildCharacterOrder() {
+			characterOrder.clear();
+			characterOrder.reserve(characters.size());
+			for(const auto& [key, character] : characters) {
+				if(character.stagingToken == 0U) characterOrder.push_back(key);
+			}
+			std::sort(characterOrder.begin(), characterOrder.end());
+		}
+
 		BodyRecord* FindBodyByObject(const TerraEngine::UUID& objectId) {
 			const auto indexed = bodyObjectToKey.find(objectId);
 			if(indexed == bodyObjectToKey.end()) return nullptr;
@@ -1319,6 +1337,33 @@ namespace TerraEngine::Physics::Backend {
 			}
 		}
 
+		void PublishCommandTransitions(PhysicsTick tick, std::size_t firstNewEvent) {
+			const std::size_t maximumPending = std::max<std::size_t>(
+				4096U, static_cast<std::size_t>(worldConfiguration.maximumContactConstraints) * 4U);
+			for(const auto& [bodyKey, type] : pendingCommandTransitions) {
+				const auto body = bodies.find(bodyKey);
+				if(body == bodies.end() || !body->second.added) continue;
+				const bool providerAlreadyReported = std::any_of(
+					pendingEvents.begin() + std::min(firstNewEvent, pendingEvents.size()),
+					pendingEvents.end(), [&](const PhysicsEvent& event) {
+						return event.type == type && event.first.body == body->second.handle;
+					});
+				if(providerAlreadyReported) continue;
+				PhysicsEvent event;
+				event.type = type;
+				event.world = worldConfiguration.world;
+				event.tick = tick;
+				event.first = MakeEventParticipant(body->second, {});
+				event.hasSecondParticipant = false;
+				if(event.IsFinite() && pendingEvents.size() < maximumPending) {
+					pendingEvents.push_back(std::move(event));
+				} else {
+					++droppedEvents;
+				}
+			}
+			pendingCommandTransitions.clear();
+		}
+
 		ThreadPool& sharedPool;
 		JoltPhysicsBackendConfiguration configuration;
 		std::unique_ptr<PhysicsAllocatorAdapter> allocator;
@@ -1348,6 +1393,10 @@ namespace TerraEngine::Physics::Backend {
 		std::vector<PhysicsBodyHandle> pendingRemovedBodies;
 		std::unordered_map<std::uint64_t, ConstraintRecord> constraints;
 		std::unordered_map<std::uint64_t, CharacterRecord> characters;
+		// Provider maps retain O(1) handle lookup, while these compact membership
+		// orders make fixed-step extraction deterministic without sorting every tick.
+		std::vector<std::uint64_t> constraintOrder;
+		std::vector<std::uint64_t> characterOrder;
 		// Query filters and callback publication resolve provider IDs frequently.
 		// This O(1) index avoids an O(body-count) scan for every hit/contact.
 		std::unordered_map<std::uint32_t, std::uint64_t> bodyIdToKey;
@@ -1358,6 +1407,10 @@ namespace TerraEngine::Physics::Backend {
 		std::uint64_t allocationFailureBaseline = 0U;
 		TerraContactListener contactListener;
 		std::vector<PhysicsEvent> pendingEvents;
+		// Jolt does not promise activation-listener callbacks for an explicit
+		// ActivateBody/DeactivateBody call. Retain the command transition until the
+		// next step, then publish it only if the provider did not report the same edge.
+		std::unordered_map<std::uint64_t, PhysicsEventType> pendingCommandTransitions;
 		std::uint64_t droppedEvents = 0U;
 		PhysicsTick lastEventDrainTick = 0U;
 		// A lease owns only stable engine keys and copied event values. Provider
@@ -1484,12 +1537,15 @@ namespace TerraEngine::Physics::Backend {
 		impl->pendingRemovedBodies.clear();
 		impl->constraints.clear();
 		impl->characters.clear();
+		impl->constraintOrder.clear();
+		impl->characterOrder.clear();
 		impl->bodyIdToKey.clear();
 		impl->bodyObjectToKey.clear();
 		impl->shapes.clear();
 		impl->shapeCache.clear();
 		impl->staging.clear();
 		impl->pendingEvents.clear();
+		impl->pendingCommandTransitions.clear();
 		impl->droppedEvents = 0U;
 		impl->lastEventDrainTick = 0U;
 		impl->extractionLeases.clear();
@@ -1603,12 +1659,15 @@ namespace TerraEngine::Physics::Backend {
 		impl->pendingRemovedBodies.clear();
 		impl->constraints.clear();
 		impl->characters.clear();
+		impl->constraintOrder.clear();
+		impl->characterOrder.clear();
 		impl->bodyIdToKey.clear();
 		impl->bodyObjectToKey.clear();
 		impl->shapes.clear();
 		impl->shapeCache.clear();
 		impl->staging.clear();
 		impl->pendingEvents.clear();
+		impl->pendingCommandTransitions.clear();
 		impl->droppedEvents = 0U;
 		impl->lastEventDrainTick = 0U;
 		impl->extractionLeases.clear();
@@ -2277,6 +2336,7 @@ namespace TerraEngine::Physics::Backend {
 		}
 		impl->pendingRemovedBodies.push_back(handle);
 		impl->dirtyBodyKeys.erase(HandleKey(handle));
+		impl->pendingCommandTransitions.erase(HandleKey(handle));
 		impl->bodies.erase(body);
 		impl->RebuildBodyOrder();
 		return Success("The Jolt body was removed and destroyed.");
@@ -2373,6 +2433,7 @@ namespace TerraEngine::Physics::Backend {
 		}
 		if(found->second.added) impl->physicsSystem->RemoveConstraint(found->second.constraint);
 		impl->constraints.erase(found);
+		impl->RebuildConstraintOrder();
 		return Success("The Jolt constraint was removed before its provider reference was released.");
 	}
 
@@ -2487,6 +2548,7 @@ namespace TerraEngine::Physics::Backend {
 		auto found = impl->characters.find(HandleKey(handle));
 		if(found == impl->characters.end() || found->second.handle != handle) return Rejected(PhysicsBackendErrorCode::StaleHandle, "The character handle was not found.");
 		impl->characters.erase(found);
+		impl->RebuildCharacterOrder();
 		return Success("The virtual character was destroyed before provider-world teardown.");
 	}
 
@@ -2634,8 +2696,10 @@ namespace TerraEngine::Physics::Backend {
 		record->pendingChange |= PhysicsBodyStateChangeMask::Updated;
 		if(command.type == PhysicsCommandType::WakeBody) {
 			record->pendingChange |= PhysicsBodyStateChangeMask::Awakened;
+			impl->pendingCommandTransitions[HandleKey(record->handle)] = PhysicsEventType::Activated;
 		} else if(command.type == PhysicsCommandType::SleepBody) {
 			record->pendingChange |= PhysicsBodyStateChangeMask::Slept;
+			impl->pendingCommandTransitions[HandleKey(record->handle)] = PhysicsEventType::Slept;
 		}
 		impl->dirtyBodyKeys.insert(HandleKey(record->handle));
 		return impl->CheckProviderHealth()
@@ -2664,6 +2728,7 @@ namespace TerraEngine::Physics::Backend {
 			impl->jobAdapter->WaitForIdle();
 			std::uint64_t dropped = 0U;
 			impl->ConvertRawEvents(impl->contactListener.Drain(dropped), dropped);
+			impl->PublishCommandTransitions(request.tick, firstNewEvent);
 			for(std::size_t index = firstNewEvent; index < impl->pendingEvents.size(); ++index) {
 				const PhysicsEvent& event = impl->pendingEvents[index];
 				Impl::BodyRecord* body = impl->FindBody(event.first.body);
@@ -2692,6 +2757,28 @@ namespace TerraEngine::Physics::Backend {
 
 	PhysicsBackendQueryResult JoltPhysicsBackend::Query(const PhysicsBackendQueryRequest& request) const {
 		std::shared_lock lock(impl->mutex);
+		return QueryLocked(request);
+	}
+
+	PhysicsBackendResult JoltPhysicsBackend::QueryBatch(
+		std::span<const PhysicsBackendQueryRequest> requests,
+		std::span<PhysicsBackendQueryResult> results) const {
+		if(requests.size() != results.size()) {
+			return Rejected(PhysicsBackendErrorCode::InvalidArgument,
+				"The Jolt query batch has mismatched request and result spans.");
+		}
+		// Simulation has already joined before query publication. Holding one shared
+		// lock across this immutable packet removes per-query lock traffic without
+		// allowing lifecycle mutation to interleave between members.
+		std::shared_lock lock(impl->mutex);
+		for(std::size_t index = 0U; index < requests.size(); ++index) {
+			results[index] = QueryLocked(requests[index]);
+		}
+		return Success("The bounded Jolt query batch completed.");
+	}
+
+	PhysicsBackendQueryResult JoltPhysicsBackend::QueryLocked(
+		const PhysicsBackendQueryRequest& request) const {
 		PhysicsBackendQueryResult result;
 		const PhysicsBackendResult ready = impl->CheckReady();
 		if(!ready.Succeeded()) {
@@ -2769,6 +2856,7 @@ namespace TerraEngine::Physics::Backend {
 		const JPH::BodyInterface& bodies = impl->physicsSystem->GetBodyInterface();
 		const std::uint32_t providerLimit = request.hitMode == PhysicsQueryHitMode::All
 			? request.maximumHits : 1U;
+		result.hits.reserve(providerLimit);
 
 		const auto appendHit = [&](
 			JPH::BodyID bodyId,
@@ -2947,18 +3035,22 @@ namespace TerraEngine::Physics::Backend {
 		impl->bodyIdToKey.reserve(impl->bodyIdToKey.size() + reservation.bodyCount);
 		impl->bodyObjectToKey.reserve(impl->bodyObjectToKey.size() + reservation.bodyCount);
 		impl->dirtyBodyKeys.reserve(impl->dirtyBodyKeys.size() + reservation.bodyCount);
+		impl->pendingCommandTransitions.reserve(
+			impl->pendingCommandTransitions.size() + reservation.bodyCount);
 		impl->bodyOrder.reserve(impl->bodyOrder.size() + reservation.bodyCount);
 		impl->bodyOrderIndices.reserve(impl->bodyOrderIndices.size() + reservation.bodyCount);
 		impl->constraints.reserve(impl->constraints.size() + reservation.constraintCount);
 		impl->characters.reserve(impl->characters.size() + reservation.characterCount);
+		impl->constraintOrder.reserve(impl->constraintOrder.size() + reservation.constraintCount);
+		impl->characterOrder.reserve(impl->characterOrder.size() + reservation.characterCount);
 		prepared.staging = staging;
 		prepared.reservedShapes = reservation.shapeCount;
 		prepared.reservedBodies = reservation.bodyCount;
 		prepared.reservedConstraints = reservation.constraintCount;
 		prepared.reservedCharacters = reservation.characterCount;
-		// Four staging vectors, four primary maps, and five body publication indexes
-		// are the engine-owned reservation sites intentionally changed here.
-		prepared.stagingAllocationCount = 13U;
+		// Four staging vectors, four primary maps, six body publication indexes, and
+		// two stable secondary orders are the engine-owned reservation sites.
+		prepared.stagingAllocationCount = 16U;
 		return Success("Provider admission storage was reserved before staging dependencies.");
 	}
 
@@ -2974,79 +3066,60 @@ namespace TerraEngine::Physics::Backend {
 
 		PhysicsBackendExtractionRequest request;
 		std::vector<std::uint32_t> selectedIndices;
-		{
-			std::unique_lock lock(impl->mutex);
-			const PhysicsBackendResult ready = impl->CheckReady();
-			if(!ready.Succeeded() || impl->physicsSystem == nullptr
-				|| !HandleMatchesWorld(profile.world, impl->worldConfiguration.world)
-				|| (profile.providerOrderGeneration != 0U
-					&& profile.providerOrderGeneration != impl->bodyOrderGeneration)) {
-				return Rejected(PhysicsBackendErrorCode::StaleWorld,
-					"The extraction profile no longer matches the current provider order.");
-			}
-			selectedIndices = profile.activeStableIndices;
-			selectedIndices.insert(selectedIndices.end(), profile.dirtyStableIndices.begin(), profile.dirtyStableIndices.end());
-			// Jolt exposes its active membership directly. Combining that compact list
-			// with the provider's dirty-key index removes the former whole-world scan
-			// while retaining sleeping/static changes and caller-required bodies.
-			impl->physicsSystem->GetActiveBodies(JPH::EBodyType::RigidBody, impl->activeBodiesScratch);
-			for(const JPH::BodyID bodyId : impl->activeBodiesScratch) {
-				if(const Impl::BodyRecord* body = impl->FindBodyByJoltId(bodyId); body != nullptr) {
-					if(const auto found = impl->bodyOrderIndices.find(HandleKey(body->handle));
-						found != impl->bodyOrderIndices.end()) selectedIndices.push_back(found->second);
-				}
-			}
-			for(const std::uint64_t bodyKey : impl->dirtyBodyKeys) {
-				if(const auto found = impl->bodyOrderIndices.find(bodyKey);
+		std::unique_lock lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded() || impl->physicsSystem == nullptr
+			|| !HandleMatchesWorld(profile.world, impl->worldConfiguration.world)
+			|| (profile.providerOrderGeneration != 0U
+				&& profile.providerOrderGeneration != impl->bodyOrderGeneration)) {
+			return Rejected(PhysicsBackendErrorCode::StaleWorld,
+				"The extraction profile no longer matches the current provider order.");
+		}
+		selectedIndices = profile.activeStableIndices;
+		selectedIndices.insert(selectedIndices.end(), profile.dirtyStableIndices.begin(), profile.dirtyStableIndices.end());
+		// Jolt exposes its active membership directly. Combining that compact list
+		// with the provider's dirty-key index removes the former whole-world scan
+		// while retaining sleeping/static changes and caller-required bodies.
+		impl->physicsSystem->GetActiveBodies(JPH::EBodyType::RigidBody, impl->activeBodiesScratch);
+		for(const JPH::BodyID bodyId : impl->activeBodiesScratch) {
+			if(const Impl::BodyRecord* body = impl->FindBodyByJoltId(bodyId); body != nullptr) {
+				if(const auto found = impl->bodyOrderIndices.find(HandleKey(body->handle));
 					found != impl->bodyOrderIndices.end()) selectedIndices.push_back(found->second);
 			}
-			for(const PhysicsBodyHandle handle : profile.explicitRequiredHandles) {
-				if(const auto found = impl->bodyOrderIndices.find(HandleKey(handle));
-					HandleMatchesWorld(handle, impl->worldConfiguration.world)
-					&& found != impl->bodyOrderIndices.end()) {
-					selectedIndices.push_back(found->second);
-				}
+		}
+		for(const std::uint64_t bodyKey : impl->dirtyBodyKeys) {
+			if(const auto found = impl->bodyOrderIndices.find(bodyKey);
+				found != impl->bodyOrderIndices.end()) selectedIndices.push_back(found->second);
+		}
+		for(const PhysicsBodyHandle handle : profile.explicitRequiredHandles) {
+			if(const auto found = impl->bodyOrderIndices.find(HandleKey(handle));
+				HandleMatchesWorld(handle, impl->worldConfiguration.world)
+				&& found != impl->bodyOrderIndices.end()) {
+				selectedIndices.push_back(found->second);
 			}
-			std::sort(selectedIndices.begin(), selectedIndices.end());
-			selectedIndices.erase(std::unique(selectedIndices.begin(), selectedIndices.end()), selectedIndices.end());
-			if(std::any_of(selectedIndices.begin(), selectedIndices.end(),
-				[this](std::uint32_t index) { return index >= impl->bodyOrder.size(); })) {
-				return Rejected(PhysicsBackendErrorCode::InvalidArgument,
-					"The extraction profile contains an out-of-range stable index.");
-			}
+		}
+		std::sort(selectedIndices.begin(), selectedIndices.end());
+		selectedIndices.erase(std::unique(selectedIndices.begin(), selectedIndices.end()), selectedIndices.end());
+		if(std::any_of(selectedIndices.begin(), selectedIndices.end(),
+			[this](std::uint32_t index) { return index >= impl->bodyOrder.size(); })) {
+			return Rejected(PhysicsBackendErrorCode::InvalidArgument,
+				"The extraction profile contains an out-of-range stable index.");
 		}
 
 		request.world = profile.world;
 		request.tick = profile.tick;
-		request.selection = PhysicsBackendExtractionSelection::StableRanges;
+		// ActiveBodies has the same non-consuming retained-state behavior needed by
+		// a lease; the prepared stable span below is the actual authoritative selection.
+		request.selection = PhysicsBackendExtractionSelection::ActiveBodies;
 		request.fields = profile.fields;
 		request.batchSize = profile.rangeSize;
 		request.parallelThreshold = std::max<std::uint32_t>(1U, profile.rangeSize);
 		// The retryable lease copies pending events below and erases them only after
 		// acknowledgement. The nested body read must not consume that queue first.
 		request.drainEvents = false;
-		for(std::size_t begin = 0U; begin < selectedIndices.size();) {
-			std::size_t end = begin + 1U;
-			while(end < selectedIndices.size() && selectedIndices[end] == selectedIndices[end - 1U] + 1U) ++end;
-			request.stableRanges.push_back({selectedIndices[begin], static_cast<std::uint32_t>(end - begin)});
-			begin = end;
-		}
-		if(request.stableRanges.empty()) {
-			// The request type requires one range. A no-body lease still carries
-			// removals/events, so bypass the getter path with an empty immutable result.
-			extraction = {};
-			extraction.world = profile.world;
-			extraction.tick = profile.tick;
-		} else {
-			const PhysicsBackendResult result = Extract(request, extraction);
-			if(!result.Succeeded()) return result;
-		}
-
-		std::unique_lock lock(impl->mutex);
-		if(profile.providerOrderGeneration != 0U && profile.providerOrderGeneration != impl->bodyOrderGeneration) {
-			return Rejected(PhysicsBackendErrorCode::StaleWorld,
-				"Provider order changed before the extraction lease could be retained.");
-		}
+		const PhysicsBackendResult extracted = ExtractLocked(
+			request, extraction, selectedIndices, true, true);
+		if(!extracted.Succeeded()) return extracted;
 		std::uint64_t value = impl->nextExtractionToken++;
 		if(value == 0U) value = impl->nextExtractionToken++;
 		token = {profile.world, profile.tick, value};
@@ -3117,10 +3190,20 @@ namespace TerraEngine::Physics::Backend {
 	PhysicsBackendResult JoltPhysicsBackend::Extract(
 		const PhysicsBackendExtractionRequest& request,
 		PhysicsBackendExtraction& extraction) const {
+		return ExtractLocked(request, extraction, {}, false, false);
+	}
+
+	PhysicsBackendResult JoltPhysicsBackend::ExtractLocked(
+		const PhysicsBackendExtractionRequest& request,
+		PhysicsBackendExtraction& extraction,
+		std::span<const std::uint32_t> preparedStableIndices,
+		bool usePreparedSelection,
+		bool membershipLockHeld) const {
 		// Retained states and event ownership are updated by this operation, so the
 		// backend takes exclusive membership ownership. Independent Jolt getter calls
 		// still run through bounded worker lanes while membership remains immutable.
-		std::unique_lock lock(impl->mutex);
+		std::unique_lock lock(impl->mutex, std::defer_lock);
+		if(!membershipLockHeld) lock.lock();
 		const PhysicsBackendResult ready = impl->CheckReady();
 		if(!ready.Succeeded()) return ready;
 		if(!request.IsValid() || impl->physicsSystem == nullptr
@@ -3138,6 +3221,8 @@ namespace TerraEngine::Physics::Backend {
 		extraction.fullState = request.fullState;
 		const JPH::BodyInterface& bodies = impl->physicsSystem->GetBodyInterface();
 		std::vector<std::uint32_t> selectedIndices;
+		if(usePreparedSelection) selectedIndices.assign(
+			preparedStableIndices.begin(), preparedStableIndices.end());
 
 		auto appendStableRange = [&](PhysicsBackendStableRange range) -> bool {
 			if(range.EndIndex() > impl->bodyOrder.size()) return false;
@@ -3147,7 +3232,7 @@ namespace TerraEngine::Physics::Backend {
 			return true;
 		};
 
-		switch(request.selection) {
+		if(!usePreparedSelection) switch(request.selection) {
 		case PhysicsBackendExtractionSelection::FullState:
 			selectedIndices.resize(impl->bodyOrder.size());
 			std::iota(selectedIndices.begin(), selectedIndices.end(), 0U);
@@ -3195,8 +3280,10 @@ namespace TerraEngine::Physics::Backend {
 			}
 			break;
 		}
-		std::sort(selectedIndices.begin(), selectedIndices.end());
-		selectedIndices.erase(std::unique(selectedIndices.begin(), selectedIndices.end()), selectedIndices.end());
+		if(!usePreparedSelection) {
+			std::sort(selectedIndices.begin(), selectedIndices.end());
+			selectedIndices.erase(std::unique(selectedIndices.begin(), selectedIndices.end()), selectedIndices.end());
+		}
 		extraction.examinedBodyCount = selectedIndices.size();
 		struct ExtractionRecordSnapshot {
 			std::uint32_t stableIndex = 0U;
@@ -3333,8 +3420,11 @@ namespace TerraEngine::Physics::Backend {
 			}));
 
 		if(HasPhysicsBodyStateFields(request.fields, PhysicsBodyStateFieldMask::Constraints)) {
-			for(const auto& [key, record] : impl->constraints) {
-				(void)key;
+			extraction.constraints.reserve(impl->constraintOrder.size());
+			for(const std::uint64_t key : impl->constraintOrder) {
+				const auto found = impl->constraints.find(key);
+				if(found == impl->constraints.end()) continue;
+				const Impl::ConstraintRecord& record = found->second;
 				if(!record.added || record.constraint == nullptr) continue;
 				PhysicsBackendConstraintState state;
 				state.handle = record.handle; state.ownerObjectId = record.ownerObjectId;
@@ -3371,12 +3461,14 @@ namespace TerraEngine::Physics::Backend {
 				}
 				extraction.constraints.push_back(state);
 			}
-			std::sort(extraction.constraints.begin(), extraction.constraints.end(), [](const auto& left, const auto& right) { return HandleKey(left.handle) < HandleKey(right.handle); });
 		}
 
 		if(HasPhysicsBodyStateFields(request.fields, PhysicsBodyStateFieldMask::Characters)) {
-			for(const auto& [key, record] : impl->characters) {
-				(void)key;
+			extraction.characters.reserve(impl->characterOrder.size());
+			for(const std::uint64_t key : impl->characterOrder) {
+				const auto found = impl->characters.find(key);
+				if(found == impl->characters.end()) continue;
+				const Impl::CharacterRecord& record = found->second;
 				if(!record.committed || record.character == nullptr) continue;
 				const JPH::CharacterVirtual& character = *record.character;
 				PhysicsBackendCharacterState state;
@@ -3393,7 +3485,6 @@ namespace TerraEngine::Physics::Backend {
 				state.contactCount = static_cast<std::uint32_t>(std::count_if(character.GetActiveContacts().begin(), character.GetActiveContacts().end(), [](const JPH::CharacterContact& contact) { return contact.mHadCollision; }));
 				extraction.characters.push_back(state);
 			}
-			std::sort(extraction.characters.begin(), extraction.characters.end(), [](const auto& left, const auto& right) { return HandleKey(left.handle) < HandleKey(right.handle); });
 		}
 		extraction.constraintCount = extraction.constraints.size();
 
@@ -3561,10 +3652,12 @@ namespace TerraEngine::Physics::Backend {
 			auto constraint = impl->constraints.find(constraintKey);
 			if(constraint != impl->constraints.end()) constraint->second.stagingToken = 0U;
 		}
+		if(!record->second.constraintKeys.empty()) impl->RebuildConstraintOrder();
 		for(std::uint64_t characterKey : record->second.characterKeys) {
 			auto character = impl->characters.find(characterKey);
 			if(character != impl->characters.end()) character->second.stagingToken = 0U;
 		}
+		if(!record->second.characterKeys.empty()) impl->RebuildCharacterOrder();
 		for(std::uint64_t shapeKey : record->second.shapeKeys) {
 			auto shape = impl->shapes.find(shapeKey);
 			if(shape != impl->shapes.end()) shape->second.stagingToken = 0U;

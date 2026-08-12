@@ -4,8 +4,6 @@
 
 #include <algorithm>
 #include <limits>
-#include <unordered_map>
-#include <unordered_set>
 
 namespace TerraEngine::Physics {
 	namespace {
@@ -104,7 +102,13 @@ namespace TerraEngine::Physics {
 	std::optional<IncrementalBodyStatePublication> IncrementalBodyStateStore::Apply(
 		const IncrementalBodyStateUpdateBatch& batch) {
 		std::lock_guard<std::mutex> lock(mutex);
+		seenHandlesScratch.clear();
+		writablePagesScratch.clear();
 		auto reject = [&]() -> std::optional<IncrementalBodyStatePublication> {
+			// Writable pages are private clones until the final publication switch, so
+			// clearing this scratch table is a complete rollback for every early exit.
+			seenHandlesScratch.clear();
+			writablePagesScratch.clear();
 			++statistics.rejectedBatchCount;
 			return std::nullopt;
 		};
@@ -113,15 +117,14 @@ namespace TerraEngine::Physics {
 			|| (latestComplete != nullptr && batch.tick <= latestComplete->tick)
 			|| (latestComplete == nullptr && !batch.fullState)) return reject();
 
-		std::unordered_set<std::uint64_t> seenHandles;
-		seenHandles.reserve(batch.updates.size());
+		seenHandlesScratch.reserve(batch.updates.size());
 		std::size_t highestSlot = 0U;
 		for(const IncrementalBodyStateUpdate& update : batch.updates) {
 			const PhysicsBodyHandle handle = update.removed ? update.removedHandle : update.state.handle;
 			const std::uint64_t key = (static_cast<std::uint64_t>(handle.slotIndex) << 32U) | handle.slotGeneration;
 			if(!handle.IsValid() || handle.worldId != batch.world.worldId
 				|| handle.worldGeneration != batch.world.worldGeneration
-				|| handle.slotIndex >= configuration.maximumSlots || !seenHandles.insert(key).second
+				|| handle.slotIndex >= configuration.maximumSlots || !seenHandlesScratch.insert(key).second
 				|| (!update.removed && (!ValidStateIdentity(update.state, batch.world)
 					|| update.fields == PhysicsBodyStateFieldMask::None))) return reject();
 			highestSlot = std::max(highestSlot, static_cast<std::size_t>(handle.slotIndex));
@@ -137,12 +140,11 @@ namespace TerraEngine::Physics {
 		const std::size_t requiredPageCount = batch.updates.empty() ? pages.size()
 			: highestSlot / configuration.pageSize + 1U;
 		pages.resize(std::max(pages.size(), requiredPageCount));
-		std::unordered_map<std::size_t, std::shared_ptr<IncrementalBodyStatePage>> writablePages;
-		writablePages.reserve(batch.updates.size());
+		writablePagesScratch.reserve(batch.updates.size());
 
 		auto writablePage = [&](std::size_t pageIndex) -> IncrementalBodyStatePage& {
-			const auto existing = writablePages.find(pageIndex);
-			if(existing != writablePages.end()) return *existing->second;
+			const auto existing = writablePagesScratch.find(pageIndex);
+			if(existing != writablePagesScratch.end()) return *existing->second;
 			auto page = std::make_shared<IncrementalBodyStatePage>();
 			page->pageIndex = static_cast<std::uint32_t>(pageIndex);
 			page->generation = generation + 1U;
@@ -151,7 +153,7 @@ namespace TerraEngine::Physics {
 				page->slots = pages[pageIndex]->slots;
 				page->liveBodyCount = pages[pageIndex]->liveBodyCount;
 			}
-			writablePages.emplace(pageIndex, page);
+			writablePagesScratch.emplace(pageIndex, page);
 			return *page;
 		};
 
@@ -186,7 +188,7 @@ namespace TerraEngine::Physics {
 
 		std::size_t pagesCopied = 0U;
 		std::size_t pagesReused = 0U;
-		for(auto& [pageIndex, writable] : writablePages) {
+		for(auto& [pageIndex, writable] : writablePagesScratch) {
 			const std::shared_ptr<const IncrementalBodyStatePage> previous = latestComplete != nullptr
 				&& pageIndex < latestComplete->pages.size() ? latestComplete->pages[pageIndex] : nullptr;
 			if(previous != nullptr && SamePage(*previous, *writable)) {
@@ -198,7 +200,7 @@ namespace TerraEngine::Physics {
 			}
 		}
 		for(std::size_t index = 0U; index < pages.size(); ++index) {
-			if(!writablePages.contains(index) && pages[index] != nullptr) ++pagesReused;
+			if(!writablePagesScratch.contains(index) && pages[index] != nullptr) ++pagesReused;
 		}
 		while(!pages.empty() && (pages.back() == nullptr || pages.back()->liveBodyCount == 0U)) pages.pop_back();
 
@@ -235,6 +237,8 @@ namespace TerraEngine::Physics {
 		statistics.pagesCopied += pagesCopied;
 		statistics.pagesReused += pagesReused;
 		statistics.retainedBytes = retainedBytes;
+		seenHandlesScratch.clear();
+		writablePagesScratch.clear();
 		return IncrementalBodyStatePublication{std::move(complete), std::move(changed), pagesReused, pagesCopied};
 	}
 
@@ -260,5 +264,7 @@ namespace TerraEngine::Physics {
 		latestChanged.reset();
 		generation = 0U;
 		statistics.retainedBytes = 0U;
+		seenHandlesScratch.clear();
+		writablePagesScratch.clear();
 	}
 }

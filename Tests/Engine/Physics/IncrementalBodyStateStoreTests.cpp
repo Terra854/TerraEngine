@@ -134,11 +134,19 @@ namespace TerraEngine::Tests {
 			provider.fields = kStoredFields;
 			provider.pose.position.x = 12.0F;
 			extraction.bodies.push_back(provider);
-			auto prepared = PhysicsWorld::ConvertExtractedBodyStates(extraction);
+			PhysicsBodyStateValidationScratch scratch;
+			auto prepared = PhysicsWorld::ConvertExtractedBodyStates(extraction, scratch);
 			context.Expect(prepared.has_value() && prepared->fullState
 				&& prepared->updates.size() == 1U
 				&& prepared->updates.front().state.worldPose.position.x == 12.0F,
 				"Provider records must become validated engine-owned state before protected publication.");
+			const std::size_t ownershipCapacity = scratch.ownershipKeys.capacity();
+			const std::size_t stableIndexCapacity = scratch.stableIndices.capacity();
+			extraction.tick = 8U;
+			context.Expect(PhysicsWorld::ConvertExtractedBodyStates(extraction, scratch).has_value()
+				&& scratch.ownershipKeys.capacity() == ownershipCapacity
+				&& scratch.stableIndices.capacity() == stableIndexCapacity,
+				"Repeated provider conversion must reuse contiguous validation storage after warm-up.");
 			extraction.bodies.front().componentGeneration = 0U;
 			context.Expect(!PhysicsWorld::ConvertExtractedBodyStates(extraction).has_value(),
 				"Missing engine ownership generations must reject before any live-state boundary is reached.");

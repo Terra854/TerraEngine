@@ -36,7 +36,7 @@ namespace TerraEngine::Tests {
 
 	void RegisterPhysicsCharacterSimulationTests(TestRegistry& registry) {
 		registry.Add("Physics.CharacterSimulation.CapsuleCylinderGroundJumpResizeTeleportAndTeardown", [](TestContext& context) {
-			CharacterFixture fixture; const PhysicsCharacterHandle capsule{{42U}, 1U, 0U, 1U}; const PhysicsCharacterHandle cylinder{{42U}, 1U, 1U, 1U};
+			CharacterFixture fixture; const PhysicsCharacterHandle capsule{{42U}, 1U, 5U, 1U}; const PhysicsCharacterHandle cylinder{{42U}, 1U, 1U, 1U};
 			PhysicsCharacterCreateRequest capsuleRequest = fixture.CreateRequest(capsule, PhysicsShapeKind::Capsule); PhysicsCharacterCreateRequest cylinderRequest = fixture.CreateRequest(cylinder, PhysicsShapeKind::Cylinder); cylinderRequest.pose.position.x = 3.0F;
 			PhysicsBackendStagingToken staging; context.Expect(fixture.backend.CreateCharacter(capsuleRequest, staging).Succeeded() && fixture.backend.CreateCharacter(cylinderRequest, staging).Succeeded(), "Capsule and cylinder virtual characters must stage together.");
 			context.Expect(fixture.backend.CommitStaging(staging).Succeeded(), "Character staging must publish atomically.");
@@ -45,6 +45,9 @@ namespace TerraEngine::Tests {
 				context.Expect(fixture.backend.UpdateCharacter(update).Succeeded() && fixture.backend.Step({fixture.world, tick, 1.0F / 60.0F, 1U}).Succeeded(), "Ground and stair character updates must remain provider-safe.");
 			}
 			PhysicsBackendExtraction extraction; extraction.world = fixture.world; fixture.backend.Extract(extraction);
+			context.Expect(extraction.characters.size() == 2U
+				&& extraction.characters[0].handle == cylinder && extraction.characters[1].handle == capsule,
+				"Character extraction must reuse ascending committed membership order after reverse-order staging.");
 			const auto grounded = std::find_if(extraction.characters.begin(), extraction.characters.end(), [&](const auto& state) { return state.handle == capsule; });
 			context.Expect(grounded != extraction.characters.end() && grounded->supported && grounded->supportBody == fixture.floorBody, "Ground support, moving-support velocity publication, and contacts must use engine body handles.");
 			context.Expect(std::isfinite(grounded->groundNormal.y) && grounded->contactCount > 0U, "Ground and slope state must remain finite under Debug Jolt tolerances.");
@@ -58,7 +61,7 @@ namespace TerraEngine::Tests {
 			context.Expect(fixture.backend.UpdateCharacter(resize).Succeeded(), "A capsule resize must use CharacterVirtual::SetShape and penetration recovery.");
 			PhysicsCharacterUpdateRequest teleport = resize; teleport.resizeRequested = false; teleport.teleportRequested = true; teleport.pose.position = {0.0F, 4.0F, 0.0F};
 			context.Expect(fixture.backend.UpdateCharacter(teleport).Succeeded(), "Teleport must refresh virtual-character contacts at the provider boundary.");
-			context.Expect(!fixture.backend.DestroyCharacter({{42U}, 1U, 0U, 2U}).Succeeded(), "A stale character generation must never destroy the live controller.");
+			context.Expect(!fixture.backend.DestroyCharacter({{42U}, 1U, 5U, 2U}).Succeeded(), "A stale character generation must never destroy the live controller.");
 			context.Expect(fixture.backend.DestroyCharacter(cylinder).Succeeded() && fixture.backend.DestroyCharacter(capsule).Succeeded(), "Virtual-character teardown must release provider state before world teardown.");
 		});
 	}

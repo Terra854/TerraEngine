@@ -76,7 +76,8 @@ namespace TerraEngine::Tests {
 				TerraEngine::UUID& objectId,
 				std::uint8_t collisionLayer = 0U,
 				bool sensor = false,
-				bool useGravity = true) {
+				bool useGravity = true,
+				bool startAwake = true) {
 				const PhysicsBodyHandle body{{world.worldId}, world.worldGeneration, nextBodySlot++, 1U};
 				PhysicsBodyCreateRequest request;
 				request.handle = body;
@@ -89,6 +90,7 @@ namespace TerraEngine::Tests {
 				request.collisionLayer = collisionLayer;
 				request.sensor = sensor;
 				request.useGravity = useGravity;
+				request.startAwake = startAwake;
 				PhysicsBackendStagingToken staging;
 				if(!backend.CreateBody(request, staging).Succeeded()
 					|| !backend.CommitStaging(staging).Succeeded()) {
@@ -224,6 +226,45 @@ namespace TerraEngine::Tests {
 				"Jolt point queries must identify an engine body containing the requested point.");
 		});
 
+		registry.Add("Physics.Provider.Jolt56.QueryBatchMatchesIndependentResults", [](TestContext& context) {
+			BackendFixture fixture;
+			context.Expect(fixture.Initialize(), "The batched Jolt query fixture must initialize.");
+			const PhysicsShapeHandle shape = fixture.PublishBox({1.0F, 1.0F, 1.0F});
+			TerraEngine::UUID objectId{};
+			const PhysicsBodyHandle body = fixture.PublishBody(
+				shape, PhysicsMotionType::Static, {0.0F, 0.0F, 0.0F}, objectId);
+			context.Expect(body.IsValid(), "The batched query fixture must publish one visible body.");
+
+			std::vector<PhysicsBackendQueryRequest> requests(3U, MakeRayQuery(fixture.world));
+			requests[1].kind = PhysicsQueryKind::Overlap;
+			requests[1].hitMode = PhysicsQueryHitMode::All;
+			requests[1].pose.position = {};
+			requests[1].shapeExtent = {0.25F, 0.25F, 0.25F};
+			requests[1].maximumHits = 2U;
+			requests[2].maximumHits = 0U;
+			std::vector<PhysicsBackendQueryResult> independent;
+			independent.reserve(requests.size());
+			for(const PhysicsBackendQueryRequest& request : requests) {
+				independent.push_back(fixture.backend.Query(request));
+			}
+			std::vector<PhysicsBackendQueryResult> batched(requests.size());
+			context.Expect(fixture.backend.QueryBatch(requests, batched).Succeeded(),
+				"A provider query packet must complete through one immutable backend read boundary.");
+			for(std::size_t index = 0U; index < requests.size(); ++index) {
+				context.Expect(batched[index].result.status == independent[index].result.status
+					&& batched[index].truncated == independent[index].truncated
+					&& batched[index].hits.size() == independent[index].hits.size(),
+					"Every batched member must retain the same status, bound, and hit count as an independent query.");
+				if(!batched[index].hits.empty()) {
+					context.Expect(batched[index].hits.front().body == independent[index].hits.front().body,
+						"Batched provider hits must preserve deterministic engine body ordering.");
+				}
+			}
+			std::vector<PhysicsBackendQueryResult> tooFewResults(2U);
+			context.Expect(!fixture.backend.QueryBatch(requests, tooFewResults).Succeeded(),
+				"Mismatched query packet spans must reject before any provider read begins.");
+		});
+
 		registry.Add("Physics.Provider.Jolt56.CallbackBridgePublishesCollisionTriggerAndActivationEvents", [](TestContext& context) {
 			BackendFixture fixture;
 			context.Expect(fixture.Initialize(), "The direct Jolt 5.6 callback fixture must initialize.");
@@ -237,12 +278,26 @@ namespace TerraEngine::Tests {
 			TerraEngine::UUID fallingId{};
 			TerraEngine::UUID triggerId{};
 			TerraEngine::UUID triggerBodyId{};
+			TerraEngine::UUID exitStaticId{};
+			TerraEngine::UUID exitMoverId{};
+			TerraEngine::UUID activationId{};
 			const PhysicsBodyHandle floor = fixture.PublishBody(floorShape, PhysicsMotionType::Static, {0.0F, -0.5F, 0.0F}, floorId);
 			const PhysicsBodyHandle falling = fixture.PublishBody(bodyShape, PhysicsMotionType::Dynamic, {0.0F, 3.0F, 0.0F}, fallingId);
 			const PhysicsBodyHandle trigger = fixture.PublishBody(triggerShape, PhysicsMotionType::Static, {10.0F, 0.0F, 0.0F}, triggerId, 0U, true);
 			const PhysicsBodyHandle triggerBody = fixture.PublishBody(bodyShape, PhysicsMotionType::Dynamic, {10.0F, 0.0F, 0.0F}, triggerBodyId, 0U, false, false);
-			context.Expect(floor.IsValid() && falling.IsValid() && trigger.IsValid() && triggerBody.IsValid(),
-				"The callback fixture must create real Jolt physical and trigger pairs.");
+			// Isolated transition bodies remove sleep/contact timing from the callback
+			// assertions below. The gravity-supported pair remains touching until it is
+			// explicitly teleported, while the dormant dynamic body has no contact that
+			// can wake it.
+			const PhysicsBodyHandle exitStatic = fixture.PublishBody(
+				bodyShape, PhysicsMotionType::Static, {30.0F, -0.5F, 0.0F}, exitStaticId);
+			const PhysicsBodyHandle exitMover = fixture.PublishBody(
+				bodyShape, PhysicsMotionType::Dynamic, {30.0F, 0.5F, 0.0F}, exitMoverId);
+			const PhysicsBodyHandle activationBody = fixture.PublishBody(
+				bodyShape, PhysicsMotionType::Dynamic, {50.0F, 0.0F, 0.0F}, activationId, 0U, false, false, false);
+			context.Expect(floor.IsValid() && falling.IsValid() && trigger.IsValid() && triggerBody.IsValid()
+				&& exitStatic.IsValid() && exitMover.IsValid() && activationBody.IsValid(),
+				"The callback fixture must create real Jolt contact, trigger, and isolated transition bodies.");
 
 			std::vector<PhysicsEvent> events;
 			for(PhysicsTick tick = 1U; tick <= 2U; ++tick) {
@@ -271,28 +326,32 @@ namespace TerraEngine::Tests {
 				&& HasEvent(events, PhysicsEventType::Contact),
 				"Jolt physical contacts must bridge collision enter/stay and contact-detail packets.");
 
-			PhysicsBodyCommandTarget fallingTarget{fixture.world, fallingId, 1U, 1U};
-			PhysicsBodyCommandTarget staleObjectTarget = fallingTarget;
+			PhysicsBodyCommandTarget activationTarget{fixture.world, activationId, 1U, 1U};
+			PhysicsBodyCommandTarget staleObjectTarget = activationTarget;
 			staleObjectTarget.objectGeneration = 2U;
 			context.Expect(!fixture.backend.ApplyCommand(PhysicsCommand::MakeWake(staleObjectTarget)).Succeeded(),
 				"A delayed command with a stale object generation must not reach the recycled provider body.");
-			context.Expect(fixture.backend.ApplyCommand(PhysicsCommand::MakeWake(fallingTarget)).Succeeded(),
-				"An explicit wake command must be accepted for the settled dynamic Jolt body.");
-			AppendEvents(events, fixture.StepAndExtract(151U, stepped));
-			context.Expect(stepped && HasEvent(events, PhysicsEventType::Activated),
+			context.Expect(fixture.backend.ApplyCommand(PhysicsCommand::MakeWake(activationTarget)).Succeeded(),
+				"An explicit wake command must be accepted for the isolated dormant Jolt body.");
+			PhysicsBackendExtraction activated = fixture.StepAndExtract(151U, stepped);
+			context.Expect(stepped && HasEvent(activated.events, PhysicsEventType::Activated),
 				"Jolt activation callbacks must become an engine Activated event at the extraction boundary.");
 
-			context.Expect(fixture.backend.ApplyCommand(PhysicsCommand::MakeSleep(fallingTarget)).Succeeded(),
+			context.Expect(fixture.backend.ApplyCommand(PhysicsCommand::MakeSleep(activationTarget)).Succeeded(),
 				"An explicit sleep command must be accepted for the dynamic Jolt body.");
-			AppendEvents(events, fixture.StepAndExtract(152U, stepped));
-			context.Expect(stepped && HasEvent(events, PhysicsEventType::Slept),
+			PhysicsBackendExtraction sleeping = fixture.StepAndExtract(152U, stepped);
+			context.Expect(stepped && HasEvent(sleeping.events, PhysicsEventType::Slept),
 				"Jolt deactivation callbacks must become an engine Slept event at the extraction boundary.");
 
-			PhysicsPose aboveFloor;
-			aboveFloor.position = {0.0F, 10.0F, 0.0F};
-			context.Expect(fixture.backend.ApplyCommand(PhysicsCommand::MakeTeleport(fallingTarget, aboveFloor)).Succeeded(),
-				"A physical body must accept a typed teleport away from its support.");
-			AppendEvents(events, fixture.StepAndExtract(153U, stepped));
+			PhysicsBodyCommandTarget exitTarget{fixture.world, exitMoverId, 1U, 1U};
+			PhysicsPose outsideContact;
+			outsideContact.position = {40.0F, 0.0F, 0.0F};
+			context.Expect(fixture.backend.ApplyCommand(PhysicsCommand::MakeWake(exitTarget)).Succeeded(),
+				"The supported contact body must be active before its overlap is removed.");
+			context.Expect(fixture.backend.ApplyCommand(PhysicsCommand::MakeTeleport(exitTarget, outsideContact)).Succeeded(),
+				"A supported contact body must accept a typed teleport away from its overlap.");
+			PhysicsBackendExtraction separated = fixture.StepAndExtract(153U, stepped);
+			AppendEvents(events, std::move(separated));
 			context.Expect(stepped && HasEvent(events, PhysicsEventType::CollisionExit),
 				"Removing a real physical overlap must publish collision exit after Jolt callbacks join.");
 		});

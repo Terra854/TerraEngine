@@ -83,6 +83,9 @@ namespace TerraEngine::Physics::Backend {
 		PhysicsBackendResult ApplyCommand(const PhysicsCommand& command) override;
 		PhysicsBackendResult Step(const PhysicsBackendStepRequest& request) override;
 		PhysicsBackendQueryResult Query(const PhysicsBackendQueryRequest& request) const override;
+		PhysicsBackendResult QueryBatch(
+			std::span<const PhysicsBackendQueryRequest> requests,
+			std::span<PhysicsBackendQueryResult> results) const override;
 		PhysicsBackendResult Extract(PhysicsBackendExtraction& extraction) const override;
 		PhysicsBackendResult Extract(
 			const PhysicsBackendExtractionRequest& request,
@@ -111,6 +114,18 @@ namespace TerraEngine::Physics::Backend {
 		void ReportFatalProviderFailureForValidation() noexcept;
 
 	private:
+		// QueryLocked is shared by single and batched calls. The caller holds the
+		// backend read lock so a batch does not reacquire it for every query.
+		PhysicsBackendQueryResult QueryLocked(const PhysicsBackendQueryRequest& request) const;
+		// A fixed-step profile has already produced a sorted stable selection while
+		// holding the membership lock. Reusing it here avoids range encoding, another
+		// sort, and a lock hand-off before the retryable lease is retained.
+		PhysicsBackendResult ExtractLocked(
+			const PhysicsBackendExtractionRequest& request,
+			PhysicsBackendExtraction& extraction,
+			std::span<const std::uint32_t> preparedStableIndices,
+			bool usePreparedSelection,
+			bool membershipLockHeld) const;
 		struct Impl;
 		Impl* impl = nullptr;
 	};

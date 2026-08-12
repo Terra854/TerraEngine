@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <unordered_set>
 #include <utility>
 
 namespace TerraEngine::Physics {
@@ -502,6 +501,13 @@ namespace TerraEngine::Physics {
 
 	std::optional<IncrementalBodyStateUpdateBatch> PhysicsWorld::ConvertExtractedBodyStates(
 		const Backend::PhysicsBackendExtraction& extraction) {
+		PhysicsBodyStateValidationScratch scratch;
+		return ConvertExtractedBodyStates(extraction, scratch);
+	}
+
+	std::optional<IncrementalBodyStateUpdateBatch> PhysicsWorld::ConvertExtractedBodyStates(
+		const Backend::PhysicsBackendExtraction& extraction,
+		PhysicsBodyStateValidationScratch& scratch) {
 		if(!extraction.world.IsValid() || extraction.tick == 0U
 			|| extraction.providerOrderGeneration == 0U
 			|| (extraction.fullState && extraction.bodies.size() != extraction.totalBodyCount)) return std::nullopt;
@@ -514,23 +520,21 @@ namespace TerraEngine::Physics {
 		batch.fullState = extraction.fullState;
 		batch.updates.reserve(extraction.bodies.size()
 			+ (extraction.fullState ? 0U : extraction.removedBodies.size()));
-		std::unordered_set<std::uint64_t> ownership;
-		std::unordered_set<std::uint32_t> stableIndices;
-		ownership.reserve(extraction.bodies.size());
-		stableIndices.reserve(extraction.bodies.size());
+		scratch.Reset(extraction.bodies.size());
 		for(const Backend::PhysicsBackendBodyState& provider : extraction.bodies) {
 			const std::uint64_t ownershipKey = (static_cast<std::uint64_t>(provider.handle.slotIndex) << 32U)
 				| provider.handle.slotGeneration;
 			if(!provider.handle.IsValid() || provider.objectId == TerraEngine::EMPTY_UUID
 				|| provider.objectGeneration == 0U || provider.componentGeneration == 0U
 				|| provider.fields == PhysicsBodyStateFieldMask::None
-				|| !ownership.insert(ownershipKey).second || !stableIndices.insert(provider.stableIndex).second
 				|| (HasPhysicsBodyStateFields(provider.fields, PhysicsBodyStateFieldMask::Pose)
 					&& !provider.pose.IsFinite())
 				|| (HasPhysicsBodyStateFields(provider.fields, PhysicsBodyStateFieldMask::LinearVelocity)
 					&& !provider.linearVelocity.IsFinite())
 				|| (HasPhysicsBodyStateFields(provider.fields, PhysicsBodyStateFieldMask::AngularVelocity)
 					&& !provider.angularVelocity.IsFinite())) return std::nullopt;
+			scratch.ownershipKeys.push_back(ownershipKey);
+			scratch.stableIndices.push_back(provider.stableIndex);
 			PhysicsBodyState stateValue;
 			stateValue.handle = provider.handle;
 			stateValue.objectId = provider.objectId;
@@ -542,13 +546,19 @@ namespace TerraEngine::Physics {
 			stateValue.awake = provider.awake;
 			batch.updates.push_back({std::move(stateValue), {}, provider.fields, provider.change, false});
 		}
+		std::sort(scratch.ownershipKeys.begin(), scratch.ownershipKeys.end());
+		std::sort(scratch.stableIndices.begin(), scratch.stableIndices.end());
+		if(std::adjacent_find(scratch.ownershipKeys.begin(), scratch.ownershipKeys.end())
+				!= scratch.ownershipKeys.end()
+			|| std::adjacent_find(scratch.stableIndices.begin(), scratch.stableIndices.end())
+				!= scratch.stableIndices.end()) return std::nullopt;
 		if(extraction.fullState) {
 			constexpr PhysicsBodyStateFieldMask completeFields = PhysicsBodyStateFieldMask::Pose
 				| PhysicsBodyStateFieldMask::LinearVelocity
 				| PhysicsBodyStateFieldMask::AngularVelocity
 				| PhysicsBodyStateFieldMask::Awake;
 			for(std::uint32_t index = 0U; index < extraction.bodies.size(); ++index) {
-				if(!stableIndices.contains(index)
+				if(scratch.stableIndices[index] != index
 					|| !HasPhysicsBodyStateFields(extraction.bodies[index].fields, completeFields)) return std::nullopt;
 			}
 		}

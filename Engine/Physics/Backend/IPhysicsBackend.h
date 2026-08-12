@@ -597,6 +597,21 @@ namespace TerraEngine::Physics {
 			virtual PhysicsBackendResult ApplyCommand(const PhysicsCommand& command) = 0;
 			virtual PhysicsBackendResult Step(const PhysicsBackendStepRequest& request) = 0;
 			virtual PhysicsBackendQueryResult Query(const PhysicsBackendQueryRequest& request) const = 0;
+			// A batch is one provider read boundary while every request keeps its own
+			// result. Providers that cannot coalesce locking retain compatible behavior
+			// through this default implementation.
+			virtual PhysicsBackendResult QueryBatch(
+				std::span<const PhysicsBackendQueryRequest> requests,
+				std::span<PhysicsBackendQueryResult> results) const {
+				if(requests.size() != results.size()) {
+					return {PhysicsResultStatus::Rejected, PhysicsBackendErrorCode::InvalidArgument,
+						"The provider query batch has mismatched request and result spans."};
+				}
+				for(std::size_t index = 0U; index < requests.size(); ++index) {
+					results[index] = Query(requests[index]);
+				}
+				return {};
+			}
 			virtual PhysicsBackendResult Extract(PhysicsBackendExtraction& extraction) const = 0;
 			// The request overload is additive so existing provider implementations and
 			// compatibility tests keep the established full-state call. Providers may

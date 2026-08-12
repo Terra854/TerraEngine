@@ -329,6 +329,7 @@ namespace TerraEngine::Physics {
 			preparedCharacterRemovals.clear();
 			plannedSteps = {};
 			preparedQueries = {};
+			backendQueryRequests.clear();
 			executedQueries.clear();
 			completedSteps.clear();
 			pendingFlushSteps.clear();
@@ -2167,7 +2168,8 @@ namespace TerraEngine::Physics {
 				AppendCommandResult(0U, PhysicsResultStatus::ProviderFailure, request.tick, result.message);
 				extraction.bodies.clear();
 			} else {
-				preparedBodyStateBatch = PhysicsWorld::ConvertExtractedBodyStates(extraction);
+				preparedBodyStateBatch = PhysicsWorld::ConvertExtractedBodyStates(
+					extraction, bodyStateValidationScratch);
 				if(!preparedBodyStateBatch) {
 					AppendCommandResult(0U, PhysicsResultStatus::StaleTarget,
 						request.tick, "Provider extraction could not be converted into generation-safe engine state.");
@@ -2233,18 +2235,26 @@ namespace TerraEngine::Physics {
 
 		void ExecutePreparedQueriesLocked() {
 			const Clock::time_point start = Clock::now();
+			backendQueryRequests.clear();
 			executedQueries.clear();
 			if(preparedQueries.queries.empty()) {
 				diagnosticTimings.queryMs = 0.0;
 				return;
 			}
-			executedQueries.resize(preparedQueries.queries.size());
+			backendQueryRequests.reserve(preparedQueries.queries.size());
+			for(const PhysicsPreparedQuery& query : preparedQueries.queries) {
+				backendQueryRequests.push_back(MakeBackendQueryRequest(query.request));
+			}
+			executedQueries.resize(backendQueryRequests.size());
 			ThreadPool& pool = ThreadPool::instance();
 			const std::size_t workerCount = pool.getThreadCount();
-			if(workerCount <= 1U || preparedQueries.queries.size() < 64U) {
-				for(std::size_t index = 0U; index < preparedQueries.queries.size(); ++index) {
-					executedQueries[index] = backend->Query(
-						MakeBackendQueryRequest(preparedQueries.queries[index].request));
+			if(workerCount <= 1U || backendQueryRequests.size() < 64U) {
+				const Backend::PhysicsBackendResult batch = backend->QueryBatch(
+					backendQueryRequests, executedQueries);
+				if(!batch.Succeeded()) {
+					for(Backend::PhysicsBackendQueryResult& result : executedQueries) {
+						result = {batch, {}, false};
+					}
 				}
 				diagnosticTimings.queryMs = MillisecondsSince(start);
 				return;
@@ -2252,16 +2262,22 @@ namespace TerraEngine::Physics {
 
 			// Each task writes a disjoint result range and all backend calls take a
 			// shared read lock after simulation has joined. No task touches scene data.
-			const std::size_t taskCount = std::min(workerCount - 1U, preparedQueries.queries.size());
-			const std::size_t chunkSize = (preparedQueries.queries.size() + taskCount - 1U) / taskCount;
+			const std::size_t taskCount = std::min(workerCount - 1U, backendQueryRequests.size());
+			const std::size_t chunkSize = (backendQueryRequests.size() + taskCount - 1U) / taskCount;
 			std::vector<std::future<void>> futures;
 			futures.reserve(taskCount);
-			for(std::size_t begin = 0U; begin < preparedQueries.queries.size(); begin += chunkSize) {
-				const std::size_t end = std::min(preparedQueries.queries.size(), begin + chunkSize);
+			for(std::size_t begin = 0U; begin < backendQueryRequests.size(); begin += chunkSize) {
+				const std::size_t end = std::min(backendQueryRequests.size(), begin + chunkSize);
 				auto task = pool.createTask([this, begin, end]() {
-					for(std::size_t index = begin; index < end; ++index) {
-						executedQueries[index] = backend->Query(
-							MakeBackendQueryRequest(preparedQueries.queries[index].request));
+					const std::span<const Backend::PhysicsBackendQueryRequest> requests(
+						backendQueryRequests.data() + begin, end - begin);
+					const std::span<Backend::PhysicsBackendQueryResult> results(
+						executedQueries.data() + begin, end - begin);
+					const Backend::PhysicsBackendResult batch = backend->QueryBatch(requests, results);
+					if(!batch.Succeeded()) {
+						for(Backend::PhysicsBackendQueryResult& result : results) {
+							result = {batch, {}, false};
+						}
 					}
 				});
 				futures.push_back(task->getFuture());
@@ -3006,12 +3022,16 @@ namespace TerraEngine::Physics {
 		std::vector<TerraEngine::UUID> preparedCharacterRemovals;
 		PhysicsFixedStepPlan plannedSteps;
 		PhysicsPreparedQueryBatch preparedQueries;
+		// Prepared provider packets are retained across ticks so their capacity can
+		// be reused instead of rebuilding a temporary request vector per query task.
+		std::vector<Backend::PhysicsBackendQueryRequest> backendQueryRequests;
 		std::vector<Backend::PhysicsBackendQueryResult> executedQueries;
 		std::vector<PhysicsFixedStepRequest> completedSteps;
 		std::vector<PhysicsFixedStepRequest> pendingFlushSteps;
 		std::vector<PendingTransformPublication> pendingTransformPublications;
 		Backend::PhysicsBackendExtraction extraction;
 		Backend::PhysicsBackendExtractionToken extractionToken;
+		PhysicsBodyStateValidationScratch bodyStateValidationScratch;
 		std::optional<IncrementalBodyStateUpdateBatch> preparedBodyStateBatch;
 		std::vector<TransformPublicationSourceRecord> preparedTransformSources;
 		std::uint64_t nextTransformPublicationGroupId = 0U;

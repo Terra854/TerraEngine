@@ -59,7 +59,10 @@ namespace TerraEngine::Tests {
 				PhysicsConstraintKind::Slider, PhysicsConstraintKind::Cone, PhysicsConstraintKind::SwingTwist, PhysicsConstraintKind::SixDegreesOfFreedom};
 			PhysicsBackendStagingToken staging;
 			for(std::size_t index = 0; index < families.size(); ++index) {
-				PhysicsConstraintCreateRequest request = fixture.Request({{41U}, 1U, static_cast<PhysicsSlotIndex>(index), 1U}, families[index]);
+				// Publish reverse handle order to prove extraction consumes the retained
+				// deterministic index instead of unordered-map iteration or insertion order.
+				const PhysicsSlotIndex slot = static_cast<PhysicsSlotIndex>(families.size() - 1U - index);
+				PhysicsConstraintCreateRequest request = fixture.Request({{41U}, 1U, slot, 1U}, families[index]);
 				request.axes[0].limitEnabled = true; request.axes[0].minimum = -0.25F; request.axes[0].maximum = 0.25F;
 				request.axes[0].springEnabled = true; request.axes[0].springUsesFrequency = true; request.axes[0].springFrequency = 4.0F; request.axes[0].springDamping = 0.8F;
 				request.axes[0].motorMode = PhysicsBackendMotorMode::PositionAndVelocity; request.axes[0].motorMaximumForce = 100.0F;
@@ -70,8 +73,11 @@ namespace TerraEngine::Tests {
 			context.Expect(fixture.backend.Step({fixture.world, 1U, 1.0F / 60.0F, 1U}).Succeeded(), "Constraint fixture must step.");
 			PhysicsBackendExtraction extraction; extraction.world = fixture.world; fixture.backend.Extract(extraction);
 			context.Expect(extraction.constraints.size() == families.size(), "Every committed constraint must publish a provider-neutral state.");
-			for(const PhysicsBackendConstraintState& state : extraction.constraints) {
+			for(std::size_t index = 0U; index < extraction.constraints.size(); ++index) {
+				const PhysicsBackendConstraintState& state = extraction.constraints[index];
 				context.Expect(std::isfinite(state.linearImpulseMagnitude) && std::isfinite(state.angularImpulseMagnitude), "Jolt solver lambdas must extract as finite impulses.");
+				context.Expect(state.handle.slotIndex == index,
+					"Constraint extraction must retain ascending handle order without a per-tick sort.");
 				context.Expect(state.handle.IsValid() && state.ownerObjectId != TerraEngine::EMPTY_UUID
 					&& state.recordId != TerraEngine::EMPTY_UUID && state.ownerObjectGeneration == 1U
 					&& state.componentGeneration == 1U && state.recordGeneration == 1U,

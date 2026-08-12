@@ -26,6 +26,21 @@
 #include <vector>
 
 namespace TerraEngine::Physics {
+	// Fixed-step conversion reuses these contiguous validation keys. Sorting two
+	// vectors is allocation-free after warm-up and avoids rebuilding hash tables for
+	// every extracted body packet.
+	struct PhysicsBodyStateValidationScratch {
+		std::vector<std::uint64_t> ownershipKeys;
+		std::vector<std::uint32_t> stableIndices;
+
+		void Reset(std::size_t expectedBodyCount) {
+			ownershipKeys.clear();
+			stableIndices.clear();
+			ownershipKeys.reserve(expectedBodyCount);
+			stableIndices.reserve(expectedBodyCount);
+		}
+	};
+
 	namespace Backend {
 		struct PhysicsBackendExtraction;
 	}
@@ -296,6 +311,9 @@ namespace TerraEngine::Physics {
 		// then preflights every generation before the store switches both same-tick views.
 		static std::optional<IncrementalBodyStateUpdateBatch> ConvertExtractedBodyStates(
 			const Backend::PhysicsBackendExtraction& extraction);
+		static std::optional<IncrementalBodyStateUpdateBatch> ConvertExtractedBodyStates(
+			const Backend::PhysicsBackendExtraction& extraction,
+			PhysicsBodyStateValidationScratch& scratch);
 		std::optional<IncrementalBodyStatePublication> PublishPreparedBodyStates(
 			const IncrementalBodyStateUpdateBatch& batch);
 		std::shared_ptr<const IncrementalBodyStateSnapshot> AcquireCompleteBodyState() const;

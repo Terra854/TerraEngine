@@ -14,6 +14,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace TerraEngine::Physics {
@@ -115,5 +117,9 @@ namespace TerraEngine::Physics {
 		std::shared_ptr<const IncrementalBodyStateSnapshot> latestComplete;
 		std::shared_ptr<const ChangedBodyStatePacket> latestChanged;
 		IncrementalBodyStateStoreStatistics statistics;
+		// Apply is serialized by mutex, so its duplicate-key and copy-on-write page
+		// tables can retain buckets between ticks without becoming shared live state.
+		std::unordered_set<std::uint64_t> seenHandlesScratch;
+		std::unordered_map<std::size_t, std::shared_ptr<IncrementalBodyStatePage>> writablePagesScratch;
 	};
 }

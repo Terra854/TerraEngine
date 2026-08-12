@@ -233,33 +233,36 @@ namespace TerraEngine::Physics {
 		packet.droppedCount = canonical.ingressDroppedCount + canonical.ingressInvalidCount;
 		const std::vector<PhysicsEvent> empty;
 		const std::vector<PhysicsEvent>& source = canonical.events != nullptr ? *canonical.events : empty;
-		std::size_t visibleCount = 0U;
-		// A gameplay view may still be the complete canonical sequence when its
-		// subscriptions accept every record; keep that shared immutable allocation.
-		bool allVisible = true;
-		for(const PhysicsEvent& event : source) {
+		// Build a private view lazily. A canonical packet that is below the cap and
+		// matches every subscription remains a zero-copy shared value; the first
+		// filtered record copies only the already-accepted prefix and continues in
+		// the same pass, so subscription predicates are never evaluated twice.
+		bool requiresView = source.size() > limits.maximumEventsPerPacket;
+		std::vector<PhysicsEvent> view;
+		if(requiresView) view.reserve(limits.maximumEventsPerPacket);
+		for(std::size_t index = 0U; index < source.size(); ++index) {
+			const PhysicsEvent& event = source[index];
 			const bool matches = !applySubscriptionFilters || AnySubscriptionMatches(event, subscriptions);
 			if(!matches) {
 				++packet.filteredCount;
-				allVisible = false;
+				if(!requiresView) {
+					requiresView = true;
+					view.reserve(std::min(source.size(), limits.maximumEventsPerPacket));
+					view.insert(view.end(), source.begin(), source.begin() + index);
+				}
 				continue;
 			}
-			++visibleCount;
+			if(!requiresView) continue;
+			if(view.size() == limits.maximumEventsPerPacket) {
+				++packet.droppedCount;
+				continue;
+			}
+			view.push_back(event);
 		}
-		if(allVisible && visibleCount <= limits.maximumEventsPerPacket && canonical.events != nullptr) {
+		if(!requiresView && canonical.events != nullptr) {
 			packet.events = canonical.events;
 			packet.countsByType = canonical.countsByType;
 		} else {
-			std::vector<PhysicsEvent> view;
-			view.reserve(std::min(visibleCount, limits.maximumEventsPerPacket));
-			for(const PhysicsEvent& event : source) {
-				if(applySubscriptionFilters && !AnySubscriptionMatches(event, subscriptions)) continue;
-				if(view.size() == limits.maximumEventsPerPacket) {
-					++packet.droppedCount;
-					continue;
-				}
-				view.push_back(event);
-			}
 			for(const PhysicsEvent& event : view) ++packet.countsByType[EventIndex(event.type)];
 			packet.events = std::make_shared<const std::vector<PhysicsEvent>>(std::move(view));
 		}
