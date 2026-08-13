@@ -6,6 +6,12 @@ file(GLOB_RECURSE TERRAENGINE_EDITOR_ANIMATION_TEST_SOURCES CONFIGURE_DEPENDS
 
 add_executable(TerraEngine-EditorTests
 	EditorTests.cpp
+	Audio/AudioClipCompilerTests.cpp
+	Audio/AudioImportPlaybackTests.cpp
+	Audio/AudioAuthoringPersistenceTests.cpp
+	Audio/AudioEditorControlTests.cpp
+	Audio/AudioExportTests.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/AudioClipCompiler.cpp
 	${TERRAENGINE_EDITOR_ANIMATION_TEST_SOURCES}
 	Export/ArchiveSerializationTests.cpp
 	Export/BuildProfileCollectionTests.cpp
@@ -217,6 +223,7 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/HistoryPlayModeAutomationProvider.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/AuthoringAutomationProvider.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/PhysicsAutomationProvider.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/AudioAutomationProvider.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/AnimationAutomationSchemas.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/AnimationAutomationTransactions.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/AnimationAutomationJobs.cpp
@@ -226,6 +233,7 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/AnimationRuntimeOperations.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/AnimationAutomationProvider.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOrientationWidget.cpp
+	Core/EditorWindowRttiStubs.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewMarkerPipeline.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayIcons.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayMarkers.cpp
@@ -253,6 +261,17 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Engine/Profiling/ProfilerCapture.cpp
 	${CMAKE_SOURCE_DIR}/Engine/Profiling/ProfilerJournalV1.cpp
 )
+
+add_test(NAME Editor.AudioClipCompiler COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.AudioClipCompiler PROPERTIES
+	LABELS "Editor;Audio;AssetPipeline"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.Audio.Compile")
+
+# Audio editor tests are state based, so CI does not need an audible hardware device.
+add_test(NAME Editor.AudioIntegration COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.AudioIntegration PROPERTIES
+	LABELS "Editor;Audio;AssetPipeline;Export"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.AudioImportPlayback,Editor.AudioAuthoring,Editor.AudioControl,Editor.AudioExport")
 
 target_include_directories(TerraEngine-EditorTests
 	PRIVATE

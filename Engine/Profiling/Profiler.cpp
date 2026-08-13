@@ -4,6 +4,7 @@
 #include "Profiling/ProfilerJournalV1.h"
 
 #include "Animation/Diagnostics/AnimationDiagnostics.h"
+#include "Audio/AudioDiagnostics.h"
 #include "Core/Scheduling/FrameWorkload.h"
 #include "Physics/PhysicsDiagnostics.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
@@ -18,6 +19,8 @@
 #include <numeric>
 #include <sstream>
 #include <thread>
+#include <tuple>
+#include <type_traits>
 
 #ifdef _WIN32
 	#ifndef NOMINMAX
@@ -701,7 +704,11 @@ ProfilerAnimationOptimizationEvidence MakeAnimationOptimizationEvidence(
 	evidence.compactPlanGroups = counters.compactPlanGroups;
 	evidence.compactDispatches = counters.compactDispatches;
 	evidence.rejectedCandidateCount = counters.rejectedCandidateCount;
-	static_assert(evidence.fallbackReasonCounts.size() == counters.fallbackReasonCounts.size());
+	// Compare the declared array extents at compile time. GCC correctly rejects
+	// calling size() through the runtime counters reference inside static_assert,
+	// even though MSVC can fold that expression as an extension.
+	static_assert(std::tuple_size_v<decltype(evidence.fallbackReasonCounts)>
+		== std::tuple_size_v<std::remove_cvref_t<decltype(counters.fallbackReasonCounts)>>);
 	std::copy(counters.fallbackReasonCounts.begin(), counters.fallbackReasonCounts.end(),
 		evidence.fallbackReasonCounts.begin());
 	evidence.timingNanoseconds = {
@@ -1277,6 +1284,7 @@ void Profiler::EndFrame()
 	// inside the frame being measured, avoiding recursive instrumentation.
 	const std::int64_t collectionStartNanoseconds = SteadyNowNanoseconds();
 	const auto physicsSnapshot = TerraEngine::Physics::AcquirePhysicsDiagnosticsSnapshot();
+	const auto audioSnapshot = TerraEngine::Audio::AcquireAudioDiagnosticsSnapshot();
 	std::vector<WorkloadExecutionRecord> workloadExecutionSnapshot =
 		TerraEngine::Scheduling::TakeLatestFrameWorkloadExecutionRecordsForProfiling();
 	thread_local std::vector<WorkerTelemetryRecord> workerCounterScratch;
@@ -1449,6 +1457,19 @@ void Profiler::EndFrame()
 			physics->extraction.examinedBodies, physics->extraction.extractedBodies,
 			physics->extraction.convertedBodies, physics->extraction.changedBodies,
 			std::min(physics->extraction.changedBodies, physics->publication.currentEntries)};
+	}
+	if(audioSnapshot) {
+		// Audio publishes one immutable bounded snapshot at AudioCommit. Copy only
+		// scalar counts into the durable profiler module so saved captures never
+		// need a live backend or device handle.
+		if(auto* module = FindModule(currentFrame->moduleSummaries, ProfilerModuleId::CpuEngine)) {
+			AddOrReplaceMetric(*module, "Audio.DeviceAvailable", audioSnapshot->deviceAvailable ? 1.0 : 0.0, "boolean");
+			AddOrReplaceMetric(*module, "Audio.AudibleVoices", static_cast<double>(audioSnapshot->audibleVoices), "count");
+			AddOrReplaceMetric(*module, "Audio.VirtualVoices", static_cast<double>(audioSnapshot->virtualVoices), "count");
+			AddOrReplaceMetric(*module, "Audio.ListenerCandidates", static_cast<double>(audioSnapshot->listenerCandidates), "count");
+			AddOrReplaceMetric(*module, "Audio.FailureEpisodes", static_cast<double>(audioSnapshot->failures.size()), "count");
+			AddOrReplaceMetric(*module, "Audio.ControlReceipts", static_cast<double>(audioSnapshot->controlReceipts.size()), "count");
+		}
 	}
 
 	// Scheduler records are published only after a completed frame-workload pass.

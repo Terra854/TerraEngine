@@ -45,7 +45,8 @@ namespace TerraEngine::Resource
 		AnimationMask = 10U,
 		RetargetProfile = 11U,
 		MotionDatabase = 12U,
-		RagdollProfile = 13U
+		RagdollProfile = 13U,
+		AudioClip = 14U
 	};
 
 	enum class ResidencyState : std::uint8_t
@@ -162,7 +163,8 @@ namespace TerraEngine::Resource
 		AnimationMask,
 		RetargetProfile,
 		MotionDatabase,
-		RagdollProfile
+		RagdollProfile,
+		AudioClip
 	};
 
 	enum class CpuPayloadOwnershipState : std::uint8_t

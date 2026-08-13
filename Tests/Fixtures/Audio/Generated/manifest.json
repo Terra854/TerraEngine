@@ -1,0 +1,45 @@
+﻿{
+    "schemaVersion":  1,
+    "fixtures":  [
+                     {
+                         "file":  "corrupt_ogg.ogg",
+                         "bytes":  10,
+                         "sha256":  "53076921354e963b19bafec2888a89de188c0fbe02b2fa0a65d9fb9437b6a91d"
+                     },
+                     {
+                         "file":  "invalid_metadata.wav",
+                         "bytes":  16,
+                         "sha256":  "be45cb2605bf36bebde684841a28f0fd43c69850a3dce5fedba69928ee3a8991"
+                     },
+                     {
+                         "file":  "loop_boundary.wav",
+                         "bytes":  52,
+                         "sha256":  "217bdf81263c0aab818f81ce089b9e2397de364f2a87bf9af834b814fe67fb24"
+                     },
+                     {
+                         "file":  "mono_pcm16.wav",
+                         "bytes":  60,
+                         "sha256":  "25a6548c28f1cd61c45274c6bcfa00ec56831e2c189caf1fd7bed5e0a024228e"
+                     },
+                     {
+                         "file":  "stereo_impulses.wav",
+                         "bytes":  60,
+                         "sha256":  "d7dcfae24bc73c12bcb9c5d864b6691627fbc1c5c670ee85ec169c3538a7b12c"
+                     },
+                     {
+                         "file":  "truncated_header.wav",
+                         "bytes":  12,
+                         "sha256":  "1e645d860e6564cde27504d80f458a672ce106fdc7d796fb9672ae65642346b2"
+                     },
+                     {
+                         "file":  "truncated_payload.wav",
+                         "bytes":  40,
+                         "sha256":  "59b89efd5b88f5ecbb8f173c9a26058e2a87ac2b7798c47ad962361c77631e1f"
+                     },
+                     {
+                         "file":  "zero_frame.wav",
+                         "bytes":  44,
+                         "sha256":  "4f8734c5e13ac599e168cf247a51c1dd0758537ce00bf16d7fed1a3d14d07041"
+                     }
+                 ]
+}

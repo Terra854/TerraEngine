@@ -1,0 +1,55 @@
+﻿{
+    "schemaVersion":  1,
+    "license":  "CC0 1.0",
+    "sources":  [
+                    {
+                        "source":  "Music",
+                        "sourcePage":  "https://www.kenney.nl/assets/music-jingles",
+                        "archiveUrl":  "https://kenney.nl/media/pages/assets/music-jingles/f37e530b9e-1677590399/kenney_music-jingles.zip",
+                        "archiveBytes":  1239525,
+                        "archiveSha256":  "b729ba57959bd58793d2c5cafa348aaf2655d354f3da35ec4729e03ec77197b8",
+                        "licenseFile":  "Music-LICENSE.txt",
+                        "archivePath":  "Audio/8-Bit jingles/jingles_NES00.ogg",
+                        "committedPath":  "Tests/Fixtures/Audio/ThirdParty/Kenney/Music/jingles_NES00.ogg",
+                        "bytes":  39948,
+                        "sha256":  "1010c9b566d6c090ff03a4aaaf7439e26eb4cc4f20373800d0b7e6a9057b795d"
+                    },
+                    {
+                        "source":  "Interface-Sounds",
+                        "sourcePage":  "https://www.kenney.nl/assets/interface-sounds",
+                        "archiveUrl":  "https://kenney.nl/media/pages/assets/interface-sounds/fa43c1dd4d-1677589452/kenney_interface-sounds.zip",
+                        "archiveBytes":  834536,
+                        "archiveSha256":  "f2193d072726d6758a5f7871b2dcc54dcce0d5c35c6f0a62f92549b327c81232",
+                        "licenseFile":  "Interface-Sounds-LICENSE.txt",
+                        "archivePath":  "Audio/click_001.ogg",
+                        "committedPath":  "Tests/Fixtures/Audio/ThirdParty/Kenney/Sfx/click_001.ogg",
+                        "bytes":  4876,
+                        "sha256":  "ccfb7fa0cccdd9faec0eb16033c732b1e308d139d80f799161495d58f7adcdb9"
+                    },
+                    {
+                        "source":  "Interface-Sounds",
+                        "sourcePage":  "https://www.kenney.nl/assets/interface-sounds",
+                        "archiveUrl":  "https://kenney.nl/media/pages/assets/interface-sounds/fa43c1dd4d-1677589452/kenney_interface-sounds.zip",
+                        "archiveBytes":  834536,
+                        "archiveSha256":  "f2193d072726d6758a5f7871b2dcc54dcce0d5c35c6f0a62f92549b327c81232",
+                        "licenseFile":  "Interface-Sounds-LICENSE.txt",
+                        "archivePath":  "Audio/confirmation_001.ogg",
+                        "committedPath":  "Tests/Fixtures/Audio/ThirdParty/Kenney/Sfx/confirmation_001.ogg",
+                        "bytes":  8968,
+                        "sha256":  "063564703b6094d70718a3e787a55cc9141611e4ecd6b6637f8828f79b4a8c3a"
+                    },
+                    {
+                        "source":  "Interface-Sounds",
+                        "sourcePage":  "https://www.kenney.nl/assets/interface-sounds",
+                        "archiveUrl":  "https://kenney.nl/media/pages/assets/interface-sounds/fa43c1dd4d-1677589452/kenney_interface-sounds.zip",
+                        "archiveBytes":  834536,
+                        "archiveSha256":  "f2193d072726d6758a5f7871b2dcc54dcce0d5c35c6f0a62f92549b327c81232",
+                        "licenseFile":  "Interface-Sounds-LICENSE.txt",
+                        "archivePath":  "Audio/error_001.ogg",
+                        "committedPath":  "Tests/Fixtures/Audio/ThirdParty/Kenney/Sfx/error_001.ogg",
+                        "bytes":  7373,
+                        "sha256":  "46e67425d16339772e8d328fb36a49426c9467418686e11beeb71ff84b0f6433"
+                    }
+                ],
+    "acquiredUtc":  "2026-08-12T17:58:12.7668713Z"
+}

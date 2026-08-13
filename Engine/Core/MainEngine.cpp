@@ -32,6 +32,7 @@
 #include "Scene/RuntimeLayout.h"
 #include "Scripting/ScriptingSystem.h"
 #include "Physics/PhysicsSystem.h"
+#include "Audio/AudioSystem.h"
 #include "Scripting/ScriptGlue.h"
 #include "UI/UISystem.h"
 #include "Utilities/PlatformUtils.h"
@@ -253,6 +254,11 @@ void Engine::Initialize()
 		std::erase(physicsDeclaration.before, "UISystem");
 	}
 	RegisterEngineSystem(systems, systemScheduler, physicsSystem, std::move(physicsDeclaration));
+
+	// Audio follows gameplay/physics authoring, prepares spatial voices from an
+	// immutable snapshot, and commits provider state before presentation.
+	TerraEngine::Audio::AudioSystem& audioSystem = TerraEngine::Audio::AudioSystem::Instance();
+	RegisterEngineSystem(systems, systemScheduler, audioSystem, audioSystem.SchedulerDeclaration());
 
 	// Presentation is a separate post-physics owner so current-step ragdoll
 	// snapshots can shape the visual plan without rewriting controller authority.

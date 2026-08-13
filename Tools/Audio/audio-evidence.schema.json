@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schemaVersion", "kind", "provider"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "kind": {"enum":["audio-stress","audio-soak"]},
+    "provider": {"type":"string"},
+    "providerRevision":{"type":"string"},
+    "deviceConfiguration":{"type":"string"},
+    "machine":{"type":"string"},
+    "operatingSystem":{"type":"string"},
+    "referenceScene":{"type":"string"},
+    "clipSet":{"type":"string"},
+    "baseline":{"type":"string"},
+    "schedulerDeclarations":{"type":"array","items":{"type":"string"},"minItems":3},
+    "requestedSources":{"type":"integer","minimum":1},
+    "repeatCount":{"type":"integer","minimum":1},
+    "hash":{"type":["integer","string"]},
+    "durationMinutes":{"type":"integer","minimum":1},
+    "actualElapsedSeconds":{"type":"number","minimum":0},
+    "iterations":{"type":"integer","minimum":1},
+    "deterministic":{"type":"boolean"},
+    "voiceLimit":{"type":"integer","minimum":1},
+    "maximumVoicesObserved":{"type":"integer","minimum":0},
+    "medianFrameDeltaMs":{"type":"number"},
+    "p95FrameDeltaMs":{"type":"number"},
+    "maximumMedianFrameDeltaMs":{"type":"number"},
+    "maximumP95FrameDeltaMs":{"type":"number"},
+    "baselineRetainedResources":{"type":"integer","minimum":0},
+    "finalRetainedResources":{"type":"integer","minimum":0},
+    "resourceGrowthPercent":{"type":"number","minimum":0}
+  },
+  "allOf": [
+    {"if":{"properties":{"kind":{"const":"audio-stress"}}},"then":{"required":["requestedSources","repeatCount","hash","deterministic","voiceLimit","maximumVoicesObserved","medianFrameDeltaMs","p95FrameDeltaMs","baselineRetainedResources","finalRetainedResources","resourceGrowthPercent","providerRevision","deviceConfiguration","machine","operatingSystem","referenceScene","clipSet","baseline","schedulerDeclarations"]}},
+    {"if":{"properties":{"kind":{"const":"audio-soak"}}},"then":{"required":["durationMinutes","actualElapsedSeconds","iterations","deterministic","voiceLimit","maximumVoicesObserved","maximumMedianFrameDeltaMs","maximumP95FrameDeltaMs","baselineRetainedResources","finalRetainedResources","resourceGrowthPercent","providerRevision","deviceConfiguration","machine","operatingSystem","referenceScene","clipSet","baseline","schedulerDeclarations"]}}
+  ]
+}

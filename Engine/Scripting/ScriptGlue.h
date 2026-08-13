@@ -19,6 +19,8 @@ inline constexpr std::uint32_t kNativeRuntimeAbiVersion = 1U;
 inline constexpr std::uint32_t kNativeRuntimeDiagnosticBytes = 192U;
 inline constexpr std::uint32_t kNativeInputKeyCapacity = 128U;
 inline constexpr std::uint32_t kNativeInputMouseButtonCapacity = 8U;
+inline constexpr std::uint32_t kNativeAudioAbiVersion = 1U;
+inline constexpr std::uint32_t kNativeAudioDiagnosticBytes = 192U;
 
 #pragma pack(push, 8)
 struct NativePhysicsAbiHeader { std::uint32_t abiVersion; std::uint32_t structSize; };
@@ -486,6 +488,67 @@ static_assert(offsetof(NativeTimeSnapshot, header) == 0U);
 static_assert(offsetof(NativeSceneRenderSettings, header) == 0U);
 static_assert(offsetof(NativeResourceStreamingStatus, header) == 0U);
 
+// Audio uses a deliberately small, fixed-width ABI. Native code copies every
+// request into the protected control queue and reads only committed snapshots.
+#pragma pack(push, 8)
+struct NativeAudioAbiHeader { std::uint32_t abiVersion; std::uint32_t structSize; };
+
+enum class NativeAudioStatus : std::uint32_t {
+	Success = 0U, Queued, Accepted, NotFound, StaleTarget,
+	InvalidArgument, LimitExceeded, ProviderFailure, VersionMismatch
+};
+
+enum class NativeAudioCommandKind : std::uint32_t { Play = 0U, Pause, Resume, Stop };
+
+struct NativeAudioCommandRequest {
+	NativeAudioAbiHeader header;
+	std::uint32_t objectEntity;
+	std::uint32_t componentGeneration;
+	std::uint32_t playbackGeneration;
+	NativeAudioCommandKind kind;
+	std::uint64_t requestedFrame;
+	std::uint64_t producerId;
+	std::uint64_t correlationId;
+	std::uint64_t idempotencyKey;
+};
+
+struct NativeAudioCommandReceipt {
+	NativeAudioAbiHeader header;
+	NativeAudioStatus status;
+	std::uint32_t rejection;
+	std::uint64_t batchSequence;
+	std::uint64_t requestedFrame;
+	std::uint64_t correlationId;
+	char diagnostic[kNativeAudioDiagnosticBytes];
+};
+
+struct NativeAudioPlaybackState {
+	NativeAudioAbiHeader header;
+	NativeAudioStatus status;
+	std::uint32_t state;
+	std::uint32_t playbackGeneration;
+	std::uint32_t audible;
+	std::uint64_t frame;
+	std::uint64_t logicalFrame;
+	float gain;
+	float pitch;
+};
+
+struct NativeAudioMixState {
+	NativeAudioAbiHeader header;
+	NativeAudioStatus status;
+	std::uint32_t muted;
+	std::uint64_t generation;
+	float volume;
+	std::uint32_t reserved;
+};
+#pragma pack(pop)
+
+static_assert(offsetof(NativeAudioCommandRequest, header) == 0U);
+static_assert(offsetof(NativeAudioCommandReceipt, header) == 0U);
+static_assert(offsetof(NativeAudioPlaybackState, header) == 0U);
+static_assert(offsetof(NativeAudioMixState, header) == 0U);
+
 class Engine;
 
 // The editor executable registers a plain function pointer so gameplay code can
@@ -546,6 +609,19 @@ extern "C" {
 	TERRAENGINE_API const char* Native_GetComponentStringProperty(uint32_t objectId, const char* componentType, const char* propertyName);
 	TERRAENGINE_API void Native_SetComponentStringProperty(uint32_t objectId, const char* componentType, const char* propertyName, const char* value);
 	TERRAENGINE_API bool Native_RemoveComponent(uint32_t objectId, const char* componentType);
+
+	// Audio controls use the same typed queue for native, managed, and editor
+	// producers, while reads return only the latest protected commit snapshot.
+	TERRAENGINE_API std::uint32_t Native_Audio_GetAbiVersion();
+	TERRAENGINE_API NativeAudioStatus Native_Audio_SubmitCommand(
+		const NativeAudioCommandRequest* request,
+		NativeAudioCommandReceipt* receipt);
+	TERRAENGINE_API NativeAudioStatus Native_Audio_ReadPlayback(
+		std::uint32_t objectEntity,
+		std::uint32_t componentGeneration,
+		NativeAudioPlaybackState* state);
+	TERRAENGINE_API NativeAudioStatus Native_Audio_ReadMasterMix(NativeAudioMixState* state);
+	TERRAENGINE_API NativeAudioStatus Native_Audio_SetMasterMix(const NativeAudioMixState* state);
 
 	// Graphics ABI v1 queues runtime-only settings for RenderSystem's protected
 	// boundary. These calls never persist project authoring files from gameplay.

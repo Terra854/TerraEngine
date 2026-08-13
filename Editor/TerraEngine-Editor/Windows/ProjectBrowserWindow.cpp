@@ -990,6 +990,7 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 					else if (importer == "UIImporter") payloadType = "ASSET_TUIML";
 					else if (importer == "StyleImporter") payloadType = "ASSET_TUSS";
 					else if (importer == "PrefabImporter") payloadType = "ASSET_PREFAB";
+					else if (importer == "AudioClipImporter" || importer == "CookedAudioClipImporter") payloadType = "ASSET_AUDIO";
 
 					ImGui::SetDragDropPayload(payloadType, &guid, sizeof(TerraEngine::UUID));
 					ImGui::Text("%s", filename.c_str());

@@ -12,10 +12,11 @@
     "dotnetSdkVersion":  "10.0.302",
     "runtimePackVersion":  "10.0.10",
     "supportedRuntimeIdentifiers":  [
-                                        "win-x64"
+                                        "win-x64",
+                                        "linux-x64"
                                     ],
-    "packageCount":  25,
-    "totalBytes":  170401909,
+    "packageCount":  29,
+    "totalBytes":  263581587,
     "packages":  [
                      {
                          "id":  "HexaGen.Runtime",
@@ -39,6 +40,36 @@
                                                 "path":  "licenses/hexagen.runtime/1.1.21/LICENSE.txt",
                                                 "bytes":  1091,
                                                 "sha256":  "4d58417d5df95fabd6a337d5eb2370309fbf76d611ac2dde3229043d2c0d5152"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "Microsoft.AspNetCore.App.Runtime.linux-x64",
+                         "version":  "10.0.10",
+                         "file":  "feed/microsoft.aspnetcore.app.runtime.linux-x64.10.0.10.nupkg",
+                         "bytes":  12926933,
+                         "sha256":  "0c1b77989393429856761176af70c8cbd22932134fc95230d1418ded0f9f7264",
+                         "sha512":  "59e6bbffd05eaa2a5569dcd79f9e315a552f328bc2eeb655b92aac972b619ed1b3c251057062f09744cb9b486897b7bba84d93c23b5cef1c0070871179980fa1",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/microsoft.aspnetcore.app.runtime.linux-x64/10.0.10/microsoft.aspnetcore.app.runtime.linux-x64.10.0.10.nupkg",
+                         "projectUrl":  "https://asp.net/",
+                         "repositoryUrl":  "https://github.com/dotnet/dotnet",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/microsoft.aspnetcore.app.runtime.linux-x64/10.0.10/LICENSE.txt"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/microsoft.aspnetcore.app.runtime.linux-x64/10.0.10/LICENSE.txt",
+                                                "bytes":  1116,
+                                                "sha256":  "cfc21f5e8bd655ae997eec916138b707b1d290b83272c02a95c9f821b8c87310"
+                                            },
+                                            {
+                                                "path":  "licenses/microsoft.aspnetcore.app.runtime.linux-x64/10.0.10/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  55638,
+                                                "sha256":  "52af3d603b6d069e635f8afd08ec44ec01559255b5f3afd161ae9e6fe7e7aa54"
                                             }
                                         ]
                      },
@@ -223,6 +254,36 @@
                                         ]
                      },
                      {
+                         "id":  "Microsoft.NETCore.App.Runtime.NativeAOT.linux-x64",
+                         "version":  "10.0.10",
+                         "file":  "feed/microsoft.netcore.app.runtime.nativeaot.linux-x64.10.0.10.nupkg",
+                         "bytes":  26321818,
+                         "sha256":  "03bd45b398fb366daa396fb3287e24a03216768e47c07d8a535de752dc33cb8e",
+                         "sha512":  "f7df04f510b36910772a669728019a6478649df141f84775cad5f03d4007da81de404020f57067b4f43fc6dbd1cf06015363b7ba11beca6d0dc17a1ea5f4cc34",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/microsoft.netcore.app.runtime.nativeaot.linux-x64/10.0.10/microsoft.netcore.app.runtime.nativeaot.linux-x64.10.0.10.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "https://github.com/dotnet/dotnet",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/microsoft.netcore.app.runtime.nativeaot.linux-x64/10.0.10/LICENSE.TXT"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/microsoft.netcore.app.runtime.nativeaot.linux-x64/10.0.10/LICENSE.TXT",
+                                                "bytes":  1116,
+                                                "sha256":  "cfc21f5e8bd655ae997eec916138b707b1d290b83272c02a95c9f821b8c87310"
+                                            },
+                                            {
+                                                "path":  "licenses/microsoft.netcore.app.runtime.nativeaot.linux-x64/10.0.10/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  76623,
+                                                "sha256":  "66f1d4e44973185519bb4aa8a9718eb22fc7af2cc532e3ae9cfc4c127ee7fc54"
+                                            }
+                                        ]
+                     },
+                     {
                          "id":  "Microsoft.NETCore.App.Runtime.NativeAOT.win-x64",
                          "version":  "10.0.10",
                          "file":  "feed/microsoft.netcore.app.runtime.nativeaot.win-x64.10.0.10.nupkg",
@@ -249,6 +310,36 @@
                                                 "path":  "licenses/microsoft.netcore.app.runtime.nativeaot.win-x64/10.0.10/THIRD-PARTY-NOTICES.TXT",
                                                 "bytes":  78041,
                                                 "sha256":  "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "Microsoft.NETCore.App.Runtime.linux-x64",
+                         "version":  "10.0.10",
+                         "file":  "feed/microsoft.netcore.app.runtime.linux-x64.10.0.10.nupkg",
+                         "bytes":  40096825,
+                         "sha256":  "1225154d0588617fdb9fe3fa1c37b40216ecdd2372154e661e115a6836b85b84",
+                         "sha512":  "c52730cbd32ea2210c63061077c8c6f6fefac73f0720942dc531ba927c3e209a32e6676d74a76304ee5bf33fed712217634254b8c6717db07d957ed1ee003cb8",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/microsoft.netcore.app.runtime.linux-x64/10.0.10/microsoft.netcore.app.runtime.linux-x64.10.0.10.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "https://github.com/dotnet/dotnet",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/microsoft.netcore.app.runtime.linux-x64/10.0.10/LICENSE.TXT"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/microsoft.netcore.app.runtime.linux-x64/10.0.10/LICENSE.TXT",
+                                                "bytes":  1116,
+                                                "sha256":  "cfc21f5e8bd655ae997eec916138b707b1d290b83272c02a95c9f821b8c87310"
+                                            },
+                                            {
+                                                "path":  "licenses/microsoft.netcore.app.runtime.linux-x64/10.0.10/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  76623,
+                                                "sha256":  "66f1d4e44973185519bb4aa8a9718eb22fc7af2cc532e3ae9cfc4c127ee7fc54"
                                             }
                                         ]
                      },
@@ -364,6 +455,36 @@
                                                 "path":  "licenses/netstandard.library/2.0.3/THIRD-PARTY-NOTICES.TXT",
                                                 "bytes":  1617,
                                                 "sha256":  "0684b2349427ee28e392ae8914645832e59731dba8a38a984f72b3fb8769c76b"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "runtime.linux-x64.Microsoft.DotNet.ILCompiler",
+                         "version":  "10.0.10",
+                         "file":  "feed/runtime.linux-x64.microsoft.dotnet.ilcompiler.10.0.10.nupkg",
+                         "bytes":  13834102,
+                         "sha256":  "af310a805ab73def0d767498f2c70b1ec18b17036816f93a694cb1947e7721c4",
+                         "sha512":  "23129b65657a8a404f989a4cd48040dd30318ab09ac89ffcdcf6c5a982a40195e5b1d1c8ef8c13eff2ebef75c21de78f2436b412ccd757d72489775e11ada5ab",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/runtime.linux-x64.microsoft.dotnet.ilcompiler/10.0.10/runtime.linux-x64.microsoft.dotnet.ilcompiler.10.0.10.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "https://github.com/dotnet/dotnet",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/shared/MIT.txt"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/shared/MIT.txt",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            },
+                                            {
+                                                "path":  "licenses/runtime.linux-x64.microsoft.dotnet.ilcompiler/10.0.10/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  76623,
+                                                "sha256":  "66f1d4e44973185519bb4aa8a9718eb22fc7af2cc532e3ae9cfc4c127ee7fc54"
                                             }
                                         ]
                      },

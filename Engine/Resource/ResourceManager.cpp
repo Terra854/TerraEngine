@@ -24,6 +24,8 @@
 
 #include "Core/Logger/Logger.h"
 #include "Animation/Assets/AnimationClipAsset.h"
+#include "Audio/Assets/AudioClipAsset.h"
+#include "File Formats/TerraEngineAudioFile.h"
 #include "Animation/Assets/AnimationControllerAsset.h"
 #include "Animation/Assets/AnimationMaskAsset.h"
 #include "Animation/Assets/MotionDatabaseAsset.h"
@@ -218,6 +220,8 @@ namespace
 			return { ".temotiondb" };
 		case AssetType::RagdollProfile:
 			return { ".teragdoll" };
+		case AssetType::AudioClip:
+			return { ".teaudio" };
 		}
 
 		return {};
@@ -624,8 +628,10 @@ namespace
 			return AssetType::RetargetProfile;
 		case TerraEngine::Resource::ResidencyAssetType::MotionDatabase:
 			return AssetType::MotionDatabase;
-		case TerraEngine::Resource::ResidencyAssetType::RagdollProfile:
-			return AssetType::RagdollProfile;
+	case TerraEngine::Resource::ResidencyAssetType::RagdollProfile:
+		return AssetType::RagdollProfile;
+	case TerraEngine::Resource::ResidencyAssetType::AudioClip:
+		return AssetType::AudioClip;
 		case TerraEngine::Resource::ResidencyAssetType::Material:
 		case TerraEngine::Resource::ResidencyAssetType::Shader:
 		case TerraEngine::Resource::ResidencyAssetType::FontAtlas:
@@ -817,6 +823,11 @@ namespace
 			}
 		}
 		return false;
+	}
+
+	bool IsNativeAudioAssetPath(const std::filesystem::path& path)
+	{
+		return HasNativeExtensionForAssetType(path, AssetType::AudioClip);
 	}
 
 	// FindEditorProjectRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2696,11 +2707,96 @@ void ResourceManager::ClearCaches()
 		cookedColliderPaths.pathToId.clear();
 		cookedColliderPaths.idToPath.clear();
 	}
+	{
+		std::unique_lock pathLock(audioClipPaths.mutex);
+		audioClipPaths.pathToId.clear();
+		audioClipPaths.idToPath.clear();
+		std::unique_lock assetLock(audioClipMutex);
+		audioClipAssets.clear();
+		audioClipGenerations.clear();
+	}
 	ClearResidencyState();
 	ClearStreamingState();
 	// Mesh and animation cache ownership changed as one protected teardown
 	// publication, so wake binding synchronization exactly once.
 	m_AnimationBindingResourceRevision.fetch_add(1U, std::memory_order_release);
+}
+
+TerraEngine::UUID ResourceManager::LoadAudioClip(const std::filesystem::path& path)
+{
+	if(!HasNativeExtensionForAssetType(path, AssetType::AudioClip)) {
+		TERRAENGINE_LOG(LogLevel::Warning, "Skipping non-cooked audio source; runtime requires .teaudio: " << path);
+		return TerraEngine::EMPTY_UUID;
+	}
+	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
+	const std::string key = NormalizeKey(resolvedPath);
+	{
+		std::shared_lock pathLock(audioClipPaths.mutex);
+		const auto registered = audioClipPaths.pathToId.find(key);
+		if(registered != audioClipPaths.pathToId.end()) {
+			std::shared_lock assetLock(audioClipMutex);
+			if(audioClipAssets.contains(registered->second)) return registered->second;
+		}
+	}
+	const std::vector<std::uint8_t> bytes = ReadFileBytes(path);
+	if(bytes.empty() || bytes.size()
+		> TerraEngine::Audio::kAudioFileMaximumPayloadBytes + TerraEngine::Audio::kAudioFileHeaderSize)
+		return TerraEngine::EMPTY_UUID;
+	const TerraEngine::Audio::AudioFileReadResult parsed = TerraEngine::Audio::ReadAudioFile(bytes);
+	if(!parsed.Succeeded()) {
+		TERRAENGINE_LOG(LogLevel::Error, "Audio TEAF envelope rejected: " << resolvedPath);
+		return TerraEngine::EMPTY_UUID;
+	}
+	std::vector<std::uint8_t> payload(parsed.payload.begin(), parsed.payload.end());
+	const TerraEngine::UUID id = parsed.metadata.assetId;
+	std::uint64_t generation = 1U;
+	{
+		std::unique_lock pathLock(audioClipPaths.mutex);
+		if(const auto registered = audioClipPaths.pathToId.find(key);
+			registered != audioClipPaths.pathToId.end() && registered->second != id) return TerraEngine::EMPTY_UUID;
+		audioClipPaths.pathToId[key] = id;
+		audioClipPaths.idToPath[id] = key;
+		std::unique_lock assetLock(audioClipMutex);
+		if(const auto existing = audioClipAssets.find(id); existing != audioClipAssets.end()) return id;
+		generation = audioClipGenerations[id] + 1U;
+		if(generation == 0U) return TerraEngine::EMPTY_UUID;
+		auto asset = TerraEngine::Audio::AudioClipAsset::Create(parsed.metadata, std::move(payload), generation);
+		if(!asset) return TerraEngine::EMPTY_UUID;
+		audioClipGenerations[id] = generation;
+		audioClipAssets[id] = std::move(asset);
+	}
+	RegisterResidencyResource(id, AssetType::AudioClip, key,
+		static_cast<std::uint64_t>(sizeof(TerraEngine::Audio::AudioClipAsset) + parsed.payload.size()), 0U, true,
+		TerraEngine::Resource::ResidencyState::Active);
+	UpdateStreamableLoadResult(id, AssetType::AudioClip, key, true,
+		static_cast<std::uint64_t>(sizeof(TerraEngine::Audio::AudioClipAsset) + parsed.payload.size()), 0U);
+	return id;
+}
+
+bool ResourceManager::ReloadAudioClip(const TerraEngine::UUID& id)
+{
+	std::filesystem::path path;
+	{
+		std::shared_lock lock(audioClipPaths.mutex);
+		const auto found = audioClipPaths.idToPath.find(id);
+		if(found == audioClipPaths.idToPath.end()) return false;
+		path = found->second;
+	}
+	// Remove no live value before parsing: a bad reimport keeps the last known
+	// good immutable generation visible to every source and retained packet.
+	const std::vector<std::uint8_t> bytes = ReadFileBytes(path);
+	if(bytes.empty() || bytes.size()
+		> TerraEngine::Audio::kAudioFileMaximumPayloadBytes + TerraEngine::Audio::kAudioFileHeaderSize) return false;
+	const auto parsed = TerraEngine::Audio::ReadAudioFile(bytes);
+	if(!parsed.Succeeded() || parsed.metadata.assetId != id) return false;
+	std::vector<std::uint8_t> payload(parsed.payload.begin(), parsed.payload.end());
+	std::unique_lock lock(audioClipMutex);
+	const std::uint64_t generation = audioClipGenerations[id] + 1U;
+	auto replacement = TerraEngine::Audio::AudioClipAsset::Create(parsed.metadata, std::move(payload), generation);
+	if(!replacement) return false;
+	audioClipGenerations[id] = generation;
+	audioClipAssets[id] = std::move(replacement);
+	return true;
 }
 
 // ResourceManager::DeleteResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2759,6 +2855,17 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 		registry.idToPath.erase(id);
 		break;
 	}
+	case AssetType::AudioClip: {
+		std::unique_lock lock(audioClipPaths.mutex);
+		for(auto iterator = audioClipPaths.pathToId.begin(); iterator != audioClipPaths.pathToId.end();) {
+			iterator = iterator->second == id ? audioClipPaths.pathToId.erase(iterator) : std::next(iterator);
+		}
+		audioClipPaths.idToPath.erase(id);
+		std::unique_lock assetLock(audioClipMutex);
+		audioClipAssets.erase(id);
+		audioClipGenerations.erase(id);
+		break;
+	}
 	}
 	if(type == AssetType::Mesh) {
 		// Deletion is a tombstone publication for animator bindings: retained
@@ -2773,7 +2880,7 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 	}
 
 	// Physics assets have no renderer-owned object or descriptor to retire.
-	if(type != AssetType::PhysicsMaterial && type != AssetType::CookedCollider
+	if(type != AssetType::PhysicsMaterial && type != AssetType::CookedCollider && type != AssetType::AudioClip
 		&& type != AssetType::Skeleton && type != AssetType::AnimationClip
 		&& type != AssetType::AnimationController && type != AssetType::AnimationMask
 		&& type != AssetType::RetargetProfile && type != AssetType::MotionDatabase
@@ -2902,6 +3009,9 @@ void ResourceManager::RegisterResidencyResource(
 			break;
 		case AssetType::RagdollProfile:
 			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::RagdollProfile;
+			break;
+		case AssetType::AudioClip:
+			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::AudioClip;
 			break;
 		case AssetType::PhysicsMaterial:
 		case AssetType::CookedCollider:
@@ -4254,7 +4364,8 @@ bool ResourceManager::HasResource(const TerraEngine::UUID& id) const
 		|| isAvailable(animationControllerCache) || isAvailable(animationMaskCache)
 		|| isAvailable(retargetProfileCache) || isAvailable(motionDatabaseCache)
 		|| isAvailable(ragdollProfileCache)
-		|| hasRegisteredPath(physicsMaterialPaths) || hasRegisteredPath(cookedColliderPaths);
+		|| hasRegisteredPath(physicsMaterialPaths) || hasRegisteredPath(cookedColliderPaths)
+		|| hasRegisteredPath(audioClipPaths);
 }
 
 // ResourceManager::RegisterAssetPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -4263,9 +4374,9 @@ void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::
 	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
 	const std::string key = NormalizeKey(resolvedPath);
 	const bool canBePreferredLoadPath = HasNativeExtensionForAssetType(resolvedPath, type);
-	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider) {
+	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider || type == AssetType::AudioClip) {
 		AssetPathRegistry& registry = type == AssetType::PhysicsMaterial
-			? physicsMaterialPaths : cookedColliderPaths;
+			? physicsMaterialPaths : (type == AssetType::CookedCollider ? cookedColliderPaths : audioClipPaths);
 		std::unique_lock lock(registry.mutex);
 		registry.pathToId[key] = id;
 		if(canBePreferredLoadPath) registry.idToPath[id] = key;
@@ -4291,9 +4402,9 @@ void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::
 std::filesystem::path ResourceManager::GetRegisteredAssetPath(const TerraEngine::UUID& id, AssetType type) const
 {
 	if(id == TerraEngine::EMPTY_UUID) return {};
-	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider) {
+	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider || type == AssetType::AudioClip) {
 		const AssetPathRegistry& registry = type == AssetType::PhysicsMaterial
-			? physicsMaterialPaths : cookedColliderPaths;
+			? physicsMaterialPaths : (type == AssetType::CookedCollider ? cookedColliderPaths : audioClipPaths);
 		std::shared_lock lock(registry.mutex);
 		const auto found = registry.idToPath.find(id);
 		return found != registry.idToPath.end() ? std::filesystem::path(found->second) : std::filesystem::path{};
@@ -4427,6 +4538,8 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 			return LoadSkeleton(candidatePath);
 		case AssetType::AnimationClip:
 			return LoadAnimationClip(candidatePath);
+		case AssetType::AudioClip:
+			return LoadAudioClip(candidatePath);
 		case AssetType::AnimationController:
 		case AssetType::AnimationMask:
 		case AssetType::RetargetProfile:
@@ -4445,9 +4558,9 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 	};
 
 	TerraEngine::UUID resolvedId = TerraEngine::EMPTY_UUID;
-	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider) {
+	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider || type == AssetType::AudioClip) {
 		const AssetPathRegistry& registry = type == AssetType::PhysicsMaterial
-			? physicsMaterialPaths : cookedColliderPaths;
+			? physicsMaterialPaths : (type == AssetType::CookedCollider ? cookedColliderPaths : audioClipPaths);
 		resolvedId = tryFindRegisteredMatch(registry);
 		return resolvedId;
 	}
@@ -4538,6 +4651,12 @@ std::filesystem::path ResourceManager::DescribeAssetReference(const TerraEngine:
 		std::shared_lock lock(cookedColliderPaths.mutex);
 		const auto found = cookedColliderPaths.idToPath.find(id);
 		if(found != cookedColliderPaths.idToPath.end()) result = found->second;
+		break;
+	}
+	case AssetType::AudioClip: {
+		std::shared_lock lock(audioClipPaths.mutex);
+		const auto found = audioClipPaths.idToPath.find(id);
+		if(found != audioClipPaths.idToPath.end()) result = found->second;
 		break;
 	}
 	}
@@ -4649,6 +4768,24 @@ TerraEngine::Animation::AnimationGeneration ResourceManager::GetAnimationAssetRu
 	case AssetType::RagdollProfile: return readGeneration(ragdollProfileCache);
 	default: return 0U;
 	}
+}
+
+std::shared_ptr<const TerraEngine::Audio::AudioClipAsset> ResourceManager::GetAudioClip(const TerraEngine::UUID& id)
+{
+	if(id == TerraEngine::EMPTY_UUID) return {};
+	{
+		std::shared_lock lock(audioClipMutex);
+		if(const auto found = audioClipAssets.find(id); found != audioClipAssets.end()) return found->second;
+	}
+	std::filesystem::path path;
+	{
+		std::shared_lock lock(audioClipPaths.mutex);
+		if(const auto found = audioClipPaths.idToPath.find(id); found != audioClipPaths.idToPath.end()) path = found->second;
+	}
+	if(path.empty() || LoadAudioClip(path) == TerraEngine::EMPTY_UUID) return {};
+	std::shared_lock lock(audioClipMutex);
+	const auto found = audioClipAssets.find(id);
+	return found != audioClipAssets.end() ? found->second : std::shared_ptr<const TerraEngine::Audio::AudioClipAsset>{};
 }
 
 std::optional<TerraEngine::Animation::AnimationGeneration>
@@ -4945,6 +5082,36 @@ std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::
 			TerraEngine::AnimationContentResolver::ReadRange(
 				ContentMount::Instance(), logicalPathString, 0U, content.logicalSize, content.logicalSize);
 		return read.Succeeded() ? read.bytes : std::vector<std::uint8_t>{};
+	}
+
+	// Packaged audio follows the same single-authority rule as animation. The
+	// archive class and complete TEAF bytes are checked before publication, and
+	// an exported runtime never substitutes a developer's loose cooked file.
+	if (IsExportRuntime() && IsNativeAudioAssetPath(absolutePath))
+	{
+		if (!ContentMount::Instance().IsMounted())
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Packaged audio read rejected because no export archive is mounted: " << logicalPathString);
+			return {};
+		}
+		const std::optional<MountedContentEntry> entry = ContentMount::Instance().FindEntry(logicalPathString);
+		if (!entry || entry->assetClass != "audio")
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Packaged audio entry is missing or has the wrong cooked class: " << logicalPathString);
+			return {};
+		}
+		const std::uint64_t maximumBytes = TerraEngine::Audio::kAudioFileMaximumPayloadBytes
+			+ TerraEngine::Audio::kAudioFileHeaderSize;
+		MountedContentReadResult read = ContentMount::Instance().ReadAllChecked(logicalPathString, maximumBytes);
+		if (!read.Succeeded() || !TerraEngine::Audio::ReadAudioFile(read.bytes).Succeeded())
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Packaged audio entry failed bounded TEAF validation: " << logicalPathString);
+			return {};
+		}
+		return std::move(read.bytes);
 	}
 
 	// In export builds, the ContentMount provides access to assets packed into 

@@ -537,6 +537,21 @@ function(terraengine_verify_nuget_package_cache package_cache)
 			"${manifest_json}" packages ${package_index} version)
 		string(JSON expected_sha512 GET
 			"${manifest_json}" packages ${package_index} sha512)
+		# The feed is a cross-platform superset, but NuGet restores only the
+		# runtime packs selected by the active RID. Verify that exact host subset
+		# while terraengine_verify_offline_nuget_feed continues to hash every
+		# archive in the shared audited feed.
+		string(TOLOWER "${package_id}" normalized_package_id)
+		if(TERRAENGINE_RUNTIME_ID STREQUAL "linux-x64"
+				AND (normalized_package_id MATCHES "[.]win-x64$"
+					OR normalized_package_id MATCHES "^runtime[.]win-x64[.]"))
+			continue()
+		endif()
+		if(TERRAENGINE_RUNTIME_ID STREQUAL "win-x64"
+				AND (normalized_package_id MATCHES "[.]linux-x64$"
+					OR normalized_package_id MATCHES "^runtime[.]linux-x64[.]"))
+			continue()
+		endif()
 		string(TOLOWER "${package_id}" package_directory)
 		set(package_version_directory
 			"${package_cache}/${package_directory}/${package_version}")

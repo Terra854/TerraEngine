@@ -189,6 +189,11 @@ std::string DetectAssetClass(const std::filesystem::path& sourcePath) {
 	if (extension == ".teragdoll") {
 		return "ragdoll-profile";
 	}
+	// Cooked audio is the runtime authority. Classify the TEAF envelope itself,
+	// not only source media, so ContentMount can fail closed on wrong metadata.
+	if (extension == ".teaudio") {
+		return "audio";
+	}
 
 	// Asset classes are coarse by design. They are primarily used for summaries
 	// and future policy hooks, not as a strict runtime type system.

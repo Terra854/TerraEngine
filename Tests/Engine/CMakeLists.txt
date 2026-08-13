@@ -6,6 +6,21 @@ file(GLOB_RECURSE TERRAENGINE_ENGINE_ANIMATION_TEST_SOURCES CONFIGURE_DEPENDS
 
 add_executable(TerraEngine-EngineTests
 	EngineTests.cpp
+	Audio/AudioProviderContractTests.cpp
+	Audio/AudioFileFormatTests.cpp
+	Audio/AudioResourceTests.cpp
+	Audio/AudioControlQueueTests.cpp
+	Audio/AudioControlIntegrationTests.cpp
+	Audio/AudioPlaybackTests.cpp
+	Audio/AudioSpatialTests.cpp
+	Audio/AudioListenerTests.cpp
+	Audio/AudioVoiceLimitTests.cpp
+	Audio/AudioFailureRecoveryTests.cpp
+	Audio/AudioResourceStabilityTests.cpp
+	Audio/AudioSchedulerTests.cpp
+	Audio/AudioOfflineRenderTests.cpp
+	Audio/FakeAudioBackend.cpp
+	Scripting/AudioManagedAbiTests.cpp
 	${TERRAENGINE_ENGINE_ANIMATION_TEST_SOURCES}
 	# Codec round-trip tests use the production cooker encoders directly while
 	# the runtime decoder remains linked from the TerraEngine library.
@@ -31,6 +46,7 @@ add_executable(TerraEngine-EngineTests
 	Runtime/ContentMountPublicApiTests.cpp
 	Runtime/ExportRuntimeBaselineLaunchTests.cpp
 	Runtime/ExportRuntimeSmokeTests.cpp
+	Runtime/AudioExportRuntimeTests.cpp
 	Runtime/ExportScriptingRuntimeTests.cpp
 	Runtime/ExportStartupFlowTests.cpp
 	Runtime/LinuxStartupSmokeTests.cpp
@@ -317,6 +333,9 @@ target_include_directories(TerraEngine-EngineTests
 		${CMAKE_SOURCE_DIR}/Editor/AssetCompilers
 		${CMAKE_SOURCE_DIR}/External/xxhash
 		${CMAKE_SOURCE_DIR}/External/zstd/lib
+		# The real-provider offline test includes miniaudio privately. Provider
+		# headers remain absent from TerraEngine's installed public SDK.
+		${TERRAENGINE_MINIAUDIO_ROOT}
 )
 
 target_link_libraries(TerraEngine-EngineTests
@@ -327,6 +346,7 @@ target_link_libraries(TerraEngine-EngineTests
 		# Keep Jolt private to this test target so gameplay consumers still see no
 		# provider headers or link requirements.
 		Jolt
+		TerraEngineAudioMiniaudioRuntime
 		libzstd_static
 		xxhash
 )
@@ -365,6 +385,33 @@ set_tests_properties(Engine.SpatialUnitTests PROPERTIES
 	LABELS "Engine"
 	ENVIRONMENT "TERRAENGINE_TEST_EXCLUDE_FILTER=Engine.ProfilerCapturePerformance.LiveThirtyThousandFramesStayResidentBounded"
 )
+
+# Audio slices stay device-independent: the fake backend and immutable planning
+# contracts provide authoritative CI evidence even on muted/headless machines.
+add_test(NAME Engine.AudioProviderContract COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.AudioProviderContract PROPERTIES LABELS "Engine;Audio;Provider" ENVIRONMENT "TERRAENGINE_TEST_FILTER=Audio.ProviderContract")
+add_test(NAME Engine.AudioFileFormat COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.AudioFileFormat PROPERTIES LABELS "Engine;Audio;Asset" ENVIRONMENT "TERRAENGINE_TEST_FILTER=Audio.FileFormat")
+add_test(NAME Engine.AudioPlayback COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.AudioPlayback PROPERTIES LABELS "Engine;Audio;Playback" ENVIRONMENT "TERRAENGINE_TEST_FILTER=Audio.Playback")
+add_test(NAME Engine.AudioSpatial COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.AudioSpatial PROPERTIES LABELS "Engine;Audio;Spatial" ENVIRONMENT "TERRAENGINE_TEST_FILTER=Audio.Spatial")
+add_test(NAME Engine.AudioControl COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.AudioControl PROPERTIES LABELS "Engine;Audio;Control" ENVIRONMENT "TERRAENGINE_TEST_FILTER=Audio.ControlQueue,Audio.ControlIntegration,Audio.MixConfiguration")
+add_test(NAME Engine.AudioManaged COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.AudioManaged PROPERTIES LABELS "Engine;Audio;Managed" ENVIRONMENT "TERRAENGINE_TEST_FILTER=Audio.ManagedAbi")
+add_test(NAME Engine.AudioScheduler COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.AudioScheduler PROPERTIES LABELS "Engine;Audio;Scheduler" ENVIRONMENT "TERRAENGINE_TEST_FILTER=Audio.Scheduler")
+add_test(NAME Engine.AudioRuntimeRobustness COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.AudioRuntimeRobustness PROPERTIES LABELS "Engine;Audio;Robustness" ENVIRONMENT "TERRAENGINE_TEST_FILTER=Audio.Listener,Audio.VoiceLimit,Audio.FailureRecovery,Audio.ResourceStability")
+add_test(NAME Engine.AudioOfflineRender COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+# This registration calls miniaudio's manual mixer with noDevice=true, so it is
+# safe on muted workstations and headless CI while still exercising real decoding.
+set_tests_properties(Engine.AudioOfflineRender PROPERTIES LABELS "Engine;Audio;Provider;Offline" ENVIRONMENT "TERRAENGINE_TEST_FILTER=Audio.OfflineRender")
+add_test(NAME Engine.AudioExportRuntime COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.AudioExportRuntime PROPERTIES
+	LABELS "Engine;Audio;Export;Runtime"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=AudioExportRuntime")
 
 add_test(NAME Engine.ProfilerJournalStress COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.ProfilerJournalStress PROPERTIES

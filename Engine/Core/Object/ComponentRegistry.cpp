@@ -8,6 +8,8 @@
 #include "ComponentRegistry.h"
 #include "Components/Transform.h"
 #include "Components/AnimatorComponent.h"
+#include "Components/AudioListenerComponent.h"
+#include "Components/AudioSourceComponent.h"
 #include "Components/ScriptComponent.h"
 #include "Components/CameraComponent.h"
 #include "Components/LightComponent.h"
@@ -72,6 +74,10 @@ void ComponentRegistry::RegisterAllComponents() {
 	// the editor can enumerate and add the component without relying on lazy
 	// serializer registration from an already-authored object.
 	AnimatorComponent::registerType();
+	// Audio authoring must be registered before an editor opens a saved scene so
+	// generic Inspector and Serializer paths can discover it without lazy setup.
+	AudioSourceComponent::registerType();
+	AudioListenerComponent::registerType();
 	ScriptComponent::registerType();
 	CameraComponent::registerType();
 	LightComponent::registerType();

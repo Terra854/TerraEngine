@@ -71,6 +71,36 @@ function(terraengine_read_checkout_revision checkout_root output_variable)
 	set(${output_variable} "${_terraengine_revision}" PARENT_SCOPE)
 endfunction()
 
+# miniaudio is compiled privately; its SDK headers never become an engine usage
+# requirement or installed public surface.
+function(terraengine_configure_miniaudio_dependency)
+	set(_terraengine_miniaudio_root "${CMAKE_SOURCE_DIR}/External/miniaudio")
+	set(TERRAENGINE_MINIAUDIO_REVISION "9634bedb5b5a2ca38c1ee7108a9358a4e233f14d")
+	if(NOT EXISTS "${_terraengine_miniaudio_root}/miniaudio.c")
+		message(FATAL_ERROR "miniaudio is missing. Run 'git submodule update --init --recursive External/miniaudio'.")
+	endif()
+	if(EXISTS "${_terraengine_miniaudio_root}/.git")
+		terraengine_read_checkout_revision("${_terraengine_miniaudio_root}" TERRAENGINE_MINIAUDIO_ACTUAL_REVISION)
+		if(NOT TERRAENGINE_MINIAUDIO_ACTUAL_REVISION STREQUAL TERRAENGINE_MINIAUDIO_REVISION)
+			message(FATAL_ERROR "External/miniaudio must be revision ${TERRAENGINE_MINIAUDIO_REVISION}; found '${TERRAENGINE_MINIAUDIO_ACTUAL_REVISION}'.")
+		endif()
+	endif()
+	add_library(TerraEngineAudioMiniaudioRuntime STATIC
+		# The TerraEngine wrapper makes stb_vorbis declarations visible before
+		# compiling miniaudio's implementation so the Ogg backend is registered.
+		"${CMAKE_SOURCE_DIR}/Engine/Audio/Backend/MiniaudioImplementation.c"
+		"${_terraengine_miniaudio_root}/extras/stb_vorbis.c"
+	)
+	target_include_directories(TerraEngineAudioMiniaudioRuntime PRIVATE "${_terraengine_miniaudio_root}")
+	set_target_properties(TerraEngineAudioMiniaudioRuntime PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_SCAN_FOR_MODULES OFF)
+	if(MSVC)
+		target_compile_options(TerraEngineAudioMiniaudioRuntime PRIVATE /W0)
+	else()
+		target_compile_options(TerraEngineAudioMiniaudioRuntime PRIVATE -w)
+	endif()
+	set(TERRAENGINE_MINIAUDIO_ROOT "${_terraengine_miniaudio_root}" PARENT_SCOPE)
+endfunction()
+
 function(terraengine_configure_jolt_dependency)
 	set(_terraengine_jolt_root "${CMAKE_SOURCE_DIR}/External/JoltPhysics")
 	set(TERRAENGINE_JOLT_REVISION "e77f175595e64cb44218cc9d9d56fc365ad0e36a")
@@ -184,4 +214,6 @@ endfunction()
 # through this single entry point before engine targets are declared.
 function(terraengine_configure_dependencies)
 	terraengine_configure_jolt_dependency()
+	terraengine_configure_miniaudio_dependency()
+	set(TERRAENGINE_MINIAUDIO_ROOT "${TERRAENGINE_MINIAUDIO_ROOT}" PARENT_SCOPE)
 endfunction()

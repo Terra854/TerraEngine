@@ -201,6 +201,15 @@ set(ENGINE_SOURCES
 	Engine/Physics/IncrementalBodyStateStore.cpp
 	Engine/Physics/TransformPublicationPacket.cpp
 	Engine/Physics/PhysicsDiagnostics.cpp
+	Engine/Audio/AudioAuthoringSnapshot.cpp
+	Engine/Audio/AudioPreparationPlan.cpp
+	Engine/Audio/AudioDiagnostics.cpp
+	Engine/Audio/AudioSystem.cpp
+	Engine/Audio/AudioCommands.cpp
+	Engine/Audio/AudioMixConfiguration.cpp
+	Engine/Audio/Backend/AudioBackendRegistry.cpp
+	Engine/Audio/Assets/AudioClipAsset.cpp
+	Engine/Audio/AudioComponentCapture.cpp
 	Engine/Physics/Assets/PhysicsAssetChangeJournal.cpp
 	Engine/Physics/Assets/PhysicsMaterial.cpp
 	Engine/Physics/Assets/ColliderRecipe.cpp
@@ -328,6 +337,20 @@ set(ENGINE_HEADERS
 	Engine/Physics/Backend/PhysicsAllocatorAdapter.h
 	Engine/Physics/Backend/PhysicsJobAdapter.h
 	Engine/Physics/Backend/JoltPhysicsBackend.h
+	Engine/Audio/AudioTypes.h
+	Engine/Audio/AudioAuthoringSnapshot.h
+	Engine/Audio/AudioPreparationPlan.h
+	Engine/Audio/AudioDiagnostics.h
+	Engine/Audio/AudioSystem.h
+	Engine/Audio/AudioCommands.h
+	Engine/Audio/AudioMixConfiguration.h
+	Engine/Audio/Backend/IAudioBackend.h
+	Engine/Audio/Backend/AudioBackendRegistry.h
+	Engine/Audio/Assets/AudioClipAsset.h
+	Engine/Audio/AudioComponentCapture.h
+	Engine/Components/AudioSourceComponent.h
+	Engine/Components/AudioListenerComponent.h
+	"Engine/File Formats/TerraEngineAudioFile.h"
 	Engine/Scene/SceneManager.h
 	Engine/Components/LightComponent.h
 	Engine/Components/UIComponent.h
@@ -518,6 +541,21 @@ if(MSVC)
 	target_compile_options(TerraEnginePhysicsRuntime PRIVATE /FS /bigobj)
 endif()
 
+# The concrete miniaudio bridge is deliberately a private archive. Its only
+# consumer is the engine DLL; public headers remain provider-neutral.
+add_library(TerraEngineAudioRuntime STATIC
+	Engine/Audio/Backend/MiniaudioBackend.cpp
+)
+target_include_directories(TerraEngineAudioRuntime PRIVATE
+	${CMAKE_CURRENT_SOURCE_DIR}/Engine
+	${TERRAENGINE_MINIAUDIO_ROOT}
+)
+target_compile_definitions(TerraEngineAudioRuntime PRIVATE TERRAENGINE_SHARED TERRAENGINE_ENGINE_BUILD)
+target_link_libraries(TerraEngineAudioRuntime PRIVATE TerraEngineAudioMiniaudioRuntime)
+if(MSVC)
+	target_compile_options(TerraEngineAudioRuntime PRIVATE /FS)
+endif()
+
 # Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
 add_library(TerraEngine-Engine SHARED
 	${ENGINE_SOURCES}
@@ -694,6 +732,7 @@ target_link_libraries(TerraEngine-Engine
 	PRIVATE
 		TerraEnginePhysicsRuntime
 		TerraEnginePhysicsJoltRuntime
+		TerraEngineAudioRuntime
 		# TEPAK reader dependencies (zstd for decompression, xxhash for hashing)
 		libzstd_static
 		xxhash
@@ -879,6 +918,9 @@ set(MANAGED_CORE_SOURCES
 	Engine/Managed/Source/Graphics.cs
 	Engine/Managed/Source/UI.cs
 	Engine/Managed/Source/SerializationAttributes.cs
+	Engine/Managed/Source/Audio/AudioTypes.cs
+	Engine/Managed/Source/Audio/Audio.cs
+	Engine/Managed/Source/Audio/AudioSource.cs
 	Engine/Managed/Source/ScriptReflection.cs
 	Engine/Managed/Source/Export/ExportVTable.cs
 	${TERRAENGINE_ANIMATION_MANAGED_CORE_SOURCES}
@@ -1046,6 +1088,35 @@ target_include_directories(TerraEnginePhysicsColliderCompiler
 target_link_libraries(TerraEnginePhysicsColliderCompiler PRIVATE TerraEngine-Engine)
 if(MSVC)
 	target_compile_options(TerraEnginePhysicsColliderCompiler PRIVATE /FS)
+endif()
+
+# Audio cooking is a deterministic headless tool. It retains validated WAV/Ogg
+# payloads inside provider-neutral TEAF envelopes for editor and export builds.
+add_executable(TerraEngineAudioClipCompiler
+	Editor/TerraEngineAudioClipCompiler.cpp
+	Editor/AssetCompilers/AudioClipCompiler.cpp
+)
+target_include_directories(TerraEngineAudioClipCompiler PRIVATE
+	${CMAKE_CURRENT_SOURCE_DIR}
+	${CMAKE_CURRENT_SOURCE_DIR}/Engine
+	${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
+)
+target_link_libraries(TerraEngineAudioClipCompiler PRIVATE TerraEngine-Engine)
+if(MSVC)
+	target_compile_options(TerraEngineAudioClipCompiler PRIVATE /FS)
+endif()
+
+# This device-independent runner proves that the worker-safe preparation path
+# produces identical results for large source sets and repeated replays.
+add_executable(TerraEngineAudioStressRunner
+	Tools/Audio/AudioStressRunner.cpp
+)
+target_include_directories(TerraEngineAudioStressRunner PRIVATE
+	${CMAKE_CURRENT_SOURCE_DIR}/Engine
+)
+target_link_libraries(TerraEngineAudioStressRunner PRIVATE TerraEngine-Engine)
+if(MSVC)
+	target_compile_options(TerraEngineAudioStressRunner PRIVATE /FS)
 endif()
 
 # This installed-runtime probe exercises the public physics boundary with the
@@ -1366,6 +1437,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Automation/Providers/HistoryPlayModeAutomationProvider.cpp
 	Editor/TerraEngine-Editor/Automation/Providers/AuthoringAutomationProvider.cpp
 	Editor/TerraEngine-Editor/Automation/Providers/PhysicsAutomationProvider.cpp
+	Editor/TerraEngine-Editor/Automation/Providers/AudioAutomationProvider.cpp
 	Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/PrefabAuthoringSubsystem.cpp
@@ -1393,6 +1465,8 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp
 	Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp
 	Editor/TerraEngine-Editor/Windows/PhysicsDiagnosticsWindow.cpp
+	Editor/TerraEngine-Editor/Windows/AudioMixerWindow.cpp
+	Editor/TerraEngine-Editor/Windows/AudioDiagnosticsWindow.cpp
 	Editor/TerraEngine-Editor/Windows/SchedulerDiagnosticsWindow.cpp
 	Editor/TerraEngine-Editor/Windows/ResourceResidencyWindow.cpp
 	Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp
@@ -1408,6 +1482,7 @@ add_executable(TerraEngine-Editor
 	Editor/AssetCompilers/MaterialAssetWriter.cpp
 	Editor/AssetCompilers/PhysicsColliderCompiler.cpp
 	Editor/AssetCompilers/PhysicsMaterialAssetWriter.cpp
+	Editor/AssetCompilers/AudioClipCompiler.cpp
 	${IMGUI_FILE_DIALOG_DIR}/ImGuiFileDialog.cpp
 	${TERRAENGINE_ANIMATION_EDITOR_SOURCES}
 	${TERRAENGINE_VIRTUAL_GEOMETRY_ASSET_COMPILER_SOURCES}
@@ -1616,6 +1691,7 @@ install(FILES
 # adapters remain private implementation details of the engine DLL.
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/TerraEngineInstall.cmake")
 terraengine_install_physics_foundation("${ENGINE_INSTALL_DESTINATION}")
+terraengine_install_audio_foundation("${ENGINE_INSTALL_DESTINATION}")
 terraengine_install_offline_nuget_notices("${ENGINE_INSTALL_DESTINATION}")
 terraengine_install_nativeaot_nuget_toolchain("${ENGINE_INSTALL_DESTINATION}")
 
@@ -2312,6 +2388,17 @@ install(TARGETS TerraEngineShaderCompiler
 install(TARGETS TerraEnginePhysicsColliderCompiler
 	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+)
+# Install the audio cooker next to the other offline editor compilers.
+install(TARGETS TerraEngineAudioClipCompiler
+	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+)
+# Install the deterministic audio evidence runner beside its PowerShell wrappers
+# so the stress workflow uses the same binaries shipped to downstream users.
+install(TARGETS TerraEngineAudioStressRunner
+	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tools/Audio
+	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tools/Audio
 )
 # Install the stress executable beside TerraEngine.dll so it can validate a
 # clean installed tree without relying on build-tree paths or system packages.

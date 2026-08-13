@@ -37,6 +37,7 @@
 #include "Editor/AssetCompilers/ShaderCompiler.h"
 #include "Editor/AssetCompilers/ModelPackageImporter.h"
 #include "Editor/AssetCompilers/PhysicsColliderCompiler.h"
+#include "Editor/AssetCompilers/AudioClipCompiler.h"
 #include "AssetImportResult.h"
 #include "Engine/File Formats/TerraEngineTextureFile.h"
 #include "Engine/File Formats/TerraEngineAnimationFile.h"
@@ -1610,6 +1611,7 @@ bool AssetDatabase::ShouldCompileAssetAsync(const std::string& importerName) con
 	// compiler process while FinishImport still publishes state on the main thread.
 	return importerName == "TextureImporter"
 		|| importerName == "MeshImporter"
+		|| importerName == "AudioClipImporter"
 		|| importerName == "ShaderImporter"
 		|| importerName == "PhysicsColliderRecipeImporter"
 		|| RuntimeAssetTypeForCookedAnimationImporter(importerName).has_value()
@@ -1906,6 +1908,9 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 	else if (metadata.importerName == "ShaderImporter") compiledRelativePath.replace_extension(".tspf");
 	else if (metadata.importerName == "MaterialImporter") compiledRelativePath.replace_extension(".tmat");
 	else if (metadata.importerName == "PhysicsColliderRecipeImporter") compiledRelativePath.replace_extension(".tepcoll");
+	// Source media keeps its .meta UUID across move, rename, and reimport while
+	// the generated TEAF envelope remains the only runtime-facing payload.
+	else if (metadata.importerName == "AudioClipImporter") compiledRelativePath.replace_extension(".teaudio");
 	else if (metadata.importerName == "ScriptImporter") compiledRelativePath.clear();
 	else if (metadata.importerName == "GenericImporter") compiledRelativePath.clear(); 
 	
@@ -2060,6 +2065,7 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 		else if (metadata.importerName == "PhysicsMaterialImporter") { type = AssetType::PhysicsMaterial; known = true; }
 		else if (metadata.importerName == "PhysicsColliderRecipeImporter"
 			|| metadata.importerName == "CookedColliderImporter") { type = AssetType::CookedCollider; known = true; }
+		else if(metadata.importerName == "AudioClipImporter") { type = AssetType::AudioClip; known = true; }
 		else if (cookedAnimationType) {
 			type = *cookedAnimationType;
 			known = true;
@@ -2099,6 +2105,11 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 			// We do this first so that idToPath (the preferred load path) is eventually overwritten by the compiled path.
 			ResourceManager::Instance().RegisterAssetPath(metadata.guid, absSourcePath, type);
 			ResourceManager::Instance().RegisterAssetPath(metadata.guid, fullCompiled, type);
+			if(type == AssetType::AudioClip && needsImport) {
+				// Audio ResourceManager performs its parse before replacing the shared
+				// generation, so corrupt watched reimports retain the prior clip.
+				(void)ResourceManager::Instance().ReloadAudioClip(metadata.guid);
+			}
 
 			if (cookedAnimationType)
 			{
@@ -3139,6 +3150,8 @@ std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath
 	if (ext == ".tephysmat") return "PhysicsMaterialImporter";
 	if (ext == ".tecollider") return "PhysicsColliderRecipeImporter";
 	if (ext == ".tepcoll") return "CookedColliderImporter";
+	if (ext == ".wav" || ext == ".ogg") return "AudioClipImporter";
+	if (ext == ".teaudio") return "CookedAudioClipImporter";
 	if (ext == ".teskel") return "SkeletonAssetImporter";
 	if (ext == ".teanim") return "AnimationClipAssetImporter";
 	if (ext == ".teanimctrl") return "AnimationControllerAssetImporter";
@@ -3852,6 +3865,19 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata, const std::share
 	else if(metadata.importerName == "PhysicsColliderRecipeImporter") {
 		return CompilePhysicsColliderWithProcess(metadata, progressState);
 	}
+	else if(metadata.importerName == "AudioClipImporter") {
+		// The compiler writes and checks a sibling staging file before its atomic
+		// replace, so a failed watched reimport leaves the prior cooked generation.
+		const TerraEngine::AssetPipeline::AudioClipCompileReport report =
+			TerraEngine::AssetPipeline::CompileAudioClip({fullSourcePath, fullCompiledPath, metadata.guid},
+				progressState ? &progressState->cancelRequested : nullptr);
+		if(!report.Succeeded()) {
+			TERRAENGINE_LOG(LogLevel::Error, "Audio clip compile failed ("
+				<< TerraEngine::AssetPipeline::ToString(report.status) << "): " << fullSourcePath);
+			return false;
+		}
+		return true;
+	}
 	else if(metadata.importerName == "PhysicsMaterialImporter" || metadata.importerName == "CookedColliderImporter"
 		|| RuntimeAssetTypeForCookedAnimationImporter(metadata.importerName).has_value()) {
 		// Cooked animation assets are already versioned runtime envelopes. Copy
@@ -3928,6 +3954,7 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 		else if (metadata.importerName == "PhysicsMaterialImporter") { type = AssetType::PhysicsMaterial; knownResource = true; }
 		else if (metadata.importerName == "PhysicsColliderRecipeImporter"
 			|| metadata.importerName == "CookedColliderImporter") { type = AssetType::CookedCollider; knownResource = true; }
+		else if(metadata.importerName == "AudioClipImporter") { type = AssetType::AudioClip; knownResource = true; }
 		else if (const std::optional<AssetType> animationType = RuntimeAssetTypeForCookedAnimationImporter(metadata.importerName)) {
 			type = *animationType;
 			knownResource = true;

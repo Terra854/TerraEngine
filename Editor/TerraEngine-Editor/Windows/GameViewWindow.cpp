@@ -11,6 +11,7 @@
 #include "Engine/Components/Transform.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/UI/UISystem.h"
+#include "Engine/Audio/AudioSystem.h"
 #include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
@@ -87,7 +88,14 @@ void GameViewWindow::OnGui() {
 	ImGui::SameLine();
 	ImGui::Checkbox("Maximize On Play", &m_MaximizeOnPlay);
 	ImGui::SameLine();
-	ImGui::Checkbox("Mute Audio", &m_MuteAudio);
+	// Reflect external mixer/managed changes every frame, then publish checkbox
+	// edits through the same master-mix state without conflating mute with pause.
+	m_MuteAudio = TerraEngine::Audio::AudioSystem::Instance().LatestMixSnapshot().master.muted;
+	if(ImGui::Checkbox("Mute Audio", &m_MuteAudio)) {
+		const auto currentMix = TerraEngine::Audio::AudioSystem::Instance().LatestMixSnapshot();
+		std::string diagnostic;
+		(void)TerraEngine::Audio::AudioSystem::Instance().SetMasterMix(currentMix.master.volume, m_MuteAudio, diagnostic);
+	}
 	ImGui::SameLine();
 	// Unity-style toolbar text toggle behavior for stats.
 	ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, m_StatsToggleRounding);

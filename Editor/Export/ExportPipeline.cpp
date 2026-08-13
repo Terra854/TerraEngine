@@ -15,6 +15,7 @@
 #include "Physics/Assets/CookedColliderAsset.h"
 #include "Physics/Assets/PhysicsMaterial.h"
 #include "Physics/PhysicsSettings.h"
+#include "File Formats/TerraEngineAudioFile.h"
 #include "Resource/ResourceResidency.h"
 #include "Resource/ResourceStreaming.h"
 
@@ -1504,6 +1505,33 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 			m_PhysicsManifest.colliders.push_back(std::move(record));
 			return true;
 		};
+		auto addValidatedAudioAsset = [&addStagedAsset, &stagingDir](
+			const std::string& guid, const std::filesystem::path& packagePath, std::string& error) -> bool {
+			const std::optional<TerraEngine::UUID> parsedGuid = TerraEngine::ParseUUID(guid);
+			if(!parsedGuid) {
+				error = "Audio asset metadata has an invalid GUID: " + guid;
+				return false;
+			}
+
+			std::vector<std::byte> stagedBytes;
+			if(!ReadExportBytes(stagingDir / packagePath, stagedBytes)) {
+				error = "Cooked audio output is missing from export staging: " + PathToUtf8(packagePath);
+				return false;
+			}
+			std::vector<std::uint8_t> audioBytes;
+			audioBytes.reserve(stagedBytes.size());
+			for(const std::byte byte : stagedBytes)
+				audioBytes.push_back(static_cast<std::uint8_t>(byte));
+			const TerraEngine::Audio::AudioFileReadResult audio = TerraEngine::Audio::ReadAudioFile(audioBytes);
+			if(!audio.Succeeded() || audio.metadata.assetId != *parsedGuid) {
+				// A valid envelope with a different UUID is still unsafe: it would let
+				// game.json resolve one authored asset to another clip's bytes.
+				error = "Cooked audio is invalid or does not match its metadata GUID: " + PathToUtf8(packagePath);
+				return false;
+			}
+			return addStagedAsset(guid, AssetType::AudioClip, packagePath,
+				HashBytesForExport(stagedBytes), static_cast<std::uint64_t>(stagedBytes.size()));
+		};
 		auto resolveSourceAssetPath = [&rawAssets](const std::filesystem::path& metaPath, const std::string& sourcePathText) {
 			if (!sourcePathText.empty()) {
 				const std::filesystem::path sourcePath(sourcePathText);
@@ -1608,6 +1636,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 					else if (importer == "MaterialImporter") type = AssetType::Material;
 					else if(importer == "PhysicsMaterialImporter") type = AssetType::PhysicsMaterial;
 					else if(importer == "PhysicsColliderRecipeImporter" || importer == "CookedColliderImporter") type = AssetType::CookedCollider;
+					else if(importer == "AudioClipImporter") type = AssetType::AudioClip;
 					else supported = false;
 
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1629,6 +1658,13 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 							std::string physicsAssetError;
 							if(!addValidatedPhysicsAsset(guid, type, manifestPath, physicsAssetError)) {
 								result.errorMessage = physicsAssetError;
+								return false;
+							}
+						}
+						else if(type == AssetType::AudioClip) {
+							std::string audioAssetError;
+							if(!addValidatedAudioAsset(guid, manifestPath, audioAssetError)) {
+								result.errorMessage = audioAssetError;
 								return false;
 							}
 						}

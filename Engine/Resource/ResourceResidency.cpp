@@ -191,6 +191,7 @@ namespace TerraEngine::Resource
 		case AssetType::RetargetProfile: return ResidencyAssetType::RetargetProfile;
 		case AssetType::MotionDatabase: return ResidencyAssetType::MotionDatabase;
 		case AssetType::RagdollProfile: return ResidencyAssetType::RagdollProfile;
+		case AssetType::AudioClip: return ResidencyAssetType::AudioClip;
 		// Physics assets remain provider-owned payloads until their dedicated
 		// residency accounting is introduced, so they retain the legacy fallback.
 		case AssetType::PhysicsMaterial:
@@ -218,6 +219,7 @@ namespace TerraEngine::Resource
 		case ResidencyAssetType::RetargetProfile: return "retarget-profile";
 		case ResidencyAssetType::MotionDatabase: return "motion-database";
 		case ResidencyAssetType::RagdollProfile: return "ragdoll-profile";
+		case ResidencyAssetType::AudioClip: return "audio-clip";
 		}
 		return "other";
 	}

@@ -68,6 +68,8 @@
 #include "../Windows/BuildProfilesWindow.h"
 #include "../Windows/ProfilerWindow.h"
 #include "../Windows/PhysicsDiagnosticsWindow.h"
+#include "../Windows/AudioMixerWindow.h"
+#include "../Windows/AudioDiagnosticsWindow.h"
 #include "../Windows/SchedulerDiagnosticsWindow.h"
 #include "../Windows/ResourceResidencyWindow.h"
 #include "../Windows/UIBuilderWindow.h"
@@ -1554,6 +1556,8 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	m_Windows.push_back(std::make_shared<BuildProfilesWindow>(this));
 	m_Windows.push_back(std::make_shared<ProfilerWindow>(this));
 	m_Windows.push_back(std::make_shared<PhysicsDiagnosticsWindow>(this));
+	m_Windows.push_back(std::make_shared<AudioMixerWindow>(this));
+	m_Windows.push_back(std::make_shared<AudioDiagnosticsWindow>(this));
 	m_Windows.push_back(std::make_shared<SchedulerDiagnosticsWindow>(this));
 	m_Windows.push_back(std::make_shared<ResourceResidencyWindow>(this));
 	m_Windows.push_back(std::make_shared<UIBuilderWindow>(this));

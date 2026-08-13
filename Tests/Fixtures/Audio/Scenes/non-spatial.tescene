@@ -1,0 +1,13 @@
+{
+	"name": "Audio Non-Spatial Reference",
+	"objects": [
+		{
+			"uuid": "51000000000000000000000000000001",
+			"name": "Music Source",
+			"components": {
+				"Transform": {"Position": [0.0, 0.0, 0.0], "Rotation": [1.0, 0.0, 0.0, 0.0], "Scale": [1.0, 1.0, 1.0]},
+				"AudioSourceComponent": {"playOnStart": true, "loop": true, "volume": 0.5, "pitch": 1.0, "spatialBlend": 0.0, "minDistance": 1.0, "maxDistance": 25.0, "priority": 128}
+			}
+		}
+	]
+}

@@ -1,0 +1,2 @@
+#include "Audio/AudioDiagnostics.h"
+namespace TerraEngine::Audio { namespace { std::mutex mutex; std::shared_ptr<const AudioDiagnosticsSnapshot> latest; } void PublishAudioDiagnosticsSnapshot(std::shared_ptr<const AudioDiagnosticsSnapshot> snapshot) { std::scoped_lock lock(mutex); latest = std::move(snapshot); } std::shared_ptr<const AudioDiagnosticsSnapshot> AcquireAudioDiagnosticsSnapshot() { std::scoped_lock lock(mutex); return latest; } }

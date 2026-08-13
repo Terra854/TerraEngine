@@ -1,0 +1,9 @@
+{
+	"schemaVersion": 1,
+	"minimumSources": 128,
+	"minimumRepeatCount": 100,
+	"expectedHash": "10560182529143497585",
+	"maximumMedianFrameDeltaMs": 1.0,
+	"maximumP95FrameDeltaMs": 2.0,
+	"maximumResourceGrowthPercent": 5.0
+}

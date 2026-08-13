@@ -146,3 +146,41 @@ than requiring Visual Studio.
   message, complete the Linux script editor launch tasks in the active Spec Kit
   plan and configure a Linux editor command such as `code {script}` or
   `rider {solution}`.
+# Audio validation
+
+Linux audio uses miniaudio ALSA/PulseAudio backends selected by the runtime
+environment. Headless CI should use the deterministic stress runner, which does
+not open a device. For audible validation, confirm the active server with
+`pactl info` (PulseAudio/PipeWire) and select an available ALSA device before
+launching the installed editor. Device names and latency are machine-specific;
+record them as manual evidence rather than treating a missing device as a
+preparation failure.
+
+The following checks are reproducible from an installed Linux tree (replace
+`<install>` with the actual prefix):
+
+```bash
+pwsh -File <install>/Tools/Audio/RunAudioStress.ps1 -RequestedSources 128 -RepeatCount 100 \
+  -Output <install>/Tools/Audio/Evidence/audio-stress.json
+pwsh -File <install>/Tools/Audio/CompareAudioEvidence.ps1 \
+  -Evidence <install>/Tools/Audio/Evidence/audio-stress.json
+```
+
+PowerShell (`pwsh`) is required for these wrappers. The 30-minute soak is an
+explicit release-gate workload, not a quick smoke test. If Linux or `pwsh` is
+not available in the validation environment, report the Linux lane as
+*not run*; Windows/device-independent results do not establish Linux support.
+Audible scenarios remain manual and must include the `pactl info` output and
+selected device in their evidence.
+
+The audio runtime foundation was validated on Ubuntu 24.04 under WSL with GCC 13.3. Strict
+offline restore used the repository-locked `linux-x64` runtime and NativeAOT
+packs; the EngineTests and EditorTests binaries built, all 12 audio CTest groups
+passed, and the complete CMake install target succeeded. The native
+`TerraEngineAudioStressRunner` and its production miniaudio/ALSA/PulseAudio
+translation unit also compiled successfully; 128 sources across 100 replays
+produced the same hash as Windows (`10560182529143497585`), honored the
+64-voice limit, retained no resources, and measured 0.005482 ms median /
+0.006189 ms p95. No Linux playback device was exposed by WSL, so this validates
+the Linux build, installation, and device-independent behavior, not audible
+Linux output.

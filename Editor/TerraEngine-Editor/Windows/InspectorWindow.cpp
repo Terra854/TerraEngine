@@ -627,6 +627,7 @@ void DrawAnimatorPropertyGuidance(std::string_view propertyName, bool labelHover
 
 std::vector<AssetType> CandidateAssetTypesForProperty(std::string_view propertyName)
 {
+	if(propertyName == "clipAssetId") return {AssetType::AudioClip};
 	if(propertyName == "controllerAssetId") return {AssetType::AnimationController};
 	if(propertyName == "defaultClipAssetId") return {AssetType::AnimationClip};
 	if(propertyName == "skeletonOverrideAssetId") return {AssetType::Skeleton};
@@ -2214,12 +2215,13 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::BeginDragDropTarget()) {
-			const char* payloads[] = { "ASSET_MESH", "ASSET_MATERIAL", "ASSET_TEXTURE", "ASSET_SHADER", "ASSET_GUID" };
+			const char* payloads[] = { "ASSET_MESH", "ASSET_MATERIAL", "ASSET_TEXTURE", "ASSET_SHADER", "ASSET_AUDIO", "ASSET_GUID" };
 			const char* expected = nullptr;
 
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (name == "meshId") expected = "ASSET_MESH";
 			else if (name == "materialId") expected = "ASSET_MATERIAL";
+			else if (name == "clipAssetId") expected = "ASSET_AUDIO";
 			else if (name.find("Texture") != std::string::npos || name.find("texture") != std::string::npos) expected = "ASSET_TEXTURE";
 
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

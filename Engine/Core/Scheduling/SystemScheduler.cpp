@@ -215,6 +215,7 @@ namespace TerraEngine::Scheduling {
 			{ "Animation", 45, true, true, false, false, "Controller authority, worker evaluation planning, and protected physics handoff." },
 			{ "Physics", 50, true, true, false, true, "Fixed-step physics snapshot, preparation, simulation, and protected publication." },
 			{ "AnimationPresentation", 55, true, true, false, false, "Current-step physics mapping and immutable animation presentation publication." },
+			{ "Audio", 58, true, true, false, false, "Audio authoring snapshot, worker-safe voice preparation, and protected provider commit." },
 			{ "UI", 60, true, false, false, false, "Runtime UI layout and CPU-side UI data." },
 			{ "Render", 70, true, false, false, false, "Renderer submission and presentation." },
 			{ "PostFrame", 80, true, false, false, false, "Frame-end cleanup and compatibility defaults." }
@@ -233,6 +234,10 @@ namespace TerraEngine::Scheduling {
 			{ "TransformWorkUnits", "Depth-ordered transform propagation batches that worker jobs can execute independently.", "Consumes hierarchy and dirty transform inputs before runtime layout publication." },
 			{ "RuntimeLayout", "Compact active-object, transform, render, camera, and light records shared with worker-safe consumers.", "Published after hierarchy and transform preparation completes." },
 			{ "ObjectManager", "Entity/object storage and component ownership.", "Refined by component read/write query declarations in Part 3." },
+			{ "AudioAuthoring", "Protected source/listener/mix/control state captured for audio preparation.", "Workers receive immutable value records only." },
+			{ "AudioPreparedFrame", "Deterministic provider-neutral voice plan.", "Committed only by AudioSystem at its protected boundary." },
+			{ "AudioProvider", "Private device and decoder state owned by the selected audio backend.", "Never read from worker, managed, or editor code." },
+			{ "AudioDiagnostics", "Immutable playback/provider/resource/control diagnostic publication.", "Readers never access the live backend." },
 			{ "SceneMutationQueue", "Deferred structural scene mutation requests.", "Feeds deferred entity/component mutation in Part 3." },
 			{ "Scripting", "Managed runtime, script assemblies, and script component state.", "May later expose script component query resources." },
 			{ "RuntimeTimeQueue", "Validated managed time-scale requests awaiting the next frame-start publication.", "Consumed before scheduler workload planning so every system observes one scale." },

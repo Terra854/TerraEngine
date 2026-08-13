@@ -20,6 +20,7 @@
 #include "Providers/HistoryPlayModeAutomationProvider.h"
 #include "Providers/ProjectSceneAutomationProvider.h"
 #include "Providers/PhysicsAutomationProvider.h"
+#include "Providers/AudioAutomationProvider.h"
 #include "Providers/ScriptBuildAutomationProvider.h"
 
 #include "../Assets/AssetImportResult.h"
@@ -53,6 +54,7 @@
 #include "Engine/Core/Scheduling/FrameWorkload.h"
 #include "Engine/Animation/AnimationPresentationSystem.h"
 #include "Engine/Animation/AnimationSystem.h"
+#include "Engine/Audio/AudioSystem.h"
 #include "Engine/Animation/Assets/AnimationClipAsset.h"
 #include "Engine/Animation/Assets/AnimationControllerAsset.h"
 #include "Engine/Animation/Diagnostics/AnimationDiagnostics.h"
@@ -2320,6 +2322,55 @@ namespace TerraEngine::Editor::Automation
 			return ResolvePhysicsAutomationHandler(name);
 		};
 		(void)capabilityRegistry.RegisterProvider(std::make_shared<PhysicsAutomationProvider>(resolvePhysicsHandler));
+		const AutomationHandlerResolver resolveAudioHandler = [](std::string_view name) {
+			const std::string operation(name);
+			return AutomationHandler{[operation](const AutomationRequestContext& request) {
+				AutomationDispatchResult result;
+				result.error = ErrorCategory::Validation;
+				auto& audio = TerraEngine::Audio::AudioSystem::Instance();
+				if(operation == "audio.inspect") {
+					const auto playback = audio.LatestPlaybackSnapshot();
+					const auto mix = audio.LatestMixSnapshot();
+					result.ok = true; result.data = {{"frame", playback ? playback->frame : 0U},
+						{"voiceCount", playback ? playback->voices.size() : 0U}, {"masterVolume", mix.master.volume},
+						{"masterMuted", mix.master.muted}, {"mixGeneration", mix.generation}};
+					return result;
+				}
+				if(operation == "audio.mix") {
+					std::string diagnostic;
+					result.ok = audio.SetMasterMix(request.arguments.value("volume", 1.0F), request.arguments.value("muted", false), diagnostic);
+					result.message = diagnostic; result.data = {{"accepted", result.ok}, {"visibilityBoundary", "next_audio_commit"}};
+					return result;
+				}
+				const auto objectId = TerraEngine::ParseUUID(request.arguments.value("objectId", std::string{}));
+				if(!objectId) { result.message = "audio.control requires a 32-character objectId."; return result; }
+				TerraEngine::Audio::AudioControlCommand command;
+				command.source.objectId = *objectId;
+				command.source.objectGeneration = request.arguments.value("objectGeneration", 0U);
+				command.source.componentGeneration = request.arguments.value("componentGeneration", 0U);
+				command.source.playbackGeneration = request.arguments.value("playbackGeneration", 0U);
+				const std::string kind = request.arguments.value("kind", std::string{});
+				if(kind == "play") command.kind = TerraEngine::Audio::AudioControlKind::Play;
+				else if(kind == "pause") command.kind = TerraEngine::Audio::AudioControlKind::Pause;
+				else if(kind == "resume") command.kind = TerraEngine::Audio::AudioControlKind::Resume;
+				else if(kind == "stop") command.kind = TerraEngine::Audio::AudioControlKind::Stop;
+				else { result.message = "Audio control kind must be play, pause, resume, or stop."; return result; }
+				TerraEngine::Audio::AudioControlBatch batch;
+				batch.requestedFrame = request.arguments.value("requestedFrame", 0ULL);
+				batch.producerId = request.arguments.value("producerId", 2ULL);
+				batch.correlationId = request.correlationId; batch.idempotencyKey = request.idempotencyKey;
+				batch.requestFingerprint = request.arguments.dump(); batch.commands.push_back(command);
+				const auto receipt = audio.SubmitControlBatch(std::move(batch));
+				result.ok = receipt.status != TerraEngine::Audio::AudioControlStatus::Rejected;
+				result.error = result.ok ? ErrorCategory::Internal : ErrorCategory::QueueFull;
+				result.message = receipt.diagnostic;
+				result.data = {{"accepted", result.ok}, {"batchSequence", receipt.batchSequence},
+					{"status", static_cast<std::uint32_t>(receipt.status)}, {"rejection", static_cast<std::uint32_t>(receipt.rejection)},
+					{"visibilityBoundary", "next_audio_commit"}};
+				return result;
+			}};
+		};
+		(void)capabilityRegistry.RegisterProvider(std::make_shared<AudioAutomationProvider>(resolveAudioHandler));
 		RegisterDefaultCapabilities();
 	}
 

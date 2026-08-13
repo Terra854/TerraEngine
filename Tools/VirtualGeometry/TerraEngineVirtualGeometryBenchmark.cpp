@@ -71,7 +71,14 @@ namespace
 		const std::time_t now = std::chrono::system_clock::to_time_t(
 			std::chrono::system_clock::now());
 		std::tm utc{};
+		// Windows and POSIX expose the same thread-safe UTC conversion with
+		// reversed parameter order and different names. Keep both paths explicit
+		// so evidence timestamps never fall back to the unsafe static buffer.
+#if defined(_WIN32)
 		gmtime_s(&utc, &now);
+#else
+		gmtime_r(&now, &utc);
+#endif
 		std::ostringstream value;
 		value << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
 		return value.str();

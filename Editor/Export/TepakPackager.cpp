@@ -6,10 +6,13 @@
 
 #include "TEPAK/PackWriter.h"
 #include "TEPAK/PackTypes.h"
+#include "File Formats/TerraEngineAudioFile.h"
 
 #include <chrono>
+#include <fstream>
 #include <iostream>
 #include <thread>
+#include <vector>
 
 // --- Compression level resolution ---
 
@@ -58,6 +61,29 @@ PackageResult TepakPackager::Package(
 		if(entry.is_regular_file() && entry.path().extension() == ".tecollider") {
 			result.errorMessage = "Source-only collider recipe is not valid export content: " + entry.path().string();
 			return result;
+		}
+		if(entry.is_regular_file() && entry.path().extension() == ".teaudio") {
+			// TEPAK is a byte-preserving archive, so validate TEAF before packing.
+			// This stops a corrupt staged clip from becoming a runtime-only failure
+			// after the original editor project is no longer available to repair it.
+			std::ifstream audioInput(entry.path(), std::ios::binary | std::ios::ate);
+			if(!audioInput) {
+				result.errorMessage = "Could not open staged audio clip: " + entry.path().string();
+				return result;
+			}
+			const std::streamoff audioSize = audioInput.tellg();
+			if(audioSize <= 0 || static_cast<std::uint64_t>(audioSize)
+				> TerraEngine::Audio::kAudioFileMaximumPayloadBytes + TerraEngine::Audio::kAudioFileHeaderSize) {
+				result.errorMessage = "Staged audio clip has an invalid bounded size: " + entry.path().string();
+				return result;
+			}
+			audioInput.seekg(0, std::ios::beg);
+			std::vector<std::uint8_t> audioBytes(static_cast<std::size_t>(audioSize));
+			if(!audioInput.read(reinterpret_cast<char*>(audioBytes.data()), audioSize)
+				|| !TerraEngine::Audio::ReadAudioFile(audioBytes).Succeeded()) {
+				result.errorMessage = "Staged audio clip is not a valid TEAF envelope: " + entry.path().string();
+				return result;
+			}
 		}
 	}
 

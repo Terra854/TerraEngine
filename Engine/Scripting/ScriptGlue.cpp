@@ -12,6 +12,7 @@
 #include "Components/Physics/ColliderSetComponent.h"
 #include "Components/Physics/ConstraintSetComponent.h"
 #include "Animation/AnimationSystem.h"
+#include "Audio/AudioSystem.h"
 #include "Animation/Runtime/AnimationAttachments.h"
 #include "Animation/Runtime/RootMotion.h"
 #include "DotNet/DotNetHost.h"
@@ -38,6 +39,32 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+
+namespace {
+	template<typename T>
+	bool IsAudioAbiRecord(const T* value) {
+		return value != nullptr
+			&& value->header.abiVersion == kNativeAudioAbiVersion
+			&& value->header.structSize == sizeof(T);
+	}
+
+	void CopyAudioDiagnostic(char* destination, std::size_t capacity, const std::string& source) {
+		if(destination == nullptr || capacity == 0U) return;
+		const std::size_t count = std::min(capacity - 1U, source.size());
+		std::memcpy(destination, source.data(), count);
+		destination[count] = '\0';
+	}
+
+	NativeAudioStatus ToNativeAudioStatus(TerraEngine::Audio::AudioControlStatus status) {
+		switch(status) {
+		case TerraEngine::Audio::AudioControlStatus::Queued: return NativeAudioStatus::Queued;
+		case TerraEngine::Audio::AudioControlStatus::Accepted: return NativeAudioStatus::Accepted;
+		case TerraEngine::Audio::AudioControlStatus::Applied: return NativeAudioStatus::Success;
+		case TerraEngine::Audio::AudioControlStatus::Rejected: return NativeAudioStatus::InvalidArgument;
+		}
+		return NativeAudioStatus::ProviderFailure;
+	}
+}
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -3886,6 +3913,108 @@ extern "C" {
 			}
 		}
 		return false;
+	}
+
+	std::uint32_t Native_Audio_GetAbiVersion() { return kNativeAudioAbiVersion; }
+
+	NativeAudioStatus Native_Audio_SubmitCommand(
+		const NativeAudioCommandRequest* request,
+		NativeAudioCommandReceipt* receipt) {
+		if(receipt == nullptr) return NativeAudioStatus::InvalidArgument;
+		*receipt = {};
+		receipt->header = {kNativeAudioAbiVersion, sizeof(*receipt)};
+		if(!IsAudioAbiRecord(request)) {
+			receipt->status = NativeAudioStatus::VersionMismatch;
+			CopyAudioDiagnostic(receipt->diagnostic, sizeof(receipt->diagnostic), "Audio ABI header does not match v1.");
+			return receipt->status;
+		}
+
+		ObjectManager& objects = ObjectManager::instance();
+		const auto object = objects.getObject(static_cast<entt::entity>(request->objectEntity));
+		if(!object) {
+			receipt->status = NativeAudioStatus::NotFound;
+			return receipt->status;
+		}
+
+		TerraEngine::Audio::AudioControlBatch batch;
+		batch.requestedFrame = request->requestedFrame;
+		batch.producerId = request->producerId;
+		batch.correlationId = std::to_string(request->correlationId);
+		batch.idempotencyKey = request->idempotencyKey == 0U ? std::string{} : std::to_string(request->idempotencyKey);
+		batch.requestFingerprint = std::to_string(request->objectEntity) + ":"
+			+ std::to_string(static_cast<std::uint32_t>(request->kind)) + ":"
+			+ std::to_string(request->playbackGeneration);
+		TerraEngine::Audio::AudioControlCommand command;
+		command.source.objectId = objects.getUUID(*object);
+		command.source.objectGeneration = object->generation;
+		command.source.componentGeneration = request->componentGeneration;
+		command.source.playbackGeneration = request->playbackGeneration;
+		switch(request->kind) {
+		case NativeAudioCommandKind::Play: command.kind = TerraEngine::Audio::AudioControlKind::Play; break;
+		case NativeAudioCommandKind::Pause: command.kind = TerraEngine::Audio::AudioControlKind::Pause; break;
+		case NativeAudioCommandKind::Resume: command.kind = TerraEngine::Audio::AudioControlKind::Resume; break;
+		case NativeAudioCommandKind::Stop: command.kind = TerraEngine::Audio::AudioControlKind::Stop; break;
+		default:
+			receipt->status = NativeAudioStatus::InvalidArgument;
+			return receipt->status;
+		}
+		batch.commands.push_back(command);
+		const auto native = TerraEngine::Audio::AudioSystem::Instance().SubmitControlBatch(std::move(batch));
+		receipt->status = ToNativeAudioStatus(native.status);
+		receipt->rejection = static_cast<std::uint32_t>(native.rejection);
+		receipt->batchSequence = native.batchSequence;
+		receipt->requestedFrame = native.requestedFrame;
+		receipt->correlationId = request->correlationId;
+		CopyAudioDiagnostic(receipt->diagnostic, sizeof(receipt->diagnostic), native.diagnostic);
+		return receipt->status;
+	}
+
+	NativeAudioStatus Native_Audio_ReadPlayback(
+		std::uint32_t objectEntity,
+		std::uint32_t componentGeneration,
+		NativeAudioPlaybackState* state) {
+		if(!IsAudioAbiRecord(state)) return NativeAudioStatus::VersionMismatch;
+		const NativeAudioAbiHeader header = state->header;
+		*state = {};
+		state->header = header;
+		ObjectManager& objects = ObjectManager::instance();
+		const auto object = objects.getObject(static_cast<entt::entity>(objectEntity));
+		const auto snapshot = TerraEngine::Audio::AudioSystem::Instance().LatestPlaybackSnapshot();
+		if(!object || !snapshot) return state->status = NativeAudioStatus::NotFound;
+		const TerraEngine::UUID uuid = objects.getUUID(*object);
+		const auto found = std::find_if(snapshot->voices.begin(), snapshot->voices.end(), [&](const auto& voice) {
+			return voice.identity.objectId == uuid && voice.identity.componentGeneration == componentGeneration;
+		});
+		if(found == snapshot->voices.end()) return state->status = NativeAudioStatus::NotFound;
+		state->status = NativeAudioStatus::Success;
+		state->state = found->paused ? 2U : 1U;
+		state->playbackGeneration = found->identity.playbackGeneration;
+		state->audible = found->audibility == TerraEngine::Audio::AudioAudibility::Audible ? 1U : 0U;
+		state->frame = snapshot->frame;
+		state->logicalFrame = found->logicalFrame;
+		state->gain = found->gain;
+		state->pitch = found->pitch;
+		return state->status;
+	}
+
+	NativeAudioStatus Native_Audio_ReadMasterMix(NativeAudioMixState* state) {
+		if(!IsAudioAbiRecord(state)) return NativeAudioStatus::VersionMismatch;
+		const NativeAudioAbiHeader header = state->header;
+		*state = {};
+		state->header = header;
+		const auto snapshot = TerraEngine::Audio::AudioSystem::Instance().LatestMixSnapshot();
+		state->status = NativeAudioStatus::Success;
+		state->muted = snapshot.master.muted ? 1U : 0U;
+		state->generation = snapshot.generation;
+		state->volume = snapshot.master.volume;
+		return state->status;
+	}
+
+	NativeAudioStatus Native_Audio_SetMasterMix(const NativeAudioMixState* state) {
+		if(!IsAudioAbiRecord(state) || !std::isfinite(state->volume)) return NativeAudioStatus::InvalidArgument;
+		std::string diagnostic;
+		return TerraEngine::Audio::AudioSystem::Instance().SetMasterMix(state->volume, state->muted != 0U, diagnostic)
+			? NativeAudioStatus::Accepted : NativeAudioStatus::InvalidArgument;
 	}
 
 	std::uint64_t Native_Object_GetComponentGeneration(uint32_t objectId) {

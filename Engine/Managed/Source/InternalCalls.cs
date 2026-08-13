@@ -2167,6 +2167,28 @@ namespace TerraEngine
 		[DllImport("TerraEngine")]
 		internal static extern uint Native_Physics_GetAbiVersion();
 
+		// Audio v1 uses caller-owned fixed-width records and the engine's protected
+		// queue/snapshot boundaries; no provider handle crosses managed code.
+		[DllImport("TerraEngine")]
+		internal static extern uint Native_Audio_GetAbiVersion();
+
+		[DllImport("TerraEngine")]
+		internal static extern Audio.AudioStatus Native_Audio_SubmitCommand(
+			ref Audio.NativeAudioCommandRequest request,
+			ref Audio.NativeAudioCommandReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern Audio.AudioStatus Native_Audio_ReadPlayback(
+			uint objectEntity,
+			uint componentGeneration,
+			ref Audio.NativeAudioPlaybackState state);
+
+		[DllImport("TerraEngine")]
+		internal static extern Audio.AudioStatus Native_Audio_ReadMasterMix(ref Audio.NativeAudioMixState state);
+
+		[DllImport("TerraEngine")]
+		internal static extern Audio.AudioStatus Native_Audio_SetMasterMix(ref Audio.NativeAudioMixState state);
+
 		[DllImport("TerraEngine")]
 		internal static extern PhysicsStatus Native_Physics_SubmitBodyCommand(ref NativePhysicsBodyCommandRequest request, ref NativePhysicsCommandReceipt receipt);
 

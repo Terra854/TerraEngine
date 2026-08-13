@@ -1632,3 +1632,32 @@ Compare only complete five-run bundles with matching identity. Finish with the
 installed five-minute soak using `-DurationSeconds 300 -SampleIntervalSeconds 1`;
 the soak retains one-second resource, generation, reuse, rejection, and present
 samples and fails closed on missing adapters or incomplete evidence.
+# Audio runtime foundation
+
+Audio acceptance is intentionally split into deterministic and audible lanes.
+The authoritative CI lane does not require an output device:
+
+```powershell
+cmake --preset RelWithDebInfo
+cmake --build out/build/RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineAudioClipCompiler
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "^(Engine|Editor)\\.Audio" --output-on-failure
+./Tools/Audio/AcquireAudioFixtures.ps1 -VerifyCommitted
+./Tools/Audio/GenerateAudioFixtures.ps1 -VerifyCommitted
+cmake --build out/build/RelWithDebInfo --target install
+```
+
+To validate real decoding and mixing on a muted workstation or headless runner,
+run the dedicated offline test:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "^Engine.AudioOfflineRender$" --output-on-failure
+```
+
+This test configures miniaudio with `noDevice=true`, renders a committed WAV
+fixture into an in-memory float PCM block, and checks its samples and deterministic
+repeatability. It does not open a playback device and therefore is strong
+non-audible evidence, but it does not replace the deferred human audible lane.
+
+When a maintainer has an audible device, also run the installed editor scenario
+in `specs/051-audio-runtime-foundation/quickstart.md`. A muted/headless run must
+record that manual lane as deferred; it must never be reported as an audible pass.

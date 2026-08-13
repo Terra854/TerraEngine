@@ -6,6 +6,8 @@
 
 #include "Scene/Serializer.h"
 #include "Components/AnimatorComponent.h"
+#include "Components/AudioListenerComponent.h"
+#include "Components/AudioSourceComponent.h"
 #include "Core/Object/ObjectManager.h"
 #include "Core/Object/Component.h"
 #include "Components/Physics/CharacterControllerComponent.h"
@@ -973,6 +975,8 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 	// the generic component path can restore it while ignoring unknown runtime
 	// keys from malformed or obsolete payloads.
 	AnimatorComponent::registerType();
+	AudioSourceComponent::registerType();
+	AudioListenerComponent::registerType();
 	ObjectManager& objManager = ObjectManager::instance();
 	entt::registry& enttRegistry = objManager.getRegistry();
 	std::string name = json.value("name", "Unnamed");

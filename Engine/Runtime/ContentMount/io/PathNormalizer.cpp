@@ -188,6 +188,11 @@ std::string DetectAssetClass(const std::filesystem::path& sourcePath) {
 	if (extension == ".teragdoll") {
 		return "ragdoll-profile";
 	}
+	// A cooked TEAF envelope remains provider-neutral, but its archive class is
+	// still audio so runtime resolution can reject mismatched metadata.
+	if (extension == ".teaudio") {
+		return "audio";
+	}
 	if (extension == ".vert" || extension == ".frag" || extension == ".comp" || extension == ".hlsl" || extension == ".glsl") {
 		return "shader";
 	}

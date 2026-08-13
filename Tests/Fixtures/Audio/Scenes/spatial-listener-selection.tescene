@@ -1,0 +1,29 @@
+{
+	"name": "Audio Spatial Listener Selection Reference",
+	"objects": [
+		{
+			"uuid": "51000000000000000000000000000010",
+			"name": "Primary Listener",
+			"components": {
+				"Transform": {"Position": [0.0, 0.0, 0.0], "Rotation": [1.0, 0.0, 0.0, 0.0], "Scale": [1.0, 1.0, 1.0]},
+				"AudioListenerComponent": {"eligible": true}
+			}
+		},
+		{
+			"uuid": "51000000000000000000000000000020",
+			"name": "Secondary Listener",
+			"components": {
+				"Transform": {"Position": [4.0, 0.0, 0.0], "Rotation": [1.0, 0.0, 0.0, 0.0], "Scale": [1.0, 1.0, 1.0]},
+				"AudioListenerComponent": {"eligible": true}
+			}
+		},
+		{
+			"uuid": "51000000000000000000000000000030",
+			"name": "Spatial Effect",
+			"components": {
+				"Transform": {"Position": [2.0, 0.0, -3.0], "Rotation": [1.0, 0.0, 0.0, 0.0], "Scale": [1.0, 1.0, 1.0]},
+				"AudioSourceComponent": {"playOnStart": true, "loop": false, "volume": 1.0, "pitch": 1.0, "spatialBlend": 1.0, "minDistance": 1.0, "maxDistance": 10.0, "priority": 200}
+			}
+		}
+	]
+}

@@ -1,0 +1,12 @@
+#include "FakeAudioBackend.h"
+
+namespace TerraEngine::Tests::Audio {
+	using namespace TerraEngine::Audio;
+	namespace { std::string ClipKey(const TerraEngine::UUID& id, AudioGeneration generation) { return TerraEngine::ToHexString(id) + ':' + std::to_string(generation); } inline constexpr std::size_t kMaximumObservations = 32U; }
+	AudioResult FakeAudioBackend::Initialize(const AudioBackendCreateInfo& createInfo) { if(createInfo.maximumVoices == 0U) return AudioResult::Rejected("The fake provider rejects zero voices."); initialized = true; shutdown = false; return AudioResult::Accepted(); }
+	AudioResult FakeAudioBackend::SubmitFrame(const AudioBackendFramePacket& packet) { if(!initialized || shutdown) return {AudioResultCode::InvalidState, "The fake provider is unavailable."}; if(!nextFailure.empty()) { auto message = std::move(nextFailure); nextFailure.clear(); return {AudioResultCode::ProviderFailure, std::move(message)}; } if(packet.sequence != lastSequence + 1U) return {AudioResultCode::StalePacket, "Fake provider packets must be consecutive."}; for(const auto& registration : packet.registrations) clips[ClipKey(registration.assetId, registration.generation)] = registration; for(const auto& release : packet.releases) clips.erase(ClipKey(release.assetId, release.generation)); for(const auto& voice : packet.voices) { if(voice.destroy) voices.erase(voice.voice); else if(voice.create) voices[voice.voice] = voice; } lastSequence = packet.sequence; packets.push_back(packet); return AudioResult::Accepted(); }
+	AudioResult FakeAudioBackend::PollObservations(std::span<AudioBackendObservation> destination, std::size_t& requiredCount) { requiredCount = observations.size(); const auto count = std::min(destination.size(), requiredCount); for(std::size_t index = 0U; index < count; ++index) { destination[index] = std::move(observations.front()); observations.pop_front(); } return count == requiredCount ? AudioResult::Accepted() : AudioResult{AudioResultCode::CapacityExceeded, "The fake observation destination is bounded."}; }
+	AudioResult FakeAudioBackend::Shutdown() { observations.clear(); voices.clear(); clips.clear(); initialized = false; shutdown = true; return AudioResult::Accepted(); }
+	void FakeAudioBackend::InjectObservation(AudioBackendObservation observation) { if(observations.size() < kMaximumObservations) observations.push_back(std::move(observation)); else ++droppedObservations; }
+	void FakeAudioBackend::FailNextSubmit(std::string message) { nextFailure = std::move(message); }
+}

@@ -57,6 +57,10 @@ namespace TerraEngine::Animation
 	struct RetargetProfileAsset;
 	struct SkeletonAsset;
 }
+namespace TerraEngine::Audio
+{
+	class AudioClipAsset;
+}
 // ShaderStage names the supported states explicitly so serialization and switches stay readable.
 enum class ShaderStage : std::uint32_t;
 
@@ -79,7 +83,10 @@ enum class AssetType : std::uint32_t {
 	AnimationMask = 9U,
 	RetargetProfile = 10U,
 	MotionDatabase = 11U,
-	RagdollProfile = 12U
+	RagdollProfile = 12U,
+	// Audio follows persisted animation identities so existing scenes and asset
+	// indexes retain their numeric meanings when audio support is introduced.
+	AudioClip = 13U
 };
 
 constexpr bool IsAnimationAssetType(AssetType type) noexcept
@@ -440,6 +447,10 @@ public:
 	TerraEngine::UUID LoadShader(const std::filesystem::path& path);
 	TerraEngine::UUID LoadShaderCollection(const std::vector<ShaderStagePath>& stagePaths);
 	TerraEngine::UUID LoadTexture(const std::filesystem::path& path);
+	// Audio loads only the validated provider-neutral TEAF envelope. The returned
+	// shared value keeps the encoded bytes alive for backend frame packets.
+	TerraEngine::UUID LoadAudioClip(const std::filesystem::path& path);
+	bool ReloadAudioClip(const TerraEngine::UUID& id);
 
 	// Re-parse a material from disk to pick up authored changes without clearing
 	// the entire cache. This ensures the renderer sees new parameters immediately.
@@ -618,6 +629,7 @@ public:
 		TryCopyMeshAnimationBindingSnapshot(const TerraEngine::UUID& id) const;
 	TerraEngine::Animation::SkeletonAsset* GetSkeleton(const TerraEngine::UUID& id);
 	TerraEngine::Animation::AnimationClipAsset* GetAnimationClip(const TerraEngine::UUID& id);
+	[[nodiscard]] std::shared_ptr<const TerraEngine::Audio::AudioClipAsset> GetAudioClip(const TerraEngine::UUID& id);
 	// Return the session-local generation currently assigned to a cooked
 	// animation publication or tombstone. Zero means the UUID/type has not been
 	// published in this manager session (or is not an animation cache type).
@@ -990,6 +1002,12 @@ private:
 	ResourceCache<Texture> textureCache;
 	AssetPathRegistry physicsMaterialPaths;
 	AssetPathRegistry cookedColliderPaths;
+	// Audio uses shared immutable generations rather than raw cache pointers:
+	// provider packets can retain a generation past a protected reload boundary.
+	AssetPathRegistry audioClipPaths;
+	std::unordered_map<TerraEngine::UUID, std::shared_ptr<const TerraEngine::Audio::AudioClipAsset>> audioClipAssets;
+	std::unordered_map<TerraEngine::UUID, std::uint64_t> audioClipGenerations;
+	mutable std::shared_mutex audioClipMutex;
 };
 
 // Render a UUID as a hex string for readable debug logging without adding a

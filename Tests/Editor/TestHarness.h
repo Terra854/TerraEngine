@@ -41,7 +41,14 @@ namespace TerraEngine::EditorTests {
 		void ExpectEqual(const Expected& expected, const Actual& actual, std::string_view message) const {
 			if(!(expected == actual)) {
 				std::ostringstream stream;
-				stream << message << " (expected '" << expected << "', got '" << actual << "')";
+				stream << message;
+				// Some standard-library values (notably GCC's filesystem clock)
+				// are equality-comparable but intentionally have no stream operator.
+				// Preserve rich diagnostics where both values support them and keep
+				// the assertion usable for portable comparable-only types.
+				if constexpr(requires { stream << expected; stream << actual; }) {
+					stream << " (expected '" << expected << "', got '" << actual << "')";
+				}
 				throw TestFailure(stream.str());
 			}
 		}
