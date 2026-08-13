@@ -425,6 +425,11 @@ set(BASISU_SOURCES
 	External/basisu/encoder/basisu_astc_hdr_common.cpp
 	External/basisu/encoder/basisu_astc_ldr_common.cpp
 	External/basisu/encoder/basisu_astc_ldr_encode.cpp
+	# The current encoder splits its floating-point ASTC and xBC7 routines into
+	# dedicated translation units. Keep them in TerraEngine's static provider so
+	# every symbol referenced by basisu_comp is available to asset compiler jobs.
+	External/basisu/encoder/basisu_astc_ldr_fencode.cpp
+	External/basisu/encoder/basisu_xbc7_encode.cpp
 	External/basisu/encoder/basisu_backend.cpp
 	External/basisu/encoder/basisu_basis_file.cpp
 	External/basisu/encoder/basisu_bc7enc.cpp
@@ -477,9 +482,10 @@ set(LAUNCHER_SOURCES
 # engine dependencies under External/ instead of inside the standalone TEPAK/
 # project folder.
 set(TEPAK_EXTERNAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/External")
-# xxHash 0.8.3 moved its supported bundled CMake entry point from
-# build/cmake to cmake_unofficial. Keep using the vendored source directly.
-add_subdirectory("${TEPAK_EXTERNAL_DIR}/xxhash/cmake_unofficial" "${CMAKE_BINARY_DIR}/xxhash")
+# xxHash keeps its supported bundled CMake entry point under build/cmake.
+# Using that provider-owned entry point keeps TerraEngine on the updated
+# vendored checkout without depending on a globally installed xxHash package.
+add_subdirectory("${TEPAK_EXTERNAL_DIR}/xxhash/build/cmake" "${CMAKE_BINARY_DIR}/xxhash")
 # TerraEngine's CTest surface should stay limited to project-owned engine and
 # editor suites. zstd defaults its upstream tests on when BUILD_TESTING is
 # enabled, so turn those off before adding the vendored dependency.
@@ -688,6 +694,11 @@ set_target_properties(assimp PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 set(SIMDJSON_INSTALL ON CACHE BOOL "Export the vendored fastgltf dependency" FORCE)
 set(SIMDJSON_DEVELOPER_MODE OFF CACHE BOOL "Disable simdjson developer targets" FORCE)
 set(SIMDJSON_SINGLEHEADER ON CACHE BOOL "Use vendored simdjson single header output mode" FORCE)
+# Current simdjson names the reflection policy explicitly. Remove the legacy
+# cache key so existing build trees do not trigger the provider's deprecation
+# path, and keep C++26 reflection disabled for TerraEngine's C++20 baseline.
+unset(SIMDJSON_STATIC_REFLECTION CACHE)
+set(SIMDJSON_STATIC_REFLECTION_MODE OFF CACHE STRING "Disable simdjson C++26 static reflection" FORCE)
 add_subdirectory(External/simdjson)
 set_target_properties(simdjson PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 

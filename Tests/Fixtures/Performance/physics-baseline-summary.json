@@ -11,8 +11,8 @@
 		"engineCommit": "ab50a86fe11220a41fdeeab351d15c23ecdc4726",
 		"installedTreeRequired": true,
 		"physicsProvider": "Jolt Physics",
-		"physicsProviderVersion": "5.6.0",
-		"physicsProviderRevision": "e77f175595e64cb44218cc9d9d56fc365ad0e36a"
+		"physicsProviderVersion": "5.6.1",
+		"physicsProviderRevision": "2e28006e4a367624bb512bf2c37ca99a93d9d1ea"
 	},
 	"hardware": {
 		"operatingSystem": "Microsoft Windows 11 Home 10.0.26200",

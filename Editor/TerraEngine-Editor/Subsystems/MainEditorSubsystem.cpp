@@ -1100,7 +1100,7 @@ namespace
 		drawList->AddRectFilled(min, max, background, 3.0f);
 		if (active || hovered)
 		{
-			drawList->AddRect(min, max, border, 3.0f, 0, active ? 1.4f : 1.0f);
+			drawList->AddRect(min, max, border, 3.0f, active ? 1.4f : 1.0f, 0);
 		}
 		DrawPlayModeToolbarIconShape(drawList, icon, min, max, iconColor);
 
@@ -2774,8 +2774,10 @@ void MainEditorSubsystem::RefreshViewportTextures(VulkanContext& vulkan)
 				// same renderer-state/queue boundary as ImGui font uploads so shutdown
 				// or swapchain replacement cannot overlap this host-side mutation.
 				vulkan.RunWithQueueAccess([&]() {
+					// Dear ImGui 1.92.9 owns the linear/nearest sampler descriptor
+					// separately, so custom texture registration now needs only the view.
+					(void)sampler;
 					const VkDescriptorSet set = ImGui_ImplVulkan_AddTexture(
-						reinterpret_cast<VkSampler>(sampler),
 						reinterpret_cast<VkImageView>(imageView),
 						VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 					descriptor = reinterpret_cast<void*>(set);
@@ -2807,7 +2809,8 @@ void MainEditorSubsystem::CaptureViewportDrawDataUses()
 	viewportTextures.BeginDrawDataUsage();
 	const ImDrawData* drawData = ImGui::GetDrawData();
 	if (drawData == nullptr) return;
-	for (int listIndex = 0; listIndex < drawData->CmdListsCount; ++listIndex) {
+	// CmdLists is now an ImVector; its Size field is the authoritative list count.
+	for (int listIndex = 0; listIndex < drawData->CmdLists.Size; ++listIndex) {
 		const ImDrawList* list = drawData->CmdLists[listIndex];
 		for (const ImDrawCmd& command : list->CmdBuffer) {
 			viewportTextures.MarkDrawDataUse(reinterpret_cast<void*>(command.GetTexID()));

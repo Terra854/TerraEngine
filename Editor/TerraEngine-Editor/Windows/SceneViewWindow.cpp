@@ -414,7 +414,7 @@ void DrawToolbarIconShape(ImDrawList* drawList, std::string_view shapeKind, cons
 		// without an icon font, keeping the toolbar self-contained.
 		const ImVec2 palmMin(center.x - unit * 0.14f, center.y - unit * 0.02f);
 		const ImVec2 palmMax(center.x + unit * 0.16f, center.y + unit * 0.24f);
-		drawList->AddRect(palmMin, palmMax, iconColor, unit * 0.06f, 0, thickness);
+		drawList->AddRect(palmMin, palmMax, iconColor, unit * 0.06f, thickness, 0);
 		for (int finger = 0; finger < 4; ++finger)
 		{
 			const float x = center.x - unit * 0.18f + static_cast<float>(finger) * unit * 0.11f;
@@ -475,8 +475,8 @@ void DrawToolbarIconShape(ImDrawList* drawList, std::string_view shapeKind, cons
 		const ImVec2 frontMin(center.x - radius * 0.8f, center.y - radius * 0.55f);
 		const ImVec2 frontMax(center.x + radius * 0.45f, center.y + radius * 0.7f);
 		const ImVec2 offset(radius * 0.38f, -radius * 0.34f);
-		drawList->AddRect(frontMin, frontMax, iconColor, 0.0f, 0, thickness);
-		drawList->AddRect(AddIconVec2(frontMin, offset), AddIconVec2(frontMax, offset), iconColor, 0.0f, 0, thickness);
+		drawList->AddRect(frontMin, frontMax, iconColor, 0.0f, thickness, 0);
+		drawList->AddRect(AddIconVec2(frontMin, offset), AddIconVec2(frontMax, offset), iconColor, 0.0f, thickness, 0);
 		drawList->AddLine(frontMin, AddIconVec2(frontMin, offset), iconColor, thickness);
 		drawList->AddLine(ImVec2(frontMax.x, frontMin.y), AddIconVec2(ImVec2(frontMax.x, frontMin.y), offset), iconColor, thickness);
 		drawList->AddLine(frontMax, AddIconVec2(frontMax, offset), iconColor, thickness);
@@ -486,7 +486,7 @@ void DrawToolbarIconShape(ImDrawList* drawList, std::string_view shapeKind, cons
 	if (shapeKind == "magnet-grid")
 	{
 		drawList->PathArcTo(ImVec2(center.x - radius * 0.35f, center.y), radius * 0.55f, 3.14159265f * 0.5f, 3.14159265f * 1.5f, 18);
-		drawList->PathStroke(iconColor, 0, thickness);
+		drawList->PathStroke(iconColor, thickness, 0);
 		drawList->AddLine(ImVec2(center.x - radius * 0.35f, center.y - radius * 0.55f), ImVec2(center.x + radius * 0.52f, center.y - radius * 0.55f), iconColor, thickness);
 		drawList->AddLine(ImVec2(center.x - radius * 0.35f, center.y + radius * 0.55f), ImVec2(center.x + radius * 0.52f, center.y + radius * 0.55f), iconColor, thickness);
 		drawList->AddLine(ImVec2(center.x + radius * 0.72f, center.y - radius * 0.65f), ImVec2(center.x + radius * 0.72f, center.y + radius * 0.65f), accentColor, thickness * 0.8f);
@@ -541,7 +541,7 @@ void DrawToolbarIconShape(ImDrawList* drawList, std::string_view shapeKind, cons
 
 	if (shapeKind == "projection-ortho")
 	{
-		drawList->AddRect(ImVec2(center.x - radius * 0.8f, center.y - radius * 0.8f), ImVec2(center.x + radius * 0.8f, center.y + radius * 0.8f), iconColor, unit * 0.03f, 0, thickness);
+		drawList->AddRect(ImVec2(center.x - radius * 0.8f, center.y - radius * 0.8f), ImVec2(center.x + radius * 0.8f, center.y + radius * 0.8f), iconColor, unit * 0.03f, thickness, 0);
 		drawList->AddLine(ImVec2(center.x - radius * 0.45f, center.y - radius * 0.8f), ImVec2(center.x - radius * 0.45f, center.y + radius * 0.8f), accentColor, thickness * 0.8f);
 		drawList->AddLine(ImVec2(center.x + radius * 0.45f, center.y - radius * 0.8f), ImVec2(center.x + radius * 0.45f, center.y + radius * 0.8f), accentColor, thickness * 0.8f);
 		return;
@@ -581,7 +581,7 @@ bool DrawOverlayIconButton(const char* id, std::string_view shapeKind, bool acti
 	// The button face is drawn manually so every toolbar command can be an icon
 	// without depending on a bundled icon font or visible text labels.
 	drawList->AddRectFilled(min, max, background, 3.0f);
-	drawList->AddRect(min, max, border, 3.0f, 0, active ? 1.6f : 1.0f);
+	drawList->AddRect(min, max, border, 3.0f, active ? 1.6f : 1.0f, 0);
 	DrawToolbarIconShape(drawList, shapeKind, min, max, icon, accent);
 
 	if (hovered && tooltip != nullptr)

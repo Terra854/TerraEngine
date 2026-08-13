@@ -572,9 +572,9 @@ if (-not (Test-Path -LiteralPath (Join-Path $physicsFixtureSource "Assets/Collid
 	throw "Physics parity fixture must retain a source-only collider recipe for installed cooking."
 }
 if ($manifest.physics.provider.identifier -ne "Jolt" -or
-	$manifest.physics.provider.version -ne "5.6.0" -or
-	$manifest.physics.provider.revision -ne "e77f175595e64cb44218cc9d9d56fc365ad0e36a") {
-	throw "Exported physics provider contract must remain Jolt 5.6.0 revision e77f175595e64cb44218cc9d9d56fc365ad0e36a."
+	$manifest.physics.provider.version -ne "5.6.1" -or
+	$manifest.physics.provider.revision -ne "2e28006e4a367624bb512bf2c37ca99a93d9d1ea") {
+	throw "Exported physics provider contract must remain Jolt 5.6.1 revision 2e28006e4a367624bb512bf2c37ca99a93d9d1ea."
 }
 $physicsInventory = @($inventory.entries | Where-Object { $_.assetType -in @("physics_settings", "physics_material", "cooked_collider") })
 if (@($physicsInventory | Where-Object { $_.assetType -eq "physics_settings" }).Count -ne 1) {
@@ -626,7 +626,7 @@ Set-Content -LiteralPath (Join-Path $evidenceRoot "physics-export-invariants.jso
 	"invariantExport=$physicsExportLog",
 	"parity=editor-play-mode-vs-export-pass",
 	"invariants=$($expectedPhysicsInvariants -join ',')",
-	"provider=Jolt 5.6.0 e77f175595e64cb44218cc9d9d56fc365ad0e36a",
+	"provider=Jolt 5.6.1 2e28006e4a367624bb512bf2c37ca99a93d9d1ea",
 	"shutdown=package-validation-final-pass"
 ) | Add-Content -LiteralPath $physicsBaselineLog -Encoding utf8
 

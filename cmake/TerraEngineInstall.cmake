@@ -101,6 +101,4 @@ function(terraengine_install_physics_foundation destination)
 	install(DIRECTORY "${CMAKE_SOURCE_DIR}/Tools/Physics/"
 		DESTINATION "${destination}/Tools/Physics"
 		FILES_MATCHING PATTERN "*.ps1" PATTERN "*.json" PATTERN "README.md")
-	install(FILES "${CMAKE_SOURCE_DIR}/specs/050-optimize-physics-runtime/contracts/physics-performance-evidence.schema.json"
-		DESTINATION "${destination}/Tools/Physics/contracts")
 endfunction()

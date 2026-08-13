@@ -21,8 +21,8 @@ it must not be accepted by weakening a nearby constant.
 | Locked reference baseline | `out/validation/animation/baseline/locked-baseline.json` — SHA-256 `cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f` |
 | Reference-baseline evidence selection | 178 files, 371,567,204 bytes — aggregate SHA-256 `4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5` |
 | Runtime limits contract | `Docs/Animation/README.md` — SHA-256 `e9e231c9c9b9e6f22868cec47146436e9a8aac90802e9d1d26b6cfeee88f98c2` |
-| Animation performance workloads | `Tools/Animation/PerformanceWorkloads.json` — SHA-256 `847c2e6f98e48be816da8907961924420c32bf25dff7c72afc88fafbd765f390` |
-| Animation stress definitions | `Tests/Fixtures/Animation/stress/workloads.json` — SHA-256 `a1e5cc3dafa996014b753a0fe9bc39b9299efc0d367ec9c8d134e5768fb7becf` |
+| Animation performance workloads | `Tools/Animation/PerformanceWorkloads.json` — SHA-256 `a50c359f5dda932c0852eaa9a83c2e57cbbca3c60f038e975f7b67e0b17774f6` |
+| Animation stress definitions | `Tests/Fixtures/Animation/stress/workloads.json` — SHA-256 `6773caf89e87b2fc5f1277ca5bde92aa68f4f20581a223af1910cb62a95c8aff` |
 | Whole-engine coverage matrix | `Tools/Animation/PerformanceCoverageMatrix.json` — SHA-256 `b32480055b7ed0adc64072848a2610b475334996648609a69b269385f62cb9c8` |
 | Soak iteration schema | `Tests/Fixtures/Animation/stress/soak-result.schema.json` — SHA-256 `fa1b6548872e9ca70a8e1d5aeef9e810d82cc8bcd45e386c2a29744df8991659` |
 

@@ -49,7 +49,7 @@ $script:ExpectedEvidenceLockSha256 = "0605b4d4241bda8ba3fd4743b2ba7a6c6b217aaf1c
 $script:ExpectedEvidenceAggregateSha256 = "4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5"
 $script:ExpectedContractSha256 = "e9e231c9c9b9e6f22868cec47146436e9a8aac90802e9d1d26b6cfeee88f98c2"
 $script:ExpectedRendererManifestSha256 = "3230959fab8c628d9396bd31a7923672c3a1ebf5b51ff4998066a8f10c2b3e4c"
-$script:ExpectedWorkloadsSha256 = "847c2e6f98e48be816da8907961924420c32bf25dff7c72afc88fafbd765f390"
+$script:ExpectedWorkloadsSha256 = "a50c359f5dda932c0852eaa9a83c2e57cbbca3c60f038e975f7b67e0b17774f6"
 $script:ExpectedCoverageMatrixSha256 = "b32480055b7ed0adc64072848a2610b475334996648609a69b269385f62cb9c8"
 $script:BaselineInventoryCache = $null
 

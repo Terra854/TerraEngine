@@ -2,7 +2,7 @@
 
 Collider assets separate authored geometry from immutable runtime shape data.
 Recipes and the envelope contract are provider-neutral; the payload inside a
-`.tepcoll` envelope is opaque Jolt 5.6.0 `ShapeWithChildren` data. A recipe
+`.tepcoll` envelope is opaque Jolt 5.6.1 `ShapeWithChildren` data. A recipe
 records source geometry, shape kind, local transform, material GUID, and
 provenance. Cooking normalizes that recipe, computes a stable hash, and emits a
 versioned cooked envelope. Installed runtimes load only `.tepcoll` and do not
@@ -52,8 +52,8 @@ their old generation.
 
 Every cooked envelope carries a magic value, schema version, non-empty payload,
 checksum, recipe hash, source/provenance record, provider revision, and cook
-revision. This feature is pinned to Jolt Physics **5.6.0**, commit
-`e77f175595e64cb44218cc9d9d56fc365ad0e36a`. Runtime loading rejects malformed,
+revision. This feature is pinned to Jolt Physics **5.6.1**, commit
+`2e28006e4a367624bb512bf2c37ca99a93d9d1ea`. Runtime loading rejects malformed,
 future-version, checksum-mismatched, provider-mismatched, or empty envelopes.
 
 If a recook fails, the last-known-good envelope remains available and its

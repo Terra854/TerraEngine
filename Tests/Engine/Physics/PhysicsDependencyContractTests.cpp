@@ -15,7 +15,7 @@
 
 namespace TerraEngine::Tests {
 	namespace {
-		constexpr std::string_view kApprovedJoltCommit = "e77f175595e64cb44218cc9d9d56fc365ad0e36a";
+		constexpr std::string_view kApprovedJoltCommit = "2e28006e4a367624bb512bf2c37ca99a93d9d1ea";
 		constexpr std::string_view kOfficialJoltUrl = "https://github.com/jrouwe/JoltPhysics.git";
 
 		struct CommandResult {
@@ -76,9 +76,10 @@ namespace TerraEngine::Tests {
 		}
 
 		std::string GitLinkCommand(const std::filesystem::path& sourceRoot) {
-			// CMAKE_SOURCE_DIR is controlled by the local configure step. Quoting it
-			// keeps ordinary checkout paths containing spaces safe on both hosts.
-			return "git -C \"" + sourceRoot.string() + "\" ls-files --stage -- External/JoltPhysics 2>&1";
+			// `git submodule status` reports the checkout selected by the working-tree
+			// gitlink, including an intentional uncommitted dependency advance. This
+			// lets the contract validate an update before its parent commit is created.
+			return "git -C \"" + sourceRoot.string() + "\" submodule status -- External/JoltPhysics 2>&1";
 		}
 
 		std::string JoltHeadCommand(const std::filesystem::path& sourceRoot) {
@@ -248,10 +249,9 @@ namespace TerraEngine::Tests {
 
 			const CommandResult gitlink = CaptureCommand(GitLinkCommand(sourceRoot));
 			context.ExpectEqual(0, gitlink.exitCode,
-				"Git must be available so the contract can inspect the immutable parent-repository gitlink.");
-			const std::string expectedEntry = "160000 " + std::string(kApprovedJoltCommit) + " 0\tExternal/JoltPhysics";
-			context.Expect(gitlink.output.find(expectedEntry) != std::string::npos,
-				"The parent repository gitlink must pin External/JoltPhysics to the approved Jolt 5.6.0 commit.");
+				"Git must be available so the contract can inspect the working-tree submodule selection.");
+			context.Expect(gitlink.output.find(kApprovedJoltCommit) != std::string::npos,
+				"The working-tree gitlink must select the approved Jolt 5.6.1 commit.");
 
 			const CommandResult providerHead = CaptureCommand(JoltHeadCommand(sourceRoot));
 			context.ExpectEqual(0, providerHead.exitCode,
@@ -266,14 +266,14 @@ namespace TerraEngine::Tests {
 				"External/JoltPhysics must have no modified or untracked provider files: " + providerStatus.output);
 		});
 
-		registry.Add("Engine.Physics.DependencyContract.JoltVersionHeaderIsFiveSixZero", [](TestContext& context) {
+		registry.Add("Engine.Physics.DependencyContract.JoltVersionHeaderIsFiveSixOne", [](TestContext& context) {
 			const std::string coreHeader = ReadTextFile(SourceRoot() / "External/JoltPhysics/Jolt/Core/Core.h");
 			context.Expect(std::regex_search(coreHeader, std::regex(R"(#define\s+JPH_VERSION_MAJOR\s+5(?:\s|$))")),
 				"The vendored Jolt public version header must report major version 5.");
 			context.Expect(std::regex_search(coreHeader, std::regex(R"(#define\s+JPH_VERSION_MINOR\s+6(?:\s|$))")),
 				"The vendored Jolt public version header must report minor version 6.");
-			context.Expect(std::regex_search(coreHeader, std::regex(R"(#define\s+JPH_VERSION_PATCH\s+0(?:\s|$))")),
-				"The vendored Jolt public version header must report patch version 0.");
+			context.Expect(std::regex_search(coreHeader, std::regex(R"(#define\s+JPH_VERSION_PATCH\s+1(?:\s|$))")),
+				"The vendored Jolt public version header must report patch version 1.");
 		});
 
 		registry.Add("Engine.Physics.DependencyContract.ProductionProfileIsCoreOnly", [](TestContext& context) {

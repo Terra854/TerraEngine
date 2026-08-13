@@ -376,8 +376,12 @@ namespace TerraEngine::Tests
 				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 					/ "Engine" / "Renderer" / "RenderSystem.cpp";
 			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
-			const std::string renderSystemSource{
+			std::string renderSystemSource{
 				std::istreambuf_iterator<char>(renderSystemStream), {} };
+			// Source contracts describe tokens and control flow, not checkout line
+			// endings. Normalize CRLF so Windows worktrees match the reviewed LF text.
+			renderSystemSource.erase(std::remove(renderSystemSource.begin(),
+				renderSystemSource.end(), '\r'), renderSystemSource.end());
 			auto request = BuildGpuVisualBindingRequest();
 			request.gpuVisualIdentity = BuildGpuVisualIdentity();
 			const AnimationRenderBinding legacy =
@@ -457,8 +461,12 @@ namespace TerraEngine::Tests
 				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 					/ "Engine" / "Renderer" / "RenderSystem.cpp";
 			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
-			const std::string renderSystemSource{
+			std::string renderSystemSource{
 				std::istreambuf_iterator<char>(renderSystemStream), {} };
+			// Source contracts describe tokens and control flow, not checkout line
+			// endings. Normalize CRLF so Windows worktrees match the reviewed LF text.
+			renderSystemSource.erase(std::remove(renderSystemSource.begin(),
+				renderSystemSource.end(), '\r'), renderSystemSource.end());
 			const bool denseIgnoresSparseCpuCount = renderSystemSource.find(
 				"const bool hasDenseAnimationPublication =\n\t\thasDenseAnimationTopologyCandidate;")
 				!= std::string::npos;

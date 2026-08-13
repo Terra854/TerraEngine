@@ -529,7 +529,7 @@ static void ValidateCookedColliderFile(const std::filesystem::path& colliderPath
 		TerraEngine::Physics::kJoltCookRevision);
 	if(!compatibility.compatible) {
 		AddDiagnostic(result, ExportDiagnosticSeverity::Error, "PhysicsCollider",
-			"Cooked collider does not match Jolt 5.6.0 revision e77f175595e64cb44218cc9d9d56fc365ad0e36a: " + compatibility.message + " Re-cook the collider with this project version.",
+			"Cooked collider does not match Jolt 5.6.1 revision 2e28006e4a367624bb512bf2c37ca99a93d9d1ea: " + compatibility.message + " Re-cook the collider with this project version.",
 			colliderPath.string());
 	}
 }

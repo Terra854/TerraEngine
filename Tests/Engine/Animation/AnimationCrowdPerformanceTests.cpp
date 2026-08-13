@@ -28,11 +28,11 @@ namespace TerraEngine::Tests {
 
 	namespace {
 		inline constexpr std::string_view kFrozenStressManifestSha256 =
-			"a1e5cc3dafa996014b753a0fe9bc39b9299efc0d367ec9c8d134e5768fb7becf";
+			"6773caf89e87b2fc5f1277ca5bde92aa68f4f20581a223af1910cb62a95c8aff";
 		inline constexpr std::string_view kFrozenRuntimeContractSha256 =
 			"e9e231c9c9b9e6f22868cec47146436e9a8aac90802e9d1d26b6cfeee88f98c2";
 		inline constexpr std::string_view kFrozenPerformanceWorkloadsSha256 =
-			"847c2e6f98e48be816da8907961924420c32bf25dff7c72afc88fafbd765f390";
+			"a50c359f5dda932c0852eaa9a83c2e57cbbca3c60f038e975f7b67e0b17774f6";
 
 		std::filesystem::path SourcePath(std::string_view relativePath)
 		{
@@ -46,7 +46,14 @@ namespace TerraEngine::Tests {
 			{
 				throw TestFailure("Could not read frozen crowd input: " + path.string());
 			}
-			return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+			std::string text{
+				std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
+			// Frozen source identities use repository LF bytes. Normalize a Windows
+			// checkout's CRLF conversion so the content contract is platform-neutral.
+			for(std::size_t position = 0; (position = text.find("\r\n", position)) != std::string::npos;) {
+				text.erase(position, 1U);
+			}
+			return text;
 		}
 
 		constexpr std::uint32_t RotateRight(std::uint32_t value, std::uint32_t bits) noexcept

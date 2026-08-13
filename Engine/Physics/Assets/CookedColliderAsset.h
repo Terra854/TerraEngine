@@ -22,8 +22,8 @@ namespace TerraEngine::Physics
 	inline constexpr std::uint32_t kCookedColliderEnvelopeMagic = 0x54455043U; // "TEPC" in canonical byte order.
 	inline constexpr std::uint32_t kCookedColliderEnvelopeVersion = 1U;
 	inline constexpr std::string_view kCookedColliderExtension = ".tepcoll";
-	inline constexpr std::string_view kJoltCookProviderVersion = "5.6.0";
-	inline constexpr std::string_view kJoltCookRevision = "e77f175595e64cb44218cc9d9d56fc365ad0e36a";
+	inline constexpr std::string_view kJoltCookProviderVersion = "5.6.1";
+	inline constexpr std::string_view kJoltCookRevision = "2e28006e4a367624bb512bf2c37ca99a93d9d1ea";
 	inline constexpr std::string_view kJoltCookPayloadFormatFamily = "TerraEngine.Jolt.ShapeWithChildren";
 	inline constexpr std::uint32_t kJoltCookPayloadFormatVersion = 1U;
 	inline constexpr std::size_t kCookedColliderMaximumPayloadBytes = 64U * 1024U * 1024U;

@@ -77,7 +77,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(report.published, "A valid staged collider must publish.");
 			context.ExpectEqual("recipe-v1", ReadColliderFile(fixture.output), "Published bytes must come from the validated recipe.");
 			context.Expect(!std::filesystem::exists(fixture.output.string() + ".staged"), "Successful publication must remove staging files.");
-			context.ExpectEqual(std::string("e77f175595e64cb44218cc9d9d56fc365ad0e36a"),
+			context.ExpectEqual(std::string("2e28006e4a367624bb512bf2c37ca99a93d9d1ea"),
 				std::string(TerraEngine::AssetPipeline::kPhysicsColliderProviderRevision),
 				"Collider compiler tests must pin the approved Jolt 5.6 provider revision.");
 		});

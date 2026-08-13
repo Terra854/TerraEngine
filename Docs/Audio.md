@@ -137,8 +137,8 @@ manual evidence and must not be reported as passed without an available device.
 These checks validate import, state transitions, packet generation, export,
 public SDK isolation, determinism, and long-running preparation without needing
 speakers. They do not prove audible output. When a playback device is available,
-run every scenario in `specs/051-audio-runtime-foundation/quickstart.md` from the
-installed editor and record the audible lane separately.
+run the audible scenarios described below from the installed editor and record
+the audible lane separately.
 
 The audio runtime foundation Windows acceptance run completed 75/75 CTests, the installed
 provider consumer, committed-fixture verification, the 128-source/100-replay

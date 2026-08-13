@@ -93,7 +93,7 @@
 				"ninja": "1.13.2",
 				"msvc": "19.51.36248",
 				"visualStudio": "Community 2026 18.7.4",
-				"dotnetSdk": "10.0.302",
+				"dotnetSdk": "10.0.400",
 				"powershell": "5.1.26100.8875"
 			}
 		},

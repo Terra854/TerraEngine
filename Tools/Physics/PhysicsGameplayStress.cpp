@@ -36,8 +36,8 @@ namespace {
 	constexpr std::uint32_t kQueryCount = 10000U;
 	constexpr std::uint32_t kProducerCount = 4U;
 	constexpr std::uint32_t kCommandsPerProducer = 64U;
-	constexpr std::string_view kProviderVersion = "5.6.0";
-	constexpr std::string_view kProviderRevision = "e77f175595e64cb44218cc9d9d56fc365ad0e36a";
+	constexpr std::string_view kProviderVersion = "5.6.1";
+	constexpr std::string_view kProviderRevision = "2e28006e4a367624bb512bf2c37ca99a93d9d1ea";
 	constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 	constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 

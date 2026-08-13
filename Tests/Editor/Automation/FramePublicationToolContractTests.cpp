@@ -1,8 +1,5 @@
 #include "TestHarness.h"
 
-#include <nlohmann/json.hpp>
-
-#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -22,55 +19,6 @@ namespace TerraEngine::EditorTests
 
 	void RegisterFramePublicationToolContractTests(TestRegistry& registry)
 	{
-		registry.Add("Editor.FramePublicationTools.ProfilerBenchmarkSchemaIsCanonicalV1", [](TestContext& context) {
-			// Parse the contract as JSON so malformed schema edits fail here instead
-			// of surfacing only after a long installed-editor benchmark has finished.
-			const nlohmann::json schema = nlohmann::json::parse(
-				Read("specs/049-profiler-rework/contracts/benchmark-evidence.schema.json"));
-			const auto& properties = schema.at("properties");
-			const auto& identity = properties.at("identity").at("properties");
-			context.Expect(properties.at("schemaVersion").at("const") == 1,
-				"Profiler benchmark evidence must remain schema version 1.");
-			context.Expect(identity.at("formatIdentifier").at("const") == "TerraEngineProfilerJournalV1"
-				&& identity.at("formatVersion").at("const") == 1,
-				"Benchmark evidence must accept only the fresh V1 journal identity.");
-			context.Expect(identity.contains("installedPackageHash")
-				&& identity.at("installedPackageFiles").at("minItems") == 2,
-				"Benchmark identity must include both editor and engine package hashes.");
-			context.Expect(identity.at("durationSeconds").at("minimum") == 60,
-				"The schema must reject benchmark captures shorter than the 60-second smoke.");
-			context.Expect(identity.at("canonicalDurationSeconds").at("const") == 300,
-				"The canonical profiler benchmark duration must remain five minutes.");
-			context.Expect(identity.at("mode").at("enum").size() == 3
-				&& properties.at("runs").at("minItems") == 1,
-				"DetailedRecording must support one canonical run while matched overhead retains quartet rows.");
-			const auto& runProperties = properties.at("runs").at("items").at("properties");
-			context.Expect(runProperties.contains("runNumber")
-				&& runProperties.contains("scenario"),
-				"Every benchmark row must expose its exact ordered run and scenario identity.");
-			context.Expect(runProperties.contains("collectionNanoseconds")
-				&& runProperties.contains("logicalInputBytes")
-				&& runProperties.contains("storedSegmentBytes")
-				&& runProperties.contains("framesPerPersistenceOperation")
-				&& runProperties.contains("compressionRatio"),
-				"Benchmark rows must preserve optional JournalV1 batching and compression counters.");
-			context.Expect(runProperties.contains("overheadMedianMs")
-				&& runProperties.contains("overheadP95Ms")
-				&& runProperties.contains("overheadSampleIntervalMilliseconds")
-				&& runProperties.contains("overheadBlockCount")
-				&& runProperties.contains("overheadBlocks"),
-				"Matched recording rows must preserve the bounded overhead stream statistics.");
-			const auto& gateProperties = properties.at("gates").at("properties");
-			context.Expect(gateProperties.contains("profilerAccumulationPassed")
-				&& runProperties.contains("collectionCostGrowthPercent")
-				&& runProperties.contains("backlogGrowthFrames"),
-				"Canonical detailed runs must publish profiler accumulation-cost and backlog gates.");
-			const auto& windowStatus = runProperties.at("windowMeasurement").at("properties").at("status").at("enum");
-			context.Expect(windowStatus == nlohmann::json::array({"measured", "unavailable"})
-				&& std::find(windowStatus.begin(), windowStatus.end(), "not-requested") == windowStatus.end(),
-				"The final evidence envelope must normalize non-window measurements to unavailable.");
-		});
-
 		registry.Add("Editor.FramePublicationTools.ProfilerBenchmarkPinsIdentity", [](TestContext& context) {
 			const std::string source = Read("Tools/Profiling/CaptureProfilerReworkBenchmark.ps1");
 			context.Expect(source.find("projectHash") != std::string::npos

@@ -2,8 +2,8 @@
 	"version": 1,
 	"provider": {
 		"name": "Jolt Physics",
-		"version": "5.6.0",
-		"revision": "e77f175595e64cb44218cc9d9d56fc365ad0e36a"
+		"version": "5.6.1",
+		"revision": "2e28006e4a367624bb512bf2c37ca99a93d9d1ea"
 	},
 	"determinism": {
 		"seed": 137903421,

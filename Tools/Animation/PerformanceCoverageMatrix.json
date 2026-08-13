@@ -6,7 +6,7 @@
 	"finalPhaseOnly": true,
 	"performanceWorkloads": {
 		"path": "Tools/Animation/PerformanceWorkloads.json",
-		"sha256": "847c2e6f98e48be816da8907961924420c32bf25dff7c72afc88fafbd765f390"
+		"sha256": "a50c359f5dda932c0852eaa9a83c2e57cbbca3c60f038e975f7b67e0b17774f6"
 	},
 	"lockedBaseline": {
 		"path": "out/validation/animation/baseline/locked-baseline.json",

@@ -33,8 +33,8 @@ namespace {
 	constexpr float kFixedDeltaTime = 1.0F / 60.0F;
 	constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 	constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
-	constexpr std::string_view kProviderVersion = "5.6.0";
-	constexpr std::string_view kProviderRevision = "e77f175595e64cb44218cc9d9d56fc365ad0e36a";
+	constexpr std::string_view kProviderVersion = "5.6.1";
+	constexpr std::string_view kProviderRevision = "2e28006e4a367624bb512bf2c37ca99a93d9d1ea";
 
 	struct CharacterIdentity {
 		PhysicsCharacterHandle handle;

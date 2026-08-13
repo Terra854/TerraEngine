@@ -140,7 +140,7 @@ and a build-tree package cache. After the single managed restore target runs,
 the engine assembly, source generator, and editor assembly build with
 `--no-restore`.
 
-The current closure is pinned to .NET SDK `10.0.302`, runtime pack `10.0.10`,
+The current closure is pinned to .NET SDK `10.0.400`, runtime pack `10.0.11`,
 and RID `win-x64`. Confirm the exact SDK and verify every archive, license, and
 manifest entry before configuring:
 
@@ -157,7 +157,7 @@ cmake -DTERRAENGINE_RUNTIME_ID=win-x64 `
 	-P cmake/TerraEngineOfflineNuGet.cmake
 ```
 
-The first command must print `10.0.302`. NuGet verifies each archive's
+The first command must print `10.0.400`. NuGet verifies each archive's
 available author and repository signatures without an online revocation
 lookup. The CMake verifier rejects changed or unmanifested packages, mismatched
 SDK metadata, and changed legal files. Set
@@ -1460,9 +1460,9 @@ or mismatched artifact fails closed.
 For timed-window regeneration it additionally requires exactly five complete
 closed/open paired windows with finite signed deltas and latency before treating
 the retained measurement as measured.
-The benchmark wrapper parses and validates the final `benchmark-evidence.json`
-against `specs/049-profiler-rework/contracts/benchmark-evidence.schema.json`
-before returning; a non-window leg is emitted as `windowMeasurement.status`
+The benchmark wrapper validates the final `benchmark-evidence.json` directly
+against its public V1 envelope invariants before returning; a non-window leg is
+emitted as `windowMeasurement.status`
 `unavailable` (the raw run JSON is never rewritten), while a timed-open leg must
 remain `measured` with all five validated pairs.
 For matched recording overhead, the recording leg also publishes a closed-window
@@ -1658,6 +1658,6 @@ fixture into an in-memory float PCM block, and checks its samples and determinis
 repeatability. It does not open a playback device and therefore is strong
 non-audible evidence, but it does not replace the deferred human audible lane.
 
-When a maintainer has an audible device, also run the installed editor scenario
-in `specs/051-audio-runtime-foundation/quickstart.md`. A muted/headless run must
-record that manual lane as deferred; it must never be reported as an audible pass.
+When a maintainer has an audible device, also run the installed editor audio
+scenarios documented in `Docs/Audio.md`. A muted/headless run must record that
+manual lane as deferred; it must never be reported as an audible pass.

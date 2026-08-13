@@ -5,8 +5,8 @@ the final physics hardening tests. It fixes the workload size and seed so a
 failure can be replayed on a clean checkout without any locally installed
 physics SDK.
 
-The fixture requires the repository copy of Jolt Physics **5.6.0** at revision
-`e77f175595e64cb44218cc9d9d56fc365ad0e36a`. Tests use TerraEngine-owned
+The fixture requires the repository copy of Jolt Physics **5.6.1** at revision
+`2e28006e4a367624bb512bf2c37ca99a93d9d1ea`. Tests use TerraEngine-owned
 backend values only; Jolt headers, IDs, and worker pools must not enter fixture
 or test contracts.
 

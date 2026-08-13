@@ -1967,7 +1967,7 @@ void UIBuilderWindow::DrawPreviewPanel()
 				const glm::vec2 elementSize = GetPreviewElementSize(*previewSelected);
 				const ImVec2 min(previewMin.x + elementMin.x, previewMin.y + elementMin.y);
 				const ImVec2 max(min.x + elementSize.x, min.y + elementSize.y);
-				drawList->AddRect(min, max, IM_COL32(84, 168, 255, 255), 4.0f, 0, 2.0f);
+				drawList->AddRect(min, max, IM_COL32(84, 168, 255, 255), 4.0f, 2.0f, 0);
 			}
 		}
 	}

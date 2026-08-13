@@ -80,13 +80,9 @@ function Get-InstalledPackageIdentity([string]$editorPath, [string]$installRoot,
 	)
 	[ordered]@{ hash = Hash-Text ($files | ConvertTo-Json -Compress -Depth 4); files = $files }
 }
-function Validate-BenchmarkEvidenceEnvelope($envelope, [string]$schemaPath) {
-	# Keep the final write fail-closed even on machines without a JSON-schema
-	# module.  We parse the checked-in schema and enforce its required V1
-	# envelope/row invariants here before accepting the artifact.
-	Require (Test-Path -LiteralPath $schemaPath -PathType Leaf) "Benchmark evidence schema is missing: $schemaPath"
-	$schema = Get-Content -LiteralPath $schemaPath -Raw | ConvertFrom-Json
-	Require ([int](Get-PropertyValue $schema 'schemaVersion') -eq 1 -or $null -ne (Get-PropertyValue $schema 'properties')) 'Benchmark evidence schema could not be parsed.'
+function Validate-BenchmarkEvidenceEnvelope($envelope) {
+	# Keep the final write fail-closed without depending on private planning
+	# artifacts. These checks validate the public V1 evidence contract directly.
 	Require ([int](Get-PropertyValue $envelope 'schemaVersion') -eq 1) 'Benchmark evidence schemaVersion must be 1.'
 	Require ([string](Get-PropertyValue $envelope 'status') -in @('passed','failed','incomparable')) 'Benchmark evidence status is outside the V1 enum.'
 	$identityEnvelope = Get-PropertyValue $envelope 'identity'
@@ -565,8 +561,7 @@ if(-not $DryRun) {
 	[IO.File]::WriteAllText($evidencePath, ($evidence | ConvertTo-Json -Depth 30), [Text.UTF8Encoding]::new($false))
 	# Validate the exact bytes that will be handed to evidence consumers.  This
 	# catches accidental PSCustomObject/property omissions after serialization.
-	$schemaPath = Join-Path $repo 'specs/049-profiler-rework/contracts/benchmark-evidence.schema.json'
 	$writtenEvidence = Get-Content -LiteralPath $evidencePath -Raw | ConvertFrom-Json
-	Validate-BenchmarkEvidenceEnvelope $writtenEvidence $schemaPath
+	Validate-BenchmarkEvidenceEnvelope $writtenEvidence
 }
 Write-Output "Profiler rework benchmark identity: $identityPath"
