@@ -41,6 +41,9 @@ namespace TerraEngine::Audio {
 			TerraEngine::UUID clipAssetId = TerraEngine::EMPTY_UUID;
 			AudioGeneration clipGeneration = 0U;
 		};
+		// CapturePhase is the protected bridge from live scene components into the
+		// immutable audio authoring snapshot consumed by worker preparation.
+		void CapturePhase(float deltaTime);
 		void SnapshotPhase(); void PreparePhase(); void CommitPhase(); void PublishFailure(std::string category, std::string message);
 		mutable std::mutex mutex;
 		AudioControlQueue controls;

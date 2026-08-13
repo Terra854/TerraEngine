@@ -4,6 +4,7 @@
 #include "Components/AudioListenerComponent.h"
 #include "Components/AudioSourceComponent.h"
 #include "Components/Transform.h"
+#include "Core/Logger/Logger.h"
 #include "Core/Object/ObjectManager.h"
 #include "Resource/ResourceManager.h"
 
@@ -33,10 +34,20 @@ namespace TerraEngine::Audio {
 		const auto found = registry.Find(providerId); if(found) descriptor = *found;
 		AudioResult result = createResult; if(!backend || !(result = backend->Initialize({})).Succeeded()) { PublishFailure("provider.initialize", result.message.empty() ? "Audio is safely silent because the configured provider could not initialize." : result.message); backend.reset(); }
 		deviceAvailable = backend != nullptr;
+		if(deviceAvailable)
+			TERRAENGINE_LOG(LogLevel::Info, "Audio provider initialized: " << providerId);
 		initialized = true;
 	}
 	void AudioSystem::Update(float deltaTime) {
-		std::scoped_lock lock(mutex); if(!initialized) return; ++frame;
+		std::scoped_lock lock(mutex);
+		if(!initialized) return;
+		CapturePhase(deltaTime);
+		SnapshotPhase();
+		PreparePhase();
+		CommitPhase();
+	}
+	void AudioSystem::CapturePhase(float deltaTime) {
+		++frame;
 		auto data = authoring.Data();
 		std::vector<AudioAuthoringSourceRecord> liveSources;
 		std::vector<AudioAuthoringListenerRecord> liveListeners;
@@ -73,7 +84,7 @@ namespace TerraEngine::Audio {
 		});
 		if(!manualAuthoringSnapshot) { data.sources = std::move(liveSources); data.listeners = std::move(liveListeners); }
 		data.frame = frame; data.deltaSeconds = deltaTime; data.masterVolume = mix.Snapshot().master.volume; data.masterMuted = mix.Snapshot().master.muted;
-		authoring = AudioAuthoringSnapshot::Create(std::move(data)); SnapshotPhase(); PreparePhase(); CommitPhase();
+		authoring = AudioAuthoringSnapshot::Create(std::move(data));
 	}
 	void AudioSystem::Shutdown() { std::scoped_lock lock(mutex); controls.Stop(); if(backend) { (void)backend->Shutdown(); backend.reset(); } activeVoices.clear(); registeredClips.clear(); playback.clear(); controlReceipts.clear(); failures.clear(); authoring = AudioAuthoringSnapshot::Create({}); manualAuthoringSnapshot = false; frame = 0U; packetSequence = 0U; deviceAvailable = false; initialized = false; }
 	std::string AudioSystem::SystemName() { return "AudioSystem"; }
@@ -92,10 +103,47 @@ namespace TerraEngine::Audio {
 		declaration.profilingLabel = "Audio"; declaration.omitWhenNoFrameWorkloads = true; declaration.usesDefaultMetadata = false;
 		return declaration;
 	}
-	std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> AudioSystem::DeclareFrameWorkloads(float) {
-		auto snapshot = TerraEngine::Scheduling::MakeSnapshotPhase("AudioSnapshot", SystemName(), {"Audio components", "Transforms", "Audio control queue"}, "AudioSnapshot"); snapshot.writes = {"Audio frame snapshot", "Audio receipts"}; snapshot.estimatedWorkItemCount = authoring.Data().sources.size();
-		auto prepare = TerraEngine::Scheduling::MakeWorkerPreparePhase("AudioPrepare", SystemName(), {"Audio frame snapshot", "Playback snapshot"}, {"Audio prepared frame"}, "AudioPrepare"); prepare.estimatedWorkItemCount = authoring.Data().sources.size(); prepare.partitionPolicy = TerraEngine::Scheduling::FrameWorkloadPartitionPolicy::DeterministicRanges;
-		auto commit = TerraEngine::Scheduling::MakeProtectedCommitPhase("AudioCommit", SystemName(), {"Audio prepared frame", "Provider observations"}, {"Audio provider", "Playback snapshot", "Audio diagnostics"}, "Provider/device calls require the protected audio boundary.", "AudioCommit"); commit.estimatedWorkItemCount = prepared.voices.size(); return {std::move(snapshot), std::move(prepare), std::move(commit)};
+	std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> AudioSystem::DeclareFrameWorkloads(float deltaTime) {
+		auto snapshot = TerraEngine::Scheduling::MakeSnapshotPhase("AudioSnapshot", SystemName(), {"Audio components", "Transforms", "Audio control queue"}, "AudioSnapshot");
+		snapshot.phase = "Audio";
+		snapshot.stableDescriptorId = "AudioSystem/Audio/AudioSnapshot";
+		snapshot.writes = {"Audio frame snapshot", "Audio receipts"};
+		snapshot.estimatedWorkItemCount = authoring.Data().sources.size();
+		// Live ObjectManager capture is a protected operation. The resulting value
+		// snapshot, rather than component storage, crosses into worker preparation.
+		snapshot.workerEligible = false;
+		snapshot.mainThreadRequired = true;
+		snapshot.protectedReason = "Live audio components and transforms must be captured on the protected scene boundary.";
+		snapshot.work = [this, deltaTime](TerraEngine::Scheduling::JobGraphContext&) {
+			std::scoped_lock lock(mutex);
+			if(!initialized) return;
+			CapturePhase(deltaTime);
+			SnapshotPhase();
+		};
+
+		auto prepare = TerraEngine::Scheduling::MakeWorkerPreparePhase("AudioPrepare", SystemName(), {"Audio frame snapshot", "Playback snapshot"}, {"Audio prepared frame"}, "AudioPrepare");
+		prepare.phase = "Audio";
+		prepare.stableDescriptorId = "AudioSystem/Audio/AudioPrepare";
+		prepare.explicitDependencies = {snapshot.stableDescriptorId};
+		prepare.estimatedWorkItemCount = authoring.Data().sources.size();
+		prepare.partitionPolicy = TerraEngine::Scheduling::FrameWorkloadPartitionPolicy::DeterministicRanges;
+		prepare.work = [this](TerraEngine::Scheduling::JobGraphContext&) {
+			// The lock protects publication ownership only. PrepareAudioFrame reads
+			// immutable value records and never touches live scene or provider state.
+			std::scoped_lock lock(mutex);
+			if(initialized) PreparePhase();
+		};
+
+		auto commit = TerraEngine::Scheduling::MakeProtectedCommitPhase("AudioCommit", SystemName(), {"Audio prepared frame", "Provider observations"}, {"Audio provider", "Playback snapshot", "Audio diagnostics"}, "Provider/device calls require the protected audio boundary.", "AudioCommit");
+		commit.phase = "Audio";
+		commit.stableDescriptorId = "AudioSystem/Audio/AudioCommit";
+		commit.explicitDependencies = {prepare.stableDescriptorId};
+		commit.estimatedWorkItemCount = prepared.voices.size();
+		commit.work = [this](TerraEngine::Scheduling::JobGraphContext&) {
+			std::scoped_lock lock(mutex);
+			if(initialized) CommitPhase();
+		};
+		return {std::move(snapshot), std::move(prepare), std::move(commit)};
 	}
 	AudioControlReceipt AudioSystem::SubmitControlBatch(AudioControlBatch batch) { return controls.Submit(std::move(batch)); }
 	std::optional<AudioControlReceipt> AudioSystem::ReadControlReceipt(AudioBatchSequence batchSequence) const {
@@ -289,6 +337,7 @@ namespace TerraEngine::Audio {
 				packet.releases.push_back(clip->second);
 				clip = candidateRegisteredClips.erase(clip);
 			}
+			const std::size_t previousActiveVoiceCount = activeVoices.size();
 			const auto result = backend->SubmitFrame(packet);
 			if(!result.Succeeded()) {
 				// The old immutable playback publication remains authoritative until a
@@ -300,6 +349,12 @@ namespace TerraEngine::Audio {
 				packetSequence = packet.sequence;
 				activeVoices = std::move(candidateActiveVoices);
 				registeredClips = std::move(candidateRegisteredClips);
+				if(activeVoices.size() != previousActiveVoiceCount || !packet.registrations.empty() || !packet.releases.empty()) {
+					TERRAENGINE_LOG(LogLevel::Debug, "Audio provider committed frame " << frame
+						<< " with activeVoices=" << activeVoices.size()
+						<< " registrations=" << packet.registrations.size()
+						<< " releases=" << packet.releases.size());
+				}
 				std::array<AudioBackendObservation, 64U> observations{}; std::size_t requiredCount = 0U;
 				const AudioResult observationResult = backend->PollObservations(observations, requiredCount);
 				const std::size_t observed = std::min(observations.size(), requiredCount);
@@ -336,5 +391,16 @@ namespace TerraEngine::Audio {
 		}
 		PublishAudioDiagnosticsSnapshot(std::move(diagnostics));
 	}
-	void AudioSystem::PublishFailure(std::string category, std::string message) { const auto found = std::find_if(failures.begin(), failures.end(), [&](const auto& episode) { return episode.category == category; }); if(found == failures.end()) failures.push_back({std::move(category), {}, frame, frame, 1U, std::move(message)}); else { found->lastFrame = frame; ++found->count; } }
+	void AudioSystem::PublishFailure(std::string category, std::string message) {
+		const auto found = std::find_if(failures.begin(), failures.end(), [&](const auto& episode) {
+			return episode.category == category;
+		});
+		if(found == failures.end()) {
+			TERRAENGINE_LOG(LogLevel::Error, "Audio failure [" << category << "]: " << message);
+			failures.push_back({std::move(category), {}, frame, frame, 1U, std::move(message)});
+		} else {
+			found->lastFrame = frame;
+			++found->count;
+		}
+	}
 }
