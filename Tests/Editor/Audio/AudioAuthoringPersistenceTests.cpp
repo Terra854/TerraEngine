@@ -64,11 +64,11 @@ namespace TerraEngine::EditorTests
 			source->playOnStart = true;
 			source->loop = true;
 			source->SetSpatialBlend(0.25F);
-			source->SetMinDistance(2.0F);
 			source->SetMaxDistance(80.0F);
 			source->mixGroupId = TerraEngine::UUID{18U};
 			source->SetPriority(200U);
 			listener->eligible = false;
+			listener->SetOutputModeValue(static_cast<std::uint32_t>(TerraEngine::Audio::AudioOutputMode::Hrtf));
 			const nlohmann::json serialized = Serializer::SerializeObject(sourceObject);
 			objects.clear();
 			Object restored = Serializer::DeserializeObject(serialized);
@@ -77,9 +77,10 @@ namespace TerraEngine::EditorTests
 			context.Expect(restoredSource != nullptr && restoredListener != nullptr
 				&& restoredSource->clipAssetId == TerraEngine::UUID{17U} && restoredSource->volume == 0.4F
 				&& restoredSource->pitch == 1.5F && restoredSource->playOnStart && restoredSource->loop
-				&& restoredSource->spatialBlend == 0.25F && restoredSource->minDistance == 2.0F
-				&& restoredSource->maxDistance == 80.0F && restoredSource->mixGroupId == TerraEngine::UUID{18U}
-				&& restoredSource->priority == 200U && !restoredListener->eligible,
+				&& restoredSource->spatialBlend == 0.25F && restoredSource->maxDistance == 80.0F
+				&& restoredSource->mixGroupId == TerraEngine::UUID{18U}
+				&& restoredSource->priority == 200U && !restoredListener->eligible
+				&& restoredListener->outputMode == TerraEngine::Audio::AudioOutputMode::Hrtf,
 				"Source and listener authored values must survive generic reflected scene serialization.");
 
 			const TerraEngine::UUID restoredId = objects.getUUID(restored);

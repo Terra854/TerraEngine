@@ -24,7 +24,21 @@ namespace TerraEngine::Audio {
 	using AudioFrame = std::uint64_t;
 	using AudioPacketSequence = std::uint64_t;
 	using AudioVoiceToken = std::uint64_t;
-	inline constexpr std::uint32_t kAudioProviderContractVersion = 1U;
+	// Version 2 adds listener-selected render modes, frontness, and explicit
+	// speaker gains to the provider packet. Version-1 providers must reject rather
+	// than interpreting the expanded spatial command with the old ABI.
+	inline constexpr std::uint32_t kAudioProviderContractVersion = 2U;
+	inline constexpr std::uint32_t kAudioRenderChannelCount = 8U;
+
+	// One effective listener defines the player's output experience. These values
+	// are stable durable authoring data; an omitted field remains Stereo.
+	enum class AudioOutputMode : std::uint8_t {
+		Mono = 0U,
+		Stereo = 1U,
+		Hrtf = 2U,
+		Surround5Point1 = 3U,
+		Surround7Point1 = 4U,
+	};
 
 	struct AudioVector3 {
 		float x = 0.0F;
@@ -58,7 +72,8 @@ namespace TerraEngine::Audio {
 	enum class AudioProviderCapability : std::uint32_t {
 		None = 0U, Wav = 1U << 0U, OggVorbis = 1U << 1U, Voices = 1U << 2U,
 		Seek = 1U << 3U, Loop = 1U << 4U, Gain = 1U << 5U, Pitch = 1U << 6U,
-		Spatial = 1U << 7U, DeviceEvents = 1U << 8U
+		Spatial = 1U << 7U, DeviceEvents = 1U << 8U, Hrtf = 1U << 9U,
+		Surround = 1U << 10U
 	};
 	constexpr AudioProviderCapability operator|(AudioProviderCapability left, AudioProviderCapability right) noexcept {
 		return static_cast<AudioProviderCapability>(static_cast<std::uint32_t>(left) | static_cast<std::uint32_t>(right));
@@ -80,7 +95,7 @@ namespace TerraEngine::Audio {
 		bool IsCompatible() const noexcept { return IsComplete() && contractVersion == kAudioProviderContractVersion && HasAudioCapability(capabilities, kRequiredAudioProviderCapabilities); }
 	};
 
-	struct AudioBackendCreateInfo { std::uint32_t sampleRate = 48000U; std::uint32_t channels = 2U; std::uint32_t maximumVoices = 64U; bool requestDeviceRecovery = true; };
+	struct AudioBackendCreateInfo { std::uint32_t sampleRate = 48000U; std::uint32_t channels = kAudioRenderChannelCount; std::uint32_t maximumVoices = 64U; bool requestDeviceRecovery = true; };
 	struct AudioClipRegistration {
 		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
 		AudioGeneration generation = 0U;
@@ -92,7 +107,15 @@ namespace TerraEngine::Audio {
 		bool IsValid() const noexcept { return assetId != TerraEngine::EMPTY_UUID && generation != 0U && sampleRate != 0U && channels != 0U && payload != nullptr; }
 	};
 	struct AudioClipRelease { TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID; AudioGeneration generation = 0U; };
-	struct AudioSpatialParameters { AudioVector3 position; AudioVector3 forward{0.0F, 0.0F, -1.0F}; float pan = 0.0F; float spatialBlend = 0.0F; };
+	struct AudioSpatialParameters {
+		AudioVector3 position;
+		AudioVector3 forward{0.0F, 0.0F, -1.0F};
+		std::array<float, kAudioRenderChannelCount> speakerGains{};
+		AudioOutputMode outputMode = AudioOutputMode::Stereo;
+		float pan = 0.0F;
+		float frontness = 1.0F;
+		float spatialBlend = 0.0F;
+	};
 	struct AudioVoiceCommand {
 		AudioVoiceToken voice = 0U;
 		AudioSourceIdentity identity;

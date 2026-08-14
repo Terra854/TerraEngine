@@ -5,6 +5,16 @@ namespace TerraEngine::Tests
 {
 	void RegisterVulkanPresentationLifecycleTests(TestRegistry& registry)
 	{
+		registry.Add("Renderer.VulkanPresentationLifecycle.MaintenanceLineageCompatibility", [](TestContext& context) {
+			using namespace TerraEngine::Renderer::Vulkan;
+			context.Expect(SelectMaintenanceExtensionLineage(true, true) == MaintenanceExtensionLineage::Ext,
+				"The EXT lineage must win when both aliases exist so older validation layers accept the pNext chain.");
+			context.Expect(SelectMaintenanceExtensionLineage(false, true) == MaintenanceExtensionLineage::Khr,
+				"KHR-only drivers must retain presentation-fence support through the promoted lineage.");
+			context.Expect(SelectMaintenanceExtensionLineage(false, false) == MaintenanceExtensionLineage::None,
+				"Missing maintenance extensions must select the bounded unextended fallback.");
+		});
+
 		registry.Add("Renderer.VulkanPresentationLifecycle.ImageCountsAndGenerations", [](TestContext& context) {
 			using namespace TerraEngine::Renderer::Vulkan;
 			for (std::uint32_t imageCount = 2; imageCount <= 8; ++imageCount) {

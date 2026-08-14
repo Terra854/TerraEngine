@@ -258,6 +258,10 @@ void Engine::Initialize()
 	// Audio follows gameplay/physics authoring, prepares spatial voices from an
 	// immutable snapshot, and commits provider state before presentation.
 	TerraEngine::Audio::AudioSystem& audioSystem = TerraEngine::Audio::AudioSystem::Instance();
+	// Exported runtimes begin gameplay immediately. The editor instead opens this
+	// gate from StartPlayMode so authored playOnStart sources remain silent while
+	// the user edits the scene.
+	audioSystem.SetRuntimePlaybackEnabled(!editorMode);
 	RegisterEngineSystem(systems, systemScheduler, audioSystem, audioSystem.SchedulerDeclaration());
 
 	// Presentation is a separate post-physics owner so current-step ragdoll

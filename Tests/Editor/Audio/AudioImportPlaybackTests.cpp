@@ -112,7 +112,13 @@ namespace TerraEngine::EditorTests
 			auto& system = TerraEngine::Audio::AudioSystem::Instance();
 			system.Shutdown();
 			system.SetConfiguredProvider("test.missing");
+			system.SetRuntimePlaybackEnabled(false);
 			system.Initialize();
+			system.Update(0.0F);
+			const auto editPublication = system.LatestPlaybackSnapshot();
+			context.Expect(editPublication && editPublication->voices.empty(),
+				"Edit Mode must not consume an authored Play On Start source.");
+			system.SetRuntimePlaybackEnabled(true);
 			system.Update(0.0F);
 			const auto playPublication = system.LatestPlaybackSnapshot();
 			context.Expect(playPublication && playPublication->voices.size() == 1U,
@@ -123,6 +129,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(stoppedPublication && stoppedPublication->voices.empty(),
 				"Leaving Play Mode must remove the source lifecycle record after its protected audio boundary.");
 			system.Shutdown();
+			system.SetRuntimePlaybackEnabled(true);
 			system.SetConfiguredProvider("terra.miniaudio");
 
 			queue.Clear();

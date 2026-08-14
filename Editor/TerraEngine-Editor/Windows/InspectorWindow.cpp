@@ -1907,7 +1907,23 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 		const auto* animatorMetadata = compName == "AnimatorComponent"
 			? TerraEngine::Editor::Animation::FindAnimatorInspectorProperty(name)
 			: nullptr;
-		if(animatorMetadata != nullptr
+		if(compName == "AudioListenerComponent" && name == "outputMode")
+		{
+			// Audio output modes are durable numeric reflection values, but authors
+			// select named renderers so scenes never depend on private enum ordinals.
+			static constexpr const char* kOutputModes[]{"Mono", "Stereo", "HRTF (Headphones)", "5.1 Surround", "7.1 Surround"};
+			int selectedMode = static_cast<int>(std::min<std::uint32_t>(val, IM_ARRAYSIZE(kOutputModes) - 1U));
+			ImGui::SetNextItemWidth(-1.0F);
+			if(ImGui::Combo(("##" + name).c_str(), &selectedMode, kOutputModes, IM_ARRAYSIZE(kOutputModes)))
+			{
+				const ReflectionVariant oldValue = access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
+				access.entitySetter(ObjectManager::instance().getRegistry(), obj, name, static_cast<std::uint32_t>(selectedMode));
+				const ReflectionVariant newValue = access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
+				UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, name, oldValue, newValue));
+				NotifySceneAfterComponentMutation(compName);
+			}
+		}
+		else if(animatorMetadata != nullptr
 			&& animatorMetadata->control
 				== TerraEngine::Editor::Animation::AnimatorInspectorControlKind::ReadOnly)
 		{

@@ -35,6 +35,10 @@ namespace TerraEngine::Audio {
 		bool RenameMixGroup(const TerraEngine::UUID& id, std::string name, std::string& diagnostic);
 		void SetAuthoringSnapshot(AudioAuthoringSnapshot snapshot);
 		void SetConfiguredProvider(std::string providerId);
+		// Editor Play Mode owns runtime playback admission. Exported runtimes keep
+		// the default enabled state, while the editor disables it until Play starts.
+		void SetRuntimePlaybackEnabled(bool enabled);
+		void SetRuntimePlaybackPaused(bool paused);
 	private:
 		struct ActiveVoiceRecord {
 			AudioSourceIdentity identity;
@@ -66,5 +70,7 @@ namespace TerraEngine::Audio {
 		// from backend ownership lets a recovered provider retain logical state.
 		bool deviceAvailable = false;
 		bool manualAuthoringSnapshot = false;
+		bool runtimePlaybackEnabled = true;
+		bool runtimePlaybackPaused = false;
 	};
 }

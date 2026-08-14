@@ -19,6 +19,8 @@ namespace TerraEngine::Audio {
 		AudioGeneration startedClipGeneration = 0U;
 	};
 	TERRAENGINE_API AudioPreparedFrame PrepareAudioFrame(const AudioAuthoringSnapshot& snapshot, std::vector<AudioPlaybackSeed>& mutablePlayback);
-	TERRAENGINE_API float ComputeAudioAttenuation(float distance, float minimumDistance, float maximumDistance) noexcept;
+	TERRAENGINE_API float ComputeAudioAttenuation(float distance, float maximumDistance) noexcept;
 	TERRAENGINE_API float ComputeAudioPan(const AudioVector3& listenerForward, const AudioVector3& sourceOffset) noexcept;
+	TERRAENGINE_API float ComputeAudioFrontness(const AudioVector3& listenerForward, const AudioVector3& sourceOffset) noexcept;
+	TERRAENGINE_API std::array<float, kAudioRenderChannelCount> ComputeAudioSpeakerGains(AudioOutputMode mode, float pan, float frontness) noexcept;
 }

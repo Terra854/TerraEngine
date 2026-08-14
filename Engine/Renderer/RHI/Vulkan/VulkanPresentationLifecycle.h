@@ -17,6 +17,26 @@
 
 namespace TerraEngine::Renderer::Vulkan
 {
+	// MaintenanceExtensionLineage identifies which spelling of the promoted
+	// surface/swapchain maintenance contract should be enabled together.
+	enum class MaintenanceExtensionLineage
+	{
+		None,
+		Ext,
+		Khr
+	};
+
+	// Prefer the original EXT lineage when both spellings are advertised. The
+	// structures have identical behavior, while older validation layers only
+	// recognize the EXT extension and otherwise reject the aliased pNext nodes.
+	[[nodiscard]] constexpr MaintenanceExtensionLineage SelectMaintenanceExtensionLineage(
+		bool extAvailable, bool khrAvailable) noexcept
+	{
+		if (extAvailable) return MaintenanceExtensionLineage::Ext;
+		if (khrAvailable) return MaintenanceExtensionLineage::Khr;
+		return MaintenanceExtensionLineage::None;
+	}
+
 	enum class PresentationLifecycleState
 	{
 		Uninitialized,

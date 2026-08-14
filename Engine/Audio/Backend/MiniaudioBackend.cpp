@@ -2,6 +2,7 @@
 
 #include "Audio/Backend/MiniaudioBackend.h"
 #include "Audio/Backend/AudioBackendRegistry.h"
+#include "Audio/AudioSpatialRenderer.h"
 
 // This is the sole TerraEngine source which includes the third-party SDK.
 #include <miniaudio.h>
@@ -30,19 +31,64 @@ namespace TerraEngine::Audio::Backend {
 		struct MiniaudioVoice final {
 			ma_decoder decoder{};
 			ma_sound sound{};
+			struct SpatialRendererNode final {
+				ma_node_base base{};
+				std::uint32_t inputChannels = 0U;
+				std::uint32_t sampleRate = 0U;
+				std::array<std::atomic<float>, kAudioRenderChannelCount> speakerGains{};
+				std::atomic<std::uint32_t> outputMode{static_cast<std::uint32_t>(AudioOutputMode::Stereo)};
+				std::atomic<float> pan{0.0F};
+				std::atomic<float> frontness{1.0F};
+				std::atomic<float> spatialBlend{0.0F};
+				AudioSpatialRenderState renderState;
+
+				void Publish(const AudioSpatialParameters& parameters) noexcept {
+					// Every field is atomic because SubmitFrame and the device callback can
+					// overlap. Publishing the mode last forms the release boundary.
+					for(std::size_t channel = 0U; channel < speakerGains.size(); ++channel)
+						speakerGains[channel].store(parameters.speakerGains[channel], std::memory_order_relaxed);
+					pan.store(parameters.pan, std::memory_order_relaxed);
+					frontness.store(parameters.frontness, std::memory_order_relaxed);
+					spatialBlend.store(parameters.spatialBlend, std::memory_order_relaxed);
+					outputMode.store(static_cast<std::uint32_t>(parameters.outputMode), std::memory_order_release);
+				}
+			};
+			SpatialRendererNode renderer{};
 			std::shared_ptr<const std::vector<std::uint8_t>> payload;
 			AudioSourceIdentity identity;
 			bool decoderInitialized = false;
 			bool soundInitialized = false;
+			bool rendererInitialized = false;
 			// The provider remembers whether output was virtualized/paused so the
 			// next audible packet can resynchronize to the engine logical cursor.
 			bool wasPaused = true;
 
 			~MiniaudioVoice() {
 				if(soundInitialized) ma_sound_uninit(&sound);
+				if(rendererInitialized) ma_node_uninit(reinterpret_cast<ma_node*>(&renderer), nullptr);
 				if(decoderInitialized) ma_decoder_uninit(&decoder);
 			}
 		};
+
+		void ProcessSpatialRenderer(ma_node* node, const float** input, ma_uint32* inputFrames,
+			float** output, ma_uint32* outputFrames) {
+			auto& renderer = *reinterpret_cast<MiniaudioVoice::SpatialRendererNode*>(node);
+			const ma_uint32 frames = std::min(inputFrames[0U], outputFrames[0U]);
+			AudioSpatialParameters parameters;
+			parameters.outputMode = static_cast<AudioOutputMode>(renderer.outputMode.load(std::memory_order_acquire));
+			for(std::size_t channel = 0U; channel < parameters.speakerGains.size(); ++channel)
+				parameters.speakerGains[channel] = renderer.speakerGains[channel].load(std::memory_order_relaxed);
+			parameters.pan = renderer.pan.load(std::memory_order_relaxed);
+			parameters.frontness = renderer.frontness.load(std::memory_order_relaxed);
+			parameters.spatialBlend = renderer.spatialBlend.load(std::memory_order_relaxed);
+			RenderAudioSpatialFrames(input[0U], renderer.inputChannels, output[0U],
+				kAudioRenderChannelCount, frames, renderer.sampleRate, parameters, renderer.renderState);
+			inputFrames[0U] = frames;
+			outputFrames[0U] = frames;
+		}
+
+		ma_node_vtable kSpatialRendererVtable{
+			&ProcessSpatialRenderer, nullptr, 1U, 1U, 0U};
 	}
 
 	struct MiniaudioBackend::Impl {
@@ -157,7 +203,10 @@ namespace TerraEngine::Audio::Backend {
 		// an allocation, while miniaudio's engine remains responsible for mixing.
 		ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
 		deviceConfig.playback.format = ma_format_f32;
-		deviceConfig.playback.channels = createInfo.channels;
+		// The mixer always uses the standard 7.1 superset channel map. Stereo/HRTF
+		// and Mono leave unused channels silent, while miniaudio converts this map to
+		// the physical endpoint layout selected by the operating system.
+		deviceConfig.playback.channels = kAudioRenderChannelCount;
 		deviceConfig.sampleRate = createInfo.sampleRate;
 		deviceConfig.dataCallback = &Impl::DeviceDataCallback;
 		deviceConfig.notificationCallback = &Impl::DeviceNotificationCallback;
@@ -170,6 +219,7 @@ namespace TerraEngine::Audio::Backend {
 
 		ma_engine_config engineConfig = ma_engine_config_init();
 		engineConfig.pDevice = &impl->device;
+		engineConfig.channels = kAudioRenderChannelCount;
 		if(ma_engine_init(&engineConfig, &impl->engine) != MA_SUCCESS) {
 			ma_device_uninit(&impl->device);
 			impl->deviceInitialized = false;
@@ -267,13 +317,34 @@ namespace TerraEngine::Audio::Backend {
 			auto created = std::make_unique<MiniaudioVoice>();
 			created->payload = clip->payload;
 			created->identity = command.identity;
-			ma_decoder_config decoderConfig = ma_decoder_config_init(ma_format_f32, 0U, 0U);
+			// A stable two-channel decoder output lets the renderer preserve authored
+			// stereo for 2D playback and derive mono point-source input for spatial modes.
+			ma_decoder_config decoderConfig = ma_decoder_config_init(ma_format_f32, 2U, impl->createInfo.sampleRate);
 			if(ma_decoder_init_memory(created->payload->data(), created->payload->size(), &decoderConfig, &created->decoder) != MA_SUCCESS)
 				return {AudioResultCode::ProviderFailure, "miniaudio rejected an encoded clip; the frame packet was not committed."};
 			created->decoderInitialized = true;
-			if(ma_sound_init_from_data_source(&impl->engine, &created->decoder, 0U, nullptr, &created->sound) != MA_SUCCESS)
+			if(ma_sound_init_from_data_source(&impl->engine, &created->decoder,
+				MA_SOUND_FLAG_NO_DEFAULT_ATTACHMENT | MA_SOUND_FLAG_NO_SPATIALIZATION, nullptr, &created->sound) != MA_SUCCESS)
 				return {AudioResultCode::ProviderFailure, "miniaudio could not stage a voice; the frame packet was not committed."};
 			created->soundInitialized = true;
+			created->renderer.inputChannels = ma_node_get_output_channels(reinterpret_cast<ma_node*>(&created->sound), 0U);
+			created->renderer.sampleRate = impl->createInfo.sampleRate;
+			const ma_uint32 inputChannels = created->renderer.inputChannels;
+			const ma_uint32 outputChannels = kAudioRenderChannelCount;
+			ma_node_config rendererConfig = ma_node_config_init();
+			rendererConfig.vtable = &kSpatialRendererVtable;
+			rendererConfig.pInputChannels = &inputChannels;
+			rendererConfig.pOutputChannels = &outputChannels;
+			if(ma_node_init(&impl->engine.nodeGraph, &rendererConfig, nullptr,
+				reinterpret_cast<ma_node*>(&created->renderer)) != MA_SUCCESS)
+				return {AudioResultCode::ProviderFailure, "miniaudio could not initialize TerraEngine's spatial renderer node."};
+			created->rendererInitialized = true;
+			created->renderer.Publish(command.spatial);
+			if(ma_node_attach_output_bus(reinterpret_cast<ma_node*>(&created->sound), 0U,
+				reinterpret_cast<ma_node*>(&created->renderer), 0U) != MA_SUCCESS
+				|| ma_node_attach_output_bus(reinterpret_cast<ma_node*>(&created->renderer), 0U,
+					ma_node_graph_get_endpoint(&impl->engine.nodeGraph), 0U) != MA_SUCCESS)
+				return {AudioResultCode::ProviderFailure, "miniaudio could not attach TerraEngine's spatial renderer graph."};
 			stagedVoices[index] = std::move(created);
 		}
 
@@ -299,12 +370,9 @@ namespace TerraEngine::Audio::Backend {
 			ma_sound_set_volume(&active.sound, NormalizeAudioUnit(command.gain));
 			ma_sound_set_pitch(&active.sound, NormalizeAudioPitch(command.pitch));
 			ma_sound_set_looping(&active.sound, command.loop ? MA_TRUE : MA_FALSE);
-			ma_sound_set_pan(&active.sound, std::clamp(command.spatial.pan, -1.0F, 1.0F));
-			// TerraEngine has already applied its authored min/max-distance curve and
-			// spatial blend to the final gain and pan. Disable miniaudio's independent
-			// 3D attenuation so the concrete provider cannot attenuate the voice twice.
-			ma_sound_set_spatialization_enabled(&active.sound, MA_FALSE);
-			ma_sound_set_position(&active.sound, command.spatial.position.x, command.spatial.position.y, command.spatial.position.z);
+			// TerraEngine's node owns speaker mapping and analytic HRTF processing. The
+			// SDK sound remains a decoder/timeline source and cannot attenuate twice.
+			active.renderer.Publish(command.spatial);
 			const bool shouldPause = command.paused || packet.gamePaused;
 			if(!shouldPause && (newlyCreated || active.wasPaused))
 				(void)ma_sound_seek_to_pcm_frame(&active.sound, command.seekFrame);
@@ -385,7 +453,8 @@ namespace TerraEngine::Audio::Backend {
 
 	AudioProviderDescriptor MiniaudioProviderDescriptor() {
 		return {"terra.miniaudio", "miniaudio", kAudioProviderContractVersion, "0.11.25",
-			"9634bedb5b5a2ca38c1ee7108a9358a4e233f14d", kRequiredAudioProviderCapabilities, 128U};
+			"9634bedb5b5a2ca38c1ee7108a9358a4e233f14d",
+			kRequiredAudioProviderCapabilities | AudioProviderCapability::Hrtf | AudioProviderCapability::Surround, 128U};
 	}
 
 	void RegisterMiniaudioBackend() {

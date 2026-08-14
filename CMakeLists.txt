@@ -203,6 +203,7 @@ set(ENGINE_SOURCES
 	Engine/Physics/PhysicsDiagnostics.cpp
 	Engine/Audio/AudioAuthoringSnapshot.cpp
 	Engine/Audio/AudioPreparationPlan.cpp
+	Engine/Audio/AudioSpatialRenderer.cpp
 	Engine/Audio/AudioDiagnostics.cpp
 	Engine/Audio/AudioSystem.cpp
 	Engine/Audio/AudioCommands.cpp

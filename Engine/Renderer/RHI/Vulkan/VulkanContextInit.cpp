@@ -3079,9 +3079,9 @@ std::vector<const char*> VulkanContext::Impl::GetRequiredExtensions() {
 	};
 
 	// Swapchain present fences depend on surface-maintenance1 and
-	// get-surface-capabilities2 at instance scope. Enable the ratified KHR lineage
-	// when the loader exposes the complete pair, with the equivalent EXT lineage as
-	// an older-driver fallback. The later device selection must match this choice.
+	// get-surface-capabilities2 at instance scope. Prefer the original EXT lineage
+	// because older validation layers understand it even when a newer driver also
+	// advertises the promoted KHR alias. The later device selection must match it.
 	std::uint32_t availableExtensionCount = 0u;
 	if (vkEnumerateInstanceExtensionProperties(nullptr, &availableExtensionCount, nullptr) == VK_SUCCESS) {
 		std::vector<VkExtensionProperties> availableExtensions(availableExtensionCount);
@@ -3093,10 +3093,13 @@ std::vector<const char*> VulkanContext::Impl::GetRequiredExtensions() {
 					});
 			};
 			if (hasInstanceExtension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)) {
-				if (hasInstanceExtension(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME)) {
-					surfaceMaintenanceExtensionName = VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME;
-				} else if (hasInstanceExtension(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME)) {
+				const auto maintenanceLineage = TerraEngine::Renderer::Vulkan::SelectMaintenanceExtensionLineage(
+					hasInstanceExtension(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME),
+					hasInstanceExtension(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME));
+				if (maintenanceLineage == TerraEngine::Renderer::Vulkan::MaintenanceExtensionLineage::Ext) {
 					surfaceMaintenanceExtensionName = VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME;
+				} else if (maintenanceLineage == TerraEngine::Renderer::Vulkan::MaintenanceExtensionLineage::Khr) {
+					surfaceMaintenanceExtensionName = VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME;
 				}
 				if (surfaceMaintenanceExtensionName != nullptr) {
 					appendUniqueExtension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);

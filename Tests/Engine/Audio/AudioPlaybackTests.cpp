@@ -134,6 +134,7 @@ namespace TerraEngine::Tests {
 			// An unavailable provider keeps this lifecycle test headless while the
 			// protected AudioCommit path still publishes deterministic snapshots.
 			system.SetConfiguredProvider("test.missing");
+			system.SetRuntimePlaybackEnabled(false);
 
 			Object sourceObject = objects.createObject("Play On Start Source");
 			auto* source = objects.AddComponent<AudioSourceComponent>(sourceObject);
@@ -143,6 +144,11 @@ namespace TerraEngine::Tests {
 			source->clipAssetId = TerraEngine::UUID{101U};
 
 			system.Initialize();
+			system.Update(1.0F / 60.0F);
+			const auto editPublication = system.LatestPlaybackSnapshot();
+			context.Expect(editPublication && editPublication->voices.empty(),
+				"Play On Start must remain silent while editor runtime playback is disabled.");
+			system.SetRuntimePlaybackEnabled(true);
 			system.Update(1.0F / 60.0F);
 			const auto firstPublication = system.LatestPlaybackSnapshot();
 			context.Expect(firstPublication && firstPublication->voices.size() == 1U
@@ -158,6 +164,7 @@ namespace TerraEngine::Tests {
 				"Removing an audio-source object must remove its logical instance at the next AudioCommit boundary.");
 
 			system.Shutdown();
+			system.SetRuntimePlaybackEnabled(true);
 			system.SetConfiguredProvider("terra.miniaudio");
 	});
 	}

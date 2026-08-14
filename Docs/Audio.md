@@ -17,7 +17,9 @@ mixing, spatialization, or cooked project data.
 4. Enable **Play On Start** for immediate playback, or call the native, managed,
    or automation control API at runtime.
 5. For spatial sound, enable spatial playback and add an eligible `Audio
-   Listener`. Non-spatial music remains playable when no listener exists.
+   Listener`. Select its **Output Mode**: Mono, Stereo (default), HRTF for
+   headphones, 5.1 Surround, or 7.1 Surround. Non-spatial music remains
+   playable when no listener exists.
 6. Use **Audio Mixer** for master/group gain and mute state. Project values are
    persisted in `ProjectSettings/AudioSettings.json`.
 7. Use **Audio Diagnostics** when a clip is virtualized, rejected, or the output
@@ -55,11 +57,26 @@ declared audio snapshot/commit boundary. If any command in a batch is invalid,
 the entire batch is rejected without partial state changes.
 
 The engine selects an eligible listener deterministically and calculates the
-tested attenuation, orientation, stereo pan, spatial blend, priority, and voice
-virtualization before calling the backend. Mix groups are flat: each source
+tested attenuation, orientation, output mode, speaker gains, spatial blend,
+priority, and voice virtualization before calling the backend. Mix groups are flat: each source
 targets one group, and effective gain combines source, group, and master state.
 The provider receives final provider-neutral clip and voice commands; it does
 not apply a second distance curve or own TerraEngine's authoring semantics.
+
+TerraEngine renders into a standard eight-channel superset ordered FL, FR, C,
+LFE, BL, BR, SL, SR. Mono uses C, Stereo uses equal-power FL/FR panning, 5.1 and
+7.1 use pairwise speaker panning, and LFE remains available to device bass
+management rather than receiving every point source. The operating system and
+miniaudio convert that superset to the physical endpoint, so requesting surround
+on stereo hardware safely downmixes rather than inventing physical speakers.
+
+HRTF mode emits binaural FL/FR for headphones. The bundled miniaudio release has
+no native HRTF implementation, so TerraEngine supplies an allocation-free
+analytic renderer using interaural time delay, head-shadow level and low-pass
+cues, and rear spectral damping. It improves side and front/back localization
+without an external dataset. It is not a personalized measured-ear profile;
+future providers can consume the same listener-relative packet and substitute a
+measured convolution renderer.
 
 ## Adding another provider
 
@@ -96,9 +113,6 @@ import library is required for the compile/link portion. FMOD and Wwise are not
 bundled because this foundation prioritizes a small self-contained open
 dependency and a verifiable provider-neutral contract. A future provider can
 still integrate either one.
-Advanced acoustics, including ideas derived from research such as Microsoft's
-Project Triton, are deliberately postponed until the basic source, listener,
-mixing, and provider lifecycle is stable.
 
 ## Reproducible validation
 

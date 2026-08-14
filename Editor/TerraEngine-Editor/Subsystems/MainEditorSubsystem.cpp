@@ -23,6 +23,7 @@
 #include "Engine/Components/PrefabLinkComponent.h"
 #include "Engine/Components/Transform.h"
 #include "Engine/Animation/AnimationSystem.h"
+#include "Engine/Audio/AudioSystem.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
 #include "Engine/Scene/SceneManager.h"
@@ -2629,6 +2630,7 @@ bool MainEditorSubsystem::StartPlayMode()
 		.SetAuthoredComponentPlaybackEnabled(true);
 	TerraEngine::Animation::AnimationSystem::Instance()
 		.SetAuthoredComponentPlaybackAdvancing(true);
+	TerraEngine::Audio::AudioSystem::Instance().SetRuntimePlaybackEnabled(true);
 	ScriptingSystem::Instance().SetRunning(true);
 	ScriptingSystem::Instance().SetPaused(false);
 	(void)TerraEngine::Physics::PhysicsSystem::Instance().SetPaused(false);
@@ -2642,6 +2644,7 @@ bool MainEditorSubsystem::SetPlayModePaused(bool paused)
 	if(!TerraEngine::Physics::PhysicsSystem::Instance().SetPaused(paused))
 		return false;
 	ScriptingSystem::Instance().SetPaused(paused);
+	TerraEngine::Audio::AudioSystem::Instance().SetRuntimePlaybackPaused(paused);
 	return true;
 }
 
@@ -2676,6 +2679,7 @@ void MainEditorSubsystem::StopPlayMode()
 	// Stop and drain provider work before restoring or destroying authored
 	// objects. Runtime body handles never survive across editor play sessions.
 	TerraEngine::Physics::PhysicsSystem::Instance().StopWorld();
+	TerraEngine::Audio::AudioSystem::Instance().SetRuntimePlaybackEnabled(false);
 	ScriptingSystem::Instance().SetRunning(false);
 	ScriptingSystem::Instance().SetPaused(false);
 	// Recreate component-owned playback at tick zero before the authored snapshot

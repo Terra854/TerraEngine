@@ -57,7 +57,7 @@ namespace TerraEngine::Audio {
 			record.identity = {objects.getUUID(object), objects.getObjectComponentGeneration(object), 1U};
 			record.clipAssetId = source.clipAssetId;
 			record.position = {transform.position.x, transform.position.y, transform.position.z};
-			record.volume = source.volume; record.pitch = source.pitch; record.minimumDistance = source.minDistance;
+			record.volume = source.volume; record.pitch = source.pitch;
 			record.mixGroupId = source.mixGroupId;
 			record.maximumDistance = source.maxDistance; record.spatialBlend = source.spatialBlend; record.priority = source.priority;
 			record.enabled = source.active; record.loop = source.loop; record.spatial = source.spatialBlend > 0.0F;
@@ -73,17 +73,23 @@ namespace TerraEngine::Audio {
 					record.clipPayload = clip->RetainedPayload();
 				}
 			}
-			if(source.playOnStart && std::none_of(playback.begin(), playback.end(), [&](const auto& seed) { return seed.identity.objectId == record.identity.objectId && seed.identity.componentGeneration == record.identity.componentGeneration; }))
+			// playOnStart is a runtime lifecycle event, not an editor-preview action.
+			// The editor explicitly opens this gate on Play Mode entry; exported games
+			// leave it enabled from startup.
+			if(runtimePlaybackEnabled && source.playOnStart && std::none_of(playback.begin(), playback.end(), [&](const auto& seed) { return seed.identity.objectId == record.identity.objectId && seed.identity.componentGeneration == record.identity.componentGeneration; }))
 				playback.push_back({record.identity, AudioPlaybackState::Playing, 0U, record.clipAssetId, record.clipGeneration});
 			liveSources.push_back(std::move(record));
 		});
 		objects.forEachObjectWithComponents<AudioListenerComponent, Transform>([&](Object object, AudioListenerComponent& listener, Transform& transform) {
 			const glm::vec3 forward = transform.rotation * glm::vec3(0.0F, 0.0F, -1.0F);
 			liveListeners.push_back({objects.getUUID(object), objects.getObjectComponentGeneration(object),
-				{transform.position.x, transform.position.y, transform.position.z}, {forward.x, forward.y, forward.z}, listener.active, listener.eligible});
+				{transform.position.x, transform.position.y, transform.position.z}, {forward.x, forward.y, forward.z}, listener.outputMode, listener.active, listener.eligible});
 		});
 		if(!manualAuthoringSnapshot) { data.sources = std::move(liveSources); data.listeners = std::move(liveListeners); }
 		data.frame = frame; data.deltaSeconds = deltaTime; data.masterVolume = mix.Snapshot().master.volume; data.masterMuted = mix.Snapshot().master.muted;
+		// A disabled runtime is also paused for provider/timeline purposes. This is
+		// a second safety boundary for explicit controls racing a Play Mode exit.
+		data.gamePaused = !runtimePlaybackEnabled || runtimePlaybackPaused;
 		authoring = AudioAuthoringSnapshot::Create(std::move(data));
 	}
 	void AudioSystem::Shutdown() { std::scoped_lock lock(mutex); controls.Stop(); if(backend) { (void)backend->Shutdown(); backend.reset(); } activeVoices.clear(); registeredClips.clear(); playback.clear(); controlReceipts.clear(); failures.clear(); authoring = AudioAuthoringSnapshot::Create({}); manualAuthoringSnapshot = false; frame = 0U; packetSequence = 0U; deviceAvailable = false; initialized = false; }
@@ -165,6 +171,18 @@ namespace TerraEngine::Audio {
 	bool AudioSystem::RenameMixGroup(const TerraEngine::UUID& id, std::string name, std::string& diagnostic) { return mix.RenameGroup(id, std::move(name), diagnostic); }
 	void AudioSystem::SetAuthoringSnapshot(AudioAuthoringSnapshot snapshot) { std::scoped_lock lock(mutex); authoring = std::move(snapshot); manualAuthoringSnapshot = true; }
 	void AudioSystem::SetConfiguredProvider(std::string value) { std::scoped_lock lock(mutex); if(!initialized) providerId = std::move(value); }
+	void AudioSystem::SetRuntimePlaybackEnabled(bool enabled) {
+		std::scoped_lock lock(mutex);
+		runtimePlaybackEnabled = enabled;
+		runtimePlaybackPaused = false;
+		// Leaving Play Mode retires every logical instance. A later Play entry then
+		// creates a fresh playOnStart generation at frame zero.
+		if(!enabled) playback.clear();
+	}
+	void AudioSystem::SetRuntimePlaybackPaused(bool paused) {
+		std::scoped_lock lock(mutex);
+		runtimePlaybackPaused = runtimePlaybackEnabled && paused;
+	}
 	void AudioSystem::SnapshotPhase() {
 		auto data = authoring.Data();
 		// Deleting an object removes it from the immutable capture. Prune its

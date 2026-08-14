@@ -16,7 +16,6 @@ namespace TerraEngine::Audio
 		record.position = position;
 		record.volume = component.volume;
 		record.pitch = component.pitch;
-		record.minimumDistance = component.minDistance;
 		record.maximumDistance = component.maxDistance;
 		record.spatialBlend = component.spatialBlend;
 		record.priority = component.priority;
@@ -35,6 +34,7 @@ namespace TerraEngine::Audio
 		record.componentGeneration = componentGeneration;
 		record.position = position;
 		record.forward = forward;
+		record.outputMode = component.outputMode;
 		record.enabled = component.active;
 		record.eligible = component.eligible;
 		return record;
