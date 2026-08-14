@@ -5,6 +5,6 @@
 
 # These reviewed validation contracts are also pinned by byte-level hashes.
 # Keep their canonical LF bytes unchanged in detached Windows worktrees.
-/Tools/Animation/PerformanceWorkloads.json -text
+/Tests/Tools/Animation/PerformanceWorkloads.json -text
 /Tests/Fixtures/Animation/stress/workloads.json -text
 /Tests/Fixtures/RendererPerformanceBaseline/workloads.json -text

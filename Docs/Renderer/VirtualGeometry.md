@@ -18,7 +18,7 @@ targeted repair must preserve last-known-good output; canceled or
 failed work is never a successful repair. Missing identities remain
 `unavailable`, not estimated.
 
-Tooling is under `Tools/VirtualGeometry/`: run `RunCodecExperiment.ps1` for the
+Tooling is under `Tests/Tools/VirtualGeometry/`: run `RunCodecExperiment.ps1` for the
 32/64/128 KiB matrix, capture with `CaptureVirtualGeometryPerformance.ps1`,
 compare at least five comparable measured runs with
 `CompareVirtualGeometryPerformance.ps1`, and use
@@ -91,7 +91,7 @@ capture with validation artifacts can be marked validated. Timing states are
 values must remain non-numeric rather than becoming zero.
 
 The processor-expanded route is captured first as the immutable correctness and
-performance oracle. Use the manifests in `Tools/VirtualGeometry/` and the
+performance oracle. Use the manifests in `Tests/Tools/VirtualGeometry/` and the
 capture/comparison scripts to preserve workload, revision, adapter, driver,
 route, quality, raw samples, image artifacts, and hashes. Competitive claims
 require at least five comparable measured runs in randomized paired order.

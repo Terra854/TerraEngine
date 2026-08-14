@@ -30,7 +30,7 @@ namespace TerraEngine::Tests {
 	namespace {
 		inline constexpr double kMaximumCollapsedDiagnosticsMedianOverheadPercent = 2.0;
 		inline constexpr std::string_view kStressManifestSha256 =
-			"6773caf89e87b2fc5f1277ca5bde92aa68f4f20581a223af1910cb62a95c8aff";
+			"b5c78e9f01dc0036db4fb4674f632ebf06a736e4a7c010ec56e1f3804b92131d";
 
 		std::filesystem::path SourcePath(std::string_view relativePath)
 		{
@@ -156,7 +156,7 @@ namespace TerraEngine::Tests {
 	void RegisterAnimationDiagnosticsPerformanceTests(TestRegistry& registry)
 	{
 		registry.Add("Animation.DiagnosticsPerformance.FrozenDefinitionsRemainFinalOnly", [](TestContext& context) {
-			const nlohmann::json performance = ReadJson("Tools/Animation/PerformanceWorkloads.json");
+			const nlohmann::json performance = ReadJson("Tests/Tools/Animation/PerformanceWorkloads.json");
 			const nlohmann::json stress = ReadJson("Tests/Fixtures/Animation/stress/workloads.json");
 			const auto crowd = std::find_if(stress.at("workloads").begin(), stress.at("workloads").end(), [](const nlohmann::json& workload) {
 				return workload.at("id") == "crowd-1000";

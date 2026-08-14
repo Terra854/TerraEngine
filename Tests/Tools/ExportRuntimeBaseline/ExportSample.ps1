@@ -12,5 +12,5 @@ if ($Profile -ne "baseline") {
 # This historical path remains callable for downstream scripts, but all real
 # preparation, export, inspection, and failure propagation live in one tool.
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../../.."))
-$runner = Join-Path $repoRoot "Tools/ExportRuntimeBaseline/RunBaseline.ps1"
+$runner = Join-Path $repoRoot "Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1"
 & $runner -BuildDir $BuildDir -WorkRoot $WorkRoot

@@ -9,7 +9,7 @@ manifest. `-DryRun` validates discovery without claiming a baseline.
 ```powershell
 cmake --fresh --preset RelWithDebInfo
 cmake --build --preset RelWithDebInfo --target install
-& .\Tools\Physics\CapturePhysicsOptimizationBenchmark.ps1 -InstallRoot .\out\build\RelWithDebInfo\Build `
+& .\Tests\Tools\Physics\CapturePhysicsOptimizationBenchmark.ps1 -InstallRoot .\out\build\RelWithDebInfo\Build `
 	-Manifest .\Tests\Fixtures\Performance\Physics\workloads.json `
 	-OutputDirectory .\out\evidence\physics-optimization\candidate -Runs 5 -DryRun
 ```
@@ -28,9 +28,9 @@ ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
 	-R "Physics|TransactionalMutation|SystemScheduler|Editor\.Automation|Editor\.Export|SceneRuntimeParity" --output-on-failure
 ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
 cmake --build --preset RelWithDebInfo --target install
-& .\out\build\RelWithDebInfo\Build\Engine\TerraEnginePhysicsGameplayStress.exe
-& .\out\build\RelWithDebInfo\Build\Engine\TerraEnginePhysicsConstraintCharacterStress.exe
-& .\Tools\Physics\RunInstalledEditorPhysicsStress.ps1 `
+& .\out\build\RelWithDebInfo\Build\Tests\Tools\Physics\TerraEnginePhysicsGameplayStress.exe
+& .\out\build\RelWithDebInfo\Build\Tests\Tools\Physics\TerraEnginePhysicsConstraintCharacterStress.exe
+& .\Tests\Tools\Physics\RunInstalledEditorPhysicsStress.ps1 `
 	-InstallRoot .\out\build\RelWithDebInfo\Build `
 	-WorkRoot .\out\validation\physics-optimization\installed `
 	-RunWorkerScalingMatrix -RunProfilerCaptureChecks -CaptureLevel detailed `
@@ -67,7 +67,7 @@ Resolve every dry-run input from the installed tree:
 
 ```powershell
 $installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
-$vgTools = Join-Path $installRoot 'Tools/VirtualGeometry'
+$vgTools = Join-Path $installRoot 'Tests/Tools/VirtualGeometry'
 $vgRunner = Join-Path $installRoot 'Tools/TerraEngineVirtualGeometryBenchmark.exe'
 $vgAdapter = Join-Path $vgTools 'VirtualGeometryRuntimeAdapter.cmd'
 $vgWorkloads = Join-Path $vgTools 'workloads.json'
@@ -199,7 +199,7 @@ Validate the setup manifests without launching a renderer:
 
 ```powershell
 $installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
-$vgTools = Join-Path $installRoot 'Tools/VirtualGeometry'
+$vgTools = Join-Path $installRoot 'Tests/Tools/VirtualGeometry'
 $vgRunner = Join-Path $installRoot 'Tools/TerraEngineVirtualGeometryBenchmark.exe'
 & (Join-Path $vgTools 'CaptureVirtualGeometryPerformance.ps1') `
 	-BenchmarkExecutable $vgRunner `
@@ -356,7 +356,7 @@ scripting, automation, export, and complete CTest surfaces described below.
 ### Animation validation tools
 
 Use the focused CTest registrations for correctness and the reusable commands in
-`Tools/Animation/` for fixture generation, installed-model checks, performance
+`Tests/Tools/Animation/` for fixture generation, installed-model checks, performance
 capture, comparison, and soak testing. The commands and their reproducible
 inputs are documented in `Docs/Animation/README.md` and
 `Docs/Animation/Performance.md`.
@@ -990,7 +990,7 @@ cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests TerraEngi
 ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "Editor.ExportUnitTests|Editor.HeadlessExport|Editor.PhysicsExport|Engine.PhysicsExport" --output-on-failure
 ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
 cmake --build --preset RelWithDebInfo --target install
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/export-runtime-baseline
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/export-runtime-baseline
 ```
 
 Run the same installed gate beyond 360 characters whenever editor scripting,
@@ -1001,7 +1001,7 @@ $deepWorkRoot = "out/ci/export-runtime-baseline/" + (
   (1..8 | ForEach-Object { "segment-abcdefghijklmnopqrstuvwxyz-{0:d2}" -f $_ }) -join "/"
 )
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
+  -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
   -InstallRoot out/build/RelWithDebInfo/Build `
   -WorkRoot $deepWorkRoot `
   -RunId export-runtime-long-path
@@ -1099,8 +1099,8 @@ Remove-Item Env:TERRAENGINE_TEST_FILTER
 Then use the installed-editor harness and export baseline:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/validation/physics-live -ObjectCount 10000 -ActiveDynamicCount 1000 -ExplicitStepCount 100 -AllowLiveStress
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/physics-export-baseline
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Physics/RunInstalledEditorPhysicsStress.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/validation/physics-live -ObjectCount 10000 -ActiveDynamicCount 1000 -ExplicitStepCount 100 -AllowLiveStress
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/physics-export-baseline
 ```
 
 The live harness accepts `-RunManagedReloadAutomationLoopback` for managed/automation checks and
@@ -1182,7 +1182,7 @@ hashes, sampled luminance/non-black ratios, VG statistics, and errors beneath
 the requested result directory, then removes the disposable scene.
 
 ```powershell
-& .\Tools\VirtualGeometry\CaptureVirtualGeometryLiveVisual.ps1 `
+& .\Tests\Tools\VirtualGeometry\CaptureVirtualGeometryLiveVisual.ps1 `
 	-InstalledEditor 'out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe' `
 	-Project 'C:\Users\benti\Desktop\TerraEngine-Projects\New Animated Project' `
 	-Asset 'Assets/ValidationModels/DenseAnimatedVG/CesiumMan.glb' `
@@ -1204,7 +1204,7 @@ CPU median and p95 deltas to remain within two percent. Run five 60-second pairs
 and retain the generated summaries and manifest:
 
 ```powershell
-& .\Tools\Profiling\MeasureProfilerIdleOverhead.ps1 `
+& .\Tests\Tools\Profiling\MeasureProfilerIdleOverhead.ps1 `
 	-InstalledEditor 'out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe' `
 	-Project 'C:\Users\benti\Desktop\TerraEngine-Projects\New Animated Project' `
 	-OutputDirectory 'Tests/Fixtures/RendererPerformanceBaseline/results/profiler' `
@@ -1239,7 +1239,7 @@ scene runtime validation adds deterministic filters for `VulkanPresentationLifec
 Run both test executables with those filters before live GPU work.
 
 Live resize/minimize validation is deliberately opt-in and paced. Use
-`Tools/RendererStability/RunLiveSmoke.ps1` with `-AllowLiveGpuStress`, at most
+`Tests/Tools/RendererStability/RunLiveSmoke.ps1` with `-AllowLiveGpuStress`, at most
 50 operations per batch, and inspect its process/driver evidence after each
 batch. The harness snapshots the latest Windows System-log RecordId/time before
 launch and polls after every resize and throughout minimize/restore waits. A
@@ -1247,7 +1247,7 @@ qualifying newer display-driver event records `driver-event-failure.json`, stops
 the launched editor process tree, and never advances to the next operation; an
 older event cannot invalidate the run. Run the CPU-only seam regression before
 live work with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
-Tools/RendererStability/RunLiveSmoke.Tests.ps1`. The harness also waits for the
+Tests/Tools/RendererStability/RunLiveSmoke.Tests.ps1`. The harness also waits for the
 backend's first-successful-present marker and stores typed generation/extent
 evidence in `presentation-readiness.json`; a window handle alone is never used
 as a Vulkan readiness proxy. Do not inject device loss on the primary display
@@ -1301,7 +1301,7 @@ visible, and best-effort regeneration is atomically published.
 After install, run the harness's capability validation matrix under a disposable work root:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
 	-InstallRoot out/build/RelWithDebInfo/Build `
 	-WorkRoot out/validation/readiness `
 	-RunReadinessMatrix -AllowLiveStress
@@ -1363,7 +1363,7 @@ capture settings, or duration differs. Validate source and install contents
 first:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Profiling/CheckProfilerSource.ps1 `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Profiling/CheckProfilerSource.ps1 `
     -RepositoryRoot . -InstallRoot out/install/RelWithDebInfo
 ```
 
@@ -1371,13 +1371,13 @@ Run a clean-input dry run, then the canonical five-run installed-editor
 comparison (use the five-minute canonical duration for release evidence):
 
 ```powershell
-& .\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
-    -Project <project> -Scene <scene> -Manifest Tools/FramePublication/workloads.json `
+& .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
+    -Project <project> -Scene <scene> -Manifest Tests/Tools/FramePublication/workloads.json `
     -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
     -CameraHash <read-only-camera-hash> -OutputDirectory out/evidence/profiler-rework `
     -DurationSeconds 60 -DryRun
-& .\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
-    -Project <project> -Scene <scene> -Manifest Tools/FramePublication/workloads.json `
+& .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
+    -Project <project> -Scene <scene> -Manifest Tests/Tools/FramePublication/workloads.json `
     -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
     -CameraHash <read-only-camera-hash> -OutputDirectory out/evidence/profiler-rework `
     -DurationSeconds 300
@@ -1412,14 +1412,14 @@ ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
 cmake --build out/build/RelWithDebInfo --target install --parallel 2
 
 # Run the exact-scene one-minute JournalV1 smoke and reopen/count check.
-& .\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
+& .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
   -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
   -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
   -CameraHash <read-only-camera-hash> -Mode DetailedRecording -Runs 5 `
   -DurationSeconds 60 -OutputDirectory out/evidence/profiler-rework/smoke
 
 # Run five AB/BA closed/open-idle pairs (the runner enforces the 2% median/P95 gate).
-& .\Tools\Profiling\MeasureProfilerIdleOverhead.ps1 `
+& .\Tests\Tools\Profiling\MeasureProfilerIdleOverhead.ps1 `
   -InstalledEditor <installed-editor> -Project <project> -PairCount 5 `
   -CaptureDurationSeconds 30 -OutputDirectory out/evidence/profiler-rework/open-idle
 
@@ -1434,7 +1434,7 @@ overhead must each be at most 2%; negative values indicate an improvement and
 remain passing.
 
 # Run a closed/open recording pair; the window opens only in the final minute.
-& .\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
+& .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
   -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
   -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
   -CameraHash <read-only-camera-hash> -Mode MatchedWindowOpen -Runs 1 `
@@ -1477,7 +1477,7 @@ missing or unequal blocks. Raw samples remain available for diagnosis.
 
 # Run one five-minute profiler capture that also serves as the changing-animation
 # visual soak, without adding a second sequential soak or saving Scene.tescene.
-& .\Tools\VirtualGeometry\CaptureVirtualGeometryLiveVisual.ps1 `
+& .\Tests\Tools\VirtualGeometry\CaptureVirtualGeometryLiveVisual.ps1 `
   -InstalledEditor <installed-editor> -Project <project> `
   -ScenePath Assets/Scenes/Scene.tescene -PrefabInstanceCount 0 `
 	-ValidationCameraPosition @(0.0, 1.0, 9.0) `
@@ -1488,7 +1488,7 @@ missing or unequal blocks. Raw samples remain available for diagnosis.
 # Run the 60-second-per-leg ABBA overhead smoke (disabled/recording/recording/disabled).
 # The balanced order cancels monotonic thermal drift while retaining the unchanged
 # three-percent median/P95 gate; this smoke is not the canonical stability run.
-& .\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
+& .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
   -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
   -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
   -CameraHash <read-only-camera-hash> -Mode MatchedRecordingComparison -Runs 1 `
@@ -1498,7 +1498,7 @@ missing or unequal blocks. Raw samples remain available for diagnosis.
 # Run the single canonical five-minute detailed recording. Fixed 60-second health
 # checkpoints measure protected collection cost per produced frame, backlog/loss,
 # memory, and Finish evidence; raw Engine CPU first/final windows are diagnostic.
-& .\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
+& .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
   -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
   -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
   -CameraHash <read-only-camera-hash> -Mode DetailedRecording -Runs 1 `
@@ -1579,7 +1579,7 @@ animated validation scene is authored separately.
 
 ### Frame-publication profiler and tooling
 
-The dependency-free tooling under `Tools/FramePublication` is installed with
+The dependency-free tooling under `Tests/Tools/FramePublication` is installed with
 the build. Validate a clean checkout without creating evidence:
 
 Record `$framePubCameraHash` from the installed editor's read-only camera/diagnostic
@@ -1588,11 +1588,11 @@ response (for example the `camera.capture_custom` live-visual summary
 inferred or substituted.
 
 ```powershell
-.\Tools\FramePublication\CaptureFramePublicationPerformance.ps1 `
+.\Tests\Tools\FramePublication\CaptureFramePublicationPerformance.ps1 `
 	-Project 'C:/Users/benti/Desktop/TerraEngine-Projects/New Animated Project' `
 	-Scene 'C:/Users/benti/Desktop/TerraEngine-Projects/New Animated Project/Assets/Scenes/Scene.tescene' `
 	-CameraHash '<recorded-camera-sha256>' `
-	-Manifest '.\Tools\FramePublication\workloads.json' `
+	-Manifest '.\Tests\Tools\FramePublication\workloads.json' `
 	-OutputDirectory '.\out\evidence\frame-publication' -DryRun
 ```
 
@@ -1611,9 +1611,9 @@ backfills identity from the current machine.
 After installation, run the native contract executable through the wrapper:
 
 ```powershell
-& '.\Tools\FramePublication\RunFramePublicationContracts.ps1' `
+& '.\Tests\Tools\FramePublication\RunFramePublicationContracts.ps1' `
 	-InstallRoot '.\out\install\RelWithDebInfo' `
-	-Manifest '.\Tools\FramePublication\workloads.json' `
+	-Manifest '.\Tests\Tools\FramePublication\workloads.json' `
 	-OutputDirectory '.\out\evidence\frame-publication\contracts'
 ```
 
@@ -1621,9 +1621,9 @@ Start exactly one installed editor for live capture. Provide the recorded camera
 hash; the tool refuses to infer it or use multiple editor processes:
 
 ```powershell
-& '.\Tools\FramePublication\CaptureFramePublicationPerformance.ps1' `
+& '.\Tests\Tools\FramePublication\CaptureFramePublicationPerformance.ps1' `
 	-Project $framePubProject -Scene $framePubScene -CameraHash $framePubCameraHash `
-	-Manifest '.\Tools\FramePublication\workloads.json' `
+	-Manifest '.\Tests\Tools\FramePublication\workloads.json' `
 	-InstallRoot '.\out\install\RelWithDebInfo' `
 	-OutputDirectory '.\out\evidence\frame-publication\candidate' -Runs 5 -WarmupSeconds 30 -DurationSeconds 60
 ```
@@ -1641,8 +1641,8 @@ The authoritative CI lane does not require an output device:
 cmake --preset RelWithDebInfo
 cmake --build out/build/RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineAudioClipCompiler
 ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "^(Engine|Editor)\\.Audio" --output-on-failure
-./Tools/Audio/AcquireAudioFixtures.ps1 -VerifyCommitted
-./Tools/Audio/GenerateAudioFixtures.ps1 -VerifyCommitted
+./Tests/Tools/Audio/AcquireAudioFixtures.ps1 -VerifyCommitted
+./Tests/Tools/Audio/GenerateAudioFixtures.ps1 -VerifyCommitted
 cmake --build out/build/RelWithDebInfo --target install
 ```
 

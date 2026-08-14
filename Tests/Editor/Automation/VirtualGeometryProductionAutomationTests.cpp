@@ -15,9 +15,9 @@ namespace TerraEngine::EditorTests
 			[](TestContext &context)
 			{
 				const std::filesystem::path root = TERRAENGINE_SOURCE_DIR;
-				context.Expect(std::filesystem::exists(root / "Tools/VirtualGeometry/RunVirtualGeometryCapabilityGate.ps1"),
+				context.Expect(std::filesystem::exists(root / "Tests/Tools/VirtualGeometry/RunVirtualGeometryCapabilityGate.ps1"),
 					"Production capability automation must be present before endpoint claims are enabled.");
-				context.Expect(std::filesystem::exists(root / "Tools/VirtualGeometry/RunVirtualGeometryProductionSoak.ps1"),
+				context.Expect(std::filesystem::exists(root / "Tests/Tools/VirtualGeometry/RunVirtualGeometryProductionSoak.ps1"),
 					"Production soak automation must be present.");
 			});
 			registry.Add("VirtualGeometry.Editor.Automation.UnavailableHardwareIsNotPass",
@@ -97,7 +97,7 @@ namespace TerraEngine::EditorTests
 			[](TestContext& context)
 			{
 				const auto source = std::filesystem::path(TERRAENGINE_SOURCE_DIR) /
-					"Tools/VirtualGeometry/CompareVirtualGeometryImages.ps1";
+					"Tests/Tools/VirtualGeometry/CompareVirtualGeometryImages.ps1";
 				std::ifstream input(source);
 				const std::string text{ std::istreambuf_iterator<char>(input), {} };
 				for(const std::string_view marker : {

@@ -14,7 +14,7 @@ namespace TerraEngine::EditorTests
 			{
 				// The manifest is a source-controlled export contract, so resolve it
 				// from the source root instead of CTest's build-tree working folder.
-				const auto manifestPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Tools/VirtualGeometry/workloads.json";
+				const auto manifestPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Tests/Tools/VirtualGeometry/workloads.json";
 				std::ifstream input(manifestPath);
 				nlohmann::json manifest;
 				context.Expect(static_cast<bool>(input), "Workload manifest is required for installed benchmark export.");
@@ -34,7 +34,7 @@ namespace TerraEngine::EditorTests
 		registry.Add("VirtualGeometry.Editor.Export.MeasuredClaimsRequireExecutionIdentity",
 			[](TestContext &context)
 			{
-				const auto sourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Tools/VirtualGeometry/TerraEngineVirtualGeometryBenchmark.cpp";
+				const auto sourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Tests/Tools/VirtualGeometry/TerraEngineVirtualGeometryBenchmark.cpp";
 				std::ifstream source(sourcePath);
 				const std::string text{ std::istreambuf_iterator<char>(source), {} };
 				context.Expect(text.find("executionId") != std::string::npos, "Measured samples must carry an execution identity.");

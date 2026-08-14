@@ -2,7 +2,7 @@
 
 This directory documents TerraEngine's deterministic, repository-owned
 animation fixtures. The corpus is generated offline by
-`Tools/Animation/GenerateAnimationFixtures.ps1`; it never downloads a model,
+`Tests/Tools/Animation/GenerateAnimationFixtures.ps1`; it never downloads a model,
 reads a DCC installation, or depends on a machine-specific source asset.
 
 ## Generate a disposable corpus
@@ -14,7 +14,7 @@ root.
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
-	-File Tools/Animation/GenerateAnimationFixtures.ps1 `
+	-File Tests/Tools/Animation/GenerateAnimationFixtures.ps1 `
 	-OutputRoot out/validation/animation-fixtures/run-a
 ```
 
@@ -89,7 +89,7 @@ $roots = @(
 )
 foreach ($root in $roots) {
 	powershell.exe -NoProfile -ExecutionPolicy Bypass `
-		-File Tools/Animation/GenerateAnimationFixtures.ps1 `
+		-File Tests/Tools/Animation/GenerateAnimationFixtures.ps1 `
 		-OutputRoot $root
 	Get-ChildItem -LiteralPath $root -Filter *.json -File -Recurse |
 		ForEach-Object { $null = Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json }

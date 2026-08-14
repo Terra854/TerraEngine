@@ -20,7 +20,7 @@ namespace TerraEngine::EditorTests
 	void RegisterFramePublicationToolContractTests(TestRegistry& registry)
 	{
 		registry.Add("Editor.FramePublicationTools.ProfilerBenchmarkPinsIdentity", [](TestContext& context) {
-			const std::string source = Read("Tools/Profiling/CaptureProfilerReworkBenchmark.ps1");
+			const std::string source = Read("Tests/Tools/Profiling/CaptureProfilerReworkBenchmark.ps1");
 			context.Expect(source.find("projectHash") != std::string::npos
 				&& source.find("sceneHash") != std::string::npos
 				&& source.find("workloadHash") != std::string::npos
@@ -90,10 +90,10 @@ namespace TerraEngine::EditorTests
 				&& source.find("Validate-BenchmarkEvidenceEnvelope") != std::string::npos
 				&& source.find("$writtenEvidence = Get-Content") != std::string::npos,
 				"Timed-open evidence regeneration must validate all five pairs before normalizing status.");
-			const std::string runner = Read("Tools/FramePublication/CaptureFramePublicationPerformance.ps1");
-			const std::string live = Read("Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
-			const std::string benchmark = Read("Tools/Profiling/CaptureProfilerReworkBenchmark.ps1");
-			const std::string idle = Read("Tools/Profiling/MeasureProfilerIdleOverhead.ps1");
+			const std::string runner = Read("Tests/Tools/FramePublication/CaptureFramePublicationPerformance.ps1");
+			const std::string live = Read("Tests/Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
+			const std::string benchmark = Read("Tests/Tools/Profiling/CaptureProfilerReworkBenchmark.ps1");
+			const std::string idle = Read("Tests/Tools/Profiling/MeasureProfilerIdleOverhead.ps1");
 			context.Expect(runner.find("Get-EngineCpuWindow") != std::string::npos
 				&& runner.find("engine-cpu-time") != std::string::npos
 				&& runner.find("exact first/final Engine CPU windows") != std::string::npos
@@ -175,7 +175,7 @@ namespace TerraEngine::EditorTests
 		});
 
 		registry.Add("Editor.FramePublicationTools.LegacyProfilerAuditIsFailClosed", [](TestContext& context) {
-			const std::string source = Read("Tools/Profiling/CheckProfilerSource.ps1");
+			const std::string source = Read("Tests/Tools/Profiling/CheckProfilerSource.ps1");
 			const std::string legacyField = "payload" "Version";
 			context.Expect(source.find("ProfilerCapture" "V2") != std::string::npos
 				&& source.find(legacyField) != std::string::npos
@@ -184,7 +184,7 @@ namespace TerraEngine::EditorTests
 		});
 
 		registry.Add("Editor.FramePublicationTools.CleanV1Documentation", [](TestContext& context) {
-			const std::string readme = Read("Tools/FramePublication/README.md");
+			const std::string readme = Read("Tests/Tools/FramePublication/README.md");
 			const std::string testing = Read("Docs/Testing.md");
 			const std::string legacySelector = "Capture" "Version v2";
 			context.Expect(readme.find("TerraEngineProfilerJournalV1") != std::string::npos

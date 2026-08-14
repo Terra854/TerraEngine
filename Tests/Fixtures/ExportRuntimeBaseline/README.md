@@ -46,7 +46,7 @@ one script-controlled runtime signal.
 Run the installed-tree gate from the repository root:
 
 ```powershell
-pwsh -NoProfile -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
+pwsh -NoProfile -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
 	-InstallRoot out/build/Debug/Build `
 	-WorkRoot out/ci/export-runtime-baseline
 ```

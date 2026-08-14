@@ -34,7 +34,7 @@ cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests TerraEngi
 ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "Editor.ExportUnitTests|Editor.HeadlessExport" --output-on-failure
 ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
 cmake --build --preset RelWithDebInfo --target install
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/export-runtime-baseline
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/export-runtime-baseline
 ```
 
 The long-path lane uses the same installed binaries and fixture, but places the
@@ -48,7 +48,7 @@ $deepWorkRoot = "out/ci/export-runtime-baseline/" + (
   (1..8 | ForEach-Object { "segment-abcdefghijklmnopqrstuvwxyz-{0:d2}" -f $_ }) -join "/"
 )
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
+  -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
   -InstallRoot out/build/RelWithDebInfo/Build `
   -WorkRoot $deepWorkRoot `
   -RunId export-runtime-long-path

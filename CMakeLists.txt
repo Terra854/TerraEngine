@@ -129,9 +129,13 @@ file(GLOB_RECURSE TERRAENGINE_ANIMATION_MANAGED_CORE_SOURCES CONFIGURE_DEPENDS
 file(GLOB_RECURSE TERRAENGINE_ANIMATION_MANAGED_EDITOR_SOURCES CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Editor/Source/Animation/*.cs"
 )
-file(GLOB_RECURSE TERRAENGINE_ANIMATION_TOOL_SOURCES CONFIGURE_DEPENDS
-	"${CMAKE_CURRENT_SOURCE_DIR}/Tools/Animation/*"
-)
+if(BUILD_TESTING)
+	# Validation runners belong to the test surface and must not leak into a
+	# production-only project configuration.
+	file(GLOB_RECURSE TERRAENGINE_ANIMATION_TOOL_SOURCES CONFIGURE_DEPENDS
+		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Animation/*"
+	)
+endif()
 
 # Virtual geometry owns a dedicated backend-neutral renderer module plus typed
 # streaming/publication files. CONFIGURE_DEPENDS keeps later milestone files in
@@ -703,10 +707,17 @@ set(SIMDJSON_STATIC_REFLECTION_MODE OFF CACHE STRING "Disable simdjson C++26 sta
 add_subdirectory(External/simdjson)
 set_target_properties(simdjson PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 
-# Benchmark/test schema validation is kept in its feature tool directory and
-# relies only on TerraEngine's already vendored JSON implementation.
-add_subdirectory(Tools/VirtualGeometry)
-add_subdirectory(Tools/FramePublication)
+# The stage-cache maintenance executable is a genuine engine asset tool, so it
+# remains available independently of the validation and benchmark targets.
+add_subdirectory(Tools/VirtualGeometryAsset)
+
+if(BUILD_TESTING)
+	# Benchmark and contract utilities are test infrastructure. Keeping their
+	# targets behind BUILD_TESTING prevents production-only builds from compiling
+	# or installing QA executables and evidence scripts.
+	add_subdirectory(Tests/Tools/VirtualGeometry)
+	add_subdirectory(Tests/Tools/FramePublication)
+endif()
 
 set(FASTGLTF_ENABLE_TESTS OFF CACHE BOOL "Disable fastgltf tests" FORCE)
 set(FASTGLTF_ENABLE_EXAMPLES OFF CACHE BOOL "Disable fastgltf examples" FORCE)
@@ -808,10 +819,12 @@ if(TERRAENGINE_ANIMATION_SHADER_SOURCES)
 	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Animation PREFIX "Animation Shaders" FILES ${TERRAENGINE_ANIMATION_SHADER_SOURCES})
 endif()
 
-add_custom_target(TerraEngine.Animation.Tools)
-if(TERRAENGINE_ANIMATION_TOOL_SOURCES)
-	target_sources(TerraEngine.Animation.Tools PRIVATE ${TERRAENGINE_ANIMATION_TOOL_SOURCES})
-	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Tools/Animation PREFIX "Animation Tools" FILES ${TERRAENGINE_ANIMATION_TOOL_SOURCES})
+if(BUILD_TESTING)
+	add_custom_target(TerraEngine.Animation.Tools)
+	if(TERRAENGINE_ANIMATION_TOOL_SOURCES)
+		target_sources(TerraEngine.Animation.Tools PRIVATE ${TERRAENGINE_ANIMATION_TOOL_SOURCES})
+		source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Animation PREFIX "Animation Test Tools" FILES ${TERRAENGINE_ANIMATION_TOOL_SOURCES})
+	endif()
 endif()
 
 add_custom_target(TerraEngine.VirtualGeometry.Shaders)
@@ -1118,90 +1131,85 @@ if(MSVC)
 	target_compile_options(TerraEngineAudioClipCompiler PRIVATE /FS)
 endif()
 
-# This device-independent runner proves that the worker-safe preparation path
-# produces identical results for large source sets and repeated replays.
-add_executable(TerraEngineAudioStressRunner
-	Tools/Audio/AudioStressRunner.cpp
-)
-target_include_directories(TerraEngineAudioStressRunner PRIVATE
-	${CMAKE_CURRENT_SOURCE_DIR}/Engine
-)
-target_link_libraries(TerraEngineAudioStressRunner PRIVATE TerraEngine-Engine)
-if(MSVC)
-	target_compile_options(TerraEngineAudioStressRunner PRIVATE /FS)
-endif()
-
-# This installed-runtime probe exercises the public physics boundary with the
-# exact 10,000-query batch limit and a dense command workload. Keeping it as a
-# normal engine-linked executable also proves the installed DLL layout works.
-add_executable(TerraEnginePhysicsGameplayStress
-	Tools/Physics/PhysicsGameplayStress.cpp
-)
-target_include_directories(TerraEnginePhysicsGameplayStress
-	PRIVATE
-		${CMAKE_CURRENT_SOURCE_DIR}/Engine
-)
-target_link_libraries(TerraEnginePhysicsGameplayStress PRIVATE TerraEngine-Engine)
-if(MSVC)
-	target_compile_options(TerraEnginePhysicsGameplayStress PRIVATE /FS)
-endif()
-
-# This measurement-only executable uses the public backend boundary to produce
-# cross-revision physics evidence. It does not link provider headers or alter
-# runtime settings, so a clean installed tree can execute the same workload.
-add_executable(TerraEnginePhysicsOptimizationBenchmark
-	Tools/Physics/PhysicsOptimizationBenchmark.cpp
-)
-target_include_directories(TerraEnginePhysicsOptimizationBenchmark
-	PRIVATE
-		${CMAKE_CURRENT_SOURCE_DIR}/Engine
-)
-target_link_libraries(TerraEnginePhysicsOptimizationBenchmark PRIVATE TerraEngine-Engine)
-# The benchmark alone adapts its read-only evidence collection to the optimized
-# runtime's additive diagnostics. Production engine targets receive no macro and
-# therefore retain identical baseline behavior.
-target_compile_definitions(TerraEnginePhysicsOptimizationBenchmark
-	PRIVATE
-		TERRAENGINE_PHYSICS_OPTIMIZED_RUNTIME=1
-)
-if(MSVC)
-	target_compile_options(TerraEnginePhysicsOptimizationBenchmark PRIVATE /FS)
-endif()
-
-# This installed-runtime fixture covers the constraint and virtual-character
-# contracts through the provider-neutral backend request boundary. It remains a
-# small engine-linked executable so the installed DLL layout is exercised too.
-add_executable(TerraEnginePhysicsConstraintCharacterStress
-	Tools/Physics/PhysicsConstraintCharacterStress.cpp
-)
-target_include_directories(TerraEnginePhysicsConstraintCharacterStress
-	PRIVATE
-		${CMAKE_CURRENT_SOURCE_DIR}/Engine
-)
-target_link_libraries(TerraEnginePhysicsConstraintCharacterStress PRIVATE TerraEngine-Engine)
-if(MSVC)
-	target_compile_options(TerraEnginePhysicsConstraintCharacterStress PRIVATE /FS)
-endif()
-
-# The animation soak driver launches this small engine-linked process in bounded
-# slices. Keeping it separate from the editor makes long-running validation usable headlessly
-# while still exercising the production animation storage and publication code.
-add_executable(TerraEngineAnimationSoakRunner
-	Tools/Animation/AnimationSoakRunner.cpp
-)
-target_include_directories(TerraEngineAnimationSoakRunner
-	PRIVATE
-		${CMAKE_CURRENT_SOURCE_DIR}/Engine
-)
-target_link_libraries(TerraEngineAnimationSoakRunner PRIVATE TerraEngine-Engine)
-if(MSVC)
-	target_compile_options(TerraEngineAnimationSoakRunner PRIVATE /FS)
-	target_link_libraries(TerraEngineAnimationSoakRunner PRIVATE Psapi)
-else()
-	set_target_properties(TerraEngineAnimationSoakRunner PROPERTIES
-		BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
-		INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}/../Engine"
+if(BUILD_TESTING)
+	# These runners produce test evidence and exercise installed-runtime
+	# contracts. Production-only configurations do not need to build them.
+	add_executable(TerraEngineAudioStressRunner
+		Tests/Tools/Audio/AudioStressRunner.cpp
 	)
+	target_include_directories(TerraEngineAudioStressRunner PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+	)
+	target_link_libraries(TerraEngineAudioStressRunner PRIVATE TerraEngine-Engine)
+	if(MSVC)
+		target_compile_options(TerraEngineAudioStressRunner PRIVATE /FS)
+	endif()
+
+	# This installed-runtime probe exercises the public physics boundary with the
+	# exact 10,000-query batch limit and a dense command workload.
+	add_executable(TerraEnginePhysicsGameplayStress
+		Tests/Tools/Physics/PhysicsGameplayStress.cpp
+	)
+	target_include_directories(TerraEnginePhysicsGameplayStress
+		PRIVATE
+			${CMAKE_CURRENT_SOURCE_DIR}/Engine
+	)
+	target_link_libraries(TerraEnginePhysicsGameplayStress PRIVATE TerraEngine-Engine)
+	if(MSVC)
+		target_compile_options(TerraEnginePhysicsGameplayStress PRIVATE /FS)
+	endif()
+
+	# This measurement-only executable uses the public backend boundary to produce
+	# cross-revision physics evidence without changing production runtime settings.
+	add_executable(TerraEnginePhysicsOptimizationBenchmark
+		Tests/Tools/Physics/PhysicsOptimizationBenchmark.cpp
+	)
+	target_include_directories(TerraEnginePhysicsOptimizationBenchmark
+		PRIVATE
+			${CMAKE_CURRENT_SOURCE_DIR}/Engine
+	)
+	target_link_libraries(TerraEnginePhysicsOptimizationBenchmark PRIVATE TerraEngine-Engine)
+	target_compile_definitions(TerraEnginePhysicsOptimizationBenchmark
+		PRIVATE
+			TERRAENGINE_PHYSICS_OPTIMIZED_RUNTIME=1
+	)
+	if(MSVC)
+		target_compile_options(TerraEnginePhysicsOptimizationBenchmark PRIVATE /FS)
+	endif()
+
+	# This fixture covers constraint and virtual-character contracts through the
+	# provider-neutral backend request boundary.
+	add_executable(TerraEnginePhysicsConstraintCharacterStress
+		Tests/Tools/Physics/PhysicsConstraintCharacterStress.cpp
+	)
+	target_include_directories(TerraEnginePhysicsConstraintCharacterStress
+		PRIVATE
+			${CMAKE_CURRENT_SOURCE_DIR}/Engine
+	)
+	target_link_libraries(TerraEnginePhysicsConstraintCharacterStress PRIVATE TerraEngine-Engine)
+	if(MSVC)
+		target_compile_options(TerraEnginePhysicsConstraintCharacterStress PRIVATE /FS)
+	endif()
+
+	# The animation soak driver launches this engine-linked process in bounded
+	# slices while exercising production animation storage and publication code.
+	add_executable(TerraEngineAnimationSoakRunner
+		Tests/Tools/Animation/AnimationSoakRunner.cpp
+	)
+	target_include_directories(TerraEngineAnimationSoakRunner
+		PRIVATE
+			${CMAKE_CURRENT_SOURCE_DIR}/Engine
+	)
+	target_link_libraries(TerraEngineAnimationSoakRunner PRIVATE TerraEngine-Engine)
+	if(MSVC)
+		target_compile_options(TerraEngineAnimationSoakRunner PRIVATE /FS)
+		target_link_libraries(TerraEngineAnimationSoakRunner PRIVATE Psapi)
+	else()
+		set_target_properties(TerraEngineAnimationSoakRunner PROPERTIES
+			BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
+			INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}/../../../Engine"
+		)
+	endif()
 endif()
 
 # Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
@@ -1607,14 +1615,14 @@ if(WIN32 AND MSVC)
 		TerraEngineModelPackageCompiler
 		TerraEngineShaderCompiler
 		TerraEnginePhysicsColliderCompiler
-		TerraEnginePhysicsGameplayStress
-		TerraEnginePhysicsConstraintCharacterStress
-		TerraEngineAnimationSoakRunner
 		TerraEngine-Export
 		TerraEngine-Editor
 	)
 	if(BUILD_TESTING)
 		list(APPEND TERRAENGINE_WINDOWS_LONG_PATH_TARGETS
+			TerraEnginePhysicsGameplayStress
+			TerraEnginePhysicsConstraintCharacterStress
+			TerraEngineAnimationSoakRunner
 			TerraEngine-EngineTests
 			TerraEngine-EditorTests
 		)
@@ -1670,6 +1678,32 @@ else()
 endif()
 
 set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR}/Build)
+
+# Installs are incremental, so explicitly remove validation artifacts that older
+# revisions published as production tools. The allowlist is intentionally
+# concrete: genuine tools such as TerraEngineVirtualGeometryAssetTool remain.
+install(CODE "file(REMOVE_RECURSE
+	\"${ENGINE_INSTALL_DESTINATION}/Tools/Animation\"
+	\"${ENGINE_INSTALL_DESTINATION}/Tools/Audio\"
+	\"${ENGINE_INSTALL_DESTINATION}/Tools/ExportRuntimeBaseline\"
+	\"${ENGINE_INSTALL_DESTINATION}/Tools/FramePublication\"
+	\"${ENGINE_INSTALL_DESTINATION}/Tools/Physics\"
+	\"${ENGINE_INSTALL_DESTINATION}/Tools/Profiling\"
+	\"${ENGINE_INSTALL_DESTINATION}/Tools/RendererStability\"
+	\"${ENGINE_INSTALL_DESTINATION}/Tools/VirtualGeometry\"
+	\"${CMAKE_INSTALL_PREFIX}/Tools/FramePublication\"
+)
+file(REMOVE
+	\"${ENGINE_INSTALL_DESTINATION}/Tools/TerraEngineAnimationSoakRunner${TERRAENGINE_EXECUTABLE_SUFFIX}\"
+	\"${ENGINE_INSTALL_DESTINATION}/Tools/TerraEngineRendererTopologyBenchmark${TERRAENGINE_EXECUTABLE_SUFFIX}\"
+	\"${ENGINE_INSTALL_DESTINATION}/Tools/TerraEngineVirtualGeometryBenchmark${TERRAENGINE_EXECUTABLE_SUFFIX}\"
+	\"${ENGINE_INSTALL_DESTINATION}/Tools/TerraEngineVirtualGeometryCodecExperiment${TERRAENGINE_EXECUTABLE_SUFFIX}\"
+	\"${ENGINE_INSTALL_DESTINATION}/Tools/${CMAKE_SHARED_LIBRARY_PREFIX}TerraEngine${TERRAENGINE_SHARED_LIBRARY_SUFFIX}\"
+	\"${ENGINE_INSTALL_DESTINATION}/Tools/${CMAKE_SHARED_LIBRARY_PREFIX}glfw3${TERRAENGINE_SHARED_LIBRARY_SUFFIX}\"
+	\"${ENGINE_INSTALL_DESTINATION}/Engine/TerraEnginePhysicsConstraintCharacterStress${TERRAENGINE_EXECUTABLE_SUFFIX}\"
+	\"${ENGINE_INSTALL_DESTINATION}/Engine/TerraEnginePhysicsGameplayStress${TERRAENGINE_EXECUTABLE_SUFFIX}\"
+	\"${ENGINE_INSTALL_DESTINATION}/Engine/TerraEnginePhysicsOptimizationBenchmark${TERRAENGINE_EXECUTABLE_SUFFIX}\"
+)")
 
 # Public geometry/deformation includes are installed beside compiled shaders so
 # authored surface shaders and offline validation use the same versioned ABI as
@@ -2276,6 +2310,7 @@ endif()
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Docs/Animation"
 		FILES_MATCHING PATTERN "*.md"
 	)
+	if(BUILD_TESTING)
 	# Animation acquisition, fixture, soak, validation, and evidence drivers are
 	# shipped as inspectable command-line tools. They still require
 	# the inputs named by each command, but no validation script should disappear
@@ -2283,10 +2318,10 @@ endif()
 	# Replace the directory before copying so renamed or retired validation files
 	# cannot survive an incremental install and leak obsolete planning identities.
 	install(CODE
-		"file(REMOVE_RECURSE \"${ENGINE_INSTALL_DESTINATION}/Tools/Animation\")"
+		"file(REMOVE_RECURSE \"${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Animation\")"
 	)
-	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Animation/"
-		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tools/Animation"
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Animation/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Animation"
 		FILES_MATCHING PATTERN "*.ps1" PATTERN "*.json"
 	)
 	# Virtual-geometry manifests and scripts define the installed validation surface.
@@ -2296,16 +2331,17 @@ endif()
 	# time. This prevents retired manifest names from surviving an incremental
 	# install and keeps the product-facing layout semantic.
 	install(CODE
-		"file(REMOVE_RECURSE \"${ENGINE_INSTALL_DESTINATION}/Tools/VirtualGeometry\")"
+		"file(REMOVE_RECURSE \"${ENGINE_INSTALL_DESTINATION}/Tests/Tools/VirtualGeometry\")"
 	)
-	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tools/VirtualGeometry/"
-		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tools/VirtualGeometry"
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/VirtualGeometry/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Tools/VirtualGeometry"
 		FILES_MATCHING
 			PATTERN "*.json"
 			PATTERN "*.ps1"
 			PATTERN "*.cmd"
 			PATTERN "*.md"
 	)
+	endif()
 	# Keep the small deterministic animation and export-parity inputs beside the
 	# installed validation tooling. The Tests path makes their QA-only role clear;
 	# exported games continue to consume cooked TEPAK data, never these sources.
@@ -2406,46 +2442,42 @@ install(TARGETS TerraEngineAudioClipCompiler
 	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 )
-# Install the deterministic audio evidence runner beside its PowerShell wrappers
-# so the stress workflow uses the same binaries shipped to downstream users.
-install(TARGETS TerraEngineAudioStressRunner
-	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tools/Audio
-	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tools/Audio
-)
-# Install the stress executable beside TerraEngine.dll so it can validate a
-# clean installed tree without relying on build-tree paths or system packages.
-install(TARGETS TerraEnginePhysicsGameplayStress
-	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
-	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
-)
-# Keep the native evidence probe beside TerraEngine.dll so captures need no
-# build-tree path or globally-installed dependencies.
-install(TARGETS TerraEnginePhysicsOptimizationBenchmark
-	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
-	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
-)
-# Install this fixture beside the gameplay stress executable and TerraEngine.dll
-# so validation can run entirely from the deterministic installed runtime tree.
-install(TARGETS TerraEnginePhysicsConstraintCharacterStress
-	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
-	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
-)
-# Install the resumable animation-soak slice runner at the path documented by
-# RunAnimationSoak.ps1. Windows receives the complete CMake-known runtime DLL
-# closure beside the executable; Linux resolves the canonical sibling Engine
-# directory through INSTALL_RPATH.
-install(TARGETS TerraEngineAnimationSoakRunner
-	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tools
-	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tools
-)
-if(WIN32)
-	# The engine DLL imports platform dependencies such as glfw3.dll. Installing
-	# TARGET_RUNTIME_DLLS keeps this headless tool runnable without relying on a
-	# developer PATH or copying an incomplete hand-maintained dependency list.
-	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngineAnimationSoakRunner>
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tools
-		OPTIONAL
+if(BUILD_TESTING)
+	# Install validation executables under the test tree so the installed layout
+	# preserves the same production-versus-test boundary as the source tree.
+	install(TARGETS TerraEngineAudioStressRunner
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Audio
+		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Audio
 	)
+	install(TARGETS
+		TerraEnginePhysicsGameplayStress
+		TerraEnginePhysicsOptimizationBenchmark
+		TerraEnginePhysicsConstraintCharacterStress
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Physics
+		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Physics
+	)
+	install(TARGETS TerraEngineAnimationSoakRunner
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Animation
+		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Animation
+	)
+	if(WIN32)
+		# Test runners link the production engine DLL. Copy the complete known
+		# runtime closure beside each category so clean installed-tree runs work.
+		install(FILES $<TARGET_FILE:TerraEngine-Engine>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Physics
+		)
+		install(FILES $<TARGET_RUNTIME_DLLS:TerraEnginePhysicsGameplayStress>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Physics
+			OPTIONAL
+		)
+		install(FILES $<TARGET_FILE:TerraEngine-Engine>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Animation
+		)
+		install(FILES $<TARGET_RUNTIME_DLLS:TerraEngineAnimationSoakRunner>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Animation
+			OPTIONAL
+		)
+	endif()
 endif()
 
 # Configure-time guard: select platform or option behavior before generating build files.

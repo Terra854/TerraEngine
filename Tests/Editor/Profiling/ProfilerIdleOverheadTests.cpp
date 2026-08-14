@@ -21,7 +21,7 @@ namespace TerraEngine::EditorTests
 	{
 		registry.Add("Editor.ProfilerIdleOverhead.MedianAndP95Gate", [](TestContext& context) {
 			const std::string window = ReadSource("Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp");
-			const std::string runner = ReadSource("Tools/Profiling/MeasureProfilerIdleOverhead.ps1");
+			const std::string runner = ReadSource("Tests/Tools/Profiling/MeasureProfilerIdleOverhead.ps1");
 			context.Expect(window.find("Timing Distribution") != std::string::npos
 				&& window.find("ProfilerWindowRefreshInterval") != std::string::npos,
 				"Idle overhead measurements must use cached, throttled timing distribution updates.");
@@ -70,7 +70,7 @@ namespace TerraEngine::EditorTests
 			const std::string automation = ReadSource("Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp");
 			const std::string engine = ReadSource("Engine/Core/MainEngine.cpp");
 			const std::string scheduler = ReadSource("Engine/Core/Scheduling/SystemScheduler.cpp");
-			const std::string harness = ReadSource("Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
+			const std::string harness = ReadSource("Tests/Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
 			context.Expect(automation.find("engineCpuTimeMs") != std::string::npos
 				&& engine.find("BeginLatestEngineFrameTiming") != std::string::npos
 				&& engine.find("PublishLatestEngineFrameTiming") != std::string::npos,
@@ -88,7 +88,7 @@ namespace TerraEngine::EditorTests
 			const std::string window = ReadSource("Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp");
 			const std::string service = ReadSource("Editor/TerraEngine-Editor/Profiling/EditorProfilerService.cpp");
 			const std::string automation = ReadSource("Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp");
-			const std::string harness = ReadSource("Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
+			const std::string harness = ReadSource("Tests/Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
 			context.Expect(window.find("ScopedProfilerWindowDrawTiming") != std::string::npos
 				&& window.find("PublishProfilerWindowDrawTiming") != std::string::npos,
 				"ProfilerWindow should publish its own CPU duration independently of later editor rendering stages.");
@@ -106,7 +106,7 @@ namespace TerraEngine::EditorTests
 			const std::string service = ReadSource("Editor/TerraEngine-Editor/Profiling/EditorProfilerService.cpp");
 			const std::string editorSystem = ReadSource("Editor/TerraEngine-Editor/Core/EditorSystem.cpp");
 			const std::string automation = ReadSource("Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp");
-			const std::string harness = ReadSource("Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
+			const std::string harness = ReadSource("Tests/Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
 			context.Expect(service.find("PublishImGuiRenderTiming") != std::string::npos
 				&& service.find("PublishPresentUiTiming") != std::string::npos,
 				"Profiler timing service should retain typed post-window stage measurements.");

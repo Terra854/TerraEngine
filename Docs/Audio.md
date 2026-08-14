@@ -100,7 +100,7 @@ library (the Windows install intentionally ships runtime DLLs, not a link-time
 `.lib`):
 
 ```powershell
-& out/build/RelWithDebInfo/Build/Tools/Audio/VerifyInstalledAudioProviderContract.ps1 `
+& out/build/RelWithDebInfo/Build/Tests/Tools/Audio/VerifyInstalledAudioProviderContract.ps1 `
   -IncludeRoot out/build/RelWithDebInfo/Build/include `
   -LibraryPath out/build/RelWithDebInfo/TerraEngine.lib `
   -RuntimeDirectory out/build/RelWithDebInfo/Build/Engine
@@ -119,8 +119,8 @@ still integrate either one.
 Verify the committed downloads and deterministic malformed inputs:
 
 ```powershell
-Tools/Audio/AcquireAudioFixtures.ps1 -VerifyCommitted
-Tools/Audio/GenerateAudioFixtures.ps1 -VerifyCommitted
+Tests/Tools/Audio/AcquireAudioFixtures.ps1 -VerifyCommitted
+Tests/Tools/Audio/GenerateAudioFixtures.ps1 -VerifyCommitted
 ```
 
 Build, install, and run the device-independent suite:
@@ -136,13 +136,13 @@ The installed stress runner hashes every prepared voice. The committed baseline
 requires at least 128 sources and 100 identical replays:
 
 ```powershell
-$audioTools = 'out/build/RelWithDebInfo/Build/Tools/Audio'
+$audioTools = 'out/build/RelWithDebInfo/Build/Tests/Tools/Audio'
 & "$audioTools/RunAudioStress.ps1" -RequestedSources 128 -RepeatCount 100 -Output "$audioTools/Evidence/stress.json"
 & "$audioTools/CompareAudioEvidence.ps1" -Evidence "$audioTools/Evidence/stress.json"
 & "$audioTools/RunAudioSoak.ps1" -DurationMinutes 30 -RequestedSources 128 -RepeatCount 100 -Output "$audioTools/Evidence/soak.json"
 ```
 
-The stress and soak wrappers create `Build/Tools/Audio/Evidence` when needed.
+The stress and soak wrappers create `Build/Tests/Tools/Audio/Evidence` when needed.
 Stress evidence is compared with
 `Tests/Fixtures/Audio/Performance/baseline.json`; both workloads are
 device-independent and automatable on Windows. Audible editor scenarios remain

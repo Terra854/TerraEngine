@@ -1154,7 +1154,7 @@ Profiler recordings use v2, while v1 is load-only compatibility; detailed,
 sampled, and aggregate five-second captures must remain at or below 10 MiB.
 Build commands intentionally do not pass `--parallel`.
 Export parity uses the installed baseline command
-`Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build`
+`Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build`
 with a disposable `out/ci/export-runtime-baseline` work root.
 
 Target gates should be finalized by Spec Kit, but the initial design expects:

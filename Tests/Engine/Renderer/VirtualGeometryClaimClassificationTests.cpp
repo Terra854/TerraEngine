@@ -1,6 +1,6 @@
 #include "TestHarness.h"
 
-#include "Tools/VirtualGeometry/VirtualGeometryComparativeEvidence.h"
+#include "Tests/Tools/VirtualGeometry/VirtualGeometryComparativeEvidence.h"
 
 namespace TerraEngine::Tests
 {

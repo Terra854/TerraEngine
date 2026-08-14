@@ -32,7 +32,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryVoxelBuilder.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometrySplineCurveBuilder.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryDisplacementBuilder.cpp
-	${CMAKE_SOURCE_DIR}/Tools/VirtualGeometry/VirtualGeometryComparativeEvidence.cpp
+	${CMAKE_SOURCE_DIR}/Tests/Tools/VirtualGeometry/VirtualGeometryComparativeEvidence.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/AnimationClipCompiler.cpp
 	# Motion database cook tests link the production deterministic compiler
 	# directly, matching the existing clip compiler test boundary above.

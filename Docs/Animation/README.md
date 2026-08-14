@@ -2,7 +2,7 @@
 
 Animation validation is split into reusable workflows instead of feature-phase
 or planning-task gates. Runtime and authoring behavior is covered by the native
-CTest suites, while the scripts under `Tools/Animation/` provide fixture,
+CTest suites, while the scripts under `Tests/Tools/Animation/` provide fixture,
 installed-project, performance, and soak validation.
 
 Use [Troubleshooting](Troubleshooting.md) for failure diagnosis and
@@ -55,8 +55,8 @@ For a short validation slice:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
-	-File Tools/Animation/RunAnimationSoak.ps1 `
-	-RunnerPath out/build/RelWithDebInfo/Build/Tools/TerraEngineAnimationSoakRunner.exe `
+	-File Tests/Tools/Animation/RunAnimationSoak.ps1 `
+	-RunnerPath out/build/RelWithDebInfo/Build/Tests/Tools/Animation/TerraEngineAnimationSoakRunner.exe `
 	-DurationHours 0.01
 ```
 

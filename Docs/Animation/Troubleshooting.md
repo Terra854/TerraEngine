@@ -62,7 +62,7 @@ cmake --build --preset RelWithDebInfo --target install
 ```
 
 Use the asset-pipeline CTest coverage for model import validation,
-`Tools/Animation/RunAnimationSoak.ps1` for long-running stability, and the CTest
+`Tests/Tools/Animation/RunAnimationSoak.ps1` for long-running stability, and the CTest
 workflow in `Docs/Testing.md` for native correctness. Never mark a manual click,
 camera capture, performance result, cross-platform run, or soak as passed when
 its evidence is unavailable.

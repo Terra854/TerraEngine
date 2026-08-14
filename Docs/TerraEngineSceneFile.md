@@ -118,7 +118,7 @@ The installed export parity check uses the same disposable work root as the
 performance quickstart:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
 	-InstallRoot out/build/RelWithDebInfo/Build `
 	-WorkRoot out/ci/export-runtime-baseline
 ```

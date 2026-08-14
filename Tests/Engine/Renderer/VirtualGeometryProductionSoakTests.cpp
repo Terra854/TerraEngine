@@ -27,7 +27,7 @@ namespace TerraEngine::Tests
 			[](TestContext &c)
 			{
 				const auto script = std::filesystem::path(TERRAENGINE_SOURCE_DIR) /
-					"Tools/VirtualGeometry/RunVirtualGeometryProductionSoak.ps1";
+					"Tests/Tools/VirtualGeometry/RunVirtualGeometryProductionSoak.ps1";
 				std::ifstream input(script);
 				const std::string text{ std::istreambuf_iterator<char>(input), {} };
 				c.Expect(text.find("30") != std::string::npos && text.find("bounded") != std::string::npos,

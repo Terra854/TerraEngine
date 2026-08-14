@@ -109,6 +109,6 @@ Focused coverage lives in:
 - `Tests/Engine/Animation/AnimationRuntimeParityTests.cpp`.
 
 Use the focused CTest coverage above together with the installed export runtime
-baseline in `Tools/ExportRuntimeBaseline/RunBaseline.ps1`. The combined checks
+baseline in `Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1`. The combined checks
 exercise eviction/reactivation, reload success and failure, TEPAK export and
 remount, installed rendered and headless startup, and managed ABI loading.

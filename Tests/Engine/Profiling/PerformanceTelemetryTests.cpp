@@ -81,7 +81,7 @@ void RegisterPerformanceTelemetryTests(TestRegistry& registry)
 	registry.Add("Profiling.PerformanceTelemetryFramePublicationComparisonFailsClosed", [](TestContext& context) {
 		const std::filesystem::path toolRoot =
 			std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Tools" / "FramePublication";
+				/ "Tests" / "Tools" / "FramePublication";
 		std::ifstream manifestStream(toolRoot / "workloads.json");
 		context.Expect(manifestStream.good(),
 			"The canonical workload manifest must be readable for comparison tests.");

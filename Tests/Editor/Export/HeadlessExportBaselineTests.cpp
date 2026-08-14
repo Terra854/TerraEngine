@@ -26,7 +26,7 @@ namespace TerraEngine::EditorTests {
 
 	void RegisterHeadlessExportBaselineTests(TestRegistry& registry) {
 		registry.Add("Editor.HeadlessExportBaseline.UsesDisposableAuthoredInputCopy", [](TestContext& context) {
-			const std::string helper = ReadText(RepositoryRoot() / "Tools" / "ExportRuntimeBaseline" / "RunBaseline.ps1");
+			const std::string helper = ReadText(RepositoryRoot() / "Tests" / "Tools" / "ExportRuntimeBaseline" / "RunBaseline.ps1");
 			ExpectContains(context, helper, "out/ci/export-runtime-baseline", "Helper should default to a disposable out/ workspace.");
 			ExpectContains(context, helper, "Assert-PathIsBelow", "Helper should guard its recursive cleanup boundary.");
 			ExpectContains(context, helper, "foreach ($directoryName in @(\"Assets\", \"BuildProfiles\", \"ProjectSettings\"))", "Helper should copy project configuration and the authored Assets root.");
@@ -35,7 +35,7 @@ namespace TerraEngine::EditorTests {
 		});
 
 		registry.Add("Editor.HeadlessExportBaseline.UsesInstalledCompilersAndManagedReferences", [](TestContext& context) {
-			const std::string helper = ReadText(RepositoryRoot() / "Tools" / "ExportRuntimeBaseline" / "RunBaseline.ps1");
+			const std::string helper = ReadText(RepositoryRoot() / "Tests" / "Tools" / "ExportRuntimeBaseline" / "RunBaseline.ps1");
 			const std::vector<std::string> requiredTokens = {
 				"InstallRoot",
 				"Join-Path $resolvedInstallRoot \"Editor\"",
@@ -54,7 +54,7 @@ namespace TerraEngine::EditorTests {
 		});
 
 		registry.Add("Editor.HeadlessExportBaseline.ValidatesGeneratedChildFormatsAndPlaceholders", [](TestContext& context) {
-			const std::string helper = ReadText(RepositoryRoot() / "Tools" / "ExportRuntimeBaseline" / "RunBaseline.ps1");
+			const std::string helper = ReadText(RepositoryRoot() / "Tests" / "Tools" / "ExportRuntimeBaseline" / "RunBaseline.ps1");
 			ExpectContains(context, helper, "generatedMeshes", "Helper should validate generated mesh records from the compiler sidecar.");
 			ExpectContains(context, helper, "generatedMaterials", "Helper should validate generated material records from the compiler sidecar.");
 			ExpectContains(context, helper, "generatedTextures", "Helper should validate generated texture records from the compiler sidecar.");
@@ -66,7 +66,7 @@ namespace TerraEngine::EditorTests {
 		});
 
 		registry.Add("Editor.HeadlessExportBaseline.InspectsStableEvidenceBundle", [](TestContext& context) {
-			const std::string helper = ReadText(RepositoryRoot() / "Tools" / "ExportRuntimeBaseline" / "RunBaseline.ps1");
+			const std::string helper = ReadText(RepositoryRoot() / "Tests" / "Tools" / "ExportRuntimeBaseline" / "RunBaseline.ps1");
 			const std::vector<std::string> evidenceFiles = {
 				"export-result.json",
 				"resolved-manifest.json",
@@ -86,7 +86,7 @@ namespace TerraEngine::EditorTests {
 		});
 
 		registry.Add("Editor.HeadlessExportBaseline.FailsClosedOnManagedWorkspaceLeaks", [](TestContext& context) {
-			const std::string helper = ReadText(RepositoryRoot() / "Tools" / "ExportRuntimeBaseline" / "RunBaseline.ps1");
+			const std::string helper = ReadText(RepositoryRoot() / "Tests" / "Tools" / "ExportRuntimeBaseline" / "RunBaseline.ps1");
 			ExpectContains(context, helper, "Build/Assembly-CSharp/Assembly-CSharp.dll", "The installed editor lane must prove its ordinary managed build at the disposable project path.");
 			ExpectContains(context, helper, "Library/AssetIndex.json", "The installed editor lane must inspect durable script compilation state.");
 			ExpectContains(context, helper, "compileStatus -ne \"Ready\"", "The baseline must reject an editor script build that did not reach Ready.");
@@ -95,7 +95,7 @@ namespace TerraEngine::EditorTests {
 
 		registry.Add("Editor.HeadlessExportBaseline.LegacyEntryPointForwardsToCanonicalTool", [](TestContext& context) {
 			const std::string legacy = ReadText(RepositoryRoot() / "Tests" / "Tools" / "ExportRuntimeBaseline" / "ExportSample.ps1");
-			ExpectContains(context, legacy, "Tools/ExportRuntimeBaseline/RunBaseline.ps1", "Historical helper should forward to the canonical installed-tree gate.");
+			ExpectContains(context, legacy, "Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1", "Historical helper should forward to the canonical installed-tree gate.");
 			ExpectContains(context, legacy, "$Profile -ne \"baseline\"", "Historical profile parameter should fail explicitly for unsupported names.");
 			context.Expect(legacy.find("Run the editor export command") == std::string::npos, "Historical helper must no longer be report-only.");
 		});

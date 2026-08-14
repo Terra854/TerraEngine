@@ -12,7 +12,7 @@ namespace TerraEngine::Tests
 			[](TestContext &context)
 			{
 				const std::filesystem::path root = TERRAENGINE_SOURCE_DIR;
-				std::ifstream file(root / "Tools/VirtualGeometry/hardware-matrix.json");
+				std::ifstream file(root / "Tests/Tools/VirtualGeometry/hardware-matrix.json");
 				const std::string matrix{ std::istreambuf_iterator<char>(file), {} };
 				context.Expect(matrix.find("Vulkan") != std::string::npos,
 					"Backend matrix must name the Vulkan route");

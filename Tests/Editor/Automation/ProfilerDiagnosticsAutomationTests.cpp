@@ -48,7 +48,7 @@ namespace TerraEngine::EditorTests
 
 		std::string ReadBenchmarkSource()
 		{
-			std::ifstream input(std::string(TERRAENGINE_SOURCE_DIR) + "/Tools/Profiling/CaptureProfilerReworkBenchmark.ps1", std::ios::binary);
+			std::ifstream input(std::string(TERRAENGINE_SOURCE_DIR) + "/Tests/Tools/Profiling/CaptureProfilerReworkBenchmark.ps1", std::ios::binary);
 			std::ostringstream text;
 			text << input.rdbuf();
 			return text.str();

@@ -84,9 +84,9 @@ namespace TerraEngine::Tests
 			{
 				using namespace TerraEngine::Tools::VirtualGeometry;
 				const std::filesystem::path root = TERRAENGINE_SOURCE_DIR;
-				const auto workloads = LoadAndValidateSchemaDocument(root / "Tools/VirtualGeometry/workloads.json", SchemaDocumentKind::Workloads);
-				const auto hardware = LoadAndValidateSchemaDocument(root / "Tools/VirtualGeometry/hardware-matrix.json", SchemaDocumentKind::HardwareMatrix);
-				const auto quality = LoadAndValidateSchemaDocument(root / "Tools/VirtualGeometry/quality-profiles.json", SchemaDocumentKind::QualityProfiles);
+				const auto workloads = LoadAndValidateSchemaDocument(root / "Tests/Tools/VirtualGeometry/workloads.json", SchemaDocumentKind::Workloads);
+				const auto hardware = LoadAndValidateSchemaDocument(root / "Tests/Tools/VirtualGeometry/hardware-matrix.json", SchemaDocumentKind::HardwareMatrix);
+				const auto quality = LoadAndValidateSchemaDocument(root / "Tests/Tools/VirtualGeometry/quality-profiles.json", SchemaDocumentKind::QualityProfiles);
 				context.Expect(workloads.valid, "The checked-in workload manifest must satisfy the installed schema.");
 				context.Expect(hardware.valid, "The checked-in hardware matrix must satisfy the installed schema.");
 				context.Expect(quality.valid, "The checked-in quality profiles must satisfy the installed schema.");

@@ -14,7 +14,7 @@ namespace TerraEngine::Tests
 		std::filesystem::path FramePublicationToolRoot()
 		{
 			return std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Tools" / "FramePublication";
+				/ "Tests" / "Tools" / "FramePublication";
 		}
 	}
 

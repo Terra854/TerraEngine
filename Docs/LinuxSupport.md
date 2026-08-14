@@ -160,10 +160,10 @@ The following checks are reproducible from an installed Linux tree (replace
 `<install>` with the actual prefix):
 
 ```bash
-pwsh -File <install>/Tools/Audio/RunAudioStress.ps1 -RequestedSources 128 -RepeatCount 100 \
-  -Output <install>/Tools/Audio/Evidence/audio-stress.json
-pwsh -File <install>/Tools/Audio/CompareAudioEvidence.ps1 \
-  -Evidence <install>/Tools/Audio/Evidence/audio-stress.json
+pwsh -File <install>/Tests/Tools/Audio/RunAudioStress.ps1 -RequestedSources 128 -RepeatCount 100 \
+  -Output <install>/Tests/Tools/Audio/Evidence/audio-stress.json
+pwsh -File <install>/Tests/Tools/Audio/CompareAudioEvidence.ps1 \
+  -Evidence <install>/Tests/Tools/Audio/Evidence/audio-stress.json
 ```
 
 PowerShell (`pwsh`) is required for these wrappers. The 30-minute soak is an

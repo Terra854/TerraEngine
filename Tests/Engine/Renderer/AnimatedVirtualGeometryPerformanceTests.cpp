@@ -10,7 +10,7 @@ namespace TerraEngine::Tests
 		registry.Add("AnimatedVirtualGeometry.Performance.HeroCrowdGateAvailability",
 			[](TestContext &context)
 			{
-				const auto path = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Tools/VirtualGeometry/RunAnimatedVirtualGeometryBenchmark.ps1";
+				const auto path = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Tests/Tools/VirtualGeometry/RunAnimatedVirtualGeometryBenchmark.ps1";
 				context.Expect(std::filesystem::exists(path), "Hero/crowd benchmark runner must be present");
 				context.Expect(true, "No live hero/crowd measurements are available; unavailable must not pass as zero.");
 			});
@@ -18,7 +18,7 @@ namespace TerraEngine::Tests
 			[](TestContext &context)
 			{
 				const auto path = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-					/ "Tools/VirtualGeometry/RunAnimatedVirtualGeometryBenchmark.ps1";
+					/ "Tests/Tools/VirtualGeometry/RunAnimatedVirtualGeometryBenchmark.ps1";
 				std::ifstream input(path, std::ios::binary);
 				const std::string source{
 					std::istreambuf_iterator<char>(input),
@@ -35,7 +35,7 @@ namespace TerraEngine::Tests
 				// preserve that fact and require a real crowd instead of relabelling
 				// the hero capture as a crowd benchmark result.
 				const auto path = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-					/ "Tools/VirtualGeometry/animated-project-runtime.json";
+					/ "Tests/Tools/VirtualGeometry/animated-project-runtime.json";
 				std::ifstream input(path, std::ios::binary);
 				const std::string profile{
 					std::istreambuf_iterator<char>(input),
@@ -52,7 +52,7 @@ namespace TerraEngine::Tests
 			[](TestContext &context)
 			{
 				const auto path = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-					/ "Tools/VirtualGeometry/CaptureVirtualGeometryRuntimeSample.ps1";
+					/ "Tests/Tools/VirtualGeometry/CaptureVirtualGeometryRuntimeSample.ps1";
 				std::ifstream input(path, std::ios::binary);
 				const std::string source{
 					std::istreambuf_iterator<char>(input),
@@ -81,7 +81,7 @@ namespace TerraEngine::Tests
 				// gates. The wrapper must retain both rather than promoting timing
 				// evidence alone into a complete ImplementationStage result.
 				const auto path = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-					/ "Tools/VirtualGeometry/RunAnimatedVirtualGeometryBenchmark.ps1";
+					/ "Tests/Tools/VirtualGeometry/RunAnimatedVirtualGeometryBenchmark.ps1";
 				std::ifstream input(path, std::ios::binary);
 				const std::string source{
 					std::istreambuf_iterator<char>(input),

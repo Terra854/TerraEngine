@@ -40,11 +40,15 @@ function(terraengine_install_audio_foundation destination)
 	install(FILES
 		"${CMAKE_SOURCE_DIR}/Engine/Utilities/UUID.h"
 		DESTINATION "${destination}/include/TerraEngine/Utilities")
-	install(DIRECTORY "${CMAKE_SOURCE_DIR}/Tests/Fixtures/Audio/"
-		DESTINATION "${destination}/Tests/Fixtures/Audio")
-	install(DIRECTORY "${CMAKE_SOURCE_DIR}/Tools/Audio/"
-		DESTINATION "${destination}/Tools/Audio"
-		FILES_MATCHING PATTERN "*.ps1" PATTERN "*.json")
+	if(BUILD_TESTING)
+		# Fixtures and stress wrappers are QA assets, so production-only installs
+		# must not publish them as part of the audio extension SDK.
+		install(DIRECTORY "${CMAKE_SOURCE_DIR}/Tests/Fixtures/Audio/"
+			DESTINATION "${destination}/Tests/Fixtures/Audio")
+		install(DIRECTORY "${CMAKE_SOURCE_DIR}/Tests/Tools/Audio/"
+			DESTINATION "${destination}/Tests/Tools/Audio"
+			FILES_MATCHING PATTERN "*.ps1" PATTERN "*.json")
+	endif()
 	install(FILES
 		"${CMAKE_SOURCE_DIR}/Tests/Fixtures/Audio/ThirdParty/Kenney/Music-LICENSE.txt"
 		"${CMAKE_SOURCE_DIR}/Tests/Fixtures/Audio/ThirdParty/Kenney/Interface-Sounds-LICENSE.txt"
@@ -94,11 +98,13 @@ endfunction()
 function(terraengine_install_physics_foundation destination)
 	terraengine_install_physics_dependency_metadata("${destination}")
 	terraengine_install_physics_headers("${destination}")
-	# Keep performance validation inputs beside installed tooling for clean-tree runs.
-	install(DIRECTORY "${CMAKE_SOURCE_DIR}/Tests/Fixtures/Performance/Physics/"
-		DESTINATION "${destination}/Tests/Fixtures/Performance/Physics"
-		FILES_MATCHING PATTERN "*.json")
-	install(DIRECTORY "${CMAKE_SOURCE_DIR}/Tools/Physics/"
-		DESTINATION "${destination}/Tools/Physics"
-		FILES_MATCHING PATTERN "*.ps1" PATTERN "*.json" PATTERN "README.md")
+	if(BUILD_TESTING)
+		# Keep performance inputs beside installed test tooling for clean-tree QA.
+		install(DIRECTORY "${CMAKE_SOURCE_DIR}/Tests/Fixtures/Performance/Physics/"
+			DESTINATION "${destination}/Tests/Fixtures/Performance/Physics"
+			FILES_MATCHING PATTERN "*.json")
+		install(DIRECTORY "${CMAKE_SOURCE_DIR}/Tests/Tools/Physics/"
+			DESTINATION "${destination}/Tests/Tools/Physics"
+			FILES_MATCHING PATTERN "*.ps1" PATTERN "*.json" PATTERN "README.md")
+	endif()
 endfunction()

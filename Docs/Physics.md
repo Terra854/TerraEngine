@@ -139,7 +139,7 @@ authoring check. It records body counts, exact paused `Next` ticks, profiler
 data, authored-scene hashes, and shutdown status:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
   -InstallRoot out/build/RelWithDebInfo/Build `
   -WorkRoot out/validation/installed-editor-physics-stress `
   -ObjectCount 10000 -ActiveDynamicCount 1000 -ExplicitStepCount 100 `
@@ -168,7 +168,7 @@ package, validates the six evidence files, launches the published runtime, and
 checks orderly shutdown:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
   -InstallRoot out/build/RelWithDebInfo/Build `
   -WorkRoot out/ci/physics-export-baseline
 ```

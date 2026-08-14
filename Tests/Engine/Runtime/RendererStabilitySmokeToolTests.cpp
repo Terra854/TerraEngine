@@ -9,7 +9,7 @@ namespace TerraEngine::Tests
 	void RegisterRendererStabilitySmokeToolTests(TestRegistry& registry)
 	{
 		registry.Add("RendererStability.SmokeTool.PacedOptInContract", [](TestContext& context) {
-			std::ifstream stream(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Tools/RendererStability/RunLiveSmoke.ps1");
+			std::ifstream stream(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Tests/Tools/RendererStability/RunLiveSmoke.ps1");
 			std::ostringstream source;
 			source << stream.rdbuf();
 			context.Expect(source.str().find("-AllowLiveGpuStress") != std::string::npos, "Live GPU stress must be explicitly opted in.");

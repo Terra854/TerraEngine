@@ -46,7 +46,7 @@ namespace TerraEngine::EditorTests
 			const std::string editorSource = ReadProductionFile(
 				"Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp");
 			const std::string harnessSource = ReadProductionFile(
-				"Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
+				"Tests/Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
 			constexpr std::string_view flag =
 				"TERRAENGINE_SUPPRESS_AUTOMATIC_SCENE_OPEN";
 			context.Expect(
@@ -63,9 +63,9 @@ namespace TerraEngine::EditorTests
 		registry.Add("VirtualGeometry.Editor.Production.LiveHarnessLocksValidationRoutes", [](TestContext& context)
 		{
 			const std::string harnessSource = ReadProductionFile(
-				"Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
+				"Tests/Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
 			const std::string comparisonSource = ReadProductionFile(
-				"Tools/VirtualGeometry/CompareVisibilityImages.ps1");
+				"Tests/Tools/VirtualGeometry/CompareVisibilityImages.ps1");
 			ExpectContains(context, harnessSource,
 				"renderer.virtualGeometry.validationRoute.set",
 				"Route-parity captures must set a transient renderer validation route before capture.");
@@ -83,9 +83,9 @@ namespace TerraEngine::EditorTests
 		registry.Add("VirtualGeometry.Editor.Production.LiveHarnessUsesCaptureForegroundForIdentityPick", [](TestContext& context)
 		{
 			const std::string harnessSource = ReadProductionFile(
-				"Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
+				"Tests/Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
 			const std::string runtimeSampleSource = ReadProductionFile(
-				"Tools/VirtualGeometry/CaptureVirtualGeometryRuntimeSample.ps1");
+				"Tests/Tools/VirtualGeometry/CaptureVirtualGeometryRuntimeSample.ps1");
 			// This source-contract test keeps pixel selection coupled to the actual
 			// dedicated capture instead of a stale fixed viewport coordinate.
 			ExpectContains(context, harnessSource,
@@ -123,7 +123,7 @@ namespace TerraEngine::EditorTests
 		registry.Add("VirtualGeometry.Editor.Production.RuntimeSampleAccountsForExplicitCpuAnimationFallback", [](TestContext& context)
 		{
 			const std::string runtimeSampleSource = ReadProductionFile(
-				"Tools/VirtualGeometry/CaptureVirtualGeometryRuntimeSample.ps1");
+				"Tests/Tools/VirtualGeometry/CaptureVirtualGeometryRuntimeSample.ps1");
 			// GPU ownership may be lower than the evaluated total only when the
 			// renderer reports the remainder as CPU fallback. Keep the accounting
 			// and completed-execution fallback visible in the source contract.
@@ -147,7 +147,7 @@ namespace TerraEngine::EditorTests
 		registry.Add("VirtualGeometry.Editor.Production.RuntimeSampleHashesAuthoredSceneIdentity", [](TestContext& context)
 		{
 			const std::string runtimeSampleSource = ReadProductionFile(
-				"Tools/VirtualGeometry/CaptureVirtualGeometryRuntimeSample.ps1");
+				"Tests/Tools/VirtualGeometry/CaptureVirtualGeometryRuntimeSample.ps1");
 			// Authored workloads intentionally clear their transient prefab path. Keep
 			// the adapter tied to the validated scene bytes that it actually opens.
 			ExpectContains(context, runtimeSampleSource,
@@ -170,9 +170,9 @@ namespace TerraEngine::EditorTests
 		registry.Add("VirtualGeometry.Editor.Production.LiveHarnessUsesDurableProfilerArtifactIdentity", [](TestContext& context)
 		{
 			const std::string harnessSource = ReadProductionFile(
-				"Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
+				"Tests/Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
 			const std::string physicsHarnessSource = ReadProductionFile(
-				"Tools/Physics/RunInstalledEditorPhysicsStress.ps1");
+				"Tests/Tools/Physics/RunInstalledEditorPhysicsStress.ps1");
 			const std::string automationSource = ReadProductionFile(
 				"Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp");
 			ExpectContains(context, harnessSource,
@@ -196,7 +196,7 @@ namespace TerraEngine::EditorTests
 		{
 			const std::string rootCmake = ReadProductionFile("CMakeLists.txt");
 			const std::string toolsCmake = ReadProductionFile(
-				"Tools/VirtualGeometry/CMakeLists.txt");
+				"Tests/Tools/VirtualGeometry/CMakeLists.txt");
 
 			// These assertions protect the direct install producers without
 			// requiring a feature-specific post-install verification script.
@@ -210,8 +210,8 @@ namespace TerraEngine::EditorTests
 				"VirtualGeometryTraversal.comp.spv",
 				"The accelerated-route shader must be produced in the install tree.");
 			ExpectContains(context, toolsCmake,
-				"${CMAKE_BINARY_DIR}/Build/Tools",
-				"Every production virtual-geometry executable must use the canonical runnable install tree.");
+				"${CMAKE_BINARY_DIR}/Build/Tests/Tools/VirtualGeometry",
+				"Every virtual-geometry validation executable must use the canonical installed test tree.");
 			ExpectContains(context, toolsCmake,
 				"TerraEngineVirtualGeometryBenchmark",
 				"The benchmark executable must have an installed producer.");
@@ -221,7 +221,7 @@ namespace TerraEngine::EditorTests
 		{
 			const std::filesystem::path scenarioRoot =
 				std::filesystem::path(TERRAENGINE_SOURCE_DIR) /
-				"Tools/VirtualGeometry/CapabilityScenarios";
+				"Tests/Tools/VirtualGeometry/CapabilityScenarios";
 			std::size_t scenarioCount = 0;
 			std::string combined;
 			for (const std::filesystem::directory_entry& entry :
@@ -261,11 +261,11 @@ namespace TerraEngine::EditorTests
 		registry.Add("VirtualGeometry.Editor.Production.ReleaseGateHashesRealEvidence", [](TestContext& context)
 		{
 			const std::string scenarioGate = ReadProductionFile(
-				"Tools/VirtualGeometry/RunVirtualGeometryCapabilityGate.ps1");
+				"Tests/Tools/VirtualGeometry/RunVirtualGeometryCapabilityGate.ps1");
 			const std::string releaseGate = ReadProductionFile(
-				"Tools/VirtualGeometry/InvokeVirtualGeometryReleaseGates.ps1");
+				"Tests/Tools/VirtualGeometry/InvokeVirtualGeometryReleaseGates.ps1");
 			const std::string matrixGate = ReadProductionFile(
-				"Tools/VirtualGeometry/RunBackendParityMatrix.ps1");
+				"Tests/Tools/VirtualGeometry/RunBackendParityMatrix.ps1");
 			ExpectContains(context, scenarioGate,
 				"InvokeVirtualGeometryReleaseGates.ps1",
 				"The installed editor runner must invoke the release-gate orchestrator.");

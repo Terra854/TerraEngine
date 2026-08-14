@@ -20,10 +20,10 @@ it must not be accepted by weakening a nearby constant.
 | Pre-animation source commit | `6d12e3a99d7c0d41899fc96fa18b02b61e5a0aa9` |
 | Locked reference baseline | `out/validation/animation/baseline/locked-baseline.json` — SHA-256 `cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f` |
 | Reference-baseline evidence selection | 178 files, 371,567,204 bytes — aggregate SHA-256 `4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5` |
-| Runtime limits contract | `Docs/Animation/README.md` — SHA-256 `e9e231c9c9b9e6f22868cec47146436e9a8aac90802e9d1d26b6cfeee88f98c2` |
-| Animation performance workloads | `Tools/Animation/PerformanceWorkloads.json` — SHA-256 `a50c359f5dda932c0852eaa9a83c2e57cbbca3c60f038e975f7b67e0b17774f6` |
-| Animation stress definitions | `Tests/Fixtures/Animation/stress/workloads.json` — SHA-256 `6773caf89e87b2fc5f1277ca5bde92aa68f4f20581a223af1910cb62a95c8aff` |
-| Whole-engine coverage matrix | `Tools/Animation/PerformanceCoverageMatrix.json` — SHA-256 `b32480055b7ed0adc64072848a2610b475334996648609a69b269385f62cb9c8` |
+| Runtime limits contract | `Docs/Animation/README.md` — SHA-256 `774c6c7a40da4ebb8fa67feb3649e956235669428d4c50ad43cdb2dceca1a801` |
+| Animation performance workloads | `Tests/Tools/Animation/PerformanceWorkloads.json` — SHA-256 `add34eb7debacbaddb03c07de115cf00f7935a3e62e849cf4b370f2cbf1bd707` |
+| Animation stress definitions | `Tests/Fixtures/Animation/stress/workloads.json` — SHA-256 `b5c78e9f01dc0036db4fb4674f632ebf06a736e4a7c010ec56e1f3804b92131d` |
+| Whole-engine coverage matrix | `Tests/Tools/Animation/PerformanceCoverageMatrix.json` — SHA-256 `e9a861037edf63207368d9e31b3a85a32bdf3723cdfb28eeaa7b5223c5a64670` |
 | Soak iteration schema | `Tests/Fixtures/Animation/stress/soak-result.schema.json` — SHA-256 `fa1b6548872e9ca70a8e1d5aeef9e810d82cc8bcd45e386c2a29744df8991659` |
 
 Candidate tools may write only below `out/` and may never overwrite the reference
@@ -187,14 +187,14 @@ ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
 During intermediate phases, verify only the definitions and protocols:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Animation/GenerateAnimationStressProject.ps1 -ValidateOnly
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Animation/RunAnimationSoak.ps1 -ValidateOnly -DurationHours 0.01
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Animation/GenerateAnimationStressProject.ps1 -ValidateOnly
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Animation/RunAnimationSoak.ps1 -ValidateOnly -DurationHours 0.01
 ```
 
 To materialize deterministic descriptors without running a benchmark:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Animation/GenerateAnimationStressProject.ps1 `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Animation/GenerateAnimationStressProject.ps1 `
   -OutputRoot out/generated/animation-stress
 ```
 
@@ -202,7 +202,7 @@ Supply fresh installed-run candidate evidence through the capture pipeline, then
 perform the whole-engine comparison explicitly:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Animation/CompareAnimationPerformance.ps1 `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Animation/CompareAnimationPerformance.ps1 `
   -CandidateManifest out/validation/animation/final/candidate-manifest.json `
   -OutputPath out/validation/animation/final/whole-engine-comparison.json `
   -FinalPhaseMatrix
@@ -226,8 +226,8 @@ iteration directory is rejected.
 The full final invocation is intentionally not run by intermediate tasks:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Animation/RunAnimationSoak.ps1 `
-  -RunnerPath out/build/RelWithDebInfo/Build/Tools/TerraEngineAnimationSoakRunner.exe `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Animation/RunAnimationSoak.ps1 `
+  -RunnerPath out/build/RelWithDebInfo/Build/Tests/Tools/Animation/TerraEngineAnimationSoakRunner.exe `
   -OutputRoot out/validation/animation/final/soak `
   -DurationHours 24 -FinalPhase
 ```
