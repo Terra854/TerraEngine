@@ -59,6 +59,7 @@ add_executable(TerraEngine-EditorTests
 	Core/EditorStartupRendererConfigurationTests.cpp
 	Core/EditorPostFrameBoundaryTests.cpp
 	Core/MainEditorToolbarTests.cpp
+	Core/InspectorDisplayNameTests.cpp
 	VirtualGeometry/VirtualGeometryProductionScaffoldingTests.cpp
 	VirtualGeometry/VirtualGeometryDiagnosticsTests.cpp
 	VirtualGeometry/DenseAnimatedVirtualGeometryFixtureTests.cpp

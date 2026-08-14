@@ -5,6 +5,7 @@
 
 #include "InspectorWindow.h"
 #include "AnimatorInspectorMetadata.h"
+#include "InspectorDisplayNames.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "../Subsystems/UndoRedoSystem.h"
@@ -558,10 +559,11 @@ std::string BuildDisplayComponentName(const std::string& componentName)
 	if (componentName.size() > componentSuffix.size()
 		&& componentName.compare(componentName.size() - componentSuffix.size(), componentSuffix.size(), componentSuffix) == 0)
 	{
-		return componentName.substr(0, componentName.size() - componentSuffix.size());
+		return TerraEngine::Editor::BuildInspectorIdentifierLabel(
+			componentName.substr(0, componentName.size() - componentSuffix.size()));
 	}
 
-	return componentName;
+	return TerraEngine::Editor::BuildInspectorIdentifierLabel(componentName);
 }
 
 std::string BuildDisplayPropertyName(const std::string& componentName, const std::string& propertyName)
@@ -603,7 +605,7 @@ std::string BuildDisplayPropertyName(const std::string& componentName, const std
 		}
 	}
 
-	return propertyName;
+	return TerraEngine::Editor::BuildStandardInspectorPropertyLabel(componentName, propertyName);
 }
 
 void DrawAnimatorPropertyGuidance(std::string_view propertyName, bool labelHovered)
