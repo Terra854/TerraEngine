@@ -7,14 +7,27 @@
 
 namespace TerraEngine::Physics {
 	namespace {
-		glm::vec3 ToGlm(const PhysicsVector3& value)
+		Scene::WorldPose ToCanonicalPose(
+			const Scene::WorldPosition& frameOrigin,
+			const PhysicsPose& localPose)
 		{
-			return {value.x, value.y, value.z};
-		}
-
-		glm::quat ToGlm(const PhysicsQuaternion& value)
-		{
-			return {value.w, value.x, value.y, value.z};
+			// Physics providers emit bounded frame-local poses. At this boundary they
+			// become a typed canonical pose value; frame migration supplies the cell
+			// origin before a distant world can publish this packet.
+			Scene::WorldDelta delta;
+			delta.offsetMetres = {
+				static_cast<double>(localPose.position.x),
+				static_cast<double>(localPose.position.y),
+				static_cast<double>(localPose.position.z)};
+			Scene::WorldPose result;
+			const Scene::WorldCoordinateResult translated = Scene::ApplyWorldDelta(frameOrigin, delta);
+			if (translated.Succeeded())
+			{
+				result.position = translated.position;
+			}
+			result.rotation = {localPose.rotation.w, localPose.rotation.x,
+				localPose.rotation.y, localPose.rotation.z};
+			return result;
 		}
 
 		bool HasValidBounds(const TransformPublicationBoundsChange& change)
@@ -58,6 +71,7 @@ namespace TerraEngine::Physics {
 			packet.entries.push_back(TransformPublicationEntry{
 				.objectId = record.objectId,
 				.body = record.body,
+				.frame = record.frame,
 				.objectLifetimeGeneration = record.objectLifetimeGeneration,
 				.bodyGeneration = record.bodyGeneration,
 				.componentGeneration = record.componentGeneration,
@@ -66,6 +80,7 @@ namespace TerraEngine::Physics {
 				.parentObjectId = record.parentObjectId,
 				.expectedParentLifetimeGeneration = record.expectedParentLifetimeGeneration,
 				.expectedParentTransformRevision = record.expectedParentTransformRevision,
+				.canonicalFrameOrigin = record.canonicalFrameOrigin,
 				.localPose = record.localPose,
 				.worldPoseReceipt = record.worldPoseReceipt,
 				.boundsChange = record.boundsChange});
@@ -124,6 +139,12 @@ namespace TerraEngine::Physics {
 				result.message = "An object appears more than once in one publication tick.";
 				return result;
 			}
+			if (entry.frame.IsValid() && entry.frame != packet.snapshot.frame)
+			{
+				result.reason = TransformPublicationValidationReason::InvalidGeneration;
+				result.message = "A publication entry belongs to a stale physics frame generation.";
+				return result;
+			}
 			if (entry.body.worldId != packet.snapshot.world.worldId
 				|| entry.body.worldGeneration != packet.snapshot.world.worldGeneration
 				|| entry.objectLifetimeGeneration == 0U || entry.bodyGeneration == 0U
@@ -149,10 +170,20 @@ namespace TerraEngine::Physics {
 				result.message = "A parent-relative entry needs complete parent generations.";
 				return result;
 			}
-			if (!entry.localPose.IsFinite() || !entry.worldPoseReceipt.IsFinite())
+			if (!entry.localPose.IsFinite() || !entry.worldPoseReceipt.IsFinite()
+				|| !Scene::NormalizeWorldPosition(entry.canonicalFrameOrigin).Succeeded())
 			{
 				result.reason = TransformPublicationValidationReason::InvalidPose;
 				result.message = "A publication entry contains a nonfinite pose.";
+				return result;
+			}
+			Scene::WorldDelta localDelta;
+			localDelta.offsetMetres = {static_cast<double>(entry.localPose.position.x),
+				static_cast<double>(entry.localPose.position.y), static_cast<double>(entry.localPose.position.z)};
+			if (!Scene::ApplyWorldDelta(entry.canonicalFrameOrigin, localDelta).Succeeded())
+			{
+				result.reason = TransformPublicationValidationReason::InvalidPose;
+				result.message = "A frame-local physics pose cannot be localized to its canonical origin.";
 				return result;
 			}
 			if (entry.boundsChange && !HasValidBounds(*entry.boundsChange))
@@ -225,8 +256,7 @@ namespace TerraEngine::Physics {
 					.parentTransformRevision = entry.expectedParentTransformRevision});
 				operation.transformUpdates.push_back(Scene::TransactionTransformUpdate{
 					.objectId = entry.objectId,
-					.position = ToGlm(entry.localPose.position),
-					.rotation = ToGlm(entry.localPose.rotation)});
+					.pose = ToCanonicalPose(entry.canonicalFrameOrigin, entry.localPose)});
 			}
 			transaction.writeSet.operations.push_back(std::move(operation));
 			group.chunks.push_back(std::move(transaction));

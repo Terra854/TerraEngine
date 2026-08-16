@@ -48,8 +48,9 @@ namespace TerraEngine::EditorTests
 			pose.objectLifetimeGeneration = 1u;
 			pose.transformRevision = revision;
 			pose.hierarchyGeneration = 1u;
-			pose.worldPosition = position;
-			pose.worldBounds = TerraEngine::Scene::MakeAABB(
+			pose.localPosition = position;
+			pose.canonicalPosition.offsetMetres = glm::dvec3(position);
+			pose.localBounds = TerraEngine::Scene::MakeAABB(
 				position - glm::vec3(boundsRadius),
 				position + glm::vec3(boundsRadius),
 				TerraEngine::Scene::SpatialBoundsSource::Authored);
@@ -80,7 +81,7 @@ namespace TerraEngine::EditorTests
 				}
 				TerraEngine::Scene::SpatialQueryHit hit;
 				hit.objectId = pose->objectId;
-				hit.bounds = pose->worldBounds.value_or(TerraEngine::Scene::SpatialAABB{});
+				hit.bounds = pose->localBounds.value_or(TerraEngine::Scene::SpatialAABB{});
 				query.spatialCandidates.hits.push_back(hit);
 			}
 		}

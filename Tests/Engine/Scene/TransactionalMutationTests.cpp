@@ -17,7 +17,11 @@ namespace TerraEngine::Tests {
 				.ObserveObject(fixture.objects, fixture.rootId)
 				.SetName(fixture.rootId, "RenamedRoot")
 				.SetActive(fixture.rootId, false)
-				.UpdateComponentProperty(fixture.rootId, std::string(Transform::kComponentName), "Position", TerraEngine::Reflection::Variant{ glm::vec3(2.0f, 3.0f, 4.0f) });
+				.SetWorldTransform(fixture.objects, fixture.rootId, [] {
+					TerraEngine::Scene::WorldPose pose{};
+					pose.position.offsetMetres = glm::dvec3(2.0, 3.0, 4.0);
+					return pose;
+				}());
 
 			const TerraEngine::Scene::TransactionResult result = TerraEngine::Scene::CommitTransaction(fixture.objects, builder.Build());
 
@@ -26,7 +30,7 @@ namespace TerraEngine::Tests {
 			context.Expect(!fixture.objects.isObjectActive(fixture.root), "Active state should apply.");
 			Transform* transform = fixture.objects.GetComponent<Transform>(fixture.root);
 			context.Expect(transform != nullptr, "Root should still have a Transform.");
-			context.ExpectEqual(2.0f, transform->position.x, "Reflected component write should use ComponentAccessRegistry.");
+			context.ExpectEqual(2.0, transform->worldPose.position.offsetMetres.x, "Typed canonical world writes should publish through the transaction path.");
 		});
 
 		registry.Add("Engine.TransactionalMutation.LocalCreatedObjectsCanBeReferencedLaterInTransaction", [](TestContext& context) {

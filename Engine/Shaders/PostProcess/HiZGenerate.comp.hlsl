@@ -1,4 +1,6 @@
 #pragma pack_matrix(column_major)
+// Hi-Z coordinates belong to one translated view and one origin generation.
+#include "../Geometry/TerraWorldReferenceFrame.hlsli"
 
 // The Hi-Z pass owns a compact descriptor set instead of rewriting global
 // renderer bindings while a command buffer is being recorded. Binding 0 is the

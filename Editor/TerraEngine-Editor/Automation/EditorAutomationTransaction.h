@@ -4,6 +4,7 @@
 
 #include "EditorAutomationTypes.h"
 #include "Scene/TransactionalMutation.h"
+#include "Scene/WorldCoordinate.h"
 
 #include <optional>
 #include <unordered_map>
@@ -25,6 +26,21 @@ namespace TerraEngine::Editor::Automation
 		std::string message;
 		std::size_t operationCount = 0u;
 	};
+
+	// Strict editor wire decoding is shared by automation, Scene View controls,
+	// and tests. It accepts only the breaking unbounded format: an exact decimal
+	// cell object plus three double local metres. Float three-vectors are never
+	// silently promoted into an absolute world address.
+	[[nodiscard]] bool ParseCanonicalWorldPosition(
+		const nlohmann::json& value,
+		TerraEngine::Scene::WorldPosition& outPosition,
+		std::string& outError);
+	[[nodiscard]] bool ParseCanonicalWorldDelta(
+		const nlohmann::json& value,
+		TerraEngine::Scene::WorldDelta& outDelta,
+		std::string& outError);
+	[[nodiscard]] nlohmann::json SerializeCanonicalWorldPosition(
+		const TerraEngine::Scene::WorldPosition& position);
 
 	// Protected lowering resolves stable object identities and converts JSON only
 	// into typed engine operations. The selection tail remains separate because

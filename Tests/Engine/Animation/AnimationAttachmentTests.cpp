@@ -82,11 +82,11 @@ namespace TerraEngine::Tests {
 			const AnimationAttachmentBinding binding = MakeBinding(target, objects);
 			const auto receipt = EnqueueAnimationAttachmentTransforms(snapshot, {&binding, 1U}, objects, queue);
 			const Transform* before = objects.GetComponent<Transform>(target);
-			const float beforeX = before == nullptr ? -1.0F : before->position.x;
+			const float beforeX = before == nullptr ? -1.0F : static_cast<float>(before->worldPose.position.offsetMetres.x);
 			queue.Apply(objects, "AttachmentFlush");
 			const Transform* after = objects.GetComponent<Transform>(target);
 			context.Expect(receipt.status == AnimationStatus::Queued && before != nullptr && IsClose(beforeX, 0.0F)
-				&& after != nullptr && IsClose(after->position.x, 19.0F),
+				&& after != nullptr && IsClose(static_cast<float>(after->worldPose.position.offsetMetres.x), 19.0F),
 				"A copied hierarchy+socket+offset transform must remain invisible until the protected flush.");
 			objects.clear();
 		});
@@ -179,8 +179,8 @@ namespace TerraEngine::Tests {
 			const Transform* reusedTransform = objects.GetComponent<Transform>(reused);
 			context.Expect(staleReceipt.status == AnimationStatus::InvalidArgument
 				&& receipt.status == AnimationStatus::Queued && firstTransform != nullptr
-				&& IsClose(firstTransform->position.x, 0.0F) && reusedTransform != nullptr
-				&& IsClose(reusedTransform->position.x, 0.0F) && !result.transactionResults.empty()
+				&& IsClose(static_cast<float>(firstTransform->worldPose.position.offsetMetres.x), 0.0F) && reusedTransform != nullptr
+				&& IsClose(static_cast<float>(reusedTransform->worldPose.position.offsetMetres.x), 0.0F) && !result.transactionResults.empty()
 				&& result.transactionResults.front().status != TerraEngine::Scene::TransactionStatus::Committed,
 				"Reload mismatches, removed targets, and reused objects must reject the entire attachment batch without moving an unrelated object.");
 			objects.clear();

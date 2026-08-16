@@ -2,6 +2,7 @@
 
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Renderer/Graph/RenderFramePublication.h"
+#include "RendererThreadingTestFixtures.h"
 
 #include <memory>
 
@@ -47,6 +48,10 @@ namespace TerraEngine::Tests
 			publication->views.push_back(view);
 			RenderViewPresentationInput input{}; input.output.outputId = 1u;
 			input.output.kind = view.outputKind; input.output.diagnosticsView = view.viewType;
+			const RenderReferenceFrame referenceFrame =
+				MakeRendererTestReferenceFrame(publication->frameId, 1u, view.outputId);
+			input.referenceFrame = referenceFrame;
+			publication->referenceFrames.push_back(referenceFrame);
 			publication->presentationInputs.push_back(std::move(input));
 			publication->submissionRanges.push_back({ RenderSubmissionRoute::Direct, 0u, 0u, 1u, generation, true });
 			return publication;

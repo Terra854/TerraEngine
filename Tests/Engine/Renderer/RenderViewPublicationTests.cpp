@@ -1,5 +1,6 @@
 #include "TestHarness.h"
 #include "Renderer/Graph/RenderFramePublication.h"
+#include "RendererThreadingTestFixtures.h"
 
 #include <array>
 #include <memory>
@@ -89,6 +90,10 @@ namespace TerraEngine::Tests
 					input.output.kind = selection.outputKind;
 					input.output.diagnosticsView = selection.viewType;
 					input.output.outputId = selection.outputId;
+					const RenderReferenceFrame referenceFrame =
+						MakeRendererTestReferenceFrame(publication->frameId, index + 1u, selection.outputId);
+					input.referenceFrame = referenceFrame;
+					publication->referenceFrames.push_back(referenceFrame);
 					publication->presentationInputs.push_back(std::move(input));
 					publication->submissionRanges.push_back({ RenderSubmissionRoute::Direct,
 						static_cast<std::uint32_t>(index), 0u, 1u,

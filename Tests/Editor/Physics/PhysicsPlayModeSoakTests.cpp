@@ -73,7 +73,10 @@ namespace TerraEngine::EditorTests {
 			ColliderSetComponent* colliders = objects.AddComponent<ColliderSetComponent>(object);
 			context.Expect(transform != nullptr && body != nullptr && colliders != nullptr,
 				"The Play Mode soak fixture must create a complete authored rigid body.");
-			transform->position = {0.0F, 3.0F, 0.0F};
+			TerraEngine::Scene::WorldPose authoredPose;
+			authoredPose.position.offsetMetres = {0.0, 3.0, 0.0};
+			context.Expect(objects.SetCanonicalWorldPose(object, authoredPose) == TerraEngine::Scene::WorldCoordinateError::None,
+				"The soak fixture canonical pose must be accepted.");
 			body->useGravity = true;
 			colliders->Add();
 			objects.MarkObjectTransformDirty(object);

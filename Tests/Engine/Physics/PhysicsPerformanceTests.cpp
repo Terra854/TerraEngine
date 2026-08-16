@@ -31,6 +31,17 @@ namespace TerraEngine::Tests {
 		constexpr std::size_t kThroughputBodyCount = 64U;
 		constexpr std::uint32_t kFixedTickCount = 60U;
 
+		Scene::WorldPose PoseAt(float x, float y, float z) {
+			Scene::WorldPose pose;
+			pose.position.offsetMetres = {x, y, z};
+			return pose;
+		}
+
+		bool HasPose(const ObjectManager& objects, const Object& object, float x, float y, float z) {
+			const auto pose = objects.GetCanonicalWorldPose(object);
+			return pose && pose->position.offsetMetres == glm::dvec3{x, y, z};
+		}
+
 		// The shared pool is initialized only for this isolated runtime fixture so
 		// fixed-tick work cannot inherit jobs or workers from another test.
 		class ThreadPoolSession final {
@@ -87,10 +98,8 @@ namespace TerraEngine::Tests {
 				ColliderSetComponent* colliders = objects.AddComponent<ColliderSetComponent>(object);
 				context.Expect(transform != nullptr && body != nullptr && colliders != nullptr,
 					"The fixed-tick fixture must create every dynamic-body component.");
-				transform->position = {
-					static_cast<float>(index % 8U),
-					4.0F + static_cast<float>(index / 8U),
-					static_cast<float>((index / 8U) % 8U)};
+				(void)objects.SetCanonicalWorldPose(object, PoseAt(static_cast<float>(index % 8U),
+					4.0F + static_cast<float>(index / 8U), static_cast<float>((index / 8U) % 8U)));
 				body->useGravity = true;
 				colliders->Add();
 				objects.MarkObjectTransformDirty(object);
@@ -176,13 +185,13 @@ namespace TerraEngine::Tests {
 			Transform* secondTransform = objects.AddComponent<Transform>(second);
 			context.Expect(firstTransform != nullptr && secondTransform != nullptr,
 				"The typed publication fixture requires two writable Transform components.");
-			firstTransform->position = {1.0F, 2.0F, 3.0F};
-			secondTransform->position = {4.0F, 5.0F, 6.0F};
+			(void)objects.SetCanonicalWorldPose(first, PoseAt(1.0F, 2.0F, 3.0F));
+			(void)objects.SetCanonicalWorldPose(second, PoseAt(4.0F, 5.0F, 6.0F));
 			const TerraEngine::UUID firstId = objects.getUUID(first);
 			const TerraEngine::UUID secondId = objects.getUUID(second);
 			const std::vector<Scene::TransactionTransformUpdate> updates{
-				{firstId, {10.0F, 20.0F, 30.0F}, {1.0F, 0.0F, 0.0F, 0.0F}},
-				{secondId, {40.0F, 50.0F, 60.0F}, {0.0F, 0.0F, 1.0F, 0.0F}}};
+				{firstId, PoseAt(10.0F, 20.0F, 30.0F)},
+				{secondId, PoseAt(40.0F, 50.0F, 60.0F)}};
 
 			Scene::TransactionalMutationBuilder staleBuilder(
 				"physics-transform-batch-stale", Scene::TransactionOrigin::System, "PhysicsPerformanceTests");
@@ -193,14 +202,14 @@ namespace TerraEngine::Tests {
 				&& staleTransaction.writeSet.operations.front().transformUpdates.size() == updates.size(),
 				"Physics publication must use one typed transform batch instead of reflected per-property writes.");
 			mutations.EnqueueTransaction(std::move(staleTransaction));
-			context.Expect(firstTransform->position == glm::vec3(1.0F, 2.0F, 3.0F),
+			context.Expect(HasPose(objects, first, 1.0F, 2.0F, 3.0F),
 				"A queued transform batch must remain invisible before the protected flush.");
 			objects.RemoveComponent<Transform>(second);
 			const Scene::SceneMutationBatchResult rejected = mutations.Apply(objects, "physics-transform-batch-rejected");
 			context.Expect(rejected.transactionResults.size() == 1U
 				&& rejected.transactionResults.front().status != Scene::TransactionStatus::Committed,
 				"A stale transform target must reject the complete publication batch.");
-			context.Expect(firstTransform->position == glm::vec3(1.0F, 2.0F, 3.0F),
+			context.Expect(HasPose(objects, first, 1.0F, 2.0F, 3.0F),
 				"Rejected transform publication must leave every earlier target unchanged.");
 
 			context.Expect(objects.AddComponent<Transform>(second) != nullptr,
@@ -209,7 +218,7 @@ namespace TerraEngine::Tests {
 				"physics-transform-batch-accepted", Scene::TransactionOrigin::System, "PhysicsPerformanceTests");
 			acceptedBuilder.UpdateTransformBatch(objects, updates);
 			mutations.EnqueueTransaction(std::move(acceptedBuilder).Build());
-			context.Expect(firstTransform->position == glm::vec3(1.0F, 2.0F, 3.0F),
+			context.Expect(HasPose(objects, first, 1.0F, 2.0F, 3.0F),
 				"The accepted transform batch must also remain invisible before its flush.");
 			const Scene::SceneMutationBatchResult committed = mutations.Apply(objects, "physics-transform-batch-committed");
 			context.Expect(committed.transactionResults.size() == 1U
@@ -219,8 +228,8 @@ namespace TerraEngine::Tests {
 			firstTransform = objects.GetComponent<Transform>(first);
 			secondTransform = objects.GetComponent<Transform>(second);
 			context.Expect(firstTransform != nullptr && secondTransform != nullptr
-				&& firstTransform->position == updates[0].position && firstTransform->rotation == updates[0].rotation
-				&& secondTransform->position == updates[1].position && secondTransform->rotation == updates[1].rotation,
+				&& HasPose(objects, first, 10.0F, 20.0F, 30.0F)
+				&& HasPose(objects, second, 40.0F, 50.0F, 60.0F),
 				"The typed publication must make the exact position and rotation values visible at the flush boundary.");
 		});
 
@@ -238,7 +247,7 @@ namespace TerraEngine::Tests {
 			ColliderSetComponent* colliders = objects.AddComponent<ColliderSetComponent>(object);
 			context.Expect(transform != nullptr && body != nullptr && colliders != nullptr,
 				"The same-pose fixture requires a dynamic body and its authored collider.");
-			transform->position = {3.0F, 4.0F, 5.0F};
+			(void)objects.SetCanonicalWorldPose(object, PoseAt(3.0F, 4.0F, 5.0F));
 			body->useGravity = false;
 			colliders->Add();
 			objects.MarkObjectTransformDirty(object);
@@ -282,11 +291,8 @@ namespace TerraEngine::Tests {
 				&& !steadyPublications.front().chunks.front().writeSet.operations.front().transformUpdates.empty()) {
 				const Scene::TransactionTransformUpdate& repeated =
 					steadyPublications.front().chunks.front().writeSet.operations.front().transformUpdates.front();
-				steadyMessage += " Repeated position=(" + std::to_string(repeated.position.x) + ", "
-					+ std::to_string(repeated.position.y) + ", " + std::to_string(repeated.position.z)
-					+ ") rotation=(" + std::to_string(repeated.rotation.x) + ", "
-					+ std::to_string(repeated.rotation.y) + ", " + std::to_string(repeated.rotation.z)
-					+ ", " + std::to_string(repeated.rotation.w) + ").";
+				steadyMessage += " Repeated canonical offset=(" + std::to_string(repeated.pose.position.offsetMetres.x) + ", "
+					+ std::to_string(repeated.pose.position.offsetMetres.y) + ", " + std::to_string(repeated.pose.position.offsetMetres.z) + ").";
 			}
 			context.Expect(steadyPublications.empty(), steadyMessage);
 			std::string diagnosticsMessage = "The canonical unchanged frame must report zero authoring, preparation, and protected publication work.";
@@ -327,7 +333,7 @@ namespace TerraEngine::Tests {
 			ColliderSetComponent* colliders = objects.AddComponent<ColliderSetComponent>(object);
 			context.Expect(transform != nullptr && body != nullptr && colliders != nullptr,
 				"The gravity regression fixture requires a dynamic body and an authored collider.");
-			if(transform != nullptr) transform->position = {0.0F, 100.0F, 0.0F};
+			if(transform != nullptr) (void)objects.SetCanonicalWorldPose(object, PoseAt(0.0F, 100.0F, 0.0F));
 			if(body != nullptr) body->useGravity = true;
 			if(colliders != nullptr) colliders->Add();
 			objects.MarkObjectTransformDirty(object);
@@ -419,7 +425,7 @@ namespace TerraEngine::Tests {
 				"An unchanged authoring capture must retain its body without requesting a rebuild.");
 			Transform* transform = objects.GetComponent<Transform>(object);
 			context.Expect(transform != nullptr, "The snapshot revision fixture requires the default Transform.");
-			transform->position.x = 3.0F;
+			(void)objects.SetCanonicalWorldPose(object, PoseAt(3.0F, 0.0F, 0.0F));
 			objects.MarkObjectTransformDirty(object);
 			const auto transformed = Physics::PhysicsAuthoringSnapshot::Capture(
 				objects, {{1U}, 1U}, Physics::PhysicsSettings::Defaults(), 0U, &*unchanged);

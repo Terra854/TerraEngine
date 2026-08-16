@@ -152,18 +152,18 @@ namespace TerraEngine::Renderer {
 			return static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(id));
 		}
 
-		std::uint64_t HashMatrix(const glm::mat4& matrix)
+		std::uint64_t HashWorldPose(const TerraEngine::Scene::WorldPose& pose)
 		{
-			std::uint64_t hash = 1469598103934665603ull;
-			for (int column = 0; column < 4; ++column)
+			std::uint64_t hash = static_cast<std::uint64_t>(
+				TerraEngine::Scene::WorldPositionHash{}(pose.position));
+			const float values[] = {
+				pose.rotation.x, pose.rotation.y, pose.rotation.z, pose.rotation.w,
+				pose.scale.x, pose.scale.y, pose.scale.z};
+			for (const float value : values)
 			{
-				for (int row = 0; row < 4; ++row)
-				{
-					std::uint32_t bits = 0u;
-					const float value = matrix[column][row];
-					std::memcpy(&bits, &value, sizeof(float));
-					HashCombine(hash, bits);
-				}
+				std::uint32_t bits = 0u;
+				std::memcpy(&bits, &value, sizeof(float));
+				HashCombine(hash, bits);
 			}
 			return hash;
 		}
@@ -200,7 +200,7 @@ namespace TerraEngine::Renderer {
 		signature.objectId = record.objectId;
 		signature.meshId = record.meshId;
 		signature.materialId = record.materialId;
-		signature.transformHash = HashMatrix(record.modelMatrix);
+		signature.transformHash = HashWorldPose(record.canonicalWorldPose);
 		signature.visibilityHash = record.taskShaderCullingEnabled ? 1u : 0u;
 		signature.overrideHash = record.usingFallback ? 1u : 0u;
 		signature.virtualGeometryHash = HashVirtualGeometryRange(record.virtualGeometry);

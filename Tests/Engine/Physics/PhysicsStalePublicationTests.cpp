@@ -38,6 +38,7 @@ namespace TerraEngine::Tests {
 			return {
 				.objectId = objects.getUUID(object),
 				.body = {world.worldId, world.worldGeneration, slot, bodyGeneration},
+				.frame = {Physics::kPrimaryPhysicsFrameId, world.worldGeneration},
 				.objectLifetimeGeneration = objects.getObjectLifetimeGeneration(object),
 				.bodyGeneration = bodyGeneration,
 				.componentGeneration = objects.getObjectComponentGeneration(object),
@@ -46,6 +47,7 @@ namespace TerraEngine::Tests {
 				.parentObjectId = parent ? objects.getUUID(*parent) : TerraEngine::EMPTY_UUID,
 				.expectedParentLifetimeGeneration = parent ? objects.getObjectLifetimeGeneration(*parent) : 0U,
 				.expectedParentTransformRevision = parent ? objects.GetObjectTransformRevision(*parent) : 0U,
+				.canonicalFrameOrigin = {},
 				.localPose = StaleTestPose(targetX),
 				.worldPoseReceipt = StaleTestPose(targetX),
 				.poseChanged = true};
@@ -58,7 +60,7 @@ namespace TerraEngine::Tests {
 			std::uint64_t groupId)
 		{
 			return Physics::PrepareTransformPublicationPacket(
-				{world, 9U, 2U, 3U}, objects.GetSceneGeneration(), objects.GetHierarchyRevision(),
+				{world, {Physics::kPrimaryPhysicsFrameId, world.worldGeneration}, 9U, 2U, 3U}, objects.GetSceneGeneration(), objects.GetHierarchyRevision(),
 				groupId, groupId + 20U, records, 1U,
 				Physics::TransformPublicationVisibilityBoundary::FrameEnd);
 		}
@@ -134,17 +136,19 @@ namespace TerraEngine::Tests {
 				runtime.bodyGenerations.emplace(objects.getUUID(targets[index]), records.back().bodyGeneration);
 			}
 			const Physics::TransformPublicationPacket packet = MakeStaleTestPacket(objects, world, records, 3U);
-			Transform* staleTransform = objects.GetComponent<Transform>(targets[1]);
-			staleTransform->position.x = 99.0F;
+			TerraEngine::Scene::WorldPose authoredPose = objects.GetCanonicalWorldPose(targets[1]).value();
+			authoredPose.position.offsetMetres.x = 99.0;
+			context.Expect(objects.SetCanonicalWorldPose(targets[1], authoredPose) == TerraEngine::Scene::WorldCoordinateError::None,
+				"The stale-publication fixture must publish its newer authored pose.");
 			objects.MarkObjectTransformDirty(targets[1]);
 			queue.EnqueuePublicationGroup(Physics::BuildTransformPublicationGroup(packet));
 
 			const Scene::SceneMutationBatchResult flushed = queue.Apply(objects, "Frame End");
 			context.ExpectEqual(static_cast<std::size_t>(1), flushed.publicationGroupResults.size(), "Rejected tick should still return one group receipt.");
 			context.Expect(!flushed.publicationGroupResults.front().Committed(), "One stale transform must reject every preparation chunk.");
-			context.Expect(std::abs(objects.GetComponent<Transform>(targets[0])->position.x) < 0.001F, "An earlier valid chunk must not become partially visible.");
-			context.Expect(std::abs(objects.GetComponent<Transform>(targets[1])->position.x - 99.0F) < 0.001F, "A rejected publication must preserve the newer authored transform.");
-			context.Expect(std::abs(objects.GetComponent<Transform>(targets[2])->position.x) < 0.001F, "A later valid chunk must not become partially visible.");
+			context.Expect(std::abs(objects.GetComponent<Transform>(targets[0])->worldPose.position.offsetMetres.x) < 0.001, "An earlier valid chunk must not become partially visible.");
+			context.Expect(std::abs(objects.GetComponent<Transform>(targets[1])->worldPose.position.offsetMetres.x - 99.0) < 0.001, "A rejected publication must preserve the newer authored transform.");
+			context.Expect(std::abs(objects.GetComponent<Transform>(targets[2])->worldPose.position.offsetMetres.x) < 0.001, "A later valid chunk must not become partially visible.");
 			const Physics::TransformPublicationReceipt receipt = Physics::MakeTransformPublicationReceipt(packet, flushed.publicationGroupResults.front());
 			context.Expect(!receipt.Accepted() && receipt.acknowledgedEntries.empty(), "Rejected ticks must not acknowledge retained last-published poses.");
 			objects.clear();
@@ -165,7 +169,7 @@ namespace TerraEngine::Tests {
 
 			const Scene::TransactionPublicationGroupResult result = Scene::CommitTransactionPublicationGroup(objects, Physics::BuildTransformPublicationGroup(packet));
 			context.Expect(!result.Committed(), "Parent identity/hierarchy changes must reject the complete publication group.");
-			context.Expect(std::abs(objects.GetComponent<Transform>(child)->position.x) < 0.001F, "Rejected reparent conflicts must preserve the authored local transform.");
+			context.Expect(std::abs(objects.GetComponent<Transform>(child)->worldPose.position.offsetMetres.x) < 0.001, "Rejected reparent conflicts must preserve the authored local transform.");
 			context.Expect(objects.getParent(child) == secondParent, "Publication rejection must not roll hierarchy back to stale worker state.");
 			objects.clear();
 		});
@@ -188,7 +192,7 @@ namespace TerraEngine::Tests {
 			context.Expect(validation.reason == Physics::TransformPublicationValidationReason::StaleBody, "Body mismatch should report a bounded stale-body reason.");
 			const Scene::TransactionPublicationGroupResult result = Physics::CommitPhysicsTransformPublication(objects, runtime, packet);
 			context.Expect(!result.Committed() && result.appliedWriteCount == 0U, "Stale body publication must perform zero scene writes.");
-			context.Expect(std::abs(objects.GetComponent<Transform>(target)->position.x) < 0.001F, "Stale body publication must leave live transforms unchanged.");
+			context.Expect(std::abs(objects.GetComponent<Transform>(target)->worldPose.position.offsetMetres.x) < 0.001, "Stale body publication must leave live transforms unchanged.");
 			objects.clear();
 		});
 

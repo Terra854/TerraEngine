@@ -13,8 +13,57 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace TerraEngine::Renderer {
+
+	RenderLocalizationResult BuildLocalizedRenderPose(
+		const TerraEngine::Scene::WorldPose& pose,
+		const RenderReferenceFrame& currentFrame,
+		const RenderReferenceFrame* previousFrame)
+	{
+		const RenderLocalizationResult current = LocalizeRenderPosition(pose.position, currentFrame);
+		if (!current.Succeeded())
+			return current;
+		if (previousFrame != nullptr && !IsRenderReferenceFrameCurrent(currentFrame, *previousFrame))
+			return { {}, TerraEngine::Scene::WorldCoordinateError::UnsafeLocalRange, true };
+		return current;
+	}
+
+	RenderLocalizedPoseMatrices BuildLocalizedRenderPoseMatrices(
+		const TerraEngine::Scene::WorldPose& pose,
+		const RenderReferenceFrame& currentFrame,
+		const RenderReferenceFrame* previousFrame)
+	{
+		const RenderLocalizationResult current = LocalizeRenderPosition(pose.position, currentFrame);
+		if (!current.Succeeded())
+			return { {}, {}, false, false };
+		RenderLocalizationResult previous = current;
+		if (previousFrame != nullptr)
+		{
+			if (!previousFrame->IsValid() || previousFrame->viewId != currentFrame.viewId
+				|| previousFrame->outputId != currentFrame.outputId
+				|| previousFrame->spatialGeneration != currentFrame.spatialGeneration
+				|| previousFrame->residencyGeneration != currentFrame.residencyGeneration)
+				return { {}, {}, false, true };
+			previous = LocalizeRenderPosition(pose.position, *previousFrame);
+			if (!previous.Succeeded())
+				return { {}, {}, false, false };
+		}
+		const glm::mat4 rotation = glm::mat4_cast(pose.rotation);
+		const glm::mat4 scale = glm::scale(glm::mat4(1.0F), pose.scale);
+		const glm::mat4 currentTranslation = glm::translate(glm::mat4(1.0F), current.offsetMetres);
+		const glm::mat4 previousTranslation = glm::translate(glm::mat4(1.0F), previous.offsetMetres);
+		return { currentTranslation * rotation * scale, previousTranslation * rotation * scale, true, false };
+	}
+
+	bool IsRenderReferenceFrameCurrent(
+		const RenderReferenceFrame& expected,
+		const RenderReferenceFrame& actual) noexcept
+	{
+		return expected.IsValid() && actual.IsValid() && expected.MatchesGeneration(actual)
+			&& expected.canonicalOrigin == actual.canonicalOrigin;
+	}
 
 	namespace {
 		std::shared_ptr<const AnimatedObjectVisibilitySnapshot>
@@ -2515,7 +2564,12 @@ namespace TerraEngine::Renderer {
 			Candidate candidate{};
 			candidate.key = BuildSharedRenderGroupKey(renderable, view);
 			candidate.stableOrdinal = topologyRecord->second->stableOrdinal;
-			candidate.instance.modelMatrix = renderable.modelMatrix;
+			const RenderLocalizedPoseMatrices localized = BuildLocalizedRenderPoseMatrices(
+				renderable.canonicalWorldPose,
+				view.referenceFrame);
+			if (!localized.valid)
+				continue;
+			candidate.instance.modelMatrix = localized.currentMatrix;
 			candidate.instance.objectIdentity = packUuid(renderable.objectId);
 			candidate.instance.animationSelectors = glm::uvec4(
 				static_cast<std::uint32_t>(renderable.animation.stableInstanceId),

@@ -2,25 +2,52 @@
 
 namespace TerraEngine
 {
-    // Transform is the managed-facing contract for this subsystem; keep it predictable for scripts.
-    public class Transform : Component
-    {
-        public Vector3 Position
-        {
-            get => GetProperty<Vector3>("Position");
-            set => SetProperty<Vector3>("Position", value);
-        }
+	// Transform exposes only the canonical world contract. Each setter submits a
+	// complete typed transaction so scripts cannot bypass revision validation.
+	public class Transform : Component
+	{
+		public WorldPose Pose
+		{
+			get
+			{
+				uint status = InternalCalls.Native_Transform_ReadWorldPose(Object.ID, out NativeWorldPose nativePose);
+				if (status != 0U)
+					throw new System.InvalidOperationException($"Unable to read canonical transform (status {status}).");
+				return nativePose.ToWorldPose();
+			}
+			set
+			{
+				NativeWorldPose nativePose = NativeWorldPose.FromWorldPose(value);
+				uint status = InternalCalls.Native_Transform_SubmitWorldPose(Object.ID, in nativePose);
+				if (status != 1U)
+					throw new System.InvalidOperationException($"Unable to queue canonical transform (status {status}).");
+			}
+		}
 
-        public Quaternion Rotation
-        {
-            get => GetProperty<Quaternion>("Rotation");
-            set => SetProperty<Quaternion>("Rotation", value);
-        }
+		public WorldPosition Position
+		{
+			get => Pose.Position;
+			set { WorldPose pose = Pose; pose.Position = value; Pose = pose; }
+		}
 
-        public Vector3 Scale
-        {
-            get => GetProperty<Vector3>("Scale");
-            set => SetProperty<Vector3>("Scale", value);
-        }
-    }
+		public Quaternion Rotation
+		{
+			get => Pose.Rotation;
+			set { WorldPose pose = Pose; pose.Rotation = value; Pose = pose; }
+		}
+
+		public Vector3 Scale
+		{
+			get => Pose.Scale;
+			set { WorldPose pose = Pose; pose.Scale = value; Pose = pose; }
+		}
+
+		public void Translate(WorldDelta delta)
+		{
+			NativeWorldDelta nativeDelta = NativeWorldDelta.FromWorldDelta(delta);
+			uint status = InternalCalls.Native_Transform_TranslateWorld(Object.ID, in nativeDelta);
+			if (status != 1U)
+				throw new System.InvalidOperationException($"Unable to queue canonical translation (status {status}).");
+		}
+	}
 }

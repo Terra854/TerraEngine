@@ -811,7 +811,7 @@ namespace TerraEngine::Editor::Automation
 			const glm::uvec2& size,
 			bool transparentBackground)
 		{
-			const glm::quat rotation = glm::normalize(transform.rotation);
+			const glm::quat rotation = glm::normalize(transform.worldPose.rotation);
 			const glm::vec3 forward = rotation * glm::vec3(0.0f, 0.0f, -1.0f);
 			glm::vec3 up = rotation * camera.up;
 			if (glm::length(up) < 0.0001f)
@@ -824,8 +824,10 @@ namespace TerraEngine::Editor::Automation
 			request.sourceName = std::move(sourceName);
 			request.targetSize = size;
 			request.transparentBackground = transparentBackground;
-			request.cameraWorldPosition = transform.position;
-			request.viewMatrix = glm::lookAt(transform.position, transform.position + forward, glm::normalize(up));
+			// Capture matrices are camera-local. The renderer retains this canonical
+			// origin separately so a distant camera never becomes a global float.
+			request.cameraCanonicalPosition = transform.worldPose.position;
+			request.viewMatrix = glm::lookAt(glm::vec3(0.0f), forward, glm::normalize(up));
 			request.projectionMatrix = glm::perspectiveZO(glm::radians(camera.verticalFovDegrees), camera.aspectRatio, camera.nearPlane, camera.farPlane);
 			request.projectionMatrix[1][1] *= -1.0f;
 			return request;
@@ -2557,8 +2559,8 @@ namespace TerraEngine::Editor::Automation
 			{
 				const std::optional<Object> object = objects.getObject(expected.objectId);
 				const Transform* transform = object ? objects.GetComponent<Transform>(*object) : nullptr;
-				if(transform == nullptr || transform->position != expected.position
-					|| transform->rotation != expected.rotation)
+				if(transform == nullptr || transform->worldPose.position != expected.pose.position
+					|| transform->worldPose.rotation != expected.pose.rotation)
 				{
 					state.failed = true;
 					state.active = false;
@@ -2584,12 +2586,21 @@ namespace TerraEngine::Editor::Automation
 		for(std::size_t index = 0U; index < state.batchSize; ++index)
 		{
 			const SparseTransformTarget& target = state.targets[(state.cursor + index) % state.targets.size()];
-			glm::vec3 position = target.baselinePosition;
+			TerraEngine::Scene::WorldPose pose = target.baselinePose;
 			if(displaced)
 			{
-				position.x += state.displacement;
+				const TerraEngine::Scene::WorldCoordinateResult moved = TerraEngine::Scene::ApplyWorldDelta(
+					pose.position, {{}, {static_cast<double>(state.displacement), 0.0, 0.0}});
+				if (!moved.Succeeded())
+				{
+					state.failed = true;
+					state.active = false;
+					state.failureReason = "A sparse validation pose exceeded the canonical world range.";
+					return;
+				}
+				pose.position = moved.position;
 			}
-			updates.push_back({target.objectId, position, target.baselineRotation});
+			updates.push_back({target.objectId, pose});
 		}
 		state.cursor = (state.cursor + state.batchSize) % state.targets.size();
 
@@ -2871,7 +2882,7 @@ namespace TerraEngine::Editor::Automation
 		add("export.cancel", "export", MutationMode::ExportMutation, true, false, false, "jobId: string");
 		add("game_view.capture", "capture", MutationMode::ReadOnly, false, false, false, "width?: integer, height?: integer, format?: image/png, freshness?: latestCompleted|nextFrame, includeOverlays?: bool, transparentBackground?: bool");
 		add("camera.capture_object", "capture", MutationMode::ReadOnly, false, true, false, "object|camera|target: uuid|entity|name, includeDisabled?: bool, width?: integer, height?: integer, format?: image/png");
-		add("camera.capture_custom", "capture", MutationMode::ReadOnly, false, false, false, "position: [x,y,z], target?: [x,y,z], forward?: [x,y,z], up?: [x,y,z], projection?: perspective|orthographic, width?: integer, height?: integer");
+		add("camera.capture_custom", "capture", MutationMode::ReadOnly, false, false, false, "camera.position: canonical cell+offset, lookAt?: canonical cell+offset, forward?: local [x,y,z], up?: local [x,y,z], projection?: perspective|orthographic");
 		add("renderer.virtualGeometry.stats", "renderer", MutationMode::ReadOnly, false, false, false, "viewType?: Game|Scene|Shadow");
 		add("renderer.virtualGeometry.capabilityEvidence", "renderer", MutationMode::ReadOnly, false, false, false, "viewType?: Game|Scene");
 		add("renderer.virtualGeometry.validationRoute.set", "renderer", MutationMode::EditorSelection, false, false, false, "route: Hardware|Compute|Indexed|Hybrid");
@@ -4275,14 +4286,18 @@ namespace TerraEngine::Editor::Automation
 				const nlohmann::json camera = sceneState.value("camera", nlohmann::json::object());
 				nlohmann::json sceneCapture = arguments;
 				sceneCapture["name"] = "Scene View";
-				sceneCapture["position"] = camera.value("position", nlohmann::json::array({0.0, 0.0, 5.0}));
-				sceneCapture["lookAt"] = camera.value("focus", nlohmann::json::array({0.0, 0.0, 0.0}));
-				sceneCapture["up"] = camera.value("up", nlohmann::json::array({0.0, 1.0, 0.0}));
-				sceneCapture["projection"] = sceneState.value("projection", "perspective");
-				sceneCapture["verticalFovDegrees"] = camera.value("fieldOfViewDegrees", 60.0);
-				sceneCapture["orthographicHeight"] = 10.0;
-				sceneCapture["nearPlane"] = 0.1;
-				sceneCapture["farPlane"] = 10000.0;
+				// Scene View already publishes canonical locations. Preserve that exact
+				// representation while adapting it to the custom-capture envelope.
+				// Float world-vector fallbacks would silently move an unbounded camera.
+				sceneCapture["camera"] = {
+					{"position", camera.value("position", nlohmann::json())},
+					{"lookAt", camera.value("focus", nlohmann::json())},
+					{"up", camera.value("up", nlohmann::json::array({0.0, 1.0, 0.0}))},
+					{"projection", sceneState.value("projection", "perspective")},
+					{"verticalFovDegrees", camera.value("fieldOfViewDegrees", 60.0)},
+					{"orthographicHeight", 10.0},
+					{"nearPlane", 0.1},
+					{"farPlane", 10000.0}};
 				envelope = HandleCustomCameraCapture(sceneCapture, request.requestId);
 				if (envelope.value("ok", false) && envelope.contains("data"))
 				{
@@ -5503,6 +5518,18 @@ namespace TerraEngine::Editor::Automation
 				return error;
 			}
 
+			const bool typedCanonicalHistory = std::all_of(
+				prepared.transaction.writeSet.operations.begin(),
+				prepared.transaction.writeSet.operations.end(),
+				[](const TerraEngine::Scene::TransactionWriteOperation& write) {
+					return write.kind == TerraEngine::Scene::TransactionWriteKind::SetWorldTransform
+						|| write.kind == TerraEngine::Scene::TransactionWriteKind::TranslateWorld;
+				});
+			// Canonical transform history replays typed operations through the mutation
+			// queue. That preserves exact cells and makes a rejected replay atomic.
+			const bool recordedTypedCanonicalHistory = typedCanonicalHistory
+				&& UndoRedoSystem::Instance().RecordCommittedTransaction(prepared.transaction, commit);
+
 			const auto resolveCommittedRef = [&](const TerraEngine::Scene::TransactionObjectRef& ref) -> std::optional<Object> {
 				TerraEngine::UUID id = ref.objectId;
 				if (ref.UsesLocalObject())
@@ -5597,8 +5624,15 @@ namespace TerraEngine::Editor::Automation
 				}
 			}
 
-			const std::string historyId = "history-" + transactionId;
-			UndoRedoSystem::Instance().PushTransactionGroup(arguments.value("label", std::string("Automation transaction")), std::move(commands), historyId);
+			const std::string historyId = recordedTypedCanonicalHistory
+				? prepared.transaction.id
+				: "history-" + transactionId;
+			if (!recordedTypedCanonicalHistory)
+			{
+				UndoRedoSystem::Instance().PushTransactionGroup(
+					arguments.value("label", std::string("Automation transaction")),
+					std::move(commands), historyId);
+			}
 			if (prepared.selectionTarget && setSelectedEntity)
 			{
 				if (const std::optional<Object> selection = resolveCommittedRef(*prepared.selectionTarget)) setSelectedEntity(selection->EntityId());
@@ -6195,11 +6229,16 @@ namespace TerraEngine::Editor::Automation
 			bool changed = false;
 			if (operation == AutomationOperation("scene_view.camera.set"))
 			{
-				const auto position = arguments.contains("position") ? ReadVec3(arguments["position"]) : std::nullopt;
-				const auto focus = arguments.contains("focus") ? ReadVec3(arguments["focus"]) : std::nullopt;
-				if (!position.has_value() || !focus.has_value())
-					return BuildError(requestId, ErrorCategory::Validation, "Camera position and focus must each be a three-number array.");
-				changed = sceneView->SetAutomationCamera(*position, *focus, error);
+				TerraEngine::Scene::WorldPosition position;
+				TerraEngine::Scene::WorldPosition focus;
+				if (!arguments.contains("position") || !arguments.contains("focus")
+					|| !ParseCanonicalWorldPosition(arguments["position"], position, error)
+					|| !ParseCanonicalWorldPosition(arguments["focus"], focus, error))
+				{
+					return BuildError(requestId, ErrorCategory::Validation,
+						error.empty() ? "Camera position and focus must be canonical WorldPosition objects." : error);
+				}
+				changed = sceneView->SetAutomationCamera(position, focus, error);
 			}
 			else if (operation == AutomationOperation("scene_view.frame_object"))
 			{
@@ -8796,16 +8835,18 @@ namespace TerraEngine::Editor::Automation
 		{
 			return validation;
 		}
-		// The public MCP contract groups authored camera values under `camera` so
-		// capture transport options remain distinct. Accept legacy top-level camera
-		// values as a compatibility fallback for older clients.
-		const nlohmann::json& camera = arguments.contains("camera") && arguments["camera"].is_object()
-			? arguments["camera"]
-			: arguments;
-		const std::optional<glm::vec3> position = ReadVec3(camera.value("position", nlohmann::json()));
-		if (!position)
+		// Custom capture is a strict breaking payload. A named camera object keeps
+		// options separate, but absolute locations must be canonical addresses.
+		if (!arguments.contains("camera") || !arguments["camera"].is_object())
 		{
-			return BuildError(requestId, ErrorCategory::Validation, "camera.capture_custom requires position: [x, y, z].");
+			return BuildError(requestId, ErrorCategory::Validation, "camera.capture_custom requires a camera object.");
+		}
+		const nlohmann::json& camera = arguments["camera"];
+		TerraEngine::Scene::WorldPosition position;
+		std::string coordinateError;
+		if (!ParseCanonicalWorldPosition(camera.value("position", nlohmann::json()), position, coordinateError))
+		{
+			return BuildError(requestId, ErrorCategory::Validation, coordinateError);
 		}
 
 		glm::vec3 up = ReadVec3(camera.value("up", nlohmann::json())).value_or(glm::vec3(0.0f, 1.0f, 0.0f));
@@ -8814,12 +8855,22 @@ namespace TerraEngine::Editor::Automation
 			return BuildError(requestId, ErrorCategory::Validation, "Custom camera up vector must be non-zero.");
 		}
 		glm::vec3 forward(0.0f, 0.0f, -1.0f);
-		const nlohmann::json targetValue = camera.contains("lookAt")
-			? camera["lookAt"]
-			: camera.value("target", nlohmann::json());
-		if (const std::optional<glm::vec3> targetPoint = ReadVec3(targetValue))
+		const nlohmann::json targetValue = camera.value("lookAt", nlohmann::json());
+		TerraEngine::Scene::WorldPosition targetPoint;
+		if (ParseCanonicalWorldPosition(targetValue, targetPoint, coordinateError))
 		{
-			forward = *targetPoint - *position;
+			const TerraEngine::Scene::WorldLocalizationResult localized =
+				TerraEngine::Scene::LocalizeWorldPosition(targetPoint, position, TerraEngine::Scene::kTransformSpaceMaximumRelativeRadiusMetres);
+			if (!localized.Succeeded())
+			{
+				return BuildError(requestId, ErrorCategory::Validation, "Custom camera target exceeds the bounded camera working frame.");
+			}
+			forward = glm::vec3(localized.offsetMetres);
+		}
+		else if (!targetValue.is_null())
+		{
+			return BuildError(requestId, ErrorCategory::Validation,
+				"Custom camera lookAt must be a canonical WorldPosition object.");
 		}
 		else if (const std::optional<glm::vec3> requestedForward = ReadVec3(camera.value("forward", nlohmann::json())))
 		{
@@ -8852,9 +8903,11 @@ namespace TerraEngine::Editor::Automation
 
 		const glm::uvec2 size(validation["width"].get<std::uint32_t>(), validation["height"].get<std::uint32_t>());
 		RenderViewType captureViewType = RenderViewType::Game;
-		if (arguments.contains("viewType"))
+		// The strict custom-camera envelope keeps all camera semantics together;
+		// read viewType from that descriptor while retaining the default Game view.
+		if (camera.contains("viewType"))
 		{
-			const std::optional<RenderViewType> parsed = ParseAutomationRenderViewType(arguments["viewType"]);
+			const std::optional<RenderViewType> parsed = ParseAutomationRenderViewType(camera["viewType"]);
 			if (!parsed || (*parsed != RenderViewType::Game && *parsed != RenderViewType::Scene))
 			{
 				return BuildError(requestId, ErrorCategory::Validation, "viewType must be Game or Scene.");
@@ -8909,8 +8962,8 @@ namespace TerraEngine::Editor::Automation
 		request.transparentBackground = validation["transparentBackground"].get<bool>();
 		request.allowBackendFallback = validation["allowBackendFallback"].get<bool>();
 		request.timeoutMs = validation["timeoutMs"].get<std::uint32_t>();
-		request.cameraWorldPosition = *position;
-		request.viewMatrix = glm::lookAt(*position, *position + normalizedForward, normalizedUp);
+		request.cameraCanonicalPosition = position;
+		request.viewMatrix = glm::lookAt(glm::vec3(0.0f), normalizedForward, normalizedUp);
 		if (projection == "orthographic")
 		{
 			const float halfHeight = orthographicHeight * 0.5f;
@@ -8930,7 +8983,7 @@ namespace TerraEngine::Editor::Automation
 		}
 		nlohmann::json result = BuildCaptureSuccessEnvelope(*this, requestId, capture);
 		result["data"]["camera"] = {
-			{"position", SerializeVec3(*position)},
+			{"position", SerializeCanonicalWorldPosition(position)},
 			{"forward", SerializeVec3(normalizedForward)},
 			{"up", SerializeVec3(normalizedUp)},
 			{"upFallbackApplied", upFallbackApplied},
@@ -9552,7 +9605,7 @@ namespace TerraEngine::Editor::Automation
 			{
 				continue;
 			}
-			targets.push_back({objects.getUUID(object), transform->position, transform->rotation});
+			targets.push_back({objects.getUUID(object), transform->worldPose});
 		}
 		std::sort(targets.begin(), targets.end(), [](const SparseTransformTarget& left,
 			const SparseTransformTarget& right) {
@@ -9638,8 +9691,8 @@ namespace TerraEngine::Editor::Automation
 			{
 				const std::optional<Object> object = objects.getObject(expected.objectId);
 				const Transform* transform = object ? objects.GetComponent<Transform>(*object) : nullptr;
-				if(transform == nullptr || transform->position != expected.position
-					|| transform->rotation != expected.rotation)
+				if(transform == nullptr || transform->worldPose.position != expected.pose.position
+					|| transform->worldPose.rotation != expected.pose.rotation)
 				{
 					finalBatchVisible = false;
 					break;

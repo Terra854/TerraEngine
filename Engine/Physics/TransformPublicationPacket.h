@@ -39,6 +39,7 @@ namespace TerraEngine::Physics {
 	// from the same immutable state-store view, even though their sizes differ.
 	struct CompleteBodySnapshotIdentity {
 		PhysicsWorldHandle world;
+		PhysicsFrameHandle frame;
 		PhysicsTick tick = 0;
 		std::uint64_t storeGeneration = 0;
 		std::uint64_t snapshotGeneration = 0;
@@ -55,6 +56,7 @@ namespace TerraEngine::Physics {
 	struct TransformPublicationSourceRecord {
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		PhysicsBodyHandle body;
+		PhysicsFrameHandle frame;
 		std::uint64_t objectLifetimeGeneration = 0;
 		PhysicsGeneration bodyGeneration = 0;
 		std::uint64_t componentGeneration = 0;
@@ -63,6 +65,9 @@ namespace TerraEngine::Physics {
 		TerraEngine::UUID parentObjectId = TerraEngine::EMPTY_UUID;
 		std::uint64_t expectedParentLifetimeGeneration = 0;
 		std::uint64_t expectedParentTransformRevision = 0;
+		// The physics provider pose is meaningful only relative to this exact
+		// canonical frame origin. It is never treated as a global float position.
+		Scene::WorldPosition canonicalFrameOrigin{};
 		PhysicsPose localPose;
 		PhysicsPose worldPoseReceipt;
 		std::optional<TransformPublicationBoundsChange> boundsChange;
@@ -73,6 +78,7 @@ namespace TerraEngine::Physics {
 	struct TransformPublicationEntry {
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		PhysicsBodyHandle body;
+		PhysicsFrameHandle frame;
 		std::uint64_t objectLifetimeGeneration = 0;
 		PhysicsGeneration bodyGeneration = 0;
 		std::uint64_t componentGeneration = 0;
@@ -81,6 +87,7 @@ namespace TerraEngine::Physics {
 		TerraEngine::UUID parentObjectId = TerraEngine::EMPTY_UUID;
 		std::uint64_t expectedParentLifetimeGeneration = 0;
 		std::uint64_t expectedParentTransformRevision = 0;
+		Scene::WorldPosition canonicalFrameOrigin{};
 		PhysicsPose localPose;
 		PhysicsPose worldPoseReceipt;
 		std::optional<TransformPublicationBoundsChange> boundsChange;

@@ -87,6 +87,7 @@ struct ClusterData
 
 #pragma pack_matrix(column_major)
 #include "../Geometry/TerraGeometryContract.hlsli"
+#include "../Geometry/TerraWorldReferenceFrame.hlsli"
 
 struct PushConstants
 {

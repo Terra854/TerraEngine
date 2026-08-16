@@ -21,7 +21,7 @@ namespace TerraEngine::Tests {
 			record.objectId = MakeUuid(idValue);
 			record.entity = static_cast<entt::entity>(idValue);
 			record.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable;
-			record.worldBounds = TerraEngine::Scene::MakeAABB(minimum, maximum, TerraEngine::Scene::SpatialBoundsSource::Authored);
+			record.localBounds = TerraEngine::Scene::MakeAABB(minimum, maximum, TerraEngine::Scene::SpatialBoundsSource::Authored);
 			record.revision = revision;
 			return record;
 		}
@@ -34,6 +34,31 @@ namespace TerraEngine::Tests {
 	}
 
 	void RegisterSpatialIndexQueryTests(TestRegistry& registry) {
+		registry.Add("Engine.SpatialIndex.RejectsRecordsFromAnotherReferenceFrame", [](TestContext& context) {
+			TerraEngine::Scene::SpatialIndex index;
+			TerraEngine::Scene::SpatialReferenceFrame frame{};
+			frame.generation = 7;
+			context.Expect(index.SetReferenceFrame(frame), "A normalized bounded reference frame should be accepted.");
+			TerraEngine::Scene::SpatialObjectRecord record = MakeRecord(42, glm::vec3(-1.0f), glm::vec3(1.0f));
+			record.frameGeneration = 6;
+			index.Rebuild({record});
+			const TerraEngine::Scene::SpatialQueryResult result = index.QueryAABB(
+				TerraEngine::Scene::MakeAABB(glm::vec3(-2.0f), glm::vec3(2.0f), TerraEngine::Scene::SpatialBoundsSource::Authored));
+			context.Expect(result.hits.empty(), "A bounded local index must reject records prepared for another reference frame.");
+		});
+		registry.Add("Engine.SpatialIndex.RejectsBoundsOutsideReferenceFrame", [](TestContext& context) {
+			TerraEngine::Scene::SpatialIndex index;
+			TerraEngine::Scene::SpatialReferenceFrame frame{};
+			frame.generation = 9;
+			frame.maximumLocalDistanceMetres = 64.0;
+			context.Expect(index.SetReferenceFrame(frame), "The bounded fixture frame should be accepted.");
+			TerraEngine::Scene::SpatialObjectRecord record = MakeRecord(43, glm::vec3(64.0f), glm::vec3(65.0f));
+			record.frameGeneration = frame.generation;
+			index.Rebuild({ record });
+			const TerraEngine::Scene::SpatialQueryResult result = index.QueryAABB(
+				TerraEngine::Scene::MakeAABB(glm::vec3(63.0f), glm::vec3(66.0f), TerraEngine::Scene::SpatialBoundsSource::Authored));
+			context.Expect(result.hits.empty(), "Out-of-frame float bounds must be rejected instead of standing in for a distant world location.");
+		});
 		registry.Add("Engine.SpatialIndex.SceneViewPerspectiveFrustumReturnsVisibleMarkerBounds", [](TestContext& context) {
 			TerraEngine::Scene::SpatialIndex index;
 			std::vector<TerraEngine::Scene::SpatialObjectRecord> records{
@@ -125,7 +150,7 @@ namespace TerraEngine::Tests {
 			TerraEngine::Scene::SpatialObjectRecord physicsOnly = MakeRecord(4, {-1.0f, -1.0f, -1.0f}, {1.0f, 1.0f, 1.0f});
 			physicsOnly.categoryMask = TerraEngine::Scene::SpatialCategoryEditorSelectable;
 			physicsOnly.active = false;
-			physicsOnly.worldBounds = TerraEngine::Scene::MakeFallbackBounds(glm::vec3(0.0f), 0.5f);
+			physicsOnly.localBounds = TerraEngine::Scene::MakeFallbackBounds(glm::vec3(0.0f), 0.5f);
 			TerraEngine::Scene::SpatialObjectRecord rendererOnly = MakeRecord(5, {-1.0f, -1.0f, -1.0f}, {1.0f, 1.0f, 1.0f});
 			rendererOnly.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable;
 

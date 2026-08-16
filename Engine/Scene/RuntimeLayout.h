@@ -12,7 +12,6 @@
 #include "Utilities/UUID.h"
 
 #include <entt/entt.hpp>
-#include <glm/mat4x4.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -83,11 +82,8 @@ namespace TerraEngine::Scene {
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		std::size_t layoutIndex = 0;
 		std::optional<std::size_t> parentIndex;
-		glm::vec3 localPosition{0.0f, 0.0f, 0.0f};
-		glm::quat localRotation{1.0f, 0.0f, 0.0f, 0.0f};
-		glm::vec3 localScale{1.0f, 1.0f, 1.0f};
-		Transform worldTransform{};
-		glm::mat4 modelMatrix{1.0f};
+		ParentRelativePose parentRelativePose{};
+		WorldPose worldPose{};
 		std::uint64_t sourceRevision = 0;
 		bool isStatic = false;
 		bool processed = false;
@@ -100,12 +96,8 @@ namespace TerraEngine::Scene {
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		std::size_t layoutIndex = 0;
 		std::optional<std::size_t> parentIndex;
-		glm::vec3 localPosition{0.0f, 0.0f, 0.0f};
-		glm::quat localRotation{1.0f, 0.0f, 0.0f, 0.0f};
-		glm::vec3 localScale{1.0f, 1.0f, 1.0f};
-		glm::vec3 worldPosition{0.0f, 0.0f, 0.0f};
-		glm::quat worldRotation{1.0f, 0.0f, 0.0f, 0.0f};
-		glm::vec3 worldScale{1.0f, 1.0f, 1.0f};
+		ParentRelativePose parentRelativePose{};
+		WorldPose worldPose{};
 		std::uint64_t transformRevision = 0;
 		std::uint64_t parentWorldGeneration = 0;
 		bool isStatic = false;
@@ -117,7 +109,7 @@ namespace TerraEngine::Scene {
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		TerraEngine::UUID parentObjectId = TerraEngine::EMPTY_UUID;
 		std::optional<std::size_t> parentIndex;
-		Transform parentWorldTransform{};
+		WorldPose parentWorldPose{};
 		std::uint64_t generation = 0;
 		bool reused = false;
 	};

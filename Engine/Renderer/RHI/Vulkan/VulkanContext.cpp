@@ -517,7 +517,7 @@ namespace
 
 	float ComputeSceneInfluenceScore(
 		const FrameLightCandidate& candidate,
-		const glm::vec3& cameraWorldPosition,
+		const glm::vec3& cameraLocalPosition,
 		const std::array<glm::vec4, 6>& frustumPlanes)
 	{
 		const GPULight& light = candidate.gpuLight;
@@ -527,7 +527,7 @@ namespace
 		const float colorWeight = std::max({ light.colorAndIntensity.x, light.colorAndIntensity.y, light.colorAndIntensity.z, 0.0f });
 		const float effectiveRange = GetEffectiveLightInfluenceRadius(candidate);
 		const glm::vec3 lightPosition = glm::vec3(light.positionAndType);
-		const float distanceToCamera = glm::length(lightPosition - cameraWorldPosition);
+		const float distanceToCamera = glm::length(lightPosition - cameraLocalPosition);
 		const float distanceOutsideInfluence = std::max(distanceToCamera - effectiveRange, 0.0f);
 		const bool intersectsFrustum = ((candidate.candidateFlags & kFrameLightCandidateFlagDirectional) != 0u)
 			|| SphereIntersectsFrustum(lightPosition, effectiveRange, frustumPlanes);
@@ -594,7 +594,7 @@ namespace
 
 	// ShouldResetTemporalViewState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool ShouldResetTemporalViewState(bool stateValid,
-		const glm::vec3& lastCameraWorldPosition,
+		const glm::vec3& lastCameraLocalPosition,
 		const glm::mat4& lastProjectionMatrix,
 		const TerraEngine::Renderer::RenderViewPresentationInput& presentation)
 	{
@@ -604,7 +604,7 @@ namespace
 		}
 
 		const float cameraDistance = glm::length(
-			presentation.cameraWorldPosition - lastCameraWorldPosition);
+			presentation.cameraLocalPosition - lastCameraLocalPosition);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (cameraDistance > kTemporalResetDistance)
 		{
@@ -616,7 +616,7 @@ namespace
 	}
 
 	// ComputeDirectionalShadowCenter is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	glm::vec3 ComputeDirectionalShadowCenter(const GPULight& light, const glm::vec3& cameraWorldPosition)
+	glm::vec3 ComputeDirectionalShadowCenter(const GPULight& light, const glm::vec3& cameraLocalPosition)
 	{
 		const glm::vec3 lightDirection = SafeNormalize(-glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
 		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
@@ -627,23 +627,23 @@ namespace
 		// Directional shadows follow the camera, but snapping the light-space
 		// center to whole shadow texels keeps the shadow map from crawling as the
 		// camera moves by sub-texel amounts.
-		const glm::vec3 provisionalLightPosition = cameraWorldPosition - lightDirection * 60.0f;
-		const glm::mat4 provisionalView = glm::lookAtRH(provisionalLightPosition, cameraWorldPosition, worldUp);
-		glm::vec4 snappedCenterLightSpace = provisionalView * glm::vec4(cameraWorldPosition, 1.0f);
+		const glm::vec3 provisionalLightPosition = cameraLocalPosition - lightDirection * 60.0f;
+		const glm::mat4 provisionalView = glm::lookAtRH(provisionalLightPosition, cameraLocalPosition, worldUp);
+		glm::vec4 snappedCenterLightSpace = provisionalView * glm::vec4(cameraLocalPosition, 1.0f);
 		snappedCenterLightSpace.x = std::floor(snappedCenterLightSpace.x / texelWorldSize) * texelWorldSize;
 		snappedCenterLightSpace.y = std::floor(snappedCenterLightSpace.y / texelWorldSize) * texelWorldSize;
 		return glm::vec3(glm::inverse(provisionalView) * snappedCenterLightSpace);
 	}
 
 	// BuildDirectionalShadowViewProjection is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	glm::mat4 BuildDirectionalShadowViewProjection(const GPULight& light, const glm::vec3& cameraWorldPosition)
+	glm::mat4 BuildDirectionalShadowViewProjection(const GPULight& light, const glm::vec3& cameraLocalPosition)
 	{
 		const glm::vec3 lightDirection = SafeNormalize(-glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
 		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
 			? glm::vec3(1.0f, 0.0f, 0.0f)
 			: glm::vec3(0.0f, 1.0f, 0.0f);
 		const float shadowExtent = kDirectionalShadowExtent;
-		const glm::vec3 snappedCenterWorld = ComputeDirectionalShadowCenter(light, cameraWorldPosition);
+		const glm::vec3 snappedCenterWorld = ComputeDirectionalShadowCenter(light, cameraLocalPosition);
 
 		const glm::vec3 lightPosition = snappedCenterWorld - lightDirection * 60.0f;
 		glm::mat4 view = glm::lookAtRH(lightPosition, snappedCenterWorld, worldUp);
@@ -778,7 +778,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 	const std::uint32_t viewIndex = (viewType == RenderViewType::Scene) ? 1u : 0u;
 	ViewLightingTemporalState& viewState = lightingTemporalStateByView[viewIndex];
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ShouldResetTemporalViewState(viewState.valid, viewState.lastCameraWorldPosition, viewState.lastProjectionMatrix, presentation))
+	if (ShouldResetTemporalViewState(viewState.valid, viewState.lastCameraLocalPosition, viewState.lastProjectionMatrix, presentation))
 	{
 		viewState.lights.clear();
 		viewState.previousShadowOwners.fill(TerraEngine::EMPTY_UUID);
@@ -808,7 +808,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 	for (std::size_t candidateIndex = 0; candidateIndex < presentation.lightCandidates.size(); ++candidateIndex)
 	{
 		UploadScoredCandidate entry{};
-		entry.score = ComputeSceneInfluenceScore(presentation.lightCandidates[candidateIndex], presentation.cameraWorldPosition, frustumPlanes);
+		entry.score = ComputeSceneInfluenceScore(presentation.lightCandidates[candidateIndex], presentation.cameraLocalPosition, frustumPlanes);
 		entry.originalIndex = candidateIndex;
 		uploadScores.push_back(entry);
 	}
@@ -853,7 +853,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		scored.uploadedIndex = uploadedIndex;
 		scored.screenInfluence = ComputeProjectedScreenInfluence(candidate, presentation.viewMatrix, presentation.projectionMatrix, frustumPlanes);
 		scored.gpuVisibilityScore = 0.0f;
-		scored.baseScore = ComputeSceneInfluenceScore(candidate, presentation.cameraWorldPosition, frustumPlanes);
+		scored.baseScore = ComputeSceneInfluenceScore(candidate, presentation.cameraLocalPosition, frustumPlanes);
 		scored.baseScore += scored.screenInfluence * 4000.0f;
 
 		const auto gpuIt = previousGpuAnalysis.recordsByLightId.find(candidate.lightId);
@@ -1269,7 +1269,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 	}
 
 	viewState.previousShadowOwners = currentShadowOwners;
-	viewState.lastCameraWorldPosition = presentation.cameraWorldPosition;
+	viewState.lastCameraLocalPosition = presentation.cameraLocalPosition;
 	viewState.lastViewMatrix = presentation.viewMatrix;
 	viewState.lastProjectionMatrix = presentation.projectionMatrix;
 	viewState.valid = true;
@@ -4314,8 +4314,8 @@ void VulkanContext::RenderFrame(
 			// texture index, otherwise every shadowed light samples slot zero.
 			const uint32_t shadowSlotIndex = static_cast<uint32_t>(std::clamp(assignedShadowSlot, 0.0f, static_cast<float>(VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS - 1u)));
 			if (lightType == 0u) {
-				const glm::mat4 lightViewProjection = BuildDirectionalShadowViewProjection(light, presentation.cameraWorldPosition);
-				const glm::vec3 snappedShadowCenter = ComputeDirectionalShadowCenter(light, presentation.cameraWorldPosition);
+				const glm::mat4 lightViewProjection = BuildDirectionalShadowViewProjection(light, presentation.cameraLocalPosition);
+				const glm::vec3 snappedShadowCenter = ComputeDirectionalShadowCenter(light, presentation.cameraLocalPosition);
 				light.positionAndType.x = snappedShadowCenter.x;
 				light.positionAndType.y = snappedShadowCenter.y;
 				light.positionAndType.z = snappedShadowCenter.z;
@@ -4610,7 +4610,7 @@ void VulkanContext::RenderFrame(
 
 	FrameCullingDataGPU analysisCullingData{};
 	analysisCullingData.frustumPlanes = BuildFrustumPlanes(currentViewProjection);
-	analysisCullingData.cameraPositionAndEpsilon = glm::vec4(presentation.cameraWorldPosition, std::max(presentation.cullingEpsilon, 0.0001f));
+	analysisCullingData.cameraPositionAndEpsilon = glm::vec4(presentation.cameraLocalPosition, std::max(presentation.cullingEpsilon, 0.0001f));
 	analysisCullingData.clusterGridAndLightCount = glm::uvec4(
 		kLightingClusterDimX,
 		kLightingClusterDimY,
@@ -7276,6 +7276,12 @@ void VulkanContext::RenderFrame(
 		identityTarget.identityFrameId = publication->frameId != 0u
 			? publication->frameId : impl->backendFrameSerial;
 		identityTarget.identityRendererGeneration = impl->renderSessionGeneration;
+		identityTarget.identityOriginGeneration =
+			presentation.referenceFrame.originGeneration;
+		identityTarget.identitySpatialGeneration =
+			presentation.referenceFrame.spatialGeneration;
+		identityTarget.identityResidencyGeneration =
+			presentation.referenceFrame.residencyGeneration;
 	}
 	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.mainpass.end" : "game.mainpass.end");
 			
@@ -7333,7 +7339,7 @@ void VulkanContext::RenderFrame(
 	std::uint64_t cameraHash = 1469598103934665603ull;
 	HashMat4(cameraHash, publicationPresentation->viewMatrix);
 	HashMat4(cameraHash, publicationPresentation->projectionMatrix);
-	HashVec4(cameraHash, glm::vec4(publicationPresentation->cameraWorldPosition, 1.0f));
+	HashVec4(cameraHash, glm::vec4(publicationPresentation->cameraLocalPosition, 1.0f));
 
 	std::uint64_t targetHash = 1469598103934665603ull;
 	HashCombine(targetHash, static_cast<std::uint64_t>(outputRequest.kind));
@@ -9552,7 +9558,10 @@ bool VulkanContext::QueueConventionalVisibilityIdentityReadback(
 	}
 	if (target.identityFrameId != request.frameId
 		|| (request.rendererGeneration != 0u
-			&& target.identityRendererGeneration != request.rendererGeneration)) {
+			&& target.identityRendererGeneration != request.rendererGeneration)
+		|| target.identityOriginGeneration != request.originGeneration
+		|| target.identitySpatialGeneration != request.spatialGeneration
+		|| target.identityResidencyGeneration != request.residencyGeneration) {
 		TERRAENGINE_LOG(LogLevel::Warning,
 			"Rejecting Vulkan conventional identity readback because rendered target metadata does not match the request. "
 				<< "requestFrame=" << request.frameId << " targetFrame=" << target.identityFrameId
@@ -9629,6 +9638,9 @@ bool VulkanContext::QueueConventionalVisibilityIdentityReadback(
 	pending.completion.rendererGeneration = request.rendererGeneration != 0u
 		? request.rendererGeneration : impl->renderSessionGeneration;
 	pending.completion.targetGeneration = target.generation;
+	pending.completion.originGeneration = target.identityOriginGeneration;
+	pending.completion.spatialGeneration = target.identitySpatialGeneration;
+	pending.completion.residencyGeneration = target.identityResidencyGeneration;
 	pending.completion.dedicatedCaptureTarget = request.dedicatedCaptureTarget;
 	pending.sourceImage = target.visibilityIdentity.image;
 	pending.stagingBuffer = staging.buffer;
@@ -9654,6 +9666,9 @@ VulkanContext::GetConventionalVisibilityIdentityTargetMetadata(
 	metadata.frameId = target.identityFrameId;
 	metadata.rendererGeneration = target.identityRendererGeneration;
 	metadata.targetGeneration = target.generation;
+	metadata.originGeneration = target.identityOriginGeneration;
+	metadata.spatialGeneration = target.identitySpatialGeneration;
+	metadata.residencyGeneration = target.identityResidencyGeneration;
 	metadata.dedicatedCaptureTarget = dedicatedCaptureTarget;
 	return metadata.IsComplete()
 		? std::optional<TerraEngine::Renderer::ConventionalVisibilityIdentityTargetMetadata>(
@@ -9689,7 +9704,10 @@ void VulkanContext::Impl::ProcessConventionalVisibilityIdentityReadbacks()
 			if (it->sourceImage != currentTarget.visibilityIdentity.image
 				|| it->completion.targetGeneration != currentTarget.generation
 				|| it->completion.frameId != currentTarget.identityFrameId
-				|| it->completion.rendererGeneration != currentTarget.identityRendererGeneration) {
+				|| it->completion.rendererGeneration != currentTarget.identityRendererGeneration
+				|| it->completion.originGeneration != currentTarget.identityOriginGeneration
+				|| it->completion.spatialGeneration != currentTarget.identitySpatialGeneration
+				|| it->completion.residencyGeneration != currentTarget.identityResidencyGeneration) {
 				it->completion.rejectionReason =
 					"Vulkan identity readback target was recreated before its fence completed.";
 				it->completion.authoritative = false;

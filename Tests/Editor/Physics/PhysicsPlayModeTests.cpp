@@ -44,12 +44,16 @@ namespace TerraEngine::EditorTests {
 			ColliderSetComponent* colliders = objects.AddComponent<ColliderSetComponent>(authoredObject);
 			context.Expect(authoredTransform != nullptr && rigidBody != nullptr && colliders != nullptr,
 				"The editor fixture must create every authored primitive-body component.");
-			authoredTransform->position = {0.0F, 5.0F, 0.0F};
+			TerraEngine::Scene::WorldPose authoredPose;
+			authoredPose.position.offsetMetres = {0.0, 5.0, 0.0};
+			context.Expect(objects.SetCanonicalWorldPose(authoredObject, authoredPose) == TerraEngine::Scene::WorldCoordinateError::None,
+				"The Play Mode fixture canonical pose must be accepted.");
 			rigidBody->useGravity = true;
 			colliders->Add();
 			objects.MarkObjectTransformDirty(authoredObject);
 			const nlohmann::json authoredSnapshot = Serializer::SerializeObject(authoredObject);
 			const TerraEngine::Scene::PreparedSceneDecode preparedRestore = Serializer::PrepareSceneDecode({
+				{"format", TerraEngine::Scene::kTerraSceneUnboundedFormat},
 				{"name", "Play Mode Physics"},
 				{"objects", nlohmann::json::array({authoredSnapshot})}
 			});

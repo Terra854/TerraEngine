@@ -145,7 +145,7 @@ namespace TerraEngine::EditorTests
 				// This intentionally uses only the minimum accepted authored fields.
 				// It makes the 10,000-object timing input deterministic and keeps the
 				// gate focused on project readiness instead of renderer or physics work.
-				output << "{\"name\":\"Readiness Fixture\",\"objects\":[";
+				output << "{\"format\":\"TerraSceneUnboundedV1\",\"name\":\"Readiness Fixture\",\"objects\":[";
 				for (std::size_t index = 0U; index < objectCount; ++index)
 				{
 					if (index != 0U)

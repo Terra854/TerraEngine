@@ -232,11 +232,11 @@ namespace TerraEngine::Editor::SceneViewOverlay
 
 	bool MarkerPipeline::UpsertPoseRecord(const MarkerPoseRecord& pose)
 	{
-		if (!UuidValid(pose.objectId) || pose.objectLifetimeGeneration == 0u || !TerraEngine::Scene::IsFinite(pose.worldPosition))
+		if (!UuidValid(pose.objectId) || pose.objectLifetimeGeneration == 0u || !TerraEngine::Scene::IsFinite(pose.localPosition))
 		{
 			return false;
 		}
-		if (pose.worldBounds && pose.worldBounds->state == TerraEngine::Scene::SpatialBoundsState::Invalid)
+		if (pose.localBounds && pose.localBounds->state == TerraEngine::Scene::SpatialBoundsState::Invalid)
 		{
 			return false;
 		}
@@ -263,8 +263,9 @@ namespace TerraEngine::Editor::SceneViewOverlay
 				&& current.transformRevision == pose.transformRevision
 				&& current.hierarchyGeneration == pose.hierarchyGeneration
 				&& current.parentWorldGeneration == pose.parentWorldGeneration
-				&& Vec3Equal(current.worldPosition, pose.worldPosition)
-				&& BoundsEqual(current.worldBounds, pose.worldBounds)
+				&& current.canonicalPosition == pose.canonicalPosition
+				&& Vec3Equal(current.localPosition, pose.localPosition)
+				&& BoundsEqual(current.localBounds, pose.localBounds)
 				&& current.movable == pose.movable;
 			if (unchanged)
 			{
@@ -489,7 +490,7 @@ namespace TerraEngine::Editor::SceneViewOverlay
 			const MarkerStaticRecord& staticRecord = *source.stable;
 			const MarkerPoseRecord& pose = *source.pose;
 
-			const glm::vec4 clip = query.viewProjection * glm::vec4(pose.worldPosition, 1.0f);
+			const glm::vec4 clip = query.viewProjection * glm::vec4(pose.localPosition, 1.0f);
 			if (!std::isfinite(clip.w) || clip.w <= 0.0001f || query.viewportSize.x <= 0.0f || query.viewportSize.y <= 0.0f)
 			{
 				++result.candidates.frustumRejectedCount;
@@ -502,7 +503,7 @@ namespace TerraEngine::Editor::SceneViewOverlay
 				continue;
 			}
 
-			const float distance = glm::length(pose.worldPosition - query.cameraPosition);
+			const float distance = glm::length(pose.localPosition - query.cameraPosition);
 			if (!std::isfinite(distance) || (preference.maximumMarkerDistance > 0.0f && distance > preference.maximumMarkerDistance))
 			{
 				++result.candidates.distanceRejectedCount;
@@ -510,7 +511,7 @@ namespace TerraEngine::Editor::SceneViewOverlay
 			}
 
 			float projectedSize = 16.0f;
-			const TerraEngine::Scene::SpatialAABB* bounds = pose.worldBounds ? &*pose.worldBounds : &hit.bounds;
+			const TerraEngine::Scene::SpatialAABB* bounds = pose.localBounds ? &*pose.localBounds : &hit.bounds;
 			if (bounds->IsUsable())
 			{
 				const glm::vec3 diameter = bounds->Extent() * 2.0f;

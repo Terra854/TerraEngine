@@ -34,6 +34,10 @@
 
 namespace TerraEngine::EditorTests
 {
+	static nlohmann::json CanonicalPosition(double x, double y, double z)
+	{
+		return {{"cell", {{"x", "0"}, {"y", "0"}, {"z", "0"}}}, {"offsetMetres", {x, y, z}}};
+	}
 	using TerraEngine::Editor::Automation::EditorMcpBridge;
 	using TerraEngine::Editor::Automation::EditorMcpTransport;
 
@@ -603,8 +607,7 @@ namespace TerraEngine::EditorTests
 				{"params", {
 					{"name", "camera.capture_custom"},
 					{"arguments", {
-						{"position", nlohmann::json::array({0.0f, 1.0f, 5.0f})},
-						{"target", nlohmann::json::array({0.0f, 0.0f, 0.0f})},
+						{"camera", {{"position", CanonicalPosition(0.0, 1.0, 5.0)}, {"lookAt", CanonicalPosition(0.0, 0.0, 0.0)}}},
 						{"width", 32u},
 						{"height", 32u}
 					}}
@@ -626,10 +629,12 @@ namespace TerraEngine::EditorTests
 		registry.Add("Editor.MCP.Transport.GameViewCaptureReturnsImageContent", [](TestContext& context) {
 			RenderSystem::Instance().Clear();
 			RenderSystem::Instance().SetGameViewTargetSize(glm::uvec2(32u, 32u));
+			TerraEngine::Scene::WorldPosition gameViewPosition;
+			gameViewPosition.offsetMetres = {0.0, 0.0, 5.0};
 			RenderSystem::Instance().SetGameViewCamera(
 				glm::mat4(1.0f),
 				glm::perspectiveZO(glm::radians(45.0f), 1.0f, 0.1f, 100.0f),
-				glm::vec3(0.0f, 0.0f, 5.0f));
+				gameViewPosition);
 			EditorMcpBridge bridge;
 			bridge.Initialize(nullptr);
 			bridge.SetEnabled(true);

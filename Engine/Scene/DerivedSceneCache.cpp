@@ -71,8 +71,8 @@ namespace TerraEngine::Scene {
 		};
 
 		bool IdentityMatches(const DerivedSceneCompatibilityIdentity& actual, const DerivedSceneCompatibilityIdentity& expected) {
-			return actual.sourceId == expected.sourceId && actual.sourceHash == expected.sourceHash
-				&& actual.dependencyHash == expected.dependencyHash
+			return actual.formatLineage == expected.formatLineage && actual.sourceId == expected.sourceId && actual.sourceHash == expected.sourceHash
+				&& actual.dependencyHash == expected.dependencyHash && actual.spatialArtifactHash == expected.spatialArtifactHash
 				&& actual.componentSchemaFingerprint == expected.componentSchemaFingerprint
 				&& actual.reflectionFingerprint == expected.reflectionFingerprint
 				&& actual.engineCompatibility == expected.engineCompatibility
@@ -96,7 +96,7 @@ namespace TerraEngine::Scene {
 			writer.WriteString(identity.sourceId); writer.WriteString(identity.sourceHash); writer.WriteString(identity.dependencyHash);
 			writer.WriteString(identity.componentSchemaFingerprint); writer.WriteString(identity.reflectionFingerprint);
 			writer.WriteString(identity.engineCompatibility); writer.WriteString(identity.platform);
-			writer.WriteU8(static_cast<std::uint8_t>(identity.byteOrder));
+			writer.WriteU8(static_cast<std::uint8_t>(identity.byteOrder)); writer.WriteString(identity.formatLineage); writer.WriteString(identity.spatialArtifactHash);
 		}
 
 		bool ReadIdentity(ByteReader& reader, DerivedSceneCompatibilityIdentity& identity) {
@@ -104,7 +104,7 @@ namespace TerraEngine::Scene {
 			return reader.ReadString(identity.sourceId) && reader.ReadString(identity.sourceHash)
 				&& reader.ReadString(identity.dependencyHash) && reader.ReadString(identity.componentSchemaFingerprint)
 				&& reader.ReadString(identity.reflectionFingerprint) && reader.ReadString(identity.engineCompatibility)
-				&& reader.ReadString(identity.platform) && reader.ReadU8(byteOrder)
+				&& reader.ReadString(identity.platform) && reader.ReadU8(byteOrder) && reader.ReadString(identity.formatLineage) && reader.ReadString(identity.spatialArtifactHash)
 				&& (identity.byteOrder = static_cast<DerivedSceneByteOrder>(byteOrder), true);
 		}
 	}
@@ -122,6 +122,9 @@ namespace TerraEngine::Scene {
 		const DerivedSceneManifest& manifest = envelope.manifest;
 		if (manifest.magic != kDerivedSceneMagic || manifest.formatVersion != kDerivedSceneFormatVersion) {
 			return {false, DerivedSceneCacheState::Rejected, "unsupported derived scene magic or format version"};
+		}
+		if (manifest.identity.formatLineage != kDerivedSceneUnboundedLineage) {
+			return {false, DerivedSceneCacheState::Rejected, "derived scene does not declare TerraSceneUnboundedV1 lineage"};
 		}
 		if (!IdentityMatches(manifest.identity, expectedIdentity)) {
 			return {false, DerivedSceneCacheState::Stale, "derived scene identity does not match authoritative source or runtime"};

@@ -1,0 +1,24 @@
+{
+	"schemaVersion": 1,
+	"profileId": "unbounded-scenes-soak-6h-v1",
+	"durationHours": 6,
+	"fixedResidentSet": {
+		"objectCount": 256,
+		"residentRegionCount": 8,
+		"residentPhysicsFrameCount": 2
+	},
+	"seed": 52601,
+	"samplingIntervalSeconds": 10,
+	"crossingsPerInterval": 32,
+	"requiredChecks": [
+		"resident-memory-bounded",
+		"queue-high-water-bounded",
+		"no-unrecovered-region-failure",
+		"no-unrecovered-physics-frame-failure",
+		"no-stale-result-accepted",
+		"no-partial-transaction-publication",
+		"deterministic-crossing-hash",
+		"complete-shutdown-finalization"
+	],
+	"failurePolicy": "incomplete-is-not-pass"
+}

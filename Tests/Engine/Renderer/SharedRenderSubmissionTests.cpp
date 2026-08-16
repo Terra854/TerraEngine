@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "Renderer/Graph/RenderFrameSnapshot.h"
+#include "RendererThreadingTestFixtures.h"
 
 namespace TerraEngine::Tests
 {
@@ -26,7 +27,8 @@ namespace TerraEngine::Tests
 			snapshot.renderables[1].materialId = snapshot.renderables[0].materialId;
 			snapshot.renderables[2].usingFallback = true;
 			const auto topology = BuildPersistentRenderTopology(snapshot, 5u);
-			const RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game, glm::uvec2(1280u, 720u), 1u, 6u };
+			RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game, glm::uvec2(1280u, 720u), 1u, 6u };
+			view.referenceFrame = MakeRendererTestReferenceFrame(8u, 1u, 1u);
 			const auto dynamic = BuildDynamicRenderFrameState(snapshot, topology, view, 8u);
 			context.Expect(dynamic.valid, "Shared submission preparation must publish a complete dynamic state.");
 			context.Expect(!dynamic.groups.empty(), "Compatible repeated instances must form an executable group.");

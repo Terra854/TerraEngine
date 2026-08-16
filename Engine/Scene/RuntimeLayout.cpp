@@ -266,8 +266,7 @@ namespace TerraEngine::Scene {
 			record.isStatic = entry.isStatic;
 			if (const auto propagated = propagatedByObject.find(entry.objectId); propagated != propagatedByObject.end())
 			{
-				record.worldTransform = propagated->second.worldTransform;
-				record.modelMatrix = propagated->second.modelMatrix;
+				record.worldPose = propagated->second.worldPose;
 				record.processed = true;
 			}
 			records.push_back(record);
@@ -337,9 +336,7 @@ namespace TerraEngine::Scene {
 				const std::uint64_t ancestorGeneration = snapshot.parentWorldStates[*entry.parentIndex].generation;
 				parentState.generation = CombineRuntimeGeneration(parentState.generation, parentObject->second.transformRevision);
 				parentState.generation = CombineRuntimeGeneration(parentState.generation, ancestorGeneration);
-				parentState.parentWorldTransform.position = parentObject->second.worldPosition;
-				parentState.parentWorldTransform.rotation = parentObject->second.worldRotation;
-				parentState.parentWorldTransform.scale = parentObject->second.worldScale;
+				parentState.parentWorldPose = parentObject->second.worldPose;
 			}
 
 			if (const auto previous = previousByObject.find(entry.objectId);
@@ -363,12 +360,8 @@ namespace TerraEngine::Scene {
 			record.objectId = entry.objectId;
 			record.layoutIndex = index;
 			record.parentIndex = entry.parentIndex;
-			record.localPosition = source.localPosition;
-			record.localRotation = source.localRotation;
-			record.localScale = source.localScale;
-			record.worldPosition = source.worldPosition;
-			record.worldRotation = source.worldRotation;
-			record.worldScale = source.worldScale;
+			record.parentRelativePose = source.parentRelativePose;
+			record.worldPose = source.worldPose;
 			record.transformRevision = source.transformRevision;
 			record.parentWorldGeneration = parentState.generation;
 			record.isStatic = entry.isStatic;

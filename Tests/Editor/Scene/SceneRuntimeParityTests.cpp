@@ -16,7 +16,7 @@ namespace TerraEngine::EditorTests {
 		registry.Add("Editor.SceneParity.SaveReloadKeepsPrefabOverrideState", [](TestContext& context) {
 			auto source = PrefabFixtures::MakePrefabSource();
 			auto instance = PrefabFixtures::MakePrefabInstance(source);
-			instance.overrides.push_back({instance.rootObjectId, "Transform", "Position", "1,2,3"});
+			instance.overrides.push_back({instance.rootObjectId, "Transform", "WorldPose", "canonical-root"});
 
 			TerraEngine::Scene::MarkStaleOverrides(instance, source);
 			context.Expect(!instance.overrides.front().stale, "Save/reload parity should keep valid overrides active.");

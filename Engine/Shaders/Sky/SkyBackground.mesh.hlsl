@@ -1,3 +1,5 @@
+#include "../Geometry/TerraWorldReferenceFrame.hlsli"
+
 struct SkyTaskPayload
 {
 	uint dispatchToken;

@@ -32,6 +32,10 @@ namespace TerraEngine::EditorTests
 
 	namespace
 	{
+		nlohmann::json CanonicalPosition(double x, double y, double z)
+		{
+			return {{"cell", {{"x", "0"}, {"y", "0"}, {"z", "0"}}}, {"offsetMetres", {x, y, z}}};
+		}
 		class TempAutomationProject
 		{
 		public:
@@ -55,6 +59,7 @@ namespace TerraEngine::EditorTests
 		nlohmann::json MakeSceneJson(const std::string& name)
 		{
 			return {
+				{"format", "TerraSceneUnboundedV1"},
 				{"name", name},
 				{"sceneSettings", nlohmann::json::object()},
 				{"objects", nlohmann::json::array()}
@@ -334,19 +339,19 @@ namespace TerraEngine::EditorTests
 				{{"object", objectId}, {"component", "Transform"}, {"property", "Scale"}, {"value", {0.25f, 0.5f, 0.75f}}},
 				WriteMode::WritesEnabled,
 				"transform-revision-1");
-			context.Expect(set.value("ok", false), "Reflected Transform property edit should succeed.");
+			context.Expect(!set.value("ok", true), "Generic reflected Transform property edits must be rejected by the canonical spatial authority boundary.");
 			const std::uint64_t afterEdit = ObjectManager::instance().GetObjectTransformRevision(object);
-			context.Expect(afterEdit > beforeEdit, "A reflected Transform edit must invalidate propagated world transforms.");
-			context.Expect(ObjectManager::instance().GetComponent<Transform>(object)->scale == glm::vec3(0.25f, 0.5f, 0.75f), "The reflected Transform edit should publish the requested scale.");
+			context.ExpectEqual(beforeEdit, afterEdit, "Rejected generic Transform edits must not advance world-transform history.");
+			context.Expect(ObjectManager::instance().GetComponent<Transform>(object)->worldPose.scale == glm::vec3(1.0f), "Rejected Transform edits must leave canonical scale unchanged.");
 
 			UndoRedoSystem::Instance().Undo();
 			const std::uint64_t afterUndo = ObjectManager::instance().GetObjectTransformRevision(object);
-			context.Expect(afterUndo > afterEdit, "Undoing a reflected Transform edit must invalidate propagated world transforms.");
-			context.Expect(ObjectManager::instance().GetComponent<Transform>(object)->scale == glm::vec3(1.0f), "Undo should restore the original Transform scale.");
+			context.ExpectEqual(afterEdit, afterUndo, "No undo entry should be created for a rejected Transform edit.");
+			context.Expect(ObjectManager::instance().GetComponent<Transform>(object)->worldPose.scale == glm::vec3(1.0f), "Rejected edits must retain the original Transform scale.");
 
 			UndoRedoSystem::Instance().Redo();
-			context.Expect(ObjectManager::instance().GetObjectTransformRevision(object) > afterUndo, "Redoing a reflected Transform edit must invalidate propagated world transforms.");
-			context.Expect(ObjectManager::instance().GetComponent<Transform>(object)->scale == glm::vec3(0.25f, 0.5f, 0.75f), "Redo should restore the reflected Transform scale.");
+			context.ExpectEqual(afterUndo, ObjectManager::instance().GetObjectTransformRevision(object), "Rejected edits must not create a redo entry.");
+			context.Expect(ObjectManager::instance().GetComponent<Transform>(object)->worldPose.scale == glm::vec3(1.0f), "Rejected edits must retain the original Transform scale after redo attempt.");
 			ObjectManager::instance().clear();
 			UndoRedoSystem::Instance().Clear();
 		});
@@ -470,7 +475,7 @@ namespace TerraEngine::EditorTests
 			EditorAutomationService service;
 			const nlohmann::json result = service.HandleTool(
 				"camera.capture_custom",
-				{{"position", nlohmann::json::array({0.0f, 1.0f, 5.0f})}, {"target", nlohmann::json::array({0.0f, 0.0f, 0.0f})}, {"width", 320u}, {"height", 180u}},
+				{{"camera", {{"position", CanonicalPosition(0.0, 1.0, 5.0)}, {"lookAt", CanonicalPosition(0.0, 0.0, 0.0)}}}, {"width", 320u}, {"height", 180u}},
 				WriteMode::ReadOnly,
 				"capture-custom");
 			context.Expect(result.value("ok", false), "Custom camera capture should succeed without mutating scene state.");
@@ -494,13 +499,13 @@ namespace TerraEngine::EditorTests
 		registry.Add("Editor.Automation.Service.CustomCameraParallelUpUsesFiniteFallback", [](TestContext& context) {
 			EditorAutomationService service;
 			for (const nlohmann::json& target : {
-				nlohmann::json::array({0.0f, 2.0f, 5.0f}),
-				nlohmann::json::array({0.0f, -2.0f, 5.0f}) })
+				CanonicalPosition(0.0, 2.0, 5.0),
+				CanonicalPosition(0.0, -2.0, 5.0) })
 			{
 				const nlohmann::json result = service.HandleTool(
 					"camera.capture_custom",
-					{{"position", nlohmann::json::array({0.0f, 0.0f, 5.0f})},
-					 {"target", target}, {"up", nlohmann::json::array({0.0f, 1.0f, 0.0f})},
+					{{"camera", {{"position", CanonicalPosition(0.0, 0.0, 5.0)},
+					 {"lookAt", target}, {"up", nlohmann::json::array({0.0f, 1.0f, 0.0f})}}},
 					 {"width", 64u}, {"height", 64u}},
 					WriteMode::ReadOnly, "capture-parallel-up");
 				context.Expect(result.value("ok", false),

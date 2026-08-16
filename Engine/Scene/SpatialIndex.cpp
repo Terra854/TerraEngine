@@ -9,6 +9,7 @@
 #include "Core/Scheduling/WorkerSafety.h"
 
 #include <algorithm>
+#include <iterator>
 
 namespace TerraEngine::Scene
 {
@@ -21,7 +22,25 @@ namespace TerraEngine::Scene
 
 		[[nodiscard]] bool IsFallbackRecord(const SpatialObjectRecord& record)
 		{
-			return record.worldBounds.state == SpatialBoundsState::Fallback || record.worldBounds.state == SpatialBoundsState::Invalid;
+			return record.localBounds.state == SpatialBoundsState::Fallback || record.localBounds.state == SpatialBoundsState::Invalid;
+		}
+
+		[[nodiscard]] bool FitsReferenceFrame(const SpatialObjectRecord& record, const SpatialReferenceFrame& frame)
+		{
+			// Local AABBs are useful only inside one bounded camera/physics frame.
+			// Rejecting an oversized float prevents producers from using it as a
+			// lossy replacement for the canonical WorldPosition address.
+			if (!record.localBounds.IsUsable())
+			{
+				return true;
+			}
+			const double maximum = frame.maximumLocalDistanceMetres;
+			return static_cast<double>(record.localBounds.min.x) >= -maximum
+				&& static_cast<double>(record.localBounds.min.y) >= -maximum
+				&& static_cast<double>(record.localBounds.min.z) >= -maximum
+				&& static_cast<double>(record.localBounds.max.x) <= maximum
+				&& static_cast<double>(record.localBounds.max.y) <= maximum
+				&& static_cast<double>(record.localBounds.max.z) <= maximum;
 		}
 
 		[[nodiscard]] bool BoundsEquivalent(const SpatialAABB& left, const SpatialAABB& right)
@@ -44,7 +63,9 @@ namespace TerraEngine::Scene
 				&& left.isStatic == right.isStatic
 				&& left.categoryMask == right.categoryMask
 				&& left.revision == right.revision
-				&& BoundsEquivalent(left.worldBounds, right.worldBounds);
+				&& left.canonicalOwner == right.canonicalOwner
+				&& left.frameGeneration == right.frameGeneration
+				&& BoundsEquivalent(left.localBounds, right.localBounds);
 		}
 	}
 
@@ -56,6 +77,27 @@ namespace TerraEngine::Scene
 	}
 
 	SpatialIndex::~SpatialIndex() = default;
+
+	bool SpatialIndex::SetReferenceFrame(SpatialReferenceFrame frame)
+	{
+		const WorldCoordinateResult normalized = NormalizeWorldPosition(frame.canonicalOrigin);
+		if (!normalized.Succeeded() || !std::isfinite(frame.maximumLocalDistanceMetres) || frame.maximumLocalDistanceMetres < 0.0)
+		{
+			return false;
+		}
+		frame.canonicalOrigin = normalized.position;
+		if (frame.generation != referenceFrame.generation || frame.canonicalOrigin != referenceFrame.canonicalOrigin)
+		{
+			Clear();
+			referenceFrame = std::move(frame);
+		}
+		return true;
+	}
+
+	SpatialReferenceFrame SpatialIndex::GetReferenceFrame() const
+	{
+		return referenceFrame;
+	}
 
 	void SpatialIndex::EnsurePartitions()
 	{
@@ -113,6 +155,8 @@ namespace TerraEngine::Scene
 			{
 				(record.isStatic ? staticRecords : movableRecords).push_back(record);
 			}
+			(void)staticPartition->SetReferenceFrame(referenceFrame);
+			(void)movablePartition->SetReferenceFrame(referenceFrame);
 			staticPartition->Rebuild(staticRecords);
 			movablePartition->Rebuild(movableRecords);
 			++staticPartitionRevision;
@@ -137,20 +181,27 @@ namespace TerraEngine::Scene
 			{
 				continue;
 			}
+			if (record.frameGeneration != referenceFrame.generation || !FitsReferenceFrame(record, referenceFrame))
+			{
+				// A stale local frame is not an uncertainty fallback: returning it
+				// could select an object at the wrong distant world location.
+				++diagnostics.rejectedObjectCount;
+				continue;
+			}
 			recordsById[record.objectId] = record;
 			diagnostics.indexedObjectCount++;
 			diagnostics.staticObjectCount += record.isStatic ? 1u : 0u;
 			diagnostics.dynamicObjectCount += record.isStatic ? 0u : 1u;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (!record.worldBounds.IsUsable() || IsFallbackRecord(record))
+			if (!record.localBounds.IsUsable() || IsFallbackRecord(record))
 			{
 				fallbackObjectIds.push_back(record.objectId);
 				nodeByObjectId[record.objectId] = -1;
 				diagnostics.fallbackObjectCount++;
-				diagnostics.invalidBoundsObjectCount += record.worldBounds.IsUsable() ? 0u : 1u;
+				diagnostics.invalidBoundsObjectCount += record.localBounds.IsUsable() ? 0u : 1u;
 				continue;
 			}
-			rootBounds = rootBounds.IsUsable() ? Merge(rootBounds, record.worldBounds) : record.worldBounds;
+			rootBounds = rootBounds.IsUsable() ? Merge(rootBounds, record.localBounds) : record.localBounds;
 		}
 
 		std::sort(fallbackObjectIds.begin(), fallbackObjectIds.end(), UuidLess);
@@ -172,7 +223,8 @@ namespace TerraEngine::Scene
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const SpatialObjectRecord& record : records)
 		{
-			if (record.objectId != TerraEngine::EMPTY_UUID && record.worldBounds.IsUsable() && !IsFallbackRecord(record))
+			if (record.objectId != TerraEngine::EMPTY_UUID && record.frameGeneration == referenceFrame.generation
+				&& FitsReferenceFrame(record, referenceFrame) && record.localBounds.IsUsable() && !IsFallbackRecord(record))
 			{
 				InsertObject(root, record);
 			}
@@ -203,6 +255,8 @@ namespace TerraEngine::Scene
 			{
 				(record.isStatic ? staticRecords : movableRecords).push_back(record);
 			}
+			(void)staticPartition->SetReferenceFrame(referenceFrame);
+			(void)movablePartition->SetReferenceFrame(referenceFrame);
 			staticPartition->Refresh(staticRecords);
 			movablePartition->Refresh(movableRecords);
 			const SpatialRefreshMode staticMode = staticPartition->diagnostics.refreshMode;
@@ -485,6 +539,11 @@ namespace TerraEngine::Scene
 		for (const SpatialBoundsPublicationChange& change : changes)
 		{
 			const TerraEngine::UUID& objectId = change.record.objectId;
+			if (change.kind != SpatialBoundsChangeKind::Remove
+				&& (change.record.frameGeneration != referenceFrame.generation || !FitsReferenceFrame(change.record, referenceFrame)))
+			{
+				return false;
+			}
 			if (auto existing = staticRecordsById.find(objectId); existing != staticRecordsById.end())
 			{
 				staticRecordsById.erase(existing);
@@ -664,7 +723,7 @@ namespace TerraEngine::Scene
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (node.depth < kMaxDepth)
 		{
-			const int childSlot = FindContainingChild(node, record.worldBounds);
+			const int childSlot = FindContainingChild(node, record.localBounds);
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (childSlot >= 0)
 			{
@@ -694,14 +753,15 @@ namespace TerraEngine::Scene
 	// SpatialIndex::InsertStoredRecord is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool SpatialIndex::InsertStoredRecord(const SpatialObjectRecord& record)
 	{
-		if (record.objectId == TerraEngine::EMPTY_UUID)
+		if (record.objectId == TerraEngine::EMPTY_UUID || record.frameGeneration != referenceFrame.generation
+			|| !FitsReferenceFrame(record, referenceFrame))
 		{
 			return false;
 		}
 
 		recordsById[record.objectId] = record;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!record.worldBounds.IsUsable() || IsFallbackRecord(record))
+		if (!record.localBounds.IsUsable() || IsFallbackRecord(record))
 		{
 			fallbackObjectIds.push_back(record.objectId);
 			std::sort(fallbackObjectIds.begin(), fallbackObjectIds.end(), UuidLess);
@@ -748,7 +808,11 @@ namespace TerraEngine::Scene
 	// SpatialIndex::CanRefreshRecordIncrementally is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool SpatialIndex::CanRefreshRecordIncrementally(const SpatialObjectRecord& record) const
 	{
-		if (!record.worldBounds.IsUsable() || IsFallbackRecord(record))
+		if (record.frameGeneration != referenceFrame.generation || !FitsReferenceFrame(record, referenceFrame))
+		{
+			return false;
+		}
+		if (!record.localBounds.IsUsable() || IsFallbackRecord(record))
 		{
 			return true;
 		}
@@ -756,7 +820,7 @@ namespace TerraEngine::Scene
 		// The query traversal starts at the current root loose bounds. Any new
 		// indexable record outside that root could be missed by queries, so fall
 		// back to a full rebuild to grow the tree around the latest aggregate.
-		return !nodes.empty() && Contains(nodes.front().looseBounds, record.worldBounds);
+		return !nodes.empty() && Contains(nodes.front().looseBounds, record.localBounds);
 	}
 
 	// SpatialIndex::RecalculateStoredDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -896,13 +960,13 @@ namespace TerraEngine::Scene
 		switch (shape.kind)
 		{
 			case QueryKind::AABB:
-				return Overlaps(shape.aabb, record.worldBounds) ? std::optional<float>(0.0f) : std::nullopt;
+				return Overlaps(shape.aabb, record.localBounds) ? std::optional<float>(0.0f) : std::nullopt;
 			case QueryKind::Sphere:
-				return Intersects(shape.sphere, record.worldBounds) ? std::optional<float>(glm::length(record.worldBounds.Center() - shape.sphere.center)) : std::nullopt;
+				return Intersects(shape.sphere, record.localBounds) ? std::optional<float>(glm::length(record.localBounds.Center() - shape.sphere.center)) : std::nullopt;
 			case QueryKind::Frustum:
-				return Intersects(shape.frustum, record.worldBounds) ? std::optional<float>(0.0f) : std::nullopt;
+				return Intersects(shape.frustum, record.localBounds) ? std::optional<float>(0.0f) : std::nullopt;
 			case QueryKind::Ray:
-				return Intersects(shape.ray, record.worldBounds);
+				return Intersects(shape.ray, record.localBounds);
 		}
 		return std::nullopt;
 	}
@@ -935,7 +999,9 @@ namespace TerraEngine::Scene
 		SpatialQueryHit hit{};
 		hit.objectId = record.objectId;
 		hit.entity = record.entity;
-		hit.bounds = record.worldBounds;
+		hit.bounds = record.localBounds;
+		hit.canonicalOwner = record.canonicalOwner;
+		hit.frameGeneration = record.frameGeneration;
 		hit.distance = distance;
 		hit.fallback = IsFallbackRecord(record);
 		result.fallbackCount += hit.fallback ? 1u : 0u;
@@ -1181,5 +1247,83 @@ namespace TerraEngine::Scene
 	{
 		std::scoped_lock lock(publishMutex);
 		return latest;
+	}
+
+	namespace
+	{
+		template<typename Query>
+		CrossRegionSpatialQueryResult QuerySparseResidentRegions(
+			const PublishedWorldRegionResidency& residency,
+			std::vector<WorldRegionKey> keys,
+			const SpatialQueryFilter& filter,
+			Query&& query)
+		{
+			CrossRegionSpatialQueryResult output{};
+			std::sort(keys.begin(), keys.end());
+			keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+			std::unordered_set<TerraEngine::UUID> seen;
+			for (const WorldRegionKey& key : keys)
+			{
+				const auto region = residency.residentRegions.find(key);
+				if (region == residency.residentRegions.end() || !region->second) continue;
+				++output.visitedRegionCount;
+				SpatialIndex fallbackIndex;
+				if (region->second->staticSpatialIndex && region->second->movableSpatialIndex)
+				{
+					// Snapshot indices were built by the worker candidate and are already
+					// immutable. Query both partitions before UUID merging below.
+					SpatialQueryResult staticResult = query(*region->second->staticSpatialIndex);
+					SpatialQueryResult movableResult = query(*region->second->movableSpatialIndex);
+					output.result.validInput = output.result.validInput && staticResult.validInput && movableResult.validInput;
+					output.result.rejectedCount += staticResult.rejectedCount + movableResult.rejectedCount;
+					output.result.fallbackCount += staticResult.fallbackCount + movableResult.fallbackCount;
+					staticResult.hits.insert(staticResult.hits.end(), std::make_move_iterator(movableResult.hits.begin()), std::make_move_iterator(movableResult.hits.end()));
+					for (SpatialQueryHit& hit : staticResult.hits) if (seen.insert(hit.objectId).second) output.result.hits.push_back(std::move(hit));
+					continue;
+				}
+				(void)fallbackIndex.SetReferenceFrame(region->second->referenceFrame);
+				fallbackIndex.Rebuild(region->second->spatialRecords);
+				SpatialQueryResult local = query(fallbackIndex);
+				output.result.validInput = output.result.validInput && local.validInput;
+				output.result.rejectedCount += local.rejectedCount;
+				output.result.fallbackCount += local.fallbackCount;
+				for (SpatialQueryHit& hit : local.hits) if (seen.insert(hit.objectId).second) output.result.hits.push_back(std::move(hit));
+			}
+			// The proxy collection is one bounded coarse index, not a directory-wide
+			// scan. A temporary index keeps proxy intersection behavior identical to
+			// ordinary local records while UUID filtering removes owner/cover copies.
+			if (!residency.coarseProxies.empty())
+			{
+				std::vector<SpatialObjectRecord> proxies;
+				for (const OversizedSpatialProxy& proxy : residency.coarseProxies)
+				{
+					SpatialObjectRecord record{}; record.objectId = proxy.objectId; record.canonicalOwner = proxy.canonicalOwner; record.localBounds = proxy.localBounds; record.frameGeneration = 0;
+					proxies.push_back(std::move(record));
+				}
+				SpatialIndex proxyIndex; proxyIndex.Rebuild(proxies);
+				SpatialQueryResult local = query(proxyIndex);
+				output.coarseProxyCount = static_cast<std::uint32_t>(proxies.size());
+				for (SpatialQueryHit& hit : local.hits) if (seen.insert(hit.objectId).second) output.result.hits.push_back(std::move(hit));
+			}
+			std::sort(output.result.hits.begin(), output.result.hits.end(), [](const SpatialQueryHit& left, const SpatialQueryHit& right) { return UuidLess(left.objectId, right.objectId); });
+			return output;
+		}
+	}
+
+	CrossRegionSpatialQueryResult QueryResidentRegionsAABB(const PublishedWorldRegionResidency& residency, std::vector<WorldRegionKey> keys, const SpatialAABB& area, const SpatialQueryFilter& filter)
+	{
+		return QuerySparseResidentRegions(residency, std::move(keys), filter, [&area, &filter](const SpatialIndex& index) { return index.QueryAABB(area, filter); });
+	}
+	CrossRegionSpatialQueryResult QueryResidentRegionsSphere(const PublishedWorldRegionResidency& residency, std::vector<WorldRegionKey> keys, const SpatialSphere& sphere, const SpatialQueryFilter& filter)
+	{
+		return QuerySparseResidentRegions(residency, std::move(keys), filter, [&sphere, &filter](const SpatialIndex& index) { return index.QuerySphere(sphere, filter); });
+	}
+	CrossRegionSpatialQueryResult QueryResidentRegionsFrustum(const PublishedWorldRegionResidency& residency, std::vector<WorldRegionKey> keys, const SpatialFrustum& frustum, const SpatialQueryFilter& filter)
+	{
+		return QuerySparseResidentRegions(residency, std::move(keys), filter, [&frustum, &filter](const SpatialIndex& index) { return index.QueryFrustum(frustum, filter); });
+	}
+	CrossRegionSpatialQueryResult QueryResidentRegionsRay(const PublishedWorldRegionResidency& residency, std::vector<WorldRegionKey> keys, const SpatialRay& ray, const SpatialQueryFilter& filter)
+	{
+		return QuerySparseResidentRegions(residency, std::move(keys), filter, [&ray, &filter](const SpatialIndex& index) { return index.QueryRay(ray, filter); });
 	}
 }

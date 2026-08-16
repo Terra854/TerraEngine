@@ -17,6 +17,99 @@ namespace TerraEngine::Physics {
 		return position.IsFinite() && rotation.IsFinite();
 	}
 
+	bool PhysicsFrameDescriptor::IsValid() const noexcept {
+		return frame.IsValid() && world.IsValid()
+			&& std::isfinite(maximumLocalMagnitudeMetres)
+			&& maximumLocalMagnitudeMetres > 0.0
+			&& TerraEngine::Scene::NormalizeWorldPosition(canonicalOrigin).Succeeded();
+	}
+
+	bool PhysicsFrameLocalPose::IsFinite() const noexcept {
+		return frame.IsValid() && pose.IsFinite();
+	}
+
+	PhysicsFramePoseConversion LocalizePhysicsPose(
+		const TerraEngine::Scene::WorldPose& canonicalPose,
+		const PhysicsFrameDescriptor& frame) noexcept {
+		PhysicsFramePoseConversion result;
+		if(!frame.IsValid()) {
+			result.error = PhysicsFrameConversionError::InvalidFrame;
+			return result;
+		}
+		if(!std::isfinite(canonicalPose.position.offsetMetres.x)
+			|| !std::isfinite(canonicalPose.position.offsetMetres.y)
+			|| !std::isfinite(canonicalPose.position.offsetMetres.z)
+			|| !std::isfinite(canonicalPose.rotation.x) || !std::isfinite(canonicalPose.rotation.y)
+			|| !std::isfinite(canonicalPose.rotation.z) || !std::isfinite(canonicalPose.rotation.w)) {
+			result.error = PhysicsFrameConversionError::NonFinitePose;
+			return result;
+		}
+		const TerraEngine::Scene::WorldLocalizationResult localized =
+			TerraEngine::Scene::LocalizeWorldPosition(
+				canonicalPose.position, frame.canonicalOrigin, frame.maximumLocalMagnitudeMetres);
+		if(!localized.Succeeded()) {
+			result.error = localized.error == TerraEngine::Scene::WorldCoordinateError::UnsafeLocalRange
+				? PhysicsFrameConversionError::OutsideLocalBounds
+				: PhysicsFrameConversionError::CoordinateOverflow;
+			return result;
+		}
+		result.localPose.frame = frame.frame;
+		result.localPose.pose.position = {static_cast<float>(localized.offsetMetres.x),
+			static_cast<float>(localized.offsetMetres.y), static_cast<float>(localized.offsetMetres.z)};
+		result.localPose.pose.rotation = {canonicalPose.rotation.x, canonicalPose.rotation.y,
+			canonicalPose.rotation.z, canonicalPose.rotation.w};
+		return result;
+	}
+
+	PhysicsCanonicalPoseConversion ReconstructCanonicalPhysicsPose(
+		const PhysicsFrameLocalPose& localPose,
+		const PhysicsFrameDescriptor& frame) noexcept {
+		PhysicsCanonicalPoseConversion result;
+		if(!frame.IsValid()) {
+			result.error = PhysicsFrameConversionError::InvalidFrame;
+			return result;
+		}
+		if(localPose.frame != frame.frame) {
+			result.error = PhysicsFrameConversionError::StaleFrame;
+			return result;
+		}
+		if(!localPose.pose.IsFinite()) {
+			result.error = PhysicsFrameConversionError::NonFinitePose;
+			return result;
+		}
+		const double x = static_cast<double>(localPose.pose.position.x);
+		const double y = static_cast<double>(localPose.pose.position.y);
+		const double z = static_cast<double>(localPose.pose.position.z);
+		if(std::sqrt(x * x + y * y + z * z) > frame.maximumLocalMagnitudeMetres) {
+			result.error = PhysicsFrameConversionError::OutsideLocalBounds;
+			return result;
+		}
+		TerraEngine::Scene::WorldDelta delta;
+		delta.offsetMetres = {x, y, z};
+		const TerraEngine::Scene::WorldCoordinateResult position =
+			TerraEngine::Scene::ApplyWorldDelta(frame.canonicalOrigin, delta);
+		if(!position.Succeeded()) {
+			result.error = PhysicsFrameConversionError::CoordinateOverflow;
+			return result;
+		}
+		result.canonicalPose.position = position.position;
+		result.canonicalPose.rotation = {localPose.pose.rotation.w, localPose.pose.rotation.x,
+			localPose.pose.rotation.y, localPose.pose.rotation.z};
+		return result;
+	}
+
+	std::string_view ToString(PhysicsFrameConversionError error) noexcept {
+		switch(error) {
+		case PhysicsFrameConversionError::None: return "None";
+		case PhysicsFrameConversionError::InvalidFrame: return "InvalidFrame";
+		case PhysicsFrameConversionError::StaleFrame: return "StaleFrame";
+		case PhysicsFrameConversionError::NonFinitePose: return "NonFinitePose";
+		case PhysicsFrameConversionError::OutsideLocalBounds: return "OutsideLocalBounds";
+		case PhysicsFrameConversionError::CoordinateOverflow: return "CoordinateOverflow";
+		}
+		return "Unknown";
+	}
+
 	std::string_view ToString(PhysicsHandleStatus status) {
 		switch(status) {
 		case PhysicsHandleStatus::Invalid: return "Invalid";

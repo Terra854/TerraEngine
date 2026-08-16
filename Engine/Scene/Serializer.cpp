@@ -8,6 +8,7 @@
 #include "Components/AnimatorComponent.h"
 #include "Components/AudioListenerComponent.h"
 #include "Components/AudioSourceComponent.h"
+#include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
 #include "Core/Object/Component.h"
 #include "Components/Physics/CharacterControllerComponent.h"
@@ -16,6 +17,7 @@
 #include "Components/Physics/RigidBodyComponent.h"
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <charconv>
 #include <cmath>
 #include <limits>
 
@@ -796,6 +798,48 @@ namespace {
 		destination = character;
 		return true;
 	}
+
+	nlohmann::json SerializeCanonicalTransform(const Transform& transform)
+	{
+		// Transform has no reflected float position alias.  Persist both exact
+		// world authority and bounded hierarchy-relative data explicitly.
+		return {{"WorldPose", {{"position", Serializer::SerializeWorldPosition(transform.worldPose.position)},
+			{"rotation", {transform.worldPose.rotation.w, transform.worldPose.rotation.x, transform.worldPose.rotation.y, transform.worldPose.rotation.z}},
+			{"scale", {transform.worldPose.scale.x, transform.worldPose.scale.y, transform.worldPose.scale.z}}}},
+			{"ParentRelativePose", {{"translationMetres", {transform.parentRelativePose.translationMetres.x, transform.parentRelativePose.translationMetres.y, transform.parentRelativePose.translationMetres.z}},
+			{"rotation", {transform.parentRelativePose.rotation.w, transform.parentRelativePose.rotation.x, transform.parentRelativePose.rotation.y, transform.parentRelativePose.rotation.z}},
+			{"scale", {transform.parentRelativePose.scale.x, transform.parentRelativePose.scale.y, transform.parentRelativePose.scale.z}},
+			{"transformSpaceId", transform.parentRelativePose.transformSpaceId}}}};
+	}
+
+	bool DeserializeCanonicalTransform(const nlohmann::json& json, Transform& destination)
+	{
+		if (!json.is_object() || !json.contains("WorldPose") || !json["WorldPose"].is_object() || !json.contains("ParentRelativePose") || !json["ParentRelativePose"].is_object()) return false;
+		const nlohmann::json& world = json["WorldPose"];
+		std::string positionError;
+		const auto position = world.contains("position") ? Serializer::DeserializeWorldPosition(world["position"], &positionError) : std::nullopt;
+		const nlohmann::json& relative = json["ParentRelativePose"];
+		if (!position || !world.contains("rotation") || !world["rotation"].is_array() || world["rotation"].size() != 4U
+			|| !world.contains("scale") || !world["scale"].is_array() || world["scale"].size() != 3U
+			|| !relative.contains("translationMetres") || !relative["translationMetres"].is_array() || relative["translationMetres"].size() != 3U
+			|| !relative.contains("rotation") || !relative["rotation"].is_array() || relative["rotation"].size() != 4U
+			|| !relative.contains("scale") || !relative["scale"].is_array() || relative["scale"].size() != 3U
+			|| !relative.contains("transformSpaceId") || !relative["transformSpaceId"].is_number_unsigned()) return false;
+		try {
+			TerraEngine::Scene::WorldPose pose;
+			pose.position = *position;
+			pose.rotation = {world["rotation"][0].get<float>(), world["rotation"][1].get<float>(), world["rotation"][2].get<float>(), world["rotation"][3].get<float>()};
+			pose.scale = {world["scale"][0].get<float>(), world["scale"][1].get<float>(), world["scale"][2].get<float>()};
+			TerraEngine::Scene::ParentRelativePose local;
+			local.translationMetres = {relative["translationMetres"][0].get<double>(), relative["translationMetres"][1].get<double>(), relative["translationMetres"][2].get<double>()};
+			local.rotation = {relative["rotation"][0].get<float>(), relative["rotation"][1].get<float>(), relative["rotation"][2].get<float>(), relative["rotation"][3].get<float>()};
+			local.scale = {relative["scale"][0].get<float>(), relative["scale"][1].get<float>(), relative["scale"][2].get<float>()};
+			local.transformSpaceId = relative["transformSpaceId"].get<std::uint64_t>();
+			if (!TerraEngine::Scene::IsWorldPoseFinite(pose) || !TerraEngine::Scene::IsParentRelativePoseInRange(local)) return false;
+			destination.worldPose = pose; destination.parentRelativePose = local;
+			return true;
+		} catch (const nlohmann::json::exception&) { return false; }
+	}
 }
 
 // SerializeObjectRecursive snapshots authored scene state through the canonical
@@ -828,6 +872,13 @@ nlohmann::json SerializeObjectRecursive(Object object) {
 
 		if (functions.entityHasComponent && functions.entityHasComponent(enttRegistry, entity))
 		{
+			if(compName == Transform::kComponentName) {
+				if(const Transform* transform = enttRegistry.try_get<Transform>(entity)) {
+					auto guard = transform->acquireReadLock();
+					objJson["components"][compName] = SerializeCanonicalTransform(*transform);
+				}
+				continue;
+			}
 			if(compName == AnimatorComponent::kComponentName) {
 				if(const AnimatorComponent* animator = enttRegistry.try_get<AnimatorComponent>(entity)) {
 					auto guard = animator->acquireReadLock();
@@ -1051,6 +1102,13 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 					}
 					continue;
 				}
+				if(compName == Transform::kComponentName) {
+					Transform* transform = enttRegistry.try_get<Transform>(entity);
+					if(transform == nullptr || !DeserializeCanonicalTransform(compData, *transform)) {
+						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
+					}
+					continue;
+				}
 				if(compName == AnimatorComponent::kComponentName) {
 					AnimatorComponent* animator = enttRegistry.try_get<AnimatorComponent>(entity);
 					if(animator == nullptr || !DeserializeAnimator(compData, *animator)) {
@@ -1164,9 +1222,12 @@ TerraEngine::Scene::PreparedSceneDecode Serializer::PrepareSceneDecode(
 	const std::function<bool()>& cancellationRequested)
 {
 	TerraEngine::Scene::PreparedSceneDecode result;
-	if (!sceneJson.is_object())
+	if (!ValidateUnboundedSceneDocument(sceneJson, &result.reason))
 	{
-		result.reason = "authored scene root is not an object";
+		const std::string observedFormat = sceneJson.is_object() && sceneJson.contains("format")
+			? sceneJson["format"].dump()
+			: "<missing>";
+		result.reason = "scene graph decode observed format " + observedFormat + ": " + result.reason;
 		return result;
 	}
 
@@ -1239,4 +1300,72 @@ TerraEngine::Scene::PreparedSceneDecode Serializer::PrepareSceneDecode(
 	}
 	result.accepted = true;
 	return result;
+}
+
+TerraEngine::Scene::PreparedSceneDecode Serializer::PreparePrefabDecode(
+	const nlohmann::json& prefabJson,
+	const std::function<bool()>& cancellationRequested)
+{
+	TerraEngine::Scene::PreparedSceneDecode rejected;
+	if (!ValidateUnboundedPrefabDocument(prefabJson, &rejected.reason))
+	{
+		return rejected;
+	}
+
+	// Scene and prefab files deliberately keep different public format tags.
+	// Lower only this private value copy so the existing worker-safe graph
+	// decoder can be shared without accepting a prefab through the scene API.
+	nlohmann::json graphDocument = prefabJson;
+	graphDocument["format"] = std::string(TerraEngine::Scene::kTerraSceneUnboundedFormat);
+	if (!ValidateUnboundedSceneDocument(graphDocument, &rejected.reason))
+	{
+		rejected.reason = "prefab graph lowering failed: " + rejected.reason;
+		return rejected;
+	}
+	TerraEngine::Scene::PreparedSceneDecode decoded = PrepareSceneDecode(graphDocument, cancellationRequested);
+	if (!decoded.accepted && !decoded.reason.empty())
+	{
+		decoded.reason = "prefab graph decode failed: " + decoded.reason;
+	}
+	return decoded;
+}
+
+nlohmann::json Serializer::SerializeWorldPosition(const TerraEngine::Scene::WorldPosition& position)
+{
+	const auto normalized = TerraEngine::Scene::NormalizeWorldPosition(position);
+	if (!normalized.Succeeded()) return nlohmann::json::object();
+	return {{"cell", {{"x", std::to_string(normalized.position.cell.x)}, {"y", std::to_string(normalized.position.cell.y)}, {"z", std::to_string(normalized.position.cell.z)}}}, {"offsetMetres", {normalized.position.offsetMetres.x, normalized.position.offsetMetres.y, normalized.position.offsetMetres.z}}};
+}
+
+std::optional<TerraEngine::Scene::WorldPosition> Serializer::DeserializeWorldPosition(const nlohmann::json& value, std::string* outError)
+{
+	auto fail = [outError](std::string reason) -> std::optional<TerraEngine::Scene::WorldPosition> { if (outError) *outError = std::move(reason); return std::nullopt; };
+	if (!value.is_object() || !value.contains("cell") || !value["cell"].is_object() || !value.contains("offsetMetres") || !value["offsetMetres"].is_array() || value["offsetMetres"].size() != 3U) return fail("world position must contain decimal cells and three offsets");
+	TerraEngine::Scene::WorldPosition result{};
+	auto readCell = [&value](std::string_view axis, std::int64_t& destination) { const auto found = value["cell"].find(std::string(axis)); if (found == value["cell"].end() || !found->is_string()) return false; const std::string text = found->get<std::string>(); if (text.empty() || (text.size() > 1U && text.front() == '+')) return false; const auto parsed = std::from_chars(text.data(), text.data() + text.size(), destination); return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size(); };
+	if (!readCell("x", result.cell.x) || !readCell("y", result.cell.y) || !readCell("z", result.cell.z)) return fail("world position cells must be exact decimal int64 strings");
+	for (std::size_t index = 0U; index < 3U; ++index) { if (!value["offsetMetres"][index].is_number()) return fail("world position offsets must be numbers"); const double offset = value["offsetMetres"][index].get<double>(); if (!std::isfinite(offset)) return fail("world position offsets must be finite"); result.offsetMetres[static_cast<glm::length_t>(index)] = offset; }
+	const auto normalized = TerraEngine::Scene::NormalizeWorldPosition(result);
+	if (!normalized.Succeeded()) return fail("world position overflows during normalization");
+	if (normalized.position.cell != result.cell || normalized.position.offsetMetres != result.offsetMetres) return fail("world position offsets are not normalized");
+	return result;
+}
+
+bool Serializer::ValidateUnboundedSceneDocument(const nlohmann::json& document, std::string* outError)
+{
+	auto fail = [outError](std::string reason) { if (outError) *outError = std::move(reason); return false; };
+	if (!document.is_object()) return fail("TerraSceneUnboundedV1 root is not an object");
+	const auto format = document.find("format");
+	if (format == document.end() || !format->is_string() || format->get<std::string>() != TerraEngine::Scene::kTerraSceneUnboundedFormat) return fail("scene format must be TerraSceneUnboundedV1");
+	return document.contains("objects") && document["objects"].is_array() ? true : fail("TerraSceneUnboundedV1 requires an objects array");
+}
+
+bool Serializer::ValidateUnboundedPrefabDocument(const nlohmann::json& document, std::string* outError)
+{
+	auto fail = [outError](std::string reason) { if (outError) *outError = std::move(reason); return false; };
+	if (!document.is_object()) return fail("TerraPrefabUnboundedV1 root is not an object");
+	const auto format = document.find("format");
+	if (format == document.end() || !format->is_string() || format->get<std::string>() != TerraEngine::Scene::kTerraPrefabUnboundedFormat) return fail("prefab format must be TerraPrefabUnboundedV1");
+	if (!document.contains("sourceId") || !document["sourceId"].is_string()) return fail("TerraPrefabUnboundedV1 requires a string sourceId");
+	return document.contains("objects") && document["objects"].is_array() ? true : fail("TerraPrefabUnboundedV1 requires an objects array");
 }

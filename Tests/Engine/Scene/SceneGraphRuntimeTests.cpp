@@ -61,6 +61,17 @@ namespace TerraEngine::Tests {
 			context.Expect(hasCycle, "Validation should explain hierarchy cycles.");
 		});
 
+		registry.Add("SceneGraphRuntime.ValidationRejectsUnboundedParentRelativePose", [](TestContext& context) {
+			auto graph = SceneFixtures::MakeThreeLevelGraph();
+			graph.objects[SceneFixtures::MakeStableUuid(2)].parentRelativePose.translationMetres.x =
+				TerraEngine::Scene::kTransformSpaceMaximumRelativeRadiusMetres + 1.0;
+			context.Expect(!TerraEngine::Scene::ValidateSceneGraph(graph), "A child relationship beyond the local transform radius must be rejected before propagation.");
+			const bool hasBoundedPoseDiagnostic = std::any_of(graph.diagnostics.begin(), graph.diagnostics.end(), [](const TerraEngine::Scene::SceneDiagnostic& diagnostic) {
+				return diagnostic.message.find("bounded transform space") != std::string::npos;
+			});
+			context.Expect(hasBoundedPoseDiagnostic, "Validation should explain the bounded parent-relative pose rejection.");
+		});
+
 		registry.Add("SceneGraphRuntime.JsonBuilderReportsDuplicateIdentity", [](TestContext& context) {
 			nlohmann::json sceneJson;
 			sceneJson["objects"] = nlohmann::json::array({
@@ -83,19 +94,25 @@ namespace TerraEngine::Tests {
 			Object child = objects.createObject("Child");
 			Object newParent = objects.createObject("NewParent");
 
-			objects.GetComponent<Transform>(parent)->position = glm::vec3(10.0f, 0.0f, 0.0f);
-			objects.GetComponent<Transform>(child)->position = glm::vec3(1.0f, 0.0f, 0.0f);
-			objects.GetComponent<Transform>(newParent)->position = glm::vec3(-5.0f, 0.0f, 0.0f);
+			TerraEngine::Scene::WorldPose parentPose{};
+			parentPose.position.offsetMetres.x = 10.0;
+			TerraEngine::Scene::WorldPose childPose{};
+			childPose.position.offsetMetres.x = 1.0;
+			TerraEngine::Scene::WorldPose newParentPose{};
+			newParentPose.position.offsetMetres.x = -5.0;
+			context.Expect(objects.SetCanonicalWorldPose(parent, parentPose) == TerraEngine::Scene::WorldCoordinateError::None, "Parent pose should be accepted.");
+			context.Expect(objects.SetCanonicalWorldPose(child, childPose) == TerraEngine::Scene::WorldCoordinateError::None, "Child pose should be accepted.");
+			context.Expect(objects.SetCanonicalWorldPose(newParent, newParentPose) == TerraEngine::Scene::WorldCoordinateError::None, "New parent pose should be accepted.");
 
 			context.Expect(objects.setParent(child, parent), "Initial parenting should succeed.");
 			auto before = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objects);
-			const glm::vec3 worldBefore = before.objects.at(objects.getUUID(child)).worldPosition;
+			const TerraEngine::Scene::WorldPosition worldBefore = before.objects.at(objects.getUUID(child)).worldPose.position;
 
 			context.Expect(TerraEngine::Scene::ReparentPreserveWorld(objects, child.EntityId(), newParent.EntityId()), "Graph-backed reparent should succeed.");
 			auto after = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objects);
-			const glm::vec3 worldAfter = after.objects.at(objects.getUUID(child)).worldPosition;
+			const TerraEngine::Scene::WorldPosition worldAfter = after.objects.at(objects.getUUID(child)).worldPose.position;
 
-			context.Expect(NearlyEqual(worldBefore, worldAfter), "World position should remain stable after reparenting.");
+			context.Expect(worldBefore == worldAfter, "World position should remain exact after reparenting.");
 			objects.clear();
 		});
 

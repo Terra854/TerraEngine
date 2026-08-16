@@ -132,13 +132,17 @@ namespace TerraEngine::Tests {
 		registry.Add("Renderer.SharedSubmission.KeepsIndependentInstanceSelectors", [](TestContext& context) {
 			auto snapshot = MakeRendererThreadingSnapshot(40u, 2u);
 			MakeGroupable(snapshot);
-			snapshot.renderables[0].modelMatrix[3].x = 3.0f;
-			snapshot.renderables[1].modelMatrix[3].x = 9.0f;
+			// Dynamic rendering localizes this canonical pose into the view frame;
+			// the cached float matrix is deliberately not a world-space input.
+			snapshot.renderables[0].canonicalWorldPose.position.offsetMetres.x = 3.0;
+			snapshot.renderables[1].canonicalWorldPose.position.offsetMetres.x = 9.0;
 			snapshot.renderables[0].virtualGeometry.selectedLodIndex = 1u;
 			snapshot.renderables[1].virtualGeometry.selectedLodIndex = 4u;
 			const auto topology = TerraEngine::Renderer::BuildPersistentRenderTopology(snapshot, 77u);
 			TerraEngine::Renderer::RenderFrameViewRequest view{};
+			view.outputId = 1u;
 			view.viewGeneration = 31u;
+			view.referenceFrame = MakeRendererTestReferenceFrame(40u, 1u, view.outputId);
 			const auto dynamic = TerraEngine::Renderer::BuildDynamicRenderFrameState(snapshot, topology, view, 40u);
 			context.Expect(dynamic.valid, "A complete immutable snapshot should build a dynamic sidecar.");
 			context.ExpectEqual<std::size_t>(1u, dynamic.groups.size(),
@@ -158,7 +162,11 @@ namespace TerraEngine::Tests {
 			MakeGroupable(snapshot);
 			snapshot.renderables[1].invalidation.residency = 0u;
 			const auto topology = TerraEngine::Renderer::BuildPersistentRenderTopology(snapshot, 78u);
-			const auto dynamic = TerraEngine::Renderer::BuildDynamicRenderFrameState(snapshot, topology, {}, 41u);
+			TerraEngine::Renderer::RenderFrameViewRequest view{};
+			view.outputId = 1u;
+			view.viewGeneration = 41u;
+			view.referenceFrame = MakeRendererTestReferenceFrame(41u, 1u, view.outputId);
+			const auto dynamic = TerraEngine::Renderer::BuildDynamicRenderFrameState(snapshot, topology, view, 41u);
 			context.ExpectEqual<std::size_t>(1u, dynamic.groups.size(),
 				"The compatible peers should still receive one group.");
 			context.ExpectEqual<std::size_t>(1u, dynamic.singletonOrdinals.size(),
@@ -171,7 +179,11 @@ namespace TerraEngine::Tests {
 			auto snapshot = MakeRendererThreadingSnapshot(42u, 2u);
 			MakeGroupable(snapshot);
 			const auto topology = TerraEngine::Renderer::BuildPersistentRenderTopology(snapshot, 79u);
-			const auto dynamic = TerraEngine::Renderer::BuildDynamicRenderFrameState(snapshot, topology, {}, 42u);
+			TerraEngine::Renderer::RenderFrameViewRequest view{};
+			view.outputId = 1u;
+			view.viewGeneration = 42u;
+			view.referenceFrame = MakeRendererTestReferenceFrame(42u, 1u, view.outputId);
+			const auto dynamic = TerraEngine::Renderer::BuildDynamicRenderFrameState(snapshot, topology, view, 42u);
 			const auto accepted = TerraEngine::Renderer::Vulkan::BuildGroupedInstanceStreamPlan(dynamic, 2u, 13u);
 			context.Expect(accepted.valid, "The complete group range should be publishable.");
 			context.ExpectEqual<std::size_t>(1u, accepted.avoidedSubmissionCount,

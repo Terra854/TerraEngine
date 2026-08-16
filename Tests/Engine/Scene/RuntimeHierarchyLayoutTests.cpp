@@ -110,12 +110,12 @@ namespace TerraEngine::Tests {
 
 			context.Expect(first.valid, "A valid parent-before-child graph should produce a compact runtime snapshot.");
 			context.ExpectEqual(static_cast<std::size_t>(4), first.records.size(), "The compact snapshot should retain all four high-frequency transforms.");
-			context.Expect(sizeof(TerraEngine::Scene::CompactTransformRuntimeRecord) < sizeof(TerraEngine::Scene::TransformRuntimeRecord), "The high-frequency record should stay smaller than the compatibility record with an Object facade and matrix.");
+			context.Expect(sizeof(TerraEngine::Scene::CompactTransformRuntimeRecord) < sizeof(TerraEngine::Scene::TransformRuntimeRecord), "The high-frequency record should stay smaller than the Object-handle record.");
 			context.ExpectEqual(static_cast<std::size_t>(4), reused.reusedParentStateCount, "An unchanged graph should reuse every generation-tagged parent world state.");
 
-			Transform* changedTransform = objects.GetComponent<Transform>(changedParent);
-			changedTransform->position.x += 5.0f;
-			objects.MarkObjectTransformDirty(changedParent);
+			TerraEngine::Scene::WorldPose changedPose = objects.GetCanonicalWorldPose(changedParent).value();
+			changedPose.position.offsetMetres.x += 5.0;
+			context.Expect(objects.SetCanonicalWorldPose(changedParent, changedPose) == TerraEngine::Scene::WorldCoordinateError::None, "Canonical parent edits should publish through ObjectManager.");
 			const TerraEngine::Scene::SceneGraph changedGraph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objects);
 			const TerraEngine::Scene::CompactTransformRuntimeSnapshot changed = TerraEngine::Scene::BuildCompactTransformRuntimeSnapshot(layout, changedGraph, &first);
 			const auto findParentState = [&changed](const TerraEngine::UUID& objectId) {

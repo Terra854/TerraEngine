@@ -22,6 +22,17 @@ namespace TerraEngine::Tests {
 	void RegisterSpatialBoundsTests(TestRegistry& registry) {
 		using namespace TerraEngine::Scene;
 
+		registry.Add("Engine.SpatialBounds.LocalizesExtremeCanonicalPointInsideReferenceFrame", [](TestContext& context) {
+			SpatialReferenceFrame frame{};
+			frame.canonicalOrigin.cell.x = 15'258'789'062LL;
+			frame.canonicalOrigin.offsetMetres.x = 1.0;
+			WorldPosition point = frame.canonicalOrigin;
+			point.offsetMetres.x += 0.001;
+			const WorldLocalizationResult localized = LocalizeToSpatialFrame(point, frame);
+			context.Expect(localized.Succeeded(), "Extreme canonical points should localize only through a bounded reference frame.");
+			context.Expect(std::abs(localized.offsetMetres.x - 0.001) < 1e-9, "Bounded localization must retain a millimetre delta.");
+		});
+
 		registry.Add("Engine.SpatialBounds.MakeAABBNormalizesCornersAndRejectsNonFiniteInput", [](TestContext& context) {
 			const SpatialAABB bounds = MakeAABB(glm::vec3(3.0f, 2.0f, 1.0f), glm::vec3(-1.0f, 4.0f, -2.0f), SpatialBoundsSource::Authored);
 			const SpatialAABB invalid = MakeAABB(

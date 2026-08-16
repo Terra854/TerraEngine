@@ -77,6 +77,12 @@ namespace TerraEngine::Renderer
 		nodesById.reserve(canonicalNodes.size());
 		for(const VirtualGeometryOracleNode *node : canonicalNodes)
 		{
+			// Zero is reserved for an absent object/view identity. Rejecting it here
+			// prevents a stale recycled selection from becoming a valid page request.
+			if(node->id == 0u)
+			{
+				continue;
+			}
 			// Duplicate identities are invalid authored input. Preserve the first
 			// canonical record so the result cannot depend on container
 			// iteration or worker completion order.

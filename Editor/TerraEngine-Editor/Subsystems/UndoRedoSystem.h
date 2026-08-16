@@ -13,8 +13,6 @@
 #include <vector>
 #include <entt/entity/entity.hpp>
 #include <nlohmann/json.hpp>
-#include <glm/glm.hpp>
-#include <glm/gtc/quaternion.hpp>
 #include "Engine/Utilities/UUID.h"
 #include "Engine/Scene/TransactionalMutation.h"
 
@@ -149,22 +147,6 @@ private:
 	std::string m_ComponentName;
 	nlohmann::json m_OldPayload;
 	nlohmann::json m_NewPayload;
-};
-
-// class ChangeTransformCommand groups related state and operations so callers have one documented contract.
-class ChangeTransformCommand : public ICommand {
-public:
-	ChangeTransformCommand(entt::entity entity, const glm::vec3& oldPos, const glm::quat& oldRot, const glm::vec3& oldScale,
-						const glm::vec3& newPos, const glm::quat& newRot, const glm::vec3& newScale);
-	void Undo() override;
-	void Redo() override;
-	std::string GetName() const override;
-
-private:
-	TerraEngine::UUID m_Uuid;
-	glm::vec3 m_OldPos, m_NewPos;
-	glm::quat m_OldRot, m_NewRot;
-	glm::vec3 m_OldScale, m_NewScale;
 };
 
 // Manages a history of ICommand instances to provide undo/redo capabilities in 

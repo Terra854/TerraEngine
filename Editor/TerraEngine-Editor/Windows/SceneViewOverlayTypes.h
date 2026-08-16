@@ -239,7 +239,9 @@ namespace TerraEngine::Editor::SceneViewOverlay
 		entt::entity entity = entt::null;
 		std::string displayName;
 		MarkerCategory category = MarkerCategory::Unsupported;
-		glm::vec3 worldPosition = glm::vec3(0.0f);
+		// Marker projection stores only the bounded value localized to the current
+		// Scene View reference frame; canonical identity remains objectId.
+		glm::vec3 referenceFrameLocalPosition = glm::vec3(0.0f);
 		glm::vec2 screenPosition = glm::vec2(0.0f);
 		float depth = 0.0f;
 		bool visible = false;

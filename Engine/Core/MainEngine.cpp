@@ -30,6 +30,7 @@
 #include "Scene/SceneMutationQueue.h"
 #include "Scene/SceneGraphRuntime.h"
 #include "Scene/RuntimeLayout.h"
+#include "Scene/WorldSpatialSystem.h"
 #include "Scripting/ScriptingSystem.h"
 #include "Physics/PhysicsSystem.h"
 #include "Audio/AudioSystem.h"
@@ -230,6 +231,11 @@ void Engine::Initialize()
 	// gameplay code can request them without re-reading disk on every access.
 	SceneManager& sceneManager = SceneManager::Instance();
 	RegisterEngineSystem(systems, systemScheduler, sceneManager, MakeSceneManagerDeclaration());
+
+	// Spatial candidates are prepared as immutable worker data during Scene and
+	// become visible only when the scheduler invokes an explicit protected edge.
+	TerraEngine::Scene::WorldSpatialSystem& worldSpatialSystem = TerraEngine::Scene::WorldSpatialSystem::Instance();
+	RegisterEngineSystem(systems, systemScheduler, worldSpatialSystem, worldSpatialSystem.SchedulerDeclaration());
 
 	// ScriptingSystem manages the .NET runtime and gameplay scripts.
 	ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
@@ -485,12 +491,19 @@ bool Engine::Update(float deltaTime)
 			TerraEngine::Scene::SceneMutationBatchResult result;
 			const bool sameFramePhysicsConsumer = TerraEngine::Scheduling::SameFramePhysicsPublicationConsumerActive();
 			const bool deferredAfterPhysics = flushPoint.name == "After Physics" && !sameFramePhysicsConsumer;
-			if (!deferredAfterPhysics && !queue.Empty()) {
+			const bool spatialOnlyBoundary = flushPoint.name == "Before Physics";
+			if (!deferredAfterPhysics && !spatialOnlyBoundary && !queue.Empty()) {
 				// Structural scene mutations are applied only at declared flush
 				// points so systems that iterate hierarchy/component data never
 				// observe the ObjectManager changing midway through their update.
 				result = SceneManager::Instance().ApplySceneMutations("system-scheduler-flush");
 				state.message = result.applied ? "Scene mutation queue flushed." : "Scene mutation queue rejected one or more requests.";
+			}
+			if (spatialOnlyBoundary || flushPoint.name == "Frame End") {
+				// The Before Physics edge publishes only explicitly urgent spatial
+				// candidates. Ordinary candidates retain the higher-throughput Frame End edge.
+				TerraEngine::Scene::WorldSpatialSystem::Instance().PublishPreparedAtProtectedBoundary(
+					ObjectManager::instance(), flushPoint.name);
 			}
 			if (flushPoint.name == "Frame End") {
 				// Scene metadata, prefab lifecycle, and explicit resource-release
@@ -704,9 +717,16 @@ TerraEngine::Runtime::PhysicsInvariantReport Engine::RunPhysicsInvariantFixture(
 			TerraEngine::Scene::SceneMutationBatchResult result;
 			const bool sameFramePhysicsConsumer = TerraEngine::Scheduling::SameFramePhysicsPublicationConsumerActive();
 			const bool deferredAfterPhysics = flushPoint.name == "After Physics" && !sameFramePhysicsConsumer;
-			if (!deferredAfterPhysics && !queue.Empty()) {
+			const bool spatialOnlyBoundary = flushPoint.name == "Before Physics";
+			if (!deferredAfterPhysics && !spatialOnlyBoundary && !queue.Empty()) {
 				result = SceneManager::Instance().ApplySceneMutations("physics-parity-scheduler-flush");
 				state.message = result.applied ? "Scene mutation queue flushed." : "Scene mutation queue rejected one or more requests.";
+			}
+			if (spatialOnlyBoundary || flushPoint.name == "Frame End") {
+				// Headless parity exercises the exact same protected spatial publication
+				// contract as the interactive scheduler path.
+				TerraEngine::Scene::WorldSpatialSystem::Instance().PublishPreparedAtProtectedBoundary(
+					ObjectManager::instance(), flushPoint.name);
 			}
 			const bool physicsPublicationBoundary = (flushPoint.name == "After Physics" && sameFramePhysicsConsumer)
 				|| (flushPoint.name == "Frame End" && !sameFramePhysicsConsumer);

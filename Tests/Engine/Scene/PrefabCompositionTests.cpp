@@ -46,8 +46,8 @@ namespace TerraEngine::Tests {
 
 			TerraEngine::Scene::PrefabInstance instance;
 			instance.sourceId = source.sourceId;
-			instance.overrides.push_back({SceneFixtures::MakeStableUuid(2), "Transform", "Position", "1,2,3"});
-			instance.overrides.push_back({SceneFixtures::MakeStableUuid(99), "Transform", "Position", "4,5,6"});
+			instance.overrides.push_back({SceneFixtures::MakeStableUuid(2), "Transform", "WorldPose", "canonical-a"});
+			instance.overrides.push_back({SceneFixtures::MakeStableUuid(99), "Transform", "WorldPose", "canonical-b"});
 
 			TerraEngine::Scene::MarkStaleOverrides(instance, source);
 			context.Expect(!instance.overrides[0].stale, "Overrides targeting source objects should stay active.");

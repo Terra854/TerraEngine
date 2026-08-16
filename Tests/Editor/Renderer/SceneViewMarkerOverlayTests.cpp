@@ -43,7 +43,8 @@ namespace
 		pose.transformRevision = revision;
 		pose.hierarchyGeneration = revision;
 		pose.parentWorldGeneration = parent == TerraEngine::EMPTY_UUID ? 0u : revision;
-		pose.worldPosition = glm::vec3(static_cast<float>(id), 0.0f, 0.0f);
+		pose.localPosition = glm::vec3(static_cast<float>(id), 0.0f, 0.0f);
+		pose.canonicalPosition.offsetMetres = glm::dvec3(pose.localPosition);
 		return pose;
 	}
 }
@@ -76,7 +77,8 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(stableName, pipeline.FindStaticRecord(MarkerUuid(2u))->displayNameId, "Equal labels should reuse one interned string identity.");
 			const std::uint64_t staticGeneration = pipeline.StaticPublicationGeneration();
 			MarkerPoseRecord moved = PoseMarker(1u, 1u, 2u);
-			moved.worldPosition = glm::vec3(8.0f, 0.0f, 0.0f);
+			moved.localPosition = glm::vec3(8.0f, 0.0f, 0.0f);
+			moved.canonicalPosition.offsetMetres = glm::dvec3(moved.localPosition);
 			context.Expect(pipeline.UpsertPoseRecord(moved), "A newer exact transform revision should update only the pose record.");
 			context.ExpectEqual(staticGeneration, pipeline.StaticPublicationGeneration(), "Pose-only movement must retain marker identity, label, tooltip, and category.");
 			context.ExpectEqual(stableName, pipeline.FindStaticRecord(MarkerUuid(1u))->displayNameId, "Moving an object must not reintern its stable label.");

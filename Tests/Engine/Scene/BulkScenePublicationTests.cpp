@@ -11,6 +11,15 @@ namespace TerraEngine::Tests {
 		nlohmann::json MakeObject(const char* name, const char* uuid) {
 			return {{"name", name}, {"uuid", uuid}, {"components", nlohmann::json::object()}};
 		}
+
+		nlohmann::json CanonicalTransform(double worldX, double localX, float scaleX = 1.0F) {
+			TerraEngine::Scene::WorldPosition position;
+			position.offsetMetres = {worldX, 0.0, 0.0};
+			return {{"WorldPose", {{"position", Serializer::SerializeWorldPosition(position)},
+				{"rotation", {1.0F, 0.0F, 0.0F, 0.0F}}, {"scale", {scaleX, 1.0F, 1.0F}}}},
+				{"ParentRelativePose", {{"translationMetres", {localX, 0.0, 0.0}},
+				{"rotation", {1.0F, 0.0F, 0.0F, 0.0F}}, {"scale", {1.0F, 1.0F, 1.0F}}, {"transformSpaceId", 0U}}}};
+		}
 	}
 
 	void RegisterBulkScenePublicationTests(TestRegistry& registry) {
@@ -58,17 +67,9 @@ namespace TerraEngine::Tests {
 			prepared.componentCount = 2U;
 			prepared.hierarchyCount = 1U;
 			nlohmann::json parent = MakeObject("Camera Rig", "55555555555555555555555555555555");
-			parent["components"]["Transform"] = {
-				{"Position", {0.0F, 10.0F, 0.0F}},
-				{"Rotation", {1.0F, 0.0F, 0.0F, 0.0F}},
-				{"Scale", {1.0F, 1.0F, 1.0F}}
-			};
+			parent["components"]["Transform"] = CanonicalTransform(10.0, 0.0, 2.0F);
 			nlohmann::json camera = MakeObject("Camera", "66666666666666666666666666666666");
-			camera["components"]["Transform"] = {
-				{"Position", {0.0F, 2.0F, 0.0F}},
-				{"Rotation", {1.0F, 0.0F, 0.0F, 0.0F}},
-				{"Scale", {1.0F, 1.0F, 1.0F}}
-			};
+			camera["components"]["Transform"] = CanonicalTransform(12.0, 1.0);
 			prepared.objects.push_back({std::move(parent), "0", std::nullopt});
 			prepared.objects.push_back({std::move(camera), "0/0", 0U});
 
@@ -80,8 +81,9 @@ namespace TerraEngine::Tests {
 			Transform* restoredCamera = children.empty() ? nullptr : objects.GetComponent<Transform>(children.front());
 			context.Expect(result.published && roots.size() == 1U && children.size() == 1U,
 				"A parent-first camera hierarchy must publish as one complete authored graph.");
-			context.Expect(restoredCamera != nullptr && restoredCamera->position == glm::vec3(0.0F, 2.0F, 0.0F),
-				"Bulk restore must retain the camera's authored local position instead of preserving its temporary root world position.");
+			context.Expect(restoredCamera != nullptr && restoredCamera->worldPose.position.offsetMetres == glm::dvec3(12.0, 0.0, 0.0)
+				&& restoredCamera->parentRelativePose.translationMetres == glm::dvec3(1.0, 0.0, 0.0),
+				"Bulk restore must retain both the exact canonical world pose and authored bounded local transform.");
 			objects.clear();
 		});
 

@@ -17,6 +17,7 @@
 
 #include "Scene/SpatialDiagnostics.h"
 #include "Scene/SpatialQuery.h"
+#include "Scene/WorldRegion.h"
 
 namespace TerraEngine::Scene
 {
@@ -85,6 +86,10 @@ namespace TerraEngine::Scene
 		SpatialIndex& operator=(const SpatialIndex&) = delete;
 
 		void Clear();
+		// The index accepts only float bounds localized to this immutable frame.
+		// Changing frames clears stale partitions instead of mixing distant data.
+		[[nodiscard]] bool SetReferenceFrame(SpatialReferenceFrame frame);
+		[[nodiscard]] SpatialReferenceFrame GetReferenceFrame() const;
 		void Rebuild(const std::vector<SpatialObjectRecord>& records);
 		// A scene replacement supplies a complete immutable record set.  This
 		// rebuilds both partitions before recording one scene-generation boundary,
@@ -161,6 +166,7 @@ namespace TerraEngine::Scene
 		std::uint64_t lastBoundsPublicationGeneration = 0;
 		std::uint64_t boundsSceneGeneration = 0;
 		std::vector<TerraEngine::UUID> lastBoundsPublicationOrder;
+		SpatialReferenceFrame referenceFrame{};
 
 		explicit SpatialIndex(bool createPartitionLeaf);
 		void EnsurePartitions();
@@ -223,4 +229,19 @@ namespace TerraEngine::Scene
 		mutable std::mutex publishMutex;
 		std::shared_ptr<const EditorSelectableSpatialSnapshot> latest;
 	};
+
+	// Cross-region traversal accepts the exact sparse key list selected by the
+	// caller. It intentionally never iterates every directory entry, so query
+	// work follows resident/intersected regions instead of authored world extent.
+	struct CrossRegionSpatialQueryResult
+	{
+		SpatialQueryResult result{};
+		std::uint32_t visitedRegionCount = 0;
+		std::uint32_t coarseProxyCount = 0;
+	};
+
+	TERRAENGINE_API CrossRegionSpatialQueryResult QueryResidentRegionsAABB(const PublishedWorldRegionResidency& residency, std::vector<WorldRegionKey> keys, const SpatialAABB& area, const SpatialQueryFilter& filter = {});
+	TERRAENGINE_API CrossRegionSpatialQueryResult QueryResidentRegionsSphere(const PublishedWorldRegionResidency& residency, std::vector<WorldRegionKey> keys, const SpatialSphere& sphere, const SpatialQueryFilter& filter = {});
+	TERRAENGINE_API CrossRegionSpatialQueryResult QueryResidentRegionsFrustum(const PublishedWorldRegionResidency& residency, std::vector<WorldRegionKey> keys, const SpatialFrustum& frustum, const SpatialQueryFilter& filter = {});
+	TERRAENGINE_API CrossRegionSpatialQueryResult QueryResidentRegionsRay(const PublishedWorldRegionResidency& residency, std::vector<WorldRegionKey> keys, const SpatialRay& ray, const SpatialQueryFilter& filter = {});
 }

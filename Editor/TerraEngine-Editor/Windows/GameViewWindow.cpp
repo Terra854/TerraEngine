@@ -242,8 +242,12 @@ void GameViewWindow::OnGui() {
 				continue;
 			}
 
-			glm::vec3 pos = transform->position;
-			glm::quat rot = transform->rotation;
+			// Each Game View camera owns its own bounded working frame. Keeping the
+			// canonical origin with the request lets the renderer reconstruct world
+			// identity without ever converting an astronomical address to float.
+			const TerraEngine::Scene::WorldPose pose = transform->worldPose;
+			const glm::vec3 localCameraPosition(0.0f);
+			const glm::quat rot = pose.rotation;
 
 			const glm::vec3 defaultForward(0.0f, 0.0f, -1.0f);
 			const glm::vec3 forward = rot * defaultForward;
@@ -251,13 +255,13 @@ void GameViewWindow::OnGui() {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (glm::length(up) < 0.0001f) up = glm::vec3(0.0f, 1.0f, 0.0f);
 
-			glm::mat4 view = glm::lookAt(pos, pos + forward, glm::normalize(up));
+			const glm::mat4 view = glm::lookAt(localCameraPosition, localCameraPosition + forward, glm::normalize(up));
 			// The Vulkan renderer and Hi-Z culling both expect 0..1 clip-space
 			// depth, so use the explicit GLM helper instead of relying on
 			// translation-unit include order for GLM_FORCE_DEPTH_ZERO_TO_ONE.
 			glm::mat4 proj = glm::perspectiveRH_ZO(glm::radians(camera->verticalFovDegrees), aspect, camera->nearPlane, camera->farPlane);
 			proj[1][1] *= -1;
-			RenderSystem::Instance().SetGameViewCamera(view, proj, pos);
+			RenderSystem::Instance().SetGameViewCamera(view, proj, pose.position);
 		}
 	}
 

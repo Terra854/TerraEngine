@@ -21,7 +21,8 @@
 namespace TerraEngine::Scene {
 
 	inline constexpr std::uint32_t kDerivedSceneMagic = 0x4453434EU; // "DSCN"
-	inline constexpr std::uint32_t kDerivedSceneFormatVersion = 1U;
+	inline constexpr std::uint32_t kDerivedSceneFormatVersion = 2U;
+	inline constexpr std::string_view kDerivedSceneUnboundedLineage = "TerraSceneUnboundedV1";
 	inline constexpr std::size_t kDerivedSceneMaximumSectionCount = 64U;
 	inline constexpr std::uint64_t kDerivedSceneMaximumArtifactBytes = 1024ULL * 1024ULL * 1024ULL;
 
@@ -61,6 +62,10 @@ namespace TerraEngine::Scene {
 		std::string engineCompatibility;
 		std::string platform;
 		DerivedSceneByteOrder byteOrder = DerivedSceneByteOrder::LittleEndian;
+		// Appended fields preserve source initialization of the identity while the
+		// binary v2 envelope still requires the explicit unbounded lineage.
+		std::string formatLineage = std::string(kDerivedSceneUnboundedLineage);
+		std::string spatialArtifactHash;
 	};
 
 	struct DerivedSceneSectionDescriptor {

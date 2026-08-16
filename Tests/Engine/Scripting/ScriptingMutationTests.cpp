@@ -144,11 +144,10 @@ namespace TerraEngine::Tests {
 			const TerraEngine::Scene::SceneMutationBatchResult result = queue.Apply(objects);
 			const Transform* transform = objects.GetComponent<Transform>(target);
 
-			context.Expect(result.applied, "Component update mutations should apply through the scene mutation queue.");
+			context.Expect(!result.applied, "Legacy JSON component envelopes must be rejected by the strict typed mutation boundary.");
 			context.Expect(transform != nullptr, "The test object should still own its transform.");
-			context.ExpectEqual(1.0f, transform->position.x, "Deferred component updates should write reflected vector values.");
-			context.ExpectEqual(2.0f, transform->position.y, "Deferred component updates should preserve vector component order.");
-			context.ExpectEqual(3.0f, transform->position.z, "Deferred component updates should preserve vector component order.");
+			context.ExpectEqual(0.0, transform->worldPose.position.offsetMetres.x, "Rejected legacy payloads must not mutate canonical world values.");
+			context.Expect(!result.diagnostics.empty(), "Rejected legacy payloads should explain the strict envelope requirement.");
 			objects.clear();
 		});
 
@@ -174,12 +173,10 @@ namespace TerraEngine::Tests {
 			const TerraEngine::Scene::SceneMutationBatchResult result = queue.Apply(objects);
 			const Transform* transform = objects.GetComponent<Transform>(target);
 
-			context.Expect(result.applied, "Typed component update mutations should apply through the scene mutation queue.");
+			context.Expect(!result.applied, "Generic Transform component payloads must be rejected; canonical movement uses a spatial transaction.");
 			context.ExpectEqual(static_cast<std::size_t>(1), result.typedMutationCount, "Typed component updates should be counted separately from JSON fallbacks.");
 			context.ExpectEqual(static_cast<std::size_t>(0), result.jsonMutationFallbackCount, "Typed component updates should avoid the JSON fallback counter.");
-			context.ExpectEqual(4.0f, transform->position.x, "Typed deferred component updates should write reflected vector values.");
-			context.ExpectEqual(5.0f, transform->position.y, "Typed deferred component updates should preserve vector component order.");
-			context.ExpectEqual(6.0f, transform->position.z, "Typed deferred component updates should preserve vector component order.");
+			context.ExpectEqual(0.0, transform->worldPose.position.offsetMetres.x, "Rejected Transform payloads must leave canonical world values unchanged.");
 			objects.clear();
 		});
 
@@ -203,12 +200,11 @@ namespace TerraEngine::Tests {
 			const TerraEngine::Scene::SceneMutationBatchResult result = queue.Apply(objects);
 			const Transform* transform = objects.GetComponent<Transform>(target);
 
-			context.Expect(result.applied, "Legacy JSON component payloads should remain supported.");
+			context.Expect(!result.applied, "Legacy JSON component payloads must be rejected without compatibility aliases.");
 			context.ExpectEqual(static_cast<std::size_t>(0), result.typedMutationCount, "JSON component updates should not increment typed counters.");
 			context.ExpectEqual(static_cast<std::size_t>(1), result.jsonMutationFallbackCount, "JSON component updates should increment fallback counters.");
-			context.ExpectEqual(7.0f, transform->position.x, "JSON fallback updates should still apply reflected vector values.");
-			context.ExpectEqual(8.0f, transform->position.y, "JSON fallback updates should preserve vector component order.");
-			context.ExpectEqual(9.0f, transform->position.z, "JSON fallback updates should preserve vector component order.");
+			context.ExpectEqual(0.0, transform->worldPose.position.offsetMetres.x, "Rejected JSON fallback payloads must not mutate canonical world values.");
+			context.Expect(!result.diagnostics.empty(), "Rejected JSON fallback payloads should expose a diagnostic.");
 			objects.clear();
 		});
 
@@ -241,10 +237,9 @@ namespace TerraEngine::Tests {
 			const Transform* transform = objects.GetComponent<Transform>(target);
 
 			context.ExpectEqual(static_cast<std::size_t>(1), pending.size(), "Same-key writes should coalesce before validation.");
-			context.ExpectEqual(static_cast<std::size_t>(1), result.coalescedMutationCount, "Coalesced write count should report removed duplicate payloads.");
-			context.ExpectEqual(2.0f, transform->position.x, "The later deterministic write should win for a coalesced property.");
-			context.ExpectEqual(3.0f, transform->position.y, "The later deterministic write should preserve vector component order.");
-			context.ExpectEqual(4.0f, transform->position.z, "The later deterministic write should preserve vector component order.");
+			context.ExpectEqual(static_cast<std::size_t>(1), result.coalescedMutationCount, "Coalesced write count should report removed duplicate payloads before strict validation.");
+			context.Expect(!result.applied, "Coalesced generic Transform writes must be rejected by the spatial authority boundary.");
+			context.ExpectEqual(0.0, transform->worldPose.position.offsetMetres.x, "Rejected coalesced Transform writes must leave world values unchanged.");
 			objects.clear();
 		});
 

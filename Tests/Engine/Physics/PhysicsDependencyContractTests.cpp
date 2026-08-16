@@ -75,24 +75,35 @@ namespace TerraEngine::Tests {
 			return result;
 		}
 
+		std::string GitExecutable() {
+#if defined(_WIN32)
+			// Desktop development environments can accumulate a PATH longer than
+			// cmd.exe preserves. Prefer the standard Git for Windows location when
+			// present so the dependency audit remains deterministic.
+			const std::filesystem::path installed = "C:/PROGRA~1/Git/cmd/git.exe";
+			if(std::filesystem::is_regular_file(installed)) return installed.string();
+#endif
+			return "git";
+		}
+
 		std::string GitLinkCommand(const std::filesystem::path& sourceRoot) {
 			// `git submodule status` reports the checkout selected by the working-tree
 			// gitlink, including an intentional uncommitted dependency advance. This
 			// lets the contract validate an update before its parent commit is created.
-			return "git -C \"" + sourceRoot.string() + "\" submodule status -- External/JoltPhysics 2>&1";
+			return GitExecutable() + " -C \"" + sourceRoot.string() + "\" submodule status -- External/JoltPhysics 2>&1";
 		}
 
 		std::string JoltHeadCommand(const std::filesystem::path& sourceRoot) {
 			// The parent gitlink is the immutable revision contract, while this
 			// second check proves the files CMake will compile are checked out at it.
-			return "git -C \"" + (sourceRoot / "External/JoltPhysics").string()
+			return GitExecutable() + " -C \"" + (sourceRoot / "External/JoltPhysics").string()
 				+ "\" rev-parse HEAD 2>&1";
 		}
 
 		std::string JoltStatusCommand(const std::filesystem::path& sourceRoot) {
 			// Include untracked files so a locally patched or augmented provider
 			// cannot silently pass while differing from the approved pristine tree.
-			return "git -C \"" + (sourceRoot / "External/JoltPhysics").string()
+			return GitExecutable() + " -C \"" + (sourceRoot / "External/JoltPhysics").string()
 				+ "\" status --porcelain=v1 --untracked-files=all 2>&1";
 		}
 

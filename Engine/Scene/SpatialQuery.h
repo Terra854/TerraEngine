@@ -42,7 +42,11 @@ namespace TerraEngine::Scene
 		bool active = true;
 		bool isStatic = false;
 		std::uint32_t categoryMask = SpatialCategoryRenderable;
-		SpatialAABB worldBounds{};
+		// Exact ownership remains canonical; localBounds are valid only in the
+		// index reference frame identified below and are never global floats.
+		WorldPosition canonicalOwner{};
+		SpatialAABB localBounds{};
+		std::uint64_t frameGeneration = 0;
 		std::uint64_t revision = 0;
 	};
 
@@ -62,6 +66,8 @@ namespace TerraEngine::Scene
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		entt::entity entity = entt::null;
 		SpatialAABB bounds{};
+		WorldPosition canonicalOwner{};
+		std::uint64_t frameGeneration = 0;
 		float distance = 0.0f;
 		bool fallback = false;
 	};
@@ -73,5 +79,6 @@ namespace TerraEngine::Scene
 		std::uint32_t rejectedCount = 0;
 		std::uint32_t fallbackCount = 0;
 		bool validInput = true;
+		WorldCoordinateError coordinateError = WorldCoordinateError::None;
 	};
 }

@@ -100,7 +100,7 @@ namespace TerraEngine::EditorTests
 			std::filesystem::create_directories(scenePath.parent_path());
 			{
 				std::ofstream scene(scenePath, std::ios::binary | std::ios::trunc);
-				scene << R"({"name":"Automation","objects":[{"name":"Root","components":{},"children":[]}]})";
+				scene << R"({"format":"TerraSceneUnboundedV1","name":"Automation","objects":[{"name":"Root","components":{},"children":[]}]})";
 			}
 
 			ProjectSceneLoadDecision cold;

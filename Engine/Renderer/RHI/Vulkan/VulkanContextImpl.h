@@ -982,7 +982,7 @@ struct VulkanContext::Impl {
 	{
 		std::unordered_map<TerraEngine::UUID, TemporalLightSelectionState> lights;
 		std::array<TerraEngine::UUID, MAX_SHADOW_RESOURCE_SLOTS> previousShadowOwners{};
-		glm::vec3 lastCameraWorldPosition = glm::vec3(0.0f);
+		glm::vec3 lastCameraLocalPosition = glm::vec3(0.0f);
 		glm::mat4 lastViewMatrix = glm::mat4(1.0f);
 		glm::mat4 lastProjectionMatrix = glm::mat4(1.0f);
 		std::uint64_t frameSerial = 0u;
@@ -1275,6 +1275,9 @@ struct VulkanContext::Impl {
 		// identity copies reject a frame/session mismatch before mapping pixels.
 		std::uint64_t identityFrameId = 0u;
 		std::uint64_t identityRendererGeneration = 0u;
+		std::uint64_t identityOriginGeneration = 0u;
+		std::uint64_t identitySpatialGeneration = 0u;
+		std::uint64_t identityResidencyGeneration = 0u;
 	};
 	OffscreenResources sceneView;
 	OffscreenResources gameView;

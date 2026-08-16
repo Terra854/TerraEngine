@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "Renderer/Graph/RenderFrameSnapshot.h"
+#include "RendererThreadingTestFixtures.h"
 
 #include <algorithm>
 
@@ -51,7 +52,8 @@ namespace TerraEngine::Tests
 				snapshot.renderables.push_back(record);
 			}
 			const auto topology = BuildPersistentRenderTopology(snapshot, 1u);
-			const RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game, glm::uvec2(1280u, 720u), 1u, 1u };
+			RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game, glm::uvec2(1280u, 720u), 1u, 1u };
+			view.referenceFrame = MakeRendererTestReferenceFrame(2u, 1u, 1u);
 			const auto dynamic = BuildDynamicRenderFrameState(snapshot, topology, view, 2u);
 			context.Expect(dynamic.valid, "A large repeated-instance workload must build a complete typed sidecar.");
 			context.ExpectEqual(static_cast<std::size_t>(4000), dynamic.instances.size(), "Typed instance count must preserve all repeated models.");
@@ -74,7 +76,8 @@ namespace TerraEngine::Tests
 				snapshot.renderables.push_back(record);
 			}
 			const auto topology = BuildPersistentRenderTopology(snapshot, 2u);
-			const RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game, glm::uvec2(640u, 480u), 1u, 1u };
+			RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game, glm::uvec2(640u, 480u), 1u, 1u };
+			view.referenceFrame = MakeRendererTestReferenceFrame(3u, 1u, 1u);
 			const auto dynamic = BuildDynamicRenderFrameState(snapshot, topology, view, 3u);
 			context.Expect(dynamic.valid, "No-peer workloads must remain valid through complete fallback preparation.");
 			context.ExpectEqual(static_cast<std::size_t>(10), dynamic.singletonOrdinals.size(), "Incompatible small scenes must preserve one stable ordinal per model.");
@@ -96,7 +99,8 @@ namespace TerraEngine::Tests
 				snapshot.renderables.push_back(record);
 			}
 			const auto topology = BuildPersistentRenderTopology(snapshot, 4u);
-			const RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game, glm::uvec2(1280u, 720u), 1u, 1u };
+			RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game, glm::uvec2(1280u, 720u), 1u, 1u };
+			view.referenceFrame = MakeRendererTestReferenceFrame(5u, 1u, 1u);
 			const auto dynamic = BuildDynamicRenderFrameState(snapshot, topology, view, 5u);
 			context.Expect(dynamic.valid, "Heterogeneous static populations must remain valid without grouping.");
 			context.ExpectEqual(static_cast<std::size_t>(4000), topology.groupTemplates.size(), "Every deterministic material identity must remain distinct in persistent topology.");
@@ -121,7 +125,8 @@ namespace TerraEngine::Tests
 				snapshot.renderables.push_back(record);
 			}
 			const auto topology = BuildPersistentRenderTopology(snapshot, 6u);
-			const RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game, glm::uvec2(1280u, 720u), 1u, 1u };
+			RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game, glm::uvec2(1280u, 720u), 1u, 1u };
+			view.referenceFrame = MakeRendererTestReferenceFrame(7u, 1u, 1u);
 			const auto dynamic = BuildDynamicRenderFrameState(snapshot, topology, view, 7u);
 			context.Expect(dynamic.valid && dynamic.groups.empty(), "A population with no compatible peers must use complete fallback work.");
 			context.ExpectEqual(static_cast<std::size_t>(4000), dynamic.singletonOrdinals.size(), "No-peer ordinal count must conserve the visible population.");
@@ -182,8 +187,9 @@ namespace TerraEngine::Tests
 			}
 			const PersistentRenderTopology first = BuildPersistentRenderTopology(snapshot, 5u);
 			const PersistentRenderTopology reused = BuildPersistentRenderTopology(snapshot, 5u);
-			const RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game,
+			RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game,
 				glm::uvec2(1280u, 720u), 1u, 5u };
+			view.referenceFrame = MakeRendererTestReferenceFrame(18u, 1u, 1u);
 			const DynamicRenderFrameState dynamic = BuildDynamicRenderFrameState(
 				snapshot, reused, view, 18u);
 			context.Expect(first.valid && reused.valid && first.records.size() == kPopulation
@@ -215,8 +221,9 @@ namespace TerraEngine::Tests
 				snapshot.renderables.push_back(record);
 			}
 			const PersistentRenderTopology topology = BuildPersistentRenderTopology(snapshot, 9u);
-			const RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game,
+			RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game,
 				glm::uvec2(1280u, 720u), 2u, 9u };
+			view.referenceFrame = MakeRendererTestReferenceFrame(10u, 2u, 2u);
 			const DynamicRenderFrameState dynamic = BuildDynamicRenderFrameState(
 				snapshot, topology, view, 10u);
 			context.Expect(dynamic.valid && dynamic.instances.size() == kPopulation,

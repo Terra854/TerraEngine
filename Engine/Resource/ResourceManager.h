@@ -540,6 +540,11 @@ public:
 	std::size_t ReleaseStreamingNeedsForObject(
 		const TerraEngine::UUID& ownerObjectId,
 		TerraEngine::Resource::StreamingNeedType needType);
+	// Called by WorldStreamingSystem only at the protected residency boundary.
+	// It records dependencies as normal asset needs and never owns scene objects.
+	void PublishSceneRegionAssetNeeds(
+		std::span<const TerraEngine::Resource::SceneRegionAssetNeed> needs,
+		std::uint64_t frameId);
 	void PublishVisibleStreamingTouches(
 		const TerraEngine::Renderer::VisibleStreamingTouchSet& touchSet,
 		std::uint64_t frameId,

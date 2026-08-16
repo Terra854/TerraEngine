@@ -229,6 +229,11 @@ namespace TerraEngine::Scheduling {
 			{ "Input", "Input backend and per-frame input state.", "" },
 			{ "SceneGraph", "Hierarchy and transform visibility for scene objects.", "Refined by safe transform and scene graph jobs in Part 3." },
 			{ kResourceSceneChangePublication, "One immutable generation-scoped scene delta captured at the protected frame boundary.", "Renderer and editor workers share this retained packet; no consumer independently drains ObjectManager." },
+			{ kResourcePublishedSpatialSnapshot, "Immutable canonical poses, hierarchy, residency, and reference-frame generations for one publication boundary.", "Renderer, physics, queries, scripting, and editor workers retain this value instead of reading live transform storage." },
+			{ kResourceSpatialTransitionQueue, "Typed deferred canonical movement, hierarchy, residency, and frame-transition requests.", "Cross-system producers enqueue value records only; protected spatial publication owns live mutation." },
+			{ kResourcePreparedSpatialTransitions, "Worker-prepared spatial transition candidates with observed revisions and complete inverse state.", "Candidates remain private until protected revalidation commits or rejects the whole publication group." },
+			{ kResourcePhysicsFrameRegistry, "Exact frame identities, canonical origins, generations, and isolated provider-world ownership.", "Physics workers retain immutable descriptors; only protected boundaries create, destroy, or migrate frames." },
+			{ kResourcePhysicsFrameMigrations, "Typed connected-closure migrations staged between isolated physics frames.", "Before Physics revalidates and publishes each migration atomically or retains source authority." },
 			{ "HierarchySnapshot", "Immutable parent-before-child hierarchy data published for worker readers.", "Prepared from SceneGraph before transform and layout jobs run." },
 			{ "DirtyTransformState", "Dirty transform roots and expanded branch state used to limit worker transform work.", "Prepared from SceneGraph before transform work units are planned." },
 			{ "TransformWorkUnits", "Depth-ordered transform propagation batches that worker jobs can execute independently.", "Consumes hierarchy and dirty transform inputs before runtime layout publication." },
@@ -372,6 +377,7 @@ namespace TerraEngine::Scheduling {
 		return {
 			{ "After Scene", MutationFlushPosition::AfterPhase, "Scene", {}, true, false },
 			{ "After Scripting", MutationFlushPosition::AfterPhase, "Scripting", {}, true, false },
+			{ "Before Physics", MutationFlushPosition::BeforePhase, "Physics", {}, true, false },
 			{ "After Physics", MutationFlushPosition::AfterPhase, "Physics", { "PhysicsSystem" }, true, false },
 			{ "Frame End", MutationFlushPosition::FrameEnd, "", {}, true, true }
 		};

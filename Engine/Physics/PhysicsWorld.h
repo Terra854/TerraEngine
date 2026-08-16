@@ -20,12 +20,15 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <map>
 #include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace TerraEngine::Physics {
+	class PhysicsWorld;
 	// Fixed-step conversion reuses these contiguous validation keys. Sorting two
 	// vectors is allocation-free after warm-up and avoids rebuilding hash tables for
 	// every extracted body packet.
@@ -96,6 +99,44 @@ namespace TerraEngine::Physics {
 		std::size_t constraintCount = 0;
 		std::size_t characterCapacity = 0;
 		std::size_t characterCount = 0;
+	};
+
+	// Frame creation is a protected lifecycle operation. The registry owns one
+	// isolated PhysicsWorld per frame, while worker code receives copied frame
+	// descriptors and never reaches the mutable map directly.
+	struct PhysicsFrameCreateRequest {
+		PhysicsFrameId frameId;
+		TerraEngine::Scene::WorldPosition canonicalOrigin;
+		double maximumLocalMagnitudeMetres = 8'192.0;
+		PhysicsSettings settings = PhysicsSettings::Defaults();
+	};
+
+	class TERRAENGINE_API PhysicsFrameRegistry final {
+	public:
+		PhysicsFrameRegistry() = default;
+		PhysicsFrameRegistry(const PhysicsFrameRegistry&) = delete;
+		PhysicsFrameRegistry& operator=(const PhysicsFrameRegistry&) = delete;
+
+		// Creates and activates a wholly separate engine world. A duplicate frame
+		// ID is rejected so callers must explicitly destroy/recreate a frame and
+		// observe its new generation rather than silently replacing simulation.
+		std::optional<PhysicsFrameDescriptor> Create(const PhysicsFrameCreateRequest& request);
+		bool Destroy(PhysicsFrameHandle frame);
+		std::optional<PhysicsFrameDescriptor> Find(PhysicsFrameHandle frame) const;
+		std::vector<PhysicsFrameDescriptor> Descriptors() const;
+		// The pointer is valid only while the caller holds the registry's declared
+		// protected lifecycle boundary; worker preparation must use Find instead.
+		PhysicsWorld* FindWorldForProtectedAccess(PhysicsFrameHandle frame);
+
+	private:
+		struct FrameRecord {
+			PhysicsFrameDescriptor descriptor;
+			std::unique_ptr<PhysicsWorld> world;
+		};
+
+		mutable std::mutex mutex;
+		std::map<std::uint64_t, FrameRecord> frames;
+		std::map<std::uint64_t, PhysicsGeneration> generationCursors;
 	};
 
 	// Provider bytes are opaque and immutable after publication. Multiple asset

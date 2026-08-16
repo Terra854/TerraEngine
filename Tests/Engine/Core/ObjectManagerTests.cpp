@@ -130,15 +130,19 @@ namespace TerraEngine::Tests {
 			Object child = manager.createObject("Child");
 			Object grandchild = manager.createObject("Grandchild");
 
-			Transform* rootTransform = manager.GetComponent<Transform>(root);
-			Transform* childTransform = manager.GetComponent<Transform>(child);
-			rootTransform->position = glm::vec3(10.0f, 0.0f, 0.0f);
-			rootTransform->scale = glm::vec3(2.0f, 2.0f, 2.0f);
-			childTransform->position = glm::vec3(4.0f, 0.0f, 0.0f);
+			TerraEngine::Scene::WorldPose rootPose{};
+			rootPose.position.offsetMetres.x = 10.0;
+			rootPose.scale = glm::vec3(2.0f);
+			TerraEngine::Scene::WorldPose childPose{};
+			childPose.position.offsetMetres.x = 4.0;
+			context.Expect(manager.SetCanonicalWorldPose(root, rootPose) == TerraEngine::Scene::WorldCoordinateError::None, "Root canonical pose should be accepted.");
+			context.Expect(manager.SetCanonicalWorldPose(child, childPose) == TerraEngine::Scene::WorldCoordinateError::None, "Child canonical pose should be accepted.");
 
 			context.Expect(manager.setParent(child, root), "Parenting a root object under another live object should succeed.");
 			context.Expect(manager.setParent(grandchild, child), "Nested parenting should succeed when no cycle is created.");
-			context.Expect(NearlyEqualVec3(childTransform->position, glm::vec3(-3.0f, 0.0f, 0.0f)), "Parenting should convert the child transform so world position is preserved.");
+			const Transform* childTransform = manager.GetComponent<Transform>(child);
+			context.Expect(childTransform != nullptr && childTransform->worldPose.position == childPose.position, "KeepWorld parenting should preserve the exact canonical world position.");
+			context.Expect(childTransform != nullptr && childTransform->parentRelativePose.translationMetres.x == -3.0, "Parenting should derive the bounded local relationship.");
 			context.Expect(HasObject(manager.getChildren(root), child), "The parent should list the child after parenting.");
 			context.Expect(!HasObject(manager.getRootObjects(), child), "Parented children should not be reported as root objects.");
 
@@ -146,7 +150,7 @@ namespace TerraEngine::Tests {
 			context.Expect(!manager.setParent(child, child), "Self-parenting should be rejected.");
 
 			context.Expect(manager.setParent(child, std::nullopt), "Passing an empty parent should detach the object to the root.");
-			context.Expect(NearlyEqualVec3(childTransform->position, glm::vec3(4.0f, 0.0f, 0.0f)), "Detaching should preserve the child's world-space position.");
+			context.Expect(childTransform != nullptr && childTransform->worldPose.position == childPose.position, "Detaching should preserve the exact canonical world position.");
 			context.Expect(manager.getChildren(root).empty(), "Detaching should remove the child from its old parent's child list.");
 			context.Expect(HasObject(manager.getRootObjects(), child), "Detached children should become root objects again.");
 
@@ -228,7 +232,7 @@ namespace TerraEngine::Tests {
 			ResetObjectManager();
 		});
 
-		registry.Add("Engine.ComponentAccess.TransformPropertiesRoundTripThroughReflection", [](TestContext& context) {
+		registry.Add("Engine.ComponentAccess.TransformUsesCanonicalPoseReflection", [](TestContext& context) {
 			ResetObjectManager();
 			ComponentRegistry::RegisterAllComponents();
 			Object object = ObjectManager::instance().createObject("Reflected");
@@ -237,29 +241,19 @@ namespace TerraEngine::Tests {
 			context.Expect(TerraEngine::Reflection::IsValid(transformAccess.reflectionType), "RegisterAllComponents should register Transform reflection metadata.");
 			context.ExpectEqual(std::string("Transform"), TerraEngine::Reflection::GetTypeName(transformAccess.reflectionType), "Transform should keep its stable reflected display name.");
 			context.Expect(transformAccess.hasComponent(object), "The reflected Transform accessor should detect the default component.");
-			context.Expect(transformAccess.setter(object, "Position", glm::vec3(3.0f, 4.0f, 5.0f)), "The reflected setter should update vec3 properties.");
-			context.Expect(transformAccess.setter(object, "Scale", glm::vec3(2.0f, 3.0f, 4.0f)), "The reflected setter should update scale properties.");
+			TerraEngine::Scene::WorldPose authoredPose{};
+			authoredPose.position.offsetMetres = glm::dvec3(3.0, 4.0, 5.0);
+			authoredPose.scale = glm::vec3(2.0f, 3.0f, 4.0f);
+			context.Expect(transformAccess.setter(object, "WorldPose", authoredPose), "The reflected setter should accept the typed canonical pose.");
 			context.Expect(!transformAccess.setter(object, "Missing", 7), "The reflected setter should fail closed for unknown properties.");
 
-			TerraEngine::Reflection::Variant positionValue = transformAccess.getter(object, "Position");
-			context.Expect(TerraEngine::Reflection::IsType<glm::vec3>(positionValue), "The reflected getter should return a typed vec3 value.");
-			context.Expect(NearlyEqualVec3(TerraEngine::Reflection::GetValue<glm::vec3>(positionValue), glm::vec3(3.0f, 4.0f, 5.0f)), "The reflected getter should read the updated position.");
+			TerraEngine::Reflection::Variant poseValue = transformAccess.getter(object, "WorldPose");
+			context.Expect(TerraEngine::Reflection::IsType<TerraEngine::Scene::WorldPose>(poseValue), "The reflected getter should return the typed canonical pose.");
+			context.Expect(TerraEngine::Reflection::GetValue<TerraEngine::Scene::WorldPose>(poseValue).position == authoredPose.position, "The reflected getter should preserve the exact canonical location.");
 			context.Expect(!TerraEngine::Reflection::IsValid(transformAccess.getter(object, "Missing")), "The reflected getter should return an empty value for unknown properties.");
 
-			nlohmann::json serialized = transformAccess.serialize(object);
-			context.Expect(serialized.contains("Position") && serialized["Position"].is_array(), "Transform serialization should include vec3 properties as arrays.");
-			transformAccess.deserialize(object, nlohmann::json{
-				{"Position", {7.0f, 8.0f, 9.0f}},
-				{"Scale", {1.0f, 1.5f, 2.0f}},
-				{"active", false}
-			});
-
 			Transform* transform = ObjectManager::instance().GetComponent<Transform>(object);
-			TerraEngine::Reflection::Variant deserializedPosition = transformAccess.getter(object, "Position");
-			context.Expect(NearlyEqualVec3(transform->position, glm::vec3(7.0f, 8.0f, 9.0f)), "Deserialization should write reflected vec3 values back to the component.");
-			context.Expect(NearlyEqualVec3(transform->scale, glm::vec3(1.0f, 1.5f, 2.0f)), "Deserialization should write reflected scale values back to the component.");
-			context.Expect(NearlyEqualVec3(TerraEngine::Reflection::GetValue<glm::vec3>(deserializedPosition), glm::vec3(7.0f, 8.0f, 9.0f)), "Registered component accessors should read reflected values after deserialization.");
-			context.Expect(!transform->active, "Deserialization should update reflected base component fields.");
+			context.Expect(transform != nullptr && transform->worldPose.position == authoredPose.position, "Transform reflection must not introduce a float position alias.");
 
 			transformAccess.removeComponent(object);
 			context.Expect(!transformAccess.hasComponent(object), "The reflected remover should detach the component.");

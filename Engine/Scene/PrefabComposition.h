@@ -80,6 +80,9 @@ namespace TerraEngine::Scene {
 	};
 
 	TERRAENGINE_API bool ValidatePrefabSource(PrefabSource& source);
+	// Prefab persistence has its own explicit envelope.  This check runs before
+	// composition so an unversioned file cannot be interpreted using stale IDs.
+	TERRAENGINE_API bool ValidateUnboundedPrefabDocument(const nlohmann::json& document, std::string* outError = nullptr);
 	TERRAENGINE_API PrefabCompositionResult ResolvePrefabInstance(const PrefabSource& source, const PrefabInstance& instance);
 	TERRAENGINE_API std::vector<SceneDiagnostic> DetectPrefabDependencyCycles(const std::unordered_map<TerraEngine::UUID, PrefabSource>& sources);
 	TERRAENGINE_API void MarkStaleOverrides(PrefabInstance& instance, const PrefabSource& source);

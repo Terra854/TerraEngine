@@ -74,6 +74,9 @@ namespace TerraEngine::Physics {
 
 	struct PhysicsPreparationPlanData {
 		PhysicsWorldHandle world;
+		// A plan belongs to one frame/island. Scheduler code partitions plans by
+		// this immutable key before workers prepare provider-independent records.
+		PhysicsFrameHandle frame;
 		PhysicsGeneration authoringGeneration = 0U;
 		PhysicsTick tick = 0U;
 		PhysicsPreparationExecutionPath executionPath = PhysicsPreparationExecutionPath::Fast;

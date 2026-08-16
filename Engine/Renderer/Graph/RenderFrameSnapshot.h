@@ -6,6 +6,24 @@
 
 namespace TerraEngine::Renderer
 {
+	struct RenderViewTransformRecord
+	{
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::uint64_t viewId = 0U;
+		std::uint64_t originGeneration = 0U;
+		glm::mat4 currentMatrix{1.0F};
+		glm::mat4 previousMatrix{1.0F};
+		bool valid = false;
+	};
+
+	struct RenderLocalizedPoseMatrices
+	{
+		glm::mat4 currentMatrix{1.0F};
+		glm::mat4 previousMatrix{1.0F};
+		bool valid = false;
+		bool staleReferenceFrame = false;
+	};
+
 	struct RenderFrameSnapshot
 	{
 		std::uint64_t frameId = 0u;
@@ -18,6 +36,7 @@ namespace TerraEngine::Renderer
 		bool reusableRenderableRecords = false;
 		std::vector<RenderFrameViewRequest> viewRequests;
 		std::vector<RenderFrameRenderableRecord> renderables;
+		std::vector<RenderViewTransformRecord> viewTransforms;
 		std::vector<ConventionalVisibilityIdentityRecord> conventionalVisibilityIdentityTable;
 		std::vector<RenderFrameLightRecord> lights;
 		std::vector<RenderFrameResourceRecord> materials;
@@ -48,6 +67,17 @@ namespace TerraEngine::Renderer
 	TERRAENGINE_API std::uint64_t BuildRenderInvalidationGenerationHash(const RenderInvalidationGenerationRecord& record);
 	TERRAENGINE_API std::uint64_t BuildSnapshotDeterministicHash(const RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API std::uint64_t EstimateSnapshotWorkload(const RenderFrameSnapshot& snapshot);
+	TERRAENGINE_API RenderLocalizationResult BuildLocalizedRenderPose(
+		const TerraEngine::Scene::WorldPose& pose,
+		const RenderReferenceFrame& currentFrame,
+		const RenderReferenceFrame* previousFrame = nullptr);
+	TERRAENGINE_API RenderLocalizedPoseMatrices BuildLocalizedRenderPoseMatrices(
+		const TerraEngine::Scene::WorldPose& pose,
+		const RenderReferenceFrame& currentFrame,
+		const RenderReferenceFrame* previousFrame = nullptr);
+	TERRAENGINE_API bool IsRenderReferenceFrameCurrent(
+		const RenderReferenceFrame& expected,
+		const RenderReferenceFrame& actual) noexcept;
 	TERRAENGINE_API std::vector<DeformationPageDemand> SelectAnimatedGeometryPageDemands(const RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API VirtualGeometryViewSelectionState BuildVirtualGeometryViewSelectionState(const RenderFrameViewRequest& view, const std::vector<RenderFrameRenderableRecord>& renderables);
 	TERRAENGINE_API std::vector<VirtualGeometryViewSelectionState> BuildVirtualGeometryViewSelectionStates(const RenderFrameSnapshot& snapshot);

@@ -5,8 +5,10 @@
 #include "Core/Export.h"
 #include "Core/Object/Object.h"
 #include "SceneGraphRuntime.h"
+#include "Scene/WorldRegion.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -42,6 +44,14 @@ namespace TerraEngine::Scene {
 		// This tag changes only when this exact parent link changes. Unrelated
 		// hierarchy edits can therefore preserve cached parent-world state.
 		std::uint64_t parentLinkGeneration = 0;
+		// Detached canonical and bounded-local state let worker preparation avoid
+		// live Transform reads while preserving exact world addresses.
+		WorldPose worldPose{};
+		ParentRelativePose parentRelativePose{};
+		// Residency remains separate from hierarchy. This metadata preserves an
+		// unloaded relation as a deterministic proxy rather than a live object.
+		std::optional<WorldRegionKey> homeRegion;
+		bool parentProxyRequired = false;
 	};
 
 	struct HierarchySnapshot {
@@ -62,5 +72,6 @@ namespace TerraEngine::Scene {
 	TERRAENGINE_API bool IsHierarchySnapshotWorkerReadable(const HierarchySnapshot& snapshot, std::uint64_t expectedRevision = 0);
 	TERRAENGINE_API HierarchySnapshot BuildHierarchySnapshot(ObjectManager& objects);
 	TERRAENGINE_API HierarchySnapshot BuildHierarchySnapshot(ObjectManager& objects, const HierarchySnapshot* previousSnapshot);
+	TERRAENGINE_API void ApplyHierarchyResidencyClosure(HierarchySnapshot& snapshot, const WorldRegionDirectory& directory, const PublishedWorldRegionResidency& residency);
 
 }

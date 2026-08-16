@@ -410,38 +410,6 @@ void SetComponentPayloadCommand::Redo()
 
 std::string SetComponentPayloadCommand::GetName() const { return "Edit " + m_ComponentName; }
 
-ChangeTransformCommand::ChangeTransformCommand(entt::entity entity, const glm::vec3& oldPos, const glm::quat& oldRot, const glm::vec3& oldScale,
-											const glm::vec3& newPos, const glm::quat& newRot, const glm::vec3& newScale)
-	: m_Uuid(GetObjectUuid(entity)), m_OldPos(oldPos), m_OldRot(oldRot), m_OldScale(oldScale),
-	m_NewPos(newPos), m_NewRot(newRot), m_NewScale(newScale) {}
-
-// ChangeTransformCommand::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void ChangeTransformCommand::Undo() {
-	if (auto obj = ResolveObject(m_Uuid)) {
-		if (auto* t = ObjectManager::instance().GetComponent<Transform>(*obj)) {
-			t->position = m_OldPos;
-			t->rotation = m_OldRot;
-			t->scale = m_OldScale;
-			ObjectManager::instance().MarkObjectTransformDirty(*obj);
-		}
-	}
-}
-
-// ChangeTransformCommand::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void ChangeTransformCommand::Redo() {
-	if (auto obj = ResolveObject(m_Uuid)) {
-		if (auto* t = ObjectManager::instance().GetComponent<Transform>(*obj)) {
-			t->position = m_NewPos;
-			t->rotation = m_NewRot;
-			t->scale = m_NewScale;
-			ObjectManager::instance().MarkObjectTransformDirty(*obj);
-		}
-	}
-}
-
-// ChangeTransformCommand::GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-std::string ChangeTransformCommand::GetName() const { return "Transform Object"; }
-
 UndoRedoSystem& UndoRedoSystem::Instance() {
 	static UndoRedoSystem instance;
 	return instance;
@@ -520,17 +488,20 @@ bool UndoRedoSystem::RecordCommittedTransaction(const TerraEngine::Scene::Transa
 	const TerraEngine::Scene::TransactionResult& result)
 {
 	using namespace TerraEngine::Scene;
-	if (transaction.origin != TransactionOrigin::Editor || transaction.undoGroupName.empty()
+	if ((transaction.origin != TransactionOrigin::Editor
+		&& transaction.origin != TransactionOrigin::Automation) || transaction.undoGroupName.empty()
 		|| result.status != TransactionStatus::Committed || result.inverseDeltas.empty())
 	{
 		return false;
 	}
 
-	// The editor bridge deliberately accepts reflected property writes only.
-	// Structural/object snapshots need a richer asynchronous replay protocol and
-	// must not be guessed from a receipt that omitted serialized forward state.
+	// Replays only retain operations whose inverse is an explicit typed write.
+	// Object/component snapshot restoration needs a richer protocol, while a
+	// canonical transform inverse is already a complete WorldPose value.
 	if (!std::all_of(transaction.writeSet.operations.begin(), transaction.writeSet.operations.end(), [](const TransactionWriteOperation& operation) {
-		return operation.kind == TransactionWriteKind::UpdateComponentProperty;
+		return operation.kind == TransactionWriteKind::UpdateComponentProperty
+			|| operation.kind == TransactionWriteKind::SetWorldTransform
+			|| operation.kind == TransactionWriteKind::TranslateWorld;
 	}))
 	{
 		return false;

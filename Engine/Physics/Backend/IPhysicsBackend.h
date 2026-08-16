@@ -51,6 +51,9 @@ namespace TerraEngine::Physics {
 
 		struct PhysicsBackendWorldConfiguration {
 			PhysicsWorldHandle world;
+			// The backend never derives an island from a world number; callers pass
+			// the exact generation-bearing frame used to localize all float inputs.
+			PhysicsFrameHandle frame;
 			PhysicsSettings settings = PhysicsSettings::Defaults();
 			std::uint32_t maximumBodies = 65536U;
 			std::uint32_t maximumBodyPairs = 65536U;
@@ -246,6 +249,7 @@ namespace TerraEngine::Physics {
 
 		struct PhysicsBackendQueryRequest {
 			PhysicsWorldHandle world;
+			PhysicsFrameHandle frame;
 			PhysicsQueryKind kind = PhysicsQueryKind::RayCast;
 			PhysicsQueryHitMode hitMode = PhysicsQueryHitMode::Closest;
 			PhysicsPose pose;

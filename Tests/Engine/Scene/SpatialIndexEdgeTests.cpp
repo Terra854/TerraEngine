@@ -26,7 +26,7 @@ namespace TerraEngine::Tests {
 			record.entity = static_cast<entt::entity>(idValue);
 			record.active = active;
 			record.categoryMask = categoryMask;
-			record.worldBounds = TerraEngine::Scene::MakeAABB(minimum, maximum, TerraEngine::Scene::SpatialBoundsSource::Authored);
+			record.localBounds = TerraEngine::Scene::MakeAABB(minimum, maximum, TerraEngine::Scene::SpatialBoundsSource::Authored);
 			record.revision = revision;
 			return record;
 		}

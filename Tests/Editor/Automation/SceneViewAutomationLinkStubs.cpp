@@ -10,27 +10,46 @@ namespace SceneOverlay = TerraEngine::Editor::SceneViewOverlay;
 // the production definitions from SceneViewWindow.cpp.
 nlohmann::json SceneViewWindow::GetAutomationState() const
 {
+	const auto encodePosition = [](const TerraEngine::Scene::WorldPosition& value) {
+		return nlohmann::json{
+			{"cell", {
+				{"x", TerraEngine::Scene::EncodeWorldCellAxis(value.cell.x)},
+				{"y", TerraEngine::Scene::EncodeWorldCellAxis(value.cell.y)},
+				{"z", TerraEngine::Scene::EncodeWorldCellAxis(value.cell.z)}}},
+			{"offsetMetres", {value.offsetMetres.x, value.offsetMetres.y, value.offsetMetres.z}}};
+	};
 	return {
-		{"camera", {{"position", {m_CameraPos.x, m_CameraPos.y, m_CameraPos.z}}, {"fieldOfViewDegrees", m_Fov}}},
+		{"camera", {{"position", encodePosition(m_CameraPosition)}, {"fieldOfViewDegrees", m_Fov}}},
 		{"visible", IsVisible()},
 		{"selectedObjectId", nullptr}
 	};
 }
 
-bool SceneViewWindow::SetAutomationCamera(const glm::vec3& position, const glm::vec3& focus, std::string& outError)
+bool SceneViewWindow::SetAutomationCamera(
+	const TerraEngine::Scene::WorldPosition& position,
+	const TerraEngine::Scene::WorldPosition& focus,
+	std::string& outError)
 {
-	const glm::vec3 direction = focus - position;
-	if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z)
-		|| !std::isfinite(focus.x) || !std::isfinite(focus.y) || !std::isfinite(focus.z)
-		|| glm::length(direction) <= 0.0001f)
+	const TerraEngine::Scene::WorldCoordinateResult normalizedPosition = TerraEngine::Scene::NormalizeWorldPosition(position);
+	const TerraEngine::Scene::WorldCoordinateResult normalizedFocus = TerraEngine::Scene::NormalizeWorldPosition(focus);
+	if (!normalizedPosition.Succeeded() || !normalizedFocus.Succeeded())
 	{
-		outError = "Camera position and focus must be finite, distinct points.";
+		outError = "Camera position and focus must be normalized canonical locations.";
 		return false;
 	}
-	m_CameraPos = position;
-	m_CameraFocus = focus;
+	const TerraEngine::Scene::WorldLocalizationResult localized = TerraEngine::Scene::LocalizeWorldPosition(
+		normalizedFocus.position,
+		normalizedPosition.position,
+		1000.0);
+	if (!localized.Succeeded() || glm::length(glm::vec3(localized.offsetMetres)) <= 0.0001f)
+	{
+		outError = "Camera focus must be a distinct location within the bounded Scene View working frame.";
+		return false;
+	}
+	m_CameraPosition = normalizedPosition.position;
+	m_CameraFocus = normalizedFocus.position;
 	m_CameraFocusInitialized = true;
-	m_CameraFocusDistance = glm::length(direction);
+	m_CameraFocusDistance = glm::length(glm::vec3(localized.offsetMetres));
 	outError.clear();
 	return true;
 }

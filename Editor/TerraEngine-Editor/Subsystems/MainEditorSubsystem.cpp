@@ -240,7 +240,28 @@ namespace
 		{
 			return false;
 		}
-		transform["Position"] = {position.x, position.y, position.z};
+		// Grid placement edits the strict canonical payload before the protected
+		// graph publication. Preserve authored rotation/scale while keeping the
+		// root's world and parent-relative translations consistent.
+		nlohmann::json& worldPose = transform["WorldPose"];
+		if (worldPose.is_null())
+		{
+			worldPose = {{"rotation", {1.0f, 0.0f, 0.0f, 0.0f}}, {"scale", {1.0f, 1.0f, 1.0f}}};
+		}
+		nlohmann::json& parentRelativePose = transform["ParentRelativePose"];
+		if (parentRelativePose.is_null())
+		{
+			parentRelativePose = {{"rotation", {1.0f, 0.0f, 0.0f, 0.0f}},
+				{"scale", {1.0f, 1.0f, 1.0f}}, {"transformSpaceId", 0u}};
+		}
+		if (!worldPose.is_object() || !parentRelativePose.is_object())
+		{
+			return false;
+		}
+		TerraEngine::Scene::WorldPosition canonicalPosition;
+		canonicalPosition.offsetMetres = glm::dvec3(position);
+		worldPose["position"] = Serializer::SerializeWorldPosition(canonicalPosition);
+		parentRelativePose["translationMetres"] = {position.x, position.y, position.z};
 		return true;
 	}
 
@@ -349,13 +370,23 @@ PrefabAuthoringService::Result PrefabAuthoringService::Create(
 	if (directoryError) {
 		return {false, "internal", "Could not create the prefab directory: " + directoryError.message()};
 	}
+	nlohmann::json document{
+		{"format", std::string(TerraEngine::Scene::kTerraPrefabUnboundedFormat)},
+		{"sourceId", sourceId},
+		{"name", sourceName},
+		{"objects", nlohmann::json::array({Serializer::SerializeObject(sourceEntity)})}
+	};
 	std::ofstream output(absolutePath, std::ios::binary | std::ios::trunc);
-	output << nlohmann::json{{"prefabId", prefabId}, {"sourceObjectId", sourceId}, {"name", sourceName}}.dump(2);
+	output << document.dump(2);
 	if (!output.good()) {
 		return {false, "internal", "Could not publish the prefab asset."};
 	}
 	const std::string relative = projectRelativePath.lexically_normal().generic_string();
-	prefabsById[prefabId] = {prefabId, relative, sourceId, sourceName, 1u, {}, TerraEngine::EMPTY_UUID, {}, false};
+	// Session-created prefabs immediately use the same strict graph path as an
+	// indexed asset. There is no lightweight or legacy representation to retain.
+	prefabsById[prefabId] = {prefabId, relative, sourceId, sourceName, 1u,
+		std::filesystem::absolute(absolutePath).lexically_normal(), TerraEngine::EMPTY_UUID,
+		std::move(document), true};
 	prefabIdByPath[relative] = prefabId;
 	return {true, {}, "Created prefab.", {{"prefabId", prefabId}, {"sourceObjectId", sourceId}, {"path", relative}}};
 }
@@ -390,17 +421,16 @@ PrefabAuthoringService::Result PrefabAuthoringService::RegisterExistingAsset(
 	} catch (const nlohmann::json::exception&) {
 		return {false, "validation", "Registered prefab document is malformed."};
 	}
-	if (!document.is_object()) {
-		return {false, "validation", "Registered prefab document must be a JSON object."};
+	std::string formatError;
+	if (!Serializer::ValidateUnboundedPrefabDocument(document, &formatError)) {
+		return {false, "validation", formatError};
 	}
-	const bool hasSerializedGraph = document.contains("objects");
-	if (hasSerializedGraph && (!document["objects"].is_array() || document["objects"].empty())) {
+	if (document["objects"].empty()) {
 		return {false, "validation", "Registered prefab object graph must contain at least one root."};
 	}
 
 	// Prefer the authored document name, then its first root, and finally the
-	// filename. This supports both generated model prefabs and older lightweight
-	// prefabs created by the automation authoring service.
+	// filename. The strict prefab contract always carries a complete object graph.
 	std::string sourceName;
 	std::string sourceObjectId;
 	if (const auto name = document.find("name"); name != document.end()) {
@@ -408,12 +438,6 @@ PrefabAuthoringService::Result PrefabAuthoringService::RegisterExistingAsset(
 			return {false, "validation", "Registered prefab name must be a string."};
 		}
 		sourceName = name->get<std::string>();
-	}
-	if (const auto sourceId = document.find("sourceObjectId"); sourceId != document.end()) {
-		if (!sourceId->is_string()) {
-			return {false, "validation", "Registered prefab sourceObjectId must be a string."};
-		}
-		sourceObjectId = sourceId->get<std::string>();
 	}
 	if (document.contains("objects") && document["objects"].is_array() && !document["objects"].empty()
 		&& document["objects"].front().is_object()) {
@@ -456,7 +480,7 @@ PrefabAuthoringService::Result PrefabAuthoringService::RegisterExistingAsset(
 		std::filesystem::absolute(absolutePath).lexically_normal(),
 		assetGuid,
 		std::move(document),
-		hasSerializedGraph
+		true
 	};
 	prefabIdByPath[relative] = prefabId;
 	return {true, {}, "Registered existing prefab asset.", {
@@ -504,17 +528,10 @@ PrefabAuthoringService::Result PrefabAuthoringService::Instantiate(
 		}};
 	}
 
-	// A prefab created earlier in this automation session deliberately keeps the
-	// legacy lightweight representation until AssetDatabase indexes its file.
-	Object instance = ObjectManager::instance().createObject(requestedName.empty() ? prefab.sourceName : std::string(requestedName));
-	const std::string instanceId = TerraEngine::ToHexString(ObjectManager::instance().getUUID(instance));
-	instances[instanceId] = {prefabId, prefab.sourceName};
-	UndoRedoSystem::Instance().PushCommand(std::make_unique<CreateObjectCommand>(instance.EntityId()));
-	return {true, {}, "Instantiated prefab.", {
-		{"prefabId", prefabId},
-		{"instanceId", instanceId},
-		{"path", prefab.relativePath},
-		{"prefabGeneration", prefab.generation}
+	// Fail closed if internal state ever lacks the strict graph. There is no
+	// compatibility representation because it cannot preserve canonical poses.
+	return {false, "validation", "Prefab does not contain a TerraPrefabUnboundedV1 object graph.", {
+		{"rolledBack", true}
 	}};
 }
 
@@ -692,111 +709,10 @@ PrefabAuthoringService::Result PrefabAuthoringService::InstantiateMany(
 		}};
 	}
 
-	ObjectManager& objects = ObjectManager::instance();
-	if (objects.IsBulkPublicationActive())
-	{
-		return {
-			false,
-			"conflict",
-			"Another protected scene publication is already active.",
-			{{"rolledBack", true}}
-		};
-	}
-
-	const bool sceneWasDirty = SceneManager::Instance().IsActiveSceneDirty();
-	std::vector<entt::entity> roots;
-	std::vector<std::unique_ptr<ICommand>> undoCommands;
-	roots.reserve(request.count);
-	undoCommands.reserve(request.count);
-	bool publicationActive = false;
-	auto rollback = [&]() {
-		for (entt::entity rootEntity : roots)
-		{
-			if (const std::optional<Object> root = objects.getObject(rootEntity))
-			{
-				objects.removeObject(*root);
-			}
-		}
-		if (publicationActive)
-		{
-			objects.FinishBulkPublication(false);
-			publicationActive = false;
-		}
-		if (!sceneWasDirty)
-		{
-			SceneManager::Instance().ClearActiveSceneDirty();
-		}
-	};
-
-	objects.BeginBulkPublication({request.count, request.count});
-	publicationActive = true;
-	try
-	{
-		for (std::uint32_t instanceIndex = 0u; instanceIndex < request.count; ++instanceIndex)
-		{
-			const std::string name = ResolveBulkInstanceName(
-				request.namePrefix, prefab.sourceName, instanceIndex, request.count);
-			Object instance = objects.createObject(name);
-			Transform* transform = objects.GetComponent<Transform>(instance);
-			if (transform == nullptr)
-			{
-				throw std::runtime_error("Prefab instance Transform was not created.");
-			}
-			transform->position = ResolveBulkGridPosition(request, instanceIndex);
-			objects.MarkObjectTransformDirty(instance);
-			if (request.parent.has_value())
-			{
-				objects.setParent(instance, objects.makeObjectHandle(*request.parent));
-			}
-			roots.push_back(instance.EntityId());
-			undoCommands.push_back(std::make_unique<CreateObjectCommand>(instance.EntityId()));
-		}
-	}
-	catch (const std::exception& error)
-	{
-		rollback();
-		return {
-			false,
-			"validation",
-			std::string("Prefab batch was rejected: ") + error.what(),
-			{{"rolledBack", true}}
-		};
-	}
-
-	objects.FinishBulkPublication(true);
-	publicationActive = false;
-	UndoRedoSystem::Instance().PushTransactionGroup("Instantiate Prefab Batch", std::move(undoCommands));
-	SceneManager::Instance().ForceMarkActiveSceneDirty();
-	for (std::uint32_t instanceIndex = 0u; instanceIndex < request.count; ++instanceIndex)
-	{
-		const Object instance = objects.makeObjectHandle(roots[instanceIndex]);
-		const std::string instanceId = TerraEngine::ToHexString(objects.getUUID(instance));
-		const std::string name = ResolveBulkInstanceName(
-			request.namePrefix, prefab.sourceName, instanceIndex, request.count);
-		const glm::vec3 position = ResolveBulkGridPosition(request, instanceIndex);
-		instances[instanceId] = {prefabId, prefab.sourceName};
-		instanceIds.push_back(instanceId);
-		instanceRows.push_back({
-			{"index", instanceIndex},
-			{"name", name},
-			{"instanceId", instanceId},
-			{"rootIds", nlohmann::json::array({instanceId})},
-			{"position", {position.x, position.y, position.z}}
-		});
-	}
-	return {true, {}, "Instantiated prefab batch.", {
-		{"prefabId", prefabId},
-		{"path", prefab.relativePath},
-		{"prefabGeneration", prefab.generation},
-		{"instanceCount", request.count},
-		{"rootCount", request.count},
-		{"objectCount", request.count},
-		{"instanceIds", std::move(instanceIds)},
-		{"instances", std::move(instanceRows)},
-		{"grid", {{"columns", columns}, {"spacing", request.spacing},
-			{"origin", {request.origin.x, request.origin.y, request.origin.z}}}},
-		{"visibilityBoundary", "prefab_bulk_publication"},
-		{"rolledBack", false}
+	// A batch must never synthesize an object-only stand-in. Rejecting here keeps
+	// publication atomic and guarantees every instance came from the strict graph.
+	return {false, "validation", "Prefab does not contain a TerraPrefabUnboundedV1 object graph.", {
+		{"rolledBack", true}
 	}};
 }
 
@@ -1386,7 +1302,7 @@ namespace
 		std::size_t rootsPerInstance)
 	{
 		ProtectedPrefabInstantiationResult result;
-		const TerraEngine::Scene::PreparedSceneDecode prepared = Serializer::PrepareSceneDecode(prefabJson);
+		const TerraEngine::Scene::PreparedSceneDecode prepared = Serializer::PreparePrefabDecode(prefabJson);
 		if (!prepared.accepted || prepared.cancelled || prepared.objectCount == 0U)
 		{
 			result.errorCategory = "validation";
@@ -1903,8 +1819,7 @@ void MainEditorSubsystem::CapturePrefabReturnSceneState()
 		// Copy only the render-facing camera fields needed to rebuild the same
 		// Game View camera after prefab mode swaps in an isolated ObjectManager.
 		PrefabReturnGameViewCamera cachedCamera;
-		cachedCamera.position = transform->position;
-		cachedCamera.rotation = transform->rotation;
+		cachedCamera.worldPose = transform->worldPose;
 		cachedCamera.up = camera->up;
 		cachedCamera.verticalFovDegrees = camera->verticalFovDegrees;
 		cachedCamera.nearPlane = camera->nearPlane;
@@ -2139,8 +2054,8 @@ bool MainEditorSubsystem::TryApplyPrefabModeGameViewCameras(float aspect) const
 
 	for (const PrefabReturnGameViewCamera& camera : m_PrefabReturnGameViewCameras)
 	{
-		const glm::vec3 forward = camera.rotation * glm::vec3(0.0f, 0.0f, -1.0f);
-		glm::vec3 up = camera.rotation * camera.up;
+		const glm::vec3 forward = camera.worldPose.rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+		glm::vec3 up = camera.worldPose.rotation * camera.up;
 		if (glm::length(up) < 0.0001f)
 		{
 			up = glm::vec3(0.0f, 1.0f, 0.0f);
@@ -2148,12 +2063,12 @@ bool MainEditorSubsystem::TryApplyPrefabModeGameViewCameras(float aspect) const
 
 		// Feed the renderer through its normal Game View camera entry point, so
 		// prefab editing only changes camera ownership, not render behavior.
-		const glm::mat4 view = glm::lookAt(camera.position, camera.position + forward, glm::normalize(up));
+		const glm::mat4 view = glm::lookAt(glm::vec3(0.0f), forward, glm::normalize(up));
 		// Keep prefab-return Game View cameras in Vulkan's 0..1 depth space so
 		// renderer depth tests and Hi-Z occlusion interpret the same projection.
 		glm::mat4 proj = glm::perspectiveRH_ZO(glm::radians(camera.verticalFovDegrees), aspect, camera.nearPlane, camera.farPlane);
 		proj[1][1] *= -1.0f;
-		RenderSystem::Instance().SetGameViewCamera(view, proj, camera.position);
+		RenderSystem::Instance().SetGameViewCamera(view, proj, camera.worldPose.position);
 	}
 
 	return true;

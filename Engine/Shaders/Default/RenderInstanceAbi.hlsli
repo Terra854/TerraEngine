@@ -6,6 +6,7 @@
 
 #ifndef TERRAENGINE_RENDER_INSTANCE_ABI_HLSLI
 #define TERRAENGINE_RENDER_INSTANCE_ABI_HLSLI
+#include "../Geometry/TerraWorldReferenceFrame.hlsli"
 
 static const uint kRenderInstanceRecordBytes = 176u;
 static const uint kRenderInstanceRecordWords = 44u;

@@ -164,6 +164,18 @@ namespace TerraEngine::Resource
 		std::string reason;
 	};
 
+	// Scene-region residency publishes only subordinate asset demand. It never
+	// hands scene-object ownership to ResourceManager, which remains an asset
+	// cache with its own independent lifetime and cleanup policy.
+	struct SceneRegionAssetNeed
+	{
+		StreamableAssetId assetId = TerraEngine::EMPTY_UUID;
+		StreamableAssetType assetType = StreamableAssetType::Mesh;
+		TerraEngine::UUID ownerObjectId = TerraEngine::EMPTY_UUID;
+		std::string regionId;
+		std::int32_t priority = 0;
+	};
+
 	struct VirtualGeometryStreamingPage
 	{
 		std::uint32_t pageId = 0u;

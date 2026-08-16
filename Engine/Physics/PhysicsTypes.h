@@ -7,6 +7,7 @@
 #pragma once
 
 #include "Core/Export.h"
+#include "Scene/WorldCoordinate.h"
 
 #include <compare>
 #include <cstdint>
@@ -126,6 +127,29 @@ namespace TerraEngine::Physics {
 	enum class PhysicsMotionQuality : std::uint8_t {
 		Discrete,
 		LinearCast
+	};
+
+	// A frame is an independently simulated local island. It is deliberately
+	// distinct from PhysicsWorldId: a frame can be recreated at the same logical
+	// identity while its generation prevents old poses, queries, and events from
+	// being applied to its replacement.
+	struct PhysicsFrameId {
+		std::uint64_t value = 0U;
+
+		constexpr bool IsValid() const noexcept { return value != 0U; }
+		auto operator<=>(const PhysicsFrameId&) const = default;
+	};
+
+	inline constexpr PhysicsFrameId kPrimaryPhysicsFrameId{1U};
+
+	struct PhysicsFrameHandle {
+		PhysicsFrameId frameId;
+		PhysicsGeneration frameGeneration = 0U;
+
+		constexpr bool IsValid() const noexcept {
+			return frameId.IsValid() && frameGeneration != 0U;
+		}
+		auto operator<=>(const PhysicsFrameHandle&) const = default;
 	};
 
 	// Provider extraction uses an explicit field mask so a transform publication
@@ -289,6 +313,71 @@ namespace TerraEngine::Physics {
 		bool IsFinite() const noexcept;
 		auto operator<=>(const PhysicsPose&) const = default;
 	};
+
+	// Jolt continues to receive floats, but only after this descriptor has
+	// localized a canonical position into its explicitly bounded island.
+	struct PhysicsFrameDescriptor {
+		PhysicsFrameHandle frame;
+		PhysicsWorldHandle world;
+		TerraEngine::Scene::WorldPosition canonicalOrigin;
+		double maximumLocalMagnitudeMetres = 8'192.0;
+
+		[[nodiscard]] bool IsValid() const noexcept;
+	};
+
+	struct PhysicsFrameLocalPose {
+		PhysicsFrameHandle frame;
+		PhysicsPose pose;
+
+		[[nodiscard]] bool IsFinite() const noexcept;
+	};
+
+	enum class PhysicsFrameConversionError : std::uint8_t {
+		None,
+		InvalidFrame,
+		StaleFrame,
+		NonFinitePose,
+		OutsideLocalBounds,
+		CoordinateOverflow
+	};
+
+	struct PhysicsFramePoseConversion {
+		PhysicsFrameLocalPose localPose;
+		PhysicsFrameConversionError error = PhysicsFrameConversionError::None;
+
+		[[nodiscard]] constexpr bool Succeeded() const noexcept {
+			return error == PhysicsFrameConversionError::None;
+		}
+	};
+
+	struct PhysicsCanonicalPoseConversion {
+		TerraEngine::Scene::WorldPose canonicalPose;
+		PhysicsFrameConversionError error = PhysicsFrameConversionError::None;
+
+		[[nodiscard]] constexpr bool Succeeded() const noexcept {
+			return error == PhysicsFrameConversionError::None;
+		}
+	};
+
+	// A membership is copied into every cross-frame request. The exact descriptor
+	// generation makes stale residency a rejection, never an implicit relocation.
+	struct PhysicsFrameMembership {
+		PhysicsFrameHandle frame;
+		PhysicsWorldHandle world;
+		std::uint64_t residencyGeneration = 0U;
+
+		[[nodiscard]] constexpr bool IsValid() const noexcept {
+			return frame.IsValid() && world.IsValid() && residencyGeneration != 0U;
+		}
+	};
+
+	TERRAENGINE_API PhysicsFramePoseConversion LocalizePhysicsPose(
+		const TerraEngine::Scene::WorldPose& canonicalPose,
+		const PhysicsFrameDescriptor& frame) noexcept;
+	TERRAENGINE_API PhysicsCanonicalPoseConversion ReconstructCanonicalPhysicsPose(
+		const PhysicsFrameLocalPose& localPose,
+		const PhysicsFrameDescriptor& frame) noexcept;
+	TERRAENGINE_API std::string_view ToString(PhysicsFrameConversionError error) noexcept;
 
 	// A typed allocator owns compact slots for one handle family. Release keeps a
 	// tombstone so callers can distinguish a destroyed target from an invalid

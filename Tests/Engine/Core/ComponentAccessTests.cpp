@@ -217,6 +217,8 @@ namespace TerraEngine::Tests {
 			const std::uint64_t spatialRevisionBefore = objects.GetSpatialRevision();
 
 			bool propertyWritten = false;
+			TerraEngine::Scene::WorldPose pose{};
+			pose.position.offsetMetres = glm::dvec3{7.0, 2.0, -3.0};
 			{
 				std::lock_guard lock(ComponentAccessRegistryMutex());
 				auto transformAccess = ComponentAccessRegistry().find(
@@ -225,15 +227,15 @@ namespace TerraEngine::Tests {
 					propertyWritten = transformAccess->second.entitySetter(
 						objects.getRegistry(),
 						object.EntityId(),
-						"Position",
-						glm::vec3{7.0F, 2.0F, -3.0F});
+						"WorldPose",
+						pose);
 				}
 			}
 
 			const Transform* transform = objects.GetComponent<Transform>(object);
 			context.Expect(propertyWritten && transform != nullptr
-				&& transform->position == glm::vec3(7.0F, 2.0F, -3.0F),
-				"The shared reflected setter must apply the Transform value used by inspector, automation, and managed runtime callers.");
+				&& transform->worldPose.position == pose.position,
+				"The shared reflected setter must retain the typed canonical value used by inspector, automation, and managed runtime callers.");
 			context.Expect(objects.GetObjectTransformRevision(object) > transformRevisionBefore
 				&& objects.GetSpatialRevision() > spatialRevisionBefore,
 				"A reflected Transform write must invalidate render, hierarchy, and bounds snapshots without requiring a caller-specific dirty notification.");

@@ -7,6 +7,7 @@
 
 #include <limits>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace TerraEngine::Scene {
 	BulkScenePublicationPacket BuildBulkScenePublicationPacket(
@@ -22,6 +23,11 @@ namespace TerraEngine::Scene {
 		packet.reservedHierarchyCount = prepared.hierarchyCount;
 		packet.cancelled = prepared.cancelled || !prepared.accepted;
 		packet.objects = prepared.objects;
+		for (const PreparedSceneObjectRecord& record : packet.objects) {
+			if (record.object.contains("uuid") && record.object["uuid"].is_string()) {
+				packet.stableIdentities.push_back({ TerraEngine::ParseUUID(record.object["uuid"].get<std::string>()).value_or(TerraEngine::EMPTY_UUID), {} });
+			}
+		}
 		return packet;
 	}
 
@@ -32,7 +38,10 @@ namespace TerraEngine::Scene {
 			return {false, "prepared scene packet belongs to a stale scene generation"};
 		}
 		if (packet.reservedObjectCount != packet.objects.size()) return {false, "prepared scene object count does not match its exact reserve"};
+		if (packet.stableIdentities.size() != packet.objects.size()) return {false, "prepared scene objects must all carry stable UUID identities"};
 		if (packet.reservedObjectCount > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) return {false, "prepared scene reserve exceeds addressable storage"};
+		std::unordered_set<TerraEngine::UUID> identities;
+		for (const StableBulkObjectIdentity& identity : packet.stableIdentities) if (identity.objectId == TerraEngine::EMPTY_UUID || !identities.insert(identity.objectId).second) return {false, "prepared scene contains a missing or duplicate stable UUID"};
 		for (std::size_t index = 0U; index < packet.objects.size(); ++index) {
 			const PreparedSceneObjectRecord& record = packet.objects[index];
 			if (!record.object.is_object() || (record.parentRecordIndex.has_value() && *record.parentRecordIndex >= index)) {
@@ -98,6 +107,13 @@ namespace TerraEngine::Scene {
 			objects.FinishBulkPublication(true);
 			return {false, true, cancellationRequested && cancellationRequested(), objects.GetSceneGeneration(), exception.what()};
 		}
+	}
+
+	BulkScenePublicationPacket BuildRegionBulkScenePublicationPacket(const PreparedSceneDecode& prepared, WorldRegionKey homeRegion, std::uint64_t expectedSceneGeneration, std::uint64_t preparedGeneration)
+	{
+		BulkScenePublicationPacket packet = BuildBulkScenePublicationPacket(prepared, expectedSceneGeneration, preparedGeneration);
+		for (StableBulkObjectIdentity& identity : packet.stableIdentities) identity.homeRegion = homeRegion;
+		return packet;
 	}
 
 }

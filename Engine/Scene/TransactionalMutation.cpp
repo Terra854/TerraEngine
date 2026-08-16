@@ -10,6 +10,7 @@
 #include "Scene/Serializer.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <sstream>
 #include <unordered_set>
@@ -81,6 +82,13 @@ namespace TerraEngine::Scene {
 			return kind == TransactionWriteKind::AddComponent
 				|| kind == TransactionWriteKind::RemoveComponent
 				|| kind == TransactionWriteKind::UpdateComponentProperty;
+		}
+
+		bool IsSpatialWrite(TransactionWriteKind kind)
+		{
+			return kind == TransactionWriteKind::SetWorldTransform
+				|| kind == TransactionWriteKind::TranslateWorld
+				|| kind == TransactionWriteKind::ChangeSimulationFrame;
 		}
 
 		std::size_t LogicalWriteCount(const Transaction& transaction)
@@ -226,6 +234,14 @@ namespace TerraEngine::Scene {
 				return result;
 			}
 
+			if (transaction.injectedFailureOperationIndex && transaction.origin != TransactionOrigin::Test)
+			{
+				result.status = TransactionStatus::Rejected;
+				AddConflict(result, TransactionConflictReason::PolicyRejection, TerraEngine::EMPTY_UUID, *transaction.injectedFailureOperationIndex,
+					"Commit fault injection is available only to test-origin transactions.");
+				return result;
+			}
+
 			if (transaction.writeSet.operations.empty() && transaction.mode == TransactionMode::Commit)
 			{
 				result.status = TransactionStatus::Rejected;
@@ -292,6 +308,16 @@ namespace TerraEngine::Scene {
 					result.status = TransactionStatus::Conflicted;
 					AddConflict(result, TransactionConflictReason::ComponentVersionMismatch, observation.objectId, 0, "Observed transform revision changed.", observation.transformRevision, transformRevision, std::string(Transform::kComponentName));
 				}
+				const std::optional<WorldPose> worldPose = objects.GetCanonicalWorldPose(*object);
+				const std::uint64_t coordinateFrameRevision = worldPose ? worldPose->coordinateFrameRevision : 0U;
+				if (observation.coordinateFrameRevision != 0U
+					&& observation.coordinateFrameRevision != coordinateFrameRevision)
+				{
+					result.status = TransactionStatus::Conflicted;
+					AddConflict(result, TransactionConflictReason::StaleSpatialPublication, observation.objectId, 0,
+						"Observed canonical coordinate-frame revision changed.", observation.coordinateFrameRevision,
+						coordinateFrameRevision, std::string(Transform::kComponentName));
+				}
 
 				const std::optional<Object> parent = objects.getParent(*object);
 				const TerraEngine::UUID parentObjectId = parent ? objects.getUUID(*parent) : TerraEngine::EMPTY_UUID;
@@ -320,6 +346,7 @@ namespace TerraEngine::Scene {
 			std::unordered_set<std::int32_t> localCreates;
 			std::unordered_set<std::string> structurallyTouchedTargets;
 			std::unordered_set<std::string> deletedTargets;
+			std::unordered_set<std::string> spatiallyTouchedTargets;
 			std::unordered_map<std::string, bool> preparedComponentPresence;
 			for (std::size_t index = 0; index < transaction.writeSet.operations.size(); ++index)
 			{
@@ -368,6 +395,47 @@ namespace TerraEngine::Scene {
 							result.status = TransactionStatus::Conflicted;
 							AddConflict(result, TransactionConflictReason::MissingTarget, update.objectId, index, "Transform publication target no longer has a Transform component.", 0, 0, std::string(Transform::kComponentName), {}, operation.kind);
 						}
+					}
+					continue;
+				}
+				if (IsSpatialWrite(operation.kind))
+				{
+					if (operation.target.UsesLocalObject() || operation.target.objectId == TerraEngine::EMPTY_UUID)
+					{
+						result.status = TransactionStatus::Rejected;
+						AddConflict(result, TransactionConflictReason::InvalidPayload, operation.target.objectId, index,
+							"Canonical spatial writes require one existing stable object identity.", 0, 0, {}, {}, operation.kind);
+						continue;
+					}
+					if (!spatiallyTouchedTargets.insert(MakeObjectRefKey(operation.target)).second)
+					{
+						result.status = TransactionStatus::Conflicted;
+						AddConflict(result, TransactionConflictReason::PolicyRejection, operation.target.objectId, index,
+							"A transaction cannot publish more than one canonical spatial write for an object.", 0, 0, {}, {}, operation.kind);
+					}
+					if (operation.kind == TransactionWriteKind::SetWorldTransform
+						&& !NormalizeWorldPosition(operation.worldPose.position).Succeeded())
+					{
+						result.status = TransactionStatus::Rejected;
+						AddConflict(result, TransactionConflictReason::InvalidCoordinate, operation.target.objectId, index,
+							"SetWorldTransform contains a non-normalizable canonical position.", 0, 0, {}, {}, operation.kind);
+					}
+					if (operation.kind == TransactionWriteKind::TranslateWorld
+						&& !NormalizeWorldDelta(operation.worldDelta).Succeeded())
+					{
+						result.status = TransactionStatus::Rejected;
+						AddConflict(result, TransactionConflictReason::InvalidCoordinate, operation.target.objectId, index,
+							"TranslateWorld contains a non-normalizable canonical delta.", 0, 0, {}, {}, operation.kind);
+					}
+					if (operation.kind == TransactionWriteKind::ChangeSimulationFrame
+						&& (operation.sourceSimulationFrameGeneration == 0U
+							|| operation.destinationSimulationFrameGeneration == 0U
+							|| operation.sourceSimulationFrameGeneration == operation.destinationSimulationFrameGeneration))
+					{
+						result.status = TransactionStatus::Rejected;
+						AddConflict(result, TransactionConflictReason::SimulationFrameConflict, operation.target.objectId, index,
+							"Simulation-frame changes require distinct nonzero source and destination generations.",
+							operation.sourceSimulationFrameGeneration, operation.destinationSimulationFrameGeneration, {}, {}, operation.kind);
 					}
 					continue;
 				}
@@ -569,6 +637,7 @@ namespace TerraEngine::Scene {
 		if (const std::optional<Object> object = objects.getObject(objectId))
 		{
 			const std::optional<Object> parent = objects.getParent(*object);
+			const std::optional<WorldPose> canonicalPose = objects.GetCanonicalWorldPose(*object);
 			transaction.readSet.objects.push_back(TransactionObjectObservation{
 				.objectId = objectId,
 				.lifetimeGeneration = objects.getObjectLifetimeGeneration(*object),
@@ -576,6 +645,7 @@ namespace TerraEngine::Scene {
 				.componentGeneration = objects.getObjectComponentGeneration(*object),
 				.hierarchyRevision = objects.GetHierarchyRevision(),
 				.transformRevision = objects.GetObjectTransformRevision(*object),
+				.coordinateFrameRevision = canonicalPose ? canonicalPose->coordinateFrameRevision : 0U,
 				.parentObjectId = parent ? objects.getUUID(*parent) : TerraEngine::EMPTY_UUID,
 				.parentLifetimeGeneration = parent ? objects.getObjectLifetimeGeneration(*parent) : 0,
 				.parentTransformRevision = parent ? objects.GetObjectTransformRevision(*parent) : 0
@@ -609,17 +679,18 @@ namespace TerraEngine::Scene {
 		return *this;
 	}
 
-	TransactionalMutationBuilder& TransactionalMutationBuilder::ReparentObject(TerraEngine::UUID objectId, TransactionObjectRef parent)
+	TransactionalMutationBuilder& TransactionalMutationBuilder::ReparentObject(TerraEngine::UUID objectId, TransactionObjectRef parent, bool keepWorld)
 	{
-		return ReparentObject(ExistingObject(objectId), parent);
+		return ReparentObject(ExistingObject(objectId), parent, keepWorld);
 	}
 
-	TransactionalMutationBuilder& TransactionalMutationBuilder::ReparentObject(TransactionObjectRef object, TransactionObjectRef parent)
+	TransactionalMutationBuilder& TransactionalMutationBuilder::ReparentObject(TransactionObjectRef object, TransactionObjectRef parent, bool keepWorld)
 	{
 		TransactionWriteOperation operation;
 		operation.kind = TransactionWriteKind::ReparentObject;
 		operation.target = object;
 		operation.parent = parent;
+		operation.keepWorldOnReparent = keepWorld;
 		transaction.writeSet.operations.push_back(std::move(operation));
 		return *this;
 	}
@@ -746,6 +817,55 @@ namespace TerraEngine::Scene {
 		return *this;
 	}
 
+	TransactionalMutationBuilder& TransactionalMutationBuilder::SetWorldTransform(ObjectManager& objects, TerraEngine::UUID objectId, WorldPose pose)
+	{
+		// Capture the source revision before a worker releases its immutable input.
+		// The protected boundary will reject the complete batch if this pose is stale.
+		ObserveScene(objects);
+		ObserveObject(objects, objectId);
+		TransactionWriteOperation operation;
+		operation.kind = TransactionWriteKind::SetWorldTransform;
+		operation.target = ExistingObject(objectId);
+		operation.worldPose = std::move(pose);
+		transaction.writeSet.operations.push_back(std::move(operation));
+		return *this;
+	}
+
+	TransactionalMutationBuilder& TransactionalMutationBuilder::TranslateWorld(ObjectManager& objects, TerraEngine::UUID objectId, WorldDelta delta)
+	{
+		ObserveScene(objects);
+		ObserveObject(objects, objectId);
+		TransactionWriteOperation operation;
+		operation.kind = TransactionWriteKind::TranslateWorld;
+		operation.target = ExistingObject(objectId);
+		operation.worldDelta = std::move(delta);
+		transaction.writeSet.operations.push_back(std::move(operation));
+		return *this;
+	}
+
+	TransactionalMutationBuilder& TransactionalMutationBuilder::ChangeSimulationFrame(
+		ObjectManager& objects,
+		TerraEngine::UUID objectId,
+		std::uint64_t sourceGeneration,
+		std::uint64_t destinationGeneration)
+	{
+		ObserveScene(objects);
+		ObserveObject(objects, objectId);
+		TransactionWriteOperation operation;
+		operation.kind = TransactionWriteKind::ChangeSimulationFrame;
+		operation.target = ExistingObject(objectId);
+		operation.sourceSimulationFrameGeneration = sourceGeneration;
+		operation.destinationSimulationFrameGeneration = destinationGeneration;
+		transaction.writeSet.operations.push_back(std::move(operation));
+		return *this;
+	}
+
+	TransactionalMutationBuilder& TransactionalMutationBuilder::InjectCommitFailureForTesting(std::size_t operationIndex)
+	{
+		transaction.injectedFailureOperationIndex = operationIndex;
+		return *this;
+	}
+
 	TransactionalMutationBuilder& TransactionalMutationBuilder::UpdateTransformBatch(ObjectManager& objects, std::vector<TransactionTransformUpdate> updates)
 	{
 		// Reserve once before capturing observations. Physics can publish thousands
@@ -818,6 +938,11 @@ namespace TerraEngine::Scene {
 		case TransactionConflictReason::InvalidPayload: return "invalid-payload";
 		case TransactionConflictReason::CommitBudgetRejection: return "commit-budget-rejection";
 		case TransactionConflictReason::SceneUnloadedOrSwitched: return "scene-unloaded-or-switched";
+		case TransactionConflictReason::InvalidCoordinate: return "invalid-coordinate";
+		case TransactionConflictReason::CoordinateOverflow: return "coordinate-overflow";
+		case TransactionConflictReason::StaleSpatialPublication: return "stale-spatial-publication";
+		case TransactionConflictReason::SimulationFrameConflict: return "simulation-frame-conflict";
+		case TransactionConflictReason::InjectedCommitFailure: return "injected-commit-failure";
 		case TransactionConflictReason::Canceled: return "canceled";
 		case TransactionConflictReason::Expired: return "expired";
 		}
@@ -879,6 +1004,14 @@ namespace TerraEngine::Scene {
 			const TransactionWriteOperation& operation = transaction.writeSet.operations[index];
 			TransactionInverseDelta inverse;
 			inverse.sourceOperationIndex = index;
+			if (transaction.injectedFailureOperationIndex && *transaction.injectedFailureOperationIndex == index)
+			{
+				// This explicit test-only seam runs on the protected boundary after
+				// earlier writes. It proves inverse capture restores a partial commit.
+				AddConflict(result, TransactionConflictReason::InjectedCommitFailure, TerraEngine::EMPTY_UUID, index,
+					"Test fault injection stopped protected transaction publication.", 0, 0, {}, {}, operation.kind);
+				break;
+			}
 
 			if (operation.kind == TransactionWriteKind::CreateObject)
 			{
@@ -926,18 +1059,21 @@ namespace TerraEngine::Scene {
 				for (std::size_t updateIndex = 0U; updateIndex < operation.transformUpdates.size(); ++updateIndex)
 				{
 					const TransactionTransformUpdate& update = operation.transformUpdates[updateIndex];
-					const Transform& previous = *targets[updateIndex].second;
-					inverse.operation.transformUpdates.push_back({update.objectId, previous.position, previous.rotation});
+					inverse.operation.transformUpdates.push_back({update.objectId, *objects.GetCanonicalWorldPose(targets[updateIndex].first)});
 				}
 				for (std::size_t updateIndex = 0U; updateIndex < operation.transformUpdates.size(); ++updateIndex)
 				{
 					const TransactionTransformUpdate& update = operation.transformUpdates[updateIndex];
-					Transform& transform = *targets[updateIndex].second;
-					transform.position = update.position;
-					transform.rotation = update.rotation;
-					objects.MarkObjectTransformDirty(targets[updateIndex].first);
+					if (objects.SetCanonicalWorldPose(targets[updateIndex].first, update.pose) != WorldCoordinateError::None)
+					{
+						AddConflict(result, TransactionConflictReason::InvalidCoordinate, update.objectId, index,
+							"Canonical transform batch entry was rejected during protected publication.", 0, 0,
+							std::string(Transform::kComponentName), {}, operation.kind);
+						break;
+					}
 				}
 				result.inverseDeltas.push_back(std::move(inverse));
+				if (!result.conflicts.empty()) break;
 				continue;
 			}
 
@@ -961,6 +1097,53 @@ namespace TerraEngine::Scene {
 
 			switch (operation.kind)
 			{
+			case TransactionWriteKind::SetWorldTransform:
+			{
+				inverse.operation.kind = TransactionWriteKind::SetWorldTransform;
+				inverse.operation.worldPose = *objects.GetCanonicalWorldPose(*target);
+				if (objects.SetCanonicalWorldPose(*target, operation.worldPose) != WorldCoordinateError::None)
+				{
+					AddConflict(result, TransactionConflictReason::InvalidCoordinate, targetId, index,
+						"Canonical world pose was rejected during protected publication.", 0, 0,
+						std::string(Transform::kComponentName), {}, operation.kind);
+					break;
+				}
+				result.inverseDeltas.push_back(std::move(inverse));
+				break;
+			}
+			case TransactionWriteKind::TranslateWorld:
+			{
+				const WorldPose previousPose = *objects.GetCanonicalWorldPose(*target);
+				const auto translatedPosition = ApplyWorldDelta(previousPose.position, operation.worldDelta);
+				if (!translatedPosition.Succeeded())
+				{
+					AddConflict(result, TransactionConflictReason::CoordinateOverflow, targetId, index,
+						"Canonical translation overflowed or used an invalid world delta.", 0, 0,
+						std::string(Transform::kComponentName), {}, operation.kind);
+					break;
+				}
+				WorldPose translatedPose = previousPose;
+				translatedPose.position = translatedPosition.position;
+				inverse.operation.kind = TransactionWriteKind::SetWorldTransform;
+				inverse.operation.worldPose = previousPose;
+				if (objects.SetCanonicalWorldPose(*target, translatedPose) != WorldCoordinateError::None)
+				{
+					AddConflict(result, TransactionConflictReason::InvalidCoordinate, targetId, index,
+						"Translated canonical pose was rejected during protected publication.", 0, 0,
+						std::string(Transform::kComponentName), {}, operation.kind);
+					break;
+				}
+				result.inverseDeltas.push_back(std::move(inverse));
+				break;
+			}
+			case TransactionWriteKind::ChangeSimulationFrame:
+				// Physics owns provider staging. This typed scene receipt records the
+				// validated boundary decision; later physics work consumes its identity.
+				inverse.operation.kind = TransactionWriteKind::ChangeSimulationFrame;
+				inverse.operation.sourceSimulationFrameGeneration = operation.destinationSimulationFrameGeneration;
+				inverse.operation.destinationSimulationFrameGeneration = operation.sourceSimulationFrameGeneration;
+				result.inverseDeltas.push_back(std::move(inverse));
+				break;
 			case TransactionWriteKind::DeleteObject:
 			{
 				inverse.operation.kind = TransactionWriteKind::CreateObject;
@@ -977,6 +1160,7 @@ namespace TerraEngine::Scene {
 			case TransactionWriteKind::ReparentObject:
 			{
 				inverse.operation.kind = TransactionWriteKind::ReparentObject;
+				const std::optional<WorldPose> previousPose = objects.GetCanonicalWorldPose(*target);
 				if (const std::optional<Object> previousParent = objects.getParent(*target))
 				{
 					inverse.operation.parent = ExistingObject(objects.getUUID(*previousParent));
@@ -989,12 +1173,24 @@ namespace TerraEngine::Scene {
 					AddConflict(result, TransactionConflictReason::MissingTarget, targetId, index, "Prepared parent disappeared before publication.", 0, 0, {}, {}, operation.kind);
 					break;
 				}
-				if (!objects.setParent(*target, nextParent))
+				if (!objects.setParent(*target, nextParent, operation.keepWorldOnReparent ? ReparentMode::KeepWorld : ReparentMode::KeepLocal))
 				{
 					AddConflict(result, TransactionConflictReason::HierarchyConflict, targetId, index, "Hierarchy rejected the prepared parent change.", 0, 0, {}, {}, operation.kind);
 					break;
 				}
 				result.inverseDeltas.push_back(std::move(inverse));
+				if (!operation.keepWorldOnReparent && previousPose)
+				{
+					// Rollback runs inverse deltas in reverse. Restore the previous
+					// canonical pose first, then KeepWorld-reparent it to the old parent
+					// so a rejected KeepLocal change is fully atomic.
+					TransactionInverseDelta poseInverse;
+					poseInverse.sourceOperationIndex = index;
+					poseInverse.operation.kind = TransactionWriteKind::SetWorldTransform;
+					poseInverse.operation.target = operation.target;
+					poseInverse.operation.worldPose = *previousPose;
+					result.inverseDeltas.push_back(std::move(poseInverse));
+				}
 				break;
 			}
 			case TransactionWriteKind::SetName:
@@ -1126,20 +1322,33 @@ namespace TerraEngine::Scene {
 		flattened.origin = group.chunks.front().origin;
 		flattened.originName = group.chunks.front().originName;
 		flattened.mode = TransactionMode::PreflightOnly;
+		// Worker completion order is intentionally irrelevant. Sorting complete
+		// chunks by their stable producer transaction id gives one repeatable group
+		// order without exposing a live scene object to worker threads.
+		std::vector<const Transaction*> orderedChunks;
+		orderedChunks.reserve(group.chunks.size());
+		for (const Transaction& chunk : group.chunks)
+		{
+			orderedChunks.push_back(&chunk);
+		}
+		std::sort(orderedChunks.begin(), orderedChunks.end(), [](const Transaction* left, const Transaction* right) {
+			return left->id < right->id;
+		});
+
 		std::unordered_set<std::string> transactionIds;
 		std::unordered_set<TerraEngine::UUID> transformTargets;
 		std::size_t totalWrites = 0U;
-		result.chunkReceipts.reserve(group.chunks.size());
-		for (std::size_t chunkIndex = 0U; chunkIndex < group.chunks.size(); ++chunkIndex)
+		result.chunkReceipts.reserve(orderedChunks.size());
+		for (std::size_t chunkIndex = 0U; chunkIndex < orderedChunks.size(); ++chunkIndex)
 		{
 			result.chunkReceipts.push_back(TransactionPublicationChunkReceipt{
-				.transactionId = group.chunks[chunkIndex].id,
+				.transactionId = orderedChunks[chunkIndex]->id,
 				.chunkIndex = chunkIndex,
-				.writeCount = LogicalWriteCount(group.chunks[chunkIndex])});
+				.writeCount = LogicalWriteCount(*orderedChunks[chunkIndex])});
 		}
-		for (std::size_t chunkIndex = 0U; chunkIndex < group.chunks.size(); ++chunkIndex)
+		for (std::size_t chunkIndex = 0U; chunkIndex < orderedChunks.size(); ++chunkIndex)
 		{
-			const Transaction& chunk = group.chunks[chunkIndex];
+			const Transaction& chunk = *orderedChunks[chunkIndex];
 			if (chunk.id.empty() || !transactionIds.insert(chunk.id).second
 				|| chunk.canceled || chunk.writeSet.operations.empty()
 				|| LogicalWriteCount(chunk) > chunk.budget.maxWriteCount)
@@ -1227,8 +1436,18 @@ namespace TerraEngine::Scene {
 		flattened.originName = group.chunks.front().originName;
 		flattened.mode = TransactionMode::Commit;
 		std::size_t totalWrites = 0U;
+		std::vector<const Transaction*> orderedChunks;
+		orderedChunks.reserve(group.chunks.size());
 		for (const Transaction& chunk : group.chunks)
 		{
+			orderedChunks.push_back(&chunk);
+		}
+		std::sort(orderedChunks.begin(), orderedChunks.end(), [](const Transaction* left, const Transaction* right) {
+			return left->id < right->id;
+		});
+		for (const Transaction* chunkPointer : orderedChunks)
+		{
+			const Transaction& chunk = *chunkPointer;
 			if (flattened.readSet.sceneGeneration == 0U) flattened.readSet.sceneGeneration = chunk.readSet.sceneGeneration;
 			if (flattened.readSet.sceneRevision == 0U) flattened.readSet.sceneRevision = chunk.readSet.sceneRevision;
 			totalWrites += LogicalWriteCount(chunk);
@@ -1285,15 +1504,11 @@ namespace TerraEngine::Scene {
 				for (const TransactionTransformUpdate& update : operation.transformUpdates)
 				{
 					const std::optional<Object> target = objects.getObject(update.objectId);
-					Transform* transform = target ? objects.GetComponent<Transform>(*target) : nullptr;
-					if (!target || !transform)
+					if (!target || objects.SetCanonicalWorldPose(*target, update.pose) != WorldCoordinateError::None)
 					{
 						restoredEveryDelta = false;
 						continue;
 					}
-					transform->position = update.position;
-					transform->rotation = update.rotation;
-					objects.MarkObjectTransformDirty(*target);
 				}
 				continue;
 			}
@@ -1307,6 +1522,21 @@ namespace TerraEngine::Scene {
 
 			switch (operation.kind)
 			{
+			case TransactionWriteKind::SetWorldTransform:
+				if (objects.SetCanonicalWorldPose(*target, operation.worldPose) != WorldCoordinateError::None)
+				{
+					restoredEveryDelta = false;
+				}
+				break;
+			case TransactionWriteKind::TranslateWorld:
+				// Translation never appears as an inverse: commit captures the exact
+				// prior WorldPose as SetWorldTransform to avoid inverse drift.
+				restoredEveryDelta = false;
+				break;
+			case TransactionWriteKind::ChangeSimulationFrame:
+				// Provider ownership is restored by the physics migration boundary. The
+				// scene transaction's inverse records only its paired frame identity.
+				break;
 			case TransactionWriteKind::DeleteObject:
 				objects.removeObject(*target);
 				break;
@@ -1320,7 +1550,7 @@ namespace TerraEngine::Scene {
 					restoredEveryDelta = false;
 					break;
 				}
-				restoredEveryDelta = objects.setParent(*target, parent) && restoredEveryDelta;
+				restoredEveryDelta = objects.setParent(*target, parent, operation.keepWorldOnReparent ? ReparentMode::KeepWorld : ReparentMode::KeepLocal) && restoredEveryDelta;
 				break;
 			}
 			case TransactionWriteKind::SetName:
@@ -1446,5 +1676,65 @@ namespace TerraEngine::Scene {
 			merged.recentResults.erase(merged.recentResults.begin());
 		}
 		return merged;
+	}
+
+	nlohmann::json SerializeSpatialTransaction(const Transaction& transaction)
+	{
+		nlohmann::json operations = nlohmann::json::array();
+		for (const TransactionWriteOperation& operation : transaction.writeSet.operations)
+		{
+			if (operation.kind != TransactionWriteKind::SetWorldTransform && operation.kind != TransactionWriteKind::TranslateWorld && operation.kind != TransactionWriteKind::ChangeSimulationFrame) continue;
+			nlohmann::json encoded{{"target", TerraEngine::ToHexString(operation.target.objectId)}};
+			if (operation.kind == TransactionWriteKind::SetWorldTransform)
+			{
+				encoded["kind"] = "setWorldPose";
+				encoded["position"] = Serializer::SerializeWorldPosition(operation.worldPose.position);
+				encoded["rotation"] = {operation.worldPose.rotation.w, operation.worldPose.rotation.x, operation.worldPose.rotation.y, operation.worldPose.rotation.z};
+				encoded["scale"] = {operation.worldPose.scale.x, operation.worldPose.scale.y, operation.worldPose.scale.z};
+			}
+			else if (operation.kind == TransactionWriteKind::TranslateWorld)
+			{
+				encoded["kind"] = "translateWorld";
+				encoded["delta"] = {{"cell", {{"x", std::to_string(operation.worldDelta.cellDelta.x)}, {"y", std::to_string(operation.worldDelta.cellDelta.y)}, {"z", std::to_string(operation.worldDelta.cellDelta.z)}}}, {"offsetMetres", {operation.worldDelta.offsetMetres.x, operation.worldDelta.offsetMetres.y, operation.worldDelta.offsetMetres.z}}};
+			}
+			else { encoded["kind"] = "changeSimulationFrame"; encoded["sourceGeneration"] = operation.sourceSimulationFrameGeneration; encoded["destinationGeneration"] = operation.destinationSimulationFrameGeneration; }
+			operations.push_back(std::move(encoded));
+		}
+		return {{"format", kTerraSpatialTransactionFormat}, {"id", transaction.id}, {"operations", std::move(operations)}};
+	}
+
+	std::optional<Transaction> LowerSpatialTransaction(const nlohmann::json& document, std::string* outError)
+	{
+		auto fail = [outError](std::string reason) -> std::optional<Transaction> { if (outError) *outError = std::move(reason); return std::nullopt; };
+		if (!document.is_object() || document.value("format", std::string{}) != kTerraSpatialTransactionFormat || !document.contains("id") || !document["id"].is_string() || !document.contains("operations") || !document["operations"].is_array()) return fail("transaction format must be TerraSpatialTransactionV1 with id and operations");
+		Transaction result; result.id = document["id"].get<std::string>(); result.origin = TransactionOrigin::ManagedCallback;
+		for (const nlohmann::json& encoded : document["operations"])
+		{
+			if (!encoded.is_object() || !encoded.contains("kind") || !encoded["kind"].is_string() || !encoded.contains("target") || !encoded["target"].is_string()) return fail("spatial operation is missing kind or target");
+			const auto target = TerraEngine::ParseUUID(encoded["target"].get<std::string>()); if (!target) return fail("spatial operation target is not a UUID");
+			TransactionWriteOperation operation; operation.target = ExistingObject(*target); const std::string kind = encoded["kind"].get<std::string>();
+			if (kind == "setWorldPose")
+			{
+				std::string positionError; const auto position = encoded.contains("position") ? Serializer::DeserializeWorldPosition(encoded["position"], &positionError) : std::nullopt; if (!position) return fail("setWorldPose: " + positionError);
+				if (!encoded.contains("rotation") || !encoded["rotation"].is_array() || encoded["rotation"].size() != 4U || !encoded.contains("scale") || !encoded["scale"].is_array() || encoded["scale"].size() != 3U) return fail("setWorldPose requires rotation and scale arrays");
+				operation.kind = TransactionWriteKind::SetWorldTransform; operation.worldPose.position = *position;
+				for (std::size_t index = 0U; index < 4U; ++index) { if (!encoded["rotation"][index].is_number()) return fail("setWorldPose rotation must be numeric"); }
+				for (std::size_t index = 0U; index < 3U; ++index) { if (!encoded["scale"][index].is_number()) return fail("setWorldPose scale must be numeric"); operation.worldPose.scale[static_cast<glm::length_t>(index)] = encoded["scale"][index].get<float>(); }
+				operation.worldPose.rotation = glm::quat(encoded["rotation"][0].get<float>(), encoded["rotation"][1].get<float>(), encoded["rotation"][2].get<float>(), encoded["rotation"][3].get<float>());
+			}
+			else if (kind == "translateWorld")
+			{
+				std::string deltaError; const auto deltaPosition = encoded.contains("delta") ? Serializer::DeserializeWorldPosition(encoded["delta"], &deltaError) : std::nullopt; if (!deltaPosition) return fail("translateWorld: " + deltaError);
+				operation.kind = TransactionWriteKind::TranslateWorld; operation.worldDelta.cellDelta = deltaPosition->cell; operation.worldDelta.offsetMetres = deltaPosition->offsetMetres;
+			}
+			else if (kind == "changeSimulationFrame")
+			{
+				if (!encoded.contains("sourceGeneration") || !encoded["sourceGeneration"].is_number_unsigned() || !encoded.contains("destinationGeneration") || !encoded["destinationGeneration"].is_number_unsigned()) return fail("changeSimulationFrame requires unsigned generations");
+				operation.kind = TransactionWriteKind::ChangeSimulationFrame; operation.sourceSimulationFrameGeneration = encoded["sourceGeneration"].get<std::uint64_t>(); operation.destinationSimulationFrameGeneration = encoded["destinationGeneration"].get<std::uint64_t>();
+			}
+			else return fail("unsupported unbounded spatial operation");
+			result.writeSet.operations.push_back(std::move(operation));
+		}
+		return result;
 	}
 }

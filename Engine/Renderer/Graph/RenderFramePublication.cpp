@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <new>
+#include <unordered_set>
 
 namespace TerraEngine::Renderer
 {
@@ -89,6 +90,30 @@ namespace TerraEngine::Renderer
 			|| publication.dynamic->rendererSessionGeneration != expectedSessionGeneration)
 			return Reject(publication, RenderPublicationOutcome::RejectedSession,
 				"The candidate does not belong to the active renderer session.");
+		if(!publication.referenceFrames.empty())
+		{
+			std::unordered_set<std::uint64_t> viewIdentities;
+			for(const RenderReferenceFrame& referenceFrame : publication.referenceFrames)
+			{
+				if(!referenceFrame.IsValid() || referenceFrame.frameId != publication.frameId
+					|| !viewIdentities.insert(referenceFrame.viewId).second)
+					return Reject(publication, RenderPublicationOutcome::RejectedStaleGeneration,
+						"A render reference frame is invalid, stale, or duplicated.");
+			}
+		}
+		for (const RenderViewPresentationInput& presentation :
+			publication.presentationInputs)
+		{
+			if (!presentation.referenceFrame.IsValid()
+				|| presentation.referenceFrame.frameId != publication.frameId
+				|| presentation.referenceFrame.outputId
+					!= presentation.output.outputId)
+			{
+				return Reject(publication,
+					RenderPublicationOutcome::RejectedStaleGeneration,
+					"A presentation input does not match its render reference frame.");
+			}
+		}
 		if(publication.backendWork == nullptr || !publication.backendWork->valid
 			|| publication.backendWork->frameId != publication.frameId
 			|| !publication.backendWork->animationWork.valid

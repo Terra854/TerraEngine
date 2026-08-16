@@ -1,6 +1,6 @@
 #include "../TestHarness.h"
 
-#include "EditorAutomationService.h"
+#include "Editor/TerraEngine-Editor/Automation/EditorAutomationService.h"
 
 #include <array>
 #include <optional>
@@ -86,18 +86,24 @@ namespace TerraEngine::EditorTests
 			}
 		});
 
-		registry.Add("Editor.MCP.SceneView.LegacyStateAndControlsRemainCompatible", [](TestContext& context) {
+		registry.Add("Editor.MCP.SceneView.CanonicalStateAndControlsRemainDiscoverable", [](TestContext& context) {
 			EditorAutomationService service;
 			AutomationStateSnapshot state;
 			state.projectAvailable = true;
 			state.sceneAvailable = true;
 			state.rendererAvailable = true;
 			state.availableServices.insert("SceneView");
-			const auto legacyState = FindSceneViewCapability(service, "scene_view.state", state);
-			const auto legacyCamera = FindSceneViewCapability(service, "scene_view.camera.set", state);
+			const auto stateCapability = FindSceneViewCapability(service, "scene_view.state", state);
+			const auto cameraCapability = FindSceneViewCapability(service, "scene_view.camera.set", state);
 
-			context.Expect(legacyState.has_value() && legacyState->availability.available, "The additive settings contract must not replace legacy scene_view.state.");
-			context.Expect(legacyCamera.has_value() && SchemaHasProperty(legacyCamera->descriptor.inputSchema, "position"), "Existing semantic camera clients should retain their v1 schema.");
+			context.Expect(stateCapability.has_value() && stateCapability->availability.available, "Canonical Scene View state should remain discoverable.");
+			context.Expect(cameraCapability.has_value() && SchemaHasProperty(cameraCapability->descriptor.inputSchema, "position"), "Camera controls should expose a named canonical position field.");
+			if (cameraCapability.has_value())
+			{
+				const nlohmann::json& position = cameraCapability->descriptor.inputSchema["properties"]["position"];
+				context.Expect(position.value("type", std::string{}) == "object", "Scene View must reject legacy three-number camera positions at schema discovery.");
+				context.Expect(SchemaHasProperty(position, "cell") && SchemaHasProperty(position, "offsetMetres"), "A Scene View camera address must declare exact cell and local-offset fields.");
+			}
 		});
 
 		registry.Add("Editor.MCP.SceneView.ControlSchemasAreSemantic", [](TestContext& context) {

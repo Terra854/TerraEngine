@@ -4015,6 +4015,21 @@ std::size_t ResourceManager::ReleaseStreamingNeedsForObject(
 	return releasedCount;
 }
 
+void ResourceManager::PublishSceneRegionAssetNeeds(
+	std::span<const TerraEngine::Resource::SceneRegionAssetNeed> needs,
+	std::uint64_t frameId)
+{
+	for (const TerraEngine::Resource::SceneRegionAssetNeed& need : needs)
+	{
+		if (need.assetId == TerraEngine::EMPTY_UUID) continue;
+		const AssetType type = need.assetType == TerraEngine::Resource::StreamableAssetType::Texture ? AssetType::Texture
+			: (need.assetType == TerraEngine::Resource::StreamableAssetType::Material ? AssetType::Material
+				: (need.assetType == TerraEngine::Resource::StreamableAssetType::ShaderCollection ? AssetType::ShaderCollection : AssetType::Mesh));
+		MarkStreamingNeed(need.assetId, type, TerraEngine::Resource::StreamingNeedType::RuntimeExplicit,
+			frameId, need.regionId.empty() ? "resident world region" : need.regionId, need.priority, need.ownerObjectId);
+	}
+}
+
 void ResourceManager::PublishVisibleStreamingTouches(
 	const TerraEngine::Renderer::VisibleStreamingTouchSet& touchSet,
 	std::uint64_t frameId,

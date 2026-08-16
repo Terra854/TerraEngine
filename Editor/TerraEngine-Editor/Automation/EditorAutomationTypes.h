@@ -19,6 +19,8 @@
 #include <entt/entt.hpp>
 #include <nlohmann/json.hpp>
 
+#include "Scene/WorldCoordinate.h"
+
 namespace TerraEngine::Editor::Automation
 {
 	enum class BridgeState
@@ -178,8 +180,8 @@ namespace TerraEngine::Editor::Automation
 	// caller. They do not create scene objects or mutate existing cameras.
 	struct McpCustomCameraDefinition
 	{
-		std::vector<float> position;
-		std::vector<float> lookAt;
+		TerraEngine::Scene::WorldPosition position{};
+		std::optional<TerraEngine::Scene::WorldPosition> lookAt;
 		std::vector<float> forward;
 		std::vector<float> up;
 		std::string projection = "perspective";

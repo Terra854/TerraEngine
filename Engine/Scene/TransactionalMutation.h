@@ -9,6 +9,7 @@
 
 #include "Core/Export.h"
 #include "Core/Object/Reflection.h"
+#include "Scene/WorldCoordinate.h"
 #include "Utilities/UUID.h"
 
 #include <nlohmann/json.hpp>
@@ -25,6 +26,7 @@
 class ObjectManager;
 
 namespace TerraEngine::Scene {
+	inline constexpr std::string_view kTerraSpatialTransactionFormat = "TerraSpatialTransactionV1";
 
 	enum class TransactionOrigin {
 		System,
@@ -61,6 +63,11 @@ namespace TerraEngine::Scene {
 		InvalidPayload,
 		CommitBudgetRejection,
 		SceneUnloadedOrSwitched,
+		InvalidCoordinate,
+		CoordinateOverflow,
+		StaleSpatialPublication,
+		SimulationFrameConflict,
+		InjectedCommitFailure,
 		Canceled,
 		Expired
 	};
@@ -77,6 +84,11 @@ namespace TerraEngine::Scene {
 		AddComponent,
 		RemoveComponent,
 		UpdateComponentProperty,
+		// World-space writes are deliberately typed. No caller may smuggle an
+		// absolute float vector through the generic reflected component path.
+		SetWorldTransform,
+		TranslateWorld,
+		ChangeSimulationFrame,
 		// A physics publication changes both fields together. Keeping the pair
 		// typed avoids reflection and per-property allocations at a hot boundary.
 		UpdateTransformBatch,
@@ -90,8 +102,9 @@ namespace TerraEngine::Scene {
 	// applies all entries or rolls the complete batch back at the flush boundary.
 	struct TransactionTransformUpdate {
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
-		glm::vec3 position{0.0F, 0.0F, 0.0F};
-		glm::quat rotation{1.0F, 0.0F, 0.0F, 0.0F};
+		// Physics and animation publish an exact canonical pose. A transform batch
+		// intentionally has no vec3 absolute-position compatibility field.
+		WorldPose pose{};
 	};
 
 	struct AnimationMutationPublication {
@@ -124,6 +137,7 @@ namespace TerraEngine::Scene {
 		std::uint64_t componentGeneration = 0;
 		std::uint64_t hierarchyRevision = 0;
 		std::uint64_t transformRevision = 0;
+		std::uint64_t coordinateFrameRevision = 0;
 		TerraEngine::UUID parentObjectId = TerraEngine::EMPTY_UUID;
 		std::uint64_t parentLifetimeGeneration = 0;
 		std::uint64_t parentTransformRevision = 0;
@@ -134,6 +148,9 @@ namespace TerraEngine::Scene {
 		// reuse hierarchy revision values, so publication packets must observe both.
 		std::uint64_t sceneGeneration = 0;
 		std::uint64_t sceneRevision = 0;
+		std::uint64_t coordinateFrameRevision = 0;
+		std::uint64_t spatialSnapshotGeneration = 0;
+		std::uint64_t residencyGeneration = 0;
 		std::vector<TransactionObjectObservation> objects;
 	};
 
@@ -148,6 +165,17 @@ namespace TerraEngine::Scene {
 		std::string componentName;
 		std::string propertyName;
 		TerraEngine::Reflection::Variant propertyValue;
+		// SetWorldTransform replaces the complete canonical pose in one protected
+		// write. It cannot be confused with a parent-relative local transform.
+		WorldPose worldPose{};
+		// TranslateWorld is intentionally a displacement rather than an absolute
+		// location, preventing a caller from treating a delta as a position.
+		WorldDelta worldDelta{};
+		// Transactions carry the reparent intent explicitly so protected commit
+		// never guesses whether canonical or parent-relative state is authoritative.
+		bool keepWorldOnReparent = true;
+		std::uint64_t sourceSimulationFrameGeneration = 0;
+		std::uint64_t destinationSimulationFrameGeneration = 0;
 		std::vector<TransactionTransformUpdate> transformUpdates;
 		std::vector<AnimationMutationPublication> animationPublications;
 	};
@@ -189,6 +217,9 @@ namespace TerraEngine::Scene {
 		TransactionBudget budget;
 		TransactionReadSet readSet;
 		TransactionWriteSet writeSet;
+		// Test-only failpoint proves that a protected commit restores every prior
+		// write. Production origins reject this field during preflight.
+		std::optional<std::size_t> injectedFailureOperationIndex;
 		bool canceled = false;
 	};
 
@@ -204,6 +235,8 @@ namespace TerraEngine::Scene {
 		std::unordered_map<std::int32_t, TerraEngine::UUID> createdObjects;
 		std::string message;
 		std::vector<AnimationMutationPublication> acceptedAnimationPublications;
+		// The spatial owner assigns this only after an all-or-nothing publication.
+		std::uint64_t spatialPublicationGeneration = 0;
 
 		bool MutatedScene() const { return status == TransactionStatus::Committed && appliedWriteCount > 0; }
 	};
@@ -263,8 +296,8 @@ namespace TerraEngine::Scene {
 		TransactionalMutationBuilder& CreateObject(std::int32_t localObjectId, std::string displayName, TransactionObjectRef parent = {});
 		TransactionalMutationBuilder& DeleteObject(TerraEngine::UUID objectId);
 		TransactionalMutationBuilder& DeleteObject(TransactionObjectRef object);
-		TransactionalMutationBuilder& ReparentObject(TerraEngine::UUID objectId, TransactionObjectRef parent);
-		TransactionalMutationBuilder& ReparentObject(TransactionObjectRef object, TransactionObjectRef parent);
+		TransactionalMutationBuilder& ReparentObject(TerraEngine::UUID objectId, TransactionObjectRef parent, bool keepWorld = true);
+		TransactionalMutationBuilder& ReparentObject(TransactionObjectRef object, TransactionObjectRef parent, bool keepWorld = true);
 		TransactionalMutationBuilder& SetName(TerraEngine::UUID objectId, std::string name);
 		TransactionalMutationBuilder& SetName(TransactionObjectRef object, std::string name);
 		TransactionalMutationBuilder& SetTag(TerraEngine::UUID objectId, std::string tag);
@@ -281,6 +314,10 @@ namespace TerraEngine::Scene {
 		TransactionalMutationBuilder& RemoveComponent(TransactionObjectRef object, std::string componentName);
 		TransactionalMutationBuilder& UpdateComponentProperty(TerraEngine::UUID objectId, std::string componentName, std::string propertyName, TerraEngine::Reflection::Variant value);
 		TransactionalMutationBuilder& UpdateComponentProperty(TransactionObjectRef object, std::string componentName, std::string propertyName, TerraEngine::Reflection::Variant value);
+		TransactionalMutationBuilder& SetWorldTransform(ObjectManager& objects, TerraEngine::UUID objectId, WorldPose pose);
+		TransactionalMutationBuilder& TranslateWorld(ObjectManager& objects, TerraEngine::UUID objectId, WorldDelta delta);
+		TransactionalMutationBuilder& ChangeSimulationFrame(ObjectManager& objects, TerraEngine::UUID objectId, std::uint64_t sourceGeneration, std::uint64_t destinationGeneration);
+		TransactionalMutationBuilder& InjectCommitFailureForTesting(std::size_t operationIndex);
 		// Snapshot every target while the protected producer owns ObjectManager,
 		// so the later protected flush can reject the whole batch if it went stale.
 		TransactionalMutationBuilder& UpdateTransformBatch(ObjectManager& objects, std::vector<TransactionTransformUpdate> updates);
@@ -303,5 +340,9 @@ namespace TerraEngine::Scene {
 	TERRAENGINE_API bool ApplyTransactionInverseDeltas(ObjectManager& objects, const std::vector<TransactionInverseDelta>& inverseDeltas);
 	TERRAENGINE_API void AccumulateTransactionDiagnostics(TransactionDiagnostics& diagnostics, const Transaction& transaction, const TransactionResult& result);
 	TERRAENGINE_API TransactionDiagnostics MergeTransactionDiagnostics(const TransactionDiagnostics& left, const TransactionDiagnostics& right);
+	// JSON is accepted only at managed/editor boundaries.  This lowerer converts
+	// the unbounded wire format into the same typed operations used by native jobs.
+	TERRAENGINE_API nlohmann::json SerializeSpatialTransaction(const Transaction& transaction);
+	TERRAENGINE_API std::optional<Transaction> LowerSpatialTransaction(const nlohmann::json& document, std::string* outError = nullptr);
 
 }

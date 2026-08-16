@@ -14,6 +14,7 @@
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Components/PrefabLinkComponent.h"
+#include "Engine/Components/Transform.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Resource/VirtualGeometryCodec.h"
 #include "Engine/Renderer/RenderSystem.h"
@@ -4388,6 +4389,72 @@ void InspectorWindow::DrawAnimatorInspector(
 	}
 }
 
+void InspectorWindow::DrawCanonicalTransformInspector(const Object& object)
+{
+	const std::optional<TerraEngine::Scene::WorldPose> current =
+		ObjectManager::instance().GetCanonicalWorldPose(object);
+	if (!current)
+	{
+		return;
+	}
+
+	TerraEngine::Scene::WorldPose candidate = *current;
+	ImGui::SeparatorText("Canonical Transform");
+	ImGui::TextDisabled("Cell is exact; offset metres stay normalized to one world cell.");
+	bool changed = false;
+	changed = ImGui::InputScalar("Cell X", ImGuiDataType_S64, &candidate.position.cell.x) || changed;
+	changed = ImGui::InputScalar("Cell Y", ImGuiDataType_S64, &candidate.position.cell.y) || changed;
+	changed = ImGui::InputScalar("Cell Z", ImGuiDataType_S64, &candidate.position.cell.z) || changed;
+	changed = ImGui::InputDouble("Local X (m)", &candidate.position.offsetMetres.x, 0.01) || changed;
+	changed = ImGui::InputDouble("Local Y (m)", &candidate.position.offsetMetres.y, 0.01) || changed;
+	changed = ImGui::InputDouble("Local Z (m)", &candidate.position.offsetMetres.z, 0.01) || changed;
+
+	if (ImGui::Button("Copy Canonical Location"))
+	{
+		const nlohmann::json value{{"cell", {{"x", TerraEngine::Scene::EncodeWorldCellAxis(current->position.cell.x)},
+			{"y", TerraEngine::Scene::EncodeWorldCellAxis(current->position.cell.y)},
+			{"z", TerraEngine::Scene::EncodeWorldCellAxis(current->position.cell.z)}}},
+			{"offsetMetres", {current->position.offsetMetres.x, current->position.offsetMetres.y, current->position.offsetMetres.z}}};
+		ImGui::SetClipboardText(value.dump().c_str());
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Paste Canonical Location"))
+	{
+		try
+		{
+			const nlohmann::json pasted = nlohmann::json::parse(ImGui::GetClipboardText());
+			candidate.position.cell.x = std::stoll(pasted.at("cell").at("x").get<std::string>());
+			candidate.position.cell.y = std::stoll(pasted.at("cell").at("y").get<std::string>());
+			candidate.position.cell.z = std::stoll(pasted.at("cell").at("z").get<std::string>());
+			const nlohmann::json& offset = pasted.at("offsetMetres");
+			candidate.position.offsetMetres = {offset.at(0).get<double>(), offset.at(1).get<double>(), offset.at(2).get<double>()};
+			changed = true;
+		}
+		catch (const std::exception&)
+		{
+			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Clipboard does not contain a canonical location.");
+		}
+	}
+
+	if (changed)
+	{
+		const TerraEngine::Scene::WorldCoordinateResult normalized =
+			TerraEngine::Scene::NormalizeWorldPosition(candidate.position);
+		if (!normalized.Succeeded())
+		{
+			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Location rejected: %s", TerraEngine::Scene::ToString(normalized.error).data());
+		}
+		else
+		{
+			candidate.position = normalized.position;
+			if (ObjectManager::instance().SetCanonicalWorldPose(object, candidate) != TerraEngine::Scene::WorldCoordinateError::None)
+			{
+				ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Location commit was rejected at the protected authoring boundary.");
+			}
+		}
+	}
+}
+
 void InspectorWindow::OnGui() {
 	m_InspectorValueDragging = false;
 
@@ -4446,6 +4513,7 @@ void InspectorWindow::OnGui() {
 		auto& objManager = ObjectManager::instance();
 		if (std::optional<Object> object = objManager.getObject(*selectedEntity)) {
 			entt::entity obj = *selectedEntity;
+			DrawCanonicalTransformInspector(*object);
 			
 			auto& accessReg = ComponentAccessRegistry();
 

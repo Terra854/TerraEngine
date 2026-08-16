@@ -154,25 +154,18 @@ namespace TerraEngine::Animation {
 			Object object,
 			AnimationTransform& output) noexcept
 		{
-			AnimationTransform world{};
-			bool captured = false;
-			std::optional<Object> current = object;
-			std::size_t depth = 0U;
-			while(current && depth++ < 4096U) {
-				const Transform* transform = objects.GetComponent<Transform>(*current);
-				if(transform == nullptr) return false;
-				AnimationTransform local;
-				local.translation = FromGlm(transform->position);
-				local.rotation = FromGlm(transform->rotation);
-				local.scale = FromGlm(transform->scale);
-				if(!IsFinite(local) || !IsNormalized(local.rotation)) return false;
-				world = captured ? CombineTransform(local, world) : local;
-				captured = true;
-				current = objects.getParent(*current);
-			}
-			if(current.has_value() || !captured) return false;
-			output = world;
-			return true;
+			// Transform already owns one propagated canonical pose. Root motion uses
+			// only its bounded local offset for animation-space rotation/scale math;
+			// it never reconstructs an absolute float position by walking parents.
+			const std::optional<TerraEngine::Scene::WorldPose> pose = objects.GetCanonicalWorldPose(object);
+			if(!pose) return false;
+			output.translation = {
+				static_cast<float>(pose->position.offsetMetres.x),
+				static_cast<float>(pose->position.offsetMetres.y),
+				static_cast<float>(pose->position.offsetMetres.z)};
+			output.rotation = FromGlm(pose->rotation);
+			output.scale = FromGlm(pose->scale);
+			return IsFinite(output) && IsNormalized(output.rotation);
 		}
 
 		bool SameSourceTransform(
@@ -1243,8 +1236,8 @@ namespace TerraEngine::Animation {
 				|| TerraEngine::CompressObjectGeneration(objects.getObjectComponentGeneration(*object)) != resolved.componentGeneration) {
 				return reject(AnimationStatus::StaleHandle);
 			}
-			const Transform* transform = objects.GetComponent<Transform>(*object);
-			if(transform == nullptr) return reject(AnimationStatus::InvalidType);
+			const std::optional<TerraEngine::Scene::WorldPose> currentPose = objects.GetCanonicalWorldPose(*object);
+			if(!currentPose) return reject(AnimationStatus::InvalidType);
 			AnimationTransform currentWorld;
 			if(!CaptureWorldTransform(objects, *object, currentWorld)) {
 				return reject(AnimationStatus::InvalidType);
@@ -1253,21 +1246,20 @@ namespace TerraEngine::Animation {
 				&& !SameSourceTransform(resolved.sourceObjectWorldTransform, currentWorld)) {
 				return reject(AnimationStatus::StaleHandle);
 			}
-			AnimationTransform desiredWorld = currentWorld;
-			desiredWorld.translation = FromGlm(
-				ToGlm(currentWorld.translation) + ToGlm(resolved.delta.worldTranslation));
-			desiredWorld.rotation = FromGlm(ToGlm(currentWorld.rotation)
-				* ToGlm(YawRotation(resolved.delta.worldYawRadians)));
-			glm::vec3 localPosition;
-			glm::quat localRotation;
-			if(!ConvertWorldTargetToLocal(
-				objects, *object, desiredWorld, localPosition, localRotation)) {
+			TerraEngine::Scene::WorldDelta worldDelta;
+			worldDelta.offsetMetres = {
+				static_cast<double>(resolved.delta.worldTranslation.x),
+				static_cast<double>(resolved.delta.worldTranslation.y),
+				static_cast<double>(resolved.delta.worldTranslation.z)};
+			const TerraEngine::Scene::WorldCoordinateResult translated =
+				TerraEngine::Scene::ApplyWorldDelta(currentPose->position, worldDelta);
+			if(!translated.Succeeded()) {
 				return reject(AnimationStatus::Rejected);
 			}
-			TransactionTransformUpdate update;
-			update.objectId = resolved.ownerObjectId;
-			update.position = localPosition;
-			update.rotation = localRotation;
+			TerraEngine::Scene::WorldPose desiredPose = *currentPose;
+			desiredPose.position = translated.position;
+			desiredPose.rotation = glm::normalize(currentPose->rotation
+				* ToGlm(YawRotation(resolved.delta.worldYawRadians)));
 			receipt.sceneTransactionId = "animation-root-motion-"
 				+ std::to_string(resolved.delta.animator.slotIndex) + "-"
 				+ std::to_string(resolved.delta.animator.generation) + "-"
@@ -1275,7 +1267,7 @@ namespace TerraEngine::Animation {
 				+ std::to_string(resolved.idempotencyKey);
 			TransactionalMutationBuilder builder(
 				receipt.sceneTransactionId, TransactionOrigin::System, "AnimationRootMotion");
-			builder.UpdateTransformBatch(objects, {update});
+			builder.SetWorldTransform(objects, resolved.ownerObjectId, desiredPose);
 			Transaction transaction = std::move(builder).Build();
 			const TransactionResult preflight = sceneMutations.PreflightTransaction(transaction, objects);
 			if(preflight.status != TransactionStatus::PreflightAccepted) return reject(AnimationStatus::Rejected);

@@ -54,6 +54,72 @@ inline const char* ToString(RenderViewType viewType)
 }
 
 namespace TerraEngine::Renderer {
+	// A render reference frame translates one canonical world origin into a
+	// bounded float space. Every view owns its identity; no renderer worker may
+	// reuse another view's origin or silently reinterpret a stale packet.
+	struct RenderReferenceFrame
+	{
+		std::uint64_t frameId = 0U;
+		std::uint64_t viewId = 0U;
+		std::uint32_t outputId = 0U;
+		TerraEngine::Scene::WorldPosition canonicalOrigin{};
+		std::uint64_t originGeneration = 0U;
+		std::uint64_t spatialGeneration = 0U;
+		std::uint64_t residencyGeneration = 0U;
+
+		[[nodiscard]] bool IsValid() const noexcept
+		{
+			return frameId != 0U && viewId != 0U && outputId != 0U
+				&& originGeneration != 0U && spatialGeneration != 0U
+				&& residencyGeneration != 0U;
+		}
+
+		[[nodiscard]] bool MatchesGeneration(const RenderReferenceFrame& other) const noexcept
+		{
+			return viewId == other.viewId && outputId == other.outputId
+				&& originGeneration == other.originGeneration
+				&& spatialGeneration == other.spatialGeneration
+				&& residencyGeneration == other.residencyGeneration;
+		}
+	};
+
+	// Cameras retain exact canonical translation while orientation remains a
+	// compact local value. Projection data is intentionally view-owned and is
+	// not a substitute for the canonical camera location.
+	struct CanonicalRenderCamera
+	{
+		TerraEngine::Scene::WorldPosition position{};
+		glm::quat rotation{1.0F, 0.0F, 0.0F, 0.0F};
+		float verticalFieldOfViewRadians = 1.04719755F;
+		float nearPlane = 0.01F;
+		float farPlane = 10000.0F;
+	};
+
+	struct RenderLocalizationResult
+	{
+		glm::vec3 offsetMetres{0.0F};
+		TerraEngine::Scene::WorldCoordinateError error = TerraEngine::Scene::WorldCoordinateError::None;
+		bool staleReferenceFrame = false;
+
+		[[nodiscard]] bool Succeeded() const noexcept
+		{
+			return error == TerraEngine::Scene::WorldCoordinateError::None;
+		}
+	};
+
+	[[nodiscard]] inline RenderLocalizationResult LocalizeRenderPosition(
+		const TerraEngine::Scene::WorldPosition& position,
+		const RenderReferenceFrame& frame,
+		double maximumRangeMetres = TerraEngine::Scene::kTransformSpaceMaximumRelativeRadiusMetres)
+	{
+		if (!frame.IsValid())
+			return { {}, TerraEngine::Scene::WorldCoordinateError::UnsafeLocalRange, false };
+		const TerraEngine::Scene::WorldLocalizationResult localized =
+			TerraEngine::Scene::LocalizeWorldPosition(position, frame.canonicalOrigin, maximumRangeMetres);
+		if (!localized.Succeeded())
+			return { {}, localized.error, false };
+		return { glm::vec3(localized.offsetMetres), TerraEngine::Scene::WorldCoordinateError::None, false };
+	}
 	// AnimationRenderFallbackPolicy is authored/runtime policy only. Render jobs
 	// never repair animation state; they either consume one immutable compatible
 	// pose generation, retain a compatible prior generation, or draw the bind
@@ -505,7 +571,7 @@ namespace TerraEngine::Renderer {
 		TerraEngine::UUID sourceObjectId = TerraEngine::EMPTY_UUID;
 		glm::mat4 viewMatrix = glm::mat4(1.0f);
 		glm::mat4 projectionMatrix = glm::mat4(1.0f);
-		glm::vec3 cameraWorldPosition = glm::vec3(0.0f);
+		TerraEngine::Scene::WorldPosition cameraCanonicalPosition{};
 		glm::uvec2 targetSize = glm::uvec2(1280u, 720u);
 		std::string format = "image/png";
 		std::string freshness = "latestCompleted";
@@ -1342,6 +1408,11 @@ struct VirtualGeometryVisibilityPick
 	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
 	std::uint64_t frameId = 0u;
+	// A completed asynchronous pick is reusable only while the exact localized
+	// origin and the two spatial publications that produced it remain current.
+	std::uint64_t originGeneration = 0u;
+	std::uint64_t spatialGeneration = 0u;
+	std::uint64_t residencyGeneration = 0u;
 	std::uint32_t packetId = 0u;
 	std::uint32_t clusterId = 0u;
 	std::uint32_t meshletId = 0u;
@@ -1354,6 +1425,14 @@ struct VirtualGeometryVisibilityPick
 		return objectId != TerraEngine::EMPTY_UUID
 			&& meshId != TerraEngine::EMPTY_UUID
 			&& frameId != 0u;
+	}
+
+	[[nodiscard]] bool IsQualifiedFor(const TerraEngine::Renderer::RenderReferenceFrame& frame) const noexcept
+	{
+		return IsValid() && frame.IsValid()
+			&& originGeneration == frame.originGeneration
+			&& spatialGeneration == frame.spatialGeneration
+			&& residencyGeneration == frame.residencyGeneration;
 	}
 };
 
@@ -2512,6 +2591,9 @@ struct RenderItemRecord
 {
 	TerraEngine::UUID meshId;
 	TerraEngine::UUID materialId;
+	// Shared command caches retain this exact pose. modelMatrix is populated only
+	// after the command is copied into one qualified render reference frame.
+	TerraEngine::Scene::WorldPose canonicalWorldPose{};
 	glm::mat4 modelMatrix;
 	std::uint32_t materialIndex = 0u;
 	std::uint32_t meshDataIndex = 0u;
@@ -2737,6 +2819,9 @@ static_assert(sizeof(GPULight) == 176, "GPULight layout changed; update shader m
 struct FrameLightCandidate
 {
 	TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
+	// Exact translation is retained until one view reference frame localizes the
+	// candidate. gpuLight.positionAndType contains only the derived local value.
+	TerraEngine::Scene::WorldPosition canonicalPosition{};
 	GPULight gpuLight{};
 	float stabilityPreference = 0.0f;
 	std::uint32_t candidateFlags = 0u;
@@ -3241,7 +3326,9 @@ struct RenderViewBuildState
 	std::uint64_t frameId = 0u;
 	glm::mat4 viewMatrix;
 	glm::mat4 projectionMatrix;
-	glm::vec3 cameraWorldPosition = glm::vec3(0.0f);
+	// This identity qualifies every derived float value submitted for the view.
+	TerraEngine::Renderer::RenderReferenceFrame referenceFrame{};
+	glm::vec3 cameraLocalPosition = glm::vec3(0.0f);
 	float deltaTimeSeconds = 0.0f;
 	bool globalTaskShaderCullingEnabled = true;
 	float cullingEpsilon = 0.001f;

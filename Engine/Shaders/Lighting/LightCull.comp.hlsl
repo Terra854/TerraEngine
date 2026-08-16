@@ -1,4 +1,6 @@
 #pragma pack_matrix(column_major)
+// Light positions are already translated into the current view-local frame.
+#include "../Geometry/TerraWorldReferenceFrame.hlsli"
 
 struct GPULight
 {

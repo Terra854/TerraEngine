@@ -6,6 +6,7 @@
 #include "Core/Object/ObjectManager.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace TerraEngine::Scene {
 	TransactionReadSet CaptureTransactionReadSet(
@@ -41,6 +42,85 @@ namespace TerraEngine::Scene {
 
 namespace TerraEngine::Physics {
 	namespace {
+		bool IsFiniteMigrationPose(const TerraEngine::Scene::WorldPose& pose) noexcept;
+		bool HasMigrationClosure(const PhysicsFrameMigrationRequest& request);
+	}
+
+	PhysicsFrameMigrationReceipt CommitPhysicsFrameMigration(
+		const PhysicsFrameMigrationRequest& request,
+		const PhysicsFrameMigrationOperations& operations) {
+		PhysicsFrameMigrationReceipt receipt;
+		if(request.id.empty() || !request.destinationFrame.IsValid()
+			|| request.expectedDestinationResidencyGeneration == 0U || request.members.empty()
+			|| !operations.stageDestination || !operations.commitDestinationAndReleaseSource
+			|| !operations.rollbackDestination) {
+			receipt.message = "The migration request or its protected operations are incomplete.";
+			return receipt;
+		}
+		const PhysicsFrameHandle sourceFrame = request.members.front().sourceMembership.frame;
+		if(!sourceFrame.IsValid() || sourceFrame == request.destinationFrame || !HasMigrationClosure(request)) {
+			receipt.message = "The migration closure is invalid or would create a cross-frame relationship.";
+			return receipt;
+		}
+		for(std::size_t index = 0U; index < request.members.size(); ++index) {
+			const PhysicsFrameMigrationMember& member = request.members[index];
+			if(member.objectId == TerraEngine::EMPTY_UUID || !member.sourceMembership.IsValid()
+				|| member.sourceMembership.frame != sourceFrame || !IsFiniteMigrationPose(member.canonicalPose)) {
+				receipt.state = PhysicsFrameMigrationState::PreflightFailed;
+				receipt.message = "A migration member has stale residency or an invalid canonical pose.";
+				return receipt;
+			}
+			for(std::size_t duplicate = 0U; duplicate < index; ++duplicate) {
+				if(request.members[duplicate].objectId == member.objectId) {
+					receipt.state = PhysicsFrameMigrationState::PreflightFailed;
+					receipt.message = "A migration closure must contain each object exactly once.";
+					return receipt;
+				}
+			}
+		}
+		if(!operations.stageDestination(request)) {
+			// The source remains the authority until all destination state exists.
+			operations.rollbackDestination(request);
+			receipt.state = PhysicsFrameMigrationState::RolledBack;
+			receipt.message = "Destination staging failed; the source frame remains authoritative.";
+			return receipt;
+		}
+		receipt.state = PhysicsFrameMigrationState::DestinationStaged;
+		if(!operations.commitDestinationAndReleaseSource(request)) {
+			operations.rollbackDestination(request);
+			receipt.state = PhysicsFrameMigrationState::RolledBack;
+			receipt.message = "Migration commit failed and all destination state was rolled back.";
+			return receipt;
+		}
+		receipt.accepted = true;
+		receipt.state = PhysicsFrameMigrationState::Committed;
+		receipt.migratedMemberCount = request.members.size();
+		receipt.message = "The complete connected closure migrated atomically.";
+		return receipt;
+	}
+
+	namespace {
+		bool IsFiniteMigrationPose(const TerraEngine::Scene::WorldPose& pose) noexcept {
+			return std::isfinite(pose.position.offsetMetres.x)
+				&& std::isfinite(pose.position.offsetMetres.y)
+				&& std::isfinite(pose.position.offsetMetres.z)
+				&& std::isfinite(pose.rotation.x) && std::isfinite(pose.rotation.y)
+				&& std::isfinite(pose.rotation.z) && std::isfinite(pose.rotation.w);
+		}
+
+		bool HasMigrationClosure(const PhysicsFrameMigrationRequest& request) {
+			for(const PhysicsFrameMigrationMember& member : request.members) {
+				for(const TerraEngine::UUID& connected : member.connectedObjectIds) {
+					if(connected == TerraEngine::EMPTY_UUID) return false;
+					const bool inRequest = std::any_of(request.members.begin(), request.members.end(),
+						[&connected](const PhysicsFrameMigrationMember& candidate) {
+							return candidate.objectId == connected;
+						});
+					if(!inRequest) return false;
+				}
+			}
+			return true;
+		}
 		using GenerationMap = std::unordered_map<TerraEngine::UUID, PhysicsGeneration>;
 
 		PhysicsGeneration NextGeneration(PhysicsGeneration generation) {

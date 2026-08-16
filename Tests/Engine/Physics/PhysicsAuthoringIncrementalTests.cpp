@@ -24,6 +24,10 @@ namespace TerraEngine::Tests {
 			body.objectId = Id(id);
 			body.objectGeneration = 1U;
 			body.componentGeneration = 1U;
+			// Immutable authoring packets always carry both an exact canonical pose
+			// and the frame that owns its localized provider representation.
+			body.canonicalWorldPose.position.offsetMetres = {static_cast<double>(id), 0.0, 0.0};
+			body.frameMembership = {{kPrimaryPhysicsFrameId, 1U}, {{1U}, 1U}, 1U};
 			body.sourceTransformRevision = transformRevision;
 			return body;
 		}

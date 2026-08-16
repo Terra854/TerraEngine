@@ -11,8 +11,8 @@
 #include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
+#include <charconv>
 #include <functional>
-#include <glm/gtc/matrix_transform.hpp>
 #include <memory>
 #include <sstream>
 #include <tuple>
@@ -31,6 +31,15 @@ namespace TerraEngine::Scene {
 				value.at(0).get<float>(),
 				value.at(1).get<float>(),
 				value.at(2).get<float>());
+		}
+
+		glm::dvec3 ReadDVec3(const nlohmann::json& value, const glm::dvec3& fallback)
+		{
+			if (!value.is_array() || value.size() < 3)
+			{
+				return fallback;
+			}
+			return glm::dvec3(value.at(0).get<double>(), value.at(1).get<double>(), value.at(2).get<double>());
 		}
 
 		glm::quat ReadQuat(const nlohmann::json& value, const glm::quat& fallback)
@@ -56,6 +65,43 @@ namespace TerraEngine::Scene {
 
 			const auto parsed = TerraEngine::ParseUUID(source.at(std::string(key)).get<std::string>());
 			return parsed.value_or(TerraEngine::EMPTY_UUID);
+		}
+
+		bool ReadInt64Axis(const nlohmann::json& value, std::int64_t& axis)
+		{
+			if (!value.is_string())
+			{
+				return false;
+			}
+			const std::string encoded = value.get<std::string>();
+			const auto [end, error] = std::from_chars(encoded.data(), encoded.data() + encoded.size(), axis);
+			return error == std::errc{} && end == encoded.data() + encoded.size();
+		}
+
+		bool ReadCanonicalPosition(const nlohmann::json& transform, WorldPosition& position)
+		{
+			const auto positionIt = transform.find("worldPosition");
+			if (positionIt == transform.end() || !positionIt->is_object())
+			{
+				return false;
+			}
+			const auto cellIt = positionIt->find("cell");
+			if (cellIt == positionIt->end() || !cellIt->is_object()
+				|| !cellIt->contains("x") || !cellIt->contains("y") || !cellIt->contains("z")
+				|| !ReadInt64Axis(cellIt->at("x"), position.cell.x)
+				|| !ReadInt64Axis(cellIt->at("y"), position.cell.y)
+				|| !ReadInt64Axis(cellIt->at("z"), position.cell.z))
+			{
+				return false;
+			}
+			position.offsetMetres = ReadDVec3(positionIt->value("offsetMetres", nlohmann::json::array()), position.offsetMetres);
+			const WorldCoordinateResult normalized = NormalizeWorldPosition(position);
+			if (!normalized.Succeeded())
+			{
+				return false;
+			}
+			position = normalized.position;
+			return true;
 		}
 
 		void AppendDiagnostic(SceneGraph& graph, SceneDiagnosticSeverity severity, SceneDiagnosticCategory category, const SceneObjectId& objectId, std::string message, std::string action)
@@ -97,9 +143,19 @@ namespace TerraEngine::Scene {
 
 			if (const auto transformIt = objectJson.find("transform"); transformIt != objectJson.end())
 			{
-				object.localPosition = ReadVec3(transformIt->value("position", nlohmann::json::array()), object.localPosition);
-				object.localRotation = ReadQuat(transformIt->value("rotation", nlohmann::json::array()), object.localRotation);
-				object.localScale = ReadVec3(transformIt->value("scale", nlohmann::json::array()), object.localScale);
+				if (!transformIt->is_object() || !ReadCanonicalPosition(*transformIt, object.worldPose.position))
+				{
+					AppendDiagnostic(graph, SceneDiagnosticSeverity::Error, SceneDiagnosticCategory::Serialization, object.objectId, "Transform did not provide a strict canonical worldPosition.", "Write TerraSceneUnboundedV1 canonical cell strings and normalized offsets.");
+				}
+				object.worldPose.rotation = ReadQuat(transformIt->value("rotation", nlohmann::json::array()), object.worldPose.rotation);
+				object.worldPose.scale = ReadVec3(transformIt->value("scale", nlohmann::json::array()), object.worldPose.scale);
+				if (const auto relativeIt = transformIt->find("parentRelativePose"); relativeIt != transformIt->end() && relativeIt->is_object())
+				{
+					object.parentRelativePose.translationMetres = ReadDVec3(relativeIt->value("translationMetres", nlohmann::json::array()), object.parentRelativePose.translationMetres);
+					object.parentRelativePose.rotation = ReadQuat(relativeIt->value("rotation", nlohmann::json::array()), object.parentRelativePose.rotation);
+					object.parentRelativePose.scale = ReadVec3(relativeIt->value("scale", nlohmann::json::array()), object.parentRelativePose.scale);
+					object.parentRelativePose.transformSpaceId = relativeIt->value("transformSpaceId", 0ULL);
+				}
 			}
 
 			if (parentId == TerraEngine::EMPTY_UUID)
@@ -139,24 +195,6 @@ namespace TerraEngine::Scene {
 			return depth;
 		}
 
-		Transform MakeTransform(const glm::vec3& position, const glm::quat& rotation, const glm::vec3& scale)
-		{
-			Transform transform{};
-			transform.position = position;
-			transform.rotation = rotation;
-			transform.scale = scale;
-			return transform;
-		}
-
-		glm::mat4 MakeModelMatrix(const Transform& transform)
-		{
-			glm::mat4 model(1.0f);
-			model = glm::translate(model, transform.position);
-			model = model * glm::mat4_cast(transform.rotation);
-			model = glm::scale(model, transform.scale);
-			return model;
-		}
-
 		SceneWorldTransformRecord ResolveWorldTransformRecord(SceneGraphObject& object, const SceneGraphObject* parent, std::uint32_t hierarchyLevel, std::uint64_t graphRevision)
 		{
 			// Parent records are resolved by an earlier hierarchy level. Workers
@@ -164,26 +202,24 @@ namespace TerraEngine::Scene {
 			// object assigned to their snapshot item.
 			if (parent != nullptr)
 			{
-				object.worldPosition = parent->worldPosition + parent->worldRotation * (parent->worldScale * object.localPosition);
-				object.worldRotation = parent->worldRotation * object.localRotation;
-				object.worldScale = parent->worldScale * object.localScale;
-			}
-			else
-			{
-				object.worldPosition = object.localPosition;
-				object.worldRotation = object.localRotation;
-				object.worldScale = object.localScale;
+				const glm::vec3 boundedRelative = parent->worldPose.rotation
+					* (parent->worldPose.scale * glm::vec3(object.parentRelativePose.translationMetres));
+				const WorldCoordinateResult translated = ApplyWorldDelta(parent->worldPose.position, { {}, glm::dvec3(boundedRelative) });
+				if (translated.Succeeded())
+				{
+					object.worldPose.position = translated.position;
+				}
+				object.worldPose.rotation = parent->worldPose.rotation * object.parentRelativePose.rotation;
+				object.worldPose.scale = parent->worldPose.scale * object.parentRelativePose.scale;
 			}
 
-			Transform world = MakeTransform(object.worldPosition, object.worldRotation, object.worldScale);
 			// The graph revision is captured per worker chunk; the exact record uses
 			// the narrower local transform revision for stale-work validation.
 			(void)graphRevision;
 			return SceneWorldTransformRecord{
 				object.objectId,
 				object.entity,
-				world,
-				MakeModelMatrix(world),
+				object.worldPose,
 				hierarchyLevel,
 				object.transformRevision
 			};
@@ -263,6 +299,7 @@ namespace TerraEngine::Scene {
 	{
 		SceneGraph graph;
 		graph.sceneGeneration = objects.GetSceneGeneration();
+		graph.hierarchyRevision = objects.GetHierarchyRevision();
 		graph.revision = objects.GetSpatialRevision();
 
 		std::function<void(Object, SceneObjectId)> visitObject = [&](Object object, SceneObjectId parentId) {
@@ -276,9 +313,10 @@ namespace TerraEngine::Scene {
 			graphObject.spatialRevision = objects.GetObjectSpatialRevision(object);
 			if (Transform* transform = objects.GetComponent<Transform>(object))
 			{
-				graphObject.localPosition = GetComponentProperty<Transform, glm::vec3>(*transform, "Position");
-				graphObject.localRotation = GetComponentProperty<Transform, glm::quat>(*transform, "Rotation");
-				graphObject.localScale = GetComponentProperty<Transform, glm::vec3>(*transform, "Scale");
+				// Copy protected-side authored state into the graph snapshot. Worker
+				// propagation mutates only this detached copy, never live components.
+				graphObject.worldPose = transform->worldPose;
+				graphObject.parentRelativePose = transform->parentRelativePose;
 			}
 
 			const SceneObjectId objectId = graphObject.objectId;
@@ -369,6 +407,18 @@ namespace TerraEngine::Scene {
 			if (object.parentId != TerraEngine::EMPTY_UUID && graph.objects.find(object.parentId) == graph.objects.end())
 			{
 				AppendDiagnostic(graph, SceneDiagnosticSeverity::Error, SceneDiagnosticCategory::Hierarchy, objectId, "Object references a missing parent.", "Restore the parent or detach the object to the scene root.");
+			}
+			const WorldCoordinateResult normalizedPosition = NormalizeWorldPosition(object.worldPose.position);
+			if (!normalizedPosition.Succeeded() || !IsWorldPoseFinite(object.worldPose))
+			{
+				AppendDiagnostic(graph, SceneDiagnosticSeverity::Error, SceneDiagnosticCategory::Composition, objectId, "Object has an invalid canonical world pose.", "Store finite rotation and scale with a normalized WorldCell plus offset.");
+			}
+			if (object.parentId != TerraEngine::EMPTY_UUID && !IsParentRelativePoseInRange(object.parentRelativePose))
+			{
+				// A graph can originate from untrusted scene JSON, not just from the
+				// protected ObjectManager path. Validate the bounded local contract
+				// before worker propagation rotates or scales this relationship.
+				AppendDiagnostic(graph, SceneDiagnosticSeverity::Error, SceneDiagnosticCategory::Hierarchy, objectId, "Child parent-relative pose exceeds the bounded transform space.", "Reparent within the supported local radius or use an intermediate anchor.");
 			}
 
 			for (const SceneObjectId& childId : object.children)
@@ -750,10 +800,10 @@ namespace TerraEngine::Scene {
 			result.skippedCleanObjectCount += output.skipped;
 			for (const SceneWorldTransformRecord& record : output.records)
 			{
-				result.worldTransformsByObject[record.objectId] = record.worldTransform;
+				result.worldTransformsByObject[record.objectId] = record.worldPose;
 				if (record.entity != entt::null)
 				{
-					result.worldTransformsByEntity[record.entity] = record.worldTransform;
+					result.worldTransformsByEntity[record.entity] = record.worldPose;
 				}
 				result.records.push_back(record);
 			}
@@ -880,7 +930,7 @@ namespace TerraEngine::Scene {
 				object.parentId,
 				object.name,
 				DepthForObject(graph, objectId),
-				object.worldPosition
+				object.worldPose.position
 			});
 		}
 		return summary;
@@ -904,6 +954,11 @@ namespace TerraEngine::Scene {
 
 	bool ReparentPreserveWorld(ObjectManager& objects, entt::entity child, std::optional<entt::entity> parent)
 	{
+		return ReparentWithMode(objects, child, parent, ReparentMode::KeepWorld);
+	}
+
+	bool ReparentWithMode(ObjectManager& objects, entt::entity child, std::optional<entt::entity> parent, ReparentMode mode)
+	{
 		std::optional<Object> childObject = objects.getObject(child);
 		if (!childObject)
 		{
@@ -918,6 +973,6 @@ namespace TerraEngine::Scene {
 				return false;
 			}
 		}
-		return objects.setParent(*childObject, parentObject);
+		return objects.setParent(*childObject, parentObject, mode);
 	}
 }

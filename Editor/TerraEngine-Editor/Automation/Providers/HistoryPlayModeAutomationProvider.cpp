@@ -63,7 +63,16 @@ namespace TerraEngine::Editor::Automation
 	std::vector<AutomationCapabilityRegistration> HistoryPlayModeAutomationProvider::GetCapabilities()
 	{
 		std::vector<AutomationCapabilityRegistration> capabilities;
-		capabilities.push_back(Make(resolveHandler, "transaction.execute", "transaction", MutationMode::SceneMutation, true, {"stopped"}));
+		AutomationCapabilityRegistration transaction = Make(resolveHandler, "transaction.execute", "transaction", MutationMode::SceneMutation, true, {"stopped"});
+		// Transactions are a breaking, versioned wire contract. Advertising the
+		// exact format prevents clients from assuming legacy float-vector writes.
+		transaction.descriptor.inputSchema = {
+			{"type", "object"},
+			{"properties", {{"format", {{"const", "TerraSpatialTransactionV1"}}},
+				{"operations", {{"type", "array"}, {"minItems", 1}}}}},
+			{"required", nlohmann::json::array({"format", "operations"})},
+			{"additionalProperties", true}};
+		capabilities.push_back(std::move(transaction));
 		capabilities.push_back(Make(resolveHandler, "history.state", "history", MutationMode::ReadOnly, true, {"stopped"}));
 		capabilities.push_back(Make(resolveHandler, "history.undo", "history", MutationMode::SceneMutation, true, {"stopped"}));
 		capabilities.push_back(Make(resolveHandler, "history.redo", "history", MutationMode::SceneMutation, true, {"stopped"}));

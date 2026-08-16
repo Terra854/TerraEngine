@@ -44,6 +44,9 @@ namespace TerraEngine::Renderer {
 		std::uint64_t frameId = 0u;
 		std::uint64_t rendererGeneration = 0u;
 		std::uint64_t targetGeneration = 0u;
+		std::uint64_t originGeneration = 0u;
+		std::uint64_t spatialGeneration = 0u;
+		std::uint64_t residencyGeneration = 0u;
 		bool dedicatedCaptureTarget = false;
 	};
 
@@ -56,6 +59,9 @@ namespace TerraEngine::Renderer {
 		std::uint64_t frameId = 0u;
 		std::uint64_t rendererGeneration = 0u;
 		std::uint64_t targetGeneration = 0u;
+		std::uint64_t originGeneration = 0u;
+		std::uint64_t spatialGeneration = 0u;
+		std::uint64_t residencyGeneration = 0u;
 		bool dedicatedCaptureTarget = false;
 		glm::uvec4 identity = glm::uvec4(0u);
 		bool completed = false;
@@ -72,12 +78,16 @@ namespace TerraEngine::Renderer {
 		std::uint64_t frameId = 0u;
 		std::uint64_t rendererGeneration = 0u;
 		std::uint64_t targetGeneration = 0u;
+		std::uint64_t originGeneration = 0u;
+		std::uint64_t spatialGeneration = 0u;
+		std::uint64_t residencyGeneration = 0u;
 		bool dedicatedCaptureTarget = false;
 
 		[[nodiscard]] bool IsComplete() const noexcept
 		{
 			return frameId != 0u && rendererGeneration != 0u
-				&& targetGeneration != 0u;
+				&& targetGeneration != 0u && originGeneration != 0U
+				&& spatialGeneration != 0U && residencyGeneration != 0U;
 		}
 	};
 

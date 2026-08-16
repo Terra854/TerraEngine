@@ -69,6 +69,9 @@
 		// from animation deformation records so moving one camera cannot rebuild a
 		// pose that every Scene, Game, shadow, reflection, and capture view shares.
 		std::uint64_t viewGeneration = 0u;
+		// Reference-frame identity is copied with the request so per-view workers
+		// can reject stale origins before producing culling or draw matrices.
+		RenderReferenceFrame referenceFrame{};
 	};
 
 	enum class AnimationRenderEvaluationSource : std::uint8_t
@@ -248,7 +251,9 @@
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
 		TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
-		glm::mat4 modelMatrix = glm::mat4(1.0f);
+		// Neutral/view-local staging only. Shared spatial identity is always the
+		// canonical pose below; consumers must materialize this matrix per view.
+		glm::mat4 modelMatrix = glm::mat4(1.0F);
 		VirtualGeometryDrawRange virtualGeometry;
 		bool taskShaderCullingEnabled = true;
 		bool usingFallback = false;
@@ -270,6 +275,9 @@
 		// transform changes. Dynamic publication can therefore copy one affected
 		// page instead of treating the global frame/view generation as a transform.
 		std::uint64_t transformGeneration = 0u;
+		// Shared topology retains only the canonical pose. A model matrix does not
+		// exist until one view-local reference frame materializes it.
+		TerraEngine::Scene::WorldPose canonicalWorldPose{};
 	};
 
 	// A compact lookup table lets a conventional raster identity resolve direct

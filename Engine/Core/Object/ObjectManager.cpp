@@ -12,6 +12,7 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <atomic>
+#include <cmath>
 #include <stdexcept>
 
 namespace
@@ -480,6 +481,12 @@ void ObjectManager::MarkObjectTransformDirty(const Object& obj)
 	// can reason about transform-only work without forcing metadata refreshes.
 	++transformRevision;
 	transformRevisionByEntity[entityId] = transformRevision;
+	if (Transform* transform = registry.try_get<Transform>(entityId))
+	{
+		// Keep the value contract and manager journal in lockstep. Snapshot users
+		// therefore need no side map to learn the revision of a canonical pose.
+		transform->worldPose.transformRevision = transformRevision;
+	}
 	notifySpatialObjectDirty(entityId);
 	const TerraEngine::Scene::SceneObjectRevisionSnapshot snapshot = captureSceneObjectRevision(obj);
 	recordSceneChange(TerraEngine::Scene::SceneChangeKind::Transform, snapshot);
@@ -510,6 +517,7 @@ Object ObjectManager::createObject(const std::string& name) {
 	uuidToEntity.emplace(uuid, entityId);
 	generationByEntity[entityId] = nextObjectGeneration++;
 	transformRevisionByEntity[entityId] = ++transformRevision;
+	registry.get<Transform>(entityId).worldPose.transformRevision = transformRevision;
 	Object object = makeHandle(entityId);
 	
 	ObjectMetadata metadata;
@@ -599,7 +607,7 @@ void ObjectManager::removeObject(Object obj) {
 }
 
 // ObjectManager::setParent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-bool ObjectManager::setParent(Object child, std::optional<Object> parent)
+bool ObjectManager::setParent(Object child, std::optional<Object> parent, ReparentMode mode)
 {
 	if (ReportWorkerObjectMutation("ObjectManager.setParent", "Worker code attempted to reparent live hierarchy directly."))
 	{
@@ -613,6 +621,10 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent)
 	}
 
 	const entt::entity parentId = parent ? parent->EntityId() : entt::null;
+	if (parent && !registry.valid(parentId))
+	{
+		return false;
+	}
 
 	// Prevent self-parenting and cycle creation by walking ancestors.
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -621,7 +633,75 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent)
 		return false;
 	}
 
-	// Ensure bookkeeping entries exist so child lists stay stable.
+	Transform* childTransform = registry.try_get<Transform>(childId);
+	if (childTransform == nullptr)
+	{
+		return false;
+	}
+
+	// Reparenting keeps the exact canonical pose. Only the bounded relative pose
+	// changes, and it is fully prepared before parent maps are mutated so an
+	// out-of-range transform space leaves live hierarchy state untouched.
+	TerraEngine::Scene::ParentRelativePose preparedRelative = childTransform->parentRelativePose;
+	if (parentId != entt::null && mode == ReparentMode::KeepWorld)
+	{
+		Transform* parentTransform = registry.try_get<Transform>(parentId);
+		if (parentTransform == nullptr)
+		{
+			return false;
+		}
+		const TerraEngine::Scene::WorldLocalizationResult local = TerraEngine::Scene::LocalizeWorldPosition(
+			childTransform->worldPose.position,
+			parentTransform->worldPose.position,
+			TerraEngine::Scene::kTransformSpaceMaximumRelativeRadiusMetres);
+		if (!local.Succeeded())
+		{
+			return false;
+		}
+		const glm::quat inverseParentRotation = glm::inverse(parentTransform->worldPose.rotation);
+		const float kMinimumScale = 1e-6f;
+		if (std::abs(parentTransform->worldPose.scale.x) < kMinimumScale
+			|| std::abs(parentTransform->worldPose.scale.y) < kMinimumScale
+			|| std::abs(parentTransform->worldPose.scale.z) < kMinimumScale)
+		{
+			return false;
+		}
+		preparedRelative.translationMetres = glm::dvec3(inverseParentRotation * glm::vec3(local.offsetMetres))
+			/ glm::dvec3(parentTransform->worldPose.scale);
+		preparedRelative.rotation = inverseParentRotation * childTransform->worldPose.rotation;
+		preparedRelative.scale = childTransform->worldPose.scale / parentTransform->worldPose.scale;
+		preparedRelative.transformSpaceId = parentTransform->worldPose.coordinateFrameRevision;
+		if (!TerraEngine::Scene::IsParentRelativePoseInRange(preparedRelative))
+		{
+			return false;
+		}
+	}
+
+	const entt::entity previousParentId = getParentEntityInternal(childId);
+	std::unordered_map<entt::entity, TerraEngine::Scene::WorldPose> originalBranchPoses;
+	if (mode == ReparentMode::KeepLocal)
+	{
+		std::function<void(entt::entity)> captureBranch = [&](entt::entity entityId) {
+			if (Transform* transform = registry.try_get<Transform>(entityId))
+			{
+				originalBranchPoses.emplace(entityId, transform->worldPose);
+			}
+		const auto children = childrenMap.find(entityId);
+		if (children == childrenMap.end())
+		{
+			return;
+		}
+		for (entt::entity descendant : children->second)
+		{
+			captureBranch(descendant);
+		}
+		};
+		captureBranch(childId);
+	}
+
+	// Delay bookkeeping allocation until every rejecting preflight above has
+	// completed. A failed protected reparent must not leave even empty map
+	// entries behind as an observable partial hierarchy mutation.
 	childrenMap.try_emplace(childId, std::vector<entt::entity>{});
 	parentMap.try_emplace(childId, entt::null);
 	if (parentId != entt::null)
@@ -629,44 +709,6 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent)
 		childrenMap.try_emplace(parentId, std::vector<entt::entity>{});
 		parentMap.try_emplace(parentId, entt::null);
 	}
-
-	auto readTransform = [&](entt::entity entityId) -> Transform {
-		Transform result{};
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (Transform* t = registry.try_get<Transform>(entityId))
-		{
-			result.position = GetComponentProperty<Transform, glm::vec3>(*t, "Position");
-			result.rotation = GetComponentProperty<Transform, glm::quat>(*t, "Rotation");
-			result.scale = GetComponentProperty<Transform, glm::vec3>(*t, "Scale");
-		}
-		return result;
-	};
-
-	// Compute the child's world transform using the current hierarchy before reparenting.
-	std::unordered_map<entt::entity, Transform> worldCacheBefore;
-	std::function<Transform(entt::entity, std::unordered_map<entt::entity, Transform>&, std::unordered_set<entt::entity>&)> computeWorld =
-		[&](entt::entity entityId, std::unordered_map<entt::entity, Transform>& cache, std::unordered_set<entt::entity>& visiting) -> Transform {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (auto cached = cache.find(entityId); cached != cache.end())
-			{
-				return cached->second;
-			}
-			Transform local = readTransform(entityId);
-			entt::entity p = getParentEntityInternal(entityId);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (p != entt::null && visiting.insert(entityId).second)
-			{
-				Transform parentWorld = computeWorld(p, cache, visiting);
-				local.position = parentWorld.position + parentWorld.rotation * (parentWorld.scale * local.position);
-				local.rotation = parentWorld.rotation * local.rotation;
-				local.scale = parentWorld.scale * local.scale;
-				visiting.erase(entityId);
-			}
-			cache[entityId] = local;
-			return local;
-		};
-	std::unordered_set<entt::entity> visitingBefore;
-	const Transform childWorld = computeWorld(childId, worldCacheBefore, visitingBefore);
 
 	detachFromParent(childId);
 
@@ -677,34 +719,68 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent)
 		childrenMap[parentId].push_back(childId);
 	}
 
-	// Preserve world-space placement by converting the saved world transform
-	// into a new local transform relative to the target parent.
-	Transform* childTransform = registry.try_get<Transform>(childId);
-	if (childTransform)
+	if (mode == ReparentMode::KeepWorld)
 	{
-		std::unordered_map<entt::entity, Transform> worldCacheAfter;
-		std::unordered_set<entt::entity> visitingAfter;
-		Transform parentWorld{};
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (parentId != entt::null)
+		childTransform->parentRelativePose = preparedRelative;
+		++childTransform->worldPose.coordinateFrameRevision;
+	}
+	else if (parentId != entt::null)
+	{
+		// KeepLocal is intentionally protected-only: it recomputes canonical
+		// world poses for the affected branch after the parent edge is accepted.
+		// No worker observes this intermediate live hierarchy state.
+		std::function<bool(entt::entity)> propagateLocalBranch = [&](entt::entity entityId) {
+			Transform* transform = registry.try_get<Transform>(entityId);
+			const entt::entity directParent = getParentEntityInternal(entityId);
+			if (transform == nullptr || directParent == entt::null)
+			{
+				return transform != nullptr;
+			}
+			Transform* directParentTransform = registry.try_get<Transform>(directParent);
+			if (directParentTransform == nullptr || !TerraEngine::Scene::IsParentRelativePoseInRange(transform->parentRelativePose))
+			{
+				return false;
+			}
+			const glm::vec3 boundedRelative = directParentTransform->worldPose.rotation
+				* (directParentTransform->worldPose.scale * glm::vec3(transform->parentRelativePose.translationMetres));
+			const TerraEngine::Scene::WorldCoordinateResult translated = TerraEngine::Scene::ApplyWorldDelta(
+				directParentTransform->worldPose.position, { {}, glm::dvec3(boundedRelative) });
+			if (!translated.Succeeded())
+			{
+				return false;
+			}
+			transform->worldPose.position = translated.position;
+			transform->worldPose.rotation = directParentTransform->worldPose.rotation * transform->parentRelativePose.rotation;
+			transform->worldPose.scale = directParentTransform->worldPose.scale * transform->parentRelativePose.scale;
+			++transform->worldPose.coordinateFrameRevision;
+			for (entt::entity descendant : childrenMap[entityId])
+			{
+				if (!propagateLocalBranch(descendant))
+				{
+					return false;
+				}
+			}
+			return true;
+		};
+		if (!propagateLocalBranch(childId))
 		{
-			parentWorld = computeWorld(parentId, worldCacheAfter, visitingAfter);
+			// Restore every touched pose and parent edge. This keeps direct protected
+			// calls atomic even when a descendant overflows a canonical cell.
+			detachFromParent(childId);
+			parentMap[childId] = previousParentId;
+			if (previousParentId != entt::null)
+			{
+				childrenMap[previousParentId].push_back(childId);
+			}
+			for (const auto& [entityId, pose] : originalBranchPoses)
+			{
+				if (Transform* transform = registry.try_get<Transform>(entityId))
+				{
+					transform->worldPose = pose;
+				}
+			}
+			return false;
 		}
-		const glm::quat invParentRot = glm::inverse(parentWorld.rotation);
-		glm::vec3 invParentScale;
-		const float kEpsilon = 1e-6f;
-		invParentScale.x = std::abs(parentWorld.scale.x) < kEpsilon ? 0.0f : 1.0f / parentWorld.scale.x;
-		invParentScale.y = std::abs(parentWorld.scale.y) < kEpsilon ? 0.0f : 1.0f / parentWorld.scale.y;
-		invParentScale.z = std::abs(parentWorld.scale.z) < kEpsilon ? 0.0f : 1.0f / parentWorld.scale.z;
-
-		glm::vec3 localPos = invParentRot * (childWorld.position - parentWorld.position);
-		localPos *= invParentScale;
-		glm::quat localRot = invParentRot * childWorld.rotation;
-		glm::vec3 localScale = childWorld.scale * invParentScale;
-
-		SetComponentProperty(*childTransform, "Position", localPos);
-		SetComponentProperty(*childTransform, "Rotation", localRot);
-		SetComponentProperty(*childTransform, "Scale", localScale);
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1119,6 +1195,49 @@ std::uint64_t ObjectManager::GetObjectSpatialRevision(const Object& object) cons
 		return it->second;
 	}
 	return 0;
+}
+
+std::optional<TerraEngine::Scene::WorldPose> ObjectManager::GetCanonicalWorldPose(const Object& object) const
+{
+	const entt::entity entityId = object.EntityId();
+	if (!registry.valid(entityId))
+	{
+		return std::nullopt;
+	}
+	const Transform* transform = registry.try_get<Transform>(entityId);
+	return transform != nullptr ? std::optional<TerraEngine::Scene::WorldPose>(transform->worldPose) : std::nullopt;
+}
+
+TerraEngine::Scene::WorldCoordinateError ObjectManager::SetCanonicalWorldPose(
+	const Object& object,
+	TerraEngine::Scene::WorldPose pose)
+{
+	if (ReportWorkerObjectMutation("ObjectManager.SetCanonicalWorldPose", "Worker code attempted to set a live canonical pose directly."))
+	{
+		return TerraEngine::Scene::WorldCoordinateError::UnsafeLocalRange;
+	}
+	const entt::entity entityId = object.EntityId();
+	Transform* transform = registry.valid(entityId) ? registry.try_get<Transform>(entityId) : nullptr;
+	if (transform == nullptr)
+	{
+		return TerraEngine::Scene::WorldCoordinateError::UnsafeLocalRange;
+	}
+	const TerraEngine::Scene::WorldCoordinateResult normalized = TerraEngine::Scene::NormalizeWorldPosition(pose.position);
+	if (!normalized.Succeeded())
+	{
+		return normalized.error;
+	}
+	if (!TerraEngine::Scene::IsWorldPoseFinite(pose))
+	{
+		return TerraEngine::Scene::WorldCoordinateError::UnsafeLocalRange;
+	}
+
+	const bool changedCell = transform->worldPose.position.cell != normalized.position.cell;
+	pose.position = normalized.position;
+	pose.coordinateFrameRevision = transform->worldPose.coordinateFrameRevision + (changedCell ? 1u : 0u);
+	transform->worldPose = pose;
+	MarkObjectTransformDirty(object);
+	return TerraEngine::Scene::WorldCoordinateError::None;
 }
 
 std::uint64_t ObjectManager::getObjectMetadataGeneration(const Object& obj) const

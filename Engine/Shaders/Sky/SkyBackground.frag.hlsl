@@ -1,3 +1,5 @@
+#include "../Geometry/TerraWorldReferenceFrame.hlsli"
+
 static const float kPi = 3.14159265359f;
 // The procedural sky uses a few hand-tuned height thresholds to mimic the
 // long, warm sunrise transition seen in DCC tools and engines such as Unity.

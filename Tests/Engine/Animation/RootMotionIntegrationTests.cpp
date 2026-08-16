@@ -61,6 +61,11 @@ namespace TerraEngine::Tests {
 			return std::abs(left - right) <= 0.0001F;
 		}
 
+		bool HasCanonicalOffsetX(ObjectManager& objects, const Object& object, float expected) {
+			const auto pose = objects.GetCanonicalWorldPose(object);
+			return pose && IsClose(static_cast<float>(pose->position.offsetMetres.x), expected);
+		}
+
 		const AnimationRootMotionApplicationResult* FindResult(
 			const std::vector<AnimationRootMotionApplicationResult>& results,
 			std::uint64_t correlation,
@@ -194,7 +199,7 @@ namespace TerraEngine::Tests {
 				objects, queue, physics);
 			const Transform* before = objects.GetComponent<Transform>(object);
 			context.Expect(transformReceipt.status == AnimationStatus::Queued && before != nullptr
-				&& IsClose(before->position.x, 0.0F) && queue.PendingTransactions().size() == 1U,
+				&& IsClose(static_cast<float>(before->worldPose.position.offsetMetres.x), 0.0F) && queue.PendingTransactions().size() == 1U,
 				"Transform application must stay invisible until its typed scene transaction flushes.");
 			const auto flush = queue.Apply(objects, "RootMotionTestFlush");
 			const Transform* after = objects.GetComponent<Transform>(object);
@@ -203,7 +208,7 @@ namespace TerraEngine::Tests {
 			const bool applied = std::any_of(results.begin(), results.end(), [](const auto& value) {
 				return value.correlationId == 200U && value.disposition == AnimationRootMotionDisposition::Applied;
 			});
-			context.Expect(!flush.transactionResults.empty() && after != nullptr && IsClose(after->position.x, 2.0F) && applied,
+			context.Expect(!flush.transactionResults.empty() && after != nullptr && IsClose(static_cast<float>(after->worldPose.position.offsetMetres.x), 2.0F) && applied,
 				"The protected flush must apply the transaction and publish its generation-safe acknowledgement.");
 			objects.clear();
 		});
@@ -263,7 +268,7 @@ namespace TerraEngine::Tests {
 			AnimationRootMotionResultPublisher::Instance().CopyForAnimator({17U, 3U}, results);
 			const AnimationRootMotionApplicationResult* applied = FindResult(results, 350U, false);
 			const AnimationRootMotionApplicationResult* rejected = FindResult(results, 350U, true);
-			context.Expect(transform != nullptr && IsClose(transform->position.x, 2.0F)
+			context.Expect(transform != nullptr && HasCanonicalOffsetX(objects, object, 2.0F)
 				&& applied != nullptr && applied->disposition == AnimationRootMotionDisposition::Applied
 				&& applied->duplicate
 				&& rejected != nullptr && rejected->disposition == AnimationRootMotionDisposition::Rejected,
@@ -279,20 +284,20 @@ namespace TerraEngine::Tests {
 			const Object child = objects.createObject("Root Motion Child");
 			if(objects.GetComponent<Transform>(parent) == nullptr) objects.AddComponent<Transform>(parent);
 			if(objects.GetComponent<Transform>(child) == nullptr) objects.AddComponent<Transform>(child);
-			Transform* parentTransform = objects.GetComponent<Transform>(parent);
-			Transform* childTransform = objects.GetComponent<Transform>(child);
-			parentTransform->position = {10.0F, 0.0F, 0.0F};
-			parentTransform->scale = {2.0F, 1.0F, 1.0F};
+			TerraEngine::Scene::WorldPose parentPose;
+			parentPose.position.offsetMetres = {10.0, 0.0, 0.0};
+			parentPose.scale = {2.0F, 1.0F, 1.0F};
+			context.Expect(objects.SetCanonicalWorldPose(parent, parentPose) == TerraEngine::Scene::WorldCoordinateError::None,
+				"The parent fixture must enter the canonical-pose authority through ObjectManager.");
 			context.Expect(objects.setParent(child, parent),
 				"The fixture must establish a parent before capturing the copied world transform.");
-			// ObjectManager preserves world placement while reparenting. Author the
-			// intended one-metre parent-local offset afterwards so the copied source
-			// world transform is genuinely twelve metres under the scaled parent.
-			// Reparenting also preserves world scale by authoring an inverse local
-			// scale, so restore unit local scale before declaring a world scale of two.
-			childTransform = objects.GetComponent<Transform>(child);
-			childTransform->position = {1.0F, 0.0F, 0.0F};
-			childTransform->scale = {1.0F, 1.0F, 1.0F};
+			// Apply the child state through the same exact API used by protected
+			// publications.  Direct Transform writes would skip revision tracking.
+			TerraEngine::Scene::WorldPose childPose;
+			childPose.position.offsetMetres = {1.0, 0.0, 0.0};
+			childPose.scale = {2.0F, 1.0F, 1.0F};
+			context.Expect(objects.SetCanonicalWorldPose(child, childPose) == TerraEngine::Scene::WorldCoordinateError::None,
+				"The child fixture must expose an exact current pose to root-motion capture.");
 
 			AnimationRootMotionApplicationRequest request = MakeRequest(
 				child, objects, AnimationRootMotionApplicationMode::ApplyToTransform, 375U);
@@ -300,7 +305,7 @@ namespace TerraEngine::Tests {
 			request.delta.worldTranslation = {};
 			request.delta.localYawRadians = 0.0F;
 			request.delta.worldYawRadians = 0.0F;
-			request.sourceObjectWorldTransform.translation = {12.0F, 0.0F, 0.0F};
+			request.sourceObjectWorldTransform.translation = {1.0F, 0.0F, 0.0F};
 			request.sourceObjectWorldTransform.scale = {2.0F, 1.0F, 1.0F};
 			request.sourceObjectWorldTransformCaptured = true;
 			TerraEngine::Scene::SceneMutationQueue queue;
@@ -314,10 +319,10 @@ namespace TerraEngine::Tests {
 			std::vector<AnimationRootMotionApplicationResult> results;
 			AnimationRootMotionResultPublisher::Instance().CopyForAnimator({17U, 3U}, results);
 			const AnimationRootMotionApplicationResult* applied = FindResult(results, 375U);
-			childTransform = objects.GetComponent<Transform>(child);
+			Transform* childTransform = objects.GetComponent<Transform>(child);
 			context.Expect(receipt.status == AnimationStatus::Ok
 				&& queue.PendingTransactions().empty()
-				&& childTransform != nullptr && IsClose(childTransform->position.x, 2.0F)
+				&& childTransform != nullptr && IsClose(static_cast<float>(childTransform->worldPose.position.offsetMetres.x), 3.0F)
 				&& applied != nullptr && applied->disposition == AnimationRootMotionDisposition::Applied
 				&& IsClose(applied->requestedTranslation.x, 2.0F)
 				&& applied->ownerObjectId == objects.getUUID(child)
@@ -364,7 +369,7 @@ namespace TerraEngine::Tests {
 				&& replay.status == AnimationStatus::Rejected
 				&& replay.idempotencyConflict
 				&& queue.PendingTransactions().empty()
-				&& transform != nullptr && IsClose(transform->position.x, 2.0F),
+				&& transform != nullptr && HasCanonicalOffsetX(objects, object, 2.0F),
 				"Terminal application identities must roll over at the bound while the latest-applied ledger prevents an evicted current-generation mutation from running twice.");
 			AnimationRootMotionResultPublisher::Instance().Clear();
 			objects.clear();
@@ -397,7 +402,7 @@ namespace TerraEngine::Tests {
 			const auto firstResult = find(401U);
 			const auto secondResult = find(402U);
 			context.Expect(first.status == AnimationStatus::Queued && second.status == AnimationStatus::Queued
-				&& transform != nullptr && IsClose(transform->position.x, 2.0F)
+				&& transform != nullptr && HasCanonicalOffsetX(objects, object, 2.0F)
 				&& firstResult != results.end() && firstResult->disposition == AnimationRootMotionDisposition::Applied
 				&& secondResult != results.end() && secondResult->disposition == AnimationRootMotionDisposition::Rejected,
 				"Generation conflicts must preserve first-writer ordering, reject the stale batch, and never leak a partial second motion.");
@@ -493,7 +498,7 @@ namespace TerraEngine::Tests {
 				handle, NativeAnimationCapability::BoneRead, 1U);
 			const NativeAnimationCapabilityResult socketCapability = QueryNativeCapability(
 				handle, NativeAnimationCapability::SocketRead, 5U);
-			context.Expect(transform != nullptr && IsClose(transform->position.x, 1.0F)
+			context.Expect(transform != nullptr && HasCanonicalOffsetX(objects, object, 1.0F)
 				&& TerraEngine::Scene::SceneMutationQueue::Instance().PendingTransactions().empty()
 				&& published && published->snapshot && published->snapshot->pose
 				&& published->snapshot->pose->RootMotionDelta().has_value()
@@ -616,7 +621,7 @@ namespace TerraEngine::Tests {
 				&& workerReceipt.status == AnimationStatus::Queued
 				&& retry.status == AnimationStatus::Queued && retry.duplicate
 				&& conflict.status == AnimationStatus::Rejected && conflict.idempotencyConflict
-				&& before != nullptr && IsClose(before->position.x, 0.0F)
+				&& before != nullptr && IsClose(static_cast<float>(before->worldPose.position.offsetMetres.x), 0.0F)
 				&& TerraEngine::Scene::SceneMutationQueue::Instance().PendingTransactions().empty()
 				&& deferred != nullptr && deferred->disposition == AnimationRootMotionDisposition::Deferred
 				&& deferred->duplicate
@@ -628,7 +633,7 @@ namespace TerraEngine::Tests {
 			std::vector<AnimationRootMotionApplicationResult> terminalResults;
 			AnimationRootMotionResultPublisher::Instance().CopyForAnimator(handle, terminalResults);
 			const AnimationRootMotionApplicationResult* applied = FindResult(terminalResults, 600U, false);
-			context.Expect(after != nullptr && IsClose(after->position.x, 1.0F)
+			context.Expect(after != nullptr && IsClose(static_cast<float>(after->worldPose.position.offsetMetres.x), 1.0F)
 				&& applied != nullptr && applied->status == AnimationStatus::Ok
 				&& applied->disposition == AnimationRootMotionDisposition::Applied
 				&& applied->duplicate

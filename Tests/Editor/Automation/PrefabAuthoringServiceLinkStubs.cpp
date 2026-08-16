@@ -121,7 +121,17 @@ namespace
 		nlohmann::json& transform = components["Transform"];
 		if (transform.is_null()) transform = nlohmann::json::object();
 		if (!transform.is_object()) return false;
-		transform["Position"] = {position.x, position.y, position.z};
+		nlohmann::json& worldPose = transform["WorldPose"];
+		if (worldPose.is_null())
+			worldPose = {{"rotation", {1.0f, 0.0f, 0.0f, 0.0f}}, {"scale", {1.0f, 1.0f, 1.0f}}};
+		nlohmann::json& parentRelativePose = transform["ParentRelativePose"];
+		if (parentRelativePose.is_null())
+			parentRelativePose = {{"rotation", {1.0f, 0.0f, 0.0f, 0.0f}}, {"scale", {1.0f, 1.0f, 1.0f}}, {"transformSpaceId", 0u}};
+		if (!worldPose.is_object() || !parentRelativePose.is_object()) return false;
+		TerraEngine::Scene::WorldPosition canonicalPosition;
+		canonicalPosition.offsetMetres = glm::dvec3(position);
+		worldPose["position"] = Serializer::SerializeWorldPosition(canonicalPosition);
+		parentRelativePose["translationMetres"] = {position.x, position.y, position.z};
 		return true;
 	}
 
@@ -223,11 +233,16 @@ PrefabAuthoringService::Result PrefabAuthoringService::Create(entt::entity sourc
 	std::error_code error;
 	std::filesystem::create_directories(absolutePath.parent_path(), error);
 	if (error) return {false, "internal", "Could not create the prefab directory: " + error.message()};
+	nlohmann::json document{{"format", std::string(TerraEngine::Scene::kTerraPrefabUnboundedFormat)},
+		{"sourceId", sourceId}, {"name", sourceName},
+		{"objects", nlohmann::json::array({Serializer::SerializeObject(sourceEntity)})}};
 	std::ofstream output(absolutePath, std::ios::binary | std::ios::trunc);
-	output << nlohmann::json{{"prefabId", prefabId}, {"sourceObjectId", sourceId}, {"name", sourceName}}.dump(2);
+	output << document.dump(2);
 	if (!output.good()) return {false, "internal", "Could not publish the prefab asset."};
 	const std::string relative = relativePath.lexically_normal().generic_string();
-	prefabsById[prefabId] = {prefabId, relative, sourceId, sourceName, 1u, {}, TerraEngine::EMPTY_UUID, {}, false};
+	prefabsById[prefabId] = {prefabId, relative, sourceId, sourceName, 1u,
+		std::filesystem::absolute(absolutePath).lexically_normal(), TerraEngine::EMPTY_UUID,
+		std::move(document), true};
 	prefabIdByPath[relative] = prefabId;
 	return {true, {}, "Created prefab.", {{"prefabId", prefabId}, {"sourceObjectId", sourceId}, {"path", relative}}};
 }
@@ -251,9 +266,10 @@ PrefabAuthoringService::Result PrefabAuthoringService::RegisterExistingAsset(
 	nlohmann::json document;
 	try { input >> document; }
 	catch (const nlohmann::json::exception&) { return {false, "validation", "Registered prefab document is malformed."}; }
-	if (!document.is_object()) return {false, "validation", "Registered prefab document must be a JSON object."};
-	const bool hasSerializedGraph = document.contains("objects");
-	if (hasSerializedGraph && (!document["objects"].is_array() || document["objects"].empty()))
+	std::string formatError;
+	if (!Serializer::ValidateUnboundedPrefabDocument(document, &formatError))
+		return {false, "validation", formatError};
+	if (document["objects"].empty())
 		return {false, "validation", "Registered prefab object graph must contain at least one root."};
 	std::string sourceName;
 	std::string sourceObjectId;
@@ -261,11 +277,6 @@ PrefabAuthoringService::Result PrefabAuthoringService::RegisterExistingAsset(
 	{
 		if (!name->is_string()) return {false, "validation", "Registered prefab name must be a string."};
 		sourceName = name->get<std::string>();
-	}
-	if (const auto sourceId = document.find("sourceObjectId"); sourceId != document.end())
-	{
-		if (!sourceId->is_string()) return {false, "validation", "Registered prefab sourceObjectId must be a string."};
-		sourceObjectId = sourceId->get<std::string>();
 	}
 	if (document.contains("objects") && document["objects"].is_array() && !document["objects"].empty()
 		&& document["objects"].front().is_object())
@@ -303,7 +314,7 @@ PrefabAuthoringService::Result PrefabAuthoringService::RegisterExistingAsset(
 		std::filesystem::absolute(absolutePath).lexically_normal(),
 		assetGuid,
 		std::move(document),
-		hasSerializedGraph
+		true
 	};
 	prefabIdByPath[relative] = prefabId;
 	return {true, {}, "Registered existing prefab asset.", {{"prefabId", prefabId}, {"sourceObjectId", sourceObjectId}, {"path", relative}, {"prefabGeneration", generation}}};
@@ -322,7 +333,7 @@ PrefabAuthoringService::Result PrefabAuthoringService::Instantiate(
 	if (prefab.hasSerializedGraph)
 	{
 		nlohmann::json document = prefab.serializedDocument;
-		const TerraEngine::Scene::PreparedSceneDecode prepared = Serializer::PrepareSceneDecode(document);
+		const TerraEngine::Scene::PreparedSceneDecode prepared = Serializer::PreparePrefabDecode(document);
 		if (!prepared.accepted || prepared.objectCount == 0U)
 			return {false, "validation", prepared.reason.empty() ? "Registered prefab has no root objects." : prepared.reason, {{"rolledBack", true}}};
 
@@ -401,11 +412,9 @@ PrefabAuthoringService::Result PrefabAuthoringService::Instantiate(
 			{"prefabGeneration", prefab.generation}, {"rootCount", roots.size()}, {"objectCount", prepared.objectCount}}};
 	}
 
-	Object instance = ObjectManager::instance().createObject(requestedName.empty() ? prefab.sourceName : std::string(requestedName));
-	const std::string instanceId = TerraEngine::ToHexString(ObjectManager::instance().getUUID(instance));
-	instances[instanceId] = {prefabId, prefab.sourceName};
-	UndoRedoSystem::Instance().PushCommand(std::make_unique<CreateObjectCommand>(instance.EntityId()));
-	return {true, {}, "Instantiated prefab.", {{"prefabId", prefabId}, {"instanceId", instanceId}, {"path", prefab.relativePath}, {"prefabGeneration", prefab.generation}}};
+	// Match production: incomplete internal state is rejected instead of being
+	// treated as an older object-only prefab representation.
+	return {false, "validation", "Prefab does not contain a TerraPrefabUnboundedV1 object graph.", {{"rolledBack", true}}};
 }
 
 PrefabAuthoringService::Result PrefabAuthoringService::InstantiateMany(
@@ -497,7 +506,7 @@ PrefabAuthoringService::Result PrefabAuthoringService::InstantiateMany(
 				document["objects"].push_back(std::move(root));
 			}
 		}
-		const TerraEngine::Scene::PreparedSceneDecode prepared = Serializer::PrepareSceneDecode(document);
+		const TerraEngine::Scene::PreparedSceneDecode prepared = Serializer::PreparePrefabDecode(document);
 		if (!prepared.accepted || prepared.objectCount == 0u)
 			return {false, "validation", prepared.reason, {{"rolledBack", true}}};
 		totalObjectCount = prepared.objectCount;
@@ -546,27 +555,9 @@ PrefabAuthoringService::Result PrefabAuthoringService::InstantiateMany(
 	}
 	else
 	{
-		objects.BeginBulkPublication({request.count, request.count});
-		publicationActive = true;
-		try
-		{
-			for (std::uint32_t instanceIndex = 0u; instanceIndex < request.count; ++instanceIndex)
-			{
-				Object instance = objects.createObject(StubInstanceName(request, prefab.sourceName, instanceIndex));
-				Transform* transform = objects.GetComponent<Transform>(instance);
-				if (transform == nullptr) throw std::runtime_error("Prefab batch Transform was not created.");
-				transform->position = StubGridPosition(request, instanceIndex);
-				objects.MarkObjectTransformDirty(instance);
-				roots.push_back(instance.EntityId());
-				generated.push_back(objects.getUUID(instance));
-				commands.push_back(std::make_unique<CreateObjectCommand>(instance.EntityId()));
-			}
-		}
-		catch (const std::exception& error)
-		{
-			rollback();
-			return {false, "validation", error.what(), {{"rolledBack", true}}};
-		}
+		// Match production fail-closed semantics; no object-only compatibility path
+		// may publish partial prefab instances.
+		return {false, "validation", "Prefab does not contain a TerraPrefabUnboundedV1 object graph.", {{"rolledBack", true}}};
 	}
 
 	objects.FinishBulkPublication(true);

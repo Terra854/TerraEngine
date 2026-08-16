@@ -9,8 +9,10 @@
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Components/PrefabLinkComponent.h"
+#include "Engine/Components/Transform.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Scene/Serializer.h"
+#include "Engine/Scene/WorldStreamingSystem.h"
 #include <imgui.h>
 #include <algorithm>
 #include <cctype>
@@ -642,6 +644,19 @@ void HierarchyWindow::DrawEntityNode(
 		else
 		{
 			m_Owner->SetSelectedEntity(obj);
+			// Selection pins the target's sparse home area until the streaming
+			// system publishes its next protected residency decision.
+			if (const std::optional<TerraEngine::Scene::WorldPose> pose = objManager.GetCanonicalWorldPose(*object))
+			{
+				TerraEngine::Scene::ObserverInterest pin;
+				pin.observerId = "editor-selection-" + TerraEngine::ToHexString(objManager.getUUID(*object));
+				pin.kind = TerraEngine::Scene::ObserverInterestKind::SelectionPin;
+				pin.position = pose->position;
+				pin.radiusMetres = TerraEngine::Scene::kWorldCellEdgeMetres;
+				pin.priority = TerraEngine::Scene::ObserverInterestPriority::Critical;
+				pin.leaseGeneration = objManager.GetObjectTransformRevision(*object);
+				TerraEngine::Scene::WorldStreamingSystem::Instance().SubmitObserverInterest(std::move(pin));
+			}
 		}
 	}
 	if (prefabLink != nullptr && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {

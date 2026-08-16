@@ -8,6 +8,7 @@
 
 #include "Core/Export.h"
 #include "Scene/Serializer.h"
+#include "Scene/WorldRegion.h"
 
 #include <cstdint>
 #include <functional>
@@ -17,6 +18,10 @@
 class ObjectManager;
 
 namespace TerraEngine::Scene {
+	struct StableBulkObjectIdentity {
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		WorldRegionKey homeRegion{};
+	};
 
 	struct BulkScenePublicationPacket {
 		std::uint64_t expectedSceneGeneration = 0U;
@@ -26,6 +31,9 @@ namespace TerraEngine::Scene {
 		std::uint64_t reservedHierarchyCount = 0U;
 		bool cancelled = false;
 		std::vector<PreparedSceneObjectRecord> objects;
+		// Stable identity is validated before the protected materialization loop.
+		// This prevents a worker packet from replacing a live UUID with a new one.
+		std::vector<StableBulkObjectIdentity> stableIdentities;
 	};
 
 	struct BulkScenePublicationPreflight {
@@ -52,5 +60,10 @@ namespace TerraEngine::Scene {
 		const BulkScenePublicationPacket& packet,
 		ObjectManager& objects,
 		const std::function<bool()>& cancellationRequested = {});
+	TERRAENGINE_API BulkScenePublicationPacket BuildRegionBulkScenePublicationPacket(
+		const PreparedSceneDecode& prepared,
+		WorldRegionKey homeRegion,
+		std::uint64_t expectedSceneGeneration,
+		std::uint64_t preparedGeneration);
 
 }

@@ -12,6 +12,7 @@
 #include "Scene/TransactionalMutation.h"
 
 #include <cstdint>
+#include <functional>
 #include <initializer_list>
 #include <string>
 #include <unordered_map>
@@ -121,6 +122,52 @@ namespace TerraEngine::Physics {
 		TerraEngine::Scene::TransactionResult sceneResult;
 		std::string message;
 	};
+
+	// Migration carries a whole connected closure. Moving only one member of a
+	// joint/character/ragdoll relationship would create an unsafe cross-frame
+	// provider reference, so the caller must name every dependent object.
+	struct PhysicsFrameMigrationMember {
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		PhysicsFrameMembership sourceMembership;
+		TerraEngine::Scene::WorldPose canonicalPose;
+		std::vector<TerraEngine::UUID> connectedObjectIds;
+	};
+
+	struct PhysicsFrameMigrationRequest {
+		std::string id;
+		PhysicsFrameHandle destinationFrame;
+		std::uint64_t expectedDestinationResidencyGeneration = 0U;
+		std::vector<PhysicsFrameMigrationMember> members;
+	};
+
+	enum class PhysicsFrameMigrationState : std::uint8_t {
+		Rejected,
+		PreflightFailed,
+		DestinationStaged,
+		Committed,
+		RolledBack
+	};
+
+	struct PhysicsFrameMigrationReceipt {
+		bool accepted = false;
+		PhysicsFrameMigrationState state = PhysicsFrameMigrationState::Rejected;
+		std::size_t migratedMemberCount = 0U;
+		std::string message;
+	};
+
+	// The provider remains private: these protected-boundary callbacks expose
+	// only atomic operations over an already validated, typed migration request.
+	// Commit is invoked only after every destination record is staged; any failure
+	// invokes rollback while the source remains authoritative.
+	struct PhysicsFrameMigrationOperations {
+		std::function<bool(const PhysicsFrameMigrationRequest&)> stageDestination;
+		std::function<bool(const PhysicsFrameMigrationRequest&)> commitDestinationAndReleaseSource;
+		std::function<void(const PhysicsFrameMigrationRequest&)> rollbackDestination;
+	};
+
+	TERRAENGINE_API PhysicsFrameMigrationReceipt CommitPhysicsFrameMigration(
+		const PhysicsFrameMigrationRequest& request,
+		const PhysicsFrameMigrationOperations& operations);
 
 	TERRAENGINE_API PhysicsTransactionResult PreflightPhysicsTransaction(
 		ObjectManager& objects,

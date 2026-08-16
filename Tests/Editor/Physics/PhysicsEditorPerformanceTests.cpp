@@ -71,10 +71,13 @@ namespace TerraEngine::EditorTests {
 				Transform* transform = objects.GetComponent<Transform>(object);
 				context.Expect(transform != nullptr,
 					"Every created editor object must expose its default Transform before performance capture.");
-				transform->position = {
-					static_cast<float>(index % 100U),
-					static_cast<float>(index / 100U),
-					static_cast<float>((index / 100U) % 10U)};
+				TerraEngine::Scene::WorldPose authoredPose;
+				authoredPose.position.offsetMetres = {
+					static_cast<double>(index % 100U),
+					static_cast<double>(index / 100U),
+					static_cast<double>((index / 100U) % 10U)};
+				context.Expect(objects.SetCanonicalWorldPose(object, authoredPose) == TerraEngine::Scene::WorldCoordinateError::None,
+					"The performance fixture canonical pose must be accepted.");
 
 				// One thousand representative dynamic bodies make Play Mode entry and
 				// fixed steps meaningful while the other objects retain authoring scale.
@@ -146,15 +149,16 @@ namespace TerraEngine::EditorTests {
 				pose.objectLifetimeGeneration = 1u;
 				pose.transformRevision = 1u;
 				pose.hierarchyGeneration = 1u;
-				pose.worldPosition = {x, y, 0.0f};
-				pose.worldBounds = TerraEngine::Scene::MakeFallbackBounds(pose.worldPosition, 0.05f);
+				pose.localPosition = {x, y, 0.0f};
+				pose.canonicalPosition.offsetMetres = glm::dvec3(pose.localPosition);
+				pose.localBounds = TerraEngine::Scene::MakeFallbackBounds(pose.localPosition, 0.05f);
 				pose.movable = index < kDynamicBodyCount;
 				(void)pipeline.UpsertPoseRecord(pose);
 
 				TerraEngine::Scene::SpatialQueryHit hit;
 				hit.objectId = objectId;
 				hit.entity = staticInput.entityReference;
-				hit.bounds = *pose.worldBounds;
+				hit.bounds = *pose.localBounds;
 				query.spatialCandidates.hits.push_back(hit);
 			}
 			query.viewportKey.markerPosePublicationGeneration = pipeline.PosePublicationGeneration();

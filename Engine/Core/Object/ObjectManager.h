@@ -39,6 +39,14 @@ struct ObjectMetadata {
 	std::uint64_t bindingGeneration = 1;
 };
 
+// Reparenting exposes the authored intent explicitly. KeepWorld derives a new
+// bounded relative pose; KeepLocal keeps that relative pose and propagates a
+// different canonical world pose through the hierarchy.
+enum class ReparentMode : std::uint8_t {
+	KeepWorld,
+	KeepLocal
+};
+
 // Exact capacities are supplied by a validated prepared scene before a bulk
 // load begins.  Reserving the manager-owned lookup tables once prevents the
 // usual per-object rehash/invalidation work during a protected scene swap.
@@ -65,7 +73,7 @@ public:
 	// mutating internal state and returns false on invalid input. Worker code
 	// must request this through SceneMutationQueue so hierarchy commits stay
 	// ordered at protected flush points.
-	bool setParent(Object child, std::optional<Object> parent);
+	bool setParent(Object child, std::optional<Object> parent, ReparentMode mode = ReparentMode::KeepWorld);
 	// Query the immediate children for a parent object, returning empty when
 	// none are present or the parent is invalid.
 	std::vector<Object> getChildren(const Object& parent);
@@ -390,6 +398,14 @@ public:
 	std::uint64_t GetSceneGeneration() const { return sceneGeneration; }
 	std::uint64_t GetObjectTransformRevision(const Object& object) const;
 	std::uint64_t GetObjectSpatialRevision(const Object& object) const;
+	// Return the exact authoritative pose captured by Transform. Worker code
+	// consumes a published snapshot instead of calling this live-registry API.
+	[[nodiscard]] std::optional<TerraEngine::Scene::WorldPose> GetCanonicalWorldPose(const Object& object) const;
+	// Validate and publish an exact pose from a protected mutation path. The
+	// returned error is stable enough for transactions to reject whole batches.
+	[[nodiscard]] TerraEngine::Scene::WorldCoordinateError SetCanonicalWorldPose(
+		const Object& object,
+		TerraEngine::Scene::WorldPose pose);
 
 private:
 	ObjectManager();

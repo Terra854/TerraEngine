@@ -310,7 +310,10 @@ namespace TerraEngine::Editor::Automation
 			resolveHandler,
 			"component.set_property",
 			"component",
-			"Set one reflected component property while retaining undo data.",
+			// Transform is intentionally not reflected through this endpoint. Its
+			// absolute translation is a WorldPosition, so callers must use the
+			// versioned transaction world.set_transform/world.translate operations.
+			"Set one reflected component property while retaining undo data; Transform uses canonical world transaction operations.",
 			ObjectSchema({
 				{"object", target},
 				{"component", {{"type", "string"}, {"minLength", 1}}},

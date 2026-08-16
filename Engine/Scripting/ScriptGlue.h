@@ -348,6 +348,21 @@ static_assert(offsetof(NativeGraphicsRenderSettings, virtualGeometryBudgetBytes)
 #pragma pack(push, 8)
 struct NativeRuntimeAbiHeader { std::uint32_t abiVersion; std::uint32_t structSize; };
 
+// Managed world coordinates mirror the fixed-layout canonical scene values.
+// Cells remain exact signed integers while bounded offsets retain local detail.
+struct NativeWorldCell { std::int64_t x; std::int64_t y; std::int64_t z; };
+struct NativeWorldPosition { NativeWorldCell cell; double offsetX; double offsetY; double offsetZ; };
+struct NativeWorldDelta { NativeWorldCell cellDelta; double offsetX; double offsetY; double offsetZ; };
+struct NativeWorldQuaternion { float x; float y; float z; float w; };
+struct NativeWorldScale { float x; float y; float z; };
+struct NativeWorldPose {
+	NativeWorldPosition position;
+	NativeWorldQuaternion rotation;
+	NativeWorldScale scale;
+	std::uint64_t transformRevision;
+	std::uint64_t coordinateFrameRevision;
+};
+
 enum class NativeRuntimeStatus : std::uint32_t
 {
 	Success = 0U,
@@ -606,6 +621,11 @@ extern "C" {
 	TERRAENGINE_API std::uint64_t Native_Object_GetBindingGeneration(uint32_t objectId);
 	TERRAENGINE_API void Native_GetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* outValue, int type);
 	TERRAENGINE_API void Native_SetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* inValue, int type);
+	// Transform has a dedicated exact ABI. Submissions only enqueue typed spatial
+	// transactions and therefore become visible at a protected scene boundary.
+	TERRAENGINE_API NativeRuntimeStatus Native_Transform_ReadWorldPose(uint32_t objectId, NativeWorldPose* pose);
+	TERRAENGINE_API NativeRuntimeStatus Native_Transform_SubmitWorldPose(uint32_t objectId, const NativeWorldPose* pose);
+	TERRAENGINE_API NativeRuntimeStatus Native_Transform_TranslateWorld(uint32_t objectId, const NativeWorldDelta* delta);
 	TERRAENGINE_API const char* Native_GetComponentStringProperty(uint32_t objectId, const char* componentType, const char* propertyName);
 	TERRAENGINE_API void Native_SetComponentStringProperty(uint32_t objectId, const char* componentType, const char* propertyName, const char* value);
 	TERRAENGINE_API bool Native_RemoveComponent(uint32_t objectId, const char* componentType);

@@ -79,9 +79,9 @@ namespace TerraEngine::Tests {
 						"physics-after-flush-visibility",
 						TerraEngine::Scene::TransactionOrigin::System,
 						"PhysicsSchedulerFixture");
-					builder.ObserveObject(objects, targetObject)
-						.UpdateComponentProperty(targetObject, std::string(Transform::kComponentName), "Position",
-							TerraEngine::Reflection::Variant{glm::vec3(4.0F, 5.0F, 6.0F)});
+					TerraEngine::Scene::WorldPose pose;
+					pose.position.offsetMetres = {4.0, 5.0, 6.0};
+					builder.SetWorldTransform(objects, targetObject, pose);
 					TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
 				};
 				return {std::move(workload)};
@@ -100,8 +100,9 @@ namespace TerraEngine::Tests {
 			void Initialize() override {}
 			void Update(float) override {
 				const Transform* transform = ObjectManager::instance().GetComponent<Transform>(targetObject);
-				observedPublishedTransform = transform != nullptr
-					&& transform->position == glm::vec3(4.0F, 5.0F, 6.0F);
+				const auto pose = ObjectManager::instance().GetCanonicalWorldPose(targetObject);
+				observedPublishedTransform = transform != nullptr && pose
+					&& pose->position.offsetMetres == glm::dvec3(4.0, 5.0, 6.0);
 			}
 			void Shutdown() override {}
 			std::string SystemName() override { return "UIObserver"; }
@@ -362,8 +363,8 @@ namespace TerraEngine::Tests {
 			if(supportColliders != nullptr) supportColliders->Add();
 			if(dynamicColliders != nullptr) dynamicColliders->Add();
 			if(dynamicBody != nullptr) dynamicBody->useGravity = false;
-			if(supportTransform != nullptr) supportTransform->position = {0.0F, 0.0F, 0.0F};
-			if(dynamicTransform != nullptr) dynamicTransform->position = {0.0F, 0.25F, 0.0F};
+			if(supportTransform != nullptr) supportTransform->worldPose.position.offsetMetres = {0.0, 0.0, 0.0};
+			if(dynamicTransform != nullptr) dynamicTransform->worldPose.position.offsetMetres = {0.0, 0.25, 0.0};
 			objects.MarkObjectTransformDirty(support);
 			objects.MarkObjectTransformDirty(dynamic);
 

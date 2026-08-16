@@ -1,0 +1,68 @@
+{
+	"schemaVersion": 1,
+	"feature": "052-unbounded-scenes",
+	"coordinateModel": "WorldCellD64V1",
+	"cellSizeMetres": 65536,
+	"regionSizeMetres": 8192,
+	"fixtures": [
+		{
+			"id": "scene-origin-sparse-v1",
+			"format": "TerraSceneUnboundedV1",
+			"path": "scene-origin-sparse-v1.tescene",
+			"role": "resident-origin-reference",
+			"expectedOutcome": "accepted"
+		},
+		{
+			"id": "scene-extreme-negative-v1",
+			"format": "TerraSceneUnboundedV1",
+			"path": "scene-extreme-negative-v1.tescene",
+			"role": "negative-extreme-precision",
+			"expectedOutcome": "accepted"
+		},
+		{
+			"id": "scene-extreme-positive-v1",
+			"format": "TerraSceneUnboundedV1",
+			"path": "scene-extreme-positive-v1.tescene",
+			"role": "positive-extreme-precision",
+			"expectedOutcome": "accepted"
+		},
+		{
+			"id": "scene-sparse-extent-1000x-v1",
+			"format": "TerraSceneUnboundedV1",
+			"path": "scene-sparse-extent-1000x-v1.tescene",
+			"role": "authored-extent-memory-comparison",
+			"expectedOutcome": "accepted"
+		},
+		{
+			"id": "scene-crossing-seed-v1",
+			"format": "TerraSceneUnboundedV1",
+			"path": "scene-crossing-seed-v1.tescene",
+			"role": "deterministic-crossing-route",
+			"expectedOutcome": "accepted"
+		},
+		{
+			"id": "legacy-float-position",
+			"format": "TerraSceneLegacy",
+			"path": "legacy-float-position.tescene",
+			"role": "unsupported-legacy-scene",
+			"expectedOutcome": "reject",
+			"expectedError": "UnsupportedFormat"
+		},
+		{
+			"id": "legacy-prefab-position",
+			"format": "TerraPrefabLegacy",
+			"path": "legacy-prefab-position.teprefab",
+			"role": "unsupported-legacy-prefab",
+			"expectedOutcome": "reject",
+			"expectedError": "UnsupportedFormat"
+		},
+		{
+			"id": "legacy-transaction-position",
+			"format": "TerraSpatialTransactionLegacy",
+			"path": "legacy-transaction-position.json",
+			"role": "unsupported-legacy-transaction",
+			"expectedOutcome": "reject",
+			"expectedError": "UnsupportedFormat"
+		}
+	]
+}

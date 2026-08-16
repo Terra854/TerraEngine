@@ -107,6 +107,24 @@ namespace TerraEngine::Editor::Automation
 			return registration;
 		}
 
+		nlohmann::json CanonicalWorldPositionSchema()
+		{
+			// Cell axes travel as decimal strings because a JSON number cannot
+			// preserve every signed 64-bit cell identity. Offsets are bounded,
+			// finite doubles in the cell-local working frame.
+			return {
+				{"type", "object"},
+				{"required", nlohmann::json::array({"cell", "offsetMetres"})},
+				{"additionalProperties", false},
+				{"properties", {
+					{"cell", {{"type", "object"}, {"required", nlohmann::json::array({"x", "y", "z"})},
+						{"additionalProperties", false}, {"properties", {
+							{"x", {{"type", "string"}}}, {"y", {{"type", "string"}}}, {"z", {{"type", "string"}}}}}}},
+					{"offsetMetres", {{"type", "array"}, {"minItems", 3}, {"maxItems", 3},
+						{"items", {{"type", "number"}}}}}
+				}}};
+		}
+
 		nlohmann::json SceneViewPerformanceSettingsSchema()
 		{
 			// Keep the automation schema aligned with the versioned performance
@@ -212,7 +230,17 @@ namespace TerraEngine::Editor::Automation
 		result.push_back(Make(resolveHandler, "scene_view.state", "scene_view", {}, {"state"}, AutomationPermission::Read, AutomationApprovalPolicy::None, true, true, true));
 		result.push_back(MakeSceneViewSettings(resolveHandler, false));
 		result.push_back(MakeSceneViewSettings(resolveHandler, true));
-		result.push_back(Make(resolveHandler, "scene_view.camera.set", "scene_view", {"position", "focus"}, {"state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true));
+		auto setSceneCamera = Make(resolveHandler, "scene_view.camera.set", "scene_view", {"position", "focus"}, {"state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true);
+		// This is deliberately a breaking canonical-only command: accepting a
+		// three-number world vector would discard the cell component of a far-away
+		// scene camera before the protected authoring boundary sees it.
+		setSceneCamera.descriptor.description = "Set the Scene View camera using canonical WorldPosition values.";
+		setSceneCamera.descriptor.inputSchema = {
+			{"type", "object"},
+			{"required", nlohmann::json::array({"position", "focus"})},
+			{"additionalProperties", false},
+			{"properties", {{"position", CanonicalWorldPositionSchema()}, {"focus", CanonicalWorldPositionSchema()}}}};
+		result.push_back(std::move(setSceneCamera));
 		result.push_back(Make(resolveHandler, "scene_view.frame_object", "scene_view", {"target"}, {"state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true));
 		result.push_back(Make(resolveHandler, "scene_view.tool.set", "scene_view", {"tool"}, {"state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true));
 		result.push_back(Make(resolveHandler, "scene_view.orientation.set", "scene_view", {"orientation"}, {"state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true));

@@ -86,6 +86,8 @@ namespace TerraEngine::EditorTests
 				const TerraEngine::UUID childId = TerraEngine::GenerateUUID();
 				std::ofstream output(absolutePath, std::ios::binary | std::ios::trunc);
 				output << nlohmann::json{
+					{"format", "TerraPrefabUnboundedV1"},
+					{"sourceId", TerraEngine::ToHexString(rootId)},
 					{"name", std::string(name)},
 					{"objects", nlohmann::json::array({{
 						{"name", std::string(name)},
@@ -96,17 +98,15 @@ namespace TerraEngine::EditorTests
 								{"requestedMode", 0}
 							}},
 							{"Transform", {
-							{"Position", {3.0f, 4.0f, 5.0f}},
-							{"Rotation", {1.0f, 0.0f, 0.0f, 0.0f}},
-							{"Scale", {1.0f, 2.0f, 1.0f}}
+							{"WorldPose", {{"position", {{"cell", {{"x", "0"}, {"y", "0"}, {"z", "0"}}}, {"offsetMetres", {3.0f, 4.0f, 5.0f}}}}, {"rotation", {1.0f, 0.0f, 0.0f, 0.0f}}, {"scale", {1.0f, 2.0f, 1.0f}}}},
+							{"ParentRelativePose", {{"translationMetres", {3.0f, 4.0f, 5.0f}}, {"rotation", {1.0f, 0.0f, 0.0f, 0.0f}}, {"scale", {1.0f, 2.0f, 1.0f}}, {"transformSpaceId", 0u}}}
 						}}}},
 						{"children", nlohmann::json::array({{
 							{"name", "Imported Hero Mesh"},
 							{"uuid", TerraEngine::ToHexString(childId)},
 							{"components", {{"Transform", {
-								{"Position", {0.0f, 2.0f, 0.0f}},
-								{"Rotation", {1.0f, 0.0f, 0.0f, 0.0f}},
-								{"Scale", {0.5f, 0.5f, 0.5f}}
+								{"WorldPose", {{"position", {{"cell", {{"x", "0"}, {"y", "0"}, {"z", "0"}}}, {"offsetMetres", {0.0f, 2.0f, 0.0f}}}}, {"rotation", {1.0f, 0.0f, 0.0f, 0.0f}}, {"scale", {0.5f, 0.5f, 0.5f}}}},
+								{"ParentRelativePose", {{"translationMetres", {0.0f, 2.0f, 0.0f}}, {"rotation", {1.0f, 0.0f, 0.0f, 0.0f}}, {"scale", {0.5f, 0.5f, 0.5f}}, {"transformSpaceId", 0u}}}
 							}}}}
 						}})}
 					}})}
@@ -158,7 +158,7 @@ namespace TerraEngine::EditorTests
 				WriteMode::WritesEnabled,
 				"prefab-existing-instantiate");
 			context.Expect(instantiated.value("ok", false),
-				"A registered project prefab should instantiate without being created during the current automation session.");
+				"A registered project prefab should instantiate without being created during the current automation session. Response: " + instantiated.dump());
 			context.ExpectEqual(registeredGuid,
 				instantiated.value("data", nlohmann::json::object()).value("prefabId", std::string()),
 				"Existing prefab resolution should expose the stable AssetDatabase GUID as its source identity.");
@@ -176,8 +176,8 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(std::string("Hero Instance"), ObjectManager::instance().getObjectName(*root),
 				"The requested name should be applied to the canonical prefab root.");
 			const Transform* rootTransform = ObjectManager::instance().GetComponent<Transform>(*root);
-			context.Expect(rootTransform != nullptr && rootTransform->position == glm::vec3(3.0f, 4.0f, 5.0f)
-				&& rootTransform->scale == glm::vec3(1.0f, 2.0f, 1.0f),
+			context.Expect(rootTransform != nullptr && rootTransform->worldPose.position.offsetMetres == glm::dvec3(3.0, 4.0, 5.0)
+				&& rootTransform->worldPose.scale == glm::vec3(1.0f, 2.0f, 1.0f),
 				"Registered prefab instantiation should restore authored root component values.");
 			const std::vector<Object> children = ObjectManager::instance().getChildren(*root);
 			context.ExpectEqual(static_cast<std::size_t>(1U), children.size(),
@@ -187,7 +187,7 @@ namespace TerraEngine::EditorTests
 				context.ExpectEqual(std::string("Imported Hero Mesh"), ObjectManager::instance().getObjectName(children.front()),
 					"Child names should come from the prefab document rather than a generated empty root.");
 				const Transform* childTransform = ObjectManager::instance().GetComponent<Transform>(children.front());
-				context.Expect(childTransform != nullptr && childTransform->position == glm::vec3(0.0f, 2.0f, 0.0f),
+				context.Expect(childTransform != nullptr && childTransform->worldPose.position.offsetMetres == glm::dvec3(0.0, 2.0, 0.0),
 					"Child components should be deserialized with their authored values.");
 			}
 			const PrefabLinkComponent* link = ObjectManager::instance().GetComponent<PrefabLinkComponent>(*root);
@@ -230,7 +230,7 @@ namespace TerraEngine::EditorTests
 					{"defaultClipStartFrameStep", 7u}},
 				WriteMode::WritesEnabled,
 				"prefab-instantiate-many-grid");
-			context.Expect(result.value("ok", false), "A registered prefab grid should publish atomically.");
+			context.Expect(result.value("ok", false), "A registered prefab grid should publish atomically. Response: " + result.dump());
 			const nlohmann::json data = result.value("data", nlohmann::json::object());
 			const nlohmann::json rows = data.value("instances", nlohmann::json::array());
 			context.ExpectEqual(static_cast<std::size_t>(4u), rows.size(),
@@ -265,7 +265,7 @@ namespace TerraEngine::EditorTests
 				context.Expect(root.has_value(), "Returned bulk identities should resolve immediately after the boundary.");
 				if (!root) continue;
 				const Transform* transform = objects.GetComponent<Transform>(*root);
-				context.Expect(transform != nullptr && transform->position == expectedPositions[index],
+				context.Expect(transform != nullptr && transform->worldPose.position.offsetMetres == glm::dvec3(expectedPositions[index]),
 					"Bulk grid placement should be deterministic and centered.");
 				const AnimatorComponent* animator = objects.GetComponent<AnimatorComponent>(*root);
 				context.Expect(

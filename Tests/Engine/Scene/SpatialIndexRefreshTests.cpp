@@ -19,7 +19,7 @@ namespace TerraEngine::Tests {
 			record.entity = static_cast<entt::entity>(idValue);
 			record.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable;
 			record.isStatic = isStatic;
-			record.worldBounds = TerraEngine::Scene::MakeAABB(minimum, maximum, TerraEngine::Scene::SpatialBoundsSource::Authored);
+			record.localBounds = TerraEngine::Scene::MakeAABB(minimum, maximum, TerraEngine::Scene::SpatialBoundsSource::Authored);
 			record.revision = revision;
 			return record;
 		}
@@ -100,8 +100,8 @@ namespace TerraEngine::Tests {
 			std::vector<TerraEngine::Scene::SpatialObjectRecord> refreshed = records;
 			for (int item = 0; item < 100; ++item)
 			{
-				refreshed[static_cast<std::size_t>(item)].worldBounds.min.x += 0.1f;
-				refreshed[static_cast<std::size_t>(item)].worldBounds.max.x += 0.1f;
+				refreshed[static_cast<std::size_t>(item)].localBounds.min.x += 0.1f;
+				refreshed[static_cast<std::size_t>(item)].localBounds.max.x += 0.1f;
 				refreshed[static_cast<std::size_t>(item)].revision = 2;
 				index.MarkDirty(refreshed[static_cast<std::size_t>(item)].objectId);
 			}

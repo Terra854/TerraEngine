@@ -12,6 +12,10 @@
 
 namespace TerraEngine::EditorTests
 {
+	static nlohmann::json CanonicalPosition(double x, double y, double z)
+	{
+		return {{"cell", {{"x", "0"}, {"y", "0"}, {"z", "0"}}}, {"offsetMetres", {x, y, z}}};
+	}
 	using TerraEngine::Editor::Automation::EditorAutomationService;
 	using TerraEngine::Editor::Automation::EditorMcpBridge;
 	using TerraEngine::Editor::Automation::MutationMode;
@@ -40,7 +44,7 @@ namespace TerraEngine::EditorTests
 			EditorAutomationService service;
 			const nlohmann::json largeCapture = service.HandleTool(
 				"camera.capture_custom",
-				{{"position", nlohmann::json::array({0.0f, 0.0f, 5.0f})}, {"width", 4096u}, {"height", 64u}},
+				{{"camera", {{"position", CanonicalPosition(0.0, 0.0, 5.0)}}}, {"width", 4096u}, {"height", 64u}},
 				WriteMode::ReadOnly,
 				"availability-large-resolution");
 			context.Expect(largeCapture.value("ok", false), "Large captures should not be rejected by a fixed maximum resolution policy.");
@@ -83,10 +87,12 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(std::string("missing_target"), missing["error"].value("category", std::string()), "Missing Game View camera should use missing-target category.");
 
 			RenderSystem::Instance().SetGameViewTargetSize(glm::uvec2(64u, 64u));
+			TerraEngine::Scene::WorldPosition gameViewPosition;
+			gameViewPosition.offsetMetres = {0.0, 0.0, 5.0};
 			RenderSystem::Instance().SetGameViewCamera(
 				glm::mat4(1.0f),
 				glm::perspectiveZO(glm::radians(45.0f), 1.0f, 0.1f, 100.0f),
-				glm::vec3(0.0f, 0.0f, 5.0f));
+				gameViewPosition);
 			const nlohmann::json captured = service.HandleTool(
 				"game_view.capture",
 				{{"width", 64u}, {"height", 64u}, {"freshness", "latestCompleted"}},
@@ -106,7 +112,11 @@ namespace TerraEngine::EditorTests
 			Transform* authoredTransform = ObjectManager::instance().GetComponent<Transform>(authoredCamera);
 			context.Expect(authoredCameraComponent != nullptr, "Fixture should add an authored camera component.");
 			context.Expect(authoredTransform != nullptr, "Authored camera objects should include a Transform.");
-			authoredTransform->position = glm::vec3(0.0f, 1.0f, 5.0f);
+			TerraEngine::Scene::WorldPose authoredPose;
+			authoredPose.position.offsetMetres = {0.0, 1.0, 5.0};
+			context.Expect(
+				ObjectManager::instance().SetCanonicalWorldPose(authoredCamera, authoredPose) == TerraEngine::Scene::WorldCoordinateError::None,
+				"The authored capture camera must accept its canonical pose.");
 			authoredCameraComponent->aspectRatio = 1.0f;
 
 			const nlohmann::json nextFrame = service.HandleTool(
@@ -186,8 +196,8 @@ namespace TerraEngine::EditorTests
 				"camera.capture_custom",
 				{
 					{"camera", {
-						{"position", nlohmann::json::array({0.0f, 2.0f, 6.0f})},
-						{"lookAt", nlohmann::json::array({0.0f, 1.0f, 0.0f})},
+						{"position", CanonicalPosition(0.0, 2.0, 6.0)},
+						{"lookAt", CanonicalPosition(0.0, 1.0, 0.0)},
 						{"up", nlohmann::json::array({0.0f, 1.0f, 0.0f})},
 						{"projection", "perspective"},
 						{"verticalFovDegrees", 60.0f},
@@ -204,7 +214,7 @@ namespace TerraEngine::EditorTests
 
 			const nlohmann::json valid = service.HandleTool(
 				"camera.capture_custom",
-				{{"position", nlohmann::json::array({0.0f, 1.0f, 5.0f})}, {"target", nlohmann::json::array({0.0f, 0.0f, 0.0f})}, {"projection", "orthographic"}, {"orthographicHeight", 8.0f}, {"width", 64u}, {"height", 64u}},
+				{{"camera", {{"position", CanonicalPosition(0.0, 1.0, 5.0)}, {"lookAt", CanonicalPosition(0.0, 0.0, 0.0)}, {"projection", "orthographic"}, {"orthographicHeight", 8.0f}}}, {"width", 64u}, {"height", 64u}},
 				WriteMode::ReadOnly,
 				"custom-valid");
 			context.Expect(valid.value("ok", false), "Custom camera capture should accept valid orthographic ad-hoc settings.");
@@ -212,7 +222,7 @@ namespace TerraEngine::EditorTests
 
 			const nlohmann::json sceneCapture = service.HandleTool(
 				"camera.capture_custom",
-				{{"position", nlohmann::json::array({0.0f, 1.0f, 5.0f})}, {"target", nlohmann::json::array({0.0f, 0.0f, 0.0f})}, {"viewType", "Scene"}, {"width", 64u}, {"height", 64u}},
+				{{"camera", {{"position", CanonicalPosition(0.0, 1.0, 5.0)}, {"lookAt", CanonicalPosition(0.0, 0.0, 0.0)}, {"viewType", "Scene"}}}, {"width", 64u}, {"height", 64u}},
 				WriteMode::ReadOnly,
 				"custom-scene-capture");
 			context.Expect(sceneCapture.value("ok", false)
@@ -250,7 +260,7 @@ namespace TerraEngine::EditorTests
 				const std::string correlationId = "capture-" + std::string(state);
 				const nlohmann::json result = service.HandleTool(
 					"camera.capture_custom",
-					{{"position", nlohmann::json::array({0.0f, 0.0f, 5.0f})}, {"width", 32u}, {"height", 32u}, {"correlationId", correlationId}},
+					{{"camera", {{"position", CanonicalPosition(0.0, 0.0, 5.0)}}}, {"width", 32u}, {"height", 32u}, {"correlationId", correlationId}},
 					WriteMode::ReadOnly,
 					"request-" + std::string(state));
 				context.Expect(result.value("ok", false), "Read-only camera capture should remain available while " + std::string(state) + ".");

@@ -99,6 +99,15 @@ namespace TerraEngine::Scheduling {
 	// renderer-specific type system is available during startup.
 	inline constexpr const char kResourceVirtualGeometryQualityProfile[] = "VirtualGeometryQualityProfile";
 	inline constexpr const char kResourceSceneChangePublication[] = "SceneChangePublication";
+	// Canonical spatial work is split into an immutable input publication, a
+	// deferred typed queue, and worker-owned prepared candidates. Keeping the
+	// resources distinct lets diagnostics prove that workers never write live
+	// ObjectManager or spatial-index state.
+	inline constexpr const char kResourcePublishedSpatialSnapshot[] = "PublishedSpatialSnapshot";
+	inline constexpr const char kResourceSpatialTransitionQueue[] = "SpatialTransitionQueue";
+	inline constexpr const char kResourcePreparedSpatialTransitions[] = "PreparedSpatialTransitions";
+	inline constexpr const char kResourcePhysicsFrameRegistry[] = "PhysicsFrameRegistry";
+	inline constexpr const char kResourcePhysicsFrameMigrations[] = "PhysicsFrameMigrations";
 	// Protected capture owns only immutable values borrowed by the following
 	// renderer workers. Keeping this resource separate from the persistent and
 	// dynamic roots makes scheduler diagnostics reflect the real ownership split.

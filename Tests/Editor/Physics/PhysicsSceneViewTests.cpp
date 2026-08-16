@@ -69,8 +69,8 @@ namespace TerraEngine::EditorTests
 				sceneViewSource.find("Empty-space and object clicks inside Scene View must not silently abandon") != std::string::npos,
 				"Scene View picking must preserve an active collider preview until explicit Apply or Cancel.");
 			context.Expect(
-				sceneViewSource.find("MarkObjectTransformDirty(*selectedObject)") != std::string::npos,
-				"Scene View transform gizmos must invalidate propagated child world transforms after moving a parent.");
+				sceneViewSource.find("SetCanonicalWorldPose(*selectedObject, pose)") != std::string::npos,
+				"Scene View transform gizmos must publish an exact canonical pose through ObjectManager after moving a parent.");
 			const std::size_t drawGizmoPosition = sceneViewSource.find("DrawGizmos(view, projNoFlip, cursorPos, contentSize);");
 			const std::size_t drawMarkersPosition = sceneViewSource.find("DrawSceneObjectMarkers();", drawGizmoPosition);
 			const std::size_t pickingPosition = sceneViewSource.find("HandlePicking(view, projNoFlip, cursorPos, contentSize);", drawMarkersPosition);

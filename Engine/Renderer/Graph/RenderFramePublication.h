@@ -364,9 +364,10 @@ namespace TerraEngine::Renderer
 	struct RenderViewPresentationInput
 	{
 		RenderOutputRequest output{};
+		RenderReferenceFrame referenceFrame{};
 		glm::mat4 viewMatrix = glm::mat4(1.0f);
 		glm::mat4 projectionMatrix = glm::mat4(1.0f);
-		glm::vec3 cameraWorldPosition = glm::vec3(0.0f);
+		glm::vec3 cameraLocalPosition = glm::vec3(0.0f);
 		float deltaTimeSeconds = 0.0f;
 		bool globalTaskShaderCullingEnabled = true;
 		float cullingEpsilon = 0.001f;
@@ -565,6 +566,7 @@ namespace TerraEngine::Renderer
 		std::shared_ptr<const RenderPersistentTopologyRoot> persistent;
 		std::shared_ptr<const RenderDynamicStateRoot> dynamic;
 		std::vector<RenderViewSelection> views;
+		std::vector<RenderReferenceFrame> referenceFrames;
 		std::vector<RenderViewPresentationInput> presentationInputs;
 		std::vector<RenderSubmissionRange> submissionRanges;
 		// Shared compact tables are prepared once and referenced by typed ranges;

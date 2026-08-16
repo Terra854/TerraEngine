@@ -71,8 +71,11 @@ namespace TerraEngine::Editor::SceneViewOverlay
 		std::uint64_t transformRevision = 0u;
 		std::uint64_t hierarchyGeneration = 0u;
 		std::uint64_t parentWorldGeneration = 0u;
-		glm::vec3 worldPosition = glm::vec3(0.0f);
-		std::optional<TerraEngine::Scene::SpatialAABB> worldBounds;
+		// The canonical address remains exact while projection consumes only this
+		// marker frame's bounded local value.
+		TerraEngine::Scene::WorldPosition canonicalPosition{};
+		glm::vec3 localPosition = glm::vec3(0.0f);
+		std::optional<TerraEngine::Scene::SpatialAABB> localBounds;
 		bool movable = false;
 	};
 

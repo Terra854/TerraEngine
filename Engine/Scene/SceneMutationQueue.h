@@ -34,6 +34,11 @@ namespace TerraEngine::Scene {
 		AddComponent,
 		RemoveComponent,
 		UpdateComponent,
+		// Spatial requests are ingress envelopes only. They must contain a lowered
+		// typed Transaction and can never carry a float Transform property payload.
+		SetWorldTransform,
+		TranslateWorld,
+		ChangeSimulationFrame,
 		AddScriptBinding,
 		CreatePrefab,
 		DeletePrefab,
@@ -68,6 +73,7 @@ namespace TerraEngine::Scene {
 		std::string componentName;
 		std::string payloadJson;
 		SceneComponentPropertyMutation typedComponentPayload;
+		std::optional<Transaction> typedSpatialTransaction;
 		std::string coalescingKey;
 		bool usedJsonFallback = false;
 		SceneComponentMutationPayloadKind componentPayloadKind = SceneComponentMutationPayloadKind::None;

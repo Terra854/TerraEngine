@@ -40,6 +40,7 @@ namespace TerraEngine::EditorTests
 				std::filesystem::create_directories(scenePath.parent_path());
 				std::ofstream scene(scenePath, std::ios::binary);
 				scene << nlohmann::json{
+					{"format", "TerraSceneUnboundedV1"},
 					{"name", "History"},
 					{"sceneSettings", nlohmann::json::object()},
 					{"objects", nlohmann::json::array()}
@@ -70,6 +71,7 @@ namespace TerraEngine::EditorTests
 		nlohmann::json ExecuteMetadataGroup(EditorAutomationService& service, const std::string& target, const std::string& name, const std::string& tag, const std::string& requestId)
 		{
 			return service.HandleTool("transaction.execute", {
+				{"format", "TerraSpatialTransactionV1"},
 				{"operations", nlohmann::json::array({
 					{{"kind", "object.set_metadata"}, {"target", target}, {"name", name}},
 					{{"kind", "object.set_metadata"}, {"target", target}, {"tag", tag}}
@@ -135,6 +137,7 @@ namespace TerraEngine::EditorTests
 			ResetHistoryFixture();
 			HistoryProjectFixture fixture("CreatedHierarchyRoundTrip");
 			const nlohmann::json transaction = fixture.service.HandleTool("transaction.execute", {
+				{"format", "TerraSpatialTransactionV1"},
 				{"operations", nlohmann::json::array({
 					{{"kind", "object.create"}, {"localId", "parent"}, {"name", "Parent"}},
 					{{"kind", "object.create"}, {"localId", "child"}, {"name", "Child"}},

@@ -12,6 +12,7 @@
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Resource/ResourceResidency.h"
 #include "Engine/Resource/ResourceStreaming.h"
+#include "Engine/Scene/WorldStreamingSystem.h"
 #include "Engine/Renderer/Graph/RenderDiagnostics.h"
 #include "Engine/Renderer/RenderSystem.h"
 
@@ -885,6 +886,17 @@ void ResourceResidencyWindow::DrawStreamingSummary()
 {
 	const TerraEngine::Resource::StreamingDiagnosticsSummary& summary = m_DiagnosticsCache->visibleStreamingSummary;
 	ImGui::SeparatorText("Streaming");
+	const TerraEngine::Scene::PublishedWorldRegionResidency residency =
+		TerraEngine::Scene::WorldStreamingSystem::Instance().CurrentResidency();
+	const TerraEngine::Scene::RegionInterestPlan plan =
+		TerraEngine::Scene::WorldStreamingSystem::Instance().CurrentInterestPlan();
+	ImGui::TextDisabled(
+		"Regions: resident=%zu generation=%llu requested=%zu retirements=%zu plan=%llu",
+		residency.residentRegions.size(),
+		static_cast<unsigned long long>(residency.generation),
+		plan.requested.size(),
+		plan.retirements.size(),
+		static_cast<unsigned long long>(plan.generation));
 	if (ImGui::BeginTable("ResourceStreamingSummary", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 	{
 		ImGui::TableSetupColumn("Tracked");

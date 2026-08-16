@@ -8,6 +8,8 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/vec3.hpp>
 
+#include <charconv>
+#include <cmath>
 #include <unordered_set>
 
 namespace TerraEngine::Editor::Automation
@@ -74,12 +76,138 @@ namespace TerraEngine::Editor::Automation
 			}
 			return {};
 		}
+
+		bool ParseExactAxis(const nlohmann::json& value, std::int64_t& outAxis)
+		{
+			// JSON numbers cannot preserve every int64 value. Require a decimal
+			// string so the cell identity remains exact across transports.
+			if (!value.is_string() || value.get_ref<const std::string&>().empty())
+			{
+				return false;
+			}
+			const std::string& text = value.get_ref<const std::string&>();
+			const char* begin = text.data();
+			const char* end = begin + text.size();
+			const auto parsed = std::from_chars(begin, end, outAxis);
+			return parsed.ec == std::errc{} && parsed.ptr == end;
+		}
+
+		bool ParseDoubleOffset(const nlohmann::json& value, glm::dvec3& outOffset)
+		{
+			if (!value.is_array() || value.size() != 3u)
+			{
+				return false;
+			}
+			for (std::size_t index = 0; index < 3u; ++index)
+			{
+				if (!value[index].is_number())
+				{
+					return false;
+				}
+				outOffset[index] = value[index].get<double>();
+				if (!std::isfinite(outOffset[index]))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		bool ParseFiniteFloatArray(const nlohmann::json& value, std::size_t expectedCount)
+		{
+			if (!value.is_array() || value.size() != expectedCount)
+			{
+				return false;
+			}
+			for (const nlohmann::json& member : value)
+			{
+				if (!member.is_number() || !std::isfinite(member.get<float>()))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+	}
+
+	bool ParseCanonicalWorldPosition(
+		const nlohmann::json& value,
+		TerraEngine::Scene::WorldPosition& outPosition,
+		std::string& outError)
+	{
+		if (!value.is_object() || !value.contains("cell") || !value.contains("offsetMetres")
+			|| !value["cell"].is_object())
+		{
+			outError = "WorldPosition must contain cell decimal strings and offsetMetres[3].";
+			return false;
+		}
+		const nlohmann::json& cell = value["cell"];
+		if (!cell.contains("x") || !cell.contains("y") || !cell.contains("z")
+			|| !ParseExactAxis(cell["x"], outPosition.cell.x)
+			|| !ParseExactAxis(cell["y"], outPosition.cell.y)
+			|| !ParseExactAxis(cell["z"], outPosition.cell.z)
+			|| !ParseDoubleOffset(value["offsetMetres"], outPosition.offsetMetres))
+		{
+			outError = "WorldPosition requires exact decimal int64 cell axes and three finite double offsets.";
+			return false;
+		}
+		const TerraEngine::Scene::WorldCoordinateResult normalized =
+			TerraEngine::Scene::NormalizeWorldPosition(outPosition);
+		if (!normalized.Succeeded() || normalized.position != outPosition)
+		{
+			outError = "WorldPosition offsets must already be normalized to the canonical cell range.";
+			return false;
+		}
+		return true;
+	}
+
+	bool ParseCanonicalWorldDelta(
+		const nlohmann::json& value,
+		TerraEngine::Scene::WorldDelta& outDelta,
+		std::string& outError)
+	{
+		if (!value.is_object() || !value.contains("cellDelta") || !value.contains("offsetMetres")
+			|| !value["cellDelta"].is_object())
+		{
+			outError = "WorldDelta must contain cellDelta decimal strings and offsetMetres[3].";
+			return false;
+		}
+		const nlohmann::json& cell = value["cellDelta"];
+		if (!cell.contains("x") || !cell.contains("y") || !cell.contains("z")
+			|| !ParseExactAxis(cell["x"], outDelta.cellDelta.x)
+			|| !ParseExactAxis(cell["y"], outDelta.cellDelta.y)
+			|| !ParseExactAxis(cell["z"], outDelta.cellDelta.z)
+			|| !ParseDoubleOffset(value["offsetMetres"], outDelta.offsetMetres))
+		{
+			outError = "WorldDelta requires exact decimal int64 cell axes and three finite double offsets.";
+			return false;
+		}
+		const TerraEngine::Scene::WorldDeltaResult normalized = TerraEngine::Scene::NormalizeWorldDelta(outDelta);
+		if (!normalized.Succeeded() || normalized.delta != outDelta)
+		{
+			outError = "WorldDelta offsets must already be normalized to the canonical cell range.";
+			return false;
+		}
+		return true;
+	}
+
+	nlohmann::json SerializeCanonicalWorldPosition(const TerraEngine::Scene::WorldPosition& position)
+	{
+		return {{"cell", {{"x", TerraEngine::Scene::EncodeWorldCellAxis(position.cell.x)},
+			{"y", TerraEngine::Scene::EncodeWorldCellAxis(position.cell.y)},
+			{"z", TerraEngine::Scene::EncodeWorldCellAxis(position.cell.z)}}},
+			{"offsetMetres", {position.offsetMetres.x, position.offsetMetres.y, position.offsetMetres.z}}};
 	}
 
 	AutomationTransactionPreflight PreflightAutomationTransaction(const nlohmann::json& arguments, const AutomationTransactionLimits& limits)
 	{
 		AutomationTransactionPreflight result;
-		if (!arguments.is_object() || !arguments.contains("operations") || !arguments["operations"].is_array() || arguments["operations"].empty())
+		if (!arguments.is_object() || arguments.value("format", std::string{}) != "TerraSpatialTransactionV1")
+		{
+			result.message = "Automation transactions must declare format TerraSpatialTransactionV1.";
+			return result;
+		}
+		if (!arguments.contains("operations") || !arguments["operations"].is_array() || arguments["operations"].empty())
 		{
 			result.message = "A non-empty operations array is required.";
 			return result;
@@ -172,7 +300,78 @@ namespace TerraEngine::Editor::Automation
 			}
 			observeExisting(*target);
 
-			if (kind == "object.delete")
+			if (kind == "world.set_transform" || kind == "world.translate")
+			{
+				if (!operation.contains("observedTransformRevision")
+					|| !operation["observedTransformRevision"].is_number_unsigned())
+				{
+					prepared.error = ErrorCategory::Validation;
+					prepared.message = "Canonical world operations require observedTransformRevision.";
+					return prepared;
+				}
+				if (target->UsesLocalObject())
+				{
+					prepared.error = ErrorCategory::Validation;
+					prepared.message = "Canonical world operations cannot target an object created in the same transaction.";
+					return prepared;
+				}
+				if (objects.GetObjectTransformRevision(*objects.getObject(target->objectId))
+					!= operation["observedTransformRevision"].get<std::uint64_t>())
+				{
+					prepared.error = ErrorCategory::Conflict;
+					prepared.message = "Canonical world operation observed a stale transform revision.";
+					return prepared;
+				}
+			}
+
+			if (kind == "world.set_transform")
+			{
+				if (!operation.contains("pose"))
+				{
+					prepared.message = "world.set_transform requires a canonical pose.";
+					return prepared;
+				}
+				TerraEngine::Scene::WorldPose pose = *objects.GetCanonicalWorldPose(*objects.getObject(target->objectId));
+				std::string coordinateError;
+				if (!ParseCanonicalWorldPosition(operation["pose"], pose.position, coordinateError))
+				{
+					prepared.message = coordinateError;
+					return prepared;
+				}
+				if (operation["pose"].contains("rotation"))
+				{
+					if (!ParseFiniteFloatArray(operation["pose"]["rotation"], 4u))
+					{
+						prepared.error = ErrorCategory::Validation;
+						prepared.message = "world.set_transform rotation must be four finite local components.";
+						return prepared;
+					}
+					pose.rotation = glm::quat(operation["pose"]["rotation"][3].get<float>(), operation["pose"]["rotation"][0].get<float>(), operation["pose"]["rotation"][1].get<float>(), operation["pose"]["rotation"][2].get<float>());
+				}
+				if (operation["pose"].contains("scale"))
+				{
+					if (!ParseFiniteFloatArray(operation["pose"]["scale"], 3u))
+					{
+						prepared.error = ErrorCategory::Validation;
+						prepared.message = "world.set_transform scale must be three finite local components.";
+						return prepared;
+					}
+					pose.scale = {operation["pose"]["scale"][0].get<float>(), operation["pose"]["scale"][1].get<float>(), operation["pose"]["scale"][2].get<float>()};
+				}
+				builder.SetWorldTransform(objects, target->objectId, pose);
+			}
+			else if (kind == "world.translate")
+			{
+				TerraEngine::Scene::WorldDelta delta;
+				std::string coordinateError;
+				if (!operation.contains("delta") || !ParseCanonicalWorldDelta(operation["delta"], delta, coordinateError))
+				{
+					prepared.message = coordinateError.empty() ? "world.translate requires a canonical delta." : coordinateError;
+					return prepared;
+				}
+				builder.TranslateWorld(objects, target->objectId, delta);
+			}
+			else if (kind == "object.delete")
 			{
 				builder.DeleteObject(*target);
 			}
@@ -219,6 +418,11 @@ namespace TerraEngine::Editor::Automation
 				if (componentName.empty() || propertyName.empty() || !operation.contains("value"))
 				{
 					prepared.message = "Component property operations require component, property, and value.";
+					return prepared;
+				}
+				if (componentName == "Transform")
+				{
+					prepared.message = "Transform reflection writes are unsupported; use world.set_transform or world.translate.";
 					return prepared;
 				}
 				TerraEngine::Reflection::Variant value;

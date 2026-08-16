@@ -111,6 +111,8 @@ namespace TerraEngine::Scene {
 			entry.objectId = objectId;
 			entry.parentId = graphObject.parentId;
 			entry.parentLinkGeneration = BuildParentLinkGeneration(entry.objectId, entry.parentId);
+			entry.worldPose = graphObject.worldPose;
+			entry.parentRelativePose = graphObject.parentRelativePose;
 			entry.depth = 0;
 			if (entry.parentId != TerraEngine::EMPTY_UUID)
 			{
@@ -169,5 +171,22 @@ namespace TerraEngine::Scene {
 		rebuilt.reused = false;
 		rebuilt.formatted = FormatHierarchySnapshot(rebuilt);
 		return rebuilt;
+	}
+
+	void ApplyHierarchyResidencyClosure(HierarchySnapshot& snapshot, const WorldRegionDirectory& directory, const PublishedWorldRegionResidency& residency)
+	{
+		for (HierarchySnapshotEntry& entry : snapshot.orderedObjects)
+		{
+			entry.homeRegion = directory.FindHomeRegion(entry.objectId);
+			entry.parentProxyRequired = false;
+			if (entry.parentId == TerraEngine::EMPTY_UUID) continue;
+			const std::optional<WorldRegionKey> parentRegion = directory.FindHomeRegion(entry.parentId);
+			if (!parentRegion) continue;
+			// The child record can remain available while its parent region is not.
+			// Marking this explicit closure lets callers render/query a stable proxy
+			// instead of silently dropping the parent relationship during unload.
+			entry.parentProxyRequired = !residency.residentRegions.contains(*parentRegion);
+		}
+		snapshot.formatted = FormatHierarchySnapshot(snapshot);
 	}
 }

@@ -320,8 +320,9 @@ private:
 	// without changing which authored scene camera drives the Game View.
 	struct PrefabReturnGameViewCamera
 	{
-		glm::vec3 position = glm::vec3(0.0f);
-		glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+		// Preserve the authored canonical pose while prefab isolation temporarily
+		// replaces the live scene. The view matrix is rebuilt in a bounded frame.
+		TerraEngine::Scene::WorldPose worldPose{};
 		glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
 		float verticalFovDegrees = 45.0f;
 		float nearPlane = 0.1f;

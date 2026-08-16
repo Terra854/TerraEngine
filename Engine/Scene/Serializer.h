@@ -8,6 +8,7 @@
 
 #include "Core/Object/Object.h"
 #include "Renderer/RenderTypes.h"
+#include "Scene/WorldCoordinate.h"
 #include <entt/entt.hpp>
 #include <nlohmann/json.hpp>
 #include <cstdint>
@@ -17,6 +18,10 @@
 #include <vector>
 
 namespace TerraEngine::Scene {
+	// Authored files must identify this exact contract.  We deliberately do not
+	// infer legacy layouts because that can silently lose unbounded coordinates.
+	inline constexpr std::string_view kTerraSceneUnboundedFormat = "TerraSceneUnboundedV1";
+	inline constexpr std::string_view kTerraPrefabUnboundedFormat = "TerraPrefabUnboundedV1";
 	// A prepared record owns only parsed authored data.  It is intentionally
 	// independent of ObjectManager so worker jobs can build it before the one
 	// protected bulk-publication boundary.
@@ -67,4 +72,16 @@ public:
 	static TerraEngine::Scene::PreparedSceneDecode PrepareSceneDecode(
 		const nlohmann::json& sceneJson,
 		const std::function<bool()>& cancellationRequested = {});
+	// Prefabs have their own strict authored envelope even though their object
+	// graph uses the same immutable worker-side decode records as a scene.
+	static TerraEngine::Scene::PreparedSceneDecode PreparePrefabDecode(
+		const nlohmann::json& prefabJson,
+		const std::function<bool()>& cancellationRequested = {});
+
+	// Cells are strings so every signed 64-bit value has an exact JSON spelling.
+	// Offsets remain numbers and must already be canonical before they are read.
+	static nlohmann::json SerializeWorldPosition(const TerraEngine::Scene::WorldPosition& position);
+	static std::optional<TerraEngine::Scene::WorldPosition> DeserializeWorldPosition(const nlohmann::json& value, std::string* outError = nullptr);
+	static bool ValidateUnboundedSceneDocument(const nlohmann::json& document, std::string* outError = nullptr);
+	static bool ValidateUnboundedPrefabDocument(const nlohmann::json& document, std::string* outError = nullptr);
 };

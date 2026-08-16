@@ -1,4 +1,5 @@
 {
+	"format": "TerraSceneUnboundedV1",
 	"name": "Physics Export Startup",
 	"physicsExportFixture": {
 		"sourceCollider": "Assets/Colliders/Startup.tecollider",
@@ -15,7 +16,7 @@
 			"uuid": "00000000000000000000000000000001",
 			"name": "Physics Export Ground",
 			"components": {
-				"Transform": { "Position": [0.0, -0.5, 0.0], "Rotation": [1.0, 0.0, 0.0, 0.0], "Scale": [1.0, 1.0, 1.0] },
+				"Transform": { "WorldPose": { "position": { "cell": { "x": "0", "y": "0", "z": "0" }, "offsetMetres": [0.0, -0.5, 0.0] }, "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] }, "ParentRelativePose": { "translationMetres": [0.0, -0.5, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0], "transformSpaceId": 0 } },
 				"RigidBodyComponent": { "motionType": "Static", "useGravity": false },
 				"ColliderSetComponent": { "colliders": [
 					{ "recordId": "10000000000000000000000000000001", "recordVersion": 1, "localCenter": [0.0, 0.0, 0.0], "localRotation": [1.0, 0.0, 0.0, 0.0], "shape": { "type": "ConvexHull", "colliderAssetId": "22222222222222223333333344444444" }, "materialId": "00000000000000000000000000000000", "useDefaultMaterial": true, "isTrigger": false, "useLayerOverride": false, "collisionLayerId": 0, "eventPolicy": "All", "queryFlags": 15, "enabled": true, "hasDebugColorOverride": false }
@@ -26,7 +27,7 @@
 			"uuid": "00000000000000000000000000000002",
 			"name": "Physics Export Falling Body",
 			"components": {
-				"Transform": { "Position": [0.0, 2.0, 0.0], "Rotation": [1.0, 0.0, 0.0, 0.0], "Scale": [1.0, 1.0, 1.0] },
+				"Transform": { "WorldPose": { "position": { "cell": { "x": "0", "y": "0", "z": "0" }, "offsetMetres": [0.0, 2.0, 0.0] }, "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] }, "ParentRelativePose": { "translationMetres": [0.0, 2.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0], "transformSpaceId": 0 } },
 				"RigidBodyComponent": { "motionType": "Dynamic" },
 				"ColliderSetComponent": { "colliders": [
 					{ "recordId": "10000000000000000000000000000002", "recordVersion": 1, "localCenter": [0.0, 0.0, 0.0], "localRotation": [1.0, 0.0, 0.0, 0.0], "shape": { "type": "Box", "halfExtents": [0.5, 0.5, 0.5] }, "materialId": "00000000000000000000000000000000", "useDefaultMaterial": true, "isTrigger": false, "useLayerOverride": false, "collisionLayerId": 0, "eventPolicy": "All", "queryFlags": 15, "enabled": true, "hasDebugColorOverride": false }
@@ -37,7 +38,7 @@
 			"uuid": "00000000000000000000000000000003",
 			"name": "Physics Export Kinematic Body",
 			"components": {
-				"Transform": { "Position": [3.0, 1.0, 0.0], "Rotation": [1.0, 0.0, 0.0, 0.0], "Scale": [1.0, 1.0, 1.0] },
+				"Transform": { "WorldPose": { "position": { "cell": { "x": "0", "y": "0", "z": "0" }, "offsetMetres": [3.0, 1.0, 0.0] }, "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] }, "ParentRelativePose": { "translationMetres": [3.0, 1.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0], "transformSpaceId": 0 } },
 				"RigidBodyComponent": { "motionType": "Kinematic", "useGravity": false },
 				"ColliderSetComponent": { "colliders": [
 					{ "recordId": "10000000000000000000000000000003", "recordVersion": 1, "localCenter": [0.0, 0.0, 0.0], "localRotation": [1.0, 0.0, 0.0, 0.0], "shape": { "type": "Box", "halfExtents": [0.5, 0.5, 0.5] }, "materialId": "00000000000000000000000000000000", "useDefaultMaterial": true, "isTrigger": false, "useLayerOverride": false, "collisionLayerId": 1, "eventPolicy": "All", "queryFlags": 15, "enabled": true, "hasDebugColorOverride": false }
@@ -48,7 +49,7 @@
 			"uuid": "00000000000000000000000000000004",
 			"name": "Physics Export Constrained Body",
 			"components": {
-				"Transform": { "Position": [5.0, 1.0, 0.0], "Rotation": [1.0, 0.0, 0.0, 0.0], "Scale": [1.0, 1.0, 1.0] },
+				"Transform": { "WorldPose": { "position": { "cell": { "x": "0", "y": "0", "z": "0" }, "offsetMetres": [5.0, 1.0, 0.0] }, "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] }, "ParentRelativePose": { "translationMetres": [5.0, 1.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0], "transformSpaceId": 0 } },
 				"RigidBodyComponent": { "motionType": "Dynamic" },
 				"ColliderSetComponent": { "colliders": [
 					{ "recordId": "10000000000000000000000000000004", "recordVersion": 1, "localCenter": [0.0, 0.0, 0.0], "localRotation": [1.0, 0.0, 0.0, 0.0], "shape": { "type": "Box", "halfExtents": [0.5, 0.5, 0.5] }, "materialId": "00000000000000000000000000000000", "useDefaultMaterial": true, "isTrigger": false, "useLayerOverride": false, "collisionLayerId": 0, "eventPolicy": "All", "queryFlags": 15, "enabled": true, "hasDebugColorOverride": false }
@@ -62,7 +63,7 @@
 			"uuid": "00000000000000000000000000000005",
 			"name": "Physics Export Character",
 			"components": {
-				"Transform": { "Position": [0.0, 1.5, 2.0], "Rotation": [1.0, 0.0, 0.0, 0.0], "Scale": [1.0, 1.0, 1.0] },
+				"Transform": { "WorldPose": { "position": { "cell": { "x": "0", "y": "0", "z": "0" }, "offsetMetres": [0.0, 1.5, 2.0] }, "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] }, "ParentRelativePose": { "translationMetres": [0.0, 1.5, 2.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0], "transformSpaceId": 0 } },
 				"CharacterControllerComponent": { "shapeKind": "Capsule", "radius": 0.5, "height": 2.0, "localCenter": [0.0, 0.0, 0.0], "upDirection": [0.0, 1.0, 0.0], "stepHeight": 0.4, "supportVolumeRadius": 0.5, "supportVolumeHeight": 0.2, "maximumSlopeAngleDegrees": 50.0, "contactPadding": 0.02, "mass": 75.0, "maximumStrength": 1000.0, "collisionLayerId": 1, "collisionMask": 4294967295, "groundAdhesion": 0.0, "allowStairWalking": true, "useGravity": true, "gravityScale": 1.0, "jumpSpeed": 5.0, "rotationPolicy": "AlignToUp", "enabled": true }
 			}
 		}

@@ -88,6 +88,7 @@ add_executable(TerraEngine-EditorTests
 	Automation/EditorMcpBuildProfileTests.cpp
 	Automation/EditorMcpSettingsTests.cpp
 	Automation/EditorMcpSceneViewTests.cpp
+	Automation/UnboundedWorldAutomationTests.cpp
 	Automation/SceneViewAutomationLinkStubs.cpp
 	Automation/PrefabAuthoringServiceLinkStubs.cpp
 	Automation/EditorMcpProfilerTests.cpp
@@ -157,6 +158,7 @@ add_executable(TerraEngine-EditorTests
 	Renderer/VirtualGeometryDebugViewTests.cpp
 	Renderer/VirtualGeometryHardeningDebugViewTests.cpp
 	Renderer/VirtualGeometryScalingDebugViewTests.cpp
+	Renderer/UnboundedRenderViewTests.cpp
 	# Virtual geometry asset-pipeline, automation, and export tests will be
 	# registered here when their story-specific test files are added.
 	Scene/ArchitectureHardeningPlayModeTests.cpp
@@ -184,6 +186,8 @@ add_executable(TerraEngine-EditorTests
 	Scene/SchedulerPlayModeGraphTests.cpp
 	Scene/SceneRuntimeParityTests.cpp
 	Scene/StreamingEditorWorkflowTests.cpp
+	Scene/UnboundedSceneAuthoringTests.cpp
+	Scene/UnboundedScenePersistenceTests.cpp
 	Hierarchy/HierarchyVirtualizationTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems/PrefabAuthoringSubsystem.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.cpp

@@ -1,0 +1,65 @@
+{
+	"schemaVersion": 1,
+	"feature": "052-unbounded-scenes",
+	"coordinateModel": "WorldCellD64V1",
+	"cellSizeMetres": 65536,
+	"regionSizeMetres": 8192,
+	"fixedResidentSet": {
+		"objectCount": 256,
+		"residentRegionCount": 8,
+		"residentPhysicsFrameCount": 2,
+		"workerCounts": [1, 4, "max"]
+	},
+	"workloads": [
+		{
+			"id": "unbounded-near-reference-v1",
+			"fixtureId": "scene-origin-sparse-v1",
+			"locationClass": "near",
+			"seed": 52001,
+			"warmupFrames": 120,
+			"measuredFrames": 600,
+			"purpose": "Resident origin reference"
+		},
+		{
+			"id": "unbounded-far-negative-v1",
+			"fixtureId": "scene-extreme-negative-v1",
+			"locationClass": "far-negative",
+			"seed": 52002,
+			"warmupFrames": 120,
+			"measuredFrames": 600,
+			"purpose": "Negative extreme precision comparison"
+		},
+		{
+			"id": "unbounded-far-positive-v1",
+			"fixtureId": "scene-extreme-positive-v1",
+			"locationClass": "far-positive",
+			"seed": 52003,
+			"warmupFrames": 120,
+			"measuredFrames": 600,
+			"purpose": "Positive extreme precision comparison"
+		},
+		{
+			"id": "unbounded-sparse-extent-1000x-v1",
+			"fixtureId": "scene-sparse-extent-1000x-v1",
+			"locationClass": "sparse-authored-extent",
+			"seed": 52004,
+			"warmupFrames": 120,
+			"measuredFrames": 600,
+			"purpose": "Fixed-residency memory scaling"
+		},
+		{
+			"id": "unbounded-crossing-route-v1",
+			"fixtureId": "scene-crossing-seed-v1",
+			"locationClass": "crossing-route",
+			"seed": 52005,
+			"crossingCount": 10000,
+			"purpose": "Deterministic region and physics-frame crossings"
+		}
+	],
+	"comparison": {
+		"pairedRuns": 5,
+		"maximumExtremeMedianFrameTimeRegression": 0.05,
+		"maximumSparseExtentResidentMemoryGrowth": 0.02,
+		"minimumLocalAccuracyMetres": 0.001
+	}
+}

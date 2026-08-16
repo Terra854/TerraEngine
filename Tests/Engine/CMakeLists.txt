@@ -19,6 +19,7 @@ add_executable(TerraEngine-EngineTests
 	Audio/AudioResourceStabilityTests.cpp
 	Audio/AudioSchedulerTests.cpp
 	Audio/AudioOfflineRenderTests.cpp
+	Audio/AudioUnboundedWorldTests.cpp
 	Audio/FakeAudioBackend.cpp
 	Scripting/AudioManagedAbiTests.cpp
 	${TERRAENGINE_ENGINE_ANIMATION_TEST_SOURCES}
@@ -80,6 +81,7 @@ add_executable(TerraEngine-EngineTests
 	Core/ObjectManagerTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Core/JobGraphTests.cpp
 	Core/SystemSchedulerTests.cpp
+	Core/WorldSpatialSchedulerTests.cpp
 	Core/FramePublicationSchedulerContractTests.cpp
 	Core/TransformTaskGraphTests.cpp
 	Performance/PerformanceTestFixtures.cpp
@@ -122,6 +124,9 @@ add_executable(TerraEngine-EngineTests
 	Physics/PhysicsRigidBodySimulationTests.cpp
 	Physics/PhysicsSchedulerTests.cpp
 	Physics/PhysicsPerformanceTests.cpp
+	Physics/PhysicsFrameTests.cpp
+	Physics/PhysicsFrameMigrationTests.cpp
+	Physics/UnboundedPhysicsPerformanceTests.cpp
 	Physics/PhysicsManagedAbiTests.cpp
 	Physics/PhysicsManagedIntegrationTests.cpp
 	Physics/PhysicsDeterminismStressTests.cpp
@@ -187,6 +192,8 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderGraphThreadingContractTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderPassValidationStressTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderPerformanceGateTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/UnboundedWorldPerformanceTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderReferenceFrameTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderPreparationCacheTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderInstanceAbiTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderResourceReadinessTests.cpp
@@ -194,6 +201,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderShadowParallelParityTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSmallSceneOverheadTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSnapshotContractTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/UnboundedMultiViewTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryBatchingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryAggregateContractTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryAggregateTransitionTests.cpp
@@ -284,6 +292,7 @@ add_executable(TerraEngine-EngineTests
 	Scripting/ScriptingDiagnosticsTests.cpp
 	Scripting/ScriptingDispatchTests.cpp
 	Scripting/ScriptingMutationTests.cpp
+	Scripting/UnboundedWorldManagedTests.cpp
 	Scripting/ScriptingRuntimeTestFixtures.cpp
 	Scripting/ScriptingWorkloadTests.cpp
 	Scripting/ScriptingWorkerBoundaryTests.cpp
@@ -295,6 +304,17 @@ add_executable(TerraEngine-EngineTests
 	Scene/RuntimeLayoutCompatibilityTests.cpp
 	Scene/SceneSerializationTests.cpp
 	Scene/SceneGraphRuntimeTests.cpp
+	Scene/UnboundedSceneTestFixtures.cpp
+	Scene/WorldCoordinateTests.cpp
+	Scene/WorldHierarchyTests.cpp
+	Scene/WorldRegionDirectoryTests.cpp
+	Scene/WorldRegionSpatialQueryTests.cpp
+	Scene/WorldSpatialTransactionTests.cpp
+	Scene/WorldSpatialTransitionTests.cpp
+	Scene/WorldStreamingSystemTests.cpp
+	Scene/UnboundedWorldMemoryTests.cpp
+	Scene/UnboundedSceneSerializationTests.cpp
+	Scene/UnboundedPrefabAndCacheTests.cpp
 	Scene/SceneChangePacketTests.cpp
 	Scene/FrameSceneChangePublicationTests.cpp
 	Scene/SceneMutationQueueTests.cpp
@@ -384,6 +404,14 @@ add_test(NAME Engine.SpatialUnitTests COMMAND $<TARGET_FILE:TerraEngine-EngineTe
 set_tests_properties(Engine.SpatialUnitTests PROPERTIES
 	LABELS "Engine"
 	ENVIRONMENT "TERRAENGINE_TEST_EXCLUDE_FILTER=Engine.ProfilerCapturePerformance.LiveThirtyThousandFramesStayResidentBounded"
+)
+
+# Keep the unbounded-scene scheduler contract independently selectable while
+# the aggregate engine registry continues to provide broad regression coverage.
+add_test(NAME Engine.WorldSpatialScheduler COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.WorldSpatialScheduler PROPERTIES
+	LABELS "Engine;Scene;Scheduler;UnboundedScenes"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Engine.WorldSpatialScheduler"
 )
 
 # Audio slices stay device-independent: the fake backend and immutable planning

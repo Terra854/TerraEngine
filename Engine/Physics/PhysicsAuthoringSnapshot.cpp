@@ -83,6 +83,11 @@ namespace TerraEngine::Physics {
 
 		std::uint64_t HashBodyProperties(const PhysicsBodyDescriptor& body) {
 			std::uint64_t hash = 14695981039346656037ULL;
+			hash = HashValue(hash, body.frameMembership.frame.frameId.value);
+			hash = HashValue(hash, body.frameMembership.frame.frameGeneration);
+			hash = HashValue(hash, body.frameMembership.world.worldId.value);
+			hash = HashValue(hash, body.frameMembership.world.worldGeneration);
+			hash = HashValue(hash, body.frameMembership.residencyGeneration);
 			hash = HashValue(hash, body.motionType);
 			hash = HashValue(hash, body.motionQuality);
 			hash = HashValue(hash, body.initialLinearVelocity);
@@ -423,6 +428,10 @@ namespace TerraEngine::Physics {
 		for(const PhysicsBodyDescriptor& body : data.bodies) {
 			if(!ValidObjectId(body.objectId) || body.objectGeneration == 0
 				|| body.componentGeneration == 0 || !ValidPose(body.worldPose)
+				|| !body.frameMembership.IsValid()
+				|| !std::isfinite(body.canonicalWorldPose.position.offsetMetres.x)
+				|| !std::isfinite(body.canonicalWorldPose.position.offsetMetres.y)
+				|| !std::isfinite(body.canonicalWorldPose.position.offsetMetres.z)
 				|| (body.hasParent && (!ValidPose(body.parentWorldPose) || !body.parentWorldScale.IsFinite()))
 				|| body.collisionLayer >= kPhysicsCollisionLayerCount) {
 				return std::nullopt;
@@ -625,23 +634,21 @@ namespace TerraEngine::Physics {
 
 		for(std::size_t index = 0; index < hierarchy.orderedObjects.size(); ++index) {
 			const Scene::HierarchySnapshotEntry& entry = hierarchy.orderedObjects[index];
-			const Transform* local = objects.GetComponent<Transform>(entry.object);
-			if(local == nullptr) continue;
-			const glm::vec3 localPosition = local->position;
-			const glm::quat localRotation = glm::normalize(local->rotation);
-			const glm::vec3 localScale = local->scale;
+			const std::optional<Scene::WorldPose> canonicalPose = objects.GetCanonicalWorldPose(entry.object);
+			if(!canonicalPose) continue;
+			const glm::vec3 localPosition{
+				static_cast<float>(canonicalPose->position.offsetMetres.x),
+				static_cast<float>(canonicalPose->position.offsetMetres.y),
+				static_cast<float>(canonicalPose->position.offsetMetres.z)};
+			const glm::quat localRotation = glm::normalize(canonicalPose->rotation);
+			const glm::vec3 localScale = canonicalPose->scale;
 			const std::uint64_t localTransformRevision = objects.GetObjectTransformRevision(entry.object);
 			ResolvedTransform resolved;
-			if(entry.parentIndex >= 0) {
-				const ResolvedTransform& parent = transforms[static_cast<std::size_t>(entry.parentIndex)];
-				resolved.position = parent.position + parent.rotation * (parent.scale * localPosition);
-				resolved.rotation = glm::normalize(parent.rotation * localRotation);
-				resolved.scale = parent.scale * localScale;
-				resolved.dependencyRevision = CombineTransformRevision(parent.dependencyRevision, localTransformRevision);
-			} else {
-				resolved = {localPosition, localRotation, localScale,
-					CombineTransformRevision(0U, localTransformRevision)};
-			}
+			// Hierarchy propagation already produced the canonical pose. Physics only
+			// consumes its bounded frame-local offset, never rebuilds a global float
+			// location by composing parent translations.
+			resolved = {localPosition, localRotation, localScale,
+				CombineTransformRevision(0U, localTransformRevision)};
 			transforms[index] = resolved;
 			// Physics follows effective hierarchy activation: disabling a parent
 			// removes every descendant body without rewriting child authoring data.
@@ -750,6 +757,11 @@ namespace TerraEngine::Physics {
 			body.objectGeneration = objectGeneration;
 			body.componentGeneration = componentGeneration;
 			body.objectTransformRevision = localTransformRevision;
+			body.canonicalWorldPose = *canonicalPose;
+			// The original frame is explicit authority. A later protected migration
+			// changes this membership together with provider state; float poses never
+			// select or imply a frame on their own.
+			body.frameMembership = {{kPrimaryPhysicsFrameId, world.worldGeneration}, world, 1U};
 			body.worldPose = {ToPhysicsVector(resolved.position), ToPhysicsRotation(resolved.rotation)};
 			body.sourceTransformRevision = resolved.dependencyRevision;
 			if(entry.parentIndex >= 0) {

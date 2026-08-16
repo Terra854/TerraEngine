@@ -25,6 +25,7 @@
 #include "File Formats/TerraEngineShaderFile.h"
 #include "Renderer/RenderTypes.h"
 #include "Scene/SceneMutationQueue.h"
+#include "Scene/BulkScenePublication.h"
 #include "Scene/Serializer.h"
 #include "Scene/TransactionalMutation.h"
 #include "ThreadPool/ThreadPool.h"
@@ -146,6 +147,12 @@ public:
 	TerraEngine::Scene::TransactionDiagnostics GetTransactionDiagnostics() const;
 	TerraEngine::Scene::TransactionResult PreflightTransaction(const TerraEngine::Scene::Transaction& transaction) const;
 	TerraEngine::Scene::SceneMutationBatchResult ApplySceneMutations(std::string commitName = {});
+	// Region streaming hands this method a fully prepared value packet. The
+	// actual ObjectManager materialization is intentionally retained at the
+	// protected scene boundary; workers never receive a live manager reference.
+	TerraEngine::Scene::BulkScenePublicationResult PublishPreparedRegionPacket(
+		const TerraEngine::Scene::BulkScenePublicationPacket& packet,
+		const std::function<bool()>& cancellationRequested = {});
 
 	// Clear all cached documents and abandon in-flight futures. Use during
 	// teardown to release memory when no other threads are reading scenes.

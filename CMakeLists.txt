@@ -184,6 +184,10 @@ set(ENGINE_SOURCES
 	Engine/Runtime/BootSummary.cpp
 	Engine/Runtime/ExportStartupCoordinator.cpp
 	Engine/Scene/SceneGraphRuntime.cpp
+	Engine/Scene/WorldCoordinate.cpp
+	Engine/Scene/WorldRegion.cpp
+	Engine/Scene/WorldSpatialSystem.cpp
+	Engine/Scene/WorldStreamingSystem.cpp
 	Engine/Scene/SceneChangePacket.cpp
 	Engine/Scene/HierarchySnapshot.cpp
 	Engine/Scene/RuntimeLayout.cpp
@@ -312,6 +316,10 @@ set(ENGINE_HEADERS
 	Engine/Resource/ResourceStreaming.h
 	Engine/Resource/ShaderCollection.h
 	Engine/Scene/SceneGraphRuntime.h
+	Engine/Scene/WorldCoordinate.h
+	Engine/Scene/WorldRegion.h
+	Engine/Scene/WorldSpatialSystem.h
+	Engine/Scene/WorldStreamingSystem.h
 	Engine/Scene/SceneChangePacket.h
 	Engine/Scene/HierarchySnapshot.h
 	Engine/Scene/RuntimeLayout.h
@@ -517,6 +525,7 @@ target_include_directories(TerraEnginePhysicsJoltRuntime
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/Engine
 		${CMAKE_CURRENT_SOURCE_DIR}/Engine/Core/Object
+		${CMAKE_CURRENT_SOURCE_DIR}/External/glm
 )
 target_compile_definitions(TerraEnginePhysicsJoltRuntime
 	PRIVATE
@@ -717,6 +726,7 @@ if(BUILD_TESTING)
 	# or installing QA executables and evidence scripts.
 	add_subdirectory(Tests/Tools/VirtualGeometry)
 	add_subdirectory(Tests/Tools/FramePublication)
+	add_subdirectory(Tests/Tools/UnboundedScenes)
 endif()
 
 set(FASTGLTF_ENABLE_TESTS OFF CACHE BOOL "Disable fastgltf tests" FORCE)
@@ -933,6 +943,7 @@ set(MANAGED_CORE_SOURCES
 	Engine/Managed/Source/Object.cs
 	Engine/Managed/Source/Component.cs
 	Engine/Managed/Source/Transform.cs
+	Engine/Managed/Source/WorldCoordinate.cs
 	Engine/Managed/Source/Camera.cs
 	Engine/Managed/Source/Light.cs
 	Engine/Managed/Source/MeshRenderer.cs
@@ -1710,6 +1721,7 @@ file(REMOVE
 # the runtime. These are source contracts, not embedded shader strings.
 install(FILES
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Geometry/TerraGeometryContract.hlsli"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Geometry/TerraWorldReferenceFrame.hlsli"
 	DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Shaders/Includes/Geometry"
 )
 # Grouped rendering and animation share these source-level ABI declarations
@@ -2347,6 +2359,14 @@ endif()
 	# exported games continue to consume cooked TEPAK data, never these sources.
 	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/Animation/"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Fixtures/Animation"
+	)
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/UnboundedScenes/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Fixtures/UnboundedScenes"
+		COMPONENT TerraEngineRuntime
+	)
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/UnboundedScenes/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Tools/UnboundedScenes"
+		COMPONENT TerraEngineRuntime
 	)
 	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/AnimationExportRuntime/"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Fixtures/AnimationExportRuntime"

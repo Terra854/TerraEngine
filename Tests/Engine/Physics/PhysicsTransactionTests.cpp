@@ -26,12 +26,12 @@ namespace TerraEngine::Tests {
 			Physics::PhysicsTransactionRuntimeState runtime;
 			runtime.world = Physics::PhysicsWorldHandle{Physics::PhysicsWorldId{1U}, 4};
 			runtime.bodyGenerations.emplace(objectId, 9);
+			TerraEngine::Scene::WorldPose targetPose = objects.GetCanonicalWorldPose(object).value();
+			targetPose.position.offsetMetres = {2.0, 0.0, 0.0};
 			transaction.sceneWrites.push_back(TerraEngine::Scene::TransactionWriteOperation{
-				.kind = TerraEngine::Scene::TransactionWriteKind::UpdateComponentProperty,
+				.kind = TerraEngine::Scene::TransactionWriteKind::SetWorldTransform,
 				.target = TerraEngine::Scene::ExistingObject(objectId),
-				.componentName = std::string(Transform::kComponentName),
-				.propertyName = "Position",
-				.propertyValue = TerraEngine::Reflection::Variant{glm::vec3(2.0f, 0.0f, 0.0f)}});
+				.worldPose = targetPose});
 			transaction.physicsCommands.push_back(Physics::PhysicsCommand::MakeWake(objectId, 4, 9));
 
 			const auto bodyGenerationsBefore = runtime.bodyGenerations;

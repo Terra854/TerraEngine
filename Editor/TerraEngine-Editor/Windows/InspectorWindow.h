@@ -20,6 +20,7 @@
 #include <optional>
 
 class MainEditorSubsystem;
+class Object;
 namespace TerraEngine::Animation { struct AnimationClipAsset; }
 // struct ComponentAccessFunctions groups related state and operations so callers have one documented contract.
 struct ComponentAccessFunctions;
@@ -46,6 +47,7 @@ private:
 	bool IsPrefabOverride(entt::entity obj, const std::string& compName, const std::string& propertyName) const;
 	void ResetPrefabOverride(entt::entity obj, const std::string& compName, const std::string& propertyName);
 	void DrawPrefabLinkInspector(entt::entity obj);
+	void DrawCanonicalTransformInspector(const Object& object);
 	void DrawProperty(const std::string& compName, TerraEngine::Reflection::Property prop, entt::entity obj, ComponentAccessFunctions& access);
 	void DrawScriptComponentInspector(entt::entity obj);
 	void DrawScriptDropTarget(entt::entity obj);

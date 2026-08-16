@@ -72,6 +72,9 @@ namespace TerraEngine::Physics {
 	// worker because it owns no scene or provider memory.
 	struct PhysicsQueryRequest {
 		PhysicsWorldHandle world;
+		// Every spatial input is localized for this exact frame. A producer must
+		// refresh the descriptor after migration instead of relying on world ID.
+		PhysicsFrameHandle frame;
 		PhysicsQueryKind kind = PhysicsQueryKind::RayCast;
 		PhysicsQueryHitMode hitMode = PhysicsQueryHitMode::Closest;
 		PhysicsPose pose;
@@ -91,6 +94,7 @@ namespace TerraEngine::Physics {
 	// discarded. Material and surface identifiers stay engine-owned asset data.
 	struct PhysicsQueryHit {
 		PhysicsBodyHandle body;
+		PhysicsFrameHandle frame;
 		TerraEngine::UUID objectId{};
 		PhysicsGeneration objectGeneration = 0U;
 		PhysicsGeneration componentGeneration = 0U;
@@ -120,6 +124,7 @@ namespace TerraEngine::Physics {
 	struct PhysicsQueryResult {
 		PhysicsQueryHandle handle;
 		PhysicsWorldHandle world;
+		PhysicsFrameHandle frame;
 		PhysicsTick tick = 0U;
 		PhysicsResultStatus status = PhysicsResultStatus::Accepted;
 		PhysicsQueryRejectionReason rejectionReason = PhysicsQueryRejectionReason::None;
@@ -151,6 +156,7 @@ namespace TerraEngine::Physics {
 
 	struct PhysicsPreparedQueryBatch {
 		PhysicsWorldHandle world;
+		PhysicsFrameHandle frame;
 		PhysicsTick tick = 0U;
 		std::vector<PhysicsPreparedQuery> queries;
 		std::vector<PhysicsQueryResult> rejected;

@@ -314,14 +314,26 @@ namespace TerraEngine::Animation {
 					result.status = AnimationStatus::StaleHandle;
 					return result;
 				}
+				const std::optional<TerraEngine::Scene::WorldPose> targetPose = objects.GetCanonicalWorldPose(*target);
+				if(!targetPose) {
+					result.status = AnimationStatus::StaleHandle;
+					return result;
+				}
 				// Socket/joint records are animator model-space for gameplay parity.
 				// Convert only while creating the deferred world-space object update.
 				const AnimationTransform resolved = CombineTransform(snapshot.sourceObjectWorldTransform,
 					CombineTransform(source->modelTransform, binding.offset));
 				if(!HasNormalizedRotation(resolved)) return result;
-				updates.push_back({binding.targetObjectId,
-					{resolved.translation.x, resolved.translation.y, resolved.translation.z},
-					{resolved.rotation.w, resolved.rotation.x, resolved.rotation.y, resolved.rotation.z}});
+				TerraEngine::Scene::WorldPose pose = *targetPose;
+				// Attachment math is bounded animation-space data. Preserve the exact
+				// canonical cell and replace only the normalized local pose authority.
+				pose.position.offsetMetres = {
+					static_cast<double>(resolved.translation.x),
+					static_cast<double>(resolved.translation.y),
+					static_cast<double>(resolved.translation.z)};
+				pose.rotation = {resolved.rotation.w, resolved.rotation.x,
+					resolved.rotation.y, resolved.rotation.z};
+				updates.push_back({binding.targetObjectId, pose});
 				minimumBindingId = std::min(minimumBindingId, binding.bindingId);
 			}
 			std::sort(updates.begin(), updates.end(), [](const auto& left, const auto& right) {

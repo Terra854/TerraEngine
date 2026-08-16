@@ -16,8 +16,32 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "Scene/WorldCoordinate.h"
+
 namespace TerraEngine::Scene
 {
+	// Every float shape is measured relative to this explicit canonical origin.
+	// The generation prevents a query prepared for one local frame being used
+	// after the index has moved to another distant area.
+	struct SpatialReferenceFrame
+	{
+		WorldPosition canonicalOrigin{};
+		std::uint64_t generation = 0;
+		double maximumLocalDistanceMetres = kTransformSpaceMaximumRelativeRadiusMetres;
+	};
+
+	struct CanonicalSpatialPoint
+	{
+		WorldPosition position{};
+		std::uint64_t frameGeneration = 0;
+	};
+
+	[[nodiscard]] inline WorldLocalizationResult LocalizeToSpatialFrame(
+		const WorldPosition& position,
+		const SpatialReferenceFrame& frame)
+	{
+		return LocalizeWorldPosition(position, frame.canonicalOrigin, frame.maximumLocalDistanceMetres);
+	}
 	// SpatialBoundsState names the supported states explicitly so serialization and switches stay readable.
 	enum class SpatialBoundsState : std::uint8_t
 	{

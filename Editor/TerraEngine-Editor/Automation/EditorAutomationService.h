@@ -260,8 +260,9 @@ namespace TerraEngine::Editor::Automation
 		struct SparseTransformTarget
 		{
 			TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
-			glm::vec3 baselinePosition{0.0F};
-			glm::quat baselineRotation{1.0F, 0.0F, 0.0F, 0.0F};
+			// The sparse validation tool moves canonical poses through the same
+			// typed transaction path as ordinary automation; no float world alias.
+			TerraEngine::Scene::WorldPose baselinePose{};
 		};
 		struct SparseTransformMutationState
 		{

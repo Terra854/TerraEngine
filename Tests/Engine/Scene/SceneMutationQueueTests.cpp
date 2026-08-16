@@ -1,9 +1,11 @@
 #include "../TestHarness.h"
 
 #include "Components/Transform.h"
+#include "Components/SkyComponent.h"
 #include "Core/Object/ComponentRegistry.h"
 #include "Core/Object/ObjectManager.h"
 #include "Scene/SceneMutationQueue.h"
+
 
 namespace TerraEngine::Tests {
 	void RegisterSceneMutationQueueTests(TestRegistry& registry)
@@ -78,6 +80,7 @@ namespace TerraEngine::Tests {
 			objects.clear();
 			Object target = objects.createObject("Component Target");
 			const TerraEngine::UUID targetId = objects.getUUID(target);
+			SkyComponent::registerType();
 
 			TerraEngine::Scene::SceneMutationQueue missingName;
 			missingName.Enqueue({ "missing-component", TerraEngine::Scene::SceneMutationOperation::AddComponent, targetId });
@@ -89,10 +92,10 @@ namespace TerraEngine::Tests {
 			TerraEngine::Scene::SceneMutationQueue valid;
 			TerraEngine::Scene::SceneMutationRequest request;
 			request.requestId = "replace-transform";
-			request.operation = TerraEngine::Scene::SceneMutationOperation::UpdateComponent;
+			request.operation = TerraEngine::Scene::SceneMutationOperation::AddComponent;
 			request.targetObjectId = targetId;
-			request.componentName = "Transform";
-			request.componentPayloadKind = TerraEngine::Scene::SceneComponentMutationPayloadKind::Replace;
+			request.componentName = "SkyComponent";
+			request.componentPayloadKind = TerraEngine::Scene::SceneComponentMutationPayloadKind::Add;
 			valid.Enqueue(request);
 			const auto accepted = valid.Apply(objects);
 			context.Expect(accepted.applied, "Valid component payload mutations should flush at the approved boundary.");

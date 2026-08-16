@@ -40,6 +40,7 @@ namespace TerraEngine::EditorTests
 				std::filesystem::create_directories(scenePath.parent_path());
 				std::ofstream scene(scenePath, std::ios::binary);
 				scene << nlohmann::json{
+					{"format", "TerraSceneUnboundedV1"},
 					{"name", "Transaction"},
 					{"sceneSettings", nlohmann::json::object()},
 					{"objects", nlohmann::json::array()}
@@ -63,6 +64,7 @@ namespace TerraEngine::EditorTests
 
 			nlohmann::json Execute(nlohmann::json operations, const std::string& requestId, nlohmann::json extra = nlohmann::json::object())
 			{
+				extra["format"] = "TerraSpatialTransactionV1";
 				extra["operations"] = std::move(operations);
 				extra["label"] = extra.value("label", std::string("Automation transaction"));
 				extra["correlationId"] = extra.value("correlationId", requestId + "-correlation");

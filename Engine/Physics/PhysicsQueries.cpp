@@ -349,6 +349,7 @@ namespace TerraEngine::Physics {
 			}
 			const PhysicsQueryHandle handle{activeWorld.worldId, activeWorld.worldGeneration, index, slot.generation,
 				slot.request.submittedTick, slot.request.expiryTick};
+			if(!batch.frame.IsValid()) batch.frame = slot.request.frame;
 			if(!IsSameWorld(slot.request.world, activeWorld)) {
 				slot.state = QueryState::Completed;
 				slot.result = MakeResult(handle, activeWorld, currentTick, PhysicsResultStatus::StaleTarget,

@@ -13,7 +13,10 @@ namespace TerraEngine::Tests {
 		snapshot.frameId = frameId;
 		snapshot.sceneRevision = frameId * 10u;
 		snapshot.resourceRevision = frameId * 100u;
-		snapshot.viewRequests.push_back({ RenderOutputKind::GameView, RenderViewType::Game, glm::uvec2(1280u, 720u), 1u });
+		TerraEngine::Renderer::RenderFrameViewRequest view{
+			RenderOutputKind::GameView, RenderViewType::Game, glm::uvec2(1280u, 720u), 1u, frameId};
+		view.referenceFrame = MakeRendererTestReferenceFrame(frameId, 1u, 1u);
+		snapshot.viewRequests.push_back(std::move(view));
 		for (std::size_t index = 0u; index < renderableCount; ++index)
 		{
 			const TerraEngine::UUID mesh = TerraEngine::GenerateUUID();
@@ -89,6 +92,10 @@ namespace TerraEngine::Tests {
 			input.output.kind = request.outputKind;
 			input.output.diagnosticsView = request.viewType;
 			input.output.outputId = request.outputId;
+			// The sealed publication owns the exact view-local origin used by its
+			// worker output. A fixture must not publish a matrix without that proof.
+			input.referenceFrame = request.referenceFrame;
+			publication.referenceFrames.push_back(request.referenceFrame);
 			for (std::size_t index = 0u; index < snapshot.renderables.size(); ++index)
 			{
 				selection.visibleOrdinals.push_back({ static_cast<std::uint32_t>(index), 1u });

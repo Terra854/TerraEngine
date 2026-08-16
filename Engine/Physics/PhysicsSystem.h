@@ -6,13 +6,16 @@
 #include "Animation/Ragdoll/RagdollPhysicsBridge.h"
 #include "PhysicsAuthoringSnapshot.h"
 #include "PhysicsDiagnostics.h"
+#include "PhysicsTransactions.h"
 #include "PhysicsWorld.h"
 #include "Scene/TransactionalMutation.h"
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace TerraEngine::Physics {
 	// This snapshot is intentionally smaller than provider job diagnostics. It is
@@ -54,6 +57,17 @@ namespace TerraEngine::Physics {
 		bool IsPaused() const;
 		float FixedTimeStep() const;
 		PhysicsWorldHandle WorldHandle() const;
+		// Additional local islands are created only at a protected lifecycle
+		// boundary. Each descriptor names the independent backend world that owns
+		// its bounded float simulation coordinates.
+		std::optional<PhysicsFrameDescriptor> CreateFrame(const PhysicsFrameCreateRequest& request);
+		bool DestroyFrame(PhysicsFrameHandle frame);
+		std::vector<PhysicsFrameDescriptor> FrameDescriptors() const;
+		// Scheduler-owned Before Physics callers submit the complete closure here;
+		// worker producers prepare only the typed request and callback packet.
+		PhysicsFrameMigrationReceipt CommitFrameMigration(
+			const PhysicsFrameMigrationRequest& request,
+			const PhysicsFrameMigrationOperations& operations);
 		// Returns the current physics-clock generation for copied cross-system
 		// requests. Animation must not substitute its independent frame counter:
 		// a later physics extraction validates this exact simulation time domain.

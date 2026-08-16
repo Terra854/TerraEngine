@@ -67,8 +67,9 @@ namespace TerraEngine::Tests {
 
 		nlohmann::json MakeSceneJson(nlohmann::json objects, nlohmann::json sceneSettings = nlohmann::json::object())
 		{
-			return {
-				{ "name", "Sky Component Test Scene" },
+		return {
+			{ "format", "TerraSceneUnboundedV1" },
+			{ "name", "Sky Component Test Scene" },
 				{ "sceneSettings", std::move(sceneSettings) },
 				{ "objects", std::move(objects) }
 			};

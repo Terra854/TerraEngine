@@ -13,6 +13,7 @@
 #include "../Animation/AnimationSceneHandles.h"
 #include "Engine/Renderer/RenderTypes.h"
 #include "Engine/Scene/SpatialIndex.h"
+#include "Engine/Scene/WorldCoordinate.h"
 #include "Engine/Utilities/UUID.h"
 #include <cstdint>
 #include <entt/entt.hpp>
@@ -36,7 +37,12 @@ public:
 	// These methods run on the editor's protected update boundary, so they may
 	// safely share the same state and validation rules as the visible toolbar.
 	[[nodiscard]] nlohmann::json GetAutomationState() const;
-	bool SetAutomationCamera(const glm::vec3& position, const glm::vec3& focus, std::string& outError);
+	// Automation submits exact canonical addresses. Screen-space vectors are
+	// deliberately not accepted here because they cannot name distant worlds.
+	bool SetAutomationCamera(
+		const TerraEngine::Scene::WorldPosition& position,
+		const TerraEngine::Scene::WorldPosition& focus,
+		std::string& outError);
 	bool FrameAutomationObject(entt::entity entity, std::string& outError);
 	bool SetAutomationTool(std::string_view tool, std::string& outError);
 	bool SetAutomationOrientation(std::string_view orientation, std::string& outError);
@@ -76,9 +82,11 @@ private:
 	void PublishSceneViewDiagnostics(bool rendererAvailable, const std::string& disabledOverlayReason = std::string());
 	glm::vec3 GetCameraForward() const;
 	glm::vec3 GetCameraUp() const;
-	glm::vec3 ResolveSceneViewFocus(float fallbackDistance) const;
-	float ResolveSceneViewFocusDistance(const glm::vec3& focus, float fallbackDistance) const;
-	void RepositionCameraAroundFocus(const glm::vec3& focus, float distance);
+	TerraEngine::Scene::WorldPosition ResolveSceneViewFocus(float fallbackDistance) const;
+	float ResolveSceneViewFocusDistance(const TerraEngine::Scene::WorldPosition& focus, float fallbackDistance) const;
+	void RepositionCameraAroundFocus(const TerraEngine::Scene::WorldPosition& focus, float distance);
+	[[nodiscard]] glm::vec3 LocalizeForCamera(const TerraEngine::Scene::WorldPosition& position) const;
+	[[nodiscard]] bool TranslateCamera(const glm::dvec3& deltaMetres);
 	void SetSceneViewProjectionMode(TerraEngine::Editor::SceneViewOverlay::ProjectionMode projectionMode);
 	bool IsPointerInsideOrientationWidget(const ImVec2& viewportPos, const ImVec2& viewportSize) const;
 	bool HandleSceneViewScrollZoom();
@@ -94,7 +102,9 @@ private:
 	MainEditorSubsystem* m_Owner;
 
 	// Camera State
-	glm::vec3 m_CameraPos{ 0.0f, 5.0f, 10.0f };
+	// Canonical state survives arbitrary world traversal. Render matrices always
+	// use a bounded frame localized around this position.
+	TerraEngine::Scene::WorldPosition m_CameraPosition{{}, {0.0, 5.0, 10.0}};
 	glm::vec3 m_CameraRot{ -0.35f, 0.0f, 0.0f }; // ~20 degrees down in radians
 	float m_Fov = 60.0f;
 	float m_CameraSpeed = 10.0f;
@@ -104,7 +114,7 @@ private:
 	std::pair<double, double> m_StoredCursorPos;
 	// Scene View camera snaps orbit around this authoring focus so orthographic
 	// axis clicks rotate the scene instead of spinning the camera in place.
-	glm::vec3 m_CameraFocus{ 0.0f, 0.0f, 0.0f };
+	TerraEngine::Scene::WorldPosition m_CameraFocus{};
 	float m_CameraFocusDistance = 18.0f;
 	bool m_CameraFocusInitialized = false;
 	// Orthographic navigation is intentionally independent from perspective
@@ -112,9 +122,9 @@ private:
 	// so switching back restores the exact position, look direction, and pivot.
 	struct PerspectiveCameraState
 	{
-		glm::vec3 position{ 0.0f };
+		TerraEngine::Scene::WorldPosition position{};
 		glm::vec3 rotation{ 0.0f };
-		glm::vec3 focus{ 0.0f };
+		TerraEngine::Scene::WorldPosition focus{};
 		float focusDistance = 18.0f;
 		float fieldOfView = 60.0f;
 		bool focusInitialized = false;
@@ -130,9 +140,7 @@ private:
 	float m_ScaleSnapValue[3] = { 0.1f, 0.1f, 0.1f };
 
 	bool m_WasUsingGizmo = false;
-	glm::vec3 m_GizmoStartPos;
-	glm::quat m_GizmoStartRot;
-	glm::vec3 m_GizmoStartScale;
+	TerraEngine::Scene::WorldPose m_GizmoStartPose{};
 	// Scene View keeps its debug mode separate from Game View so artists can
 	// inspect editor-only culling while gameplay preview stays in another mode.
 	VirtualGeometryDebugVisualizationMode m_VirtualGeometryDebugMode = VirtualGeometryDebugVisualizationMode::None;
@@ -162,6 +170,7 @@ private:
 	std::uint64_t m_MarkerSpatialPublicationGeneration = 0u;
 	std::uint64_t m_MarkerViewGeneration = 0u;
 	std::uint64_t m_MarkerPreferenceGeneration = 0u;
+	TerraEngine::Scene::WorldPosition m_MarkerWorkingFrameOrigin{};
 	std::uint32_t m_MarkerSpatialQueryRejectedCount = 0u;
 	std::uint32_t m_MarkerSpatialQueryFallbackCount = 0u;
 	std::size_t m_LastMarkerPreferenceHash = 0u;

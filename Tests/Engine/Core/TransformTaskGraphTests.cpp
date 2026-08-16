@@ -107,25 +107,23 @@ namespace TerraEngine::Tests {
 							{
 								{"uuid", TerraEngine::ToHexString(TerraEngine::Tests::SceneFixtures::MakeStableUuid(2))},
 								{"name", "DirtyChild"},
-								{"transform", {{"position", {1.0f, 0.0f, 0.0f}}}},
 								{"children", nlohmann::json::array({
 									{
 										{"uuid", TerraEngine::ToHexString(TerraEngine::Tests::SceneFixtures::MakeStableUuid(3))},
 										{"name", "Grandchild"},
-										{"transform", {{"position", {2.0f, 0.0f, 0.0f}}}}
 									}
 								})}
 							},
 							{
 								{"uuid", TerraEngine::ToHexString(TerraEngine::Tests::SceneFixtures::MakeStableUuid(4))},
 								{"name", "CleanSibling"},
-								{"transform", {{"position", {10.0f, 0.0f, 0.0f}}}}
 							}
 						})}
 					}
 				})}
 			});
-			graph.objects[TerraEngine::Tests::SceneFixtures::MakeStableUuid(2)].localPosition = glm::vec3(5.0f, 0.0f, 0.0f);
+			graph.objects[TerraEngine::Tests::SceneFixtures::MakeStableUuid(2)].parentRelativePose.translationMetres = glm::dvec3(5.0, 0.0, 0.0);
+			graph.objects[TerraEngine::Tests::SceneFixtures::MakeStableUuid(3)].parentRelativePose.translationMetres = glm::dvec3(2.0, 0.0, 0.0);
 
 			const auto dirty = TerraEngine::Scene::BuildDirtyTransformState(
 				graph,
@@ -137,7 +135,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(1u, result.dirtyRootCount, "Only the edited child should be a dirty root.");
 			context.ExpectEqual(2u, result.processedObjectCount, "The dirty child and its grandchild should be recomputed.");
 			context.ExpectEqual(2u, result.skippedCleanObjectCount, "The root and clean sibling should be skipped.");
-			context.Expect(graph.objects.at(TerraEngine::Tests::SceneFixtures::MakeStableUuid(3)).worldPosition.x > 6.9f, "Grandchild world transform should consume the updated parent transform.");
+			context.Expect(graph.objects.at(TerraEngine::Tests::SceneFixtures::MakeStableUuid(3)).worldPose.position.offsetMetres.x > 6.9, "Grandchild world transform should consume the updated parent transform.");
 		});
 	}
 }

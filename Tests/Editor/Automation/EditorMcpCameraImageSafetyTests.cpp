@@ -5,6 +5,10 @@
 
 namespace TerraEngine::EditorTests
 {
+	nlohmann::json CanonicalPosition(double x, double y, double z)
+	{
+		return {{"cell", {{"x", "0"}, {"y", "0"}, {"z", "0"}}}, {"offsetMetres", {x, y, z}}};
+	}
 	using TerraEngine::Editor::Automation::EditorAutomationService;
 	using TerraEngine::Editor::Automation::WriteMode;
 
@@ -19,7 +23,7 @@ namespace TerraEngine::EditorTests
 
 			const nlohmann::json result = service.HandleTool(
 				"camera.capture_custom",
-				{{"position", nlohmann::json::array({0.0f, 2.0f, 5.0f})}, {"target", nlohmann::json::array({0.0f, 0.0f, 0.0f})}, {"width", 64u}, {"height", 64u}},
+				{{"camera", {{"position", CanonicalPosition(0.0, 2.0, 5.0)}, {"lookAt", CanonicalPosition(0.0, 0.0, 0.0)}}}, {"width", 64u}, {"height", 64u}},
 				WriteMode::ReadOnly,
 				"safety-custom");
 

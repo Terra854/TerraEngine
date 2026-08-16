@@ -53,10 +53,15 @@ namespace TerraEngine::Audio {
 		std::vector<AudioAuthoringListenerRecord> liveListeners;
 		ObjectManager& objects = ObjectManager::instance();
 		objects.forEachObjectWithComponents<AudioSourceComponent, Transform>([&](Object object, AudioSourceComponent& source, Transform& transform) {
+			const std::optional<TerraEngine::Scene::WorldPose> pose = objects.GetCanonicalWorldPose(object);
+			if(!pose) return;
 			AudioAuthoringSourceRecord record;
 			record.identity = {objects.getUUID(object), objects.getObjectComponentGeneration(object), 1U};
 			record.clipAssetId = source.clipAssetId;
-			record.position = {transform.position.x, transform.position.y, transform.position.z};
+			// Audio records remain bounded local inputs. The exact canonical cell is
+			// retained by the spatial publication consumed by future listener frames.
+			record.position = {static_cast<float>(pose->position.offsetMetres.x),
+				static_cast<float>(pose->position.offsetMetres.y), static_cast<float>(pose->position.offsetMetres.z)};
 			record.volume = source.volume; record.pitch = source.pitch;
 			record.mixGroupId = source.mixGroupId;
 			record.maximumDistance = source.maxDistance; record.spatialBlend = source.spatialBlend; record.priority = source.priority;
@@ -81,9 +86,12 @@ namespace TerraEngine::Audio {
 			liveSources.push_back(std::move(record));
 		});
 		objects.forEachObjectWithComponents<AudioListenerComponent, Transform>([&](Object object, AudioListenerComponent& listener, Transform& transform) {
-			const glm::vec3 forward = transform.rotation * glm::vec3(0.0F, 0.0F, -1.0F);
+			const std::optional<TerraEngine::Scene::WorldPose> pose = objects.GetCanonicalWorldPose(object);
+			if(!pose) return;
+			const glm::vec3 forward = pose->rotation * glm::vec3(0.0F, 0.0F, -1.0F);
 			liveListeners.push_back({objects.getUUID(object), objects.getObjectComponentGeneration(object),
-				{transform.position.x, transform.position.y, transform.position.z}, {forward.x, forward.y, forward.z}, listener.outputMode, listener.active, listener.eligible});
+				{static_cast<float>(pose->position.offsetMetres.x), static_cast<float>(pose->position.offsetMetres.y),
+					static_cast<float>(pose->position.offsetMetres.z)}, {forward.x, forward.y, forward.z}, listener.outputMode, listener.active, listener.eligible});
 		});
 		if(!manualAuthoringSnapshot) { data.sources = std::move(liveSources); data.listeners = std::move(liveListeners); }
 		data.frame = frame; data.deltaSeconds = deltaTime; data.masterVolume = mix.Snapshot().master.volume; data.masterMuted = mix.Snapshot().master.muted;

@@ -7,6 +7,18 @@
 #include <unordered_set>
 
 namespace TerraEngine::Scene {
+	bool ValidateUnboundedPrefabDocument(const nlohmann::json& document, std::string* outError)
+	{
+		auto fail = [outError](std::string reason) { if (outError) *outError = std::move(reason); return false; };
+		if (!document.is_object() || document.value("format", std::string{}) != "TerraPrefabUnboundedV1") return fail("prefab format must be TerraPrefabUnboundedV1");
+		// Source identifiers are kept as strings in JSON, since UUID precision must
+		// not depend on a JavaScript or JSON number implementation.
+		if (!document.contains("sourceId") || !document["sourceId"].is_string()) return fail("prefab requires a string sourceId");
+		if (!document.contains("objects") || !document["objects"].is_array()) return fail("prefab requires an objects array");
+		if (const auto overrides = document.find("overrides"); overrides != document.end() && !overrides->is_array()) return fail("prefab overrides must be an array");
+		return true;
+	}
+
 	namespace {
 		SceneDiagnostic MakePrefabDiagnostic(SceneDiagnosticSeverity severity, TerraEngine::UUID objectId, std::string message, std::string action)
 		{

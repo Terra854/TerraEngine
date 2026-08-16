@@ -57,6 +57,77 @@ namespace TerraEngine::Physics {
 			&& expiryTick >= tick && currentTick <= expiryTick && states != nullptr;
 	}
 
+	std::optional<PhysicsFrameDescriptor> PhysicsFrameRegistry::Create(
+		const PhysicsFrameCreateRequest& request) {
+		if(!request.frameId.IsValid() || !request.settings.Validate().accepted
+			|| !std::isfinite(request.maximumLocalMagnitudeMetres)
+			|| request.maximumLocalMagnitudeMetres <= 0.0) {
+			return std::nullopt;
+		}
+		const TerraEngine::Scene::WorldCoordinateResult normalizedOrigin =
+			TerraEngine::Scene::NormalizeWorldPosition(request.canonicalOrigin);
+		if(!normalizedOrigin.Succeeded()) return std::nullopt;
+
+		std::lock_guard<std::mutex> lock(mutex);
+		if(frames.contains(request.frameId.value)) return std::nullopt;
+		PhysicsGeneration& cursor = generationCursors[request.frameId.value];
+		++cursor;
+		if(cursor == 0U) ++cursor;
+		auto world = std::make_unique<PhysicsWorld>(PhysicsWorldId{request.frameId.value});
+		if(!world->Create(request.settings)) return std::nullopt;
+		PhysicsFrameDescriptor descriptor;
+		descriptor.frame = {request.frameId, cursor};
+		descriptor.world = world->Handle();
+		descriptor.canonicalOrigin = normalizedOrigin.position;
+		descriptor.maximumLocalMagnitudeMetres = request.maximumLocalMagnitudeMetres;
+		frames.emplace(request.frameId.value, FrameRecord{descriptor, std::move(world)});
+		return descriptor;
+	}
+
+	bool PhysicsFrameRegistry::Destroy(PhysicsFrameHandle frame) {
+		std::lock_guard<std::mutex> lock(mutex);
+		const auto found = frames.find(frame.frameId.value);
+		if(!frame.IsValid() || found == frames.end() || found->second.descriptor.frame != frame) {
+			return false;
+		}
+		// Teardown keeps the frame's provider-neutral handle lifecycle explicit;
+		// backend owners must destroy the matching provider world at this boundary.
+		(void)found->second.world->BeginStopping();
+		(void)found->second.world->BeginDraining();
+		(void)found->second.world->CompleteTeardown();
+		frames.erase(found);
+		return true;
+	}
+
+	std::optional<PhysicsFrameDescriptor> PhysicsFrameRegistry::Find(PhysicsFrameHandle frame) const {
+		std::lock_guard<std::mutex> lock(mutex);
+		const auto found = frames.find(frame.frameId.value);
+		if(!frame.IsValid() || found == frames.end() || found->second.descriptor.frame != frame) {
+			return std::nullopt;
+		}
+		return found->second.descriptor;
+	}
+
+	std::vector<PhysicsFrameDescriptor> PhysicsFrameRegistry::Descriptors() const {
+		std::lock_guard<std::mutex> lock(mutex);
+		std::vector<PhysicsFrameDescriptor> result;
+		result.reserve(frames.size());
+		for(const auto& [id, record] : frames) {
+			(void)id;
+			result.push_back(record.descriptor);
+		}
+		return result;
+	}
+
+	PhysicsWorld* PhysicsFrameRegistry::FindWorldForProtectedAccess(PhysicsFrameHandle frame) {
+		std::lock_guard<std::mutex> lock(mutex);
+		const auto found = frames.find(frame.frameId.value);
+		if(!frame.IsValid() || found == frames.end() || found->second.descriptor.frame != frame) {
+			return nullptr;
+		}
+		return found->second.world.get();
+	}
+
 	PhysicsWorld::PhysicsWorld(PhysicsWorldId requestedWorldId, PhysicsCommandQueueLimits commandLimits)
 		: worldId(requestedWorldId.IsValid() ? requestedWorldId : kPrimaryPhysicsWorldId)
 		, commandQueue(commandLimits) {

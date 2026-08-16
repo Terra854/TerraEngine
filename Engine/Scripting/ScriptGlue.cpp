@@ -4267,6 +4267,12 @@ extern "C" {
 
 	// Native_GetComponentProperty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_GetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* outValue, int type) {
+		// Transform is spatial authority and cannot pass through the lossy generic
+		// reflection bridge. Managed callers must use the canonical ABI below.
+		if (componentType == nullptr || propertyName == nullptr || outValue == nullptr
+			|| std::string_view(componentType) == Transform::kComponentName) {
+			return;
+		}
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		ObjectManager& objects = ObjectManager::instance();
 		const entt::entity entity = static_cast<entt::entity>(objectId);
@@ -4282,6 +4288,10 @@ extern "C" {
 
 	// Native_SetComponentProperty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_SetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* inValue, int type) {
+		if (componentType == nullptr || propertyName == nullptr || inValue == nullptr
+			|| std::string_view(componentType) == Transform::kComponentName) {
+			return;
+		}
 		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
 			if (componentType == nullptr || componentType[0] == '\0' || propertyName == nullptr || propertyName[0] == '\0' || inValue == nullptr) {
 				return;
@@ -4341,6 +4351,131 @@ extern "C" {
 				}
 			}
 		}
+	}
+
+	NativeRuntimeStatus Native_Transform_ReadWorldPose(uint32_t objectId, NativeWorldPose* pose) {
+		if (pose == nullptr) {
+			return NativeRuntimeStatus::InvalidArgument;
+		}
+
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		const std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId));
+		if (!object.has_value()) {
+			return NativeRuntimeStatus::NotFound;
+		}
+		const std::optional<TerraEngine::Scene::WorldPose> worldPose = objects.GetCanonicalWorldPose(*object);
+		if (!worldPose.has_value()) {
+			return NativeRuntimeStatus::NotFound;
+		}
+
+		pose->position = {
+			{worldPose->position.cell.x, worldPose->position.cell.y, worldPose->position.cell.z},
+			worldPose->position.offsetMetres.x,
+			worldPose->position.offsetMetres.y,
+			worldPose->position.offsetMetres.z};
+		pose->rotation = {worldPose->rotation.x, worldPose->rotation.y, worldPose->rotation.z, worldPose->rotation.w};
+		pose->scale = {worldPose->scale.x, worldPose->scale.y, worldPose->scale.z};
+		pose->transformRevision = worldPose->transformRevision;
+		pose->coordinateFrameRevision = worldPose->coordinateFrameRevision;
+		return NativeRuntimeStatus::Success;
+	}
+
+	NativeRuntimeStatus Native_Transform_SubmitWorldPose(uint32_t objectId, const NativeWorldPose* pose) {
+		if (pose == nullptr) {
+			return NativeRuntimeStatus::InvalidArgument;
+		}
+
+		TerraEngine::Scene::WorldPose requested;
+		requested.position = {
+			{pose->position.cell.x, pose->position.cell.y, pose->position.cell.z},
+			{pose->position.offsetX, pose->position.offsetY, pose->position.offsetZ}};
+		requested.rotation = {pose->rotation.w, pose->rotation.x, pose->rotation.y, pose->rotation.z};
+		requested.scale = {pose->scale.x, pose->scale.y, pose->scale.z};
+		requested.transformRevision = pose->transformRevision;
+		requested.coordinateFrameRevision = pose->coordinateFrameRevision;
+		const TerraEngine::Scene::WorldCoordinateResult normalized = TerraEngine::Scene::NormalizeWorldPosition(requested.position);
+		if (!normalized.Succeeded() || !(normalized.position == requested.position)
+			|| !std::isfinite(requested.scale.x) || !std::isfinite(requested.scale.y) || !std::isfinite(requested.scale.z)
+			|| !std::isfinite(requested.rotation.x) || !std::isfinite(requested.rotation.y)
+			|| !std::isfinite(requested.rotation.z) || !std::isfinite(requested.rotation.w)) {
+			return NativeRuntimeStatus::InvalidArgument;
+		}
+
+		TerraEngine::Scene::Transaction transaction;
+		TerraEngine::UUID objectUuid = TerraEngine::EMPTY_UUID;
+		{
+			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			ObjectManager& objects = ObjectManager::instance();
+			const std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId));
+			if (!object.has_value()) {
+				return NativeRuntimeStatus::NotFound;
+			}
+			objectUuid = objects.getUUID(*object);
+			TerraEngine::Scene::TransactionalMutationBuilder builder(
+				"managed-world-pose-" + TerraEngine::ToHexString(objectUuid),
+				TerraEngine::Scene::TransactionOrigin::ManagedCallback,
+				"managed-canonical-transform");
+			builder.SetWorldTransform(objects, objectUuid, requested);
+			transaction = std::move(builder).Build();
+		}
+
+		if (const auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
+			ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+			auto request = scriptingSystem.BuildScriptMutationRequest(
+				TerraEngine::Scene::SceneMutationOperation::SetWorldTransform,
+				*context,
+				objectUuid);
+			request.typedSpatialTransaction = std::move(transaction);
+			scriptingSystem.RecordScriptMutationRequest(std::move(request));
+		} else {
+			TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(std::move(transaction));
+		}
+		return NativeRuntimeStatus::Accepted;
+	}
+
+	NativeRuntimeStatus Native_Transform_TranslateWorld(uint32_t objectId, const NativeWorldDelta* delta) {
+		if (delta == nullptr) {
+			return NativeRuntimeStatus::InvalidArgument;
+		}
+		TerraEngine::Scene::WorldDelta requested{
+			{delta->cellDelta.x, delta->cellDelta.y, delta->cellDelta.z},
+			{delta->offsetX, delta->offsetY, delta->offsetZ}};
+		const TerraEngine::Scene::WorldDeltaResult normalized = TerraEngine::Scene::NormalizeWorldDelta(requested);
+		if (!normalized.Succeeded() || !(normalized.delta == requested)) {
+			return NativeRuntimeStatus::InvalidArgument;
+		}
+
+		TerraEngine::Scene::Transaction transaction;
+		TerraEngine::UUID objectUuid = TerraEngine::EMPTY_UUID;
+		{
+			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			ObjectManager& objects = ObjectManager::instance();
+			const std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId));
+			if (!object.has_value()) {
+				return NativeRuntimeStatus::NotFound;
+			}
+			objectUuid = objects.getUUID(*object);
+			TerraEngine::Scene::TransactionalMutationBuilder builder(
+				"managed-world-delta-" + TerraEngine::ToHexString(objectUuid),
+				TerraEngine::Scene::TransactionOrigin::ManagedCallback,
+				"managed-canonical-transform");
+			builder.TranslateWorld(objects, objectUuid, requested);
+			transaction = std::move(builder).Build();
+		}
+
+		if (const auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
+			ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+			auto request = scriptingSystem.BuildScriptMutationRequest(
+				TerraEngine::Scene::SceneMutationOperation::TranslateWorld,
+				*context,
+				objectUuid);
+			request.typedSpatialTransaction = std::move(transaction);
+			scriptingSystem.RecordScriptMutationRequest(std::move(request));
+		} else {
+			TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(std::move(transaction));
+		}
+		return NativeRuntimeStatus::Accepted;
 	}
 
 	const char* Native_Object_GetTag(uint32_t objectId) {

@@ -6,6 +6,8 @@
 
 #include "Scene/SceneManager.h"
 #include "Scene/BulkScenePublication.h"
+#include "Scene/WorldSpatialSystem.h"
+#include "Scene/WorldStreamingSystem.h"
 
 #include <algorithm>
 #include <cctype>
@@ -34,91 +36,9 @@
 #include "Components/LightComponent.h"
 #include "Components/MeshRenderComponent.h"
 #include "Components/SkyComponent.h"
-#include "Components/AnimatorComponent.h"
 
 namespace
 {
-	bool MigrateAnimatorPayloads(nlohmann::json& value)
-	{
-		if (value.is_array())
-		{
-			for (nlohmann::json& child : value)
-			{
-				if (!MigrateAnimatorPayloads(child)) return false;
-			}
-			return true;
-		}
-		if (!value.is_object()) return true;
-
-		if (auto components = value.find("components"); components != value.end() && components->is_object())
-		{
-			if (auto animator = components->find(std::string(AnimatorComponent::kComponentName)); animator != components->end())
-			{
-				if (!animator->is_object()) return false;
-				std::uint32_t schema = 0U;
-				try
-				{
-					schema = animator->value("schemaVersion", 0U);
-				}
-				catch (const nlohmann::json::exception&)
-				{
-					return false;
-				}
-				if (schema > TerraEngine::Animation::kAnimatorComponentSchemaVersion) return false;
-
-				// Version 0 used provisional names in early imported prefab fixtures.
-				// Copy only when the canonical field is absent so explicit new authoring
-				// always wins and the migration remains idempotent.
-				const auto renameIfAbsent = [&animator](std::string_view legacy, std::string_view canonical)
-				{
-					const std::string legacyKey(legacy);
-					const std::string canonicalKey(canonical);
-					if (!animator->contains(canonicalKey) && animator->contains(legacyKey))
-					{
-						(*animator)[canonicalKey] = (*animator)[legacyKey];
-					}
-					animator->erase(legacyKey);
-				};
-				renameIfAbsent("controller", "controllerAssetId");
-				renameIfAbsent("clipAssetId", "defaultClipAssetId");
-				renameIfAbsent("defaultClip", "defaultClipAssetId");
-				renameIfAbsent("skeletonAssetId", "skeletonOverrideAssetId");
-				renameIfAbsent("executionMode", "requestedMode");
-				renameIfAbsent("initialParametersJson", "initialParameters");
-				renameIfAbsent("parameters", "initialParameters");
-				if (!animator->contains("requestedMode"))
-				{
-					(*animator)["requestedMode"] = static_cast<std::uint32_t>(
-						TerraEngine::Animation::AnimationExecutionPolicy::Auto);
-				}
-				if (!animator->contains("defaultClipStartFrame"))
-				{
-					// Schema 2 adds a persistent direct-clip cursor. Older scenes
-					// retain their historical frame-zero behavior after migration.
-					(*animator)["defaultClipStartFrame"] = 0U;
-				}
-				if (!animator->contains("playAutomatically"))
-				{
-					// Schema 3 makes the historical runtime-autoplay behavior an
-					// explicit authored choice without changing older scenes.
-					(*animator)["playAutomatically"] = true;
-				}
-				if (auto parameters = animator->find("initialParameters"); parameters != animator->end() && parameters->is_object())
-				{
-					*parameters = parameters->dump();
-				}
-				(*animator)["schemaVersion"] = TerraEngine::Animation::kAnimatorComponentSchemaVersion;
-			}
-		}
-
-		for (auto& [key, child] : value.items())
-		{
-			if (key == "components") continue;
-			if (!MigrateAnimatorPayloads(child)) return false;
-		}
-		return true;
-	}
-
 	// LoadSceneRenderSettingsFromDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	SceneRenderSettings LoadSceneRenderSettingsFromDocument(const SceneDocument& document)
 	{
@@ -142,13 +62,33 @@ namespace
 		}
 	}
 
+	// Publish a bounded root pose through the canonical transform API. Scene
+	// helper objects are created on the protected thread, so they may write live
+	// state here; worker producers must use the deferred transaction queue.
+	bool SetRootWorldPose(
+		ObjectManager& objects,
+		const Object& object,
+		const glm::dvec3& offsetMetres,
+		const glm::quat& rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
+		const glm::vec3& scale = glm::vec3(1.0f))
+	{
+		TerraEngine::Scene::WorldPose pose = objects.GetCanonicalWorldPose(object)
+			.value_or(TerraEngine::Scene::WorldPose{});
+		pose.position = {};
+		pose.position.offsetMetres = offsetMetres;
+		pose.rotation = rotation;
+		pose.scale = scale;
+		return objects.SetCanonicalWorldPose(object, pose)
+			== TerraEngine::Scene::WorldCoordinateError::None;
+	}
+
 	// ConfigureValidationPointLight is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void ConfigureValidationPointLight(ObjectManager& objects, Object lightObject, const glm::vec3& position, const glm::vec3& color, float intensity, float range)
 	{
-		if (Transform* transform = objects.GetComponent<Transform>(lightObject))
+		if (!SetRootWorldPose(objects, lightObject, glm::dvec3(position)))
 		{
-			SetComponentProperty(*transform, "Position", position);
-			objects.MarkObjectTransformDirty(lightObject);
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Validation point-light canonical pose was rejected.");
 		}
 
 		if (LightComponent* light = objects.AddComponent<LightComponent>(lightObject))
@@ -283,15 +223,9 @@ TerraEngine::UUID SceneManager::LoadPreparedScene(
 		TERRAENGINE_LOG(LogLevel::Error, "Rejected an invalid prepared scene document for " << path);
 		return TerraEngine::EMPTY_UUID;
 	}
-	// Prepared packets may have been decoded by an older worker before the main
-	// thread learned the latest component schema. Migrate a private document copy
-	// and rebuild the value-only packet atomically so the two representations can
-	// never disagree during publication.
-	if (!MigrateAnimatorPayloads(sceneDocument))
-	{
-		TERRAENGINE_LOG(LogLevel::Error, "Rejected prepared scene with an unsupported AnimatorComponent schema: " << path);
-		return TerraEngine::EMPTY_UUID;
-	}
+	// Prepared packets are accepted only for the current authored contract. No
+	// migration can safely infer an unbounded coordinate from an old payload.
+	if (!Serializer::ValidateUnboundedSceneDocument(sceneDocument)) return TerraEngine::EMPTY_UUID;
 	preparedScene = Serializer::PrepareSceneDecode(sceneDocument);
 	if (!preparedScene.accepted || preparedScene.cancelled) return TerraEngine::EMPTY_UUID;
 	const std::filesystem::path resolvedPath = ResolveScenePath(path);
@@ -562,6 +496,22 @@ TerraEngine::Scene::SceneMutationBatchResult SceneManager::ApplySceneMutations(s
 	return result;
 }
 
+TerraEngine::Scene::BulkScenePublicationResult SceneManager::PublishPreparedRegionPacket(
+	const TerraEngine::Scene::BulkScenePublicationPacket& packet,
+	const std::function<bool()>& cancellationRequested)
+{
+	// Region decode happens off-thread, but exact UUID restoration is a live
+	// ObjectManager write. Reuse the one protected bulk path so a cancellation
+	// or malformed packet exposes neither partial objects nor partial identity.
+	TerraEngine::Scene::BulkScenePublicationResult result = TerraEngine::Scene::PublishBulkScenePacket(
+		packet, ObjectManager::instance(), cancellationRequested);
+	if (result.published)
+	{
+		ForceMarkActiveSceneDirty();
+	}
+	return result;
+}
+
 // SceneManager::SaveScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 {
@@ -591,6 +541,26 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 	}
 
 	nlohmann::json sceneJson;
+	// A save is captured against one published generation.  ObjectManager has no
+	// reader transaction, so detect any concurrent generation change and refuse
+	// to write a mixed-generation file rather than persisting torn world state.
+	const TerraEngine::Scene::PublishedSpatialSnapshot saveSnapshot = TerraEngine::Scene::WorldSpatialSystem::Instance().CurrentSnapshot();
+	const std::uint64_t saveSceneGeneration = ObjectManager::instance().GetSceneGeneration();
+	sceneJson["format"] = TerraEngine::Scene::kTerraSceneUnboundedFormat;
+	sceneJson["sourceSceneGeneration"] = saveSceneGeneration;
+	sceneJson["spatialPublicationGeneration"] = saveSnapshot.spatialGeneration;
+	const TerraEngine::Scene::PublishedWorldRegionResidency saveResidency = TerraEngine::Scene::WorldStreamingSystem::Instance().CurrentResidency();
+	sceneJson["residencyGeneration"] = saveResidency.generation;
+	sceneJson["regions"] = nlohmann::json::array();
+	for (const auto& [key, region] : saveResidency.residentRegions)
+	{
+		if (!region) continue;
+		TerraEngine::Scene::WorldRegionArtifactManifest manifest;
+		manifest.key = key;
+		manifest.contentHash = region->contentHash;
+		manifest.sourceGeneration = saveResidency.generation;
+		sceneJson["regions"].push_back(TerraEngine::Scene::SerializeWorldRegionArtifactManifest(manifest));
+	}
 	sceneJson["name"] = activeScene->name;
 	sceneJson["sceneSettings"] = Serializer::SerializeSceneRenderSettings(activeSceneRenderSettings);
 	sceneJson["objects"] = nlohmann::json::array();
@@ -609,6 +579,12 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 		{
 			sceneJson["objects"].push_back(Serializer::SerializeObject(*root));
 		}
+	}
+	if (ObjectManager::instance().GetSceneGeneration() != saveSceneGeneration
+		|| TerraEngine::Scene::WorldSpatialSystem::Instance().CurrentSnapshot().spatialGeneration != saveSnapshot.spatialGeneration)
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Scene changed while SaveScene captured generation " << saveSceneGeneration << "; no file was written.");
+		return false;
 	}
 
 	std::ofstream file(targetPath);
@@ -687,6 +663,7 @@ bool SceneManager::CreateSceneFile(const std::filesystem::path& path, std::strin
 		return false;
 	}
 	output << nlohmann::json{
+		{"format", TerraEngine::Scene::kTerraSceneUnboundedFormat},
 		{"name", name.empty() ? path.stem().string() : std::string(name)},
 		{"sceneSettings", nlohmann::json::object()},
 		{"objects", nlohmann::json::array()}
@@ -845,14 +822,13 @@ void SceneManager::SpawnLightStressTestGrid(std::uint32_t gridWidth, std::uint32
 		{
 			Object lightObject = objects.createObject("StressPointLight");
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (Transform* transform = objects.GetComponent<Transform>(lightObject))
+			const float worldX = (static_cast<float>(x) - centerX) * safeSpacing;
+			const float worldZ = (static_cast<float>(z) - centerZ) * safeSpacing;
+			const float worldY = 1.5f + std::sin(static_cast<float>(x + z) * 0.37f) * 0.5f;
+			if (!SetRootWorldPose(objects, lightObject, glm::dvec3(worldX, worldY, worldZ)))
 			{
-				const float worldX = (static_cast<float>(x) - centerX) * safeSpacing;
-				const float worldZ = (static_cast<float>(z) - centerZ) * safeSpacing;
-				const float worldY = 1.5f + std::sin(static_cast<float>(x + z) * 0.37f) * 0.5f;
-				SetComponentProperty(*transform, "Position", glm::vec3(worldX, worldY, worldZ));
-				objects.MarkObjectTransformDirty(lightObject);
+				TERRAENGINE_LOG(LogLevel::Error,
+					"Stress point-light canonical pose was rejected.");
 			}
 
 			if (LightComponent* light = objects.AddComponent<LightComponent>(lightObject))
@@ -974,14 +950,15 @@ std::unique_ptr<SceneDocument> SceneManager::LoadSceneDocument(const std::filesy
 		TERRAENGINE_LOG(LogLevel::Error, "Scene file failed JSON parse at byte " << parseError.byte << ": " << parseError.what() << " Path: " << path);
 		return nullptr;
 	}
-	// Migration runs on the parsed value before it enters either cache. A failure
-	// discards the private document and leaves the currently active scene intact.
-	if (!MigrateAnimatorPayloads(parsed))
+	std::string formatError;
+	const bool validFormat = type == SceneFileType::Prefab
+		? Serializer::ValidateUnboundedPrefabDocument(parsed, &formatError)
+		: Serializer::ValidateUnboundedSceneDocument(parsed, &formatError);
+	if (!validFormat)
 	{
-		TERRAENGINE_LOG(LogLevel::Error, "Scene contains an unsupported or malformed AnimatorComponent schema: " << path);
+		TERRAENGINE_LOG(LogLevel::Error, "Rejected legacy or malformed authored document " << path << ": " << formatError);
 		return nullptr;
 	}
-
 	auto document = std::make_unique<SceneDocument>();
 	document->sourcePath = path;
 	document->name = parsed.value("name", path.stem().string());
@@ -1184,14 +1161,11 @@ void SceneManager::SpawnPreviewObject(const TerraEngine::UUID& meshId, const Ter
 	Object previewObjectHandle = objects.createObject("GeneratedPreview");
 	previewObject = previewObjectHandle.EntityId();
 
-	// Initialize transform through the generic setter so locks are respected.
-	Transform* t = objects.GetComponent<Transform>(previewObjectHandle);
-	if (t)
+	// The default canonical pose is already identity, but publish it explicitly
+	// so this preview path exercises the same strict contract as authored scenes.
+	if (!SetRootWorldPose(objects, previewObjectHandle, glm::dvec3(0.0)))
 	{
-		SetComponentProperty(*t, "Position", glm::vec3(0.0f, 0.0f, 0.0f));
-		SetComponentProperty(*t, "Rotation", glm::quat(1.0f, 0.0f, 0.0f, 0.0f));
-		SetComponentProperty(*t, "Scale", glm::vec3(1.0f, 1.0f, 1.0f));
-		objects.MarkObjectTransformDirty(previewObjectHandle);
+		TERRAENGINE_LOG(LogLevel::Error, "Preview object canonical pose was rejected.");
 	}
 
 	// Attach a simple render binding component so downstream renderer work can
@@ -1211,15 +1185,11 @@ void SceneManager::SpawnPreviewCamera()
 	Object previewCameraHandle = objects.createObject("PreviewCamera");
 	previewCamera = previewCameraHandle.EntityId();
 
-	// Match the legacy hardcoded camera by positioning it three units away
-	// from the origin while keeping an identity rotation and uniform scale.
-	Transform* transform = objects.GetComponent<Transform>(previewCameraHandle);
-	if (transform)
+	// Position the preview camera three local metres from the exact origin while
+	// keeping identity rotation and scale in its canonical WorldPose.
+	if (!SetRootWorldPose(objects, previewCameraHandle, glm::dvec3(0.0, 0.0, 3.0)))
 	{
-		SetComponentProperty(*transform, "Position", glm::vec3(0.0f, 0.0f, 3.0f));
-		SetComponentProperty(*transform, "Rotation", glm::quat(1.0f, 0.0f, 0.0f, 0.0f));
-		SetComponentProperty(*transform, "Scale", glm::vec3(1.0f, 1.0f, 1.0f));
-		objects.MarkObjectTransformDirty(previewCameraHandle);
+		TERRAENGINE_LOG(LogLevel::Error, "Preview camera canonical pose was rejected.");
 	}
 
 	// Add a camera component with projection defaults that mirror the previous

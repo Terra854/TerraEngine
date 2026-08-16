@@ -121,7 +121,7 @@ namespace TerraEngine::Tests {
 		}
 
 		std::string MakeSceneDocument() {
-			return "{\n\t\"name\": \"Mounted Smoke Scene\",\n\t\"objects\": []\n}\n";
+			return "{\n\t\"format\": \"TerraSceneUnboundedV1\",\n\t\"name\": \"Mounted Smoke Scene\",\n\t\"objects\": []\n}\n";
 		}
 
 		void BootstrapExportRuntime(const ExportRuntimeWorkspace& workspace) {

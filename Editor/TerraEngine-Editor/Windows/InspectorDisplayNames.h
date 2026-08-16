@@ -109,6 +109,11 @@ namespace TerraEngine::Editor
 			if(propertyName == "farPlane") return "Far Clipping Plane";
 			if(propertyName == "up") return "Up Direction";
 		}
+		if(componentName == "Transform")
+		{
+			if(propertyName == "worldPose") return "Canonical World Pose";
+			if(propertyName == "parentRelativePose") return "Bounded Parent Transform Space";
+		}
 		return BuildInspectorIdentifierLabel(propertyName);
 	}
 }

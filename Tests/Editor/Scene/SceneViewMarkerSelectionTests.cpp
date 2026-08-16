@@ -49,8 +49,9 @@ namespace TerraEngine::EditorTests
 			pose.objectLifetimeGeneration = lifetime;
 			pose.transformRevision = componentGeneration;
 			pose.hierarchyGeneration = componentGeneration;
-			pose.worldPosition = position;
-			pose.worldBounds = TerraEngine::Scene::MakeAABB(
+			pose.canonicalPosition.offsetMetres = glm::dvec3(position);
+			pose.localPosition = position;
+			pose.localBounds = TerraEngine::Scene::MakeAABB(
 				position - glm::vec3(0.1f), position + glm::vec3(0.1f),
 				TerraEngine::Scene::SpatialBoundsSource::Authored);
 			(void)pipeline.UpsertPoseRecord(pose);
@@ -78,7 +79,7 @@ namespace TerraEngine::EditorTests
 			}
 			TerraEngine::Scene::SpatialQueryHit hit;
 			hit.objectId = pose->objectId;
-			hit.bounds = pose->worldBounds.value_or(TerraEngine::Scene::SpatialAABB{});
+			hit.bounds = pose->localBounds.value_or(TerraEngine::Scene::SpatialAABB{});
 			query.spatialCandidates.hits.push_back(std::move(hit));
 		}
 

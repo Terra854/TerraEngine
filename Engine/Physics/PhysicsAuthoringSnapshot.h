@@ -4,6 +4,7 @@
 #include "Components/Physics/ConstraintSetComponent.h"
 #include "PhysicsAuthoringGeneration.h"
 #include "PhysicsSettings.h"
+#include "Scene/WorldCoordinate.h"
 #include "Utilities/UUID.h"
 
 #include <array>
@@ -28,6 +29,10 @@ namespace TerraEngine::Physics {
 		TerraEngine::UUID parentObjectId = TerraEngine::EMPTY_UUID;
 		std::uint64_t parentObjectGeneration = 0U;
 		std::uint64_t parentTransformRevision = 0U;
+		// Canonical pose and residency are captured together at the protected scene
+		// boundary. The local PhysicsPose below is only a frame-local provider input.
+		Scene::WorldPose canonicalWorldPose;
+		PhysicsFrameMembership frameMembership;
 		PhysicsPose worldPose;
 		PhysicsPose parentWorldPose;
 		PhysicsVector3 parentWorldScale{1.0F, 1.0F, 1.0F};

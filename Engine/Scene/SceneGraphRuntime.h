@@ -12,9 +12,6 @@
 #include "Utilities/UUID.h"
 
 #include <entt/entt.hpp>
-#include <glm/mat4x4.hpp>
-#include <glm/gtc/quaternion.hpp>
-#include <glm/vec3.hpp>
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
@@ -26,6 +23,7 @@
 #include <vector>
 
 class ObjectManager;
+enum class ReparentMode : std::uint8_t;
 
 namespace TerraEngine::Scene {
 
@@ -64,12 +62,10 @@ namespace TerraEngine::Scene {
 		SceneObjectId parentId = TerraEngine::EMPTY_UUID;
 		std::vector<SceneObjectId> children;
 		std::string name;
-		glm::vec3 localPosition{0.0f, 0.0f, 0.0f};
-		glm::quat localRotation{1.0f, 0.0f, 0.0f, 0.0f};
-		glm::vec3 localScale{1.0f, 1.0f, 1.0f};
-		glm::vec3 worldPosition{0.0f, 0.0f, 0.0f};
-		glm::quat worldRotation{1.0f, 0.0f, 0.0f, 0.0f};
-		glm::vec3 worldScale{1.0f, 1.0f, 1.0f};
+		// Canonical world pose is the only absolute coordinate authority. Local
+		// hierarchy operations use the separate bounded transform space record.
+		WorldPose worldPose{};
+		ParentRelativePose parentRelativePose{};
 		bool active = true;
 		std::uint64_t transformRevision = 0;
 		std::uint64_t spatialRevision = 0;
@@ -80,6 +76,7 @@ namespace TerraEngine::Scene {
 		// The object-manager lifetime generation rejects packets prepared for a
 		// scene that was cleared or atomically replaced after this graph snapshot.
 		std::uint64_t sceneGeneration = 0;
+		std::uint64_t hierarchyRevision = 0;
 		std::vector<SceneObjectId> rootObjects;
 		std::unordered_map<SceneObjectId, SceneGraphObject> objects;
 		std::vector<SceneDiagnostic> diagnostics;
@@ -91,7 +88,7 @@ namespace TerraEngine::Scene {
 		SceneObjectId parentId = TerraEngine::EMPTY_UUID;
 		std::string name;
 		std::uint32_t depth = 0;
-		glm::vec3 worldPosition{0.0f, 0.0f, 0.0f};
+		WorldPosition worldPosition{};
 	};
 
 	struct SceneRuntimeSummary {
@@ -136,8 +133,7 @@ namespace TerraEngine::Scene {
 	struct SceneWorldTransformRecord {
 		SceneObjectId objectId = TerraEngine::EMPTY_UUID;
 		entt::entity entity = entt::null;
-		Transform worldTransform{};
-		glm::mat4 modelMatrix{1.0f};
+		WorldPose worldPose{};
 		std::uint32_t hierarchyLevel = 0;
 		std::uint64_t sourceRevision = 0;
 	};
@@ -157,8 +153,8 @@ namespace TerraEngine::Scene {
 		std::uint64_t workerTimeNs = 0;
 		double workerUtilization = 0.0;
 		std::vector<SceneWorldTransformRecord> records;
-		std::unordered_map<SceneObjectId, Transform> worldTransformsByObject;
-		std::unordered_map<entt::entity, Transform> worldTransformsByEntity;
+		std::unordered_map<SceneObjectId, WorldPose> worldTransformsByObject;
+		std::unordered_map<entt::entity, WorldPose> worldTransformsByEntity;
 		std::vector<SceneDiagnostic> diagnostics;
 	};
 
@@ -180,5 +176,6 @@ namespace TerraEngine::Scene {
 	TERRAENGINE_API std::uint64_t ObserveHierarchyRevision(const ObjectManager& objects);
 	TERRAENGINE_API std::uint64_t ObserveHierarchyRevision(const SceneGraph& graph);
 	TERRAENGINE_API bool ReparentPreserveWorld(ObjectManager& objects, entt::entity child, std::optional<entt::entity> parent);
+	TERRAENGINE_API bool ReparentWithMode(ObjectManager& objects, entt::entity child, std::optional<entt::entity> parent, ReparentMode mode);
 
 }

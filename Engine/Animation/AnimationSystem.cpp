@@ -550,26 +550,17 @@ namespace TerraEngine::Animation {
 			Object object,
 			AnimationTransform& output) noexcept
 		{
-			AnimationTransform world{};
-			bool captured = false;
-			std::size_t depth = 0U;
-			std::optional<Object> current = object;
-			while(current && depth++ < kMaximumAnimationExecutionJoints) {
-				const Transform* transform = objects.GetComponent<Transform>(*current);
-				if(transform == nullptr) return false;
-				AnimationTransform local;
-				local.translation = {transform->position.x, transform->position.y, transform->position.z};
-				local.rotation = {transform->rotation.x, transform->rotation.y,
-					transform->rotation.z, transform->rotation.w};
-				local.scale = {transform->scale.x, transform->scale.y, transform->scale.z};
-				if(!IsFinite(local) || !IsNormalized(local.rotation)) return false;
-				world = captured ? CombineTransform(local, world) : local;
-				captured = true;
-				current = objects.getParent(*current);
-			}
-			if(current.has_value()) return false;
-			output = world;
-			return captured;
+			// The propagated canonical pose is the sole world-space authority. The
+			// animation graph receives a bounded offset for local joint math only.
+			const std::optional<TerraEngine::Scene::WorldPose> pose = objects.GetCanonicalWorldPose(object);
+			if(!pose) return false;
+			output.translation = {
+				static_cast<float>(pose->position.offsetMetres.x),
+				static_cast<float>(pose->position.offsetMetres.y),
+				static_cast<float>(pose->position.offsetMetres.z)};
+			output.rotation = {pose->rotation.x, pose->rotation.y, pose->rotation.z, pose->rotation.w};
+			output.scale = {pose->scale.x, pose->scale.y, pose->scale.z};
+			return IsFinite(output) && IsNormalized(output.rotation);
 		}
 
 		AnimationPlaybackSnapshot MakePublishedPlaybackSnapshot(

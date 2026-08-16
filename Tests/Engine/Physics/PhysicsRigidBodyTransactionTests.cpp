@@ -17,6 +17,13 @@
 namespace TerraEngine::Tests {
 	using namespace TerraEngine::Physics;
 
+	static void SetTestPose(ObjectManager& objects, const Object& object, float x, float y, float z)
+	{
+		TerraEngine::Scene::WorldPose pose;
+		pose.position.offsetMetres = {x, y, z};
+		(void)objects.SetCanonicalWorldPose(object, pose);
+	}
+
 	void RegisterPhysicsRigidBodyTransactionTests(TestRegistry& registry)
 	{
 		registry.Add("Physics.RigidBodyTransaction.CancelledBodyCreationPublishesNothing", [](TestContext& context) {
@@ -137,7 +144,7 @@ namespace TerraEngine::Tests {
 
 			// A later Transform write must advance the observed component generation
 			// before the physics transaction reaches its protected commit boundary.
-			transform->position = {2.0F, 0.0F, 0.0F};
+			SetTestPose(objects, object, 2.0F, 0.0F, 0.0F);
 			objects.notifyObjectStructureChanged(object);
 			PhysicsTransactionRuntimeState runtime;
 			runtime.world = PhysicsWorldHandle{PhysicsWorldId{1U}, 3U};
@@ -147,7 +154,7 @@ namespace TerraEngine::Tests {
 
 			context.Expect(result.state == PhysicsTransactionState::Conflicted,
 				"A stale Transform observation must reject the mixed transaction before publication.");
-			context.Expect(transform->position == glm::vec3(2.0F, 0.0F, 0.0F),
+			context.Expect(objects.GetCanonicalWorldPose(object)->position.offsetMetres == glm::dvec3(2.0, 0.0, 0.0),
 				"Rejected Transform publication must preserve the newer authored pose.");
 			context.Expect(runtime.bodyGenerations == bodyGenerationsBefore && result.providerWorldUnchanged,
 				"A scene version conflict must roll back or avoid every provider-side staged mutation.");
@@ -205,7 +212,8 @@ namespace TerraEngine::Tests {
 					"Neither boundary may expose an early transform before the group-wide preflight succeeds.");
 				for(std::size_t index = 0U; index + 1U < targets.size(); ++index) {
 					const Transform* transform = objects.GetComponent<Transform>(targets[index]);
-					context.Expect(transform != nullptr && std::abs(transform->position.x) < 0.001F,
+					context.Expect(transform != nullptr && objects.GetCanonicalWorldPose(targets[index])
+						&& std::abs(objects.GetCanonicalWorldPose(targets[index])->position.offsetMetres.x) < 0.001,
 						"A rejected packet must leave every surviving target at its authored transform.");
 				}
 				objects.clear();

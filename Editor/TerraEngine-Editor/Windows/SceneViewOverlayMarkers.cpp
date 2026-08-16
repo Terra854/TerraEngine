@@ -92,7 +92,7 @@ namespace TerraEngine::Editor::SceneViewOverlay
 
 	bool ProjectMarkerToScreen(SceneObjectMarker& marker, const glm::mat4& viewProjection, const glm::vec2& viewportPos, const glm::vec2& viewportSize)
 	{
-		const glm::vec4 clip = viewProjection * glm::vec4(marker.worldPosition, 1.0f);
+		const glm::vec4 clip = viewProjection * glm::vec4(marker.referenceFrameLocalPosition, 1.0f);
 		if (clip.w <= 0.0001f || viewportSize.x <= 0.0f || viewportSize.y <= 0.0f)
 		{
 			marker.visible = false;

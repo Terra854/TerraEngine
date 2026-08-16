@@ -70,7 +70,7 @@ namespace TerraEngine::Renderer
 	class RenderWorldTransformCache
 	{
 	public:
-		const std::unordered_map<entt::entity, Transform>& Refresh(
+		const std::unordered_map<entt::entity, TerraEngine::Scene::WorldPose>& Refresh(
 			ObjectManager& objects,
 			RenderTransformCacheDiagnostics& diagnostics);
 		[[nodiscard]] const TerraEngine::Scene::SceneTransformPropagationResult& LatestPropagation() const;
@@ -78,7 +78,7 @@ namespace TerraEngine::Renderer
 
 	private:
 		TerraEngine::Scene::SceneGraph graph;
-		std::unordered_map<entt::entity, Transform> worldTransforms;
+		std::unordered_map<entt::entity, TerraEngine::Scene::WorldPose> worldTransforms;
 		bool initialized = false;
 		// Scene generation is independent from hierarchy revision. A bulk scene
 		// replacement can rebuild the same topology and therefore reuse the same
@@ -175,6 +175,10 @@ public:
 		GetConventionalVisibilityIdentityPickState(
 			RenderViewType viewType, const glm::uvec2& pixel,
 			bool dedicatedCaptureTarget = false) const;
+	// Editor tools compare asynchronous results against this immutable frame;
+	// they never infer origin or residency generations from live camera state.
+	std::optional<TerraEngine::Renderer::RenderReferenceFrame>
+		GetLatestRenderReferenceFrame(RenderViewType viewType) const;
 	// These validation controls are transient editor state. Hardware, Compute,
 	// and Indexed are real packet routes; hybrid deliberately keeps no fourth
 	// route and instead requests a mixed packet/material validation scene.
@@ -280,12 +284,14 @@ public:
 	struct OverrideCameraData {
 		glm::mat4 view;
 		glm::mat4 proj;
-		glm::vec3 pos;
+		TerraEngine::Scene::WorldPosition canonicalPosition{};
 		bool orthographic = false;
 	};
 	// SetSceneViewCamera is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	void SetSceneViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos, bool orthographic = false) {
-		sceneViewCamera = OverrideCameraData{view, proj, pos, orthographic};
+	void SetSceneViewCamera(const glm::mat4& view, const glm::mat4& proj,
+		const TerraEngine::Scene::WorldPosition& canonicalPosition,
+		bool orthographic = false) {
+		sceneViewCamera = OverrideCameraData{view, proj, canonicalPosition, orthographic};
 		hasSceneViewCamera = true;
 	}
 	// Record the editor panel dimensions before rendering so Vulkan allocates
@@ -307,8 +313,9 @@ public:
 	// SetEditorModeEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetEditorModeEnabled(bool enabled) { editorModeEnabled = enabled; }
 	// SetGameViewCamera is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	void SetGameViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos) {
-		OverrideCameraData camera{view, proj, pos, false};
+	void SetGameViewCamera(const glm::mat4& view, const glm::mat4& proj,
+		const TerraEngine::Scene::WorldPosition& canonicalPosition) {
+		OverrideCameraData camera{view, proj, canonicalPosition, false};
 		gameViewCameras.push_back(camera);
 		// Store a descriptor copy for MCP capture requests. This is read-only
 		// metadata, not gameplay camera ownership, so capture can inspect the
@@ -505,13 +512,18 @@ private:
 		std::uint64_t frameId = 0u;
 		std::uint64_t rendererGeneration = 0u;
 		std::uint64_t targetGeneration = 0u;
+		std::uint64_t originGeneration = 0u;
+		std::uint64_t spatialGeneration = 0u;
+		std::uint64_t residencyGeneration = 0u;
 		std::uint32_t outputId = 0u;
 		std::vector<TerraEngine::Renderer::ConventionalVisibilityIdentityRecord> table;
 
 		[[nodiscard]] bool IsUsable() const noexcept
 		{
 			return frameId != 0u && rendererGeneration != 0u
-				&& targetGeneration != 0u && !table.empty();
+				&& targetGeneration != 0u && originGeneration != 0U
+				&& spatialGeneration != 0U && residencyGeneration != 0U
+				&& !table.empty();
 		}
 	};
 	CaptureConventionalVisibilityIdentitySnapshot latestGameCaptureIdentitySnapshot;
@@ -606,7 +618,9 @@ private:
 	// World matrices are index-aligned with the stable membership order above.
 	// Skinning changes vertex data without changing object transforms, so a static
 	// crowd can reuse these matrices until the protected spatial revision changes.
-	std::vector<glm::mat4> renderableModelMatrixCache;
+	// Shared render preparation retains exact canonical poses. Float matrices are
+	// derived later for one explicit view reference frame.
+	std::vector<TerraEngine::Scene::WorldPose> renderableWorldPoseCache;
 	std::uint64_t renderableModelMatrixSceneGeneration = 0U;
 	std::uint64_t renderableModelMatrixSpatialRevision = 0U;
 	std::uint64_t renderableModelMatrixComponentRevision = 0U;

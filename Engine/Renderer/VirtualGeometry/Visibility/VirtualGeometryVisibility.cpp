@@ -17,6 +17,8 @@ namespace TerraEngine::Renderer
 		const VirtualGeometryVisibilityIdentity &identity, const VirtualGeometryVisibilityRequirements &requirements)
 	{
 		const std::uint32_t totalBits = requirements.primitiveBits + requirements.instanceBits + requirements.materialBits;
+		// A zero-bit or oversized identity cannot carry a view-qualified visible
+		// record, so fail closed before any reuse table sees the packed value.
 		if(totalBits == 0u || totalBits > 64u) return {};
 		const auto fits = [](std::uint32_t value, std::uint32_t bits) {
 			return bits != 0u && (bits >= 32u || value < (1u << bits));

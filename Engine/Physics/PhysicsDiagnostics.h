@@ -227,6 +227,19 @@ namespace TerraEngine::Physics {
 		bool currentHealthPublished = true;
 	};
 
+	// One entry per isolated local simulation island. Origins remain exact
+	// canonical coordinates, while the high-water value proves provider floats
+	// stayed inside that frame's configured local safety radius.
+	struct PhysicsFrameDiagnostics {
+		PhysicsFrameDescriptor descriptor;
+		std::uint64_t bodyCount = 0U;
+		std::uint64_t queryDepth = 0U;
+		std::uint64_t eventDepth = 0U;
+		std::uint64_t migrationAcceptedCount = 0U;
+		std::uint64_t migrationRolledBackCount = 0U;
+		double localMagnitudeHighWaterMetres = 0.0;
+	};
+
 	struct PhysicsDiagnosticsSnapshot {
 		PhysicsWorldHandle world;
 		PhysicsTick tick = 0;
@@ -245,6 +258,7 @@ namespace TerraEngine::Physics {
 		PhysicsStateStoreDiagnostics stateStore;
 		PhysicsPublicationDiagnostics publication;
 		PhysicsDiagnosticsRate rate;
+		std::shared_ptr<const std::vector<PhysicsFrameDiagnostics>> frames;
 		std::shared_ptr<const std::vector<PhysicsSchedulerDeclaration>> scheduler;
 	};
 

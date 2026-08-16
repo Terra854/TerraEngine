@@ -29,6 +29,7 @@ namespace TerraEngine::EditorTests {
 			objects.clear();
 			Object authored = objects.createObject("Generation Safe Play Snapshot");
 			const nlohmann::json authoredScene = {
+				{"format", TerraEngine::Scene::kTerraSceneUnboundedFormat},
 				{"name", "Generation Safe Play"},
 				{"objects", nlohmann::json::array({Serializer::SerializeObject(authored)})}
 			};
@@ -52,6 +53,7 @@ namespace TerraEngine::EditorTests {
 			objects.clear();
 			Object authored = objects.createObject("Authored Before Play");
 			const nlohmann::json authoredScene = {
+				{"format", TerraEngine::Scene::kTerraSceneUnboundedFormat},
 				{"name", "Play Mode Restore"},
 				{"objects", nlohmann::json::array({Serializer::SerializeObject(authored)})}
 			};

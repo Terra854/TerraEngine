@@ -1894,6 +1894,15 @@ namespace TerraEngine
 		internal static extern unsafe void Native_SetComponentProperty(uint objectId, string componentType, string propertyName, void* inValue, int type);
 
 		[DllImport("TerraEngine")]
+		internal static extern uint Native_Transform_ReadWorldPose(uint objectId, out NativeWorldPose pose);
+
+		[DllImport("TerraEngine")]
+		internal static extern uint Native_Transform_SubmitWorldPose(uint objectId, in NativeWorldPose pose);
+
+		[DllImport("TerraEngine")]
+		internal static extern uint Native_Transform_TranslateWorld(uint objectId, in NativeWorldDelta delta);
+
+		[DllImport("TerraEngine")]
 		internal static extern IntPtr Native_GetComponentStringProperty(uint objectId, string componentType, string propertyName);
 
 		[DllImport("TerraEngine")]

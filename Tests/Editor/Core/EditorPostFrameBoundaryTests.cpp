@@ -72,14 +72,15 @@ namespace TerraEngine::EditorTests
 			pose.objectLifetimeGeneration = 1u;
 			pose.transformRevision = 1u;
 			pose.hierarchyGeneration = 1u;
-			pose.worldPosition = glm::vec3(0.0f);
-			pose.worldBounds = TerraEngine::Scene::MakeAABB(glm::vec3(-0.1f), glm::vec3(0.1f), TerraEngine::Scene::SpatialBoundsSource::Authored);
+			pose.canonicalPosition = {};
+			pose.localPosition = glm::vec3(0.0f);
+			pose.localBounds = TerraEngine::Scene::MakeAABB(glm::vec3(-0.1f), glm::vec3(0.1f), TerraEngine::Scene::SpatialBoundsSource::Authored);
 			context.Expect(pipeline.UpsertPoseRecord(pose), "The fixture pose must publish before its viewport cache is tested.");
 
 			MarkerViewportQuery query = MakeBoundaryQuery(pipeline);
 			TerraEngine::Scene::SpatialQueryHit hit;
 			hit.objectId = staticInput.objectId;
-			hit.bounds = *pose.worldBounds;
+			hit.bounds = *pose.localBounds;
 			query.spatialCandidates.hits.push_back(hit);
 			const MarkerFrameResult first = pipeline.PrepareViewport(query, {});
 			context.Expect(!first.reusedViewportCache, "The first viewport preparation must populate the cache.");

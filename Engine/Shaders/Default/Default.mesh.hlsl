@@ -1,6 +1,7 @@
 #pragma pack_matrix(column_major)
 #include "DefaultDeformation.hlsli"
 #include "../Geometry/TerraGeometryContract.hlsli"
+#include "../Geometry/TerraWorldReferenceFrame.hlsli"
 #include "../VirtualGeometry/VirtualGeometryPackedVertex.hlsli"
 
 // Meshlet table emitted by the mesh compiler and mirrored from TerraEngineMeshFile.h.
@@ -1027,7 +1028,8 @@ void EmitMeshlet(
 			+ decodedVertex.normalizedTextureCoordinate
 				* decode.uvOffsetScale.zw;
 
-		const float4 worldPosition = mul(ActiveModelMatrix(), float4(deformedPosition, 1.0f));
+		const TerraTranslatedWorldPosition translatedPosition = TerraLocalizeModelPosition(ActiveModelMatrix(), deformedPosition);
+		const float4 worldPosition = float4(translatedPosition.value, 1.0f);
 
 		PSIn outVertex;
 		outVertex.position = mul(SceneUniforms.viewProj, worldPosition);
@@ -1165,7 +1167,8 @@ void EmitPageLocalMeshlet(
 			+ decodedVertex.normalizedTextureCoordinate
 				* decode.uvOffsetScale.zw;
 
-		const float4 worldPosition = mul(ActiveModelMatrix(), float4(position, 1.0f));
+		const TerraTranslatedWorldPosition translatedPosition = TerraLocalizeModelPosition(ActiveModelMatrix(), position);
+		const float4 worldPosition = float4(translatedPosition.value, 1.0f);
 
 		PSIn outVertex;
 		outVertex.position = mul(SceneUniforms.viewProj, worldPosition);

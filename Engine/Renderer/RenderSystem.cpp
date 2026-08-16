@@ -1697,7 +1697,7 @@ namespace
 	std::uint64_t BuildDrawCommandSignature(
 		const TerraEngine::UUID& meshId,
 		const TerraEngine::UUID& materialId,
-		const Transform& transform,
+		const TerraEngine::Scene::WorldPose& transform,
 		bool taskShaderCullingEnabled)
 	{
 		// The cache key covers every RenderItemRecord input that affects model-space
@@ -1706,7 +1706,8 @@ namespace
 		std::uint64_t seed = kRenderHashOffset;
 		HashCombine(seed, static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(meshId)));
 		HashCombine(seed, static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(materialId)));
-		HashVec3(seed, transform.position);
+		HashCombine(seed, static_cast<std::uint64_t>(
+			TerraEngine::Scene::WorldPositionHash{}(transform.position)));
 		HashQuat(seed, transform.rotation);
 		HashVec3(seed, transform.scale);
 		HashCombine(seed, taskShaderCullingEnabled ? 1u : 0u);
@@ -1729,13 +1730,16 @@ namespace
 			static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(objectId)));
 	}
 
-	std::uint64_t BuildLightCandidateSignature(const Transform& transform, const LightComponent& light)
+	std::uint64_t BuildLightCandidateSignature(
+		const TerraEngine::Scene::WorldPose& transform,
+		const LightComponent& light)
 	{
 		// The packed light cache key covers transform and every authoring field
 		// used to produce the GPULight payload. The renderer can reuse the
 		// previous candidate until one of those inputs changes.
 		std::uint64_t seed = kRenderHashOffset;
-		HashVec3(seed, transform.position);
+		HashCombine(seed, static_cast<std::uint64_t>(
+			TerraEngine::Scene::WorldPositionHash{}(transform.position)));
 		HashQuat(seed, transform.rotation);
 		HashCombine(seed, static_cast<std::uint64_t>(static_cast<std::uint32_t>(light.type)));
 		HashCombine(seed, static_cast<std::uint64_t>(static_cast<std::uint32_t>(light.unit)));
@@ -2007,14 +2011,14 @@ namespace
 		std::uint64_t settingsSignature,
 		std::uint64_t renderableWorldSignature,
 		std::uint64_t lightSetSignature,
-		const glm::vec3& cameraWorldPosition)
+		const glm::vec3& cameraLocalPosition)
 	{
 		std::uint64_t seed = kRenderHashOffset;
 		HashCombine(seed, sceneRevision);
 		HashCombine(seed, settingsSignature);
 		HashCombine(seed, renderableWorldSignature);
 		HashCombine(seed, lightSetSignature);
-		HashVec3(seed, cameraWorldPosition);
+		HashVec3(seed, cameraLocalPosition);
 		return seed;
 	}
 
@@ -2175,16 +2179,12 @@ namespace
 
 	Transform ReflectTransformComponent(const Transform& transform)
 	{
-		Transform reflectedTransform{};
 		// Render collection runs as protected main-thread work after scripting,
-		// so it can read the concrete component fields directly. Avoiding the
+		// so it copies the canonical pose and bounded parent-relative pose directly. Avoiding the
 		// reflection getter here removes repeated property lookup, variant
 		// wrapping, and shared-lock overhead from every visible object each
 		// frame.
-		reflectedTransform.position = transform.position;
-		reflectedTransform.rotation = transform.rotation;
-		reflectedTransform.scale = transform.scale;
-		return reflectedTransform;
+		return transform;
 	}
 
 	// SafeNormalizeDirection is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2226,7 +2226,7 @@ namespace
 	}
 
 	// ComputeDirectionalShadowCenter is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	glm::vec3 ComputeDirectionalShadowCenter(const GPULight& light, const glm::vec3& cameraWorldPosition)
+	glm::vec3 ComputeDirectionalShadowCenter(const GPULight& light, const glm::vec3& cameraLocalPosition)
 	{
 		const glm::vec3 lightDirection = SafeNormalizeShadowDirection(-glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
 		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
@@ -2236,22 +2236,22 @@ namespace
 
 		// Matching the Vulkan light-space snap keeps CPU culling aligned with the
 		// exact shadow map coverage that the GPU will render.
-		const glm::vec3 provisionalLightPosition = cameraWorldPosition - lightDirection * 60.0f;
-		const glm::mat4 provisionalView = glm::lookAtRH(provisionalLightPosition, cameraWorldPosition, worldUp);
-		glm::vec4 snappedCenterLightSpace = provisionalView * glm::vec4(cameraWorldPosition, 1.0f);
+		const glm::vec3 provisionalLightPosition = cameraLocalPosition - lightDirection * 60.0f;
+		const glm::mat4 provisionalView = glm::lookAtRH(provisionalLightPosition, cameraLocalPosition, worldUp);
+		glm::vec4 snappedCenterLightSpace = provisionalView * glm::vec4(cameraLocalPosition, 1.0f);
 		snappedCenterLightSpace.x = std::floor(snappedCenterLightSpace.x / texelWorldSize) * texelWorldSize;
 		snappedCenterLightSpace.y = std::floor(snappedCenterLightSpace.y / texelWorldSize) * texelWorldSize;
 		return glm::vec3(glm::inverse(provisionalView) * snappedCenterLightSpace);
 	}
 
 	// BuildDirectionalShadowViewProjection is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	glm::mat4 BuildDirectionalShadowViewProjection(const GPULight& light, const glm::vec3& cameraWorldPosition)
+	glm::mat4 BuildDirectionalShadowViewProjection(const GPULight& light, const glm::vec3& cameraLocalPosition)
 	{
 		const glm::vec3 lightDirection = SafeNormalizeShadowDirection(-glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
 		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
 			? glm::vec3(1.0f, 0.0f, 0.0f)
 			: glm::vec3(0.0f, 1.0f, 0.0f);
-		const glm::vec3 snappedCenterWorld = ComputeDirectionalShadowCenter(light, cameraWorldPosition);
+		const glm::vec3 snappedCenterWorld = ComputeDirectionalShadowCenter(light, cameraLocalPosition);
 		const glm::vec3 lightPosition = snappedCenterWorld - lightDirection * 60.0f;
 		glm::mat4 view = glm::lookAtRH(lightPosition, snappedCenterWorld, worldUp);
 		glm::mat4 projection = glm::orthoRH_ZO(-kDirectionalShadowExtent, kDirectionalShadowExtent, -kDirectionalShadowExtent, kDirectionalShadowExtent, kDirectionalShadowNear, kDirectionalShadowFar);
@@ -2835,6 +2835,9 @@ bool RenderSystem::RequestConventionalVisibilityIdentityPick(
 			requestSnapshot.rendererGeneration =
 				latestRendererRecoverySnapshot.renderSessionGeneration;
 			requestSnapshot.targetGeneration = targetMetadata->targetGeneration;
+			requestSnapshot.originGeneration = targetMetadata->originGeneration;
+			requestSnapshot.spatialGeneration = targetMetadata->spatialGeneration;
+			requestSnapshot.residencyGeneration = targetMetadata->residencyGeneration;
 			requestSnapshot.table =
 				latestRenderFrameSnapshot.conventionalVisibilityIdentityTable;
 			requestVisibilityRecords = viewType == RenderViewType::Scene
@@ -2844,12 +2847,18 @@ bool RenderSystem::RequestConventionalVisibilityIdentityPick(
 		if (!requestSnapshot.IsUsable()
 			|| requestSnapshot.frameId != targetMetadata->frameId
 			|| requestSnapshot.rendererGeneration != targetMetadata->rendererGeneration
-			|| requestSnapshot.targetGeneration != targetMetadata->targetGeneration) {
+			|| requestSnapshot.targetGeneration != targetMetadata->targetGeneration
+			|| requestSnapshot.originGeneration != targetMetadata->originGeneration
+			|| requestSnapshot.spatialGeneration != targetMetadata->spatialGeneration
+			|| requestSnapshot.residencyGeneration != targetMetadata->residencyGeneration) {
 			return false;
 		}
 		request.frameId = requestSnapshot.frameId;
 		request.rendererGeneration = requestSnapshot.rendererGeneration;
 		request.targetGeneration = requestSnapshot.targetGeneration;
+		request.originGeneration = requestSnapshot.originGeneration;
+		request.spatialGeneration = requestSnapshot.spatialGeneration;
+		request.residencyGeneration = requestSnapshot.residencyGeneration;
 	}
 	if (!rhi->QueueConventionalVisibilityIdentityReadback(request)) {
 		std::lock_guard<std::mutex> lock(statsMutex);
@@ -2937,6 +2946,23 @@ RenderSystem::GetConventionalVisibilityIdentityPickState(
 		? "No authoritative Vulkan identity result is available for this pixel."
 		: failureReason;
 	return state;
+}
+
+std::optional<TerraEngine::Renderer::RenderReferenceFrame>
+RenderSystem::GetLatestRenderReferenceFrame(RenderViewType viewType) const
+{
+	const std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> publication =
+		renderFramePublicationStore.Load();
+	if (!publication)
+		return std::nullopt;
+	const std::size_t count = std::min(publication->views.size(), publication->referenceFrames.size());
+	for (std::size_t index = 0U; index < count; ++index)
+	{
+		if (publication->views[index].viewType == viewType
+			&& publication->referenceFrames[index].IsValid())
+			return publication->referenceFrames[index];
+	}
+	return std::nullopt;
 }
 
 bool RenderSystem::SetVirtualGeometryValidationRouteOverride(
@@ -3529,7 +3555,7 @@ CompactedVisibilitySet RenderSystem::CompactVirtualGeometryClusterPackets(
 	return result;
 }
 
-const std::unordered_map<entt::entity, Transform>& TerraEngine::Renderer::RenderWorldTransformCache::Refresh(
+const std::unordered_map<entt::entity, TerraEngine::Scene::WorldPose>& TerraEngine::Renderer::RenderWorldTransformCache::Refresh(
 	ObjectManager& objects,
 	TerraEngine::Renderer::RenderTransformCacheDiagnostics& diagnostics)
 {
@@ -3613,9 +3639,8 @@ const std::unordered_map<entt::entity, Transform>& TerraEngine::Renderer::Render
 		// scheduling the dependency-aware world transform propagation.
 		const Transform* localTransform = objects.GetComponent<Transform>(*object);
 		const Transform local = localTransform != nullptr ? *localTransform : Transform{};
-		graphObject.localPosition = local.position;
-		graphObject.localRotation = local.rotation;
-		graphObject.localScale = local.scale;
+		graphObject.worldPose = local.worldPose;
+		graphObject.parentRelativePose = local.parentRelativePose;
 		graphObject.transformRevision = transformRevision;
 		graphObject.spatialRevision = objects.GetObjectSpatialRevision(*object);
 		changedObjectIds.push_back(objectId);
@@ -3661,14 +3686,7 @@ const std::unordered_map<entt::entity, Transform>& TerraEngine::Renderer::Render
 			}
 
 			TerraEngine::Scene::SceneGraphObject& object = graphObject->second;
-			Transform worldTransform{};
-			worldTransform.position = object.localPosition;
-			worldTransform.rotation = object.localRotation;
-			worldTransform.scale = object.localScale;
-			object.worldPosition = worldTransform.position;
-			object.worldRotation = worldTransform.rotation;
-			object.worldScale = worldTransform.scale;
-			worldTransforms[object.entity] = worldTransform;
+			worldTransforms[object.entity] = object.worldPose;
 		}
 
 		hierarchyLevelCount = latestPropagation.hierarchyLevelCount;
@@ -5380,7 +5398,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		loggedMissingCamera = false;
 	}
 
-	const std::unordered_map<entt::entity, Transform>* worldTransforms = nullptr;
+	const std::unordered_map<entt::entity, TerraEngine::Scene::WorldPose>* worldTransforms = nullptr;
 	const TerraEngine::Scene::SceneTransformPropagationResult* transformPropagation = nullptr;
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Resolve World Transforms", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -5392,15 +5410,25 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		}
 	}
 
-	auto makeModelMatrix = [](const Transform& transform) {
+	auto makeModelMatrix = [](const TerraEngine::Scene::WorldPose& pose,
+		const TerraEngine::Scene::WorldPosition& referenceOrigin) {
 		glm::mat4 model = glm::mat4(1.0f);
-		model = glm::translate(model, transform.position);
-		model = model * glm::mat4_cast(transform.rotation);
-		model = glm::scale(model, transform.scale);
+		const TerraEngine::Scene::WorldLocalizationResult localized =
+			TerraEngine::Scene::LocalizeWorldPosition(
+				pose.position,
+				referenceOrigin,
+				TerraEngine::Scene::kTransformSpaceMaximumRelativeRadiusMetres);
+		if (!localized.Succeeded())
+		{
+			return model;
+		}
+		model = glm::translate(model, glm::vec3(localized.offsetMetres));
+		model = model * glm::mat4_cast(pose.rotation);
+		model = glm::scale(model, pose.scale);
 		return model;
 	};
-	const Transform fallbackWorldTransform{};
-	auto getWorldTransform = [&](entt::entity entity) -> const Transform& {
+	const TerraEngine::Scene::WorldPose fallbackWorldTransform{};
+	auto getWorldTransform = [&](entt::entity entity) -> const TerraEngine::Scene::WorldPose& {
 		if (const auto transform = worldTransforms->find(entity); transform != worldTransforms->end())
 		{
 			return transform->second;
@@ -5609,6 +5637,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		hybridValidationSceneRequested = virtualGeometryHybridValidationSceneRequested;
 	}
 	bool hasPendingDedicatedCaptureRender = false;
+	TerraEngine::Scene::WorldPosition pendingDedicatedCaptureCanonicalOrigin{};
 	glm::uvec2 pendingDedicatedCaptureTargetSize = captureLimits.defaultWidth > 0u && captureLimits.defaultHeight > 0u
 		? glm::uvec2(captureLimits.defaultWidth, captureLimits.defaultHeight)
 		: glm::uvec2(1280u, 720u);
@@ -5623,6 +5652,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			{
 				hasPendingDedicatedCaptureRender = true;
 				pendingDedicatedCaptureTargetSize = captureRequest.targetSize;
+				pendingDedicatedCaptureCanonicalOrigin =
+					captureRequest.cameraCanonicalPosition;
 				break;
 			}
 		}
@@ -5738,6 +5769,11 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		TerraEngine::Renderer::RenderDiagnosticsRequested();
 	TerraEngine::Renderer::RenderFrameSnapshot renderFrameSnapshot =
 		std::move(recycledRenderFrameSnapshot);
+	// View requests are tiny compared with renderable records. Retain the prior
+	// qualified origins so motion matrices can be rebuilt without treating a
+	// canonical pose as a global float.
+	const std::vector<TerraEngine::Renderer::RenderFrameViewRequest>
+		previousViewRequests = renderFrameSnapshot.viewRequests;
 	const bool reuseRenderableRecords = renderableBindingsReusable
 		&& !detailedRenderableEvidenceRequested
 		&& renderFrameSnapshot.reusableRenderableRecords
@@ -5788,25 +5824,63 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	// frame must agree with it; querying recovery state per renderable could mix a
 	// pre-loss and post-loss generation in one snapshot.
 	const std::uint64_t snapshotRendererGeneration = protectedRendererGeneration;
+	const auto makeViewRequest = [&](RenderOutputKind outputKind,
+		RenderViewType viewType,
+		const glm::uvec2& targetSize,
+		std::uint32_t outputId,
+		const TerraEngine::Scene::WorldPosition& canonicalOrigin)
+	{
+		TerraEngine::Renderer::RenderFrameViewRequest request{};
+		request.outputKind = outputKind;
+		request.viewType = viewType;
+		request.targetSize = targetSize;
+		request.outputId = outputId;
+		request.viewGeneration = activeRenderFrameId;
+		request.referenceFrame.frameId = activeRenderFrameId;
+		request.referenceFrame.viewId = static_cast<std::uint64_t>(outputId);
+		request.referenceFrame.outputId = outputId;
+		request.referenceFrame.canonicalOrigin = canonicalOrigin;
+		request.referenceFrame.originGeneration = activeRenderFrameId;
+		request.referenceFrame.spatialGeneration =
+			std::max<std::uint64_t>(1U, capturedSpatialRevision);
+		request.referenceFrame.residencyGeneration = std::max<std::uint64_t>(
+			1U, capturedVirtualGeometryResidencyGeneration);
+		return request;
+	};
 	renderFrameSnapshot.viewRequests.reserve(3u + gameViewCameras.size() + cameras.size());
 	if (hasSceneViewCamera && (!editorModeEnabled || (sceneViewTargetSize.x > 0u && sceneViewTargetSize.y > 0u)))
 	{
-		renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::SceneView, RenderViewType::Scene, sceneViewTargetSize, 1u, activeRenderFrameId });
+		renderFrameSnapshot.viewRequests.push_back(makeViewRequest(
+			RenderOutputKind::SceneView, RenderViewType::Scene,
+			sceneViewTargetSize, 1U, sceneViewCamera.canonicalPosition));
 	}
 	if (!gameViewSuppressed && (!editorModeEnabled || (gameViewTargetSize.x > 0u && gameViewTargetSize.y > 0u)))
 	{
 		if (!gameViewCameras.empty())
 		{
-			renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::GameView, RenderViewType::Game, gameViewTargetSize, 2u, activeRenderFrameId });
+			renderFrameSnapshot.viewRequests.push_back(makeViewRequest(
+				RenderOutputKind::GameView, RenderViewType::Game,
+				gameViewTargetSize, 2U, gameViewCameras.front().canonicalPosition));
 		}
 		else if (!cameras.empty())
 		{
-			renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::MainRuntimeView, RenderViewType::Game, gameViewTargetSize, 2u, activeRenderFrameId });
+			TerraEngine::Scene::WorldPosition runtimeCameraPosition{};
+			const auto runtimeCamera = worldTransforms->find(cameras.front().entity);
+			if (runtimeCamera != worldTransforms->end())
+			{
+				runtimeCameraPosition = runtimeCamera->second.position;
+			}
+			renderFrameSnapshot.viewRequests.push_back(makeViewRequest(
+				RenderOutputKind::MainRuntimeView, RenderViewType::Game,
+				gameViewTargetSize, 2U, runtimeCameraPosition));
 		}
 	}
 	if (hasPendingDedicatedCaptureRender)
 	{
-		renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::OffscreenTexture, RenderViewType::Game, pendingDedicatedCaptureTargetSize, 9000u, activeRenderFrameId });
+		renderFrameSnapshot.viewRequests.push_back(makeViewRequest(
+			RenderOutputKind::OffscreenTexture, RenderViewType::Game,
+			pendingDedicatedCaptureTargetSize, 9000U,
+			pendingDedicatedCaptureCanonicalOrigin));
 	}
 	if (renderFrameSnapshot.viewRequests.empty())
 	{
@@ -6069,7 +6143,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		capturedComponentMutationRevision;
 	const std::uint64_t modelMatrixHierarchyRevision = capturedHierarchyRevision;
 	const bool reuseModelMatrixShape =
-		renderableModelMatrixCache.size() == renderables.size()
+		renderableWorldPoseCache.size() == renderables.size()
 		&& renderableModelMatrixSceneGeneration == modelMatrixSceneGeneration
 		&& renderableModelMatrixComponentRevision == modelMatrixComponentRevision
 		&& renderableModelMatrixHierarchyRevision == modelMatrixHierarchyRevision;
@@ -6100,18 +6174,18 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				{
 					const std::size_t index = static_cast<std::size_t>(
 						changedRenderable - renderables.begin());
-					renderableModelMatrixCache[index] = changedTransform.modelMatrix;
+					renderableWorldPoseCache[index] = changedTransform.worldPose;
 				}
 			}
 		}
 		else
 		{
-			renderableModelMatrixCache.resize(renderables.size(), glm::mat4(1.0f));
+			renderableWorldPoseCache.resize(renderables.size());
 			for(std::size_t index = 0U; index < renderables.size(); ++index)
 			{
 				const auto transformIt = worldTransforms->find(renderables[index].entity);
-				renderableModelMatrixCache[index] = transformIt != worldTransforms->end()
-					? makeModelMatrix(transformIt->second) : glm::mat4(1.0f);
+				renderableWorldPoseCache[index] = transformIt != worldTransforms->end()
+					? transformIt->second : TerraEngine::Scene::WorldPose{};
 			}
 		}
 		renderableModelMatrixSceneGeneration = modelMatrixSceneGeneration;
@@ -6162,13 +6236,15 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			entry.objectId,
 			entry.mesh->meshId,
 			entry.mesh->materialId,
-			renderableModelMatrixCache[renderableIndex],
+			glm::mat4(1.0F),
 			virtualRange,
 			entry.mesh->taskShaderCullingEnabled,
 			false
 		});
 		TerraEngine::Renderer::RenderFrameRenderableRecord& snapshotRenderable =
 			renderFrameSnapshot.renderables.back();
+		snapshotRenderable.canonicalWorldPose =
+			renderableWorldPoseCache[renderableIndex];
 		snapshotRenderable.transformGeneration = entry.transformGeneration;
 		// Static meshes do not carry an animation binding, but they still need a
 		// complete immutable resource lifetime before persistent topology can publish
@@ -6434,6 +6510,44 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			geometryRouteSelectionSignature ^=
 				static_cast<std::uint64_t>(route.selected) + 1u;
 			geometryRouteSelectionSignature *= 1099511628211ULL;
+		}
+	}
+	renderFrameSnapshot.viewTransforms.clear();
+	renderFrameSnapshot.viewTransforms.reserve(
+		renderFrameSnapshot.viewRequests.size()
+		* renderFrameSnapshot.renderables.size());
+	for (const TerraEngine::Renderer::RenderFrameViewRequest& viewRequest :
+		renderFrameSnapshot.viewRequests)
+	{
+		const TerraEngine::Renderer::RenderReferenceFrame* previousFrame = nullptr;
+		for (const TerraEngine::Renderer::RenderFrameViewRequest& previousRequest :
+			previousViewRequests)
+		{
+			if (previousRequest.referenceFrame.viewId
+					== viewRequest.referenceFrame.viewId
+				&& previousRequest.referenceFrame.outputId
+					== viewRequest.referenceFrame.outputId)
+			{
+				previousFrame = &previousRequest.referenceFrame;
+				break;
+			}
+		}
+		for (const TerraEngine::Renderer::RenderFrameRenderableRecord& renderable :
+			renderFrameSnapshot.renderables)
+		{
+			const TerraEngine::Renderer::RenderLocalizedPoseMatrices localized =
+				TerraEngine::Renderer::BuildLocalizedRenderPoseMatrices(
+					renderable.canonicalWorldPose,
+					viewRequest.referenceFrame, previousFrame);
+			TerraEngine::Renderer::RenderViewTransformRecord record{};
+			record.objectId = renderable.objectId;
+			record.viewId = viewRequest.referenceFrame.viewId;
+			record.originGeneration =
+				viewRequest.referenceFrame.originGeneration;
+			record.currentMatrix = localized.currentMatrix;
+			record.previousMatrix = localized.previousMatrix;
+			record.valid = localized.valid && !localized.staleReferenceFrame;
+			renderFrameSnapshot.viewTransforms.push_back(record);
 		}
 	}
 	{
@@ -7297,8 +7411,21 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	bool spatialIndexRebuilt = false;
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Refresh Spatial Index", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		TerraEngine::Scene::SpatialReferenceFrame spatialFrame{};
+		spatialFrame.generation = std::max<std::uint64_t>(1U, capturedSpatialRevision);
+		if (!renderables.empty())
+		{
+			spatialFrame.canonicalOrigin = getWorldTransform(renderables.front().entity).position;
+		}
+		const TerraEngine::Scene::SpatialReferenceFrame previousSpatialFrame =
+			spatialIndex.GetReferenceFrame();
+		const bool spatialFrameChanged =
+			previousSpatialFrame.generation != spatialFrame.generation
+			|| previousSpatialFrame.canonicalOrigin != spatialFrame.canonicalOrigin;
+		const bool spatialFrameAccepted = spatialIndex.SetReferenceFrame(spatialFrame);
 		if(!spatialPreparationCache.valid
-			|| spatialPreparationCache.signature != spatialPreparationSignature)
+			|| spatialPreparationCache.signature != spatialPreparationSignature
+			|| spatialFrameChanged || !spatialFrameAccepted)
 		{
 			spatialPreparationCache.records.clear();
 			spatialPreparationCache.renderableLookup.clear();
@@ -7311,8 +7438,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			{
 				const RenderableEntry& entry = renderables[index];
 				spatialPreparationCache.renderableLookup.emplace(entry.entity, index);
-				const Transform& transform = getWorldTransform(entry.entity);
-				const glm::mat4 model = makeModelMatrix(transform);
+				const TerraEngine::Scene::WorldPose& transform = getWorldTransform(entry.entity);
+				const glm::mat4 model = makeModelMatrix(transform, spatialFrame.canonicalOrigin);
 				const auto cachedBounds = localBoundsByMesh.find(entry.mesh->meshId);
 				const TerraEngine::Scene::SpatialAABB localBounds =
 					cachedBounds != localBoundsByMesh.end()
@@ -7326,13 +7453,23 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				// on the GPU later in the frame.
 				spatialPreparationCache.conservativeAnimationBounds[index] = spatialMesh != nullptr
 					&& spatialMesh->hasDeformablePayload && localBounds.IsUsable();
-				TerraEngine::Scene::SpatialAABB worldBounds = localBounds.IsUsable()
+				const TerraEngine::Scene::WorldLocalizationResult localizedOwner =
+					TerraEngine::Scene::LocalizeWorldPosition(
+						transform.position,
+						spatialFrame.canonicalOrigin,
+						spatialFrame.maximumLocalDistanceMetres);
+				TerraEngine::Scene::SpatialAABB localizedBounds = localBounds.IsUsable()
 					? TerraEngine::Scene::TransformAABB(localBounds, model)
-					: TerraEngine::Scene::MakeFallbackBounds(transform.position, 1.0f);
+					: (localizedOwner.Succeeded()
+						? TerraEngine::Scene::MakeFallbackBounds(
+							glm::vec3(localizedOwner.offsetMetres), 1.0f)
+						: TerraEngine::Scene::MakeInvalidBounds(
+							TerraEngine::Scene::SpatialBoundsSource::Fallback));
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (!worldBounds.IsUsable())
+				if (!localizedBounds.IsUsable() && localizedOwner.Succeeded())
 				{
-					worldBounds = TerraEngine::Scene::MakeFallbackBounds(transform.position, 1.0f);
+					localizedBounds = TerraEngine::Scene::MakeFallbackBounds(
+						glm::vec3(localizedOwner.offsetMetres), 1.0f);
 				}
 
 				TerraEngine::Scene::SpatialObjectRecord record{};
@@ -7341,7 +7478,9 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				record.active = true;
 				record.isStatic = entry.isStatic;
 				record.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable | TerraEngine::Scene::SpatialCategoryEditorSelectable;
-				record.worldBounds = worldBounds;
+				record.canonicalOwner = transform.position;
+				record.localBounds = localizedBounds;
+				record.frameGeneration = spatialFrame.generation;
 				record.revision = capturedSpatialRevision;
 				spatialPreparationCache.records.push_back(record);
 			}
@@ -7465,7 +7604,10 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				command.conventionalVisibilityIdentityIndex =
 					renderFrameSnapshot.renderables[index].conventionalVisibilityIdentityIndex;
 				command.taskShaderCullingEnabled = meshComp.taskShaderCullingEnabled;
-				command.modelMatrix = makeModelMatrix(getWorldTransform(entry.entity));
+				const TerraEngine::Scene::WorldPose& canonicalPose =
+					getWorldTransform(entry.entity);
+				command.canonicalWorldPose = canonicalPose;
+				command.modelMatrix = makeModelMatrix(canonicalPose, canonicalPose.position);
 				renderableDrawCommands[index] = command;
 
 				CachedDrawCommandRecord record{};
@@ -9011,8 +9153,30 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 
 	const std::uint64_t virtualGeometryResidencyGeneration =
 		capturedVirtualGeometryResidencyGeneration;
-	auto buildVisibleDrawCommands = [&](const glm::mat4& viewProjection, const glm::uvec2& targetSize, RenderOutputKind outputKind, RenderViewType viewType, std::uint32_t outputId, const glm::vec3& cameraPosition) {
+	auto buildVisibleDrawCommands = [&](const glm::mat4& viewProjection,
+		const glm::uvec2& targetSize,
+		RenderOutputKind outputKind,
+		RenderViewType viewType,
+		std::uint32_t outputId,
+		const glm::vec3& cameraPosition,
+		const TerraEngine::Renderer::RenderReferenceFrame& referenceFrame) {
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Visible Draw Commands Cache Lookup", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		const auto localizeViewCommands = [&](std::vector<RenderItemRecord>& commands)
+		{
+			commands.erase(std::remove_if(commands.begin(), commands.end(),
+				[&](RenderItemRecord& command)
+				{
+					const TerraEngine::Renderer::RenderLocalizedPoseMatrices localized =
+						TerraEngine::Renderer::BuildLocalizedRenderPoseMatrices(
+							command.canonicalWorldPose, referenceFrame);
+					if (!localized.valid)
+					{
+						return true;
+					}
+					command.modelMatrix = localized.currentMatrix;
+					return false;
+				}), commands.end());
+		};
 		VirtualGeometryQualityProfile viewVirtualGeometryQuality = renderFrameSnapshot.renderSettings.virtualGeometry;
 		viewVirtualGeometryQuality.debugVisualizationMode = GetVirtualGeometryDebugVisualizationMode(viewType, outputId);
 		viewVirtualGeometryQuality = SanitizeVirtualGeometryQualityProfile(viewVirtualGeometryQuality);
@@ -9034,6 +9198,11 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		// Slot lifetime keys and packet-template identities are topology-owned. A
 		// rebuilt allocator root must never reuse a retained view-selection payload.
 		HashCombine(signature, retainedRenderTopology.topology.generation);
+		HashCombine(signature, static_cast<std::uint64_t>(
+			TerraEngine::Scene::WorldPositionHash{}(referenceFrame.canonicalOrigin)));
+		HashCombine(signature, referenceFrame.originGeneration);
+		HashCombine(signature, referenceFrame.spatialGeneration);
+		HashCombine(signature, referenceFrame.residencyGeneration);
 		const auto materializeCachedCommands = [&](const VisibleCommandCacheRecord& record)
 		{
 			std::vector<RenderItemRecord> commands;
@@ -9064,6 +9233,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 					record.editorTints[index], command);
 				commands.push_back(std::move(command));
 			}
+			localizeViewCommands(commands);
 			return commands;
 		};
 		if (const auto existing = visibleCommandCache.recordsBySignature.find(signature); existing != visibleCommandCache.recordsBySignature.end())
@@ -9158,10 +9328,27 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		TerraEngine::Scene::SpatialQueryFilter filter{};
 		filter.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable;
 		filter.collectDiagnostics = TerraEngine::Renderer::RenderDiagnosticsRequested();
-		const TerraEngine::Scene::SpatialQueryResult query = spatialIndex.QueryFrustum(frustum, filter);
+		const TerraEngine::Scene::SpatialReferenceFrame indexedFrame =
+			spatialIndex.GetReferenceFrame();
 		VisibleCommandBuildResult result;
 		result.packetEvidenceSignature = signature;
-		result.commands = buildDrawCommandsFromCandidateIndices(collectCandidateIndices(query));
+		if (indexedFrame.canonicalOrigin == referenceFrame.canonicalOrigin
+			&& indexedFrame.generation == referenceFrame.spatialGeneration)
+		{
+			const TerraEngine::Scene::SpatialQueryResult query =
+				spatialIndex.QueryFrustum(frustum, filter);
+			result.commands = buildDrawCommandsFromCandidateIndices(
+				collectCandidateIndices(query));
+		}
+		else
+		{
+			// A view outside the currently materialized region must not reinterpret
+			// that region's float index. Until its resident region index is published,
+			// localize the immutable command snapshot and fail closed on out-of-range
+			// records; no live scene storage is scanned here.
+			result.commands = renderableDrawCommands;
+		}
+		localizeViewCommands(result.commands);
 		VirtualGeometryViewSelectionPacket selectionPacket = applyVirtualGeometrySelection(result.commands, viewProjection, outputKind, viewType, outputId, cameraPosition, targetSize, viewVirtualGeometryQuality);
 		const RenderViewType diagnosticsViewType = outputKind == RenderOutputKind::MainRuntimeView ? RenderViewType::ExportRuntime : viewType;
 		recordVirtualGeometryViewSelection(result.commands, selectionPacket.selectedClusters, selectionPacket.pageNeeds, selectionPacket.clusterPackets, selectionPacket.clusterBatches, selectionPacket.compactionResults, selectionPacket.fallbackCoverage, selectionPacket.lodTransitionStates, viewVirtualGeometryQuality.debugVisualizationMode, outputKind, diagnosticsViewType, targetSize, outputId, false, outputKind == RenderOutputKind::MainRuntimeView, nullptr, true, &selectionPacket);
@@ -9288,7 +9475,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		std::unordered_set<TerraEngine::UUID> aliveLightIds;
 		aliveLightIds.reserve(lights.size());
 
-		auto makeLightCandidate = [&](const LightEntry& entry, const Transform& transform) {
+		auto makeLightCandidate = [&](const LightEntry& entry,
+			const TerraEngine::Scene::WorldPose& transform) {
 			const LightComponent& light = entry.light;
 			const glm::quat normalizedRotation = glm::normalize(transform.rotation);
 			glm::vec3 direction = normalizedRotation * glm::vec3(0.0f, 0.0f, -1.0f);
@@ -9321,7 +9509,11 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			const float clampedOuterAngle = std::clamp(std::max(light.outerConeAngle, clampedInnerAngle + 0.001f), 0.0f, 1.57f);
 
 			GPULight gpuLight{};
-			gpuLight.positionAndType = glm::vec4(transform.position, static_cast<float>(static_cast<std::uint32_t>(light.type)));
+			// Translation is localized per view after light selection. Shared light
+			// candidates never store an absolute float position.
+			gpuLight.positionAndType = glm::vec4(
+				glm::vec3(0.0F),
+				static_cast<float>(static_cast<std::uint32_t>(light.type)));
 			gpuLight.directionAndRange = glm::vec4(direction, clampedRange);
 			gpuLight.colorAndIntensity = glm::vec4(
 				std::max(finalColor.x, 0.0f),
@@ -9342,6 +9534,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 
 			FrameLightCandidate candidate{};
 			candidate.lightId = entry.lightId;
+			candidate.canonicalPosition = transform.position;
 			candidate.gpuLight = gpuLight;
 			candidate.stabilityPreference = std::max(light.stabilityPreference, 0.0f);
 			candidate.candidateFlags = 0u;
@@ -9472,14 +9665,14 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		return commands;
 	};
 
-	auto buildShadowDrawLists = [&](const glm::vec3& cameraWorldPosition) {
+	auto buildShadowDrawLists = [&](const glm::vec3& cameraLocalPosition) {
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Shadow Draw Lists Cache Lookup", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const std::uint64_t signature = BuildShadowDrawListCacheKey(
 			renderFrameSnapshot.sceneRevision,
 			renderPreparationSettingsSignature,
 			renderableSubmissionSignature,
 			BuildLightSetSignature(packedLights),
-			cameraWorldPosition);
+			cameraLocalPosition);
 		if (const auto existing = shadowDrawListCache.recordsBySignature.find(signature); existing != shadowDrawListCache.recordsBySignature.end())
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -9545,7 +9738,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (lightType == static_cast<std::uint32_t>(LightType::Directional))
 					{
-						const glm::mat4 lightViewProjection = BuildDirectionalShadowViewProjection(candidate.gpuLight, cameraWorldPosition);
+						const glm::mat4 lightViewProjection = BuildDirectionalShadowViewProjection(candidate.gpuLight, cameraLocalPosition);
 						query = spatialIndex.QueryFrustum(TerraEngine::Scene::ExtractFrustum(lightViewProjection), filter);
 					}
 					// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -9818,9 +10011,10 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		// single ownership and avoids a crowd-sized copy at the queue boundary.
 		TerraEngine::Renderer::RenderViewPresentationInput input{};
 		input.output = output;
+		input.referenceFrame = frame.referenceFrame;
 		input.viewMatrix = frame.viewMatrix;
 		input.projectionMatrix = frame.projectionMatrix;
-		input.cameraWorldPosition = frame.cameraWorldPosition;
+		input.cameraLocalPosition = frame.cameraLocalPosition;
 		input.deltaTimeSeconds = frame.deltaTimeSeconds;
 		input.globalTaskShaderCullingEnabled = frame.globalTaskShaderCullingEnabled;
 		input.cullingEpsilon = frame.cullingEpsilon;
@@ -10461,6 +10655,38 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	};
 	const bool sceneViewTargetReady = !editorModeEnabled || (sceneViewTargetSize.x > 0u && sceneViewTargetSize.y > 0u);
 	const bool gameViewTargetReady = !editorModeEnabled || (gameViewTargetSize.x > 0u && gameViewTargetSize.y > 0u);
+	const auto findReferenceFrame = [&](RenderOutputKind outputKind,
+		std::uint32_t outputId)
+	{
+		for (const TerraEngine::Renderer::RenderFrameViewRequest& request :
+			renderFrameSnapshot.viewRequests)
+		{
+			if (request.outputKind == outputKind && request.outputId == outputId)
+			{
+				return request.referenceFrame;
+			}
+		}
+		return TerraEngine::Renderer::RenderReferenceFrame{};
+	};
+	const auto localizeFrameLights = [](RenderViewBuildState& view)
+	{
+		view.lightCandidates.erase(std::remove_if(
+			view.lightCandidates.begin(), view.lightCandidates.end(),
+			[&](FrameLightCandidate& candidate)
+			{
+				const TerraEngine::Renderer::RenderLocalizationResult localized =
+					TerraEngine::Renderer::LocalizeRenderPosition(
+						candidate.canonicalPosition, view.referenceFrame);
+				if (!localized.Succeeded())
+				{
+					return true;
+				}
+				candidate.gpuLight.positionAndType = glm::vec4(
+					localized.offsetMetres,
+					candidate.gpuLight.positionAndType.w);
+				return false;
+			}), view.lightCandidates.end());
+	};
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (hasSceneViewCamera && sceneViewTargetReady)
@@ -10472,7 +10698,10 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		RenderViewBuildState sceneFrameData = frameData;
 		sceneFrameData.viewMatrix = sceneViewCamera.view;
 		sceneFrameData.projectionMatrix = sceneViewCamera.proj;
-		sceneFrameData.cameraWorldPosition = sceneViewCamera.pos;
+		sceneFrameData.referenceFrame = findReferenceFrame(
+			RenderOutputKind::SceneView, 1U);
+		sceneFrameData.cameraLocalPosition = glm::vec3(0.0F);
+		localizeFrameLights(sceneFrameData);
 		sceneFrameData.sceneViewGridVisible = sceneViewGridVisible;
 		sceneFrameData.sceneViewOrthographic = sceneViewCamera.orthographic;
 		VisibleCommandBuildResult visibleCommands;
@@ -10482,7 +10711,11 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		std::uint64_t sceneGroupingCompatibilitySignature = 0U;
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Scene View Visible Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-			visibleCommands = buildVisibleDrawCommands(sceneFrameData.projectionMatrix * sceneFrameData.viewMatrix, sceneViewTargetSize, RenderOutputKind::SceneView, RenderViewType::Scene, 1u, sceneFrameData.cameraWorldPosition);
+			visibleCommands = buildVisibleDrawCommands(
+				sceneFrameData.projectionMatrix * sceneFrameData.viewMatrix,
+				sceneViewTargetSize, RenderOutputKind::SceneView,
+				RenderViewType::Scene, 1U, sceneFrameData.cameraLocalPosition,
+				sceneFrameData.referenceFrame);
 		}
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Materialize Scene View Commands",
@@ -10517,7 +10750,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		}
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Scene View Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-			sceneFrameData.shadowDrawLists = buildShadowDrawLists(sceneFrameData.cameraWorldPosition);
+			sceneFrameData.shadowDrawLists = buildShadowDrawLists(sceneFrameData.cameraLocalPosition);
 		}
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Queue Scene View Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -10547,7 +10780,10 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			gameFrameData.editorContextTint = glm::vec4(0.0f);
 			gameFrameData.viewMatrix = cam.view;
 			gameFrameData.projectionMatrix = cam.proj;
-			gameFrameData.cameraWorldPosition = cam.pos;
+			gameFrameData.referenceFrame = findReferenceFrame(
+				RenderOutputKind::GameView, 2U);
+			gameFrameData.cameraLocalPosition = glm::vec3(0.0F);
+			localizeFrameLights(gameFrameData);
 			VisibleCommandBuildResult visibleCommands;
 			std::vector<RenderItemRecord>& gameCommands =
 				lifetimeState->viewCommandScratch;
@@ -10555,7 +10791,11 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			std::uint64_t gameGroupingCompatibilitySignature = 0U;
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Game View Visible Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-				visibleCommands = buildVisibleDrawCommands(gameFrameData.projectionMatrix * gameFrameData.viewMatrix, gameViewTargetSize, RenderOutputKind::GameView, RenderViewType::Game, 2u, gameFrameData.cameraWorldPosition);
+				visibleCommands = buildVisibleDrawCommands(
+					gameFrameData.projectionMatrix * gameFrameData.viewMatrix,
+					gameViewTargetSize, RenderOutputKind::GameView,
+					RenderViewType::Game, 2U, gameFrameData.cameraLocalPosition,
+					gameFrameData.referenceFrame);
 			}
 			visibleCommands.PopulateSelectedItems(gameCommands, renderables,
 				renderableDrawCommands,
@@ -10573,7 +10813,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				visibleCommands.cacheHit);
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Game View Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-				gameFrameData.shadowDrawLists = buildShadowDrawLists(gameFrameData.cameraWorldPosition);
+				gameFrameData.shadowDrawLists = buildShadowDrawLists(gameFrameData.cameraLocalPosition);
 			}
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Queue Game View Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -10592,7 +10832,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		blankData.frameId = activeRenderFrameId;
 		blankData.viewMatrix = glm::mat4(1.0f);
 		blankData.projectionMatrix = glm::mat4(1.0f);
-		blankData.cameraWorldPosition = glm::vec3(0.0f);
+		blankData.cameraLocalPosition = glm::vec3(0.0f);
 		blankData.deltaTimeSeconds = deltaTime;
 		blankData.globalTaskShaderCullingEnabled = taskShaderCullingEnabled;
 			blankData.cullingEpsilon = 0.001f;
@@ -10625,7 +10865,9 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			const entt::entity cameraEntity = cameras[cameraIndex].entity;
 			const auto& camera = cameras[cameraIndex].camera;
 			const auto propagatedCameraTransform = worldTransforms->find(cameraEntity);
-			Transform cameraTransform = propagatedCameraTransform != worldTransforms->end() ? propagatedCameraTransform->second : Transform{};
+			TerraEngine::Scene::WorldPose cameraTransform =
+				propagatedCameraTransform != worldTransforms->end()
+					? propagatedCameraTransform->second : TerraEngine::Scene::WorldPose{};
 
 			// Normalize the rotation so derived direction vectors remain unit length
 			// even if authoring data drifts slightly off the identity quaternion.
@@ -10644,13 +10886,17 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			const float safeAspect = camera.aspectRatio > 0.0f ? camera.aspectRatio : 1.0f;
 			const float nearPlane = std::max(0.0001f, camera.nearPlane);
 			const float farPlane = std::max(nearPlane + 0.001f, camera.farPlane);
-			runtimeFrameData.viewMatrix = glm::lookAt(cameraTransform.position, cameraTransform.position + forward, glm::normalize(up));
+			runtimeFrameData.viewMatrix = glm::lookAt(
+				glm::vec3(0.0F), forward, glm::normalize(up));
 			// Use an explicit Vulkan depth projection. Relying on GLM's global
 			// depth macro is fragile because this file includes engine headers
 			// before local GLM configuration defines are visible.
 			runtimeFrameData.projectionMatrix = glm::perspectiveRH_ZO(glm::radians(clampedFov), safeAspect, nearPlane, farPlane);
 			runtimeFrameData.projectionMatrix[1][1] *= -1;
-			runtimeFrameData.cameraWorldPosition = cameraTransform.position;
+			runtimeFrameData.cameraLocalPosition = glm::vec3(0.0F);
+			runtimeFrameData.referenceFrame = findReferenceFrame(
+				RenderOutputKind::MainRuntimeView, 2U);
+			localizeFrameLights(runtimeFrameData);
 			// The editor publishes this descriptor through GameViewWindow. A
 			// packaged runtime has no dock, so publish the exact authored camera
 			// used for MainRuntimeView here as read-only capture metadata. This
@@ -10659,12 +10905,16 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			latestGameViewCamera = {
 				runtimeFrameData.viewMatrix,
 				runtimeFrameData.projectionMatrix,
-				runtimeFrameData.cameraWorldPosition,
+				cameraTransform.position,
 				false
 			};
 			hasLatestGameViewCamera = true;
 			runtimeFrameData.editorContextTint = glm::vec4(0.0f);
-			const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(runtimeFrameData.projectionMatrix * runtimeFrameData.viewMatrix, gameViewTargetSize, RenderOutputKind::MainRuntimeView, RenderViewType::Game, 2u, runtimeFrameData.cameraWorldPosition);
+			const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(
+				runtimeFrameData.projectionMatrix * runtimeFrameData.viewMatrix,
+				gameViewTargetSize, RenderOutputKind::MainRuntimeView,
+				RenderViewType::Game, 2U, runtimeFrameData.cameraLocalPosition,
+				runtimeFrameData.referenceFrame);
 			std::vector<RenderItemRecord>& runtimeCommands =
 				lifetimeState->viewCommandScratch;
 			runtimeCommands.clear();
@@ -10682,7 +10932,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				RenderViewType::Game, 2u,
 				runtimeGroupingCompatibilitySignature,
 				visibleCommands.cacheHit);
-			runtimeFrameData.shadowDrawLists = buildShadowDrawLists(runtimeFrameData.cameraWorldPosition);
+			runtimeFrameData.shadowDrawLists = buildShadowDrawLists(runtimeFrameData.cameraLocalPosition);
 
 			queuePreparedSubmission(std::move(runtimeFrameData),
 				makeOutputRequest(RenderOutputKind::MainRuntimeView,
@@ -10730,18 +10980,22 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		RenderViewBuildState captureFrameData = frameData;
 		captureFrameData.viewMatrix = captureRequest.viewMatrix;
 		captureFrameData.projectionMatrix = captureRequest.projectionMatrix;
-		captureFrameData.cameraWorldPosition = captureRequest.cameraWorldPosition;
+		captureFrameData.cameraLocalPosition = glm::vec3(0.0F);
 		captureFrameData.editorContextTint = glm::vec4(0.0f);
 		captureFrameData.uiBatch = {};
 		const std::uint32_t captureOutputId = captureRequest.viewType
 			== RenderViewType::Scene ? 9001U : 9000U;
+		captureFrameData.referenceFrame = findReferenceFrame(
+			RenderOutputKind::OffscreenTexture, captureOutputId);
+		localizeFrameLights(captureFrameData);
 		const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(
 			captureFrameData.projectionMatrix * captureFrameData.viewMatrix,
 			captureRequest.targetSize,
 			RenderOutputKind::OffscreenTexture,
 			captureRequest.viewType,
 			captureOutputId,
-			captureFrameData.cameraWorldPosition);
+			captureFrameData.cameraLocalPosition,
+			captureFrameData.referenceFrame);
 		std::vector<RenderItemRecord>& captureCommands =
 			lifetimeState->viewCommandScratch;
 		captureCommands.clear();
@@ -10759,7 +11013,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			captureOutputId,
 			captureGroupingCompatibilitySignature,
 			visibleCommands.cacheHit);
-		captureFrameData.shadowDrawLists = buildShadowDrawLists(captureFrameData.cameraWorldPosition);
+		captureFrameData.shadowDrawLists = buildShadowDrawLists(captureFrameData.cameraLocalPosition);
 
 		RenderOutputRequest captureOutputRequest = makeOutputRequest(
 			RenderOutputKind::OffscreenTexture, captureRequest.viewType,
@@ -10866,6 +11120,12 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 					prepared.selection.generation;
 				completedSceneCaptureIdentitySnapshot.rendererGeneration = snapshotRendererGeneration;
 				completedSceneCaptureIdentitySnapshot.outputId = prepared.output.outputId;
+				completedSceneCaptureIdentitySnapshot.originGeneration =
+					prepared.presentation.referenceFrame.originGeneration;
+				completedSceneCaptureIdentitySnapshot.spatialGeneration =
+					prepared.presentation.referenceFrame.spatialGeneration;
+				completedSceneCaptureIdentitySnapshot.residencyGeneration =
+					prepared.presentation.referenceFrame.residencyGeneration;
 				completedSceneCaptureIdentitySnapshot.table =
 					renderFrameSnapshot.conventionalVisibilityIdentityTable;
 				sceneCaptureProcessed = true;
@@ -10879,6 +11139,12 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 					prepared.selection.generation;
 				completedGameCaptureIdentitySnapshot.rendererGeneration = snapshotRendererGeneration;
 				completedGameCaptureIdentitySnapshot.outputId = prepared.output.outputId;
+				completedGameCaptureIdentitySnapshot.originGeneration =
+					prepared.presentation.referenceFrame.originGeneration;
+				completedGameCaptureIdentitySnapshot.spatialGeneration =
+					prepared.presentation.referenceFrame.spatialGeneration;
+				completedGameCaptureIdentitySnapshot.residencyGeneration =
+					prepared.presentation.referenceFrame.residencyGeneration;
 				completedGameCaptureIdentitySnapshot.table =
 					renderFrameSnapshot.conventionalVisibilityIdentityTable;
 				gameCaptureProcessed = true;
@@ -11006,6 +11272,13 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			previousPublication = renderFramePublicationStore.Load();
 		auto publication = std::make_shared<TerraEngine::Renderer::RenderFramePublication>();
 		publication->frameId = activeRenderFrameId;
+		publication->referenceFrames.reserve(
+			renderFrameSnapshot.viewRequests.size());
+		for (const TerraEngine::Renderer::RenderFrameViewRequest& request :
+			renderFrameSnapshot.viewRequests)
+		{
+			publication->referenceFrames.push_back(request.referenceFrame);
+		}
 		publication->rendererSessionGeneration = publicationSessionGeneration;
 		publication->backendResourceGeneration = protectedBackendResourceGeneration;
 		publication->sceneGeneration = protectedSceneGeneration;
@@ -11242,7 +11515,9 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
                                     renderFrameSnapshot
                                         .renderables[renderableIndex];
                             lane.key = persistent.key;
-                            lane.instance.modelMatrix = renderable.modelMatrix;
+							// Retained pages are view-independent. Per-view materialization
+							// replaces this neutral value before backend publication.
+							lane.instance.modelMatrix = glm::mat4(1.0F);
                             lane.previousModelMatrix =
                                 previousPage != nullptr &&
                                         laneIndex <
@@ -11252,7 +11527,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
                                         previousPage->lanes[laneIndex].occupied
                                     ? previousPage->lanes[laneIndex]
                                           .instance.modelMatrix
-                                    : renderable.modelMatrix;
+									: glm::mat4(1.0F);
                             lane.instance.objectIdentity = glm::uvec4(
                                 renderable.conventionalVisibilityIdentityIndex,
                                 0u, 0u, 0u);
@@ -11598,7 +11873,13 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			RenderViewType::Scene, true);
 		if(metadata && metadata->frameId == completedSceneCaptureIdentitySnapshot.frameId
 			&& metadata->rendererGeneration
-				== completedSceneCaptureIdentitySnapshot.rendererGeneration)
+				== completedSceneCaptureIdentitySnapshot.rendererGeneration
+			&& metadata->originGeneration
+				== completedSceneCaptureIdentitySnapshot.originGeneration
+			&& metadata->spatialGeneration
+				== completedSceneCaptureIdentitySnapshot.spatialGeneration
+			&& metadata->residencyGeneration
+				== completedSceneCaptureIdentitySnapshot.residencyGeneration)
 			completedSceneCaptureIdentitySnapshot.targetGeneration =
 				metadata->targetGeneration;
 	}
@@ -11608,7 +11889,13 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			RenderViewType::Game, true);
 		if(metadata && metadata->frameId == completedGameCaptureIdentitySnapshot.frameId
 			&& metadata->rendererGeneration
-				== completedGameCaptureIdentitySnapshot.rendererGeneration)
+				== completedGameCaptureIdentitySnapshot.rendererGeneration
+			&& metadata->originGeneration
+				== completedGameCaptureIdentitySnapshot.originGeneration
+			&& metadata->spatialGeneration
+				== completedGameCaptureIdentitySnapshot.spatialGeneration
+			&& metadata->residencyGeneration
+				== completedGameCaptureIdentitySnapshot.residencyGeneration)
 			completedGameCaptureIdentitySnapshot.targetGeneration =
 				metadata->targetGeneration;
 	}
@@ -12282,7 +12569,7 @@ void RenderSystem::Shutdown()
 	renderableMembershipHierarchyRevision = 0U;
 	renderableMembershipActiveRevision = 0U;
 	renderableMembershipPacketRevision = 0U;
-	renderableModelMatrixCache.clear();
+	renderableWorldPoseCache.clear();
 	renderableModelMatrixSceneGeneration = 0U;
 	renderableModelMatrixSpatialRevision = 0U;
 	renderableModelMatrixComponentRevision = 0U;
@@ -13475,7 +13762,7 @@ void RenderSystem::Clear()
 	renderableMembershipHierarchyRevision = 0U;
 	renderableMembershipActiveRevision = 0U;
 	renderableMembershipPacketRevision = 0U;
-	renderableModelMatrixCache.clear();
+	renderableWorldPoseCache.clear();
 	renderableModelMatrixSceneGeneration = 0U;
 	renderableModelMatrixSpatialRevision = 0U;
 	renderableModelMatrixComponentRevision = 0U;
@@ -13967,6 +14254,13 @@ void RenderSystem::DrainConventionalVisibilityIdentityReadbacks()
 			failureReason = "The Vulkan identity copy belonged to a resized or recreated target.";
 			continue;
 		}
+		if (result.originGeneration != resolvedSnapshot.originGeneration
+			|| result.spatialGeneration != resolvedSnapshot.spatialGeneration
+			|| result.residencyGeneration != resolvedSnapshot.residencyGeneration)
+		{
+			failureReason = "The Vulkan identity copy belonged to a stale origin, spatial, or residency generation.";
+			continue;
+		}
 		const std::vector<TerraEngine::Renderer::ConventionalVisibilityIdentityRecord>& identityTable =
 			resolvedSnapshot.table;
 		if (resolvedSnapshot.frameId != result.frameId || identityTable.empty()) {
@@ -13990,6 +14284,9 @@ void RenderSystem::DrainConventionalVisibilityIdentityReadbacks()
 		pick.meshId = identityRecord->meshId;
 		pick.materialId = identityRecord->materialId;
 		pick.frameId = result.frameId;
+		pick.originGeneration = result.originGeneration;
+		pick.spatialGeneration = result.spatialGeneration;
+		pick.residencyGeneration = result.residencyGeneration;
 		pick.meshletId = result.identity.x;
 		// VG packet metadata remains useful when it agrees with the same snapshot
 		// object. Direct meshes intentionally leave these fields at their neutral
@@ -14038,7 +14335,8 @@ TerraEngine::Renderer::RenderCaptureResult RenderSystem::CaptureImage(const Terr
 		// even when the Game View dock tab is occluded.
 		preparedRequest.viewMatrix = latestGameViewCamera.view;
 		preparedRequest.projectionMatrix = latestGameViewCamera.proj;
-		preparedRequest.cameraWorldPosition = latestGameViewCamera.pos;
+		preparedRequest.cameraCanonicalPosition =
+			latestGameViewCamera.canonicalPosition;
 		preparedRequest.dedicatedRenderTarget = true;
 	}
 	std::string errorMessage;

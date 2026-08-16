@@ -1661,3 +1661,25 @@ non-audible evidence, but it does not replace the deferred human audible lane.
 When a maintainer has an audible device, also run the installed editor audio
 scenarios documented in `Docs/Audio.md`. A muted/headless run must record that
 manual lane as deferred; it must never be reported as an audible pass.
+
+## Effectively unbounded scenes
+
+Configure and compile the strict canonical runtime from a clean checkout, then run the feature filter:
+
+```powershell
+cmake --fresh --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-UnboundedSceneValidation
+$env:TERRAENGINE_TEST_FILTER = 'WorldCoordinate;WorldSpatial;WorldStreaming;SpatialIndex;TransactionalMutation;SystemScheduler;RenderReferenceFrame;Physics.Frame;Unbounded'
+& .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+& .\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+Run the complete suite and mandatory install gate after the focused tests:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -j 1 --output-on-failure
+cmake --build --preset RelWithDebInfo --target install
+```
+
+The installed fixture manifests, workloads, tools, translated-world shaders, and runtime binaries must be validated from the runnable bundle at `out/build/RelWithDebInfo/Build`; source-tree fallbacks are failures. Use `specs/052-unbounded-scenes/quickstart.md` for the installed scenario matrix, five-run 5% timing gate, fixed-residency 2% memory gate, five-minute smoke, and six-hour release soak. Missing hardware or evidence is incomplete, never a zero-cost pass.

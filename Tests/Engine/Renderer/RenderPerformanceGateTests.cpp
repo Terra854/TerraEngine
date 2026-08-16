@@ -70,8 +70,10 @@ namespace TerraEngine::Tests {
 				objects.clear();
 				return;
 			}
-			parentTransform->position.x = 10.0f;
-			childTransform->position.x = 2.0f;
+			// Roots have no parent transform space. Their absolute translation must
+			// therefore be authored as a canonical WorldPose, not a local offset.
+			parentTransform->worldPose.position.offsetMetres.x = 10.0;
+			childTransform->parentRelativePose.translationMetres.x = 2.0;
 			objects.MarkObjectTransformDirty(parent);
 			objects.MarkObjectTransformDirty(child);
 
@@ -83,7 +85,7 @@ namespace TerraEngine::Tests {
 			context.Expect(initialChild != initialWorldTransforms.end(), "The first transform snapshot must include the child entity.");
 			if (initialChild != initialWorldTransforms.end())
 			{
-				context.Expect(initialChild->second.position.x == 12.0f, "The cache must preserve parent-relative world transform composition.");
+				context.Expect(initialChild->second.position.offsetMetres.x == 12.0, "The cache must preserve parent-relative world transform composition.");
 			}
 
 			cache.Refresh(objects, diagnostics);
@@ -103,8 +105,12 @@ namespace TerraEngine::Tests {
 					reflectedTransformWritten = transformAccess->second.entitySetter(
 						objects.getRegistry(),
 						child.EntityId(),
-						"Position",
-						glm::vec3{4.0F, childTransform->position.y, childTransform->position.z});
+						"ParentRelativePose",
+						TerraEngine::Scene::ParentRelativePose{
+							{ 4.0, childTransform->parentRelativePose.translationMetres.y, childTransform->parentRelativePose.translationMetres.z },
+							childTransform->parentRelativePose.rotation,
+							childTransform->parentRelativePose.scale,
+							childTransform->parentRelativePose.transformSpaceId });
 				}
 			}
 			const auto& changedWorldTransforms = cache.Refresh(objects, diagnostics);
@@ -116,10 +122,10 @@ namespace TerraEngine::Tests {
 			context.Expect(diagnostics.propagatedObjectCount >= 1U, "A local transform edit must propagate the changed branch before rendering.");
 			if (changedChild != changedWorldTransforms.end())
 			{
-				context.Expect(changedChild->second.position.x == 14.0f, "The cached child world transform must refresh after its authored local value changes.");
+				context.Expect(changedChild->second.position.offsetMetres.x == 14.0, "The cached child world transform must refresh after its authored local value changes.");
 			}
 
-			parentTransform->position.x = 20.0f;
+			parentTransform->worldPose.position.offsetMetres.x = 20.0;
 			objects.MarkObjectTransformDirty(parent);
 			const auto& parentChangedWorldTransforms = cache.Refresh(objects, diagnostics);
 			const auto descendantAfterParentMove = parentChangedWorldTransforms.find(child.EntityId());
@@ -128,7 +134,7 @@ namespace TerraEngine::Tests {
 			context.Expect(diagnostics.propagatedObjectCount >= 2U,
 				"A parent local edit must propagate through both the parent and its child.");
 			context.Expect(descendantAfterParentMove != parentChangedWorldTransforms.end()
-				&& descendantAfterParentMove->second.position.x == 24.0f,
+				&& descendantAfterParentMove->second.position.offsetMetres.x == 24.0,
 				"Moving a parent must update the cached world transform of its child while preserving the child's local offset.");
 
 			Object newRoot = objects.createObject("Transform Cache New Root");
@@ -142,16 +148,18 @@ namespace TerraEngine::Tests {
 			context.Expect(flatTransform != nullptr, "The flat cache fixture must expose a Transform component.");
 			if (flatTransform != nullptr)
 			{
-				flatTransform->position.x = 3.0f;
+				// A root has no parent-relative frame. Its standalone world position
+				// must stay in the exact canonical pose even on the flat fast path.
+				flatTransform->worldPose.position.offsetMetres.x = 3.0;
 				objects.MarkObjectTransformDirty(flatRoot);
 				cache.Clear();
 				cache.Refresh(objects, diagnostics);
-				flatTransform->position.x = 7.0f;
+				flatTransform->worldPose.position.offsetMetres.x = 7.0;
 				objects.MarkObjectTransformDirty(flatRoot);
 				const auto& flatWorldTransforms = cache.Refresh(objects, diagnostics);
 				const auto flatRootWorldTransform = flatWorldTransforms.find(flatRoot.EntityId());
 				context.Expect(diagnostics.usedFlatHierarchyFastPath, "Independent root bodies must bypass generic hierarchy propagation planning.");
-				context.Expect(flatRootWorldTransform != flatWorldTransforms.end() && flatRootWorldTransform->second.position.x == 7.0f, "The flat cache fast path must publish changed local transforms as world transforms.");
+				context.Expect(flatRootWorldTransform != flatWorldTransforms.end() && flatRootWorldTransform->second.position.offsetMetres.x == 7.0, "The flat cache fast path must publish changed local transforms as world transforms.");
 			}
 			objects.clear();
 
@@ -168,8 +176,8 @@ namespace TerraEngine::Tests {
 				"The first scene lifetime must expose both transforms.");
 			if(firstParentTransform != nullptr && firstChildTransform != nullptr)
 			{
-				firstParentTransform->position.x = 10.0f;
-				firstChildTransform->position.x = 2.0f;
+				firstParentTransform->worldPose.position.offsetMetres.x = 10.0;
+				firstChildTransform->parentRelativePose.translationMetres.x = 2.0;
 				objects.MarkObjectTransformDirty(firstParent);
 				objects.MarkObjectTransformDirty(firstChild);
 			}
@@ -189,8 +197,8 @@ namespace TerraEngine::Tests {
 				"The restored scene lifetime must expose both transforms.");
 			if(restoredParentTransform != nullptr && restoredChildTransform != nullptr)
 			{
-				restoredParentTransform->position.x = 100.0f;
-				restoredChildTransform->position.x = 3.0f;
+				restoredParentTransform->worldPose.position.offsetMetres.x = 100.0;
+				restoredChildTransform->parentRelativePose.translationMetres.x = 3.0;
 				objects.MarkObjectTransformDirty(restoredParent);
 				objects.MarkObjectTransformDirty(restoredChild);
 			}
@@ -204,7 +212,7 @@ namespace TerraEngine::Tests {
 			context.Expect(diagnostics.rebuiltForHierarchy,
 				"A new scene lifetime must rebuild cached transforms even when its hierarchy revision repeats.");
 			context.Expect(restoredChildWorld != restoredWorldTransforms.end()
-				&& restoredChildWorld->second.position.x == 103.0f,
+				&& restoredChildWorld->second.position.offsetMetres.x == 103.0,
 				"The rebuilt cache must publish transforms from the restored scene rather than stale pre-Play values.");
 			objects.clear();
 		});

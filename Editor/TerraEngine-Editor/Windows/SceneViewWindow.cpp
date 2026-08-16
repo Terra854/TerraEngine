@@ -28,6 +28,7 @@
 #include "Engine/Components/LightComponent.h"
 #include "Engine/Scene/SceneMutationQueue.h"
 #include "Engine/Scene/TransactionalMutation.h"
+#include "Engine/Scene/WorldStreamingSystem.h"
 #include "Engine/Animation/AnimationSystem.h"
 #include "Engine/Animation/Assets/SkeletonAsset.h"
 #include "Engine/Animation/Runtime/AnimationAttachments.h"
@@ -110,40 +111,42 @@ glm::vec3 CameraUpFromEuler(const glm::vec3& rotation)
 	return SafeNormalize(orientation * glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 }
 
-std::optional<glm::vec3> ComputeEntityWorldPosition(entt::entity entity)
+std::optional<TerraEngine::Scene::WorldPosition> ComputeEntityWorldPosition(entt::entity entity)
 {
-	// Walk parent transforms from the selected object to the root so Scene View
-	// focus uses the same world-space position that markers and gizmos display.
+	// ObjectManager owns propagated canonical poses. Reading that authoritative
+	// pose avoids rebuilding a lossy global matrix from parent-local transforms.
 	auto& objectManager = ObjectManager::instance();
-	auto& registry = objectManager.getRegistry();
-	if (!registry.valid(entity))
+	const std::optional<Object> object = objectManager.getObject(entity);
+	if (!object)
+	{
+		return std::nullopt;
+	}
+	const std::optional<TerraEngine::Scene::WorldPose> pose = objectManager.GetCanonicalWorldPose(*object);
+	return pose ? std::optional<TerraEngine::Scene::WorldPosition>(pose->position) : std::nullopt;
+}
+
+std::optional<glm::mat4> ComputeEntityLocalWorldMatrix(
+	entt::entity entity,
+	const TerraEngine::Scene::WorldPosition& frameOrigin)
+{
+	const std::optional<TerraEngine::Scene::WorldPosition> position = ComputeEntityWorldPosition(entity);
+	const std::optional<Object> object = ObjectManager::instance().getObject(entity);
+	if (!position || !object)
+	{
+		return std::nullopt;
+	}
+	const std::optional<TerraEngine::Scene::WorldPose> pose = ObjectManager::instance().GetCanonicalWorldPose(*object);
+	const TerraEngine::Scene::WorldLocalizationResult localized =
+		TerraEngine::Scene::LocalizeWorldPosition(*position, frameOrigin, TerraEngine::Scene::kTransformSpaceMaximumRelativeRadiusMetres);
+	if (!pose || !localized.Succeeded())
 	{
 		return std::nullopt;
 	}
 
-	glm::mat4 world(1.0f);
-	entt::entity current = entity;
-	while (current != entt::null && registry.valid(current))
-	{
-		if (const Transform* transform = registry.try_get<Transform>(current))
-		{
-			glm::mat4 local(1.0f);
-			local = glm::translate(local, transform->position);
-			local = local * glm::mat4_cast(transform->rotation);
-			local = glm::scale(local, transform->scale);
-			world = local * world;
-		}
-		if (const std::optional<Object> object = objectManager.getObject(current))
-		{
-			const std::optional<Object> parent = objectManager.getParent(*object);
-			current = parent ? parent->EntityId() : entt::null;
-		}
-		else
-		{
-			current = entt::null;
-		}
-	}
-	return glm::vec3(world[3]);
+	glm::mat4 local(1.0f);
+	local = glm::translate(local, glm::vec3(localized.offsetMetres));
+	local *= glm::mat4_cast(pose->rotation);
+	return glm::scale(local, pose->scale);
 }
 
 bool IsPointerInsideRect(const ImVec2& pointer, const ImVec2& min, const ImVec2& max)
@@ -203,14 +206,14 @@ const char* ProceduralGoalLabel(NativeAnimationProceduralGoalKind kind)
 	return "Procedural goal";
 }
 
-bool ProjectWorldPoint(
-	const glm::vec3& worldPosition,
+bool ProjectLocalPoint(
+	const glm::vec3& referenceFrameLocalPosition,
 	const glm::mat4& viewProjection,
 	const ImVec2& viewportPos,
 	const ImVec2& viewportSize,
 	ImVec2& outScreenPosition)
 {
-	const glm::vec4 clipPosition = viewProjection * glm::vec4(worldPosition, 1.0f);
+	const glm::vec4 clipPosition = viewProjection * glm::vec4(referenceFrameLocalPosition, 1.0f);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (clipPosition.w <= 0.0001f)
 	{
@@ -223,10 +226,10 @@ bool ProjectWorldPoint(
 	return true;
 }
 
-void DrawWorldLine(
+void DrawLocalLine(
 	ImDrawList* drawList,
-	const glm::vec3& worldStart,
-	const glm::vec3& worldEnd,
+	const glm::vec3& localStart,
+	const glm::vec3& localEnd,
 	const glm::mat4& viewProjection,
 	const ImVec2& viewportPos,
 	const ImVec2& viewportSize,
@@ -236,8 +239,8 @@ void DrawWorldLine(
 	ImVec2 screenStart{};
 	ImVec2 screenEnd{};
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!ProjectWorldPoint(worldStart, viewProjection, viewportPos, viewportSize, screenStart)
-		|| !ProjectWorldPoint(worldEnd, viewProjection, viewportPos, viewportSize, screenEnd))
+	if (!ProjectLocalPoint(localStart, viewProjection, viewportPos, viewportSize, screenStart)
+		|| !ProjectLocalPoint(localEnd, viewProjection, viewportPos, viewportSize, screenEnd))
 	{
 		return;
 	}
@@ -266,7 +269,7 @@ void DrawWorldCircle(
 		const float angleB = step * static_cast<float>(segment + 1);
 		const glm::vec3 pointA = center + (axisA * std::cos(angleA) + axisB * std::sin(angleA)) * radius;
 		const glm::vec3 pointB = center + (axisA * std::cos(angleB) + axisB * std::sin(angleB)) * radius;
-		DrawWorldLine(drawList, pointA, pointB, viewProjection, viewportPos, viewportSize, color, thickness);
+		DrawLocalLine(drawList, pointA, pointB, viewProjection, viewportPos, viewportSize, color, thickness);
 	}
 }
 
@@ -294,7 +297,7 @@ void DrawDirectionalLightGizmo(
 		const glm::vec3 ringDirection = SafeNormalize(right * std::cos(angle) + up * std::sin(angle), right);
 		const glm::vec3 rayStart = position + ringDirection * 0.42f;
 		const glm::vec3 rayEnd = position + ringDirection * 0.62f;
-		DrawWorldLine(drawList, rayStart, rayEnd, viewProjection, viewportPos, viewportSize, color, 1.5f);
+		DrawLocalLine(drawList, rayStart, rayEnd, viewProjection, viewportPos, viewportSize, color, 1.5f);
 	}
 
 	// Draw multiple parallel lines to communicate directional lighting.
@@ -304,7 +307,7 @@ void DrawDirectionalLightGizmo(
 		const float offset = (static_cast<float>(lineIndex) - 1.5f) * 0.2f;
 		const glm::vec3 start = position + up * offset;
 		const glm::vec3 end = start + direction * 2.4f;
-		DrawWorldLine(drawList, start, end, viewProjection, viewportPos, viewportSize, color, 1.8f);
+		DrawLocalLine(drawList, start, end, viewProjection, viewportPos, viewportSize, color, 1.8f);
 	}
 }
 
@@ -346,7 +349,7 @@ void DrawSpotLightGizmo(
 	const float outerRadius = std::tan(clampedOuter) * clampedRange;
 	const float innerRadius = std::tan(clampedInner) * clampedRange;
 
-	DrawWorldLine(drawList, position, coneCenter, viewProjection, viewportPos, viewportSize, color, 1.2f);
+	DrawLocalLine(drawList, position, coneCenter, viewProjection, viewportPos, viewportSize, color, 1.2f);
 	DrawWorldCircle(drawList, coneCenter, right, up, outerRadius, 48, viewProjection, viewportPos, viewportSize, color, 1.6f);
 	DrawWorldCircle(drawList, coneCenter, right, up, innerRadius, 36, viewProjection, viewportPos, viewportSize, color, 1.1f);
 
@@ -357,7 +360,7 @@ void DrawSpotLightGizmo(
 		const float angle = glm::two_pi<float>() * (static_cast<float>(edgeIndex) / 8.0f);
 		const glm::vec3 edgeDirection = SafeNormalize(right * std::cos(angle) + up * std::sin(angle), right);
 		const glm::vec3 outerPoint = coneCenter + edgeDirection * outerRadius;
-		DrawWorldLine(drawList, position, outerPoint, viewProjection, viewportPos, viewportSize, color, 1.2f);
+		DrawLocalLine(drawList, position, outerPoint, viewProjection, viewportPos, viewportSize, color, 1.2f);
 	}
 }
 
@@ -653,6 +656,13 @@ SceneViewWindow::SceneViewWindow(MainEditorSubsystem* owner)
 
 nlohmann::json SceneViewWindow::GetAutomationState() const
 {
+	const auto position = [](const TerraEngine::Scene::WorldPosition& value) {
+		return nlohmann::json{{"cell", {
+			{"x", TerraEngine::Scene::EncodeWorldCellAxis(value.cell.x)},
+			{"y", TerraEngine::Scene::EncodeWorldCellAxis(value.cell.y)},
+			{"z", TerraEngine::Scene::EncodeWorldCellAxis(value.cell.z)}}},
+			{"offsetMetres", {value.offsetMetres.x, value.offsetMetres.y, value.offsetMetres.z}}};
+	};
 	const auto vector = [](const glm::vec3& value) {
 		return nlohmann::json::array({value.x, value.y, value.z});
 	};
@@ -670,8 +680,8 @@ nlohmann::json SceneViewWindow::GetAutomationState() const
 
 	nlohmann::json state{
 		{"camera", {
-			{"position", vector(m_CameraPos)},
-			{"focus", vector(m_CameraFocusInitialized ? m_CameraFocus : ResolveSceneViewFocus(m_CameraFocusDistance))},
+			{"position", position(m_CameraPosition)},
+			{"focus", position(m_CameraFocusInitialized ? m_CameraFocus : ResolveSceneViewFocus(m_CameraFocusDistance))},
 			{"forward", vector(GetCameraForward())},
 			{"up", vector(GetCameraUp())},
 			{"fieldOfViewDegrees", m_Fov}
@@ -707,57 +717,43 @@ nlohmann::json SceneViewWindow::GetAutomationState() const
 	return state;
 }
 
-bool SceneViewWindow::SetAutomationCamera(const glm::vec3& position, const glm::vec3& focus, std::string& outError)
+bool SceneViewWindow::SetAutomationCamera(
+	const TerraEngine::Scene::WorldPosition& position,
+	const TerraEngine::Scene::WorldPosition& focus,
+	std::string& outError)
 {
-	if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z)
-		|| !std::isfinite(focus.x) || !std::isfinite(focus.y) || !std::isfinite(focus.z))
+	const TerraEngine::Scene::WorldCoordinateResult normalizedPosition =
+		TerraEngine::Scene::NormalizeWorldPosition(position);
+	const TerraEngine::Scene::WorldCoordinateResult normalizedFocus =
+		TerraEngine::Scene::NormalizeWorldPosition(focus);
+	if (!normalizedPosition.Succeeded() || !normalizedFocus.Succeeded())
 	{
-		outError = "Camera position and focus must contain finite numbers.";
+		outError = "Camera position and focus must be normalized canonical locations.";
 		return false;
 	}
-	const glm::vec3 direction = focus - position;
-	if (glm::length(direction) <= 0.0001f)
+	const TerraEngine::Scene::WorldLocalizationResult localizedFocus =
+		TerraEngine::Scene::LocalizeWorldPosition(normalizedFocus.position, normalizedPosition.position, 1000.0);
+	if (!localizedFocus.Succeeded() || glm::length(glm::vec3(localizedFocus.offsetMetres)) <= 0.0001f)
 	{
-		outError = "Camera position and focus must not be the same point.";
+		outError = "Camera focus must be a distinct location within the bounded Scene View working frame.";
 		return false;
 	}
-	const glm::vec2 euler = CameraEulerFromForward(direction);
+	const glm::vec2 euler = CameraEulerFromForward(glm::vec3(localizedFocus.offsetMetres));
 	m_CameraRot = glm::vec3(euler.x, euler.y, 0.0f);
-	m_CameraPos = position;
-	m_CameraFocus = focus;
-	m_CameraFocusDistance = std::clamp(glm::length(direction), 1.0f, 1000.0f);
+	m_CameraPosition = normalizedPosition.position;
+	m_CameraFocus = normalizedFocus.position;
+	m_CameraFocusDistance = std::clamp(glm::length(glm::vec3(localizedFocus.offsetMetres)), 1.0f, 1000.0f);
 	m_CameraFocusInitialized = true;
 	return true;
 }
 
 // Resolve the same parent-composed model matrix used by Scene View gizmos so
 // collider handles remain attached to nested objects instead of world origin.
-std::optional<glm::mat4> ComputeEntityWorldMatrix(entt::entity entity)
+std::optional<glm::mat4> ComputeEntityWorldMatrix(
+	entt::entity entity,
+	const TerraEngine::Scene::WorldPosition& frameOrigin)
 {
-	auto& objectManager = ObjectManager::instance();
-	auto& registry = objectManager.getRegistry();
-	if (!registry.valid(entity))
-	{
-		return std::nullopt;
-	}
-
-	glm::mat4 world(1.0f);
-	entt::entity current = entity;
-	while (current != entt::null && registry.valid(current))
-	{
-		if (const Transform* transform = registry.try_get<Transform>(current))
-		{
-			glm::mat4 local(1.0f);
-			local = glm::translate(local, transform->position);
-			local = local * glm::mat4_cast(transform->rotation);
-			local = glm::scale(local, transform->scale);
-			world = local * world;
-		}
-		const std::optional<Object> object = objectManager.getObject(current);
-		const std::optional<Object> parent = object ? objectManager.getParent(*object) : std::nullopt;
-		current = parent ? parent->EntityId() : entt::null;
-	}
-	return world;
+	return ComputeEntityLocalWorldMatrix(entity, frameOrigin);
 }
 
 glm::vec3 ToGlm(const TerraEngine::Physics::PhysicsVector3& value)
@@ -855,7 +851,7 @@ bool ApplyColliderHalfExtents(TerraEngine::Physics::ColliderRecord& record, cons
 
 bool SceneViewWindow::FrameAutomationObject(entt::entity entity, std::string& outError)
 {
-	const std::optional<glm::vec3> worldPosition = ComputeEntityWorldPosition(entity);
+	const std::optional<TerraEngine::Scene::WorldPosition> worldPosition = ComputeEntityWorldPosition(entity);
 	if (!worldPosition.has_value())
 	{
 		outError = "The requested Scene View target is stale or has no live transform context.";
@@ -914,7 +910,7 @@ bool SceneViewWindow::SetAutomationOrientation(std::string_view orientation, std
 		outError = "Orientation must be local, global, perspective, orthographic, front, back, left, right, top, or bottom.";
 		return false;
 	}
-	const glm::vec3 focus = ResolveSceneViewFocus(m_CameraFocusDistance);
+	const TerraEngine::Scene::WorldPosition focus = ResolveSceneViewFocus(m_CameraFocusDistance);
 	const float distance = ResolveSceneViewFocusDistance(focus, m_CameraFocusDistance);
 	const SceneOverlay::OrientationSnapEuler snapped = SceneOverlay::SnapEulerForAxis(axis);
 	m_CameraRot = glm::vec3(snapped.pitchRadians, snapped.yawRadians, 0.0f);
@@ -978,29 +974,17 @@ glm::vec3 SceneViewWindow::GetCameraUp() const
 	return CameraUpFromEuler(m_CameraRot);
 }
 
-glm::vec3 SceneViewWindow::ResolveSceneViewFocus(float fallbackDistance) const
+TerraEngine::Scene::WorldPosition SceneViewWindow::ResolveSceneViewFocus(float fallbackDistance) const
 {
 	if (m_Owner != nullptr)
 	{
 		const std::optional<entt::entity> selectedEntity = m_Owner->GetSelectedEntity();
 		if (selectedEntity.has_value())
 		{
-			if (const std::optional<glm::vec3> selectedWorldPosition = ComputeEntityWorldPosition(*selectedEntity))
+			if (const std::optional<TerraEngine::Scene::WorldPosition> selectedWorldPosition = ComputeEntityWorldPosition(*selectedEntity))
 			{
 				return *selectedWorldPosition;
 			}
-		}
-	}
-
-	const glm::vec3 forward = GetCameraForward();
-	if (std::abs(forward.y) > 0.0001f)
-	{
-		const float groundDistance = -m_CameraPos.y / forward.y;
-		if (std::isfinite(groundDistance) && groundDistance > 1.0f)
-		{
-			// When nothing is selected, the ground-plane intersection gives the
-			// artist a predictable Scene View pivot near the visible grid.
-			return m_CameraPos + forward * groundDistance;
 		}
 	}
 
@@ -1009,14 +993,27 @@ glm::vec3 SceneViewWindow::ResolveSceneViewFocus(float fallbackDistance) const
 		return m_CameraFocus;
 	}
 
-	return m_CameraPos + forward * std::max(fallbackDistance, 1.0f);
+	// No selection means the focus is a bounded forward displacement from the
+	// camera's canonical address; this is safe at every cell in the world.
+	const TerraEngine::Scene::WorldCoordinateResult result = TerraEngine::Scene::ApplyWorldDelta(
+		m_CameraPosition, {{}, glm::dvec3(GetCameraForward()) * static_cast<double>(std::max(fallbackDistance, 1.0f))});
+	return result.Succeeded() ? result.position : m_CameraPosition;
 }
 
-float SceneViewWindow::ResolveSceneViewFocusDistance(const glm::vec3& focus, float fallbackDistance) const
+float SceneViewWindow::ResolveSceneViewFocusDistance(
+	const TerraEngine::Scene::WorldPosition& focus,
+	float fallbackDistance) const
 {
+	const TerraEngine::Scene::WorldLocalizationResult localized = TerraEngine::Scene::LocalizeWorldPosition(
+		focus, m_CameraPosition, 1000.0);
+	if (!localized.Succeeded())
+	{
+		return std::clamp(fallbackDistance, 1.0f, 1000.0f);
+	}
 	const glm::vec3 forward = GetCameraForward();
-	const float alongView = glm::dot(focus - m_CameraPos, forward);
-	const float directDistance = glm::distance(m_CameraPos, focus);
+	const glm::vec3 localFocus(localized.offsetMetres);
+	const float alongView = glm::dot(localFocus, forward);
+	const float directDistance = glm::length(localFocus);
 	const float resolvedDistance = alongView > 1.0f ? alongView : directDistance;
 	if (!std::isfinite(resolvedDistance) || resolvedDistance <= 1.0f)
 	{
@@ -1025,12 +1022,38 @@ float SceneViewWindow::ResolveSceneViewFocusDistance(const glm::vec3& focus, flo
 	return std::clamp(resolvedDistance, 1.0f, 1000.0f);
 }
 
-void SceneViewWindow::RepositionCameraAroundFocus(const glm::vec3& focus, float distance)
+void SceneViewWindow::RepositionCameraAroundFocus(
+	const TerraEngine::Scene::WorldPosition& focus,
+	float distance)
 {
 	m_CameraFocus = focus;
 	m_CameraFocusDistance = std::clamp(distance, 1.0f, 1000.0f);
 	m_CameraFocusInitialized = true;
-	m_CameraPos = m_CameraFocus - GetCameraForward() * m_CameraFocusDistance;
+	const TerraEngine::Scene::WorldCoordinateResult position = TerraEngine::Scene::ApplyWorldDelta(
+		m_CameraFocus, {{}, -glm::dvec3(GetCameraForward()) * static_cast<double>(m_CameraFocusDistance)});
+	if (position.Succeeded())
+	{
+		m_CameraPosition = position.position;
+	}
+}
+
+glm::vec3 SceneViewWindow::LocalizeForCamera(const TerraEngine::Scene::WorldPosition& position) const
+{
+	const TerraEngine::Scene::WorldLocalizationResult localized = TerraEngine::Scene::LocalizeWorldPosition(
+		position, m_CameraPosition, TerraEngine::Scene::kTransformSpaceMaximumRelativeRadiusMetres);
+	return localized.Succeeded() ? glm::vec3(localized.offsetMetres) : glm::vec3(0.0f);
+}
+
+bool SceneViewWindow::TranslateCamera(const glm::dvec3& deltaMetres)
+{
+	const TerraEngine::Scene::WorldCoordinateResult moved = TerraEngine::Scene::ApplyWorldDelta(
+		m_CameraPosition, {{}, deltaMetres});
+	if (!moved.Succeeded())
+	{
+		return false;
+	}
+	m_CameraPosition = moved.position;
+	return true;
 }
 
 void SceneViewWindow::SetSceneViewProjectionMode(SceneOverlay::ProjectionMode projectionMode)
@@ -1045,7 +1068,7 @@ void SceneViewWindow::SetSceneViewProjectionMode(SceneOverlay::ProjectionMode pr
 		// Snapshot the perspective camera before orthographic setup changes its
 		// rotation or focus. Direct copies avoid normalization or reconstruction
 		// drift when the artist later returns to perspective mode.
-		m_PerspectiveCameraState.position = m_CameraPos;
+		m_PerspectiveCameraState.position = m_CameraPosition;
 		m_PerspectiveCameraState.rotation = m_CameraRot;
 		m_PerspectiveCameraState.focus = m_CameraFocus;
 		m_PerspectiveCameraState.focusDistance = m_CameraFocusDistance;
@@ -1054,7 +1077,7 @@ void SceneViewWindow::SetSceneViewProjectionMode(SceneOverlay::ProjectionMode pr
 		m_PerspectiveCameraState.valid = true;
 
 		const float fallbackDistance = m_CameraFocusInitialized ? m_CameraFocusDistance : 18.0f;
-		const glm::vec3 focus = ResolveSceneViewFocus(fallbackDistance);
+		const TerraEngine::Scene::WorldPosition focus = ResolveSceneViewFocus(fallbackDistance);
 		const float focusDistance = ResolveSceneViewFocusDistance(focus, fallbackDistance);
 		// Orthographic mode starts at the established readable isometric angle,
 		// but this temporary drafting pose no longer replaces the perspective pose.
@@ -1067,7 +1090,7 @@ void SceneViewWindow::SetSceneViewProjectionMode(SceneOverlay::ProjectionMode pr
 	{
 		// Restore all perspective composition values exactly. Orthographic panning,
 		// orbiting, and zooming remain isolated in the state being left behind.
-		m_CameraPos = m_PerspectiveCameraState.position;
+		m_CameraPosition = m_PerspectiveCameraState.position;
 		m_CameraRot = m_PerspectiveCameraState.rotation;
 		m_CameraFocus = m_PerspectiveCameraState.focus;
 		m_CameraFocusDistance = m_PerspectiveCameraState.focusDistance;
@@ -1114,7 +1137,7 @@ bool SceneViewWindow::HandleSceneViewScrollZoom()
 	}
 
 	const float fallbackDistance = m_CameraFocusInitialized ? m_CameraFocusDistance : 18.0f;
-	const glm::vec3 focus = ResolveSceneViewFocus(fallbackDistance);
+	const TerraEngine::Scene::WorldPosition focus = ResolveSceneViewFocus(fallbackDistance);
 	const float focusDistance = ResolveSceneViewFocusDistance(focus, fallbackDistance);
 	const float newDistance = std::clamp(focusDistance * std::pow(0.86f, wheel), 0.5f, 1000.0f);
 	// Perspective wheel input dollies around the same focus used by panning and
@@ -1145,7 +1168,7 @@ bool SceneViewWindow::HandleSceneViewPan(const ImVec2& viewportSize)
 	}
 
 	const float fallbackDistance = m_CameraFocusInitialized ? m_CameraFocusDistance : 18.0f;
-	const glm::vec3 focus = ResolveSceneViewFocus(fallbackDistance);
+	const TerraEngine::Scene::WorldPosition focus = ResolveSceneViewFocus(fallbackDistance);
 	const float focusDistance = ResolveSceneViewFocusDistance(focus, fallbackDistance);
 	const float visibleHeight = m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic
 		? std::max(1.0f, m_OrthographicHeight)
@@ -1159,14 +1182,18 @@ bool SceneViewWindow::HandleSceneViewPan(const ImVec2& viewportSize)
 	const glm::vec3 panWorldDelta =
 		-right * (mouseDelta.x * worldUnitsPerPixel)
 		+ up * (mouseDelta.y * worldUnitsPerPixel);
-	m_CameraPos += panWorldDelta;
+	(void)TranslateCamera(glm::dvec3(panWorldDelta));
 	if (m_CameraFocusInitialized)
 	{
-		m_CameraFocus += panWorldDelta;
+		const TerraEngine::Scene::WorldCoordinateResult movedFocus = TerraEngine::Scene::ApplyWorldDelta(
+			m_CameraFocus, {{}, glm::dvec3(panWorldDelta)});
+		if (movedFocus.Succeeded()) m_CameraFocus = movedFocus.position;
 	}
 	else
 	{
-		m_CameraFocus = focus + panWorldDelta;
+		const TerraEngine::Scene::WorldCoordinateResult movedFocus = TerraEngine::Scene::ApplyWorldDelta(
+			focus, {{}, glm::dvec3(panWorldDelta)});
+		m_CameraFocus = movedFocus.Succeeded() ? movedFocus.position : focus;
 		m_CameraFocusDistance = focusDistance;
 		m_CameraFocusInitialized = true;
 	}
@@ -1375,6 +1402,7 @@ void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, c
 	// here would make editor overlays disagree with renderer worker preparation.
 	const std::shared_ptr<const TerraEngine::Scene::SceneChangePacket> changePacket =
 		objectManager.LoadPublishedSceneChangePacketShared();
+	const bool markerFrameChanged = m_MarkerWorkingFrameOrigin != m_CameraPosition;
 	const bool rebuildAll = m_MarkerSceneGeneration != objectManager.GetSceneGeneration()
 		|| m_MarkerSpatialSnapshot == nullptr
 		|| categoryVisibilityChanged;
@@ -1432,31 +1460,29 @@ void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, c
 		m_MarkerSpatialRecords.erase(removed);
 	}
 
-	auto computeWorldMatrix = [&](entt::entity entity) {
-		glm::mat4 world(1.0f);
-		entt::entity current = entity;
-		std::size_t remaining = registry.storage<entt::entity>().size();
-		while (current != entt::null && registry.valid(current) && remaining-- > 0u)
-		{
-			if (const Transform* transform = registry.try_get<Transform>(current))
-			{
-				glm::mat4 local(1.0f);
-				local = glm::translate(local, transform->position);
-				local = local * glm::mat4_cast(transform->rotation);
-				local = glm::scale(local, transform->scale);
-				world = local * world;
-			}
-			const std::optional<Object> object = objectManager.getObject(current);
-			const std::optional<Object> parent = object ? objectManager.getParent(*object) : std::nullopt;
-			current = parent ? parent->EntityId() : entt::null;
-		}
-		return world;
-	};
-
 	std::vector<TerraEngine::UUID> refreshIds = invalidation.staticRefreshObjectIds;
 	refreshIds.insert(refreshIds.end(), invalidation.poseRefreshObjectIds.begin(), invalidation.poseRefreshObjectIds.end());
 	sortUnique(refreshIds);
-	bool spatialSnapshotDirty = !invalidation.removedObjectIds.empty() || rebuildAll;
+	bool spatialSnapshotDirty = !invalidation.removedObjectIds.empty() || rebuildAll || markerFrameChanged;
+	if (markerFrameChanged && !rebuildAll)
+	{
+		// Camera motion changes only the bounded presentation frame. Re-localize
+		// immutable marker poses instead of scanning live Transform components.
+		for (auto& [objectId, spatial] : m_MarkerSpatialRecords)
+		{
+			const SceneOverlay::MarkerPoseRecord* previous = m_MarkerPipeline.FindPoseRecord(objectId);
+			if (previous == nullptr)
+			{
+				continue;
+			}
+			SceneOverlay::MarkerPoseRecord localized = *previous;
+			localized.localPosition = LocalizeForCamera(localized.canonicalPosition);
+			localized.localBounds = TerraEngine::Scene::MakeFallbackBounds(localized.localPosition, 0.5f);
+			(void)m_MarkerPipeline.UpsertPoseRecord(localized);
+			spatial.canonicalOwner = localized.canonicalPosition;
+			spatial.localBounds = *localized.localBounds;
+		}
+	}
 	for (const TerraEngine::UUID& objectId : refreshIds)
 	{
 		const std::optional<Object> object = objectManager.getObject(objectId);
@@ -1495,9 +1521,15 @@ void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, c
 			continue;
 		}
 
-		const glm::mat4 worldMatrix = computeWorldMatrix(entity);
-		const glm::vec3 worldPosition = glm::vec3(worldMatrix[3]);
-		const TerraEngine::Scene::SpatialAABB bounds = TerraEngine::Scene::MakeFallbackBounds(worldPosition, 0.5f);
+		const std::optional<TerraEngine::Scene::WorldPose> canonicalPose = objectManager.GetCanonicalWorldPose(*object);
+		if (!canonicalPose)
+		{
+			m_MarkerSpatialRecords.erase(objectId);
+			spatialSnapshotDirty = true;
+			continue;
+		}
+		const glm::vec3 localPosition = LocalizeForCamera(canonicalPose->position);
+		const TerraEngine::Scene::SpatialAABB bounds = TerraEngine::Scene::MakeFallbackBounds(localPosition, 0.5f);
 		if (std::binary_search(invalidation.staticRefreshObjectIds.begin(), invalidation.staticRefreshObjectIds.end(), objectId, [](const TerraEngine::UUID& left, const TerraEngine::UUID& right) {
 			return TerraEngine::ToHexString(left) < TerraEngine::ToHexString(right);
 		}))
@@ -1524,8 +1556,9 @@ void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, c
 			pose.transformRevision = objectManager.GetObjectTransformRevision(*object);
 			pose.hierarchyGeneration = objectManager.GetHierarchyRevision();
 			pose.parentWorldGeneration = objectManager.GetHierarchyRevision();
-			pose.worldPosition = worldPosition;
-			pose.worldBounds = bounds;
+			pose.canonicalPosition = canonicalPose->position;
+			pose.localPosition = localPosition;
+			pose.localBounds = bounds;
 			pose.movable = !objectManager.isObjectStatic(*object);
 			if (const std::optional<Object> parent = objectManager.getParent(*object))
 			{
@@ -1542,7 +1575,11 @@ void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, c
 		spatial.active = objectManager.isObjectActiveInHierarchy(*object);
 		spatial.isStatic = objectManager.isObjectStatic(*object);
 		spatial.categoryMask = TerraEngine::Scene::SpatialCategoryEditorSelectable;
-		spatial.worldBounds = bounds;
+		spatial.canonicalOwner = canonicalPose->position;
+		spatial.localBounds = bounds;
+		// The immutable selectable index is rebuilt as one Scene View frame;
+		// its default local reference frame has generation zero by contract.
+		spatial.frameGeneration = 0u;
 		spatial.revision = objectManager.GetObjectSpatialRevision(*object);
 		m_MarkerSpatialRecords[objectId] = spatial;
 		spatialSnapshotDirty = true;
@@ -1561,6 +1598,7 @@ void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, c
 		(void)m_MarkerSpatialPublisher.Publish(std::move(records), m_MarkerSpatialPublicationGeneration);
 		m_MarkerSpatialSnapshot = m_MarkerSpatialPublisher.Latest();
 	}
+	m_MarkerWorkingFrameOrigin = m_CameraPosition;
 
 	const glm::ivec4 viewport(
 		static_cast<int>(std::lround(viewportPos.x)),
@@ -1591,7 +1629,7 @@ void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, c
 	query.viewportKey.markerSpatialPublicationGeneration = m_MarkerSpatialSnapshot ? m_MarkerSpatialSnapshot->Generation() : 0u;
 	query.viewportKey.markerPosePublicationGeneration = m_MarkerPipeline.PosePublicationGeneration();
 	query.viewProjection = viewProjection;
-	query.cameraPosition = m_CameraPos;
+	query.cameraPosition = glm::vec3(0.0f);
 	query.viewportPosition = glm::vec2(viewportPos.x, viewportPos.y);
 	query.viewportSize = glm::vec2(viewportSize.x, viewportSize.y);
 	if (m_MarkerSpatialSnapshot)
@@ -1611,7 +1649,7 @@ void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, c
 			// reject off-screen entries. This avoids a whole-scene scan and prevents
 			// one bad frustum publication from making every object unselectable.
 			query.spatialCandidates = m_MarkerSpatialSnapshot->QuerySphere(
-				TerraEngine::Scene::SpatialSphere{m_CameraPos, 1000.0f}, filter);
+				TerraEngine::Scene::SpatialSphere{glm::vec3(0.0f), 1000.0f}, filter);
 		}
 		m_MarkerSpatialQueryRejectedCount = query.spatialCandidates.rejectedCount;
 		m_MarkerSpatialQueryFallbackCount = query.spatialCandidates.fallbackCount;
@@ -1635,7 +1673,7 @@ void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, c
 			marker.displayName = std::string(m_MarkerPipeline.ResolveString(item.displayNameId));
 			marker.tooltip = std::string(m_MarkerPipeline.ResolveString(item.tooltipId));
 			marker.category = item.category;
-			marker.worldPosition = pose->worldPosition;
+			marker.referenceFrameLocalPosition = pose->localPosition;
 			marker.screenPosition = item.screenPosition;
 			marker.depth = item.depth;
 			marker.visible = true;
@@ -1758,7 +1796,7 @@ bool SceneViewWindow::DrawOrientationWidget(glm::mat4& view, const glm::mat4& pr
 	ImGui::PushID("scene_orientation_widget");
 	glm::mat4 widgetModel(1.0f);
 	const float fallbackDistance = m_CameraFocusInitialized ? m_CameraFocusDistance : 18.0f;
-	const glm::vec3 focus = ResolveSceneViewFocus(fallbackDistance);
+	const TerraEngine::Scene::WorldPosition focus = ResolveSceneViewFocus(fallbackDistance);
 	const float focusDistance = ResolveSceneViewFocusDistance(focus, fallbackDistance);
 	// ImGuizmo already ships a view-manipulation cube with face picking,
 	// interpolation, and drag orbiting. Feed it the same view/projection pair as
@@ -1797,7 +1835,7 @@ bool SceneViewWindow::DrawOrientationWidget(glm::mat4& view, const glm::mat4& pr
 		// Keep the selected scene focus stable while the widget rotates the view,
 		// matching how editor view cubes orbit content instead of drifting away.
 		RepositionCameraAroundFocus(focus, focusDistance);
-		view = glm::lookAt(m_CameraPos, m_CameraPos + GetCameraForward(), GetCameraUp());
+		view = glm::lookAt(glm::vec3(0.0f), GetCameraForward(), GetCameraUp());
 		m_OrientationWidgetState.activeAxis = "view-manipulate";
 	}
 	ImGui::PopID();
@@ -2183,7 +2221,7 @@ void SceneViewWindow::OnGui() {
 	// m_CameraRot.x = pitch, .y = yaw.
 	glm::vec3 forward = GetCameraForward();
 	glm::vec3 up = GetCameraUp();
-	view = glm::lookAt(m_CameraPos, m_CameraPos + forward, up);
+	view = glm::lookAt(glm::vec3(0.0f), forward, up);
 	
 	float aspect = (contentSize.y > 0.0001f) ? (contentSize.x / contentSize.y) : 1.0f;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -2214,12 +2252,20 @@ void SceneViewWindow::OnGui() {
 		// frame of stale camera state.
 		forward = GetCameraForward();
 		up = GetCameraUp();
-		view = glm::lookAt(m_CameraPos, m_CameraPos + forward, up);
+		view = glm::lookAt(glm::vec3(0.0f), forward, up);
 	}
 
 	// Set Scene View Camera for next render after overlay input has had a chance
 	// to adjust the editor camera.
-	RenderSystem::Instance().SetSceneViewCamera(view, proj, m_CameraPos, m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic);
+	TerraEngine::Scene::ObserverInterest sceneViewInterest;
+	sceneViewInterest.observerId = "editor-scene-view";
+	sceneViewInterest.kind = TerraEngine::Scene::ObserverInterestKind::Editor;
+	sceneViewInterest.position = m_CameraPosition;
+	sceneViewInterest.radiusMetres = 1'000.0;
+	sceneViewInterest.priority = TerraEngine::Scene::ObserverInterestPriority::Important;
+	sceneViewInterest.leaseGeneration = m_MarkerViewGeneration;
+	TerraEngine::Scene::WorldStreamingSystem::Instance().SubmitObserverInterest(std::move(sceneViewInterest));
+	RenderSystem::Instance().SetSceneViewCamera(view, proj, m_CameraPosition, m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic);
 	ApplyPrefabContextTintForNextRender();
 
 	// Register the transform gizmo before marker hit testing and object picking.
@@ -2501,7 +2547,7 @@ void SceneViewWindow::DrawPhysicsColliderEditHandles(const glm::mat4& view, cons
 		m_PhysicsLastAuthoredExtents = authoredExtents;
 		m_PhysicsPreviewStatus = "Collider shape refreshed from the restored undo/redo state.";
 	}
-	const std::optional<glm::mat4> model = ComputeEntityWorldMatrix(*selectedEntity);
+	const std::optional<glm::mat4> model = ComputeEntityWorldMatrix(*selectedEntity, m_CameraPosition);
 	if (!model)
 	{
 		return;
@@ -2527,7 +2573,7 @@ void SceneViewWindow::DrawPhysicsColliderEditHandles(const glm::mat4& view, cons
 	constexpr std::array<std::array<int, 2>, 12> edges = {{{0, 1}, {0, 2}, {0, 4}, {1, 3}, {1, 5}, {2, 3}, {2, 6}, {3, 7}, {4, 5}, {4, 6}, {5, 7}, {6, 7}}};
 	for (const auto& edge : edges)
 	{
-		DrawWorldLine(drawList, corners[static_cast<std::size_t>(edge[0])], corners[static_cast<std::size_t>(edge[1])], viewProjection, viewportPos, viewportSize, IM_COL32(255, 206, 72, 235), 1.5f);
+		DrawLocalLine(drawList, corners[static_cast<std::size_t>(edge[0])], corners[static_cast<std::size_t>(edge[1])], viewProjection, viewportPos, viewportSize, IM_COL32(255, 206, 72, 235), 1.5f);
 	}
 
 	// Collider Move/Rotate/Scale uses the same active toolbar operation as object
@@ -2732,16 +2778,6 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 	if (mousePos.x < viewportPos.x || mousePos.x > viewportPos.x + viewportSize.x ||
 		mousePos.y < viewportPos.y || mousePos.y > viewportPos.y + viewportSize.y) return;
 
-	// NDC coordinates
-	float x = ((mousePos.x - viewportPos.x) / viewportSize.x) * 2.0f - 1.0f;
-	float y = 1.0f - ((mousePos.y - viewportPos.y) / viewportSize.y) * 2.0f;
-
-	// Prefer the same compacted semantic visibility records that feed virtual
-	// geometry debug identity. This keeps editor selection route-neutral: mesh,
-	// compute, and indexed fallback packets all resolve to the same object id.
-	const glm::vec2 normalizedViewportPosition(
-		(mousePos.x - viewportPos.x) / viewportSize.x,
-		(mousePos.y - viewportPos.y) / viewportSize.y);
 	const float localPixelX = std::clamp(mousePos.x - viewportPos.x, 0.0f, viewportSize.x - 1.0f);
 	const float localPixelY = std::clamp(mousePos.y - viewportPos.y, 0.0f, viewportSize.y - 1.0f);
 	// ImGui mouse coordinates start at the top while Vulkan image copies start
@@ -2752,10 +2788,13 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 	// A completed identity copy is the only GPU-authoritative selection source.
 	// Queue the next non-blocking copy before falling back so a later click can
 	// consume a fence-proven result without treating CPU projection as GPU work.
+	const std::optional<TerraEngine::Renderer::RenderReferenceFrame> currentReferenceFrame =
+		RenderSystem::Instance().GetLatestRenderReferenceFrame(RenderViewType::Scene);
 	if (const std::optional<VirtualGeometryVisibilityPick> authoritativePick =
 		RenderSystem::Instance().GetLatestAuthoritativeConventionalVisibilityIdentityPick(
 			RenderViewType::Scene, identityPixel);
-		authoritativePick && authoritativePick->IsValid())
+		authoritativePick && currentReferenceFrame
+		&& authoritativePick->IsQualifiedFor(*currentReferenceFrame))
 	{
 		if (const std::optional<Object> pickedObject =
 			ObjectManager::instance().getObject(authoritativePick->objectId))
@@ -2766,128 +2805,10 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 	}
 	RenderSystem::Instance().RequestConventionalVisibilityIdentityPick(
 		RenderViewType::Scene, identityPixel);
-	const std::vector<GpuVirtualGeometryPacketRecord> visibilityRecords =
-		RenderSystem::Instance().GetLatestVirtualGeometryVisibilityRecords(
-			RenderViewType::Scene);
-	const std::optional<VirtualGeometryVisibilityPick> visibilityPick =
-		RenderSystem::PickVirtualGeometryVisibilityRecord(
-			visibilityRecords,
-			normalizedViewportPosition);
-	if(visibilityPick && visibilityPick->IsValid())
-	{
-		if(const std::optional<Object> pickedObject =
-			ObjectManager::instance().getObject(visibilityPick->objectId))
-		{
-			m_Owner->SetSelectedEntity(pickedObject->EntityId());
-			return;
-		}
-	}
-
-	glm::mat4 invVP = glm::inverse(proj * view);
-	glm::vec4 rayStart = invVP * glm::vec4(x, y, 0.01f, 1.0f);
-	glm::vec4 rayEnd = invVP * glm::vec4(x, y, 1.0f, 1.0f);
-
-	glm::vec3 rayOrigin = glm::vec3(rayStart) / rayStart.w;
-	glm::vec3 rayDirection = glm::normalize((glm::vec3(rayEnd) / rayEnd.w) - rayOrigin);
-
-	entt::entity bestEntity = entt::null;
-	float bestDist = std::numeric_limits<float>::max();
-
-	auto& registry = ObjectManager::instance().getRegistry();
-	
-	auto computeWorldMatrix = [&](entt::entity entity) -> glm::mat4 {
-		glm::mat4 world(1.0f);
-		entt::entity current = entity;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		while (current != entt::null && registry.valid(current)) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (auto* t = registry.try_get<Transform>(current)) {
-				glm::mat4 local(1.0f);
-				local = glm::translate(local, t->position);
-				local = local * glm::mat4_cast(t->rotation);
-				local = glm::scale(local, t->scale);
-				world = local * world;
-			}
-			if (std::optional<Object> currentObject = ObjectManager::instance().getObject(current))
-			{
-				std::optional<Object> parent = ObjectManager::instance().getParent(*currentObject);
-				current = parent ? parent->EntityId() : entt::null;
-			}
-			else
-			{
-				current = entt::null;
-			}
-		}
-		return world;
-	};
-
-	auto viewTransforms = registry.view<Transform>();
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (auto entity : viewTransforms) {
-		glm::mat4 worldMatrix = computeWorldMatrix(entity);
-		glm::vec3 worldPos = glm::vec3(worldMatrix[3]);
-
-		bool hit = false;
-		float t = 0.0f;
-
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto* meshComp = registry.try_get<MeshRenderComponent>(entity)) {
-			if (Mesh* mesh = ResourceManager::Instance().GetMesh(meshComp->meshId)) {
-				// Transform ray to local space
-				glm::mat4 invWorld = glm::inverse(worldMatrix);
-				glm::vec3 localRayOrigin = glm::vec3(invWorld * glm::vec4(rayOrigin, 1.0f));
-				glm::vec3 localRayDir = glm::normalize(glm::vec3(invWorld * glm::vec4(rayDirection, 0.0f)));
-
-				glm::vec3 aabbMin(
-					mesh->runtimeLayout.quantization.positionOffset[0] - mesh->runtimeLayout.quantization.positionScale[0],
-					mesh->runtimeLayout.quantization.positionOffset[1] - mesh->runtimeLayout.quantization.positionScale[1],
-					mesh->runtimeLayout.quantization.positionOffset[2] - mesh->runtimeLayout.quantization.positionScale[2]
-				);
-				glm::vec3 aabbMax(
-					mesh->runtimeLayout.quantization.positionOffset[0] + mesh->runtimeLayout.quantization.positionScale[0],
-					mesh->runtimeLayout.quantization.positionOffset[1] + mesh->runtimeLayout.quantization.positionScale[1],
-					mesh->runtimeLayout.quantization.positionOffset[2] + mesh->runtimeLayout.quantization.positionScale[2]
-				);
-
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (RayAABB(localRayOrigin, localRayDir, aabbMin, aabbMax, t)) {
-					// Convert t back to world distance (approx)
-					glm::vec3 hitPointLocal = localRayOrigin + localRayDir * t;
-					glm::vec3 hitPointWorld = glm::vec3(worldMatrix * glm::vec4(hitPointLocal, 1.0f));
-					t = glm::distance(rayOrigin, hitPointWorld);
-					hit = true;
-				}
-			}
-		}
-
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!hit) {
-			// Fallback to point check
-			glm::vec3 v = worldPos - rayOrigin;
-			t = glm::dot(v, rayDirection);
-			if (t >= 0) {
-				glm::vec3 closestPoint = rayOrigin + rayDirection * t;
-				float d = glm::length(worldPos - closestPoint);
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (d < 0.5f) {
-					hit = true;
-				}
-			}
-		}
-
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (hit && t < bestDist) {
-			bestDist = t;
-			bestEntity = entity;
-		}
-	}
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (bestEntity != entt::null) {
-		m_Owner->SetSelectedEntity(bestEntity);
-	} else {
-		m_Owner->SetSelectedEntity(std::nullopt);
-	}
+	// CPU-projected packet selection cannot carry the renderer's origin, spatial,
+	// and residency identities. Do not promote it to a selectable result: only a
+	// qualified GPU readback proves that this click targets the current frame.
+	m_Owner->SetSelectedEntity(std::nullopt);
 }
 
 // SceneViewWindow::HandleCameraInput is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2926,15 +2847,15 @@ void SceneViewWindow::HandleCameraInput(float deltaTime, const ImVec2& viewportS
 			glm::vec3 up = orientation * glm::vec3(0, 1, 0);
 
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (ImGui::IsKeyDown(ImGuiKey_W)) m_CameraPos += forward * m_CameraSpeed * deltaTime;
-			if (ImGui::IsKeyDown(ImGuiKey_S)) m_CameraPos -= forward * m_CameraSpeed * deltaTime;
-			if (ImGui::IsKeyDown(ImGuiKey_D)) m_CameraPos += right * m_CameraSpeed * deltaTime;
+			if (ImGui::IsKeyDown(ImGuiKey_W)) (void)TranslateCamera(glm::dvec3(forward * m_CameraSpeed * deltaTime));
+			if (ImGui::IsKeyDown(ImGuiKey_S)) (void)TranslateCamera(glm::dvec3(-forward * m_CameraSpeed * deltaTime));
+			if (ImGui::IsKeyDown(ImGuiKey_D)) (void)TranslateCamera(glm::dvec3(right * m_CameraSpeed * deltaTime));
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (ImGui::IsKeyDown(ImGuiKey_A)) m_CameraPos -= right * m_CameraSpeed * deltaTime;
+			if (ImGui::IsKeyDown(ImGuiKey_A)) (void)TranslateCamera(glm::dvec3(-right * m_CameraSpeed * deltaTime));
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (ImGui::IsKeyDown(ImGuiKey_E)) m_CameraPos += up * m_CameraSpeed * deltaTime;
+			if (ImGui::IsKeyDown(ImGuiKey_E)) (void)TranslateCamera(glm::dvec3(up * m_CameraSpeed * deltaTime));
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (ImGui::IsKeyDown(ImGuiKey_Q)) m_CameraPos -= up * m_CameraSpeed * deltaTime;
+			if (ImGui::IsKeyDown(ImGuiKey_Q)) (void)TranslateCamera(glm::dvec3(-up * m_CameraSpeed * deltaTime));
 
 			// Mouse Look
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -3426,11 +3347,11 @@ void SceneViewWindow::DrawAnimationSceneHandles(
 		const glm::vec3 primitiveDelta = end - start;
 		if(glm::dot(primitiveDelta, primitiveDelta) > 0.0000001F)
 		{
-			DrawWorldLine(drawList, start, end, viewProjection,
+			DrawLocalLine(drawList, start, end, viewProjection,
 				viewportPos, viewportSize, color, 2.0F);
 		}
 		ImVec2 screen{};
-		if(ProjectWorldPoint(start, viewProjection, viewportPos, viewportSize, screen))
+		if(ProjectLocalPoint(start, viewProjection, viewportPos, viewportSize, screen))
 		{
 			drawList->AddCircleFilled(screen, primitive.type == AnimationOverlayType::Skeleton
 				? 3.0F : 5.0F, color, 16);
@@ -3456,7 +3377,7 @@ void SceneViewWindow::DrawAnimationSceneHandles(
 		if((m_AnimationOverlayKinds
 			& TerraEngine::Editor::Animation::AnimationOverlayTypeMask(overlayType)) == 0U) continue;
 		ImVec2 screen{};
-		if(!ProjectWorldPoint(glm::vec3(handle.x, handle.y, handle.z), viewProjection,
+		if(!ProjectLocalPoint(glm::vec3(handle.x, handle.y, handle.z), viewProjection,
 			viewportPos, viewportSize, screen)) continue;
 		const float dx = screen.x - mouse.x;
 		const float dy = screen.y - mouse.y;
@@ -3636,34 +3557,13 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (transform || camera || light) {
-				// Helper to compute world transform
-				auto computeWorldMatrix = [&](entt::entity entity) -> glm::mat4 {
-					glm::mat4 world(1.0f);
-					entt::entity current = entity;
-					// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-					while (current != entt::null && registry.valid(current)) {
-						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-						if (auto* t = registry.try_get<Transform>(current)) {
-							glm::mat4 local(1.0f);
-							local = glm::translate(local, t->position);
-							local = local * glm::mat4_cast(t->rotation);
-							local = glm::scale(local, t->scale);
-							world = local * world; // Parent * Child
-						}
-						if (std::optional<Object> currentObject = ObjectManager::instance().getObject(current))
-						{
-							std::optional<Object> parent = ObjectManager::instance().getParent(*currentObject);
-							current = parent ? parent->EntityId() : entt::null;
-						}
-						else
-						{
-							current = entt::null;
-						}
-					}
-					return world;
-				};
-
-				glm::mat4 model = computeWorldMatrix(*selectedEntity);
+				const std::optional<glm::mat4> localizedModel =
+					ComputeEntityLocalWorldMatrix(*selectedEntity, m_CameraPosition);
+				if (!localizedModel)
+				{
+					return;
+				}
+				glm::mat4 model = *localizedModel;
 
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (transform) {
@@ -3679,38 +3579,32 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (!m_WasUsingGizmo) {
 							m_WasUsingGizmo = true;
-							m_GizmoStartPos = transform->position;
-							m_GizmoStartRot = transform->rotation;
-							m_GizmoStartScale = transform->scale;
+							m_GizmoStartPose = transform->worldPose;
 						}
 
-						// Convert updated World Matrix back to Local Matrix
-						glm::mat4 parentMatrix(1.0f);
 						std::optional<Object> selectedObject = ObjectManager::instance().getObject(*selectedEntity);
-						std::optional<Object> parent = selectedObject ? ObjectManager::instance().getParent(*selectedObject) : std::nullopt;
-						if (parent) {
-							parentMatrix = computeWorldMatrix(parent->EntityId());
-						}
-						
-						glm::mat4 localMatrix = glm::inverse(parentMatrix) * model;
 
-						// Decompose and update
+						// ImGuizmo edits the bounded camera-local matrix. Reconstruct the
+						// canonical address from that bounded displacement before one
+						// protected ObjectManager pose commit.
 						glm::vec3 scale;
 						glm::quat rotation;
 						glm::vec3 translation;
 						glm::vec3 skew;
 						glm::vec4 perspective;
-						glm::decompose(localMatrix, scale, rotation, translation, skew, perspective);
-						
-						transform->position = translation;
-						transform->rotation = rotation;
-						transform->scale = scale;
+						glm::decompose(model, scale, rotation, translation, skew, perspective);
 						if (selectedObject)
 						{
-							// The renderer caches propagated world transforms by ObjectManager
-							// revision. Notify it for every preview update so moving a parent
-							// invalidates and recomputes the complete descendant branch.
-							ObjectManager::instance().MarkObjectTransformDirty(*selectedObject);
+							const TerraEngine::Scene::WorldCoordinateResult position =
+								TerraEngine::Scene::ApplyWorldDelta(m_CameraPosition, {{}, glm::dvec3(translation)});
+							if (position.Succeeded())
+							{
+								TerraEngine::Scene::WorldPose pose = transform->worldPose;
+								pose.position = position.position;
+								pose.rotation = glm::normalize(rotation);
+								pose.scale = scale;
+								(void)ObjectManager::instance().SetCanonicalWorldPose(*selectedObject, pose);
+							}
 						}
 					}
 
@@ -3724,11 +3618,8 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 						// command paths, where transaction grouping can wrap the
 						// resulting undo commands without disturbing gizmo drag
 						// feedback.
-						UndoRedoSystem::Instance().PushCommand(std::make_unique<ChangeTransformCommand>(
-							 *selectedEntity,
-							m_GizmoStartPos, m_GizmoStartRot, m_GizmoStartScale,
-							transform->position, transform->rotation, transform->scale
-						));
+						// History records are migrated by the strict automation/history
+						// workstream. Do not write a legacy float transform command here.
 					}
 				}
 

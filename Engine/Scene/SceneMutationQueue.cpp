@@ -59,6 +59,13 @@ namespace TerraEngine::Scene {
 			}
 		}
 
+		bool IsSpatialMutation(SceneMutationOperation operation)
+		{
+			return operation == SceneMutationOperation::SetWorldTransform
+				|| operation == SceneMutationOperation::TranslateWorld
+				|| operation == SceneMutationOperation::ChangeSimulationFrame;
+		}
+
 		TerraEngine::Reflection::Variant MakeVariantFromMutationPayload(const nlohmann::json& value, int valueKind)
 		{
 			const auto readFloat = [&value](std::size_t index, float fallback) {
@@ -385,6 +392,23 @@ namespace TerraEngine::Scene {
 				result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, "Component mutation is missing a component name.", "Set componentName so the owning system can apply the payload deterministically."));
 			}
 
+			if (IsSpatialMutation(request.operation) && !request.typedSpatialTransaction)
+			{
+				result.accepted = false;
+				result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request,
+					"Spatial mutation ingress must be lowered to a typed transaction before it reaches the queue.",
+					"Build SetWorldTransform, TranslateWorld, ReparentObject, or ChangeSimulationFrame through TransactionalMutationBuilder."));
+			}
+
+			if (request.operation == SceneMutationOperation::UpdateComponent
+				&& request.componentName == Transform::kComponentName)
+			{
+				result.accepted = false;
+				result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request,
+					"Generic reflected Transform mutations are not a spatial authority.",
+					"Lower canonical movement to a typed world-spatial transaction instead of supplying a Transform property payload."));
+			}
+
 			if (request.operation == SceneMutationOperation::AddScriptBinding && request.metadataValue.empty())
 			{
 				result.accepted = false;
@@ -457,6 +481,28 @@ namespace TerraEngine::Scene {
 		{
 			const SceneMutationRequest& request = requestSnapshot[index];
 			SceneMutationResult& result = batch.results[index];
+			if (IsSpatialMutation(request.operation))
+			{
+				// Generic ingress has completed validation. The only publication route
+				// from here is the typed STM, which owns observations and rollback.
+				const TransactionResult typedResult = CommitTransaction(objects, *request.typedSpatialTransaction);
+				{
+					std::scoped_lock lock(requestsMutex);
+					AccumulateTransactionDiagnostics(transactionDiagnostics, *request.typedSpatialTransaction, typedResult);
+				}
+				batch.transactionResults.push_back(typedResult);
+				if (typedResult.status == TransactionStatus::Committed)
+				{
+					batch.acceptedMutationCount += typedResult.appliedWriteCount;
+					batch.acceptedAnimationPublications.insert(batch.acceptedAnimationPublications.end(),
+						typedResult.acceptedAnimationPublications.begin(), typedResult.acceptedAnimationPublications.end());
+				}
+				else
+				{
+					batch.rejectedMutationCount += typedResult.rejectedWriteCount;
+				}
+				continue;
+			}
 
 			switch (request.operation)
 			{
@@ -636,7 +682,7 @@ namespace TerraEngine::Scene {
 		// no-op, not a successful publication. Later receipts may set this true.
 		batch.applied = !requestSnapshot.empty();
 		const std::vector<TransactionResult> transactionResults = DrainTransactions(objects);
-		batch.transactionResults = transactionResults;
+		batch.transactionResults.insert(batch.transactionResults.end(), transactionResults.begin(), transactionResults.end());
 		for (const TransactionResult& transactionResult : transactionResults)
 		{
 			// Unknown transaction IDs are ignored by the animation publisher. Known

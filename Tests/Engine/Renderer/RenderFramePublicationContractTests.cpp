@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "Renderer/Graph/RenderFramePublication.h"
+#include "RendererThreadingTestFixtures.h"
 
 #include <algorithm>
 #include <memory>
@@ -53,6 +54,7 @@ namespace TerraEngine::Tests
 			backendWork->valid = true;
 			publication->backendWork = std::move(backendWork);
 			RenderViewSelection view{};
+			view.outputId = 1u;
 			view.generation = 1u;
 			view.visibleOrdinals.push_back(slot.key);
 			view.selectedLods.push_back(0u);
@@ -65,6 +67,10 @@ namespace TerraEngine::Tests
 			presentation.output.kind = view.outputKind;
 			presentation.output.diagnosticsView = view.viewType;
 			presentation.output.outputId = view.outputId;
+			const RenderReferenceFrame referenceFrame =
+				MakeRendererTestReferenceFrame(publication->frameId, 1u, view.outputId);
+			presentation.referenceFrame = referenceFrame;
+			publication->referenceFrames.push_back(referenceFrame);
 			RenderViewCommandLane commandLane{};
 			commandLane.materialIndex = 3u;
 			commandLane.virtualMeshletOffset = 5u;

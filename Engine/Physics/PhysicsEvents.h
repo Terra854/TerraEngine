@@ -80,6 +80,9 @@ namespace TerraEngine::Physics {
 	struct PhysicsEvent {
 		PhysicsEventType type = PhysicsEventType::CollisionEnter;
 		PhysicsWorldHandle world;
+		// Contacts never span local islands. Consumers reject a stale frame before
+		// interpreting the float contact point against a different origin.
+		PhysicsFrameHandle frame;
 		PhysicsTick tick = 0U;
 		PhysicsEventParticipant first;
 		PhysicsEventParticipant second;
@@ -150,6 +153,7 @@ namespace TerraEngine::Physics {
 	// bounded views, so adding a diagnostic reader cannot introduce another sort.
 	struct PhysicsCanonicalEventResult {
 		PhysicsWorldHandle world;
+		PhysicsFrameHandle frame;
 		PhysicsTick tick = 0U;
 		std::shared_ptr<const std::vector<PhysicsEvent>> events;
 		std::array<std::uint32_t, kPhysicsEventTypeCount> countsByType{};
@@ -162,6 +166,7 @@ namespace TerraEngine::Physics {
 
 	struct PhysicsEventPacket {
 		PhysicsWorldHandle world;
+		PhysicsFrameHandle frame;
 		PhysicsTick tick = 0U;
 		PhysicsTick expiryTick = 0U;
 		PhysicsGeneration subscriptionGeneration = 0U;

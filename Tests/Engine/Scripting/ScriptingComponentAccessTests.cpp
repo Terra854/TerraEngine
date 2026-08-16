@@ -102,7 +102,7 @@ namespace TerraEngine::Tests {
 			context.Expect(readView.scriptRecords.front().bindingGeneration != 0, "Read views should carry binding generations for managed HasComponent caches.");
 		});
 
-		registry.Add("Scripting.ComponentAccess.ReflectedTransformWritePublishesOneSpatialRevision", [](TestContext& context) {
+		registry.Add("Scripting.ComponentAccess.GenericTransformWriteIsRejectedWithoutRevision", [](TestContext& context) {
 			ScriptingRuntimeTestScope scope;
 			ObjectManager& objects = ObjectManager::instance();
 			const Object object = objects.createObject("Managed Transform Target");
@@ -112,23 +112,22 @@ namespace TerraEngine::Tests {
 			const std::uint64_t spatialRevisionBefore = objects.GetSpatialRevision();
 			glm::vec3 position{3.0F, 4.0F, 5.0F};
 
-			// This no-dispatch-context call is the compatibility path used by
-			// protected editor/runtime bridges. Gameplay callbacks use the
-			// deferred SceneMutationQueue path tested below.
+			// Transform is canonical-only. The generic reflected bridge must not
+			// reinterpret a float vector as an absolute world address.
 			Native_SetComponentProperty(
 				objectId, "Transform", "Position", &position, 5);
 
 			const Transform* transform = objects.GetComponent<Transform>(object);
-			context.Expect(transform != nullptr && transform->position == position,
-				"The managed component ABI must update the authored Transform value.");
+			context.Expect(transform != nullptr && transform->worldPose.position == TerraEngine::Scene::WorldPosition{},
+				"The generic managed component ABI must leave canonical Transform authority untouched.");
 			context.ExpectEqual(
-				transformRevisionBefore + 1U,
+				transformRevisionBefore,
 				objects.GetObjectTransformRevision(object),
-				"The shared reflected setter must publish exactly one Transform revision.");
+				"A rejected generic Transform write must not publish a Transform revision.");
 			context.ExpectEqual(
-				spatialRevisionBefore + 1U,
+				spatialRevisionBefore,
 				objects.GetSpatialRevision(),
-				"The managed Transform write must invalidate renderer and bounds snapshots exactly once.");
+				"A rejected generic Transform write must not invalidate spatial snapshots.");
 		});
 
 		registry.Add("Scripting.ObjectMetadata.WorkerWritesPublishOnlyAtProtectedFlush", [](TestContext& context) {
@@ -563,7 +562,7 @@ namespace TerraEngine::Tests {
 			const std::filesystem::path scenePath = root / "Deferred.tescene";
 			{
 				std::ofstream output(scenePath, std::ios::binary | std::ios::trunc);
-				output << R"({"name":"Deferred Managed Scene","sceneSettings":{},"objects":[]})";
+				output << R"({"format":"TerraSceneUnboundedV1","name":"Deferred Managed Scene","sceneSettings":{},"objects":[]})";
 			}
 			scenes.SetSceneRoot(root);
 

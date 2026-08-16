@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "Renderer/Graph/RenderFrameSnapshot.h"
+#include "RendererThreadingTestFixtures.h"
 
 #include <filesystem>
 #include <fstream>
@@ -41,10 +42,13 @@ namespace TerraEngine::Tests
 			context.Expect(topology.records.front().groupTemplateIndex
 				!= PersistentRenderTopologyRecord::kInvalidGroupTemplateIndex,
 				"A complete stable record must receive a retained compatibility-template index.");
-			const RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game, glm::uvec2(1280u, 720u), 1u, 9u };
+			RenderFrameViewRequest view{ RenderOutputKind::GameView, RenderViewType::Game, glm::uvec2(1280u, 720u), 1u, 9u };
+			view.referenceFrame = MakeRendererTestReferenceFrame(1u, 1u, 1u);
 			const DynamicRenderFrameState first = BuildDynamicRenderFrameState(snapshot, topology, view, 10u);
 			snapshot.frameId = 2u;
-			snapshot.renderables.front().modelMatrix[3][0] = 4.0f;
+			// The topology is retained while the canonical pose changes; the
+			// per-view dynamic phase creates its bounded float matrix afterwards.
+			snapshot.renderables.front().canonicalWorldPose.position.offsetMetres.x = 4.0;
 			snapshot.renderables.front().virtualGeometry.selectedLodIndex = 3u;
 			snapshot.renderables.front().geometryRouteDecision.selected = GeometryRoute::VirtualGeometryHardware;
 			snapshot.renderables.front().animation.source = AnimationRenderEvaluationSource::GpuVisual;

@@ -32,6 +32,7 @@ namespace TerraEngine::Tests {
 			return Physics::TransformPublicationSourceRecord{
 				.objectId = objects.getUUID(object),
 				.body = {world.worldId, world.worldGeneration, slot, bodyGeneration},
+				.frame = {Physics::kPrimaryPhysicsFrameId, world.worldGeneration},
 				.objectLifetimeGeneration = objects.getObjectLifetimeGeneration(object),
 				.bodyGeneration = bodyGeneration,
 				.componentGeneration = objects.getObjectComponentGeneration(object),
@@ -40,6 +41,9 @@ namespace TerraEngine::Tests {
 				.parentObjectId = parent ? objects.getUUID(*parent) : TerraEngine::EMPTY_UUID,
 				.expectedParentLifetimeGeneration = parent ? objects.getObjectLifetimeGeneration(*parent) : 0U,
 				.expectedParentTransformRevision = parent ? objects.GetObjectTransformRevision(*parent) : 0U,
+				// Every provider float pose is explicitly relative to this canonical
+				// origin; tests must not imply a global float position authority.
+				.canonicalFrameOrigin = {},
 				.localPose = pose,
 				.worldPoseReceipt = pose,
 				.poseChanged = changed};
@@ -53,7 +57,7 @@ namespace TerraEngine::Tests {
 			std::uint64_t groupId)
 		{
 			return Physics::PrepareTransformPublicationPacket(
-				{world, 42U, 7U, 11U},
+				{world, {Physics::kPrimaryPhysicsFrameId, world.worldGeneration}, 42U, 7U, 11U},
 				objects.GetSceneGeneration(),
 				objects.GetHierarchyRevision(),
 				groupId,
@@ -118,7 +122,7 @@ namespace TerraEngine::Tests {
 			queue.EnqueuePublicationGroup(Physics::BuildTransformPublicationGroup(packet));
 			for (const Object& target : targets)
 			{
-				context.Expect(std::abs(objects.GetComponent<Transform>(target)->position.x) < 0.001F, "Prepared worker output must remain invisible before the declared flush.");
+				context.Expect(std::abs(static_cast<float>(objects.GetComponent<Transform>(target)->worldPose.position.offsetMetres.x)) < 0.001F, "Prepared worker output must remain invisible before the declared flush.");
 			}
 
 			const Scene::SceneMutationBatchResult flushed = queue.Apply(objects, "After Physics");
@@ -127,7 +131,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::size_t>(2), flushed.publicationGroupResults.front().chunkReceipts.size(), "The accepted group should retain per-chunk receipts.");
 			for (std::size_t index = 0U; index < targets.size(); ++index)
 			{
-				context.Expect(std::abs(objects.GetComponent<Transform>(targets[index])->position.x - static_cast<float>(index + 1U)) < 0.001F, "All chunks should become visible together at the protected boundary.");
+				context.Expect(std::abs(static_cast<float>(objects.GetComponent<Transform>(targets[index])->worldPose.position.offsetMetres.x) - static_cast<float>(index + 1U)) < 0.001F, "All chunks should become visible together at the protected boundary.");
 			}
 
 			const Physics::TransformPublicationReceipt receipt = Physics::MakeTransformPublicationReceipt(packet, flushed.publicationGroupResults.front());
@@ -165,7 +169,7 @@ namespace TerraEngine::Tests {
 				&& !rejectedFlush.publicationGroupResults.front().Committed()
 				&& rejectedFlush.publicationGroupResults.front().appliedWriteCount == 0U,
 				"A stale late publication chunk must reject the whole replacement packet before any write becomes visible.");
-			context.Expect(visibleFirst != nullptr && std::abs(visibleFirst->position.x - 1.0F) < 0.001F,
+			context.Expect(visibleFirst != nullptr && std::abs(static_cast<float>(visibleFirst->worldPose.position.offsetMetres.x) - 1.0F) < 0.001F,
 				"Rejected publication must retain the last complete visible pose rather than exposing a partial replacement.");
 			objects.clear();
 		});

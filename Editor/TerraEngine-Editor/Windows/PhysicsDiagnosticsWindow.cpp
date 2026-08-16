@@ -42,6 +42,33 @@ void PhysicsDiagnosticsWindow::OnGui()
 	DrawCounters();
 	DrawTimings();
 	DrawSchedulerDeclarations();
+	if (snapshot->frames && !snapshot->frames->empty())
+	{
+		ImGui::SeparatorText("Physics Frames");
+		if (ImGui::BeginTable("PhysicsDiagnosticsFrames", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+		{
+			ImGui::TableSetupColumn("Frame / generation");
+			ImGui::TableSetupColumn("World / generation");
+			ImGui::TableSetupColumn("Canonical origin cell");
+			ImGui::TableSetupColumn("Bodies / queries / events");
+			ImGui::TableSetupColumn("Local high-water");
+			ImGui::TableSetupColumn("Migrations ok / rollback");
+			ImGui::TableHeadersRow();
+			for (const auto& frame : *snapshot->frames)
+			{
+				// This panel displays exact cells only; it never feeds display values
+				// back into simulation or reconstructs a lossy global float position.
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0); ImGui::Text("%llu / %u", static_cast<unsigned long long>(frame.descriptor.frame.frameId.value), frame.descriptor.frame.frameGeneration);
+				ImGui::TableSetColumnIndex(1); ImGui::Text("%llu / %u", static_cast<unsigned long long>(frame.descriptor.world.worldId.value), frame.descriptor.world.worldGeneration);
+				ImGui::TableSetColumnIndex(2); ImGui::Text("%lld, %lld, %lld", static_cast<long long>(frame.descriptor.canonicalOrigin.cell.x), static_cast<long long>(frame.descriptor.canonicalOrigin.cell.y), static_cast<long long>(frame.descriptor.canonicalOrigin.cell.z));
+				ImGui::TableSetColumnIndex(3); ImGui::Text("%llu / %llu / %llu", static_cast<unsigned long long>(frame.bodyCount), static_cast<unsigned long long>(frame.queryDepth), static_cast<unsigned long long>(frame.eventDepth));
+				ImGui::TableSetColumnIndex(4); ImGui::Text("%.2f m", frame.localMagnitudeHighWaterMetres);
+				ImGui::TableSetColumnIndex(5); ImGui::Text("%llu / %llu", static_cast<unsigned long long>(frame.migrationAcceptedCount), static_cast<unsigned long long>(frame.migrationRolledBackCount));
+			}
+			ImGui::EndTable();
+		}
+	}
 }
 
 void PhysicsDiagnosticsWindow::DrawCounters()
