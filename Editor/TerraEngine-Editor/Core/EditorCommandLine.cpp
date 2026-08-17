@@ -33,6 +33,12 @@ EditorCommandLineOptions ParseEditorCommandLine(int argc, char** argv)
 			}
 			continue;
 		}
+		if (argument == "--validate-editor-terrain-invariants")
+		{
+			if (index + 1 < argc && argv[index + 1] != nullptr)
+				options.terrainInvariantOutputPath = std::filesystem::path(argv[++index]);
+			continue;
+		}
 
 		constexpr std::string_view projectEqualsPrefix = "--project=";
 		if (argument.rfind(projectEqualsPrefix, 0) == 0)
@@ -53,6 +59,12 @@ EditorCommandLineOptions ParseEditorCommandLine(int argc, char** argv)
 			{
 				options.physicsInvariantOutputPath = std::filesystem::path(value);
 			}
+		}
+		constexpr std::string_view terrainInvariantEqualsPrefix = "--validate-editor-terrain-invariants=";
+		if (argument.rfind(terrainInvariantEqualsPrefix, 0) == 0)
+		{
+			const std::string_view value = argument.substr(terrainInvariantEqualsPrefix.size());
+			if (!value.empty()) options.terrainInvariantOutputPath = std::filesystem::path(value);
 		}
 	}
 

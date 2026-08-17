@@ -6,6 +6,7 @@
 #include "Resource/VirtualGeometryPagePublication.h"
 #include "Resource/VirtualGeometryStreamingDiagnostics.h"
 #include "Resource/VirtualGeometryStreamingPolicy.h"
+#include "Terrain/TerrainTypes.h"
 
 #include <atomic>
 #include <cstdint>
@@ -14,6 +15,26 @@
 
 namespace TerraEngine::Resource
 {
+	// Terrain's producer includes the complete-cut identity rather than feeding
+	// anonymous detail pages into the generic VG queue.
+	struct TerrainVirtualGeometryProducerBatch
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		TerraEngine::Terrain::ContentHash sourceIdentity{};
+		std::uint64_t authoredGeneration = 0u;
+		std::uint32_t viewId = 0u;
+		std::uint32_t regionalRootPageId = 0u;
+		std::vector<VirtualGeometryPagePublicationCandidate> candidates;
+	};
+
+	struct TerrainVirtualGeometryFeedback
+	{
+		std::uint32_t viewId = 0u;
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		std::uint64_t authoredGeneration = 0u;
+		std::uint32_t acceptedPageCount = 0u;
+		bool completeCut = false;
+	};
 	// VirtualGeometryStreamingSystem owns the boundary between immutable
 	// prior-frame feedback, worker-safe planning, and protected page publication.
 	// It intentionally stores values only; renderer and RHI owners provide already
@@ -40,6 +61,15 @@ namespace TerraEngine::Resource
 		// The queue is private until PagePublish validates the complete batch.
 		void SubmitCompletedPublicationCandidates(
 			std::vector<VirtualGeometryPagePublicationCandidate> candidates);
+		// Terrain cooks use the same private candidate queue as every other VG
+		// producer. This explicit ingress documents that terrain never publishes
+		// directly from a worker or bypasses PagePublish.
+		void SubmitCommittedTerrainPageCandidates(
+			std::vector<VirtualGeometryPagePublicationCandidate> candidates);
+		// Validates one coherent terrain cut before the normal private ingress.
+		// It rejects mixed source/generation pages and never publishes directly.
+		[[nodiscard]] bool SubmitTerrainProducerBatch(TerrainVirtualGeometryProducerBatch batch);
+		[[nodiscard]] std::vector<TerrainVirtualGeometryFeedback> TerrainFeedbackSnapshot() const;
 		[[nodiscard]] VirtualGeometryStreamingPlan LastPreparedPlan() const;
 		[[nodiscard]] std::vector<VirtualGeometryPagePublication> PublishedPages() const;
 		[[nodiscard]] VirtualGeometryPhysicalPageResidencySnapshot ResidencySnapshot() const;
@@ -61,5 +91,6 @@ namespace TerraEngine::Resource
 		VirtualGeometryPagePublicationStore publicationStore;
 		VirtualGeometryPhysicalPageResidencyStore residencyStore;
 		VirtualGeometryStreamingDiagnostics diagnostics;
+		std::vector<TerrainVirtualGeometryFeedback> terrainFeedback;
 	};
 } // namespace TerraEngine::Resource

@@ -197,6 +197,7 @@ namespace TerraEngine::Physics {
 		case PhysicsShapeKind::TaperedCapsule: return "TaperedCapsule";
 		case PhysicsShapeKind::ConvexHull: return "ConvexHull";
 		case PhysicsShapeKind::Mesh: return "Mesh";
+		case PhysicsShapeKind::HeightField: return "HeightField";
 		case PhysicsShapeKind::Compound: return "Compound";
 		}
 		return "Unknown";

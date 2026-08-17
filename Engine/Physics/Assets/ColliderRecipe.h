@@ -154,6 +154,15 @@ namespace TerraEngine::Physics
 		[[nodiscard]] std::uint64_t StableHash(const ColliderRecipeLimits& limits = {}) const;
 	};
 
+	// Terrain collision never serializes a provider shape. This helper keeps the
+	// 257-grid and cell-hole contract available to asset import and worker cooks.
+	[[nodiscard]] inline ColliderRecipeValidationResult ValidateTerrainHeightFieldRecipe(const TerrainHeightFieldRecipe& recipe)
+	{
+		if (!recipe.IsComplete())
+			return {false, ColliderRecipeValidationCode::InvalidMeshGeometry, "Terrain heightfield requires a complete 257-grid, bounded holes, and current source identity.", 0u};
+		return {true, ColliderRecipeValidationCode::None, {}, 0u};
+	}
+
 	TERRAENGINE_API std::string_view ToString(ColliderRecipeKind kind);
 	TERRAENGINE_API std::string_view ToString(ColliderRecipeValidationCode code);
 }

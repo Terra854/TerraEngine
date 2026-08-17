@@ -1,0 +1,19 @@
+{
+  "schemaVersion": { "major": 1, "minor": 0 },
+  "fixtureId": "terrain-save-recovery",
+  "baseFixture": "terrain-flat-4-area",
+  "expected": {
+    "predecessorRootHash": "9f0a4b7c2d1e3f405162738495a6b7c8",
+    "recoveredRootHash": "9f0a4b7c2d1e3f405162738495a6b7c8",
+    "interruptedSaveLeavesPredecessorCurrent": true,
+    "partialBlobIsNeverPublished": true
+  },
+  "failureStages": [
+    "blob-write",
+    "directory-write",
+    "root-manifest-write",
+    "current-replacement",
+    "flush"
+  ],
+  "hashPolicy": "Replace expected hashes with captured canonical root and area hashes in non-dry validation evidence."
+}

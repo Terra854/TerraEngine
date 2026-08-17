@@ -8,6 +8,7 @@
 #include "Components/AnimatorComponent.h"
 #include "Components/AudioListenerComponent.h"
 #include "Components/AudioSourceComponent.h"
+#include "Components/TerrainComponent.h"
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
 #include "Core/Object/Component.h"
@@ -1028,6 +1029,9 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 	AnimatorComponent::registerType();
 	AudioSourceComponent::registerType();
 	AudioListenerComponent::registerType();
+	// Register the small terrain-instance contract before generic reflection
+	// deserialization attempts to create TerrainComponent from scene JSON.
+	TerrainComponent::registerType();
 	ObjectManager& objManager = ObjectManager::instance();
 	entt::registry& enttRegistry = objManager.getRegistry();
 	std::string name = json.value("name", "Unnamed");

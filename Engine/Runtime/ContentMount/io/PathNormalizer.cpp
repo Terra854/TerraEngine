@@ -193,6 +193,11 @@ std::string DetectAssetClass(const std::filesystem::path& sourcePath) {
 	if (extension == ".teaudio") {
 		return "audio";
 	}
+	// Terrain roots and immutable authored-area blobs share one archive class.
+	// JSON directory manifests remain ordinary data and are validated by their root.
+	if (extension == ".teterrain" || extension == ".tearea") {
+		return "terrain";
+	}
 	if (extension == ".vert" || extension == ".frag" || extension == ".comp" || extension == ".hlsl" || extension == ".glsl") {
 		return "shader";
 	}

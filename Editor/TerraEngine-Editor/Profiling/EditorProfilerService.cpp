@@ -1009,8 +1009,26 @@ void EditorProfilerService::PublishPresentationLocked()
 		snapshot->selectedFrameArtifactId = selectedFrameArtifactId;
 	}
 	snapshot->operations = operations;
+	snapshot->terrainDiagnostics = terrainDiagnostics;
 	std::shared_ptr<const EditorProfilerPresentationSnapshot> immutableSnapshot = std::move(snapshot);
 	std::atomic_store_explicit(&presentationSnapshot, std::move(immutableSnapshot), std::memory_order_release);
+}
+
+void EditorProfilerService::PublishTerrainDiagnostics(TerraEngine::Terrain::TerrainDiagnosticSnapshot snapshot)
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	// Publication generation changes for authored edits, while collision
+	// generation changes when a derived candidate becomes current. Suppressing an
+	// identical pair keeps idle profiler presentation revisions stable.
+	if(terrainDiagnostics
+		&& terrainDiagnostics->revision == snapshot.revision
+		&& terrainDiagnostics->collisionGeneration == snapshot.collisionGeneration
+		&& terrainDiagnostics->pendingTransactions == snapshot.pendingTransactions)
+	{
+		return;
+	}
+	terrainDiagnostics = std::move(snapshot);
+	PublishPresentationLocked();
 }
 
 void EditorProfilerService::AcceptWorkerCompletion(WorkerCompletion&& completion)

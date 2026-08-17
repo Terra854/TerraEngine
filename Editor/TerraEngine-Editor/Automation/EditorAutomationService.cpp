@@ -16,6 +16,11 @@
 #include "Providers/AssetPrefabAutomationProvider.h"
 #include "Providers/AnimationAutomationProvider.h"
 #include "Providers/AuthoringAutomationProvider.h"
+#include "Providers/TerrainAutomationProvider.h"
+#include "../Terrain/TerrainAutomationAdapter.h"
+#include "../Windows/TerrainWindow.h"
+#include "TerrainAutomationSchema.h"
+#include "Physics/Terrain/TerrainCollisionSystem.h"
 #include "Providers/EditorDiagnosticsAutomationProvider.h"
 #include "Providers/HistoryPlayModeAutomationProvider.h"
 #include "Providers/ProjectSceneAutomationProvider.h"
@@ -2712,6 +2717,9 @@ namespace TerraEngine::Editor::Automation
 		// The bridge owns no windows. It receives this non-owning editor pointer so
 		// semantic automation always reaches the same Scene View the user sees.
 		mainEditor = editor;
+		if(mainEditor != nullptr)
+			if(auto terrainTools = mainEditor->GetWindow<TerrainWindow>())
+				SetTerrainAutomationAdapter(&terrainTools->AutomationAdapter());
 	}
 
 	void EditorAutomationService::SetSelectionCallbacks(std::function<std::optional<entt::entity>()> getter, std::function<void(std::optional<entt::entity>)> setter)
@@ -2728,6 +2736,194 @@ namespace TerraEngine::Editor::Automation
 	void EditorAutomationService::SetActivityCallback(ActivityCallback callback)
 	{
 		activityCallback = std::move(callback);
+	}
+
+	void EditorAutomationService::PumpTerrainAutomationJobsAtProtectedFrame()
+	{
+		using CollisionStatus = TerraEngine::Physics::Terrain::TerrainCollisionStatus;
+		std::vector<std::pair<std::string, PendingTerrainCollisionJob>> pending;
+		{
+			std::scoped_lock lock(terrainAutomationMutex);
+			for(const auto& entry : pendingTerrainCollisionJobs) pending.push_back(entry);
+		}
+		if(pending.empty()) return;
+
+		const auto snapshot = TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().Snapshot();
+		for(const auto& [jobId, expected] : pending)
+		{
+			bool terminal = false;
+			if(jobService.IsCancellationRequested(jobId))
+			{
+				if(terrainAutomationAdapter) (void)terrainAutomationAdapter->DispatchCommand("terrain.collision-cancel", nlohmann::json::object());
+				(void)jobService.CompleteCanceled(jobId, {{"outcome", "Cancelled"},
+					{"visibilityBoundary", "terrain_collision_publish_before_physics"}, {"lastKnownGoodActive", true}});
+				terminal = true;
+			}
+			else if(snapshot.status == CollisionStatus::Current)
+			{
+				const bool current = TerraEngine::Terrain::ToHexString(snapshot.sourceRootHash) == expected.sourceRootHash
+					&& snapshot.sourcePublicationGeneration == expected.sourcePublicationGeneration;
+				const nlohmann::json result = {{"outcome", current ? "Committed" : "StaleGeneration"},
+					{"sourceRootHash", TerraEngine::Terrain::ToHexString(snapshot.sourceRootHash)},
+					{"sourcePublicationGeneration", snapshot.sourcePublicationGeneration},
+					{"buildLatencyMilliseconds", snapshot.buildLatencyMilliseconds},
+					{"visibilityBoundary", "terrain_collision_publish_before_physics"},
+					{"lastKnownGoodActive", !current}};
+				if(current) (void)jobService.CompleteSucceeded(jobId, result);
+				else (void)jobService.CompleteFailed(jobId, result);
+				terminal = true;
+			}
+			else if(snapshot.status == CollisionStatus::Stale || snapshot.status == CollisionStatus::Failed
+				|| snapshot.status == CollisionStatus::Cancelled)
+			{
+				const nlohmann::json result = {{"outcome", snapshot.status == CollisionStatus::Cancelled ? "Cancelled" : "DerivedBuildFailed"},
+					{"message", snapshot.message}, {"lastKnownGoodActive", true},
+					{"visibilityBoundary", "terrain_collision_publish_before_physics"}};
+				if(snapshot.status == CollisionStatus::Cancelled) (void)jobService.CompleteCanceled(jobId, result);
+				else (void)jobService.CompleteFailed(jobId, result);
+				terminal = true;
+			}
+			if(terminal)
+			{
+				std::scoped_lock lock(terrainAutomationMutex);
+				pendingTerrainCollisionJobs.erase(jobId);
+			}
+		}
+	}
+
+	void EditorAutomationService::SetTerrainAutomationAdapter(TerraEngine::Editor::Terrain::TerrainAutomationAdapter* adapter)
+	{
+		terrainAutomationAdapter = adapter;
+		if(adapter != nullptr)
+			adapter->SetReceiptCallback([this](std::string_view jobId, const TerraEngine::Terrain::TerrainTransactionReceipt& receipt, const TerraEngine::Editor::Automation::TerrainAutomationRequest& request) {
+				// Values here originate in the typed request/receipt, never guessed UI
+				// timing. This lets reconnecting clients audit the exact visibility fact.
+				nlohmann::json terminal={{"operationId",TerraEngine::ToHexString(receipt.transactionId)}, {"jobId",std::string(jobId)}, {"operation",request.operation}, {"previousRootHash",TerraEngine::Terrain::ToHexString(receipt.previousRootHash)}, {"publishedRootHash",TerraEngine::Terrain::ToHexString(receipt.publishedRootHash)}, {"publicationGeneration",receipt.publicationGeneration}, {"affectedBounds",{{"minX",request.bounds.minX},{"minZ",request.bounds.minZ},{"maxXExclusive",request.bounds.maxXExclusive},{"maxZExclusive",request.bounds.maxZExclusive}}}, {"actualBudget",{{"areas",receipt.affectedAreas.size()},{"maximumAreas",request.budget.maximumAreas},{"maximumSamples",request.budget.maximumSamples},{"maximumPreparedBytes",request.budget.maximumPreparedBytes}}}, {"visibilityBoundary","terrain_authoring_publish"}, {"derivedInvalidationAreas",receipt.invalidation ? receipt.invalidation->areas.size() : 0u}, {"warnings",nlohmann::json::array()}, {"repairActions",nlohmann::json::array()}, {"message",receipt.message}};
+				if(receipt.outcome==TerraEngine::Terrain::TerrainEditOutcome::Committed) (void)jobService.CompleteSucceeded(jobId,std::move(terminal));
+				else if(receipt.outcome==TerraEngine::Terrain::TerrainEditOutcome::Cancelled) (void)jobService.CompleteCanceled(jobId,std::move(terminal));
+				else (void)jobService.CompleteFailed(jobId,std::move(terminal));
+			});
+		if(terrainAutomationProviderRegistered || adapter == nullptr) return;
+		const AutomationHandlerResolver resolver = [this](std::string_view name) {
+			const std::string operation(name);
+			return AutomationHandler{[this, operation](const AutomationRequestContext& context) {
+				// Public terrain routes follow the installed contract. The internal
+				// route names keep the existing typed producers compact and are never
+				// exposed as a second mutation API.
+				std::string route = operation;
+				if(operation == "terrain.asset.inspect") route = "terrain.inspect";
+				else if(operation == "terrain.import_heightmap") route = "terrain.import";
+				else if(operation == "terrain.stroke.apply") route = "terrain.sculpt";
+				else if(operation == "terrain.layers.set") route = "terrain.layer";
+				else if(operation == "terrain.holes.set") route = "terrain.hole";
+				else if(operation == "terrain.operation.start") route = "terrain.procedural";
+				if(terrainAutomationAdapter == nullptr)
+					return AutomationDispatchResult{false, ErrorCategory::Unavailable, "Terrain automation requires the editor terrain command adapter.", {}};
+				if(route == "terrain.job.get")
+				{
+					const auto jobId=context.arguments.value("jobId",std::string{}); const auto job=jobService.Get(jobId);
+					return job ? AutomationDispatchResult{true,ErrorCategory::Internal,"Terrain job snapshot.",{{"jobId",job->jobId},{"state",static_cast<int>(job->state)},{"progress",job->progress},{"terminalReceipt",job->result}}}
+						: AutomationDispatchResult{false,ErrorCategory::Unavailable,"Terrain job is unavailable or expired.",{}};
+				}
+				if(route == "terrain.job.cancel")
+					return jobService.RequestCancellation(context.arguments.value("jobId",std::string{})) ? AutomationDispatchResult{true,ErrorCategory::Internal,"Terrain job cancellation requested.",{{"cancelRequested",true}}} : AutomationDispatchResult{false,ErrorCategory::Unavailable,"Terrain job cannot be cancelled.",{}};
+				if(route == "terrain.export")
+				{
+					// Export already has a durable, cancellable, progress-reporting job
+					// backed by ExportPipeline. Terrain reuses that authority instead of
+					// creating a second packager or completing a placeholder job.
+					auto response = HandleExportStart(context.arguments, context.requestId);
+					const bool accepted = response.value("ok", false);
+					const nlohmann::json responseData = accepted
+						? response.value("data", nlohmann::json::object())
+						: response;
+					return AutomationDispatchResult{accepted,
+						accepted ? ErrorCategory::Internal : ErrorCategory::Unavailable,
+						response.value("message", accepted ? "Terrain export job accepted." : "Terrain export job rejected."),
+						responseData};
+				}
+				if(route == "terrain.inspect")
+				{
+					const auto capture = terrainAutomationAdapter->Inspect();
+					if(!capture) return AutomationDispatchResult{false,ErrorCategory::Unavailable,"Terrain inspection requires a current immutable root.",{}};
+					return AutomationDispatchResult{true,ErrorCategory::Internal,"Terrain immutable root inspection.",{{"assetUuid",TerraEngine::ToHexString(capture->root->assetUuid)},{"rootHash",TerraEngine::Terrain::ToHexString(capture->root->rootContentHash)},{"publicationGeneration",capture->publicationGeneration},{"visibilityBoundary","immutable_terrain_snapshot"}}};
+				}
+				if(route == "terrain.create" || route == "terrain.import" || route == "terrain.rebuild"
+					|| route == "terrain.collision-refresh" || route == "terrain.validate"
+					|| route == "terrain.save" || route == "terrain.diagnostics.get"
+					|| route == "terrain.session.begin" || route == "terrain.session.get"
+					|| route == "terrain.session.cancel" || route == "terrain.session.commit")
+				{
+					if(route == "terrain.rebuild")
+					{
+						std::scoped_lock lock(terrainAutomationMutex);
+						if(!pendingTerrainCollisionJobs.empty())
+							return AutomationDispatchResult{false, ErrorCategory::Unavailable,
+								"A terrain collision rebuild is already awaiting its protected publication boundary.", nlohmann::json::object()};
+					}
+					const auto job=jobService.Create({"terrain_command",operation,context.requestId,context.correlationId,context.idempotencyKey,true});
+					(void)jobService.SetState(job.jobId,AutomationJobState::Running,"terrain_editor_command");
+					auto result = terrainAutomationAdapter->DispatchCommand(route, context.arguments);
+					nlohmann::json terminal = result.result;
+					terminal["jobId"] = job.jobId;
+					terminal["operation"] = operation;
+					terminal["message"] = result.message;
+					if(result.accepted)
+					{
+						if(result.category == "Pending" && result.result.contains("sourceRootHash")
+							&& result.result.contains("sourcePublicationGeneration"))
+						{
+							{
+								std::scoped_lock lock(terrainAutomationMutex);
+								pendingTerrainCollisionJobs.emplace(job.jobId, PendingTerrainCollisionJob{
+									result.result["sourceRootHash"].get<std::string>(),
+									result.result["sourcePublicationGeneration"].get<std::uint64_t>()});
+							}
+							(void)jobService.PublishProgress(job.jobId, 0.5, "waiting_for_terrain_collision_publish");
+							return AutomationDispatchResult{true,ErrorCategory::Internal,result.message,
+								{{"jobId",job.jobId},{"state","running"},{"visibilityBoundary","terrain_collision_publish_before_physics"}}};
+						}
+						(void)jobService.CompleteSucceeded(job.jobId, terminal);
+						return AutomationDispatchResult{true,ErrorCategory::Internal,result.message,{{"jobId",job.jobId},{"terminalReceipt",std::move(terminal)}}};
+					}
+					(void)jobService.CompleteFailed(job.jobId, terminal);
+					return AutomationDispatchResult{false, result.category=="InvalidSchema"?ErrorCategory::Validation:ErrorCategory::Unavailable,
+						result.message, {{"jobId",job.jobId},{"category",result.category}}};
+				}
+				if(!terrainAutomationAdapter->IsConfigured())
+					return AutomationDispatchResult{false, ErrorCategory::Unavailable, "Terrain edit automation requires an open editor terrain session.", {}};
+				const auto parsed=ParseTerrainAutomationRequest(context.arguments);
+				if(!parsed.accepted) return AutomationDispatchResult{false, ErrorCategory::Validation, parsed.message, {{"category",parsed.category}}};
+				const auto preflight=terrainAutomationAdapter->Preflight(parsed.request);
+				if(!preflight.accepted) return AutomationDispatchResult{false, preflight.category=="StaleGeneration"?ErrorCategory::StaleTarget:ErrorCategory::OverBudget, preflight.message, {{"category",preflight.category}}};
+				if(parsed.request.previewOnly)
+					return AutomationDispatchResult{true, ErrorCategory::Internal, "Terrain detached preview preflight accepted.", {{"previewOnly",true},{"approvalFingerprint",preflight.fingerprint},{"visibilityBoundary","terrain_authoring_publish"}}};
+				auto operationMatchesCapability = [&]() {
+					const auto& kind = parsed.request.operation;
+					if(route == "terrain.sculpt") return kind=="raise" || kind=="lower" || kind=="smooth" || kind=="flatten" || kind=="ramp" || kind=="stamp" || kind=="height-remap";
+					if(route == "terrain.layer") return kind=="paint" || kind=="erase-layer" || kind=="fill-layer" || kind=="normalize-layers";
+					if(route == "terrain.hole") return kind=="paint-hole" || kind=="erase-hole";
+					if(route == "terrain.procedural") return kind=="terrace" || kind=="noise" || kind=="hydraulic-erosion" || kind=="thermal-erosion" || kind=="spline-grade";
+					return false;
+				};
+				if(!operationMatchesCapability()) return AutomationDispatchResult{false,ErrorCategory::Validation,"Terrain operation kind does not match the requested capability.",{{"category","UnsupportedOperation"}}};
+				const auto job=jobService.Create({"terrain_edit",operation,context.requestId,context.correlationId,context.idempotencyKey,true}); std::string error;
+				if(route == "terrain.layer" || route == "terrain.hole")
+				{
+					const auto started = terrainAutomationAdapter->DispatchTypedOperation(operation, parsed.request);
+					if(!started.accepted || !started.transactionId)
+					{
+						(void)jobService.CompleteFailed(job.jobId,{{"category",started.category},{"message",started.message}});
+						return AutomationDispatchResult{false,ErrorCategory::Unavailable,started.message,{{"jobId",job.jobId},{"category",started.category}}};
+					}
+					terrainAutomationAdapter->TrackPendingTransaction(*started.transactionId, job.jobId, parsed.request);
+				}
+				else if(!terrainAutomationAdapter->PrepareAndEnqueue(parsed.request,job.jobId,error)) { (void)jobService.CompleteFailed(job.jobId,{{"category","Unavailable"},{"message",error}}); return AutomationDispatchResult{false,ErrorCategory::Unavailable,error,{{"jobId",job.jobId}}}; }
+				(void)jobService.SetState(job.jobId,AutomationJobState::Preparing,"queued_for_terrain_authoring_boundary");
+				return AutomationDispatchResult{true,ErrorCategory::Internal,"Terrain transaction queued for protected publication.",{{"jobId",job.jobId},{"visibilityBoundary","terrain_authoring_publish"}}};
+			}};
+		};
+		terrainAutomationProviderRegistered=capabilityRegistry.RegisterProvider(std::make_shared<TerrainAutomationProvider>(resolver)).registered;
 	}
 
 	bool EditorAutomationService::RegisterCapability(const AssistantCapability& capability)

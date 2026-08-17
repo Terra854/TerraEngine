@@ -13,6 +13,32 @@ add_executable(TerraEngine-EditorTests
 	Audio/AudioExportTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/AudioClipCompiler.cpp
 	${TERRAENGINE_EDITOR_ANIMATION_TEST_SOURCES}
+	${TERRAENGINE_TERRAIN_EDITOR_TEST_SOURCES}
+	# Terrain editor tests exercise the real provider-neutral creation/session
+	# implementation instead of local mocks. UI windows remain on the production
+	# editor target; only the small deterministic services are linked here.
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/TerrainCompiler.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainCreationService.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainAuthoringSession.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainPicking.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainBrushPresetStore.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainAuthoringSystem.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainHistoryCommand.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainDirtyState.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainSurfaceBrush.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainHoleBrush.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainProceduralOperators.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainHydraulicErosion.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainThermalErosion.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainProceduralJobs.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainSplineGrader.cpp
+	# The schema contract test links the same lowering implementation used by
+	# the installed automation provider, avoiding a test-only validator fork.
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/TerrainAutomationSchema.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/TerrainAutomationProvider.cpp
+	# Keep the generation-safe adapter available to editor contract tests. It
+	# only queues typed transactions and never mutates live roots from JSON.
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainAutomationAdapter.cpp
 	Export/ArchiveSerializationTests.cpp
 	Export/BuildProfileCollectionTests.cpp
 	Export/BuildProfileEdgeTests.cpp
@@ -292,6 +318,7 @@ target_include_directories(TerraEngine-EditorTests
 		${CMAKE_SOURCE_DIR}/Editor/Export
 		${CMAKE_SOURCE_DIR}/Tools/HeadlessExport
 		${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Profiling
+		${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain
 		${CMAKE_SOURCE_DIR}/External/basisu/encoder
 		${CMAKE_SOURCE_DIR}/External/basisu/transcoder
 		${CMAKE_SOURCE_DIR}/External/basisu/zstd
@@ -534,4 +561,69 @@ add_test(NAME Editor.Animation COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
 set_tests_properties(Editor.Animation PROPERTIES
 	LABELS "Editor;Animation"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Animation"
+)
+if(EXISTS "${CMAKE_SOURCE_DIR}/Tests/Editor/Terrain/TerrainAutomationContractTests.cpp")
+	target_compile_definitions(TerraEngine-EditorTests PRIVATE TERRAENGINE_HAS_TERRAIN_AUTOMATION_CONTRACT_TESTS=1)
+endif()
+if(EXISTS "${CMAKE_SOURCE_DIR}/Tests/Editor/Terrain/TerrainAutomationJobTests.cpp")
+	target_compile_definitions(TerraEngine-EditorTests PRIVATE TERRAENGINE_HAS_TERRAIN_AUTOMATION_JOB_TESTS=1)
+endif()
+if(EXISTS "${CMAKE_SOURCE_DIR}/Tests/Editor/Terrain/TerrainAutomationParityTests.cpp")
+	target_compile_definitions(TerraEngine-EditorTests PRIVATE TERRAENGINE_HAS_TERRAIN_AUTOMATION_PARITY_TESTS=1)
+endif()
+
+add_test(NAME Editor.Terrain.Foundation COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Terrain.Foundation PROPERTIES
+	LABELS "Editor;Terrain;Foundation"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain."
+)
+
+add_test(NAME Editor.Terrain.CreateSculpt COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Terrain.CreateSculpt PROPERTIES
+	LABELS "Editor;Terrain;Create;Sculpt"
+	# The executable uses behavior-specific names; select the real creation,
+	# sculpt-session, and preset tests instead of an empty umbrella substring.
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.TerrainCreation,Editor.TerrainSculpt,Terrain.CreateSculpt"
+)
+
+add_test(NAME Editor.Terrain.Layers COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Terrain.Layers PROPERTIES
+	LABELS "Editor;Terrain;Surface;Layers"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.TerrainLayers")
+
+add_test(NAME Editor.Terrain.CollisionAlignment COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Terrain.CollisionAlignment PROPERTIES
+	LABELS "Editor;Terrain;Physics;Collision"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=TerrainCollision")
+
+add_test(NAME Editor.Terrain.Procedural COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Terrain.Procedural PROPERTIES
+	LABELS "Editor;Terrain;Procedural;Cancellation"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=TerrainProcedural,TerrainSpline")
+
+if(EXISTS "${CMAKE_SOURCE_DIR}/Tests/Editor/Terrain/TerrainAutomationContractTests.cpp"
+	OR EXISTS "${CMAKE_SOURCE_DIR}/Tests/Editor/Terrain/TerrainAutomationJobTests.cpp"
+	OR EXISTS "${CMAKE_SOURCE_DIR}/Tests/Editor/Terrain/TerrainAutomationParityTests.cpp")
+	add_test(NAME Editor.Terrain.Automation COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+	set_tests_properties(Editor.Terrain.Automation PROPERTIES
+		LABELS "Editor;Terrain;Automation;Parity;Jobs"
+		ENVIRONMENT "TERRAENGINE_TEST_FILTER=TerrainAutomation,Terrain.Automation")
+endif()
+
+add_test(NAME Editor.Terrain.History COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Terrain.History PROPERTIES
+	LABELS "Editor;Terrain;History"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.TerrainHistory"
+)
+
+add_test(NAME Editor.Terrain.SaveRecovery COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Terrain.SaveRecovery PROPERTIES
+	LABELS "Editor;Terrain;Save;Recovery;Lifecycle"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.TerrainSaveRecovery,Editor.TerrainLifecycle"
+)
+
+add_test(NAME Editor.Terrain.LargeWorld COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Terrain.LargeWorld PROPERTIES
+	LABELS "Editor;Terrain;LargeWorld;Soak"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.TerrainLargeWorldSoak"
 )

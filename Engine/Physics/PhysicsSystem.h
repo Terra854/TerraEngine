@@ -68,6 +68,11 @@ namespace TerraEngine::Physics {
 		PhysicsFrameMigrationReceipt CommitFrameMigration(
 			const PhysicsFrameMigrationRequest& request,
 			const PhysicsFrameMigrationOperations& operations);
+		// Called only from the declared Before Physics protected boundary. Terrain
+		// workers supply immutable recipes; this method allocates fresh handles and
+		// delegates provider staging/rollback without exposing backend pointers.
+		TerrainCollisionReplacementReceipt CommitTerrainCollisionReplacement(
+			TerrainCollisionReplacementPacket packet);
 		// Returns the current physics-clock generation for copied cross-system
 		// requests. Animation must not substitute its independent frame counter:
 		// a later physics extraction validates this exact simulation time domain.

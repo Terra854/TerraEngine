@@ -45,6 +45,9 @@ namespace TerraEngine::Editor::Automation
 		// listener is disabled, disconnected, or has no queued requests.
 		void PumpAnimationRecordingsAtProtectedFrame();
 		void PumpRendererValidationMutationsAtProtectedFrame();
+		// Complete terrain automation jobs only after their typed protected
+		// publication workload has made the requested generation visible.
+		void PumpTerrainAutomationJobsAtProtectedFrame();
 		void SetMainEditor(MainEditorSubsystem* mainEditor);
 		void SetSelectionCallbacks(std::function<std::optional<entt::entity>()> getter, std::function<void(std::optional<entt::entity>)> setter);
 

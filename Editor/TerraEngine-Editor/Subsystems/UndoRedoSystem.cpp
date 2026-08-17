@@ -450,20 +450,19 @@ void UndoRedoSystem::PushCommand(std::unique_ptr<ICommand> command) {
 
 	HistoryEntry entry;
 	entry.command = std::move(command);
+	entry.byteCost = entry.command->GetHistoryBytes();
 	entry.beforeStateId = m_CurrentStateId;
 	entry.afterStateId = m_NextStateId++;
 	m_CurrentStateId = entry.afterStateId;
 	undoStack.push_back(std::move(entry));
+	m_HistoryBytes += undoStack.back().byteCost;
 	++historySequence;
-	// New actions invalidate the redo branch as the scene state has branched 
-	// from the previous history.
+	// New actions invalidate the redo branch as the scene state has branched.
+	// Drop retained terrain spans along with the discarded redo entries.
+	for(const HistoryEntry& discarded : redoStack) m_HistoryBytes -= discarded.byteCost;
 	redoStack.clear();
 
-	if (undoStack.size() > MaxHistory) {
-		// State identifiers remain valid after pruning. If the saved state falls
-		// outside the retained history it simply cannot be reached by later undo.
-		undoStack.pop_front();
-	}
+	PruneToHistoryBudget();
 
 	UpdateDirtyState();
 }
@@ -565,6 +564,31 @@ bool UndoRedoSystem::CompleteDeferredReplay(const TerraEngine::Scene::Transactio
 	return true;
 }
 
+bool UndoRedoSystem::CompleteTerrainReplay(const TerraEngine::Terrain::TerrainTransactionReceipt& receipt)
+{
+	if(!m_DeferredReplay || m_DeferredReplay->transactionId != TerraEngine::ToHexString(receipt.transactionId)) return false;
+	const DeferredReplay replay = *m_DeferredReplay;
+	m_DeferredReplay.reset();
+	if(receipt.outcome == TerraEngine::Terrain::TerrainEditOutcome::Committed)
+	{
+		UpdateDirtyState();
+		return true;
+	}
+	// Terrain publication rejected atomically, so retain the original command at
+	// its prior cursor position and allow the author to inspect/fix the conflict.
+	if(replay.direction == DeferredReplayDirection::Undo && !redoStack.empty())
+	{
+		HistoryEntry entry = std::move(redoStack.back()); redoStack.pop_back(); m_CurrentStateId = entry.afterStateId; undoStack.push_back(std::move(entry));
+	}
+	else if(replay.direction == DeferredReplayDirection::Redo && !undoStack.empty())
+	{
+		HistoryEntry entry = std::move(undoStack.back()); undoStack.pop_back(); m_CurrentStateId = entry.beforeStateId; redoStack.push_back(std::move(entry));
+	}
+	++historySequence;
+	UpdateDirtyState();
+	return true;
+}
+
 // UndoRedoSystem::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UndoRedoSystem::Undo() {
 	if (undoStack.empty()) return;
@@ -630,6 +654,30 @@ std::string UndoRedoSystem::GetRedoLabel() const { return redoStack.empty() ? st
 std::string UndoRedoSystem::GetUndoHistoryId() const { return undoStack.empty() ? std::string{} : undoStack.back().command->GetHistoryId(); }
 std::string UndoRedoSystem::GetRedoHistoryId() const { return redoStack.empty() ? std::string{} : redoStack.back().command->GetHistoryId(); }
 std::uint64_t UndoRedoSystem::GetSequence() const { return historySequence; }
+std::size_t UndoRedoSystem::GetHistoryBytes() const { return m_HistoryBytes; }
+std::size_t UndoRedoSystem::GetHistoryCountBudget() const { return m_MaxHistory; }
+std::size_t UndoRedoSystem::GetHistoryByteBudget() const { return m_MaxHistoryBytes; }
+bool UndoRedoSystem::IsAtSavePoint() const { return m_CurrentStateId == m_SavedStateId; }
+
+void UndoRedoSystem::SetHistoryBudget(std::size_t maximumCommands, std::size_t maximumBytes)
+{
+	m_MaxHistory = maximumCommands;
+	m_MaxHistoryBytes = maximumBytes;
+	PruneToHistoryBudget();
+	++historySequence;
+	UpdateDirtyState();
+}
+
+void UndoRedoSystem::PruneToHistoryBudget()
+{
+	while(!undoStack.empty() && (undoStack.size() > m_MaxHistory || m_HistoryBytes > m_MaxHistoryBytes))
+	{
+		// State identifiers remain valid after pruning. If the saved state falls
+		// outside the retained history it simply cannot be reached by later undo.
+		m_HistoryBytes -= undoStack.front().byteCost;
+		undoStack.pop_front();
+	}
+}
 
 // UndoRedoSystem::SetSavePoint is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UndoRedoSystem::SetSavePoint() {
@@ -640,7 +688,9 @@ void UndoRedoSystem::SetSavePoint() {
 // UndoRedoSystem::Clear is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UndoRedoSystem::Clear() {
 	undoStack.clear();
+	for(const HistoryEntry& discarded : redoStack) m_HistoryBytes -= discarded.byteCost;
 	redoStack.clear();
+	m_HistoryBytes = 0U;
 	m_DeferredReplay.reset();
 	++historySequence;
 	// A cleared history represents a newly loaded document. Allocate a fresh

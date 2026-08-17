@@ -8,8 +8,10 @@
 
 #include "Core/Export.h"
 #include "Scene/WorldCoordinate.h"
+#include "Utilities/UUID.h"
 
 #include <compare>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <mutex>
@@ -263,6 +265,7 @@ namespace TerraEngine::Physics {
 		TaperedCapsule,
 		ConvexHull,
 		Mesh,
+		HeightField,
 		Compound
 	};
 
@@ -294,6 +297,32 @@ namespace TerraEngine::Physics {
 
 		bool IsFinite() const noexcept;
 		auto operator<=>(const PhysicsVector3&) const = default;
+	};
+
+	// Immutable terrain samples stay provider-neutral until a backend creates a
+	// replacement static shape. Holes are one bit per 256 by 256 terrain cell.
+	struct TerrainHeightFieldRecipe
+	{
+		static constexpr std::uint32_t kGridExtent = 257u;
+		static constexpr std::size_t kSampleCount = static_cast<std::size_t>(kGridExtent) * kGridExtent;
+		static constexpr std::size_t kHoleByteCount = (256u * 256u) / 8u;
+		TerraEngine::UUID terrainAssetId = TerraEngine::EMPTY_UUID;
+		std::int64_t areaX = 0;
+		std::int64_t areaZ = 0;
+		std::uint64_t authoredGeneration = 0u;
+		std::uint64_t authoredHash = 0u;
+		float sampleSpacingMetres = 1.0f;
+		float heightDatumMetres = 0.0f;
+		std::vector<std::int32_t> heightMillimetres;
+		std::vector<std::uint8_t> holeBits;
+		std::vector<std::uint16_t> materialIndices;
+		[[nodiscard]] bool IsComplete() const noexcept
+		{
+			return terrainAssetId != TerraEngine::EMPTY_UUID && authoredGeneration != 0u && authoredHash != 0u
+				&& std::isfinite(sampleSpacingMetres) && sampleSpacingMetres > 0.0f && std::isfinite(heightDatumMetres)
+				&& heightMillimetres.size() == kSampleCount && holeBits.size() == kHoleByteCount
+				&& (materialIndices.empty() || materialIndices.size() == 256u * 256u);
+		}
 	};
 
 	struct PhysicsQuaternion {

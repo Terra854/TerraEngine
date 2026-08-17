@@ -311,6 +311,36 @@ namespace TerraEngine::Tests {
 	void RegisterVulkanPresentationLifecycleTests(TestRegistry& registry);
 	void RegisterVulkanUiSubmissionFailureTests(TestRegistry& registry);
 	void RegisterEditorFrameCompletionTrackerTests(TestRegistry& registry);
+	void RegisterTerrainCoordinateTests(TestRegistry& registry);
+	void RegisterTerrainFormatTests(TestRegistry& registry);
+	void RegisterTerrainAssetIntegrationTests(TestRegistry& registry);
+	void RegisterTerrainSchedulerContractTests(TestRegistry& registry);
+	void RegisterTerrainTransactionTests(TestRegistry& registry);
+	void RegisterTerrainBrushKernelTests(TestRegistry& registry);
+	void RegisterTerrainPageCookerTests(TestRegistry& registry);
+	void RegisterTerrainRenderSystemIntegrationTests(TestRegistry& registry);
+	void RegisterTerrainAtomicEditTests(TestRegistry& registry);
+	void RegisterTerrainLargeWorldCoordinateTests(TestRegistry& registry);
+	void RegisterTerrainResidencyTests(TestRegistry& registry);
+	void RegisterTerrainLodSeamTests(TestRegistry& registry);
+	void RegisterTerrainLayerWeightTests(TestRegistry& registry);
+	void RegisterTerrainSurfaceRenderingTests(TestRegistry& registry);
+	void RegisterTerrainHoleTests(TestRegistry& registry);
+	void RegisterTerrainHeightFieldRecipeTests(TestRegistry& registry);
+	void RegisterTerrainCollisionPublicationTests(TestRegistry& registry);
+	void RegisterTerrainProceduralOperationTests(TestRegistry& registry);
+#if defined(TERRAENGINE_HAS_TERRAIN_DIAGNOSTICS_TESTS)
+	void RegisterTerrainDiagnosticsTests(TestRegistry& registry);
+#endif
+#if defined(TERRAENGINE_HAS_TERRAIN_AUTOMATION_DIAGNOSTIC_TESTS)
+	void RegisterTerrainAutomationDiagnosticTests(TestRegistry& registry);
+#endif
+#if defined(TERRAENGINE_HAS_TERRAIN_MULTITHREADED_STRESS_TESTS)
+	void RegisterTerrainMultithreadedStressTests(TestRegistry& registry);
+#endif
+#if defined(TERRAENGINE_HAS_TERRAIN_EXPORT_RUNTIME_TESTS)
+	void RegisterTerrainExportRuntimeTests(TestRegistry& registry);
+#endif
 }
 
 int main() {
@@ -318,6 +348,11 @@ int main() {
 
 	registry.Add("Engine.Smoke.HarnessRuns", [](TerraEngine::Tests::TestContext& context) {
 		context.Expect(true, "The engine test harness should execute registered tests.");
+	});
+	registry.Add("Engine.Terrain.Foundation", [](TerraEngine::Tests::TestContext& context) {
+		// This registration anchors the foundation CTest filter before the first
+		// terrain implementation tests are linked into the executable.
+		context.Expect(true, "The terrain foundation test group is registered.");
 	});
 
 	TerraEngine::Tests::RegisterAnimationTestScaffolding(registry);
@@ -626,6 +661,36 @@ int main() {
 	TerraEngine::Tests::RegisterUIParserTests(registry);
 	TerraEngine::Tests::RegisterUISystemPreparationTests(registry);
 	TerraEngine::Tests::RegisterUIStyleTests(registry);
+	TerraEngine::Tests::RegisterTerrainCoordinateTests(registry);
+	TerraEngine::Tests::RegisterTerrainFormatTests(registry);
+	TerraEngine::Tests::RegisterTerrainAssetIntegrationTests(registry);
+	TerraEngine::Tests::RegisterTerrainSchedulerContractTests(registry);
+	TerraEngine::Tests::RegisterTerrainTransactionTests(registry);
+	TerraEngine::Tests::RegisterTerrainBrushKernelTests(registry);
+	TerraEngine::Tests::RegisterTerrainPageCookerTests(registry);
+	TerraEngine::Tests::RegisterTerrainRenderSystemIntegrationTests(registry);
+	TerraEngine::Tests::RegisterTerrainAtomicEditTests(registry);
+	TerraEngine::Tests::RegisterTerrainLargeWorldCoordinateTests(registry);
+	TerraEngine::Tests::RegisterTerrainResidencyTests(registry);
+	TerraEngine::Tests::RegisterTerrainLodSeamTests(registry);
+	TerraEngine::Tests::RegisterTerrainLayerWeightTests(registry);
+	TerraEngine::Tests::RegisterTerrainSurfaceRenderingTests(registry);
+	TerraEngine::Tests::RegisterTerrainHoleTests(registry);
+	TerraEngine::Tests::RegisterTerrainHeightFieldRecipeTests(registry);
+	TerraEngine::Tests::RegisterTerrainCollisionPublicationTests(registry);
+	TerraEngine::Tests::RegisterTerrainProceduralOperationTests(registry);
+#if defined(TERRAENGINE_HAS_TERRAIN_DIAGNOSTICS_TESTS)
+	TerraEngine::Tests::RegisterTerrainDiagnosticsTests(registry);
+#endif
+#if defined(TERRAENGINE_HAS_TERRAIN_AUTOMATION_DIAGNOSTIC_TESTS)
+	TerraEngine::Tests::RegisterTerrainAutomationDiagnosticTests(registry);
+#endif
+#if defined(TERRAENGINE_HAS_TERRAIN_MULTITHREADED_STRESS_TESTS)
+	TerraEngine::Tests::RegisterTerrainMultithreadedStressTests(registry);
+#endif
+#if defined(TERRAENGINE_HAS_TERRAIN_EXPORT_RUNTIME_TESTS)
+	TerraEngine::Tests::RegisterTerrainExportRuntimeTests(registry);
+#endif
 
 	return registry.RunAll(std::cout);
 }

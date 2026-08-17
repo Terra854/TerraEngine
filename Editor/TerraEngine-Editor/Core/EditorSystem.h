@@ -21,6 +21,7 @@ public:
 	// Configures the opt-in installed-editor acceptance run. The normal editor
 	// path leaves this unset and therefore never writes validation evidence.
 	void SetPhysicsInvariantOutputPath(const std::filesystem::path& outputPath);
+	void SetTerrainInvariantOutputPath(const std::filesystem::path& outputPath);
 	int RequestedProcessExitCode() const noexcept;
 	void Setup(Engine* engine);
 	void Initialize() override;
@@ -28,6 +29,7 @@ public:
 	void Shutdown() override;
 	std::string SystemName() override;
 	TerraEngine::Scheduling::SystemDeclaration SchedulerDeclaration() override;
+	std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> DeclareFrameWorkloads(float deltaTime) override;
 
 	void SaveWorkspaceLayout();
 	void LoadWorkspaceLayout();
@@ -40,6 +42,7 @@ private:
 	std::shared_ptr<MainEditorSubsystem> mainEditor;
 	std::optional<std::filesystem::path> startupProjectPath;
 	std::optional<std::filesystem::path> physicsInvariantOutputPath;
+	std::optional<std::filesystem::path> terrainInvariantOutputPath;
 
 	// Managed Editor Hooks
 	typedef void (*ManagedInitFn)(void*);
@@ -63,6 +66,8 @@ private:
 	bool pendingSaveLayout = false;
 	bool startupProjectOpenAttempted = false;
 	bool physicsInvariantRunAttempted = false;
+	bool terrainInvariantRunAttempted = false;
+	float terrainInvariantWaitSeconds = 0.0f;
 	// The installed acceptance command waits for the normal asynchronous
 	// Assembly-CSharp coordinator instead of canceling it during early shutdown.
 	float physicsInvariantManagedWaitSeconds = 0.0f;
@@ -71,6 +76,7 @@ private:
 	void HandleProjectLoaded();
 	void ProcessStartupProjectOpen();
 	void ProcessPhysicsInvariantValidation(float deltaTime);
+	void ProcessTerrainInvariantValidation(float deltaTime);
 public:
 	void DrawWindowMenu();
 	void HideAllWindows();

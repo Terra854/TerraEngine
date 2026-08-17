@@ -21,8 +21,15 @@ namespace TerraEngine {
 	using UUID = std::array<std::uint8_t, 16>;
 
 	[[nodiscard]] inline UUID GenerateUUID() {
-		static std::random_device rd;
-		static std::mt19937_64 gen(rd());
+		// UUID creation is used by worker-side transaction producers. Each thread
+		// owns its generator so concurrent jobs never race inside std::mt19937_64.
+		thread_local std::mt19937_64 gen([] {
+			std::random_device entropy;
+			std::seed_seq seed{
+				entropy(), entropy(), entropy(), entropy(),
+				entropy(), entropy(), entropy(), entropy()};
+			return std::mt19937_64(seed);
+		}());
 
 		UUID uuid{};
 

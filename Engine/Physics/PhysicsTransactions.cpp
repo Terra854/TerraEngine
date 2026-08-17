@@ -4,6 +4,7 @@
 
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
+#include "Physics/Assets/ColliderRecipe.h"
 
 #include <algorithm>
 #include <cmath>
@@ -350,6 +351,74 @@ namespace TerraEngine::Physics {
 
 	PhysicsTransaction::PhysicsTransaction(std::string transactionId)
 		: id(std::move(transactionId)), correlationId(id) {
+	}
+
+	TerrainCollisionReplacementReceipt CommitTerrainCollisionReplacement(
+		Backend::IPhysicsBackend& backend,
+		const TerrainCollisionReplacementPacket& packet) {
+		TerrainCollisionReplacementReceipt receipt;
+		receipt.activeShape = packet.priorShape;
+		receipt.activeBody = packet.priorBody;
+		receipt.retiredShape = packet.priorShape;
+		receipt.retiredBody = packet.priorBody;
+		if(packet.cancelled) {
+			receipt.retainedLastKnownGood = true;
+			receipt.message = "Terrain collision replacement was cancelled before provider staging.";
+			return receipt;
+		}
+		if(packet.id.empty() || !packet.expectedWorld.IsValid() || !packet.sourceRootHash.IsValid()
+			|| packet.sourcePublicationGeneration == 0U || !packet.replacementShape.IsValid()
+			|| !packet.replacementBody.handle.IsValid()
+			|| packet.replacementBody.shape != packet.replacementShape
+			|| packet.replacementShape.worldId != packet.expectedWorld.worldId || packet.replacementShape.worldGeneration != packet.expectedWorld.worldGeneration
+			|| packet.replacementBody.handle.worldId != packet.expectedWorld.worldId || packet.replacementBody.handle.worldGeneration != packet.expectedWorld.worldGeneration
+			|| packet.replacementBody.motionType != PhysicsMotionType::Static
+			|| !ValidateTerrainHeightFieldRecipe(packet.recipe).accepted) {
+			receipt.retainedLastKnownGood = true;
+			receipt.message = "Terrain collision replacement packet is incomplete or invalid.";
+			return receipt;
+		}
+
+		Backend::PhysicsBackendAdmissionReservation reservation;
+		reservation.world = packet.expectedWorld;
+		reservation.shapeCount = 1U;
+		reservation.bodyCount = 1U;
+		Backend::PhysicsBackendPreparedAdmission admission;
+		const Backend::PhysicsBackendResult reserve = backend.ReserveAdmission(reservation, admission);
+		if(!reserve.Succeeded()) {
+			receipt.retainedLastKnownGood = true;
+			receipt.message = "Terrain collision admission failed: " + reserve.message;
+			return receipt;
+		}
+		const auto rollback = [&]() {
+			(void)backend.RollbackStaging(admission.staging);
+			receipt.retainedLastKnownGood = true;
+		};
+		const Backend::PhysicsShapeRecipe shapeRecipe = Backend::MakeTerrainHeightFieldShapeRecipe(packet.recipe);
+		const Backend::PhysicsBackendResult shape = backend.CreateShape(packet.expectedWorld, packet.replacementShape, shapeRecipe, admission.staging);
+		if(!shape.Succeeded()) { rollback(); receipt.message = "Terrain collision shape staging failed: " + shape.message; return receipt; }
+		const Backend::PhysicsBackendResult body = backend.CreateBody(packet.replacementBody, admission.staging);
+		if(!body.Succeeded()) { rollback(); receipt.message = "Terrain collision body staging failed: " + body.message; return receipt; }
+		const Backend::PhysicsBackendResult committed = backend.CommitStaging(admission.staging);
+		if(!committed.Succeeded()) { rollback(); receipt.message = "Terrain collision provider commit failed: " + committed.message; return receipt; }
+
+		// A new body is live only after staging commits. Retire the old body next;
+		// on failure the fresh body is removed and the old collision remains LKG.
+		if(packet.priorBody.IsValid()) {
+			const Backend::PhysicsBackendResult retire = backend.DestroyBody(packet.priorBody);
+			if(!retire.Succeeded()) {
+				(void)backend.DestroyBody(packet.replacementBody.handle);
+				(void)backend.DestroyShape(packet.replacementShape);
+				receipt.retainedLastKnownGood = true;
+				receipt.message = "Terrain collision old-body retirement failed; fresh replacement was rolled back.";
+				return receipt;
+			}
+		}
+		receipt.committed = true;
+		receipt.activeShape = packet.replacementShape;
+		receipt.activeBody = packet.replacementBody.handle;
+		receipt.message = "Fresh terrain heightfield shape and static body committed before simulation.";
+		return receipt;
 	}
 
 	PhysicsTransactionResult PreflightPhysicsTransaction(

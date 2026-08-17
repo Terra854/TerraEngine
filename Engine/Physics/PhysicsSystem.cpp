@@ -134,6 +134,14 @@ namespace TerraEngine::Physics {
 			PhysicsFrameMembership frameMembership;
 		};
 
+		struct RuntimeTerrainCollision {
+			TerraEngine::UUID terrainAssetId = TerraEngine::EMPTY_UUID;
+			std::int64_t areaX = 0;
+			std::int64_t areaZ = 0;
+			PhysicsShapeHandle shape;
+			PhysicsBodyHandle body;
+		};
+
 		struct PreparedBody {
 			PhysicsBodyDescriptor body;
 			std::vector<PhysicsColliderDescriptor> colliders;
@@ -3350,6 +3358,7 @@ namespace TerraEngine::Physics {
 		std::uint64_t lastStatePagesCopied = 0U;
 		PhysicsTick lastAggregateDiagnosticsTick = 0U;
 		std::uint64_t explicitStepPublicationCount = 0U;
+		std::vector<RuntimeTerrainCollision> terrainCollisions;
 		mutable std::mutex mutex;
 	};
 
@@ -3420,7 +3429,7 @@ namespace TerraEngine::Physics {
 		declaration.phase = "Physics";
 		declaration.after = {"ScriptingSystem"};
 		declaration.before = {"UISystem"};
-		declaration.reads = {"SceneGraph", "ObjectManager", "PhysicsSettingsUpdateQueue", "PhysicsAuthoringSnapshot", "PhysicsQueryQueue", "PhysicsEventSubscriptions", "RagdollPhysicsQueue", TerraEngine::Scheduling::kResourcePhysicsFrameRegistry, TerraEngine::Scheduling::kResourcePhysicsFrameMigrations};
+		declaration.reads = {"SceneGraph", "ObjectManager", "PhysicsSettingsUpdateQueue", "PhysicsAuthoringSnapshot", "PhysicsQueryQueue", "PhysicsEventSubscriptions", "RagdollPhysicsQueue", TerraEngine::Scheduling::kResourceTerrainPublishedCollision, TerraEngine::Scheduling::kResourcePhysicsFrameRegistry, TerraEngine::Scheduling::kResourcePhysicsFrameMigrations};
 		declaration.writes = {"PhysicsSettings", "PhysicsPreparedWork", "PhysicsWorld", "PhysicsQueryResults", "PhysicsEventPackets", "PhysicsPublishedSnapshots", "RagdollPhysicsSnapshots", "RagdollPhysicsResults", "PhysicsTransformTransactions", "SceneMutationQueue", TerraEngine::Scheduling::kResourcePhysicsFrameRegistry, TerraEngine::Scheduling::kResourcePhysicsFrameMigrations};
 		declaration.mainThread = true;
 		declaration.requiresFlushedSceneMutations = true;
@@ -3478,7 +3487,7 @@ namespace TerraEngine::Physics {
 				{"PhysicsPreparedWork", "PhysicsWorld", "RagdollPhysicsQueue"},
 				{"PhysicsWorld", "RagdollPhysicsSnapshots", "RagdollPhysicsResults"}, false, WorkerSystemPhaseKind::ProtectedCommit);
 			configure(descriptors[3], "PhysicsSimulate",
-				{"PhysicsWorld"}, {"PhysicsWorld"}, true, WorkerSystemPhaseKind::WorkerPrepare);
+				{"PhysicsWorld", kResourceTerrainPublishedCollision}, {"PhysicsWorld"}, true, WorkerSystemPhaseKind::WorkerPrepare);
 			configure(descriptors[4], "PhysicsExtract",
 				{"PhysicsWorld", "PhysicsPreparedQueries"},
 				{"PhysicsPublishedSnapshots", "PhysicsBackendQueryResults", "PhysicsRawEvents"}, true, WorkerSystemPhaseKind::WorkerPrepare);
@@ -3689,6 +3698,50 @@ namespace TerraEngine::Physics {
 		if(backend != impl->frameBackends.end()) {
 			if(receipt.accepted) ++backend->second.migrationAcceptedCount;
 			else if(receipt.state == PhysicsFrameMigrationState::RolledBack) ++backend->second.migrationRolledBackCount;
+		}
+		return receipt;
+	}
+
+	TerrainCollisionReplacementReceipt PhysicsSystem::CommitTerrainCollisionReplacement(
+		TerrainCollisionReplacementPacket packet) {
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		TerrainCollisionReplacementReceipt rejected;
+		if(!impl->backend || !impl->world.Handle().IsValid() || packet.recipe.terrainAssetId == TerraEngine::EMPTY_UUID) {
+			rejected.retainedLastKnownGood = true;
+			rejected.message = "Terrain collision replacement requires an active primary physics world and terrain identity.";
+			return rejected;
+		}
+		const auto prior = std::find_if(impl->terrainCollisions.begin(), impl->terrainCollisions.end(), [&](const Impl::RuntimeTerrainCollision& value) {
+			return value.terrainAssetId == packet.recipe.terrainAssetId && value.areaX == packet.recipe.areaX && value.areaZ == packet.recipe.areaZ;
+		});
+		packet.expectedWorld = impl->world.Handle();
+		if(prior != impl->terrainCollisions.end()) { packet.priorShape = prior->shape; packet.priorBody = prior->body; }
+		packet.replacementShape = impl->world.AllocateShape(); packet.replacementBody.handle = impl->world.AllocateBody();
+		packet.replacementBody.shape = packet.replacementShape;
+		packet.replacementBody.objectId = packet.replacementBody.objectId == TerraEngine::EMPTY_UUID ? packet.recipe.terrainAssetId : packet.replacementBody.objectId;
+		packet.replacementBody.objectGeneration = packet.replacementBody.objectGeneration == 0U ? std::max<PhysicsGeneration>(1U, static_cast<PhysicsGeneration>(packet.recipe.authoredGeneration)) : packet.replacementBody.objectGeneration;
+		packet.replacementBody.componentGeneration = packet.replacementBody.componentGeneration == 0U ? 1U : packet.replacementBody.componentGeneration;
+		packet.replacementBody.motionType = PhysicsMotionType::Static;
+		if(!packet.replacementShape.IsValid() || !packet.replacementBody.handle.IsValid()) {
+			if(packet.replacementShape.IsValid()) (void)impl->world.Release(packet.replacementShape);
+			if(packet.replacementBody.handle.IsValid()) (void)impl->world.Release(packet.replacementBody.handle);
+			rejected.retainedLastKnownGood = true;
+			rejected.message = "Terrain collision replacement could not allocate fresh typed handles.";
+			return rejected;
+		}
+		TerrainCollisionReplacementReceipt receipt = TerraEngine::Physics::CommitTerrainCollisionReplacement(*impl->backend, packet);
+		if(!receipt.committed) {
+			(void)impl->world.Release(packet.replacementShape); (void)impl->world.Release(packet.replacementBody.handle);
+			return receipt;
+		}
+		if(prior != impl->terrainCollisions.end()) {
+			// The helper already retired the provider body. Releasing only its typed
+			// body handle makes stale packets fail while retaining the old shape for
+			// deferred provider-safe retirement and last-known-good diagnostics.
+			(void)impl->world.Release(prior->body);
+			prior->shape = packet.replacementShape; prior->body = packet.replacementBody.handle;
+		} else {
+			impl->terrainCollisions.push_back({packet.recipe.terrainAssetId, packet.recipe.areaX, packet.recipe.areaZ, packet.replacementShape, packet.replacementBody.handle});
 		}
 		return receipt;
 	}

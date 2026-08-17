@@ -15,6 +15,7 @@
 #include <nlohmann/json.hpp>
 #include "Engine/Utilities/UUID.h"
 #include "Engine/Scene/TransactionalMutation.h"
+#include "Terrain/TerrainEditTransaction.h"
 
 // Interface for atomic editor operations that can be reversed and reapplied.
 // Concrete implementations must capture all state necessary to restore the 
@@ -28,6 +29,9 @@ struct ICommand {
 	// Deferred commands return the transaction they queued so the history owner
 	// can wait for the protected scene flush before finalizing dirty-state tracking.
 	virtual std::string GetPendingReplayTransactionId() const { return {}; }
+	// Typed history can report retained blob bytes so long terrain sessions obey
+	// a memory budget without pretending large patches are ordinary JSON edits.
+	virtual std::size_t GetHistoryBytes() const { return 0U; }
 };
 
 // Records the creation of a new object. Undo destroys the entity, while Redo
@@ -174,6 +178,7 @@ public:
 	// Completes an undo/redo command that published through SceneMutationQueue.
 	// Returning true means the receipt belonged to the active history replay.
 	bool CompleteDeferredReplay(const TerraEngine::Scene::TransactionResult& result);
+	bool CompleteTerrainReplay(const TerraEngine::Terrain::TerrainTransactionReceipt& receipt);
 	
 	// Reverses the most recent command on the undo stack and moves it to the 
 	// redo stack.
@@ -192,6 +197,13 @@ public:
 	std::string GetUndoHistoryId() const;
 	std::string GetRedoHistoryId() const;
 	std::uint64_t GetSequence() const;
+	std::size_t GetHistoryBytes() const;
+	std::size_t GetHistoryCountBudget() const;
+	std::size_t GetHistoryByteBudget() const;
+	bool IsAtSavePoint() const;
+	// Projects and tests may tune both limits. Reducing either limit prunes the
+	// oldest retained commands immediately while preserving the active cursor.
+	void SetHistoryBudget(std::size_t maximumCommands, std::size_t maximumBytes);
 
 	// Marks the current point in history as the 'Saved' state.
 	void SetSavePoint();
@@ -208,6 +220,7 @@ private:
 		std::unique_ptr<ICommand> command;
 		std::uint64_t beforeStateId = 0u;
 		std::uint64_t afterStateId = 0u;
+		std::size_t byteCost = 0U;
 	};
 
 	enum class DeferredReplayDirection
@@ -223,6 +236,7 @@ private:
 	};
 
 	void UpdateDirtyState();
+	void PruneToHistoryBudget();
 
 	std::deque<HistoryEntry> undoStack;
 	std::deque<HistoryEntry> redoStack;
@@ -238,8 +252,10 @@ private:
 	std::uint64_t m_SavedStateId = 0u;
 	std::uint64_t m_NextStateId = 1u;
 	std::uint64_t historySequence = 0u;
+	std::size_t m_HistoryBytes = 0U;
 
-	// Limits history depth to prevent unbounded memory growth during long 
-	// editing sessions.
-	static constexpr size_t MaxHistory = 100;
+	// Defaults satisfy terrain's exact 1,000-stroke workflow while remaining
+	// configurable for memory-constrained projects and deterministic tests.
+	std::size_t m_MaxHistory = 1000U;
+	std::size_t m_MaxHistoryBytes = 512U * 1024U * 1024U;
 };

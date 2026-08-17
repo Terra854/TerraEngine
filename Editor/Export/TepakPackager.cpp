@@ -53,6 +53,7 @@ PackageResult TepakPackager::Package(
 	// They must never enter an archive: exported runtime resolves only validated
 	// .tepcoll envelopes, whose provider/version checks occur before staging.
 	std::error_code inventoryError;
+	std::vector<std::filesystem::path> terrainRoots;
 	for(const std::filesystem::directory_entry& entry : std::filesystem::recursive_directory_iterator(assetDirectory, inventoryError)) {
 		if(inventoryError) {
 			result.errorMessage = "Could not inspect staged assets for source-only collider inputs: " + inventoryError.message();
@@ -61,6 +62,9 @@ PackageResult TepakPackager::Package(
 		if(entry.is_regular_file() && entry.path().extension() == ".tecollider") {
 			result.errorMessage = "Source-only collider recipe is not valid export content: " + entry.path().string();
 			return result;
+		}
+		if(entry.is_regular_file() && entry.path().extension() == ".teterrain") {
+			terrainRoots.push_back(entry.path());
 		}
 		if(entry.is_regular_file() && entry.path().extension() == ".teaudio") {
 			// TEPAK is a byte-preserving archive, so validate TEAF before packing.
@@ -84,6 +88,13 @@ PackageResult TepakPackager::Package(
 				result.errorMessage = "Staged audio clip is not a valid TEAF envelope: " + entry.path().string();
 				return result;
 			}
+		}
+	}
+	for(const std::filesystem::path& terrainRoot : terrainRoots) {
+		const std::filesystem::path dataDirectory = terrainRoot.string() + ".data";
+		if(!std::filesystem::is_directory(dataDirectory)) {
+			result.errorMessage = "Terrain root is missing its managed data bundle: " + terrainRoot.string();
+			return result;
 		}
 	}
 

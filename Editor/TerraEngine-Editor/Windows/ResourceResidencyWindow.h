@@ -9,6 +9,7 @@
 #include "../Framework/EditorWindow.h"
 
 #include <memory>
+#include <string>
 
 class MainEditorSubsystem;
 
@@ -29,6 +30,7 @@ private:
 	void DrawSummary();
 	void DrawStreamingSummary();
 	void DrawVirtualGeometrySummary();
+	void DrawTerrainSummary();
 	void DrawCandidates();
 	void DrawReleaseRecords();
 	void DrawDiagnosticsFilters();
@@ -42,4 +44,5 @@ private:
 	int m_MemoryFilter = 0;
 	int m_LoadStateFilter = 0;
 	bool m_ShowOnlyReleaseEligible = false;
+	std::string m_TerrainActionStatus;
 };

@@ -48,6 +48,13 @@ public:
 	bool SetAutomationOrientation(std::string_view orientation, std::string& outError);
 	bool SetAutomationSnapping(bool enabled, const std::optional<glm::vec3>& values, std::string& outError);
 	bool SetAutomationVisualization(std::string_view mode, std::string& outError);
+	// Terrain diagnostics supply an already normalized canonical focus. Scene View
+	// owns camera placement and keeps the focus exact across distant world cells.
+	void FrameTerrainDiagnostic(const TerraEngine::Scene::WorldPosition& focus);
+	// Terrain authoring claims the pointer before ordinary object selection only
+	// while a real brush stroke is active. Releasing it restores normal picking.
+	void SetTerrainBrushCapture(bool active) noexcept { m_TerrainBrushCapture = active; }
+	[[nodiscard]] bool HasTerrainBrushCapture() const noexcept { return m_TerrainBrushCapture; }
 
 	// The ColliderSet Inspector owns the visible authoring controls. Scene View
 	// owns only the detached 3D preview and its transactional Apply boundary so
@@ -111,6 +118,7 @@ private:
 	float m_MouseSensitivity = 0.1f;
 	bool m_IsFlyCamActive = false;
 	bool m_IsSceneViewPanning = false;
+	bool m_TerrainBrushCapture = false;
 	std::pair<double, double> m_StoredCursorPos;
 	// Scene View camera snaps orbit around this authoring focus so orthographic
 	// axis clicks rotate the scene instead of spinning the camera in place.

@@ -95,6 +95,10 @@ namespace TerraEngine::EditorTests {
 			ScriptingSystem::Instance().SetRunning(false);
 			UndoRedoSystem& history = UndoRedoSystem::Instance();
 			history.Clear();
+			// Terrain workflows intentionally raise the configurable production
+			// history limit. Pin this legacy pruning check to its documented 100-entry
+			// budget so it is independent of earlier test and project configuration.
+			history.SetHistoryBudget(100U, 512U * 1024U * 1024U);
 			int value = 0;
 			// The history retains 100 commands. Pushing one extra command makes the
 			// original clean state unreachable, so undoing everything retained must
@@ -112,6 +116,7 @@ namespace TerraEngine::EditorTests {
 			context.ExpectEqual(1, value, "Pruning should leave the oldest retained edited state.");
 			context.Expect(SceneManager::Instance().IsActiveSceneDirty(), "An unreachable saved revision must remain dirty after all retained undo steps.");
 			history.Clear();
+			history.SetHistoryBudget(1000U, 512U * 1024U * 1024U);
 		});
 
 		registry.Add("Editor.TransactionalMutationUndo.PhysicsEditUndoRedoPreservesSelectionAndDirtyState", [](TestContext& context) {

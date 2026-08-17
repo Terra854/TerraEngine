@@ -222,6 +222,8 @@ namespace
 			return { ".teragdoll" };
 		case AssetType::AudioClip:
 			return { ".teaudio" };
+		case AssetType::Terrain:
+			return { ".teterrain" };
 		}
 
 		return {};
@@ -2715,6 +2717,11 @@ void ResourceManager::ClearCaches()
 		audioClipAssets.clear();
 		audioClipGenerations.clear();
 	}
+	{
+		std::unique_lock lock(terrainPaths.mutex);
+		terrainPaths.pathToId.clear();
+		terrainPaths.idToPath.clear();
+	}
 	ClearResidencyState();
 	ClearStreamingState();
 	// Mesh and animation cache ownership changed as one protected teardown
@@ -2864,6 +2871,14 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 		std::unique_lock assetLock(audioClipMutex);
 		audioClipAssets.erase(id);
 		audioClipGenerations.erase(id);
+		break;
+	}
+	case AssetType::Terrain: {
+		std::unique_lock lock(terrainPaths.mutex);
+		for(auto iterator = terrainPaths.pathToId.begin(); iterator != terrainPaths.pathToId.end();) {
+			iterator = iterator->second == id ? terrainPaths.pathToId.erase(iterator) : std::next(iterator);
+		}
+		terrainPaths.idToPath.erase(id);
 		break;
 	}
 	}
@@ -4380,7 +4395,7 @@ bool ResourceManager::HasResource(const TerraEngine::UUID& id) const
 		|| isAvailable(retargetProfileCache) || isAvailable(motionDatabaseCache)
 		|| isAvailable(ragdollProfileCache)
 		|| hasRegisteredPath(physicsMaterialPaths) || hasRegisteredPath(cookedColliderPaths)
-		|| hasRegisteredPath(audioClipPaths);
+		|| hasRegisteredPath(audioClipPaths) || hasRegisteredPath(terrainPaths);
 }
 
 // ResourceManager::RegisterAssetPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -4389,9 +4404,9 @@ void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::
 	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
 	const std::string key = NormalizeKey(resolvedPath);
 	const bool canBePreferredLoadPath = HasNativeExtensionForAssetType(resolvedPath, type);
-	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider || type == AssetType::AudioClip) {
+	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider || type == AssetType::AudioClip || type == AssetType::Terrain) {
 		AssetPathRegistry& registry = type == AssetType::PhysicsMaterial
-			? physicsMaterialPaths : (type == AssetType::CookedCollider ? cookedColliderPaths : audioClipPaths);
+			? physicsMaterialPaths : (type == AssetType::CookedCollider ? cookedColliderPaths : (type == AssetType::AudioClip ? audioClipPaths : terrainPaths));
 		std::unique_lock lock(registry.mutex);
 		registry.pathToId[key] = id;
 		if(canBePreferredLoadPath) registry.idToPath[id] = key;
@@ -4417,9 +4432,9 @@ void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::
 std::filesystem::path ResourceManager::GetRegisteredAssetPath(const TerraEngine::UUID& id, AssetType type) const
 {
 	if(id == TerraEngine::EMPTY_UUID) return {};
-	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider || type == AssetType::AudioClip) {
+	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider || type == AssetType::AudioClip || type == AssetType::Terrain) {
 		const AssetPathRegistry& registry = type == AssetType::PhysicsMaterial
-			? physicsMaterialPaths : (type == AssetType::CookedCollider ? cookedColliderPaths : audioClipPaths);
+			? physicsMaterialPaths : (type == AssetType::CookedCollider ? cookedColliderPaths : (type == AssetType::AudioClip ? audioClipPaths : terrainPaths));
 		std::shared_lock lock(registry.mutex);
 		const auto found = registry.idToPath.find(id);
 		return found != registry.idToPath.end() ? std::filesystem::path(found->second) : std::filesystem::path{};
@@ -4573,9 +4588,9 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 	};
 
 	TerraEngine::UUID resolvedId = TerraEngine::EMPTY_UUID;
-	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider || type == AssetType::AudioClip) {
+	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider || type == AssetType::AudioClip || type == AssetType::Terrain) {
 		const AssetPathRegistry& registry = type == AssetType::PhysicsMaterial
-			? physicsMaterialPaths : (type == AssetType::CookedCollider ? cookedColliderPaths : audioClipPaths);
+			? physicsMaterialPaths : (type == AssetType::CookedCollider ? cookedColliderPaths : (type == AssetType::AudioClip ? audioClipPaths : terrainPaths));
 		resolvedId = tryFindRegisteredMatch(registry);
 		return resolvedId;
 	}
@@ -4672,6 +4687,12 @@ std::filesystem::path ResourceManager::DescribeAssetReference(const TerraEngine:
 		std::shared_lock lock(audioClipPaths.mutex);
 		const auto found = audioClipPaths.idToPath.find(id);
 		if(found != audioClipPaths.idToPath.end()) result = found->second;
+		break;
+	}
+	case AssetType::Terrain: {
+		std::shared_lock lock(terrainPaths.mutex);
+		const auto found = terrainPaths.idToPath.find(id);
+		if(found != terrainPaths.idToPath.end()) result = found->second;
 		break;
 	}
 	}

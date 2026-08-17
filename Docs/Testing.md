@@ -1683,3 +1683,96 @@ cmake --build --preset RelWithDebInfo --target install
 ```
 
 The installed fixture manifests, workloads, tools, translated-world shaders, and runtime binaries must be validated from the runnable bundle at `out/build/RelWithDebInfo/Build`; source-tree fallbacks are failures. Use `specs/052-unbounded-scenes/quickstart.md` for the installed scenario matrix, five-run 5% timing gate, fixed-residency 2% memory gate, five-minute smoke, and six-hour release soak. Missing hardware or evidence is incomplete, never a zero-cost pass.
+
+## Terrain surface layers
+
+Run the installed terrain surface matrix after the focused foundation and
+sculpt lanes:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+    -R "^(Engine|Editor)\\.Terrain\\.(Surface|Layers)$" --output-on-failure
+cmake --build --preset RelWithDebInfo --target install
+```
+
+The installed audit must discover `Tests/Tools/Terrain/workloads.json`, the
+`terrain-surface-layers` record, runtime terrain shaders under
+`Editor/Shaders/Terrain`, editor preview shaders in the same installed terrain
+shader bundle, and the terrain fixture manifests. The layer workflow must
+exercise 16 stable named layers, four local contributors, fifth-contributor
+preview/displacement, missing-source fallback, boundary seams, and save/reload
+canonical root/area hashes. Missing shaders, fallback sources, captures, or
+hash evidence are unavailable failures; do not synthesize passing metrics.
+
+## Terrain heightfield collision
+
+Run the installed Jolt heightfield workload after the terrain collision
+provider-neutral recipe and publication tests:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+    -R "^(Engine|Editor)\\.Terrain\\.(Collision|CollisionAlignment)$" --output-on-failure
+cmake --build --preset RelWithDebInfo --target TerraEngineTerrainBenchmark
+$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$tool = Join-Path $installRoot 'Tests/Tools/Terrain/TerraEngineTerrainBenchmark.exe'
+$manifest = Join-Path $installRoot 'Tests/Fixtures/Terrain/manifest.json'
+& $tool --fixture $manifest --route terrain-1000km-edit-route --collision true `
+    --output (Join-Path $installRoot 'Tests/Tools/Terrain/terrain-collision-result.json')
+cmake --build --preset RelWithDebInfo --target install
+```
+
+The collision workload records Jolt sample counts 257/513/1025 and requires
+build/update latency, allocation bytes, sample count, and query-alignment
+centimetres. Provider-neutral terrain collision headers must be present in the
+installed `include/Physics/Terrain` tree. A missing backend, shader, query
+capture, or timing counter is unavailable evidence, not a passing zero.
+
+## Terrain procedural and spline operations
+
+Run deterministic operation and cancellation coverage after the selection query,
+procedural job, and spline grader sources are available:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+    -R "^(Engine|Editor)\\.Terrain\\.(Procedural|ProceduralJob|SplineGrading)$" --output-on-failure
+cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineTerrainBenchmark
+cmake --build --preset RelWithDebInfo --target install
+```
+
+The installed audit must discover the procedural workload, selection and
+operation sources, cancellation/job receipts, and spline route evidence from
+the installed terrain bundle. Verify strict affected bounds, deterministic
+remap/terrace/noise/stamp/erosion hashes, cancellation with zero authored
+changes, stale completion rejection, bounded memory/work estimates, and one
+history group for road/river grading. Missing operation hashes or cancellation
+receipts are unavailable evidence and must not be reported as passes.
+
+## Terrain installed route and soak
+
+Use the installed terrain bundle only. The soak script generates the sparse
+256 km fixture, repeatedly executes the deterministic 1,000 km route, and
+measures wall-clock elapsed route work with a stopwatch. `-DurationSecondsOverride`
+is a bounded smoke run; it is useful for wiring checks but cannot satisfy the
+30-minute acceptance gate.
+
+```powershell
+$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$tools = Join-Path $installRoot 'Tests/Tools/Terrain'
+& (Join-Path $tools 'RunTerrainSoak.ps1') -InstallRoot $installRoot `
+    -OutputDirectory (Join-Path $tools 'terrain-soak-smoke') `
+    -DurationSecondsOverride 10 -Fixture terrain-256km `
+    -Route terrain-1000km-edit-route
+& (Join-Path $tools 'RunTerrainSoak.ps1') -InstallRoot $installRoot `
+    -OutputDirectory (Join-Path $tools 'terrain-soak-30m') `
+    -DurationMinutes 30 -Fixture terrain-256km `
+    -Route terrain-1000km-edit-route `
+    -TepakArchive (Join-Path $installRoot 'Content/Terrain.tpak') `
+    -ContentMountRoot (Join-Path $installRoot 'Content')
+```
+
+When an archive or mount root is supplied, the script fails closed if it is
+missing and records its SHA-256 route artifacts. Results must contain measured
+elapsed seconds, iteration count, route identity, fixture/benchmark hashes,
+and raw benchmark output. A duration field alone is not evidence. Missing
+executables, fixtures, shaders, ContentMount/TEPAK inputs, backend counters, or
+hardware capability are unavailable failures, never passing zeros.

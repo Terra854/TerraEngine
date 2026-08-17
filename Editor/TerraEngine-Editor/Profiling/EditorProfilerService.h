@@ -6,6 +6,7 @@
 
 #include "ProfilerCaptureStore.h"
 #include "Engine/Profiling/Profiler.h"
+#include "Engine/Terrain/TerrainDiagnostics.h"
 
 #include <array>
 #include <atomic>
@@ -155,6 +156,7 @@ struct EditorProfilerPresentationSnapshot
 	std::optional<TerraEngine::Profiling::ProfilerFrameRecord> selectedFrame;
 	std::string selectedFrameArtifactId;
 	std::array<EditorProfilerOperationStatus, kEditorProfilerOperationCount> operations{};
+	std::optional<TerraEngine::Terrain::TerrainDiagnosticSnapshot> terrainDiagnostics;
 };
 
 // class EditorProfilerService groups related state and operations so callers have one documented contract.
@@ -174,6 +176,9 @@ public:
 	void ClearProfilerWindowDrawTiming() noexcept;
 	void PublishImGuiRenderTiming(std::uint64_t frameIndex, double durationMs) noexcept;
 	void PublishPresentUiTiming(std::uint64_t frameIndex, double durationMs) noexcept;
+	// Terrain timings are measured by terrain scheduler boundaries and copied
+	// here; the profiler service never fabricates missing stage samples.
+	void PublishTerrainDiagnostics(TerraEngine::Terrain::TerrainDiagnosticSnapshot snapshot);
 	[[nodiscard]] EditorProfilerFrameTiming GetEditorFrameTiming() const noexcept;
 
 	void StartRecording();
@@ -278,6 +283,7 @@ private:
 	// The service owns one scalar health copy and publishes it only at the
 	// protected editor boundary. ProfilerWindow never polls mutable engine state.
 	TerraEngine::Profiling::ProfilerCaptureHealth health;
+	std::optional<TerraEngine::Terrain::TerrainDiagnosticSnapshot> terrainDiagnostics;
 	// Active recording publishes only scalar health at a bounded cadence. The
 	// Profiler window stays responsive without rebuilding frame history or
 	// taking a profiler mutex on every editor frame.

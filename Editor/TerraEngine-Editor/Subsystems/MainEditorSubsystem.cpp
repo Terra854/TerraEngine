@@ -22,6 +22,7 @@
 #include "Engine/Components/MeshRenderComponent.h"
 #include "Engine/Components/PrefabLinkComponent.h"
 #include "Engine/Components/Transform.h"
+#include "Engine/Components/TerrainComponent.h"
 #include "Engine/Animation/AnimationSystem.h"
 #include "Engine/Audio/AudioSystem.h"
 #include "Engine/Renderer/RenderSystem.h"
@@ -63,6 +64,7 @@
 // Include Window Headers
 #include "../Windows/HierarchyWindow.h"
 #include "../Windows/InspectorWindow.h"
+#include "../Windows/TerrainWindow.h"
 #include "../Windows/ProjectBrowserWindow.h"
 #include "../Windows/GameViewWindow.h"
 #include "../Windows/SceneViewWindow.h"
@@ -1465,6 +1467,7 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	context.editorProfiler->Initialize(context);
 	m_Windows.push_back(std::make_shared<HierarchyWindow>(this));
 	m_Windows.push_back(std::make_shared<InspectorWindow>(this));
+	m_Windows.push_back(std::make_shared<TerrainWindow>());
 	m_Windows.push_back(std::make_shared<ProjectBrowserWindow>(this));
 	m_Windows.push_back(std::make_shared<GameViewWindow>(this));
 	m_Windows.push_back(std::make_shared<SceneViewWindow>(this));
@@ -2111,6 +2114,8 @@ bool MainEditorSubsystem::LoadPrefabIntoIsolatedObjectManager(const std::filesys
 
 // MainEditorSubsystem::OpenScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
+	if(auto terrainTools = GetWindow<TerrainWindow>())
+		terrainTools->CancelDetachedPreview("Terrain preview cancelled while opening another scene.");
 	if (m_IsPrefabEditingMode)
 	{
 		ClosePrefabMode();
@@ -2245,6 +2250,8 @@ bool MainEditorSubsystem::InstantiatePrefabAsset(const TerraEngine::UUID& prefab
 
 bool MainEditorSubsystem::OpenPrefabAssetInternal(const std::filesystem::path& path, bool openedFromSceneObject)
 {
+	if(auto terrainTools = GetWindow<TerrainWindow>())
+		terrainTools->CancelDetachedPreview("Terrain preview cancelled while entering prefab editing.");
 	const std::filesystem::path absolutePath = std::filesystem::absolute(path).lexically_normal();
 	if (absolutePath.extension() != ".teprefab")
 	{
@@ -2455,6 +2462,8 @@ void MainEditorSubsystem::ClosePrefabMode()
 
 // MainEditorSubsystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::Shutdown() {
+	if(auto terrainTools = GetWindow<TerrainWindow>())
+		terrainTools->CancelDetachedPreview("Terrain preview cancelled during editor shutdown.");
 	// Provider-owned bodies must be gone before editor teardown can release the
 	// authored ObjectManager state referenced by the current physics snapshot.
 	TerraEngine::Physics::PhysicsSystem::Instance().StopWorld();
@@ -2515,6 +2524,10 @@ bool MainEditorSubsystem::StartPlayMode()
 			return false;
 		}
 	}
+	// A detached terrain preview is not authored content. Discard it before the
+	// play snapshot so a later input event cannot target the runtime scene.
+	if(auto terrainTools = GetWindow<TerrainWindow>())
+		terrainTools->CancelDetachedPreview("Terrain preview cancelled when Play Mode started.");
 	// Commit pending authoring transactions before capturing the exact pre-play
 	// snapshot consumed and later restored by both scripting and physics.
 	SceneManager::Instance().ApplySceneMutations("play-mode-entry");
@@ -2584,6 +2597,8 @@ void MainEditorSubsystem::StopPlayMode()
 		return;
 	}
 
+	if(auto terrainTools = GetWindow<TerrainWindow>())
+		terrainTools->CancelDetachedPreview("Terrain preview cancelled when Play Mode stopped.");
 	// Route every stop request through one helper so toolbar clicks and
 	// Application.Quit() both restore the same cached pre-play scene snapshot.
 	// Retire the running-world authority before physics and scene restoration can
@@ -2758,6 +2773,13 @@ void MainEditorSubsystem::ReleaseCompletedViewportTextures(std::uint64_t complet
 
 void MainEditorSubsystem::ShutdownViewportTextures(bool deviceLost)
 {
+	if(deviceLost)
+	{
+		// A device-loss boundary invalidates visual preview assumptions. Keep the
+		// committed terrain root intact and discard only the detached brush data.
+		if(auto terrainTools = GetWindow<TerrainWindow>())
+			terrainTools->CancelDetachedPreview("Terrain preview cancelled after renderer device loss.");
+	}
 	RenderSystem* renderSystem = ctx && ctx->engine ? ctx->engine->GetSystem<RenderSystem>() : nullptr;
 	auto* vulkan = renderSystem ? dynamic_cast<VulkanContext*>(renderSystem->GetContext()) : nullptr;
 	viewportTextures.Shutdown(deviceLost, vulkan
@@ -2784,6 +2806,47 @@ void MainEditorSubsystem::OnBackendReady() {
 
 // MainEditorSubsystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::Update(float deltaTime) {
+	// Keep the Scene View's selection priority synchronized with the detached
+	// terrain stroke state. Merely selecting the terrain tool does not capture
+	// input, preserving normal selection outside an active stroke.
+	if (auto terrainTools = GetWindow<TerrainWindow>())
+	{
+		if (auto sceneView = GetWindow<SceneViewWindow>())
+		{
+			sceneView->SetTerrainBrushCapture(terrainTools->IsBrushStrokeActive());
+			if(const auto area = terrainTools->ConsumeDiagnosticLocateRequest())
+			{
+				TerraEngine::Scene::WorldPosition terrainOrigin{};
+				if(selectedEntity)
+				{
+					if(const auto object = ObjectManager::instance().getObject(*selectedEntity);
+						object && ObjectManager::instance().GetComponent<TerrainComponent>(*object))
+					{
+						if(const Transform* transform = ObjectManager::instance().GetComponent<Transform>(*object))
+							terrainOrigin = transform->worldPose.position;
+					}
+				}
+				bool overflowX = false, overflowZ = false, moduloOverflowX = false, moduloOverflowZ = false;
+				const auto cellX = TerraEngine::Terrain::FloorDivideTerrainCoordinate(area->x, 256, overflowX);
+				const auto cellZ = TerraEngine::Terrain::FloorDivideTerrainCoordinate(area->z, 256, overflowZ);
+				const auto remainderX = TerraEngine::Terrain::FloorModuloTerrainCoordinate(area->x, 256, moduloOverflowX);
+				const auto remainderZ = TerraEngine::Terrain::FloorModuloTerrainCoordinate(area->z, 256, moduloOverflowZ);
+				if(!overflowX && !overflowZ && !moduloOverflowX && !moduloOverflowZ)
+				{
+					TerraEngine::Scene::WorldDelta delta;
+					delta.cellDelta = {cellX, 0, cellZ};
+					delta.offsetMetres = {static_cast<double>(remainderX * 256 + 128), 0.0,
+						static_cast<double>(remainderZ * 256 + 128)};
+					if(const auto focus = TerraEngine::Scene::ApplyWorldDelta(terrainOrigin, delta); focus.Succeeded())
+						sceneView->FrameTerrainDiagnostic(focus.position);
+				}
+			}
+		}
+		// The profiler receives the same immutable value shown by residency UI.
+		// Terrain stages own their clocks; this handoff never estimates timings.
+		if(ctx != nullptr && ctx->editorProfiler)
+			ctx->editorProfiler->PublishTerrainDiagnostics(terrainTools->DiagnosticSnapshot());
+	}
 	PublishCommittedEditorTransactionsToUndo();
 	// Advance the scripting coordinator after asset watcher events have been
 	// processed so queued C# rebuilds can start and completed async builds can
@@ -2859,7 +2922,10 @@ void MainEditorSubsystem::Update(float deltaTime) {
 				// the state only after a successful write lets undo return to the exact
 				// revision represented by the file on disk.
 				if (SceneManager::Instance().SaveScene()) {
-					UndoRedoSystem::Instance().SetSavePoint();
+					std::string terrainSaveError;
+					if(auto terrainTools = GetWindow<TerrainWindow>(); !terrainTools || terrainTools->SaveTerrain(terrainSaveError))
+						UndoRedoSystem::Instance().SetSavePoint();
+					else TERRAENGINE_LOG(LogLevel::Error, "Scene was saved but terrain root remains dirty: " << terrainSaveError);
 				}
 			}
 		}
@@ -2888,6 +2954,24 @@ void MainEditorSubsystem::Update(float deltaTime) {
 			}
 		}
 	}
+}
+
+nlohmann::json MainEditorSubsystem::RunTerrainLiveValidationFixture()
+{
+	if(ctx == nullptr || ctx->projectManager == nullptr)
+		return {{"schemaVersion", 1}, {"succeeded", false}, {"failure", "The active project manager is unavailable."}};
+	const auto terrainTools = GetWindow<TerrainWindow>();
+	if(!terrainTools)
+		return {{"schemaVersion", 1}, {"succeeded", false}, {"failure", "Terrain Tools is unavailable in the live editor workspace."}};
+	const std::string suffix = TerraEngine::ToHexString(TerraEngine::GenerateUUID());
+	const auto destination = ctx->projectManager->GetProjectRoot() / "Assets" / "TerrainLiveValidation" / ("Live-" + suffix + ".teterrain");
+	return terrainTools->RunLiveValidationFixture(destination);
+}
+
+std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> MainEditorSubsystem::DeclareTerrainAuthoringWorkloads(float deltaTime)
+{
+	if(auto terrainTools = GetWindow<TerrainWindow>()) return terrainTools->DeclareAuthoringWorkloads(deltaTime);
+	return {};
 }
 
 void MainEditorSubsystem::PublishEditorStreamingNeeds()
@@ -2964,6 +3048,64 @@ void MainEditorSubsystem::SetSelectedEntity(std::optional<entt::entity> entity)
 		ctx->scripting.hasWatchedObject = selectedEntity.has_value();
 		ctx->scripting.watchedObjectId = selectedEntity.has_value() ? static_cast<std::uint32_t>(*selectedEntity) : 0;
 	}
+}
+
+bool MainEditorSubsystem::CreateIndependentTerrainCopy(entt::entity entity, std::string& outError)
+{
+	ObjectManager& objects = ObjectManager::instance();
+	TerrainComponent* terrain = objects.getRegistry().try_get<TerrainComponent>(entity);
+	const std::optional<Object> object = objects.getObject(entity);
+	if(terrain == nullptr || !object || terrain->terrainAssetId == TerraEngine::EMPTY_UUID)
+	{
+		outError = "Select a terrain instance with a registered terrain asset before creating an independent copy.";
+		return false;
+	}
+	const AssetMetadata* source = AssetDatabase::Instance().FindAssetByGuid(terrain->terrainAssetId);
+	if(source == nullptr || source->sourcePath.extension() != ".teterrain")
+	{
+		outError = "The selected terrain asset is not available in the Asset Database.";
+		return false;
+	}
+	const std::filesystem::path sourcePath = std::filesystem::absolute(AssetDatabase::Instance().GetAssetRoot() / source->sourcePath);
+	std::filesystem::path destination;
+	for(std::uint32_t index = 1U; ; ++index)
+	{
+		destination = sourcePath.parent_path() / (sourcePath.stem().string() + " Copy " + std::to_string(index) + sourcePath.extension().string());
+		if(!std::filesystem::exists(destination) && !std::filesystem::exists(destination.string() + ".data")) break;
+	}
+	std::error_code error;
+	std::filesystem::copy_file(sourcePath, destination, std::filesystem::copy_options::none, error);
+	if(error) { outError = "The terrain parent asset could not be copied."; return false; }
+	const std::filesystem::path sourceData = sourcePath.string() + ".data";
+	const std::filesystem::path destinationData = destination.string() + ".data";
+	if(!std::filesystem::exists(sourceData))
+	{
+		std::filesystem::remove(destination, error);
+		outError = "The selected terrain has no complete private data bundle to copy.";
+		return false;
+	}
+	else
+	{
+		std::filesystem::copy(sourceData, destinationData, std::filesystem::copy_options::recursive, error);
+		if(error) { std::filesystem::remove(destination, error); outError = "The private terrain data bundle could not be copied; the parent copy was rolled back."; return false; }
+	}
+	AssetDatabase::Instance().ImportAsset(destination, true);
+	const auto found = AssetDatabase::Instance().GetAssets().find(std::filesystem::absolute(destination));
+	if(found == AssetDatabase::Instance().GetAssets().end())
+	{
+		std::filesystem::remove_all(destinationData, error); std::filesystem::remove(destination, error);
+		outError = "The copied terrain was not registered; copied files were rolled back.";
+		return false;
+	}
+	TerraEngine::Scene::TransactionalMutationBuilder builder(
+		"terrain-independent-copy-" + TerraEngine::ToHexString(TerraEngine::GenerateUUID()),
+		TerraEngine::Scene::TransactionOrigin::Editor, "Terrain Independent Copy");
+	builder.ObserveScene(objects).ObserveObject(objects, objects.getUUID(*object))
+		.SetUndoGroup("Terrain Independent Copy")
+		.UpdateComponentProperty(objects.getUUID(*object), "TerrainComponent", "terrainAssetId", TerraEngine::Reflection::Variant{found->second.guid});
+	TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
+	outError = "Independent terrain copy is queued for the protected scene boundary.";
+	return true;
 }
 
 std::vector<entt::entity> MainEditorSubsystem::GetSelectedEntities() const
@@ -3495,7 +3637,8 @@ void MainEditorSubsystem::DrawMainMenuBar() {
 
 // MainEditorSubsystem::RequestOpenScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::RequestOpenScene(const std::filesystem::path& path) {
-	if (SceneManager::Instance().IsActiveSceneDirty() || (m_IsPrefabEditingMode && m_PrefabEditingDirty)) {
+	const bool terrainDirty = [&]() { if(auto terrainTools = GetWindow<TerrainWindow>()) return terrainTools->IsTerrainDirty(); return false; }();
+	if (SceneManager::Instance().IsActiveSceneDirty() || terrainDirty || (m_IsPrefabEditingMode && m_PrefabEditingDirty)) {
 		m_PendingAction = PendingAction::OpenScene;
 		m_PendingScenePath = path;
 		m_ShowSaveConfirmation = true;
@@ -3511,7 +3654,8 @@ void MainEditorSubsystem::RequestCloseProject() {
 		m_ShowImportCloseConfirmation = true;
 		return;
 	}
-	if (SceneManager::Instance().IsActiveSceneDirty() || (m_IsPrefabEditingMode && m_PrefabEditingDirty)) {
+	const bool terrainDirty = [&]() { if(auto terrainTools = GetWindow<TerrainWindow>()) return terrainTools->IsTerrainDirty(); return false; }();
+	if (SceneManager::Instance().IsActiveSceneDirty() || terrainDirty || (m_IsPrefabEditingMode && m_PrefabEditingDirty)) {
 		m_PendingAction = PendingAction::CloseProject;
 		m_ShowSaveConfirmation = true;
 	} else {
@@ -3566,7 +3710,7 @@ void MainEditorSubsystem::DrawSaveConfirmationModal() {
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginPopupModal("Save Changes?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-		ImGui::Text("There are unsaved changes to the current scene or prefab.\nDo you want to save them?");
+		ImGui::Text("There are unsaved changes to the current scene, terrain, or prefab.\nDo you want to save them?");
 		ImGui::Separator();
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -3577,12 +3721,18 @@ void MainEditorSubsystem::DrawSaveConfirmationModal() {
 				ClosePrefabMode();
 				if (restoreSceneNeedsSave) {
 					if (SceneManager::Instance().SaveScene(m_CurrentScenePath)) {
-						UndoRedoSystem::Instance().SetSavePoint();
+						std::string terrainSaveError;
+						if(auto terrainTools = GetWindow<TerrainWindow>(); !terrainTools || terrainTools->SaveTerrain(terrainSaveError))
+							UndoRedoSystem::Instance().SetSavePoint();
+						else TERRAENGINE_LOG(LogLevel::Error, "Terrain save failed while closing project: " << terrainSaveError);
 					}
 				}
 			} else {
 				if (SceneManager::Instance().SaveScene()) {
-					UndoRedoSystem::Instance().SetSavePoint();
+					std::string terrainSaveError;
+					if(auto terrainTools = GetWindow<TerrainWindow>(); !terrainTools || terrainTools->SaveTerrain(terrainSaveError))
+						UndoRedoSystem::Instance().SetSavePoint();
+					else TERRAENGINE_LOG(LogLevel::Error, "Terrain save failed while closing project: " << terrainSaveError);
 				}
 			}
 			ExecutePendingAction();
@@ -3677,6 +3827,8 @@ void MainEditorSubsystem::DrawScriptCompilationModal() {
 
 // MainEditorSubsystem::CloseCurrentProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::CloseCurrentProject() {
+	if(auto terrainTools = GetWindow<TerrainWindow>())
+		terrainTools->CancelDetachedPreview("Terrain preview cancelled while closing the project.");
 	// Invalidate profiler worker results before resource teardown starts. A slow
 	// capture read/write may finish later, but its old project epoch is already
 	// unable to restore document or window state into the next project.

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <iterator>
 #include <limits>
 #include <tuple>
@@ -137,6 +138,7 @@ namespace TerraEngine::Resource
 		priorFrameFeedback.clear();
 		pendingPublicationCandidates.clear();
 		preparedPublicationCandidates.clear();
+		terrainFeedback.clear();
 		lastPreparedPlan = {};
 		publicationStore.Clear();
 		residencyStore.Clear();
@@ -162,6 +164,55 @@ namespace TerraEngine::Resource
 			std::make_move_iterator(candidates.begin()),
 			std::make_move_iterator(candidates.end()));
 		diagnostics.submittedPublicationCandidates += candidates.size();
+	}
+
+	void VirtualGeometryStreamingSystem::SubmitCommittedTerrainPageCandidates(
+		std::vector<VirtualGeometryPagePublicationCandidate> candidates)
+	{
+		// Terrain candidates have already captured an immutable authored generation.
+		// Reusing the normal ingress preserves the same coalescing, stale-result
+		// discard, residency accounting, and last-known-good PagePublish behavior.
+		SubmitCompletedPublicationCandidates(std::move(candidates));
+	}
+
+	bool VirtualGeometryStreamingSystem::SubmitTerrainProducerBatch(TerrainVirtualGeometryProducerBatch batch)
+	{
+		if (batch.assetId == TerraEngine::EMPTY_UUID || !batch.sourceIdentity.IsValid()
+			|| batch.authoredGeneration == 0u || batch.candidates.empty()) return false;
+		for (const VirtualGeometryPagePublicationCandidate& candidate : batch.candidates)
+		{
+			// Asset source/build fields are the compact form used by existing VG
+			// publication records. Require the exact terrain source on every page.
+			if (!candidate.IsComplete() || candidate.publicationGeneration != batch.authoredGeneration
+				|| candidate.key.asset.assetId != batch.assetId
+				|| candidate.key.asset.sourceHash != (batch.sourceIdentity.low64 == 0u ? 1u : batch.sourceIdentity.low64)
+				|| candidate.key.asset.buildRecipeHash != (batch.sourceIdentity.high64 == 0u ? 1u : batch.sourceIdentity.high64)) return false;
+		}
+		TerrainVirtualGeometryFeedback feedback{};
+		feedback.viewId = batch.viewId;
+		feedback.assetId = batch.assetId;
+		feedback.authoredGeneration = batch.authoredGeneration;
+		feedback.acceptedPageCount = static_cast<std::uint32_t>(batch.candidates.size());
+		feedback.completeCut = std::any_of(batch.candidates.begin(), batch.candidates.end(), [&batch](const auto& candidate)
+		{
+			return candidate.key.pageId == batch.regionalRootPageId;
+		});
+		if (!feedback.completeCut) return false;
+		{
+			std::scoped_lock lock(candidateMutex);
+			terrainFeedback.push_back(feedback);
+			// Feedback is diagnostic input for the next frames, not an archive. Keep
+			// it bounded even when a capture tool creates many short-lived views.
+			if (terrainFeedback.size() > 256u) terrainFeedback.erase(terrainFeedback.begin(), terrainFeedback.begin() + static_cast<std::ptrdiff_t>(terrainFeedback.size() - 256u));
+		}
+		SubmitCommittedTerrainPageCandidates(std::move(batch.candidates));
+		return true;
+	}
+
+	std::vector<TerrainVirtualGeometryFeedback> VirtualGeometryStreamingSystem::TerrainFeedbackSnapshot() const
+	{
+		std::scoped_lock lock(candidateMutex);
+		return terrainFeedback;
 	}
 
 	VirtualGeometryStreamingPlan VirtualGeometryStreamingSystem::LastPreparedPlan() const

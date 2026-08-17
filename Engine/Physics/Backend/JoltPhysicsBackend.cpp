@@ -29,6 +29,8 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
+#include <Jolt/Physics/Collision/PhysicsMaterialSimple.h>
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
@@ -269,6 +271,8 @@ namespace TerraEngine::Physics::Backend {
 					&& recipe.indices.size() >= 3U
 					&& recipe.indices.size() % 3U == 0U
 					&& recipe.indices.size() / 3U <= kMaximumCookTriangles;
+			case PhysicsShapeKind::HeightField:
+				return recipe.terrainHeightField.has_value() && recipe.terrainHeightField->IsComplete();
 			case PhysicsShapeKind::Compound:
 				return true;
 			}
@@ -386,6 +390,52 @@ namespace TerraEngine::Physics::Backend {
 					triangles.push_back(triangle);
 				}
 				result = JPH::MeshShapeSettings(std::move(vertices), std::move(triangles)).Create();
+				break;
+			}
+			case PhysicsShapeKind::HeightField: {
+				if (!recipe.terrainHeightField.has_value() || !recipe.terrainHeightField->IsComplete())
+					return ShapeError("Terrain heightfield recipe is incomplete.");
+				const TerrainHeightFieldRecipe& terrain = *recipe.terrainHeightField;
+				JPH::Array<float> samples;
+				samples.reserve(terrain.heightMillimetres.size());
+				// Jolt stores one material index per terrain cell.  Preserve the
+				// provider-neutral uint16 identities through a sorted, stable local
+				// palette instead of mutating materials on an existing heightfield.
+				std::vector<std::uint16_t> palette = terrain.materialIndices;
+				std::sort(palette.begin(), palette.end());
+				palette.erase(std::unique(palette.begin(), palette.end()), palette.end());
+				if(palette.size() > 256u) return ShapeError("Terrain heightfield uses more than Jolt's 256 material slots.");
+				std::vector<std::uint8_t> materialIndices;
+				JPH::PhysicsMaterialList materials;
+				if(!palette.empty()) {
+					materialIndices.resize(terrain.materialIndices.size()); materials.reserve(palette.size());
+					for(std::size_t material = 0u; material < palette.size(); ++material)
+						materials.push_back(new JPH::PhysicsMaterialSimple("Terrain material " + JPH::ConvertToString(palette[material]), JPH::Color::sGetDistinctColor(static_cast<JPH::uint>(material))));
+					for(std::size_t cell = 0u; cell < terrain.materialIndices.size(); ++cell)
+						materialIndices[cell] = static_cast<std::uint8_t>(std::lower_bound(palette.begin(), palette.end(), terrain.materialIndices[cell]) - palette.begin());
+				}
+				for (std::uint32_t z = 0u; z < TerrainHeightFieldRecipe::kGridExtent; ++z)
+					for (std::uint32_t x = 0u; x < TerrainHeightFieldRecipe::kGridExtent; ++x)
+					{
+						const std::size_t index = static_cast<std::size_t>(z) * TerrainHeightFieldRecipe::kGridExtent + x;
+						// Holes affect their cell origin. Jolt's no-collision sentinel
+						// is baked into a new shape; no live SetHeights call is ever used.
+						const bool hole = x < 256u && z < 256u && (terrain.holeBits[(z * 256u + x) / 8u] & (1u << ((z * 256u + x) % 8u))) != 0u;
+						samples.push_back(hole ? JPH::HeightFieldShapeConstants::cNoCollisionValue : static_cast<float>(terrain.heightMillimetres[index]));
+					}
+				JPH::HeightFieldShapeSettings heightField(
+					samples.data(),
+					JPH::Vec3(0.0f, terrain.heightDatumMetres, 0.0f),
+					JPH::Vec3(terrain.sampleSpacingMetres, 0.001f, terrain.sampleSpacingMetres),
+					TerrainHeightFieldRecipe::kGridExtent,
+					materialIndices.empty() ? nullptr : materialIndices.data(),
+					materials);
+				// Terrain collision targets centimetre-scale agreement. Jolt compresses
+				// each block independently, so retain its full 16-bit sample precision
+				// and smallest supported block instead of accepting the 8-bit default.
+				heightField.mBitsPerSample = 16u;
+				heightField.mBlockSize = 2u;
+				result = heightField.Create();
 				break;
 			}
 			case PhysicsShapeKind::Compound: {

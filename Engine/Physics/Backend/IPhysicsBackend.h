@@ -17,6 +17,7 @@
 #include <array>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -71,6 +72,9 @@ namespace TerraEngine::Physics {
 			bool sensor = false;
 			std::vector<PhysicsVector3> points;
 			std::vector<std::uint32_t> indices;
+		// Heightfield recipes are immutable replacement inputs. A backend must not
+		// mutate an existing provider heightfield in response to terrain edits.
+		std::optional<TerraEngine::Physics::TerrainHeightFieldRecipe> terrainHeightField;
 			// A compound is an ordered tree of provider-neutral child recipes. The
 			// authoring snapshot rejects cycles before this packet reaches a worker.
 			std::vector<PhysicsShapeRecipe> children;
@@ -85,6 +89,17 @@ namespace TerraEngine::Physics {
 			std::uint64_t cookedPayloadChecksum = 0U;
 			std::shared_ptr<const std::vector<std::byte>> cookedPayload;
 		};
+
+		// Converts immutable terrain input into the normal shape creation packet.
+		// Backends create a fresh static shape from this value; there is no mutable
+		// heightfield update operation in the provider-neutral interface.
+		[[nodiscard]] inline PhysicsShapeRecipe MakeTerrainHeightFieldShapeRecipe(TerrainHeightFieldRecipe recipe)
+		{
+			PhysicsShapeRecipe result{};
+			result.kind = PhysicsShapeKind::HeightField;
+			result.terrainHeightField = std::move(recipe);
+			return result;
+		}
 
 		struct PhysicsCookRequest {
 			PhysicsWorldHandle world;

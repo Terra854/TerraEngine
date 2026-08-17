@@ -1,0 +1,47 @@
+{
+  "schemaVersion": { "major": 1, "minor": 0 },
+  "description": "Canonical terrain authoring and validation fixtures.",
+  "coordinateConvention": "signed-xz-floor-division",
+  "fixtures": [
+    {
+      "id": "terrain-flat-4-area",
+      "kind": "flat",
+      "areas": [ { "x": 0, "z": 0 }, { "x": 1, "z": 0 }, { "x": 0, "z": 1 }, { "x": 1, "z": 1 } ],
+      "sampleSpacingMetres": 1.0,
+      "defaultHeightMillimetres": 0,
+      "expectedPurpose": "four-area-corner-seams-and-defaults"
+    },
+    {
+      "id": "terrain-reference-png16",
+      "kind": "png16",
+      "source": "terrain-reference-16bit.png",
+      "littleEndian": false,
+      "declaredHeightRangeMetres": [ -128.0, 2048.0 ],
+      "expectedPurpose": "16-bit-import-precision-and-remapping"
+    },
+    {
+      "id": "terrain-reference-raw16-le",
+      "kind": "raw16",
+      "source": "terrain-reference-16bit-le.raw",
+      "littleEndian": true,
+      "width": 257,
+      "height": 257,
+      "declaredHeightRangeMetres": [ -128.0, 2048.0 ],
+      "expectedPurpose": "raw16-endian-and-byte-count-validation"
+    },
+    {
+      "id": "terrain-corrupt-inputs",
+      "kind": "invalid-input-set",
+      "sources": [ "terrain-truncated.raw", "terrain-wrong-bit-depth.png", "terrain-corrupt-header.raw" ],
+      "expectedPurpose": "rejection-without-authored-mutation"
+    },
+    {
+      "id": "terrain-negative-coordinate",
+      "kind": "flat",
+      "areas": [ { "x": -2, "z": -2 }, { "x": -1, "z": -2 }, { "x": -2, "z": -1 }, { "x": -1, "z": -1 } ],
+      "sampleSpacingMetres": 1.0,
+      "defaultHeightMillimetres": 0,
+      "expectedPurpose": "negative-floor-and-world-region-boundaries"
+    }
+  ]
+}

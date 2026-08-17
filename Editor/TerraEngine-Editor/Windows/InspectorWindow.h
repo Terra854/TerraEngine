@@ -96,6 +96,10 @@ private:
 	std::string m_VirtualGeometryEditKey;
 	std::string m_VirtualGeometrySettingsMessage;
 	bool m_VirtualGeometrySettingsMessageIsError = false;
+	// Terrain instances always share an immutable asset until an explicit copy
+	// workflow is selected. The inspector never silently forks a large terrain.
+	bool m_TerrainSharedEditChoice = true;
+	std::string m_TerrainCopyStatus;
 	// Clip bytes and playback cursors are editor-only caches. Neither record is
 	// reachable from reflection or scene serialization, so closing/changing the
 	// Inspector cannot modify authored AnimatorComponent data.

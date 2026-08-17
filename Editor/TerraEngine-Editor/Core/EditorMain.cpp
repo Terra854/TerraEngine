@@ -34,6 +34,9 @@ int main(int argc, char** argv) {
 	if (commandLine.physicsInvariantOutputPath.has_value()) {
 		editorSystem.SetPhysicsInvariantOutputPath(*commandLine.physicsInvariantOutputPath);
 	}
+	if (commandLine.terrainInvariantOutputPath.has_value()) {
+		editorSystem.SetTerrainInvariantOutputPath(*commandLine.terrainInvariantOutputPath);
+	}
 	// Pass the engine pointer to the editor system so it can access engine state/systems
 	editorSystem.Setup(&engine);
 	

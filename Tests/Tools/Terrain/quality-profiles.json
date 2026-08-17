@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "product": "terrain-authoring",
+  "comparisonPolicy": {
+    "missingSamplesAreUnavailable": true,
+    "missingArtifactsAreUnavailable": true,
+    "requireRawCounters": true,
+    "requireArtifactHashes": true,
+    "protectedMetrics": ["previewP95Ms", "publishMs", "residentBytes", "buildLatencyMicroseconds", "updateLatencyMicroseconds", "allocationBytes", "queryAlignmentCentimetres"]
+  },
+  "qualityProfiles": [
+    { "id": "terrain-reference", "version": 1, "settingsHash": "terrain-reference-v1", "sampleCounts": [257, 513, 1025], "localLayerContributorLimit": 4, "maxQueryAlignmentCentimetres": 5.0, "availability": "reference-contract", "evidenceStatus": "unavailable" },
+    { "id": "terrain-interactive", "version": 1, "settingsHash": "terrain-interactive-v1", "workloadClass": "interactive", "maxAreas": 4, "maxSamples": 263169, "availability": "reference-contract", "evidenceStatus": "unavailable" },
+    { "id": "terrain-large-world", "version": 1, "settingsHash": "terrain-large-world-v1", "workloadClass": "large", "extentKilometres": [256, 256], "fullResidency": false, "availability": "reference-contract", "evidenceStatus": "unavailable" }
+  ],
+  "artifactHashContract": {
+    "algorithm": "SHA256",
+    "requiredArtifacts": ["terrain-edit-v1.schema.json", "manifest.json", "SaveRecovery/manifest.json", "workloads.json", "runtime-shaders", "editor-shaders"],
+    "sourceOfTruth": "installed-tree",
+    "sourceCheckoutSubstitution": "reject"
+  }
+}

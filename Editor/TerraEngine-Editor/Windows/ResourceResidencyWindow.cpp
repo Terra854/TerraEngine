@@ -8,6 +8,7 @@
 #include "ResourceResidencyWindowModel.h"
 
 #include "AssetDatabase.h"
+#include "TerrainWindow.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Resource/ResourceResidency.h"
@@ -682,6 +683,8 @@ void ResourceResidencyWindow::OnGui()
 	DrawStreamingSummary();
 	ImGui::Spacing();
 	DrawVirtualGeometrySummary();
+	ImGui::Spacing();
+	DrawTerrainSummary();
 	ImGui::Spacing();
 	DrawCandidates();
 	ImGui::Spacing();
@@ -1411,6 +1414,96 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 				ImGui::TableSetColumnIndex(10);
 				ImGui::Text("%u", summary.missingPages);
 			}
+		}
+		ImGui::EndTable();
+	}
+}
+
+void ResourceResidencyWindow::DrawTerrainSummary()
+{
+	ImGui::SeparatorText("Terrain Residency");
+	if(owner == nullptr)
+	{
+		ImGui::TextDisabled("Terrain diagnostics are unavailable without the editor owner.");
+		return;
+	}
+	const auto terrainTools = owner->GetWindow<TerrainWindow>();
+	if(!terrainTools)
+	{
+		ImGui::TextDisabled("Terrain Tools is not available in this workspace.");
+		return;
+	}
+	const TerraEngine::Terrain::TerrainDiagnosticSnapshot snapshot = terrainTools->DiagnosticSnapshot();
+	if(snapshot.revision == 0U)
+	{
+		ImGui::TextDisabled("No terrain root is open. IO/decode/upload/fallback state is unavailable.");
+		return;
+	}
+	std::uint64_t totalResidentBytes = 0U;
+	std::size_t pinnedCount = 0U;
+	for(const auto& area : snapshot.residency)
+	{
+		totalResidentBytes += area.residentBytes;
+		pinnedCount += area.pinned ? 1U : 0U;
+	}
+	ImGui::Text("Authored/Saved: %llu/%llu   Pending: %zu   Dirty: %s",
+		static_cast<unsigned long long>(snapshot.authoredGeneration),
+		static_cast<unsigned long long>(snapshot.savedGeneration), snapshot.pendingTransactions,
+		snapshot.dirty ? "yes" : "no");
+	ImGui::Text("Resident: %zu areas, %llu bytes, %zu pinned",
+		snapshot.residency.size(), static_cast<unsigned long long>(totalResidentBytes), pinnedCount);
+	ImGui::Text("Visible/Control/Collision: %llu/%llu/%llu   History: %zu commands, %llu bytes",
+		static_cast<unsigned long long>(snapshot.visibleGeneration),
+		static_cast<unsigned long long>(snapshot.controlGeneration),
+		static_cast<unsigned long long>(snapshot.collisionGeneration), snapshot.historyDepth,
+		static_cast<unsigned long long>(snapshot.historyBytes));
+	if(snapshot.stagePercentiles.empty())
+		ImGui::TextDisabled("Terrain stage timings are unavailable until a measured scheduler boundary publishes samples.");
+	else for(const auto& stage : snapshot.stagePercentiles)
+		ImGui::Text("%s: p50 %.3f ms, p95 %.3f ms (%zu samples)", stage.stage.c_str(),
+			static_cast<double>(stage.p50Nanoseconds) / 1'000'000.0,
+			static_cast<double>(stage.p95Nanoseconds) / 1'000'000.0, stage.sampleCount);
+	for(const auto& pressure : snapshot.resourcePressure)
+		ImGui::Text("%s: %llu / %llu bytes%s", pressure.resource.c_str(),
+			static_cast<unsigned long long>(pressure.usedBytes),
+			static_cast<unsigned long long>(pressure.budgetBytes), pressure.evictionRequired ? " (eviction required)" : "");
+	for(const auto& collision : snapshot.collisions)
+		ImGui::Text("Collision: generation %llu, age %llums, build %llums%s",
+			static_cast<unsigned long long>(collision.activeSourcePublicationGeneration),
+			static_cast<unsigned long long>(collision.ageMilliseconds),
+			static_cast<unsigned long long>(collision.buildLatencyMilliseconds),
+			collision.lastKnownGoodActive ? " (last-known-good)" : "");
+	ImGui::TextDisabled("Priority: selected pin > active authoring > normal view. Missing IO/decode/upload counters remain explicitly unavailable.");
+	bool pinSelected = terrainTools->IsSelectedAreaPinned();
+	if(ImGui::Checkbox("Pin selected terrain area##Residency", &pinSelected)) terrainTools->SetSelectedAreaPinned(pinSelected);
+	ImGui::SameLine();
+	if(ImGui::Button("Collect terrain GC (64)"))
+	{
+		std::string message;
+		const bool collectionCompleted = terrainTools->RunBoundedGarbageCollection(64U, message);
+		if(!collectionCompleted && message.empty()) message = "Terrain garbage collection did not complete.";
+		m_TerrainActionStatus = std::move(message);
+	}
+	ImGui::SameLine();
+	if(ImGui::Button("Repair terrain generation"))
+	{
+		std::string message;
+		const bool repairCompleted = terrainTools->RepairFailedGeneration(message);
+		if(!repairCompleted && message.empty()) message = "Terrain generation repair did not complete.";
+		m_TerrainActionStatus = std::move(message);
+	}
+	if(!m_TerrainActionStatus.empty()) ImGui::TextDisabled("Action: %s", m_TerrainActionStatus.c_str());
+	if(ImGui::BeginTable("TerrainResidencyAreas", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Area"); ImGui::TableSetupColumn("Resident Bytes"); ImGui::TableSetupColumn("Pin"); ImGui::TableSetupColumn("Derived State");
+		ImGui::TableHeadersRow();
+		for(const auto& area : snapshot.residency)
+		{
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0); ImGui::Text("%lld, %lld", static_cast<long long>(area.coordinate.x), static_cast<long long>(area.coordinate.z));
+			ImGui::TableSetColumnIndex(1); ImGui::Text("%llu", static_cast<unsigned long long>(area.residentBytes));
+			ImGui::TableSetColumnIndex(2); ImGui::TextUnformatted(area.pinned ? "protected" : "evictable");
+			ImGui::TableSetColumnIndex(3); ImGui::TextUnformatted("IO/decode/upload/fallback unavailable");
 		}
 		ImGui::EndTable();
 	}

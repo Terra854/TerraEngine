@@ -38,6 +38,13 @@ add_executable(TerraEngine-EngineTests
 	# Motion database cook tests link the production deterministic compiler
 	# directly, matching the existing clip compiler test boundary above.
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/MotionDatabaseCompiler.cpp
+	${TERRAENGINE_TERRAIN_ENGINE_TEST_SOURCES}
+	# Procedural operators are editor-owned implementations, but these focused
+	# engine tests exercise their deterministic, provider-neutral API directly.
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainProceduralOperators.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainHydraulicErosion.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainThermalErosion.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainBrushEngine.cpp
 	Runtime/ArchiveSerializationTests.cpp
 	Runtime/AnimationParityValidatorTests.cpp
 	Runtime/BinaryIOTests.cpp
@@ -638,6 +645,95 @@ set_tests_properties(Engine.Animation PROPERTIES
 	LABELS "Engine;Animation"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Animation"
 )
+if(EXISTS "${CMAKE_SOURCE_DIR}/Tests/Engine/Terrain/TerrainDiagnosticsTests.cpp")
+	target_compile_definitions(TerraEngine-EngineTests PRIVATE TERRAENGINE_HAS_TERRAIN_DIAGNOSTICS_TESTS=1)
+endif()
+if(EXISTS "${CMAKE_SOURCE_DIR}/Tests/Engine/Terrain/TerrainAutomationDiagnosticTests.cpp")
+	target_compile_definitions(TerraEngine-EngineTests PRIVATE TERRAENGINE_HAS_TERRAIN_AUTOMATION_DIAGNOSTIC_TESTS=1)
+endif()
+if(EXISTS "${CMAKE_SOURCE_DIR}/Tests/Engine/Terrain/TerrainMultithreadedStressTests.cpp")
+	target_compile_definitions(TerraEngine-EngineTests PRIVATE TERRAENGINE_HAS_TERRAIN_MULTITHREADED_STRESS_TESTS=1)
+endif()
+if(EXISTS "${CMAKE_SOURCE_DIR}/Tests/Engine/Terrain/TerrainExportRuntimeTests.cpp")
+	target_compile_definitions(TerraEngine-EngineTests PRIVATE TERRAENGINE_HAS_TERRAIN_EXPORT_RUNTIME_TESTS=1)
+endif()
+
+add_test(NAME Engine.Terrain.Foundation COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Terrain.Foundation PROPERTIES
+	LABELS "Engine;Terrain;Foundation"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain."
+)
+
+add_test(NAME Engine.Terrain.Sculpt COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Terrain.Sculpt PROPERTIES
+	LABELS "Engine;Terrain;Sculpt"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.BrushKernel,Terrain.PageCooker"
+)
+
+add_test(NAME Engine.Terrain.AtomicEdit COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Terrain.AtomicEdit PROPERTIES
+	LABELS "Engine;Terrain;Transactions;AtomicEdit"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.AtomicEdit"
+)
+
+add_test(NAME Engine.Terrain.LargeWorld COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Terrain.LargeWorld PROPERTIES
+	LABELS "Engine;Terrain;LargeWorld;Residency;LOD"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.LargeWorld,Terrain.Residency,Terrain.Lod"
+)
+
+if(TARGET TerraEngineTerrainTransactionStress)
+	add_test(NAME Engine.Terrain.TransactionStress COMMAND $<TARGET_FILE:TerraEngineTerrainTransactionStress> --workers 4 --iterations 10000 --seed 0x7e11a9)
+	set_tests_properties(Engine.Terrain.TransactionStress PROPERTIES
+		LABELS "Engine;Terrain;Transactions;Stress"
+		TIMEOUT 120
+	)
+endif()
+if(TARGET TerraEngineTerrainFixtureGenerator)
+	add_test(NAME Engine.Terrain.LargeWorldFixture COMMAND $<TARGET_FILE:TerraEngineTerrainFixtureGenerator> --output ${CMAKE_BINARY_DIR}/terrain-256km.json)
+	set_tests_properties(Engine.Terrain.LargeWorldFixture PROPERTIES
+		LABELS "Engine;Terrain;LargeWorld;Fixture")
+	add_test(NAME Engine.Terrain.LargeWorldBenchmark COMMAND $<TARGET_FILE:TerraEngineTerrainBenchmark>
+		--fixture ${CMAKE_BINARY_DIR}/terrain-256km.json --route terrain-1000km-edit-route
+		--output ${CMAKE_BINARY_DIR}/terrain-benchmark-result.json)
+	set_tests_properties(Engine.Terrain.LargeWorldBenchmark PROPERTIES
+		LABELS "Engine;Terrain;LargeWorld;Benchmark"
+		DEPENDS Engine.Terrain.LargeWorldFixture)
+endif()
+
+add_test(NAME Engine.Terrain.Surface COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Terrain.Surface PROPERTIES
+	LABELS "Engine;Terrain;Surface;Layers"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.Layers,Terrain.Surface")
+
+add_test(NAME Engine.Terrain.Collision COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Terrain.Collision PROPERTIES
+	LABELS "Engine;Terrain;Physics;Collision"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.Holes,Terrain.HeightFieldRecipe,Terrain.CollisionPublication")
+
+add_test(NAME Engine.Terrain.Procedural COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Terrain.Procedural PROPERTIES
+	LABELS "Engine;Terrain;Procedural;Determinism"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.Procedural")
+
+if(EXISTS "${CMAKE_SOURCE_DIR}/Tests/Engine/Terrain/TerrainAutomationDiagnosticTests.cpp")
+	add_test(NAME Engine.Terrain.AutomationDiagnostics COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+	set_tests_properties(Engine.Terrain.AutomationDiagnostics PROPERTIES
+		LABELS "Engine;Terrain;Automation;Diagnostics"
+		ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.AutomationDiagnostics")
+endif()
+if(EXISTS "${CMAKE_SOURCE_DIR}/Tests/Engine/Terrain/TerrainMultithreadedStressTests.cpp")
+	add_test(NAME Engine.Terrain.MultithreadedStress COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+	set_tests_properties(Engine.Terrain.MultithreadedStress PROPERTIES
+		LABELS "Engine;Terrain;Stress;Concurrency"
+		ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.Stress")
+endif()
+if(EXISTS "${CMAKE_SOURCE_DIR}/Tests/Engine/Terrain/TerrainExportRuntimeTests.cpp")
+	add_test(NAME Engine.Terrain.ExportRuntime COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+	set_tests_properties(Engine.Terrain.ExportRuntime PROPERTIES
+		LABELS "Engine;Terrain;Export;Runtime;ContentMount"
+		ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.ExportRuntime")
+endif()
 
 add_test(NAME Engine.AnimationParityValidator COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.AnimationParityValidator PROPERTIES

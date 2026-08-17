@@ -152,6 +152,11 @@ file(GLOB_RECURSE TERRAENGINE_VIRTUAL_GEOMETRY_ENGINE_HEADERS CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Resource/VirtualGeometry*.hpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Renderer/RHI/Vulkan/VulkanVirtualGeometry*.h"
 )
+
+# Terrain foundation sources are explicit and existence-guarded so the build
+# remains valid while the staged implementation tasks add their files.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/TerraEngineTerrain.cmake)
+
 set(ENGINE_SOURCES
 	Engine/Core/MainEngine.cpp
 	Engine/Core/FatalErrorReport.cpp
@@ -286,6 +291,8 @@ set(ENGINE_SOURCES
 	Engine/Runtime/ContentMount/util/WorkerPool.cpp
 	${TERRAENGINE_ANIMATION_ENGINE_SOURCES}
 	${TERRAENGINE_VIRTUAL_GEOMETRY_ENGINE_SOURCES}
+	${TERRAENGINE_TERRAIN_ENGINE_SOURCES}
+	${TERRAENGINE_TERRAIN_PHYSICS_SOURCES}
 )
 
 set(ENGINE_HEADERS
@@ -431,6 +438,8 @@ set(ENGINE_HEADERS
 	Engine/Debug.h
 	${TERRAENGINE_ANIMATION_ENGINE_HEADERS}
 	${TERRAENGINE_VIRTUAL_GEOMETRY_ENGINE_HEADERS}
+	${TERRAENGINE_TERRAIN_ENGINE_HEADERS}
+	${TERRAENGINE_TERRAIN_PHYSICS_HEADERS}
 )
 
 set(BASISU_SOURCES
@@ -843,6 +852,16 @@ if(TERRAENGINE_VIRTUAL_GEOMETRY_SHADER_SOURCES)
 	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry PREFIX "Virtual Geometry Shaders" FILES ${TERRAENGINE_VIRTUAL_GEOMETRY_SHADER_SOURCES})
 endif()
 
+add_custom_target(TerraEngine.Terrain.Shaders)
+if(TERRAENGINE_TERRAIN_RUNTIME_SHADER_SOURCES)
+	target_sources(TerraEngine.Terrain.Shaders PRIVATE ${TERRAENGINE_TERRAIN_RUNTIME_SHADER_SOURCES})
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Terrain PREFIX "Terrain Shaders" FILES ${TERRAENGINE_TERRAIN_RUNTIME_SHADER_SOURCES})
+endif()
+if(TERRAENGINE_TERRAIN_EDITOR_SHADER_SOURCES)
+	target_sources(TerraEngine.Terrain.Shaders PRIVATE ${TERRAENGINE_TERRAIN_EDITOR_SHADER_SOURCES})
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Editor/Shaders/Terrain PREFIX "Terrain Editor Shaders" FILES ${TERRAENGINE_TERRAIN_EDITOR_SHADER_SOURCES})
+endif()
+
 # --- Managed Source ----------------------------------------------------------
 # The following files are managed C# source files. CMake will generate the
 # .sln and .csproj files for these during the build process if configured.
@@ -1108,6 +1127,64 @@ add_executable(TerraEngineShaderCompiler
 	Editor/TerraEngineShaderCompiler.cpp
 	Editor/AssetCompilers/ShaderCompiler.cpp
 )
+
+# Terrain shaders are engine-owned artifacts, so compile them during the normal
+# build with the same self-contained DXC and TSPF compiler used by installation.
+# Keeping one output per source gives Ninja precise incremental dependencies and
+# lets shader compilation run concurrently with unrelated C++ translation units.
+set(TERRAENGINE_TERRAIN_COMPILED_SHADER_DIR
+	"${CMAKE_CURRENT_BINARY_DIR}/Build/Intermediate/TerrainShaders/$<CONFIG>")
+set(TERRAENGINE_TERRAIN_COMPILED_SHADERS)
+if(WIN32)
+	set(TERRAENGINE_DXC_PATH "${CMAKE_SOURCE_DIR}/External/dxc/windows/bin/x64/dxc.exe")
+else()
+	set(TERRAENGINE_DXC_PATH "${CMAKE_SOURCE_DIR}/External/dxc/linux/bin/dxc")
+endif()
+
+function(terraengine_add_terrain_shader source_file output_name stage)
+	set(_terrain_shader_output "${TERRAENGINE_TERRAIN_COMPILED_SHADER_DIR}/${output_name}")
+	add_custom_command(
+		OUTPUT "${_terrain_shader_output}"
+		COMMAND ${CMAKE_COMMAND} -E make_directory "${TERRAENGINE_TERRAIN_COMPILED_SHADER_DIR}"
+		COMMAND $<TARGET_FILE:TerraEngineShaderCompiler>
+			-i "${CMAKE_CURRENT_SOURCE_DIR}/${source_file}"
+			-o "${_terrain_shader_output}"
+			-s "${stage}"
+			--dxc "${TERRAENGINE_DXC_PATH}"
+		DEPENDS
+			TerraEngineShaderCompiler
+			"${CMAKE_CURRENT_SOURCE_DIR}/${source_file}"
+			"${TERRAENGINE_DXC_PATH}"
+		COMMENT "Compiling terrain shader ${source_file}"
+		VERBATIM
+	)
+	list(APPEND TERRAENGINE_TERRAIN_COMPILED_SHADERS "${_terrain_shader_output}")
+	set(TERRAENGINE_TERRAIN_COMPILED_SHADERS
+		"${TERRAENGINE_TERRAIN_COMPILED_SHADERS}" PARENT_SCOPE)
+endfunction()
+
+terraengine_add_terrain_shader(
+	Engine/Shaders/Terrain/TerrainVisibility.vert.hlsl TerrainVisibility.vert.tspf vs)
+terraengine_add_terrain_shader(
+	Engine/Shaders/Terrain/TerrainVisibility.frag.hlsl TerrainVisibility.frag.tspf ps)
+terraengine_add_terrain_shader(
+	Engine/Shaders/Terrain/TerrainSurface.comp.hlsl TerrainSurface.comp.tspf cs)
+terraengine_add_terrain_shader(
+	Editor/Shaders/Terrain/TerrainBrushPreview.vert.hlsl TerrainBrushPreview.vert.tspf vs)
+terraengine_add_terrain_shader(
+	Editor/Shaders/Terrain/TerrainBrushPreview.frag.hlsl TerrainBrushPreview.frag.tspf ps)
+
+set(TERRAENGINE_TERRAIN_COMPILED_RUNTIME_SHADERS
+	"${TERRAENGINE_TERRAIN_COMPILED_SHADER_DIR}/TerrainVisibility.vert.tspf"
+	"${TERRAENGINE_TERRAIN_COMPILED_SHADER_DIR}/TerrainVisibility.frag.tspf"
+	"${TERRAENGINE_TERRAIN_COMPILED_SHADER_DIR}/TerrainSurface.comp.tspf")
+set(TERRAENGINE_TERRAIN_COMPILED_EDITOR_SHADERS
+	"${TERRAENGINE_TERRAIN_COMPILED_SHADER_DIR}/TerrainBrushPreview.vert.tspf"
+	"${TERRAENGINE_TERRAIN_COMPILED_SHADER_DIR}/TerrainBrushPreview.frag.tspf")
+
+add_custom_target(TerraEngine.Terrain.ShaderCompile
+	DEPENDS ${TERRAENGINE_TERRAIN_COMPILED_SHADERS})
+add_dependencies(TerraEngine.Terrain.Shaders TerraEngine.Terrain.ShaderCompile)
 
 # The collider compiler is deliberately headless. It links the same engine and
 # pinned Jolt 5.6 backend used at runtime, so editor and CI cooks cannot drift.
@@ -1517,6 +1594,7 @@ add_executable(TerraEngine-Editor
 	${IMGUI_FILE_DIALOG_DIR}/ImGuiFileDialog.cpp
 	${TERRAENGINE_ANIMATION_EDITOR_SOURCES}
 	${TERRAENGINE_VIRTUAL_GEOMETRY_ASSET_COMPILER_SOURCES}
+	${TERRAENGINE_TERRAIN_EDITOR_SOURCES}
 )
 
 # The tool compiles the bounded codec directly, so its exported result types
@@ -1604,6 +1682,29 @@ if(WIN32)
 endif()
 
 add_dependencies(TerraEngine-Editor TerraEngineModelPackageCompiler TerraEngineMeshCompiler TerraEngineTextureCompiler TerraEngineShaderCompiler TerraEnginePhysicsColliderCompiler)
+
+if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${TERRAENGINE_TERRAIN_STRESS_SOURCE}")
+	add_executable(TerraEngineTerrainTransactionStress ${TERRAENGINE_TERRAIN_STRESS_SOURCE})
+	target_include_directories(TerraEngineTerrainTransactionStress PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+		${CMAKE_CURRENT_SOURCE_DIR})
+	target_link_libraries(TerraEngineTerrainTransactionStress PRIVATE TerraEngine-Engine)
+	set_target_properties(TerraEngineTerrainTransactionStress PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+	if(MSVC)
+		target_compile_options(TerraEngineTerrainTransactionStress PRIVATE /FS)
+	endif()
+endif()
+if(BUILD_TESTING)
+	add_executable(TerraEngineTerrainFixtureGenerator ${TERRAENGINE_TERRAIN_FIXTURE_SOURCE})
+	add_executable(TerraEngineTerrainBenchmark ${TERRAENGINE_TERRAIN_BENCHMARK_SOURCE})
+	set_target_properties(TerraEngineTerrainFixtureGenerator TerraEngineTerrainBenchmark PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+	if(MSVC)
+		target_compile_options(TerraEngineTerrainFixtureGenerator PRIVATE /FS)
+		target_compile_options(TerraEngineTerrainBenchmark PRIVATE /FS)
+	endif()
+endif()
 
 if(BUILD_TESTING)
 	# Test targets live under one repository-level Tests tree while preserving
@@ -1744,6 +1845,47 @@ install(FILES
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/VirtualGeometryProductionCodecAbi.hlsli"
 	DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Shaders/Includes/VirtualGeometry"
 )
+if(TERRAENGINE_TERRAIN_RUNTIME_SHADER_SOURCES)
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Terrain/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Engine/Shaders/Terrain"
+	)
+endif()
+
+if(TERRAENGINE_TERRAIN_COMPILER_SOURCES)
+	add_executable(TerraEngineTerrainCompiler ${TERRAENGINE_TERRAIN_COMPILER_SOURCES})
+	target_include_directories(TerraEngineTerrainCompiler PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
+	)
+	target_link_libraries(TerraEngineTerrainCompiler PRIVATE TerraEngine-Engine)
+	if(MSVC)
+		target_compile_options(TerraEngineTerrainCompiler PRIVATE /FS)
+	endif()
+endif()
+if(TERRAENGINE_TERRAIN_EDITOR_SHADER_SOURCES)
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Editor/Shaders/Terrain/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Shaders/Terrain"
+	)
+endif()
+if(TERRAENGINE_TERRAIN_COMPILED_RUNTIME_SHADERS)
+	# Install compiled TSPF packages beside their authored runtime sources so a
+	# shipped engine never needs a system shader compiler installed.
+	install(FILES ${TERRAENGINE_TERRAIN_COMPILED_RUNTIME_SHADERS}
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Engine/Shaders/Terrain"
+	)
+endif()
+if(TERRAENGINE_TERRAIN_COMPILED_EDITOR_SHADERS)
+	# Preview packages remain editor-only and cannot leak into runtime content.
+	install(FILES ${TERRAENGINE_TERRAIN_COMPILED_EDITOR_SHADERS}
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Shaders/Terrain"
+	)
+	# The dependency is declared once after both output groups are known; the
+	# shader target itself owns all runtime and editor package generation.
+	if(TARGET install)
+		add_dependencies(install TerraEngine.Terrain.Shaders)
+	endif()
+endif()
 
 # Install only provider-neutral physics contracts. The Jolt job and allocator
 # adapters remain private implementation details of the engine DLL.
@@ -1752,6 +1894,10 @@ terraengine_install_physics_foundation("${ENGINE_INSTALL_DESTINATION}")
 terraengine_install_audio_foundation("${ENGINE_INSTALL_DESTINATION}")
 terraengine_install_offline_nuget_notices("${ENGINE_INSTALL_DESTINATION}")
 terraengine_install_nativeaot_nuget_toolchain("${ENGINE_INSTALL_DESTINATION}")
+if(TERRAENGINE_TERRAIN_PHYSICS_HEADERS)
+	install(FILES ${TERRAENGINE_TERRAIN_PHYSICS_HEADERS}
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/include/Physics/Terrain")
+endif()
 
 # Jolt is statically linked into TerraEngine-Engine, so its upstream MIT notice
 # must accompany every runtime installation even though no standalone Jolt
@@ -2312,6 +2458,7 @@ endif()
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/PhysicsGameplay.md"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/PhysicsConstraintsAndCharacters.md"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/CSharpRuntimeAPI.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/Terrain.md"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Docs"
 	)
 	# Install the complete animation guide set. Asset authors, gameplay users,
@@ -2353,6 +2500,24 @@ endif()
 			PATTERN "*.cmd"
 			PATTERN "*.md"
 	)
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Terrain/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Terrain"
+		FILES_MATCHING PATTERN "*.json" PATTERN "*.md"
+	)
+	if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${TERRAENGINE_TERRAIN_AUTOMATION_RUNNER}")
+		install(FILES
+			"${CMAKE_CURRENT_SOURCE_DIR}/${TERRAENGINE_TERRAIN_AUTOMATION_RUNNER}"
+			"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Terrain/CaptureTerrainEvidence.ps1"
+			"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Terrain/PrepareTerrainEvidenceManifest.ps1"
+			"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Terrain/ValidateTerrainEvidenceManifest.ps1"
+			"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Terrain/RunTerrainSoak.ps1"
+			"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Terrain/VerifyInstalledTerrainContract.ps1"
+			"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Terrain/VerifyTerrainArchitecture.ps1"
+			"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Terrain/hardware-matrix.json"
+			"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Terrain/quality-profiles.json"
+			DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Terrain"
+		)
+	endif()
 	endif()
 	# Keep the small deterministic animation and export-parity inputs beside the
 	# installed validation tooling. The Tests path makes their QA-only role clear;
@@ -2377,6 +2542,23 @@ endif()
 		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/VirtualGeometry/production-validation-fixtures.json"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Fixtures/VirtualGeometry"
 	)
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/Terrain/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Fixtures/Terrain"
+		FILES_MATCHING PATTERN "*.json" PATTERN "*.png" PATTERN "*.raw"
+	)
+	install(FILES
+		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/TerrainAutomation.md"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Docs"
+	)
+	install(FILES
+		"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Help/TerrainHelp.md"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Help"
+	)
+	if(TERRAENGINE_TERRAIN_CONTRACT_FILES)
+		install(FILES ${TERRAENGINE_TERRAIN_CONTRACT_FILES}
+			DESTINATION "${ENGINE_INSTALL_DESTINATION}/Schemas/Terrain"
+		)
+	endif()
 	# Install the complete deterministic animated-page fixture so installed
 	# validation never reaches back into the source checkout for inputs.
 	install(DIRECTORY
@@ -2462,6 +2644,36 @@ install(TARGETS TerraEngineAudioClipCompiler
 	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 )
+if(TARGET TerraEngineTerrainCompiler)
+	install(TARGETS TerraEngineTerrainCompiler
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+	)
+endif()
+if(TARGET TerraEngineTerrainTransactionStress)
+	install(TARGETS TerraEngineTerrainTransactionStress
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Terrain
+		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Terrain
+	)
+	if(WIN32)
+		# The stress probe exercises the public engine DLL from the installed tree.
+		# Keep its complete runtime closure beside the executable so validation does
+		# not accidentally depend on the developer build directory or PATH.
+		install(FILES $<TARGET_FILE:TerraEngine-Engine>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Terrain
+		)
+		install(FILES $<TARGET_RUNTIME_DLLS:TerraEngineTerrainTransactionStress>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Terrain
+			OPTIONAL
+		)
+	endif()
+endif()
+if(TARGET TerraEngineTerrainFixtureGenerator)
+	install(TARGETS TerraEngineTerrainFixtureGenerator TerraEngineTerrainBenchmark
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Terrain
+		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Terrain
+	)
+endif()
 if(BUILD_TESTING)
 	# Install validation executables under the test tree so the installed layout
 	# preserves the same production-versus-test boundary as the source tree.

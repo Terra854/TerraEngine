@@ -7,6 +7,7 @@
 
 #include "ComponentRegistry.h"
 #include "Components/Transform.h"
+#include "Components/TerrainComponent.h"
 #include "Components/AnimatorComponent.h"
 #include "Components/AudioListenerComponent.h"
 #include "Components/AudioSourceComponent.h"
@@ -70,6 +71,9 @@ void ComponentRegistry::RegisterAllComponents() {
 	TerraEngine::Reflection::ConfigureTypeMetadata(rotationPolicyFactory, "PhysicsCharacterRotationPolicy");
 
 	Transform::registerType();
+	// Terrain must be reflected before scene loading so a saved terrain instance
+	// can be recreated without waiting for a live component constructor.
+	TerrainComponent::registerType();
 	// Animator authoring metadata must exist before the first scene is loaded so
 	// the editor can enumerate and add the component without relying on lazy
 	// serializer registration from an already-authored object.

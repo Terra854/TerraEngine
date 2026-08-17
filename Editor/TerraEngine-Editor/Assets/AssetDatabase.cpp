@@ -496,6 +496,11 @@ namespace {
 	}
 
 	bool IsIgnoredAssetDatabasePath(const std::filesystem::path& path) {
+		// The subtree next to a terrain root contains private manifests and blobs.
+		// Neither the watcher nor scan may create sidecars inside that transaction.
+		for(const std::filesystem::path& part : path) {
+			if(LowerPath(part.generic_string()).ends_with(".teterrain.data")) return true;
+		}
 		if(IsModelPackageTransactionPath(path)) {
 			return true;
 		}
@@ -1220,6 +1225,14 @@ void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 
 	assets.clear();
 	generatedModelPackageResources.clear();
+	{
+		// Material observations are project-local. Reset them on initialization so
+		// a newly opened project never interprets a previous project's deletion as
+		// a fallback condition for its own terrain layer UUIDs.
+		std::lock_guard<std::mutex> lock(terrainMaterialChangeMutex);
+		terrainMaterialChanges.clear();
+		nextTerrainMaterialChangeGeneration = 0u;
+	}
 	// Initialize is a protected project boundary. Publisher retains from the
 	// previous project are no longer valid, so reclaim their real cache payloads
 	// before Reset discards the only publisher-generation retirement records.
@@ -1912,7 +1925,7 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 	// the generated TEAF envelope remains the only runtime-facing payload.
 	else if (metadata.importerName == "AudioClipImporter") compiledRelativePath.replace_extension(".teaudio");
 	else if (metadata.importerName == "ScriptImporter") compiledRelativePath.clear();
-	else if (metadata.importerName == "GenericImporter") compiledRelativePath.clear(); 
+	else if (metadata.importerName == "GenericImporter" || metadata.importerName == "TerrainImporter") compiledRelativePath.clear();
 	
 	// Store relative path in metadata
 	metadata.compiledPath = compiledRelativePath;
@@ -2046,6 +2059,20 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 	}
 
 	assets[absSourcePath] = metadata;
+	if(metadata.importerName == "MaterialImporter") {
+		// A GUID observed at a different path is a rename; a known path is a
+		// reimport. Both retain authored terrain layer references by UUID.
+		const TerrainMaterialChangeKind changeKind = previousMetadata
+			? (previousMetadata->sourcePath != metadata.sourcePath
+				? TerrainMaterialChangeKind::Renamed : TerrainMaterialChangeKind::Reimported)
+			: TerrainMaterialChangeKind::Imported;
+		RecordTerrainMaterialChange(metadata, changeKind);
+	}
+	if(metadata.importerName == "TerrainImporter") {
+		// Terrain roots are already durable runtime manifests. Their private data
+		// directory stays next to the root, so no generic one-file compiler runs.
+		ResourceManager::Instance().RegisterAssetPath(metadata.guid, absSourcePath, AssetType::Terrain);
+	}
 
 	// Register with Engine ResourceManager so it can resolve GUIDs to compiled paths
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -3150,6 +3177,7 @@ std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath
 	if (ext == ".tephysmat") return "PhysicsMaterialImporter";
 	if (ext == ".tecollider") return "PhysicsColliderRecipeImporter";
 	if (ext == ".tepcoll") return "CookedColliderImporter";
+	if (ext == ".teterrain") return "TerrainImporter";
 	if (ext == ".wav" || ext == ".ogg") return "AudioClipImporter";
 	if (ext == ".teaudio") return "CookedAudioClipImporter";
 	if (ext == ".teskel") return "SkeletonAssetImporter";
@@ -3951,7 +3979,8 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 		else if (metadata.importerName == "MaterialImporter") { type = AssetType::Material; knownResource = true; }
 		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (metadata.importerName == "ShaderImporter") { type = AssetType::ShaderCollection; knownResource = true; }
-		else if (metadata.importerName == "PhysicsMaterialImporter") { type = AssetType::PhysicsMaterial; knownResource = true; }
+	else if (metadata.importerName == "PhysicsMaterialImporter") { type = AssetType::PhysicsMaterial; knownResource = true; }
+	else if (metadata.importerName == "TerrainImporter") { type = AssetType::Terrain; knownResource = true; }
 		else if (metadata.importerName == "PhysicsColliderRecipeImporter"
 			|| metadata.importerName == "CookedColliderImporter") { type = AssetType::CookedCollider; knownResource = true; }
 		else if(metadata.importerName == "AudioClipImporter") { type = AssetType::AudioClip; knownResource = true; }
@@ -3962,6 +3991,11 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 
 		if (knownResource) {
 			ResourceManager::Instance().DeleteResource(metadata.guid, type);
+		}
+		if(metadata.importerName == "MaterialImporter") {
+			// Deletion deliberately records a fallback condition instead of touching
+			// terrain blobs. Restoring/reimporting this GUID reactivates the layer.
+			RecordTerrainMaterialChange(metadata, TerrainMaterialChangeKind::Deleted);
 		}
 
 		if (TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName)) {
@@ -4002,6 +4036,47 @@ TerraEngine::Physics::PhysicsAssetChangeSnapshot AssetDatabase::GetPhysicsAssetC
 
 TerraEngine::Physics::PhysicsAssetGeneration AssetDatabase::GetPhysicsAssetChangeGeneration() const {
 	return TerraEngine::Physics::PhysicsAssetChangeJournal::Instance().CurrentGeneration();
+}
+
+TerrainMaterialChangeSnapshot AssetDatabase::GetTerrainMaterialChangesSince(
+	std::uint64_t observedGeneration) const
+{
+	std::lock_guard<std::mutex> lock(terrainMaterialChangeMutex);
+	TerrainMaterialChangeSnapshot snapshot;
+	snapshot.generation = nextTerrainMaterialChangeGeneration;
+	if(observedGeneration > snapshot.generation) {
+		snapshot.requiresFullRefresh = true;
+		return snapshot;
+	}
+	if(!terrainMaterialChanges.empty() && observedGeneration + 1u < terrainMaterialChanges.front().generation)
+		snapshot.requiresFullRefresh = true;
+	for(const TerrainMaterialChange& change : terrainMaterialChanges)
+		if(change.generation > observedGeneration) snapshot.changes.push_back(change);
+	return snapshot;
+}
+
+std::uint64_t AssetDatabase::GetTerrainMaterialChangeGeneration() const
+{
+	std::lock_guard<std::mutex> lock(terrainMaterialChangeMutex);
+	return nextTerrainMaterialChangeGeneration;
+}
+
+void AssetDatabase::RecordTerrainMaterialChange(
+	const AssetMetadata& metadata, TerrainMaterialChangeKind changeKind)
+{
+	if(metadata.guid == TerraEngine::EMPTY_UUID) return;
+	std::lock_guard<std::mutex> lock(terrainMaterialChangeMutex);
+	TerrainMaterialChange change;
+	change.materialAssetId = metadata.guid;
+	change.kind = changeKind;
+	change.generation = ++nextTerrainMaterialChangeGeneration;
+	change.sourcePath = metadata.sourcePath;
+	terrainMaterialChanges.push_back(std::move(change));
+	// A bounded journal makes repeated project scans safe. Readers that lag the
+	// oldest retained event receive requiresFullRefresh and rebuild diagnostics.
+	constexpr std::size_t kMaximumTerrainMaterialChanges = 1024u;
+	while(terrainMaterialChanges.size() > kMaximumTerrainMaterialChanges)
+		terrainMaterialChanges.pop_front();
 }
 
 bool AssetDatabase::TryGetGeneratedModelPackageChildDisplayName(

@@ -259,6 +259,27 @@ static bool RewriteStagedPhysicsColliderReferences(
 	return true;
 }
 
+// Terrain uses a root document plus a private content-addressed sibling tree.
+// Validate that relationship before TEPAK writes any archive bytes so a runtime
+// never receives a root that cannot resolve its authored area manifests/blobs.
+static bool ValidateStagedTerrainBundles(const std::filesystem::path& stagingDirectory, std::string& error)
+{
+	std::error_code iteratorError;
+	for(const std::filesystem::directory_entry& entry : std::filesystem::recursive_directory_iterator(stagingDirectory, iteratorError)) {
+		if(iteratorError) {
+			error = "Could not inspect staged terrain content: " + iteratorError.message();
+			return false;
+		}
+		if(!entry.is_regular_file() || entry.path().extension() != ".teterrain") continue;
+		const std::filesystem::path dataDirectory = entry.path().string() + ".data";
+		if(!std::filesystem::is_directory(dataDirectory)) {
+			error = "Staged terrain root is missing its managed data bundle: " + PathToUtf8(entry.path());
+			return false;
+		}
+	}
+	return true;
+}
+
 static void EmitProgress(ExportProgressCallback& cb, ExportPhase phase, float progress, const std::string& message, bool finished = false) {
 	if (!cb) return;
 	ExportProgress p;
@@ -834,6 +855,10 @@ ExportResult ExportPipeline::Execute(
 			packageInputDirectory, result, capturedProgress)) {
 			result.affectedPath = packageInputDirectory;
 			return finish(ExportFailureCategory::AssetStagingFailed, result.stage, result.errorMessage);
+		}
+		std::string terrainBundleError;
+		if(!ValidateStagedTerrainBundles(packageInputDirectory, terrainBundleError)) {
+			return finish(ExportFailureCategory::AssetStagingFailed, result.stage, terrainBundleError);
 		}
 
 		const std::filesystem::path manifestPath = packageInputDirectory / "game.json";

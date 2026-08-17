@@ -58,6 +58,18 @@ namespace TerraEngine::EditorTests
 				"A missing output path must not enable evidence generation or overwrite an implicit location.");
 		});
 
+		registry.Add("Editor.CommandLine.TerrainLiveInvariantOutputIsExplicit", [](TestContext& context) {
+			const auto separate = Parse({"TerraEngine-Editor.exe", "--project", "C:/Fixture/project.json",
+				"--validate-editor-terrain-invariants", "C:/Evidence/terrain-live.json"});
+			const auto equals = Parse({"TerraEngine-Editor.exe",
+				"--validate-editor-terrain-invariants=C:/Evidence/terrain-live-equals.json"});
+			const auto missing = Parse({"TerraEngine-Editor.exe", "--validate-editor-terrain-invariants"});
+			context.Expect(separate.terrainInvariantOutputPath == std::filesystem::path("C:/Evidence/terrain-live.json")
+				&& equals.terrainInvariantOutputPath == std::filesystem::path("C:/Evidence/terrain-live-equals.json")
+				&& !missing.terrainInvariantOutputPath,
+				"Live terrain validation must require one explicit evidence path in either supported command-line form.");
+		});
+
 		registry.Add("Editor.CommandLine.RendererBootstrapPrecedesEngineRun", [](TestContext& context) {
 			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Editor/TerraEngine-Editor/Core/EditorMain.cpp");

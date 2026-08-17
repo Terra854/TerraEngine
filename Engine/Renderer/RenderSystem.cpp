@@ -2500,6 +2500,72 @@ bool RenderSystem::RequestsEngineShutdown() const
 	return true;
 }
 
+std::vector<TerraEngine::Renderer::Terrain::TerrainPreparedRenderPacket>
+RenderSystem::PrepareCommittedTerrainPackets(
+	std::span<const TerraEngine::Renderer::Terrain::TerrainViewPacket> views,
+	std::span<const TerraEngine::Renderer::Terrain::TerrainPageCookResult> cooks,
+	std::span<const TerraEngine::Resource::VirtualGeometryPagePublication> committedPages)
+{
+	std::vector<TerraEngine::Renderer::Terrain::TerrainPreparedRenderPacket> packets;
+	packets.reserve(views.size());
+	const std::vector<TerraEngine::Resource::VirtualGeometryPagePublication> committedSnapshot(
+		committedPages.begin(), committedPages.end());
+	for (const TerraEngine::Renderer::Terrain::TerrainViewPacket& view : views)
+	{
+		// A terrain view carries the authored root identity captured by the
+		// protected terrain snapshot. Select only a cook with the same identity;
+		// this prevents an old worker result from being mixed into a new frame.
+		const auto cook = std::find_if(cooks.begin(), cooks.end(), [&view](const auto& candidate)
+		{
+			return candidate.assetId == view.assetId
+				&& candidate.area == view.area
+				&& candidate.authoredHash == view.authoredHash
+				&& candidate.authoredGeneration == view.authoredGeneration;
+		});
+		if (cook != cooks.end())
+		{
+			if (const auto prepared = TerraEngine::Renderer::Terrain::PrepareTerrainRenderPacket(view, *cook, committedSnapshot))
+				packets.push_back(*prepared);
+			continue;
+		}
+
+		// No current cook exists. Pass an intentionally incomplete value to the
+		// packet helper, which can select a matching committed last-known-good page
+		// but will not fabricate a fresh candidate from stale data.
+		TerraEngine::Renderer::Terrain::TerrainPageCookResult missingCook{};
+		if (const auto fallback = TerraEngine::Renderer::Terrain::PrepareTerrainRenderPacket(view, missingCook, committedSnapshot))
+			packets.push_back(*fallback);
+	}
+	return packets;
+}
+
+bool RenderSystem::SubmitPreparedTerrainPackets(
+	std::span<const TerraEngine::Renderer::Terrain::TerrainPreparedRenderPacket> packets)
+{
+	if (packets.empty()) return true;
+	// One batch is intentionally limited to one exact view/source/generation.
+	// Callers split multi-view LOD choices before this boundary, preserving each
+	// camera's independent cut while still giving VG a complete typed producer.
+	const auto& first = packets.front();
+	TerraEngine::Resource::TerrainVirtualGeometryProducerBatch batch{};
+	batch.assetId = first.view.assetId;
+	batch.sourceIdentity = first.view.pageSourceIdentity;
+	batch.authoredGeneration = first.view.authoredGeneration;
+	batch.viewId = first.view.viewId;
+	batch.regionalRootPageId = first.view.pageId;
+	batch.candidates.reserve(packets.size());
+	for (const auto& packet : packets)
+	{
+		if (packet.usesLastKnownGood || packet.view.assetId != batch.assetId
+			|| packet.view.pageSourceIdentity != batch.sourceIdentity
+			|| packet.view.authoredGeneration != batch.authoredGeneration
+			|| packet.view.viewId != batch.viewId) return false;
+		batch.regionalRootPageId = std::min(batch.regionalRootPageId, packet.view.pageId);
+		batch.candidates.push_back(packet.candidate);
+	}
+	return TerraEngine::Resource::VirtualGeometryStreamingSystem::Instance().SubmitTerrainProducerBatch(std::move(batch));
+}
+
 std::vector<VirtualGeometryClusterPacket> RenderSystem::BuildVirtualGeometryClusterPackets(
 	const VirtualGeometryAssetRuntime& asset,
 	const std::vector<TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord>& selectedClusters,

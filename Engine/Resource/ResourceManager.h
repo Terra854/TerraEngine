@@ -86,7 +86,9 @@ enum class AssetType : std::uint32_t {
 	RagdollProfile = 12U,
 	// Audio follows persisted animation identities so existing scenes and asset
 	// indexes retain their numeric meanings when audio support is introduced.
-	AudioClip = 13U
+	AudioClip = 13U,
+	// Terrain keeps one persisted identity while TerrainAssetStore owns its areas.
+	Terrain = 14U
 };
 
 constexpr bool IsAnimationAssetType(AssetType type) noexcept
@@ -1010,6 +1012,9 @@ private:
 	// Audio uses shared immutable generations rather than raw cache pointers:
 	// provider packets can retain a generation past a protected reload boundary.
 	AssetPathRegistry audioClipPaths;
+	// A terrain path is a root-manifest lookup; its heavy area data never enters
+	// the generic ResourceManager cache.
+	AssetPathRegistry terrainPaths;
 	std::unordered_map<TerraEngine::UUID, std::shared_ptr<const TerraEngine::Audio::AudioClipAsset>> audioClipAssets;
 	std::unordered_map<TerraEngine::UUID, std::uint64_t> audioClipGenerations;
 	mutable std::shared_mutex audioClipMutex;

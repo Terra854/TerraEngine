@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "Core/Scheduling/FrameWorkload.h"
+
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -162,6 +164,9 @@ public:
 	virtual void Update(float deltaTime) override;
 	virtual void DrawUI() override;
 	virtual void Shutdown() override;
+	// EditorSystem forwards this independent terrain system contract into the
+	// frame scheduler without making ImGui callbacks publish terrain mutations.
+	[[nodiscard]] std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> DeclareTerrainAuthoringWorkloads(float deltaTime);
 	// GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual std::string GetName() const override { return "Main Editor"; }
 
@@ -179,6 +184,7 @@ public:
 	// publication, and stop methods as the toolbar. It returns engine-owned
 	// invariant counts for comparison with the exported runtime report.
 	TerraEngine::Runtime::PhysicsInvariantReport RunPhysicsExportInvariantFixture();
+	[[nodiscard]] nlohmann::json RunTerrainLiveValidationFixture();
 	// Reports whether a drag control in the inspector is active this frame for cursor wrapping.
 	bool IsInspectorValueDragging() const;
 
@@ -195,6 +201,10 @@ public:
 	void SetSelectedEntity(std::optional<entt::entity> entity);
 	void SetSelectedEntities(const std::vector<entt::entity>& entities);
 	void ToggleSelectedEntity(entt::entity entity);
+	// Copies the selected terrain's parent asset plus its private immutable data
+	// bundle, then queues the component reference change at the scene boundary.
+	// The original terrain remains untouched for every other scene instance.
+	bool CreateIndependentTerrainCopy(entt::entity entity, std::string& outError);
 
 	// GetSelectedAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::optional<std::filesystem::path> GetSelectedAsset() const { return selectedAsset; }

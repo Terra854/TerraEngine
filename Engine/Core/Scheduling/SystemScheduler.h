@@ -165,6 +165,24 @@ namespace TerraEngine::Scheduling {
 	inline constexpr const char kResourceVisibleStreamingTouchSets[] = "VisibleStreamingTouchSets";
 	inline constexpr const char kResourceRendererRecoveryStateSnapshot[] = "RendererRecoveryStateSnapshot";
 	inline constexpr const char kResourceRendererDeviceIncidentLog[] = "RendererDeviceIncidentLog";
+	// Terrain keeps authored roots, streamed areas, and derived render products
+	// separate so scheduler diagnostics prove workers never mutate live authority.
+	inline constexpr const char kResourceTerrainAssetRoots[] = "TerrainAssetRoots";
+	inline constexpr const char kResourceTerrainStreamingDemands[] = "TerrainStreamingDemands";
+	inline constexpr const char kResourceTerrainPreparedResidency[] = "TerrainPreparedResidency";
+	inline constexpr const char kResourceTerrainPublishedResidency[] = "TerrainPublishedResidency";
+	inline constexpr const char kResourceTerrainDerivedInvalidations[] = "TerrainDerivedInvalidations";
+	inline constexpr const char kResourceTerrainPreparedDerived[] = "TerrainPreparedDerived";
+	inline constexpr const char kResourceTerrainPublishedDerived[] = "TerrainPublishedDerived";
+	// Collision cooking and publication are separate resources so worker-built
+	// candidates cannot be mistaken for the protected, physics-visible snapshot.
+	inline constexpr const char kResourceTerrainPreparedCollision[] = "TerrainPreparedCollision";
+	inline constexpr const char kResourceTerrainPublishedCollision[] = "TerrainPublishedCollision";
+	// Detached editor candidates must remain distinct from published terrain
+	// mutations so scheduler diagnostics can expose their protected boundary.
+	inline constexpr const char kResourceTerrainPreparedTransactions[] = "TerrainPreparedTransactions";
+	inline constexpr const char kResourceTerrainPublishedTransactions[] = "TerrainPublishedTransactions";
+	inline constexpr const char kResourceTerrainDiagnostics[] = "TerrainDiagnostics";
 
 	struct SystemDeclaration {
 		std::string name;

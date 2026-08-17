@@ -15,6 +15,7 @@
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Components/PrefabLinkComponent.h"
 #include "Engine/Components/Transform.h"
+#include "Engine/Components/TerrainComponent.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Resource/VirtualGeometryCodec.h"
 #include "Engine/Renderer/RenderSystem.h"
@@ -4438,6 +4439,15 @@ void InspectorWindow::DrawCanonicalTransformInspector(const Object& object)
 
 	if (changed)
 	{
+		const bool hasTerrain = ObjectManager::instance().getRegistry().any_of<TerrainComponent>(object.EntityId());
+		if(hasTerrain && !TerrainComponent::SupportsTranslationOnlyPlacement(candidate))
+		{
+			// Terrain's fixed sample lattice has no valid rotated or scaled form.
+			// Reject the whole transform candidate instead of applying translation
+			// while silently retaining an invalid existing orientation or scale.
+			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Terrain placement accepts translation only; rotation and scale must remain identity/unit.");
+			return;
+		}
 		const TerraEngine::Scene::WorldCoordinateResult normalized =
 			TerraEngine::Scene::NormalizeWorldPosition(candidate.position);
 		if (!normalized.Succeeded())
@@ -4971,6 +4981,63 @@ void InspectorWindow::OnGui() {
 						DrawAnimatorInspector(obj, selectedEntities);
 					}
 					// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+					else if (compName == "TerrainComponent")
+					{
+						const TerrainComponent* terrain = ObjectManager::instance().getRegistry().try_get<TerrainComponent>(obj);
+						ImGui::TextUnformatted("Terrain instance");
+						ImGui::TextDisabled("Translation-only placement. Rotation and scale are rejected before commit.");
+						if(terrain != nullptr)
+						{
+							const AssetMetadata* metadata = AssetDatabase::Instance().FindAssetByGuid(terrain->terrainAssetId);
+							ImGui::Text("Asset: %s", TerraEngine::ToHexString(terrain->terrainAssetId).c_str());
+							if(metadata != nullptr) ImGui::TextDisabled("Source: %s", metadata->sourcePath.generic_string().c_str());
+							else ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Terrain asset is not registered or has not finished importing.");
+						}
+						if(ImGui::RadioButton("Edit shared terrain asset", m_TerrainSharedEditChoice)) m_TerrainSharedEditChoice = true;
+						ImGui::SameLine();
+						if(ImGui::RadioButton("Create independent copy", !m_TerrainSharedEditChoice))
+						{
+							std::string copyStatus;
+							m_TerrainSharedEditChoice = !m_Owner->CreateIndependentTerrainCopy(obj, copyStatus);
+							m_TerrainCopyStatus = copyStatus;
+						}
+						if(!m_TerrainCopyStatus.empty()) ImGui::TextWrapped("%s", m_TerrainCopyStatus.c_str());
+						if (ImGui::Button("Frame terrain in Scene View"))
+						{
+							std::string frameError;
+							if (auto sceneView = m_Owner->GetWindow<SceneViewWindow>())
+								sceneView->FrameAutomationObject(obj, frameError);
+							if (!frameError.empty()) ImGui::TextWrapped("%s", frameError.c_str());
+						}
+						if(ImGui::Button("Remove Terrain Instance"))
+						{
+							ObjectManager& objects = ObjectManager::instance();
+							if(const std::optional<Object> object = objects.getObject(obj))
+							{
+								// Inspector-originated scene writes publish only at the protected
+								// scene boundary. The transaction receipt becomes the undo entry;
+								// no live component storage is mutated from the ImGui callback.
+								const TerraEngine::UUID objectId = objects.getUUID(*object);
+								TerraEngine::Scene::TransactionalMutationBuilder builder(
+									"terrain-remove-" + TerraEngine::ToHexString(TerraEngine::GenerateUUID()),
+									TerraEngine::Scene::TransactionOrigin::Editor,
+									"Remove Terrain Instance");
+								builder.ObserveScene(objects).ObserveObject(objects, objectId)
+									.SetUndoGroup("Remove Terrain Instance")
+									.RemoveComponent(objectId, compName);
+								TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
+								m_TerrainCopyStatus = "Terrain removal is queued for the protected scene boundary.";
+							}
+						}
+						if(ImGui::BeginTable("TerrainProperties", 2, ImGuiTableFlags_SizingStretchProp))
+						{
+							ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+							ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
+							for(const ReflectionProperty& property : TerraEngine::Reflection::GetProperties(type))
+								if(MetaPropertyName(property) != "active") DrawProperty(compName, property, obj, access);
+							ImGui::EndTable();
+						}
+					}
 					else if (compName == "Script")
 					{
 						DrawScriptComponentInspector(obj);

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "product": "terrain-authoring",
+  "status": "reference-contract",
+  "referenceWorkstation": {
+    "id": "terraengine-reference-workstation",
+    "os": "Windows-AMD64",
+    "cpu": "not-captured",
+    "memoryBytes": null,
+    "gpu": "not-captured",
+    "driver": "not-captured",
+    "availability": "unavailable",
+    "evidenceStatus": "unavailable",
+    "note": "A hardware probe and raw counter capture are required before performance claims."
+  },
+  "requiredBackends": ["Jolt", "Vulkan"],
+  "backendCapabilities": [
+    { "id": "jolt-heightfield", "backend": "Jolt", "capabilities": ["heightfield-build", "shape-replacement", "hole-sentinel", "query-alignment"], "availability": "unavailable-until-runtime-probe" },
+    { "id": "vulkan-terrain", "backend": "Vulkan", "capabilities": ["terrain-visibility", "terrain-surface", "brush-preview"], "availability": "unavailable-until-runtime-probe" }
+  ],
+  "hardwareProfiles": [
+    { "id": "amd-vulkan", "vendor": "AMD", "backend": "Vulkan", "availability": "required-future-lane", "evidenceStatus": "unavailable" },
+    { "id": "nvidia-vulkan", "vendor": "NVIDIA", "backend": "Vulkan", "availability": "required-future-lane", "evidenceStatus": "unavailable" },
+    { "id": "intel-vulkan", "vendor": "Intel", "backend": "Vulkan", "availability": "required-future-lane", "evidenceStatus": "unavailable" }
+  ],
+  "rawCounters": {
+    "required": ["buildLatencyMicroseconds", "updateLatencyMicroseconds", "allocationBytes", "sampleCount", "queryAlignmentCentimetres", "residentBytes", "stagePercentiles"],
+    "missingCounterPolicy": "unavailable-not-pass",
+    "artifactHashRequired": true
+  }
+}

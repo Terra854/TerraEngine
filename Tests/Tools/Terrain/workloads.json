@@ -1,0 +1,14 @@
+{
+  "schemaVersion": { "major": 1, "minor": 0 },
+  "workloads": [
+    { "id": "terrain-benchmark-interactive", "kind": "benchmark", "fixture": "terrain-flat-4-area", "metrics": [ "preview-p50-ms", "preview-p95-ms", "preview-p99-ms", "publish-ms", "resident-bytes" ], "targetPreviewP95Ms": 50.0 },
+    { "id": "terrain-seam-matrix", "kind": "seam-matrix", "fixture": "terrain-flat-4-area", "cases": [ "same-lod", "mixed-lod", "negative-coordinate", "world-region", "hole", "layer", "shadow", "capture", "picking", "collision" ] },
+    { "id": "terrain-collision-matrix", "kind": "collision-matrix", "fixture": "terrain-flat-4-area", "cases": [ "heightfield-replacement", "hole-toggle", "stale-candidate", "last-known-good" ], "targetCurrentWithinSeconds": 1.0, "targetPositionErrorCentimetres": 5.0 },
+    { "id": "terrain-automation-parity", "kind": "automation-parity", "fixture": "terrain-flat-4-area", "cases": [ "preview", "commit", "cancel", "conflict", "unbounded-rejection" ], "compare": [ "root-hash", "area-hashes", "history", "dirty-state", "diagnostics", "receipt" ] },
+    { "id": "terrain-256km", "kind": "large-world", "extentKilometres": [ 256, 256 ], "fixture": "terrain-flat-4-area", "targetFullResidency": false, "metrics": [ "streaming", "lod", "fallback", "resident-bytes" ] },
+    { "id": "terrain-1000km-edit-route", "kind": "route", "distanceKilometres": 1000, "fixture": "terrain-flat-4-area", "operations": [ "travel", "select", "sculpt", "undo", "redo" ], "targetPickingErrorCentimetres": 2.0 },
+    { "id": "terrain-30-minute-soak", "kind": "soak", "durationMinutes": 30, "fixture": "terrain-256km", "route": "terrain-1000km-edit-route", "targetResidentGrowthPercent": 5.0 }
+    ,{ "id": "terrain-surface-layers", "kind": "surface-layer-matrix", "fixture": "terrain-flat-4-area", "layerCount": 16, "localContributorLimit": 4, "cases": [ "add", "duplicate", "reorder", "replace", "enable", "disable", "remove", "paint", "erase", "fill", "normalize", "fifth-contributor-preview", "missing-source-fallback", "save-reload-hash" ], "metrics": [ "control-page-residency", "generation-publication", "boundary-seam", "fallback-state" ] },
+    { "id": "terrain-jolt-heightfield", "kind": "collision-matrix", "fixture": "terrain-flat-4-area", "backend": "Jolt", "sampleCounts": [257, 513, 1025], "cases": [ "heightfield-build", "shape-replacement", "hole-sentinel", "material-assignment", "query-alignment", "stale-generation", "last-known-good" ], "metrics": [ "build-latency-microseconds", "update-latency-microseconds", "allocation-bytes", "sample-count", "query-alignment-centimetres" ], "targets": { "normalStrokeCurrentSeconds": 1.0, "queryAlignmentCentimetres": 5.0 } }
+  ]
+}

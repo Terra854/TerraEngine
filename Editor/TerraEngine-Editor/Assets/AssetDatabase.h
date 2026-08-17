@@ -34,6 +34,24 @@ struct AssetMetadata {
 	nlohmann::json settings; // Importer-specific settings
 };
 
+// Terrain keeps material UUIDs in authored weight texels. This compact change
+// journal tells terrain editors when a source disappeared or became valid
+// again without ever changing those authored UUIDs or weights.
+enum class TerrainMaterialChangeKind : std::uint8_t { Imported, Reimported, Renamed, Deleted };
+
+struct TerrainMaterialChange {
+	TerraEngine::UUID materialAssetId = TerraEngine::EMPTY_UUID;
+	TerrainMaterialChangeKind kind = TerrainMaterialChangeKind::Imported;
+	std::uint64_t generation = 0u;
+	std::filesystem::path sourcePath;
+};
+
+struct TerrainMaterialChangeSnapshot {
+	std::uint64_t generation = 0u;
+	bool requiresFullRefresh = false;
+	std::vector<TerrainMaterialChange> changes;
+};
+
 struct VirtualGeometryAssetMetadata {
 	bool readable = false;
 	bool hasVirtualGeometry = false;
@@ -291,6 +309,11 @@ public:
 	TerraEngine::Physics::PhysicsAssetChangeSnapshot GetPhysicsAssetChangesSince(
 		TerraEngine::Physics::PhysicsAssetGeneration observedGeneration) const;
 	TerraEngine::Physics::PhysicsAssetGeneration GetPhysicsAssetChangeGeneration() const;
+	// Consumers retain their observed generation and convert these events into
+	// fallback diagnostics. Events are observational: they never rewrite paint.
+	[[nodiscard]] TerrainMaterialChangeSnapshot GetTerrainMaterialChangesSince(
+		std::uint64_t observedGeneration) const;
+	[[nodiscard]] std::uint64_t GetTerrainMaterialChangeGeneration() const;
 	bool TryGetGeneratedModelPackageChildDisplayName(const TerraEngine::UUID& guid, GeneratedModelPackageChildKind kind, std::string& outName) const;
 	bool TryGetGeneratedModelPackageChildIds(const TerraEngine::UUID& packageGuid, GeneratedModelPackageChildKind kind, std::vector<TerraEngine::UUID>& outChildIds) const;
 	bool TryGetGeneratedModelPackageChildMetadata(const TerraEngine::UUID& guid, GeneratedModelPackageChildKind kind, GeneratedModelPackageChildMetadata& outMetadata) const;
@@ -403,6 +426,9 @@ private:
 	void PublishPhysicsAssetChange(
 		const AssetMetadata& metadata,
 		TerraEngine::Physics::PhysicsAssetChangeKind changeKind);
+	void RecordTerrainMaterialChange(
+		const AssetMetadata& metadata,
+		TerrainMaterialChangeKind changeKind);
 	void RegisterGeneratedModelPackageMaterialMetadata(const std::filesystem::path& absSourcePath);
 	void RegisterGeneratedModelPackageResources(const std::filesystem::path& absSourcePath);
 	void UpdateModelPackageAnimationSummary(const std::filesystem::path& absSourcePath);
@@ -451,6 +477,9 @@ private:
 	// replaced generation becomes retirement-eligible. Explicit evaluator/GPU
 	// retains in the publisher can extend that lifetime further.
 	std::uint64_t animationReloadBoundaryToRetireNextUpdate = 0u;
+	mutable std::mutex terrainMaterialChangeMutex;
+	std::deque<TerrainMaterialChange> terrainMaterialChanges;
+	std::uint64_t nextTerrainMaterialChangeGeneration = 0u;
 	
 	// Debouncing
 	// struct PendingEvent groups related state and operations so callers have one documented contract.

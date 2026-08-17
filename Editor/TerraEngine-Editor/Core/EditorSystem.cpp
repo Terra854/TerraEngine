@@ -37,6 +37,7 @@
 #include <utility>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <iostream>
 #include <stdexcept>
 #include <type_traits>
@@ -138,6 +139,37 @@ void EditorSystem::SetStartupProjectPath(const std::filesystem::path& projectPat
 
 void EditorSystem::SetPhysicsInvariantOutputPath(const std::filesystem::path& outputPath) {
 	physicsInvariantOutputPath = outputPath;
+}
+
+void EditorSystem::SetTerrainInvariantOutputPath(const std::filesystem::path& outputPath) {
+	terrainInvariantOutputPath = outputPath;
+}
+
+void EditorSystem::ProcessTerrainInvariantValidation(float deltaTime) {
+	if(!terrainInvariantOutputPath || terrainInvariantRunAttempted) return;
+	terrainInvariantWaitSeconds += std::max(0.0f, deltaTime);
+	const bool ready = context.projectManager && context.projectManager->HasActiveProject() && mainEditor;
+	if(!ready && terrainInvariantWaitSeconds < 120.0f) return;
+	terrainInvariantRunAttempted = true;
+	nlohmann::json report;
+	if(ready) report = mainEditor->RunTerrainLiveValidationFixture();
+	else report = {{"schemaVersion", 1}, {"succeeded", false}, {"failure", "Timed out waiting for the live terrain editor workspace."}};
+	try {
+		const auto outputPath = std::filesystem::absolute(*terrainInvariantOutputPath);
+		if(!outputPath.parent_path().empty()) std::filesystem::create_directories(outputPath.parent_path());
+		std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+		if(!output) throw std::runtime_error("Could not open the live terrain invariant output path.");
+		const std::string serialized = report.dump(2);
+		output.write(serialized.data(), static_cast<std::streamsize>(serialized.size()));
+		output.flush();
+		if(!output) throw std::runtime_error("Could not persist the live terrain invariant report.");
+		std::cout << "[Editor] Terrain live invariant report: " << serialized << '\n';
+		requestedProcessExitCode = report.value("succeeded", false) ? 0 : 1;
+	} catch(const std::exception& exception) {
+		requestedProcessExitCode = 1;
+		TERRAENGINE_LOG(LogLevel::Error, "[EditorSystem] Terrain live validation failed: " << exception.what());
+	}
+	context.engine->SignalShutdown();
 }
 
 // The installed-editor acceptance command shares normal project startup with an
@@ -727,9 +759,14 @@ void EditorSystem::Update(float deltaTime) {
 	if (context.editorMcpBridge) {
 		context.editorMcpBridge->PumpAnimationRecordingsAtProtectedFrame();
 		context.editorMcpBridge->PumpRendererValidationMutationsAtProtectedFrame();
+		context.editorMcpBridge->PumpTerrainAutomationJobsAtProtectedFrame();
 	}
 	// The opt-in installed acceptance mode must observe the prior frame's
 	// script-coordinator publication before beginning another ImGui frame.
+	ProcessTerrainInvariantValidation(deltaTime);
+	if (terrainInvariantRunAttempted) {
+		return;
+	}
 	ProcessPhysicsInvariantValidation(deltaTime);
 	if (physicsInvariantRunAttempted) {
 		return;
@@ -1017,6 +1054,25 @@ TerraEngine::Scheduling::SystemDeclaration EditorSystem::SchedulerDeclaration() 
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
 	return declaration;
+}
+
+std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> EditorSystem::DeclareFrameWorkloads(float deltaTime)
+{
+	using namespace TerraEngine::Scheduling;
+	// EditorSystem keeps its historical protected Update workload explicit so
+	// adding TerrainAuthoringSystem does not accidentally omit the main editor.
+	auto editorUpdate = MakeProtectedCommitPhase("EditorSystemUpdate", SystemName(),
+		SchedulerDeclaration().reads, SchedulerDeclaration().writes,
+		"Runs the protected editor update and UI lifecycle.", "EditorSystem.Update");
+	editorUpdate.stableDescriptorId = "EditorSystem/PostFrame/EditorSystemUpdate";
+	editorUpdate.work = [this, deltaTime](JobGraphContext&) { Update(deltaTime); };
+	std::vector<FrameWorkloadDeclaration> workloads; workloads.push_back(std::move(editorUpdate));
+	if(mainEditor)
+	{
+		auto terrainWorkloads = mainEditor->DeclareTerrainAuthoringWorkloads(deltaTime);
+		workloads.insert(workloads.end(), std::make_move_iterator(terrainWorkloads.begin()), std::make_move_iterator(terrainWorkloads.end()));
+	}
+	return workloads;
 }
 
 // EditorSystem::DrawWindowMenu is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

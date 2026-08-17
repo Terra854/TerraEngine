@@ -4,6 +4,7 @@
 // It handles editor-specific rendering features like the grid, selection outlines, and camera movement controls.
 
 #include "SceneViewWindow.h"
+#include "TerrainWindow.h"
 #include "../Core/EditorContext.h"
 #include "../Project/ProjectManager.h"
 #include "../Subsystems/MainEditorSubsystem.h"
@@ -745,6 +746,14 @@ bool SceneViewWindow::SetAutomationCamera(
 	m_CameraFocusDistance = std::clamp(glm::length(glm::vec3(localizedFocus.offsetMetres)), 1.0f, 1000.0f);
 	m_CameraFocusInitialized = true;
 	return true;
+}
+
+void SceneViewWindow::FrameTerrainDiagnostic(const TerraEngine::Scene::WorldPosition& focus)
+{
+	const auto normalized = TerraEngine::Scene::NormalizeWorldPosition(focus);
+	if(!normalized.Succeeded()) return;
+	const float distance = ResolveSceneViewFocusDistance(normalized.position, 64.0f);
+	RepositionCameraAroundFocus(normalized.position, std::clamp(distance, 8.0f, 1000.0f));
 }
 
 // Resolve the same parent-composed model matrix used by Scene View gizmos so
@@ -2751,6 +2760,38 @@ bool RayAABB(const glm::vec3& rayOrigin, const glm::vec3& rayDir, const glm::vec
 
 // SceneViewWindow::HandlePicking is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize) {
+	// Terrain receives pointer input before ordinary object selection. It uses a
+	// canonical CPU ray for immediate feedback; normal selection resumes as soon
+	// as the stroke releases its capture.
+	if(auto terrainTools = m_Owner->GetWindow<TerrainWindow>(); terrainTools && terrainTools->IsSculpting())
+	{
+		const ImVec2 mouse = ImGui::GetMousePos();
+		const bool inside = mouse.x >= viewportPos.x && mouse.x <= viewportPos.x + viewportSize.x
+			&& mouse.y >= viewportPos.y && mouse.y <= viewportPos.y + viewportSize.y;
+		if(inside)
+		{
+			const glm::dvec3 origin(
+				static_cast<double>(m_CameraPosition.cell.x) * TerraEngine::Scene::kWorldCellEdgeMetres + m_CameraPosition.offsetMetres.x,
+				static_cast<double>(m_CameraPosition.cell.y) * TerraEngine::Scene::kWorldCellEdgeMetres + m_CameraPosition.offsetMetres.y,
+				static_cast<double>(m_CameraPosition.cell.z) * TerraEngine::Scene::kWorldCellEdgeMetres + m_CameraPosition.offsetMetres.z);
+			const glm::vec3 forward = GetCameraForward();
+			const bool wasCapturing = terrainTools->IsBrushStrokeActive();
+			terrainTools->HandleSceneViewPointer({origin, glm::dvec3(forward)}, ImGui::IsMouseClicked(ImGuiMouseButton_Left), ImGui::IsMouseDown(ImGuiMouseButton_Left), ImGui::IsMouseReleased(ImGuiMouseButton_Left));
+			if(TerrainWindow::ShouldCaptureSceneSelection(terrainTools->IsSculpting(), terrainTools->IsBrushStrokeActive()) || wasCapturing)
+			{
+				// A lightweight editor overlay is deliberately screen-local. Terrain
+				// preview samples remain in TerrainWindow until Apply is accepted.
+				ImGui::GetWindowDrawList()->AddCircle(mouse, terrainTools->BrushSettings().radiusSamples, IM_COL32(80, 210, 120, 220), 32, 2.0F);
+				return;
+			}
+		}
+	}
+	// A terrain stroke owns this pointer sequence before selection. This is a
+	// deliberately narrow priority override: a released brush immediately lets
+	// the ordinary scene selection path below run unchanged.
+	if (m_TerrainBrushCapture) {
+		return;
+	}
 	if (!ImGui::IsMouseClicked(0) || ImGuizmo::IsOver() || m_IsFlyCamActive || !ImGui::IsWindowHovered()) return;
 	if (m_PhysicsShapePreview && m_PhysicsShapePreview->active)
 	{

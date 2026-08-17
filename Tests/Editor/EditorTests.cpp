@@ -200,6 +200,28 @@ namespace TerraEngine::EditorTests {
 	void RegisterPhysicsExportValidationTests(TestRegistry& registry);
 	void RegisterPhysicsExportParityTests(TestRegistry& registry);
 	void RegisterPhysicsPlayModeSoakTests(TestRegistry& registry);
+	void RegisterTerrainAssetDatabaseTests(TestRegistry& registry);
+	void RegisterTerrainBrushPresetStoreTests(TestRegistry& registry);
+	void RegisterTerrainCreationImportTests(TestRegistry& registry);
+	void RegisterTerrainSculptWorkflowTests(TestRegistry& registry);
+	void RegisterTerrainHistoryTests(TestRegistry& registry);
+	void RegisterTerrainSaveRecoveryTests(TestRegistry& registry);
+	void RegisterTerrainEditLifecycleTests(TestRegistry& registry);
+	void RegisterTerrainFailureContainmentTests(TestRegistry& registry);
+	void RegisterTerrainLargeWorldSoakContractTests(TestRegistry& registry);
+	void RegisterTerrainLayerWorkflowTests(TestRegistry& registry);
+	void RegisterTerrainCollisionAlignmentTests(TestRegistry& registry);
+	void RegisterTerrainSplineGradingTests(TestRegistry& registry);
+	void RegisterTerrainProceduralJobTests(TestRegistry& registry);
+#if defined(TERRAENGINE_HAS_TERRAIN_AUTOMATION_CONTRACT_TESTS)
+	void RegisterTerrainAutomationContractTests(TestRegistry& registry);
+#endif
+#if defined(TERRAENGINE_HAS_TERRAIN_AUTOMATION_JOB_TESTS)
+	void RegisterTerrainAutomationJobTests(TestRegistry& registry);
+#endif
+#if defined(TERRAENGINE_HAS_TERRAIN_AUTOMATION_PARITY_TESTS)
+	void RegisterTerrainAutomationParityTests(TestRegistry& registry);
+#endif
 }
 
 int main() {
@@ -208,12 +230,39 @@ int main() {
 	registry.Add("Editor.Smoke.HarnessRuns", [](TerraEngine::EditorTests::TestContext& context) {
 		context.Expect(true, "The editor test harness should execute registered tests.");
 	});
+	registry.Add("Editor.Terrain.Foundation", [](TerraEngine::EditorTests::TestContext& context) {
+		// This registration anchors the foundation CTest filter before the first
+		// terrain editor tests are linked into the executable.
+		context.Expect(true, "The terrain editor foundation test group is registered.");
+	});
 	TerraEngine::EditorTests::RegisterInspectorDisplayNameTests(registry);
 	TerraEngine::EditorTests::RegisterAudioClipCompilerTests(registry);
 	TerraEngine::EditorTests::RegisterAudioImportPlaybackTests(registry);
 	TerraEngine::EditorTests::RegisterAudioAuthoringPersistenceTests(registry);
 	TerraEngine::EditorTests::RegisterAudioEditorControlTests(registry);
 	TerraEngine::EditorTests::RegisterAudioExportTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainAssetDatabaseTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainBrushPresetStoreTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainCreationImportTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainSculptWorkflowTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainHistoryTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainSaveRecoveryTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainEditLifecycleTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainFailureContainmentTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainLargeWorldSoakContractTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainLayerWorkflowTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainCollisionAlignmentTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainSplineGradingTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainProceduralJobTests(registry);
+#if defined(TERRAENGINE_HAS_TERRAIN_AUTOMATION_CONTRACT_TESTS)
+	TerraEngine::EditorTests::RegisterTerrainAutomationContractTests(registry);
+#endif
+#if defined(TERRAENGINE_HAS_TERRAIN_AUTOMATION_JOB_TESTS)
+	TerraEngine::EditorTests::RegisterTerrainAutomationJobTests(registry);
+#endif
+#if defined(TERRAENGINE_HAS_TERRAIN_AUTOMATION_PARITY_TESTS)
+	TerraEngine::EditorTests::RegisterTerrainAutomationParityTests(registry);
+#endif
 
 	TerraEngine::EditorTests::RegisterAnimationEditorTestScaffolding(registry);
 	TerraEngine::EditorTests::RegisterAnimationWindowTests(registry);

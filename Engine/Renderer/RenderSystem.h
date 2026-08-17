@@ -35,6 +35,7 @@
 #include "Renderer/VirtualGeometry/Diagnostics/VirtualGeometryReplay.h"
 #include "Renderer/VirtualGeometry/Selection/VirtualGeometryViewPolicy.h"
 #include "Renderer/VirtualGeometry/Visibility/VirtualGeometryVisibility.h"
+#include "Renderer/Terrain/TerrainRenderPackets.h"
 #include "Physics/PhysicsDiagnostics.h"
 #include "Scene/RuntimeLayout.h"
 #include "Scene/SceneGraphRuntime.h"
@@ -161,6 +162,18 @@ public:
 		PickVirtualGeometryVisibilityRecord(
 			std::span<const GpuVirtualGeometryPacketRecord> records,
 			const glm::vec2& normalizedViewportPosition);
+	// Terrain uses the same immutable virtual-geometry publication truth as
+	// meshes. Render preparation only admits a current cook or an explicitly
+	// matching last-known-good page; worker results never enter a live frame.
+	static std::vector<TerraEngine::Renderer::Terrain::TerrainPreparedRenderPacket>
+		PrepareCommittedTerrainPackets(
+			std::span<const TerraEngine::Renderer::Terrain::TerrainViewPacket> views,
+			std::span<const TerraEngine::Renderer::Terrain::TerrainPageCookResult> cooks,
+			std::span<const TerraEngine::Resource::VirtualGeometryPagePublication> committedPages);
+	// Moves already-validated immutable terrain packets into the VG private queue.
+	// It is not a publication path; PagePublish still owns visibility.
+	static bool SubmitPreparedTerrainPackets(
+		std::span<const TerraEngine::Renderer::Terrain::TerrainPreparedRenderPacket> packets);
 	// Queue one non-blocking GPU identity copy. Returning false means callers
 	// must use the explicit CPU-projection fallback and must not claim GPU proof.
 	bool RequestConventionalVisibilityIdentityPick(

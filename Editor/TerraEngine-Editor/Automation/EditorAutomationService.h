@@ -33,6 +33,7 @@
 #include <glm/vec3.hpp>
 
 struct EditorContext;
+namespace TerraEngine::Editor::Terrain { class TerrainAutomationAdapter; }
 
 namespace TerraEngine::Profiling
 {
@@ -55,6 +56,9 @@ namespace TerraEngine::Editor::Automation
 		void SetSelectionCallbacks(std::function<std::optional<entt::entity>()> getter, std::function<void(std::optional<entt::entity>)> setter);
 		void SetBridgeToolCallback(BridgeToolCallback callback);
 		void SetActivityCallback(ActivityCallback callback);
+		// The Terrain window injects its narrow adapter only while an authored
+		// terrain session exists; absent injection keeps terrain tools unavailable.
+		void SetTerrainAutomationAdapter(TerraEngine::Editor::Terrain::TerrainAutomationAdapter* adapter);
 
 		bool RegisterCapability(const AssistantCapability& capability);
 		void RegisterDefaultCapabilities();
@@ -77,6 +81,9 @@ namespace TerraEngine::Editor::Automation
 		// protected editor frame owns transaction creation so network polling never
 		// determines how many scene changes become visible in a rendered frame.
 		void PumpRendererValidationMutationsAtProtectedFrame();
+		// Completes terrain derived jobs only after their protected engine boundary
+		// has published or rejected the generation-checked candidate.
+		void PumpTerrainAutomationJobsAtProtectedFrame();
 		// Condenses optional frame-publication evidence into a stable automation
 		// payload. The result retains unavailable lanes, incomplete frames, and
 		// reconciliation facts instead of treating absent instrumentation as
@@ -202,6 +209,15 @@ namespace TerraEngine::Editor::Automation
 		std::function<void(std::optional<entt::entity>)> setSelectedEntity;
 		std::vector<AssistantCapability> capabilities;
 		std::vector<ExportJob> exportJobs;
+		TerraEngine::Editor::Terrain::TerrainAutomationAdapter* terrainAutomationAdapter = nullptr;
+		bool terrainAutomationProviderRegistered = false;
+		struct PendingTerrainCollisionJob
+		{
+			std::string sourceRootHash;
+			std::uint64_t sourcePublicationGeneration = 0u;
+		};
+		std::unordered_map<std::string, PendingTerrainCollisionJob> pendingTerrainCollisionJobs;
+		std::mutex terrainAutomationMutex;
 		std::unordered_map<std::string, std::size_t> capabilityIndexByName;
 		// Provider names are bound to stable operation IDs once during registry
 		// construction. Retaining the reverse map detects the otherwise extremely

@@ -7,6 +7,8 @@
 #pragma once
 
 #include "Core/Export.h"
+#include "Physics/Backend/IPhysicsBackend.h"
+#include "Terrain/TerrainTypes.h"
 #include "PhysicsCommands.h"
 #include "TransformPublicationPacket.h"
 #include "Scene/TransactionalMutation.h"
@@ -123,6 +125,34 @@ namespace TerraEngine::Physics {
 		std::string message;
 	};
 
+	// Terrain replacement is intentionally separate from a scene-body transaction:
+	// its immutable 257-grid recipe is prepared by terrain workers, then this
+	// packet atomically swaps a static provider body at Before Physics.  The old
+	// shape is retained for deferred retirement so a provider failure cannot leave
+	// the live body pointing at deleted geometry.
+	struct TerrainCollisionReplacementPacket {
+		std::string id;
+		TerraEngine::Terrain::ContentHash sourceRootHash{};
+		TerraEngine::Terrain::Generation sourcePublicationGeneration = 0U;
+		PhysicsWorldHandle expectedWorld;
+		TerrainHeightFieldRecipe recipe{};
+		PhysicsShapeHandle priorShape;
+		PhysicsBodyHandle priorBody;
+		PhysicsShapeHandle replacementShape;
+		Backend::PhysicsBodyCreateRequest replacementBody;
+		bool cancelled = false;
+	};
+
+	struct TerrainCollisionReplacementReceipt {
+		bool committed = false;
+		bool retainedLastKnownGood = false;
+		PhysicsShapeHandle activeShape;
+		PhysicsBodyHandle activeBody;
+		PhysicsShapeHandle retiredShape;
+		PhysicsBodyHandle retiredBody;
+		std::string message;
+	};
+
 	// Migration carries a whole connected closure. Moving only one member of a
 	// joint/character/ragdoll relationship would create an unsafe cross-frame
 	// provider reference, so the caller must name every dependent object.
@@ -180,6 +210,12 @@ namespace TerraEngine::Physics {
 		ObjectManager& objects,
 		PhysicsTransactionRuntimeState& runtime,
 		const PhysicsTransaction& transaction);
+	// Creates a fresh terrain shape and static body in provider staging.  Only
+	// after staging commits does it retire the old body; any earlier failure rolls
+	// back the staged work and leaves the last-known-good collision authoritative.
+	TERRAENGINE_API TerrainCollisionReplacementReceipt CommitTerrainCollisionReplacement(
+		Backend::IPhysicsBackend& backend,
+		const TerrainCollisionReplacementPacket& packet);
 	// Validate both the live scene generations and provider-owned body generation
 	// before a group is eligible for the deferred protected scene boundary.
 	TERRAENGINE_API TransformPublicationValidationResult ValidatePhysicsTransformPublication(

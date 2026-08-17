@@ -19,6 +19,8 @@
 #include "Window/GLFW/GlfwWindowBackend.h"
 #include "Window/WindowSystem.h"
 #include "Object/ComponentRegistry.h"
+#include "Terrain/TerrainDerivedSystem.h"
+#include "Terrain/TerrainStreamingSystem.h"
 #include "Profiling/Profiler.h"
 #include "Profiling/ProfilerScope.h"
 #include "Resource/ResourceManager.h"
@@ -33,6 +35,7 @@
 #include "Scene/WorldSpatialSystem.h"
 #include "Scripting/ScriptingSystem.h"
 #include "Physics/PhysicsSystem.h"
+#include "Physics/Terrain/TerrainCollisionSystem.h"
 #include "Audio/AudioSystem.h"
 #include "Scripting/ScriptGlue.h"
 #include "UI/UISystem.h"
@@ -250,6 +253,12 @@ void Engine::Initialize()
 
 	// Editor Play Mode owns world creation/restoration, while exported games
 	// start the same shared system during ordinary engine initialization.
+	// Terrain collision prepares heightfield candidates on workers and publishes
+	// the complete replacement immediately before physics simulation.
+	TerraEngine::Physics::Terrain::TerrainCollisionSystem& terrainCollisionSystem =
+		TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance();
+	RegisterEngineSystem(systems, systemScheduler, terrainCollisionSystem, terrainCollisionSystem.SchedulerDeclaration());
+
 	TerraEngine::Physics::PhysicsSystem& physicsSystem = TerraEngine::Physics::PhysicsSystem::Instance();
 	physicsSystem.SetEditorLifecycleControlled(editorMode);
 	auto physicsDeclaration = physicsSystem.SchedulerDeclaration();
@@ -292,6 +301,15 @@ void Engine::Initialize()
 		// installed parity run independent of a graphics driver and window server.
 		UISystem& uiSystem = UISystem::Instance();
 		RegisterEngineSystem(systems, systemScheduler, uiSystem, uiSystem.SchedulerDeclaration());
+
+		// Terrain has independent worker preparation and protected publication
+		// boundaries. Register it before virtual-geometry and render consumers.
+		TerraEngine::Terrain::TerrainStreamingSystem& terrainStreamingSystem =
+			TerraEngine::Terrain::TerrainStreamingSystem::Instance();
+		RegisterEngineSystem(systems, systemScheduler, terrainStreamingSystem, terrainStreamingSystem.SchedulerDeclaration());
+		TerraEngine::Terrain::TerrainDerivedSystem& terrainDerivedSystem =
+			TerraEngine::Terrain::TerrainDerivedSystem::Instance();
+		RegisterEngineSystem(systems, systemScheduler, terrainDerivedSystem, terrainDerivedSystem.SchedulerDeclaration());
 
 		// Streaming publication is a separate protected boundary. Register it before
 		// RenderSystem so accepted page state is complete before the renderer captures

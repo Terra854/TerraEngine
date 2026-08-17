@@ -297,6 +297,11 @@ namespace TerraEngine::Editor::Automation
 		service.PumpRendererValidationMutationsAtProtectedFrame();
 	}
 
+	void EditorMcpBridge::PumpTerrainAutomationJobsAtProtectedFrame()
+	{
+		service.PumpTerrainAutomationJobsAtProtectedFrame();
+	}
+
 	void EditorMcpBridge::SetMainEditor(MainEditorSubsystem* editor)
 	{
 		std::lock_guard lifecycleLock(lifecycleMutex);
