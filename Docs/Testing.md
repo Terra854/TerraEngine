@@ -140,7 +140,7 @@ and a build-tree package cache. After the single managed restore target runs,
 the engine assembly, source generator, and editor assembly build with
 `--no-restore`.
 
-The current closure is pinned to .NET SDK `10.0.400`, runtime pack `10.0.11`,
+The current closure is pinned to .NET SDK `10.0.303`, runtime pack `10.0.11`,
 and RID `win-x64`. Confirm the exact SDK and verify every archive, license, and
 manifest entry before configuring:
 
@@ -157,7 +157,7 @@ cmake -DTERRAENGINE_RUNTIME_ID=win-x64 `
 	-P cmake/TerraEngineOfflineNuGet.cmake
 ```
 
-The first command must print `10.0.400`. NuGet verifies each archive's
+The first command must print `10.0.303`. NuGet verifies each archive's
 available author and repository signatures without an online revocation
 lookup. The CMake verifier rejects changed or unmanifested packages, mismatched
 SDK metadata, and changed legal files. Set

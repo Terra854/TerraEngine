@@ -1,4 +1,5 @@
 #include "TestHarness.h"
+#include "VulkanSourceTestUtils.h"
 
 #include "Renderer/RHI/Vulkan/VulkanFrameDiagnostics.h"
 
@@ -49,9 +50,7 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Renderer.VulkanFrameDiagnostics.RetainsLatestValidViewStats", [](TestContext& context) {
-			std::ifstream source(std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp");
-			const std::string text((std::istreambuf_iterator<char>(source)), {});
+			const std::string text = VulkanSourceContracts::ReadResourceSources();
 			const std::size_t publish = text.find("std::lock_guard<std::mutex> lock(statsMutex);",
 				text.find("void VulkanContext::Impl::PublishCompletedFrameStats"));
 			context.Expect(publish != std::string::npos,

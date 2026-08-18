@@ -1,4 +1,5 @@
 #include "TestHarness.h"
+#include "VulkanSourceTestUtils.h"
 
 #include "RendererThreadingTestFixtures.h"
 
@@ -86,16 +87,10 @@ namespace TerraEngine::Tests {
 		registry.Add("Renderer.VulkanRecording.FrameUploadsReusePersistentMappings", [](TestContext& context) {
 			const std::filesystem::path implPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContextImpl.h";
-			const std::filesystem::path resourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContextResources.cpp";
-			const std::filesystem::path contextPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
 			std::ifstream implStream(implPath, std::ios::binary);
-			std::ifstream resourceStream(resourcePath, std::ios::binary);
-			std::ifstream contextStream(contextPath, std::ios::binary);
 			const std::string implementation{ std::istreambuf_iterator<char>(implStream), {} };
-			const std::string resources{ std::istreambuf_iterator<char>(resourceStream), {} };
-			const std::string contextSource{ std::istreambuf_iterator<char>(contextStream), {} };
+			const std::string resources = VulkanSourceContracts::ReadResourceSources();
+			const std::string contextSource = VulkanSourceContracts::ReadContextSources();
 
 			// Host-visible frame resources are updated every frame. Keeping their VMA
 			// allocations mapped removes repeated driver bookkeeping, while every path
@@ -207,10 +202,7 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Renderer.VulkanRecording.HiZReusesSealedVisibilitySignature", [](TestContext& context) {
-			const std::filesystem::path contextPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
-			std::ifstream contextStream(contextPath, std::ios::binary);
-			const std::string source{ std::istreambuf_iterator<char>(contextStream), {} };
+			const std::string source = VulkanSourceContracts::ReadContextSources();
 
 			// A sealed visibility result has already visited every command and folded
 			// world, resource, route, LOD, and view identity into one signature. Vulkan
@@ -455,10 +447,7 @@ namespace TerraEngine::Tests {
 			context.Expect(!empty.authoritative && empty.identity == glm::uvec4(0u),
 				"A zero uint4 identity must never be presented as an authoritative GPU pick.");
 
-			const std::filesystem::path vulkanSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
-			std::ifstream stream(vulkanSource, std::ios::binary);
-			const std::string source{ std::istreambuf_iterator<char>(stream), {} };
+			const std::string source = VulkanSourceContracts::ReadContextSources();
 			context.Expect(source.find("inFlightConventionalVisibilityIdentityReadbacks") != std::string::npos
 				&& source.find("vkGetFenceStatus") != std::string::npos
 				&& source.find("Identity pixel was zero") != std::string::npos,
@@ -494,11 +483,8 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Renderer.VulkanRecording.CaptureIdentityExcludesShadowOffscreenOutputs", [](TestContext& context) {
-			const std::filesystem::path vulkanContextSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
-			std::ifstream vulkanContextStream(vulkanContextSource, std::ios::binary);
-			const std::string vulkanContext{
-				std::istreambuf_iterator<char>(vulkanContextStream), {}};
+			const std::string vulkanContext =
+				VulkanSourceContracts::ReadContextSources();
 
 			// Shadow diagnostics share the OffscreenTexture classification, but they
 			// do not own the dedicated MCP capture framebuffer or its identity image.
@@ -529,10 +515,8 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Renderer.VulkanRecording.ConventionalIdentityBlendRequiresIndependentBlend", [](TestContext& context) {
-			const std::filesystem::path vulkanContextSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
-			std::ifstream vulkanContextStream(vulkanContextSource, std::ios::binary);
-			const std::string vulkanContext{ std::istreambuf_iterator<char>(vulkanContextStream), {} };
+			const std::string vulkanContext =
+				VulkanSourceContracts::ReadContextSources();
 			const std::filesystem::path initializationSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContextInit.cpp";
 			std::ifstream initializationStream(initializationSource, std::ios::binary);
@@ -554,14 +538,10 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Renderer.VulkanRecording.PrimaryCommandBuffersSubmitOncePerFrameSlot", [](TestContext& context) {
-			const std::filesystem::path vulkanContextSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
-			std::ifstream vulkanContextStream(vulkanContextSource, std::ios::binary);
-			const std::string vulkanContext{ std::istreambuf_iterator<char>(vulkanContextStream), {} };
-			const std::filesystem::path resourceSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContextResources.cpp";
-			std::ifstream resourceStream(resourceSource, std::ios::binary);
-			const std::string resources{ std::istreambuf_iterator<char>(resourceStream), {} };
+			const std::string vulkanContext =
+				VulkanSourceContracts::ReadContextSources();
+			const std::string resources =
+				VulkanSourceContracts::ReadResourceSources();
 			// The marker is set after queue submission and cleared only when the
 			// owning frame slot becomes reusable. Descriptor-mutation prefix
 			// submissions must use the same ownership marker because asset
@@ -656,10 +636,7 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Renderer.VulkanRecording.StatsKeepPublicationAndCaptureProvenanceSeparate", [](TestContext& context) {
-			const std::filesystem::path vulkanPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
-			std::ifstream stream(vulkanPath, std::ios::binary);
-			const std::string source{ std::istreambuf_iterator<char>(stream), {} };
+			const std::string source = VulkanSourceContracts::ReadContextSources();
 
 			// Game and capture share a camera type but not an output target. Capture-
 			// only tools still need renderer counters, so the delayed snapshot carries
@@ -690,22 +667,16 @@ namespace TerraEngine::Tests {
 				/ "Engine" / "Shaders" / "Default" / "Default.frag.hlsl";
 			const std::filesystem::path renderSystemPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine" / "Renderer" / "RenderSystem.cpp";
-			const std::filesystem::path resourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContextResources.cpp";
-			const std::filesystem::path vulkanPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
 			std::ifstream taskStream(taskShaderPath, std::ios::binary);
 			std::ifstream meshStream(meshShaderPath, std::ios::binary);
 			std::ifstream fragmentStream(fragmentShaderPath, std::ios::binary);
 			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
-			std::ifstream resourceStream(resourcePath, std::ios::binary);
-			std::ifstream vulkanStream(vulkanPath, std::ios::binary);
 			const std::string taskShader{ std::istreambuf_iterator<char>(taskStream), {} };
 			const std::string meshShader{ std::istreambuf_iterator<char>(meshStream), {} };
 			const std::string fragmentShader{ std::istreambuf_iterator<char>(fragmentStream), {} };
 			const std::string renderSystem{ std::istreambuf_iterator<char>(renderSystemStream), {} };
-			const std::string resources{ std::istreambuf_iterator<char>(resourceStream), {} };
-			const std::string vulkan{ std::istreambuf_iterator<char>(vulkanStream), {} };
+			const std::string resources = VulkanSourceContracts::ReadResourceSources();
+			const std::string vulkan = VulkanSourceContracts::ReadContextSources();
 
 			// Later groups have a nonzero firstInstance. Their task payload must be
 			// validated against the complete stream, not only the local group count,
@@ -742,12 +713,9 @@ namespace TerraEngine::Tests {
 		registry.Add("Renderer.VulkanRecording.DedicatedCaptureIdentityUsesRetainedSnapshot", [](TestContext& context) {
 			const std::filesystem::path renderSystemPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine" / "Renderer" / "RenderSystem.cpp";
-			const std::filesystem::path vulkanPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
 			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
-			std::ifstream vulkanStream(vulkanPath, std::ios::binary);
 			const std::string renderSystem{ std::istreambuf_iterator<char>(renderSystemStream), {} };
-			const std::string vulkan{ std::istreambuf_iterator<char>(vulkanStream), {} };
+			const std::string vulkan = VulkanSourceContracts::ReadContextSources();
 
 			// A capture image is intentionally long-lived relative to ordinary editor
 			// frames. Its typed pick must retain its own table/frame rather than fail

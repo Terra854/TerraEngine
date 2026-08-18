@@ -1,4 +1,5 @@
 #include "TestHarness.h"
+#include "VulkanSourceTestUtils.h"
 
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
@@ -328,7 +329,7 @@ namespace TerraEngine::Tests
 		});
 
 		registry.Add("VirtualGeometry.HiZ.PageIdentityIsHashedButTaskPathHasNoQualityTier", [](TestContext& context) {
-			const std::string vulkanSource = ReadSourceFile("Engine/Renderer/RHI/Vulkan/VulkanContext.cpp");
+			const std::string vulkanSource = VulkanSourceContracts::ReadContextSources();
 			const std::string taskShader = ReadSourceFile("Engine/Shaders/Default/Default.task.hlsl");
 
 			context.Expect(ContainsText(vulkanSource, "command.virtualGeometryPageId"), "Vulkan Hi-Z depth signatures should include the resident page id.");

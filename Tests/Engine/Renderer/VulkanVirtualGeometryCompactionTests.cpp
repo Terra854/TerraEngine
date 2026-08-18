@@ -4,6 +4,7 @@
 #include "Renderer/RHI/Vulkan/VulkanVirtualGeometryExecutor.h"
 #include "Renderer/Graph/RenderFramePublication.h"
 #include "TestHarness.h"
+#include "VulkanSourceTestUtils.h"
 
 #include <filesystem>
 #include <fstream>
@@ -143,13 +144,8 @@ namespace TerraEngine::Tests
 		r.Add("Vulkan.VirtualGeometry.PacketPublicationRejectsCrossViewGenerations",
 			[](TestContext &context)
 			{
-				const std::filesystem::path sourcePath =
-					std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-						/ "Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp";
-				std::ifstream sourceStream(sourcePath, std::ios::binary);
-				const std::string source{
-					std::istreambuf_iterator<char>(sourceStream),
-					std::istreambuf_iterator<char>() };
+				const std::string source =
+					VulkanSourceContracts::ReadResourceSources();
 				context.Expect(
 					source.find("belongsToCurrentPublication") != std::string::npos
 						&& source.find("canonicalPacketPublication") != std::string::npos
@@ -164,13 +160,8 @@ namespace TerraEngine::Tests
 				context.Expect(!presentation.virtualGeometryVisibilityDiagnosticsRequested,
 					"Ordinary dense VG frames must not pay for the diagnostic compute-visibility mirror.");
 
-				const std::filesystem::path sourcePath =
-					std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-						/ "Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp";
-				std::ifstream sourceStream(sourcePath, std::ios::binary);
-				const std::string source{
-					std::istreambuf_iterator<char>(sourceStream),
-					std::istreambuf_iterator<char>() };
+				const std::string source =
+					VulkanSourceContracts::ReadResourceSources();
 				const std::size_t productionGate = source.find(
 					"productionComputeRasterRequested");
 				const std::size_t gate = source.find(

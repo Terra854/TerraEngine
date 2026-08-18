@@ -1,5 +1,5 @@
 param(
-	[string]$SdkVersion = "10.0.400",
+	[string]$SdkVersion = "10.0.303",
 	[string]$RuntimePackVersion = "10.0.11"
 )
 

@@ -1,4 +1,5 @@
 #include "TestHarness.h"
+#include "VulkanSourceTestUtils.h"
 
 #include "File Formats/TerraEngineMaterialFile.h"
 #include "Renderer/VirtualGeometry/Visibility/VirtualGeometryRasterBins.h"
@@ -116,8 +117,7 @@ namespace TerraEngine::Tests
 						&& renderer.find("singleSidedComputeSurface") == std::string::npos,
 					"Default double-sided materials must carry explicit winding policy through GPU setup instead of falling off the compute route.");
 
-				const std::string vulkan = ReadSource(sourceRoot
-					/ "Engine/Renderer/RHI/Vulkan/VulkanContext.cpp");
+				const std::string vulkan = VulkanSourceContracts::ReadContextSources();
 				const std::size_t shadowPreparation = vulkan.find("preparedShadowLists");
 				const std::size_t computeOwnership = vulkan.find("hasComputeOwnedDraw");
 				context.Expect(

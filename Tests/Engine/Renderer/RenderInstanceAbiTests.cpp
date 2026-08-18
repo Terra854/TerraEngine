@@ -1,6 +1,7 @@
 // RenderInstanceAbiTests.cpp - renderer instance-stream contract checks.
 
 #include "TestHarness.h"
+#include "VulkanSourceTestUtils.h"
 #include "RendererThreadingTestFixtures.h"
 
 #include "Renderer/Graph/RenderFrameSnapshot.h"
@@ -120,8 +121,7 @@ namespace TerraEngine::Tests {
 				(packed >> RenderInstanceRecord::kAnimationSourcePolicyShift)
 					& RenderInstanceRecord::kAnimationSourcePolicyMask,
 				"The compact proof must preserve the exact animation source.");
-			const std::string backend = ReadShader(
-				"Engine/Renderer/RHI/Vulkan/VulkanContext.cpp");
+			const std::string backend = VulkanSourceContracts::ReadContextSources();
 			context.Expect(backend.find("groupedRecordMatchesRepresentative")
 					!= std::string::npos
 				&& backend.find("commandResolver.Resolve(memberCommandIndex, member)")

@@ -1,4 +1,5 @@
 #include "TestHarness.h"
+#include "VulkanSourceTestUtils.h"
 
 #include "Renderer/RenderSystem.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
@@ -471,7 +472,7 @@ namespace TerraEngine::Tests
 		registry.Add("VirtualGeometry.Render.ResidentAndFallbackPacketsDoNotRequireOwnerDecodeStreams", [](TestContext& context) {
 			const std::string taskShader = ReadRendererSourceFile("Engine/Shaders/Default/Default.task.hlsl");
 			const std::string meshShader = ReadRendererSourceFile("Engine/Shaders/Default/Default.mesh.hlsl");
-			const std::string vulkanResources = ReadRendererSourceFile("Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp");
+			const std::string vulkanResources = VulkanSourceContracts::ReadResourceSources();
 
 			context.Expect(SourceContains(taskShader, "TryUsePageLocalGeometry"), "Resident page task culling should choose page-local geometry before consulting owner streams.");
 			context.Expect(SourceContains(taskShader, "ResolvePageLocalMeshletIndex"), "Resident page task dispatch should translate selected meshlets into page-local indices.");

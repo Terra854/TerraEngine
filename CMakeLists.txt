@@ -257,6 +257,18 @@ set(ENGINE_SOURCES
 	Engine/Renderer/Backend/RenderBackendWork.cpp
 	Engine/Renderer/Graph/RenderWorkPacket.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContext.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanAnimationResources.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanBuiltinPasses.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanEditorRendering.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanFrameRendering.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanFrameSubmission.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanGlobalResources.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanGpuDiagnostics.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanLightingResources.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPipelineResources.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessing.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanReadback.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanVirtualGeometryResources.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanPresentationLifecycle.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanCommandRecording.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanDescriptorPlanning.cpp
@@ -420,6 +432,8 @@ set(ENGINE_HEADERS
 	Engine/Renderer/RHI/Vulkan/VulkanUploadPlanning.h
 	Engine/Renderer/RHI/Vulkan/VulkanCommonIncludes.h
 	Engine/Renderer/RHI/Vulkan/VulkanContextImpl.h
+	Engine/Renderer/RHI/Vulkan/VulkanContextSource.h
+	Engine/Renderer/RHI/Vulkan/VulkanResourceSource.h
 	Engine/Renderer/RHI/Vulkan/VulkanHiZ.h
 	Engine/Renderer/RHI/Vulkan/VulkanVRS.h
 	Engine/DotNet/DotNetHost.h

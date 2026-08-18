@@ -1,4 +1,5 @@
 #include "TestHarness.h"
+#include "Renderer/VulkanSourceTestUtils.h"
 
 #include "Resource/ResourceManager.h"
 
@@ -145,7 +146,7 @@ namespace TerraEngine::Tests
 		registry.Add("Resource.Manager.Mesh.PageStreamingUploadPolicyUsesPageLocalPath", [](TestContext& context) {
 			const std::string meshSource = ReadResourceManagerMeshSource();
 			const std::string meshHeader = ReadSourceFile("Engine/File Formats/TerraEngineMeshFile.h");
-			const std::string vulkanSource = ReadSourceFile("Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp");
+			const std::string vulkanSource = VulkanSourceContracts::ReadResourceSources();
 
 			context.Expect(meshHeader.find("virtualGeometryPageStreamingReady") != std::string::npos, "Mesh metadata should expose whether physical page streaming is ready.");
 			context.Expect(meshHeader.find("virtualGeometryFullOwnerPayloadBytes") != std::string::npos, "Mesh metadata should expose the exact owner-stream byte cost.");

@@ -1,4 +1,5 @@
 #include "TestHarness.h"
+#include "VulkanSourceTestUtils.h"
 
 #include <fstream>
 #include <filesystem>
@@ -19,8 +20,7 @@ namespace TerraEngine::Tests
 				"Engine/Renderer/Graph/RenderFramePublication.h");
 			const std::string publicationImplementation = readSource(
 				"Engine/Renderer/Graph/RenderFramePublication.cpp");
-			const std::string vulkan = readSource(
-				"Engine/Renderer/RHI/Vulkan/VulkanContext.cpp");
+			const std::string vulkan = VulkanSourceContracts::ReadContextSources();
 			context.Expect(!renderSystem.empty() && !publication.empty()
 				&& !publicationImplementation.empty() && !vulkan.empty(),
 				"The renderer source guard must inspect every command-publication boundary.");

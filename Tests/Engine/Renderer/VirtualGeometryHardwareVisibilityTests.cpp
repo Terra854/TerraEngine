@@ -1,4 +1,5 @@
 #include "TestHarness.h"
+#include "VulkanSourceTestUtils.h"
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -26,9 +27,9 @@ namespace TerraEngine::Tests
 				const std::string meshShader = ReadSource("Engine/Shaders/Default/Default.mesh.hlsl");
 				const std::string fragmentShader = ReadSource("Engine/Shaders/Default/Default.frag.hlsl");
 				const std::string renderPassSource = ReadSource("Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp");
-				const std::string offscreenSource = ReadSource("Engine/Renderer/RHI/Vulkan/VulkanContext.cpp");
+				const std::string offscreenSource = VulkanSourceContracts::ReadContextSources();
 				const std::string implementationSource = ReadSource("Engine/Renderer/RHI/Vulkan/VulkanContextImpl.h");
-				const std::string pipelineSource = ReadSource("Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp");
+				const std::string pipelineSource = VulkanSourceContracts::ReadResourceSources();
 				context.Expect(!meshShader.empty() && !fragmentShader.empty()
 					&& !renderPassSource.empty() && !offscreenSource.empty()
 					&& !implementationSource.empty() && !pipelineSource.empty(),

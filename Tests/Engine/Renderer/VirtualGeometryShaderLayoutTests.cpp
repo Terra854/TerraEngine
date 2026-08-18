@@ -1,4 +1,5 @@
 #include "TestHarness.h"
+#include "VulkanSourceTestUtils.h"
 
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Renderer/RHI/Vulkan/VulkanHiZ.h"
@@ -96,12 +97,7 @@ namespace TerraEngine::Tests
 			// The Vulkan draw path owns the final push-constant submission.
 			// Hi-Z culling depends on the task shader receiving its reflected
 			// byte range even when another stage has a smaller legacy range.
-			const std::filesystem::path sourcePath =
-				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Renderer/RHI/Vulkan/VulkanContext.cpp";
-			std::ifstream input(sourcePath, std::ios::binary);
-			std::ostringstream buffer;
-			buffer << input.rdbuf();
-			return buffer.str();
+			return VulkanSourceContracts::ReadContextSources();
 		}
 
 		std::string ReadVulkanContextImplSource()
@@ -122,12 +118,7 @@ namespace TerraEngine::Tests
 			// Hi-Z descriptor publication is also a source-level contract for
 			// editor multi-view rendering: one missing view must not block the
 			// other view from sampling its current pyramid.
-			const std::filesystem::path sourcePath =
-				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp";
-			std::ifstream input(sourcePath, std::ios::binary);
-			std::ostringstream buffer;
-			buffer << input.rdbuf();
-			return buffer.str();
+			return VulkanSourceContracts::ReadResourceSources();
 		}
 
 		std::string ReadVulkanContextInitSource()

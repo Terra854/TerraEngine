@@ -1,4 +1,5 @@
 #include "TestHarness.h"
+#include "VulkanSourceTestUtils.h"
 #include "Renderer/RHI/Vulkan/VulkanReadbackConversion.h"
 
 #include <filesystem>
@@ -97,7 +98,7 @@ namespace TerraEngine::Tests
 		});
 
 		registry.Add("Renderer.VulkanImageReadback.OwnsAsyncLifetimeContracts", [](TestContext& context) {
-			const std::string contextSource = ReadSourceFile("Engine/Renderer/RHI/Vulkan/VulkanContext.cpp");
+			const std::string contextSource = VulkanSourceContracts::ReadContextSources();
 			const std::string initSource = ReadSourceFile("Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp");
 			const std::string renderSource = ReadSourceFile("Engine/Renderer/RenderSystem.cpp");
 
