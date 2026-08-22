@@ -1,8 +1,104 @@
 // TerrainAutomationProvider.cpp -- Canonical terrain automation descriptors.
 #include "TerrainAutomationProvider.h"
 #include <utility>
+
 namespace TerraEngine::Editor::Automation
 {
+	namespace
+	{
+		using Json = nlohmann::json;
+
+		Json NoArgumentsSchema()
+		{
+			return {{"type", "object"}, {"properties", Json::object()}, {"additionalProperties", false}};
+		}
+
+		Json TerrainCreateSchema(bool importing)
+		{
+			Json properties = {
+				{"destination", {{"type", "string"}, {"description", "Destination .teterrain path inside the active project's Assets directory."}}},
+				{"sampleSpacingMetres", {{"type", "number"}, {"exclusiveMinimum", 0.0}}},
+				{"heightScaleMetres", {{"type", "number"}}},
+				{"heightOffsetMetres", {{"type", "number"}}}
+			};
+			Json required = Json::array({"destination"});
+			if(importing)
+			{
+				properties["source"] = {{"type", "string"}, {"description", "Source PNG16 or RAW16 little-endian heightmap path."}};
+				properties["format"] = {{"type", "string"}, {"enum", Json::array({"png16", "raw16-le"})}, {"default", "png16"}};
+				properties["width"] = {{"type", "integer"}, {"minimum", 1}};
+				properties["height"] = {{"type", "integer"}, {"minimum", 1}};
+				required.push_back("source");
+			}
+			return {{"type", "object"}, {"properties", std::move(properties)}, {"required", std::move(required)}, {"additionalProperties", false}};
+		}
+
+		Json TerrainEditSchema(std::initializer_list<std::string_view> operations)
+		{
+			Json operationKinds = Json::array();
+			for(const std::string_view operation : operations) operationKinds.push_back(operation);
+			const Json decimalString = {{"type", "string"}, {"pattern", "^-?[0-9]+$"}};
+			const Json unsignedString = {{"type", "string"}, {"pattern", "^[0-9]+$"}};
+			const Json hash = {{"type", "string"}, {"pattern", "^[0-9a-f]{32}$"}};
+			const Json uuid = {{"type", "string"}, {"pattern", "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}};
+			const Json worldPosition = {
+				{"type", "object"},
+				{"properties", {
+					{"cellX", decimalString}, {"cellY", decimalString}, {"cellZ", decimalString},
+					{"localX", {{"type", "number"}}}, {"localY", {{"type", "number"}}}, {"localZ", {{"type", "number"}}}
+				}},
+				{"required", Json::array({"cellX", "cellY", "cellZ", "localX", "localY", "localZ"})},
+				{"additionalProperties", false}
+			};
+			const Json observation = {
+				{"type", "object"},
+				{"properties", {{"areaX", decimalString}, {"areaZ", decimalString}, {"editGeneration", unsignedString}, {"authoredContentHash", hash}}},
+				{"required", Json::array({"areaX", "areaZ", "editGeneration", "authoredContentHash"})},
+				{"additionalProperties", false}
+			};
+			// The application parser performs the final strict typed lowering. This
+			// discovery schema makes every required canonical field constructible by
+			// MCP clients instead of advertising an impossible empty object.
+			return {
+				{"type", "object"},
+				{"properties", {
+					{"schemaVersion", {{"type", "integer"}, {"const", 1}}},
+					{"transactionId", uuid},
+					{"correlationId", {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}}},
+					{"idempotencyKey", {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}}},
+					{"target", {{"type", "object"}, {"properties", {{"assetUuid", uuid}, {"instanceUuid", uuid}}}, {"required", Json::array({"assetUuid", "instanceUuid"})}, {"additionalProperties", false}}},
+					{"operation", {{"type", "object"}, {"properties", {{"kind", {{"type", "string"}, {"enum", std::move(operationKinds)}}}, {"settings", {{"type", "object"}, {"additionalProperties", true}}}, {"seed", {{"type", "integer"}, {"minimum", 0}}}}}, {"required", Json::array({"kind", "settings"})}, {"additionalProperties", false}}},
+					{"worldBounds", {{"type", "object"}, {"properties", {{"min", worldPosition}, {"max", worldPosition}}}, {"required", Json::array({"min", "max"})}, {"additionalProperties", false}}},
+					{"expectedRootHash", hash},
+					{"expectedLayerStackGeneration", unsignedString},
+					{"observations", {{"type", "array"}, {"minItems", 1}, {"maxItems", 4096}, {"items", observation}}},
+					{"budgets", {{"type", "object"}, {"properties", {{"maxAreas", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4096}}}, {"maxSamples", {{"type", "integer"}, {"minimum", 1}}}, {"maxPreparedBytes", {{"type", "integer"}, {"minimum", 1}, {"maximum", 536870912}}}, {"workloadClass", {{"type", "string"}, {"enum", Json::array({"interactive", "bounded", "large"})}}}}}, {"required", Json::array({"maxAreas", "maxSamples", "maxPreparedBytes", "workloadClass"})}, {"additionalProperties", false}}},
+					{"previewOnly", {{"type", "boolean"}}},
+					{"approvalFingerprint", {{"type", Json::array({"string", "null"})}, {"pattern", "^[0-9a-f]{32}$"}}}
+				}},
+				{"required", Json::array({"schemaVersion", "transactionId", "correlationId", "idempotencyKey", "target", "operation", "worldBounds", "expectedRootHash", "observations", "budgets", "previewOnly"})},
+				{"additionalProperties", false}
+			};
+		}
+
+		Json TerrainInputSchema(std::string_view name)
+		{
+			if(name == "terrain.create") return TerrainCreateSchema(false);
+			if(name == "terrain.import_heightmap") return TerrainCreateSchema(true);
+			if(name == "terrain.stroke.apply") return TerrainEditSchema({"raise", "lower", "smooth", "flatten", "ramp", "stamp", "height-remap"});
+			if(name == "terrain.layers.set") return TerrainEditSchema({"paint", "erase-layer", "fill-layer", "normalize-layers"});
+			if(name == "terrain.holes.set") return TerrainEditSchema({"paint-hole", "erase-hole"});
+			if(name == "terrain.operation.start") return TerrainEditSchema({"terrace", "noise", "hydraulic-erosion", "thermal-erosion", "spline-grade"});
+			if(name == "terrain.job.get" || name == "terrain.job.cancel")
+				return {{"type", "object"}, {"properties", {{"jobId", {{"type", "string"}, {"minLength", 1}}}}}, {"required", Json::array({"jobId"})}, {"additionalProperties", false}};
+			if(name == "terrain.rebuild")
+				return {{"type", "object"}, {"properties", {{"target", {{"type", "string"}, {"enum", Json::array({"all", "collision", "persistence"})}, {"default", "all"}}}}}, {"additionalProperties", false}};
+			if(name == "terrain.export")
+				return {{"type", "object"}, {"properties", {{"profile", {{"type", "string"}, {"minLength", 1}}}, {"correlationId", {{"type", "string"}}}, {"idempotencyKey", {{"type", "string"}}}}}, {"required", Json::array({"profile"})}, {"additionalProperties", false}};
+			return NoArgumentsSchema();
+		}
+	}
+
 	TerrainAutomationProvider::TerrainAutomationProvider(AutomationHandlerResolver resolver) : resolveHandler(std::move(resolver)) {}
 	std::string_view TerrainAutomationProvider::GetProviderId() const { return "terrain"; }
 	std::vector<AutomationCapabilityRegistration> TerrainAutomationProvider::GetCapabilities()
@@ -18,7 +114,7 @@ namespace TerraEngine::Editor::Automation
 			"terrain.validate", "terrain.export", "terrain.save"})
 		{
 			AutomationCapabilityDescriptor descriptor; descriptor.name=std::string(name); descriptor.category="terrain"; descriptor.description="Canonical, generation-checked terrain operation.";
-			descriptor.inputSchema={{"type","object"},{"additionalProperties",false}}; descriptor.resultSchema={{"type","object"}};
+			descriptor.inputSchema=TerrainInputSchema(name); descriptor.resultSchema={{"type","object"}};
 			const bool read=name=="terrain.asset.inspect" || name=="terrain.session.get"
 				|| name=="terrain.job.get" || name=="terrain.diagnostics.get";
 			descriptor.permission=read?AutomationPermission::Read:AutomationPermission::ProjectWrite;

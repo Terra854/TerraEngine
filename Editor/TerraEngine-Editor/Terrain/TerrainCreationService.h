@@ -45,4 +45,10 @@ namespace TerraEngine::Editor::Terrain
 	private:
 		ParentAssetRegistration registerParentAsset;
 	};
+
+	// Editor UI surfaces use this configured service so a completed terrain is
+	// registered through AssetDatabase and ResourceManager before it is exposed.
+	// Keeping the callback here prevents each window from implementing a subtly
+	// different publication path for the same durable terrain bundle.
+	[[nodiscard]] TerrainCreationService CreateProjectTerrainCreationService();
 }

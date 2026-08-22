@@ -3,17 +3,142 @@
 #include "TestHarness.h"
 
 #include "Editor/AssetCompilers/TerrainCompiler.h"
+#include "Editor/TerraEngine-Editor/Assets/AssetDatabase.h"
 #include "Editor/TerraEngine-Editor/Terrain/TerrainCreationService.h"
 
 #include <chrono>
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 
 namespace TerraEngine::EditorTests
 {
 	void RegisterTerrainCreationImportTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.TerrainCreation.ProjectBrowserExposesAtomicFlatCreation", [](TestContext& context) {
+			const auto browserPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor/TerraEngine-Editor/Windows/ProjectBrowserWindow.cpp";
+			std::ifstream browserSource(browserPath);
+			const std::string source(
+				(std::istreambuf_iterator<char>(browserSource)),
+				std::istreambuf_iterator<char>());
+			context.Expect(source.find("Terrain (.teterrain)") != std::string::npos
+				&& source.find("CreateProjectTerrainCreationService()") != std::string::npos
+				&& source.find("service.CreateOrImport(request, targetPath)") != std::string::npos,
+				"Project Browser must expose terrain creation through the checked atomic service instead of writing an empty descriptor.");
+			context.Expect(source.find("IsTerrainPrivateDataDirectory") != std::string::npos
+				&& source.find("[TER]") != std::string::npos,
+				"Project Browser must present one terrain parent tile while hiding its implementation-owned private data directory.");
+			context.Expect(source.find("importer == \"TerrainImporter\") payloadType = \"ASSET_TERRAIN\"") != std::string::npos,
+				"Project Browser must publish registered terrain parents with the dedicated terrain drag payload.");
+
+			const auto inspectorPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp";
+			std::ifstream inspectorSourceFile(inspectorPath);
+			const std::string inspectorSource(
+				(std::istreambuf_iterator<char>(inspectorSourceFile)),
+				std::istreambuf_iterator<char>());
+			const std::size_t queuedAssignment = inspectorSource.find(
+				"SceneMutationQueue::Instance().EnqueueTransaction(builder.Build())");
+			const std::size_t requestedProxyRestore = inspectorSource.find(
+				"m_Owner->RequestTerrainProxyRestore()", queuedAssignment);
+			context.Expect(inspectorSource.find("AcceptDragDropPayload(\"ASSET_TERRAIN\")") != std::string::npos
+				&& inspectorSource.find("droppedMetadata->importerName != \"TerrainImporter\"") != std::string::npos
+				&& inspectorSource.find("UpdateComponentProperty(objectId, \"TerrainComponent\", \"terrainAssetId\"") != std::string::npos
+				&& queuedAssignment != std::string::npos
+				&& requestedProxyRestore != std::string::npos
+				&& requestedProxyRestore > queuedAssignment,
+				"Terrain Inspector drops must queue an undoable terrainAssetId transaction and arm proxy restoration for the protected post-flush boundary.");
+
+			const auto projectRoot = std::filesystem::temp_directory_path()
+				/ ("TerrainProjectBrowser-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+			const auto destination = projectRoot / "Assets" / "Landscapes" / "New Terrain.teterrain";
+			std::error_code ignored;
+			std::filesystem::remove_all(projectRoot, ignored);
+			std::filesystem::create_directories(destination.parent_path(), ignored);
+			AssetDatabase::Instance().Shutdown();
+			AssetDatabase::Instance().Initialize(projectRoot);
+
+			TerraEngine::AssetPipeline::TerrainImportRequest request;
+			request.assetId = TerraEngine::GenerateUUID();
+			const auto created = TerraEngine::Editor::Terrain::CreateProjectTerrainCreationService()
+				.CreateOrImport(request, destination);
+			const auto registered = AssetDatabase::Instance().GetAssets().find(
+				std::filesystem::absolute(destination));
+			context.Expect(created.succeeded && registered != AssetDatabase::Instance().GetAssets().end()
+				&& registered->second.guid == request.assetId
+				&& registered->second.importerName == "TerrainImporter",
+				"The browser creation path must register the durable terrain UUID through the live project Asset Database.");
+
+			AssetDatabase::Instance().Shutdown();
+			std::filesystem::remove_all(projectRoot, ignored);
+		});
+
+		registry.Add("Editor.TerrainCreation.SceneInstanceUsesTerrainComponentOnly", [](TestContext& context) {
+			const auto terrainWindowPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor/TerraEngine-Editor/Windows/TerrainWindow.cpp";
+			std::ifstream terrainWindowFile(terrainWindowPath);
+			const std::string terrainWindowSource(
+				(std::istreambuf_iterator<char>(terrainWindowFile)),
+				std::istreambuf_iterator<char>());
+			const std::size_t proxyPublication = terrainWindowSource.find(
+				"TerrainRenderProxyRegistry::Instance().Publish");
+			const std::size_t existingInstanceGate = terrainWindowSource.find(
+				"if(terrainRenderProxyInstanceQueued) return", proxyPublication);
+			context.Expect(proxyPublication != std::string::npos
+				&& existingInstanceGate != std::string::npos
+				&& existingInstanceGate > proxyPublication
+				&& terrainWindowSource.find(".AddComponent(local, std::string(TerrainComponent::kComponentName))") != std::string::npos
+				&& terrainWindowSource.find(".AddComponent(local, std::string(MeshRenderComponent::kComponentName))") == std::string::npos,
+				"Terrain creation and recovery must republish derived render resources before gating scene creation, while adding only TerrainComponent to the scene object.");
+
+			const auto editorSubsystemPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp";
+			std::ifstream editorSubsystemFile(editorSubsystemPath);
+			const std::string editorSubsystemSource(
+				(std::istreambuf_iterator<char>(editorSubsystemFile)),
+				std::istreambuf_iterator<char>());
+			context.Expect(editorSubsystemSource.find(
+				"TerrainRenderProxyRegistry::Instance()") != std::string::npos
+				&& editorSubsystemSource.find("terrainProxyRestorePending = true") != std::string::npos,
+				"The editor must detect a visible registered TerrainComponent whose derived render proxy is missing, regardless of which producer assigned it.");
+
+			const auto rendererPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine/Renderer/RenderSystem.cpp";
+			std::ifstream rendererFile(rendererPath);
+			const std::string rendererSource(
+				(std::istreambuf_iterator<char>(rendererFile)),
+				std::istreambuf_iterator<char>());
+			context.Expect(rendererSource.find("forEachObjectWithComponents<Transform, TerrainComponent>") != std::string::npos
+				&& rendererSource.find("Resolve(terrain->terrainAssetId)") != std::string::npos
+				&& rendererSource.find("kResourceTerrainRenderProxies") != std::string::npos,
+				"RenderSystem must collect TerrainComponent instances through the declared terrain proxy resource contract.");
+
+			// The editor executable publishes terrain proxies while RenderSystem consumes
+			// them from the engine DLL. Keeping Instance() out of the header guarantees
+			// both modules reach the same registry on Windows instead of creating one
+			// function-local singleton per binary module.
+			const auto proxyHeaderPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine/Renderer/Terrain/TerrainRenderProxyRegistry.h";
+			std::ifstream proxyHeaderFile(proxyHeaderPath);
+			const std::string proxyHeaderSource(
+				(std::istreambuf_iterator<char>(proxyHeaderFile)),
+				std::istreambuf_iterator<char>());
+			const auto proxySourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine/Renderer/Terrain/TerrainRenderProxyRegistry.cpp";
+			std::ifstream proxySourceFile(proxySourcePath);
+			const std::string proxySource(
+				(std::istreambuf_iterator<char>(proxySourceFile)),
+				std::istreambuf_iterator<char>());
+			context.Expect(proxyHeaderSource.find("class TERRAENGINE_API TerrainRenderProxyRegistry final") != std::string::npos
+				&& proxyHeaderSource.find("static TerrainRenderProxyRegistry& Instance();") != std::string::npos
+				&& proxyHeaderSource.find("static TerrainRenderProxyRegistry registry;") == std::string::npos
+				&& proxySource.find("TerrainRenderProxyRegistry::Instance()") != std::string::npos
+				&& proxySource.find("static TerrainRenderProxyRegistry registry;") != std::string::npos,
+				"Terrain proxy singleton storage must live in the exported engine DLL so editor publication and renderer consumption share one registry.");
+		});
+
 		registry.Add("Editor.TerrainCreation.FlatCreatesPrivateGeneration", [](TestContext& context) {
 			const auto root = std::filesystem::temp_directory_path() / ("TerrainFlat-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
 			const auto destination = root / "Flat.teterrain";

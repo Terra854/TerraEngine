@@ -35,18 +35,30 @@ class TerrainWindow final : public EditorWindow
 {
 public:
 	struct AutomationOperationStart { bool accepted=false; std::string category,message; std::optional<TerraEngine::UUID> transactionId; };
+	// Scene View renders this canonical footprint through its own camera. Keeping
+	// the radius in metres prevents zoom from changing the apparent brush coverage.
+	struct SceneViewBrushFootprint
+	{
+		TerraEngine::Scene::WorldPosition center{};
+		float radiusMetres = 0.0F;
+		bool holeBrush = false;
+	};
 	TerrainWindow();
 	~TerrainWindow() override;
 	[[nodiscard]] TerraEngine::Editor::Terrain::TerrainBrushSettings BrushSettings() const noexcept { return brushSettings; }
 	[[nodiscard]] bool IsSculpting() const noexcept { return sculpting || holeSculpting; }
+	[[nodiscard]] bool IsHeightSculpting() const noexcept { return sculpting; }
+	[[nodiscard]] bool IsHoleSculpting() const noexcept { return holeSculpting; }
 	void SetSculpting(bool value);
-	[[nodiscard]] bool IsBrushStrokeActive() const noexcept { return brushStrokeActive; }
-	[[nodiscard]] static constexpr bool ShouldCaptureSceneSelection(bool sculptEnabled, bool strokeActive) noexcept { return sculptEnabled && strokeActive; }
-	// Scene View calls this only between pointer-down and pointer-up after a
-	// canonical terrain pick succeeds; enabling the tool alone never blocks selection.
+	void SetHoleSculpting(bool value);
+	[[nodiscard]] bool IsBrushStrokeActive() const noexcept { return brushStrokeActive || holeBrushActive; }
+	[[nodiscard]] const std::optional<SceneViewBrushFootprint>& BrushFootprint() const noexcept { return sceneViewBrushFootprint; }
+	[[nodiscard]] static constexpr bool ShouldCaptureSceneSelection(bool sculptEnabled, bool) noexcept { return sculptEnabled; }
+	// An enabled terrain brush owns Scene View clicks even before the first valid
+	// terrain hit. This prevents a missed pick from selecting an unrelated object.
 	void SetBrushStrokeActive(bool value) noexcept { brushStrokeActive = value; }
-	// Scene View supplies a canonical ray and pointer lifecycle. This method
-	// updates only detached local preview data; Apply owns publication.
+	// Scene View supplies a canonical ray and pointer lifecycle. A release turns
+	// the detached stroke into one typed, undoable transaction automatically.
 	void HandleSceneViewPointer(
 		const TerraEngine::Scene::WorldPosition& rayOrigin,
 		const glm::dvec3& rayDirection,
@@ -98,7 +110,7 @@ public:
 	void CancelSurfacePreview() noexcept;
 	[[nodiscard]] bool PreviewHoleStamp(const TerraEngine::Editor::Terrain::TerrainHoleBrushStamp& stamp);
 	[[nodiscard]] bool ApplyHolePreview(std::string& outError);
-	void CancelHolePreview() noexcept;
+	void CancelHolePreview();
 	void ObserveTerrainMaterialChanges();
 	[[nodiscard]] bool StartProceduralPreview(std::string& outError);
 	[[nodiscard]] bool ApplyProceduralPreview(std::string& outError);
@@ -155,6 +167,7 @@ private:
 	std::vector<std::uint8_t> previewHoleMask;
 	TerraEngine::Editor::Terrain::TerrainHoleBrushSettings holeBrushSettings{};
 	std::optional<TerraEngine::Editor::Terrain::TerrainBrushStamp> previousStamp;
+	std::optional<SceneViewBrushFootprint> sceneViewBrushFootprint;
 	bool applyRequested = false;
 	bool selectedAreaPinned = false;
 	std::string garbageCollectionStatus;
@@ -178,6 +191,7 @@ private:
 	TerraEngine::Editor::Terrain::TerrainProceduralJobs proceduralJobs;
 	std::optional<TerraEngine::Editor::Terrain::TerrainProceduralPreview> proceduralPreview;
 	std::optional<TerraEngine::UUID> queuedProceduralTransactionId;
+	bool proceduralAutoApplyRequested = false;
 	TerraEngine::Terrain::TerrainSelectionCriteria proceduralSelection{};
 	// The operator picker feeds immutable core algorithms; all variants still
 	// share one preview, transaction, history, and protected publish route.
@@ -192,9 +206,9 @@ private:
 	// Protected-boundary timings are bounded raw samples consumed by the
 	// diagnostics percentile builder. They are never estimated from frame time.
 	std::vector<std::uint64_t> publicationStageSamplesNanoseconds;
-	// Direct-resident proxy generation is worker-owned. The protected authoring
-	// boundary publishes only a completed mesh whose root identity still matches
-	// the visible terrain generation.
+	// Direct-resident proxy generation is worker-owned. Detached preview meshes
+	// may be published at the protected boundary for responsive sculpt feedback,
+	// but only terrain transactions may change durable roots, collision, or history.
 	std::future<TerraEngine::Renderer::Terrain::TerrainDirectMeshResult> terrainRenderProxyFuture;
 	std::shared_ptr<std::atomic_bool> terrainRenderProxyCancellation;
 	TerraEngine::UUID terrainRenderProxyMeshId = TerraEngine::EMPTY_UUID;
@@ -203,6 +217,7 @@ private:
 	// terrain keeps this empty so publication creates exactly one scene instance.
 	TerraEngine::UUID terrainRenderProxyTargetObjectId = TerraEngine::EMPTY_UUID;
 	bool terrainRenderProxyBuildActive = false;
+	bool terrainRenderProxyBuildWasPreview = false;
 	bool terrainRenderProxyRebuildRequested = false;
 	bool terrainRenderProxyInstanceQueued = false;
 };

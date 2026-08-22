@@ -11,6 +11,8 @@
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Components/ScriptComponent.h"
 #include "Engine/Scripting/ScriptingSystem.h"
+#include "Engine/Utilities/PlatformUtils.h"
+#include "Editor/Export/ExportRuntimeLayout.h"
 #include "NativeAotProjectWorkspace.h"
 
 #include <array>
@@ -1193,6 +1195,27 @@ ScriptCompilationSubsystem::ScriptBuildResult ScriptCompilationSubsystem::RunBui
 	const std::filesystem::path canonicalProjectPath = m_WorkspaceService.GetProjectPath();
 	const std::filesystem::path canonicalAssemblyPath = m_WorkspaceService.GetAssemblyPath();
 
+	// Resolve the SDK from the installed editor layout before launching worker
+	// tools. This deliberately has no PATH fallback: an incomplete install must
+	// fail clearly instead of selecting an arbitrary machine-wide SDK.
+	ExportRuntimeLayout runtimeLayout;
+	std::string runtimeLayoutError;
+	if (!DiscoverExportRuntimeLayout(
+			TerraEngine::PlatformUtils::GetExecutablePath(),
+			runtimeLayout,
+			runtimeLayoutError))
+	{
+		result.failureMessage = "Could not resolve the bundled .NET SDK: " + runtimeLayoutError;
+		return result;
+	}
+	std::error_code dotnetError;
+	if (!std::filesystem::is_regular_file(runtimeLayout.dotnetExecutable, dotnetError))
+	{
+		result.failureMessage = "The bundled .NET SDK executable was not found: "
+			+ runtimeLayout.dotnetExecutable.string() + ". Run the CMake install target to repair the editor layout.";
+		return result;
+	}
+
 	NativeAotProjectWorkspace processWorkspace(canonicalProjectRoot);
 	std::string processWorkspaceError;
 	if (!processWorkspace.Prepare(processWorkspaceError))
@@ -1206,6 +1229,7 @@ ScriptCompilationSubsystem::ScriptBuildResult ScriptCompilationSubsystem::RunBui
 		canonicalProjectRoot,
 		canonicalProjectPath,
 		BuildProfileToString(profile),
+		runtimeLayout.dotnetExecutable,
 		processWorkspace.BuildProjectRoot(),
 		processWorkspace.BuildProjectRoot() / canonicalProjectPath.filename());
 

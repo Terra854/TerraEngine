@@ -98,6 +98,9 @@ namespace TerraEngine::Scheduling {
 	// are plain strings because the scheduler validates declarations before any
 	// renderer-specific type system is available during startup.
 	inline constexpr const char kResourceVirtualGeometryQualityProfile[] = "VirtualGeometryQualityProfile";
+	// Terrain components resolve renderer-derived mesh/material bindings through
+	// this protected handoff instead of persisting generated mesh components.
+	inline constexpr const char kResourceTerrainRenderProxies[] = "TerrainRenderProxies";
 	inline constexpr const char kResourceSceneChangePublication[] = "SceneChangePublication";
 	// Canonical spatial work is split into an immutable input publication, a
 	// deferred typed queue, and worker-owned prepared candidates. Keeping the

@@ -14,6 +14,8 @@
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/File Formats/TerraEngineMeshFile.h"
 #include "Engine/Components/MeshRenderComponent.h"
+#include "Engine/Components/TerrainComponent.h"
+#include "Engine/Renderer/Terrain/TerrainRenderProxyRegistry.h"
 #include "Engine/Components/Physics/ColliderSetComponent.h"
 #include "Engine/Components/Physics/CharacterControllerComponent.h"
 #include "Engine/Components/Physics/ConstraintSetComponent.h"
@@ -60,6 +62,26 @@ namespace SceneOverlay = TerraEngine::Editor::SceneViewOverlay;
 
 namespace
 {
+Mesh* ResolveSceneEntityRenderMesh(entt::entity entity)
+{
+	auto& registry = ObjectManager::instance().getRegistry();
+	if(!registry.valid(entity)) return nullptr;
+	// Terrain render data is derived from its durable asset UUID. Resolve that
+	// specialized binding first so editor framing and fitting use the same mesh
+	// as RenderSystem without requiring MeshRenderComponent in the scene.
+	if(const TerrainComponent* terrain = registry.try_get<TerrainComponent>(entity);
+		terrain != nullptr && terrain->terrainAssetId != TerraEngine::EMPTY_UUID)
+	{
+		const auto proxy = TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance()
+			.Resolve(terrain->terrainAssetId);
+		return proxy && proxy->IsComplete()
+			? ResourceManager::Instance().GetMesh(proxy->meshId) : nullptr;
+	}
+	const MeshRenderComponent* renderable = registry.try_get<MeshRenderComponent>(entity);
+	return renderable != nullptr
+		? ResourceManager::Instance().GetMesh(renderable->meshId) : nullptr;
+}
+
 // SafeNormalize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 glm::vec3 SafeNormalize(const glm::vec3& value, const glm::vec3& fallback)
 {
@@ -876,11 +898,7 @@ bool SceneViewWindow::FrameAutomationObject(entt::entity entity, std::string& ou
 	// Framing a renderable uses its authored bounds instead of only its transform
 	// pivot. This matters especially for terrain, whose mesh spans positive X/Z
 	// from an origin at one corner; pivot-only framing produced a clipped wedge.
-	auto& registry = ObjectManager::instance().getRegistry();
-	const MeshRenderComponent* renderable = registry.valid(entity)
-		? registry.try_get<MeshRenderComponent>(entity) : nullptr;
-	const Mesh* mesh = renderable != nullptr
-		? ResourceManager::Instance().GetMesh(renderable->meshId) : nullptr;
+	const Mesh* mesh = ResolveSceneEntityRenderMesh(entity);
 	if (mesh != nullptr && mesh->hasLocalBounds)
 	{
 		const glm::vec3 localMinimum(mesh->localBoundsMin[0], mesh->localBoundsMin[1], mesh->localBoundsMin[2]);
@@ -1194,12 +1212,22 @@ bool SceneViewWindow::HandleSceneViewScrollZoom()
 	}
 
 	const float fallbackDistance = m_CameraFocusInitialized ? m_CameraFocusDistance : 18.0f;
-	const TerraEngine::Scene::WorldPosition focus = ResolveSceneViewFocus(fallbackDistance);
-	const float focusDistance = ResolveSceneViewFocusDistance(focus, fallbackDistance);
+	// Wheel zoom follows the ray already passing through the centre of the
+	// viewport. Do not ask ResolveSceneViewFocus for this pivot because that
+	// helper may intentionally resolve the selected entity for explicit framing
+	// and view-cube operations, which would make ordinary scrolling recenter it.
+	const TerraEngine::Scene::WorldCoordinateResult forwardFocus = TerraEngine::Scene::ApplyWorldDelta(
+		m_CameraPosition,
+		{{}, glm::dvec3(GetCameraForward()) * static_cast<double>(fallbackDistance)});
+	if (!forwardFocus.Succeeded())
+	{
+		return false;
+	}
+	const TerraEngine::Scene::WorldPosition focus = forwardFocus.position;
+	const float focusDistance = fallbackDistance;
 	const float newDistance = std::clamp(focusDistance * std::pow(0.86f, wheel), 0.5f, 1000.0f);
-	// Perspective wheel input dollies around the same focus used by panning and
-	// the view manipulator, so scroll zoom feels like moving the Scene View
-	// camera through the current composition instead of only changing FOV.
+	// Perspective wheel input dollies along the current viewing axis, preserving
+	// the composition instead of changing gameplay FOV or targeting selection.
 	RepositionCameraAroundFocus(focus, newDistance);
 	return true;
 }
@@ -1558,7 +1586,7 @@ void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, c
 		components.hasDirectionalLight = light != nullptr && light->type == LightType::Directional;
 		components.hasSpotLight = light != nullptr && light->type == LightType::Spot;
 		components.hasPointLight = light != nullptr && !components.hasDirectionalLight && !components.hasSpotLight;
-		components.hasRenderable = registry.any_of<MeshRenderComponent>(entity);
+		components.hasRenderable = registry.any_of<MeshRenderComponent, TerrainComponent>(entity);
 		components.hasRigidBody = registry.any_of<RigidBodyComponent>(entity);
 		components.hasColliderSet = registry.any_of<ColliderSetComponent>(entity);
 		components.hasConstraintSet = registry.any_of<ConstraintSetComponent>(entity);
@@ -2424,9 +2452,7 @@ void SceneViewWindow::RequestPhysicsColliderFitToRenderMesh(entt::entity entity)
 		return;
 	}
 
-	auto& registry = ObjectManager::instance().getRegistry();
-	const MeshRenderComponent* renderable = registry.valid(entity) ? registry.try_get<MeshRenderComponent>(entity) : nullptr;
-	Mesh* mesh = renderable ? ResourceManager::Instance().GetMesh(renderable->meshId) : nullptr;
+	Mesh* mesh = ResolveSceneEntityRenderMesh(entity);
 	if (mesh == nullptr)
 	{
 		m_PhysicsPreviewStatus = "Fit rejected: the selected object has no loaded render mesh bounds.";
@@ -2808,19 +2834,20 @@ bool RayAABB(const glm::vec3& rayOrigin, const glm::vec3& rayDir, const glm::vec
 
 // SceneViewWindow::HandlePicking is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize) {
-	// Terrain receives pointer input before ordinary object selection. It uses a
-	// canonical CPU ray for immediate feedback; normal selection resumes as soon
-	// as the stroke releases its capture.
+	// Terrain receives pointer input before ordinary object selection. An enabled
+	// brush owns clicks until the user disables it, just like the other edit tools.
 	if(auto terrainTools = m_Owner->GetWindow<TerrainWindow>(); terrainTools && terrainTools->IsSculpting())
 	{
 		const ImVec2 mouse = ImGui::GetMousePos();
 		const bool inside = mouse.x >= viewportPos.x && mouse.x <= viewportPos.x + viewportSize.x
 			&& mouse.y >= viewportPos.y && mouse.y <= viewportPos.y + viewportSize.y;
-		if(inside)
+		const bool wasCapturing = terrainTools->IsBrushStrokeActive();
+		if(inside || wasCapturing)
 		{
-			const bool wasCapturing = terrainTools->IsBrushStrokeActive();
-			const double normalizedX = static_cast<double>(mouse.x - viewportPos.x) / std::max(1.0, static_cast<double>(viewportSize.x));
-			const double normalizedY = static_cast<double>(mouse.y - viewportPos.y) / std::max(1.0, static_cast<double>(viewportSize.y));
+			// Clamp only while finishing a captured stroke outside the viewport. This
+			// guarantees pointer-up reaches Terrain Tools instead of leaving it stuck.
+			const double normalizedX = std::clamp(static_cast<double>(mouse.x - viewportPos.x) / std::max(1.0, static_cast<double>(viewportSize.x)), 0.0, 1.0);
+			const double normalizedY = std::clamp(static_cast<double>(mouse.y - viewportPos.y) / std::max(1.0, static_cast<double>(viewportSize.y)), 0.0, 1.0);
 			const auto viewportRay = TerraEngine::Editor::Terrain::TerrainPicking::BuildViewportRay(
 				view, proj, normalizedX, normalizedY,
 				m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic);
@@ -2839,16 +2866,29 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 			}
 			if(TerrainWindow::ShouldCaptureSceneSelection(terrainTools->IsSculpting(), terrainTools->IsBrushStrokeActive()) || wasCapturing)
 			{
-				// A lightweight editor overlay is deliberately screen-local. Terrain
-				// preview samples remain in TerrainWindow until Apply is accepted.
-				ImGui::GetWindowDrawList()->AddCircle(mouse, terrainTools->BrushSettings().radiusSamples, IM_COL32(80, 210, 120, 220), 32, 2.0F);
+				// Project the canonical terrain footprint instead of treating sample count
+				// as pixels. Perspective and orthographic zoom now match actual coverage.
+				if(inside && terrainTools->BrushFootprint())
+				{
+					const auto& footprint = *terrainTools->BrushFootprint();
+					DrawWorldCircle(
+						ImGui::GetWindowDrawList(),
+						LocalizeForCamera(footprint.center),
+						glm::vec3(1.0F, 0.0F, 0.0F),
+						glm::vec3(0.0F, 0.0F, 1.0F),
+						footprint.radiusMetres,
+						64,
+						proj * view,
+						viewportPos,
+						viewportSize,
+						IM_COL32(80, 210, 120, 220),
+						2.0F);
+				}
 				return;
 			}
 		}
 	}
-	// A terrain stroke owns this pointer sequence before selection. This is a
-	// deliberately narrow priority override: a released brush immediately lets
-	// the ordinary scene selection path below run unchanged.
+	// Compatibility capture remains for callers outside TerrainWindow.
 	if (m_TerrainBrushCapture) {
 		return;
 	}

@@ -73,6 +73,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterManagedReadinessTests(TestRegistry& registry);
 	void RegisterProjectReadinessPerformanceTests(TestRegistry& registry);
 	void RegisterEditorCommandLineTests(TestRegistry& registry);
+	void RegisterEditorRuntimeLayoutTests(TestRegistry& registry);
 	void RegisterEditorStartupRendererConfigurationTests(TestRegistry& registry);
 	void RegisterEditorPostFrameBoundaryTests(TestRegistry& registry);
 	void RegisterCheckedImGuiVulkanBridgeTests(TestRegistry& registry);
@@ -326,6 +327,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterManagedReadinessTests(registry);
 	TerraEngine::EditorTests::RegisterProjectReadinessPerformanceTests(registry);
 	TerraEngine::EditorTests::RegisterEditorCommandLineTests(registry);
+	TerraEngine::EditorTests::RegisterEditorRuntimeLayoutTests(registry);
 	TerraEngine::EditorTests::RegisterEditorStartupRendererConfigurationTests(registry);
 	TerraEngine::EditorTests::RegisterEditorPostFrameBoundaryTests(registry);
 	TerraEngine::EditorTests::RegisterCheckedImGuiVulkanBridgeTests(registry);

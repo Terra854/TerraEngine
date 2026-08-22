@@ -24,7 +24,7 @@ Welcome to TerraEngine! Please follow these repo-wide guidelines whenever you ad
 
 ## Repository Structure
 1. Keep engine sources under `Engine/`, third-party code in `External/`, and **all engine shaders in `Engine/Shaders/` with editor only shaders in `Editor/Shaders/`** (use module-specific subdirectories beneath that folder).
-2. Place build tooling/scripts under `Tools/` with usage comments explaining prerequisites and commands.
+2. Place genuine engine, editor, export, and dependency-maintenance utilities under `Tools/`. Place benchmarks, fixtures, stress/soak runners, evidence collectors, and other validation-only utilities under `Tests/Tools/`. Include usage comments explaining prerequisites and commands.
 
 ## Testing & Verification
 1. Provide reproducible instructions (README or per-feature docs) describing how to configure, build, install, and run relevant tests/demos from a clean checkout.

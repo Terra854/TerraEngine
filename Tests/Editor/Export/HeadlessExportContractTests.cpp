@@ -95,6 +95,12 @@ namespace TerraEngine::EditorTests {
 			std::filesystem::create_directories(editorDirectory / "Shaders");
 			std::filesystem::create_directories(editorDirectory / "Fonts");
 			std::filesystem::create_directories(editorDirectory / "Managed");
+			std::filesystem::create_directories(editorDirectory / "DotNet");
+#ifdef _WIN32
+			Touch(editorDirectory / "DotNet" / "dotnet.exe");
+#else
+			Touch(editorDirectory / "DotNet" / "dotnet");
+#endif
 			std::filesystem::create_directories(editorDirectory / "NativeAotNuGet" / "feed");
 			Touch(editorDirectory / "NativeAotNuGet" / "NuGet.Config");
 			Touch(editorDirectory / "NativeAotNuGet" / "global.json");

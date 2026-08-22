@@ -10,13 +10,14 @@ namespace TerraEngine::EditorTests {
 		registry.Add("Editor.LinuxScriptCompilation.BuildCommandUsesDotnetAndWorkspaceProject", [](TestContext& context) {
 			const std::filesystem::path projectRoot = std::filesystem::path("/tmp") / "Terra Project";
 			const std::filesystem::path projectPath = projectRoot / "Assembly-CSharp.csproj";
+			const std::filesystem::path dotnetExecutable = "/opt/terraengine/DotNet/dotnet";
 
 			const TerraEngine::Editor::Scripting::ScriptBuildInvocation invocation =
-				TerraEngine::Editor::Scripting::CreateScriptBuildInvocation(projectRoot, projectPath, "Debug");
+				TerraEngine::Editor::Scripting::CreateScriptBuildInvocation(projectRoot, projectPath, "Debug", dotnetExecutable);
 
 			context.ExpectEqual(projectRoot, invocation.projectRoot, "Script builds should retain the canonical project root.");
 			context.ExpectEqual(projectRoot, invocation.processWorkingDirectory, "Direct script builds should run from the project root.");
-			context.Expect(invocation.commandLine.find("dotnet build") != std::string::npos, "Script builds should invoke dotnet build.");
+			context.Expect(invocation.commandLine.find("\"/opt/terraengine/DotNet/dotnet\" build") != std::string::npos, "Script builds should invoke the bundled dotnet executable.");
 			context.Expect(invocation.commandLine.find("\"/tmp/Terra Project/Assembly-CSharp.csproj\"") != std::string::npos, "Project paths with spaces should be quoted.");
 			context.Expect(invocation.commandLine.find("-c Debug") != std::string::npos, "The active script build profile should be passed to dotnet.");
 			context.Expect(invocation.commandLine.find("-p:GenerateFullPaths=true") != std::string::npos, "Compiler diagnostics should include full paths.");
@@ -27,8 +28,9 @@ namespace TerraEngine::EditorTests {
 		registry.Add("Editor.LinuxScriptCompilation.DiagnosticsNameCommandDirectoryExitCodeAndOutput", [](TestContext& context) {
 			const std::filesystem::path projectRoot = std::filesystem::path("/tmp") / "Terra Project";
 			const std::filesystem::path projectPath = projectRoot / "Assembly-CSharp.csproj";
+			const std::filesystem::path dotnetExecutable = "/opt/terraengine/DotNet/dotnet";
 			const TerraEngine::Editor::Scripting::ScriptBuildInvocation invocation =
-				TerraEngine::Editor::Scripting::CreateScriptBuildInvocation(projectRoot, projectPath, "Release");
+				TerraEngine::Editor::Scripting::CreateScriptBuildInvocation(projectRoot, projectPath, "Release", dotnetExecutable);
 
 			const std::string failure = TerraEngine::Editor::Scripting::DescribeScriptBuildExitFailure(invocation, 42, "CS1002: ; expected");
 
@@ -43,11 +45,13 @@ namespace TerraEngine::EditorTests {
 			const std::filesystem::path projectPath = projectRoot / "Assembly-CSharp.csproj";
 			const std::filesystem::path processWorkingDirectory = std::filesystem::path("C:/Temp") / "TEAOT-private";
 			const std::filesystem::path buildProjectPath = processWorkingDirectory / "Assembly-CSharp.csproj";
+			const std::filesystem::path dotnetExecutable = "C:/Installed TerraEngine/Editor/DotNet/dotnet.exe";
 			const TerraEngine::Editor::Scripting::ScriptBuildInvocation invocation =
 				TerraEngine::Editor::Scripting::CreateScriptBuildInvocation(
 					projectRoot,
 					projectPath,
 					"Release",
+					dotnetExecutable,
 					processWorkingDirectory,
 					buildProjectPath);
 

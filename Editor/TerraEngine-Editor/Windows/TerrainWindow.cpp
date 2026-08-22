@@ -15,6 +15,7 @@
 #include "Physics/Terrain/TerrainCollisionSystem.h"
 #include "Physics/PhysicsSystem.h"
 #include "Renderer/RenderSystem.h"
+#include "Renderer/Terrain/TerrainRenderProxyRegistry.h"
 #include "Resource/ResourceManager.h"
 #include "Scene/SceneMutationQueue.h"
 #include "Scene/TransactionalMutation.h"
@@ -34,44 +35,6 @@
 #include <utility>
 
 #include <imgui.h>
-
-namespace
-{
-	// Terrain creation publishes the descriptor and its private data directory
-	// first, then registers that complete asset through the normal editor asset
-	// database. This keeps the durable terrain UUID, the Inspector, and runtime
-	// resource lookup in agreement at the same protected editor boundary.
-	TerraEngine::Editor::Terrain::TerrainCreationService CreateRegisteredTerrainService()
-	{
-		return TerraEngine::Editor::Terrain::TerrainCreationService(
-			[](const std::filesystem::path& assetPath, std::string& outError)
-			{
-				AssetDatabase& assets = AssetDatabase::Instance();
-				std::filesystem::path absolutePath = assetPath;
-				if(!absolutePath.is_absolute())
-					absolutePath = assets.GetAssetRoot().parent_path() / absolutePath;
-				absolutePath = std::filesystem::absolute(absolutePath).lexically_normal();
-
-				assets.ImportAsset(absolutePath);
-				const auto registered = assets.GetAssets().find(absolutePath);
-				if(registered == assets.GetAssets().end()
-					|| registered->second.importerName != "TerrainImporter")
-				{
-					outError = "The completed terrain descriptor could not be registered with the project asset database.";
-					return false;
-				}
-
-				const std::filesystem::path runtimePath = ResourceManager::Instance().GetRegisteredAssetPath(
-					registered->second.guid, AssetType::Terrain);
-				if(runtimePath.empty())
-				{
-					outError = "The terrain asset database entry did not publish a runtime terrain path.";
-					return false;
-				}
-				return true;
-			});
-	}
-}
 
 TerrainWindow::TerrainWindow() : EditorWindow("Terrain Tools", false, "Tools")
 {
@@ -97,14 +60,18 @@ TerrainWindow::~TerrainWindow()
 
 void TerrainWindow::ScheduleRenderProxyBuild()
 {
-	if(!terrainStore || committedHeightMm.size() != TerraEngine::Terrain::kTerrainAreaSampleCount)
+	const bool useDetachedPreview = authoringSession.IsDirty() || holePreviewActive;
+	const std::vector<std::int32_t>& sourceHeights = useDetachedPreview
+		? previewHeightMm : committedHeightMm;
+	const std::vector<std::uint8_t>& sourceHoles = useDetachedPreview && holePreviewActive
+		? previewHoleMask : committedHoleMask;
+	if(!terrainStore || sourceHeights.size() != TerraEngine::Terrain::kTerrainAreaSampleCount)
 		return;
 	if(terrainRenderProxyBuildActive)
 	{
-		// Coalesce rapid strokes. The current worker owns only copied values, so it
-		// can stop at its next row checkpoint while the newest generation waits.
-		if(terrainRenderProxyCancellation)
-			terrainRenderProxyCancellation->store(true, std::memory_order_release);
+		// Let the current immutable preview finish so a continuous drag still gets
+		// visible intermediate results. One queued rebuild then consumes the newest
+		// preview buffer, bounding worker pressure to a single active task.
 		terrainRenderProxyRebuildRequested = true;
 		return;
 	}
@@ -113,11 +80,24 @@ void TerrainWindow::ScheduleRenderProxyBuild()
 	const auto descriptor = terrainStore->FindDescriptor(*capture.root, {0, 0});
 	if(!descriptor) return;
 	const auto cancellation = std::make_shared<std::atomic_bool>(false);
-	auto heights = committedHeightMm;
-	auto holes = committedHoleMask;
+	auto heights = sourceHeights;
+	auto holes = sourceHoles;
 	const TerraEngine::UUID assetId = capture.root->assetUuid;
-	const auto authoredHash = descriptor->authoredContentHash;
-	const std::uint64_t generation = descriptor->editGeneration;
+	auto authoredHash = descriptor->authoredContentHash;
+	std::uint64_t generation = descriptor->editGeneration;
+	if(useDetachedPreview)
+	{
+		// Preview identity is derived only from copied editor buffers. It never enters
+		// TerrainAssetStore and therefore cannot become visible as authored content.
+		std::vector<std::uint8_t> previewBytes(
+			heights.size() * sizeof(std::int32_t) + holes.size());
+		std::memcpy(previewBytes.data(), heights.data(), heights.size() * sizeof(std::int32_t));
+		if(!holes.empty())
+			std::memcpy(previewBytes.data() + heights.size() * sizeof(std::int32_t), holes.data(), holes.size());
+		authoredHash = TerraEngine::Terrain::HashTerrainBytes(previewBytes);
+		generation = descriptor->editGeneration == std::numeric_limits<std::uint64_t>::max()
+			? descriptor->editGeneration : descriptor->editGeneration + 1u;
+	}
 	const float spacing = authoredSampleSpacingMetres;
 	auto work = [assetId, authoredHash, generation, spacing, heights = std::move(heights), holes = std::move(holes), cancellation]() mutable
 	{
@@ -134,24 +114,33 @@ void TerrainWindow::ScheduleRenderProxyBuild()
 	terrainRenderProxyFuture = task->getFuture();
 	terrainRenderProxyCancellation = cancellation;
 	terrainRenderProxyBuildActive = true;
+	terrainRenderProxyBuildWasPreview = useDetachedPreview;
 	terrainRenderProxyRebuildRequested = false;
 	ThreadPool::instance().enqueue(task, TerraEngine::Terrain::kTerrainAreaSampleCount);
 }
 
 void TerrainWindow::QueueRenderProxySceneInstance()
 {
-	if(terrainRenderProxyInstanceQueued || !terrainStore
+	if(!terrainStore
 		|| terrainRenderProxyMeshId == TerraEngine::EMPTY_UUID
 		|| terrainRenderProxyMaterialId == TerraEngine::EMPTY_UUID)
 		return;
 	const auto capture = terrainStore->CaptureRoot();
 	if(!capture.IsValid()) return;
+	// Terrain render resources are derived from the durable asset and published
+	// outside ECS. RenderSystem resolves this binding directly from
+	// TerrainComponent, so scene serialization never needs generated mesh IDs.
+	if(!TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance().Publish({
+		capture.root->assetUuid, terrainRenderProxyMeshId, terrainRenderProxyMaterialId}))
+	{
+		status = "Terrain render proxy publication rejected an incomplete binding.";
+		return;
+	}
+	// Resource replacement and scene-instance creation have different lifetimes.
+	// A terrain edit or renderer reset must republish this binding even though the
+	// durable scene object already exists and needs no additional mutation.
+	if(terrainRenderProxyInstanceQueued) return;
 	ObjectManager& objects = ObjectManager::instance();
-	TerraEngine::Scene::TransactionalMutationBuilder builder(
-		"terrain-render-instance-" + TerraEngine::ToHexString(TerraEngine::GenerateUUID()),
-		TerraEngine::Scene::TransactionOrigin::Editor,
-		terrainRenderProxyTargetObjectId == TerraEngine::EMPTY_UUID
-			? "Create Terrain Render Instance" : "Restore Terrain Render Proxy");
 	if(terrainRenderProxyTargetObjectId != TerraEngine::EMPTY_UUID)
 	{
 		const auto targetObject = objects.getObject(terrainRenderProxyTargetObjectId);
@@ -160,22 +149,34 @@ void TerrainWindow::QueueRenderProxySceneInstance()
 			status = "Terrain render proxy restore was cancelled because its scene object no longer exists.";
 			return;
 		}
-		const auto target = TerraEngine::Scene::ExistingObject(terrainRenderProxyTargetObjectId);
-		builder.ObserveScene(objects)
-			.ObserveObject(objects, terrainRenderProxyTargetObjectId);
-		if(objects.GetComponent<MeshRenderComponent>(*targetObject) == nullptr)
-			builder.AddComponent(target, std::string(MeshRenderComponent::kComponentName));
-		builder.UpdateComponentProperty(target, std::string(MeshRenderComponent::kComponentName), "meshId", TerraEngine::Reflection::Variant{terrainRenderProxyMeshId})
-			.UpdateComponentProperty(target, std::string(MeshRenderComponent::kComponentName), "materialId", TerraEngine::Reflection::Variant{terrainRenderProxyMaterialId})
-			// Empty means the renderer uses the scene object's UUID. A terrain asset
-			// may have multiple translated instances, so its asset UUID is not a
-			// valid per-instance spatial identity.
-			.UpdateComponentProperty(target, std::string(MeshRenderComponent::kComponentName), "spatialObjectId", TerraEngine::Reflection::Variant{TerraEngine::EMPTY_UUID})
-			.UpdateComponentProperty(target, std::string(MeshRenderComponent::kComponentName), "taskShaderCullingEnabled", TerraEngine::Reflection::Variant{false});
-		TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
+		// Earlier editor versions serialized the generated fallback as a mesh
+		// component. Remove only that recognizable proxy shape; an independently
+		// authored mesh component on the same object remains untouched.
+		if(const MeshRenderComponent* legacy = objects.GetComponent<MeshRenderComponent>(*targetObject);
+			legacy != nullptr
+			&& legacy->meshId == terrainRenderProxyMeshId
+			&& legacy->materialId == terrainRenderProxyMaterialId
+			&& legacy->spatialObjectId == TerraEngine::EMPTY_UUID
+			&& !legacy->taskShaderCullingEnabled)
+		{
+			TerraEngine::Scene::TransactionalMutationBuilder migration(
+				"terrain-render-migration-" + TerraEngine::ToHexString(TerraEngine::GenerateUUID()),
+				TerraEngine::Scene::TransactionOrigin::Editor,
+				"Remove Legacy Terrain Render Proxy");
+			migration.ObserveScene(objects)
+				.ObserveObject(objects, terrainRenderProxyTargetObjectId)
+				.SetUndoGroup("Remove Legacy Terrain Render Proxy")
+				.RemoveComponent(terrainRenderProxyTargetObjectId,
+					std::string(MeshRenderComponent::kComponentName));
+			TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(migration.Build());
+		}
 		terrainRenderProxyInstanceQueued = true;
 		return;
 	}
+	TerraEngine::Scene::TransactionalMutationBuilder builder(
+		"terrain-render-instance-" + TerraEngine::ToHexString(TerraEngine::GenerateUUID()),
+		TerraEngine::Scene::TransactionOrigin::Editor,
+		"Create Terrain Render Instance");
 	const auto local = TerraEngine::Scene::LocalObject(-1);
 	builder.ObserveScene(objects)
 		.SetUndoGroup("Create Terrain Render Instance")
@@ -184,15 +185,7 @@ void TerrainWindow::QueueRenderProxySceneInstance()
 		.AddComponent(local, std::string(TerrainComponent::kComponentName))
 		.UpdateComponentProperty(local, std::string(TerrainComponent::kComponentName), "terrainAssetId", TerraEngine::Reflection::Variant{capture.root->assetUuid})
 		.UpdateComponentProperty(local, std::string(TerrainComponent::kComponentName), "visible", TerraEngine::Reflection::Variant{true})
-		.UpdateComponentProperty(local, std::string(TerrainComponent::kComponentName), "castsShadows", TerraEngine::Reflection::Variant{true})
-		.AddComponent(local, std::string(MeshRenderComponent::kComponentName))
-		.UpdateComponentProperty(local, std::string(MeshRenderComponent::kComponentName), "meshId", TerraEngine::Reflection::Variant{terrainRenderProxyMeshId})
-		.UpdateComponentProperty(local, std::string(MeshRenderComponent::kComponentName), "materialId", TerraEngine::Reflection::Variant{terrainRenderProxyMaterialId})
-		.UpdateComponentProperty(local, std::string(MeshRenderComponent::kComponentName), "spatialObjectId", TerraEngine::Reflection::Variant{TerraEngine::EMPTY_UUID})
-		// The resident authoring proxy is deliberately conservative: its compact
-		// per-area bounds are rebuilt asynchronously after every edit, so the first
-		// published generation must not depend on task-stage culling metadata.
-		.UpdateComponentProperty(local, std::string(MeshRenderComponent::kComponentName), "taskShaderCullingEnabled", TerraEngine::Reflection::Variant{false});
+		.UpdateComponentProperty(local, std::string(TerrainComponent::kComponentName), "castsShadows", TerraEngine::Reflection::Variant{true});
 	TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
 	terrainRenderProxyInstanceQueued = true;
 }
@@ -200,21 +193,26 @@ void TerrainWindow::QueueRenderProxySceneInstance()
 bool TerrainWindow::RestoreSceneTerrainProxy()
 {
 	ObjectManager& objects = ObjectManager::instance();
-	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
-	TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID firstVisibleObjectId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID missingProxyObjectId = TerraEngine::EMPTY_UUID;
 	objects.forEachObjectWithComponents<TerrainComponent>(
 		[&](Object object, TerrainComponent& terrain)
 		{
-			// The authoring window currently owns one direct one-area proxy. Keep the
-			// first visible durable instance deterministic and leave other instances
-			// untouched until the multi-area runtime system owns their publications.
-			if(objectId == TerraEngine::EMPTY_UUID && terrain.visible
-				&& terrain.terrainAssetId != TerraEngine::EMPTY_UUID)
+			if(!terrain.visible || terrain.terrainAssetId == TerraEngine::EMPTY_UUID) return;
+			const TerraEngine::UUID candidateObjectId = objects.getUUID(object);
+			if(firstVisibleObjectId == TerraEngine::EMPTY_UUID)
+				firstVisibleObjectId = candidateObjectId;
+			// Build one missing asset at a time. Once it publishes, the next update
+			// can select another terrain asset without duplicating scene components.
+			if(missingProxyObjectId == TerraEngine::EMPTY_UUID
+				&& !TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance()
+					.Resolve(terrain.terrainAssetId))
 			{
-				objectId = objects.getUUID(object);
-				assetId = terrain.terrainAssetId;
+				missingProxyObjectId = candidateObjectId;
 			}
 		});
+	const TerraEngine::UUID objectId = missingProxyObjectId != TerraEngine::EMPTY_UUID
+		? missingProxyObjectId : firstVisibleObjectId;
 	if(objectId == TerraEngine::EMPTY_UUID) return false;
 
 	std::string error;
@@ -240,6 +238,12 @@ bool TerrainWindow::OpenTerrainForEditing(TerraEngine::UUID objectId, std::strin
 		if(current.IsValid() && current.root->assetUuid == assetId
 			&& terrainRenderProxyTargetObjectId == objectId)
 		{
+			// Renderer teardown can retire derived proxy bindings while the durable
+			// terrain component and authoring store remain valid. Rebuild on demand
+			// so the scene recovers without requiring another Inspector drop.
+			const auto proxy = TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance()
+				.Resolve(assetId);
+			if(!proxy && !terrainRenderProxyBuildActive) ScheduleRenderProxyBuild();
 			status = "Terrain Tools is ready: drag in Scene View to create a detached sculpt preview.";
 			return true;
 		}
@@ -289,14 +293,20 @@ void TerrainWindow::PollRenderProxyBuild()
 	auto completed = terrainRenderProxyFuture.get();
 	terrainRenderProxyBuildActive = false;
 	terrainRenderProxyCancellation.reset();
+	const bool completedWasPreview = terrainRenderProxyBuildWasPreview;
 	const auto capture = terrainStore ? terrainStore->CaptureRoot() : TerraEngine::Terrain::TerrainRootCapture{};
 	const auto descriptor = capture.IsValid() ? terrainStore->FindDescriptor(*capture.root, {0, 0}) : std::nullopt;
-	const bool current = descriptor && completed.assetId == capture.root->assetUuid
-		&& completed.authoredHash == descriptor->authoredContentHash
-		&& completed.authoredGeneration == descriptor->editGeneration;
-	if(!completed.Succeeded() || !current || terrainRenderProxyRebuildRequested)
+	const bool currentAsset = descriptor && completed.assetId == capture.root->assetUuid;
+	const bool current = completedWasPreview
+		? currentAsset && (authoringSession.IsDirty() || holePreviewActive)
+		: currentAsset && completed.authoredHash == descriptor->authoredContentHash
+			&& completed.authoredGeneration == descriptor->editGeneration;
+	const bool rebuildRequested = terrainRenderProxyRebuildRequested;
+	terrainRenderProxyRebuildRequested = false;
+	if(!completed.Succeeded() || !current)
 	{
-		terrainRenderProxyRebuildRequested = false;
+		// A cancelled or obsolete preview must never replace the current proxy. The
+		// queued rebuild selects the latest detached or committed buffers afresh.
 		ScheduleRenderProxyBuild();
 		return;
 	}
@@ -331,7 +341,11 @@ void TerrainWindow::PollRenderProxyBuild()
 	terrainRenderProxyMeshId = resources.RegisterMesh(meshKey, std::move(completed.mesh));
 	RenderSystem::Instance().InvalidateGeneratedMesh(terrainRenderProxyMeshId);
 	QueueRenderProxySceneInstance();
-	status = "Terrain render proxy published; Scene and Game views will consume the committed generation.";
+	status = completedWasPreview
+		? "Terrain brush preview updated in Scene View."
+		: "Terrain render proxy published; Scene and Game views will consume the committed generation.";
+	if(rebuildRequested)
+		ScheduleRenderProxyBuild();
 }
 
 TerraEngine::Editor::Terrain::TerrainAutomationCommandResult TerrainWindow::ExecuteAutomationCommand(
@@ -365,7 +379,8 @@ TerraEngine::Editor::Terrain::TerrainAutomationCommandResult TerrainWindow::Exec
 				}
 				else return {false, "InvalidSchema", "Terrain import format must be png16 or raw16-le."};
 			}
-			TerraEngine::Editor::Terrain::TerrainCreationService service = CreateRegisteredTerrainService();
+			TerraEngine::Editor::Terrain::TerrainCreationService service =
+				TerraEngine::Editor::Terrain::CreateProjectTerrainCreationService();
 			std::filesystem::path destination = arguments["destination"].get<std::string>();
 			if(!destination.is_absolute())
 				destination = AssetDatabase::Instance().GetAssetRoot().parent_path() / destination;
@@ -533,9 +548,29 @@ TerraEngine::Editor::Terrain::TerrainAutomationCommandResult TerrainWindow::Exec
 
 void TerrainWindow::SetSculpting(bool value)
 {
-	if(!value && sculpting)
+	if(value && holeSculpting)
+	{
+		CancelHolePreview();
+		holeSculpting = false;
+	}
+	if(!value && sculpting && authoringSession.IsDirty())
 		CancelDetachedPreview("Terrain preview cancelled because the sculpt tool changed.");
 	sculpting = value;
+	sceneViewBrushFootprint.reset();
+}
+
+void TerrainWindow::SetHoleSculpting(bool value)
+{
+	if(value && sculpting)
+	{
+		if(authoringSession.IsDirty())
+			CancelDetachedPreview("Terrain preview cancelled because the sculpt tool changed.");
+		sculpting = false;
+	}
+	if(!value && holeSculpting)
+		CancelHolePreview();
+	holeSculpting = value;
+	sceneViewBrushFootprint.reset();
 }
 
 void TerrainWindow::OnGui()
@@ -609,7 +644,8 @@ void TerrainWindow::DrawCreateImportControls()
 		request.sourcePath = sourceBuffer; request.assetId = TerraEngine::GenerateUUID();
 		// RAW dimensions are deliberately visible and bounded in this first UI.
 		if(request.sourceFormat == TerraEngine::AssetPipeline::TerrainSourceFormat::Raw16LittleEndian) { request.rawWidth = 256U; request.rawHeight = 256U; }
-		TerraEngine::Editor::Terrain::TerrainCreationService service = CreateRegisteredTerrainService();
+		TerraEngine::Editor::Terrain::TerrainCreationService service =
+			TerraEngine::Editor::Terrain::CreateProjectTerrainCreationService();
 		auto result = service.CreateOrImport(request, destinationBuffer, [&](float, std::string_view, std::string_view) { return true; });
 		status = result.message;
 		if(result.succeeded)
@@ -626,6 +662,7 @@ void TerrainWindow::DrawSculptControls()
 	ImGui::TextUnformatted("Sculpt");
 	bool requestedSculpting = sculpting;
 	if(ImGui::Checkbox("Enable terrain brush", &requestedSculpting)) SetSculpting(requestedSculpting);
+	ImGui::TextDisabled("Drag in Scene View; releasing commits one undoable stroke.");
 	ImGui::SliderFloat("Radius (samples)", &brushSettings.radiusSamples, 0.25F, 512.0F);
 	ImGui::SliderFloat("Strength (mm)", &brushSettings.strengthMm, 1.0F, 10000.0F);
 	ImGui::SliderFloat("Spacing (samples)", &brushSettings.spacingSamples, 0.0F, 128.0F);
@@ -680,14 +717,24 @@ void TerrainWindow::DrawSculptControls()
 	}
 	ImGui::Separator();
 	ImGui::TextUnformatted("Holes / Collision");
-	ImGui::Checkbox("Enable hole brush", &holeSculpting);
+	bool requestedHoleSculpting = holeSculpting;
+	if(ImGui::Checkbox("Enable hole brush", &requestedHoleSculpting)) SetHoleSculpting(requestedHoleSculpting);
 	const char* holeModes[] = {"Paint hole", "Erase hole"};
 	int holeMode = static_cast<int>(holeBrushSettings.mode);
 	if(ImGui::Combo("Hole mode", &holeMode, holeModes, IM_ARRAYSIZE(holeModes))) holeBrushSettings.mode = static_cast<TerraEngine::Editor::Terrain::TerrainHoleBrushMode>(holeMode);
-		ImGui::SliderFloat("Hole radius (cells)", &holeBrushSettings.radiusCells, 0.25F, 128.0F);
-		if(ImGui::Button("Preview hole at selected area centre"))
+		holeBrushSettings.radiusCells = TerraEngine::Editor::Terrain::TerrainHoleBrush::EffectiveRadiusCells(
+			holeBrushSettings.radiusCells);
+		ImGui::SliderFloat("Hole radius (cells)", &holeBrushSettings.radiusCells,
+			TerraEngine::Editor::Terrain::TerrainHoleBrush::kMinimumRadiusCells, 128.0F);
+		if(ImGui::Button("Paint hole at area centre"))
 		{
-			if(!PreviewHoleStamp({128.0F, 128.0F})) status = "Hole preview was outside the active canonical mask.";
+			if(!PreviewHoleStamp(TerraEngine::Editor::Terrain::TerrainHoleBrush::CenteredOnCell(128, 128)))
+				status = "Hole preview was outside the active canonical mask.";
+			else
+			{
+				std::string error;
+				if(!ApplyHolePreview(error)) status = error;
+			}
 		}
 	ImGui::SameLine();
 	if(ImGui::Button("Apply hole preview"))
@@ -719,6 +766,11 @@ void TerrainWindow::DrawSurfaceControls()
 {
 	ImGui::TextUnformatted("Terrain Surface Layers");
 	ImGui::TextDisabled("Layer IDs stay stable when this list is reordered or a material is unavailable.");
+	// Each button is one authoring action. Stage and queue it together so users
+	// never need to discover a second Apply button for ordinary list edits.
+	const auto stageAndApplyLayerPatch = [this](TerraEngine::Terrain::TerrainLayerPatch patch, std::string& outError) {
+		return StageLayerPatch(patch, outError) && ApplyLayerPreview(outError);
+	};
 	// Render from a copy: a click can replace the detached stack while the UI is
 	// iterating, and retaining a reference would make that ordinary edit unsafe.
 	const TerraEngine::Terrain::TerrainLayerStack stack = LayerPreview();
@@ -736,7 +788,7 @@ void TerrainWindow::DrawSurfaceControls()
 		if(ImGui::SmallButton(layer.enabled ? "Disable" : "Enable"))
 		{
 			std::string error;
-			const bool staged = StageLayerPatch({TerraEngine::Terrain::TerrainLayerPatchKind::SetEnabled, 0u, layer.stableId, 0u, {}, !layer.enabled}, error);
+			const bool staged = stageAndApplyLayerPatch({TerraEngine::Terrain::TerrainLayerPatchKind::SetEnabled, 0u, layer.stableId, 0u, {}, !layer.enabled}, error);
 			if(!staged) status = error.empty() ? "Unable to stage the terrain layer visibility change." : error;
 		}
 		ImGui::SameLine();
@@ -748,21 +800,21 @@ void TerrainWindow::DrawSurfaceControls()
 			duplicate.stableId = nextId;
 			duplicate.name += " Copy";
 			std::string error;
-			const bool staged = StageLayerPatch({TerraEngine::Terrain::TerrainLayerPatchKind::Add, 0u, 0u, 0xffffffffu, std::move(duplicate)}, error);
+			const bool staged = stageAndApplyLayerPatch({TerraEngine::Terrain::TerrainLayerPatchKind::Add, 0u, 0u, 0xffffffffu, std::move(duplicate)}, error);
 			if(!staged) status = error.empty() ? "Unable to stage the terrain layer duplicate." : error;
 		}
 		ImGui::SameLine();
 		if(index > 0u && ImGui::SmallButton("Up"))
 		{
 			std::string error;
-			const bool staged = StageLayerPatch({TerraEngine::Terrain::TerrainLayerPatchKind::Move, 0u, layer.stableId, static_cast<std::uint32_t>(index - 1u)}, error);
+			const bool staged = stageAndApplyLayerPatch({TerraEngine::Terrain::TerrainLayerPatchKind::Move, 0u, layer.stableId, static_cast<std::uint32_t>(index - 1u)}, error);
 			if(!staged) status = error.empty() ? "Unable to stage the terrain layer reorder." : error;
 		}
 		ImGui::SameLine();
 		if(stack.layers.size() > 1u && ImGui::SmallButton("Remove"))
 		{
 			std::string error;
-			const bool staged = StageLayerPatch({TerraEngine::Terrain::TerrainLayerPatchKind::Remove, 0u, layer.stableId}, error);
+			const bool staged = stageAndApplyLayerPatch({TerraEngine::Terrain::TerrainLayerPatchKind::Remove, 0u, layer.stableId}, error);
 			if(!staged) status = error.empty() ? "Unable to stage the terrain layer removal." : error;
 		}
 		ImGui::PopID();
@@ -776,7 +828,7 @@ void TerrainWindow::DrawSurfaceControls()
 		layer.name = "Layer " + std::to_string(nextId);
 		layer.fallbackState = TerraEngine::Terrain::TerrainLayerFallbackState::FallbackActive;
 		std::string error;
-		if(StageLayerPatch({TerraEngine::Terrain::TerrainLayerPatchKind::Add, 0u, 0u, 0xffffffffu, std::move(layer)}, error)) selectedLayerId = nextId;
+		if(stageAndApplyLayerPatch({TerraEngine::Terrain::TerrainLayerPatchKind::Add, 0u, 0u, 0xffffffffu, std::move(layer)}, error)) selectedLayerId = nextId;
 		else status = error;
 	}
 	ImGui::SameLine();
@@ -795,7 +847,7 @@ void TerrainWindow::DrawSurfaceControls()
 		else
 		{
 			std::string error;
-			if(!StageLayerPatch({TerraEngine::Terrain::TerrainLayerPatchKind::SetFallbackState, 0u, selectedLayerId, 0u, {}, true, TerraEngine::Terrain::TerrainLayerFallbackState::Healthy}, error)) status = error;
+			if(!stageAndApplyLayerPatch({TerraEngine::Terrain::TerrainLayerPatchKind::SetFallbackState, 0u, selectedLayerId, 0u, {}, true, TerraEngine::Terrain::TerrainLayerFallbackState::Healthy}, error)) status = error;
 		}
 	}
 
@@ -811,11 +863,16 @@ void TerrainWindow::DrawSurfaceControls()
 	int strength = static_cast<int>(surfaceBrushSettings.strength);
 	if(ImGui::SliderInt("Weight strength", &strength, 1, 255)) surfaceBrushSettings.strength = static_cast<std::uint8_t>(strength);
 	ImGui::Checkbox("Use layer mask", &surfaceBrushSettings.useLayerMask);
-	if(ImGui::Button("Preview surface stroke"))
+	if(ImGui::Button("Paint selected area"))
 	{
 		const auto result = PreviewSurfaceBrush(surfaceBrushSettings,
 			surfaceBrushSettings.useLayerMask ? std::span<const std::uint8_t>(brushMask) : std::span<const std::uint8_t>{});
 		if(!result.changed) status = "Surface preview made no change; choose a valid stable layer ID or mask coverage.";
+		else
+		{
+			std::string error;
+			if(!ApplySurfacePreview(error)) status = error;
+		}
 	}
 	if(displacedLayerWarning != 0u)
 		ImGui::TextColored(ImVec4(1.0F, 0.55F, 0.1F, 1.0F), "Fifth contributor displaced stable layer %u; Apply preserves the explicit canonical result.", displacedLayerWarning);
@@ -844,10 +901,11 @@ void TerrainWindow::DrawProceduralControls()
 	ImGui::ProgressBar(progress.fraction, ImVec2(-1.0F, 0.0F), progress.message.c_str());
 	ImGui::TextDisabled("Estimate: %zu area(s), %zu samples, %zu kernel batch(es), %zu preview bytes.",
 		progress.estimate.areas, progress.estimate.samples, progress.estimate.kernelBatches, progress.estimate.previewBytes);
-	if(ImGui::Button("Preview procedural operation"))
+	if(ImGui::Button("Run procedural operation"))
 	{
 		std::string error;
-		if(!StartProceduralPreview(error)) status = error;
+		proceduralAutoApplyRequested = StartProceduralPreview(error);
+		if(!proceduralAutoApplyRequested) status = error;
 	}
 	ImGui::SameLine();
 	if(ImGui::Button("Cancel procedural preview")) CancelProceduralPreview();
@@ -863,7 +921,13 @@ void TerrainWindow::PollProceduralPreview()
 	if(const auto ready = proceduralJobs.TakeReadyPreview())
 	{
 		proceduralPreview = *ready;
-		status = "Detached procedural preview is ready to Apply or Cancel.";
+		if(proceduralAutoApplyRequested)
+		{
+			proceduralAutoApplyRequested = false;
+			std::string error;
+			if(!ApplyProceduralPreview(error)) status = error;
+		}
+		else status = "Detached procedural preview is ready to Apply or Cancel.";
 	}
 }
 
@@ -957,6 +1021,7 @@ bool TerrainWindow::ApplyProceduralPreview(std::string& outError)
 
 void TerrainWindow::CancelProceduralPreview() noexcept
 {
+	proceduralAutoApplyRequested = false;
 	proceduralJobs.Cancel("Procedural preview cancelled by the editor.");
 	if(queuedProceduralTransactionId)
 		authoringSystem.CancelPreparedTransaction(*queuedProceduralTransactionId, "Procedural transaction cancelled before protected publication.");
@@ -1030,7 +1095,8 @@ TerrainWindow::AutomationOperationStart TerrainWindow::BeginAutomationOperation(
 		TerraEngine::Editor::Terrain::TerrainHoleBrushStamp stamp;
 		stamp.centerCellX=request.settings.value("centerX",128.0F); stamp.centerCellZ=request.settings.value("centerZ",128.0F);
 		holeBrushSettings.mode=request.operation=="paint-hole"?TerraEngine::Editor::Terrain::TerrainHoleBrushMode::PaintHole:TerraEngine::Editor::Terrain::TerrainHoleBrushMode::EraseHole;
-		holeBrushSettings.radiusCells=request.settings.value("radiusCells",1.0F);
+		holeBrushSettings.radiusCells = TerraEngine::Editor::Terrain::TerrainHoleBrush::EffectiveRadiusCells(
+			request.settings.value("radiusCells", 1.0F));
 		if(!PreviewHoleStamp(stamp)) return {false,"InvalidSchema","Hole preview did not affect a canonical cell.",std::nullopt};
 		std::string error; if(!ApplyHolePreview(error)) return {false,"Unavailable",error,std::nullopt};
 		return {true,{},"Hole transaction queued for protected publication.",queuedHoleTransactionId};
@@ -1396,6 +1462,9 @@ bool TerrainWindow::PreviewHoleStamp(const TerraEngine::Editor::Terrain::Terrain
 		previewHoleMask = std::move(after);
 		holePreviewActive = true;
 		status = "Detached hole preview is ready to Apply or Cancel.";
+		// Hole painting shares the same detached render route as height sculpting so
+		// removed cells disappear during the drag without publishing collision early.
+		ScheduleRenderProxyBuild();
 	}
 	return changed;
 }
@@ -1410,13 +1479,16 @@ bool TerrainWindow::ApplyHolePreview(std::string& outError)
 	return QueueHolePreviewForPublication(outError);
 }
 
-void TerrainWindow::CancelHolePreview() noexcept
+void TerrainWindow::CancelHolePreview()
 {
+	const bool restoreCommittedProxy = holePreviewActive;
 	if(queuedHoleTransactionId)
 		authoringSystem.CancelPreparedTransaction(*queuedHoleTransactionId, "Terrain hole preview was cancelled before protected publication.");
 	previewHoleMask = committedHoleMask;
 	holePreviewActive = false;
 	holeBrushActive = false;
+	if(restoreCommittedProxy)
+		ScheduleRenderProxyBuild();
 }
 
 bool TerrainWindow::QueueHolePreviewForPublication(std::string& outError)
@@ -1604,6 +1676,7 @@ void TerrainWindow::CancelDetachedPreview(std::string_view reason)
 {
 	// Preview buffers are editor-private. Resetting them is safe at every
 	// lifecycle boundary because live terrain data changes only via publication.
+	const bool restoreCommittedProxy = authoringSession.IsDirty();
 	authoringSession.Cancel();
 	authoringSystem.CancelPreparedWork(reason);
 	previewHeightMm = committedHeightMm;
@@ -1613,6 +1686,8 @@ void TerrainWindow::CancelDetachedPreview(std::string_view reason)
 	previousStamp.reset();
 	applyRequested = false;
 	status.assign(reason);
+	if(restoreCommittedProxy)
+		ScheduleRenderProxyBuild();
 }
 
 void TerrainWindow::MarkTerrainSaved()
@@ -1776,7 +1851,8 @@ void TerrainWindow::HandleSceneViewPointer(
 	const glm::dvec3& rayDirection,
 	bool pressed, bool held, bool released)
 {
-	if((!sculpting && !holeSculpting) || !terrainStore || (!pressed && !brushStrokeActive && !holeBrushActive)) return;
+	if((!sculpting && !holeSculpting) || !terrainStore) return;
+	sceneViewBrushFootprint.reset();
 	TerraEngine::Scene::WorldPosition terrainOrigin{};
 	if(terrainRenderProxyTargetObjectId != TerraEngine::EMPTY_UUID)
 	{
@@ -1804,6 +1880,40 @@ void TerrainWindow::HandleSceneViewPointer(
 		if(x < 0 || z < 0 || x >= 256 || z >= 256) return std::nullopt;
 		return static_cast<double>(previewHeightMm[static_cast<std::size_t>(z) * 256U + x]) / 1000.0;
 	}, 20000.0, 0.5);
+	if(hit)
+	{
+		// Height brushes stamp vertices at integer samples, while hole brushes stamp
+		// the centre of the picked cell at a half-sample offset. Convert the active
+		// tool's exact centre and radius into metres for Scene View projection.
+		const double surfaceHeight = static_cast<double>(
+			previewHeightMm[static_cast<std::size_t>(hit->sample.z) * 256U
+				+ static_cast<std::size_t>(hit->sample.x)]) / 1000.0;
+		const auto holeStamp = TerraEngine::Editor::Terrain::TerrainHoleBrush::CenteredOnCell(
+			hit->sample.x, hit->sample.z);
+		const double centerSampleX = holeSculpting
+			? static_cast<double>(holeStamp.centerCellX) : static_cast<double>(hit->sample.x);
+		const double centerSampleZ = holeSculpting
+			? static_cast<double>(holeStamp.centerCellZ) : static_cast<double>(hit->sample.z);
+		const auto worldCenter = TerraEngine::Scene::ApplyWorldDelta(
+			terrainOrigin,
+			{{}, {
+				centerSampleX * spacing,
+				surfaceHeight + 0.02,
+				centerSampleZ * spacing}});
+		if(worldCenter.Succeeded())
+		{
+			const float radiusUnits = holeSculpting
+				? TerraEngine::Editor::Terrain::TerrainHoleBrush::EffectiveRadiusCells(holeBrushSettings.radiusCells)
+				: brushSettings.radiusSamples;
+			sceneViewBrushFootprint = SceneViewBrushFootprint{
+				worldCenter.position,
+				std::max(0.001F, radiusUnits) * authoredSampleSpacingMetres,
+				holeSculpting};
+		}
+	}
+	// Hovering updates only the projected footprint. Mutation remains gated by
+	// the pointer lifecycle below so moving the mouse never creates terrain work.
+	if(!pressed && !brushStrokeActive && !holeBrushActive) return;
 	if(holeSculpting)
 	{
 		if(pressed)
@@ -1816,7 +1926,10 @@ void TerrainWindow::HandleSceneViewPointer(
 		if(released && holeBrushActive)
 		{
 			holeBrushActive = false;
-			status = holePreviewActive ? "Detached hole stroke ready to Apply or Cancel." : "Hole stroke produced no changes.";
+			std::string error;
+			if(holePreviewActive && !ApplyHolePreview(error)) status = error;
+			else if(holePreviewActive) status = "Terrain hole stroke queued for the protected authoring boundary.";
+			else status = "Hole stroke produced no changes.";
 		}
 		return;
 	}
@@ -1827,14 +1940,23 @@ void TerrainWindow::HandleSceneViewPointer(
 		authoringSession.SetResidentAreas({{0, 0}}); brushStrokeActive = true; previousStamp.reset(); ApplyBrushAt(*hit);
 	}
 	else if(held && brushStrokeActive && hit) ApplyBrushAt(*hit);
-	if(released && brushStrokeActive) { brushStrokeActive = false; previousStamp.reset(); status = authoringSession.IsDirty() ? "Detached terrain stroke ready to Apply or Cancel." : "Terrain stroke produced no changes."; }
+	if(released && brushStrokeActive)
+	{
+		brushStrokeActive = false;
+		previousStamp.reset();
+		const bool changed = authoringSession.IsDirty();
+		applyRequested = QueuePreviewForPublication();
+		if(!changed) status = "Terrain stroke produced no changes.";
+	}
 }
 
 void TerrainWindow::ApplyHoleBrushAt(const TerraEngine::Editor::Terrain::TerrainPickHit& hit)
 {
 	// Pointer routing already owns interaction feedback; a rejected detached
-	// sample simply leaves the current preview unchanged.
-	(void)PreviewHoleStamp({static_cast<float>(hit.sample.x), static_cast<float>(hit.sample.z)});
+	// sample simply leaves the current preview unchanged. Snap to the selected
+	// cell centre so radii below one cell cannot fall between every cell centre.
+	(void)PreviewHoleStamp(TerraEngine::Editor::Terrain::TerrainHoleBrush::CenteredOnCell(
+		hit.sample.x, hit.sample.z));
 }
 
 void TerrainWindow::ApplyBrushAt(const TerraEngine::Editor::Terrain::TerrainPickHit& hit)
@@ -1846,6 +1968,10 @@ void TerrainWindow::ApplyBrushAt(const TerraEngine::Editor::Terrain::TerrainPick
 	std::vector<std::int32_t> delta(after.size()); for(std::size_t index = 0U; index < after.size(); ++index) delta[index] = after[index] - previewHeightMm[index];
 	std::string error; if(!authoringSession.AddHeightDelta({0, 0}, std::move(delta), error)) { status = error; brushStrokeActive = false; return; }
 	previewHeightMm = std::move(after); previousStamp = stamp;
+	// Render the detached value immediately. The worker owns a copy and publishes
+	// only at the protected boundary; mouse release still creates the sole durable
+	// transaction and undo-history entry for the complete stroke.
+	ScheduleRenderProxyBuild();
 }
 
 bool TerrainWindow::QueuePreviewForPublication()
@@ -1992,6 +2118,8 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> TerrainWindow::De
 			// This records history/dirty state even when the Terrain window is not
 			// being drawn, rather than making correctness depend on an ImGui tick.
 			workload.work = [this](TerraEngine::Scheduling::JobGraphContext&) { ProcessProtectedAuthoringBoundary(); };
+			workload.writes.push_back(
+				TerraEngine::Scheduling::kResourceTerrainRenderProxies);
 		}
 	}
 	return workloads;

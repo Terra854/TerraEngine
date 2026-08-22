@@ -82,6 +82,7 @@ add_executable(TerraEngine-EditorTests
 	Project/ManagedReadinessTests.cpp
 	Project/ProjectReadinessPerformanceTests.cpp
 	Core/EditorCommandLineTests.cpp
+	Core/EditorRuntimeLayoutTests.cpp
 	Core/EditorStartupRendererConfigurationTests.cpp
 	Core/EditorPostFrameBoundaryTests.cpp
 	Core/MainEditorToolbarTests.cpp
@@ -219,6 +220,7 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core/EditorCommandLine.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core/EditorRuntimeLayout.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core/EditorStartupRendererConfiguration.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core/CheckedImGuiVulkanBridge.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core/ViewportTextureRegistry.cpp

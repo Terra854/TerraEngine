@@ -5112,6 +5112,55 @@ void InspectorWindow::OnGui() {
 							std::snprintf(assetNameBuffer, sizeof(assetNameBuffer), "%s", assetName.c_str());
 							if(metadata == nullptr) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.35f, 1.0f));
 							ImGui::InputText("##TerrainAsset", assetNameBuffer, sizeof(assetNameBuffer), ImGuiInputTextFlags_ReadOnly);
+							// Assign the durable terrain UUID through the protected scene mutation
+							// boundary. The typed payload and importer check prevent non-terrain
+							// assets from ever reaching TerrainComponent::terrainAssetId.
+							if(ImGui::BeginDragDropTarget())
+							{
+								if(const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_TERRAIN"))
+								{
+									if(payload->Data == nullptr || payload->DataSize != sizeof(TerraEngine::UUID))
+									{
+										m_TerrainInspectorError = "The dropped terrain payload is invalid.";
+									}
+									else
+									{
+										TerraEngine::UUID droppedAssetId{};
+										std::memcpy(droppedAssetId.data(), payload->Data, sizeof(droppedAssetId));
+										const AssetMetadata* droppedMetadata = AssetDatabase::Instance().FindAssetByGuid(droppedAssetId);
+										if(droppedMetadata == nullptr || droppedMetadata->importerName != "TerrainImporter")
+										{
+											m_TerrainInspectorError = "Only registered .teterrain assets can be assigned here.";
+										}
+										else if(const std::optional<Object> terrainObject = ObjectManager::instance().getObject(obj))
+										{
+											ObjectManager& objects = ObjectManager::instance();
+											const TerraEngine::UUID objectId = objects.getUUID(*terrainObject);
+											TerraEngine::Scene::TransactionalMutationBuilder builder(
+												"inspector-terrain-asset-" + TerraEngine::ToHexString(TerraEngine::GenerateUUID()),
+												TerraEngine::Scene::TransactionOrigin::Editor,
+												"Assign Terrain Asset");
+											builder.ObserveScene(objects)
+												.ObserveObject(objects, objectId)
+												.SetUndoGroup("Assign Terrain Asset")
+												.UpdateComponentProperty(objectId, "TerrainComponent", "terrainAssetId",
+													TerraEngine::Reflection::Variant{droppedAssetId});
+											TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
+											// The component update is deferred, so ask the editor lifecycle
+											// owner to retry until that UUID is visible and registered. The
+											// terrain worker then creates the render proxy without adding a
+											// generated MeshRenderComponent to the scene.
+											if(m_Owner != nullptr) m_Owner->RequestTerrainProxyRestore();
+											m_TerrainInspectorError.clear();
+										}
+										else
+										{
+											m_TerrainInspectorError = "The selected terrain object is no longer available.";
+										}
+									}
+								}
+								ImGui::EndDragDropTarget();
+							}
 							if(metadata == nullptr) ImGui::PopStyleColor();
 							// Durable schema and UUID fields are serialization details. The
 							// Inspector presents the asset by name and keeps only author-facing
@@ -5135,8 +5184,14 @@ void InspectorWindow::OnGui() {
 								terrainTools->SetVisible(true);
 								std::string openError;
 								const TerraEngine::UUID objectId = ObjectManager::instance().getUUID(*object);
-								m_TerrainInspectorError = terrainTools->OpenTerrainForEditing(objectId, openError)
-									? std::string{} : std::move(openError);
+								if(terrainTools->OpenTerrainForEditing(objectId, openError))
+								{
+									// Edit Terrain is an action, so it activates the default Raise
+									// brush instead of requiring a second hidden-mode checkbox.
+									terrainTools->SetSculpting(true);
+									m_TerrainInspectorError.clear();
+								}
+								else m_TerrainInspectorError = std::move(openError);
 							}
 							else m_TerrainInspectorError = "Terrain Tools is unavailable.";
 						}

@@ -56,6 +56,7 @@ namespace TerraEngine::Editor::Scripting
 		const std::filesystem::path& projectRoot,
 		const std::filesystem::path& projectPath,
 		std::string profileName,
+		const std::filesystem::path& dotnetExecutable,
 		const std::filesystem::path& processWorkingDirectory = {},
 		const std::filesystem::path& buildProjectPath = {})
 	{
@@ -73,7 +74,8 @@ namespace TerraEngine::Editor::Scripting
 		// servers can inherit that pipe and keep it open after dotnet exits,
 		// leaving the background reader stuck waiting for EOF on Linux. Disable
 		// those servers for interactive script builds so project-open cannot hang.
-		invocation.commandLine = "dotnet build " + QuoteDotNetCommandArgument(invocation.buildProjectPath)
+		invocation.commandLine = QuoteDotNetCommandArgument(dotnetExecutable)
+			+ " build " + QuoteDotNetCommandArgument(invocation.buildProjectPath)
 			+ " -c " + invocation.profileName
 			+ " -nologo -p:GenerateFullPaths=true -p:UseSharedCompilation=false --disable-build-servers";
 		return invocation;

@@ -178,22 +178,29 @@ namespace TerraEngine::Tests
 			const std::string texture = ReadSourceFile("Engine/Resource/ResourceManagerTexture.cpp");
 			const std::string publication =
 				"m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);";
+			// Generated resource registration now publishes the same generation before
+			// the reload functions in these files. Restrict source-order assertions to
+			// each reload implementation so an earlier valid publication is not mistaken
+			// for an invalid failed-reload publication.
+			const std::string meshReload = mesh.substr(mesh.find("ResourceManager::ReloadMesh("));
+			const std::string materialReload = material.substr(material.find("ResourceManager::ReloadMaterial("));
+			const std::string textureReload = texture.substr(texture.find("ResourceManager::ReloadTexture("));
 
 			context.Expect(header.find("GetRendererResourcePublicationGeneration")
 					!= std::string::npos
 				&& header.find("std::atomic_uint64_t m_RendererResourcePublicationGeneration{1U}")
 					!= std::string::npos,
 				"ResourceManager must expose a monotonic renderer-only publication generation.");
-			context.Expect(mesh.find("meshCache.resources[id] = std::move(mesh);")
-					< mesh.find(publication)
-				&& material.find("materialCache.resources[id] = std::move(material);")
-					< material.find(publication)
-				&& texture.find("textureCache.resources[id] = std::move(texture);")
-					< texture.find(publication),
+			context.Expect(meshReload.find("meshCache.resources[id] = std::move(mesh);")
+					< meshReload.find(publication)
+				&& materialReload.find("materialCache.resources[id] = std::move(material);")
+					< materialReload.find(publication)
+				&& textureReload.find("textureCache.resources[id] = std::move(texture);")
+					< textureReload.find(publication),
 				"Mesh, material, and texture reloads must advance renderer publication only after replacing a complete cache payload.");
-			context.Expect(mesh.find("if (mesh)") < mesh.find(publication)
-				&& material.find("if (material)") < material.find(publication)
-				&& texture.find("if (texture)") < texture.find(publication),
+			context.Expect(meshReload.find("if (mesh)") < meshReload.find(publication)
+				&& materialReload.find("if (material)") < materialReload.find(publication)
+				&& textureReload.find("if (texture)") < textureReload.find(publication),
 				"Reload failures must not advance the renderer publication generation.");
 		});
 	}

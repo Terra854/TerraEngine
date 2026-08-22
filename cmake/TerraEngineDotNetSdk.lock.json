@@ -1,0 +1,15 @@
+{
+	"sdkVersion": "10.0.303",
+	"archives": {
+		"win-x64": {
+			"file": "dotnet-sdk-10.0.303-win-x64.zip",
+			"url": "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.303/dotnet-sdk-10.0.303-win-x64.zip",
+			"sha512": "ad4ef6202e55babde1c65e1be7b468c3ecb738ccc2fb8bd3c2bb408a4f45d247c8c5a5f57fedc54ebee7cb5fc4f487772997f2d053010d2e1903b974cc64216d"
+		},
+		"linux-x64": {
+			"file": "dotnet-sdk-10.0.303-linux-x64.tar.gz",
+			"url": "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.303/dotnet-sdk-10.0.303-linux-x64.tar.gz",
+			"sha512": "538df11ceb9d86bdda061bab6ede3d1f6d46bb9ba087ae905643f3d456afe982949d1b952bceb305a5d22d2d6e69cc0e5100216ffcc709aaa86e867f2d9cdf9a"
+		}
+	}
+}

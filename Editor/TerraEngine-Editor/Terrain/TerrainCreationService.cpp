@@ -2,8 +2,10 @@
 
 #include "TerrainCreationService.h"
 
+#include "Editor/TerraEngine-Editor/Assets/AssetDatabase.h"
 #include "Terrain/TerrainAreaCodec.h"
 #include "File Formats/TerraEngineTerrainFile.h"
+#include "Resource/ResourceManager.h"
 #include "Utilities/UUID.h"
 
 #include <algorithm>
@@ -77,6 +79,40 @@ namespace TerraEngine::Editor::Terrain
 			if(!currentOutput) { outError = "The staged terrain CURRENT pointer could not be written."; return false; }
 			return true;
 		}
+	}
+
+	TerrainCreationService CreateProjectTerrainCreationService()
+	{
+		return TerrainCreationService(
+			[](const std::filesystem::path& assetPath, std::string& outError)
+			{
+				AssetDatabase& assets = AssetDatabase::Instance();
+				std::filesystem::path absolutePath = assetPath;
+				if(!absolutePath.is_absolute())
+					absolutePath = assets.GetAssetRoot().parent_path() / absolutePath;
+				absolutePath = std::filesystem::absolute(absolutePath).lexically_normal();
+
+				// Import only after the descriptor and private generation have both
+				// been published. A failed registration makes CreateOrImport roll the
+				// complete bundle back instead of leaving a half-visible browser item.
+				assets.ImportAsset(absolutePath);
+				const auto registered = assets.GetAssets().find(absolutePath);
+				if(registered == assets.GetAssets().end()
+					|| registered->second.importerName != "TerrainImporter")
+				{
+					outError = "The completed terrain descriptor could not be registered with the project asset database.";
+					return false;
+				}
+
+				const std::filesystem::path runtimePath = ResourceManager::Instance().GetRegisteredAssetPath(
+					registered->second.guid, AssetType::Terrain);
+				if(runtimePath.empty())
+				{
+					outError = "The terrain asset database entry did not publish a runtime terrain path.";
+					return false;
+				}
+				return true;
+			});
 	}
 
 	TerrainCreationResult TerrainCreationService::CreateOrImport(const TerraEngine::AssetPipeline::TerrainImportRequest& request,

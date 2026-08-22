@@ -72,6 +72,12 @@ bool DiscoverExportRuntimeLayout(
 	outLayout.shaderDirectory = outLayout.editorDirectory / "Shaders";
 	outLayout.fontDirectory = outLayout.editorDirectory / "Fonts";
 	outLayout.managedDirectory = outLayout.editorDirectory / "Managed";
+	outLayout.dotnetSdkDirectory = outLayout.editorDirectory / "DotNet";
+#ifdef _WIN32
+	outLayout.dotnetExecutable = outLayout.dotnetSdkDirectory / "dotnet.exe";
+#else
+	outLayout.dotnetExecutable = outLayout.dotnetSdkDirectory / "dotnet";
+#endif
 	outLayout.nativeAotToolchainDirectory = outLayout.editorDirectory / "NativeAotNuGet";
 	outLayout.nativeAotNugetConfig = outLayout.nativeAotToolchainDirectory / "NuGet.Config";
 	outLayout.nativeAotNugetFeed = outLayout.nativeAotToolchainDirectory / "feed";
@@ -97,6 +103,8 @@ bool ValidateExportRuntimeLayout(
 		|| !RequireDirectory(layout.shaderDirectory, "shader", outError)
 		|| !RequireDirectory(layout.fontDirectory, "font", outError)
 		|| !RequireDirectory(layout.managedDirectory, "managed reference", outError)
+		|| !RequireDirectory(layout.dotnetSdkDirectory, ".NET SDK", outError)
+		|| !RequireFile(layout.dotnetExecutable, ".NET SDK executable", outError)
 		|| !RequireDirectory(layout.nativeAotToolchainDirectory, "NativeAOT toolchain", outError)
 		|| !RequireDirectory(layout.nativeAotNugetFeed, "NativeAOT offline feed", outError)
 		|| !RequireFile(layout.nativeAotNugetConfig, "NativeAOT NuGet.Config", outError)

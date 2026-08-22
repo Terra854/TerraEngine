@@ -141,28 +141,37 @@ the engine assembly, source generator, and editor assembly build with
 `--no-restore`.
 
 The current closure is pinned to .NET SDK `10.0.303`, runtime pack `10.0.11`,
-and RID `win-x64`. Confirm the exact SDK and verify every archive, license, and
-manifest entry before configuring:
+and RID `win-x64`. CMake downloads the SDK archive selected by
+`cmake/TerraEngineDotNetSdk.lock.json`, verifies its SHA-512, and extracts it to
+`External/dotnet/sdk/<rid>/<version>`. Build commands always use that absolute
+executable; an SDK installed on PATH is ignored. Confirm the repository-local
+SDK and verify every package archive, license, and manifest entry after
+configuring:
 
 ```powershell
-dotnet --version
+cmake --fresh --preset RelWithDebInfo
+$dotnet = "External/dotnet/sdk/win-x64/10.0.303/dotnet.exe"
+& $dotnet --version
 $archives = @(
 	Get-ChildItem .nuget/feed/*.nupkg |
 	Select-Object -ExpandProperty FullName
 )
 $env:NUGET_CERT_REVOCATION_MODE = "offline"
-dotnet nuget verify @archives --all --verbosity minimal
+& $dotnet nuget verify @archives --all --verbosity minimal
 Remove-Item Env:NUGET_CERT_REVOCATION_MODE
 cmake -DTERRAENGINE_RUNTIME_ID=win-x64 `
 	-P cmake/TerraEngineOfflineNuGet.cmake
 ```
 
-The first command must print `10.0.303`. NuGet verifies each archive's
+The SDK version command must print `10.0.303`. NuGet verifies each archive's
 available author and repository signatures without an online revocation
 lookup. The CMake verifier rejects changed or unmanifested packages, mismatched
 SDK metadata, and changed legal files. Set
+`-DTERRAENGINE_DOTNET_SDK_MODE=OFF` together with
 `-DTERRAENGINE_NUGET_CACHE_MODE=OFF` when network access is prohibited; this
-keeps verification fail-closed instead of regenerating a missing archive.
+keeps both dependency boundaries fail-closed instead of downloading a missing
+SDK or regenerating a missing package archive. `global.json` and
+`cmake/TerraEngineDotNetSdk.lock.json` must always select the same SDK version.
 `cmake/TerraEngineNuGet.lock.json` records the complete project and NativeAOT
 export dependency closure with original package provenance. The fourth project is the
 `netstandard2.0` target of the vendored Hexa.NET.ImGui project referenced by the
@@ -1226,9 +1235,11 @@ install tree stays verified with the compiled outputs.
 cmake --build out/build/Debug --target install
 ```
 
-The install target also runs managed `dotnet` publish/build targets. If
-`dotnet` is not available on PATH, native test targets can still validate but
-install will fail at managed publish.
+The install target also runs managed publish/build targets through the
+repository-local SDK and copies that SDK to `Build/Editor/DotNet`. Installed
+editor script builds and NativeAOT exports invoke the copied executable by
+absolute path, so neither building nor using TerraEngine requires `dotnet` on
+PATH.
 
 ### Renderer Stability Hardening
 

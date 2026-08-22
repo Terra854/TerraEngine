@@ -1000,6 +1000,12 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed PREFIX "Engine/Mana
 # Verify and restore every managed dependency through one serialized,
 # repository-contained boundary. Individual targets use --no-restore below so
 # none of them can consult an ambient user or network NuGet source.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/TerraEngineDotNetSdk.cmake")
+terraengine_resolve_bundled_dotnet(
+	"${TERRAENGINE_DOTNET_RID}"
+	TERRAENGINE_DOTNET_EXECUTABLE
+	TERRAENGINE_DOTNET_SDK_ROOT
+)
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/TerraEngineOfflineNuGet.cmake")
 terraengine_add_offline_nuget_restore_target(
 	TerraEngine.Managed.Restore
@@ -1539,6 +1545,7 @@ add_dependencies(TerraEngine-Export TerraEngineModelPackageCompiler TerraEngine-
 add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Core/EditorMain.cpp
 	Editor/TerraEngine-Editor/Core/EditorCommandLine.cpp
+	Editor/TerraEngine-Editor/Core/EditorRuntimeLayout.cpp
 	Editor/TerraEngine-Editor/Core/EditorSystem.cpp
 	Editor/TerraEngine-Editor/Core/EditorStartupRendererConfiguration.cpp
 	Editor/TerraEngine-Editor/Core/CheckedImGuiVulkanBridge.cpp
@@ -1908,6 +1915,12 @@ terraengine_install_physics_foundation("${ENGINE_INSTALL_DESTINATION}")
 terraengine_install_audio_foundation("${ENGINE_INSTALL_DESTINATION}")
 terraengine_install_offline_nuget_notices("${ENGINE_INSTALL_DESTINATION}")
 terraengine_install_nativeaot_nuget_toolchain("${ENGINE_INSTALL_DESTINATION}")
+# Script compilation and NativeAOT export are editor features. Install the
+# validated SDK beside the editor so shipped tools invoke the same bits as the
+# source build and never depend on an SDK registered on the user's machine.
+install(DIRECTORY "${TERRAENGINE_DOTNET_SDK_ROOT}/"
+	DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/DotNet"
+	USE_SOURCE_PERMISSIONS)
 if(TERRAENGINE_TERRAIN_PHYSICS_HEADERS)
 	install(FILES ${TERRAENGINE_TERRAIN_PHYSICS_HEADERS}
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/include/Physics/Terrain")

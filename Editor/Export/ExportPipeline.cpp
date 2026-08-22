@@ -1145,6 +1145,7 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 	const std::filesystem::path& nativeAotPublishOutputDir =
 		nativeAotWorkspace.PublishDirectory();
 	const NativeAotPublishContext nativeAotContext{
+		.dotnetExecutable = runtimeLayout.dotnetExecutable,
 		.workingDirectory = runtimeLayout.nativeAotToolchainDirectory,
 		.nugetConfig = runtimeLayout.nativeAotNugetConfig,
 		.nugetFeed = runtimeLayout.nativeAotNugetFeed,

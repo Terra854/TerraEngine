@@ -276,6 +276,12 @@ namespace TerraEngine::EditorTests {
 			layout.shaderDirectory = layout.editorDirectory / "Shaders";
 			layout.fontDirectory = layout.editorDirectory / "Fonts";
 			layout.managedDirectory = layout.editorDirectory / "Managed";
+			layout.dotnetSdkDirectory = layout.editorDirectory / "DotNet";
+#ifdef _WIN32
+			layout.dotnetExecutable = layout.dotnetSdkDirectory / "dotnet.exe";
+#else
+			layout.dotnetExecutable = layout.dotnetSdkDirectory / "dotnet";
+#endif
 			layout.nativeAotToolchainDirectory = layout.editorDirectory / "NativeAotNuGet";
 			layout.nativeAotNugetConfig = layout.nativeAotToolchainDirectory / "NuGet.Config";
 			layout.nativeAotNugetFeed = layout.nativeAotToolchainDirectory / "feed";
@@ -292,6 +298,8 @@ namespace TerraEngine::EditorTests {
 			Touch(layout.launcherDirectory / GetExportGlfwLibraryName(platform));
 			std::filesystem::create_directories(layout.engineDirectory);
 			std::filesystem::create_directories(layout.managedDirectory);
+			std::filesystem::create_directories(layout.dotnetSdkDirectory);
+			Touch(layout.dotnetExecutable);
 			std::filesystem::create_directories(layout.nativeAotNugetFeed);
 			Touch(layout.nativeAotNugetConfig, "offline-config");
 			Touch(layout.nativeAotGlobalJson, "sdk-pin");

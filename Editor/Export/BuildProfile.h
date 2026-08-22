@@ -183,6 +183,8 @@ std::string GetExportManagedRuntimeLibraryName(ExportPlatform platform);
 /// NuGet cache, an ambient package source, or another concurrent build's
 /// intermediate/output tree.
 struct NativeAotPublishContext {
+	/// Absolute executable from the SDK installed beside the editor.
+	std::filesystem::path dotnetExecutable;
 	/// Installed directory used for global.json SDK selection.
 	std::filesystem::path workingDirectory;
 	/// Installed offline NuGet configuration and bundled package feed.

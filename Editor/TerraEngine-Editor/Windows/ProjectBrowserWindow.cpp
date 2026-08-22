@@ -6,6 +6,7 @@
 #include "ProjectBrowserWindow.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
+#include "../Terrain/TerrainCreationService.h"
 #include "UIBuilderWindow.h"
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
@@ -196,6 +197,15 @@ std::string ToLowerText(std::string text)
 		return static_cast<char>(std::tolower(character));
 	});
 	return text;
+}
+
+bool IsTerrainPrivateDataDirectory(const std::filesystem::path& directory)
+{
+	// A .teterrain.data directory is implementation-owned immutable storage for
+	// its sibling parent asset. It must not appear as a separately editable
+	// folder in either half of the Project Browser.
+	return std::filesystem::is_directory(directory)
+		&& ToLowerText(directory.filename().string()).ends_with(".teterrain.data");
 }
 
 bool MatchesSearchText(const std::string& text, const std::string& searchFilter)
@@ -542,6 +552,9 @@ void ProjectBrowserWindow::OnGui() {
 			if (ImGui::MenuItem("Prefab (.teprefab)")) {
 				OpenCreateAssetModal("Create Prefab", "New Prefab", ".teprefab");
 			}
+			if (ImGui::MenuItem("Terrain (.teterrain)")) {
+				OpenCreateAssetModal("Create Terrain", "New Terrain", ".teterrain");
+			}
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::MenuItem("UI Markup (.tuiml)")) {
 				OpenCreateAssetModal("Create UI Markup", "New UI", ".tuiml");
@@ -792,6 +805,28 @@ void ProjectBrowserWindow::CreateNamedAsset()
 		return;
 	}
 
+	if (m_CreateAssetExtension == ".teterrain") {
+		TerraEngine::AssetPipeline::TerrainImportRequest request;
+		request.sourceFormat = TerraEngine::AssetPipeline::TerrainSourceFormat::Flat;
+		request.assetId = TerraEngine::GenerateUUID();
+		// The initial flat 256x256 generation is bounded and must finish its
+		// atomic database registration before the modal closes. Heavier PNG/RAW
+		// imports continue to use Terrain Tools with cancellable progress.
+		TerraEngine::Editor::Terrain::TerrainCreationService service =
+			TerraEngine::Editor::Terrain::CreateProjectTerrainCreationService();
+		const TerraEngine::Editor::Terrain::TerrainCreationResult result =
+			service.CreateOrImport(request, targetPath);
+		if(!result.succeeded) {
+			m_CreateAssetError = result.message.empty()
+				? "The terrain asset could not be created."
+				: result.message;
+			return;
+		}
+		m_Owner->SetSelectedAsset(std::filesystem::absolute(result.assetPath));
+		ImGui::CloseCurrentPopup();
+		return;
+	}
+
 	if (m_CreateAssetExtension == ".tmat") {
 		MaterialHeader header{};
 		std::memcpy(header.magic, "TMAT", 4);
@@ -839,6 +874,7 @@ void ProjectBrowserWindow::DrawDirectoryTree(const std::filesystem::path& path) 
 	for (const auto& entry : std::filesystem::directory_iterator(path)) {
 		if (entry.path().extension() == ".meta") continue;
 		if (!entry.is_directory()) continue;
+		if (IsTerrainPrivateDataDirectory(entry.path())) continue;
 
 		std::string filename = entry.path().filename().string();
 		
@@ -877,6 +913,7 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 		if (entry.path().extension() == ".meta") continue;
 		if (!entry.is_directory() && IsImportResultSidecarPath(entry.path())) continue;
 		if (entry.is_directory() && IsGeneratedFolderForPackage(entry.path())) continue;
+		if (entry.is_directory() && IsTerrainPrivateDataDirectory(entry.path())) continue;
 		entries.push_back(entry);
 	}
 
@@ -928,6 +965,8 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 				icon = "[UI]";
 			} else if (!entry.is_directory() && entry.path().extension() == ".teprefab") {
 				icon = "[PFB]";
+			} else if (!entry.is_directory() && entry.path().extension() == ".teterrain") {
+				icon = "[TER]";
 			} else if (!entry.is_directory() && IsModelPackagePath(entry.path())) {
 				icon = "[PKG]";
 			}
@@ -991,6 +1030,9 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 					else if (importer == "StyleImporter") payloadType = "ASSET_TUSS";
 					else if (importer == "PrefabImporter") payloadType = "ASSET_PREFAB";
 					else if (importer == "AudioClipImporter" || importer == "CookedAudioClipImporter") payloadType = "ASSET_AUDIO";
+					// Terrain fields accept only durable terrain parents. A dedicated
+					// payload prevents an arbitrary asset GUID from being assigned by drag.
+					else if (importer == "TerrainImporter") payloadType = "ASSET_TERRAIN";
 
 					ImGui::SetDragDropPayload(payloadType, &guid, sizeof(TerraEngine::UUID));
 					ImGui::Text("%s", filename.c_str());

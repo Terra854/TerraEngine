@@ -21,6 +21,10 @@ struct ExportRuntimeLayout {
 	std::filesystem::path fontDirectory;
 	std::filesystem::path managedDirectory;
 	std::filesystem::path modelPackageCompiler;
+	// The editor ships the exact SDK used to build TerraEngine. Managed child
+	// processes invoke this absolute path instead of resolving dotnet from PATH.
+	std::filesystem::path dotnetSdkDirectory;
+	std::filesystem::path dotnetExecutable;
 	// NativeAOT compilation is an editor feature, so the installed feed and SDK
 	// pin live beside the editor instead of depending on user NuGet settings.
 	std::filesystem::path nativeAotToolchainDirectory;

@@ -597,23 +597,22 @@ function(terraengine_add_offline_nuget_restore_target target_name runtime_id)
 	endif()
 
 	terraengine_verify_offline_nuget_feed("${runtime_id}")
-	# Native-only Linux/headless validation must remain configurable even on a
-	# worker that intentionally has no .NET SDK. Keep the managed target present
-	# and fail when that target is actually built; Windows clean builds still
-	# resolve the exact global.json-pinned SDK and exercise the offline feed.
-	find_program(dotnet_executable NAMES dotnet)
-	if(NOT dotnet_executable)
-		set(dotnet_executable dotnet)
-		message(WARNING
-			"dotnet was not found while configuring ${runtime_id}. Native-only "
-			"targets remain available, but TerraEngine.Managed.Restore and every "
-			"managed publish target will fail until the pinned SDK is present.")
+	# The root configure resolves an absolute, hash-verified SDK executable.
+	# Refuse an unset or missing path instead of silently consulting PATH.
+	if(NOT DEFINED TERRAENGINE_DOTNET_EXECUTABLE
+			OR NOT EXISTS "${TERRAENGINE_DOTNET_EXECUTABLE}")
+		message(FATAL_ERROR
+			"The repository-local .NET SDK was not resolved before configuring "
+			"the managed restore boundary.")
 	endif()
+	set(dotnet_executable "${TERRAENGINE_DOTNET_EXECUTABLE}")
 
 	set(package_cache "${CMAKE_BINARY_DIR}/NuGetPackages")
 	set(dotnet_cli_home "${CMAKE_BINARY_DIR}/DotNetCliHome")
 	set(dotnet_environment
 		"NUGET_PACKAGES=${package_cache}"
+		"DOTNET_ROOT=${TERRAENGINE_DOTNET_SDK_ROOT}"
+		"DOTNET_MULTILEVEL_LOOKUP=0"
 		"DOTNET_CLI_HOME=${dotnet_cli_home}"
 		"DOTNET_CLI_TELEMETRY_OPTOUT=1"
 		"DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1"

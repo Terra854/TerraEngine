@@ -3,6 +3,7 @@
 // Implements the primary editor workspace logic, including the main menu bar, toolbars, and global hotkey handling. It manages the lifecycle of all native editor windows and provides the necessary hooks for scene state capture and restoration during play mode.
 
 #include "MainEditorSubsystem.h"
+#include "EditorRuntimeLayout.h"
 #include "PhysicsEditorAuthoringState.h"
 #include "Editor/AssetCompilers/ModelPackageImporter.h"
 #include "ProjectManager.h"
@@ -26,6 +27,7 @@
 #include "Engine/Animation/AnimationSystem.h"
 #include "Engine/Audio/AudioSystem.h"
 #include "Engine/Renderer/RenderSystem.h"
+#include "Engine/Renderer/Terrain/TerrainRenderProxyRegistry.h"
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Scene/SceneGraphRuntime.h"
@@ -894,19 +896,22 @@ namespace
 		return roots;
 	}
 
-	// ResolveEditorRuntimeRoot returns the directory that contains the running
-	// editor executable. Renderer-owned shaders and managed binaries are staged
-	// beside that executable, so this must not depend on the process working
-	// directory; --project launches often use the repository root as cwd.
+	// ResolveEditorRuntimeRoot returns the complete runtime selected at startup.
+	// Raw CMake executables live above Build/Editor, so executable-directory-only
+	// resolution would point shaders back at the incomplete raw output folder.
 	std::filesystem::path ResolveEditorRuntimeRoot()
 	{
 		const std::filesystem::path executableDirectory = TerraEngine::PlatformUtils::GetExecutableDirectory();
-		if (!executableDirectory.empty())
+		const TerraEngine::Editor::EditorRuntimeLayout layout =
+			TerraEngine::Editor::ResolveEditorRuntimeLayout(
+				executableDirectory, std::filesystem::current_path());
+		if(layout.complete)
 		{
-			return executableDirectory;
+			return layout.runtimeDirectory;
 		}
 
-		TERRAENGINE_LOG(LogLevel::Warning, "Could not resolve editor executable directory; falling back to current working directory for engine root.");
+		TERRAENGINE_LOG(LogLevel::Warning, layout.diagnostic
+			<< " Falling back to the current working directory for engine root.");
 		return std::filesystem::current_path();
 	}
 
@@ -2815,6 +2820,24 @@ void MainEditorSubsystem::OnBackendReady() {
 
 // MainEditorSubsystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::Update(float deltaTime) {
+	// Component mutations can originate from the Inspector, undo/redo, scene
+	// automation, or a loaded scene. Detect the durable state itself so every
+	// producer gets the same renderer-derived proxy path and none must add a
+	// generated MeshRenderComponent as an implementation detail.
+	ObjectManager::instance().forEachObjectWithComponents<TerrainComponent>(
+		[this](Object, TerrainComponent& terrain)
+		{
+			if(!terrain.visible || terrain.terrainAssetId == TerraEngine::EMPTY_UUID
+				|| AssetDatabase::Instance().FindAssetByGuid(terrain.terrainAssetId) == nullptr)
+			{
+				return;
+			}
+			if(!TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance()
+				.Resolve(terrain.terrainAssetId))
+			{
+				terrainProxyRestorePending = true;
+			}
+		});
 	if(terrainProxyRestorePending)
 	{
 		bool durableTerrainRegistered = false;

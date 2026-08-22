@@ -226,7 +226,7 @@ std::string BuildNativeAotRestoreCommand(
 	// PackageReference in the gameplay project. Make the property explicit so
 	// a missing vendored compiler fails before publish starts writing output.
 	std::ostringstream command;
-	command << "dotnet restore"
+	command << QuoteShellPath(context.dotnetExecutable) << " restore"
 		<< " " << QuoteShellPath(managedProject)
 		<< " -r " << GetExportRuntimeIdentifier(profile.platform)
 		<< " -p:PublishAot=true";
@@ -246,7 +246,7 @@ std::string BuildNativeAotPublishCommand(
 	// string construction in one helper lets tests verify profile toggles and
 	// the final fail-closed NativeAOT boundary without launching dotnet.
 	std::ostringstream command;
-	command << "dotnet publish"
+	command << QuoteShellPath(context.dotnetExecutable) << " publish"
 		<< " " << QuoteShellPath(managedProject)
 		<< " -c Release"
 		<< " -r " << GetExportRuntimeIdentifier(profile.platform)

@@ -34,6 +34,26 @@ namespace TerraEngine::EditorTests
 				"The brush must set the requested canonical hole bit before consumers observe it.");
 		});
 
+		registry.Add("Editor.TerrainCollision.HoleRadiusClampsToOneCell", [](TestContext& context) {
+			using namespace TerraEngine::Editor::Terrain;
+			std::array<std::uint8_t, 8u> source{};
+			std::array<std::uint8_t, 8u> painted{};
+			TerrainHoleBrushSettings settings;
+			settings.mode = TerrainHoleBrushMode::PaintHole;
+			settings.radiusCells = 0.25F;
+			const TerrainHoleBrushStamp stamp = TerrainHoleBrush::CenteredOnCell(3, 4);
+
+			context.Expect(stamp.centerCellX == 3.5F && stamp.centerCellZ == 4.5F,
+				"A picked integer cell must be converted to its canonical centre before stamping.");
+			context.Expect(TerrainHoleBrush::EffectiveRadiusCells(settings.radiusCells) == 1.0F,
+				"Hole-brush requests below one cell must resolve to the canonical minimum radius.");
+			context.Expect(TerrainHoleBrush::ApplyStamp(source, painted, 8u, 8u, settings, stamp)
+				&& TerrainHoleBrush::IsHole(painted, 8u, 8u, 3u, 4u)
+				&& TerrainHoleBrush::IsHole(painted, 8u, 8u, 4u, 4u)
+				&& !TerrainHoleBrush::IsHole(painted, 8u, 8u, 4u, 5u),
+				"The kernel must apply a one-cell radius when a smaller value reaches it.");
+		});
+
 		registry.Add("Editor.TerrainCollision.AlignmentLatencyAndLastKnownGoodStatusAreVisible", [](TestContext& context) {
 			std::vector<std::int32_t> renderedHeights(TerraEngine::Terrain::kTerrainAreaSampleCount, 0);
 			for(std::size_t index = 0u; index < renderedHeights.size(); ++index) renderedHeights[index] = static_cast<std::int32_t>(index % 256u) * 10;

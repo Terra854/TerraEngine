@@ -8,8 +8,11 @@
 
 #include "Terrain/TerrainPublication.h"
 
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <set>
+#include <string>
 
 #include <glm/ext/matrix_clip_space.hpp>
 
@@ -113,11 +116,75 @@ namespace TerraEngine::EditorTests
 				"Apply must enqueue a typed terrain transaction and expose one committed receipt only after the protected publication boundary.");
 		});
 
-		registry.Add("Editor.TerrainSculpt.SelectionRestoresAfterStrokeRelease", [](TestContext& context) {
+		registry.Add("Editor.TerrainSculpt.EnabledToolOwnsSelection", [](TestContext& context) {
 			context.Expect(TerrainWindow::ShouldCaptureSceneSelection(true, true)
-				&& !TerrainWindow::ShouldCaptureSceneSelection(true, false)
+				&& TerrainWindow::ShouldCaptureSceneSelection(true, false)
 				&& !TerrainWindow::ShouldCaptureSceneSelection(false, true),
-				"Terrain capture must take priority only during an active stroke so ordinary Scene View selection restores on release.");
+				"An enabled terrain tool must own Scene View clicks so a missed terrain pick cannot select unrelated objects.");
+		});
+
+		registry.Add("Editor.TerrainSculpt.DetachedBrushPublishesRealtimeRenderPreview", [](TestContext& context) {
+			const std::filesystem::path sourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor/TerraEngine-Editor/Windows/TerrainWindow.cpp";
+			std::ifstream sourceFile(sourcePath, std::ios::binary);
+			const std::string source(
+				(std::istreambuf_iterator<char>(sourceFile)),
+				std::istreambuf_iterator<char>());
+			const auto methodBody = [&source](std::string_view declaration, std::string_view nextDeclaration) {
+				const std::size_t begin = source.find(declaration);
+				const std::size_t end = begin == std::string::npos
+					? std::string::npos : source.find(nextDeclaration, begin + declaration.size());
+				return begin != std::string::npos && end != std::string::npos
+					? source.substr(begin, end - begin) : std::string();
+			};
+
+			const std::string schedule = methodBody(
+				"void TerrainWindow::ScheduleRenderProxyBuild()",
+				"void TerrainWindow::QueueRenderProxySceneInstance()");
+			const std::string stamp = methodBody(
+				"void TerrainWindow::ApplyBrushAt",
+				"bool TerrainWindow::QueuePreviewForPublication()");
+			const std::string pointer = methodBody(
+				"void TerrainWindow::HandleSceneViewPointer",
+				"void TerrainWindow::ApplyHoleBrushAt");
+			context.Expect(schedule.find("authoringSession.IsDirty() || holePreviewActive") != std::string::npos
+				&& schedule.find("previewHeightMm") != std::string::npos
+				&& schedule.find("previewHoleMask") != std::string::npos,
+				"The render worker must consume detached height and hole buffers while a brush preview is active.");
+			context.Expect(schedule.find("terrainRenderProxyCancellation->store") == std::string::npos,
+				"Continuous pointer samples must coalesce behind one worker without cancelling every intermediate preview before it can appear.");
+			context.Expect(stamp.find("previewHeightMm = std::move(after)") != std::string::npos
+				&& stamp.find("ScheduleRenderProxyBuild();") != std::string::npos,
+				"Every accepted height stamp must request a detached render-proxy refresh during the drag.");
+			context.Expect(pointer.find("if(released && brushStrokeActive)") != std::string::npos
+				&& pointer.find("QueuePreviewForPublication()") != std::string::npos,
+				"Mouse release must remain the single durable transaction boundary for the complete stroke.");
+		});
+
+		registry.Add("Editor.TerrainSculpt.BrushFootprintProjectsActiveWorldRadius", [](TestContext& context) {
+			const auto readSource = [](const std::filesystem::path& relativePath) {
+				std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relativePath, std::ios::binary);
+				return std::string(
+					(std::istreambuf_iterator<char>(input)),
+					std::istreambuf_iterator<char>());
+			};
+			const std::string terrainWindow = readSource(
+				"Editor/TerraEngine-Editor/Windows/TerrainWindow.cpp");
+			const std::string sceneView = readSource(
+				"Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp");
+
+			context.Expect(terrainWindow.find("EffectiveRadiusCells(holeBrushSettings.radiusCells)") != std::string::npos
+				&& terrainWindow.find(": brushSettings.radiusSamples") != std::string::npos,
+				"The visible footprint must use the clamped hole radius in hole mode and the height radius in height mode.");
+			context.Expect(terrainWindow.find("std::max(0.001F, radiusUnits) * authoredSampleSpacingMetres") != std::string::npos
+				&& terrainWindow.find("worldCenter.position") != std::string::npos,
+				"Terrain Tools must expose a canonical centre and metre radius instead of a screen-pixel approximation.");
+			context.Expect(sceneView.find("LocalizeForCamera(footprint.center)") != std::string::npos
+				&& sceneView.find("footprint.radiusMetres") != std::string::npos
+				&& sceneView.find("proj * view") != std::string::npos,
+				"Scene View must project the brush footprint through the active camera so zoom preserves terrain coverage.");
+			context.Expect(sceneView.find("AddCircle(mouse, terrainTools->BrushSettings().radiusSamples") == std::string::npos,
+				"Scene View must not interpret terrain samples as fixed screen pixels.");
 		});
 	}
 }

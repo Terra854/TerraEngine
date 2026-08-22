@@ -3,6 +3,7 @@
 #include "TestHarness.h"
 
 #include "Renderer/RenderSystem.h"
+#include "Renderer/Terrain/TerrainRenderProxyRegistry.h"
 
 #include <cstdint>
 #include <vector>
@@ -11,6 +12,27 @@ namespace TerraEngine::Tests
 {
 	void RegisterTerrainRenderSystemIntegrationTests(TestRegistry& registry)
 	{
+		registry.Add("Terrain.RenderSystem.ProxyRegistryKeepsDerivedBindingsOutOfComponents", [](TestContext& context) {
+			auto& proxies = TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance();
+			proxies.Clear();
+			const std::uint64_t before = proxies.PublicationGeneration();
+			const TerraEngine::UUID assetId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			context.Expect(!proxies.Publish({assetId, TerraEngine::EMPTY_UUID, materialId}),
+				"Terrain render proxy publication must reject an incomplete derived binding.");
+			context.Expect(proxies.Publish({assetId, meshId, materialId}),
+				"A complete terrain-derived mesh and material binding must publish without an ECS mesh component.");
+			const auto resolved = proxies.Resolve(assetId);
+			context.Expect(resolved && resolved->IsComplete()
+				&& resolved->meshId == meshId && resolved->materialId == materialId
+				&& resolved->publicationGeneration > before,
+				"The renderer must resolve the complete derived binding from the durable terrain asset UUID.");
+			proxies.Clear();
+			context.Expect(!proxies.Resolve(assetId).has_value(),
+				"Clearing a render session must retire terrain proxy bindings rather than leaking them into the next scene.");
+		});
+
 		registry.Add("Terrain.RenderSystem.ConsumesOnlyCurrentCommittedCookPackets", [](TestContext& context) {
 			std::vector<std::int32_t> heights(TerraEngine::Terrain::kTerrainAreaSampleCount, 1000);
 			TerraEngine::Renderer::Terrain::TerrainCookInput input{};

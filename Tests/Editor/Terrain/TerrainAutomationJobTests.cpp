@@ -28,13 +28,20 @@ namespace TerraEngine::EditorTests
 			const auto rebuild = std::find_if(capabilities.begin(), capabilities.end(), [](const auto& value) { return value.descriptor.name == "terrain.rebuild"; });
 			const bool allExecutable = std::all_of(capabilities.begin(), capabilities.end(), [](const auto& value) { return static_cast<bool>(value.handler) && !value.descriptor.execution.visibilityBoundary.empty(); });
 			const auto hasCapability = [&](std::string_view name) { return std::any_of(capabilities.begin(), capabilities.end(), [&](const auto& value) { return value.descriptor.name == name; }); };
+			const auto create = std::find_if(capabilities.begin(), capabilities.end(), [](const auto& value) { return value.descriptor.name == "terrain.create"; });
+			const auto operation = std::find_if(capabilities.begin(), capabilities.end(), [](const auto& value) { return value.descriptor.name == "terrain.operation.start"; });
+			const bool schemasDescribeArguments = create != capabilities.end() && operation != capabilities.end()
+				&& create->descriptor.inputSchema["properties"].contains("destination")
+				&& operation->descriptor.inputSchema["properties"].contains("operation")
+				&& operation->descriptor.inputSchema.value("required", nlohmann::json::array()).size() >= 10u;
 			context.Expect(provider.GetProviderId() == "terrain" && capabilities.size() == 18u && allExecutable && rebuild != capabilities.end()
 				&& hasCapability("terrain.asset.inspect") && hasCapability("terrain.session.begin")
 				&& hasCapability("terrain.stroke.apply") && hasCapability("terrain.layers.set")
 				&& hasCapability("terrain.holes.set") && hasCapability("terrain.operation.start")
 				&& hasCapability("terrain.diagnostics.get")
+				&& schemasDescribeArguments
 				&& rebuild->descriptor.approvalPolicy == AutomationApprovalPolicy::HighImpact && rebuild->descriptor.execution.protectedCommit,
-				"Terrain discovery must register executable handlers, bounded visibility metadata, and high-impact approval for rebuild work.");
+				"Terrain discovery must register executable handlers, usable input schemas, bounded visibility metadata, and high-impact approval for rebuild work.");
 		});
 
 		registry.Add("Editor.TerrainAutomation.DurableJobReconnectCancellationAndTerminalReceipt", [](TestContext& context) {

@@ -459,7 +459,9 @@ set_tests_properties(Engine.ProfilerJournalStress PROPERTIES
 # output directory lets Windows resolve TerraEngine.dll and its bundled peers.
 add_test(
 	NAME Engine.ManagedRuntimeApiSmoke
-	COMMAND dotnet run --project "${CMAKE_SOURCE_DIR}/Tests/Managed/RuntimeApiSmoke/RuntimeApiSmoke.csproj" --configuration Debug
+	COMMAND ${TERRAENGINE_DOTNET_COMMAND} run
+		--project "${CMAKE_SOURCE_DIR}/Tests/Managed/RuntimeApiSmoke/RuntimeApiSmoke.csproj"
+		--configuration Debug
 )
 set_tests_properties(Engine.ManagedRuntimeApiSmoke PROPERTIES
 	LABELS "Engine;Managed;Scripting"

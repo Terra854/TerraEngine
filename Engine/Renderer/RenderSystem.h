@@ -637,6 +637,10 @@ private:
 	std::uint64_t renderableMembershipHierarchyRevision = 0U;
 	std::uint64_t renderableMembershipActiveRevision = 0U;
 	std::uint64_t renderableMembershipPacketRevision = 0U;
+	// Terrain proxy publication is independent from scene component mutation.
+	// Track its generation so a newly built terrain becomes renderable even when
+	// the owning TerrainComponent did not change during that frame.
+	std::uint64_t renderableMembershipTerrainProxyGeneration = 0U;
 	// World matrices are index-aligned with the stable membership order above.
 	// Skinning changes vertex data without changing object transforms, so a static
 	// crowd can reuse these matrices until the protected spatial revision changes.

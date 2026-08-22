@@ -2,8 +2,8 @@
 
 TerraEngine supports native Linux development through the same CMake lifecycle
 used by the rest of the project. The first supported target is Linux x64 on a
-mainstream desktop or CI distribution with CMake, a C++20 compiler, .NET SDK
-support for `net10.0`, Vulkan-capable runtime libraries, and the usual X11
+mainstream desktop or CI distribution with CMake, a C++20 compiler,
+Vulkan-capable runtime libraries, and the usual X11
 desktop development packages required by GLFW.
 
 ## Prerequisites
@@ -13,9 +13,8 @@ desktop development packages required by GLFW.
 - Ninja for the checked-in `Debug` preset. Unix Makefiles are acceptable for
   local validation when Ninja is unavailable.
 - A C++20 compiler such as GCC or Clang.
-- .NET SDK capable of building the managed projects. Current CMake managed
-  targets call `dotnet` from PATH; if it is missing, native tests can still
-  build but the full `install` target will stop at managed publish.
+- Network access for the first configure, unless the hash-pinned SDK and NuGet
+  caches were populated earlier. No machine-wide .NET SDK is required.
 - Vulkan loader/runtime support for systems that launch the editor or renderer.
 - X11 development libraries for GLFW's default Linux backend.
 
@@ -25,8 +24,11 @@ desktop development packages required by GLFW.
 git submodule update --init --recursive
 ```
 
-All third-party project dependencies must come from `External/`. Do not replace
-vendored dependencies with global package-manager copies.
+All third-party project dependencies must come from `External/`. CMake
+bootstraps the exact `global.json` SDK into
+`External/dotnet/sdk/linux-x64/<version>` and verifies the archive against
+`cmake/TerraEngineDotNetSdk.lock.json`. Do not replace vendored dependencies
+with global package-manager copies.
 
 ## Configure
 
@@ -63,8 +65,8 @@ cmake --build out/build/Debug --target install
 ```
 
 The install target builds native tools, managed assemblies, shaders, and the
-runtime layout. A missing `dotnet` executable is an environment failure for the
-managed publish step, not a C++ compile failure.
+runtime layout. It copies the pinned SDK to `Build/Editor/DotNet`; installed
+script compilation and NativeAOT export invoke that executable directly.
 
 ## Startup Smoke Validation
 
@@ -86,7 +88,8 @@ Historical failure fixed by the Linux scripting implementation:
 Assembly-CSharp build failed: The current scripting build runner is implemented for Windows only.
 ```
 
-Final expected behavior: the editor starts `dotnet build` for the generated
+Final expected behavior: the editor starts its bundled `DotNet/dotnet build`
+for the generated
 Assembly-CSharp project from the project workspace, captures stdout/stderr and
 the process exit code, then either reloads the newly built script assembly or
 reports normal compiler/process diagnostics. Live editor scripting uses the
@@ -119,16 +122,15 @@ than requiring Visual Studio.
   GLFW is being configured.
 - Missing Ninja appears before CMake configures the project when using
   `cmake --preset Debug`; install Ninja or use the Makefiles fallback above.
-- Missing .NET SDK appears during `TerraEngine`, `TerraEngine.Editor.Managed`,
-  or `TerraEngine.Export.Generator` builds as `dotnet: No such file or
-  directory`.
+- A missing or damaged repository SDK fails during configure with its expected
+  path. Reconfigure with `-DTERRAENGINE_DOTNET_SDK_MODE=AUTO` to repair it, or
+  use `OFF` to keep a disconnected build fail-closed.
 - Missing Vulkan runtime support usually appears when launching renderer-owned
   entry points.
 - Missing managed runtime payloads usually mention `Managed/Assembly-CSharp.so`
   for Linux exports or `Managed/Assembly-CSharp.dll` for Windows exports.
-- Missing `dotnet` prevents editor Assembly-CSharp script builds from starting;
-  install a supported .NET SDK and confirm `dotnet --info` works from the same
-  shell used to launch the editor.
+- A missing installed `Editor/DotNet/dotnet` prevents Assembly-CSharp builds;
+  rerun the CMake install target instead of installing a system SDK.
 - A failed editor script build should report the `dotnet build` command,
   working directory, process exit code, and captured compiler output. Compiler
   errors are normal build failures; missing command/output details are scripting

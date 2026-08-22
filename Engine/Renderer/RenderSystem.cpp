@@ -18,6 +18,7 @@
 #include "Window/WindowSystem.h"
 #include "Components/CameraComponent.h"
 #include "Components/MeshRenderComponent.h"
+#include "Components/TerrainComponent.h"
 #include "Components/LightComponent.h"
 #include "Components/SkyComponent.h"
 #include "Components/AnimatorComponent.h"
@@ -30,6 +31,7 @@
 #include "Components/Transform.h"
 #include "Resource/ResourceManager.h"
 #include "Resource/VirtualGeometryStreamingSystem.h"
+#include "Renderer/Terrain/TerrainRenderProxyRegistry.h"
 #include "Utilities/PlatformUtils.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Profiling/Profiler.h"
@@ -4646,6 +4648,9 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		&& immutableGpuAnimationPlan->topologyInputSignature != 0U
 		&& immutableGpuAnimationPlan->topologyRendererGeneration != 0U;
 	auto& resourceManager = ResourceManager::Instance();
+	const std::uint64_t protectedTerrainProxyGeneration =
+		TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance()
+			.PublicationGeneration();
 	// Capture reuse is independent of cameras and transforms. It covers only the
 	// live ECS/resource work needed to rediscover render membership and animation
 	// binding topology. Fully GPU-visual pose generations are intentionally absent:
@@ -4657,6 +4662,10 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	HashCombine(renderableCaptureSourceSignature,
 		objManager.GetComponentValueMutationRevision(
 			MeshRenderComponent::kComponentName));
+	HashCombine(renderableCaptureSourceSignature,
+		objManager.GetComponentValueMutationRevision(
+			TerrainComponent::kComponentName));
+	HashCombine(renderableCaptureSourceSignature, protectedTerrainProxyGeneration);
 	HashCombine(renderableCaptureSourceSignature,
 		objManager.GetHierarchyRevision());
 	HashCombine(renderableCaptureSourceSignature,
@@ -4686,6 +4695,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			== objManager.GetHierarchyRevision()
 		&& renderableMembershipActiveRevision
 			== objManager.GetRuntimeActiveMembershipRevision()
+		&& renderableMembershipTerrainProxyGeneration
+			== protectedTerrainProxyGeneration
 		&& retainedRenderableEntries.size() == renderableMembershipCache.size();
 	FrameVector<CameraEntry> cameras;
 	cameras.reserve(10);
@@ -4927,7 +4938,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		renderCollectionGraph.AddQuery(MakeProtectedRenderQuery(
 			"Render.CollectRenderables",
 			diagnosticsEnabled,
-			{ "Transform", "MeshRenderComponent", "AnimatorComponent" },
+			{ "Transform", "MeshRenderComponent", "TerrainComponent", "AnimatorComponent" },
 			{ "Render.CameraCollection", TerraEngine::Scheduling::kResourceAnimatorComponents,
 				TerraEngine::Scheduling::kResourceAnimationRuntimeState },
 			{ "Render.RenderableCollection" },
@@ -4942,7 +4953,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				&frameMeshResources, &frameMaterialResources,
 				&frameMeshLocalBounds, &resourceManager, &registry,
 				protectedRendererGeneration,
-				protectedSceneGeneration, reuseProtectedRenderableCapture,
+				protectedSceneGeneration, protectedTerrainProxyGeneration,
+				reuseProtectedRenderableCapture,
 				this](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Renderables", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -4975,21 +4987,52 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 					objManager.GetHierarchyRevision();
 				const std::uint64_t membershipActiveRevision =
 					objManager.GetRuntimeActiveMembershipRevision();
+				const auto resolveRenderBinding = [&](entt::entity objectEntity)
+					-> std::optional<MeshRenderComponent> {
+					// Terrain owns a specialized derived binding. When TerrainComponent is
+					// present it is authoritative, so a stale legacy mesh component cannot
+					// accidentally render a second copy of the same surface.
+					if(const TerrainComponent* terrain = registry.try_get<TerrainComponent>(objectEntity))
+					{
+						if(!IsRuntimeComponentActive(*terrain) || !terrain->visible
+							|| terrain->terrainAssetId == TerraEngine::EMPTY_UUID)
+						{
+							return std::nullopt;
+						}
+						const auto proxy = TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance()
+							.Resolve(terrain->terrainAssetId);
+						if(!proxy || !proxy->IsComplete()) return std::nullopt;
+						MeshRenderComponent binding;
+						binding.meshId = proxy->meshId;
+						binding.materialId = proxy->materialId;
+						binding.spatialObjectId = TerraEngine::EMPTY_UUID;
+						// Direct terrain meshes use complete per-area bounds and therefore do
+						// not rely on generic task-shader culling metadata.
+						binding.taskShaderCullingEnabled = false;
+						return binding;
+					}
+					if(const MeshRenderComponent* mesh = registry.try_get<MeshRenderComponent>(objectEntity);
+						mesh != nullptr && IsRuntimeComponentActive(*mesh))
+					{
+						return *mesh;
+					}
+					return std::nullopt;
+				};
 				const auto captureMembership = [&](Object object)
 					-> std::optional<RenderableMembershipCacheRecord> {
 					const entt::entity objectEntity = object.EntityId();
 					if(!registry.valid(objectEntity)
-						|| !registry.all_of<Transform, MeshRenderComponent>(objectEntity)
+						|| !registry.all_of<Transform>(objectEntity)
 						|| !objManager.isObjectActiveInHierarchy(object)) {
 						return std::nullopt;
 					}
 					const Transform& transform = registry.get<Transform>(objectEntity);
-					const MeshRenderComponent& meshComp =
-						registry.get<MeshRenderComponent>(objectEntity);
-					if(!IsRuntimeComponentActive(transform)
-						|| !IsRuntimeComponentActive(meshComp)) {
+					const std::optional<MeshRenderComponent> resolvedBinding =
+						resolveRenderBinding(objectEntity);
+					if(!IsRuntimeComponentActive(transform) || !resolvedBinding) {
 						return std::nullopt;
 					}
+					const MeshRenderComponent& meshComp = *resolvedBinding;
 					RenderableMembershipCacheRecord cached;
 					cached.object = object;
 					cached.objectId = meshComp.spatialObjectId != TerraEngine::EMPTY_UUID
@@ -5036,8 +5079,13 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 					renderableMembershipSceneGeneration != membershipSceneGeneration
 					|| renderableMembershipComponentRevision != membershipComponentRevision
 					|| renderableMembershipHierarchyRevision != membershipHierarchyRevision
-					|| renderableMembershipActiveRevision != membershipActiveRevision;
+					|| renderableMembershipActiveRevision != membershipActiveRevision
+					|| renderableMembershipTerrainProxyGeneration
+						!= protectedTerrainProxyGeneration;
 				if(membershipChanged) {
+					const bool terrainProxyChanged =
+						renderableMembershipTerrainProxyGeneration
+							!= protectedTerrainProxyGeneration;
 					const bool sameSceneAndHierarchy =
 						renderableMembershipSceneGeneration == membershipSceneGeneration
 						&& renderableMembershipHierarchyRevision == membershipHierarchyRevision;
@@ -5045,7 +5093,12 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 						&& protectedSceneChanges->Validate(membershipSceneGeneration).valid
 						&& protectedSceneChanges->PublicationRevision()
 							== renderableMembershipPacketRevision + 1U;
-					const bool applyDelta = sameSceneAndHierarchy && packetIsNext
+					// A proxy publication can replace the mesh or material for every
+					// instance of one terrain asset without producing an ECS change packet.
+					// Rebuild the protected membership snapshot in that case instead of
+					// retaining stale derived bindings through the object-delta fast path.
+					const bool applyDelta = !terrainProxyChanged
+						&& sameSceneAndHierarchy && packetIsNext
 						&& !renderableMembershipCache.empty();
 					if(applyDelta) {
 						std::vector<TerraEngine::Scene::SceneObjectRevisionSnapshot>
@@ -5101,6 +5154,14 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 						renderableMembershipCache.clear();
 						objManager.forEachObjectWithComponents<Transform, MeshRenderComponent>(
 							[&](Object object, Transform&, MeshRenderComponent&) {
+								if(registry.any_of<TerrainComponent>(object.EntityId())) return;
+								if(const auto captured = captureMembership(object);
+									captured.has_value()) {
+									renderableMembershipCache.push_back(*captured);
+								}
+							});
+						objManager.forEachObjectWithComponents<Transform, TerrainComponent>(
+							[&](Object object, Transform&, TerrainComponent&) {
 								if(const auto captured = captureMembership(object);
 									captured.has_value()) {
 									renderableMembershipCache.push_back(*captured);
@@ -5120,6 +5181,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 					renderableMembershipComponentRevision = membershipComponentRevision;
 					renderableMembershipHierarchyRevision = membershipHierarchyRevision;
 					renderableMembershipActiveRevision = membershipActiveRevision;
+					renderableMembershipTerrainProxyGeneration =
+						protectedTerrainProxyGeneration;
 					renderableMembershipPacketRevision = protectedSceneChanges != nullptr
 						? protectedSceneChanges->PublicationRevision() : 0U;
 				}
@@ -5803,6 +5866,19 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	const std::uint64_t capturedMeshComponentRevision =
 		objManager.GetComponentValueMutationRevision(
 			MeshRenderComponent::kComponentName);
+	const std::uint64_t capturedTerrainComponentRevision =
+		objManager.GetComponentValueMutationRevision(
+			TerrainComponent::kComponentName);
+	const std::uint64_t capturedTerrainProxyGeneration =
+		TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance()
+			.PublicationGeneration();
+	// Existing cache records call this the mesh-component revision. Fold every
+	// source of a resolved render binding into one token so TerrainComponent and
+	// proxy changes invalidate the same topology, spatial, and draw caches.
+	std::uint64_t capturedRenderBindingRevision = kRenderHashOffset;
+	HashCombine(capturedRenderBindingRevision, capturedMeshComponentRevision);
+	HashCombine(capturedRenderBindingRevision, capturedTerrainComponentRevision);
+	HashCombine(capturedRenderBindingRevision, capturedTerrainProxyGeneration);
 	const std::uint64_t capturedHierarchyRevision = objManager.GetHierarchyRevision();
 	const std::uint64_t capturedActiveMembershipRevision =
 		objManager.GetRuntimeActiveMembershipRevision();
@@ -5829,6 +5905,10 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		capturedComponentMutationRevision);
 	HashCombine(capturedRenderableSourceSignature,
 		capturedMeshComponentRevision);
+	HashCombine(capturedRenderableSourceSignature,
+		capturedTerrainComponentRevision);
+	HashCombine(capturedRenderableSourceSignature,
+		capturedTerrainProxyGeneration);
 	HashCombine(capturedRenderableSourceSignature, capturedHierarchyRevision);
 	HashCombine(capturedRenderableSourceSignature,
 		capturedRendererResourceRevision);
@@ -7146,7 +7226,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		const std::uint64_t topologyComponentMutationRevision =
 			capturedComponentMutationRevision;
 		const std::uint64_t topologyMeshComponentRevision =
-			capturedMeshComponentRevision;
+			capturedRenderBindingRevision;
 		const std::uint64_t topologyHierarchyRevision = capturedHierarchyRevision;
 		// Exact monotonic producers prove whether any immutable input can have
 		// changed. On a warm frame, this constant-time gate avoids hashing every
@@ -7486,7 +7566,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		localBoundsByMesh;
 	const std::uint64_t spatialSceneGeneration = capturedSceneGeneration;
 	const std::uint64_t spatialRevision = capturedSpatialRevision;
-	const std::uint64_t meshComponentRevision = capturedMeshComponentRevision;
+	const std::uint64_t meshComponentRevision = capturedRenderBindingRevision;
 	// This token changes after every successful renderer-resource reload. A mesh
 	// replacement can alter bounds without mutating the MeshRenderComponent, so it
 	// must invalidate the spatial observation before cached bounds are reused.
@@ -7673,7 +7753,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		const std::uint64_t drawHierarchyRevision = capturedHierarchyRevision;
 		const std::uint64_t drawSpatialRevision = capturedSpatialRevision;
 		const std::uint64_t drawMeshComponentRevision =
-			capturedMeshComponentRevision;
+			capturedRenderBindingRevision;
 		const bool reuseOrderedBaseCommands = drawCommandCache.baseInputsValid
 			&& drawCommandCache.observedSceneGeneration == drawSceneGeneration
 			&& drawCommandCache.observedActiveMembershipRevision
@@ -12714,6 +12794,8 @@ void RenderSystem::Shutdown()
 	renderableMembershipHierarchyRevision = 0U;
 	renderableMembershipActiveRevision = 0U;
 	renderableMembershipPacketRevision = 0U;
+	renderableMembershipTerrainProxyGeneration = 0U;
+	TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance().Clear();
 	renderableWorldPoseCache.clear();
 	renderableModelMatrixSceneGeneration = 0U;
 	renderableModelMatrixSpatialRevision = 0U;
@@ -12763,6 +12845,7 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		"ObjectManager",
 		"UI",
 		"Resources",
+		TerraEngine::Scheduling::kResourceTerrainRenderProxies,
 		TerraEngine::Scheduling::kResourceAnimatorComponents,
 		TerraEngine::Scheduling::kResourceAnimationRuntimeState,
 		TerraEngine::Scheduling::kResourceVirtualGeometryQualityProfile,
@@ -13111,6 +13194,9 @@ std::vector<TerraEngine::Scene::RenderRuntimeRecord> RenderSystem::BuildCompactR
 	objManager.forEachObjectWithComponents<Transform, MeshRenderComponent>(
 		[&](Object object, Transform&, MeshRenderComponent& mesh)
 		{
+			// TerrainComponent has its own derived binding and is recorded below.
+			// Skipping it here prevents a legacy proxy component from double-counting.
+			if(objManager.getRegistry().any_of<TerrainComponent>(object.EntityId())) return;
 			TerraEngine::Scene::RenderRuntimeRecord record;
 			record.recordKind = TerraEngine::Scene::RuntimeLayoutRecordKind::Renderable;
 			record.entity = object.EntityId();
@@ -13121,6 +13207,30 @@ std::vector<TerraEngine::Scene::RenderRuntimeRecord> RenderSystem::BuildCompactR
 			if (mesh.meshId == TerraEngine::EMPTY_UUID || mesh.materialId == TerraEngine::EMPTY_UUID)
 			{
 				record.rejectionReason = "missing-render-resource-id";
+			}
+			records.push_back(std::move(record));
+		});
+
+	objManager.forEachObjectWithComponents<Transform, TerrainComponent>(
+		[&](Object object, Transform&, TerrainComponent& terrain)
+		{
+			TerraEngine::Scene::RenderRuntimeRecord record;
+			record.recordKind = TerraEngine::Scene::RuntimeLayoutRecordKind::Renderable;
+			record.entity = object.EntityId();
+			record.objectId = objManager.getUUID(object);
+			record.renderFlags = 0U;
+			record.sourceRevision = objManager.GetObjectSpatialRevision(object);
+			const auto proxy = terrain.visible && terrain.terrainAssetId != TerraEngine::EMPTY_UUID
+				? TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance()
+					.Resolve(terrain.terrainAssetId)
+				: std::nullopt;
+			if(proxy && proxy->IsComplete())
+			{
+				record.resourceIds = {proxy->meshId, proxy->materialId};
+			}
+			else
+			{
+				record.rejectionReason = "terrain-render-proxy-unavailable";
 			}
 			records.push_back(std::move(record));
 		});
@@ -13915,6 +14025,8 @@ void RenderSystem::Clear()
 	renderableMembershipHierarchyRevision = 0U;
 	renderableMembershipActiveRevision = 0U;
 	renderableMembershipPacketRevision = 0U;
+	renderableMembershipTerrainProxyGeneration = 0U;
+	TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance().Clear();
 	renderableWorldPoseCache.clear();
 	renderableModelMatrixSceneGeneration = 0U;
 	renderableModelMatrixSpatialRevision = 0U;

@@ -76,10 +76,12 @@ namespace TerraEngine::EditorTests
 				"The Terrain Inspector should use compact author-facing fields, bind the selected terrain, and expose full-width actions.");
 			const std::string terrainWindowSource = ReadSceneViewOverlaySourceForTest(
 				"Editor/TerraEngine-Editor/Windows/TerrainWindow.cpp");
-			context.Expect(terrainWindowSource.find("CreateRegisteredTerrainService()") != std::string::npos
-				&& terrainWindowSource.find("assets.ImportAsset(absolutePath)") != std::string::npos
-				&& terrainWindowSource.find("GetRegisteredAssetPath") != std::string::npos
-				&& terrainWindowSource.find("GetAssetRoot().parent_path() / destination") != std::string::npos,
+			const std::string terrainCreationSource = ReadSceneViewOverlaySourceForTest(
+				"Editor/TerraEngine-Editor/Terrain/TerrainCreationService.cpp");
+			context.Expect(terrainWindowSource.find("CreateProjectTerrainCreationService()") != std::string::npos
+				&& terrainCreationSource.find("assets.ImportAsset(absolutePath)") != std::string::npos
+				&& terrainCreationSource.find("GetRegisteredAssetPath") != std::string::npos
+				&& terrainCreationSource.find("GetAssetRoot().parent_path() / absolutePath") != std::string::npos,
 				"New terrain publication must make the descriptor visible to both the editor asset database and runtime resource lookup.");
 		});
 	}

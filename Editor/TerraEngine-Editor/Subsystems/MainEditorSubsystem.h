@@ -185,6 +185,10 @@ public:
 	// invariant counts for comparison with the exported runtime report.
 	TerraEngine::Runtime::PhysicsInvariantReport RunPhysicsExportInvariantFixture();
 	[[nodiscard]] nlohmann::json RunTerrainLiveValidationFixture();
+	// Inspector assignment becomes visible only after SceneMutationQueue flushes.
+	// Keep restoration armed across that boundary so the terrain window can open
+	// the newly referenced asset and publish its derived renderer resources.
+	void RequestTerrainProxyRestore() noexcept { terrainProxyRestorePending = true; }
 	// Reports whether a drag control in the inspector is active this frame for cursor wrapping.
 	bool IsInspectorValueDragging() const;
 

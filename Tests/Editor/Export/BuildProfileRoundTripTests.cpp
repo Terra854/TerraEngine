@@ -16,6 +16,7 @@ namespace TerraEngine::EditorTests {
 			// Command tests use deliberately distinct paths so an omitted option
 			// cannot accidentally pass by matching another publish argument.
 			return {
+				"C:/Installed Editor/DotNet/dotnet.exe",
 				"C:/Installed Editor/NativeAotNuGet",
 				"C:/Installed Editor/NativeAotNuGet/NuGet.Config",
 				"C:/Installed Editor/NativeAotNuGet/feed",
@@ -213,11 +214,12 @@ namespace TerraEngine::EditorTests {
 
 			const std::string restore = BuildNativeAotRestoreCommand(
 				profile, "/tmp/Terra Game/Assembly-CSharp.csproj", toolchain);
-			context.Expect(restore.find("dotnet restore") == 0U
+			context.Expect(restore.find("Installed Editor/DotNet/dotnet.exe") != std::string::npos
+				&& restore.find(" restore ") != std::string::npos
 				&& restore.find("-p:PublishAot=true") != std::string::npos
 				&& restore.find("--configfile \"C:/Installed Editor/NativeAotNuGet/NuGet.Config\"") != std::string::npos
 				&& restore.find("--packages \"C:/Temp/TEAOT-command-test/packages/\"") != std::string::npos,
-				"NativeAOT restore should select the installed config and private per-run cache.");
+				"NativeAOT restore should select the bundled SDK, installed config, and private per-run cache.");
 			context.Expect(restore.find("-p:BaseIntermediateOutputPath=\"C:/Temp/TEAOT-command-test/obj/\"")
 					!= std::string::npos
 					&& restore.find("-p:MSBuildProjectExtensionsPath=\"C:/Temp/TEAOT-command-test/obj/\"")

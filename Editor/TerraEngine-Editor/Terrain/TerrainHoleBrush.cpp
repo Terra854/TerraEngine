@@ -41,7 +41,7 @@ namespace
 		const std::size_t required = RequiredBytes(width, height);
 		if(width == 0u || height == 0u || sourceMask.size() < required || outMask.size() < required) return false;
 		std::copy_n(sourceMask.begin(), required, outMask.begin());
-		const float radius = std::max(0.001F, settings.radiusCells);
+		const float radius = EffectiveRadiusCells(settings.radiusCells);
 		bool changed = false;
 		for(std::uint32_t z = 0u; z < height; ++z) for(std::uint32_t x = 0u; x < width; ++x)
 		{
