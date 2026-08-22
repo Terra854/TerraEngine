@@ -21,7 +21,10 @@ namespace TerraEngine::EditorTests
 			std::error_code error;
 			std::filesystem::remove_all(root, error);
 			std::filesystem::create_directories(privateBlob.parent_path(), error);
-			std::ofstream(terrainRoot, std::ios::binary | std::ios::trunc) << "{}";
+			const TerraEngine::UUID terrainId = TerraEngine::GenerateUUID();
+			std::ofstream(terrainRoot, std::ios::binary | std::ios::trunc)
+				<< "{\"format\":\"TerraEngineTerrain\",\"version\":1,\"width\":256,\"height\":256,\"assetId\":\""
+				<< TerraEngine::ToHexString(terrainId) << "\"}";
 			std::ofstream(privateBlob, std::ios::binary | std::ios::trunc) << "private terrain area";
 
 			AssetDatabase::Instance().Shutdown();
@@ -30,6 +33,9 @@ namespace TerraEngine::EditorTests
 			const auto& assets = AssetDatabase::Instance().GetAssets();
 			context.Expect(assets.contains(std::filesystem::absolute(terrainRoot)),
 				"The .teterrain root must be discovered as the one editable project asset.");
+			context.Expect(assets.at(std::filesystem::absolute(terrainRoot)).guid == terrainId
+				&& AssetDatabase::Instance().FindAssetByGuid(terrainId) != nullptr,
+				"Terrain metadata must adopt the durable descriptor UUID used by scene components.");
 			context.Expect(!assets.contains(std::filesystem::absolute(privateBlob)),
 				"Managed terrain blobs must never receive independent Asset Database identities.");
 			context.Expect(!std::filesystem::exists(privateBlob.string() + ".meta"),

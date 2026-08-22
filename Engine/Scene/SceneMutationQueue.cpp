@@ -308,7 +308,20 @@ namespace TerraEngine::Scene {
 	{
 		std::scoped_lock lock(requestsMutex);
 		std::vector<TransactionResult> completed;
-		completed.swap(completedEditorTransactionResults);
+		completed.reserve(completedEditorTransactions.size());
+		for (EditorTransactionCompletion& completion : completedEditorTransactions)
+		{
+			completed.push_back(std::move(completion.result));
+		}
+		completedEditorTransactions.clear();
+		return completed;
+	}
+
+	std::vector<EditorTransactionCompletion> SceneMutationQueue::DrainCompletedEditorTransactions()
+	{
+		std::scoped_lock lock(requestsMutex);
+		std::vector<EditorTransactionCompletion> completed;
+		completed.swap(completedEditorTransactions);
 		return completed;
 	}
 
@@ -325,7 +338,7 @@ namespace TerraEngine::Scene {
 		workerBuffers.clear();
 		transactions.clear();
 		publicationGroups.clear();
-		completedEditorTransactionResults.clear();
+		completedEditorTransactions.clear();
 	}
 
 	SceneMutationBatchResult SceneMutationQueue::Validate(const SceneGraph& graph) const
@@ -745,7 +758,7 @@ namespace TerraEngine::Scene {
 					// Keep one complete receipt until MainEditorSubsystem records a new
 					// command or reconciles a deferred undo/redo replay. The bounded
 					// diagnostics copy cannot carry the inverse payload needed by history.
-					completedEditorTransactionResults.push_back(result);
+					completedEditorTransactions.push_back({transaction, result});
 				}
 			}
 			results.push_back(std::move(result));

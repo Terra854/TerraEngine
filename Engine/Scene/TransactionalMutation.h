@@ -74,6 +74,9 @@ namespace TerraEngine::Scene {
 
 	enum class TransactionWriteKind {
 		CreateObject,
+		// Undo/redo restores an editor-authored object graph from a snapshot at the
+		// same protected flush boundary as every other scene mutation.
+		RestoreObjectSnapshot,
 		DeleteObject,
 		ReparentObject,
 		SetName,
@@ -178,6 +181,9 @@ namespace TerraEngine::Scene {
 		std::uint64_t destinationSimulationFrameGeneration = 0;
 		std::vector<TransactionTransformUpdate> transformUpdates;
 		std::vector<AnimationMutationPublication> animationPublications;
+		// This payload is populated only by editor history replay. Runtime systems
+		// keep using compact typed fields and never pay serialization costs.
+		nlohmann::json serializedObject = nlohmann::json::object();
 	};
 
 	struct TransactionWriteSet {

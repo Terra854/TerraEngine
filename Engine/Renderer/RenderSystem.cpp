@@ -172,58 +172,89 @@ namespace
 	CanonicalGeometryRouteFacts BuildCanonicalGeometryRouteFacts(const Mesh& mesh)
 	{
 		CanonicalGeometryRouteFacts facts{};
-		if(mesh.storage.size() < sizeof(TemfProductionHeader)) return facts;
-
-		TemfProductionHeader header{};
-		std::memcpy(&header, mesh.storage.data(), sizeof(header));
-		if(header.magic != kMeshMagicValue
-			|| header.formatVersion != kMeshCurrentVersion
-			|| header.minorVersion != kMeshCurrentMinorVersion
-			|| header.headerBytes != kTemfProductionHeaderBytes
-			|| header.formatContractId != kTemfProductionContractId
-			|| (header.representationFlags & ~kTemfRepresentationKnownMask) != 0u
-			|| !FitsCanonicalDirectoryRange(mesh.storage, header.blockTableOffset,
-				header.blockCount, sizeof(TemfBlockDescriptor))
-			|| !FitsCanonicalDirectoryRange(mesh.storage, header.pageTableOffset,
-				header.pageCount, sizeof(TemfPageDescriptor))) {
-			return facts;
-		}
-
-		const bool declaresDirect =
-			(header.representationFlags & kTemfRepresentationDirectMeshlets) != 0u;
-		const bool declaresVirtual =
-			(header.representationFlags & kTemfRepresentationVirtualGeometry) != 0u;
-		if(!declaresDirect && !declaresVirtual) return facts;
-
+		const bool generatedDirect = mesh.generatedDirectMeshletRoute.IsComplete();
+		bool declaresDirect = generatedDirect;
+		bool declaresVirtual = false;
+		std::uint32_t logicalPageSizeBytes = 0u;
 		bool directResidentDescriptors = true;
-		for(std::uint32_t index = 0u; index < header.blockCount; ++index) {
-			TemfBlockDescriptor block{};
-			const std::size_t offset = static_cast<std::size_t>(header.blockTableOffset)
-				+ static_cast<std::size_t>(index) * sizeof(block);
-			std::memcpy(&block, mesh.storage.data() + offset, sizeof(block));
-			if(block.encodedBytes == 0u || block.decodedBytes == 0u
-				|| block.encodedBytes > std::numeric_limits<std::uint64_t>::max()
-					- facts.storedBytes
-				|| block.decodedBytes > std::numeric_limits<std::uint64_t>::max()
-					- facts.decodedBytes) {
-				return {};
+		if(generatedDirect) {
+			// A procedural producer has no serialized TEMF directory. Its typed
+			// publication receipt supplies only immutable identity and resident-byte
+			// facts; the stream/range checks below still gate route eligibility.
+			facts.representationFlags = kTemfRepresentationDirectMeshlets;
+			facts.storedBytes = mesh.generatedDirectMeshletRoute.residentPayloadBytes;
+			facts.decodedBytes = mesh.generatedDirectMeshletRoute.residentPayloadBytes;
+			facts.calibrationIdentity =
+				mesh.generatedDirectMeshletRoute.sourceContentIdentity
+				^ mesh.generatedDirectMeshletRoute.generationIdentity;
+			if(facts.calibrationIdentity == 0u) facts.calibrationIdentity = 1u;
+		}
+		else {
+			if(mesh.storage.size() < sizeof(TemfProductionHeader)) return facts;
+			TemfProductionHeader header{};
+			std::memcpy(&header, mesh.storage.data(), sizeof(header));
+			if(header.magic != kMeshMagicValue
+				|| header.formatVersion != kMeshCurrentVersion
+				|| header.minorVersion != kMeshCurrentMinorVersion
+				|| header.headerBytes != kTemfProductionHeaderBytes
+				|| header.formatContractId != kTemfProductionContractId
+				|| (header.representationFlags & ~kTemfRepresentationKnownMask) != 0u
+				|| !FitsCanonicalDirectoryRange(mesh.storage, header.blockTableOffset,
+					header.blockCount, sizeof(TemfBlockDescriptor))
+				|| !FitsCanonicalDirectoryRange(mesh.storage, header.pageTableOffset,
+					header.pageCount, sizeof(TemfPageDescriptor))) {
+				return facts;
 			}
-			facts.storedBytes += block.encodedBytes;
-			facts.decodedBytes += block.decodedBytes;
-			directResidentDescriptors = directResidentDescriptors
-				&& (block.flags & kTemfBlockFlagDirectResident) != 0u
-				&& block.logicalPageId == kTemfDirectResidentPageId;
+			declaresDirect =
+				(header.representationFlags & kTemfRepresentationDirectMeshlets) != 0u;
+			declaresVirtual =
+				(header.representationFlags & kTemfRepresentationVirtualGeometry) != 0u;
+			if(!declaresDirect && !declaresVirtual) return facts;
+
+			for(std::uint32_t index = 0u; index < header.blockCount; ++index) {
+				TemfBlockDescriptor block{};
+				const std::size_t offset = static_cast<std::size_t>(header.blockTableOffset)
+					+ static_cast<std::size_t>(index) * sizeof(block);
+				std::memcpy(&block, mesh.storage.data() + offset, sizeof(block));
+				if(block.encodedBytes == 0u || block.decodedBytes == 0u
+					|| block.encodedBytes > std::numeric_limits<std::uint64_t>::max()
+						- facts.storedBytes
+					|| block.decodedBytes > std::numeric_limits<std::uint64_t>::max()
+						- facts.decodedBytes) {
+					return {};
+				}
+				facts.storedBytes += block.encodedBytes;
+				facts.decodedBytes += block.decodedBytes;
+				directResidentDescriptors = directResidentDescriptors
+					&& (block.flags & kTemfBlockFlagDirectResident) != 0u
+					&& block.logicalPageId == kTemfDirectResidentPageId;
+			}
+			facts.representationFlags = header.representationFlags;
+			facts.physicalPageCount = header.pageCount;
+			facts.physicalBlockCount = header.blockCount;
+			logicalPageSizeBytes = header.logicalPageSizeBytes;
+			facts.calibrationIdentity = header.buildRecipeHash
+				^ header.generationIdentity
+				^ (static_cast<std::uint64_t>(header.selectedCodecProfileId) << 32u)
+				^ header.selectedQuantizationProfileId;
 		}
 
 		std::uint64_t primitiveCount = 0u;
+		std::uint64_t generatedVertexOffset = 0u;
+		std::uint64_t generatedPrimitiveOffset = 0u;
 		for(const MeshletRecord& record : mesh.meshletRecords) {
 			if(record.primitiveIndexCount == 0u
 				|| record.primitiveIndexCount % 3u != 0u
 				|| primitiveCount > std::numeric_limits<std::uint64_t>::max()
-					- record.primitiveIndexCount) {
+					- record.primitiveIndexCount
+				|| (generatedDirect
+					&& (record.vertexOffset != generatedVertexOffset
+						|| record.primitiveIndexOffset != generatedPrimitiveOffset))) {
 				return {};
 			}
 			primitiveCount += record.primitiveIndexCount;
+			generatedVertexOffset += record.vertexCount;
+			generatedPrimitiveOffset += record.primitiveIndexCount;
 		}
 		if(mesh.runtimeLayout.meshletCount == 0u
 			|| mesh.runtimeLayout.meshletCount != mesh.meshletRecords.size()
@@ -231,9 +262,40 @@ namespace
 			|| mesh.meshletPrimitiveIndexData.size() != primitiveCount) {
 			return {};
 		}
+		if(generatedDirect) {
+			const std::size_t remapStride = mesh.runtimeLayout.meshletVertexRemapEncoding
+				== static_cast<std::uint32_t>(MeshletRemapEncoding::Uint16)
+				? sizeof(std::uint16_t)
+				: mesh.runtimeLayout.meshletVertexRemapEncoding
+					== static_cast<std::uint32_t>(MeshletRemapEncoding::Uint32)
+					? sizeof(std::uint32_t) : 0u;
+			const std::size_t expectedVertexBytes =
+				static_cast<std::size_t>(mesh.runtimeLayout.meshletVertexCount)
+				* mesh.runtimeLayout.layout.strideBytes;
+			const std::size_t expectedRemapBytes =
+				static_cast<std::size_t>(mesh.runtimeLayout.meshletVertexRemapCount)
+				* remapStride;
+			if(mesh.runtimeLayout.layout.strideBytes != kMeshletPackedVertexStrideBytes
+				|| remapStride == 0u
+				|| mesh.meshletVertexData.size() != expectedVertexBytes
+				|| mesh.meshletVertexRemapData.size() != expectedRemapBytes
+				|| mesh.meshletVertexRemapDecoded.size()
+					!= mesh.runtimeLayout.meshletVertexRemapCount
+				|| generatedVertexOffset != mesh.runtimeLayout.meshletVertexRemapCount
+				|| mesh.runtimeLayout.meshletSectionCount != mesh.meshletSections.size()
+				|| mesh.runtimeLayout.meshletBoundsCount != mesh.meshletBounds.size()
+				|| mesh.meshletBounds.size() != mesh.meshletRecords.size()) {
+				return {};
+			}
+			for(const MeshletSection& section : mesh.meshletSections) {
+				const std::uint64_t sectionEnd =
+					static_cast<std::uint64_t>(section.meshletOffset) + section.meshletCount;
+				if(section.meshletCount == 0u
+					|| sectionEnd > mesh.runtimeLayout.meshletCount) return {};
+			}
+		}
 
 		facts.complete = true;
-		facts.representationFlags = header.representationFlags;
 		// The direct payload may contain several resident LOD ranges. Route cost and
 		// draw batching describe one selected range, not the sum of every alternative
 		// detail packed beside it.
@@ -247,19 +309,14 @@ namespace
 		facts.sourceTriangleCount = baseDetail != nullptr
 			? baseDetail->primitiveCount
 			: static_cast<std::uint32_t>(primitiveCount / 3u);
-		facts.physicalPageCount = header.pageCount;
-		facts.physicalBlockCount = header.blockCount;
-		facts.calibrationIdentity = header.buildRecipeHash
-			^ header.generationIdentity
-			^ (static_cast<std::uint64_t>(header.selectedCodecProfileId) << 32u)
-			^ header.selectedQuantizationProfileId;
 		// Direct-only TEMFPRD1 cooks prove that every descriptor is resident;
 		// hybrid cooks can share decoded runtime streams without that restriction.
+		// Generated meshes instead carry the typed resident receipt validated above.
 		facts.directUsable = declaresDirect
-			&& (declaresVirtual || directResidentDescriptors);
+			&& (generatedDirect || declaresVirtual || directResidentDescriptors);
 		facts.virtualGeometryUsable = declaresVirtual
-			&& header.logicalPageSizeBytes != 0u
-			&& header.pageCount != 0u
+			&& logicalPageSizeBytes != 0u
+			&& facts.physicalPageCount != 0u
 			&& mesh.hasVirtualGeometry
 			&& !mesh.virtualGeometryClusters.empty();
 		return facts;
@@ -2564,6 +2621,13 @@ bool RenderSystem::SubmitPreparedTerrainPackets(
 		batch.candidates.push_back(packet.candidate);
 	}
 	return TerraEngine::Resource::VirtualGeometryStreamingSystem::Instance().SubmitTerrainProducerBatch(std::move(batch));
+}
+
+bool RenderSystem::IsDirectMeshletRouteEligible(const Mesh& mesh)
+{
+	// Keep diagnostics on the exact production decision. A parallel terrain-only
+	// approximation could pass tests while the frame router still rejects draws.
+	return BuildCanonicalGeometryRouteFacts(mesh).directUsable;
 }
 
 std::vector<VirtualGeometryClusterPacket> RenderSystem::BuildVirtualGeometryClusterPackets(
@@ -5703,6 +5767,9 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		hybridValidationSceneRequested = virtualGeometryHybridValidationSceneRequested;
 	}
 	bool hasPendingDedicatedCaptureRender = false;
+	TerraEngine::Renderer::RenderCaptureViewIdentity pendingDedicatedCaptureIdentity =
+		TerraEngine::Renderer::ResolveDedicatedCaptureViewIdentity(
+			RenderViewType::Game);
 	TerraEngine::Scene::WorldPosition pendingDedicatedCaptureCanonicalOrigin{};
 	glm::uvec2 pendingDedicatedCaptureTargetSize = captureLimits.defaultWidth > 0u && captureLimits.defaultHeight > 0u
 		? glm::uvec2(captureLimits.defaultWidth, captureLimits.defaultHeight)
@@ -5717,6 +5784,9 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				&& captureRequest.format == "image/png")
 			{
 				hasPendingDedicatedCaptureRender = true;
+				pendingDedicatedCaptureIdentity =
+					TerraEngine::Renderer::ResolveDedicatedCaptureViewIdentity(
+						captureRequest.viewType);
 				pendingDedicatedCaptureTargetSize = captureRequest.targetSize;
 				pendingDedicatedCaptureCanonicalOrigin =
 					captureRequest.cameraCanonicalPosition;
@@ -5944,8 +6014,10 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	if (hasPendingDedicatedCaptureRender)
 	{
 		renderFrameSnapshot.viewRequests.push_back(makeViewRequest(
-			RenderOutputKind::OffscreenTexture, RenderViewType::Game,
-			pendingDedicatedCaptureTargetSize, 9000U,
+			RenderOutputKind::OffscreenTexture,
+			pendingDedicatedCaptureIdentity.viewType,
+			pendingDedicatedCaptureTargetSize,
+			pendingDedicatedCaptureIdentity.outputId,
 			pendingDedicatedCaptureCanonicalOrigin));
 	}
 	if (renderFrameSnapshot.viewRequests.empty())
@@ -11049,17 +11121,18 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		captureFrameData.cameraLocalPosition = glm::vec3(0.0F);
 		captureFrameData.editorContextTint = glm::vec4(0.0f);
 		captureFrameData.uiBatch = {};
-		const std::uint32_t captureOutputId = captureRequest.viewType
-			== RenderViewType::Scene ? 9001U : 9000U;
+		const TerraEngine::Renderer::RenderCaptureViewIdentity captureIdentity =
+			TerraEngine::Renderer::ResolveDedicatedCaptureViewIdentity(
+				captureRequest.viewType);
 		captureFrameData.referenceFrame = findReferenceFrame(
-			RenderOutputKind::OffscreenTexture, captureOutputId);
+			RenderOutputKind::OffscreenTexture, captureIdentity.outputId);
 		localizeFrameLights(captureFrameData);
 		const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(
 			captureFrameData.projectionMatrix * captureFrameData.viewMatrix,
 			captureRequest.targetSize,
 			RenderOutputKind::OffscreenTexture,
 			captureRequest.viewType,
-			captureOutputId,
+			captureIdentity.outputId,
 			captureFrameData.cameraLocalPosition,
 			captureFrameData.referenceFrame);
 		std::vector<RenderItemRecord>& captureCommands =
@@ -11075,15 +11148,15 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		copyVirtualGeometryFramePayload(captureFrameData, visibleCommands);
 		buildGroupedSubmissions(captureFrameData, captureCommands,
 			RenderOutputKind::OffscreenTexture,
-			captureRequest.viewType,
-			captureOutputId,
+			captureIdentity.viewType,
+			captureIdentity.outputId,
 			captureGroupingCompatibilitySignature,
 			visibleCommands.cacheHit);
 		captureFrameData.shadowDrawLists = buildShadowDrawLists(captureFrameData.cameraLocalPosition);
 
 		RenderOutputRequest captureOutputRequest = makeOutputRequest(
-			RenderOutputKind::OffscreenTexture, captureRequest.viewType,
-			captureOutputId);
+			RenderOutputKind::OffscreenTexture, captureIdentity.viewType,
+			captureIdentity.outputId);
 		captureOutputRequest.targetSize = captureRequest.targetSize;
 		queuePreparedSubmission(std::move(captureFrameData),
 			std::move(captureOutputRequest), captureCommands,
@@ -11402,6 +11475,10 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			const TerraEngine::Renderer::RenderDynamicLane& right) noexcept
 		{
 			return left.key == right.key && left.transformGeneration == right.transformGeneration
+				&& left.hasCanonicalWorldPose == right.hasCanonicalWorldPose
+				&& left.canonicalWorldPose.position == right.canonicalWorldPose.position
+				&& left.canonicalWorldPose.rotation == right.canonicalWorldPose.rotation
+				&& left.canonicalWorldPose.scale == right.canonicalWorldPose.scale
 				&& left.animationPresentationGeneration == right.animationPresentationGeneration
 				&& left.animationBinding.animationAuthorityGeneration
 					== right.animationBinding.animationAuthorityGeneration
@@ -11581,9 +11658,11 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
                                     renderFrameSnapshot
                                         .renderables[renderableIndex];
                             lane.key = persistent.key;
-							// Retained pages are view-independent. Per-view materialization
-							// replaces this neutral value before backend publication.
+							// Retained pages are view-independent. The precise canonical pose
+							// below is localized by each sealed view's command resolver.
 							lane.instance.modelMatrix = glm::mat4(1.0F);
+							lane.canonicalWorldPose = renderable.canonicalWorldPose;
+							lane.hasCanonicalWorldPose = true;
                             lane.previousModelMatrix =
                                 previousPage != nullptr &&
                                         laneIndex <
@@ -13701,6 +13780,14 @@ void RenderSystem::ReloadMesh(const TerraEngine::UUID& meshId)
 	ResourceManager::Instance().ReloadMesh(meshId);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (rhi)
+	{
+		rhi->InvalidateMesh(meshId);
+	}
+}
+
+void RenderSystem::InvalidateGeneratedMesh(const TerraEngine::UUID& meshId)
+{
+	if(rhi && meshId != TerraEngine::EMPTY_UUID)
 	{
 		rhi->InvalidateMesh(meshId);
 	}

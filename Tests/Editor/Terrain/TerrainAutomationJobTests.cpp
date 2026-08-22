@@ -53,6 +53,51 @@ namespace TerraEngine::EditorTests
 				"A reconnectable terrain job must retain progress and a terminal cancelled receipt while explicitly preserving last-known-good derived state.");
 		});
 
+		registry.Add("Editor.TerrainAutomation.InspectPublishesExactAreaObservations", [](TestContext& context) {
+			using namespace TerraEngine;
+			auto root = std::make_shared<Terrain::TerrainAssetRoot>();
+			root->assetUuid = GenerateUUID();
+			root->publicationGeneration = 7u;
+			root->rootContentHash = {101u, 202u};
+			root->authoredBounds = {0, 0, 256, 256};
+			Terrain::TerrainAreaDescriptor descriptor;
+			descriptor.coordinate = {0, 0};
+			descriptor.editGeneration = 4u;
+			descriptor.authoredContentHash = {303u, 404u};
+			descriptor.channels.heightHash = Terrain::ContentHash{505u, 606u};
+			descriptor.minHeightMm = -12;
+			descriptor.maxHeightMm = 34;
+			Terrain::TerrainDirectoryShard shard;
+			shard.descriptors.emplace(descriptor.coordinate, descriptor);
+			root->directoryShards.push_back(std::move(shard));
+
+			Terrain::TerrainAssetStore store(root);
+			Editor::Terrain::TerrainAuthoringSystem authoring;
+			Editor::Terrain::TerrainAutomationAdapter adapter;
+			adapter.Configure(store, authoring);
+			Editor::Automation::EditorAutomationService service;
+			service.SetTerrainAutomationAdapter(&adapter);
+			Editor::Automation::AutomationRequestContext request;
+			request.requestId = "terrain-inspect-request";
+			request.correlationId = "terrain-inspect-correlation";
+			request.state.projectAvailable = true;
+			request.grantedPermission = Editor::Automation::AutomationPermission::Read;
+			request.arguments = nlohmann::json::object();
+			const auto inspected = service.GetRegistry().Dispatch("terrain.asset.inspect", 1u, request);
+			const auto areas = inspected.data.value("areas", nlohmann::json::array());
+
+			context.Expect(inspected.ok && areas.size() == 1u
+				&& areas[0].value("areaX", "") == "0"
+				&& areas[0].value("editGeneration", "") == "4"
+				&& areas[0].value("authoredContentHash", "")
+					== Terrain::ToHexString(descriptor.authoredContentHash)
+				&& areas[0].value("heightHash", "")
+					== Terrain::ToHexString(*descriptor.channels.heightHash)
+				&& inspected.data.value("totalAreaCount", 0u) == 1u
+				&& !inspected.data.value("areasTruncated", true),
+				"Terrain inspection must expose the exact immutable observation tuple required by a later generation-checked edit.");
+		});
+
 		registry.Add("Editor.TerrainAutomation.IdempotencyReplaysExactTerminalResultAndRejectsMismatch", [](TestContext& context) {
 			using namespace TerraEngine::Editor::Automation;
 			EditorAutomationIdempotencyStore idempotency(4u);

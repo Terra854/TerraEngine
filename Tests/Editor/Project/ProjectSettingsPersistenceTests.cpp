@@ -200,6 +200,36 @@ namespace TerraEngine::EditorTests
 			std::filesystem::remove_all(root, ignored);
 		});
 
+		registry.Add("Editor.ProjectSettings.NewProjectsCreateLoadableDefaultScene", [](TestContext& context) {
+			const std::filesystem::path root =
+				std::filesystem::temp_directory_path() / "TerraEngineProjectSettings" / "LoadableDefaultScene";
+			std::error_code ignored;
+			std::filesystem::remove_all(root, ignored);
+
+			{
+				::ProjectManager manager;
+				std::string error;
+				context.Expect(manager.CreateProject(root, "Loadable Default Scene", ::ProjectTemplate::Blank, &error),
+					error.empty() ? "New project creation should succeed." : error);
+
+				::ProjectSceneLoadDecision decision;
+				context.Expect(manager.PrepareSceneForLoading("Scenes/Scene.tescene", decision, &error),
+					error.empty() ? "A new project's default scene should pass the production scene preparation path." : error);
+				context.Expect(decision.prepared, "The default scene should produce a prepared scene packet.");
+				context.ExpectEqual(std::size_t{2U}, decision.preparedScene.objectCount,
+					"The default scene should contain its sky and camera objects.");
+				context.Expect(decision.preparedScene.objects.size() == 2U
+					&& decision.preparedScene.objects[0].object.value("uuid", std::string{}).size() == 32U
+					&& decision.preparedScene.objects[1].object.value("uuid", std::string{}).size() == 32U,
+					"Every generated default object should carry a stable scene identity.");
+				context.Expect(decision.preparedScene.objects[0].object.value("uuid", std::string{})
+					!= decision.preparedScene.objects[1].object.value("uuid", std::string{}),
+					"Generated default object identities should be unique within the scene.");
+			}
+
+			std::filesystem::remove_all(root, ignored);
+		});
+
 		registry.Add("Editor.ProjectSettings.TempProjectsDoNotPolluteRecents", [](TestContext& context) {
 			ScopedEditorPreferenceFile preferences("TempProjectsDoNotPolluteRecents");
 			const std::filesystem::path root =

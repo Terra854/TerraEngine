@@ -20,6 +20,7 @@ namespace TerraEngine::Editor::Terrain
 		void Redo() override;
 		std::string GetName() const override { return "Terrain Stroke"; }
 		std::string GetHistoryId() const override { return historyId; }
+		std::string_view GetHistoryDomain() const override { return "terrain-authoring"; }
 		std::string GetPendingReplayTransactionId() const override { return pendingReplayId; }
 		std::size_t GetHistoryBytes() const override { return retainedBytes; }
 	private:

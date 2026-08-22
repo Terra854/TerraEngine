@@ -938,6 +938,25 @@ static_assert(sizeof(TemfDeformableMorphRecord) == 16u,
 // in MeshletRuntimeLayout after validated production block reconstruction.
 using MeshHeader = TemfProductionHeader;
 
+// Runtime-generated direct meshes have no serialized TEMF directory to inspect.
+// Their producer publishes this typed receipt only after constructing every
+// immutable vertex, remap, primitive, record, section, and bounds stream. The
+// renderer still rechecks the stream sizes and record ranges before admitting
+// the mesh to the direct route, so this flag cannot make a partial payload draw.
+struct GeneratedDirectMeshletRouteMetadata
+{
+	std::uint64_t sourceContentIdentity = 0u;
+	std::uint64_t generationIdentity = 0u;
+	std::uint64_t residentPayloadBytes = 0u;
+	bool validated = false;
+
+	[[nodiscard]] bool IsComplete() const noexcept
+	{
+		return validated && sourceContentIdentity != 0u
+			&& generationIdentity != 0u && residentPayloadBytes != 0u;
+	}
+};
+
 // In-memory representation of an entire .temf payload.
 // Raw byte storage keeps payload ownership in one place while spans/vectors expose typed views.
 struct Mesh
@@ -954,6 +973,10 @@ struct Mesh
 	std::vector<std::uint8_t> storage;
 	// Decoded canonical blocks own the byte spans consumed by the renderer.
 	std::vector<std::uint8_t> decodedProductionStorage;
+	// Procedural producers use a typed in-memory route receipt instead of
+	// manufacturing a fake on-disk TEMF header. Serialized meshes leave this
+	// value empty and continue to derive route truth from their checked directory.
+	GeneratedDirectMeshletRouteMetadata generatedDirectMeshletRoute{};
 	// Attribute production blocks are independently decoded and then
 	// interleaved once into this upload-ready fixed-stride runtime buffer.
 	std::vector<std::uint8_t> reconstructedVertexData;

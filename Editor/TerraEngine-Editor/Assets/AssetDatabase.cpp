@@ -720,6 +720,30 @@ namespace {
 		return envelope.assetId.value;
 	}
 
+	std::optional<TerraEngine::UUID> ReadTerrainAssetId(
+		const std::filesystem::path& path)
+	{
+		// The small public terrain descriptor is the identity authority shared by
+		// scenes, the private area bundle, and ResourceManager. Adopting that UUID
+		// prevents an unrelated generated .meta GUID from breaking scene reloads.
+		std::ifstream input(path, std::ios::binary);
+		nlohmann::json descriptor;
+		try
+		{
+			if(!input || !(input >> descriptor) || !descriptor.is_object()
+				|| descriptor.value("format", std::string{}) != "TerraEngineTerrain"
+				|| descriptor.value("version", 0u) != 1u
+				|| !descriptor.contains("assetId") || !descriptor["assetId"].is_string())
+				return std::nullopt;
+		}
+		catch(const nlohmann::json::exception&)
+		{
+			return std::nullopt;
+		}
+		const auto assetId = TerraEngine::ParseUUID(descriptor["assetId"].get<std::string>());
+		return assetId && *assetId != TerraEngine::EMPTY_UUID ? assetId : std::nullopt;
+	}
+
 	std::optional<GeneratedModelPackageChildKind> GeneratedKindForManifestKind(
 		TerraEngine::AssetPipeline::AnimationImportSubAssetKind kind)
 	{
@@ -1902,6 +1926,19 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 				TERRAENGINE_LOG(LogLevel::Warning,
 					"Cooked animation identity differs from its existing metadata; reimport will fail closed: "
 					<< absSourcePath);
+			}
+		}
+	}
+	else if(importerName == "TerrainImporter")
+	{
+		// TerrainComponent persists the descriptor UUID, so metadata must use that
+		// same identity even when migrating a project created before this rule.
+		if(const std::optional<TerraEngine::UUID> terrainId = ReadTerrainAssetId(absSourcePath))
+		{
+			if(metadata.guid != *terrainId)
+			{
+				metadata.guid = *terrainId;
+				needsImport = true;
 			}
 		}
 	}

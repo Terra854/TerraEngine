@@ -137,21 +137,21 @@ namespace TerraEngine::Physics
 
 		[[nodiscard]] ColliderRecipeValidationResult Validate(
 			const ColliderRecipeLimits& limits = {}) const;
-		[[nodiscard]] bool TryNormalize(
+		[[nodiscard]] TERRAENGINE_API bool TryNormalize(
 			ColliderRecipe& normalized,
 			ColliderRecipeValidationResult& validation,
 			const ColliderRecipeLimits& limits = {}) const;
 		// JSON is restricted to engine-owned schema keys. The opaque provider
 		// payload belongs only in CookedColliderAsset, never in this recipe file.
 		[[nodiscard]] nlohmann::json ToJson() const;
-		[[nodiscard]] static bool LoadJson(
+		[[nodiscard]] static TERRAENGINE_API bool LoadJson(
 			const nlohmann::json& source,
 			ColliderRecipe& destination,
 			ColliderRecipeValidationResult& validation,
 			const ColliderRecipeLimits& limits = {});
 		// Zero means validation failed. Successful hashes are canonical FNV-1a
 		// hashes of normalized project-owned fields, never provider cooked bytes.
-		[[nodiscard]] std::uint64_t StableHash(const ColliderRecipeLimits& limits = {}) const;
+		[[nodiscard]] TERRAENGINE_API std::uint64_t StableHash(const ColliderRecipeLimits& limits = {}) const;
 	};
 
 	// Terrain collision never serializes a provider shape. This helper keeps the

@@ -1718,6 +1718,40 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadMeshAsync(const std::
 	});
 }
 
+// ResourceManager::RegisterMesh publishes one already-validated generated mesh.
+// Terrain preview workers use this after completing canonical meshlet packing;
+// no half-built payload is ever visible to renderer collection.
+TerraEngine::UUID ResourceManager::RegisterMesh(const std::string& cacheKey, std::unique_ptr<Mesh> mesh)
+{
+	const std::string normalizedKey = "generated/" + cacheKey;
+	TerraEngine::UUID id = TerraEngine::GenerateUUID();
+	{
+		std::unique_lock lock(meshCache.mutex);
+		if(const auto existing = meshCache.pathToId.find(normalizedKey);
+			existing != meshCache.pathToId.end())
+		{
+			id = existing->second;
+		}
+		meshCache.pathToId[normalizedKey] = id;
+		meshCache.idToPath[id] = normalizedKey;
+		if(mesh)
+		{
+			meshCache.resources[id] = std::move(mesh);
+		}
+		else
+		{
+			meshCache.resources.erase(id);
+		}
+		meshCache.inFlight.erase(normalizedKey);
+		m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);
+	}
+	if(Mesh* published = GetMesh(id); published != nullptr)
+	{
+		CacheLoadedMeshBounds(id, published);
+	}
+	return id;
+}
+
 // ResourceManager::ReloadMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::ReloadMesh(const TerraEngine::UUID& id)
 {

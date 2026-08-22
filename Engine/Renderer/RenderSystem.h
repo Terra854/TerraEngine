@@ -125,6 +125,10 @@ public:
 
 	void ReloadMaterial(const TerraEngine::UUID& materialId);
 	void ReloadMesh(const TerraEngine::UUID& meshId);
+	// Generated meshes already replaced their immutable CPU cache entry. This
+	// protected call retires only the backend copy so the next frame uploads the
+	// new generation without trying to reload a nonexistent disk path.
+	void InvalidateGeneratedMesh(const TerraEngine::UUID& meshId);
 	void ReloadTexture(const TerraEngine::UUID& textureId);
 
 	void DeleteResource(const TerraEngine::UUID& id);
@@ -174,6 +178,11 @@ public:
 	// It is not a publication path; PagePublish still owns visibility.
 	static bool SubmitPreparedTerrainPackets(
 		std::span<const TerraEngine::Renderer::Terrain::TerrainPreparedRenderPacket> packets);
+	// Returns the same fail-closed direct-route admission decision used during
+	// frame preparation. Terrain diagnostics and regression tests can therefore
+	// prove that a generated mesh will produce draw work without exposing private
+	// route-cost state or touching the graphics backend.
+	[[nodiscard]] static bool IsDirectMeshletRouteEligible(const Mesh& mesh);
 	// Queue one non-blocking GPU identity copy. Returning false means callers
 	// must use the explicit CPU-projection fallback and must not claim GPU proof.
 	bool RequestConventionalVisibilityIdentityPick(

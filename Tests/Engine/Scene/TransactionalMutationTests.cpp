@@ -4,6 +4,7 @@
 
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
+#include "Scene/Serializer.h"
 
 #include <glm/vec3.hpp>
 
@@ -64,6 +65,37 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(std::string("TransactionRoot"), result.inverseDeltas[0].operation.stringValue, "The name inverse should contain the exact prior value.");
 			context.Expect(result.inverseDeltas[1].operation.kind == TerraEngine::Scene::TransactionWriteKind::SetActive, "The second inverse should restore active state.");
 			context.Expect(result.inverseDeltas[1].operation.boolValue, "The active-state inverse should contain the exact prior value.");
+		});
+
+		registry.Add("Engine.TransactionalMutation.SnapshotRestoreRollsBackAtomicallyAfterLaterFailure", [](TestContext& context) {
+			TransactionalMutationFixture fixture = MakeTransactionalMutationFixture();
+			Object authored = fixture.objects.createObject("Terrain Snapshot");
+			fixture.objects.setObjectStatic(authored, true);
+			const TerraEngine::UUID authoredId = fixture.objects.getUUID(authored);
+			const nlohmann::json snapshot = Serializer::SerializeObject(authored.EntityId());
+			fixture.objects.removeObject(authored);
+
+			TerraEngine::Scene::Transaction transaction;
+			transaction.id = "tx-snapshot-rollback";
+			transaction.origin = TerraEngine::Scene::TransactionOrigin::Test;
+			TerraEngine::Scene::TransactionWriteOperation restore;
+			restore.kind = TerraEngine::Scene::TransactionWriteKind::RestoreObjectSnapshot;
+			restore.target = TerraEngine::Scene::ExistingObject(authoredId);
+			restore.serializedObject = snapshot;
+			TerraEngine::Scene::TransactionWriteOperation laterWrite;
+			laterWrite.kind = TerraEngine::Scene::TransactionWriteKind::SetName;
+			laterWrite.target = TerraEngine::Scene::ExistingObject(fixture.rootId);
+			laterWrite.stringValue = "Must Not Publish";
+			transaction.writeSet.operations = {restore, laterWrite};
+			transaction.injectedFailureOperationIndex = 1U;
+
+			const TerraEngine::Scene::TransactionResult rejected = TerraEngine::Scene::CommitTransaction(fixture.objects, transaction);
+			context.Expect(rejected.status == TerraEngine::Scene::TransactionStatus::Rejected,
+				"A failure after snapshot restoration must reject the complete transaction.");
+			context.Expect(!fixture.objects.getObject(authoredId),
+				"Rollback must remove the partially restored object graph before it becomes visible.");
+			context.ExpectEqual(std::string("TransactionRoot"), fixture.objects.getObjectName(fixture.root),
+				"Rollback must leave unrelated later writes unapplied.");
 		});
 
 		registry.Add("Engine.TransactionalMutation.InvalidReflectedWriteRejectsBeforeAnyPublication", [](TestContext& context) {

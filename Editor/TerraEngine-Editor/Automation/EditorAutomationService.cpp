@@ -2846,7 +2846,48 @@ namespace TerraEngine::Editor::Automation
 				{
 					const auto capture = terrainAutomationAdapter->Inspect();
 					if(!capture) return AutomationDispatchResult{false,ErrorCategory::Unavailable,"Terrain inspection requires a current immutable root.",{}};
-					return AutomationDispatchResult{true,ErrorCategory::Internal,"Terrain immutable root inspection.",{{"assetUuid",TerraEngine::ToHexString(capture->root->assetUuid)},{"rootHash",TerraEngine::Terrain::ToHexString(capture->root->rootContentHash)},{"publicationGeneration",capture->publicationGeneration},{"visibilityBoundary","immutable_terrain_snapshot"}}};
+					// Generation-checked edit requests must repeat the exact immutable area
+					// observations they inspected. Publish a bounded, deterministic copy of
+					// those observations here; otherwise an MCP client would have to read the
+					// terrain asset's private data directory to construct a valid request.
+					constexpr std::size_t maximumInspectionAreas = 4096u;
+					nlohmann::json areas = nlohmann::json::array();
+					std::size_t totalAreaCount = 0u;
+					for(const TerraEngine::Terrain::TerrainDirectoryShard& shard : capture->root->directoryShards)
+					{
+						for(const auto& [coordinate, descriptor] : shard.descriptors)
+						{
+							++totalAreaCount;
+							if(areas.size() >= maximumInspectionAreas)
+								continue;
+							nlohmann::json area = {
+								{"areaX", std::to_string(coordinate.x)},
+								{"areaZ", std::to_string(coordinate.z)},
+								{"editGeneration", std::to_string(descriptor.editGeneration)},
+								{"authoredContentHash", TerraEngine::Terrain::ToHexString(descriptor.authoredContentHash)},
+								{"minHeightMm", descriptor.minHeightMm},
+								{"maxHeightMm", descriptor.maxHeightMm}
+							};
+							if(descriptor.channels.heightHash)
+								area["heightHash"] = TerraEngine::Terrain::ToHexString(*descriptor.channels.heightHash);
+							if(descriptor.channels.holeHash)
+								area["holeHash"] = TerraEngine::Terrain::ToHexString(*descriptor.channels.holeHash);
+							areas.push_back(std::move(area));
+						}
+					}
+					return AutomationDispatchResult{true,ErrorCategory::Internal,"Terrain immutable root inspection.",{
+						{"assetUuid",TerraEngine::ToHexString(capture->root->assetUuid)},
+						{"rootHash",TerraEngine::Terrain::ToHexString(capture->root->rootContentHash)},
+						{"publicationGeneration",capture->publicationGeneration},
+						{"layerStackGeneration",std::to_string(capture->root->layerStackGeneration)},
+						{"authoredBounds",{{"minX",std::to_string(capture->root->authoredBounds.minX)},
+							{"minZ",std::to_string(capture->root->authoredBounds.minZ)},
+							{"maxXExclusive",std::to_string(capture->root->authoredBounds.maxXExclusive)},
+							{"maxZExclusive",std::to_string(capture->root->authoredBounds.maxZExclusive)}}},
+						{"areas",std::move(areas)},
+						{"totalAreaCount",totalAreaCount},
+						{"areasTruncated",totalAreaCount > maximumInspectionAreas},
+						{"visibilityBoundary","immutable_terrain_snapshot"}}};
 				}
 				if(route == "terrain.create" || route == "terrain.import" || route == "terrain.rebuild"
 					|| route == "terrain.collision-refresh" || route == "terrain.validate"

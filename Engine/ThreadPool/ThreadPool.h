@@ -1,6 +1,7 @@
 // ThreadPool.h — Contains declarations for the Thread Pool queue state, worker coordination, and synchronization helpers used by task queue storage, worker thread lifecycle, and synchronization primitives.
 
 #pragma once
+#include "Core/Export.h"
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -176,15 +177,15 @@ class ThreadPool {
 public:
 	static constexpr std::size_t kMaximumTelemetryHistoryCapacityPerWorker = 256;
 
-	static ThreadPool& instance();
+	static TERRAENGINE_API ThreadPool& instance();
 
 	ThreadPool(const ThreadPool&) = delete;
 	ThreadPool& operator=(const ThreadPool&) = delete;
 
 	// requestedWorkerCount==0 preserves the historical hardware-concurrency
 	// default. Explicit counts are used by deterministic performance runs.
-	void initialize(std::size_t requestedWorkerCount = 0);
-	void shutdown();
+	TERRAENGINE_API void initialize(std::size_t requestedWorkerCount = 0);
+	TERRAENGINE_API void shutdown();
 
 	// This function needs to be in the header file or else you'll get linker errors
 	// Create a task with parameters and return value

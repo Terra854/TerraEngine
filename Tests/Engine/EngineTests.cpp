@@ -319,6 +319,7 @@ namespace TerraEngine::Tests {
 	void RegisterTerrainBrushKernelTests(TestRegistry& registry);
 	void RegisterTerrainPageCookerTests(TestRegistry& registry);
 	void RegisterTerrainRenderSystemIntegrationTests(TestRegistry& registry);
+	void RegisterTerrainDirectMeshTests(TestRegistry& registry);
 	void RegisterTerrainAtomicEditTests(TestRegistry& registry);
 	void RegisterTerrainLargeWorldCoordinateTests(TestRegistry& registry);
 	void RegisterTerrainResidencyTests(TestRegistry& registry);
@@ -669,6 +670,7 @@ int main() {
 	TerraEngine::Tests::RegisterTerrainBrushKernelTests(registry);
 	TerraEngine::Tests::RegisterTerrainPageCookerTests(registry);
 	TerraEngine::Tests::RegisterTerrainRenderSystemIntegrationTests(registry);
+	TerraEngine::Tests::RegisterTerrainDirectMeshTests(registry);
 	TerraEngine::Tests::RegisterTerrainAtomicEditTests(registry);
 	TerraEngine::Tests::RegisterTerrainLargeWorldCoordinateTests(registry);
 	TerraEngine::Tests::RegisterTerrainResidencyTests(registry);

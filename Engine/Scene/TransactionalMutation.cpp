@@ -74,7 +74,37 @@ namespace TerraEngine::Scene {
 
 		bool RequiresExistingTarget(TransactionWriteKind kind)
 		{
-			return kind != TransactionWriteKind::CreateObject;
+			return kind != TransactionWriteKind::CreateObject
+				&& kind != TransactionWriteKind::RestoreObjectSnapshot;
+		}
+
+		std::optional<TerraEngine::UUID> SnapshotObjectId(const nlohmann::json& snapshot)
+		{
+			if (!snapshot.is_object() || !snapshot.contains("uuid") || !snapshot["uuid"].is_string())
+			{
+				return std::nullopt;
+			}
+			return TerraEngine::ParseUUID(snapshot["uuid"].get<std::string>());
+		}
+
+		bool ValidateSnapshotTree(ObjectManager& objects, const nlohmann::json& snapshot,
+			std::unordered_set<TerraEngine::UUID>& reservedIds)
+		{
+			const std::optional<TerraEngine::UUID> objectId = SnapshotObjectId(snapshot);
+			if (!objectId || *objectId == TerraEngine::EMPTY_UUID
+				|| !reservedIds.insert(*objectId).second || objects.getObject(*objectId))
+			{
+				return false;
+			}
+			if (snapshot.contains("name") && !snapshot["name"].is_string()) return false;
+			if (snapshot.contains("components") && !snapshot["components"].is_object()) return false;
+			if (!snapshot.contains("children")) return true;
+			if (!snapshot["children"].is_array()) return false;
+			for (const nlohmann::json& child : snapshot["children"])
+			{
+				if (!ValidateSnapshotTree(objects, child, reservedIds)) return false;
+			}
+			return true;
 		}
 
 		bool IsComponentWrite(TransactionWriteKind kind)
@@ -344,6 +374,7 @@ namespace TerraEngine::Scene {
 			}
 
 			std::unordered_set<std::int32_t> localCreates;
+			std::unordered_set<TerraEngine::UUID> snapshotRestoreIds;
 			std::unordered_set<std::string> structurallyTouchedTargets;
 			std::unordered_set<std::string> deletedTargets;
 			std::unordered_set<std::string> spatiallyTouchedTargets;
@@ -367,6 +398,29 @@ namespace TerraEngine::Scene {
 					{
 						result.status = TransactionStatus::Conflicted;
 						AddConflict(result, TransactionConflictReason::MissingTarget, operation.parent.objectId, index, "Created-object parent no longer exists.", 0, 0, {}, {}, operation.kind);
+					}
+					continue;
+				}
+				if (operation.kind == TransactionWriteKind::RestoreObjectSnapshot)
+				{
+					const std::optional<TerraEngine::UUID> snapshotId = SnapshotObjectId(operation.serializedObject);
+					const bool editorReplayOrigin = transaction.origin == TransactionOrigin::Editor
+						|| transaction.origin == TransactionOrigin::Automation || transaction.origin == TransactionOrigin::Test;
+					if (!editorReplayOrigin || operation.target.UsesLocalObject()
+						|| !snapshotId || *snapshotId != operation.target.objectId
+						|| !ValidateSnapshotTree(objects, operation.serializedObject, snapshotRestoreIds))
+					{
+						result.status = TransactionStatus::Rejected;
+						AddConflict(result, TransactionConflictReason::InvalidPayload, operation.target.objectId, index,
+							"Object snapshot replay needs a valid, collision-free serialized graph with the requested stable identity.",
+							0, 0, {}, {}, operation.kind);
+					}
+					if (HasObjectRef(operation.parent) && (operation.parent.UsesLocalObject()
+						|| !objects.getObject(operation.parent.objectId)))
+					{
+						result.status = TransactionStatus::Conflicted;
+						AddConflict(result, TransactionConflictReason::MissingTarget, operation.parent.objectId, index,
+							"Object snapshot replay parent no longer exists.", 0, 0, {}, {}, operation.kind);
 					}
 					continue;
 				}
@@ -1035,6 +1089,32 @@ namespace TerraEngine::Scene {
 				continue;
 			}
 
+			if (operation.kind == TransactionWriteKind::RestoreObjectSnapshot)
+			{
+				const entt::entity restoredEntity = Serializer::DeserializeObjectEntity(operation.serializedObject);
+				const std::optional<Object> restored = objects.getObject(restoredEntity);
+				if (!restored || objects.getUUID(*restored) != operation.target.objectId)
+				{
+					AddConflict(result, TransactionConflictReason::InvalidPayload, operation.target.objectId, index,
+						"Serialized object graph could not be restored with its stable identity.", 0, 0, {}, {}, operation.kind);
+					break;
+				}
+				inverse.operation.kind = TransactionWriteKind::DeleteObject;
+				inverse.operation.target = operation.target;
+				result.inverseDeltas.push_back(std::move(inverse));
+				if (HasObjectRef(operation.parent))
+				{
+					const std::optional<Object> parent = objects.getObject(operation.parent.objectId);
+					if (!parent || !objects.setParent(*restored, parent))
+					{
+						AddConflict(result, TransactionConflictReason::HierarchyConflict, operation.target.objectId, index,
+							"Restored object graph could not be attached to its prepared parent.", 0, 0, {}, {}, operation.kind);
+						break;
+					}
+				}
+				continue;
+			}
+
 			if (operation.kind == TransactionWriteKind::UpdateTransformBatch)
 			{
 				// Resolve every target before the first write. This retains all-or-nothing
@@ -1273,6 +1353,7 @@ namespace TerraEngine::Scene {
 				break;
 			}
 			case TransactionWriteKind::CreateObject:
+			case TransactionWriteKind::RestoreObjectSnapshot:
 				break;
 			}
 
@@ -1605,6 +1686,7 @@ namespace TerraEngine::Scene {
 				break;
 			}
 			case TransactionWriteKind::CreateObject:
+			case TransactionWriteKind::RestoreObjectSnapshot:
 				// Serialized restoration is handled before target resolution above.
 				restoredEveryDelta = false;
 				break;

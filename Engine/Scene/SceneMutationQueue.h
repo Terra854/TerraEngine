@@ -123,6 +123,14 @@ namespace TerraEngine::Scene {
 		std::vector<SceneMutationRequest> requests;
 	};
 
+	struct EditorTransactionCompletion {
+		// Keep the immutable request beside its protected-boundary receipt. Async
+		// editor producers may be enqueued and flushed between editor UI passes, so
+		// reconstructing this association from PendingTransactions is racy.
+		Transaction transaction;
+		TransactionResult result;
+	};
+
 	class TERRAENGINE_API SceneMutationQueue {
 	public:
 		static SceneMutationQueue& Instance();
@@ -143,6 +151,7 @@ namespace TerraEngine::Scene {
 		// Diagnostics intentionally discard that payload, so the editor drains this
 		// short-lived receipt channel at the beginning of its following frame.
 		std::vector<TransactionResult> DrainCompletedEditorTransactionResults();
+		std::vector<EditorTransactionCompletion> DrainCompletedEditorTransactions();
 		TransactionDiagnostics GetTransactionDiagnostics() const;
 		void Clear();
 		SceneMutationBatchResult Validate(const SceneGraph& graph) const;
@@ -156,7 +165,7 @@ namespace TerraEngine::Scene {
 		std::vector<SceneMutationWorkerBuffer> workerBuffers;
 		std::vector<Transaction> transactions;
 		std::vector<TransactionPublicationGroup> publicationGroups;
-		std::vector<TransactionResult> completedEditorTransactionResults;
+		std::vector<EditorTransactionCompletion> completedEditorTransactions;
 		TransactionDiagnostics transactionDiagnostics;
 		mutable std::mutex requestsMutex;
 	};

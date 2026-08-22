@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <entt/entity/entity.hpp>
 #include <nlohmann/json.hpp>
@@ -26,6 +27,9 @@ struct ICommand {
 	virtual void Redo() = 0;
 	virtual std::string GetName() const = 0;
 	virtual std::string GetHistoryId() const { return {}; }
+	// Domains let an editor tool invalidate commands that retain tool-owned
+	// resources without erasing unrelated scene history.
+	virtual std::string_view GetHistoryDomain() const { return {}; }
 	// Deferred commands return the transaction they queued so the history owner
 	// can wait for the protected scene flush before finalizing dirty-state tracking.
 	virtual std::string GetPendingReplayTransactionId() const { return {}; }
@@ -210,6 +214,9 @@ public:
 
 	// Clears the undo/redo history.
 	void Clear();
+	// Removes commands belonging to one tool-owned lifetime. Other editor actions
+	// remain undoable when that tool replaces its backing data store.
+	void DiscardHistoryDomain(std::string_view domain);
 
 private:
 	// Each history entry names both scene states surrounding its command. Stable

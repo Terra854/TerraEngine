@@ -7,6 +7,7 @@
 #include "../Framework/EditorWindow.h"
 #include "AssetDatabase.h"
 #include "Engine/Core/Object/Reflection.h"
+#include "Engine/Scene/WorldCoordinate.h"
 #include "Engine/Utilities/UUID.h"
 #include "../Animation/AnimationPreviewController.h"
 #include "../Subsystems/PhysicsEditorAuthoringState.h"
@@ -47,7 +48,7 @@ private:
 	bool IsPrefabOverride(entt::entity obj, const std::string& compName, const std::string& propertyName) const;
 	void ResetPrefabOverride(entt::entity obj, const std::string& compName, const std::string& propertyName);
 	void DrawPrefabLinkInspector(entt::entity obj);
-	void DrawCanonicalTransformInspector(const Object& object);
+	void DrawTransformInspector(const Object& object);
 	void DrawProperty(const std::string& compName, TerraEngine::Reflection::Property prop, entt::entity obj, ComponentAccessFunctions& access);
 	void DrawScriptComponentInspector(entt::entity obj);
 	void DrawScriptDropTarget(entt::entity obj);
@@ -84,6 +85,11 @@ private:
 	TerraEngine::Reflection::Variant m_PreEditValue;
 	std::string m_PreEditName;
 	std::string m_PreEditScriptJson;
+	// Transform widgets present ordinary Position/Rotation/Scale values while
+	// retaining the exact canonical pose needed to build one undo command when
+	// the user finishes a drag or typed edit.
+	std::optional<TerraEngine::Scene::WorldPose> m_PreEditWorldPose;
+	TerraEngine::UUID m_PreEditWorldPoseObjectId = TerraEngine::EMPTY_UUID;
 
 	std::filesystem::path m_LastInspectedAsset;
 	std::vector<uint8_t> m_MaterialDataBuffer;
@@ -96,10 +102,9 @@ private:
 	std::string m_VirtualGeometryEditKey;
 	std::string m_VirtualGeometrySettingsMessage;
 	bool m_VirtualGeometrySettingsMessageIsError = false;
-	// Terrain instances always share an immutable asset until an explicit copy
-	// workflow is selected. The inspector never silently forks a large terrain.
-	bool m_TerrainSharedEditChoice = true;
-	std::string m_TerrainCopyStatus;
+	// Terrain actions report only failures here. Successful changes immediately
+	// become visible through the ordinary asset and property rows.
+	std::string m_TerrainInspectorError;
 	// Clip bytes and playback cursors are editor-only caches. Neither record is
 	// reachable from reflection or scene serialization, so closing/changing the
 	// Inspector cannot modify authored AnimatorComponent data.

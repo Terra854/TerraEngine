@@ -2157,6 +2157,15 @@ void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
 			{
 				TERRAENGINE_LOG(LogLevel::Warning, "Editor scene graph diagnostic: " << TerraEngine::Scene::FormatSceneDiagnostic(diagnostic));
 			}
+			terrainProxyRestorePending = false;
+			ObjectManager::instance().forEachObjectWithComponents<TerrainComponent>(
+				[this](Object, TerrainComponent& terrain)
+				{
+					// Asset discovery may still be reconciling .meta files here. Update
+					// performs the restore once the descriptor UUID becomes resolvable.
+					terrainProxyRestorePending = terrainProxyRestorePending
+						|| (terrain.visible && terrain.terrainAssetId != TerraEngine::EMPTY_UUID);
+				});
 			if (ctx != nullptr && ctx->projectManager != nullptr && loadDecision.prepared)
 			{
 				ctx->projectManager->MarkSimulationEssentialReady(loadDecision);
@@ -2806,6 +2815,22 @@ void MainEditorSubsystem::OnBackendReady() {
 
 // MainEditorSubsystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::Update(float deltaTime) {
+	if(terrainProxyRestorePending)
+	{
+		bool durableTerrainRegistered = false;
+		ObjectManager::instance().forEachObjectWithComponents<TerrainComponent>(
+			[&durableTerrainRegistered](Object, TerrainComponent& terrain)
+			{
+				durableTerrainRegistered = durableTerrainRegistered
+					|| (terrain.visible && terrain.terrainAssetId != TerraEngine::EMPTY_UUID
+						&& AssetDatabase::Instance().FindAssetByGuid(terrain.terrainAssetId) != nullptr);
+			});
+		if(durableTerrainRegistered)
+		{
+			if(auto terrainTools = GetWindow<TerrainWindow>())
+				terrainProxyRestorePending = !terrainTools->RestoreSceneTerrainProxy();
+		}
+	}
 	// Keep the Scene View's selection priority synchronized with the detached
 	// terrain stroke state. Merely selecting the terrain tool does not capture
 	// input, preserving normal selection outside an active stroke.
@@ -3176,38 +3201,17 @@ void MainEditorSubsystem::ToggleSelectedEntity(entt::entity entity)
 	SetSelectedEntities(entities);
 }
 
-void MainEditorSubsystem::CapturePendingEditorTransactionsForUndo()
-{
-	for (const TerraEngine::Scene::Transaction& transaction : TerraEngine::Scene::SceneMutationQueue::Instance().PendingTransactions())
-	{
-		if (transaction.origin != TerraEngine::Scene::TransactionOrigin::Editor || transaction.undoGroupName.empty())
-		{
-			continue;
-		}
-		const bool physicsPropertyBatch = !transaction.writeSet.operations.empty()
-			&& std::all_of(transaction.writeSet.operations.begin(), transaction.writeSet.operations.end(), [](const TerraEngine::Scene::TransactionWriteOperation& operation) {
-				return operation.kind == TerraEngine::Scene::TransactionWriteKind::UpdateComponentProperty
-					&& (operation.componentName == "RigidBodyComponent"
-						|| operation.componentName == "ColliderSetComponent"
-						|| operation.componentName == "ConstraintSetComponent"
-						|| operation.componentName == "CharacterControllerComponent");
-			});
-		if (physicsPropertyBatch)
-		{
-			pendingEditorUndoTransactions.try_emplace(transaction.id, transaction);
-		}
-	}
-}
-
 void MainEditorSubsystem::PublishCommittedEditorTransactionsToUndo()
 {
-	// Full editor receipts are retained separately from diagnostics because the
-	// diagnostic ring intentionally strips inverse payloads. Consuming the full
-	// receipt is what makes ColliderSet and other physics edits enter history.
-	const std::vector<TerraEngine::Scene::TransactionResult> completedResults =
-		TerraEngine::Scene::SceneMutationQueue::Instance().DrainCompletedEditorTransactionResults();
-	for (const TerraEngine::Scene::TransactionResult& result : completedResults)
+	// The queue retains each immutable editor request beside its full commit
+	// receipt. Pairing them at the protected boundary avoids a frame-order race
+	// when async terrain publication enqueues and flushes between ImGui passes.
+	const std::vector<TerraEngine::Scene::EditorTransactionCompletion> completions =
+		TerraEngine::Scene::SceneMutationQueue::Instance().DrainCompletedEditorTransactions();
+	for (const TerraEngine::Scene::EditorTransactionCompletion& completion : completions)
 	{
+		const TerraEngine::Scene::Transaction& transaction = completion.transaction;
+		const TerraEngine::Scene::TransactionResult& result = completion.result;
 		// Undo/redo transactions already own a history entry. Their receipt only
 		// finalizes that entry and restores the dirty flag after SceneManager's
 		// protected flush marked the scene changed.
@@ -3215,21 +3219,15 @@ void MainEditorSubsystem::PublishCommittedEditorTransactionsToUndo()
 		{
 			continue;
 		}
-		const auto pending = pendingEditorUndoTransactions.find(result.transactionId);
-		if (pending == pendingEditorUndoTransactions.end())
-		{
-			continue;
-		}
 		if (result.status == TerraEngine::Scene::TransactionStatus::Committed)
 		{
-			UndoRedoSystem::Instance().RecordCommittedTransaction(pending->second, result);
+			UndoRedoSystem::Instance().RecordCommittedTransaction(transaction, result);
 		}
 		else
 		{
-			TERRAENGINE_LOG(LogLevel::Warning, "Editor physics transaction '" << result.transactionId
+			TERRAENGINE_LOG(LogLevel::Warning, "Editor transaction '" << result.transactionId
 				<< "' was rejected; no undo history entry was created.");
 		}
-		pendingEditorUndoTransactions.erase(pending);
 	}
 }
 
@@ -3506,10 +3504,6 @@ void MainEditorSubsystem::DrawUI() {
 			});
 		}
 	}
-	// Windows enqueue editor transactions during ImGui. Capture their immutable
-	// forward payload now, before the scheduler consumes them next frame.
-	CapturePendingEditorTransactionsForUndo();
-
 	DrawSaveConfirmationModal();
 	DrawImportCloseConfirmationModal();
 	DrawScriptCompilationModal();
@@ -3886,7 +3880,6 @@ void MainEditorSubsystem::CloseCurrentProject() {
 	// Clear Selection
 	selectedEntity = std::nullopt;
 	selectedEntityUuids.clear();
-	pendingEditorUndoTransactions.clear();
 	selectedAsset = std::nullopt;
 	if (ctx != nullptr)
 	{

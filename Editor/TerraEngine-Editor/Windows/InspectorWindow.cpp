@@ -10,6 +10,7 @@
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "../Subsystems/UndoRedoSystem.h"
 #include "SceneViewWindow.h"
+#include "TerrainWindow.h"
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Core/Object/Component.h"
@@ -698,6 +699,21 @@ bool ResolveInspectorAssetLabel(
 			outLabel = resourcePath.stem().string();
 			return true;
 		}
+	}
+
+	// Terrain and other editor previews can own resources that are generated in
+	// memory and therefore have no AssetDatabase path. Treat a live cache entry
+	// as a valid generated resource so the Inspector does not call it missing.
+	ResourceManager& resources = ResourceManager::Instance();
+	if(propertyName == "materialId" && resources.GetMaterial(assetId) != nullptr)
+	{
+		outLabel = "(Generated material)";
+		return true;
+	}
+	if(propertyName == "meshId" && resources.GetMesh(assetId) != nullptr)
+	{
+		outLabel = "(Generated mesh)";
+		return true;
 	}
 
 	outLabel = "(Missing asset)";
@@ -1499,6 +1515,62 @@ private:
 	std::string m_Property;
 	ReflectionVariant m_OldValue;
 	ReflectionVariant m_NewValue;
+};
+
+// CommitInspectorWorldPose keeps every Inspector-authored transform change on
+// the typed transaction path. The function is synchronous because ImGui needs
+// the edited value to remain visible on the next frame while a drag is active.
+bool CommitInspectorWorldPose(
+	TerraEngine::UUID objectId,
+	const TerraEngine::Scene::WorldPose& pose)
+{
+	ObjectManager& objects = ObjectManager::instance();
+	const std::optional<Object> object = objects.getObject(objectId);
+	if (!object)
+	{
+		return false;
+	}
+
+	TerraEngine::Scene::TransactionalMutationBuilder builder(
+		"inspector-transform-" + TerraEngine::ToHexString(TerraEngine::GenerateUUID()),
+		TerraEngine::Scene::TransactionOrigin::Editor,
+		"Modify Transform");
+	builder.ObserveScene(objects)
+		.ObserveObject(objects, objectId)
+		.SetUndoGroup("Modify Transform")
+		.SetWorldTransform(objects, objectId, pose);
+	const TerraEngine::Scene::TransactionResult result =
+		TerraEngine::Scene::CommitTransaction(objects, builder.Build());
+	if (result.status == TerraEngine::Scene::TransactionStatus::Committed)
+	{
+		NotifySceneAfterComponentMutation("Transform");
+		return true;
+	}
+	return false;
+}
+
+// ModifyWorldPoseCommand stores exact canonical poses, but replays them only
+// through typed transactions. Undo therefore never reconstructs a distant
+// position from the rounded values used to draw the conventional Inspector.
+class ModifyWorldPoseCommand final : public ICommand
+{
+public:
+	ModifyWorldPoseCommand(
+		TerraEngine::UUID objectId,
+		TerraEngine::Scene::WorldPose oldPose,
+		TerraEngine::Scene::WorldPose newPose)
+		: m_ObjectId(objectId), m_OldPose(std::move(oldPose)), m_NewPose(std::move(newPose))
+	{
+	}
+
+	void Undo() override { (void)CommitInspectorWorldPose(m_ObjectId, m_OldPose); }
+	void Redo() override { (void)CommitInspectorWorldPose(m_ObjectId, m_NewPose); }
+	std::string GetName() const override { return "Modify Transform"; }
+
+private:
+	TerraEngine::UUID m_ObjectId = TerraEngine::EMPTY_UUID;
+	TerraEngine::Scene::WorldPose m_OldPose{};
+	TerraEngine::Scene::WorldPose m_NewPose{};
 };
 
 // ObjectMetadataField names the supported states explicitly so serialization and switches stay readable.
@@ -4390,7 +4462,7 @@ void InspectorWindow::DrawAnimatorInspector(
 	}
 }
 
-void InspectorWindow::DrawCanonicalTransformInspector(const Object& object)
+void InspectorWindow::DrawTransformInspector(const Object& object)
 {
 	const std::optional<TerraEngine::Scene::WorldPose> current =
 		ObjectManager::instance().GetCanonicalWorldPose(object);
@@ -4399,69 +4471,101 @@ void InspectorWindow::DrawCanonicalTransformInspector(const Object& object)
 		return;
 	}
 
+	const TerraEngine::UUID objectId = ObjectManager::instance().getUUID(object);
 	TerraEngine::Scene::WorldPose candidate = *current;
-	ImGui::SeparatorText("Canonical Transform");
-	ImGui::TextDisabled("Cell is exact; offset metres stay normalized to one world cell.");
-	bool changed = false;
-	changed = ImGui::InputScalar("Cell X", ImGuiDataType_S64, &candidate.position.cell.x) || changed;
-	changed = ImGui::InputScalar("Cell Y", ImGuiDataType_S64, &candidate.position.cell.y) || changed;
-	changed = ImGui::InputScalar("Cell Z", ImGuiDataType_S64, &candidate.position.cell.z) || changed;
-	changed = ImGui::InputDouble("Local X (m)", &candidate.position.offsetMetres.x, 0.01) || changed;
-	changed = ImGui::InputDouble("Local Y (m)", &candidate.position.offsetMetres.y, 0.01) || changed;
-	changed = ImGui::InputDouble("Local Z (m)", &candidate.position.offsetMetres.z, 0.01) || changed;
+	const auto displayAxis = [](std::int64_t cell, double offset) {
+		return static_cast<double>(static_cast<long double>(cell)
+			* static_cast<long double>(TerraEngine::Scene::kWorldCellEdgeMetres)
+			+ static_cast<long double>(offset));
+	};
+	glm::dvec3 position(
+		displayAxis(current->position.cell.x, current->position.offsetMetres.x),
+		displayAxis(current->position.cell.y, current->position.offsetMetres.y),
+		displayAxis(current->position.cell.z, current->position.offsetMetres.z));
+	const glm::dvec3 originalPosition = position;
+	glm::vec3 rotation = glm::degrees(glm::eulerAngles(current->rotation));
+	glm::vec3 scale = current->scale;
+	bool commitRejected = false;
 
-	if (ImGui::Button("Copy Canonical Location"))
-	{
-		const nlohmann::json value{{"cell", {{"x", TerraEngine::Scene::EncodeWorldCellAxis(current->position.cell.x)},
-			{"y", TerraEngine::Scene::EncodeWorldCellAxis(current->position.cell.y)},
-			{"z", TerraEngine::Scene::EncodeWorldCellAxis(current->position.cell.z)}}},
-			{"offsetMetres", {current->position.offsetMetres.x, current->position.offsetMetres.y, current->position.offsetMetres.z}}};
-		ImGui::SetClipboardText(value.dump().c_str());
-	}
-	ImGui::SameLine();
-	if (ImGui::Button("Paste Canonical Location"))
-	{
-		try
+	// Capture one exact pose at activation and one exact pose at deactivation.
+	// Intermediate drag frames still commit transactionally for live feedback,
+	// but they do not flood the user's undo history.
+	auto finishHistory = [&]() {
+		if (ImGui::IsItemActivated())
 		{
-			const nlohmann::json pasted = nlohmann::json::parse(ImGui::GetClipboardText());
-			candidate.position.cell.x = std::stoll(pasted.at("cell").at("x").get<std::string>());
-			candidate.position.cell.y = std::stoll(pasted.at("cell").at("y").get<std::string>());
-			candidate.position.cell.z = std::stoll(pasted.at("cell").at("z").get<std::string>());
-			const nlohmann::json& offset = pasted.at("offsetMetres");
-			candidate.position.offsetMetres = {offset.at(0).get<double>(), offset.at(1).get<double>(), offset.at(2).get<double>()};
-			changed = true;
+			m_PreEditWorldPose = *current;
+			m_PreEditWorldPoseObjectId = objectId;
 		}
-		catch (const std::exception&)
+		if (ImGui::IsItemDeactivatedAfterEdit())
 		{
-			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Clipboard does not contain a canonical location.");
-		}
-	}
-
-	if (changed)
-	{
-		const bool hasTerrain = ObjectManager::instance().getRegistry().any_of<TerrainComponent>(object.EntityId());
-		if(hasTerrain && !TerrainComponent::SupportsTranslationOnlyPlacement(candidate))
-		{
-			// Terrain's fixed sample lattice has no valid rotated or scaled form.
-			// Reject the whole transform candidate instead of applying translation
-			// while silently retaining an invalid existing orientation or scale.
-			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Terrain placement accepts translation only; rotation and scale must remain identity/unit.");
-			return;
-		}
-		const TerraEngine::Scene::WorldCoordinateResult normalized =
-			TerraEngine::Scene::NormalizeWorldPosition(candidate.position);
-		if (!normalized.Succeeded())
-		{
-			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Location rejected: %s", TerraEngine::Scene::ToString(normalized.error).data());
-		}
-		else
-		{
-			candidate.position = normalized.position;
-			if (ObjectManager::instance().SetCanonicalWorldPose(object, candidate) != TerraEngine::Scene::WorldCoordinateError::None)
+			const std::optional<Object> liveObject = ObjectManager::instance().getObject(objectId);
+			const std::optional<TerraEngine::Scene::WorldPose> finalPose = liveObject
+				? ObjectManager::instance().GetCanonicalWorldPose(*liveObject) : std::nullopt;
+			if (m_PreEditWorldPose && finalPose && m_PreEditWorldPoseObjectId == objectId)
 			{
-				ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Location commit was rejected at the protected authoring boundary.");
+				UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyWorldPoseCommand>(
+					objectId, *m_PreEditWorldPose, *finalPose));
+			}
+			m_PreEditWorldPose.reset();
+			m_PreEditWorldPoseObjectId = TerraEngine::EMPTY_UUID;
+		}
+		UpdateInspectorDragState();
+	};
+
+	if (ImGui::BeginTable("TransformProperties", 2, ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+		ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
+		auto beginRow = [](const char* label) {
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextUnformatted(label);
+			ImGui::TableSetColumnIndex(1);
+			ImGui::SetNextItemWidth(-1.0f);
+		};
+
+		beginRow("Position");
+		if (ImGui::DragScalarN("##Position", ImGuiDataType_Double, &position.x, 3, 0.1f, nullptr, nullptr, "%.3f"))
+		{
+			const TerraEngine::Scene::WorldCoordinateResult moved = TerraEngine::Scene::ApplyWorldDelta(
+				current->position, {{}, position - originalPosition});
+			if (moved.Succeeded())
+			{
+				candidate.position = moved.position;
+				commitRejected = !CommitInspectorWorldPose(objectId, candidate);
+			}
+			else
+			{
+				commitRejected = true;
 			}
 		}
+		finishHistory();
+
+		const bool translationOnly = ObjectManager::instance().getRegistry().any_of<TerrainComponent>(object.EntityId());
+		ImGui::BeginDisabled(translationOnly);
+		beginRow("Rotation");
+		if (ImGui::DragFloat3("##Rotation", &rotation.x, 0.1f, 0.0f, 0.0f, "%.3f"))
+		{
+			candidate.rotation = glm::normalize(glm::quat(glm::radians(rotation)));
+			commitRejected = !CommitInspectorWorldPose(objectId, candidate);
+		}
+		finishHistory();
+
+		beginRow("Scale");
+		if (ImGui::DragFloat3("##Scale", &scale.x, 0.1f, 0.0f, 0.0f, "%.3f"))
+		{
+			candidate.scale = scale;
+			commitRejected = !CommitInspectorWorldPose(objectId, candidate);
+		}
+		finishHistory();
+		ImGui::EndDisabled();
+		ImGui::EndTable();
+	}
+
+	if (commitRejected)
+	{
+		ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Transform change was rejected.");
 	}
 }
 
@@ -4523,7 +4627,6 @@ void InspectorWindow::OnGui() {
 		auto& objManager = ObjectManager::instance();
 		if (std::optional<Object> object = objManager.getObject(*selectedEntity)) {
 			entt::entity obj = *selectedEntity;
-			DrawCanonicalTransformInspector(*object);
 			
 			auto& accessReg = ComponentAccessRegistry();
 
@@ -4896,7 +4999,14 @@ void InspectorWindow::OnGui() {
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (isOpen) {
 					ImGui::Indent();
-					if (compName == "LightComponent")
+					if (compName == "Transform")
+					{
+						// Canonical cells and bounded offsets are engine storage details.
+						// Developers author the familiar Transform surface regardless of
+						// how far from the origin the object is stored internally.
+						DrawTransformInspector(*object);
+					}
+					else if (compName == "LightComponent")
 					{
 						DrawLightComponentInspector(compName, obj, access);
 					}
@@ -4984,58 +5094,73 @@ void InspectorWindow::OnGui() {
 					else if (compName == "TerrainComponent")
 					{
 						const TerrainComponent* terrain = ObjectManager::instance().getRegistry().try_get<TerrainComponent>(obj);
-						ImGui::TextUnformatted("Terrain instance");
-						ImGui::TextDisabled("Translation-only placement. Rotation and scale are rejected before commit.");
-						if(terrain != nullptr)
-						{
-							const AssetMetadata* metadata = AssetDatabase::Instance().FindAssetByGuid(terrain->terrainAssetId);
-							ImGui::Text("Asset: %s", TerraEngine::ToHexString(terrain->terrainAssetId).c_str());
-							if(metadata != nullptr) ImGui::TextDisabled("Source: %s", metadata->sourcePath.generic_string().c_str());
-							else ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Terrain asset is not registered or has not finished importing.");
-						}
-						if(ImGui::RadioButton("Edit shared terrain asset", m_TerrainSharedEditChoice)) m_TerrainSharedEditChoice = true;
-						ImGui::SameLine();
-						if(ImGui::RadioButton("Create independent copy", !m_TerrainSharedEditChoice))
-						{
-							std::string copyStatus;
-							m_TerrainSharedEditChoice = !m_Owner->CreateIndependentTerrainCopy(obj, copyStatus);
-							m_TerrainCopyStatus = copyStatus;
-						}
-						if(!m_TerrainCopyStatus.empty()) ImGui::TextWrapped("%s", m_TerrainCopyStatus.c_str());
-						if (ImGui::Button("Frame terrain in Scene View"))
-						{
-							std::string frameError;
-							if (auto sceneView = m_Owner->GetWindow<SceneViewWindow>())
-								sceneView->FrameAutomationObject(obj, frameError);
-							if (!frameError.empty()) ImGui::TextWrapped("%s", frameError.c_str());
-						}
-						if(ImGui::Button("Remove Terrain Instance"))
-						{
-							ObjectManager& objects = ObjectManager::instance();
-							if(const std::optional<Object> object = objects.getObject(obj))
-							{
-								// Inspector-originated scene writes publish only at the protected
-								// scene boundary. The transaction receipt becomes the undo entry;
-								// no live component storage is mutated from the ImGui callback.
-								const TerraEngine::UUID objectId = objects.getUUID(*object);
-								TerraEngine::Scene::TransactionalMutationBuilder builder(
-									"terrain-remove-" + TerraEngine::ToHexString(TerraEngine::GenerateUUID()),
-									TerraEngine::Scene::TransactionOrigin::Editor,
-									"Remove Terrain Instance");
-								builder.ObserveScene(objects).ObserveObject(objects, objectId)
-									.SetUndoGroup("Remove Terrain Instance")
-									.RemoveComponent(objectId, compName);
-								TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
-								m_TerrainCopyStatus = "Terrain removal is queued for the protected scene boundary.";
-							}
-						}
+						const AssetMetadata* metadata = terrain != nullptr
+							? AssetDatabase::Instance().FindAssetByGuid(terrain->terrainAssetId) : nullptr;
 						if(ImGui::BeginTable("TerrainProperties", 2, ImGuiTableFlags_SizingStretchProp))
 						{
-							ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+							ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 100.0f);
 							ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
+							ImGui::TableNextRow();
+							ImGui::TableSetColumnIndex(0);
+							ImGui::AlignTextToFramePadding();
+							ImGui::TextUnformatted("Terrain Asset");
+							ImGui::TableSetColumnIndex(1);
+							ImGui::SetNextItemWidth(-1.0f);
+							const std::string assetName = metadata != nullptr
+								? metadata->sourcePath.filename().string() : "Missing asset";
+							char assetNameBuffer[512]{};
+							std::snprintf(assetNameBuffer, sizeof(assetNameBuffer), "%s", assetName.c_str());
+							if(metadata == nullptr) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.35f, 1.0f));
+							ImGui::InputText("##TerrainAsset", assetNameBuffer, sizeof(assetNameBuffer), ImGuiInputTextFlags_ReadOnly);
+							if(metadata == nullptr) ImGui::PopStyleColor();
+							// Durable schema and UUID fields are serialization details. The
+							// Inspector presents the asset by name and keeps only author-facing
+							// rendering properties in the ordinary component table.
 							for(const ReflectionProperty& property : TerraEngine::Reflection::GetProperties(type))
-								if(MetaPropertyName(property) != "active") DrawProperty(compName, property, obj, access);
+							{
+								const std::string propertyName = MetaPropertyName(property);
+								if(propertyName != "active" && propertyName != "schemaVersion"
+									&& propertyName != "terrainAssetId")
+									DrawProperty(compName, property, obj, access);
+							}
 							ImGui::EndTable();
+						}
+
+						ImGui::Spacing();
+						const float actionWidth = ImGui::GetContentRegionAvail().x;
+						if(ImGui::Button("Edit Terrain", ImVec2(actionWidth, 0.0f)))
+						{
+							if(auto terrainTools = m_Owner->GetWindow<TerrainWindow>())
+							{
+								terrainTools->SetVisible(true);
+								std::string openError;
+								const TerraEngine::UUID objectId = ObjectManager::instance().getUUID(*object);
+								m_TerrainInspectorError = terrainTools->OpenTerrainForEditing(objectId, openError)
+									? std::string{} : std::move(openError);
+							}
+							else m_TerrainInspectorError = "Terrain Tools is unavailable.";
+						}
+						if(ImGui::Button("Frame in Scene View", ImVec2(actionWidth, 0.0f)))
+						{
+							std::string frameError;
+							if(auto sceneView = m_Owner->GetWindow<SceneViewWindow>())
+								sceneView->FrameAutomationObject(obj, frameError);
+							else frameError = "Scene View is unavailable.";
+							m_TerrainInspectorError = std::move(frameError);
+						}
+						if(ImGui::Button("Make Independent", ImVec2(actionWidth, 0.0f)))
+						{
+							std::string copyStatus;
+							const bool copyQueued = m_Owner->CreateIndependentTerrainCopy(obj, copyStatus);
+							// A successful queued copy becomes visible through the Asset row;
+							// persistent success prose would only crowd a narrow Inspector.
+							m_TerrainInspectorError = copyQueued ? std::string{} : std::move(copyStatus);
+						}
+						if(!m_TerrainInspectorError.empty())
+						{
+							ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.35f, 1.0f));
+							ImGui::TextWrapped("%s", m_TerrainInspectorError.c_str());
+							ImGui::PopStyleColor();
 						}
 					}
 					else if (compName == "Script")

@@ -1,6 +1,7 @@
 // RenderFramePublication.cpp - Validation and protected immutable-root exchange.
 
 #include "RenderFramePublication.h"
+#include "RenderFrameSnapshot.h"
 
 #include <algorithm>
 #include <new>
@@ -607,6 +608,7 @@ namespace TerraEngine::Renderer
 	{
 		bool ResolvePublishedItem(
 			const RenderFramePublication& publication,
+			const RenderReferenceFrame& referenceFrame,
 			RenderSlotGenerationKey key,
 			GeometryRoute route,
 			std::uint32_t selectedLod,
@@ -643,7 +645,23 @@ namespace TerraEngine::Renderer
 			resolved.meshId = persistent.meshId;
 			resolved.materialId = persistent.materialId;
 			resolved.objectId = persistent.objectId;
-			resolved.modelMatrix = dynamic.instance.modelMatrix;
+			if(dynamic.hasCanonicalWorldPose)
+			{
+				// Dynamic pages are shared by every camera. Localize their precise
+				// canonical pose only when this view consumes the sealed command.
+				const RenderLocalizedPoseMatrices localized =
+					BuildLocalizedRenderPoseMatrices(
+						dynamic.canonicalWorldPose, referenceFrame);
+				if(!localized.valid)
+					return false;
+				resolved.modelMatrix = localized.currentMatrix;
+			}
+			else
+			{
+				// Compatibility and hand-authored test publications may still carry
+				// a ready local matrix without canonical large-world pose metadata.
+				resolved.modelMatrix = dynamic.instance.modelMatrix;
+			}
 			resolved.conventionalVisibilityIdentityIndex = dynamic.instance.objectIdentity.x;
 			resolved.geometryRoute = route;
 			resolved.animation = dynamic.animation;
@@ -722,7 +740,7 @@ namespace TerraEngine::Renderer
 		}
 		const RenderViewCommandLane& lane =
 			presentation_->CommandLanes()[selectionIndex];
-		return ResolvePublishedItem(*publication_,
+		return ResolvePublishedItem(*publication_, presentation_->referenceFrame,
 			selection_->VisibleOrdinals()[visibleSelection],
 			static_cast<GeometryRoute>(selection_->RouteSelectors()[visibleSelection]),
 			selection_->SelectedLods()[visibleSelection],
@@ -730,6 +748,7 @@ namespace TerraEngine::Renderer
 	}
 
 	bool ResolveShadowDrawListItem(const RenderFramePublication& publication,
+		const RenderReferenceFrame& referenceFrame,
 		const ShadowDrawList& shadow, std::size_t itemIndex,
 		RenderItemRecord& output) noexcept
 	{
@@ -737,7 +756,7 @@ namespace TerraEngine::Renderer
 			|| itemIndex >= shadow.stableOrdinals.size()) {
 			return false;
 		}
-		return ResolvePublishedItem(publication,
+		return ResolvePublishedItem(publication, referenceFrame,
 			{ shadow.stableOrdinals[itemIndex], shadow.topologyGeneration },
 			static_cast<GeometryRoute>(shadow.routeSelectors[itemIndex]),
 			shadow.selectedLods[itemIndex], shadow.editorTints[itemIndex],

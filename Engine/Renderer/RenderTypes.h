@@ -588,6 +588,25 @@ namespace TerraEngine::Renderer {
 		std::uint64_t submittedFrameId = 0u;
 	};
 
+	// Dedicated capture views use stable output identities so the immutable frame
+	// snapshot, publication validator, and Vulkan target all describe one view.
+	// Keep this mapping in one typed helper: duplicating the numeric IDs previously
+	// let Scene captures register a Game reference frame and fail before rendering.
+	struct RenderCaptureViewIdentity
+	{
+		RenderViewType viewType = RenderViewType::Game;
+		std::uint32_t outputId = 9000u;
+	};
+
+	[[nodiscard]] inline constexpr RenderCaptureViewIdentity
+		ResolveDedicatedCaptureViewIdentity(RenderViewType viewType) noexcept
+	{
+		return {
+			viewType,
+			viewType == RenderViewType::Scene ? 9001u : 9000u
+		};
+	}
+
 	struct RenderCaptureResult
 	{
 		std::string requestId;

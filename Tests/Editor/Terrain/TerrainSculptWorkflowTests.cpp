@@ -11,6 +11,8 @@
 #include <limits>
 #include <set>
 
+#include <glm/ext/matrix_clip_space.hpp>
+
 namespace TerraEngine::EditorTests
 {
 	void RegisterTerrainSculptWorkflowTests(TestRegistry& registry)
@@ -32,6 +34,26 @@ namespace TerraEngine::EditorTests
 			context.Expect(hit.has_value() && hit->sample.x == 4 && hit->sample.z == 3
 				&& TerrainPicking::QualifyGpuIdentity({id, 9U}, id, 9U) && !TerrainPicking::QualifyGpuIdentity({id, 8U}, id, 9U),
 				"CPU canonical picks and GPU identity generations must agree before a brush accepts a target.");
+		});
+
+		registry.Add("Editor.TerrainSculpt.PointerRayTracksViewportAndEntersFinitePatch", [](TestContext& context) {
+			using namespace TerraEngine::Editor::Terrain;
+			const glm::mat4 view(1.0F);
+			const glm::mat4 projection = glm::perspectiveRH_ZO(glm::radians(60.0F), 1.0F, 0.1F, 1000.0F);
+			const auto centre = TerrainPicking::BuildViewportRay(view, projection, 0.5, 0.5, false);
+			const auto right = TerrainPicking::BuildViewportRay(view, projection, 0.9, 0.5, false);
+			context.Expect(centre && right && std::abs(centre->direction.x) < 0.0001
+				&& right->direction.x > 0.1,
+				"Terrain pointer rays must follow the Scene View cursor instead of always using camera forward.");
+
+			const auto entered = TerrainPicking::PickHeightfield(
+				{{-5.0, 10.0, 4.0}, {1.0, -0.5, 0.0}},
+				[](std::int64_t x, std::int64_t z) -> std::optional<double> {
+					if(x < 0 || x >= 16 || z < 0 || z >= 16) return std::nullopt;
+					return 2.0;
+				}, 40.0, 0.25);
+			context.Expect(entered.has_value() && entered->sample.x >= 0,
+				"A terrain ray must march into a finite resident patch when the camera begins outside it.");
 		});
 
 		registry.Add("Editor.TerrainSculpt.PreviewOverflowRejectsAtomically", [](TestContext& context) {

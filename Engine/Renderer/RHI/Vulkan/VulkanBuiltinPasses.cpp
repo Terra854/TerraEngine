@@ -197,6 +197,16 @@ void VulkanContext::Impl::RenderSceneViewGrid(VkCommandBuffer cmd,
 	VkExtent2D renderExtent) {
 	if (sceneViewGridPipeline == VK_NULL_HANDLE) return;
 
+	// Scene geometry is rendered in a camera-relative float frame, while the
+	// construction grid is anchored to canonical world Y=0. Express canonical
+	// origin in this view's immutable reference frame, then make the shader's
+	// local y=0 plane represent that canonical plane. Without this translation,
+	// perspective rays intersected a plane through the camera and were discarded.
+	const TerraEngine::Renderer::RenderLocalizationResult gridOrigin =
+		TerraEngine::Renderer::LocalizeRenderPosition(
+			TerraEngine::Scene::WorldPosition{}, presentation.referenceFrame);
+	if (!gridOrigin.Succeeded()) return;
+
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sceneViewGridPipeline);
 
 	VkViewport viewport{};
@@ -214,9 +224,11 @@ void VulkanContext::Impl::RenderSceneViewGrid(VkCommandBuffer cmd,
 	vkCmdSetScissor(cmd, 0, 1, &scissor);
 
 	GridPushConstants push{};
-	push.view = presentation.viewMatrix;
+	const glm::mat4 gridCoordinatesToViewFrame = glm::translate(
+		glm::mat4(1.0F), gridOrigin.offsetMetres);
+	push.view = presentation.viewMatrix * gridCoordinatesToViewFrame;
 	push.proj = presentation.projectionMatrix;
-	push.inverseView = glm::inverse(presentation.viewMatrix);
+	push.inverseView = glm::inverse(push.view);
 	push.inverseProj = glm::inverse(presentation.projectionMatrix);
 
 	vkCmdPushConstants(cmd, sceneViewGridPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(GridPushConstants), &push);
@@ -1170,4 +1182,3 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 	vkCmdBindVertexBuffers(cmd, 0, 1, textVertexBuffers, textOffsets);
 	vkCmdDraw(cmd, static_cast<uint32_t>(textVertices.size() / 8), 1, 0, 0);
 }
-

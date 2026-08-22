@@ -109,6 +109,11 @@ namespace TerraEngine::Editor
 			if(propertyName == "farPlane") return "Far Clipping Plane";
 			if(propertyName == "up") return "Up Direction";
 		}
+		if(componentName == "TerrainComponent")
+		{
+			if(propertyName == "terrainAssetId") return "Terrain Asset";
+			if(propertyName == "castsShadows") return "Cast Shadows";
+		}
 		if(componentName == "Transform")
 		{
 			if(propertyName == "worldPose") return "Canonical World Pose";

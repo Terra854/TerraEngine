@@ -292,7 +292,6 @@ private:
 	bool LoadPrefabIntoIsolatedObjectManager(const std::filesystem::path& path);
 	bool OpenPrefabAssetInternal(const std::filesystem::path& path, bool openedFromSceneObject);
 	void PublishEditorStreamingNeeds();
-	void CapturePendingEditorTransactionsForUndo();
 	void PublishCommittedEditorTransactionsToUndo();
 	void RefreshViewportTextures(VulkanContext& vulkan);
 	void DrawMainMenuBar();
@@ -342,6 +341,9 @@ private:
 
 	TerraEngine::Editor::ViewportTextureRegistry viewportTextures;
 	bool sceneLoaded = false;
+	// Project asset discovery can finish after the startup scene is deserialized.
+	// Keep one bounded retry active until the scene's terrain UUID is registered.
+	bool terrainProxyRestorePending = false;
 	
 	std::optional<entt::entity> selectedEntity;
 	std::vector<TerraEngine::UUID> selectedEntityUuids;
@@ -351,7 +353,6 @@ private:
 	std::filesystem::path m_CurrentScenePath;
 	// Receipts intentionally omit their forward payload, so editor transactions
 	// are cached before the next protected flush and paired by stable ID later.
-	std::unordered_map<std::string, TerraEngine::Scene::Transaction> pendingEditorUndoTransactions;
 
 	// PendingAction names the supported states explicitly so serialization and switches stay readable.
 	enum class PendingAction {

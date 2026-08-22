@@ -32,7 +32,7 @@ namespace TerraEngine::EditorTests
 			const char* categoryPath;
 		};
 
-		constexpr std::array<NativeWindowMenuContract, 9> kNativeWindowMenuContracts = {{
+		constexpr std::array<NativeWindowMenuContract, 10> kNativeWindowMenuContracts = {{
 			{"Editor/TerraEngine-Editor/Windows/HierarchyWindow.cpp", "Scene Hierarchy", "General"},
 			{"Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp", "Inspector", "General"},
 			{"Editor/TerraEngine-Editor/Windows/ProjectBrowserWindow.cpp", "Project Browser", "General"},
@@ -41,7 +41,8 @@ namespace TerraEngine::EditorTests
 			{"Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp", "Profiler", "Rendering"},
 			{"Editor/TerraEngine-Editor/Windows/ResourceResidencyWindow.cpp", "Resource Residency", "Rendering"},
 			{"Editor/TerraEngine-Editor/Windows/SchedulerDiagnosticsWindow.cpp", "Scheduler Diagnostics", "Diagnostics"},
-			{"Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp", "UI Builder", "Tools"}
+			{"Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp", "UI Builder", "Tools"},
+			{"Editor/TerraEngine-Editor/Windows/TerrainWindow.cpp", "Terrain Tools", "Tools"}
 		}};
 	}
 

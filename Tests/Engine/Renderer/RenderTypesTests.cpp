@@ -37,6 +37,26 @@ namespace TerraEngine::Tests {
 	static_assert(sizeof(MeshletCullingCountersGPU) == 48, "Meshlet culling counters should preserve their 48-byte diagnostic GPU layout.");
 
 	void RegisterRenderTypesTests(TestRegistry& registry) {
+		registry.Add("Engine.RenderTypes.DedicatedCaptureIdentitySeparatesSceneAndGame", [](TestContext& context) {
+			const TerraEngine::Renderer::RenderCaptureViewIdentity game =
+				TerraEngine::Renderer::ResolveDedicatedCaptureViewIdentity(
+					RenderViewType::Game);
+			const TerraEngine::Renderer::RenderCaptureViewIdentity scene =
+				TerraEngine::Renderer::ResolveDedicatedCaptureViewIdentity(
+					RenderViewType::Scene);
+
+			context.Expect(game.viewType == RenderViewType::Game,
+				"A dedicated Game capture should retain its Game view type.");
+			context.ExpectEqual(9000u, game.outputId,
+				"A dedicated Game capture should use the stable Game output identity.");
+			context.Expect(scene.viewType == RenderViewType::Scene,
+				"A dedicated Scene capture should retain its Scene view type.");
+			context.ExpectEqual(9001u, scene.outputId,
+				"A dedicated Scene capture should use the stable Scene output identity.");
+			context.Expect(game.outputId != scene.outputId,
+				"Scene and Game captures must not share a render reference-frame identity.");
+		});
+
 		registry.Add("Engine.RenderTypes.ClampSkyTintClampsEveryChannel", [](TestContext& context) {
 			const glm::vec3 clamped = ClampSkyTint(glm::vec3(-1.0f, 2.5f, 8.0f));
 

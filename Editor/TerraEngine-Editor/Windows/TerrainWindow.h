@@ -17,9 +17,12 @@
 #include "Terrain/TerrainDiagnostics.h"
 #include "Terrain/TerrainGarbageCollector.h"
 #include "Terrain/TerrainLayerStack.h"
+#include "Renderer/Terrain/TerrainDirectMesh.h"
 #include "Editor/AssetCompilers/TerrainCompiler.h"
 
+#include <atomic>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <limits>
 #include <optional>
@@ -44,7 +47,10 @@ public:
 	void SetBrushStrokeActive(bool value) noexcept { brushStrokeActive = value; }
 	// Scene View supplies a canonical ray and pointer lifecycle. This method
 	// updates only detached local preview data; Apply owns publication.
-	void HandleSceneViewPointer(const TerraEngine::Editor::Terrain::TerrainCanonicalRay& ray, bool pressed, bool held, bool released);
+	void HandleSceneViewPointer(
+		const TerraEngine::Scene::WorldPosition& rayOrigin,
+		const glm::dvec3& rayDirection,
+		bool pressed, bool held, bool released);
 	// Called from MainEditorSubsystem's protected editor boundary after widgets
 	// have prepared requests. Returns a committed/rejected receipt to the UI.
 	void ProcessProtectedAuthoringBoundary();
@@ -56,6 +62,13 @@ public:
 	// Installed live validation uses the same window-owned create, typed edit,
 	// protected publication, diagnostics, and save paths as an interactive user.
 	[[nodiscard]] nlohmann::json RunLiveValidationFixture(const std::filesystem::path& destination);
+	// Scene loading restores runtime-only render resources from the durable
+	// TerrainComponent reference. The mesh still builds on ThreadPool and only
+	// publishes at this window's declared protected authoring boundary.
+	[[nodiscard]] bool RestoreSceneTerrainProxy();
+	// Inspector actions name an exact scene instance. Opening that instance here
+	// binds editing, picking, persistence, and proxy updates to the same asset.
+	[[nodiscard]] bool OpenTerrainForEditing(TerraEngine::UUID objectId, std::string& outError);
 	[[nodiscard]] bool HasDetachedPreview() const noexcept { return authoringSession.IsDirty(); }
 	// Lifecycle owners call this before a scene/project/play-mode/device boundary.
 	// It only discards detached data, so an uncommitted brush can never mutate
@@ -103,7 +116,14 @@ private:
 	[[nodiscard]] TerraEngine::Editor::Terrain::TerrainAutomationCommandResult ExecuteAutomationCommand(
 		std::string_view capability, const nlohmann::json& arguments);
 	void PollProceduralPreview();
-	void InitializeAuthoringTerrain(TerraEngine::UUID assetId, const TerraEngine::AssetPipeline::TerrainHeightfield& heightfield);
+	void ScheduleRenderProxyBuild();
+	void PollRenderProxyBuild();
+	void QueueRenderProxySceneInstance();
+	void InitializeAuthoringTerrain(
+		TerraEngine::UUID assetId,
+		const TerraEngine::AssetPipeline::TerrainHeightfield& heightfield,
+		TerraEngine::UUID existingObjectId = TerraEngine::EMPTY_UUID);
+	[[nodiscard]] bool SynchronizeCommittedHeightFromPublishedRoot();
 	void ApplyBrushAt(const TerraEngine::Editor::Terrain::TerrainPickHit& hit);
 	void ApplyHoleBrushAt(const TerraEngine::Editor::Terrain::TerrainPickHit& hit);
 	[[nodiscard]] bool QueuePreviewForPublication();
@@ -172,4 +192,17 @@ private:
 	// Protected-boundary timings are bounded raw samples consumed by the
 	// diagnostics percentile builder. They are never estimated from frame time.
 	std::vector<std::uint64_t> publicationStageSamplesNanoseconds;
+	// Direct-resident proxy generation is worker-owned. The protected authoring
+	// boundary publishes only a completed mesh whose root identity still matches
+	// the visible terrain generation.
+	std::future<TerraEngine::Renderer::Terrain::TerrainDirectMeshResult> terrainRenderProxyFuture;
+	std::shared_ptr<std::atomic_bool> terrainRenderProxyCancellation;
+	TerraEngine::UUID terrainRenderProxyMeshId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID terrainRenderProxyMaterialId = TerraEngine::EMPTY_UUID;
+	// A restored scene supplies its existing object identity. A newly created
+	// terrain keeps this empty so publication creates exactly one scene instance.
+	TerraEngine::UUID terrainRenderProxyTargetObjectId = TerraEngine::EMPTY_UUID;
+	bool terrainRenderProxyBuildActive = false;
+	bool terrainRenderProxyRebuildRequested = false;
+	bool terrainRenderProxyInstanceQueued = false;
 };

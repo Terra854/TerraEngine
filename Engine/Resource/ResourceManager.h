@@ -609,6 +609,10 @@ public:
 	// Inject a generated material directly into the cache so tooling can synthesize preview materials
 	// without writing TMAT files to disk. The cacheKey should be unique and stable (e.g., "generated/preview").
 	TerraEngine::UUID RegisterMaterial(const std::string& cacheKey, std::unique_ptr<Material> material);
+	// Publish a fully prepared generated mesh under a stable synthetic key. The
+	// caller must invalidate the matching backend mesh after replacing an existing
+	// payload; this method owns only the atomic CPU cache and bounds publication.
+	TerraEngine::UUID RegisterMesh(const std::string& cacheKey, std::unique_ptr<Mesh> mesh);
 
 	// Asynchronous load helpers. Each call schedules a background task on
 	// the shared thread pool and returns a shared_future that multiple

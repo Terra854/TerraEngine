@@ -8,8 +8,17 @@
 
 #include "Terrain/TerrainAreaCodec.h"
 #include "AssetDatabase.h"
+#include "Components/MeshRenderComponent.h"
+#include "Components/TerrainComponent.h"
+#include "File Formats/TerraEngineMaterialFile.h"
+#include "File Formats/TerraEngineMeshFile.h"
 #include "Physics/Terrain/TerrainCollisionSystem.h"
 #include "Physics/PhysicsSystem.h"
+#include "Renderer/RenderSystem.h"
+#include "Resource/ResourceManager.h"
+#include "Scene/SceneMutationQueue.h"
+#include "Scene/TransactionalMutation.h"
+#include "ThreadPool/ThreadPool.h"
 #include "Editor/TerraEngine-Editor/Terrain/TerrainHydraulicErosion.h"
 #include "Editor/TerraEngine-Editor/Terrain/TerrainProceduralOperators.h"
 #include "Editor/TerraEngine-Editor/Terrain/TerrainSplineGrader.h"
@@ -26,7 +35,45 @@
 
 #include <imgui.h>
 
-TerrainWindow::TerrainWindow() : EditorWindow("Terrain Tools")
+namespace
+{
+	// Terrain creation publishes the descriptor and its private data directory
+	// first, then registers that complete asset through the normal editor asset
+	// database. This keeps the durable terrain UUID, the Inspector, and runtime
+	// resource lookup in agreement at the same protected editor boundary.
+	TerraEngine::Editor::Terrain::TerrainCreationService CreateRegisteredTerrainService()
+	{
+		return TerraEngine::Editor::Terrain::TerrainCreationService(
+			[](const std::filesystem::path& assetPath, std::string& outError)
+			{
+				AssetDatabase& assets = AssetDatabase::Instance();
+				std::filesystem::path absolutePath = assetPath;
+				if(!absolutePath.is_absolute())
+					absolutePath = assets.GetAssetRoot().parent_path() / absolutePath;
+				absolutePath = std::filesystem::absolute(absolutePath).lexically_normal();
+
+				assets.ImportAsset(absolutePath);
+				const auto registered = assets.GetAssets().find(absolutePath);
+				if(registered == assets.GetAssets().end()
+					|| registered->second.importerName != "TerrainImporter")
+				{
+					outError = "The completed terrain descriptor could not be registered with the project asset database.";
+					return false;
+				}
+
+				const std::filesystem::path runtimePath = ResourceManager::Instance().GetRegisteredAssetPath(
+					registered->second.guid, AssetType::Terrain);
+				if(runtimePath.empty())
+				{
+					outError = "The terrain asset database entry did not publish a runtime terrain path.";
+					return false;
+				}
+				return true;
+			});
+	}
+}
+
+TerrainWindow::TerrainWindow() : EditorWindow("Terrain Tools", false, "Tools")
 {
 	automationAdapter.SetCommandCallback([this](std::string_view capability, const nlohmann::json& arguments) {
 		return ExecuteAutomationCommand(capability, arguments);
@@ -40,10 +87,251 @@ TerrainWindow::TerrainWindow() : EditorWindow("Terrain Tools")
 
 TerrainWindow::~TerrainWindow()
 {
+	if(terrainRenderProxyCancellation)
+		terrainRenderProxyCancellation->store(true, std::memory_order_release);
 	// The collision scheduler may outlive editor windows during shutdown. Remove
 	// only this window's store pointer before its immutable storage is destroyed.
 	if(terrainStore)
 		TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().ClearPublication(terrainStore.get());
+}
+
+void TerrainWindow::ScheduleRenderProxyBuild()
+{
+	if(!terrainStore || committedHeightMm.size() != TerraEngine::Terrain::kTerrainAreaSampleCount)
+		return;
+	if(terrainRenderProxyBuildActive)
+	{
+		// Coalesce rapid strokes. The current worker owns only copied values, so it
+		// can stop at its next row checkpoint while the newest generation waits.
+		if(terrainRenderProxyCancellation)
+			terrainRenderProxyCancellation->store(true, std::memory_order_release);
+		terrainRenderProxyRebuildRequested = true;
+		return;
+	}
+	const auto capture = terrainStore->CaptureRoot();
+	if(!capture.IsValid()) return;
+	const auto descriptor = terrainStore->FindDescriptor(*capture.root, {0, 0});
+	if(!descriptor) return;
+	const auto cancellation = std::make_shared<std::atomic_bool>(false);
+	auto heights = committedHeightMm;
+	auto holes = committedHoleMask;
+	const TerraEngine::UUID assetId = capture.root->assetUuid;
+	const auto authoredHash = descriptor->authoredContentHash;
+	const std::uint64_t generation = descriptor->editGeneration;
+	const float spacing = authoredSampleSpacingMetres;
+	auto work = [assetId, authoredHash, generation, spacing, heights = std::move(heights), holes = std::move(holes), cancellation]() mutable
+	{
+		TerraEngine::Renderer::Terrain::TerrainDirectMeshInput input{};
+		input.assetId = assetId;
+		input.authoredHash = authoredHash;
+		input.authoredGeneration = generation;
+		input.sampleSpacingMetres = spacing;
+		input.heightMillimetres = heights;
+		input.holeCellBits = holes;
+		return TerraEngine::Renderer::Terrain::BuildTerrainDirectMesh(input, cancellation.get());
+	};
+	auto task = ThreadPool::instance().createTask(std::move(work));
+	terrainRenderProxyFuture = task->getFuture();
+	terrainRenderProxyCancellation = cancellation;
+	terrainRenderProxyBuildActive = true;
+	terrainRenderProxyRebuildRequested = false;
+	ThreadPool::instance().enqueue(task, TerraEngine::Terrain::kTerrainAreaSampleCount);
+}
+
+void TerrainWindow::QueueRenderProxySceneInstance()
+{
+	if(terrainRenderProxyInstanceQueued || !terrainStore
+		|| terrainRenderProxyMeshId == TerraEngine::EMPTY_UUID
+		|| terrainRenderProxyMaterialId == TerraEngine::EMPTY_UUID)
+		return;
+	const auto capture = terrainStore->CaptureRoot();
+	if(!capture.IsValid()) return;
+	ObjectManager& objects = ObjectManager::instance();
+	TerraEngine::Scene::TransactionalMutationBuilder builder(
+		"terrain-render-instance-" + TerraEngine::ToHexString(TerraEngine::GenerateUUID()),
+		TerraEngine::Scene::TransactionOrigin::Editor,
+		terrainRenderProxyTargetObjectId == TerraEngine::EMPTY_UUID
+			? "Create Terrain Render Instance" : "Restore Terrain Render Proxy");
+	if(terrainRenderProxyTargetObjectId != TerraEngine::EMPTY_UUID)
+	{
+		const auto targetObject = objects.getObject(terrainRenderProxyTargetObjectId);
+		if(!targetObject)
+		{
+			status = "Terrain render proxy restore was cancelled because its scene object no longer exists.";
+			return;
+		}
+		const auto target = TerraEngine::Scene::ExistingObject(terrainRenderProxyTargetObjectId);
+		builder.ObserveScene(objects)
+			.ObserveObject(objects, terrainRenderProxyTargetObjectId);
+		if(objects.GetComponent<MeshRenderComponent>(*targetObject) == nullptr)
+			builder.AddComponent(target, std::string(MeshRenderComponent::kComponentName));
+		builder.UpdateComponentProperty(target, std::string(MeshRenderComponent::kComponentName), "meshId", TerraEngine::Reflection::Variant{terrainRenderProxyMeshId})
+			.UpdateComponentProperty(target, std::string(MeshRenderComponent::kComponentName), "materialId", TerraEngine::Reflection::Variant{terrainRenderProxyMaterialId})
+			// Empty means the renderer uses the scene object's UUID. A terrain asset
+			// may have multiple translated instances, so its asset UUID is not a
+			// valid per-instance spatial identity.
+			.UpdateComponentProperty(target, std::string(MeshRenderComponent::kComponentName), "spatialObjectId", TerraEngine::Reflection::Variant{TerraEngine::EMPTY_UUID})
+			.UpdateComponentProperty(target, std::string(MeshRenderComponent::kComponentName), "taskShaderCullingEnabled", TerraEngine::Reflection::Variant{false});
+		TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
+		terrainRenderProxyInstanceQueued = true;
+		return;
+	}
+	const auto local = TerraEngine::Scene::LocalObject(-1);
+	builder.ObserveScene(objects)
+		.SetUndoGroup("Create Terrain Render Instance")
+		.CreateObject(-1, "Terrain")
+		.SetStatic(local, true)
+		.AddComponent(local, std::string(TerrainComponent::kComponentName))
+		.UpdateComponentProperty(local, std::string(TerrainComponent::kComponentName), "terrainAssetId", TerraEngine::Reflection::Variant{capture.root->assetUuid})
+		.UpdateComponentProperty(local, std::string(TerrainComponent::kComponentName), "visible", TerraEngine::Reflection::Variant{true})
+		.UpdateComponentProperty(local, std::string(TerrainComponent::kComponentName), "castsShadows", TerraEngine::Reflection::Variant{true})
+		.AddComponent(local, std::string(MeshRenderComponent::kComponentName))
+		.UpdateComponentProperty(local, std::string(MeshRenderComponent::kComponentName), "meshId", TerraEngine::Reflection::Variant{terrainRenderProxyMeshId})
+		.UpdateComponentProperty(local, std::string(MeshRenderComponent::kComponentName), "materialId", TerraEngine::Reflection::Variant{terrainRenderProxyMaterialId})
+		.UpdateComponentProperty(local, std::string(MeshRenderComponent::kComponentName), "spatialObjectId", TerraEngine::Reflection::Variant{TerraEngine::EMPTY_UUID})
+		// The resident authoring proxy is deliberately conservative: its compact
+		// per-area bounds are rebuilt asynchronously after every edit, so the first
+		// published generation must not depend on task-stage culling metadata.
+		.UpdateComponentProperty(local, std::string(MeshRenderComponent::kComponentName), "taskShaderCullingEnabled", TerraEngine::Reflection::Variant{false});
+	TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
+	terrainRenderProxyInstanceQueued = true;
+}
+
+bool TerrainWindow::RestoreSceneTerrainProxy()
+{
+	ObjectManager& objects = ObjectManager::instance();
+	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+	objects.forEachObjectWithComponents<TerrainComponent>(
+		[&](Object object, TerrainComponent& terrain)
+		{
+			// The authoring window currently owns one direct one-area proxy. Keep the
+			// first visible durable instance deterministic and leave other instances
+			// untouched until the multi-area runtime system owns their publications.
+			if(objectId == TerraEngine::EMPTY_UUID && terrain.visible
+				&& terrain.terrainAssetId != TerraEngine::EMPTY_UUID)
+			{
+				objectId = objects.getUUID(object);
+				assetId = terrain.terrainAssetId;
+			}
+		});
+	if(objectId == TerraEngine::EMPTY_UUID) return false;
+
+	std::string error;
+	return OpenTerrainForEditing(objectId, error);
+}
+
+bool TerrainWindow::OpenTerrainForEditing(TerraEngine::UUID objectId, std::string& outError)
+{
+	outError.clear();
+	ObjectManager& objects = ObjectManager::instance();
+	const std::optional<Object> object = objects.getObject(objectId);
+	const TerrainComponent* terrain = object ? objects.GetComponent<TerrainComponent>(*object) : nullptr;
+	if(!object || terrain == nullptr || terrain->terrainAssetId == TerraEngine::EMPTY_UUID)
+	{
+		outError = "The selected object does not reference an editable terrain asset.";
+		status = outError;
+		return false;
+	}
+	const TerraEngine::UUID assetId = terrain->terrainAssetId;
+	if(terrainStore)
+	{
+		const auto current = terrainStore->CaptureRoot();
+		if(current.IsValid() && current.root->assetUuid == assetId
+			&& terrainRenderProxyTargetObjectId == objectId)
+		{
+			status = "Terrain Tools is ready: drag in Scene View to create a detached sculpt preview.";
+			return true;
+		}
+		if(authoringSession.IsDirty())
+		{
+			outError = "Apply or cancel the current terrain preview before editing another terrain.";
+			status = outError;
+			return false;
+		}
+	}
+
+	std::filesystem::path terrainPath = ResourceManager::Instance().GetRegisteredAssetPath(assetId, AssetType::Terrain);
+	if(terrainPath.empty())
+	{
+		if(const AssetMetadata* metadata = AssetDatabase::Instance().FindAssetByGuid(assetId))
+			terrainPath = AssetDatabase::Instance().GetAssetRoot() / metadata->sourcePath;
+	}
+	if(terrainPath.empty())
+	{
+		status = "Terrain Tools could not open the selected terrain because its asset is not registered.";
+		outError = status;
+		TERRAENGINE_LOG(LogLevel::Error, status << " Asset: " << TerraEngine::ToHexString(assetId));
+		return false;
+	}
+
+	TerraEngine::Editor::Terrain::TerrainCreationService service;
+	const auto opened = service.OpenExisting(terrainPath);
+	if(!opened.succeeded || opened.assetId != assetId)
+	{
+		status = "Terrain Tools could not open the selected terrain: " + opened.message;
+		outError = status;
+		TERRAENGINE_LOG(LogLevel::Error, status << " Path: " << terrainPath);
+		return false;
+	}
+	destinationPath = terrainPath;
+	authoredSampleSpacingMetres = opened.sampleSpacingMetres;
+	InitializeAuthoringTerrain(opened.assetId, opened.heightfield, objectId);
+	status = "Editing " + terrainPath.filename().string() + ". Drag in Scene View to sculpt a detached preview.";
+	return true;
+}
+
+void TerrainWindow::PollRenderProxyBuild()
+{
+	if(!terrainRenderProxyBuildActive || !terrainRenderProxyFuture.valid()
+		|| terrainRenderProxyFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+		return;
+	auto completed = terrainRenderProxyFuture.get();
+	terrainRenderProxyBuildActive = false;
+	terrainRenderProxyCancellation.reset();
+	const auto capture = terrainStore ? terrainStore->CaptureRoot() : TerraEngine::Terrain::TerrainRootCapture{};
+	const auto descriptor = capture.IsValid() ? terrainStore->FindDescriptor(*capture.root, {0, 0}) : std::nullopt;
+	const bool current = descriptor && completed.assetId == capture.root->assetUuid
+		&& completed.authoredHash == descriptor->authoredContentHash
+		&& completed.authoredGeneration == descriptor->editGeneration;
+	if(!completed.Succeeded() || !current || terrainRenderProxyRebuildRequested)
+	{
+		terrainRenderProxyRebuildRequested = false;
+		ScheduleRenderProxyBuild();
+		return;
+	}
+
+	ResourceManager& resources = ResourceManager::Instance();
+	if(terrainRenderProxyMaterialId == TerraEngine::EMPTY_UUID)
+	{
+		auto material = std::make_unique<Material>();
+		std::memcpy(material->header.magic, "TMAT", 4u);
+		material->header.version = kMaterialCurrentVersion;
+		material->header.headerSize = static_cast<std::uint16_t>(sizeof(MaterialHeader));
+		material->header.shadingModel = static_cast<std::uint32_t>(ShadingModel::Unlit);
+		material->header.alphaMode = static_cast<std::uint32_t>(AlphaMode::Opaque);
+		// Terrain is normally viewed from above, but an editor authoring proxy must
+		// remain visible while orbiting below it or while a flat tile has no vertical
+		// extent. The production terrain surface path can restore one-sided culling.
+		material->header.flags = DoubleSided;
+		material->header.shaderCollectionId = resources.GetDefaultShaderCollectionID();
+		material->header.baseColorFactor[0] = 0.18F;
+		material->header.baseColorFactor[1] = 0.55F;
+		material->header.baseColorFactor[2] = 0.16F;
+		material->header.baseColorFactor[3] = 1.0F;
+		material->header.roughnessFactor = 0.92F;
+		material->header.normalScale = 1.0F;
+		material->header.occlusionStrength = 1.0F;
+		material->shaderCollectionId = material->header.shaderCollectionId;
+		material->shadowBehavior = DeriveMaterialShadowBehavior(
+			material->header.alphaMode, material->header.emissiveFactor);
+		terrainRenderProxyMaterialId = resources.RegisterMaterial("terrain-direct-fallback", std::move(material));
+	}
+	const std::string meshKey = "terrain/" + TerraEngine::ToHexString(completed.assetId);
+	terrainRenderProxyMeshId = resources.RegisterMesh(meshKey, std::move(completed.mesh));
+	RenderSystem::Instance().InvalidateGeneratedMesh(terrainRenderProxyMeshId);
+	QueueRenderProxySceneInstance();
+	status = "Terrain render proxy published; Scene and Game views will consume the committed generation.";
 }
 
 TerraEngine::Editor::Terrain::TerrainAutomationCommandResult TerrainWindow::ExecuteAutomationCommand(
@@ -77,8 +365,15 @@ TerraEngine::Editor::Terrain::TerrainAutomationCommandResult TerrainWindow::Exec
 				}
 				else return {false, "InvalidSchema", "Terrain import format must be png16 or raw16-le."};
 			}
-			TerraEngine::Editor::Terrain::TerrainCreationService service;
-			const std::filesystem::path destination = arguments["destination"].get<std::string>();
+			TerraEngine::Editor::Terrain::TerrainCreationService service = CreateRegisteredTerrainService();
+			std::filesystem::path destination = arguments["destination"].get<std::string>();
+			if(!destination.is_absolute())
+				destination = AssetDatabase::Instance().GetAssetRoot().parent_path() / destination;
+			destination = std::filesystem::absolute(destination).lexically_normal();
+			const std::filesystem::path relativeDestination = destination.lexically_relative(
+				AssetDatabase::Instance().GetAssetRoot());
+			if(relativeDestination.empty() || *relativeDestination.begin() == "..")
+				return {false, "InvalidSchema", "Terrain destinations must remain inside the active project's Assets directory."};
 			auto result = service.CreateOrImport(request, destination, [](float, std::string_view, std::string_view) { return true; });
 			if(!result.succeeded) return {false, result.cancelled ? "Cancelled" : "Unavailable", result.message};
 			destinationPath = destination;
@@ -314,7 +609,7 @@ void TerrainWindow::DrawCreateImportControls()
 		request.sourcePath = sourceBuffer; request.assetId = TerraEngine::GenerateUUID();
 		// RAW dimensions are deliberately visible and bounded in this first UI.
 		if(request.sourceFormat == TerraEngine::AssetPipeline::TerrainSourceFormat::Raw16LittleEndian) { request.rawWidth = 256U; request.rawHeight = 256U; }
-		TerraEngine::Editor::Terrain::TerrainCreationService service;
+		TerraEngine::Editor::Terrain::TerrainCreationService service = CreateRegisteredTerrainService();
 		auto result = service.CreateOrImport(request, destinationBuffer, [&](float, std::string_view, std::string_view) { return true; });
 		status = result.message;
 		if(result.succeeded)
@@ -787,16 +1082,44 @@ nlohmann::json TerrainWindow::RunLiveValidationFixture(const std::filesystem::pa
 	}
 	const bool invisibleBeforeBoundary = terrainStore->CaptureRoot().publicationGeneration == before.publicationGeneration;
 	ProcessProtectedAuthoringBoundary();
+	const auto afterFirst = terrainStore->CaptureRoot();
+	const auto descriptorAfterFirst = terrainStore->FindDescriptor(*afterFirst.root, {0, 0});
+	if(!descriptorAfterFirst)
+	{
+		result["failure"] = "The first live terrain publication lost its canonical authored area.";
+		return result;
+	}
+	// Chain a second additive command through the same automation boundary. This
+	// catches stale editor-buffer mirrors: 125 mm followed by 75 mm must publish
+	// 200 mm, rather than restarting the second command from the original flat
+	// heightfield while the immutable store is already at a newer generation.
+	request.transactionId = TerraEngine::GenerateUUID();
+	request.settings = {{"addMm", 75}};
+	request.expectedRootHash = TerraEngine::Terrain::ToHexString(afterFirst.root->rootContentHash);
+	request.observations = {{descriptorAfterFirst->coordinate, descriptorAfterFirst->editGeneration,
+		descriptorAfterFirst->authoredContentHash}};
+	request.approvalFingerprint = TerraEngine::Editor::Automation::TerrainApprovalFingerprint(request);
+	auto chainedTransaction = PrepareAutomationTransaction(request, error);
+	if(!chainedTransaction || !automationAdapter.Enqueue(request, std::move(*chainedTransaction), error))
+	{
+		result["failure"] = error;
+		return result;
+	}
+	ProcessProtectedAuthoringBoundary();
 	const auto after = terrainStore->CaptureRoot();
-	const bool published = after.publicationGeneration > before.publicationGeneration
+	const bool chainedHeightPreserved = !committedHeightMm.empty()
+		&& std::all_of(committedHeightMm.begin(), committedHeightMm.end(), [](std::int32_t height) { return height == 200; });
+	const bool published = after.publicationGeneration >= before.publicationGeneration + 2u
 		&& after.root->rootContentHash != before.root->rootContentHash;
 	const auto saved = ExecuteAutomationCommand("terrain.save", nlohmann::json::object());
 	const auto diagnostics = DiagnosticSnapshot();
-	result["succeeded"] = invisibleBeforeBoundary && published && saved.accepted
+	result["succeeded"] = invisibleBeforeBoundary && published && chainedHeightPreserved && saved.accepted
 		&& !diagnostics.stagePercentiles.empty() && !diagnostics.dirty;
 	result["invisibleBeforeBoundary"] = invisibleBeforeBoundary;
 	result["publicationGenerationBefore"] = before.publicationGeneration;
 	result["publicationGenerationAfter"] = after.publicationGeneration;
+	result["chainedHeightMm"] = committedHeightMm.empty() ? 0 : committedHeightMm.front();
+	result["chainedHeightPreserved"] = chainedHeightPreserved;
 	result["saved"] = saved.accepted;
 	result["dirtyAfterSave"] = diagnostics.dirty;
 	result["measuredStageCount"] = diagnostics.stagePercentiles.size();
@@ -805,13 +1128,22 @@ nlohmann::json TerrainWindow::RunLiveValidationFixture(const std::filesystem::pa
 	return result;
 }
 
-void TerrainWindow::InitializeAuthoringTerrain(TerraEngine::UUID assetId, const TerraEngine::AssetPipeline::TerrainHeightfield& heightfield)
+void TerrainWindow::InitializeAuthoringTerrain(
+	TerraEngine::UUID assetId,
+	const TerraEngine::AssetPipeline::TerrainHeightfield& heightfield,
+	TerraEngine::UUID existingObjectId)
 {
-	// History commands retain references into the previous store. Destroy them
-	// before replacing that store so a new terrain asset cannot inherit or dangle
-	// an old asset's exact-history blobs.
-	UndoRedoSystem::Instance().Clear();
+	// Terrain stroke commands retain references into the previous store. Remove
+	// only that tool-owned domain before replacing it; scene/object history must
+	// survive opening or creating a terrain asset.
+	UndoRedoSystem::Instance().DiscardHistoryDomain("terrain-authoring");
 	automationSessionId.reset();
+	if(terrainRenderProxyCancellation)
+		terrainRenderProxyCancellation->store(true, std::memory_order_release);
+	terrainRenderProxyRebuildRequested = false;
+	terrainRenderProxyInstanceQueued = false;
+	terrainRenderProxyMeshId = TerraEngine::EMPTY_UUID;
+	terrainRenderProxyTargetObjectId = existingObjectId;
 	if(terrainStore)
 		TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().ClearPublication(terrainStore.get());
 	// Keep a small, editor-owned in-memory authority for the visible workflow.
@@ -894,6 +1226,28 @@ void TerrainWindow::InitializeAuthoringTerrain(TerraEngine::UUID assetId, const 
 	displacedLayerWarning = 0u;
 	observedTerrainMaterialGeneration = AssetDatabase::Instance().GetTerrainMaterialChangeGeneration();
 	previousStamp.reset(); authoringSession.Cancel(); status = "Terrain Tools is ready: drag in Scene View to create a detached sculpt preview.";
+	ScheduleRenderProxyBuild();
+}
+
+bool TerrainWindow::SynchronizeCommittedHeightFromPublishedRoot()
+{
+	// The immutable asset store is the authority after every protected publish.
+	// Automation prepares a detached blob without mutating the window's preview
+	// vector, so copying previewHeightMm here would make the next operation start
+	// from stale samples. Resolve the just-published channel and mirror its exact
+	// canonical int32 payload into both editor buffers instead.
+	if(!terrainStore) return false;
+	const auto capture = terrainStore->CaptureRoot();
+	if(!capture.IsValid()) return false;
+	const auto descriptor = terrainStore->FindDescriptor(*capture.root, {0, 0});
+	if(!descriptor || !descriptor->channels.heightHash) return false;
+	const auto bytes = terrainStore->Blobs().Resolve(*descriptor->channels.heightHash);
+	const std::size_t expectedBytes = TerraEngine::Terrain::kTerrainAreaSampleCount * sizeof(std::int32_t);
+	if(!bytes || bytes->size() != expectedBytes) return false;
+	committedHeightMm.resize(TerraEngine::Terrain::kTerrainAreaSampleCount);
+	std::memcpy(committedHeightMm.data(), bytes->data(), expectedBytes);
+	previewHeightMm = committedHeightMm;
+	return true;
 }
 
 bool TerrainWindow::StageLayerPatch(const TerraEngine::Terrain::TerrainLayerPatch& sourcePatch, std::string& outError)
@@ -1417,10 +1771,36 @@ bool TerrainWindow::RepairFailedGeneration(std::string& outMessage)
 	return true;
 }
 
-void TerrainWindow::HandleSceneViewPointer(const TerraEngine::Editor::Terrain::TerrainCanonicalRay& ray, bool pressed, bool held, bool released)
+void TerrainWindow::HandleSceneViewPointer(
+	const TerraEngine::Scene::WorldPosition& rayOrigin,
+	const glm::dvec3& rayDirection,
+	bool pressed, bool held, bool released)
 {
-	if((!sculpting && !holeSculpting) || !terrainStore) return;
-	const auto hit = TerraEngine::Editor::Terrain::TerrainPicking::PickHeightfield(ray, [this](std::int64_t x, std::int64_t z) -> std::optional<double> {
+	if((!sculpting && !holeSculpting) || !terrainStore || (!pressed && !brushStrokeActive && !holeBrushActive)) return;
+	TerraEngine::Scene::WorldPosition terrainOrigin{};
+	if(terrainRenderProxyTargetObjectId != TerraEngine::EMPTY_UUID)
+	{
+		const std::optional<Object> target = ObjectManager::instance().getObject(terrainRenderProxyTargetObjectId);
+		const std::optional<TerraEngine::Scene::WorldPose> pose = target
+			? ObjectManager::instance().GetCanonicalWorldPose(*target) : std::nullopt;
+		if(!pose)
+		{
+			status = "Terrain stroke rejected because the selected terrain instance no longer exists.";
+			return;
+		}
+		terrainOrigin = pose->position;
+	}
+	const auto localOrigin = TerraEngine::Scene::LocalizeWorldPosition(rayOrigin, terrainOrigin, 20'000.0);
+	if(!localOrigin.Succeeded())
+	{
+		status = "Terrain stroke rejected because the terrain is outside the bounded Scene View editing range.";
+		return;
+	}
+	const double spacing = std::max(0.001, static_cast<double>(authoredSampleSpacingMetres));
+	const TerraEngine::Editor::Terrain::TerrainCanonicalRay sampleRay{
+		{localOrigin.offsetMetres.x / spacing, localOrigin.offsetMetres.y, localOrigin.offsetMetres.z / spacing},
+		{rayDirection.x / spacing, rayDirection.y, rayDirection.z / spacing}};
+	const auto hit = TerraEngine::Editor::Terrain::TerrainPicking::PickHeightfield(sampleRay, [this](std::int64_t x, std::int64_t z) -> std::optional<double> {
 		if(x < 0 || z < 0 || x >= 256 || z >= 256) return std::nullopt;
 		return static_cast<double>(previewHeightMm[static_cast<std::size_t>(z) * 256U + x]) / 1000.0;
 	}, 20000.0, 0.5);
@@ -1501,8 +1881,12 @@ bool TerrainWindow::QueuePreviewForPublication()
 
 void TerrainWindow::ProcessProtectedAuthoringBoundary()
 {
+	// Resource publication belongs to the same protected editor boundary as the
+	// terrain receipt. A completed worker mesh cannot appear mid-render-frame.
+	PollRenderProxyBuild();
 	const auto publicationStart = std::chrono::steady_clock::now();
 	authoringSystem.PublishAtProtectedBoundary();
+	bool committedRenderableChange = false;
 	for(const auto& receipt : authoringSystem.DrainReceipts())
 	{
 		// Automation jobs become terminal only after this protected-boundary receipt,
@@ -1517,6 +1901,7 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 		const bool wasHistoryReplay = UndoRedoSystem::Instance().CompleteTerrainReplay(receipt);
 		if(receipt.outcome == TerraEngine::Terrain::TerrainEditOutcome::Committed)
 		{
+			committedRenderableChange = true;
 			if(!wasHistoryReplay && receipt.historyPayload && terrainStore && terrainQueue)
 			{
 				const auto capture = terrainStore->CaptureRoot();
@@ -1559,14 +1944,21 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 			{
 				// Only the immutable result associated with this receipt becomes
 				// authoritative.  A later preview cannot leak through this boundary.
-				if(proceduralPreview) committedHeightMm = proceduralPreview->afterHeightMm;
-				previewHeightMm = committedHeightMm;
+				if(!SynchronizeCommittedHeightFromPublishedRoot() && proceduralPreview)
+				{
+					committedHeightMm = proceduralPreview->afterHeightMm;
+					previewHeightMm = committedHeightMm;
+				}
 				proceduralPreview.reset(); queuedProceduralTransactionId.reset();
 				status = "Terrain procedural preview applied as one named history group.";
 			}
 			else
 			{
-				committedHeightMm = previewHeightMm; authoringSession.Cancel(); applyRequested = false;
+				// Visible strokes already carry a matching preview, while automation
+				// commits do not. Prefer the published blob for both so chained tools
+				// always compose from the same authoritative generation.
+				if(!SynchronizeCommittedHeightFromPublishedRoot()) committedHeightMm = previewHeightMm;
+				previewHeightMm = committedHeightMm; authoringSession.Cancel(); applyRequested = false;
 				status = "Terrain sculpt applied at the protected boundary (generation " + std::to_string(receipt.publicationGeneration) + ").";
 			}
 		}
@@ -1580,6 +1972,8 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 			status = std::string(isLayerReceipt ? "Terrain layer preview was not published: " : (isSurfaceReceipt ? "Terrain surface preview was not published: " : (isHoleReceipt ? "Terrain hole preview was not published: " : (isProceduralReceipt ? "Terrain procedural preview was not published: " : "Terrain sculpt rejected: ")))) + receipt.message;
 		}
 	}
+	if(committedRenderableChange)
+		ScheduleRenderProxyBuild();
 	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
 		std::chrono::steady_clock::now() - publicationStart).count();
 	publicationStageSamplesNanoseconds.push_back(static_cast<std::uint64_t>(std::max<std::int64_t>(0, elapsed)));

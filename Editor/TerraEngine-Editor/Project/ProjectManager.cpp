@@ -448,11 +448,14 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
 			return false;
 		}
 
-		// Create Default Scene
+		// Create the authoritative default scene in the same unbounded format that
+		// the scene loader accepts. Keeping this template canonical prevents a new
+		// project from opening with "No Active Scene" after strict format checks.
 		{
 			fs::path scenePath = location / "Assets" / "Scenes" / "Scene.tescene";
 			std::ofstream sceneFile(scenePath);
 			sceneFile << R"({
+	"format": "TerraSceneUnboundedV1",
 	"name": "Scene",
 	"sceneSettings": {
 		"indirectStrength": 1.0,
@@ -461,6 +464,7 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
 	},
 	"objects": [
 		{
+			"uuid": "00000000000000000000000000000001",
 			"name": "Sky",
 			"components": {
 				"SkyComponent": {
@@ -482,12 +486,24 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
 			"children": []
 		},
 		{
+			"uuid": "00000000000000000000000000000002",
 			"name": "Main Camera",
 			"components": {
 				"Transform": {
-					"Position": [0.0, 1.0, -10.0],
-					"Rotation": [1.0, 0.0, 0.0, 0.0],
-					"Scale": [1.0, 1.0, 1.0]
+					"WorldPose": {
+						"position": {
+							"cell": { "x": "0", "y": "0", "z": "0" },
+							"offsetMetres": [0.0, 1.0, -10.0]
+						},
+						"rotation": [1.0, 0.0, 0.0, 0.0],
+						"scale": [1.0, 1.0, 1.0]
+					},
+					"ParentRelativePose": {
+						"translationMetres": [0.0, 1.0, -10.0],
+						"rotation": [1.0, 0.0, 0.0, 0.0],
+						"scale": [1.0, 1.0, 1.0],
+						"transformSpaceId": 0
+					}
 				},
 				"CameraComponent": {
 					"verticalFovDegrees": 45.0,
@@ -501,6 +517,12 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
 		}
 	]
 })";
+			if (!sceneFile)
+			{
+				const std::string message = "Could not write the default scene: " + scenePath.string();
+				if (outError != nullptr) *outError = message;
+				return false;
+			}
 		}
 
 		ProjectSettings settings;

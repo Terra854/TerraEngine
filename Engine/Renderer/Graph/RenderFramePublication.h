@@ -96,6 +96,11 @@ namespace TerraEngine::Renderer
 	{
 		RenderSlotGenerationKey key{};
 		RenderInstanceRecord instance{};
+		// Large-world positions cannot be retained safely in the float matrix above.
+		// The backend localizes this canonical pose against each view's immutable
+		// reference frame when it reconstructs a draw command.
+		TerraEngine::Scene::WorldPose canonicalWorldPose{};
+		bool hasCanonicalWorldPose = false;
 		// Motion-vector and temporal consumers need the transform that produced the
 		// preceding sealed frame.  It stays in the dynamic lane because changing it
 		// must copy only this page, never the stable mesh/material topology.
@@ -617,6 +622,7 @@ namespace TerraEngine::Renderer
 	// from the same sealed roots without retaining a second full command array.
 	[[nodiscard]] TERRAENGINE_API bool ResolveShadowDrawListItem(
 		const RenderFramePublication& publication,
+		const RenderReferenceFrame& referenceFrame,
 		const ShadowDrawList& shadow,
 		std::size_t itemIndex,
 		RenderItemRecord& output) noexcept;

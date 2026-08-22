@@ -50,6 +50,8 @@ set(_TERRAENGINE_TERRAIN_ENGINE_FILES
 	Engine/Renderer/Terrain/TerrainPageCooker.h
 	Engine/Renderer/Terrain/TerrainRenderPackets.cpp
 	Engine/Renderer/Terrain/TerrainRenderPackets.h
+	Engine/Renderer/Terrain/TerrainDirectMesh.cpp
+	Engine/Renderer/Terrain/TerrainDirectMesh.h
 	Engine/Terrain/TerrainLayerStack.cpp
 	Engine/Terrain/TerrainLayerStack.h
 	Engine/Renderer/Terrain/TerrainSurfaceCache.cpp
@@ -155,6 +157,7 @@ set(_TERRAENGINE_TERRAIN_ENGINE_TEST_FILES
 	Tests/Engine/Terrain/TerrainBrushKernelTests.cpp
 	Tests/Engine/Terrain/TerrainPageCookerTests.cpp
 	Tests/Engine/Terrain/TerrainRenderSystemIntegrationTests.cpp
+	Tests/Engine/Terrain/TerrainDirectMeshTests.cpp
 	Tests/Engine/Terrain/TerrainAtomicEditTests.cpp
 	Tests/Engine/Terrain/TerrainLayerWeightTests.cpp
 	Tests/Engine/Terrain/TerrainSurfaceRenderingTests.cpp

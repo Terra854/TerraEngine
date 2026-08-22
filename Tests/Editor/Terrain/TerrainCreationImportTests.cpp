@@ -24,6 +24,10 @@ namespace TerraEngine::EditorTests
 				&& std::filesystem::exists(destination) && std::filesystem::exists(destination.string() + ".data/CURRENT")
 				&& std::filesystem::exists(destination.string() + ".data/roots/1.json"),
 				"Flat creation must publish one parent asset plus a complete private CURRENT/root/blob generation.");
+			const auto reopened = service.OpenExisting(destination);
+			context.Expect(reopened.succeeded && reopened.assetId == request.assetId
+				&& reopened.heightfield.heightsMm == result.heightfield.heightsMm,
+				"A scene reload must recover the exact persisted origin area used to rebuild its render proxy.");
 			std::error_code ignored; std::filesystem::remove_all(root, ignored);
 		});
 

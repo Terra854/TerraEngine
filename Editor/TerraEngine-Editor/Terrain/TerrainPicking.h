@@ -9,10 +9,19 @@
 #include <optional>
 
 #include <glm/vec3.hpp>
+#include <glm/mat4x4.hpp>
 
 namespace TerraEngine::Editor::Terrain
 {
 	struct TerrainCanonicalRay { glm::dvec3 origin{0.0}; glm::dvec3 direction{0.0, -1.0, 0.0}; };
+	// Viewport rays stay relative to the Scene View camera. The caller can add
+	// localOriginMetres to its exact canonical camera address without flattening
+	// a distant world cell into one imprecise global floating-point coordinate.
+	struct TerrainViewportRay
+	{
+		glm::dvec3 localOriginMetres{0.0};
+		glm::dvec3 direction{0.0, -1.0, 0.0};
+	};
 	struct TerrainPickHit { glm::dvec3 canonicalWorldPosition{0.0}; TerraEngine::Terrain::TerrainSampleCoordinate sample{}; double distance = 0.0; };
 	struct TerrainGpuPickIdentity { TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID; TerraEngine::Terrain::Generation generation = 0U; };
 	// The distant route retains the engine's exact cell+offset address until the
@@ -39,6 +48,12 @@ namespace TerraEngine::Editor::Terrain
 		[[nodiscard]] static std::optional<TerrainPickHit> PickHeightfield(
 			const TerrainCanonicalRay& ray, const TerrainHeightSampler& sampleHeight,
 			double maximumDistance, double stepMetres = 1.0);
+		// Converts a normalized top-left viewport position to the same camera-local
+		// ray used by rendering. Perspective rays begin at the camera; orthographic
+		// rays begin at their individual near-plane position.
+		[[nodiscard]] static std::optional<TerrainViewportRay> BuildViewportRay(
+			const glm::mat4& view, const glm::mat4& projection,
+			double normalizedX, double normalizedY, bool orthographic);
 		[[nodiscard]] static bool QualifyGpuIdentity(
 			const TerrainGpuPickIdentity& gpu, TerraEngine::UUID expectedAsset,
 			TerraEngine::Terrain::Generation expectedGeneration) noexcept;

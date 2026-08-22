@@ -18,6 +18,15 @@ namespace TerraEngine::Editor::Terrain
 		std::string message;
 	};
 
+	struct TerrainOpenResult
+	{
+		bool succeeded = false;
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		float sampleSpacingMetres = 1.0F;
+		TerraEngine::AssetPipeline::TerrainHeightfield heightfield{};
+		std::string message;
+	};
+
 	class TerrainCreationService
 	{
 	public:
@@ -29,6 +38,10 @@ namespace TerraEngine::Editor::Terrain
 			const TerraEngine::AssetPipeline::TerrainImportRequest& request,
 			const std::filesystem::path& destination,
 			TerraEngine::AssetPipeline::TerrainCompileProgressCallback progress = {}) const;
+		// Scene reload uses the same checked area codec as terrain creation. Only
+		// the first authored area is materialized because the current direct proxy
+		// is explicitly a one-area authoring surface.
+		[[nodiscard]] TerrainOpenResult OpenExisting(const std::filesystem::path& source) const;
 	private:
 		ParentAssetRegistration registerParentAsset;
 	};

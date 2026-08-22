@@ -38,6 +38,12 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(std::string("Aspect Ratio"),
 				TerraEngine::Editor::BuildStandardInspectorPropertyLabel("CameraComponent", "aspectRatio"),
 				"Properties without a domain override should still use the readable fallback.");
+			context.ExpectEqual(std::string("Terrain Asset"),
+				TerraEngine::Editor::BuildStandardInspectorPropertyLabel("TerrainComponent", "terrainAssetId"),
+				"Terrain references should be described as assets instead of UUID storage fields.");
+			context.ExpectEqual(std::string("Cast Shadows"),
+				TerraEngine::Editor::BuildStandardInspectorPropertyLabel("TerrainComponent", "castsShadows"),
+				"Terrain rendering options should use the established author-facing wording.");
 		});
 	}
 }

@@ -494,8 +494,76 @@ bool UndoRedoSystem::RecordCommittedTransaction(const TerraEngine::Scene::Transa
 		return false;
 	}
 
+	const bool containsCreate = std::any_of(transaction.writeSet.operations.begin(), transaction.writeSet.operations.end(),
+		[](const TransactionWriteOperation& operation) { return operation.kind == TransactionWriteKind::CreateObject; });
+	if (containsCreate)
+	{
+		// A create transaction may initialize the new objects through later local
+		// writes. Snapshot only the resulting root graphs, then undo with stable
+		// deletes and redo with protected snapshot restores.
+		const bool writesOnlyCreatedObjects = std::all_of(transaction.writeSet.operations.begin(), transaction.writeSet.operations.end(),
+			[&result](const TransactionWriteOperation& operation) {
+				return operation.kind == TransactionWriteKind::CreateObject
+					? result.createdObjects.contains(operation.createdLocalObjectId)
+					: operation.target.UsesLocalObject() && result.createdObjects.contains(operation.target.localObjectId);
+			});
+		if (!writesOnlyCreatedObjects)
+		{
+			return false;
+		}
+
+		ObjectManager& objects = ObjectManager::instance();
+		std::unordered_set<TerraEngine::UUID> createdIds;
+		for (const auto& [localId, objectId] : result.createdObjects)
+		{
+			(void)localId;
+			createdIds.insert(objectId);
+		}
+		std::vector<TerraEngine::UUID> rootIds;
+		for (const TerraEngine::UUID& objectId : createdIds)
+		{
+			const std::optional<Object> object = objects.getObject(objectId);
+			const std::optional<Object> parent = object ? objects.getParent(*object) : std::nullopt;
+			if (object && (!parent || !createdIds.contains(objects.getUUID(*parent))))
+			{
+				rootIds.push_back(objectId);
+			}
+		}
+		std::sort(rootIds.begin(), rootIds.end(), [](const TerraEngine::UUID& left, const TerraEngine::UUID& right) {
+			return TerraEngine::ToHexString(left) < TerraEngine::ToHexString(right);
+		});
+		if (rootIds.empty()) return false;
+
+		std::vector<TransactionWriteOperation> forward;
+		std::vector<TransactionWriteOperation> inverse;
+		forward.reserve(rootIds.size());
+		inverse.reserve(rootIds.size());
+		for (const TerraEngine::UUID& rootId : rootIds)
+		{
+			const std::optional<Object> root = objects.getObject(rootId);
+			if (!root) return false;
+			TransactionWriteOperation restore;
+			restore.kind = TransactionWriteKind::RestoreObjectSnapshot;
+			restore.target = ExistingObject(rootId);
+			restore.serializedObject = Serializer::SerializeObject(root->EntityId());
+			if (const std::optional<Object> parent = objects.getParent(*root))
+			{
+				restore.parent = ExistingObject(objects.getUUID(*parent));
+			}
+			forward.push_back(std::move(restore));
+
+			TransactionWriteOperation remove;
+			remove.kind = TransactionWriteKind::DeleteObject;
+			remove.target = ExistingObject(rootId);
+			inverse.push_back(std::move(remove));
+		}
+		PushCommand(std::make_unique<CommittedTransactionCommand>(transaction.undoGroupName,
+			transaction.id, std::move(forward), std::move(inverse)));
+		return true;
+	}
+
 	// Replays only retain operations whose inverse is an explicit typed write.
-	// Object/component snapshot restoration needs a richer protocol, while a
+	// Component snapshot restoration still needs a richer protocol, while a
 	// canonical transform inverse is already a complete WorldPose value.
 	if (!std::all_of(transaction.writeSet.operations.begin(), transaction.writeSet.operations.end(), [](const TransactionWriteOperation& operation) {
 		return operation.kind == TransactionWriteKind::UpdateComponentProperty
@@ -698,6 +766,36 @@ void UndoRedoSystem::Clear() {
 	m_CurrentStateId = m_NextStateId++;
 	m_SavedStateId = m_CurrentStateId;
 	UpdateDirtyState();
+}
+
+void UndoRedoSystem::DiscardHistoryDomain(std::string_view domain)
+{
+	if (domain.empty()) return;
+	bool removedAny = false;
+	const auto discard = [&](std::deque<HistoryEntry>& stack) {
+		for (auto entry = stack.begin(); entry != stack.end();)
+		{
+			if (entry->command->GetHistoryDomain() != domain)
+			{
+				++entry;
+				continue;
+			}
+			if (m_DeferredReplay && entry->command->GetPendingReplayTransactionId() == m_DeferredReplay->transactionId)
+			{
+				m_DeferredReplay.reset();
+			}
+			m_HistoryBytes -= entry->byteCost;
+			entry = stack.erase(entry);
+			removedAny = true;
+		}
+	};
+	discard(undoStack);
+	discard(redoStack);
+	if (removedAny)
+	{
+		++historySequence;
+		UpdateDirtyState();
+	}
 }
 
 // UndoRedoSystem::UpdateDirtyState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

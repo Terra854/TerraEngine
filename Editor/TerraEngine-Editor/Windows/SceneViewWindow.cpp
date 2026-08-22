@@ -870,8 +870,56 @@ bool SceneViewWindow::FrameAutomationObject(entt::entity entity, std::string& ou
 	{
 		m_Owner->SetSelectedEntity(entity);
 	}
-	const float distance = ResolveSceneViewFocusDistance(*worldPosition, m_CameraFocusDistance);
-	RepositionCameraAroundFocus(*worldPosition, distance);
+	TerraEngine::Scene::WorldPosition focus = *worldPosition;
+	float distance = ResolveSceneViewFocusDistance(focus, m_CameraFocusDistance);
+
+	// Framing a renderable uses its authored bounds instead of only its transform
+	// pivot. This matters especially for terrain, whose mesh spans positive X/Z
+	// from an origin at one corner; pivot-only framing produced a clipped wedge.
+	auto& registry = ObjectManager::instance().getRegistry();
+	const MeshRenderComponent* renderable = registry.valid(entity)
+		? registry.try_get<MeshRenderComponent>(entity) : nullptr;
+	const Mesh* mesh = renderable != nullptr
+		? ResourceManager::Instance().GetMesh(renderable->meshId) : nullptr;
+	if (mesh != nullptr && mesh->hasLocalBounds)
+	{
+		const glm::vec3 localMinimum(mesh->localBoundsMin[0], mesh->localBoundsMin[1], mesh->localBoundsMin[2]);
+		const glm::vec3 localMaximum(mesh->localBoundsMax[0], mesh->localBoundsMax[1], mesh->localBoundsMax[2]);
+		const bool finiteBounds = std::isfinite(localMinimum.x) && std::isfinite(localMinimum.y) && std::isfinite(localMinimum.z)
+			&& std::isfinite(localMaximum.x) && std::isfinite(localMaximum.y) && std::isfinite(localMaximum.z);
+		if (finiteBounds
+			&& glm::all(glm::greaterThanEqual(localMaximum, localMinimum)))
+		{
+			const glm::mat4 model = ComputeEntityWorldMatrix(entity, *worldPosition).value_or(glm::mat4(1.0F));
+			const glm::vec3 localCenter = (localMinimum + localMaximum) * 0.5F;
+			const glm::vec3 localHalfExtents = (localMaximum - localMinimum) * 0.5F;
+			const glm::vec3 centerFromObject = glm::vec3(model * glm::vec4(localCenter, 1.0F));
+			const auto centered = TerraEngine::Scene::ApplyWorldDelta(
+				*worldPosition, {{}, glm::dvec3(centerFromObject)});
+			if (centered.Succeeded()) focus = centered.position;
+
+			// Absolute matrix columns conservatively transform an AABB's extents.
+			// A sphere around that box then fits regardless of the current orbit angle.
+			const glm::mat3 absoluteLinear(
+				glm::abs(glm::vec3(model[0])),
+				glm::abs(glm::vec3(model[1])),
+				glm::abs(glm::vec3(model[2])));
+			const float radius = glm::length(absoluteLinear * localHalfExtents);
+			if (std::isfinite(radius) && radius > 0.001F)
+			{
+				const float aspect = m_LastMarkerViewport.w > 0
+					? static_cast<float>(m_LastMarkerViewport.z) / static_cast<float>(m_LastMarkerViewport.w)
+					: 1.0F;
+				const float verticalHalfAngle = glm::radians(std::max(m_Fov, 0.1F)) * 0.5F;
+				const float horizontalHalfAngle = std::atan(std::tan(verticalHalfAngle) * std::max(aspect, 0.01F));
+				const float limitingHalfAngle = std::max(0.01F, std::min(verticalHalfAngle, horizontalHalfAngle));
+				distance = std::clamp((radius / std::sin(limitingHalfAngle)) * 1.12F, 1.0F, 1000.0F);
+				if (m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic)
+					m_OrthographicHeight = std::clamp(radius * 2.24F, 2.0F, 160.0F);
+			}
+		}
+	}
+	RepositionCameraAroundFocus(focus, distance);
 	return true;
 }
 
@@ -2770,13 +2818,25 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 			&& mouse.y >= viewportPos.y && mouse.y <= viewportPos.y + viewportSize.y;
 		if(inside)
 		{
-			const glm::dvec3 origin(
-				static_cast<double>(m_CameraPosition.cell.x) * TerraEngine::Scene::kWorldCellEdgeMetres + m_CameraPosition.offsetMetres.x,
-				static_cast<double>(m_CameraPosition.cell.y) * TerraEngine::Scene::kWorldCellEdgeMetres + m_CameraPosition.offsetMetres.y,
-				static_cast<double>(m_CameraPosition.cell.z) * TerraEngine::Scene::kWorldCellEdgeMetres + m_CameraPosition.offsetMetres.z);
-			const glm::vec3 forward = GetCameraForward();
 			const bool wasCapturing = terrainTools->IsBrushStrokeActive();
-			terrainTools->HandleSceneViewPointer({origin, glm::dvec3(forward)}, ImGui::IsMouseClicked(ImGuiMouseButton_Left), ImGui::IsMouseDown(ImGuiMouseButton_Left), ImGui::IsMouseReleased(ImGuiMouseButton_Left));
+			const double normalizedX = static_cast<double>(mouse.x - viewportPos.x) / std::max(1.0, static_cast<double>(viewportSize.x));
+			const double normalizedY = static_cast<double>(mouse.y - viewportPos.y) / std::max(1.0, static_cast<double>(viewportSize.y));
+			const auto viewportRay = TerraEngine::Editor::Terrain::TerrainPicking::BuildViewportRay(
+				view, proj, normalizedX, normalizedY,
+				m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic);
+			if(viewportRay)
+			{
+				// Preserve the exact camera cell. Only the bounded near-plane offset is
+				// added before Terrain Tools localizes the ray to its selected instance.
+				const auto canonicalOrigin = TerraEngine::Scene::ApplyWorldDelta(
+					m_CameraPosition, {{}, viewportRay->localOriginMetres});
+				if(canonicalOrigin.Succeeded())
+					terrainTools->HandleSceneViewPointer(
+						canonicalOrigin.position, viewportRay->direction,
+						ImGui::IsMouseClicked(ImGuiMouseButton_Left),
+						ImGui::IsMouseDown(ImGuiMouseButton_Left),
+						ImGui::IsMouseReleased(ImGuiMouseButton_Left));
+			}
 			if(TerrainWindow::ShouldCaptureSceneSelection(terrainTools->IsSculpting(), terrainTools->IsBrushStrokeActive()) || wasCapturing)
 			{
 				// A lightweight editor overlay is deliberately screen-local. Terrain

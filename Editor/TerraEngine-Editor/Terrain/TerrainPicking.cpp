@@ -3,6 +3,7 @@
 #include "TerrainPicking.h"
 
 #include <glm/geometric.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
 
 #include <cmath>
 
@@ -21,7 +22,14 @@ namespace TerraEngine::Editor::Terrain
 			const auto x = static_cast<std::int64_t>(std::floor(point.x));
 			const auto z = static_cast<std::int64_t>(std::floor(point.z));
 			const std::optional<double> height = sampleHeight(x, z);
-			if(!height) return std::nullopt;
+			if(!height)
+			{
+				// A normal editor camera starts outside the finite authored patch.
+				// Keep marching until the ray enters resident terrain; carrying the
+				// previous difference across a gap could manufacture a false hit.
+				hasPrior = false;
+				continue;
+			}
 			const double difference = point.y - *height;
 			if((hasPrior && priorDifference >= 0.0 && difference <= 0.0) || difference == 0.0)
 				return TerrainPickHit{{point.x, *height, point.z}, {x, z}, distance};
@@ -29,6 +37,48 @@ namespace TerraEngine::Editor::Terrain
 			hasPrior = true;
 		}
 		return std::nullopt;
+	}
+
+	std::optional<TerrainViewportRay> TerrainPicking::BuildViewportRay(
+		const glm::mat4& view, const glm::mat4& projection,
+		double normalizedX, double normalizedY, bool orthographic)
+	{
+		if(!std::isfinite(normalizedX) || !std::isfinite(normalizedY)
+			|| normalizedX < 0.0 || normalizedX > 1.0
+			|| normalizedY < 0.0 || normalizedY > 1.0)
+			return std::nullopt;
+
+		// Scene View uses a right-handed zero-to-one projection. ImGui's pointer
+		// origin is top-left, so y is inverted while x maps directly to clip space.
+		const float clipX = static_cast<float>(normalizedX * 2.0 - 1.0);
+		const float clipY = static_cast<float>(1.0 - normalizedY * 2.0);
+		const glm::mat4 inverseViewProjection = glm::inverse(projection * view);
+		auto unproject = [&inverseViewProjection](const glm::vec4& clip) -> std::optional<glm::dvec3>
+		{
+			const glm::vec4 homogeneous = inverseViewProjection * clip;
+			if(!std::isfinite(homogeneous.x) || !std::isfinite(homogeneous.y)
+				|| !std::isfinite(homogeneous.z) || !std::isfinite(homogeneous.w)
+				|| std::abs(homogeneous.w) <= 1.0e-7F)
+				return std::nullopt;
+			return glm::dvec3(homogeneous) / static_cast<double>(homogeneous.w);
+		};
+		const auto nearPoint = unproject({clipX, clipY, 0.0F, 1.0F});
+		const auto farPoint = unproject({clipX, clipY, 1.0F, 1.0F});
+		if(!nearPoint || !farPoint) return std::nullopt;
+		const glm::dvec3 delta = *farPoint - *nearPoint;
+		if(glm::length(delta) <= 1.0e-9) return std::nullopt;
+
+		glm::dvec3 localOrigin = *nearPoint;
+		if(!orthographic)
+		{
+			const glm::mat4 inverseView = glm::inverse(view);
+			const glm::vec4 camera = inverseView * glm::vec4(0.0F, 0.0F, 0.0F, 1.0F);
+			if(!std::isfinite(camera.x) || !std::isfinite(camera.y)
+				|| !std::isfinite(camera.z) || std::abs(camera.w) <= 1.0e-7F)
+				return std::nullopt;
+			localOrigin = glm::dvec3(camera) / static_cast<double>(camera.w);
+		}
+		return TerrainViewportRay{localOrigin, glm::normalize(delta)};
 	}
 
 	bool TerrainPicking::QualifyGpuIdentity(const TerrainGpuPickIdentity& gpu, TerraEngine::UUID expectedAsset,

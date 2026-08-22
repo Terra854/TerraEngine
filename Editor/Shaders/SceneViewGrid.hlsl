@@ -82,7 +82,11 @@ bool TryResolveGridWorldPosition(VSOutput input, out float3 worldPos)
 		return false;
 	}
 
-	const float t = -input.NearPoint.y / denominator;
+	// Keep the editor construction plane just below authored Y=0 geometry. A
+	// mathematically coplanar grid z-fights through flat terrain and makes both
+	// surfaces look damaged even when the perspective lines are continuous.
+	const float kGridPlaneY = -0.02;
+	const float t = (kGridPlaneY - input.NearPoint.y) / denominator;
 	if (!IsOrthographicGrid() && t < 0.0)
 	{
 		worldPos = float3(0.0, 0.0, 0.0);
@@ -128,16 +132,32 @@ float ChooseOrthographicGridSpacing(float2 worldCoord)
 	return decade * multiplier;
 }
 
+float ChoosePerspectiveGridSpacing()
+{
+	// A perspective plane must use one spacing for the whole draw. Choosing the
+	// spacing from per-pixel derivatives makes neighbouring fragments select
+	// different decades, which breaks continuous lines into the chaotic wedges
+	// seen when the camera looks across a large terrain.
+	float3 cameraPosition = mul(PC.inverseView, float4(0, 0, 0, 1)).xyz;
+	float desiredSpacing = max(abs(cameraPosition.y) * 0.08, 1.0);
+	float decade = pow(10.0, floor(log(desiredSpacing) / 2.302585093));
+	float mantissa = desiredSpacing / max(decade, 0.0001);
+	float multiplier = mantissa > 5.0 ? 10.0 : (mantissa > 2.0 ? 5.0 : (mantissa > 1.0 ? 2.0 : 1.0));
+	return decade * multiplier;
+}
+
 float4 BuildPerspectiveGridColor(float3 worldPos)
 {
 	float2 coord = worldPos.xz;
-	float2 derivative = fwidth(coord);
-	float2 grid = abs(frac(coord - 0.5) - 0.5) / derivative;
-	float lineVal = min(grid.x, grid.y);
-	float minimumz = min(derivative.y, 1.0);
-	float minimumx = min(derivative.x, 1.0);
-
-	float4 color = float4(0.2, 0.2, 0.2, 1.0 - min(lineVal, 1.0));
+	// The camera-height LOD is constant across the draw, keeping every grid line
+	// continuous while still reducing density when a large object is framed.
+	float spacing = ChoosePerspectiveGridSpacing();
+	float minorAlpha = GridLineAlpha(coord, spacing, 0.92);
+	float majorAlpha = GridLineAlpha(coord, spacing * 5.0, 1.25);
+	float4 color = float4(0.20, 0.22, 0.24, max(minorAlpha * 0.52, majorAlpha * 0.82));
+	color.rgb = lerp(color.rgb, float3(0.13, 0.15, 0.17), majorAlpha);
+	float minimumz = max(fwidth(worldPos.z), 0.0001);
+	float minimumx = max(fwidth(worldPos.x), 0.0001);
 
 	// Z Axis (Blue)
 	if(abs(worldPos.x) < minimumx)
@@ -148,7 +168,11 @@ float4 BuildPerspectiveGridColor(float3 worldPos)
 		color.xyz = float3(1.0, 0.0, 0.0);
 
 	float dist = distance(mul(PC.inverseView, float4(0,0,0,1)).xyz, worldPos);
-	float fade = max(0.0, 1.0 - (dist / 100.0));
+	// Preserve roughly two hundred visible cells at every adaptive spacing. A
+	// large framed terrain therefore keeps contextual grid lines without making
+	// a close-up view extend all the way to the projection far plane.
+	float fadeDistance = max(100.0, spacing * 100.0);
+	float fade = max(0.0, 1.0 - (dist / fadeDistance));
 	color.a *= fade;
 	return color;
 }

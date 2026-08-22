@@ -1,7 +1,10 @@
 #include "TestHarness.h"
 #include "Scene/SceneManager.h"
+#include "Scene/SceneMutationQueue.h"
 #include "Scene/TransactionalMutation.h"
 
+#include "Core/Object/ComponentRegistry.h"
+#include "Core/Object/ObjectManager.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "UndoRedoSystem.h"
 
@@ -17,19 +20,21 @@ namespace TerraEngine::EditorTests {
 		class IntegerDeltaCommand final : public ICommand
 		{
 		public:
-			IntegerDeltaCommand(int& value, int before, int after)
-				: value(value), before(before), after(after)
+			IntegerDeltaCommand(int& value, int before, int after, std::string domain = {})
+				: value(value), before(before), after(after), domain(std::move(domain))
 			{
 			}
 
 			void Undo() override { value = before; }
 			void Redo() override { value = after; }
 			std::string GetName() const override { return "Integer delta"; }
+			std::string_view GetHistoryDomain() const override { return domain; }
 
 		private:
 			int& value;
 			int before = 0;
 			int after = 0;
+			std::string domain;
 		};
 	}
 
@@ -117,6 +122,71 @@ namespace TerraEngine::EditorTests {
 			context.Expect(SceneManager::Instance().IsActiveSceneDirty(), "An unreachable saved revision must remain dirty after all retained undo steps.");
 			history.Clear();
 			history.SetHistoryBudget(1000U, 512U * 1024U * 1024U);
+		});
+
+		registry.Add("Editor.TransactionalMutation.CreatedObjectUndoRedoUsesProtectedStableSnapshotReplay", [](TestContext& context) {
+			ComponentRegistry::RegisterAllComponents();
+			ScriptingSystem::Instance().SetRunning(false);
+			ObjectManager& objects = ObjectManager::instance();
+			auto& queue = TerraEngine::Scene::SceneMutationQueue::Instance();
+			objects.clear();
+			queue.Clear();
+			UndoRedoSystem& history = UndoRedoSystem::Instance();
+			history.Clear();
+
+			const auto local = TerraEngine::Scene::LocalObject(-1);
+			TerraEngine::Scene::TransactionalMutationBuilder builder(
+				"editor-create-undo", TerraEngine::Scene::TransactionOrigin::Editor, "TerrainCreateRegression");
+			builder.SetUndoGroup("Create Terrain Render Instance")
+				.CreateObject(-1, "Terrain")
+				.SetStatic(local, true);
+			const TerraEngine::Scene::Transaction transaction = builder.Build();
+			queue.EnqueueTransaction(transaction);
+			(void)queue.DrainTransactions(objects);
+			auto completions = queue.DrainCompletedEditorTransactions();
+			context.Expect(completions.size() == 1U,
+				"The protected queue must retain an async editor request beside its commit receipt.");
+			if (completions.empty()) return;
+			const TerraEngine::Scene::TransactionResult& committed = completions.front().result;
+			context.Expect(committed.status == TerraEngine::Scene::TransactionStatus::Committed
+				&& committed.createdObjects.contains(-1), "The terrain-style local create transaction must commit with a stable result identity.");
+			const TerraEngine::UUID terrainId = committed.createdObjects.at(-1);
+			context.Expect(history.RecordCommittedTransaction(completions.front().transaction, committed),
+				"A committed terrain-style create must enter editor history.");
+
+			history.Undo();
+			queue.Apply(objects, "editor-create-undo-boundary");
+			auto receipts = queue.DrainCompletedEditorTransactionResults();
+			context.Expect(receipts.size() == 1U && history.CompleteDeferredReplay(receipts.front()),
+				"Create undo must finish only after its protected delete transaction commits.");
+			context.Expect(!objects.getObject(terrainId), "Undo must remove the created terrain object.");
+
+			history.Redo();
+			queue.Apply(objects, "editor-create-redo-boundary");
+			receipts = queue.DrainCompletedEditorTransactionResults();
+			context.Expect(receipts.size() == 1U && history.CompleteDeferredReplay(receipts.front()),
+				"Create redo must finish only after its protected snapshot transaction commits.");
+			const std::optional<Object> restored = objects.getObject(terrainId);
+			context.Expect(restored && objects.getObjectName(*restored) == "Terrain" && objects.isObjectStatic(*restored),
+				"Redo must restore the same UUID and exact authored metadata.");
+
+			history.Clear();
+			queue.Clear();
+			objects.clear();
+		});
+
+		registry.Add("Editor.UndoRedo.DiscardingTerrainDomainPreservesUnrelatedHistory", [](TestContext& context) {
+			ScriptingSystem::Instance().SetRunning(false);
+			UndoRedoSystem& history = UndoRedoSystem::Instance();
+			history.Clear();
+			int value = 2;
+			history.PushCommand(std::make_unique<IntegerDeltaCommand>(value, 0, 1));
+			history.PushCommand(std::make_unique<IntegerDeltaCommand>(value, 1, 2, "terrain-authoring"));
+			history.Undo();
+			history.DiscardHistoryDomain("terrain-authoring");
+			context.Expect(history.GetUndoDepth() == 1U && history.GetRedoDepth() == 0U,
+				"Replacing a terrain store must remove terrain commands from both stacks without clearing unrelated actions.");
+			history.Clear();
 		});
 
 		registry.Add("Editor.TransactionalMutationUndo.PhysicsEditUndoRedoPreservesSelectionAndDirtyState", [](TestContext& context) {

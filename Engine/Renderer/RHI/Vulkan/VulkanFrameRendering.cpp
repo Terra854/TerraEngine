@@ -415,7 +415,8 @@ void VulkanContext::RenderFrame(
 				itemIndex < shadowDrawList.stableOrdinals.size(); ++itemIndex) {
 				RenderItemRecord command{};
 				if(!TerraEngine::Renderer::ResolveShadowDrawListItem(
-					*publication, shadowDrawList, itemIndex, command)) {
+					*publication, presentation.referenceFrame,
+					shadowDrawList, itemIndex, command)) {
 					continue;
 				}
 				// Shadow virtual geometry arrives as light-view draw commands with
@@ -2917,7 +2918,8 @@ void VulkanContext::RenderFrame(
 			itemIndex < shadowDrawList.stableOrdinals.size(); ++itemIndex) {
 			RenderItemRecord command{};
 			if(!TerraEngine::Renderer::ResolveShadowDrawListItem(
-				*publication, shadowDrawList, itemIndex, command)) {
+				*publication, presentation.referenceFrame,
+				shadowDrawList, itemIndex, command)) {
 				continue;
 			}
 			Material* material = ResolveMaterial(command.materialId);
@@ -4241,4 +4243,3 @@ void VulkanContext::RenderFrame(
 	depthHistory.lastViewProjectionMatrix = currentViewProjection;
 	depthHistory.valid = true;
 }
-

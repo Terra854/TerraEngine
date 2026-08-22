@@ -33,7 +33,11 @@ namespace TerraEngine::Tests
 			dynamicPage->changedLanes.push_back(true);
 			RenderDynamicLane lane{};
 			lane.key = slot.key;
-			lane.instance.modelMatrix[3][0] = 7.0f;
+			// Poison the float matrix so the resolver test proves the canonical
+			// large-world pose is localized against the view reference frame.
+			lane.instance.modelMatrix[3][0] = 900.0f;
+			lane.canonicalWorldPose.position.offsetMetres.x = 107.0;
+			lane.hasCanonicalWorldPose = true;
 			lane.instance.objectIdentity.x = 1u;
 			lane.occupied = true;
 			dynamicPage->lanes.push_back(lane);
@@ -67,8 +71,9 @@ namespace TerraEngine::Tests
 			presentation.output.kind = view.outputKind;
 			presentation.output.diagnosticsView = view.viewType;
 			presentation.output.outputId = view.outputId;
-			const RenderReferenceFrame referenceFrame =
+			RenderReferenceFrame referenceFrame =
 				MakeRendererTestReferenceFrame(publication->frameId, 1u, view.outputId);
+			referenceFrame.canonicalOrigin.offsetMetres.x = 100.0;
 			presentation.referenceFrame = referenceFrame;
 			publication->referenceFrames.push_back(referenceFrame);
 			RenderViewCommandLane commandLane{};
@@ -267,7 +272,9 @@ namespace TerraEngine::Tests
 			const RenderPublicationReceipt validation = ValidateRenderFramePublication(
 				*publication, 1u);
 			context.Expect(validation.IsSuccess()
-				&& ResolveShadowDrawListItem(*publication, shadow, 0u, resolved)
+				&& ResolveShadowDrawListItem(*publication,
+					publication->presentationInputs.front().referenceFrame,
+					shadow, 0u, resolved)
 				&& resolved.selectedVirtualLod == 2u
 				&& resolved.geometryRoute == GeometryRoute::VirtualGeometryCompute
 				&& resolved.virtualMeshletOffset == 17u
