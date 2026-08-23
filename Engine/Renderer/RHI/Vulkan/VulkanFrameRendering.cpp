@@ -3707,7 +3707,9 @@ void VulkanContext::RenderFrame(
 						0u,
 						static_cast<std::uint32_t>(sizeof(constants)),
 						constants.data());
-					vkCmdDraw(composite, 3u, 1u, 0u, 0u);
+					// One task group dispatches the mesh workgroup that emits the
+					// procedural fullscreen composite triangle.
+					vkCmdDrawMeshTasksEXT(composite, 1u, 1u, 1u);
 					if(vkEndCommandBuffer(composite) == VK_SUCCESS)
 					{
 						virtualGeometryCompositeSecondary = composite;

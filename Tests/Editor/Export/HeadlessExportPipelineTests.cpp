@@ -309,11 +309,16 @@ namespace TerraEngine::EditorTests {
 				"Default.task.tspf",
 				"Default.mesh.tspf",
 				"Default.frag.tspf",
+				"Default.ConventionalVisibilityIdentity.frag.spv",
 				"Editor/SceneViewGrid.vert.spv",
 				"Editor/SceneViewGrid.frag.spv",
 				"Sky/SkyBackground.task.tspf",
 				"Sky/SkyBackground.mesh.tspf",
 				"Sky/SkyBackground.frag.tspf",
+				"Terrain/TerrainVisibility.task.tspf",
+				"Terrain/TerrainVisibility.mesh.tspf",
+				"Terrain/TerrainVisibility.frag.tspf",
+				"Terrain/TerrainSurface.comp.tspf",
 				"UI/ui_instanced.vert.spv",
 				"UI/ui_instanced.frag.spv",
 				"UI/ui_static.vert.spv",
@@ -361,7 +366,7 @@ namespace TerraEngine::EditorTests {
 	}
 
 	void RegisterHeadlessExportPipelineTests(TestRegistry& registry) {
-		registry.Add("Editor.MaterialAssetWriter.StagedWritePreservesRollback", [](TestContext& context) {
+		registry.Add("Editor.MaterialAssetWriter.StagedWriteCleansRollbackBackup", [](TestContext& context) {
 			using namespace TerraEngine::AssetPipeline;
 
 			TempHeadlessPipelineDirectory tempDirectory;
@@ -400,8 +405,8 @@ namespace TerraEngine::EditorTests {
 			replacement.header.baseColorFactor[0] = 0.8f;
 			context.Expect(WriteMaterialAsset(outputPath, replacement),
 				"A valid replacement should publish through the staged writer.");
-			context.Expect(ReadBytes(outputPath.string() + ".previous") == initialBytes,
-				"The staged writer must preserve the last complete material as .previous.");
+			context.Expect(!std::filesystem::exists(outputPath.string() + ".previous"),
+				"A successful staged write must remove its temporary rollback backup.");
 			context.Expect(ReadBytes(outputPath) != initialBytes,
 				"Atomic replacement must publish the validated replacement bytes.");
 
@@ -409,6 +414,8 @@ namespace TerraEngine::EditorTests {
 				ReadBytes(outputPath);
 			context.Expect(PublishMaterialAssetBytes(outputPath, generatedBytes),
 				"Inspector-style material bytes must use the same validated publication path.");
+			context.Expect(!std::filesystem::exists(outputPath.string() + ".previous"),
+				"A successful Inspector save must remove its temporary rollback backup.");
 			std::vector<std::uint8_t> malformedBytes = generatedBytes;
 			malformedBytes.resize(sizeof(MaterialHeader) - 1u);
 			const std::vector<std::uint8_t> lastKnownGood =

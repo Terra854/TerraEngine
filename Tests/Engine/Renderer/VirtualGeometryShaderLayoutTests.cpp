@@ -79,6 +79,20 @@ namespace TerraEngine::Tests
 			return buffer.str();
 		}
 
+		std::string ReadVirtualGeometryCompositeShader(const char* stage)
+		{
+			// The composite stage topology is a source-level runtime contract. This
+			// helper keeps the assertions independent of mesh-shader hardware in CI.
+			const std::filesystem::path shaderPath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine/Shaders/VirtualGeometry"
+				/ (std::string("VirtualGeometryComposite.") + stage + ".hlsl");
+			std::ifstream input(shaderPath, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << input.rdbuf();
+			return buffer.str();
+		}
+
 		std::string ReadVirtualGeometryAbi()
 		{
 			// The feature ABI is intentionally policy-free and shared by every
@@ -182,6 +196,22 @@ namespace TerraEngine::Tests
 
 	void RegisterVirtualGeometryShaderLayoutTests(TestRegistry& registry)
 	{
+		registry.Add("VirtualGeometry.ShaderLayout.CompositeUsesTaskMeshFragmentPipeline", [](TestContext& context) {
+			const std::string taskShader = ReadVirtualGeometryCompositeShader("task");
+			const std::string meshShader = ReadVirtualGeometryCompositeShader("mesh");
+			const std::string fragmentShader = ReadVirtualGeometryCompositeShader("frag");
+			const std::string vulkanInit = ReadVulkanContextInitSource();
+			const std::string vulkanSource = ReadVulkanContextSource();
+
+			context.Expect(ShaderContains(taskShader, "DispatchMesh(1u, 1u, 1u"), "The composite task stage should dispatch exactly one procedural mesh group.");
+			context.Expect(ShaderContains(meshShader, "SetMeshOutputCounts(3u, 1u)"), "The composite mesh stage should emit one fullscreen triangle.");
+			context.Expect(!fragmentShader.empty(), "The task/mesh composite must retain its production fragment stage.");
+			context.Expect(ShaderContains(vulkanInit, "VK_SHADER_STAGE_TASK_BIT_EXT, taskModule"), "The Vulkan composite pipeline should bind the task shader stage.");
+			context.Expect(ShaderContains(vulkanInit, "VK_SHADER_STAGE_MESH_BIT_EXT, meshModule"), "The Vulkan composite pipeline should bind the mesh shader stage.");
+			context.Expect(!ShaderContains(vulkanInit, "VirtualGeometryComposite.vert.spv"), "The Vulkan runtime must not load the retired composite vertex artifact.");
+			context.Expect(ShaderContains(vulkanSource, "vkCmdDrawMeshTasksEXT(composite, 1u, 1u, 1u)"), "Composite recording should dispatch mesh tasks rather than issuing a vertex draw.");
+		});
+
 		registry.Add("VirtualGeometry.ShaderLayout.FeatureAbiOwnsBindingsAndGenerationGuards", [](TestContext& context) {
 			const std::string abi = ReadVirtualGeometryAbi();
 			context.Expect(!abi.empty(), "The virtual-geometry ABI shader include must be readable from the source tree.");

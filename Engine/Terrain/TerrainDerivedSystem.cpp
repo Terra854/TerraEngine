@@ -2,8 +2,60 @@
 
 #include "TerrainDerivedSystem.h"
 
+#include "Components/TerrainComponent.h"
+#include "Core/Logger/Logger.h"
+#include "Core/Object/ObjectManager.h"
+#include "File Formats/TerraEngineMaterialFile.h"
+#include "Renderer/Terrain/TerrainRenderProxyRegistry.h"
+#include "Resource/ResourceManager.h"
+#include "Runtime/ContentMount/ContentMount.h"
+#include "Runtime/ContentMount/TerrainRuntimeProxyLoader.h"
+#include "ThreadPool/ThreadPool.h"
+
+#include <cstring>
+#include <future>
+#include <memory>
+#include <string>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
 namespace TerraEngine::Terrain
 {
+	namespace
+	{
+		struct PendingRuntimeTerrainProxy
+		{
+			TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+			std::future<TerraEngine::Renderer::Terrain::TerrainDirectMeshResult> preparedMesh;
+		};
+
+		std::unique_ptr<Material> CreateRuntimeTerrainMaterial(ResourceManager& resources)
+		{
+			// The direct-resident terrain mesh uses the ordinary material contract so
+			// it can render immediately while the paged terrain surface path warms up.
+			auto material = std::make_unique<Material>();
+			std::memcpy(material->header.magic, "TMAT", 4U);
+			material->header.version = kMaterialCurrentVersion;
+			material->header.headerSize = static_cast<std::uint16_t>(sizeof(MaterialHeader));
+			material->header.shadingModel = static_cast<std::uint32_t>(ShadingModel::Unlit);
+			material->header.alphaMode = static_cast<std::uint32_t>(AlphaMode::Opaque);
+			material->header.flags = DoubleSided;
+			material->header.shaderCollectionId = resources.GetDefaultShaderCollectionID();
+			material->header.baseColorFactor[0] = 0.18F;
+			material->header.baseColorFactor[1] = 0.55F;
+			material->header.baseColorFactor[2] = 0.16F;
+			material->header.baseColorFactor[3] = 1.0F;
+			material->header.roughnessFactor = 0.92F;
+			material->header.normalScale = 1.0F;
+			material->header.occlusionStrength = 1.0F;
+			material->shaderCollectionId = material->header.shaderCollectionId;
+			material->shadowBehavior = DeriveMaterialShadowBehavior(
+				material->header.alphaMode, material->header.emissiveFactor);
+			return material;
+		}
+	}
+
 	TerrainDerivedPublicationCheck ValidateTerrainDerivedCandidate(const TerrainDerivedCandidate& candidate, const TerrainAssetStore& store)
 	{
 		// This is deliberately repeated at the protected boundary. A worker may
@@ -36,6 +88,84 @@ namespace TerraEngine::Terrain
 	void TerrainDerivedSystem::Initialize()
 	{
 		initialized.store(true, std::memory_order_release);
+
+		ResourceManager& resources = ResourceManager::Instance();
+		if(!resources.IsExportRuntime() || !ContentMount::Instance().IsMounted()) return;
+
+		// SceneManager has already loaded the startup scene at this protected
+		// lifecycle boundary. Capture only durable IDs and logical paths here; the
+		// worker tasks below never access live ECS or ResourceManager state.
+		std::unordered_set<TerraEngine::UUID> scheduledAssets;
+		std::vector<PendingRuntimeTerrainProxy> pending;
+		ObjectManager::instance().forEachObjectWithComponents<TerrainComponent>(
+			[&](Object, TerrainComponent& terrain)
+			{
+				if(!terrain.visible || terrain.terrainAssetId == TerraEngine::EMPTY_UUID
+					|| !scheduledAssets.emplace(terrain.terrainAssetId).second) return;
+				const std::filesystem::path logicalPath = resources.GetRegisteredAssetPath(
+					terrain.terrainAssetId, AssetType::Terrain);
+				if(logicalPath.empty())
+				{
+					TERRAENGINE_LOG(LogLevel::Error,
+						"Export terrain asset is absent from game.json: "
+						<< TerraEngine::ToHexString(terrain.terrainAssetId));
+					return;
+				}
+				// ResourceManager stores preferred paths as normalized absolute keys.
+				// ContentMount accepts only archive-relative logical paths, so remove
+				// the configured runtime asset root before crossing into the worker.
+				const std::filesystem::path mountedPath = logicalPath.is_absolute()
+					? logicalPath.lexically_relative(resources.GetAssetRoot()) : logicalPath;
+				const std::string mountedPathText = mountedPath.generic_string();
+				if(mountedPath.empty() || mountedPathText.starts_with(".."))
+				{
+					TERRAENGINE_LOG(LogLevel::Error,
+						"Export terrain path is outside the mounted content root: " << logicalPath);
+					return;
+				}
+
+				auto task = ThreadPool::instance().createTask(
+					[assetId = terrain.terrainAssetId, path = mountedPathText]()
+					{
+						return TerraEngine::Runtime::BuildMountedTerrainDirectMesh(
+							ContentMount::Instance(), assetId, path);
+					});
+				pending.push_back({terrain.terrainAssetId, task->getFuture()});
+				ThreadPool::instance().enqueue(task, TerraEngine::Terrain::kTerrainAreaSampleCount);
+			});
+
+		TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
+		for(PendingRuntimeTerrainProxy& item : pending)
+		{
+			// Resource registration and registry publication remain on this protected
+			// coordinator boundary; workers return detached value-only meshes.
+			auto completed = item.preparedMesh.get();
+			if(!completed.Succeeded())
+			{
+				TERRAENGINE_LOG(LogLevel::Error,
+					"Failed to prepare exported terrain " << TerraEngine::ToHexString(item.assetId)
+					<< ": " << completed.diagnostic);
+				continue;
+			}
+			if(materialId == TerraEngine::EMPTY_UUID)
+			{
+				materialId = resources.RegisterMaterial(
+					"terrain-runtime-direct-fallback", CreateRuntimeTerrainMaterial(resources));
+			}
+			const TerraEngine::UUID meshId = resources.RegisterMesh(
+				"terrain/runtime/" + TerraEngine::ToHexString(item.assetId), std::move(completed.mesh));
+			const bool published = TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance().Publish(
+				{item.assetId, meshId, materialId, 0U});
+			if(!published)
+			{
+				TERRAENGINE_LOG(LogLevel::Error,
+					"Failed to publish exported terrain render proxy: "
+					<< TerraEngine::ToHexString(item.assetId));
+				continue;
+			}
+			TERRAENGINE_LOG(LogLevel::Info,
+				"Published exported terrain render proxy: " << TerraEngine::ToHexString(item.assetId));
+		}
 	}
 
 	void TerrainDerivedSystem::Update(float)
@@ -45,6 +175,7 @@ namespace TerraEngine::Terrain
 
 	void TerrainDerivedSystem::Shutdown()
 	{
+		TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance().Clear();
 		initialized.store(false, std::memory_order_release);
 	}
 

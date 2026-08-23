@@ -19,7 +19,8 @@ $required = @(
 	'Tests/Tools/Terrain/hardware-matrix.json', 'Tests/Tools/Terrain/quality-profiles.json',
 	'Tests/Tools/Terrain/workloads.json', 'Tests/Fixtures/Terrain/manifest.json',
 	'Tests/Fixtures/Terrain/SaveRecovery/manifest.json', 'Schemas/Terrain/terrain-edit-v1.schema.json',
-	'Engine/Shaders/Terrain/TerrainVisibility.vert.hlsl', 'Engine/Shaders/Terrain/TerrainVisibility.frag.hlsl',
+	'Engine/Shaders/Terrain/TerrainVisibility.task.hlsl', 'Engine/Shaders/Terrain/TerrainVisibility.mesh.hlsl',
+	'Engine/Shaders/Terrain/TerrainVisibility.frag.hlsl',
 	'Engine/Shaders/Terrain/TerrainSurface.comp.hlsl', 'Editor/Shaders/Terrain/TerrainBrushPreview.vert.hlsl',
 	'Editor/Shaders/Terrain/TerrainBrushPreview.frag.hlsl'
 )

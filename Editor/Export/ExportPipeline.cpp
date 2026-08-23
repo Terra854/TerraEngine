@@ -4,6 +4,7 @@
 
 #include "ExportPipeline.h"
 #include "ExportEvidence.h"
+#include "ExportMeshClassification.h"
 #include "AnimationExportDependencies.h"
 #include "ExportOutputTransaction.h"
 #include "ExportPackageValidator.h"
@@ -360,10 +361,14 @@ static bool IsModelPackageImporterName(const std::string& importer)
 	return importer == "FbxPackageImporter" || importer == "GltfPackageImporter";
 }
 
-static bool IsCompiledVirtualGeometryMeshPath(const std::string& path)
+static bool IsCompiledTemfMeshPath(const std::string& path)
 {
 	std::filesystem::path compiledPath(path);
-	return compiledPath.extension() == ".temf" || compiledPath.extension() == ".TEMF";
+	std::string extension = compiledPath.extension().string();
+	std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
+		return static_cast<char>(std::tolower(value));
+	});
+	return extension == ".temf";
 }
 
 static nlohmann::json BuildVirtualGeometryExportManifest(const BuildProfile& profile)
@@ -399,6 +404,7 @@ static nlohmann::json BuildVirtualGeometryExportManifest(const BuildProfile& pro
 		"Shaders/Default.task.tspf",
 		"Shaders/Default.mesh.tspf",
 		"Shaders/Default.frag.tspf",
+		"Shaders/Default.ConventionalVisibilityIdentity.frag.spv",
 		"Shaders/PostProcess/HiZGenerate.comp.spv"
 	});
 	return virtualGeometry;
@@ -1388,7 +1394,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 			byteSize = static_cast<std::uint64_t>(bytes.size());
 			return true;
 		};
-		auto addStagedAsset = [this, &stagedAssetGuids, &stagedAssetIdentityError, &readStagedAssetEvidence](
+		auto addStagedAsset = [this, &stagingDir, &stagedAssetGuids, &stagedAssetIdentityError, &readStagedAssetEvidence](
 			std::string guid,
 			AssetType type,
 			const std::filesystem::path& path,
@@ -1463,8 +1469,32 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 			asset.type = type;
 			asset.checksum = std::move(checksum);
 			asset.byteSize = byteSize;
-			asset.virtualGeometryRequired = asset.type == AssetType::Mesh
-				&& IsCompiledVirtualGeometryMeshPath(asset.path);
+			if (asset.type == AssetType::Mesh && IsCompiledTemfMeshPath(asset.path))
+			{
+				// The .temf suffix names the canonical mesh container, not its route.
+				// Inspect the validated header so direct-only small meshes are not
+				// incorrectly advertised as requiring virtual-geometry page metadata.
+				std::vector<std::byte> meshBytes;
+				if (!ReadExportBytes(stagingDir / std::filesystem::path(asset.path), meshBytes))
+				{
+					stagedAssetIdentityError =
+						"Could not read staged TEMF mesh for representation classification: "
+						+ asset.path;
+					return false;
+				}
+				const auto classification = TerraEngine::Editor::Export::ClassifyMeshRepresentation(
+					std::span<const std::uint8_t>(
+						reinterpret_cast<const std::uint8_t*>(meshBytes.data()),
+						meshBytes.size()));
+				if (!classification.valid)
+				{
+					stagedAssetIdentityError =
+						"Staged TEMF mesh failed canonical representation classification: "
+						+ asset.path + ". " + classification.diagnostic;
+					return false;
+				}
+				asset.virtualGeometryRequired = classification.requiresVirtualGeometry;
+			}
 			m_StagedAssets.push_back(std::move(asset));
 			return true;
 		};
@@ -1663,6 +1693,10 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 					else if(importer == "PhysicsMaterialImporter") type = AssetType::PhysicsMaterial;
 					else if(importer == "PhysicsColliderRecipeImporter" || importer == "CookedColliderImporter") type = AssetType::CookedCollider;
 					else if(importer == "AudioClipImporter") type = AssetType::AudioClip;
+					// Terrain has no compiled single-file replacement. Its source descriptor
+					// and immutable .data tree are runtime payloads, so register the source
+					// path under the durable UUID that TerrainComponent stores.
+					else if(importer == "TerrainImporter") type = AssetType::Terrain;
 					else supported = false;
 
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

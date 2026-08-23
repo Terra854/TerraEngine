@@ -29,6 +29,10 @@ std::uint32_t EncodeAssetClass(std::string_view assetClass) {
 		{"retarget-profile", 12U},
 		{"motion-database", 13U},
 		{"ragdoll-profile", 14U},
+		// Terrain uses the same append-only code as the runtime reader. If the
+		// writer falls back to "other", checked ContentMount reads reject the
+		// descriptor even though its bytes are present in the archive.
+		{"terrain", 15U},
 	};
 
 	const auto found = kCodes.find(assetClass);
@@ -67,6 +71,8 @@ std::string DecodeAssetClass(std::uint32_t assetClassCode) {
 		return "motion-database";
 	case 14U:
 		return "ragdoll-profile";
+	case 15U:
+		return "terrain";
 	default:
 		return "other";
 	}

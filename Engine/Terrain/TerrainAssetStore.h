@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -66,6 +67,13 @@ namespace TerraEngine::Terrain
 		Generation publicationGeneration = 0u;
 		[[nodiscard]] bool IsValid() const noexcept { return root != nullptr && publicationGeneration != 0u; }
 	};
+
+	// Decodes the immutable TERRAINROOT2 document used by both the editor's
+	// filesystem store and the export runtime's mounted-content loader. Keeping
+	// one checked decoder prevents those two paths from accepting different root
+	// schemas or interpreting channel hashes differently.
+	[[nodiscard]] TERRAENGINE_API std::optional<TerrainAssetRoot>
+		DecodeTerrainRootManifest(std::string_view text);
 
 	// Persistence tracks saved identity separately from the live publication
 	// generation. Saving never rewrites a root that workers may still read.

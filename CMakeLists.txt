@@ -866,7 +866,10 @@ if(TERRAENGINE_VIRTUAL_GEOMETRY_SHADER_SOURCES)
 	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry PREFIX "Virtual Geometry Shaders" FILES ${TERRAENGINE_VIRTUAL_GEOMETRY_SHADER_SOURCES})
 endif()
 
-add_custom_target(TerraEngine.Terrain.Shaders)
+# Terrain packages are runtime artifacts, not optional IDE organization files.
+# Keeping the target in ALL makes both a normal build and `--target install`
+# compile every declared stage before CMake tries to copy the packages.
+add_custom_target(TerraEngine.Terrain.Shaders ALL)
 if(TERRAENGINE_TERRAIN_RUNTIME_SHADER_SOURCES)
 	target_sources(TerraEngine.Terrain.Shaders PRIVATE ${TERRAENGINE_TERRAIN_RUNTIME_SHADER_SOURCES})
 	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Terrain PREFIX "Terrain Shaders" FILES ${TERRAENGINE_TERRAIN_RUNTIME_SHADER_SOURCES})
@@ -1184,7 +1187,9 @@ function(terraengine_add_terrain_shader source_file output_name stage)
 endfunction()
 
 terraengine_add_terrain_shader(
-	Engine/Shaders/Terrain/TerrainVisibility.vert.hlsl TerrainVisibility.vert.tspf vs)
+	Engine/Shaders/Terrain/TerrainVisibility.task.hlsl TerrainVisibility.task.tspf ts)
+terraengine_add_terrain_shader(
+	Engine/Shaders/Terrain/TerrainVisibility.mesh.hlsl TerrainVisibility.mesh.tspf ms)
 terraengine_add_terrain_shader(
 	Engine/Shaders/Terrain/TerrainVisibility.frag.hlsl TerrainVisibility.frag.tspf ps)
 terraengine_add_terrain_shader(
@@ -1195,7 +1200,8 @@ terraengine_add_terrain_shader(
 	Editor/Shaders/Terrain/TerrainBrushPreview.frag.hlsl TerrainBrushPreview.frag.tspf ps)
 
 set(TERRAENGINE_TERRAIN_COMPILED_RUNTIME_SHADERS
-	"${TERRAENGINE_TERRAIN_COMPILED_SHADER_DIR}/TerrainVisibility.vert.tspf"
+	"${TERRAENGINE_TERRAIN_COMPILED_SHADER_DIR}/TerrainVisibility.task.tspf"
+	"${TERRAENGINE_TERRAIN_COMPILED_SHADER_DIR}/TerrainVisibility.mesh.tspf"
 	"${TERRAENGINE_TERRAIN_COMPILED_SHADER_DIR}/TerrainVisibility.frag.tspf"
 	"${TERRAENGINE_TERRAIN_COMPILED_SHADER_DIR}/TerrainSurface.comp.tspf")
 set(TERRAENGINE_TERRAIN_COMPILED_EDITOR_SHADERS
@@ -1867,6 +1873,10 @@ install(FILES
 	DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Shaders/Includes/VirtualGeometry"
 )
 if(TERRAENGINE_TERRAIN_RUNTIME_SHADER_SOURCES)
+	# Remove the retired vertex-stage source and package when installing over an
+	# older build tree; install(DIRECTORY) intentionally does not prune files.
+	install(CODE
+		"file(REMOVE \"${ENGINE_INSTALL_DESTINATION}/Engine/Shaders/Terrain/TerrainVisibility.vert.hlsl\" \"${ENGINE_INSTALL_DESTINATION}/Engine/Shaders/Terrain/TerrainVisibility.vert.tspf\" \"${ENGINE_INSTALL_DESTINATION}/Editor/Shaders/Terrain/TerrainVisibility.vert.hlsl\" \"${ENGINE_INSTALL_DESTINATION}/Editor/Shaders/Terrain/TerrainVisibility.vert.tspf\")")
 	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Terrain/"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Engine/Shaders/Terrain"
 	)
@@ -1894,6 +1904,11 @@ if(TERRAENGINE_TERRAIN_COMPILED_RUNTIME_SHADERS)
 	# shipped engine never needs a system shader compiler installed.
 	install(FILES ${TERRAENGINE_TERRAIN_COMPILED_RUNTIME_SHADERS}
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Engine/Shaders/Terrain"
+	)
+	# Editor/Shaders is the complete installed shader tree consumed by exports.
+	# Mirror runtime terrain packages there so TEPAK staging cannot omit them.
+	install(FILES ${TERRAENGINE_TERRAIN_COMPILED_RUNTIME_SHADERS}
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Shaders/Terrain"
 	)
 endif()
 if(TERRAENGINE_TERRAIN_COMPILED_EDITOR_SHADERS)
@@ -1954,14 +1969,20 @@ set(SKY_SHADER_SRC_DIR \"${CMAKE_SOURCE_DIR}/Engine/Shaders/Sky\")
 set(SHADER_INSTALL_ROOT \"${ENGINE_INSTALL_DESTINATION}\")
 set(DXC_PATH \"${TERRAENGINE_DXC_PATH}\")
 
-set(out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders\")
-set(editor_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Editor\")
-set(lighting_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Lighting\")
-set(postprocess_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/PostProcess\")
-set(virtualgeometry_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/VirtualGeometry\")
-set(animation_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Animation\")
-set(ui_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/UI\")
-set(sky_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Sky\")
+# Compile into a private build-tree snapshot instead of deleting files from the
+# live installed tree. An editor export may run while another build installs;
+# keeping the previous complete snapshot visible prevents TEPAK from observing
+# only the prefix of this sequential shader compilation list.
+set(shader_stage_root \"${CMAKE_BINARY_DIR}/Build/Intermediate/InstalledShaders/$<CONFIG>\")
+file(REMOVE_RECURSE \"\${shader_stage_root}\")
+set(out_dir \"\${shader_stage_root}\")
+set(editor_out_dir \"\${shader_stage_root}/Editor\")
+set(lighting_out_dir \"\${shader_stage_root}/Lighting\")
+set(postprocess_out_dir \"\${shader_stage_root}/PostProcess\")
+set(virtualgeometry_out_dir \"\${shader_stage_root}/VirtualGeometry\")
+set(animation_out_dir \"\${shader_stage_root}/Animation\")
+set(ui_out_dir \"\${shader_stage_root}/UI\")
+set(sky_out_dir \"\${shader_stage_root}/Sky\")
 set(lighting_src_dir \"${CMAKE_SOURCE_DIR}/Engine/Shaders/Lighting\")
 set(postprocess_src_dir \"${CMAKE_SOURCE_DIR}/Engine/Shaders/PostProcess\")
 set(virtualgeometry_src_dir \"${CMAKE_SOURCE_DIR}/Engine/Shaders/VirtualGeometry\")
@@ -1993,6 +2014,8 @@ file(REMOVE
 	\"\${virtualgeometry_out_dir}/VirtualGeometryAnimatedMorphBeforeSkin.comp.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryComputeRaster.comp.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryTriangleSetup.comp.spv\"
+	\"\${virtualgeometry_out_dir}/VirtualGeometryComposite.task.spv\"
+	\"\${virtualgeometry_out_dir}/VirtualGeometryComposite.mesh.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryComposite.vert.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryComposite.frag.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryGeneratedIndirect.comp.spv\"
@@ -2189,12 +2212,19 @@ foreach(virtualgeometry_canonical_shader IN ITEMS
 endforeach()
 
 # The adaptive microtriangle route shades a fullscreen visibility winner with
-# the same default surface function as the hardware fragment path.
+# the same default surface function as the hardware fragment path. Its
+# procedural triangle uses the engine-wide task/mesh graphics topology.
 execute_process(
-	COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E main -Fo \"\${virtualgeometry_out_dir}/VirtualGeometryComposite.vert.spv\" -spirv -I \"\${virtualgeometry_src_dir}\" \"\${virtualgeometry_src_dir}/VirtualGeometryComposite.vert.hlsl\"
-	RESULT_VARIABLE compile_virtualgeometry_composite_vertex)
-if(NOT compile_virtualgeometry_composite_vertex EQUAL 0)
-	message(FATAL_ERROR \"Failed to compile VirtualGeometryComposite.vert.hlsl during install\")
+	COMMAND \"\${DXC_PATH}\" -T as_6_5 -E main -Fo \"\${virtualgeometry_out_dir}/VirtualGeometryComposite.task.spv\" -spirv -fspv-target-env=vulkan1.3 -I \"\${virtualgeometry_src_dir}\" \"\${virtualgeometry_src_dir}/VirtualGeometryComposite.task.hlsl\"
+	RESULT_VARIABLE compile_virtualgeometry_composite_task)
+if(NOT compile_virtualgeometry_composite_task EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile VirtualGeometryComposite.task.hlsl during install\")
+endif()
+execute_process(
+	COMMAND \"\${DXC_PATH}\" -T ms_6_5 -E main -Fo \"\${virtualgeometry_out_dir}/VirtualGeometryComposite.mesh.spv\" -spirv -fspv-target-env=vulkan1.3 -I \"\${virtualgeometry_src_dir}\" \"\${virtualgeometry_src_dir}/VirtualGeometryComposite.mesh.hlsl\"
+	RESULT_VARIABLE compile_virtualgeometry_composite_mesh)
+if(NOT compile_virtualgeometry_composite_mesh EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile VirtualGeometryComposite.mesh.hlsl during install\")
 endif()
 execute_process(
 	COMMAND \"\${DXC_PATH}\" -T ps_6_0 -E main -Fo \"\${virtualgeometry_out_dir}/VirtualGeometryComposite.frag.spv\" -spirv -I \"\${virtualgeometry_src_dir}\" \"\${virtualgeometry_src_dir}/VirtualGeometryComposite.frag.hlsl\"
@@ -2356,6 +2386,12 @@ execute_process(
 if(NOT compile_grid_ps EQUAL 0)
     message(FATAL_ERROR \"Failed to compile SceneViewGrid.frag.spv during install\")
 endif()
+
+# Publish only after every compiler invocation has succeeded. file(COPY) updates
+# individual installed files without first removing the previous complete set,
+# so concurrent exports always retain every required shader path.
+file(COPY \"\${shader_stage_root}/\"
+	DESTINATION \"\${SHADER_INSTALL_ROOT}/Editor/Shaders\")
 ")
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(SCRIPT "${SHADER_INSTALL_SCRIPT}")

@@ -181,6 +181,8 @@ namespace TerraEngine::EditorTests {
 
 			context.Expect(parsed.success, "Host-supported paths containing spaces and non-ASCII characters should parse successfully.");
 			context.Expect(fixture.output.lexically_normal() == parsed.request.finalOutputDirectory, "The explicit output should become the final publication path.");
+			context.Expect(fixture.evidence.lexically_normal() == parsed.request.evidenceDirectory,
+				"An explicit evidence path should remain available for CI and audit workflows.");
 			context.Expect(fixture.output.lexically_normal() == parsed.request.profile.outputDirectory, "The output override should affect only the request-local profile copy.");
 			context.ExpectEqual(std::string("contract-run"), parsed.request.runId, "The test run id should remain stable for evidence correlation.");
 
@@ -218,6 +220,10 @@ namespace TerraEngine::EditorTests {
 			context.Expect(parsed.success, "Relative request paths should resolve against the captured launch directory.");
 			context.Expect(std::filesystem::canonical(fixture.project) == parsed.request.projectRoot, "Project canonicalization should not depend on a later current-directory change.");
 			context.Expect(fixture.output.lexically_normal() == parsed.request.finalOutputDirectory, "A not-yet-created output should still resolve deterministically.");
+			context.Expect(
+				parsed.request.evidenceDirectory
+					== parsed.request.projectRoot / "Library" / "ExportEvidence" / "relative-run",
+				"Default evidence should stay in disposable project Library state instead of beside published output.");
 		});
 
 		registry.Add("Editor.HeadlessExport.RejectsMalformedProfileAndMissingRuntimeFile", [](TestContext& context) {

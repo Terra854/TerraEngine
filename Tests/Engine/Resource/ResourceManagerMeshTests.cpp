@@ -1,9 +1,11 @@
 #include "TestHarness.h"
 #include "Renderer/VulkanSourceTestUtils.h"
 
+#include "File Formats/TerraEngineMaterialFile.h"
 #include "Resource/ResourceManager.h"
 
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -202,6 +204,65 @@ namespace TerraEngine::Tests
 				&& materialReload.find("if (material)") < materialReload.find(publication)
 				&& textureReload.find("if (texture)") < textureReload.find(publication),
 				"Reload failures must not advance the renderer publication generation.");
+		});
+
+		registry.Add("Resource.Manager.InitialRendererLoadInvalidatesWarmRenderCaches", [](TestContext& context) {
+			ResourceManager& resourceManager = ResourceManager::Instance();
+			context.Expect(IsRendererResourceAssetType(AssetType::Mesh)
+					&& IsRendererResourceAssetType(AssetType::Material)
+					&& IsRendererResourceAssetType(AssetType::Texture)
+					&& IsRendererResourceAssetType(AssetType::ShaderCollection)
+					&& !IsRendererResourceAssetType(AssetType::AnimationClip),
+				"Only renderer-owned asset caches should publish this invalidation generation.");
+
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			const std::filesystem::path materialPath =
+				std::filesystem::temp_directory_path()
+				/ ("terra-live-material-" + TerraEngine::ToHexString(materialId) + ".tmat");
+			MaterialHeader header{};
+			std::memcpy(header.magic, "TMAT", sizeof(header.magic));
+			header.version = kMaterialCurrentVersion;
+			header.headerSize = static_cast<std::uint16_t>(sizeof(MaterialHeader));
+			header.textureArrayOffset = header.headerSize;
+			header.floatParameterOffset = header.headerSize;
+			{
+				// The smallest valid TMAT is sufficient to exercise the same lazy first
+				// load used when an Inspector assigns a previously unreferenced material.
+				std::ofstream output(materialPath, std::ios::binary | std::ios::trunc);
+				output.write(reinterpret_cast<const char*>(&header), sizeof(header));
+				context.Expect(static_cast<bool>(output),
+					"The first-load regression fixture must be written completely.");
+			}
+
+			resourceManager.RegisterAssetPath(materialId, materialPath, AssetType::Material);
+			const std::uint64_t beforeLoad =
+				resourceManager.GetRendererResourcePublicationGeneration();
+			context.Expect(resourceManager.GetMaterial(materialId) != nullptr,
+				"A registered material should load through its stable Inspector UUID.");
+			context.Expect(
+				resourceManager.GetRendererResourcePublicationGeneration() > beforeLoad,
+				"A successful first renderer-resource load must invalidate warm render caches.");
+
+			const TerraEngine::UUID missingMaterialId = TerraEngine::GenerateUUID();
+			const std::filesystem::path missingMaterialPath =
+				materialPath.parent_path()
+				/ ("terra-missing-material-"
+					+ TerraEngine::ToHexString(missingMaterialId) + ".tmat");
+			resourceManager.RegisterAssetPath(
+				missingMaterialId, missingMaterialPath, AssetType::Material);
+			const std::uint64_t beforeFailedLoad =
+				resourceManager.GetRendererResourcePublicationGeneration();
+			context.Expect(resourceManager.GetMaterial(missingMaterialId) == nullptr,
+				"A missing first-load candidate must not create a material payload.");
+			context.ExpectEqual(
+				beforeFailedLoad,
+				resourceManager.GetRendererResourcePublicationGeneration(),
+				"A failed first load must retain the prior renderer generation.");
+
+			resourceManager.DeleteResource(materialId, AssetType::Material);
+			resourceManager.DeleteResource(missingMaterialId, AssetType::Material);
+			std::error_code removeError;
+			std::filesystem::remove(materialPath, removeError);
 		});
 	}
 }

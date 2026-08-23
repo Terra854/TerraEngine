@@ -4904,16 +4904,22 @@ void InspectorWindow::OnGui() {
 					ImGui::GetStateStorage()->SetInt(ImGui::GetID("IsOpen"), isOpen);
 				}
 
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (compName != "Transform") {
-					if (ImGui::BeginPopupContextItem("ComponentSettings")) {
+				// Attach every component-level action to the full-width invisible header.
+				// ImGui context popups belong to the most recently submitted item, so
+				// keeping one popup here makes every part of the header behave alike.
+				if (ImGui::BeginPopupContextItem("ComponentSettings")) {
+					// Transform is required by every object and therefore cannot be removed.
+					if (compName != "Transform") {
 						if (ImGui::MenuItem("Remove Component")) {
 							UndoRedoSystem::Instance().PushCommand(std::make_unique<RemoveComponentCommand>(obj, compName));
 							access.entityRemoveComponent(ObjectManager::instance().getRegistry(), obj);
 							NotifySceneAfterComponentMutation(compName);
 						}
-						ImGui::EndPopup();
 					}
+					if (ImGui::MenuItem("Reset Component To Prefab Defaults")) {
+						ResetPrefabOverride(obj, compName, "");
+					}
+					ImGui::EndPopup();
 				}
 
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -4986,12 +4992,6 @@ void InspectorWindow::OnGui() {
 				ImGui::SameLine();
 				ImGui::AlignTextToFramePadding();
 				ImGui::TextUnformatted(displayName.c_str());
-				if (ImGui::BeginPopupContextItem(("PrefabComponentReset_" + compName).c_str())) {
-					if (ImGui::MenuItem("Reset Component To Prefab Defaults")) {
-						ResetPrefabOverride(obj, compName, "");
-					}
-					ImGui::EndPopup();
-				}
 
 				ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + lineHeight));
 				ImGui::Dummy(ImVec2(0,0));

@@ -9,6 +9,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterAudioEditorControlTests(TestRegistry& registry);
 	void RegisterAudioExportTests(TestRegistry& registry);
 	void RegisterInspectorDisplayNameTests(TestRegistry& registry);
+	void RegisterInspectorComponentHeaderTests(TestRegistry& registry);
 	// Editor animation tests use one stable registrar so later authoring and MCP
 	// stories do not rely on static initialization or hidden test discovery.
 	void RegisterAnimationEditorTestScaffolding(TestRegistry& registry);
@@ -237,6 +238,7 @@ int main() {
 		context.Expect(true, "The terrain editor foundation test group is registered.");
 	});
 	TerraEngine::EditorTests::RegisterInspectorDisplayNameTests(registry);
+	TerraEngine::EditorTests::RegisterInspectorComponentHeaderTests(registry);
 	TerraEngine::EditorTests::RegisterAudioClipCompilerTests(registry);
 	TerraEngine::EditorTests::RegisterAudioImportPlaybackTests(registry);
 	TerraEngine::EditorTests::RegisterAudioAuthoringPersistenceTests(registry);

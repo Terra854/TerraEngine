@@ -600,8 +600,8 @@ void BuildProfilesWindow::StartExport() {
 			: (profile.outputDirectory.is_absolute() ? profile.outputDirectory : projectRoot / profile.outputDirectory);
 		request.finalOutputDirectory = std::filesystem::weakly_canonical(configuredOutput);
 		request.runId = GenerateEditorExportRunId();
-		request.evidenceDirectory = request.finalOutputDirectory.parent_path()
-			/ "ExportEvidence" / request.runId;
+		request.evidenceDirectory = BuildDefaultExportEvidenceDirectory(
+			request.projectRoot, request.runId);
 		request.invocationKind = ExportInvocationKind::Editor;
 		std::string layoutError;
 		DiscoverExportRuntimeLayout(ResolveRunningEditorExecutable(), request.runtimeLayout, layoutError);

@@ -203,6 +203,11 @@ namespace TerraEngine::Terrain
 		}
 	}
 
+	std::optional<TerrainAssetRoot> DecodeTerrainRootManifest(std::string_view text)
+	{
+		return DecodeRootManifest(std::string(text));
+	}
+
 	bool TerrainBlobResolver::PutVerified(ContentHash hash, std::vector<std::uint8_t> bytes)
 	{
 		if (!hash.IsValid() || bytes.empty() || HashTerrainBytes(bytes) != hash) return false;

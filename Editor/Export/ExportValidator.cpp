@@ -703,15 +703,20 @@ static ExportValidationResult ValidateAssetsAndShaders(
 	// 1. Missing Compiled Shader Outputs Check
 	const std::filesystem::path shadersDir = FindShadersDirectory(projectRoot, runtimeShaderDirectory);
 	
-	static constexpr std::array<std::string_view, 24> kRequiredShaders = {
+	static constexpr std::array<std::string_view, 29> kRequiredShaders = {
 		"default.task.tspf",
 		"default.mesh.tspf",
 		"default.frag.tspf",
+		"default.conventionalvisibilityidentity.frag.spv",
 		"editor/sceneviewgrid.vert.spv",
 		"editor/sceneviewgrid.frag.spv",
 		"sky/skybackground.task.tspf",
 		"sky/skybackground.mesh.tspf",
 		"sky/skybackground.frag.tspf",
+		"terrain/terrainvisibility.task.tspf",
+		"terrain/terrainvisibility.mesh.tspf",
+		"terrain/terrainvisibility.frag.tspf",
+		"terrain/terrainsurface.comp.tspf",
 		"ui/ui_instanced.vert.spv",
 		"ui/ui_instanced.frag.spv",
 		"ui/ui_static.vert.spv",

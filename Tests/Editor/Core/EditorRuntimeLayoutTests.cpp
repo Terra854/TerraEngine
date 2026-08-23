@@ -31,8 +31,14 @@ namespace TerraEngine::EditorTests
 				// Tiny placeholder files are sufficient because layout resolution checks
 				// ownership and presence; shader parsing and managed hosting are tested elsewhere.
 				for(const std::filesystem::path relative : {
+					std::filesystem::path{"Shaders/Default.task.tspf"},
 					std::filesystem::path{"Shaders/Default.mesh.tspf"},
 					std::filesystem::path{"Shaders/Default.frag.tspf"},
+					std::filesystem::path{"Shaders/Default.ConventionalVisibilityIdentity.frag.spv"},
+					std::filesystem::path{"Shaders/Terrain/TerrainVisibility.task.tspf"},
+					std::filesystem::path{"Shaders/Terrain/TerrainVisibility.mesh.tspf"},
+					std::filesystem::path{"Shaders/Terrain/TerrainVisibility.frag.tspf"},
+					std::filesystem::path{"Shaders/Terrain/TerrainSurface.comp.tspf"},
 					std::filesystem::path{"Managed/TerraEngine.Editor.runtimeconfig.json"},
 					std::filesystem::path{"Project/Templates/Assembly-CSharp.csproj.in"}})
 				{

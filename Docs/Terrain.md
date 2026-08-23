@@ -47,7 +47,9 @@ areas and exact signed lattice coordinates; it must not be interpreted as a
 fully resident sample dump.
 
 For surface validation, run the `terrain-surface-layers` workload after creating
-16 stable named layers. Verify four-contributor normalization, fifth-layer
+16 stable named layers. Runtime terrain graphics ship as a task/mesh/fragment
+shader set; the installed audit rejects retired vertex-stage terrain artifacts.
+Verify four-contributor normalization, fifth-layer
 preview/displacement, missing-material fallback, control-page residency and
 generation coupling, boundary seams, and identical canonical root/area hashes
 after save/reload. The installed runtime and editor terrain shader bundles must

@@ -11,9 +11,15 @@ namespace TerraEngine::Editor
 {
 	namespace
 	{
-		constexpr std::array<const char*, 4> kRequiredRuntimeFiles{
+		constexpr std::array<const char*, 10> kRequiredRuntimeFiles{
+			"Shaders/Default.task.tspf",
 			"Shaders/Default.mesh.tspf",
 			"Shaders/Default.frag.tspf",
+			"Shaders/Default.ConventionalVisibilityIdentity.frag.spv",
+			"Shaders/Terrain/TerrainVisibility.task.tspf",
+			"Shaders/Terrain/TerrainVisibility.mesh.tspf",
+			"Shaders/Terrain/TerrainVisibility.frag.tspf",
+			"Shaders/Terrain/TerrainSurface.comp.tspf",
 			"Managed/TerraEngine.Editor.runtimeconfig.json",
 			"Project/Templates/Assembly-CSharp.csproj.in"
 		};

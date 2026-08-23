@@ -113,6 +113,16 @@ namespace TerraEngine::AssetPipeline
 			return outputPath.parent_path() / (outputPath.filename().string()
 				+ std::string(suffix) + "." + std::to_string(stamp));
 		}
+
+		void RemovePublishedBackup(const std::filesystem::path& outputPath)
+		{
+			// The backup protects only the replacement window. Once the candidate is
+			// live, retaining it would expose an internal rollback file as a project
+			// asset. Cleanup is best-effort because the requested material has already
+			// been committed and reporting a failed save would invite a duplicate retry.
+			std::error_code cleanupError;
+			std::filesystem::remove(outputPath.string() + ".previous", cleanupError);
+		}
 	}
 
 	MaterialHeader CreateDefaultMaterialHeader(const TerraEngine::UUID& shaderCollectionId)
@@ -245,6 +255,7 @@ namespace TerraEngine::AssetPipeline
 			std::filesystem::remove(candidatePath, removeError);
 			return false;
 		}
+		RemovePublishedBackup(outputPath);
 		return true;
 	}
 
@@ -322,6 +333,7 @@ namespace TerraEngine::AssetPipeline
 			std::filesystem::remove(candidatePath, removeError);
 			return false;
 		}
+		RemovePublishedBackup(outputPath);
 		return true;
 	}
 }

@@ -327,34 +327,28 @@ void VulkanContext::Impl::EnsurePipeline(
 				&& stage.stage == ShaderStage::Fragment;
 			if (replaceFragmentWithIdentity) {
 				// The artifact is intentionally raw Vulkan SPIR-V rather than a
-				// cross-backend .tspf resource. Resolve it from the installed engine
-				// root so projects launched from arbitrary working directories agree.
+				// cross-backend .tspf resource. Read it through ResourceManager so an
+				// editor session uses the installed tree while an exported game reads
+				// the same logical path from its mounted TEPAK archive.
 				const std::filesystem::path variantPath = ResourceManager::Instance().GetEngineRoot()
 					/ "Shaders" / "Default.ConventionalVisibilityIdentity.frag.spv";
-				std::ifstream variantFile(variantPath, std::ios::ate | std::ios::binary);
-				if (!variantFile.is_open()) {
+				const std::vector<std::uint8_t> variantBytes =
+					ResourceManager::Instance().ReadFileBytes(variantPath);
+				if (variantBytes.empty()) {
 					TERRAENGINE_LOG(LogLevel::Error,
-						"Failed to open Vulkan conventional visibility identity shader: " << variantPath);
+						"Failed to load Vulkan conventional visibility identity shader: " << variantPath);
 					identityVariantLoadFailed = true;
 					continue;
 				}
-				const std::streamsize byteCount = variantFile.tellg();
-				if (byteCount <= 0 || (byteCount % static_cast<std::streamsize>(sizeof(std::uint32_t))) != 0) {
+				if ((variantBytes.size() % sizeof(std::uint32_t)) != 0U) {
 					TERRAENGINE_LOG(LogLevel::Error,
 						"Vulkan conventional visibility identity shader has an invalid SPIR-V byte count: " << variantPath);
 					identityVariantLoadFailed = true;
 					continue;
 				}
-				conventionalIdentityBytecode.resize(static_cast<std::size_t>(byteCount) / sizeof(std::uint32_t));
-				variantFile.seekg(0);
-				variantFile.read(reinterpret_cast<char*>(conventionalIdentityBytecode.data()), byteCount);
-				if (!variantFile) {
-					TERRAENGINE_LOG(LogLevel::Error,
-						"Failed to read Vulkan conventional visibility identity shader: " << variantPath);
-					identityVariantLoadFailed = true;
-					continue;
-				}
-				createInfo.codeSize = static_cast<std::size_t>(byteCount);
+				conventionalIdentityBytecode.resize(variantBytes.size() / sizeof(std::uint32_t));
+				std::memcpy(conventionalIdentityBytecode.data(), variantBytes.data(), variantBytes.size());
+				createInfo.codeSize = variantBytes.size();
 				createInfo.pCode = conventionalIdentityBytecode.data();
 			} else {
 				createInfo.codeSize = shader->bytecode.size();

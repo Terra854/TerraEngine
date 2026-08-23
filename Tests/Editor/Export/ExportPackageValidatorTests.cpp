@@ -64,11 +64,16 @@ namespace TerraEngine::EditorTests {
 				"Shaders/Default.task.tspf",
 				"Shaders/Default.mesh.tspf",
 				"Shaders/Default.frag.tspf",
+				"Shaders/Default.ConventionalVisibilityIdentity.frag.spv",
 				"Shaders/Editor/SceneViewGrid.vert.spv",
 				"Shaders/Editor/SceneViewGrid.frag.spv",
 				"Shaders/Sky/SkyBackground.task.tspf",
 				"Shaders/Sky/SkyBackground.mesh.tspf",
 				"Shaders/Sky/SkyBackground.frag.tspf",
+				"Shaders/Terrain/TerrainVisibility.task.tspf",
+				"Shaders/Terrain/TerrainVisibility.mesh.tspf",
+				"Shaders/Terrain/TerrainVisibility.frag.tspf",
+				"Shaders/Terrain/TerrainSurface.comp.tspf",
 				"Shaders/UI/UI_Instanced.vert.spv",
 				"Shaders/UI/UI_Instanced.frag.spv",
 				"Shaders/UI/UI_Static.vert.spv",
@@ -152,6 +157,22 @@ namespace TerraEngine::EditorTests {
 
 			context.Expect(!valid, "A package missing the required runtime font should fail validation.");
 			context.Expect(error.find("fonts/roboto-medium.ttf") != std::string::npos, "The validation error should name the missing font path.");
+		});
+
+		registry.Add("Editor.ExportPackageValidator.RejectsMissingConventionalVisibilityIdentityShader", [](TestContext& context) {
+			TempExportPackageWorkspace workspace;
+			WriteRequiredExportRuntimeEntries(workspace);
+			WriteManifestAndStartupScene(workspace);
+			std::filesystem::remove(
+				workspace.InputRoot() / "Shaders" / "Default.ConventionalVisibilityIdentity.frag.spv");
+			workspace.CreatePack();
+
+			std::string error;
+			const bool valid = ValidateExportPackage(workspace.PackPath(), error);
+
+			context.Expect(!valid, "A package missing the conventional visibility identity shader should fail validation.");
+			context.Expect(error.find("default.conventionalvisibilityidentity.frag.spv") != std::string::npos,
+				"The validation error should name the exact missing Vulkan identity shader path.");
 		});
 
 		registry.Add("Editor.ExportPackageValidator.RejectsMissingStartupScene", [](TestContext& context) {

@@ -194,6 +194,12 @@ std::string DetectAssetClass(const std::filesystem::path& sourcePath) {
 	if (extension == ".teaudio") {
 		return "audio";
 	}
+	// Terrain roots and immutable authored-area blobs must retain their checked
+	// package class. The runtime resolver intentionally rejects generic entries
+	// so corrupt or accidentally substituted files cannot become render data.
+	if (extension == ".teterrain" || extension == ".tearea") {
+		return "terrain";
+	}
 
 	// Asset classes are coarse by design. They are primarily used for summaries
 	// and future policy hooks, not as a strict runtime type system.

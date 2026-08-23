@@ -46,6 +46,8 @@ set(_TERRAENGINE_TERRAIN_ENGINE_FILES
 	Engine/File Formats/TerraEngineTerrainFile.h
 	Engine/Runtime/ContentMount/TerrainContentResolver.cpp
 	Engine/Runtime/ContentMount/TerrainContentResolver.h
+	Engine/Runtime/ContentMount/TerrainRuntimeProxyLoader.cpp
+	Engine/Runtime/ContentMount/TerrainRuntimeProxyLoader.h
 	Engine/Renderer/Terrain/TerrainPageCooker.cpp
 	Engine/Renderer/Terrain/TerrainPageCooker.h
 	Engine/Renderer/Terrain/TerrainRenderPackets.cpp

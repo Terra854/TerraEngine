@@ -1,4 +1,5 @@
 // TerrainVisibility.frag.hlsl -- Terrain visibility with explicit material fallback.
+// This interpolator contract is emitted by TerrainVisibility.mesh.hlsl.
 struct TerrainFragmentInput { float4 position : SV_Position; float2 uv : TEXCOORD0; };
 Texture2D<float4> terrainSurface : register(t0);
 Texture2D<uint> terrainFallbackMask : register(t1);

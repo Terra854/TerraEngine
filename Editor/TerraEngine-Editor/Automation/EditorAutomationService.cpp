@@ -8795,8 +8795,8 @@ namespace TerraEngine::Editor::Automation
 				: (profileSnapshot->outputDirectory.is_absolute() ? profileSnapshot->outputDirectory : projectRoot / profileSnapshot->outputDirectory);
 			exportRequest.finalOutputDirectory = std::filesystem::absolute(configuredOutput).lexically_normal();
 			exportRequest.runId = GenerateAutomationExportRunId();
-			exportRequest.evidenceDirectory = exportRequest.finalOutputDirectory.parent_path()
-				/ "ExportEvidence" / exportRequest.runId;
+			exportRequest.evidenceDirectory = BuildDefaultExportEvidenceDirectory(
+				exportRequest.projectRoot, exportRequest.runId);
 			exportRequest.invocationKind = ExportInvocationKind::Editor;
 			std::string layoutError;
 			(void)DiscoverExportRuntimeLayout(ResolveAutomationEditorExecutable(), exportRequest.runtimeLayout, layoutError);

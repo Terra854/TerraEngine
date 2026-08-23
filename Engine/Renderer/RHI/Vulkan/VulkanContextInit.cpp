@@ -557,7 +557,7 @@ bool VulkanContext::Impl::EnsureVulkanVirtualGeometryVisibilityPipelines()
 VkPipeline VulkanContext::Impl::EnsureVulkanVirtualGeometryCompositePipeline(
 	VkRenderPass renderPass)
 {
-	if(renderPass == VK_NULL_HANDLE
+	if(renderPass == VK_NULL_HANDLE || !taskShaderSupported
 		|| !EnsureVulkanVirtualGeometryVisibilityPipelines())
 	{
 		return VK_NULL_HANDLE;
@@ -593,30 +593,30 @@ VkPipeline VulkanContext::Impl::EnsureVulkanVirtualGeometryCompositePipeline(
 		return vkCreateShaderModule(device, &moduleInfo, nullptr, &module)
 			== VK_SUCCESS ? module : VK_NULL_HANDLE;
 	};
-	VkShaderModule vertexModule = loadModule(
-		"Shaders/VirtualGeometry/VirtualGeometryComposite.vert.spv");
+	VkShaderModule taskModule = loadModule(
+		"Shaders/VirtualGeometry/VirtualGeometryComposite.task.spv");
+	VkShaderModule meshModule = loadModule(
+		"Shaders/VirtualGeometry/VirtualGeometryComposite.mesh.spv");
 	VkShaderModule fragmentModule = loadModule(
 		"Shaders/VirtualGeometry/VirtualGeometryComposite.frag.spv");
-	if(vertexModule == VK_NULL_HANDLE || fragmentModule == VK_NULL_HANDLE)
+	if(taskModule == VK_NULL_HANDLE || meshModule == VK_NULL_HANDLE
+		|| fragmentModule == VK_NULL_HANDLE)
 	{
-		if(vertexModule != VK_NULL_HANDLE)
-			vkDestroyShaderModule(device, vertexModule, nullptr);
+		if(taskModule != VK_NULL_HANDLE)
+			vkDestroyShaderModule(device, taskModule, nullptr);
+		if(meshModule != VK_NULL_HANDLE)
+			vkDestroyShaderModule(device, meshModule, nullptr);
 		if(fragmentModule != VK_NULL_HANDLE)
 			vkDestroyShaderModule(device, fragmentModule, nullptr);
 		return VK_NULL_HANDLE;
 	}
-	const std::array<VkPipelineShaderStageCreateInfo, 2u> shaderStages{{
+	const std::array<VkPipelineShaderStageCreateInfo, 3u> shaderStages{{
 		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0u,
-			VK_SHADER_STAGE_VERTEX_BIT, vertexModule, "main", nullptr },
+			VK_SHADER_STAGE_TASK_BIT_EXT, taskModule, "main", nullptr },
+		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0u,
+			VK_SHADER_STAGE_MESH_BIT_EXT, meshModule, "main", nullptr },
 		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0u,
 			VK_SHADER_STAGE_FRAGMENT_BIT, fragmentModule, "main", nullptr } }};
-	VkPipelineVertexInputStateCreateInfo vertexInput{};
-	vertexInput.sType =
-		VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-	inputAssembly.sType =
-		VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 	VkPipelineViewportStateCreateInfo viewportState{};
 	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
 	viewportState.viewportCount = 1u;
@@ -668,8 +668,10 @@ VkPipeline VulkanContext::Impl::EnsureVulkanVirtualGeometryCompositePipeline(
 	pipelineInfo.stageCount =
 		static_cast<std::uint32_t>(shaderStages.size());
 	pipelineInfo.pStages = shaderStages.data();
-	pipelineInfo.pVertexInputState = &vertexInput;
-	pipelineInfo.pInputAssemblyState = &inputAssembly;
+	// Mesh pipelines synthesize their own vertices and primitives; Vulkan must
+	// not receive legacy vertex-input or input-assembly state for this pass.
+	pipelineInfo.pVertexInputState = nullptr;
+	pipelineInfo.pInputAssemblyState = nullptr;
 	pipelineInfo.pViewportState = &viewportState;
 	pipelineInfo.pRasterizationState = &rasterization;
 	pipelineInfo.pMultisampleState = &multisample;
@@ -683,7 +685,8 @@ VkPipeline VulkanContext::Impl::EnsureVulkanVirtualGeometryCompositePipeline(
 	const VkResult result = vkCreateGraphicsPipelines(
 		device, VK_NULL_HANDLE, 1u, &pipelineInfo, nullptr, &pipeline);
 	vkDestroyShaderModule(device, fragmentModule, nullptr);
-	vkDestroyShaderModule(device, vertexModule, nullptr);
+	vkDestroyShaderModule(device, meshModule, nullptr);
+	vkDestroyShaderModule(device, taskModule, nullptr);
 	if(result != VK_SUCCESS)
 	{
 		return VK_NULL_HANDLE;

@@ -503,17 +503,22 @@ bool ValidateExportPackage(const std::filesystem::path& packagePath, ExportPlatf
 			entries.insert(entry.normalizedPath);
 		}
 
-		static constexpr std::array<std::string_view, 26> kRequiredRuntimeEntries = {
+		static constexpr std::array<std::string_view, 31> kRequiredRuntimeEntries = {
 			"game.json",
 			"fonts/roboto-medium.ttf",
 			"shaders/default.task.tspf",
 			"shaders/default.mesh.tspf",
 			"shaders/default.frag.tspf",
+			"shaders/default.conventionalvisibilityidentity.frag.spv",
 			"shaders/editor/sceneviewgrid.vert.spv",
 			"shaders/editor/sceneviewgrid.frag.spv",
 			"shaders/sky/skybackground.task.tspf",
 			"shaders/sky/skybackground.mesh.tspf",
 			"shaders/sky/skybackground.frag.tspf",
+			"shaders/terrain/terrainvisibility.task.tspf",
+			"shaders/terrain/terrainvisibility.mesh.tspf",
+			"shaders/terrain/terrainvisibility.frag.tspf",
+			"shaders/terrain/terrainsurface.comp.tspf",
 			"shaders/ui/ui_instanced.vert.spv",
 			"shaders/ui/ui_instanced.frag.spv",
 			"shaders/ui/ui_static.vert.spv",

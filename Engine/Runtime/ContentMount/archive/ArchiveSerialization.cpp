@@ -27,6 +27,10 @@ std::uint32_t EncodeAssetClass(std::string_view assetClass) {
 		{"retarget-profile", 12U},
 		{"motion-database", 13U},
 		{"ragdoll-profile", 14U},
+		// Terrain is append-only after the animation classes. The writer already
+		// detects .teterrain/.tearea; preserving that class in the archive lets the
+		// checked runtime resolver distinguish authored terrain from arbitrary data.
+		{"terrain", 15U},
 	};
 
 	const auto found = kCodes.find(assetClass);
@@ -65,6 +69,8 @@ std::string DecodeAssetClass(std::uint32_t assetClassCode) {
 		return "motion-database";
 	case 14U:
 		return "ragdoll-profile";
+	case 15U:
+		return "terrain";
 	default:
 		return "other";
 	}

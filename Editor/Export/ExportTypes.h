@@ -147,3 +147,10 @@ std::string_view ToString(ExportStage stage);
 std::string_view ToString(ExportFailureCategory category);
 int ExitCodeForFailure(ExportFailureCategory category);
 ExportStage StageForPhase(ExportPhase phase);
+
+/// Places automatically generated diagnostics in disposable project state.
+/// Published game output remains runtime-only, while callers that need durable
+/// CI artifacts can still provide an explicit evidence directory.
+std::filesystem::path BuildDefaultExportEvidenceDirectory(
+	const std::filesystem::path& projectRoot,
+	std::string_view runId);

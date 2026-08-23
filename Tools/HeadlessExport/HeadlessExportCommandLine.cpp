@@ -190,8 +190,8 @@ HeadlessExportParseResult ParseHeadlessExportCommandLine(
 	if(values.contains("--evidence")) {
 		result.request.evidenceDirectory = ResolvePath(values["--evidence"], launchDirectory, false, pathError);
 	} else {
-		result.request.evidenceDirectory = result.request.finalOutputDirectory.parent_path()
-			/ "ExportEvidence" / result.request.runId;
+		result.request.evidenceDirectory = BuildDefaultExportEvidenceDirectory(
+			result.request.projectRoot, result.request.runId);
 	}
 	if(result.request.evidenceDirectory.empty()) {
 		result.message = pathError;

@@ -115,6 +115,23 @@ namespace TerraEngine::EditorTests
 				&& rendererSource.find("kResourceTerrainRenderProxies") != std::string::npos,
 				"RenderSystem must collect TerrainComponent instances through the declared terrain proxy resource contract.");
 
+			const auto runtimeSystemPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine/Terrain/TerrainDerivedSystem.cpp";
+			std::ifstream runtimeSystemFile(runtimeSystemPath);
+			const std::string runtimeSystemSource(
+				(std::istreambuf_iterator<char>(runtimeSystemFile)),
+				std::istreambuf_iterator<char>());
+			const auto exportPipelinePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor/Export/ExportPipeline.cpp";
+			std::ifstream exportPipelineFile(exportPipelinePath);
+			const std::string exportPipelineSource(
+				(std::istreambuf_iterator<char>(exportPipelineFile)),
+				std::istreambuf_iterator<char>());
+			context.Expect(runtimeSystemSource.find("BuildMountedTerrainDirectMesh") != std::string::npos
+				&& runtimeSystemSource.find("TerrainRenderProxyRegistry::Instance().Publish") != std::string::npos
+				&& exportPipelineSource.find("importer == \"TerrainImporter\") type = AssetType::Terrain") != std::string::npos,
+				"Standalone exports must register terrain UUID paths and publish mounted render proxies without relying on TerrainWindow.");
+
 			// The editor executable publishes terrain proxies while RenderSystem consumes
 			// them from the engine DLL. Keeping Instance() out of the header guarantees
 			// both modules reach the same registry on Windows instead of creating one

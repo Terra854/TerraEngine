@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "archive/ArchiveWorkflow.h"
+#include "io/PathNormalizer.h"
 
 #include <filesystem>
 #include <functional>
@@ -30,6 +31,13 @@ namespace TerraEngine::EditorTests {
 	}
 
 	void RegisterPackagingRequestValidationTests(TestRegistry& registry) {
+		registry.Add("Editor.PackagingRequestValidation.ClassifiesTerrainForCheckedRuntimeReads", [](TestContext& context) {
+			context.ExpectEqual(std::string("terrain"), tepak::io::DetectAssetClass("World.teterrain"),
+				"Terrain descriptors must retain the checked terrain archive class.");
+			context.ExpectEqual(std::string("terrain"), tepak::io::DetectAssetClass("World.teterrain.data/blobs/hash.tearea"),
+				"Immutable terrain blobs must retain the checked terrain archive class.");
+		});
+
 		registry.Add("Editor.PackagingRequestValidation.RequiresInputRoot", [](TestContext& context) {
 			tepak::PackagingRequest request = MakeValidRequest();
 			request.inputRoot.clear();

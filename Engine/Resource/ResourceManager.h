@@ -96,6 +96,18 @@ constexpr bool IsAnimationAssetType(AssetType type) noexcept
 	return type >= AssetType::Skeleton && type <= AssetType::RagdollProfile;
 }
 
+constexpr bool IsRendererResourceAssetType(AssetType type) noexcept
+{
+	// These persisted asset identities can create or replace backend draw state.
+	// Their first successful load must invalidate warm renderer caches just like
+	// a later hot reload; physics, animation, audio, and terrain publish through
+	// their own typed runtime boundaries instead.
+	return type == AssetType::Mesh
+		|| type == AssetType::Texture
+		|| type == AssetType::Material
+		|| type == AssetType::ShaderCollection;
+}
+
 // Validation commands return structured evidence instead of only logging a
 // parser failure. Tooling can display diagnosticCode/message directly, while
 // runtime callers can branch on the stable AnimationStatus value.
@@ -1276,6 +1288,15 @@ TerraEngine::UUID ResourceManager::FinalizeLoad(
 		cache.pathToId[key] = publicationId;
 		cache.idToPath[publicationId] = key;
 		cache.resources[publicationId] = std::move(resource);
+		if (IsRendererResourceAssetType(cache.assetType))
+		{
+			// Live Inspector assignments can demand an asset after the renderer has
+			// already retained topology and backend resource plans. Publish only after
+			// the complete typed payload is visible so the next protected frame rebuilds
+			// those plans without requiring an editor restart.
+			m_RendererResourcePublicationGeneration.fetch_add(
+				1U, std::memory_order_release);
+		}
 		if (cache.assetType == AssetType::Mesh)
 		{
 			// Publication happens while the typed cache lock is exclusive. The

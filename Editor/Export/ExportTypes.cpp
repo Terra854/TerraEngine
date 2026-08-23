@@ -79,3 +79,13 @@ ExportStage StageForPhase(ExportPhase phase) {
 	}
 	return ExportStage::Arguments;
 }
+
+std::filesystem::path BuildDefaultExportEvidenceDirectory(
+	const std::filesystem::path& projectRoot,
+	std::string_view runId)
+{
+	// Library is already the project's disposable editor-state boundary. Keeping
+	// evidence here prevents diagnostic bundles from appearing beside published
+	// builds without weakening the export validation and audit trail.
+	return projectRoot / "Library" / "ExportEvidence" / std::string(runId);
+}

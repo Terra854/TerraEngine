@@ -108,10 +108,11 @@ namespace TerraEngine::EditorTests {
 		}
 
 		void WriteRuntimeEntries(const PhysicsValidationWorkspace& workspace) {
-			static constexpr std::array<std::string_view, 26> kEntries = {
+			static constexpr std::array<std::string_view, 31> kEntries = {
 				"Fonts/Roboto-Medium.ttf", "Shaders/Default.task.tspf", "Shaders/Default.mesh.tspf", "Shaders/Default.frag.tspf",
-				"Shaders/Editor/SceneViewGrid.vert.spv", "Shaders/Editor/SceneViewGrid.frag.spv", "Shaders/Sky/SkyBackground.task.tspf",
-				"Shaders/Sky/SkyBackground.mesh.tspf", "Shaders/Sky/SkyBackground.frag.tspf", "Shaders/UI/UI_Instanced.vert.spv",
+				"Shaders/Default.ConventionalVisibilityIdentity.frag.spv", "Shaders/Editor/SceneViewGrid.vert.spv", "Shaders/Editor/SceneViewGrid.frag.spv", "Shaders/Sky/SkyBackground.task.tspf",
+				"Shaders/Sky/SkyBackground.mesh.tspf", "Shaders/Sky/SkyBackground.frag.tspf", "Shaders/Terrain/TerrainVisibility.task.tspf",
+				"Shaders/Terrain/TerrainVisibility.mesh.tspf", "Shaders/Terrain/TerrainVisibility.frag.tspf", "Shaders/Terrain/TerrainSurface.comp.tspf", "Shaders/UI/UI_Instanced.vert.spv",
 				"Shaders/UI/UI_Instanced.frag.spv", "Shaders/UI/UI_Static.vert.spv", "Shaders/UI/UI_Static.frag.spv",
 				"Shaders/UI/UI_SDF_Text.vert.spv", "Shaders/UI/UI_SDF_Text.frag.spv", "Shaders/Lighting/ClusterDepthMask.comp.spv",
 				"Shaders/Lighting/ClusterGrid.comp.spv", "Shaders/Lighting/ClusterLightCount.comp.spv", "Shaders/Lighting/ClusterLightFill.comp.spv",

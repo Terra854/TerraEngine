@@ -275,6 +275,9 @@ TerraEngine::UUID ResourceManager::RegisterMaterial(const std::string& cacheKey,
 	{
 		materialCache.resources.erase(id);
 	}
+	// Generated materials bypass FinalizeLoad, so publish the same renderer
+	// invalidation token here after their complete cache state becomes visible.
+	m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);
 
 	// Clear any stale in-flight futures that may have been waiting on this key.
 	materialCache.inFlight.erase(normalizedKey);

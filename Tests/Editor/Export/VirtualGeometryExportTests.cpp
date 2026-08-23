@@ -1,10 +1,12 @@
 #include "TestHarness.h"
 
 #include "ExportPackageValidator.h"
+#include "ExportMeshClassification.h"
 #include "File Formats/TerraEngineMeshFile.h"
 #include "TEPAK/PackWriter.h"
 #include "VirtualGeometryProductionBlocks.h"
 
+#include <array>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -86,11 +88,16 @@ namespace TerraEngine::EditorTests
 				"Shaders/Default.task.tspf",
 				"Shaders/Default.mesh.tspf",
 				"Shaders/Default.frag.tspf",
+				"Shaders/Default.ConventionalVisibilityIdentity.frag.spv",
 				"Shaders/Editor/SceneViewGrid.vert.spv",
 				"Shaders/Editor/SceneViewGrid.frag.spv",
 				"Shaders/Sky/SkyBackground.task.tspf",
 				"Shaders/Sky/SkyBackground.mesh.tspf",
 				"Shaders/Sky/SkyBackground.frag.tspf",
+				"Shaders/Terrain/TerrainVisibility.task.tspf",
+				"Shaders/Terrain/TerrainVisibility.mesh.tspf",
+				"Shaders/Terrain/TerrainVisibility.frag.tspf",
+				"Shaders/Terrain/TerrainSurface.comp.tspf",
 				"Shaders/UI/UI_Instanced.vert.spv",
 				"Shaders/UI/UI_Instanced.frag.spv",
 				"Shaders/UI/UI_Static.vert.spv",
@@ -308,6 +315,34 @@ namespace TerraEngine::EditorTests
 			return TerraEngine::Editor::BuildTemfProductionBlocks(request).bytes;
 		}
 
+		std::vector<std::uint8_t> MakeDirectMeshletTemf()
+		{
+			// Small production meshes use one direct-resident payload and intentionally
+			// omit virtual pages. This mirrors the route selected for viking_room.temf.
+			const std::array<std::uint8_t, 3u> source = { 7u, 11u, 13u };
+			TemfQuantizationDomain domain{};
+			domain.domainId = 0u;
+			domain.domainVersion = 1u;
+			domain.domainScope = static_cast<std::uint16_t>(TemfQuantizationDomainScope::Asset);
+			domain.streamKind = static_cast<std::uint16_t>(TemfStreamKind::Position);
+			domain.componentCount = 3u;
+			domain.domainHash = 1u;
+			const TerraEngine::Editor::TemfProductionStreamInput stream{
+				TemfStreamKind::Position,
+				TemfCodecProfile::ExpandedProduction,
+				0u,
+				0u,
+				1u,
+				3u,
+				source };
+			const TerraEngine::Editor::TemfProductionBuildRequest request{
+				.representationFlags = kTemfRepresentationDirectMeshlets,
+				.logicalPageSizeBytes = 0u,
+				.quantizationDomains = std::span(&domain, 1u),
+				.streams = std::span(&stream, 1u) };
+			return TerraEngine::Editor::BuildTemfProductionBlocks(request).bytes;
+		}
+
 		void WriteVirtualGeometryManifest(const TempVirtualGeometryExportWorkspace& workspace, bool includeCoverage = true)
 		{
 			// Export validation now requires the runtime package to declare which
@@ -344,6 +379,7 @@ namespace TerraEngine::EditorTests
 				"\t\t\t\"Shaders/Default.task.tspf\",\n"
 				"\t\t\t\"Shaders/Default.mesh.tspf\",\n"
 				"\t\t\t\"Shaders/Default.frag.tspf\",\n"
+				"\t\t\t\"Shaders/Default.ConventionalVisibilityIdentity.frag.spv\",\n"
 				"\t\t\t\"Shaders/PostProcess/HiZGenerate.comp.spv\"\n"
 				"\t\t]\n"
 				"\t},\n"
@@ -357,6 +393,26 @@ namespace TerraEngine::EditorTests
 
 	void RegisterVirtualGeometryExportTests(TestRegistry& registry)
 	{
+		registry.Add("VirtualGeometry.Editor.Export.ClassifiesTemfByDeclaredRepresentation", [](TestContext& context) {
+			const std::vector<std::uint8_t> directPayload = MakeDirectMeshletTemf();
+			const auto direct = TerraEngine::Editor::Export::ClassifyMeshRepresentation(directPayload);
+			context.Expect(direct.valid, direct.diagnostic.empty()
+				? "A direct-resident TEMF should be valid for export."
+				: direct.diagnostic);
+			context.Expect(!direct.requiresVirtualGeometry,
+				"A direct-resident TEMF must not require virtual-page export metadata.");
+
+			const std::vector<std::uint8_t> virtualPayload =
+				MakeVirtualGeometryTemf(VirtualGeometryTemfVariant::Valid);
+			const auto virtualGeometry =
+				TerraEngine::Editor::Export::ClassifyMeshRepresentation(virtualPayload);
+			context.Expect(virtualGeometry.valid, virtualGeometry.diagnostic.empty()
+				? "A virtual-geometry TEMF should be valid for export."
+				: virtualGeometry.diagnostic);
+			context.Expect(virtualGeometry.requiresVirtualGeometry,
+				"A TEMF that declares virtual pages must retain strict export validation.");
+		});
+
 		registry.Add("VirtualGeometry.Editor.Export.PipelineDeclaresConeSafetyMetadata", [](TestContext& context) {
 			const std::filesystem::path pipelinePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Editor" / "Export" / "ExportPipeline.cpp";
 			const std::string pipelineSource = ReadTextFile(pipelinePath);

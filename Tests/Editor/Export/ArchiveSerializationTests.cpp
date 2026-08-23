@@ -30,6 +30,8 @@ namespace TerraEngine::EditorTests {
 			context.ExpectEqual(std::string("retarget-profile"), tepak::archive::DecodeAssetClass(12U), "Retarget code twelve must decode in the writer.");
 			context.ExpectEqual(std::string("motion-database"), tepak::archive::DecodeAssetClass(13U), "Motion database code thirteen must decode in the writer.");
 			context.ExpectEqual(std::string("ragdoll-profile"), tepak::archive::DecodeAssetClass(14U), "Ragdoll code fourteen must decode in the writer.");
+			context.ExpectEqual(15U, tepak::archive::EncodeAssetClass("terrain"), "Terrain assets must retain appended TEPAK code fifteen.");
+			context.ExpectEqual(std::string("terrain"), tepak::archive::DecodeAssetClass(15U), "Terrain code fifteen must survive writer serialization.");
 		});
 
 		registry.Add("Editor.ArchiveSerialization.DictionaryFlagUsesLowBitOnly", [](TestContext& context) {

@@ -101,6 +101,11 @@ namespace TerraEngine::Tests
 				context.Expect(
 					buildScript.find("Default.ConventionalVisibilityIdentity.frag.dxil") == std::string::npos,
 					"The conventional identity variant is Vulkan SPIR-V-only and must not add DXIL output.");
+				const std::string pipelineSource =
+					ReadSource("Engine/Renderer/RHI/Vulkan/VulkanPipelineResources.cpp");
+				context.Expect(
+					pipelineSource.find("ReadFileBytes(variantPath)") != std::string::npos,
+					"The Vulkan identity variant must load through ResourceManager so exported TEPAK content is authoritative.");
 			});
 	}
 } // namespace TerraEngine::Tests
