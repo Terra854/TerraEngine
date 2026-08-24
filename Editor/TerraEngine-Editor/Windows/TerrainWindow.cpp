@@ -1734,6 +1734,9 @@ void TerrainWindow::InitializeAuthoringTerrain(
 	const std::array<TerraEngine::Terrain::TerrainWeightContribution, 1u> baseWeight{{{1u, 255u}}};
 	committedSurfaceWeights.assign(TerraEngine::Terrain::kTerrainAreaSampleCount, TerraEngine::Terrain::NormalizeTerrainWeights(baseWeight));
 	previewSurfaceWeights = committedSurfaceWeights;
+	// Persisted roots can contain holes and painted weights in addition to height.
+	// Rehydrate all channels through the same path used after history replay.
+	(void)SynchronizeCommittedAuthoringStateFromPublishedRoot();
 	selectedLayerId = 1u;
 	layerPreviewActive = false;
 	surfacePreviewActive = false;
@@ -1743,25 +1746,80 @@ void TerrainWindow::InitializeAuthoringTerrain(
 	ScheduleRenderProxyBuild();
 }
 
-bool TerrainWindow::SynchronizeCommittedHeightFromPublishedRoot()
+bool TerrainWindow::SynchronizeCommittedAuthoringStateFromPublishedRoot()
 {
 	// The immutable asset store is the authority after every protected publish.
-	// Automation prepares a detached blob without mutating the window's preview
-	// vector, so copying previewHeightMm here would make the next operation start
-	// from stale samples. Resolve the just-published channel and mirror its exact
-	// canonical int32 payload into both editor buffers instead.
+	// History and automation prepare detached blobs without mutating the window's
+	// preview vectors, so copying any preview here would make the next operation
+	// start from stale samples. Resolve the published channels into fresh buffers.
 	if(!terrainStore) return false;
 	const auto capture = terrainStore->CaptureRoot();
 	if(!capture.IsValid()) return false;
+	if(capture.root->layerStack)
+	{
+		committedLayerStack = *capture.root->layerStack;
+		previewLayerStack = committedLayerStack;
+	}
 	const auto descriptor = terrainStore->FindDescriptor(*capture.root, {0, 0});
-	if(!descriptor || !descriptor->channels.heightHash) return false;
-	const auto bytes = terrainStore->Blobs().Resolve(*descriptor->channels.heightHash);
-	const std::size_t expectedBytes = TerraEngine::Terrain::kTerrainAreaSampleCount * sizeof(std::int32_t);
-	if(!bytes || bytes->size() != expectedBytes) return false;
-	committedHeightMm.resize(TerraEngine::Terrain::kTerrainAreaSampleCount);
-	std::memcpy(committedHeightMm.data(), bytes->data(), expectedBytes);
+	if(!descriptor) return false;
+
+	bool synchronizedHeight = false;
+	if(descriptor->channels.heightHash)
+	{
+		const auto bytes = terrainStore->Blobs().Resolve(*descriptor->channels.heightHash);
+		const std::size_t expectedBytes = TerraEngine::Terrain::kTerrainAreaSampleCount * sizeof(std::int32_t);
+		if(bytes && bytes->size() == expectedBytes)
+		{
+			committedHeightMm.resize(TerraEngine::Terrain::kTerrainAreaSampleCount);
+			std::memcpy(committedHeightMm.data(), bytes->data(), expectedBytes);
+			synchronizedHeight = true;
+		}
+	}
 	previewHeightMm = committedHeightMm;
-	return true;
+
+	// A missing hole channel is the canonical all-solid terrain state. This case
+	// occurs when undoing the first hole stroke and must replace the stale mask.
+	committedHoleMask.assign(TerraEngine::Terrain::kTerrainAreaSampleCount / 8u, 0u);
+	if(descriptor->channels.holeHash)
+	{
+		const auto bytes = terrainStore->Blobs().Resolve(*descriptor->channels.holeHash);
+		if(bytes && bytes->size() == committedHoleMask.size()) committedHoleMask = *bytes;
+	}
+	previewHoleMask = committedHoleMask;
+
+	// Likewise, an absent weight group means the root still uses its fallback
+	// layer. Decode canonical 12-byte samples only after validating the full blob,
+	// so a corrupt replay can never partially replace the editor mirror.
+	const auto fallbackLayer = std::find_if(committedLayerStack.layers.begin(), committedLayerStack.layers.end(),
+		[](const TerraEngine::Terrain::TerrainLayer& layer) { return layer.enabled; });
+	const std::uint16_t fallbackLayerId = fallbackLayer != committedLayerStack.layers.end()
+		? fallbackLayer->stableId : (committedLayerStack.layers.empty() ? 1u : committedLayerStack.layers.front().stableId);
+	const std::array<TerraEngine::Terrain::TerrainWeightContribution, 1u> fallbackWeight{{{fallbackLayerId, 255u}}};
+	committedSurfaceWeights.assign(TerraEngine::Terrain::kTerrainAreaSampleCount,
+		TerraEngine::Terrain::NormalizeTerrainWeights(fallbackWeight));
+	if(const auto weight = descriptor->channels.weightGroupHashes.find(1u);
+		weight != descriptor->channels.weightGroupHashes.end())
+	{
+		const auto bytes = terrainStore->Blobs().Resolve(weight->second);
+		constexpr std::size_t bytesPerSample = 12u;
+		if(bytes && bytes->size() == TerraEngine::Terrain::kTerrainAreaSampleCount * bytesPerSample)
+		{
+			std::vector<TerraEngine::Terrain::TerrainWeightSample> decoded(TerraEngine::Terrain::kTerrainAreaSampleCount);
+			bool valid = true;
+			for(std::size_t index = 0u; index < decoded.size(); ++index)
+			{
+				const std::span<const std::uint8_t, bytesPerSample> sample(bytes->data() + index * bytesPerSample, bytesPerSample);
+				if(!TerraEngine::Terrain::DecodeTerrainWeightSample(sample, decoded[index]).Succeeded())
+				{
+					valid = false;
+					break;
+				}
+			}
+			if(valid) committedSurfaceWeights = std::move(decoded);
+		}
+	}
+	previewSurfaceWeights = committedSurfaceWeights;
+	return synchronizedHeight;
 }
 
 bool TerrainWindow::StageLayerPatch(const TerraEngine::Terrain::TerrainLayerPatch& sourcePatch, std::string& outError)
@@ -2511,7 +2569,21 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 					*terrainStore, *terrainQueue, std::move(forward), std::move(inverse), receipt.historyPayload->retainedByteCount));
 			}
 			terrainDirtyState.Observe(terrainStore ? terrainStore->CaptureRoot() : TerraEngine::Terrain::TerrainRootCapture{});
-			if(isLayerReceipt)
+			if(wasHistoryReplay)
+			{
+				// A replay can target height, holes, surface weights, or layer metadata.
+				// Refresh every editor mirror from the newly authoritative root before
+				// another brush or layer action can compose from stale detached data.
+				(void)SynchronizeCommittedAuthoringStateFromPublishedRoot();
+				authoringSession.Cancel();
+				layerPreviewActive = false;
+				surfacePreviewActive = false;
+				holePreviewActive = false;
+				holeBrushActive = false;
+				displacedLayerWarning = 0u;
+				status = "Terrain undo/redo applied at the protected boundary.";
+			}
+			else if(isLayerReceipt)
 			{
 				const auto capture = terrainStore->CaptureRoot();
 				if(capture.root && capture.root->layerStack) committedLayerStack = *capture.root->layerStack;
@@ -2536,7 +2608,7 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 			{
 				// Only the immutable result associated with this receipt becomes
 				// authoritative.  A later preview cannot leak through this boundary.
-				if(!SynchronizeCommittedHeightFromPublishedRoot() && proceduralPreview)
+				if(!SynchronizeCommittedAuthoringStateFromPublishedRoot() && proceduralPreview)
 				{
 					committedHeightMm = proceduralPreview->afterHeightMm;
 					previewHeightMm = committedHeightMm;
@@ -2549,7 +2621,7 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 				// Visible strokes already carry a matching preview, while automation
 				// commits do not. Prefer the published blob for both so chained tools
 				// always compose from the same authoritative generation.
-				if(!SynchronizeCommittedHeightFromPublishedRoot()) committedHeightMm = previewHeightMm;
+				if(!SynchronizeCommittedAuthoringStateFromPublishedRoot()) committedHeightMm = previewHeightMm;
 				previewHeightMm = committedHeightMm; authoringSession.Cancel(); applyRequested = false;
 				status = "Terrain sculpt applied at the protected boundary (generation " + std::to_string(receipt.publicationGeneration) + ").";
 			}

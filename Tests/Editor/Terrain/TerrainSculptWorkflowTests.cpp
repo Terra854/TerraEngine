@@ -181,6 +181,30 @@ namespace TerraEngine::EditorTests
 				"Mouse release must remain the single durable transaction boundary for the complete stroke.");
 		});
 
+		registry.Add("Editor.TerrainSculpt.HistoryReplayRefreshesEveryAuthoredChannel", [](TestContext& context) {
+			const std::filesystem::path sourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor/TerraEngine-Editor/Windows/TerrainWindow.cpp";
+			std::ifstream sourceFile(sourcePath, std::ios::binary);
+			const std::string source(
+				(std::istreambuf_iterator<char>(sourceFile)),
+				std::istreambuf_iterator<char>());
+			const std::size_t synchronizationBegin = source.find(
+				"bool TerrainWindow::SynchronizeCommittedAuthoringStateFromPublishedRoot()");
+			const std::size_t synchronizationEnd = synchronizationBegin == std::string::npos
+				? std::string::npos : source.find("bool TerrainWindow::StageLayerPatch", synchronizationBegin);
+			const std::string synchronization = synchronizationBegin != std::string::npos && synchronizationEnd != std::string::npos
+				? source.substr(synchronizationBegin, synchronizationEnd - synchronizationBegin) : std::string{};
+			context.Expect(synchronization.find("capture.root->layerStack") != std::string::npos
+				&& synchronization.find("descriptor->channels.heightHash") != std::string::npos
+				&& synchronization.find("descriptor->channels.holeHash") != std::string::npos
+				&& synchronization.find("descriptor->channels.weightGroupHashes.find(1u)") != std::string::npos
+				&& synchronization.find("DecodeTerrainWeightSample") != std::string::npos,
+				"History replay must rebuild height, holes, surface weights, and layer metadata from the published root.");
+			context.Expect(source.find("if(wasHistoryReplay)") != std::string::npos
+				&& source.find("(void)SynchronizeCommittedAuthoringStateFromPublishedRoot();") != std::string::npos,
+				"A committed terrain undo or redo receipt must refresh every detached editor mirror before the next edit.");
+		});
+
 		registry.Add("Editor.TerrainSculpt.BrushFootprintProjectsActiveWorldRadius", [](TestContext& context) {
 			const auto readSource = [](const std::filesystem::path& relativePath) {
 				std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relativePath, std::ios::binary);

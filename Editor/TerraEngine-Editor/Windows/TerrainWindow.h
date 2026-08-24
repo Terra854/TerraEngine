@@ -177,7 +177,10 @@ private:
 		TerraEngine::UUID assetId,
 		const TerraEngine::AssetPipeline::TerrainHeightfield& heightfield,
 		TerraEngine::UUID existingObjectId = TerraEngine::EMPTY_UUID);
-	[[nodiscard]] bool SynchronizeCommittedHeightFromPublishedRoot();
+	// Undo and redo publish immutable terrain roots without rebuilding the detached
+	// editor buffers. Mirror every authored channel so the next tool operation
+	// starts from the replayed value instead of overwriting it with stale state.
+	[[nodiscard]] bool SynchronizeCommittedAuthoringStateFromPublishedRoot();
 	void ApplyBrushAt(const TerraEngine::Editor::Terrain::TerrainPickHit& hit);
 	void ApplyHoleBrushAt(const TerraEngine::Editor::Terrain::TerrainPickHit& hit);
 	[[nodiscard]] bool QueuePreviewForPublication();
