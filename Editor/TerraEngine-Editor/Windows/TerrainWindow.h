@@ -54,9 +54,19 @@ public:
 	void SetHoleSculpting(bool value);
 	[[nodiscard]] bool IsBrushStrokeActive() const noexcept { return brushStrokeActive || holeBrushActive; }
 	[[nodiscard]] const std::optional<SceneViewBrushFootprint>& BrushFootprint() const noexcept { return sceneViewBrushFootprint; }
-	[[nodiscard]] static constexpr bool ShouldCaptureSceneSelection(bool sculptEnabled, bool) noexcept { return sculptEnabled; }
-	// An enabled terrain brush owns Scene View clicks even before the first valid
-	// terrain hit. This prevents a missed pick from selecting an unrelated object.
+	// Terrain input belongs to this window only while the exact scene instance
+	// opened for editing is selected. Comparing durable UUIDs avoids accidentally
+	// editing the old terrain after the user selects another object.
+	[[nodiscard]] bool IsEditingTargetSelected(const std::optional<TerraEngine::UUID>& selectedObjectId) const noexcept;
+	[[nodiscard]] static constexpr bool ShouldCaptureSceneSelection(
+		bool sculptEnabled, bool editingTargetSelected) noexcept
+	{
+		return sculptEnabled && editingTargetSelected;
+	}
+	// Selection changes can happen outside Scene View while a drag is active.
+	// Canceling the detached work prevents that partial stroke from being committed
+	// after the terrain is no longer selected.
+	void HandleEditingTargetDeselected();
 	void SetBrushStrokeActive(bool value) noexcept { brushStrokeActive = value; }
 	// Scene View supplies a canonical ray and pointer lifecycle. A release turns
 	// the detached stroke into one typed, undoable transaction automatically.

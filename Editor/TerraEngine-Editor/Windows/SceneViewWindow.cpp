@@ -2834,15 +2834,28 @@ bool RayAABB(const glm::vec3& rayOrigin, const glm::vec3& rayDir, const glm::vec
 
 // SceneViewWindow::HandlePicking is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize) {
-	// Terrain receives pointer input before ordinary object selection. An enabled
-	// brush owns clicks until the user disables it, just like the other edit tools.
+	// Terrain receives pointer input before ordinary object selection, but only
+	// when the exact terrain instance opened in Terrain Tools remains selected.
 	if(auto terrainTools = m_Owner->GetWindow<TerrainWindow>(); terrainTools && terrainTools->IsSculpting())
 	{
+		std::optional<TerraEngine::UUID> selectedObjectId;
+		if(const std::optional<entt::entity> selectedEntity = m_Owner->GetSelectedEntity())
+		{
+			if(const std::optional<Object> selectedObject = ObjectManager::instance().getObject(*selectedEntity))
+				selectedObjectId = ObjectManager::instance().getUUID(*selectedObject);
+		}
+		const bool editingTargetSelected = terrainTools->IsEditingTargetSelected(selectedObjectId);
+		if(!editingTargetSelected)
+		{
+			// Hierarchy and automation selection changes can occur during a drag.
+			// Discard the detached stroke before ordinary picking resumes.
+			terrainTools->HandleEditingTargetDeselected();
+		}
 		const ImVec2 mouse = ImGui::GetMousePos();
 		const bool inside = mouse.x >= viewportPos.x && mouse.x <= viewportPos.x + viewportSize.x
 			&& mouse.y >= viewportPos.y && mouse.y <= viewportPos.y + viewportSize.y;
 		const bool wasCapturing = terrainTools->IsBrushStrokeActive();
-		if(inside || wasCapturing)
+		if(editingTargetSelected && (inside || wasCapturing))
 		{
 			// Clamp only while finishing a captured stroke outside the viewport. This
 			// guarantees pointer-up reaches Terrain Tools instead of leaving it stuck.
@@ -2864,7 +2877,8 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 						ImGui::IsMouseDown(ImGuiMouseButton_Left),
 						ImGui::IsMouseReleased(ImGuiMouseButton_Left));
 			}
-			if(TerrainWindow::ShouldCaptureSceneSelection(terrainTools->IsSculpting(), terrainTools->IsBrushStrokeActive()) || wasCapturing)
+			if(TerrainWindow::ShouldCaptureSceneSelection(
+				terrainTools->IsSculpting(), editingTargetSelected))
 			{
 				// Project the canonical terrain footprint instead of treating sample count
 				// as pixels. Perspective and orthographic zoom now match actual coverage.

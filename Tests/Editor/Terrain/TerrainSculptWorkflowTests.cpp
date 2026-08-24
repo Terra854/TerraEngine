@@ -116,11 +116,22 @@ namespace TerraEngine::EditorTests
 				"Apply must enqueue a typed terrain transaction and expose one committed receipt only after the protected publication boundary.");
 		});
 
-		registry.Add("Editor.TerrainSculpt.EnabledToolOwnsSelection", [](TestContext& context) {
+		registry.Add("Editor.TerrainSculpt.SelectedTargetOwnsSelection", [](TestContext& context) {
 			context.Expect(TerrainWindow::ShouldCaptureSceneSelection(true, true)
-				&& TerrainWindow::ShouldCaptureSceneSelection(true, false)
+				&& !TerrainWindow::ShouldCaptureSceneSelection(true, false)
 				&& !TerrainWindow::ShouldCaptureSceneSelection(false, true),
-				"An enabled terrain tool must own Scene View clicks so a missed terrain pick cannot select unrelated objects.");
+				"An enabled terrain tool must own Scene View clicks only while its exact terrain target remains selected.");
+
+			const std::filesystem::path sceneViewPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp";
+			std::ifstream sceneViewFile(sceneViewPath, std::ios::binary);
+			const std::string sceneViewSource(
+				(std::istreambuf_iterator<char>(sceneViewFile)),
+				std::istreambuf_iterator<char>());
+			context.Expect(sceneViewSource.find(
+				"terrainTools->IsEditingTargetSelected(selectedObjectId)") != std::string::npos
+				&& sceneViewSource.find("terrainTools->HandleEditingTargetDeselected()") != std::string::npos,
+				"Scene View must compare the selected object with Terrain Tools' durable target and cancel a detached stroke after deselection.");
 		});
 
 		registry.Add("Editor.TerrainSculpt.DetachedBrushPublishesRealtimeRenderPreview", [](TestContext& context) {

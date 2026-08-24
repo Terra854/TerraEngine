@@ -641,6 +641,32 @@ void TerrainWindow::SetHoleSculpting(bool value)
 	sceneViewBrushFootprint.reset();
 }
 
+bool TerrainWindow::IsEditingTargetSelected(
+	const std::optional<TerraEngine::UUID>& selectedObjectId) const noexcept
+{
+	// A newly created terrain may not have a scene object until its queued create
+	// transaction publishes. It must not accept Scene View input during that gap.
+	return selectedObjectId.has_value()
+		&& terrainRenderProxyTargetObjectId != TerraEngine::EMPTY_UUID
+		&& *selectedObjectId == terrainRenderProxyTargetObjectId;
+}
+
+void TerrainWindow::HandleEditingTargetDeselected()
+{
+	if(!brushStrokeActive && !holeBrushActive && !authoringSession.IsDirty()
+		&& !holePreviewActive && !sceneViewBrushFootprint.has_value())
+		return;
+
+	brushStrokeActive = false;
+	holeBrushActive = false;
+	previousStamp.reset();
+	sceneViewBrushFootprint.reset();
+	if(authoringSession.IsDirty())
+		CancelDetachedPreview("Terrain preview cancelled because its terrain object is no longer selected.");
+	if(holePreviewActive)
+		CancelHolePreview();
+}
+
 void TerrainWindow::OnGui()
 {
 	ObserveTerrainMaterialChanges();
