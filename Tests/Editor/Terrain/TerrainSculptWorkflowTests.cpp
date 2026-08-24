@@ -132,6 +132,15 @@ namespace TerraEngine::EditorTests
 				"terrainTools->IsEditingTargetSelected(selectedObjectId)") != std::string::npos
 				&& sceneViewSource.find("terrainTools->HandleEditingTargetDeselected()") != std::string::npos,
 				"Scene View must compare the selected object with Terrain Tools' durable target and cancel a detached stroke after deselection.");
+			const std::filesystem::path editorPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp";
+			std::ifstream editorFile(editorPath, std::ios::binary);
+			const std::string editorSource(
+				(std::istreambuf_iterator<char>(editorFile)),
+				std::istreambuf_iterator<char>());
+			context.Expect(editorSource.find(
+				"terrainTools->SynchronizeEditingSelection(selectedTerrainObjectId)") != std::string::npos,
+				"The selected Terrain component must activate authoring even when the Inspector window is hidden.");
 		});
 
 		registry.Add("Editor.TerrainSculpt.DetachedBrushPublishesRealtimeRenderPreview", [](TestContext& context) {

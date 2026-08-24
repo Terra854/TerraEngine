@@ -36,7 +36,7 @@
 
 #include <imgui.h>
 
-TerrainWindow::TerrainWindow() : EditorWindow("Terrain Tools", false, "Tools")
+TerrainWindow::TerrainWindow() : EditorWindow("Terrain Tools", false)
 {
 	automationAdapter.SetCommandCallback([this](std::string_view capability, const nlohmann::json& arguments) {
 		return ExecuteAutomationCommand(capability, arguments);
@@ -667,20 +667,304 @@ void TerrainWindow::HandleEditingTargetDeselected()
 		CancelHolePreview();
 }
 
+void TerrainWindow::SynchronizeEditingSelection(
+	const std::optional<TerraEngine::UUID>& selectedTerrainObjectId)
+{
+	if(!selectedTerrainObjectId.has_value())
+	{
+		if(editingSelectionActive || IsBrushStrokeActive() || authoringSession.IsDirty()
+			|| holePreviewActive)
+			HandleEditingTargetDeselected();
+		editingSelectionActive = false;
+		sculpting = false;
+		holeSculpting = false;
+		return;
+	}
+
+	if(!IsEditingTargetSelected(selectedTerrainObjectId))
+	{
+		// Switching directly between terrain objects must discard the old detached
+		// preview before OpenTerrainForEditing binds the new durable asset.
+		HandleEditingTargetDeselected();
+		std::string openError;
+		if(!OpenTerrainForEditing(*selectedTerrainObjectId, openError))
+		{
+			editingSelectionActive = false;
+			sculpting = false;
+			holeSculpting = false;
+			status = std::move(openError);
+			return;
+		}
+	}
+
+	editingSelectionActive = true;
+	ApplyInspectorToolMode();
+}
+
+void TerrainWindow::ApplyInspectorToolMode()
+{
+	const bool wantsHeightBrush = editingSelectionActive && inspectorTool == InspectorTool::Sculpt;
+	const bool wantsHoleBrush = editingSelectionActive && inspectorTool == InspectorTool::Holes;
+	if(sculpting != wantsHeightBrush) SetSculpting(wantsHeightBrush);
+	if(holeSculpting != wantsHoleBrush) SetHoleSculpting(wantsHoleBrush);
+}
+
+void TerrainWindow::DrawInspectorToolPalette()
+{
+	struct ToolEntry
+	{
+		InspectorTool tool;
+		const char* label;
+		const char* tooltip;
+	};
+	static constexpr std::array<ToolEntry, 5> tools = {{
+		{InspectorTool::Sculpt, "Sculpt", "Raise, lower, smooth, flatten, and shape terrain height."},
+		{InspectorTool::Paint, "Paint", "Paint the selected terrain surface layer."},
+		{InspectorTool::Holes, "Holes", "Paint or erase terrain holes in Scene View."},
+		{InspectorTool::Layers, "Layers", "Manage the ordered terrain material layers."},
+		{InspectorTool::Settings, "More", "Procedural tools, diagnostics, save, and maintenance."}
+	}};
+
+	ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(2.0F, 2.0F));
+	if(ImGui::BeginTable("##TerrainInspectorToolPalette", static_cast<int>(tools.size()),
+		ImGuiTableFlags_SizingStretchSame))
+	{
+		for(const ToolEntry& entry : tools)
+		{
+			ImGui::TableNextColumn();
+			const bool selected = inspectorTool == entry.tool;
+			if(selected)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
+				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered));
+			}
+			if(ImGui::Button(entry.label, ImVec2(-1.0F, 30.0F)) && !selected)
+			{
+				inspectorTool = entry.tool;
+				ApplyInspectorToolMode();
+			}
+			if(selected) ImGui::PopStyleColor(2);
+			if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+				ImGui::SetTooltip("%s", entry.tooltip);
+		}
+		ImGui::EndTable();
+	}
+	ImGui::PopStyleVar();
+}
+
+void TerrainWindow::DrawInspectorSculptControls()
+{
+	const char* modes[] = {"Raise", "Lower", "Smooth", "Flatten", "Pick Height", "Terrace", "Ramp", "Stamp", "Noise"};
+	int mode = static_cast<int>(brushSettings.mode);
+	ImGui::SetNextItemWidth(-1.0F);
+	if(ImGui::Combo("##TerrainSculptMode", &mode, modes, IM_ARRAYSIZE(modes)))
+		brushSettings.mode = static_cast<TerraEngine::Editor::Terrain::TerrainBrushMode>(mode);
+	ImGui::TextDisabled("Drag over the terrain in Scene View. Release creates one undo step.");
+	ImGui::SliderFloat("Size", &brushSettings.radiusSamples, 0.25F, 512.0F, "%.1f samples");
+	ImGui::SliderFloat("Opacity", &brushSettings.pressure, 0.0F, 1.0F, "%.2f");
+	ImGui::SliderFloat("Strength", &brushSettings.strengthMm, 1.0F, 10000.0F, "%.0f mm");
+	const char* falloffs[] = {"Hard", "Linear", "Smooth", "Soft"};
+	int falloff = static_cast<int>(brushSettings.falloff);
+	if(ImGui::Combo("Falloff", &falloff, falloffs, IM_ARRAYSIZE(falloffs)))
+		brushSettings.falloff = static_cast<TerraEngine::Editor::Terrain::TerrainBrushFalloff>(falloff);
+
+	if(brushSettings.mode == TerraEngine::Editor::Terrain::TerrainBrushMode::FlattenValue
+		|| brushSettings.mode == TerraEngine::Editor::Terrain::TerrainBrushMode::FlattenPicked
+		|| brushSettings.mode == TerraEngine::Editor::Terrain::TerrainBrushMode::Ramp)
+		ImGui::InputScalar("Target Height", ImGuiDataType_S32, &brushSettings.flattenHeightMm);
+	if(brushSettings.mode == TerraEngine::Editor::Terrain::TerrainBrushMode::Terrace)
+		ImGui::InputScalar("Terrace Step", ImGuiDataType_S32, &brushSettings.terraceStepMm);
+	if(brushSettings.mode == TerraEngine::Editor::Terrain::TerrainBrushMode::Noise)
+		ImGui::InputScalar("Noise Seed", ImGuiDataType_U32, &brushSettings.randomSeed);
+
+	if(ImGui::CollapsingHeader("Brush Options"))
+	{
+		ImGui::SliderFloat("Spacing", &brushSettings.spacingSamples, 0.0F, 128.0F, "%.1f samples");
+		ImGui::SliderAngle("Rotation", &brushSettings.rotationRadians, -180.0F, 180.0F);
+		ImGui::Checkbox("Use Mask", &maskEnabled);
+	}
+}
+
+void TerrainWindow::DrawInspectorPaintControls()
+{
+	const TerraEngine::Terrain::TerrainLayerStack stack = LayerPreview();
+	const auto selectedLayer = std::find_if(stack.layers.begin(), stack.layers.end(), [this](const auto& layer) {
+		return layer.stableId == surfaceBrushSettings.layerId;
+	});
+	const char* preview = selectedLayer != stack.layers.end() ? selectedLayer->name.c_str() : "Choose Layer";
+	if(ImGui::BeginCombo("Layer", preview))
+	{
+		for(const auto& layer : stack.layers)
+		{
+			if(!layer.enabled) continue;
+			const bool selected = layer.stableId == surfaceBrushSettings.layerId;
+			if(ImGui::Selectable(layer.name.c_str(), selected))
+				surfaceBrushSettings.layerId = layer.stableId;
+			if(selected) ImGui::SetItemDefaultFocus();
+		}
+		ImGui::EndCombo();
+	}
+	const char* paintModes[] = {"Paint", "Erase", "Fill", "Replace", "Normalize", "Layer Mask"};
+	int paintMode = static_cast<int>(surfaceBrushSettings.mode);
+	if(ImGui::Combo("Mode", &paintMode, paintModes, IM_ARRAYSIZE(paintModes)))
+		surfaceBrushSettings.mode = static_cast<TerraEngine::Editor::Terrain::TerrainSurfaceBrushMode>(paintMode);
+	int strength = static_cast<int>(surfaceBrushSettings.strength);
+	if(ImGui::SliderInt("Opacity", &strength, 1, 255))
+		surfaceBrushSettings.strength = static_cast<std::uint8_t>(strength);
+	ImGui::Checkbox("Use Layer Mask", &surfaceBrushSettings.useLayerMask);
+	ImGui::TextDisabled("Area operations use the selected stable layer and commit atomically.");
+	if(ImGui::Button("Apply To Terrain", ImVec2(-1.0F, 0.0F)))
+	{
+		const auto result = PreviewSurfaceBrush(surfaceBrushSettings,
+			surfaceBrushSettings.useLayerMask
+				? std::span<const std::uint8_t>(brushMask) : std::span<const std::uint8_t>{});
+		std::string error;
+		if(!result.changed) status = "Surface paint made no change. Choose a valid enabled layer.";
+		else if(!ApplySurfacePreview(error)) status = std::move(error);
+	}
+	if(displacedLayerWarning != 0u)
+		ImGui::TextColored(ImVec4(1.0F, 0.65F, 0.15F, 1.0F),
+			"Layer %u was displaced from a full four-layer sample.", displacedLayerWarning);
+}
+
+void TerrainWindow::DrawInspectorHoleControls()
+{
+	const char* modes[] = {"Paint Holes", "Erase Holes"};
+	int mode = static_cast<int>(holeBrushSettings.mode);
+	ImGui::SetNextItemWidth(-1.0F);
+	if(ImGui::Combo("##TerrainHoleMode", &mode, modes, IM_ARRAYSIZE(modes)))
+		holeBrushSettings.mode = static_cast<TerraEngine::Editor::Terrain::TerrainHoleBrushMode>(mode);
+	holeBrushSettings.radiusCells = TerraEngine::Editor::Terrain::TerrainHoleBrush::EffectiveRadiusCells(
+		holeBrushSettings.radiusCells);
+	ImGui::SliderFloat("Size", &holeBrushSettings.radiusCells,
+		TerraEngine::Editor::Terrain::TerrainHoleBrush::kMinimumRadiusCells, 128.0F, "%.1f cells");
+	ImGui::TextDisabled("Drag over the terrain in Scene View. Collision updates after release.");
+	if(holePreviewActive && ImGui::Button("Cancel Hole Preview", ImVec2(-1.0F, 0.0F)))
+		CancelHolePreview();
+}
+
+void TerrainWindow::DrawInspectorLayerControls()
+{
+	const auto stageAndApply = [this](TerraEngine::Terrain::TerrainLayerPatch patch, std::string& outError) {
+		return StageLayerPatch(patch, outError) && ApplyLayerPreview(outError);
+	};
+	const TerraEngine::Terrain::TerrainLayerStack stack = LayerPreview();
+	ImGui::TextDisabled("Layers are evaluated from top to bottom and keep stable paint IDs.");
+	for(std::size_t index = 0u; index < stack.layers.size(); ++index)
+	{
+		const auto& layer = stack.layers[index];
+		ImGui::PushID(static_cast<int>(layer.stableId));
+		const bool selected = selectedLayerId == layer.stableId;
+		if(ImGui::Selectable(layer.name.c_str(), selected, 0, ImVec2(0.0F, 24.0F)))
+			selectedLayerId = layer.stableId;
+		if(selected)
+		{
+			if(ImGui::SmallButton(layer.enabled ? "Disable" : "Enable"))
+			{
+				std::string error;
+				if(!stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::SetEnabled,
+					0u, layer.stableId, 0u, {}, !layer.enabled}, error)) status = std::move(error);
+			}
+			ImGui::SameLine();
+			if(index > 0u && ImGui::SmallButton("Move Up"))
+			{
+				std::string error;
+				if(!stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::Move,
+					0u, layer.stableId, static_cast<std::uint32_t>(index - 1u)}, error)) status = std::move(error);
+			}
+			ImGui::SameLine();
+			if(stack.layers.size() > 1u && ImGui::SmallButton("Remove"))
+			{
+				std::string error;
+				if(!stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::Remove,
+					0u, layer.stableId}, error)) status = std::move(error);
+			}
+		}
+		ImGui::PopID();
+	}
+	if(ImGui::Button("Add Terrain Layer", ImVec2(-1.0F, 0.0F)))
+	{
+		std::uint16_t nextId = 1u;
+		for(const auto& layer : stack.layers)
+			nextId = std::max<std::uint16_t>(nextId, static_cast<std::uint16_t>(layer.stableId + 1u));
+		TerraEngine::Terrain::TerrainLayer layer;
+		layer.stableId = nextId;
+		layer.name = "Layer " + std::to_string(nextId);
+		layer.fallbackState = TerraEngine::Terrain::TerrainLayerFallbackState::FallbackActive;
+		std::string error;
+		if(stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::Add,
+			0u, 0u, 0xffffffffu, std::move(layer)}, error)) selectedLayerId = nextId;
+		else status = std::move(error);
+	}
+}
+
+void TerrainWindow::DrawInspectorSettingsControls()
+{
+	if(terrainDirtyState.IsDirty() && ImGui::Button("Save Terrain Asset", ImVec2(-1.0F, 0.0F)))
+	{
+		std::string saveError;
+		if(!SaveTerrain(saveError)) status = std::move(saveError);
+	}
+	ImGui::Checkbox("Pin Selected Area", &selectedAreaPinned);
+	if(ImGui::CollapsingHeader("Procedural Tools")) DrawProceduralControls();
+	if(ImGui::CollapsingHeader("Diagnostics")) DrawDiagnosticControls();
+	if(ImGui::CollapsingHeader("Maintenance"))
+	{
+		if(ImGui::Button("Collect Unused Terrain Data", ImVec2(-1.0F, 0.0F)))
+		{
+			std::string message;
+			if(!RunBoundedGarbageCollection(64u, message)) status = std::move(message);
+		}
+		if(ImGui::Button("Repair Failed Generation", ImVec2(-1.0F, 0.0F)))
+		{
+			std::string message;
+			if(!RepairFailedGeneration(message)) status = std::move(message);
+		}
+	}
+}
+
+void TerrainWindow::DrawInspectorControls(TerraEngine::UUID selectedTerrainObjectId)
+{
+	const std::optional<TerraEngine::UUID> selectedId = selectedTerrainObjectId;
+	if(!editingSelectionActive || !IsEditingTargetSelected(selectedId) || !terrainStore)
+	{
+		ImGui::TextDisabled("Preparing terrain tools...");
+		if(!status.empty()) ImGui::TextWrapped("%s", status.c_str());
+		return;
+	}
+
+	ObserveTerrainMaterialChanges();
+	PollProceduralPreview();
+	DrawInspectorToolPalette();
+	ImGui::Spacing();
+	switch(inspectorTool)
+	{
+	case InspectorTool::Sculpt: DrawInspectorSculptControls(); break;
+	case InspectorTool::Paint: DrawInspectorPaintControls(); break;
+	case InspectorTool::Holes: DrawInspectorHoleControls(); break;
+	case InspectorTool::Layers: DrawInspectorLayerControls(); break;
+	case InspectorTool::Settings: DrawInspectorSettingsControls(); break;
+	}
+	if(authoringSession.IsDirty())
+	{
+		ImGui::Spacing();
+		ImGui::TextColored(ImVec4(1.0F, 0.75F, 0.25F, 1.0F), "Uncommitted terrain preview");
+		if(ImGui::Button("Cancel Preview", ImVec2(-1.0F, 0.0F)))
+			CancelDetachedPreview("Detached terrain preview cancelled; committed terrain was not changed.");
+	}
+	if(!status.empty() && status.find("ready:") == std::string::npos)
+	{
+		ImGui::Spacing();
+		ImGui::TextWrapped("%s", status.c_str());
+	}
+}
+
 void TerrainWindow::OnGui()
 {
-	ObserveTerrainMaterialChanges();
-	DrawCreateImportControls();
-	ImGui::Separator();
-	DrawSculptControls();
-	ImGui::Separator();
-	DrawMaterialControls();
-	ImGui::Separator();
-	DrawSurfaceControls();
-	ImGui::Separator();
-	DrawProceduralControls();
-	ImGui::Separator();
-	DrawDiagnosticControls();
+	// Terrain Tools is a service-backed window for automation and job ownership.
+	// Interactive controls live in TerrainComponent's Inspector, matching the
+	// selected-object workflow used by the other component authoring surfaces.
+	ImGui::TextDisabled("Select a Terrain component to edit it in the Inspector.");
 }
 
 void TerrainWindow::DrawMaterialControls()

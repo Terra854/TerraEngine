@@ -32,7 +32,7 @@ namespace TerraEngine::EditorTests
 			const char* categoryPath;
 		};
 
-		constexpr std::array<NativeWindowMenuContract, 10> kNativeWindowMenuContracts = {{
+		constexpr std::array<NativeWindowMenuContract, 9> kNativeWindowMenuContracts = {{
 			{"Editor/TerraEngine-Editor/Windows/HierarchyWindow.cpp", "Scene Hierarchy", "General"},
 			{"Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp", "Inspector", "General"},
 			{"Editor/TerraEngine-Editor/Windows/ProjectBrowserWindow.cpp", "Project Browser", "General"},
@@ -41,8 +41,7 @@ namespace TerraEngine::EditorTests
 			{"Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp", "Profiler", "Rendering"},
 			{"Editor/TerraEngine-Editor/Windows/ResourceResidencyWindow.cpp", "Resource Residency", "Rendering"},
 			{"Editor/TerraEngine-Editor/Windows/SchedulerDiagnosticsWindow.cpp", "Scheduler Diagnostics", "Diagnostics"},
-			{"Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp", "UI Builder", "Tools"},
-			{"Editor/TerraEngine-Editor/Windows/TerrainWindow.cpp", "Terrain Tools", "Tools"}
+			{"Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp", "UI Builder", "Tools"}
 		}};
 	}
 
@@ -75,9 +74,12 @@ namespace TerraEngine::EditorTests
 			const std::string buildProfiles = ReadWindowMenuSource("Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp");
 			const std::string projectSettings = ReadWindowMenuSource("Editor/TerraEngine-Editor/Windows/ProjectSettingsWindow.cpp");
 			const std::string preferences = ReadWindowMenuSource("Editor/TerraEngine-Editor/Windows/PreferencesWindow.cpp");
+			const std::string terrainTools = ReadWindowMenuSource("Editor/TerraEngine-Editor/Windows/TerrainWindow.cpp");
 			context.Expect(buildProfiles.find("EditorWindow(\"Build Profiles\", false,") == std::string::npos, "Build Profiles should rely on its File menu command instead of a Windows menu path.");
 			context.Expect(projectSettings.find("kProjectSettingsWindowTitle), false,") == std::string::npos, "Project Settings should rely on its Edit menu command instead of a Windows menu path.");
 			context.Expect(preferences.find("kPreferencesWindowTitle), false,") == std::string::npos, "Preferences should rely on its Edit menu command instead of a Windows menu path.");
+			context.Expect(terrainTools.find("EditorWindow(\"Terrain Tools\", false, \"Tools\")") == std::string::npos,
+				"Terrain Tools should live in TerrainComponent's Inspector instead of the Windows menu.");
 		});
 
 		registry.Add("Editor.WindowMenu.ManagedWindowsUseTheSameOptInModel", [](TestContext& context) {

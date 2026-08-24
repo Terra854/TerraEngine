@@ -95,6 +95,13 @@ public:
 	// Inspector actions name an exact scene instance. Opening that instance here
 	// binds editing, picking, persistence, and proxy updates to the same asset.
 	[[nodiscard]] bool OpenTerrainForEditing(TerraEngine::UUID objectId, std::string& outError);
+	// MainEditor calls this once per protected editor update. Terrain authoring is
+	// selected-object driven: choosing a Terrain component opens its asset and
+	// activates the last inspector tool without a separate enable checkbox.
+	void SynchronizeEditingSelection(const std::optional<TerraEngine::UUID>& selectedTerrainObjectId);
+	// InspectorWindow owns presentation while this class continues to own terrain
+	// transactions, previews, jobs, persistence, and Scene View brush state.
+	void DrawInspectorControls(TerraEngine::UUID selectedTerrainObjectId);
 	// Terrain height and holes are their own collision source. Play Mode calls this
 	// after creating a physics world, while committed edits call it automatically;
 	// users never need to add or configure a separate collider component.
@@ -138,6 +145,21 @@ protected:
 	void OnGui() override;
 
 private:
+	enum class InspectorTool : std::uint8_t
+	{
+		Sculpt,
+		Paint,
+		Holes,
+		Layers,
+		Settings
+	};
+	void ApplyInspectorToolMode();
+	void DrawInspectorToolPalette();
+	void DrawInspectorSculptControls();
+	void DrawInspectorPaintControls();
+	void DrawInspectorHoleControls();
+	void DrawInspectorLayerControls();
+	void DrawInspectorSettingsControls();
 	void DrawCreateImportControls();
 	void DrawSculptControls();
 	void DrawMaterialControls();
@@ -169,6 +191,8 @@ private:
 	std::string status;
 	int sourceFormat = 0;
 	bool sculpting = false;
+	bool editingSelectionActive = false;
+	InspectorTool inspectorTool = InspectorTool::Sculpt;
 	bool brushStrokeActive = false;
 	bool maskEnabled = false;
 	bool holeSculpting = false;

@@ -55,6 +55,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(sceneViewSource.find("radius / std::sin(limitingHalfAngle)") != std::string::npos,
 				"Bounds-aware framing should fit the selected object inside both viewport axes.");
 			const std::string inspectorSource = ReadSceneViewOverlaySourceForTest("Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp");
+			const std::string mainEditorSource = ReadSceneViewOverlaySourceForTest("Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp");
 			context.Expect(inspectorSource.find("(Generated material)") != std::string::npos,
 				"The Inspector should distinguish a live generated terrain material from a missing asset.");
 			context.Expect(inspectorSource.find("Canonical Transform") == std::string::npos
@@ -70,10 +71,13 @@ namespace TerraEngine::EditorTests
 				&& inspectorSource.find("Create independent copy") == std::string::npos,
 				"The Terrain Inspector should not expose redundant implementation prose or model an action as a persistent radio choice.");
 			context.Expect(inspectorSource.find("ImGui::TextUnformatted(\"Terrain Asset\")") != std::string::npos
-				&& inspectorSource.find("ImGui::Button(\"Edit Terrain\"") != std::string::npos
-				&& inspectorSource.find("OpenTerrainForEditing(objectId, openError)") != std::string::npos
+				&& inspectorSource.find("terrainTools->DrawInspectorControls") != std::string::npos
+				&& inspectorSource.find("ImGui::Button(\"Edit Terrain\"") == std::string::npos
 				&& inspectorSource.find("ImGui::Button(\"Make Independent\"") != std::string::npos,
-				"The Terrain Inspector should use compact author-facing fields, bind the selected terrain, and expose full-width actions.");
+				"The Terrain Inspector should host the always-available tool palette directly instead of opening a separate tool window.");
+			context.Expect(mainEditorSource.find("m_TerrainTools = std::make_shared<TerrainWindow>()") != std::string::npos
+				&& mainEditorSource.find("m_Windows.push_back(std::make_shared<TerrainWindow>())") == std::string::npos,
+				"Terrain authoring must remain an Inspector-backed service and never enter the drawable docking collection.");
 			const std::string terrainWindowSource = ReadSceneViewOverlaySourceForTest(
 				"Editor/TerraEngine-Editor/Windows/TerrainWindow.cpp");
 			const std::string terrainCreationSource = ReadSceneViewOverlaySourceForTest(

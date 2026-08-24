@@ -14,6 +14,7 @@
 #include <vector>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <filesystem>
 #include <memory>
 #include <unordered_map>
@@ -34,6 +35,7 @@
 
 class Object;
 class VulkanContext;
+class TerrainWindow;
 namespace TerraEngine::Runtime { struct PhysicsInvariantReport; }
 
 // PrefabAuthoringService owns the semantic prefab operations shared by the
@@ -263,6 +265,13 @@ public:
 	template<typename T>
 	// GetWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::shared_ptr<T> GetWindow() const {
+		// Terrain authoring is an Inspector-backed service, not a drawable window.
+		// Preserve the existing typed lookup contract without placing the service in
+		// the docking, drawing, layout, or Windows-menu collections.
+		if constexpr(std::is_same_v<T, TerrainWindow>)
+		{
+			return std::static_pointer_cast<T>(m_TerrainTools);
+		}
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto& win : m_Windows) {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -307,6 +316,10 @@ private:
 	
 	// Windows
 	std::vector<std::shared_ptr<EditorWindow>> m_Windows;
+	// TerrainWindow retains its historical type name because it owns substantial
+	// terrain authoring state, but it is now a non-drawn service consumed only by
+	// the Terrain Inspector, Scene View, automation, and editor lifecycle.
+	std::shared_ptr<TerrainWindow> m_TerrainTools;
 
 	// Internal State
 	bool showDemoWindow = false;

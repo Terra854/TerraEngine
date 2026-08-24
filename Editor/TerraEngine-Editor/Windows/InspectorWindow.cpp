@@ -5177,24 +5177,15 @@ void InspectorWindow::OnGui() {
 
 						ImGui::Spacing();
 						const float actionWidth = ImGui::GetContentRegionAvail().x;
-						if(ImGui::Button("Edit Terrain", ImVec2(actionWidth, 0.0f)))
+						if(auto terrainTools = m_Owner->GetWindow<TerrainWindow>())
 						{
-							if(auto terrainTools = m_Owner->GetWindow<TerrainWindow>())
-							{
-								terrainTools->SetVisible(true);
-								std::string openError;
-								const TerraEngine::UUID objectId = ObjectManager::instance().getUUID(*object);
-								if(terrainTools->OpenTerrainForEditing(objectId, openError))
-								{
-									// Edit Terrain is an action, so it activates the default Raise
-									// brush instead of requiring a second hidden-mode checkbox.
-									terrainTools->SetSculpting(true);
-									m_TerrainInspectorError.clear();
-								}
-								else m_TerrainInspectorError = std::move(openError);
-							}
-							else m_TerrainInspectorError = "Terrain Tools is unavailable.";
+							ImGui::SeparatorText("Terrain Tools");
+							// TerrainWindow owns the editor jobs and transactional data, while
+							// the selected component owns their compact authoring presentation.
+							terrainTools->DrawInspectorControls(ObjectManager::instance().getUUID(*object));
 						}
+						else m_TerrainInspectorError = "Terrain Tools is unavailable.";
+						ImGui::Spacing();
 						if(ImGui::Button("Frame in Scene View", ImVec2(actionWidth, 0.0f)))
 						{
 							std::string frameError;

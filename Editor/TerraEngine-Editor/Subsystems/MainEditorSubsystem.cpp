@@ -1472,7 +1472,10 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	context.editorProfiler->Initialize(context);
 	m_Windows.push_back(std::make_shared<HierarchyWindow>(this));
 	m_Windows.push_back(std::make_shared<InspectorWindow>(this));
-	m_Windows.push_back(std::make_shared<TerrainWindow>());
+	// Terrain authoring is selected-component UI backed by a persistent service.
+	// Keeping it outside m_Windows prevents ImGui docking/layout restoration from
+	// recreating the obsolete standalone Terrain Tools window.
+	m_TerrainTools = std::make_shared<TerrainWindow>();
 	m_Windows.push_back(std::make_shared<ProjectBrowserWindow>(this));
 	m_Windows.push_back(std::make_shared<GameViewWindow>(this));
 	m_Windows.push_back(std::make_shared<SceneViewWindow>(this));
@@ -2497,6 +2500,7 @@ void MainEditorSubsystem::Shutdown() {
 	}
 	ctx = nullptr;
 	m_Windows.clear();
+	m_TerrainTools.reset();
 }
 
 bool MainEditorSubsystem::StartPlayMode()
@@ -2893,6 +2897,19 @@ void MainEditorSubsystem::Update(float deltaTime) {
 	// input, preserving normal selection outside an active stroke.
 	if (auto terrainTools = GetWindow<TerrainWindow>())
 	{
+		std::optional<TerraEngine::UUID> selectedTerrainObjectId;
+		if(selectedEntity)
+		{
+			if(const std::optional<Object> object = ObjectManager::instance().getObject(*selectedEntity);
+				object && ObjectManager::instance().GetComponent<TerrainComponent>(*object) != nullptr)
+			{
+				selectedTerrainObjectId = ObjectManager::instance().getUUID(*object);
+			}
+		}
+		// Selection is the terrain-tool lifecycle. This update runs even when the
+		// Inspector is hidden, so Scene View never depends on a button or window
+		// being drawn before the selected terrain becomes editable.
+		terrainTools->SynchronizeEditingSelection(selectedTerrainObjectId);
 		if (auto sceneView = GetWindow<SceneViewWindow>())
 		{
 			sceneView->SetTerrainBrushCapture(terrainTools->IsBrushStrokeActive());
