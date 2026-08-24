@@ -8,6 +8,7 @@
 #include "Terrain/TerrainAreaCodec.h"
 #include "Terrain/TerrainAssetStore.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstring>
@@ -168,16 +169,16 @@ namespace TerraEngine::Runtime
 		}
 	}
 
-	TerraEngine::Renderer::Terrain::TerrainDirectMeshResult BuildMountedTerrainDirectMesh(
+	MountedTerrainRuntimeResult BuildMountedTerrainRuntime(
 		const ::ContentMount& mount,
 		const TerraEngine::UUID& expectedAssetId,
 		std::string_view logicalTerrainPath)
 	{
-		TerraEngine::Renderer::Terrain::TerrainDirectMeshResult failed{};
-		failed.assetId = expectedAssetId;
+		MountedTerrainRuntimeResult failed{};
+		failed.renderProxy.assetId = expectedAssetId;
 		if(expectedAssetId == TerraEngine::EMPTY_UUID || logicalTerrainPath.empty())
 		{
-			failed.diagnostic = "Mounted terrain proxy preparation requires a durable asset ID and logical path.";
+			failed.renderProxy.diagnostic = "Mounted terrain proxy preparation requires a durable asset ID and logical path.";
 			return failed;
 		}
 
@@ -185,7 +186,7 @@ namespace TerraEngine::Runtime
 			TerraEngine::TerrainContentResolver::ReadRoot(mount, logicalTerrainPath);
 		if(!descriptorRead.Succeeded())
 		{
-			failed.diagnostic = "The terrain descriptor is unavailable from the mounted export package.";
+			failed.renderProxy.diagnostic = "The terrain descriptor is unavailable from the mounted export package.";
 			return failed;
 		}
 
@@ -201,13 +202,13 @@ namespace TerraEngine::Runtime
 				|| *descriptorAssetId != expectedAssetId || !std::isfinite(sampleSpacingMetres)
 				|| sampleSpacingMetres <= 0.0F)
 			{
-				failed.diagnostic = "The mounted terrain descriptor has invalid format, identity, or sample spacing.";
+				failed.renderProxy.diagnostic = "The mounted terrain descriptor has invalid format, identity, or sample spacing.";
 				return failed;
 			}
 		}
 		catch(const nlohmann::json::exception& exception)
 		{
-			failed.diagnostic = std::string("The mounted terrain descriptor is invalid: ") + exception.what();
+			failed.renderProxy.diagnostic = std::string("The mounted terrain descriptor is invalid: ") + exception.what();
 			return failed;
 		}
 
@@ -216,7 +217,7 @@ namespace TerraEngine::Runtime
 		const auto currentText = ReadMountedText(mount, (dataRoot / "CURRENT").generic_string(), 4096U);
 		if(!currentText)
 		{
-			failed.diagnostic = "The mounted terrain bundle has no readable CURRENT pointer.";
+			failed.renderProxy.diagnostic = "The mounted terrain bundle has no readable CURRENT pointer.";
 			return failed;
 		}
 		std::istringstream current(*currentText);
@@ -226,7 +227,7 @@ namespace TerraEngine::Runtime
 		std::getline(current, predecessor);
 		if(primary.empty())
 		{
-			failed.diagnostic = "The mounted terrain CURRENT pointer is empty.";
+			failed.renderProxy.diagnostic = "The mounted terrain CURRENT pointer is empty.";
 			return failed;
 		}
 
@@ -250,12 +251,12 @@ namespace TerraEngine::Runtime
 
 			std::vector<std::uint8_t> heightPayload;
 			if(!DecodeArea(mount, dataRoot, origin->heightHash, expectedAssetId,
-				TerraEngine::Terrain::TerrainChannelKind::Height, heightPayload, failed.diagnostic)) continue;
+				TerraEngine::Terrain::TerrainChannelKind::Height, heightPayload, failed.renderProxy.diagnostic)) continue;
 			const std::size_t expectedHeightBytes = TerraEngine::Terrain::kTerrainAreaSampleCount
 				* sizeof(std::int32_t);
 			if(heightPayload.size() != expectedHeightBytes)
 			{
-				failed.diagnostic = "The mounted terrain origin height payload has the wrong decoded size.";
+				failed.renderProxy.diagnostic = "The mounted terrain origin height payload has the wrong decoded size.";
 				continue;
 			}
 			std::vector<std::int32_t> heights(TerraEngine::Terrain::kTerrainAreaSampleCount);
@@ -265,10 +266,10 @@ namespace TerraEngine::Runtime
 			if(origin->holeHash)
 			{
 				if(!DecodeArea(mount, dataRoot, *origin->holeHash, expectedAssetId,
-					TerraEngine::Terrain::TerrainChannelKind::Holes, holes, failed.diagnostic)) continue;
+					TerraEngine::Terrain::TerrainChannelKind::Holes, holes, failed.renderProxy.diagnostic)) continue;
 				if(holes.size() != TerraEngine::Terrain::kTerrainAreaSampleCount / 8U)
 				{
-					failed.diagnostic = "The mounted terrain origin hole payload has the wrong decoded size.";
+					failed.renderProxy.diagnostic = "The mounted terrain origin hole payload has the wrong decoded size.";
 					continue;
 				}
 			}
@@ -280,11 +281,40 @@ namespace TerraEngine::Runtime
 			input.sampleSpacingMetres = sampleSpacingMetres;
 			input.heightMillimetres = heights;
 			input.holeCellBits = holes;
-			return TerraEngine::Renderer::Terrain::BuildTerrainDirectMesh(input);
+			MountedTerrainRuntimeResult completed{};
+			completed.renderProxy = TerraEngine::Renderer::Terrain::BuildTerrainDirectMesh(input);
+			if(!completed.renderProxy.Succeeded()) return completed;
+			completed.collisionRecipe.terrainAssetId = expectedAssetId;
+			completed.collisionRecipe.authoredGeneration = origin->generation;
+			completed.collisionRecipe.authoredHash = origin->authoredHash.low64 ^ origin->authoredHash.high64;
+			if(completed.collisionRecipe.authoredHash == 0U) completed.collisionRecipe.authoredHash = 1U;
+			completed.collisionRecipe.sampleSpacingMetres = sampleSpacingMetres;
+			completed.collisionRecipe.heightMillimetres.resize(
+				TerraEngine::Physics::TerrainHeightFieldRecipe::kSampleCount);
+			for(std::uint32_t z = 0U; z < TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent; ++z)
+				for(std::uint32_t x = 0U; x < TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent; ++x)
+					completed.collisionRecipe.heightMillimetres[
+						static_cast<std::size_t>(z) * TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent + x]
+						= heights[static_cast<std::size_t>(std::min(z, 255U)) * 256U + std::min(x, 255U)];
+			completed.collisionRecipe.holeBits = std::move(holes);
+			if(completed.collisionRecipe.holeBits.empty())
+				completed.collisionRecipe.holeBits.assign(
+					TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount, 0U);
+			completed.sourceRootHash = origin->authoredHash;
+			completed.sourcePublicationGeneration = origin->generation;
+			return completed;
 		}
 
-		if(failed.diagnostic.empty())
-			failed.diagnostic = "Neither mounted terrain CURRENT generation contains a complete origin area.";
+		if(failed.renderProxy.diagnostic.empty())
+			failed.renderProxy.diagnostic = "Neither mounted terrain CURRENT generation contains a complete origin area.";
 		return failed;
+	}
+
+	TerraEngine::Renderer::Terrain::TerrainDirectMeshResult BuildMountedTerrainDirectMesh(
+		const ::ContentMount& mount,
+		const TerraEngine::UUID& expectedAssetId,
+		std::string_view logicalTerrainPath)
+	{
+		return std::move(BuildMountedTerrainRuntime(mount, expectedAssetId, logicalTerrainPath).renderProxy);
 	}
 }

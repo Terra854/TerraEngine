@@ -128,8 +128,11 @@ mutate a shared root.
 Layers are named and generation-tracked, with four local contributors per
 control page. Holes use the canonical cell mask shared by rendering and
 heightfield collision. Heightfield collision supports complete replacement and
-last-known-good fallback; voxels, caves, overhangs, runtime deformation,
-vegetation, navigation, and water are outside terrain v1.
+last-known-good fallback. Creation, scene loading, Play Mode world creation,
+committed height/hole edits, and packaged runtime startup publish collision
+automatically; authors do not add a separate collider component. Voxels, caves,
+overhangs, runtime deformation, vegetation, navigation, and water are outside
+terrain v1.
 
 ## Clean-checkout installed contract
 

@@ -58,6 +58,55 @@ TerrainWindow::~TerrainWindow()
 		TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().ClearPublication(terrainStore.get());
 }
 
+bool TerrainWindow::QueueAutomaticTerrainCollision(std::string& outError)
+{
+	outError.clear();
+	if(!terrainStore) return true;
+	if(committedHeightMm.size() != TerraEngine::Terrain::kTerrainAreaSampleCount)
+	{
+		outError = "Automatic terrain collision requires one resident canonical terrain area.";
+		return false;
+	}
+
+	// Edit Mode deliberately owns no live physics world. Keep the request armed;
+	// StartPlayMode calls this method again immediately after world creation.
+	if(!TerraEngine::Physics::PhysicsSystem::Instance().WorldHandle().IsValid())
+		return true;
+
+	const auto capture = terrainStore->CaptureRoot();
+	if(!capture.IsValid())
+	{
+		outError = "Automatic terrain collision requires a current immutable root.";
+		return false;
+	}
+	const auto started = std::chrono::steady_clock::now();
+	TerraEngine::Physics::TerrainHeightFieldRecipe recipe;
+	recipe.terrainAssetId = capture.root->assetUuid;
+	recipe.authoredGeneration = capture.publicationGeneration;
+	recipe.authoredHash = capture.root->rootContentHash.low64 ^ capture.root->rootContentHash.high64;
+	if(recipe.authoredHash == 0u) recipe.authoredHash = 1u;
+	recipe.sampleSpacingMetres = authoredSampleSpacingMetres;
+	recipe.heightMillimetres.resize(TerraEngine::Physics::TerrainHeightFieldRecipe::kSampleCount);
+	for(std::uint32_t z = 0u; z < TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent; ++z)
+		for(std::uint32_t x = 0u; x < TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent; ++x)
+			recipe.heightMillimetres[static_cast<std::size_t>(z) * TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent + x]
+				= committedHeightMm[static_cast<std::size_t>(std::min(z, 255u)) * 256u + std::min(x, 255u)];
+	recipe.holeBits = committedHoleMask;
+	if(recipe.holeBits.size() != TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount)
+		recipe.holeBits.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount, 0u);
+	auto candidate = TerraEngine::Physics::Terrain::PrepareTerrainCollisionCandidate(
+		std::move(recipe), capture.root->rootContentHash, capture.publicationGeneration);
+	candidate.buildLatencyMilliseconds = std::chrono::duration<double, std::milli>(
+		std::chrono::steady_clock::now() - started).count();
+	if(!candidate.complete)
+	{
+		outError = "The automatic terrain collision recipe failed provider-neutral validation.";
+		return false;
+	}
+	TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().SetPreparedCandidate(std::move(candidate));
+	return true;
+}
+
 void TerrainWindow::ScheduleRenderProxyBuild()
 {
 	const bool useDetachedPreview = authoringSession.IsDirty() || holePreviewActive;
@@ -318,7 +367,9 @@ void TerrainWindow::PollRenderProxyBuild()
 		std::memcpy(material->header.magic, "TMAT", 4u);
 		material->header.version = kMaterialCurrentVersion;
 		material->header.headerSize = static_cast<std::uint16_t>(sizeof(MaterialHeader));
-		material->header.shadingModel = static_cast<std::uint32_t>(ShadingModel::Unlit);
+		// Direct terrain vertices carry generated slope normals, so use the shared
+		// physically based surface path and let scene lights and shadows affect them.
+		material->header.shadingModel = static_cast<std::uint32_t>(ShadingModel::MetallicRoughness);
 		material->header.alphaMode = static_cast<std::uint32_t>(AlphaMode::Opaque);
 		// Terrain is normally viewed from above, but an editor authoring proxy must
 		// remain visible while orbiting below it or while a flat tile has no vertical
@@ -506,33 +557,13 @@ TerraEngine::Editor::Terrain::TerrainAutomationCommandResult TerrainWindow::Exec
 	}
 	if(capability == "terrain.collision-refresh")
 	{
-		if(!terrainStore || committedHeightMm.size() != TerraEngine::Terrain::kTerrainAreaSampleCount)
-			return {false, "Unavailable", "Collision refresh requires one resident canonical terrain area."};
-		const auto capture = terrainStore->CaptureRoot();
-		if(!capture.IsValid()) return {false, "Unavailable", "Collision refresh requires a current immutable root."};
-		const auto started = std::chrono::steady_clock::now();
-		TerraEngine::Physics::TerrainHeightFieldRecipe recipe;
-		recipe.terrainAssetId = capture.root->assetUuid;
-		recipe.authoredGeneration = capture.publicationGeneration;
-		recipe.authoredHash = capture.root->rootContentHash.low64 ^ capture.root->rootContentHash.high64;
-		if(recipe.authoredHash == 0u) recipe.authoredHash = 1u;
-		recipe.sampleSpacingMetres = authoredSampleSpacingMetres;
-		recipe.heightMillimetres.resize(TerraEngine::Physics::TerrainHeightFieldRecipe::kSampleCount);
-		for(std::uint32_t z = 0u; z < TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent; ++z)
-			for(std::uint32_t x = 0u; x < TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent; ++x)
-				recipe.heightMillimetres[static_cast<std::size_t>(z) * TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent + x]
-					= committedHeightMm[static_cast<std::size_t>(std::min(z, 255u)) * 256u + std::min(x, 255u)];
-		recipe.holeBits = committedHoleMask;
-		if(recipe.holeBits.size() != TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount)
-			recipe.holeBits.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount, 0u);
-		auto candidate = TerraEngine::Physics::Terrain::PrepareTerrainCollisionCandidate(
-			std::move(recipe), capture.root->rootContentHash, capture.publicationGeneration);
-		candidate.buildLatencyMilliseconds = std::chrono::duration<double, std::milli>(
-			std::chrono::steady_clock::now() - started).count();
-		if(!candidate.complete) return {false, "InvalidSchema", "The generated terrain collision recipe failed provider-neutral validation."};
-		TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().SetPreparedCandidate(std::move(candidate));
-		return {true, "Pending", "Terrain collision candidate queued for the protected before-physics boundary.", std::nullopt,
-			{{"sourceRootHash", TerraEngine::Terrain::ToHexString(capture.root->rootContentHash)},
+		std::string error;
+		if(!QueueAutomaticTerrainCollision(error)) return {false, "Unavailable", std::move(error)};
+		const auto capture = terrainStore ? terrainStore->CaptureRoot() : TerraEngine::Terrain::TerrainRootCapture{};
+		return {true, "Pending", TerraEngine::Physics::PhysicsSystem::Instance().WorldHandle().IsValid()
+			? "Terrain collision candidate queued for the protected before-physics boundary."
+			: "Terrain collision is automatic and will publish when the physics world starts.", std::nullopt,
+			{{"sourceRootHash", capture.IsValid() ? TerraEngine::Terrain::ToHexString(capture.root->rootContentHash) : std::string{}},
 			 {"sourcePublicationGeneration", capture.publicationGeneration},
 			 {"visibilityBoundary", "terrain_collision_publish_before_physics"}}};
 	}
@@ -1275,6 +1306,12 @@ void TerrainWindow::InitializeAuthoringTerrain(
 		terrainStore.get(), [](TerraEngine::Physics::TerrainCollisionReplacementPacket packet) {
 			return TerraEngine::Physics::PhysicsSystem::Instance().CommitTerrainCollisionReplacement(std::move(packet));
 		});
+	// Terrain always owns heightfield collision. In Edit Mode this remains armed
+	// until Play Mode creates its world; exported/editor worlds that already exist
+	// receive the candidate immediately.
+	std::string collisionError;
+	if(!QueueAutomaticTerrainCollision(collisionError) && !collisionError.empty())
+		status = collisionError;
 	automationAdapter.SetPrepareCallback([this](const TerraEngine::Editor::Automation::TerrainAutomationRequest& request, std::string& error) { return PrepareAutomationTransaction(request,error); });
 	terrainDirtyState.MarkSaved(terrainStore->CaptureRoot());
 	// A terrain always starts with one stable fallback layer. Surface authoring
@@ -2013,6 +2050,7 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 	const auto publicationStart = std::chrono::steady_clock::now();
 	authoringSystem.PublishAtProtectedBoundary();
 	bool committedRenderableChange = false;
+	bool committedCollisionChange = false;
 	for(const auto& receipt : authoringSystem.DrainReceipts())
 	{
 		// Automation jobs become terminal only after this protected-boundary receipt,
@@ -2028,6 +2066,22 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 		if(receipt.outcome == TerraEngine::Terrain::TerrainEditOutcome::Committed)
 		{
 			committedRenderableChange = true;
+			if(receipt.historyPayload)
+			{
+				committedCollisionChange = std::any_of(
+					receipt.historyPayload->forwardPatches.begin(), receipt.historyPayload->forwardPatches.end(),
+					[](const TerraEngine::Terrain::TerrainPatch& patch) {
+						return patch.kind == TerraEngine::Terrain::TerrainPatchKind::ReplaceHeight
+							|| patch.kind == TerraEngine::Terrain::TerrainPatchKind::ReplaceHoles;
+					}) || committedCollisionChange;
+			}
+			else if(isHoleReceipt || isProceduralReceipt || (!isLayerReceipt && !isSurfaceReceipt))
+			{
+				// Older or compatibility producers may omit history payloads. Their
+				// typed receipt identity still tells us whether height/hole authority
+				// changed, so collision cannot silently remain on an older generation.
+				committedCollisionChange = true;
+			}
 			if(!wasHistoryReplay && receipt.historyPayload && terrainStore && terrainQueue)
 			{
 				const auto capture = terrainStore->CaptureRoot();
@@ -2100,6 +2154,12 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 	}
 	if(committedRenderableChange)
 		ScheduleRenderProxyBuild();
+	if(committedCollisionChange)
+	{
+		std::string collisionError;
+		if(!QueueAutomaticTerrainCollision(collisionError) && !collisionError.empty())
+			status = collisionError;
+	}
 	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
 		std::chrono::steady_clock::now() - publicationStart).count();
 	publicationStageSamplesNanoseconds.push_back(static_cast<std::uint64_t>(std::max<std::int64_t>(0, elapsed)));

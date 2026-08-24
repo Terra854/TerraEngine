@@ -81,6 +81,10 @@ public:
 	// Inspector actions name an exact scene instance. Opening that instance here
 	// binds editing, picking, persistence, and proxy updates to the same asset.
 	[[nodiscard]] bool OpenTerrainForEditing(TerraEngine::UUID objectId, std::string& outError);
+	// Terrain height and holes are their own collision source. Play Mode calls this
+	// after creating a physics world, while committed edits call it automatically;
+	// users never need to add or configure a separate collider component.
+	[[nodiscard]] bool QueueAutomaticTerrainCollision(std::string& outError);
 	[[nodiscard]] bool HasDetachedPreview() const noexcept { return authoringSession.IsDirty(); }
 	// Lifecycle owners call this before a scene/project/play-mode/device boundary.
 	// It only discards detached data, so an uncommitted brush can never mutate

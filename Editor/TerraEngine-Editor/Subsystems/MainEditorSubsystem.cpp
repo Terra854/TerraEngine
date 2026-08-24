@@ -2559,6 +2559,21 @@ bool MainEditorSubsystem::StartPlayMode()
 		ClearPlayModeSceneState();
 		return false;
 	}
+	if(auto terrainTools = GetWindow<TerrainWindow>())
+	{
+		// Terrain collision is derived automatically from the current committed
+		// height/hole channels. Queue it after world creation so the terrain publish
+		// workload makes the static body visible before the first simulation step.
+		std::string collisionError;
+		if(!terrainTools->QueueAutomaticTerrainCollision(collisionError))
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Play Mode terrain collision preparation failed: " << collisionError);
+			TerraEngine::Physics::PhysicsSystem::Instance().StopWorld();
+			ClearPlayModeSceneState();
+			return false;
+		}
+	}
 	if(ctx != nullptr && ctx->engine != nullptr)
 		ctx->engine->ResetFrameTimer();
 	// The world is now live, so no entry failure can leave an otherwise valid edit

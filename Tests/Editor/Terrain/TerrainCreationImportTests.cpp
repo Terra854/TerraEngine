@@ -101,7 +101,8 @@ namespace TerraEngine::EditorTests
 				std::istreambuf_iterator<char>());
 			context.Expect(editorSubsystemSource.find(
 				"TerrainRenderProxyRegistry::Instance()") != std::string::npos
-				&& editorSubsystemSource.find("terrainProxyRestorePending = true") != std::string::npos,
+				&& editorSubsystemSource.find("terrainProxyRestorePending = true") != std::string::npos
+				&& editorSubsystemSource.find("QueueAutomaticTerrainCollision") != std::string::npos,
 				"The editor must detect a visible registered TerrainComponent whose derived render proxy is missing, regardless of which producer assigned it.");
 
 			const auto rendererPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
@@ -127,10 +128,13 @@ namespace TerraEngine::EditorTests
 			const std::string exportPipelineSource(
 				(std::istreambuf_iterator<char>(exportPipelineFile)),
 				std::istreambuf_iterator<char>());
-			context.Expect(runtimeSystemSource.find("BuildMountedTerrainDirectMesh") != std::string::npos
+			context.Expect(runtimeSystemSource.find("BuildMountedTerrainRuntime") != std::string::npos
 				&& runtimeSystemSource.find("TerrainRenderProxyRegistry::Instance().Publish") != std::string::npos
+				&& runtimeSystemSource.find("CommitTerrainCollisionReplacement") != std::string::npos
+				&& runtimeSystemSource.find("ShadingModel::MetallicRoughness") != std::string::npos
+				&& terrainWindowSource.find("ShadingModel::MetallicRoughness") != std::string::npos
 				&& exportPipelineSource.find("importer == \"TerrainImporter\") type = AssetType::Terrain") != std::string::npos,
-				"Standalone exports must register terrain UUID paths and publish mounted render proxies without relying on TerrainWindow.");
+				"Editor and standalone terrain proxies must publish lit render materials and collision products without serialized helper components.");
 
 			// The editor executable publishes terrain proxies while RenderSystem consumes
 			// them from the engine DLL. Keeping Instance() out of the header guarantees

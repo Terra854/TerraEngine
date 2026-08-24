@@ -13,6 +13,7 @@
 #include "Physics/Assets/PhysicsMaterial.h"
 #include "Physics/PhysicsAuthoringGeneration.h"
 #include "Physics/PhysicsPreparationPlan.h"
+#include "Physics/Terrain/TerrainCollisionSystem.h"
 #include "Physics/PhysicsTransactions.h"
 #include "Physics/TransformPublicationPacket.h"
 #include "Resource/ResourceManager.h"
@@ -300,6 +301,10 @@ namespace TerraEngine::Physics {
 				lastStatePagesReused = 0U;
 				lastStatePagesCopied = 0U;
 				lastAggregateDiagnosticsTick = 0U;
+				// Terrain collision is derived from authored height data rather than a
+				// scene collider component. Re-stage its latest immutable candidate for
+				// this new world generation before the first simulation frame.
+				TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().RequestRepublish();
 				return true;
 			}
 			// Preserve the provider's actionable failure at the protected creation
@@ -327,6 +332,10 @@ namespace TerraEngine::Physics {
 			world.BeginStopping();
 			world.BeginDraining();
 			const Backend::PhysicsBackendResult destroyed = backend->DestroyWorld(handle);
+			// Provider handles cannot cross a world-generation boundary. The terrain
+			// collision system retains the desired recipe and republishes fresh handles
+			// after StartWorldLocked creates the replacement world.
+			terrainCollisions.clear();
 			runtimeBodies.clear();
 			bodyObjects.clear();
 			runtimeConstraints.clear();

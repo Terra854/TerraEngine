@@ -118,10 +118,13 @@ namespace TerraEngine::Tests
 			auto workloads = system.DeclareFrameWorkloads(0.0f);
 			TerraEngine::Scheduling::JobGraphContext graphContext;
 			if(workloads.size() == 2u && workloads.back().work) workloads.back().work(graphContext);
-			const auto snapshot = system.Snapshot();
-			context.Expect(commitCount == 1u && snapshot.status == TerraEngine::Physics::Terrain::TerrainCollisionStatus::Current
-				&& snapshot.sourcePublicationGeneration == 9u,
-				"The protected collision workload must validate the immutable root and commit exactly one provider replacement before physics visibility.");
+			system.RequestRepublish();
+			workloads = system.DeclareFrameWorkloads(0.0f);
+			if(workloads.size() == 2u && workloads.back().work) workloads.back().work(graphContext);
+			const auto republishedSnapshot = system.Snapshot();
+			context.Expect(commitCount == 2u && republishedSnapshot.status == TerraEngine::Physics::Terrain::TerrainCollisionStatus::Current
+				&& republishedSnapshot.sourcePublicationGeneration == 9u,
+				"The protected collision workload must commit automatically on first publication and again when a fresh physics world requests the desired terrain.");
 			system.ClearPublication(&store);
 			system.Shutdown();
 		});

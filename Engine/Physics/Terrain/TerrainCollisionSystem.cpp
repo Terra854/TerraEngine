@@ -54,7 +54,7 @@ namespace TerraEngine::Physics::Terrain
 	TerrainCollisionSystem& TerrainCollisionSystem::Instance() { static TerrainCollisionSystem instance; return instance; }
 	void TerrainCollisionSystem::Initialize() { initialized.store(true, std::memory_order_release); }
 	void TerrainCollisionSystem::Update(float) { /* Work is declared below; Update never mutates collision state. */ }
-	void TerrainCollisionSystem::Shutdown() { initialized.store(false, std::memory_order_release); std::scoped_lock lock(mutex); prepared.reset(); snapshot = {}; publicationStore = nullptr; commitReplacement = {}; }
+	void TerrainCollisionSystem::Shutdown() { initialized.store(false, std::memory_order_release); std::scoped_lock lock(mutex); prepared.reset(); desired.reset(); snapshot = {}; publicationStore = nullptr; commitReplacement = {}; }
 	std::string TerrainCollisionSystem::SystemName() { return "TerrainCollisionSystem"; }
 	TerraEngine::Scheduling::SystemDeclaration TerrainCollisionSystem::SchedulerDeclaration()
 	{
@@ -102,10 +102,28 @@ namespace TerraEngine::Physics::Terrain
 		std::scoped_lock lock(mutex);
 		if(publicationStore != store) return;
 		prepared.reset();
+		desired.reset();
 		publicationStore = nullptr;
 		commitReplacement = {};
 	}
-	void TerrainCollisionSystem::SetPreparedCandidate(TerrainCollisionCandidate candidate) { std::scoped_lock lock(mutex); prepared = std::move(candidate); snapshot.status = TerrainCollisionStatus::Pending; }
+	void TerrainCollisionSystem::SetPreparedCandidate(TerrainCollisionCandidate candidate)
+	{
+		std::scoped_lock lock(mutex);
+		// Keep one immutable desired copy in addition to the one-shot prepared work.
+		// Typed vectors own their samples, so this copy cannot observe later editor
+		// mutations and is safe to reuse after a physics-world generation change.
+		desired = candidate;
+		prepared = std::move(candidate);
+		snapshot.status = TerrainCollisionStatus::Pending;
+	}
+	void TerrainCollisionSystem::RequestRepublish()
+	{
+		std::scoped_lock lock(mutex);
+		if(!desired) return;
+		prepared = *desired;
+		snapshot.status = TerrainCollisionStatus::Pending;
+		snapshot.message = "Terrain collision is queued automatically for the fresh physics world.";
+	}
 	void TerrainCollisionSystem::CancelPreparedCandidate(std::string message)
 	{
 		std::scoped_lock lock(mutex);

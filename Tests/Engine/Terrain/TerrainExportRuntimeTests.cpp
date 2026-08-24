@@ -122,12 +122,14 @@ namespace TerraEngine::Tests
 			ContentMount mount;
 			context.Expect(mount.Mount(workspace.CreatePack()),
 				"The saved TERRAINROOT2 runtime fixture must mount through TEPAK.");
-			auto loaded = TerraEngine::Runtime::BuildMountedTerrainDirectMesh(
+			auto loaded = TerraEngine::Runtime::BuildMountedTerrainRuntime(
 				mount, assetId, "Terrain/Runtime.teterrain");
-			context.Expect(loaded.Succeeded() && loaded.mesh->generatedDirectMeshletRoute.IsComplete()
-				&& !loaded.mesh->meshletRecords.empty(),
-				"A saved raw-channel terrain generation must become a complete direct-resident render mesh without editor services. "
-				+ loaded.diagnostic);
+			context.Expect(loaded.Succeeded() && loaded.renderProxy.mesh->generatedDirectMeshletRoute.IsComplete()
+				&& !loaded.renderProxy.mesh->meshletRecords.empty() && loaded.collisionRecipe.IsComplete()
+				&& loaded.collisionRecipe.sampleSpacingMetres == 2.0F
+				&& loaded.collisionRecipe.heightMillimetres.front() == 1250,
+				"A saved raw-channel terrain generation must become complete direct-resident render and collision products without editor services. "
+				+ loaded.renderProxy.diagnostic);
 		});
 
 		registry.Add("Terrain.ExportRuntime.MultiViewPacketsRetainOneCurrentSourceIdentity", [](TestContext& context) {

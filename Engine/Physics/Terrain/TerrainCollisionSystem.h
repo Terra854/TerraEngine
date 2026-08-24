@@ -67,6 +67,10 @@ namespace TerraEngine::Physics::Terrain
 			std::function<TerrainCollisionReplacementReceipt(TerrainCollisionReplacementPacket)> commit);
 		void ClearPublication(const TerraEngine::Terrain::TerrainAssetStore* store) noexcept;
 		void SetPreparedCandidate(TerrainCollisionCandidate candidate);
+		// Physics worlds are generation-scoped. When Play Mode or a settings change
+		// creates a fresh world, stage the latest authored terrain again so users do
+		// not have to rebuild or attach collision components by hand.
+		void RequestRepublish();
 		void CancelPreparedCandidate(std::string message = "Terrain collision refresh was cancelled before publication.");
 		[[nodiscard]] bool PublishBeforePhysics(const TerraEngine::Terrain::TerrainAssetStore& store);
 	private:
@@ -74,6 +78,7 @@ namespace TerraEngine::Physics::Terrain
 		std::atomic<bool> initialized{false};
 		mutable std::mutex mutex;
 		std::optional<TerrainCollisionCandidate> prepared;
+		std::optional<TerrainCollisionCandidate> desired;
 		TerrainCollisionSnapshot snapshot{};
 		const TerraEngine::Terrain::TerrainAssetStore* publicationStore = nullptr;
 		std::function<TerrainCollisionReplacementReceipt(TerrainCollisionReplacementPacket)> commitReplacement;

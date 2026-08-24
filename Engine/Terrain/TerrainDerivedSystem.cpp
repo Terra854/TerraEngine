@@ -6,6 +6,8 @@
 #include "Core/Logger/Logger.h"
 #include "Core/Object/ObjectManager.h"
 #include "File Formats/TerraEngineMaterialFile.h"
+#include "Physics/PhysicsSystem.h"
+#include "Physics/PhysicsTransactions.h"
 #include "Renderer/Terrain/TerrainRenderProxyRegistry.h"
 #include "Resource/ResourceManager.h"
 #include "Runtime/ContentMount/ContentMount.h"
@@ -27,7 +29,7 @@ namespace TerraEngine::Terrain
 		struct PendingRuntimeTerrainProxy
 		{
 			TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
-			std::future<TerraEngine::Renderer::Terrain::TerrainDirectMeshResult> preparedMesh;
+			std::future<TerraEngine::Runtime::MountedTerrainRuntimeResult> preparedRuntime;
 		};
 
 		std::unique_ptr<Material> CreateRuntimeTerrainMaterial(ResourceManager& resources)
@@ -38,7 +40,10 @@ namespace TerraEngine::Terrain
 			std::memcpy(material->header.magic, "TMAT", 4U);
 			material->header.version = kMaterialCurrentVersion;
 			material->header.headerSize = static_cast<std::uint16_t>(sizeof(MaterialHeader));
-			material->header.shadingModel = static_cast<std::uint32_t>(ShadingModel::Unlit);
+			// The generated proxy includes terrain slope normals. Selecting the shared
+			// PBR model makes exported terrain consume the same lights and shadows as
+			// every other opaque scene surface.
+			material->header.shadingModel = static_cast<std::uint32_t>(ShadingModel::MetallicRoughness);
 			material->header.alphaMode = static_cast<std::uint32_t>(AlphaMode::Opaque);
 			material->header.flags = DoubleSided;
 			material->header.shaderCollectionId = resources.GetDefaultShaderCollectionID();
@@ -127,7 +132,7 @@ namespace TerraEngine::Terrain
 				auto task = ThreadPool::instance().createTask(
 					[assetId = terrain.terrainAssetId, path = mountedPathText]()
 					{
-						return TerraEngine::Runtime::BuildMountedTerrainDirectMesh(
+						return TerraEngine::Runtime::BuildMountedTerrainRuntime(
 							ContentMount::Instance(), assetId, path);
 					});
 				pending.push_back({terrain.terrainAssetId, task->getFuture()});
@@ -139,12 +144,29 @@ namespace TerraEngine::Terrain
 		{
 			// Resource registration and registry publication remain on this protected
 			// coordinator boundary; workers return detached value-only meshes.
-			auto completed = item.preparedMesh.get();
+			auto completed = item.preparedRuntime.get();
 			if(!completed.Succeeded())
 			{
 				TERRAENGINE_LOG(LogLevel::Error,
 					"Failed to prepare exported terrain " << TerraEngine::ToHexString(item.assetId)
-					<< ": " << completed.diagnostic);
+					<< ": " << completed.renderProxy.diagnostic);
+				continue;
+			}
+			// Exported terrain uses the same typed provider transaction as editor
+			// terrain. The package's committed height/hole generation therefore owns a
+			// static Jolt body automatically, without serialized collider components.
+			TerraEngine::Physics::TerrainCollisionReplacementPacket collisionPacket;
+			collisionPacket.id = "runtime-terrain-collision-" + TerraEngine::ToHexString(item.assetId);
+			collisionPacket.sourceRootHash = completed.sourceRootHash;
+			collisionPacket.sourcePublicationGeneration = completed.sourcePublicationGeneration;
+			collisionPacket.recipe = std::move(completed.collisionRecipe);
+			const auto collisionReceipt = TerraEngine::Physics::PhysicsSystem::Instance()
+				.CommitTerrainCollisionReplacement(std::move(collisionPacket));
+			if(!collisionReceipt.committed)
+			{
+				TERRAENGINE_LOG(LogLevel::Error,
+					"Failed to publish exported terrain collision "
+					<< TerraEngine::ToHexString(item.assetId) << ": " << collisionReceipt.message);
 				continue;
 			}
 			if(materialId == TerraEngine::EMPTY_UUID)
@@ -153,7 +175,7 @@ namespace TerraEngine::Terrain
 					"terrain-runtime-direct-fallback", CreateRuntimeTerrainMaterial(resources));
 			}
 			const TerraEngine::UUID meshId = resources.RegisterMesh(
-				"terrain/runtime/" + TerraEngine::ToHexString(item.assetId), std::move(completed.mesh));
+				"terrain/runtime/" + TerraEngine::ToHexString(item.assetId), std::move(completed.renderProxy.mesh));
 			const bool published = TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance().Publish(
 				{item.assetId, meshId, materialId, 0U});
 			if(!published)
