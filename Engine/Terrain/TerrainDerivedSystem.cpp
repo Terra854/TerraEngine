@@ -2,6 +2,8 @@
 
 #include "TerrainDerivedSystem.h"
 
+#include "Terrain/TerrainMaterial.h"
+
 #include "Components/TerrainComponent.h"
 #include "Core/Logger/Logger.h"
 #include "Core/Object/ObjectManager.h"
@@ -30,35 +32,8 @@ namespace TerraEngine::Terrain
 		{
 			TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
 			std::future<TerraEngine::Runtime::MountedTerrainRuntimeResult> preparedRuntime;
+			TerrainMaterialSettings materialSettings{};
 		};
-
-		std::unique_ptr<Material> CreateRuntimeTerrainMaterial(ResourceManager& resources)
-		{
-			// The direct-resident terrain mesh uses the ordinary material contract so
-			// it can render immediately while the paged terrain surface path warms up.
-			auto material = std::make_unique<Material>();
-			std::memcpy(material->header.magic, "TMAT", 4U);
-			material->header.version = kMaterialCurrentVersion;
-			material->header.headerSize = static_cast<std::uint16_t>(sizeof(MaterialHeader));
-			// The generated proxy includes terrain slope normals. Selecting the shared
-			// PBR model makes exported terrain consume the same lights and shadows as
-			// every other opaque scene surface.
-			material->header.shadingModel = static_cast<std::uint32_t>(ShadingModel::MetallicRoughness);
-			material->header.alphaMode = static_cast<std::uint32_t>(AlphaMode::Opaque);
-			material->header.flags = DoubleSided;
-			material->header.shaderCollectionId = resources.GetDefaultShaderCollectionID();
-			material->header.baseColorFactor[0] = 0.18F;
-			material->header.baseColorFactor[1] = 0.55F;
-			material->header.baseColorFactor[2] = 0.16F;
-			material->header.baseColorFactor[3] = 1.0F;
-			material->header.roughnessFactor = 0.92F;
-			material->header.normalScale = 1.0F;
-			material->header.occlusionStrength = 1.0F;
-			material->shaderCollectionId = material->header.shaderCollectionId;
-			material->shadowBehavior = DeriveMaterialShadowBehavior(
-				material->header.alphaMode, material->header.emissiveFactor);
-			return material;
-		}
 	}
 
 	TerrainDerivedPublicationCheck ValidateTerrainDerivedCandidate(const TerrainDerivedCandidate& candidate, const TerrainAssetStore& store)
@@ -135,11 +110,10 @@ namespace TerraEngine::Terrain
 						return TerraEngine::Runtime::BuildMountedTerrainRuntime(
 							ContentMount::Instance(), assetId, path);
 					});
-				pending.push_back({terrain.terrainAssetId, task->getFuture()});
+				pending.push_back({terrain.terrainAssetId, task->getFuture(), terrain.MaterialSettings()});
 				ThreadPool::instance().enqueue(task, TerraEngine::Terrain::kTerrainAreaSampleCount);
 			});
 
-		TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
 		for(PendingRuntimeTerrainProxy& item : pending)
 		{
 			// Resource registration and registry publication remain on this protected
@@ -169,11 +143,11 @@ namespace TerraEngine::Terrain
 					<< TerraEngine::ToHexString(item.assetId) << ": " << collisionReceipt.message);
 				continue;
 			}
-			if(materialId == TerraEngine::EMPTY_UUID)
-			{
-				materialId = resources.RegisterMaterial(
-					"terrain-runtime-direct-fallback", CreateRuntimeTerrainMaterial(resources));
-			}
+			// Each durable terrain receives a stable generated material identity. This
+			// preserves independent Terrain Tools values when a scene has many terrains.
+			const TerraEngine::UUID materialId = resources.RegisterMaterial(
+				"terrain/runtime/" + TerraEngine::ToHexString(item.assetId),
+				CreateTerrainMaterial(resources, item.materialSettings));
 			const TerraEngine::UUID meshId = resources.RegisterMesh(
 				"terrain/runtime/" + TerraEngine::ToHexString(item.assetId), std::move(completed.renderProxy.mesh));
 			const bool published = TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance().Publish(

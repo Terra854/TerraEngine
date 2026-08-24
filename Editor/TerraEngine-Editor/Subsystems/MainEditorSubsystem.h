@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <nlohmann/json.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/vec3.hpp>
@@ -348,6 +349,9 @@ private:
 	// Project asset discovery can finish after the startup scene is deserialized.
 	// Keep one bounded retry active until the scene's terrain UUID is registered.
 	bool terrainProxyRestorePending = false;
+	// This set records component-owned assets observed at the prior protected
+	// editor boundary. A disappearance retires derived render and physics state.
+	std::unordered_set<TerraEngine::UUID> observedTerrainComponentAssets;
 	
 	std::optional<entt::entity> selectedEntity;
 	std::vector<TerraEngine::UUID> selectedEntityUuids;

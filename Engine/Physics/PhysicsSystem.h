@@ -73,6 +73,10 @@ namespace TerraEngine::Physics {
 		// delegates provider staging/rollback without exposing backend pointers.
 		TerrainCollisionReplacementReceipt CommitTerrainCollisionReplacement(
 			TerrainCollisionReplacementPacket packet);
+		// The protected scene-lifecycle boundary calls this after the last component
+		// referencing an asset disappears. Every area body is retired atomically from
+		// the system-owned lookup before later publications can observe it.
+		[[nodiscard]] bool RemoveTerrainCollisions(TerraEngine::UUID terrainAssetId);
 		// Returns the current physics-clock generation for copied cross-system
 		// requests. Animation must not substitute its independent frame counter:
 		// a later physics extraction validates this exact simulation time domain.

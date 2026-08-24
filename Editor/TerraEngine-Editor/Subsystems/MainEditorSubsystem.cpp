@@ -2835,6 +2835,25 @@ void MainEditorSubsystem::OnBackendReady() {
 
 // MainEditorSubsystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::Update(float deltaTime) {
+	// Reconcile derived state against durable component membership before any
+	// restore attempt. Removing the last TerrainComponent must retire the cached
+	// render binding and every provider heightfield body for that asset.
+	std::unordered_set<TerraEngine::UUID> liveTerrainAssets;
+	ObjectManager::instance().forEachObjectWithComponents<TerrainComponent>(
+		[&liveTerrainAssets](Object, TerrainComponent& terrain)
+		{
+			if(terrain.terrainAssetId != TerraEngine::EMPTY_UUID)
+				liveTerrainAssets.insert(terrain.terrainAssetId);
+		});
+	for(const TerraEngine::UUID& removedAsset : observedTerrainComponentAssets)
+	{
+		if(liveTerrainAssets.contains(removedAsset)) continue;
+		(void)TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance().Remove(removedAsset);
+		(void)TerraEngine::Physics::PhysicsSystem::Instance().RemoveTerrainCollisions(removedAsset);
+		if(auto terrainTools = GetWindow<TerrainWindow>())
+			terrainTools->ReleaseSceneTerrain(removedAsset);
+	}
+	observedTerrainComponentAssets = std::move(liveTerrainAssets);
 	// Component mutations can originate from the Inspector, undo/redo, scene
 	// automation, or a loaded scene. Detect the durable state itself so every
 	// producer gets the same renderer-derived proxy path and none must add a

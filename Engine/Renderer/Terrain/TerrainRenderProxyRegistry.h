@@ -75,6 +75,17 @@ namespace TerraEngine::Renderer::Terrain
 			return generation.load(std::memory_order_acquire);
 		}
 
+		// Component removal retires only the affected asset binding. Other terrain
+		// instances keep their generated resources and do not need to rebuild.
+		[[nodiscard]] bool Remove(const TerraEngine::UUID& terrainAssetId)
+		{
+			if(terrainAssetId == TerraEngine::EMPTY_UUID) return false;
+			std::unique_lock lock(mutex);
+			if(bindings.erase(terrainAssetId) == 0U) return false;
+			generation.fetch_add(1U, std::memory_order_release);
+			return true;
+		}
+
 		void Clear()
 		{
 			std::unique_lock lock(mutex);

@@ -36,6 +36,8 @@ set(_TERRAENGINE_TERRAIN_ENGINE_FILES
 	Engine/Terrain/TerrainStreamingSystem.h
 	Engine/Terrain/TerrainDerivedSystem.cpp
 	Engine/Terrain/TerrainDerivedSystem.h
+	Engine/Terrain/TerrainMaterial.cpp
+	Engine/Terrain/TerrainMaterial.h
 	Engine/Terrain/TerrainDiagnostics.cpp
 	Engine/Terrain/TerrainDiagnostics.h
 	Engine/Terrain/TerrainGarbageCollector.cpp

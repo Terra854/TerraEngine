@@ -28,6 +28,12 @@ namespace TerraEngine::Tests
 				&& resolved->meshId == meshId && resolved->materialId == materialId
 				&& resolved->publicationGeneration > before,
 				"The renderer must resolve the complete derived binding from the durable terrain asset UUID.");
+			const std::uint64_t publishedGeneration = proxies.PublicationGeneration();
+			context.Expect(proxies.Remove(assetId) && !proxies.Resolve(assetId)
+				&& proxies.PublicationGeneration() > publishedGeneration,
+				"Removing the last terrain component must retire its binding and invalidate cached render membership.");
+			context.Expect(!proxies.Remove(assetId),
+				"Repeated terrain proxy retirement must be an idempotent no-op.");
 			proxies.Clear();
 			context.Expect(!proxies.Resolve(assetId).has_value(),
 				"Clearing a render session must retire terrain proxy bindings rather than leaking them into the next scene.");

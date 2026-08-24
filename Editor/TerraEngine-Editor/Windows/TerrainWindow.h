@@ -17,6 +17,7 @@
 #include "Terrain/TerrainDiagnostics.h"
 #include "Terrain/TerrainGarbageCollector.h"
 #include "Terrain/TerrainLayerStack.h"
+#include "Terrain/TerrainMaterial.h"
 #include "Renderer/Terrain/TerrainDirectMesh.h"
 #include "Editor/AssetCompilers/TerrainCompiler.h"
 
@@ -78,6 +79,9 @@ public:
 	// TerrainComponent reference. The mesh still builds on ThreadPool and only
 	// publishes at this window's declared protected authoring boundary.
 	[[nodiscard]] bool RestoreSceneTerrainProxy();
+	// MainEditor calls this when the last scene component referencing an authored
+	// asset disappears. Tool-owned jobs and store pointers are detached together.
+	void ReleaseSceneTerrain(TerraEngine::UUID assetId);
 	// Inspector actions name an exact scene instance. Opening that instance here
 	// binds editing, picking, persistence, and proxy updates to the same asset.
 	[[nodiscard]] bool OpenTerrainForEditing(TerraEngine::UUID objectId, std::string& outError);
@@ -126,6 +130,7 @@ protected:
 private:
 	void DrawCreateImportControls();
 	void DrawSculptControls();
+	void DrawMaterialControls();
 	void DrawSurfaceControls();
 	void DrawProceduralControls();
 	void DrawDiagnosticControls();
@@ -134,6 +139,7 @@ private:
 	void PollProceduralPreview();
 	void ScheduleRenderProxyBuild();
 	void PollRenderProxyBuild();
+	void SynchronizeTerrainMaterial();
 	void QueueRenderProxySceneInstance();
 	void InitializeAuthoringTerrain(
 		TerraEngine::UUID assetId,
@@ -217,6 +223,7 @@ private:
 	std::shared_ptr<std::atomic_bool> terrainRenderProxyCancellation;
 	TerraEngine::UUID terrainRenderProxyMeshId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID terrainRenderProxyMaterialId = TerraEngine::EMPTY_UUID;
+	std::optional<TerraEngine::Terrain::TerrainMaterialSettings> publishedTerrainMaterial;
 	// A restored scene supplies its existing object identity. A newly created
 	// terrain keeps this empty so publication creates exactly one scene instance.
 	TerraEngine::UUID terrainRenderProxyTargetObjectId = TerraEngine::EMPTY_UUID;

@@ -102,8 +102,10 @@ namespace TerraEngine::EditorTests
 			context.Expect(editorSubsystemSource.find(
 				"TerrainRenderProxyRegistry::Instance()") != std::string::npos
 				&& editorSubsystemSource.find("terrainProxyRestorePending = true") != std::string::npos
-				&& editorSubsystemSource.find("QueueAutomaticTerrainCollision") != std::string::npos,
-				"The editor must detect a visible registered TerrainComponent whose derived render proxy is missing, regardless of which producer assigned it.");
+				&& editorSubsystemSource.find("QueueAutomaticTerrainCollision") != std::string::npos
+				&& editorSubsystemSource.find("RemoveTerrainCollisions(removedAsset)") != std::string::npos
+				&& editorSubsystemSource.find(".Remove(removedAsset)") != std::string::npos,
+				"The editor must restore missing terrain derivatives and retire render/collision state when the last component disappears.");
 
 			const auto rendererPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine/Renderer/RenderSystem.cpp";
@@ -122,6 +124,12 @@ namespace TerraEngine::EditorTests
 			const std::string runtimeSystemSource(
 				(std::istreambuf_iterator<char>(runtimeSystemFile)),
 				std::istreambuf_iterator<char>());
+			const auto terrainMaterialPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine/Terrain/TerrainMaterial.cpp";
+			std::ifstream terrainMaterialFile(terrainMaterialPath);
+			const std::string terrainMaterialSource(
+				(std::istreambuf_iterator<char>(terrainMaterialFile)),
+				std::istreambuf_iterator<char>());
 			const auto exportPipelinePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Editor/Export/ExportPipeline.cpp";
 			std::ifstream exportPipelineFile(exportPipelinePath);
@@ -131,8 +139,9 @@ namespace TerraEngine::EditorTests
 			context.Expect(runtimeSystemSource.find("BuildMountedTerrainRuntime") != std::string::npos
 				&& runtimeSystemSource.find("TerrainRenderProxyRegistry::Instance().Publish") != std::string::npos
 				&& runtimeSystemSource.find("CommitTerrainCollisionReplacement") != std::string::npos
-				&& runtimeSystemSource.find("ShadingModel::MetallicRoughness") != std::string::npos
-				&& terrainWindowSource.find("ShadingModel::MetallicRoughness") != std::string::npos
+				&& runtimeSystemSource.find("CreateTerrainMaterial") != std::string::npos
+				&& terrainWindowSource.find("CreateTerrainMaterial") != std::string::npos
+				&& terrainMaterialSource.find("ShadingModel::MetallicRoughness") != std::string::npos
 				&& exportPipelineSource.find("importer == \"TerrainImporter\") type = AssetType::Terrain") != std::string::npos,
 				"Editor and standalone terrain proxies must publish lit render materials and collision products without serialized helper components.");
 

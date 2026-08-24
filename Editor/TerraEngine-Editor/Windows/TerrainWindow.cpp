@@ -361,32 +361,11 @@ void TerrainWindow::PollRenderProxyBuild()
 	}
 
 	ResourceManager& resources = ResourceManager::Instance();
+	SynchronizeTerrainMaterial();
 	if(terrainRenderProxyMaterialId == TerraEngine::EMPTY_UUID)
 	{
-		auto material = std::make_unique<Material>();
-		std::memcpy(material->header.magic, "TMAT", 4u);
-		material->header.version = kMaterialCurrentVersion;
-		material->header.headerSize = static_cast<std::uint16_t>(sizeof(MaterialHeader));
-		// Direct terrain vertices carry generated slope normals, so use the shared
-		// physically based surface path and let scene lights and shadows affect them.
-		material->header.shadingModel = static_cast<std::uint32_t>(ShadingModel::MetallicRoughness);
-		material->header.alphaMode = static_cast<std::uint32_t>(AlphaMode::Opaque);
-		// Terrain is normally viewed from above, but an editor authoring proxy must
-		// remain visible while orbiting below it or while a flat tile has no vertical
-		// extent. The production terrain surface path can restore one-sided culling.
-		material->header.flags = DoubleSided;
-		material->header.shaderCollectionId = resources.GetDefaultShaderCollectionID();
-		material->header.baseColorFactor[0] = 0.18F;
-		material->header.baseColorFactor[1] = 0.55F;
-		material->header.baseColorFactor[2] = 0.16F;
-		material->header.baseColorFactor[3] = 1.0F;
-		material->header.roughnessFactor = 0.92F;
-		material->header.normalScale = 1.0F;
-		material->header.occlusionStrength = 1.0F;
-		material->shaderCollectionId = material->header.shaderCollectionId;
-		material->shadowBehavior = DeriveMaterialShadowBehavior(
-			material->header.alphaMode, material->header.emissiveFactor);
-		terrainRenderProxyMaterialId = resources.RegisterMaterial("terrain-direct-fallback", std::move(material));
+		status = "Terrain material publication failed; the mesh remains detached.";
+		return;
 	}
 	const std::string meshKey = "terrain/" + TerraEngine::ToHexString(completed.assetId);
 	terrainRenderProxyMeshId = resources.RegisterMesh(meshKey, std::move(completed.mesh));
@@ -397,6 +376,64 @@ void TerrainWindow::PollRenderProxyBuild()
 		: "Terrain render proxy published; Scene and Game views will consume the committed generation.";
 	if(rebuildRequested)
 		ScheduleRenderProxyBuild();
+}
+
+void TerrainWindow::SynchronizeTerrainMaterial()
+{
+	if(!terrainStore) return;
+	const auto capture = terrainStore->CaptureRoot();
+	if(!capture.IsValid()) return;
+	TerraEngine::Terrain::TerrainMaterialSettings settings{};
+	ObjectManager& objects = ObjectManager::instance();
+	bool found = false;
+	objects.forEachObjectWithComponents<TerrainComponent>(
+		[&](Object object, TerrainComponent& terrain)
+		{
+			if(found || terrain.terrainAssetId != capture.root->assetUuid) return;
+			if(terrainRenderProxyTargetObjectId != TerraEngine::EMPTY_UUID
+				&& objects.getUUID(object) != terrainRenderProxyTargetObjectId) return;
+			settings = terrain.MaterialSettings();
+			found = true;
+		});
+	// A new terrain can reach this boundary one flush before its component. The
+	// documented defaults remain valid until the next protected synchronization.
+	settings = TerraEngine::Terrain::SanitizeTerrainMaterialSettings(settings);
+	if(terrainRenderProxyMaterialId != TerraEngine::EMPTY_UUID
+		&& publishedTerrainMaterial && *publishedTerrainMaterial == settings) return;
+	ResourceManager& resources = ResourceManager::Instance();
+	terrainRenderProxyMaterialId = resources.RegisterMaterial(
+		"terrain/editor/" + TerraEngine::ToHexString(capture.root->assetUuid),
+		TerraEngine::Terrain::CreateTerrainMaterial(resources, settings));
+	publishedTerrainMaterial = settings;
+	// Replacing the stable resource advances ResourceManager's renderer token.
+	// Republish too, because a renderer reset may have cleared the asset binding.
+	if(terrainRenderProxyMeshId != TerraEngine::EMPTY_UUID)
+		(void)TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance().Publish(
+			{capture.root->assetUuid, terrainRenderProxyMeshId, terrainRenderProxyMaterialId});
+}
+
+void TerrainWindow::ReleaseSceneTerrain(TerraEngine::UUID assetId)
+{
+	if(!terrainStore) return;
+	const auto capture = terrainStore->CaptureRoot();
+	if(!capture.IsValid() || capture.root->assetUuid != assetId) return;
+	if(terrainRenderProxyCancellation)
+		terrainRenderProxyCancellation->store(true, std::memory_order_release);
+	TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().ClearPublication(terrainStore.get());
+	authoringSystem.CancelPreparedWork("Terrain component removed from the scene.");
+	terrainStore.reset();
+	terrainQueue.reset();
+	terrainPublication.reset();
+	terrainGarbageCollector.reset();
+	terrainRenderProxyCancellation.reset();
+	terrainRenderProxyMeshId = TerraEngine::EMPTY_UUID;
+	terrainRenderProxyMaterialId = TerraEngine::EMPTY_UUID;
+	terrainRenderProxyTargetObjectId = TerraEngine::EMPTY_UUID;
+	publishedTerrainMaterial.reset();
+	terrainRenderProxyBuildActive = false;
+	terrainRenderProxyRebuildRequested = false;
+	terrainRenderProxyInstanceQueued = false;
+	status = "Terrain component removed; terrain rendering, collision, and authoring were detached.";
 }
 
 TerraEngine::Editor::Terrain::TerrainAutomationCommandResult TerrainWindow::ExecuteAutomationCommand(
@@ -611,11 +648,73 @@ void TerrainWindow::OnGui()
 	ImGui::Separator();
 	DrawSculptControls();
 	ImGui::Separator();
+	DrawMaterialControls();
+	ImGui::Separator();
 	DrawSurfaceControls();
 	ImGui::Separator();
 	DrawProceduralControls();
 	ImGui::Separator();
 	DrawDiagnosticControls();
+}
+
+void TerrainWindow::DrawMaterialControls()
+{
+	ImGui::TextUnformatted("Terrain Material");
+	ImGui::TextDisabled("Metallic Roughness (lit PBR)");
+	if(!terrainStore)
+	{
+		ImGui::TextDisabled("Open or create a terrain to edit its material.");
+		return;
+	}
+	const auto capture = terrainStore->CaptureRoot();
+	if(!capture.IsValid()) return;
+	ObjectManager& objects = ObjectManager::instance();
+	std::optional<Object> owner;
+	if(terrainRenderProxyTargetObjectId != TerraEngine::EMPTY_UUID)
+	{
+		const auto candidate = objects.getObject(terrainRenderProxyTargetObjectId);
+		if(candidate && objects.GetComponent<TerrainComponent>(*candidate)) owner = candidate;
+	}
+	if(!owner)
+	{
+		objects.forEachObjectWithComponents<TerrainComponent>(
+			[&](Object object, TerrainComponent& terrain)
+			{
+				if(!owner && terrain.terrainAssetId == capture.root->assetUuid) owner = object;
+			});
+	}
+	TerrainComponent* terrain = owner ? objects.GetComponent<TerrainComponent>(*owner) : nullptr;
+	if(!terrain)
+	{
+		ImGui::TextDisabled("The terrain scene component is not available yet.");
+		return;
+	}
+	glm::vec3 baseColor = terrain->baseColor;
+	float metallic = terrain->metallic;
+	float roughness = terrain->roughness;
+	const bool colorChanged = ImGui::ColorEdit3("Base color", &baseColor.x);
+	const bool metallicChanged = ImGui::SliderFloat("Metallic", &metallic, 0.0F, 1.0F);
+	const bool roughnessChanged = ImGui::SliderFloat("Roughness", &roughness, 0.0F, 1.0F);
+	if(!colorChanged && !metallicChanged && !roughnessChanged) return;
+
+	// UI prepares one atomic scene transaction. The regular protected mutation
+	// flush makes persistence, undo, renderer invalidation, and automation agree.
+	const TerraEngine::UUID objectId = objects.getUUID(*owner);
+	TerraEngine::Scene::TransactionalMutationBuilder builder(
+		"terrain-material-" + TerraEngine::ToHexString(TerraEngine::GenerateUUID()),
+		TerraEngine::Scene::TransactionOrigin::Editor, "Edit Terrain Material");
+	builder.ObserveScene(objects).ObserveObject(objects, objectId)
+		.SetUndoGroup("Edit Terrain Material");
+	if(colorChanged)
+		builder.UpdateComponentProperty(objectId, "TerrainComponent", "baseColor",
+			TerraEngine::Reflection::Variant{baseColor});
+	if(metallicChanged)
+		builder.UpdateComponentProperty(objectId, "TerrainComponent", "metallic",
+			TerraEngine::Reflection::Variant{metallic});
+	if(roughnessChanged)
+		builder.UpdateComponentProperty(objectId, "TerrainComponent", "roughness",
+			TerraEngine::Reflection::Variant{roughness});
+	TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
 }
 
 void TerrainWindow::DrawDiagnosticControls()
@@ -1240,6 +1339,8 @@ void TerrainWindow::InitializeAuthoringTerrain(
 	terrainRenderProxyRebuildRequested = false;
 	terrainRenderProxyInstanceQueued = false;
 	terrainRenderProxyMeshId = TerraEngine::EMPTY_UUID;
+	terrainRenderProxyMaterialId = TerraEngine::EMPTY_UUID;
+	publishedTerrainMaterial.reset();
 	terrainRenderProxyTargetObjectId = existingObjectId;
 	if(terrainStore)
 		TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().ClearPublication(terrainStore.get());
@@ -2046,6 +2147,7 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 {
 	// Resource publication belongs to the same protected editor boundary as the
 	// terrain receipt. A completed worker mesh cannot appear mid-render-frame.
+	SynchronizeTerrainMaterial();
 	PollRenderProxyBuild();
 	const auto publicationStart = std::chrono::steady_clock::now();
 	authoringSystem.PublishAtProtectedBoundary();

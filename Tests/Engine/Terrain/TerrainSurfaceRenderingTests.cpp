@@ -3,7 +3,9 @@
 #include "TestHarness.h"
 
 #include "Renderer/Terrain/TerrainSurfaceCache.h"
+#include "Components/TerrainComponent.h"
 #include "Terrain/TerrainDerivedSystem.h"
+#include "Terrain/TerrainMaterial.h"
 
 #include <memory>
 
@@ -11,6 +13,18 @@ namespace TerraEngine::Tests
 {
 	void RegisterTerrainSurfaceRenderingTests(TestRegistry& registry)
 	{
+		registry.Add("Terrain.Surface.ComponentPersistsSanitizedPbrInputs", [](TestContext& context) {
+			TerrainComponent terrain;
+			terrain.baseColor = {-1.0F, 0.4F, 2.0F};
+			terrain.metallic = 1.5F;
+			terrain.roughness = -0.25F;
+			const auto settings = terrain.MaterialSettings();
+			context.Expect(TerrainComponent::kSchemaVersion == 2U
+				&& settings.baseColor == glm::vec3(0.0F, 0.4F, 1.0F)
+				&& settings.metallic == 1.0F && settings.roughness == 0.0F,
+				"Terrain scene material inputs must persist under schema v2 and clamp to valid metallic-roughness ranges.");
+		});
+
 		registry.Add("Terrain.Surface.CacheKeepsProtectedControlAndRejectsStalePublication", [](TestContext& context) {
 			const auto asset = TerraEngine::GenerateUUID();
 			TerraEngine::Renderer::Terrain::TerrainSurfaceCacheRequest pinned{};

@@ -9,6 +9,7 @@
 
 #include "Core/Object/Component.h"
 #include "Scene/WorldCoordinate.h"
+#include "Terrain/TerrainMaterial.h"
 
 #include <glm/gtc/quaternion.hpp>
 #include <glm/vec3.hpp>
@@ -20,7 +21,7 @@
 struct TerrainComponent final : public Component<TerrainComponent>
 {
 	static constexpr std::string_view kComponentName = "TerrainComponent";
-	static constexpr std::uint32_t kSchemaVersion = 1U;
+	static constexpr std::uint32_t kSchemaVersion = 2U;
 
 	// The durable Asset Database UUID is the only authored terrain reference in
 	// a scene. Terrain area data is intentionally not duplicated in components.
@@ -28,6 +29,17 @@ struct TerrainComponent final : public Component<TerrainComponent>
 	TerraEngine::UUID terrainAssetId = TerraEngine::EMPTY_UUID;
 	bool visible = true;
 	bool castsShadows = true;
+	// Terrain Tools exposes these authored metallic-roughness inputs. Generated
+	// meshes remain derived data, while these small values persist with the scene.
+	glm::vec3 baseColor{0.18F, 0.55F, 0.16F};
+	float metallic = 0.0F;
+	float roughness = 0.92F;
+
+	[[nodiscard]] TerraEngine::Terrain::TerrainMaterialSettings MaterialSettings() const noexcept
+	{
+		return TerraEngine::Terrain::SanitizeTerrainMaterialSettings(
+			{baseColor, metallic, roughness});
+	}
 
 	// Terrain v1 accepts translation through Transform::worldPose, but rejects
 	// rotation and scale because either would break the exact shared sample grid.
@@ -65,5 +77,8 @@ struct TerrainComponent final : public Component<TerrainComponent>
 		TerraEngine::Reflection::RegisterDataProperty<&TerrainComponent::terrainAssetId>(factory, "terrainAssetId");
 		TerraEngine::Reflection::RegisterDataProperty<&TerrainComponent::visible>(factory, "visible");
 		TerraEngine::Reflection::RegisterDataProperty<&TerrainComponent::castsShadows>(factory, "castsShadows");
+		TerraEngine::Reflection::RegisterDataProperty<&TerrainComponent::baseColor>(factory, "baseColor");
+		TerraEngine::Reflection::RegisterDataProperty<&TerrainComponent::metallic>(factory, "metallic");
+		TerraEngine::Reflection::RegisterDataProperty<&TerrainComponent::roughness>(factory, "roughness");
 	}
 };

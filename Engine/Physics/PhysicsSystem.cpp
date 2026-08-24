@@ -3755,6 +3755,30 @@ namespace TerraEngine::Physics {
 		return receipt;
 	}
 
+	bool PhysicsSystem::RemoveTerrainCollisions(TerraEngine::UUID terrainAssetId) {
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		if(terrainAssetId == TerraEngine::EMPTY_UUID) return false;
+		bool removed = false;
+		for(auto collision = impl->terrainCollisions.begin(); collision != impl->terrainCollisions.end();) {
+			if(collision->terrainAssetId != terrainAssetId) {
+				++collision;
+				continue;
+			}
+			// Provider destruction happens before typed-handle retirement. If no world
+			// is active, StopWorld already destroyed provider bodies and cleared this
+			// collection, so this branch only owns live protected state.
+			if(impl->backend && collision->body.IsValid())
+				(void)impl->backend->DestroyBody(collision->body);
+			if(impl->backend && collision->shape.IsValid())
+				(void)impl->backend->DestroyShape(collision->shape);
+			if(collision->body.IsValid()) (void)impl->world.Release(collision->body);
+			if(collision->shape.IsValid()) (void)impl->world.Release(collision->shape);
+			collision = impl->terrainCollisions.erase(collision);
+			removed = true;
+		}
+		return removed;
+	}
+
 	Animation::AnimationFixedTick PhysicsSystem::CurrentFixedTick() const {
 		std::lock_guard<std::mutex> lock(impl->mutex);
 		// Timing::tick names the most recently issued physics step. Before the first
