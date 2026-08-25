@@ -5168,8 +5168,12 @@ void InspectorWindow::OnGui() {
 							for(const ReflectionProperty& property : TerraEngine::Reflection::GetProperties(type))
 							{
 								const std::string propertyName = MetaPropertyName(property);
+								// Terrain material properties use dedicated bounded controls under
+								// Terrain Tools > More. The generic vec3 editor accepts values above
+								// one, which are later clamped by rendering and appear broken.
 								if(propertyName != "active" && propertyName != "schemaVersion"
-									&& propertyName != "terrainAssetId")
+									&& propertyName != "terrainAssetId" && propertyName != "baseColor"
+									&& propertyName != "metallic" && propertyName != "roughness")
 									DrawProperty(compName, property, obj, access);
 							}
 							ImGui::EndTable();
@@ -6340,11 +6344,17 @@ void InspectorWindow::DrawMaterialInspector(const std::filesystem::path& path) {
 			std::span<const std::uint8_t>(
 				m_MaterialDataBuffer.data(),
 				m_MaterialDataBuffer.size()))) {
-			// Reload only after the complete candidate becomes visible.
+			// Reload directly from the validated authored TMAT. Waiting for the file
+			// watcher to copy it into Build made color dragging visibly lag behind.
 			auto& assets = AssetDatabase::Instance().GetAssets();
 			auto it = assets.find(std::filesystem::absolute(path));
 			if (it != assets.end()) {
-				ResourceManager::Instance().ReloadMaterial(it->second.guid);
+				if(RenderSystem::Instance().ReloadEditedMaterial(it->second.guid, path)
+					&& m_Owner != nullptr)
+				{
+					if(auto terrainTools = m_Owner->GetWindow<TerrainWindow>())
+						terrainTools->RefreshMaterialAsset(it->second.guid);
+				}
 			}
 		}
 	}

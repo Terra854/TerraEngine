@@ -417,11 +417,15 @@ void TerrainWindow::PollRenderProxyBuild()
 		ScheduleRenderProxyBuild();
 }
 
-void TerrainWindow::SynchronizeTerrainMaterial()
+void TerrainWindow::SynchronizeTerrainMaterial(bool forceLayerMaterialRefresh)
 {
 	if(!terrainStore) return;
 	const auto capture = terrainStore->CaptureRoot();
 	if(!capture.IsValid() || !capture.root->layerStack) return;
+	// Detached layer previews and material availability notifications live in the
+	// editor mirror until their protected transaction publishes. Rendering that
+	// mirror keeps material feedback immediate without mutating the immutable root.
+	const TerraEngine::Terrain::TerrainLayerStack& runtimeLayerStack = LayerPreview();
 	TerraEngine::Terrain::TerrainMaterialSettings settings{};
 	ObjectManager& objects = ObjectManager::instance();
 	bool found = false;
@@ -438,12 +442,12 @@ void TerrainWindow::SynchronizeTerrainMaterial()
 	// documented defaults remain valid until the next protected synchronization.
 	settings = TerraEngine::Terrain::SanitizeTerrainMaterialSettings(settings);
 	const auto foundLayer = std::find_if(
-		capture.root->layerStack->layers.begin(), capture.root->layerStack->layers.end(),
+		runtimeLayerStack.layers.begin(), runtimeLayerStack.layers.end(),
 		[](const TerraEngine::Terrain::TerrainLayer& layer) {
 			return layer.enabled && layer.materialAssetUuid != TerraEngine::EMPTY_UUID
 				&& layer.fallbackState == TerraEngine::Terrain::TerrainLayerFallbackState::Healthy;
 		});
-	const TerraEngine::Terrain::TerrainLayer* surfaceLayer = foundLayer != capture.root->layerStack->layers.end()
+	const TerraEngine::Terrain::TerrainLayer* surfaceLayer = foundLayer != runtimeLayerStack.layers.end()
 		? &*foundLayer : nullptr;
 	const TerraEngine::UUID surfaceMaterialId = surfaceLayer
 		? surfaceLayer->materialAssetUuid : TerraEngine::EMPTY_UUID;
@@ -470,28 +474,37 @@ void TerrainWindow::SynchronizeTerrainMaterial()
 	controlIdentityBytes.insert(controlIdentityBytes.end(), weightPixels.begin(), weightPixels.end());
 	controlIdentityBytes.insert(controlIdentityBytes.end(), layerIdPixels.begin(), layerIdPixels.end());
 	const auto controlHash = TerraEngine::Terrain::HashTerrainBytes(controlIdentityBytes);
-	if(terrainRenderProxyMaterialId != TerraEngine::EMPTY_UUID
+	const bool controlTexturesChanged = terrainWeightTextureId == TerraEngine::EMPTY_UUID
+		|| terrainLayerIdTextureId == TerraEngine::EMPTY_UUID
+		|| publishedSurfaceControlHash != controlHash;
+	if(!forceLayerMaterialRefresh && !controlTexturesChanged
+		&& terrainRenderProxyMaterialId != TerraEngine::EMPTY_UUID
 		&& publishedTerrainMaterial && *publishedTerrainMaterial == settings
-		&& publishedTerrainLayerGeneration == capture.root->layerStackGeneration
+		&& publishedTerrainLayerGeneration == runtimeLayerStack.generation
 		&& publishedTerrainLayerMaterialId == surfaceMaterialId
 		&& publishedTerrainLayerSourceAvailable == sourceAvailable
 		&& publishedSurfaceControlHash == controlHash) return;
 	ResourceManager& resources = ResourceManager::Instance();
-	terrainWeightTextureId = resources.RegisterTexture(
-		"terrain/control-weights/" + TerraEngine::ToHexString(capture.root->assetUuid),
-		MakeTerrainControlTexture(256u, 256u, 37u, 4u, std::move(weightPixels)));
-	terrainLayerIdTextureId = resources.RegisterTexture(
-		"terrain/control-layer-ids/" + TerraEngine::ToHexString(capture.root->assetUuid),
-		MakeTerrainControlTexture(256u, 256u, 91u, 8u, std::move(layerIdPixels)));
-	RenderSystem::Instance().InvalidateGeneratedTexture(terrainWeightTextureId);
-	RenderSystem::Instance().InvalidateGeneratedTexture(terrainLayerIdTextureId);
+	if(controlTexturesChanged)
+	{
+		// Painting changes these larger images. A color-only material edit reuses
+		// them and updates just the runtime layer table below.
+		terrainWeightTextureId = resources.RegisterTexture(
+			"terrain/control-weights/" + TerraEngine::ToHexString(capture.root->assetUuid),
+			MakeTerrainControlTexture(256u, 256u, 37u, 4u, std::move(weightPixels)));
+		terrainLayerIdTextureId = resources.RegisterTexture(
+			"terrain/control-layer-ids/" + TerraEngine::ToHexString(capture.root->assetUuid),
+			MakeTerrainControlTexture(256u, 256u, 91u, 8u, std::move(layerIdPixels)));
+		RenderSystem::Instance().InvalidateGeneratedTexture(terrainWeightTextureId);
+		RenderSystem::Instance().InvalidateGeneratedTexture(terrainLayerIdTextureId);
+	}
 	terrainRenderProxyMaterialId = resources.RegisterMaterial(
 		"terrain/editor/" + TerraEngine::ToHexString(capture.root->assetUuid),
 		TerraEngine::Terrain::CreateTerrainMaterial(
 			resources, settings, surfaceMaterial,
 			surfaceLayer ? &surfaceLayer->mapping : nullptr));
 	publishedTerrainMaterial = settings;
-	publishedTerrainLayerGeneration = capture.root->layerStackGeneration;
+	publishedTerrainLayerGeneration = runtimeLayerStack.generation;
 	publishedTerrainLayerMaterialId = surfaceMaterialId;
 	publishedTerrainLayerSourceAvailable = sourceAvailable;
 	publishedSurfaceControlHash = controlHash;
@@ -500,7 +513,7 @@ void TerrainWindow::SynchronizeTerrainMaterial()
 	runtimeBinding.materialId = terrainRenderProxyMaterialId;
 	runtimeBinding.weightTextureId = terrainWeightTextureId;
 	runtimeBinding.layerIdTextureId = terrainLayerIdTextureId;
-	for(const auto& layer : capture.root->layerStack->layers)
+	for(const auto& layer : runtimeLayerStack.layers)
 	{
 		if(!layer.enabled || runtimeBinding.layerCount >= runtimeBinding.layers.size()) continue;
 		auto& gpuLayer = runtimeBinding.layers[runtimeBinding.layerCount++];
@@ -519,12 +532,19 @@ void TerrainWindow::SynchronizeTerrainMaterial()
 		const Material* layerMaterial = resources.GetMaterial(layer.materialAssetUuid);
 		if(layerMaterial == nullptr || layer.fallbackState != TerraEngine::Terrain::TerrainLayerFallbackState::Healthy)
 		{
-			gpuLayer.baseColorFactor = {1.0F, 0.0F, 1.0F, 1.0F};
+			// Negative alpha is an internal runtime sentinel. Ordinary authored
+			// colors cannot collide with it, and the shader turns it into a clearly
+			// diagnostic yellow/black checker instead of ambiguous solid magenta.
+			gpuLayer.baseColorFactor = {1.0F, 0.8F, 0.0F, -1.0F};
 			continue;
 		}
+		// Bake the terrain component's tint into each healthy runtime layer once.
+		// Missing sources keep the diagnostic checker instead of being tinted black.
 		gpuLayer.baseColorFactor = {
-			layerMaterial->header.baseColorFactor[0], layerMaterial->header.baseColorFactor[1],
-			layerMaterial->header.baseColorFactor[2], layerMaterial->header.baseColorFactor[3]};
+			layerMaterial->header.baseColorFactor[0] * settings.baseColor.r,
+			layerMaterial->header.baseColorFactor[1] * settings.baseColor.g,
+			layerMaterial->header.baseColorFactor[2] * settings.baseColor.b,
+			layerMaterial->header.baseColorFactor[3]};
 		const auto baseTexture = std::find_if(layerMaterial->textures.begin(), layerMaterial->textures.end(),
 			[](const TextureBinding& binding) { return binding.semantic == TextureSemantic::Base; });
 		if(baseTexture != layerMaterial->textures.end())
@@ -541,7 +561,9 @@ void TerrainWindow::SynchronizeTerrainMaterial()
 		status = "Terrain material controls could not publish a complete runtime binding.";
 		return;
 	}
-	RenderSystem::Instance().ReloadMaterial(terrainRenderProxyMaterialId);
+	// The UUID is stable across layer edits, so retire the old GPU record only
+	// after its complete replacement runtime binding is visible.
+	RenderSystem::Instance().InvalidateGeneratedMaterial(terrainRenderProxyMaterialId);
 	// Replacing the stable resource advances ResourceManager's renderer token.
 	// Republish too, because a renderer reset may have cleared the asset binding.
 	if(terrainRenderProxyMeshId != TerraEngine::EMPTY_UUID)
@@ -554,9 +576,37 @@ void TerrainWindow::ReleaseSceneTerrain(TerraEngine::UUID assetId)
 	if(!terrainStore) return;
 	const auto capture = terrainStore->CaptureRoot();
 	if(!capture.IsValid() || capture.root->assetUuid != assetId) return;
+	ResetSceneTerrainState(
+		"Terrain component removed; terrain rendering, collision, and authoring were detached.");
+}
+
+void TerrainWindow::ReleaseProjectTerrainState()
+{
+	// Project close is a stronger boundary than component removal. Retire the
+	// opened asset even when the component observation pass did not run this frame.
+	if(terrainStore)
+	{
+		const auto capture = terrainStore->CaptureRoot();
+		if(capture.IsValid())
+		{
+			(void)TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance()
+				.Remove(capture.root->assetUuid);
+			(void)TerraEngine::Physics::PhysicsSystem::Instance()
+				.RemoveTerrainCollisions(capture.root->assetUuid);
+		}
+	}
+	ResetSceneTerrainState(
+		"Terrain project state released; derived resources will be rebuilt after the next scene load.");
+}
+
+void TerrainWindow::ResetSceneTerrainState(std::string_view statusMessage)
+{
+	// The worker owns copied terrain values. Cancellation prevents an obsolete
+	// completion from being admitted after a different project becomes active.
 	if(terrainRenderProxyCancellation)
 		terrainRenderProxyCancellation->store(true, std::memory_order_release);
-	TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().ClearPublication(terrainStore.get());
+	if(terrainStore)
+		TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().ClearPublication(terrainStore.get());
 	authoringSystem.CancelPreparedWork("Terrain component removed from the scene.");
 	terrainStore.reset();
 	terrainQueue.reset();
@@ -578,7 +628,7 @@ void TerrainWindow::ReleaseSceneTerrain(TerraEngine::UUID assetId)
 	terrainRenderProxyBuildActive = false;
 	terrainRenderProxyRebuildRequested = false;
 	terrainRenderProxyInstanceQueued = false;
-	status = "Terrain component removed; terrain rendering, collision, and authoring were detached.";
+	status = statusMessage;
 }
 
 TerraEngine::Editor::Terrain::TerrainAutomationCommandResult TerrainWindow::ExecuteAutomationCommand(
@@ -951,7 +1001,20 @@ void TerrainWindow::DrawInspectorSculptControls()
 
 void TerrainWindow::DrawInspectorPaintControls()
 {
+	// Layer creation, removal, disable, and project reload can all invalidate the
+	// last brush target. Repair it before drawing or accepting a Scene View stroke.
+	EnsureValidPaintLayer();
 	const TerraEngine::Terrain::TerrainLayerStack stack = LayerPreview();
+	const std::size_t enabledLayerCount = static_cast<std::size_t>(std::count_if(
+		stack.layers.begin(), stack.layers.end(),
+		[](const TerraEngine::Terrain::TerrainLayer& layer) { return layer.enabled; }));
+	if(enabledLayerCount <= 1u)
+	{
+		ImGui::TextColored(ImVec4(1.0F, 0.72F, 0.18F, 1.0F),
+			"The only enabled layer already covers 100%% of the terrain.");
+		ImGui::TextWrapped(
+			"Open Layers, add another terrain layer, assign its material, then paint that new layer.");
+	}
 	const auto selectedLayer = std::find_if(stack.layers.begin(), stack.layers.end(), [this](const auto& layer) {
 		return layer.stableId == surfaceBrushSettings.layerId;
 	});
@@ -963,7 +1026,10 @@ void TerrainWindow::DrawInspectorPaintControls()
 			if(!layer.enabled) continue;
 			const bool selected = layer.stableId == surfaceBrushSettings.layerId;
 			if(ImGui::Selectable(layer.name.c_str(), selected))
+			{
 				surfaceBrushSettings.layerId = layer.stableId;
+				selectedLayerId = layer.stableId;
+			}
 			if(selected) ImGui::SetItemDefaultFocus();
 		}
 		ImGui::EndCombo();
@@ -990,7 +1056,10 @@ void TerrainWindow::DrawInspectorPaintControls()
 			surfaceBrushSettings.useLayerMask
 				? std::span<const std::uint8_t>(brushMask) : std::span<const std::uint8_t>{});
 		std::string error;
-		if(!result.changed) status = "Surface paint made no change. Choose a valid enabled layer.";
+		if(!result.changed)
+			status = enabledLayerCount <= 1u
+				? "Surface paint made no change: the only enabled layer already covers the complete terrain. Add and select another layer."
+				: "Surface paint made no change: this layer is already at maximum weight in the selected area, or the layer mask has no coverage.";
 		else if(!ApplySurfacePreview(error)) status = std::move(error);
 	}
 	if(displacedLayerWarning != 0u)
@@ -1027,13 +1096,27 @@ void TerrainWindow::DrawInspectorLayerControls()
 		ImGui::PushID(static_cast<int>(layer.stableId));
 		const bool selected = selectedLayerId == layer.stableId;
 		if(ImGui::Selectable(layer.name.c_str(), selected, 0, ImVec2(0.0F, 24.0F)))
+		{
 			selectedLayerId = layer.stableId;
+			if(layer.enabled) surfaceBrushSettings.layerId = layer.stableId;
+		}
 		if(selected)
 		{
 			const AssetMetadata* materialMetadata = layer.materialAssetUuid != TerraEngine::EMPTY_UUID
 				? AssetDatabase::Instance().FindAssetByGuid(layer.materialAssetUuid) : nullptr;
+			const Material* runtimeMaterial = layer.materialAssetUuid != TerraEngine::EMPTY_UUID
+				? ResourceManager::Instance().GetMaterial(layer.materialAssetUuid) : nullptr;
 			ImGui::TextDisabled("Material: %s", materialMetadata
 				? materialMetadata->sourcePath.filename().string().c_str() : "None (flat fallback)");
+			if(layer.materialAssetUuid != TerraEngine::EMPTY_UUID
+				&& (runtimeMaterial == nullptr
+					|| layer.fallbackState != TerraEngine::Terrain::TerrainLayerFallbackState::Healthy))
+			{
+				ImGui::TextColored(ImVec4(1.0F, 0.72F, 0.18F, 1.0F),
+					"Material unavailable: diagnostic checker is shown.");
+				ImGui::TextWrapped(
+					"Base Color is intentionally ignored for a broken material source so the failure remains visible.");
+			}
 			ImGui::Button("Drop Material Here", ImVec2(-1.0F, 0.0F));
 			if(ImGui::BeginDragDropTarget())
 			{
@@ -1061,11 +1144,26 @@ void TerrainWindow::DrawInspectorLayerControls()
 				}
 				ImGui::EndDragDropTarget();
 			}
+			if(layer.materialAssetUuid != TerraEngine::EMPTY_UUID
+				&& ImGui::SmallButton("Clear Material"))
+			{
+				// Clearing restores the flat TerrainComponent Base Color. This is
+				// especially useful when a texture was accidentally assigned to the
+				// always-present base layer instead of a new paint layer.
+				TerraEngine::Terrain::TerrainLayer replacement = layer;
+				replacement.materialAssetUuid = TerraEngine::EMPTY_UUID;
+				replacement.fallbackState = TerraEngine::Terrain::TerrainLayerFallbackState::FallbackActive;
+				std::string error;
+				if(!stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::Replace,
+					0u, layer.stableId, 0xffffffffu, std::move(replacement)}, error))
+					status = std::move(error);
+			}
 			if(ImGui::SmallButton(layer.enabled ? "Disable" : "Enable"))
 			{
 				std::string error;
 				if(!stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::SetEnabled,
 					0u, layer.stableId, 0u, {}, !layer.enabled}, error)) status = std::move(error);
+				else EnsureValidPaintLayer();
 			}
 			ImGui::SameLine();
 			if(index > 0u && ImGui::SmallButton("Move Up"))
@@ -1080,6 +1178,11 @@ void TerrainWindow::DrawInspectorLayerControls()
 				std::string error;
 				if(!stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::Remove,
 					0u, layer.stableId}, error)) status = std::move(error);
+				else
+				{
+					EnsureValidPaintLayer();
+					if(selectedLayerId == layer.stableId) selectedLayerId = surfaceBrushSettings.layerId;
+				}
 			}
 		}
 		ImGui::PopID();
@@ -1095,13 +1198,22 @@ void TerrainWindow::DrawInspectorLayerControls()
 		layer.fallbackState = TerraEngine::Terrain::TerrainLayerFallbackState::FallbackActive;
 		std::string error;
 		if(stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::Add,
-			0u, 0u, 0xffffffffu, std::move(layer)}, error)) selectedLayerId = nextId;
+			0u, 0u, 0xffffffffu, std::move(layer)}, error))
+		{
+			selectedLayerId = nextId;
+			surfaceBrushSettings.layerId = nextId;
+		}
 		else status = std::move(error);
 	}
 }
 
 void TerrainWindow::DrawInspectorSettingsControls()
 {
+	// Material values are authored here instead of through the generic reflected
+	// vec3 editor. The dedicated control presents RGB in familiar 8-bit units and
+	// publishes all changes through the terrain transaction/undo path below.
+	DrawMaterialControls();
+	ImGui::Separator();
 	if(terrainDirtyState.IsDirty() && ImGui::Button("Save Terrain Asset", ImVec2(-1.0F, 0.0F)))
 	{
 		std::string saveError;
@@ -1196,7 +1308,15 @@ void TerrainWindow::DrawMaterialControls()
 	glm::vec3 baseColor = terrain->baseColor;
 	float metallic = terrain->metallic;
 	float roughness = terrain->roughness;
-	const bool colorChanged = ImGui::ColorEdit3("Base color", &baseColor.x);
+	// TerrainComponent stores normalized channels for shaders and serialization,
+	// while artists expect RGB fields in the 0-255 range. Explicit Uint8 display
+	// flags prevent ImGui's global color preference from exposing 0.0-1.0 values.
+	const bool colorChanged = ImGui::ColorEdit3(
+		"Base Color (RGB)",
+		&baseColor.x,
+		ImGuiColorEditFlags_Uint8
+			| ImGuiColorEditFlags_DisplayRGB
+			| ImGuiColorEditFlags_InputRGB);
 	const bool metallicChanged = ImGui::SliderFloat("Metallic", &metallic, 0.0F, 1.0F);
 	const bool roughnessChanged = ImGui::SliderFloat("Roughness", &roughness, 0.0F, 1.0F);
 	if(!colorChanged && !metallicChanged && !roughnessChanged) return;
@@ -1939,13 +2059,31 @@ void TerrainWindow::InitializeAuthoringTerrain(
 	// Persisted roots can contain holes and painted weights in addition to height.
 	// Rehydrate all channels through the same path used after history replay.
 	(void)SynchronizeCommittedAuthoringStateFromPublishedRoot();
-	selectedLayerId = 1u;
+	selectedLayerId = TerraEngine::Editor::Terrain::TerrainSurfaceBrush::ResolveEnabledLayerId(
+		committedLayerStack, 1u);
+	surfaceBrushSettings.layerId = selectedLayerId;
 	layerPreviewActive = false;
 	surfacePreviewActive = false;
 	displacedLayerWarning = 0u;
 	observedTerrainMaterialGeneration = AssetDatabase::Instance().GetTerrainMaterialChangeGeneration();
 	previousStamp.reset(); authoringSession.Cancel(); status = "Terrain Tools is ready: drag in Scene View to create a detached sculpt preview.";
 	ScheduleRenderProxyBuild();
+}
+
+void TerrainWindow::EnsureValidPaintLayer() noexcept
+{
+	const auto& stack = LayerPreview();
+	const std::uint16_t resolved =
+		TerraEngine::Editor::Terrain::TerrainSurfaceBrush::ResolveEnabledLayerId(
+			stack, surfaceBrushSettings.layerId);
+	surfaceBrushSettings.layerId = resolved;
+	// If the metadata selection vanished, keep the Layers panel and Paint panel
+	// on the same surviving entry. Disabled layers remain selectable for repair.
+	const bool selectedStillExists = std::any_of(
+		stack.layers.begin(), stack.layers.end(), [this](const auto& layer) {
+			return layer.stableId == selectedLayerId;
+		});
+	if(!selectedStillExists) selectedLayerId = resolved;
 }
 
 bool TerrainWindow::SynchronizeCommittedAuthoringStateFromPublishedRoot()
@@ -2352,10 +2490,46 @@ bool TerrainWindow::QueueSurfacePreviewForPublication(std::string& outError)
 	return true;
 }
 
+void TerrainWindow::RefreshMaterialAsset(TerraEngine::UUID materialId)
+{
+	if(!terrainStore || materialId == TerraEngine::EMPTY_UUID) return;
+	const auto referencesMaterial = [materialId](const TerraEngine::Terrain::TerrainLayerStack& stack) {
+		return std::any_of(stack.layers.begin(), stack.layers.end(),
+			[materialId](const TerraEngine::Terrain::TerrainLayer& layer) {
+				return layer.materialAssetUuid == materialId;
+			});
+	};
+	if(!referencesMaterial(committedLayerStack) && !referencesMaterial(previewLayerStack)) return;
+
+	// The Material Inspector has already installed the authored TMAT in the live
+	// resource cache. Repair both editor mirrors before rebuilding the small
+	// terrain runtime table so an earlier missing-source marker cannot mask it.
+	const auto state = ResourceManager::Instance().GetMaterial(materialId) != nullptr
+		? TerraEngine::Terrain::TerrainLayerFallbackState::Healthy
+		: TerraEngine::Terrain::TerrainLayerFallbackState::MissingSource;
+	const auto applyFallback = [materialId, state](TerraEngine::Terrain::TerrainLayerStack& stack) {
+		for(auto& layer : stack.layers)
+			if(layer.materialAssetUuid == materialId) layer.fallbackState = state;
+	};
+	applyFallback(committedLayerStack);
+	applyFallback(previewLayerStack);
+	SynchronizeTerrainMaterial(true);
+}
+
 void TerrainWindow::ObserveTerrainMaterialChanges()
 {
 	const TerrainMaterialChangeSnapshot changes = AssetDatabase::Instance().GetTerrainMaterialChangesSince(observedTerrainMaterialGeneration);
 	if(changes.generation == observedTerrainMaterialGeneration && !changes.requiresFullRefresh) return;
+	bool referencedMaterialChanged = false;
+	const auto referencesMaterial = [this](TerraEngine::UUID materialId) {
+		const auto stackReferences = [materialId](const TerraEngine::Terrain::TerrainLayerStack& stack) {
+			return std::any_of(stack.layers.begin(), stack.layers.end(),
+				[materialId](const TerraEngine::Terrain::TerrainLayer& layer) {
+					return layer.materialAssetUuid == materialId;
+				});
+		};
+		return stackReferences(committedLayerStack) || stackReferences(previewLayerStack);
+	};
 	auto applyFallback = [](TerraEngine::Terrain::TerrainLayerStack& stack, TerraEngine::UUID materialId, TerraEngine::Terrain::TerrainLayerFallbackState state) {
 		for(auto& layer : stack.layers)
 			if(layer.materialAssetUuid == materialId) layer.fallbackState = state;
@@ -2365,12 +2539,16 @@ void TerrainWindow::ObserveTerrainMaterialChanges()
 		for(auto* stack : {&committedLayerStack, &previewLayerStack})
 			for(auto& layer : stack->layers)
 				if(layer.materialAssetUuid != TerraEngine::EMPTY_UUID)
+				{
+					referencedMaterialChanged = true;
 					layer.fallbackState = AssetDatabase::Instance().FindAssetByGuid(layer.materialAssetUuid)
 						? TerraEngine::Terrain::TerrainLayerFallbackState::Healthy
 						: TerraEngine::Terrain::TerrainLayerFallbackState::MissingSource;
+				}
 	}
 	for(const TerrainMaterialChange& change : changes.changes)
 	{
+		referencedMaterialChanged = referencedMaterialChanged || referencesMaterial(change.materialAssetId);
 		const auto state = change.kind == TerrainMaterialChangeKind::Deleted
 			? TerraEngine::Terrain::TerrainLayerFallbackState::MissingSource
 			: TerraEngine::Terrain::TerrainLayerFallbackState::Healthy;
@@ -2378,6 +2556,9 @@ void TerrainWindow::ObserveTerrainMaterialChanges()
 		applyFallback(previewLayerStack, change.materialAssetId, state);
 	}
 	observedTerrainMaterialGeneration = changes.generation;
+	// File-watcher edits and deletions use the same immediate terrain republish
+	// path as Inspector edits. Control textures remain cached when paint is stable.
+	if(referencedMaterialChanged) SynchronizeTerrainMaterial(true);
 }
 
 void TerrainWindow::CancelDetachedPreview(std::string_view reason)
@@ -2560,6 +2741,7 @@ void TerrainWindow::HandleSceneViewPointer(
 	bool pressed, bool held, bool released)
 {
 	if((!sculpting && !surfacePainting && !holeSculpting) || !terrainStore) return;
+	if(surfacePainting) EnsureValidPaintLayer();
 	sceneViewBrushFootprint.reset();
 	TerraEngine::Scene::WorldPosition terrainOrigin{};
 	if(terrainRenderProxyTargetObjectId != TerraEngine::EMPTY_UUID)
@@ -2647,7 +2829,18 @@ void TerrainWindow::HandleSceneViewPointer(
 			std::string error;
 			if(surfacePreviewActive && !ApplySurfacePreview(error)) status = error;
 			else if(surfacePreviewActive) status = "Terrain surface stroke queued for the protected authoring boundary.";
-			else status = "Surface stroke produced no changes.";
+			else
+			{
+				const auto& stack = LayerPreview();
+				const std::size_t enabledLayers = static_cast<std::size_t>(std::count_if(
+					stack.layers.begin(), stack.layers.end(),
+					[](const TerraEngine::Terrain::TerrainLayer& layer) { return layer.enabled; }));
+				status = surfaceBrushSettings.layerId == 0u
+					? "Surface stroke rejected: no enabled paint layer is available."
+					: (enabledLayers <= 1u
+						? "Surface stroke made no change: the only enabled layer already covers 100% of the terrain. Add and select another layer."
+						: "Surface stroke made no change: the selected layer is already at maximum weight under the brush, or its mask has no coverage.");
+			}
 		}
 		return;
 	}

@@ -126,6 +126,20 @@ namespace
 				"Surface stroke spacing must suppress dense pointer samples and accept the next due stamp deterministically.");
 		});
 
+		registry.Add("Editor.TerrainLayers.PaintSelectionAlwaysResolvesToAnEnabledStableLayer", [](TestContext& context) {
+			using namespace TerraEngine::Editor::Terrain;
+			auto stack = MakeStack();
+			stack.layers[0].enabled = false;
+			context.Expect(TerrainSurfaceBrush::ResolveEnabledLayerId(stack, 3u) == 3u,
+				"A valid selected paint layer must retain its stable ID.");
+			context.Expect(TerrainSurfaceBrush::ResolveEnabledLayerId(stack, 1u) == 2u
+				&& TerrainSurfaceBrush::ResolveEnabledLayerId(stack, 0u) == 2u,
+				"A disabled or unset paint layer must fall back to the first enabled stable ID.");
+			for(auto& layer : stack.layers) layer.enabled = false;
+			context.Expect(TerrainSurfaceBrush::ResolveEnabledLayerId(stack, 3u) == 0u,
+				"A stack with no enabled layers must explicitly report that painting is unavailable.");
+		});
+
 		registry.Add("Editor.TerrainLayers.MetadataHistoryAndSaveReloadStayAtomic", [](TestContext& context) {
 			using namespace TerraEngine::Terrain;
 			const TerrainLayerStack stack = MakeStack();

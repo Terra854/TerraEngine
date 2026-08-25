@@ -95,6 +95,9 @@ public:
 	// MainEditor calls this when the last scene component referencing an authored
 	// asset disappears. Tool-owned jobs and store pointers are detached together.
 	void ReleaseSceneTerrain(TerraEngine::UUID assetId);
+	// Project shutdown also invalidates generated resource UUIDs even when the
+	// same terrain asset is loaded again in the next project session.
+	void ReleaseProjectTerrainState();
 	// Inspector actions name an exact scene instance. Opening that instance here
 	// binds editing, picking, persistence, and proxy updates to the same asset.
 	[[nodiscard]] bool OpenTerrainForEditing(TerraEngine::UUID objectId, std::string& outError);
@@ -136,6 +139,9 @@ public:
 	[[nodiscard]] TerraEngine::Editor::Terrain::TerrainSurfaceBrushResult PreviewSurfaceBrush(const TerraEngine::Editor::Terrain::TerrainSurfaceBrushSettings& settings, std::span<const std::uint8_t> mask = {});
 	[[nodiscard]] bool ApplySurfacePreview(std::string& outError);
 	void CancelSurfacePreview() noexcept;
+	// Material Inspector edits bypass the delayed filesystem watcher and ask any
+	// open terrain using this UUID to republish only its small material binding.
+	void RefreshMaterialAsset(TerraEngine::UUID materialId);
 	[[nodiscard]] bool PreviewHoleStamp(const TerraEngine::Editor::Terrain::TerrainHoleBrushStamp& stamp);
 	[[nodiscard]] bool ApplyHolePreview(std::string& outError);
 	void CancelHolePreview();
@@ -171,7 +177,9 @@ private:
 	void PollProceduralPreview();
 	void ScheduleRenderProxyBuild();
 	void PollRenderProxyBuild();
-	void SynchronizeTerrainMaterial();
+	void ResetSceneTerrainState(std::string_view statusMessage);
+	void EnsureValidPaintLayer() noexcept;
+	void SynchronizeTerrainMaterial(bool forceLayerMaterialRefresh = false);
 	void QueueRenderProxySceneInstance();
 	void InitializeAuthoringTerrain(
 		TerraEngine::UUID assetId,

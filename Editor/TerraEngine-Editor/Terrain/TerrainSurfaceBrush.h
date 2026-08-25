@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Terrain/TerrainAreaCodec.h"
+#include "Terrain/TerrainLayerStack.h"
 
 #include <cstdint>
 #include <span>
@@ -46,6 +47,12 @@ namespace TerraEngine::Editor::Terrain
 	class TerrainSurfaceBrush
 	{
 	public:
+		// Returns the requested layer only while it remains enabled. Layer-list
+		// edits use the first enabled layer as a deterministic fallback so a paint
+		// stroke never silently targets the invalid stable ID zero.
+		[[nodiscard]] static std::uint16_t ResolveEnabledLayerId(
+			const TerraEngine::Terrain::TerrainLayerStack& stack,
+			std::uint16_t preferredLayerId) noexcept;
 		// Applies one bounded sample edit to detached data. layerMask is optional
 		// and uses 0..255 coverage, matching the height-brush mask convention.
 		[[nodiscard]] static TerrainSurfaceBrushResult ApplySample(

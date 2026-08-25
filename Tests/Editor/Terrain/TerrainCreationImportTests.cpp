@@ -92,6 +92,42 @@ namespace TerraEngine::EditorTests
 				&& terrainWindowSource.find(".AddComponent(local, std::string(TerrainComponent::kComponentName))") != std::string::npos
 				&& terrainWindowSource.find(".AddComponent(local, std::string(MeshRenderComponent::kComponentName))") == std::string::npos,
 				"Terrain creation and recovery must republish derived render resources before gating scene creation, while adding only TerrainComponent to the scene object.");
+			context.Expect(terrainWindowSource.find("DrawMaterialControls();") != std::string::npos
+				&& terrainWindowSource.find("ImGuiColorEditFlags_Uint8") != std::string::npos
+				&& terrainWindowSource.find("ImGuiColorEditFlags_DisplayRGB") != std::string::npos,
+				"Terrain material settings must expose the normalized base color through an explicit 0-255 RGB editor instead of an unbounded generic vector control.");
+			context.Expect(terrainWindowSource.find(
+				"layerMaterial->header.baseColorFactor[0] * settings.baseColor.r") != std::string::npos,
+				"Healthy painted layers must include the TerrainComponent tint exactly once in their runtime color factor.");
+			const std::size_t runtimeBindingPublication = terrainWindowSource.find(
+				"TerrainMaterialRuntimeRegistry::Instance().Publish");
+			const std::size_t generatedMaterialInvalidation = terrainWindowSource.find(
+				"InvalidateGeneratedMaterial(terrainRenderProxyMaterialId)", runtimeBindingPublication);
+			context.Expect(runtimeBindingPublication != std::string::npos
+				&& generatedMaterialInvalidation != std::string::npos
+				&& generatedMaterialInvalidation > runtimeBindingPublication,
+				"Terrain layer changes must retire the stable generated GPU material only after publishing the complete replacement runtime binding.");
+			context.Expect(terrainWindowSource.find("void TerrainWindow::RefreshMaterialAsset") != std::string::npos
+				&& terrainWindowSource.find("SynchronizeTerrainMaterial(true)") != std::string::npos
+				&& terrainWindowSource.find("if(controlTexturesChanged)") != std::string::npos,
+				"Material edits must immediately republish terrain layer bindings while preserving unchanged paint control textures.");
+			context.Expect(terrainWindowSource.find("Clear Material") != std::string::npos
+				&& terrainWindowSource.find("the only enabled layer already covers 100% of the terrain") != std::string::npos,
+				"Terrain painting must explain the fully weighted base-layer case and let artists restore its flat Base Color material.");
+
+			const auto inspectorPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp";
+			std::ifstream inspectorFile(inspectorPath);
+			const std::string inspectorSource(
+				(std::istreambuf_iterator<char>(inspectorFile)),
+				std::istreambuf_iterator<char>());
+			context.Expect(inspectorSource.find("propertyName != \"baseColor\"") != std::string::npos
+				&& inspectorSource.find("propertyName != \"metallic\"") != std::string::npos
+				&& inspectorSource.find("propertyName != \"roughness\"") != std::string::npos,
+				"Terrain material properties must not also render through generic unbounded reflected controls.");
+			context.Expect(inspectorSource.find("ReloadEditedMaterial(it->second.guid, path)") != std::string::npos
+				&& inspectorSource.find("RefreshMaterialAsset(it->second.guid)") != std::string::npos,
+				"Material Inspector edits must update the live material cache and any referencing terrain without waiting for the asset watcher.");
 
 			const auto editorSubsystemPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp";
@@ -106,6 +142,17 @@ namespace TerraEngine::EditorTests
 				&& editorSubsystemSource.find("RemoveTerrainCollisions(removedAsset)") != std::string::npos
 				&& editorSubsystemSource.find(".Remove(removedAsset)") != std::string::npos,
 				"The editor must restore missing terrain derivatives and retire render/collision state when the last component disappears.");
+			const std::size_t projectClose = editorSubsystemSource.find(
+				"void MainEditorSubsystem::CloseCurrentProject()");
+			const std::size_t releaseProjectTerrain = editorSubsystemSource.find(
+				"terrainTools->ReleaseProjectTerrainState()", projectClose);
+			const std::size_t clearResourceCaches = editorSubsystemSource.find(
+				"ResourceManager::Instance().ClearCaches()", projectClose);
+			context.Expect(projectClose != std::string::npos
+				&& releaseProjectTerrain != std::string::npos
+				&& clearResourceCaches != std::string::npos
+				&& releaseProjectTerrain < clearResourceCaches,
+				"Project close must discard cached terrain resource identities before cache clearing so reopening the same terrain rebuilds a valid proxy.");
 
 			const auto rendererPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine/Renderer/RenderSystem.cpp";

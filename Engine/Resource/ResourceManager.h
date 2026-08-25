@@ -469,6 +469,12 @@ public:
 	// Re-parse a material from disk to pick up authored changes without clearing
 	// the entire cache. This ensures the renderer sees new parameters immediately.
 	void ReloadMaterial(const TerraEngine::UUID& id);
+	// Inspector edits are already complete validated TMAT files. Publish that
+	// authored file directly into the live cache while keeping the registered
+	// cooked path unchanged for later project loads and exports.
+	[[nodiscard]] bool ReloadMaterialFromAuthoredPath(
+		const TerraEngine::UUID& id,
+		const std::filesystem::path& authoredPath);
 
 	// Re-parse a mesh from disk to pick up authored changes.
 	void ReloadMesh(const TerraEngine::UUID& id);

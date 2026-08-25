@@ -1011,6 +1011,10 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 		const auto idIndex = textureIndexMap.find(terrainBinding->layerIdTextureId);
 		if(weightIndex != textureIndexMap.end() && idIndex != textureIndexMap.end())
 		{
+			// Terrain runtime layers already include the component tint in each
+			// healthy layer factor. Keep the ordinary material factor neutral so
+			// colors are applied once and diagnostic magenta remains recognizable.
+			data.BaseColorFactor = glm::vec4(1.0F);
 			data.Flags |= TerrainLayerBlend;
 			data.TerrainControl = glm::uvec4(
 				weightIndex->second, idIndex->second, terrainBinding->layerCount, 0u);

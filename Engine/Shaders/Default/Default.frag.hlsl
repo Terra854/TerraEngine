@@ -846,6 +846,17 @@ uint TerrainPackedValue(uint4 values[4], uint index)
 	return values[min(index / 4u, 3u)][index % 4u];
 }
 
+float4 TerrainDiagnosticPattern(float2 terrainUv)
+{
+	// A high-contrast checker is visually distinct from every ordinary solid
+	// material color. Keeping it derived from terrain UV also makes the failure
+	// obvious without relying on animation or editor-only uniforms.
+	const uint2 cell = uint2(floor(saturate(terrainUv) * 32.0f));
+	return ((cell.x + cell.y) & 1u) != 0u
+		? float4(1.0f, 0.82f, 0.0f, 1.0f)
+		: float4(0.015f, 0.015f, 0.015f, 1.0f);
+}
+
 float4 SampleTerrainLayerBlend(MaterialData mat, float2 terrainUv)
 {
 	const uint weightTextureIndex = min(mat.TerrainControl.x, kMaxBindlessTextureCount - 1u);
@@ -854,7 +865,7 @@ float4 SampleTerrainLayerBlend(MaterialData mat, float2 terrainUv)
 	uint height = 0u;
 	globalTextures[NonUniformResourceIndex(weightTextureIndex)].GetDimensions(width, height);
 	if(width == 0u || height == 0u || mat.TerrainControl.z == 0u)
-		return float4(1.0f, 0.0f, 1.0f, 1.0f);
+		return TerrainDiagnosticPattern(terrainUv);
 	const uint2 texel = min(
 		uint2(saturate(terrainUv) * float2(width - 1u, height - 1u) + 0.5f),
 		uint2(width - 1u, height - 1u));
@@ -878,11 +889,14 @@ float4 SampleTerrainLayerBlend(MaterialData mat, float2 terrainUv)
 				TerrainPackedValue(mat.TerrainLayerTextureIndices, layerIndex),
 				kMaxBindlessTextureCount - 1u);
 			const float4 transform = mat.TerrainLayerUVTransforms[layerIndex];
-			float4 sampleValue = globalTextures[NonUniformResourceIndex(textureIndex)].Sample(
-				globalSamplers[NonUniformResourceIndex(textureIndex)],
-				terrainUv * transform.xy + transform.zw);
-			if(!all(isfinite(sampleValue))) sampleValue = float4(1.0f, 0.0f, 1.0f, 1.0f);
-			blended += sampleValue * mat.TerrainLayerBaseColorFactors[layerIndex] * weight;
+			const float4 layerFactor = mat.TerrainLayerBaseColorFactors[layerIndex];
+			float4 sampleValue = layerFactor.a < 0.0f
+				? TerrainDiagnosticPattern(terrainUv)
+				: globalTextures[NonUniformResourceIndex(textureIndex)].Sample(
+					globalSamplers[NonUniformResourceIndex(textureIndex)],
+					terrainUv * transform.xy + transform.zw) * layerFactor;
+			if(!all(isfinite(sampleValue))) sampleValue = TerrainDiagnosticPattern(terrainUv);
+			blended += sampleValue * weight;
 			accumulatedWeight += weight;
 			found = true;
 			break;
@@ -890,12 +904,12 @@ float4 SampleTerrainLayerBlend(MaterialData mat, float2 terrainUv)
 		// Keep an authored but unavailable layer visible as an explicit diagnostic.
 		if(!found)
 		{
-			blended += float4(1.0f, 0.0f, 1.0f, 1.0f) * weight;
+			blended += TerrainDiagnosticPattern(terrainUv) * weight;
 			accumulatedWeight += weight;
 		}
 	}
 	return accumulatedWeight > 0.0001f
-		? blended / accumulatedWeight : float4(1.0f, 0.0f, 1.0f, 1.0f);
+		? blended / accumulatedWeight : TerrainDiagnosticPattern(terrainUv);
 }
 
 // Both fixed-function fragments and the visibility-buffer composite call the

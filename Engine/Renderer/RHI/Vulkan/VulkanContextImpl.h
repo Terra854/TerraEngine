@@ -198,6 +198,10 @@ struct alignas(16) MaterialData {
 	uint32_t OcclusionTextureIndex;
 	uint32_t EmissiveTextureIndex;
 	uint32_t ShadowBehavior;
+	// DXC starts the following HLSL uint4 at byte 112. Default GLM vectors have
+	// four-byte alignment, so reserve the eight bytes that HLSL inserts before
+	// terrain fields instead of silently uploading every terrain value too early.
+	std::array<std::uint32_t, 2u> TerrainAlignmentPadding{};
 	// x=weight map, y=stable-layer-ID map, z=layer count, w=reserved.
 	glm::uvec4 TerrainControl;
 	std::array<glm::uvec4, 4u> TerrainLayerTextureIndices{};
@@ -205,6 +209,15 @@ struct alignas(16) MaterialData {
 	std::array<glm::vec4, 16u> TerrainLayerBaseColorFactors{};
 	std::array<glm::vec4, 16u> TerrainLayerUVTransforms{};
 };
+
+// These offsets are part of the StructuredBuffer ABI in Default.frag.hlsl.
+// Compile-time checks make a future C++ or GLM layout change fail visibly.
+static_assert(offsetof(MaterialData, TerrainControl) == 112u);
+static_assert(offsetof(MaterialData, TerrainLayerTextureIndices) == 128u);
+static_assert(offsetof(MaterialData, TerrainLayerStableIds) == 192u);
+static_assert(offsetof(MaterialData, TerrainLayerBaseColorFactors) == 256u);
+static_assert(offsetof(MaterialData, TerrainLayerUVTransforms) == 512u);
+static_assert(sizeof(MaterialData) == 768u);
 
 // struct PipelineKey groups related state and operations so callers have one documented contract.
 struct PipelineKey {

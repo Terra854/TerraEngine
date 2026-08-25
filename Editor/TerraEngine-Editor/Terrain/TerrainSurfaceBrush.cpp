@@ -53,6 +53,22 @@ namespace
 	}
 }
 
+	std::uint16_t TerrainSurfaceBrush::ResolveEnabledLayerId(
+		const TerraEngine::Terrain::TerrainLayerStack& stack,
+		std::uint16_t preferredLayerId) noexcept
+	{
+		const auto preferred = std::find_if(
+			stack.layers.begin(), stack.layers.end(),
+			[preferredLayerId](const TerraEngine::Terrain::TerrainLayer& layer) {
+				return layer.enabled && layer.stableId == preferredLayerId;
+			});
+		if(preferred != stack.layers.end()) return preferred->stableId;
+		const auto fallback = std::find_if(
+			stack.layers.begin(), stack.layers.end(),
+			[](const TerraEngine::Terrain::TerrainLayer& layer) { return layer.enabled; });
+		return fallback != stack.layers.end() ? fallback->stableId : 0u;
+	}
+
 	TerrainSurfaceBrushResult TerrainSurfaceBrush::ApplySample(TerrainWeightSample& sample, const TerrainSurfaceBrushSettings& settings, std::uint8_t layerMask) noexcept
 	{
 		TerrainSurfaceBrushResult result;

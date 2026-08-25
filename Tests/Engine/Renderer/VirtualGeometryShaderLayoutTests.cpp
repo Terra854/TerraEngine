@@ -905,6 +905,19 @@ namespace TerraEngine::Tests
 				"The primitive upload should initialize the complete padded range.");
 		});
 
+		registry.Add("VirtualGeometry.ShaderLayout.TerrainLayerBlendAppliesComponentTintOnce", [](TestContext& context) {
+			const std::string vulkanResourcesSource = ReadVulkanContextResourcesSource();
+			const std::string fragmentShader = ReadDefaultFragmentShader();
+
+			context.Expect(ShaderContains(vulkanResourcesSource,
+				"data.BaseColorFactor = glm::vec4(1.0F);"),
+				"Terrain runtime layers include the component tint, so the generated material factor must be neutral during shading.");
+			context.Expect(ShaderContains(fragmentShader, "TerrainDiagnosticPattern")
+				&& ShaderContains(fragmentShader, "layerFactor.a < 0.0f")
+				&& !ShaderContains(fragmentShader, "float4(1.0f, 0.0f, 1.0f, 1.0f)"),
+				"Unavailable terrain layers must use an unmistakable checker diagnostic rather than an ambiguous legitimate magenta color.");
+		});
+
 		registry.Add("VirtualGeometry.ShaderLayout.CanonicalGraphicsBridgeIndexesEveryOwnerGroup", [](TestContext& context) {
 			const std::string vulkanSource = ReadVulkanContextSource();
 

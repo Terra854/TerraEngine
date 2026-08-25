@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <deque>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -124,6 +125,11 @@ public:
 	std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> DeclareFrameWorkloads(float deltaTime) override;
 
 	void ReloadMaterial(const TerraEngine::UUID& materialId);
+	// Material Inspector previews load the validated authored TMAT immediately;
+	// the asynchronous asset watcher still maintains the durable cooked copy.
+	[[nodiscard]] bool ReloadEditedMaterial(
+		const TerraEngine::UUID& materialId,
+		const std::filesystem::path& authoredPath);
 	void ReloadMesh(const TerraEngine::UUID& meshId);
 	// Generated meshes already replaced their immutable CPU cache entry. This
 	// protected call retires only the backend copy so the next frame uploads the
@@ -132,6 +138,9 @@ public:
 	// Generated control textures already replaced their CPU cache entry. Retire
 	// only the backend image so the next material upload sees the new pixels.
 	void InvalidateGeneratedTexture(const TerraEngine::UUID& textureId);
+	// Generated materials cannot be reloaded from disk. Retire only their backend
+	// record after the editor publishes its complete replacement runtime binding.
+	void InvalidateGeneratedMaterial(const TerraEngine::UUID& materialId);
 	void ReloadTexture(const TerraEngine::UUID& textureId);
 
 	void DeleteResource(const TerraEngine::UUID& id);

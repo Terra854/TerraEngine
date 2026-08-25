@@ -331,3 +331,29 @@ void ResourceManager::ReloadMaterial(const TerraEngine::UUID& id)
 		m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);
 	}
 }
+
+bool ResourceManager::ReloadMaterialFromAuthoredPath(
+	const TerraEngine::UUID& id,
+	const std::filesystem::path& authoredPath)
+{
+	// TMAT source assets already use the runtime binary contract. Loading the
+	// atomically published authored file avoids waiting for the file watcher to
+	// copy the same bytes into Build before an Inspector preview can update.
+	if(id == TerraEngine::EMPTY_UUID || !IsCompiledMaterialPath(authoredPath))
+	{
+		return false;
+	}
+	auto material = LoadMaterialFile(*this, authoredPath);
+	if(!material)
+	{
+		return false;
+	}
+	{
+		std::unique_lock lock(materialCache.mutex);
+		materialCache.resources[id] = std::move(material);
+		// Readers observe the generation only after the complete replacement owns
+		// all spans into its new storage buffer.
+		m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);
+	}
+	return true;
+}

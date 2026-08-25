@@ -3896,7 +3896,15 @@ void MainEditorSubsystem::DrawScriptCompilationModal() {
 // MainEditorSubsystem::CloseCurrentProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::CloseCurrentProject() {
 	if(auto terrainTools = GetWindow<TerrainWindow>())
+	{
 		terrainTools->CancelDetachedPreview("Terrain preview cancelled while closing the project.");
+		// TerrainWindow caches generated mesh/material UUIDs independently of the
+		// component. Discard them before ResourceManager clears those resources so
+		// reopening this asset cannot publish a stale, non-resident binding.
+		terrainTools->ReleaseProjectTerrainState();
+	}
+	terrainProxyRestorePending = false;
+	observedTerrainComponentAssets.clear();
 	// Invalidate profiler worker results before resource teardown starts. A slow
 	// capture read/write may finish later, but its old project epoch is already
 	// unable to restore document or window state into the next project.

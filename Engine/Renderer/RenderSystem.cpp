@@ -13884,6 +13884,25 @@ void RenderSystem::ReloadMaterial(const TerraEngine::UUID& materialId)
 	}
 }
 
+bool RenderSystem::ReloadEditedMaterial(
+	const TerraEngine::UUID& materialId,
+	const std::filesystem::path& authoredPath)
+{
+	// The Inspector has already atomically validated and published authoredPath.
+	// Replace the live CPU value first, then retire the GPU slot so no frame can
+	// rebuild from the previous material generation.
+	if(!ResourceManager::Instance().ReloadMaterialFromAuthoredPath(
+		materialId, authoredPath))
+	{
+		return false;
+	}
+	if(rhi)
+	{
+		rhi->InvalidateMaterial(materialId);
+	}
+	return true;
+}
+
 // RenderSystem::ReloadMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::ReloadMesh(const TerraEngine::UUID& meshId)
 {
@@ -13908,6 +13927,17 @@ void RenderSystem::InvalidateGeneratedTexture(const TerraEngine::UUID& textureId
 	if(rhi && textureId != TerraEngine::EMPTY_UUID)
 	{
 		rhi->InvalidateTexture(textureId);
+	}
+}
+
+void RenderSystem::InvalidateGeneratedMaterial(const TerraEngine::UUID& materialId)
+{
+	// Generated terrain materials have no disk path for ReloadMaterial. Dropping
+	// their backend slot makes the next visible draw rebuild MaterialData from the
+	// freshly published CPU material and terrain runtime-layer binding.
+	if(rhi && materialId != TerraEngine::EMPTY_UUID)
+	{
+		rhi->InvalidateMaterial(materialId);
 	}
 }
 
