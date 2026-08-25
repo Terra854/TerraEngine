@@ -349,6 +349,26 @@ TerraEngine::UUID ResourceManager::LoadTexture(const std::filesystem::path& path
 	});
 }
 
+TerraEngine::UUID ResourceManager::RegisterTexture(
+	const std::string& cacheKey,
+	std::unique_ptr<Texture> texture)
+{
+	// Stable synthetic keys let terrain replace a detached control-page preview
+	// without creating a new UUID or leaking an unbounded bindless texture slot.
+	const std::string normalizedKey = "generated/" + cacheKey;
+	std::unique_lock lock(textureCache.mutex);
+	TerraEngine::UUID id = TerraEngine::GenerateUUID();
+	if(const auto existing = textureCache.pathToId.find(normalizedKey);
+		existing != textureCache.pathToId.end())
+		id = existing->second;
+	textureCache.pathToId[normalizedKey] = id;
+	if(texture) textureCache.resources[id] = std::move(texture);
+	else textureCache.resources.erase(id);
+	textureCache.inFlight.erase(normalizedKey);
+	m_RendererResourcePublicationGeneration.fetch_add(1u, std::memory_order_release);
+	return id;
+}
+
 // ResourceManager::LoadTextureAsync is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::shared_future<TerraEngine::UUID> ResourceManager::LoadTextureAsync(const std::filesystem::path& path)
 {

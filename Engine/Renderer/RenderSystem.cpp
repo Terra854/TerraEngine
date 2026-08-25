@@ -13903,6 +13903,14 @@ void RenderSystem::InvalidateGeneratedMesh(const TerraEngine::UUID& meshId)
 	}
 }
 
+void RenderSystem::InvalidateGeneratedTexture(const TerraEngine::UUID& textureId)
+{
+	if(rhi && textureId != TerraEngine::EMPTY_UUID)
+	{
+		rhi->InvalidateTexture(textureId);
+	}
+}
+
 // RenderSystem::ReloadTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::ReloadTexture(const TerraEngine::UUID& textureId)
 {

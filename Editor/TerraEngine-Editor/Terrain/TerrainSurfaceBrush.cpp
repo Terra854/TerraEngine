@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 
 namespace TerraEngine::Editor::Terrain
@@ -99,6 +100,67 @@ namespace
 			combined.deterministicDisplacementMm += PreviewDisplacementMm(settings.displacementSeed, static_cast<std::int64_t>(index), 0, settings.strength);
 		}
 		return combined;
+	}
+
+	TerrainSurfaceBrushResult TerrainSurfaceBrush::ApplyStamp(
+		std::span<const TerrainWeightSample> source,
+		std::span<TerrainWeightSample> out,
+		std::uint32_t width,
+		std::uint32_t height,
+		const TerrainSurfaceBrushSettings& settings,
+		const TerrainSurfaceBrushStamp& stamp,
+		std::span<const std::uint8_t> layerMask) noexcept
+	{
+		TerrainSurfaceBrushResult combined;
+		const std::size_t sampleCount = static_cast<std::size_t>(width) * height;
+		if(width == 0u || height == 0u || source.size() != sampleCount
+			|| out.size() != sampleCount || (!layerMask.empty() && layerMask.size() < sampleCount)
+			|| !std::isfinite(settings.radiusSamples) || settings.radiusSamples <= 0.0F
+			|| !std::isfinite(stamp.centerX) || !std::isfinite(stamp.centerZ))
+			return combined;
+
+		std::copy(source.begin(), source.end(), out.begin());
+		const float radius = settings.radiusSamples;
+		const std::int32_t minimumX = std::max(0, static_cast<std::int32_t>(std::floor(stamp.centerX - radius)));
+		const std::int32_t maximumX = std::min(static_cast<std::int32_t>(width) - 1,
+			static_cast<std::int32_t>(std::ceil(stamp.centerX + radius)));
+		const std::int32_t minimumZ = std::max(0, static_cast<std::int32_t>(std::floor(stamp.centerZ - radius)));
+		const std::int32_t maximumZ = std::min(static_cast<std::int32_t>(height) - 1,
+			static_cast<std::int32_t>(std::ceil(stamp.centerZ + radius)));
+		for(std::int32_t z = minimumZ; z <= maximumZ; ++z)
+		{
+			for(std::int32_t x = minimumX; x <= maximumX; ++x)
+			{
+				const float dx = static_cast<float>(x) - stamp.centerX;
+				const float dz = static_cast<float>(z) - stamp.centerZ;
+				const float normalizedDistance = std::sqrt(dx * dx + dz * dz) / radius;
+				if(normalizedDistance > 1.0F) continue;
+				// Smoothstep gives artists a soft edge while retaining an exact zero at
+				// the footprint boundary. Convert it to the canonical 0..255 mask once.
+				const float inverse = 1.0F - normalizedDistance;
+				const float falloff = inverse * inverse * (3.0F - 2.0F * inverse);
+				const std::size_t index = static_cast<std::size_t>(z) * width + static_cast<std::size_t>(x);
+				std::uint32_t coverage = static_cast<std::uint32_t>(std::lround(falloff * 255.0F));
+				if(!layerMask.empty()) coverage = coverage * layerMask[index] / 255u;
+				TerrainSurfaceBrushSettings local = settings;
+				local.useLayerMask = true;
+				const auto result = ApplySample(out[index], local, static_cast<std::uint8_t>(coverage));
+				combined.changed = combined.changed || result.changed;
+				if(combined.displacedLayerId == 0u) combined.displacedLayerId = result.displacedLayerId;
+			}
+		}
+		return combined;
+	}
+
+	bool TerrainSurfaceBrush::IsStrokeSampleDue(
+		const TerrainSurfaceBrushStamp& previous,
+		const TerrainSurfaceBrushStamp& candidate,
+		float spacingSamples) noexcept
+	{
+		const float dx = candidate.centerX - previous.centerX;
+		const float dz = candidate.centerZ - previous.centerZ;
+		const float spacing = std::max(0.0F, spacingSamples);
+		return dx * dx + dz * dz >= spacing * spacing;
 	}
 
 	std::int32_t TerrainSurfaceBrush::PreviewDisplacementMm(std::uint32_t seed, std::int64_t sampleX, std::int64_t sampleZ, std::int32_t amplitudeMm) noexcept

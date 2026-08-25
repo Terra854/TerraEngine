@@ -13,6 +13,7 @@ class ResourceManager;
 
 namespace TerraEngine::Terrain
 {
+	struct TerrainLayerMapping;
 	// Terrain keeps a compact set of physically based inputs in the scene. The
 	// generated editor and runtime materials both consume this value object, so an
 	// exported terrain cannot silently fall back to different lighting values.
@@ -33,5 +34,7 @@ namespace TerraEngine::Terrain
 	// Builds the ordinary TMAT-backed PBR representation used by both editor and
 	// packaged terrain proxies. Resource registration remains with the caller.
 	[[nodiscard]] TERRAENGINE_API std::unique_ptr<Material> CreateTerrainMaterial(
-		ResourceManager& resources, TerrainMaterialSettings settings);
+		ResourceManager& resources, TerrainMaterialSettings settings,
+		const Material* surfaceSource = nullptr,
+		const TerrainLayerMapping* mapping = nullptr);
 }

@@ -20,6 +20,11 @@ struct MaterialData
 	uint OcclusionTextureIndex;
 	uint EmissiveTextureIndex;
 	uint ShadowBehavior;
+	uint4 TerrainControl;
+	uint4 TerrainLayerTextureIndices[4];
+	uint4 TerrainLayerStableIds[4];
+	float4 TerrainLayerBaseColorFactors[16];
+	float4 TerrainLayerUVTransforms[16];
 };
 
 static const uint kShadingModel_Unlit = 0u;
@@ -30,6 +35,7 @@ static const uint kMaterialShadowBehavior_AlphaCutout = 1u;
 static const uint kMaterialShadowBehavior_TransparentNoShadow = 2u;
 static const uint kMaterialShadowBehavior_TranslucentApproximate = 3u;
 static const uint kMaterialShadowBehavior_EmissiveUsesOpacity = 4u;
+static const uint kMaterialFlag_TerrainLayerBlend = 1u << 3u;
 
 struct FrameCullingData
 {
@@ -835,6 +841,63 @@ ConventionalVisibilityOutput MakeConventionalVisibilityOutput(float4 color,
 #endif
 #endif
 
+uint TerrainPackedValue(uint4 values[4], uint index)
+{
+	return values[min(index / 4u, 3u)][index % 4u];
+}
+
+float4 SampleTerrainLayerBlend(MaterialData mat, float2 terrainUv)
+{
+	const uint weightTextureIndex = min(mat.TerrainControl.x, kMaxBindlessTextureCount - 1u);
+	const uint idTextureIndex = min(mat.TerrainControl.y, kMaxBindlessTextureCount - 1u);
+	uint width = 0u;
+	uint height = 0u;
+	globalTextures[NonUniformResourceIndex(weightTextureIndex)].GetDimensions(width, height);
+	if(width == 0u || height == 0u || mat.TerrainControl.z == 0u)
+		return float4(1.0f, 0.0f, 1.0f, 1.0f);
+	const uint2 texel = min(
+		uint2(saturate(terrainUv) * float2(width - 1u, height - 1u) + 0.5f),
+		uint2(width - 1u, height - 1u));
+	const float4 weights = max(
+		globalTextures[NonUniformResourceIndex(weightTextureIndex)].Load(int3(texel, 0)), 0.0f);
+	const uint4 stableIds = uint4(round(saturate(
+		globalTextures[NonUniformResourceIndex(idTextureIndex)].Load(int3(texel, 0))) * 65535.0f));
+	float4 blended = 0.0f;
+	float accumulatedWeight = 0.0f;
+	[unroll]
+	for(uint contributor = 0u; contributor < 4u; ++contributor)
+	{
+		const float weight = weights[contributor];
+		if(weight <= 0.0001f || stableIds[contributor] == 0u) continue;
+		bool found = false;
+		[loop]
+		for(uint layerIndex = 0u; layerIndex < min(mat.TerrainControl.z, 16u); ++layerIndex)
+		{
+			if(TerrainPackedValue(mat.TerrainLayerStableIds, layerIndex) != stableIds[contributor]) continue;
+			const uint textureIndex = min(
+				TerrainPackedValue(mat.TerrainLayerTextureIndices, layerIndex),
+				kMaxBindlessTextureCount - 1u);
+			const float4 transform = mat.TerrainLayerUVTransforms[layerIndex];
+			float4 sampleValue = globalTextures[NonUniformResourceIndex(textureIndex)].Sample(
+				globalSamplers[NonUniformResourceIndex(textureIndex)],
+				terrainUv * transform.xy + transform.zw);
+			if(!all(isfinite(sampleValue))) sampleValue = float4(1.0f, 0.0f, 1.0f, 1.0f);
+			blended += sampleValue * mat.TerrainLayerBaseColorFactors[layerIndex] * weight;
+			accumulatedWeight += weight;
+			found = true;
+			break;
+		}
+		// Keep an authored but unavailable layer visible as an explicit diagnostic.
+		if(!found)
+		{
+			blended += float4(1.0f, 0.0f, 1.0f, 1.0f) * weight;
+			accumulatedWeight += weight;
+		}
+	}
+	return accumulatedWeight > 0.0001f
+		? blended / accumulatedWeight : float4(1.0f, 0.0f, 1.0f, 1.0f);
+}
+
 // Both fixed-function fragments and the visibility-buffer composite call the
 // same material function. Passing immutable draw state explicitly lets a
 // fullscreen composite shade different materials without per-triangle draws.
@@ -846,7 +909,9 @@ float4 ShadeDefaultSurface(
 	const MaterialData mat = allMaterials[uniforms.materialIndex];
 	const float2 uv = input.uv * mat.UVTransform.xy + mat.UVTransform.zw;
 
-	float4 baseColorSample = globalTextures[NonUniformResourceIndex(min(mat.BaseColorTextureIndex, kMaxBindlessTextureCount - 1u))].Sample(globalSamplers[NonUniformResourceIndex(min(mat.BaseColorTextureIndex, kMaxBindlessTextureCount - 1u))], uv);
+	float4 baseColorSample = (mat.Flags & kMaterialFlag_TerrainLayerBlend) != 0u
+		? SampleTerrainLayerBlend(mat, input.uv)
+		: globalTextures[NonUniformResourceIndex(min(mat.BaseColorTextureIndex, kMaxBindlessTextureCount - 1u))].Sample(globalSamplers[NonUniformResourceIndex(min(mat.BaseColorTextureIndex, kMaxBindlessTextureCount - 1u))], uv);
 	if (!all(isfinite(baseColorSample)))
 	{
 		baseColorSample = float4(1.0f, 1.0f, 1.0f, 1.0f);

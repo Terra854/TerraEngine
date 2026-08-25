@@ -129,6 +129,9 @@ public:
 	// protected call retires only the backend copy so the next frame uploads the
 	// new generation without trying to reload a nonexistent disk path.
 	void InvalidateGeneratedMesh(const TerraEngine::UUID& meshId);
+	// Generated control textures already replaced their CPU cache entry. Retire
+	// only the backend image so the next material upload sees the new pixels.
+	void InvalidateGeneratedTexture(const TerraEngine::UUID& textureId);
 	void ReloadTexture(const TerraEngine::UUID& textureId);
 
 	void DeleteResource(const TerraEngine::UUID& id);

@@ -265,9 +265,9 @@ public:
 	template<typename T>
 	// GetWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::shared_ptr<T> GetWindow() const {
-		// Terrain authoring is an Inspector-backed service, not a drawable window.
-		// Preserve the existing typed lookup contract without placing the service in
-		// the docking, drawing, layout, or Windows-menu collections.
+		// Terrain authoring is an Inspector-backed service and does not derive from
+		// EditorWindow. Preserve this typed lookup contract for Scene View,
+		// automation, and lifecycle callers without exposing a drawable surface.
 		if constexpr(std::is_same_v<T, TerrainWindow>)
 		{
 			return std::static_pointer_cast<T>(m_TerrainTools);
@@ -317,8 +317,8 @@ private:
 	// Windows
 	std::vector<std::shared_ptr<EditorWindow>> m_Windows;
 	// TerrainWindow retains its historical type name because it owns substantial
-	// terrain authoring state, but it is now a non-drawn service consumed only by
-	// the Terrain Inspector, Scene View, automation, and editor lifecycle.
+	// terrain authoring state, but it is a service consumed only by the Terrain
+	// Inspector, Scene View, automation, and editor lifecycle.
 	std::shared_ptr<TerrainWindow> m_TerrainTools;
 
 	// Internal State

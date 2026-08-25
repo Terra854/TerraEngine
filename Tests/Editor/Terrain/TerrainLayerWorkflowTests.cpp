@@ -104,6 +104,28 @@ namespace
 				"Displacement previews must be deterministic for canonical signed coordinates.");
 		});
 
+		registry.Add("Editor.TerrainLayers.SurfaceBrushStampIsBoundedAndSpacingAware", [](TestContext& context) {
+			using namespace TerraEngine::Terrain;
+			using namespace TerraEngine::Editor::Terrain;
+			std::vector<TerrainWeightSample> source(64u, NormalizeTerrainWeights(
+				std::array<TerrainWeightContribution, 1u>{{{1u, 255u}}}));
+			std::vector<TerrainWeightSample> painted(source.size());
+			TerrainSurfaceBrushSettings settings;
+			settings.mode = TerrainSurfaceBrushMode::Paint;
+			settings.layerId = 2u;
+			settings.strength = 255u;
+			settings.radiusSamples = 2.0F;
+			settings.spacingSamples = 1.5F;
+			const auto result = TerrainSurfaceBrush::ApplyStamp(
+				source, painted, 8u, 8u, settings, {3.0F, 3.0F});
+			context.Expect(result.changed && painted[3u * 8u + 3u].slots != source[3u * 8u + 3u].slots
+				&& painted.front().slots == source.front().slots,
+				"A Scene View surface stamp must change its centre while preserving samples outside the circular footprint.");
+			context.Expect(!TerrainSurfaceBrush::IsStrokeSampleDue({3.0F, 3.0F}, {4.0F, 3.0F}, settings.spacingSamples)
+				&& TerrainSurfaceBrush::IsStrokeSampleDue({3.0F, 3.0F}, {5.0F, 3.0F}, settings.spacingSamples),
+				"Surface stroke spacing must suppress dense pointer samples and accept the next due stamp deterministically.");
+		});
+
 		registry.Add("Editor.TerrainLayers.MetadataHistoryAndSaveReloadStayAtomic", [](TestContext& context) {
 			using namespace TerraEngine::Terrain;
 			const TerrainLayerStack stack = MakeStack();

@@ -1,8 +1,7 @@
-// TerrainWindow.h -- Visible create/import/sculpt controls for terrain assets.
+// TerrainWindow.h -- Inspector-backed terrain authoring state and operations.
 
 #pragma once
 
-#include "../Framework/EditorWindow.h"
 #include "../Terrain/TerrainAuthoringSession.h"
 #include "../Terrain/TerrainBrushEngine.h"
 #include "../Terrain/TerrainSurfaceBrush.h"
@@ -32,7 +31,10 @@
 #include <string_view>
 #include <vector>
 
-class TerrainWindow final : public EditorWindow
+// The historical type name is retained to avoid disrupting terrain automation
+// and lifecycle integrations. It is deliberately not an EditorWindow: the
+// TerrainComponent Inspector owns all interactive terrain presentation.
+class TerrainWindow final
 {
 public:
 	struct AutomationOperationStart { bool accepted=false; std::string category,message; std::optional<TerraEngine::UUID> transactionId; };
@@ -45,14 +47,15 @@ public:
 		bool holeBrush = false;
 	};
 	TerrainWindow();
-	~TerrainWindow() override;
+	~TerrainWindow();
 	[[nodiscard]] TerraEngine::Editor::Terrain::TerrainBrushSettings BrushSettings() const noexcept { return brushSettings; }
-	[[nodiscard]] bool IsSculpting() const noexcept { return sculpting || holeSculpting; }
+	[[nodiscard]] bool IsSculpting() const noexcept { return sculpting || surfacePainting || holeSculpting; }
 	[[nodiscard]] bool IsHeightSculpting() const noexcept { return sculpting; }
+	[[nodiscard]] bool IsSurfacePainting() const noexcept { return surfacePainting; }
 	[[nodiscard]] bool IsHoleSculpting() const noexcept { return holeSculpting; }
 	void SetSculpting(bool value);
 	void SetHoleSculpting(bool value);
-	[[nodiscard]] bool IsBrushStrokeActive() const noexcept { return brushStrokeActive || holeBrushActive; }
+	[[nodiscard]] bool IsBrushStrokeActive() const noexcept { return brushStrokeActive || surfaceBrushActive || holeBrushActive; }
 	[[nodiscard]] const std::optional<SceneViewBrushFootprint>& BrushFootprint() const noexcept { return sceneViewBrushFootprint; }
 	// Terrain input belongs to this window only while the exact scene instance
 	// opened for editing is selected. Comparing durable UUIDs avoids accidentally
@@ -141,9 +144,6 @@ public:
 	[[nodiscard]] bool ApplyProceduralPreview(std::string& outError);
 	void CancelProceduralPreview() noexcept;
 
-protected:
-	void OnGui() override;
-
 private:
 	enum class InspectorTool : std::uint8_t
 	{
@@ -182,6 +182,7 @@ private:
 	// starts from the replayed value instead of overwriting it with stale state.
 	[[nodiscard]] bool SynchronizeCommittedAuthoringStateFromPublishedRoot();
 	void ApplyBrushAt(const TerraEngine::Editor::Terrain::TerrainPickHit& hit);
+	void ApplySurfaceBrushAt(const TerraEngine::Editor::Terrain::TerrainPickHit& hit);
 	void ApplyHoleBrushAt(const TerraEngine::Editor::Terrain::TerrainPickHit& hit);
 	[[nodiscard]] bool QueuePreviewForPublication();
 	[[nodiscard]] bool QueueSurfacePreviewForPublication(std::string& outError);
@@ -198,6 +199,8 @@ private:
 	InspectorTool inspectorTool = InspectorTool::Sculpt;
 	bool brushStrokeActive = false;
 	bool maskEnabled = false;
+	bool surfacePainting = false;
+	bool surfaceBrushActive = false;
 	bool holeSculpting = false;
 	bool holeBrushActive = false;
 	std::unique_ptr<TerraEngine::Terrain::TerrainAssetStore> terrainStore;
@@ -214,6 +217,7 @@ private:
 	std::vector<std::uint8_t> previewHoleMask;
 	TerraEngine::Editor::Terrain::TerrainHoleBrushSettings holeBrushSettings{};
 	std::optional<TerraEngine::Editor::Terrain::TerrainBrushStamp> previousStamp;
+	std::optional<TerraEngine::Editor::Terrain::TerrainSurfaceBrushStamp> previousSurfaceStamp;
 	std::optional<SceneViewBrushFootprint> sceneViewBrushFootprint;
 	bool applyRequested = false;
 	bool selectedAreaPinned = false;
@@ -260,7 +264,13 @@ private:
 	std::shared_ptr<std::atomic_bool> terrainRenderProxyCancellation;
 	TerraEngine::UUID terrainRenderProxyMeshId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID terrainRenderProxyMaterialId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID terrainWeightTextureId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID terrainLayerIdTextureId = TerraEngine::EMPTY_UUID;
 	std::optional<TerraEngine::Terrain::TerrainMaterialSettings> publishedTerrainMaterial;
+	TerraEngine::Terrain::ContentHash publishedSurfaceControlHash{};
+	TerraEngine::Terrain::Generation publishedTerrainLayerGeneration = 0u;
+	TerraEngine::UUID publishedTerrainLayerMaterialId = TerraEngine::EMPTY_UUID;
+	bool publishedTerrainLayerSourceAvailable = false;
 	// A restored scene supplies its existing object identity. A newly created
 	// terrain keeps this empty so publication creates exactly one scene instance.
 	TerraEngine::UUID terrainRenderProxyTargetObjectId = TerraEngine::EMPTY_UUID;

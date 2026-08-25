@@ -621,6 +621,9 @@ public:
 	// Inject a generated material directly into the cache so tooling can synthesize preview materials
 	// without writing TMAT files to disk. The cacheKey should be unique and stable (e.g., "generated/preview").
 	TerraEngine::UUID RegisterMaterial(const std::string& cacheKey, std::unique_ptr<Material> material);
+	// Generated control maps use the same immutable CPU texture representation as
+	// loaded TETF assets, but do not require a temporary file on disk.
+	TerraEngine::UUID RegisterTexture(const std::string& cacheKey, std::unique_ptr<Texture> texture);
 	// Publish a fully prepared generated mesh under a stable synthetic key. The
 	// caller must invalidate the matching backend mesh after replacing an existing
 	// payload; this method owns only the atomic CPU cache and bounds publication.

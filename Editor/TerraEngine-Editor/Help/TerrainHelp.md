@@ -17,6 +17,15 @@ ordered, and generation-tracked. Keep four local contributors per control page;
 the fifth contributor is previewed and displaced deterministically. Hole paint
 and erase use the same canonical cell mask as rendering and collision.
 
+For textured surfaces, import textures and create compiled Material assets first.
+Select a terrain layer and drag its Material onto **Drop Material Here**. Switch
+to **Paint**, choose the layer, configure opacity, size, and spacing, then drag on
+the terrain in Scene View. The preview updates while dragging and pointer release
+queues one undoable transaction. Fill, Replace, and Normalize remain explicit
+whole-area operations. The live proxy resolves four contributors per sample
+against the first 16 enabled layers; unavailable authored materials render
+magenta so they can be repaired without losing their stable paint IDs.
+
 ## Procedural tools
 
 Height, slope, mask, and layer selections are strict about bounds and budgets.

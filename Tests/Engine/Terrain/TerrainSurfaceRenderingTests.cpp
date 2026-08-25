@@ -3,10 +3,15 @@
 #include "TestHarness.h"
 
 #include "Renderer/Terrain/TerrainSurfaceCache.h"
+#include "Renderer/Terrain/TerrainMaterialRuntimeRegistry.h"
 #include "Components/TerrainComponent.h"
 #include "Terrain/TerrainDerivedSystem.h"
 #include "Terrain/TerrainMaterial.h"
+#include "Terrain/TerrainLayerStack.h"
+#include "File Formats/TerraEngineMaterialFile.h"
+#include "Resource/ResourceManager.h"
 
+#include <cstring>
 #include <memory>
 
 namespace TerraEngine::Tests
@@ -23,6 +28,58 @@ namespace TerraEngine::Tests
 				&& settings.baseColor == glm::vec3(0.0F, 0.4F, 1.0F)
 				&& settings.metallic == 1.0F && settings.roughness == 0.0F,
 				"Terrain scene material inputs must persist under schema v2 and clamp to valid metallic-roughness ranges.");
+		});
+
+		registry.Add("Terrain.Surface.GeneratedProxyCopiesFirstLayerTextureAndMapping", [](TestContext& context) {
+			Material source{};
+			TextureBinding binding{};
+			binding.semantic = TextureSemantic::Base;
+			binding.textureUuid = TerraEngine::GenerateUUID();
+			binding.uvScale[0] = 2.0F;
+			binding.uvScale[1] = 3.0F;
+			source.storage.resize(sizeof(binding));
+			std::memcpy(source.storage.data(), &binding, sizeof(binding));
+			source.textures = std::span<const TextureBinding>(
+				reinterpret_cast<const TextureBinding*>(source.storage.data()), 1u);
+			TerraEngine::Terrain::TerrainLayerMapping mapping{};
+			mapping.scaleX = 4.0;
+			mapping.scaleZ = 5.0;
+			mapping.offsetX = 0.25;
+			mapping.offsetZ = 0.5;
+			auto generated = TerraEngine::Terrain::CreateTerrainMaterial(
+				ResourceManager::Instance(), {}, &source, &mapping);
+			context.Expect(generated && generated->textures.size() == 1u
+				&& generated->textures[0].textureUuid == binding.textureUuid
+				&& generated->textures[0].uvScale[0] == 8.0F
+				&& generated->textures[0].uvScale[1] == 15.0F
+				&& generated->textures[0].uvOffset[0] == 0.25F
+				&& generated->textures[0].uvOffset[1] == 0.5F,
+				"The generated terrain proxy must own a copied layer texture binding and apply its authored mapping.");
+		});
+
+		registry.Add("Terrain.Surface.RuntimeBindingPublishesAtomically", [](TestContext& context) {
+			auto& runtimeRegistry = TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeRegistry::Instance();
+			runtimeRegistry.Clear();
+			TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeBinding incomplete{};
+			incomplete.materialId = TerraEngine::GenerateUUID();
+			context.Expect(!runtimeRegistry.Publish(incomplete) && !runtimeRegistry.Resolve(incomplete.materialId),
+				"An incomplete terrain control binding must be rejected without leaving partial renderer state.");
+
+			TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeBinding complete{};
+			complete.materialId = TerraEngine::GenerateUUID();
+			complete.weightTextureId = TerraEngine::GenerateUUID();
+			complete.layerIdTextureId = TerraEngine::GenerateUUID();
+			complete.layerCount = 1u;
+			complete.layers[0].stableLayerId = 7u;
+			context.Expect(runtimeRegistry.Publish(complete),
+				"A complete terrain control binding must publish as one protected value.");
+			const auto resolved = runtimeRegistry.Resolve(complete.materialId);
+			context.Expect(resolved && resolved->publicationGeneration > 0u
+				&& resolved->layers[0].stableLayerId == 7u,
+				"The renderer must resolve one immutable generation containing controls and stable layer metadata together.");
+			runtimeRegistry.Remove(complete.materialId);
+			context.Expect(!runtimeRegistry.Resolve(complete.materialId),
+				"Releasing a terrain proxy must also remove its renderer binding.");
 		});
 
 		registry.Add("Terrain.Surface.CacheKeepsProtectedControlAndRejectsStalePublication", [](TestContext& context) {

@@ -198,6 +198,12 @@ struct alignas(16) MaterialData {
 	uint32_t OcclusionTextureIndex;
 	uint32_t EmissiveTextureIndex;
 	uint32_t ShadowBehavior;
+	// x=weight map, y=stable-layer-ID map, z=layer count, w=reserved.
+	glm::uvec4 TerrainControl;
+	std::array<glm::uvec4, 4u> TerrainLayerTextureIndices{};
+	std::array<glm::uvec4, 4u> TerrainLayerStableIds{};
+	std::array<glm::vec4, 16u> TerrainLayerBaseColorFactors{};
+	std::array<glm::vec4, 16u> TerrainLayerUVTransforms{};
 };
 
 // struct PipelineKey groups related state and operations so callers have one documented contract.

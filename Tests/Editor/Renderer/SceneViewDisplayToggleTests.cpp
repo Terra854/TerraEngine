@@ -78,6 +78,11 @@ namespace TerraEngine::EditorTests
 			context.Expect(mainEditorSource.find("m_TerrainTools = std::make_shared<TerrainWindow>()") != std::string::npos
 				&& mainEditorSource.find("m_Windows.push_back(std::make_shared<TerrainWindow>())") == std::string::npos,
 				"Terrain authoring must remain an Inspector-backed service and never enter the drawable docking collection.");
+			const std::string terrainHeader = ReadSceneViewOverlaySourceForTest(
+				"Editor/TerraEngine-Editor/Windows/TerrainWindow.h");
+			context.Expect(terrainHeader.find("class TerrainWindow final : public EditorWindow") == std::string::npos
+				&& terrainHeader.find("void OnGui() override") == std::string::npos,
+				"Terrain authoring must not retain an EditorWindow or standalone OnGui presentation path.");
 			const std::string terrainWindowSource = ReadSceneViewOverlaySourceForTest(
 				"Editor/TerraEngine-Editor/Windows/TerrainWindow.cpp");
 			const std::string terrainCreationSource = ReadSceneViewOverlaySourceForTest(

@@ -12,10 +12,12 @@
 #include "Components/TerrainComponent.h"
 #include "File Formats/TerraEngineMaterialFile.h"
 #include "File Formats/TerraEngineMeshFile.h"
+#include "File Formats/TerraEngineTextureFile.h"
 #include "Physics/Terrain/TerrainCollisionSystem.h"
 #include "Physics/PhysicsSystem.h"
 #include "Renderer/RenderSystem.h"
 #include "Renderer/Terrain/TerrainRenderProxyRegistry.h"
+#include "Renderer/Terrain/TerrainMaterialRuntimeRegistry.h"
 #include "Resource/ResourceManager.h"
 #include "Scene/SceneMutationQueue.h"
 #include "Scene/TransactionalMutation.h"
@@ -36,7 +38,42 @@
 
 #include <imgui.h>
 
-TerrainWindow::TerrainWindow() : EditorWindow("Terrain Tools", false)
+namespace
+{
+	std::unique_ptr<Texture> MakeTerrainControlTexture(
+		std::uint16_t width,
+		std::uint16_t height,
+		std::uint32_t vkFormat,
+		std::uint16_t bytesPerPixel,
+		std::vector<std::uint8_t> pixels)
+	{
+		const std::size_t expectedBytes = static_cast<std::size_t>(width) * height * bytesPerPixel;
+		if(width == 0u || height == 0u || pixels.size() != expectedBytes) return {};
+		auto texture = std::make_unique<Texture>();
+		texture->header.magic = kMagic;
+		texture->header.version = kVersion;
+		texture->header.headerSize = sizeof(TETFHeader);
+		texture->descriptor.width = width;
+		texture->descriptor.height = height;
+		texture->descriptor.depth = 1u;
+		texture->descriptor.layers = 1u;
+		texture->descriptor.mipCount = 1u;
+		texture->descriptor.faces = 1u;
+		texture->descriptor.blockWidth = 1u;
+		texture->descriptor.blockHeight = 1u;
+		texture->descriptor.blockBytes = bytesPerPixel;
+		texture->descriptor.semantic = static_cast<std::uint8_t>(TextureFileSemantic::Data);
+		texture->descriptor.payloadChunkIndex = TETF_INVALID_CHUNK_INDEX;
+		texture->descriptor.userMetadataChunk = TETF_INVALID_CHUNK_INDEX;
+		texture->descriptor.thumbnailChunk = TETF_INVALID_CHUNK_INDEX;
+		texture->descriptor.vkFormat = vkFormat;
+		texture->levelTable.push_back({0u, static_cast<std::uint64_t>(pixels.size())});
+		texture->transcodedData = std::move(pixels);
+		return texture;
+	}
+}
+
+TerrainWindow::TerrainWindow()
 {
 	automationAdapter.SetCommandCallback([this](std::string_view capability, const nlohmann::json& arguments) {
 		return ExecuteAutomationCommand(capability, arguments);
@@ -52,6 +89,8 @@ TerrainWindow::~TerrainWindow()
 {
 	if(terrainRenderProxyCancellation)
 		terrainRenderProxyCancellation->store(true, std::memory_order_release);
+	TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeRegistry::Instance().Remove(
+		terrainRenderProxyMaterialId);
 	// The collision scheduler may outlive editor windows during shutdown. Remove
 	// only this window's store pointer before its immutable storage is destroyed.
 	if(terrainStore)
@@ -382,7 +421,7 @@ void TerrainWindow::SynchronizeTerrainMaterial()
 {
 	if(!terrainStore) return;
 	const auto capture = terrainStore->CaptureRoot();
-	if(!capture.IsValid()) return;
+	if(!capture.IsValid() || !capture.root->layerStack) return;
 	TerraEngine::Terrain::TerrainMaterialSettings settings{};
 	ObjectManager& objects = ObjectManager::instance();
 	bool found = false;
@@ -398,13 +437,111 @@ void TerrainWindow::SynchronizeTerrainMaterial()
 	// A new terrain can reach this boundary one flush before its component. The
 	// documented defaults remain valid until the next protected synchronization.
 	settings = TerraEngine::Terrain::SanitizeTerrainMaterialSettings(settings);
+	const auto foundLayer = std::find_if(
+		capture.root->layerStack->layers.begin(), capture.root->layerStack->layers.end(),
+		[](const TerraEngine::Terrain::TerrainLayer& layer) {
+			return layer.enabled && layer.materialAssetUuid != TerraEngine::EMPTY_UUID
+				&& layer.fallbackState == TerraEngine::Terrain::TerrainLayerFallbackState::Healthy;
+		});
+	const TerraEngine::Terrain::TerrainLayer* surfaceLayer = foundLayer != capture.root->layerStack->layers.end()
+		? &*foundLayer : nullptr;
+	const TerraEngine::UUID surfaceMaterialId = surfaceLayer
+		? surfaceLayer->materialAssetUuid : TerraEngine::EMPTY_UUID;
+	const Material* surfaceMaterial = surfaceMaterialId != TerraEngine::EMPTY_UUID
+		? ResourceManager::Instance().GetMaterial(surfaceMaterialId) : nullptr;
+	const bool sourceAvailable = surfaceMaterial != nullptr;
+
+	const auto& controlWeights = surfacePreviewActive ? previewSurfaceWeights : committedSurfaceWeights;
+	if(controlWeights.size() != TerraEngine::Terrain::kTerrainAreaSampleCount) return;
+	std::vector<std::uint8_t> weightPixels(controlWeights.size() * 4u, 0u);
+	std::vector<std::uint8_t> layerIdPixels(controlWeights.size() * 8u, 0u);
+	for(std::size_t sampleIndex = 0u; sampleIndex < controlWeights.size(); ++sampleIndex)
+	{
+		for(std::size_t contributor = 0u; contributor < 4u; ++contributor)
+		{
+			const auto& slot = controlWeights[sampleIndex].slots[contributor];
+			weightPixels[sampleIndex * 4u + contributor] = slot.weight;
+			layerIdPixels[sampleIndex * 8u + contributor * 2u] = static_cast<std::uint8_t>(slot.layerId & 0xffu);
+			layerIdPixels[sampleIndex * 8u + contributor * 2u + 1u] = static_cast<std::uint8_t>(slot.layerId >> 8u);
+		}
+	}
+	std::vector<std::uint8_t> controlIdentityBytes;
+	controlIdentityBytes.reserve(weightPixels.size() + layerIdPixels.size());
+	controlIdentityBytes.insert(controlIdentityBytes.end(), weightPixels.begin(), weightPixels.end());
+	controlIdentityBytes.insert(controlIdentityBytes.end(), layerIdPixels.begin(), layerIdPixels.end());
+	const auto controlHash = TerraEngine::Terrain::HashTerrainBytes(controlIdentityBytes);
 	if(terrainRenderProxyMaterialId != TerraEngine::EMPTY_UUID
-		&& publishedTerrainMaterial && *publishedTerrainMaterial == settings) return;
+		&& publishedTerrainMaterial && *publishedTerrainMaterial == settings
+		&& publishedTerrainLayerGeneration == capture.root->layerStackGeneration
+		&& publishedTerrainLayerMaterialId == surfaceMaterialId
+		&& publishedTerrainLayerSourceAvailable == sourceAvailable
+		&& publishedSurfaceControlHash == controlHash) return;
 	ResourceManager& resources = ResourceManager::Instance();
+	terrainWeightTextureId = resources.RegisterTexture(
+		"terrain/control-weights/" + TerraEngine::ToHexString(capture.root->assetUuid),
+		MakeTerrainControlTexture(256u, 256u, 37u, 4u, std::move(weightPixels)));
+	terrainLayerIdTextureId = resources.RegisterTexture(
+		"terrain/control-layer-ids/" + TerraEngine::ToHexString(capture.root->assetUuid),
+		MakeTerrainControlTexture(256u, 256u, 91u, 8u, std::move(layerIdPixels)));
+	RenderSystem::Instance().InvalidateGeneratedTexture(terrainWeightTextureId);
+	RenderSystem::Instance().InvalidateGeneratedTexture(terrainLayerIdTextureId);
 	terrainRenderProxyMaterialId = resources.RegisterMaterial(
 		"terrain/editor/" + TerraEngine::ToHexString(capture.root->assetUuid),
-		TerraEngine::Terrain::CreateTerrainMaterial(resources, settings));
+		TerraEngine::Terrain::CreateTerrainMaterial(
+			resources, settings, surfaceMaterial,
+			surfaceLayer ? &surfaceLayer->mapping : nullptr));
 	publishedTerrainMaterial = settings;
+	publishedTerrainLayerGeneration = capture.root->layerStackGeneration;
+	publishedTerrainLayerMaterialId = surfaceMaterialId;
+	publishedTerrainLayerSourceAvailable = sourceAvailable;
+	publishedSurfaceControlHash = controlHash;
+
+	TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeBinding runtimeBinding{};
+	runtimeBinding.materialId = terrainRenderProxyMaterialId;
+	runtimeBinding.weightTextureId = terrainWeightTextureId;
+	runtimeBinding.layerIdTextureId = terrainLayerIdTextureId;
+	for(const auto& layer : capture.root->layerStack->layers)
+	{
+		if(!layer.enabled || runtimeBinding.layerCount >= runtimeBinding.layers.size()) continue;
+		auto& gpuLayer = runtimeBinding.layers[runtimeBinding.layerCount++];
+		gpuLayer.stableLayerId = layer.stableId;
+		gpuLayer.uvTransform = {
+			static_cast<float>(layer.mapping.scaleX), static_cast<float>(layer.mapping.scaleZ),
+			static_cast<float>(layer.mapping.offsetX), static_cast<float>(layer.mapping.offsetZ)};
+		if(layer.materialAssetUuid == TerraEngine::EMPTY_UUID)
+		{
+			// A newly created terrain deliberately starts with a usable flat layer;
+			// magenta is reserved for an authored source that later became invalid.
+			gpuLayer.baseColorFactor = {
+				settings.baseColor.r, settings.baseColor.g, settings.baseColor.b, 1.0F};
+			continue;
+		}
+		const Material* layerMaterial = resources.GetMaterial(layer.materialAssetUuid);
+		if(layerMaterial == nullptr || layer.fallbackState != TerraEngine::Terrain::TerrainLayerFallbackState::Healthy)
+		{
+			gpuLayer.baseColorFactor = {1.0F, 0.0F, 1.0F, 1.0F};
+			continue;
+		}
+		gpuLayer.baseColorFactor = {
+			layerMaterial->header.baseColorFactor[0], layerMaterial->header.baseColorFactor[1],
+			layerMaterial->header.baseColorFactor[2], layerMaterial->header.baseColorFactor[3]};
+		const auto baseTexture = std::find_if(layerMaterial->textures.begin(), layerMaterial->textures.end(),
+			[](const TextureBinding& binding) { return binding.semantic == TextureSemantic::Base; });
+		if(baseTexture != layerMaterial->textures.end())
+		{
+			gpuLayer.baseColorTextureId = baseTexture->textureUuid;
+			gpuLayer.uvTransform[0] *= baseTexture->uvScale[0];
+			gpuLayer.uvTransform[1] *= baseTexture->uvScale[1];
+			gpuLayer.uvTransform[2] += baseTexture->uvOffset[0];
+			gpuLayer.uvTransform[3] += baseTexture->uvOffset[1];
+		}
+	}
+	if(!TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeRegistry::Instance().Publish(std::move(runtimeBinding)))
+	{
+		status = "Terrain material controls could not publish a complete runtime binding.";
+		return;
+	}
+	RenderSystem::Instance().ReloadMaterial(terrainRenderProxyMaterialId);
 	// Replacing the stable resource advances ResourceManager's renderer token.
 	// Republish too, because a renderer reset may have cleared the asset binding.
 	if(terrainRenderProxyMeshId != TerraEngine::EMPTY_UUID)
@@ -426,10 +563,18 @@ void TerrainWindow::ReleaseSceneTerrain(TerraEngine::UUID assetId)
 	terrainPublication.reset();
 	terrainGarbageCollector.reset();
 	terrainRenderProxyCancellation.reset();
+	TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeRegistry::Instance().Remove(
+		terrainRenderProxyMaterialId);
 	terrainRenderProxyMeshId = TerraEngine::EMPTY_UUID;
 	terrainRenderProxyMaterialId = TerraEngine::EMPTY_UUID;
+	terrainWeightTextureId = TerraEngine::EMPTY_UUID;
+	terrainLayerIdTextureId = TerraEngine::EMPTY_UUID;
 	terrainRenderProxyTargetObjectId = TerraEngine::EMPTY_UUID;
 	publishedTerrainMaterial.reset();
+	publishedSurfaceControlHash = {};
+	publishedTerrainLayerGeneration = 0u;
+	publishedTerrainLayerMaterialId = TerraEngine::EMPTY_UUID;
+	publishedTerrainLayerSourceAvailable = false;
 	terrainRenderProxyBuildActive = false;
 	terrainRenderProxyRebuildRequested = false;
 	terrainRenderProxyInstanceQueued = false;
@@ -653,18 +798,22 @@ bool TerrainWindow::IsEditingTargetSelected(
 
 void TerrainWindow::HandleEditingTargetDeselected()
 {
-	if(!brushStrokeActive && !holeBrushActive && !authoringSession.IsDirty()
-		&& !holePreviewActive && !sceneViewBrushFootprint.has_value())
+	if(!brushStrokeActive && !surfaceBrushActive && !holeBrushActive && !authoringSession.IsDirty()
+		&& !surfacePreviewActive && !holePreviewActive && !sceneViewBrushFootprint.has_value())
 		return;
 
 	brushStrokeActive = false;
+	surfaceBrushActive = false;
 	holeBrushActive = false;
 	previousStamp.reset();
+	previousSurfaceStamp.reset();
 	sceneViewBrushFootprint.reset();
 	if(authoringSession.IsDirty())
 		CancelDetachedPreview("Terrain preview cancelled because its terrain object is no longer selected.");
 	if(holePreviewActive)
 		CancelHolePreview();
+	if(surfacePreviewActive)
+		CancelSurfacePreview();
 }
 
 void TerrainWindow::SynchronizeEditingSelection(
@@ -673,10 +822,11 @@ void TerrainWindow::SynchronizeEditingSelection(
 	if(!selectedTerrainObjectId.has_value())
 	{
 		if(editingSelectionActive || IsBrushStrokeActive() || authoringSession.IsDirty()
-			|| holePreviewActive)
+			|| surfacePreviewActive || holePreviewActive)
 			HandleEditingTargetDeselected();
 		editingSelectionActive = false;
 		sculpting = false;
+		surfacePainting = false;
 		holeSculpting = false;
 		return;
 	}
@@ -691,6 +841,7 @@ void TerrainWindow::SynchronizeEditingSelection(
 		{
 			editingSelectionActive = false;
 			sculpting = false;
+			surfacePainting = false;
 			holeSculpting = false;
 			status = std::move(openError);
 			return;
@@ -704,9 +855,22 @@ void TerrainWindow::SynchronizeEditingSelection(
 void TerrainWindow::ApplyInspectorToolMode()
 {
 	const bool wantsHeightBrush = editingSelectionActive && inspectorTool == InspectorTool::Sculpt;
+	const bool wantsSurfaceBrush = editingSelectionActive && inspectorTool == InspectorTool::Paint;
 	const bool wantsHoleBrush = editingSelectionActive && inspectorTool == InspectorTool::Holes;
+	if(surfacePainting && !wantsSurfaceBrush)
+	{
+		CancelSurfacePreview();
+		surfaceBrushActive = false;
+		previousSurfaceStamp.reset();
+	}
 	if(sculpting != wantsHeightBrush) SetSculpting(wantsHeightBrush);
 	if(holeSculpting != wantsHoleBrush) SetHoleSculpting(wantsHoleBrush);
+	if(wantsSurfaceBrush)
+	{
+		if(sculpting) SetSculpting(false);
+		if(holeSculpting) SetHoleSculpting(false);
+	}
+	surfacePainting = wantsSurfaceBrush;
 }
 
 void TerrainWindow::DrawInspectorToolPalette()
@@ -811,9 +975,16 @@ void TerrainWindow::DrawInspectorPaintControls()
 	int strength = static_cast<int>(surfaceBrushSettings.strength);
 	if(ImGui::SliderInt("Opacity", &strength, 1, 255))
 		surfaceBrushSettings.strength = static_cast<std::uint8_t>(strength);
+	ImGui::SliderFloat("Size", &surfaceBrushSettings.radiusSamples, 0.25F, 512.0F, "%.1f samples");
+	ImGui::SliderFloat("Spacing", &surfaceBrushSettings.spacingSamples, 0.0F, 128.0F, "%.1f samples");
 	ImGui::Checkbox("Use Layer Mask", &surfaceBrushSettings.useLayerMask);
-	ImGui::TextDisabled("Area operations use the selected stable layer and commit atomically.");
-	if(ImGui::Button("Apply To Terrain", ImVec2(-1.0F, 0.0F)))
+	const bool areaOperation = surfaceBrushSettings.mode == TerraEngine::Editor::Terrain::TerrainSurfaceBrushMode::Fill
+		|| surfaceBrushSettings.mode == TerraEngine::Editor::Terrain::TerrainSurfaceBrushMode::Replace
+		|| surfaceBrushSettings.mode == TerraEngine::Editor::Terrain::TerrainSurfaceBrushMode::Normalize;
+	ImGui::TextDisabled(areaOperation
+		? "This operation applies to the complete selected area as one undo step."
+		: "Drag over the terrain in Scene View. Release creates one undo step.");
+	if(areaOperation && ImGui::Button("Apply To Entire Area", ImVec2(-1.0F, 0.0F)))
 	{
 		const auto result = PreviewSurfaceBrush(surfaceBrushSettings,
 			surfaceBrushSettings.useLayerMask
@@ -859,6 +1030,37 @@ void TerrainWindow::DrawInspectorLayerControls()
 			selectedLayerId = layer.stableId;
 		if(selected)
 		{
+			const AssetMetadata* materialMetadata = layer.materialAssetUuid != TerraEngine::EMPTY_UUID
+				? AssetDatabase::Instance().FindAssetByGuid(layer.materialAssetUuid) : nullptr;
+			ImGui::TextDisabled("Material: %s", materialMetadata
+				? materialMetadata->sourcePath.filename().string().c_str() : "None (flat fallback)");
+			ImGui::Button("Drop Material Here", ImVec2(-1.0F, 0.0F));
+			if(ImGui::BeginDragDropTarget())
+			{
+				if(const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_MATERIAL"))
+				{
+					TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
+					if(payload->DataSize == sizeof(TerraEngine::UUID))
+						std::memcpy(&materialId, payload->Data, sizeof(materialId));
+					const AssetMetadata* dropped = AssetDatabase::Instance().FindAssetByGuid(materialId);
+					if(dropped == nullptr || (dropped->importerName != "MaterialImporter"
+						&& dropped->sourcePath.extension() != ".tmat"))
+					{
+						status = "Terrain layers accept compiled Material assets only.";
+					}
+					else
+					{
+						TerraEngine::Terrain::TerrainLayer replacement = layer;
+						replacement.materialAssetUuid = materialId;
+						replacement.fallbackState = TerraEngine::Terrain::TerrainLayerFallbackState::Healthy;
+						std::string error;
+						if(!stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::Replace,
+							0u, layer.stableId, 0xffffffffu, std::move(replacement)}, error))
+							status = std::move(error);
+					}
+				}
+				ImGui::EndDragDropTarget();
+			}
 			if(ImGui::SmallButton(layer.enabled ? "Disable" : "Enable"))
 			{
 				std::string error;
@@ -957,14 +1159,6 @@ void TerrainWindow::DrawInspectorControls(TerraEngine::UUID selectedTerrainObjec
 		ImGui::Spacing();
 		ImGui::TextWrapped("%s", status.c_str());
 	}
-}
-
-void TerrainWindow::OnGui()
-{
-	// Terrain Tools is a service-backed window for automation and job ownership.
-	// Interactive controls live in TerrainComponent's Inspector, matching the
-	// selected-object workflow used by the other component authoring surfaces.
-	ImGui::TextDisabled("Select a Terrain component to edit it in the Inspector.");
 }
 
 void TerrainWindow::DrawMaterialControls()
@@ -1648,9 +1842,17 @@ void TerrainWindow::InitializeAuthoringTerrain(
 		terrainRenderProxyCancellation->store(true, std::memory_order_release);
 	terrainRenderProxyRebuildRequested = false;
 	terrainRenderProxyInstanceQueued = false;
+	TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeRegistry::Instance().Remove(
+		terrainRenderProxyMaterialId);
 	terrainRenderProxyMeshId = TerraEngine::EMPTY_UUID;
 	terrainRenderProxyMaterialId = TerraEngine::EMPTY_UUID;
+	terrainWeightTextureId = TerraEngine::EMPTY_UUID;
+	terrainLayerIdTextureId = TerraEngine::EMPTY_UUID;
 	publishedTerrainMaterial.reset();
+	publishedSurfaceControlHash = {};
+	publishedTerrainLayerGeneration = 0u;
+	publishedTerrainLayerMaterialId = TerraEngine::EMPTY_UUID;
+	publishedTerrainLayerSourceAvailable = false;
 	terrainRenderProxyTargetObjectId = existingObjectId;
 	if(terrainStore)
 		TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().ClearPublication(terrainStore.get());
@@ -2357,7 +2559,7 @@ void TerrainWindow::HandleSceneViewPointer(
 	const glm::dvec3& rayDirection,
 	bool pressed, bool held, bool released)
 {
-	if((!sculpting && !holeSculpting) || !terrainStore) return;
+	if((!sculpting && !surfacePainting && !holeSculpting) || !terrainStore) return;
 	sceneViewBrushFootprint.reset();
 	TerraEngine::Scene::WorldPosition terrainOrigin{};
 	if(terrainRenderProxyTargetObjectId != TerraEngine::EMPTY_UUID)
@@ -2410,7 +2612,7 @@ void TerrainWindow::HandleSceneViewPointer(
 		{
 			const float radiusUnits = holeSculpting
 				? TerraEngine::Editor::Terrain::TerrainHoleBrush::EffectiveRadiusCells(holeBrushSettings.radiusCells)
-				: brushSettings.radiusSamples;
+				: (surfacePainting ? surfaceBrushSettings.radiusSamples : brushSettings.radiusSamples);
 			sceneViewBrushFootprint = SceneViewBrushFootprint{
 				worldCenter.position,
 				std::max(0.001F, radiusUnits) * authoredSampleSpacingMetres,
@@ -2419,7 +2621,36 @@ void TerrainWindow::HandleSceneViewPointer(
 	}
 	// Hovering updates only the projected footprint. Mutation remains gated by
 	// the pointer lifecycle below so moving the mouse never creates terrain work.
-	if(!pressed && !brushStrokeActive && !holeBrushActive) return;
+	if(!pressed && !brushStrokeActive && !surfaceBrushActive && !holeBrushActive) return;
+	if(surfacePainting)
+	{
+		const bool supportsStroke = surfaceBrushSettings.mode == TerraEngine::Editor::Terrain::TerrainSurfaceBrushMode::Paint
+			|| surfaceBrushSettings.mode == TerraEngine::Editor::Terrain::TerrainSurfaceBrushMode::Erase
+			|| surfaceBrushSettings.mode == TerraEngine::Editor::Terrain::TerrainSurfaceBrushMode::LayerMask;
+		if(!supportsStroke)
+		{
+			if(pressed) status = "Fill, Replace, and Normalize use the entire-area button in Terrain Tools.";
+			return;
+		}
+		if(pressed)
+		{
+			if(!hit) { status = "Surface stroke rejected: the canonical ray did not hit a resident terrain sample."; return; }
+			surfaceBrushActive = true;
+			previousSurfaceStamp.reset();
+			ApplySurfaceBrushAt(*hit);
+		}
+		else if(held && surfaceBrushActive && hit) ApplySurfaceBrushAt(*hit);
+		if(released && surfaceBrushActive)
+		{
+			surfaceBrushActive = false;
+			previousSurfaceStamp.reset();
+			std::string error;
+			if(surfacePreviewActive && !ApplySurfacePreview(error)) status = error;
+			else if(surfacePreviewActive) status = "Terrain surface stroke queued for the protected authoring boundary.";
+			else status = "Surface stroke produced no changes.";
+		}
+		return;
+	}
 	if(holeSculpting)
 	{
 		if(pressed)
@@ -2463,6 +2694,29 @@ void TerrainWindow::ApplyHoleBrushAt(const TerraEngine::Editor::Terrain::Terrain
 	// cell centre so radii below one cell cannot fall between every cell centre.
 	(void)PreviewHoleStamp(TerraEngine::Editor::Terrain::TerrainHoleBrush::CenteredOnCell(
 		hit.sample.x, hit.sample.z));
+}
+
+void TerrainWindow::ApplySurfaceBrushAt(const TerraEngine::Editor::Terrain::TerrainPickHit& hit)
+{
+	const TerraEngine::Editor::Terrain::TerrainSurfaceBrushStamp stamp{
+		static_cast<float>(hit.sample.x), static_cast<float>(hit.sample.z)};
+	if(previousSurfaceStamp && !TerraEngine::Editor::Terrain::TerrainSurfaceBrush::IsStrokeSampleDue(
+		*previousSurfaceStamp, stamp, surfaceBrushSettings.spacingSamples))
+		return;
+	if(!surfacePreviewActive) previewSurfaceWeights = committedSurfaceWeights;
+	std::vector<TerraEngine::Terrain::TerrainWeightSample> after(previewSurfaceWeights.size());
+	const auto result = TerraEngine::Editor::Terrain::TerrainSurfaceBrush::ApplyStamp(
+		previewSurfaceWeights, after, 256u, 256u, surfaceBrushSettings, stamp,
+		surfaceBrushSettings.useLayerMask
+			? std::span<const std::uint8_t>(brushMask) : std::span<const std::uint8_t>{});
+	if(!result.changed) return;
+	previewSurfaceWeights = std::move(after);
+	surfacePreviewActive = true;
+	previousSurfaceStamp = stamp;
+	if(result.displacedLayerId != 0u) displacedLayerWarning = result.displacedLayerId;
+	// The durable edit remains deferred until release. Material synchronization at
+	// the next protected boundary can consume this detached control-page preview.
+	status = "Terrain surface stroke preview updated; release to commit one undo step.";
 }
 
 void TerrainWindow::ApplyBrushAt(const TerraEngine::Editor::Terrain::TerrainPickHit& hit)

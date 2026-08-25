@@ -20,8 +20,18 @@ namespace TerraEngine::Editor::Terrain
 		std::uint16_t layerId = 0u;
 		std::uint16_t replacementLayerId = 0u;
 		std::uint8_t strength = 32u;
+		// Scene View strokes use the same sample-space convention as height tools.
+		// Keeping radius and spacing in samples makes coverage independent of zoom.
+		float radiusSamples = 8.0F;
+		float spacingSamples = 1.0F;
 		bool useLayerMask = false;
 		std::uint32_t displacementSeed = 0u;
+	};
+
+	struct TerrainSurfaceBrushStamp
+	{
+		float centerX = 0.0F;
+		float centerZ = 0.0F;
 	};
 
 	struct TerrainSurfaceBrushResult
@@ -48,6 +58,20 @@ namespace TerraEngine::Editor::Terrain
 			std::span<TerraEngine::Terrain::TerrainWeightSample> samples,
 			const TerrainSurfaceBrushSettings& settings,
 			std::span<const std::uint8_t> layerMask = {}) noexcept;
+		// Applies one circular, smooth-falloff stamp to detached weights. Source and
+		// output may alias only through separate buffers, matching the height brush.
+		[[nodiscard]] static TerrainSurfaceBrushResult ApplyStamp(
+			std::span<const TerraEngine::Terrain::TerrainWeightSample> source,
+			std::span<TerraEngine::Terrain::TerrainWeightSample> out,
+			std::uint32_t width,
+			std::uint32_t height,
+			const TerrainSurfaceBrushSettings& settings,
+			const TerrainSurfaceBrushStamp& stamp,
+			std::span<const std::uint8_t> layerMask = {}) noexcept;
+		[[nodiscard]] static bool IsStrokeSampleDue(
+			const TerrainSurfaceBrushStamp& previous,
+			const TerrainSurfaceBrushStamp& candidate,
+			float spacingSamples) noexcept;
 		[[nodiscard]] static std::int32_t PreviewDisplacementMm(
 			std::uint32_t seed, std::int64_t sampleX, std::int64_t sampleZ,
 			std::int32_t amplitudeMm) noexcept;

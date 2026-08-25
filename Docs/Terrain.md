@@ -134,6 +134,24 @@ automatically; authors do not add a separate collider component. Voxels, caves,
 overhangs, runtime deformation, vegetation, navigation, and water are outside
 terrain v1.
 
+To texture and paint a terrain in the editor:
+
+1. Import the source textures and create a Material asset for each desired
+	surface, such as grass, rock, or soil.
+2. Select the terrain object, open **Terrain Tools**, choose **Layers**, and add
+	or select a layer. Drag the compiled Material asset onto **Drop Material Here**.
+3. Choose **Paint**, select the stable layer, then set opacity, brush size, and
+	spacing. Drag directly over the terrain in Scene View; releasing the pointer
+	commits the complete stroke as one undoable transaction.
+4. Use Fill, Replace, or Normalize for whole-area changes, then save the terrain
+	asset through the existing authoring workflow.
+
+The live editor proxy blends up to four stable contributors at each control
+sample and resolves those contributors against up to 16 enabled layer materials.
+The weight and stable-ID control textures publish together at a protected
+boundary. A missing authored material is intentionally rendered magenta so the
+broken layer is visible instead of silently changing the terrain's appearance.
+
 ## Clean-checkout installed contract
 
 Configure, build, install, and audit only the installed tree:

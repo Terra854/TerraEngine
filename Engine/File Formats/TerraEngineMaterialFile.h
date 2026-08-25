@@ -101,7 +101,10 @@ enum MaterialFlags : std::uint32_t
 {
 	DoubleSided = 1u << 0,
 	UseVertexColor = 1u << 1,
-	ReceivesShadows = 1u << 2
+	ReceivesShadows = 1u << 2,
+	// Runtime-generated terrain materials use two control maps plus a bounded
+	// layer table. Serialized v1 materials never set this editor/runtime flag.
+	TerrainLayerBlend = 1u << 3
 };
 
 // DeriveMaterialShadowBehavior is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

@@ -4,6 +4,7 @@
 // All allocations remain synchronized through VulkanContext::Impl and its existing locks.
 
 #include "VulkanResourceSource.h"
+#include "Renderer/Terrain/TerrainMaterialRuntimeRegistry.h"
 
 // VulkanContext::Impl::CreateDefaultTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateDefaultTexture() {
@@ -995,6 +996,43 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 			case TextureSemantic::Occlusion:         data.OcclusionTextureIndex = gpuIndex; break;
 			case TextureSemantic::Emissive:          data.EmissiveTextureIndex = gpuIndex; break;
 			default: break;
+		}
+	}
+
+	if(const auto terrainBinding = TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeRegistry::Instance().Resolve(materialId);
+		terrainBinding && terrainBinding->IsComplete())
+	{
+		// Terrain control maps and layer tables are runtime-derived resources. They
+		// stay outside TMAT v1 serialization while sharing the ordinary bindless heap
+		// and PBR shader, so non-terrain materials retain zeroed extension fields.
+		EnsureTexture(terrainBinding->weightTextureId);
+		EnsureTexture(terrainBinding->layerIdTextureId);
+		const auto weightIndex = textureIndexMap.find(terrainBinding->weightTextureId);
+		const auto idIndex = textureIndexMap.find(terrainBinding->layerIdTextureId);
+		if(weightIndex != textureIndexMap.end() && idIndex != textureIndexMap.end())
+		{
+			data.Flags |= TerrainLayerBlend;
+			data.TerrainControl = glm::uvec4(
+				weightIndex->second, idIndex->second, terrainBinding->layerCount, 0u);
+			for(std::uint32_t layerIndex = 0u; layerIndex < terrainBinding->layerCount; ++layerIndex)
+			{
+				const auto& layer = terrainBinding->layers[layerIndex];
+				std::uint32_t textureIndex = 0u;
+				if(layer.baseColorTextureId != TerraEngine::EMPTY_UUID)
+				{
+					EnsureTexture(layer.baseColorTextureId);
+					if(const auto found = textureIndexMap.find(layer.baseColorTextureId);
+						found != textureIndexMap.end()) textureIndex = found->second;
+				}
+				data.TerrainLayerTextureIndices[layerIndex / 4u][layerIndex % 4u] = textureIndex;
+				data.TerrainLayerStableIds[layerIndex / 4u][layerIndex % 4u] = layer.stableLayerId;
+				data.TerrainLayerBaseColorFactors[layerIndex] = glm::vec4(
+					layer.baseColorFactor[0], layer.baseColorFactor[1],
+					layer.baseColorFactor[2], layer.baseColorFactor[3]);
+				data.TerrainLayerUVTransforms[layerIndex] = glm::vec4(
+					layer.uvTransform[0], layer.uvTransform[1],
+					layer.uvTransform[2], layer.uvTransform[3]);
+			}
 		}
 	}
 

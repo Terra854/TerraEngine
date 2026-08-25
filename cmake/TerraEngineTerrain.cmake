@@ -56,6 +56,8 @@ set(_TERRAENGINE_TERRAIN_ENGINE_FILES
 	Engine/Renderer/Terrain/TerrainRenderPackets.h
 	Engine/Renderer/Terrain/TerrainRenderProxyRegistry.cpp
 	Engine/Renderer/Terrain/TerrainRenderProxyRegistry.h
+	Engine/Renderer/Terrain/TerrainMaterialRuntimeRegistry.cpp
+	Engine/Renderer/Terrain/TerrainMaterialRuntimeRegistry.h
 	Engine/Renderer/Terrain/TerrainDirectMesh.cpp
 	Engine/Renderer/Terrain/TerrainDirectMesh.h
 	Engine/Terrain/TerrainLayerStack.cpp
