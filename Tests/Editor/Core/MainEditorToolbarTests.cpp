@@ -26,6 +26,23 @@ namespace TerraEngine::EditorTests
 
 	void RegisterMainEditorToolbarTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.MainToolbar.PlayModeRestoreSnapshotUsesVersionedSceneFormat", [](TestContext& context) {
+			const std::string source = ReadMainEditorSubsystemSource();
+			const std::size_t captureStart = source.find("void MainEditorSubsystem::CapturePlayModeSceneState()");
+			const std::size_t captureEnd = source.find("void MainEditorSubsystem::RestorePlayModeSceneState()", captureStart);
+			const std::string captureSource = captureStart != std::string::npos && captureEnd != std::string::npos
+				? source.substr(captureStart, captureEnd - captureStart)
+				: std::string{};
+
+			// Play Mode feeds this transient document to the strict scene decoder.
+			// Keeping the format assignment inside the capture method prevents a
+			// valid authored scene from being rejected before Jolt starts its world.
+			context.Expect(!captureSource.empty(), "Play Mode scene capture should remain available for contract checks.");
+			context.Expect(
+				captureSource.find("snapshotJson[\"format\"] = TerraEngine::Scene::kTerraSceneUnboundedFormat;") != std::string::npos,
+				"Play Mode restore snapshots must declare the strict unbounded scene format before decode preparation.");
+		});
+
 		registry.Add("Editor.MainToolbar.PlayModeControlsUseIconsAndTooltips", [](TestContext& context) {
 			const std::string source = ReadMainEditorSubsystemSource();
 			context.Expect(!source.empty(), "Main editor subsystem source should be available for toolbar contract checks.");

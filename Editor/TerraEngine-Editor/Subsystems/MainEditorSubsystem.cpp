@@ -1649,6 +1649,9 @@ void MainEditorSubsystem::CapturePlayModeSceneState()
 
 	nlohmann::json snapshotJson;
 	const SceneDocument* activeScene = SceneManager::Instance().GetActiveScene();
+	// The restore packet uses the same strict, versioned scene decoder as authored
+	// files, so identify this in-memory document before worker-safe preparation.
+	snapshotJson["format"] = TerraEngine::Scene::kTerraSceneUnboundedFormat;
 	snapshotJson["name"] = activeScene != nullptr ? activeScene->name : "ActiveScene";
 	snapshotJson["sceneSettings"] = Serializer::SerializeSceneRenderSettings(SceneManager::Instance().GetActiveSceneRenderSettings());
 	snapshotJson["objects"] = nlohmann::json::array();
