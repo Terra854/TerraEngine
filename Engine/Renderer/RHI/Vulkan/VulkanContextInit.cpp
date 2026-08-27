@@ -1585,6 +1585,18 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		vkDestroyDescriptorPool(device, editorDescriptorPool, nullptr);
 		vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 		vkDestroyDescriptorPool(device, globalDescriptorPool, nullptr);
+		// Sampled-texture aliases live in the global descriptor sets. Destroying
+		// their pool first invalidates those descriptor references, after which the
+		// shared policy samplers can be released safely before the device dies.
+		for(auto& [key, cachedSampler] : textureSamplerCache)
+		{
+			(void)key;
+			if(cachedSampler.handle != VK_NULL_HANDLE)
+				vkDestroySampler(device, cachedSampler.handle, nullptr);
+		}
+		textureSamplerCache.clear();
+		sampledTextureAliases.clear();
+		textureViewGenerations.clear();
 		vkDestroyDescriptorSetLayout(device, globalDescriptorSetLayout, nullptr);
 		editorDescriptorPool = VK_NULL_HANDLE;
 		descriptorPool = VK_NULL_HANDLE;
@@ -1743,6 +1755,13 @@ bool VulkanContext::Impl::PickPhysicalDevice() {
 		queriedFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 		queriedFeatures.pNext = &queriedMeshFeatures;
 		vkGetPhysicalDeviceFeatures2(physicalDevice, &queriedFeatures);
+		samplerAnisotropySupported = queriedFeatures.features.samplerAnisotropy == VK_TRUE;
+		maximumSamplerAnisotropy = samplerAnisotropySupported
+			? std::max(1.0F, deviceProperties.limits.maxSamplerAnisotropy) : 1.0F;
+		effectiveTerrainAnisotropy = samplerAnisotropySupported
+			? std::clamp(requestedTerrainAnisotropy, 1.0F, maximumSamplerAnisotropy) : 1.0F;
+		terrainAnisotropyFallbackActive = !samplerAnisotropySupported
+			|| effectiveTerrainAnisotropy < requestedTerrainAnisotropy;
 		meshShaderSupported = queriedMeshFeatures.meshShader == VK_TRUE;
 		taskShaderSupported = queriedMeshFeatures.taskShader == VK_TRUE;
 		
@@ -1759,6 +1778,9 @@ bool VulkanContext::Impl::PickPhysicalDevice() {
 		TERRAENGINE_LOG(LogLevel::Debug, "  API Version: " << selectedApiVersionString);
 		TERRAENGINE_LOG(LogLevel::Debug, "  Mesh Shader Support: " << (meshShaderSupported ? "yes" : "no"));
 		TERRAENGINE_LOG(LogLevel::Debug, "  Task Shader Support: " << (taskShaderSupported ? "yes" : "no"));
+		TERRAENGINE_LOG(LogLevel::Debug, "  Sampler Anisotropy: "
+			<< (samplerAnisotropySupported ? "yes" : "no")
+			<< " (max " << maximumSamplerAnisotropy << ")");
 	} else {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to find a suitable GPU!");
 		return false;
@@ -1819,7 +1841,9 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	}
 
 	VkPhysicalDeviceFeatures deviceFeatures{};
-	deviceFeatures.samplerAnisotropy = VK_TRUE;
+	// An otherwise valid device remains usable when anisotropy is absent. Terrain
+	// policy normalizes authored anisotropic intent to safe trilinear filtering.
+	deviceFeatures.samplerAnisotropy = samplerAnisotropySupported ? VK_TRUE : VK_FALSE;
 	// Conventional visibility has a blended target0 beside a typed identity
 	// target, so the selected device must expose and enable independent blending.
 	deviceFeatures.independentBlend = VK_TRUE;
@@ -3015,18 +3039,23 @@ bool VulkanContext::Impl::CreateDescriptorPool() {
 		return false;
 	}
 
-	// ImGui needs only combined image samplers for its font atlas and the Scene
-	// and Game viewport images. Keep these short-lived editor descriptors out of
-	// the engine pool so asset imports cannot race or starve the UI allocation.
-	VkDescriptorPoolSize editorPoolSize{};
-	editorPoolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	editorPoolSize.descriptorCount = 64u;
+	// Keep short-lived editor descriptors out of the engine pool so asset imports
+	// cannot race or starve UI allocation. Current Dear ImGui Vulkan backends use
+	// both combined descriptors and separate sampled-image/sampler bindings, so
+	// the pool must declare capacity for all three descriptor types it may request.
+	std::array<VkDescriptorPoolSize, 3> editorPoolSizes{};
+	editorPoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	editorPoolSizes[0].descriptorCount = 64u;
+	editorPoolSizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	editorPoolSizes[1].descriptorCount = 64u;
+	editorPoolSizes[2].type = VK_DESCRIPTOR_TYPE_SAMPLER;
+	editorPoolSizes[2].descriptorCount = 64u;
 
 	VkDescriptorPoolCreateInfo editorPoolInfo{};
 	editorPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	editorPoolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-	editorPoolInfo.poolSizeCount = 1u;
-	editorPoolInfo.pPoolSizes = &editorPoolSize;
+	editorPoolInfo.poolSizeCount = static_cast<std::uint32_t>(editorPoolSizes.size());
+	editorPoolInfo.pPoolSizes = editorPoolSizes.data();
 	editorPoolInfo.maxSets = 64u;
 	if (vkCreateDescriptorPool(device, &editorPoolInfo, nullptr, &editorDescriptorPool) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create editor descriptor pool!");

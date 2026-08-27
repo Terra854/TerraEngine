@@ -11,6 +11,7 @@
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "../Automation/EditorMcpBridge.h"
 #include "../Profiling/EditorProfilerService.h"
+#include "../Windows/SceneViewWindow.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Core/MainEngine.h"
@@ -462,6 +463,12 @@ void EditorSystem::SaveWorkspaceLayout() {
 		});
 		s_layoutPtr = nullptr;
 	}
+	if(auto sceneView = mainEditor->GetWindow<SceneViewWindow>())
+	{
+		// Scene View camera placement is project workspace state. Keeping it beside
+		// window visibility avoids modifying the authored scene on editor close.
+		layout["sceneViewCamera"] = sceneView->SerializeWorkspaceState();
+	}
 
 	std::ofstream file(userSettingsDir / "EditorLayout.terra");
 	file << layout.dump(4);
@@ -513,6 +520,18 @@ void EditorSystem::LoadWorkspaceLayout() {
 							win->SetVisible(visible);
 							break;
 						}
+					}
+				}
+			}
+			if(layout.contains("sceneViewCamera"))
+			{
+				if(auto sceneView = mainEditor->GetWindow<SceneViewWindow>())
+				{
+					std::string cameraError;
+					if(!sceneView->RestoreWorkspaceState(layout["sceneViewCamera"], cameraError))
+					{
+						TERRAENGINE_LOG(LogLevel::Warning,
+							"Ignored invalid Scene View camera workspace state: " << cameraError);
 					}
 				}
 			}

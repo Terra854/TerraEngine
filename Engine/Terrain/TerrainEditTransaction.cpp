@@ -6,6 +6,28 @@
 
 namespace TerraEngine::Terrain
 {
+	TerrainInvalidationSet DetermineTerrainInvalidationKinds(
+		const TerrainEditTransaction& transaction) noexcept
+	{
+		TerrainInvalidationSet result{};
+		if(transaction.layerStackPatch.has_value()) result.Add(TerrainInvalidationKind::MaterialBindings);
+		for(const TerrainPatch& patch : transaction.patches)
+		{
+			switch(patch.kind)
+			{
+			case TerrainPatchKind::ReplaceHeight:
+			case TerrainPatchKind::ReplaceHoles:
+			case TerrainPatchKind::ReplaceDescriptorMetadata:
+				result.Add(TerrainInvalidationKind::GeometryAndCollision);
+				break;
+			case TerrainPatchKind::ReplaceWeightGroup:
+				result.Add(TerrainInvalidationKind::ControlTextures);
+				break;
+			}
+		}
+		return result;
+	}
+
 	bool TerrainExactSpan::IsComplete() const noexcept
 	{
 		return uncompressedByteCount != 0u

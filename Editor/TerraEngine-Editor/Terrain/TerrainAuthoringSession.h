@@ -42,6 +42,16 @@ namespace TerraEngine::Editor::Terrain
 			std::string historyGroup,
 			std::string& outError) const;
 
+		// Layer controls also edit detached copies, but they do not need a sculpt
+		// session or resident sample buffers. This shared builder gives Apply and
+		// edit-deactivation the same typed transaction and exact undo pair.
+		[[nodiscard]] static std::optional<TerraEngine::Terrain::TerrainEditTransaction> BuildLayerCommitRequest(
+			const TerraEngine::Terrain::TerrainRootCapture& capture,
+			TerraEngine::Terrain::TerrainLayerPatch forward,
+			TerraEngine::Terrain::TerrainLayerPatch inverse,
+			std::string historyGroup,
+			std::string& outError);
+
 	private:
 		bool active = false;
 		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;

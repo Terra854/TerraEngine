@@ -2523,6 +2523,18 @@ struct RenderSettings
 	VirtualGeometryQualityProfile virtualGeometry = MakeDefaultVirtualGeometryQualityProfile();
 };
 
+// Immutable evidence attached to terrain material rebuilds. A quality change
+// replaces sampler aliases and shader bindings while source texture UUIDs keep
+// the same image allocation identity.
+struct TerrainSamplerQualityPublication
+{
+	std::uint32_t requestedAnisotropy = 1u;
+	std::uint32_t effectiveAnisotropy = 1u;
+	std::uint64_t publicationGeneration = 0u;
+	bool capabilityFallbackActive = false;
+	bool imageAllocationsReused = true;
+};
+
 // Scene-level render settings can grow over time while keeping one explicit
 // root block in scene JSON for non-object renderer-facing authoring data.
 struct SceneRenderSettings

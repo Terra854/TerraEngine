@@ -260,5 +260,40 @@ namespace TerraEngine::EditorTests
 			UndoRedoSystem::Instance().Clear();
 			UndoRedoSystem::Instance().SetHistoryBudget(1000U, 512U * 1024U * 1024U);
 		});
+
+		registry.Add("Editor.TerrainHistory.ProjectCloseClearsHistoryBeforeStoreRelease", [](TestContext& context) {
+			UndoRedoSystem& history = UndoRedoSystem::Instance();
+			history.Clear();
+
+			// Terrain history commands hold non-owning references to this project-owned
+			// store. Project close must clear the command while the store is still alive
+			// so its destructor can release the immutable blob retained at publication.
+			auto root = std::make_shared<TerraEngine::Terrain::TerrainAssetRoot>();
+			root->assetUuid = TerraEngine::GenerateUUID();
+			root->publicationGeneration = 1U;
+			auto store = std::make_unique<TerraEngine::Terrain::TerrainAssetStore>(root);
+			TerraEngine::Terrain::TerrainMutationQueue queue;
+			const std::vector<std::uint8_t> blobBytes{0x54U, 0x45U, 0x52U, 0x52U, 0x41U};
+			const TerraEngine::Terrain::ContentHash blobHash = TerraEngine::Terrain::HashTerrainBytes(blobBytes);
+			context.Expect(store->Blobs().PutVerified(blobHash, blobBytes)
+				&& store->Blobs().Retain(blobHash),
+				"The close-order fixture must begin with one retained immutable terrain blob.");
+
+			TerraEngine::Terrain::TerrainEditTransaction forward;
+			TerraEngine::Terrain::TerrainPatch retainedPatch;
+			retainedPatch.retainedBlobHashes = {blobHash};
+			forward.patches = {retainedPatch};
+			TerraEngine::Terrain::TerrainEditTransaction inverse = forward;
+			history.PushCommand(std::make_unique<TerraEngine::Editor::Terrain::TerrainHistoryCommand>(
+				*store, queue, std::move(forward), std::move(inverse), blobBytes.size()));
+
+			context.Expect(store->Blobs().CollectUnretained({}, 1U, nullptr).empty(),
+				"A live terrain history command must keep its immutable blob retained.");
+			history.Clear();
+			const auto collected = store->Blobs().CollectUnretained({}, 1U, nullptr);
+			context.Expect(collected.size() == 1U && collected.front() == blobHash,
+				"Clearing project history while the store is alive must release its retained terrain blob safely.");
+			store.reset();
+		});
 	}
 }

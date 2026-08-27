@@ -6,6 +6,7 @@
 #pragma once
 #include "../Framework/EditorWindow.h"
 #include "SceneViewOrientationWidget.h"
+#include "SceneViewCameraState.h"
 #include "SceneViewMarkerPipeline.h"
 #include "SceneViewOverlayIcons.h"
 #include "SceneViewOverlayMarkers.h"
@@ -37,6 +38,10 @@ public:
 	// These methods run on the editor's protected update boundary, so they may
 	// safely share the same state and validation rules as the visible toolbar.
 	[[nodiscard]] nlohmann::json GetAutomationState() const;
+	// Project workspace persistence captures the viewport camera independently of
+	// scene objects. Restore validates the whole record before changing live state.
+	[[nodiscard]] nlohmann::json SerializeWorkspaceState() const;
+	bool RestoreWorkspaceState(const nlohmann::json& value, std::string& outError);
 	// Automation submits exact canonical addresses. Screen-space vectors are
 	// deliberately not accepted here because they cannot name distant worlds.
 	bool SetAutomationCamera(

@@ -3,6 +3,7 @@
 #include "Renderer/Terrain/TerrainDirectMesh.h"
 
 #include "File Formats/TerraEngineMeshFile.h"
+#include "Renderer/Terrain/TerrainMaterialRuntimeRegistry.h"
 #include "Renderer/VirtualGeometry/Geometry/VirtualGeometryPackedVertex.h"
 
 #include <algorithm>
@@ -14,6 +15,11 @@
 
 namespace TerraEngine::Renderer::Terrain
 {
+	// Direct-resident geometry carries only control UV. Its material consumer uses
+	// the same fixed record as page-backed packets, preventing a first-layer-only
+	// compatibility layout from becoming a second rendering ABI.
+	static_assert(sizeof(TerrainGpuLayerBinding) == 96u);
+
 	namespace
 	{
 		constexpr std::uint32_t kMeshletCellExtent = 7u;
@@ -143,7 +149,11 @@ namespace TerraEngine::Renderer::Terrain
 				const auto packed = TerraEngine::PackVirtualGeometryVertex(
 					position, ComputeNormal(input.heightMillimetres, x, z, input.sampleSpacingMetres),
 					{1.0F, 0.0F, 0.0F}, 1.0F,
-					{static_cast<float>(x) / 255.0F, static_cast<float>(z) / 255.0F},
+					// TexCoord0 is the independent area-local control address. Dividing
+					// by the owned 256-sample extent lets the shader recover the exact
+					// local sample as uv * 256; physical surface UVs are then computed
+					// from sample spacing and a bounded per-area material phase.
+					{static_cast<float>(x) / 256.0F, static_cast<float>(z) / 256.0F},
 					16u, 12u, 10u, 16u);
 				std::memcpy(mesh->reconstructedVertexData.data() + sample * sizeof(packed), &packed, sizeof(packed));
 			}

@@ -142,4 +142,36 @@ namespace TerraEngine::Editor::Terrain
 		}
 		return transaction;
 	}
+
+	std::optional<TerraEngine::Terrain::TerrainEditTransaction> TerrainAuthoringSession::BuildLayerCommitRequest(
+		const TerraEngine::Terrain::TerrainRootCapture& capture,
+		TerraEngine::Terrain::TerrainLayerPatch forward,
+		TerraEngine::Terrain::TerrainLayerPatch inverse,
+		std::string historyGroup,
+		std::string& outError)
+	{
+		if(!capture.IsValid() || !capture.root->layerStack || !forward.expectedGeneration)
+		{
+			outError = "A complete committed layer generation is required before applying a mapping preview.";
+			return std::nullopt;
+		}
+		if(forward.expectedGeneration != capture.root->layerStackGeneration)
+		{
+			outError = "The terrain layer generation changed while the detached mapping preview was open.";
+			return std::nullopt;
+		}
+
+		TerraEngine::Terrain::TerrainEditTransaction transaction;
+		transaction.transactionId = TerraEngine::GenerateUUID();
+		transaction.origin = TerraEngine::Terrain::TerrainEditOrigin::VisibleEditor;
+		transaction.targetAssetUuid = capture.root->assetUuid;
+		transaction.historyGroup = std::move(historyGroup);
+		transaction.inputRootHash = capture.root->rootContentHash;
+		transaction.expectedLayerStackGeneration = capture.root->layerStackGeneration;
+		transaction.affectedBounds = capture.root->authoredBounds;
+		transaction.budget.maximumAreas = 1u;
+		transaction.layerStackPatch = std::move(forward);
+		transaction.inverseLayerStackPatch = std::move(inverse);
+		return transaction;
+	}
 }

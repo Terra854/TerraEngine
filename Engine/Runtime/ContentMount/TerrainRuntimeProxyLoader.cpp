@@ -14,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -25,12 +26,11 @@ namespace TerraEngine::Runtime
 {
 	namespace
 	{
-		struct TerrainOriginSource
+		struct DecodedMountedArea
 		{
-			TerraEngine::Terrain::ContentHash authoredHash{};
-			TerraEngine::Terrain::ContentHash heightHash{};
-			std::optional<TerraEngine::Terrain::ContentHash> holeHash;
-			TerraEngine::Terrain::Generation generation = 0U;
+			TerraEngine::Terrain::TerrainAreaDescriptor descriptor{};
+			std::vector<std::int32_t> heights;
+			std::vector<std::uint8_t> holes;
 		};
 
 		std::optional<TerraEngine::Terrain::ContentHash> ParseContentHash(std::string_view text)
@@ -61,56 +61,21 @@ namespace TerraEngine::Runtime
 			return std::string(read.bytes.begin(), read.bytes.end());
 		}
 
-		std::optional<TerrainOriginSource> DecodeLegacyOrigin(
-			std::string_view rootText,
-			const TerraEngine::UUID& expectedAssetId)
-		{
-			try
-			{
-				const nlohmann::json root = nlohmann::json::parse(rootText);
-				const auto assetId = root.contains("assetId") && root["assetId"].is_string()
-					? TerraEngine::ParseUUID(root["assetId"].get<std::string>()) : std::nullopt;
-				if(!assetId || *assetId != expectedAssetId || !root.contains("areas")
-					|| !root["areas"].is_array()) return std::nullopt;
-				for(const nlohmann::json& area : root["areas"])
-				{
-					if(!area.is_object() || area.value("x", 1) != 0 || area.value("z", 1) != 0
-						|| !area.contains("heightHash") || !area["heightHash"].is_string()) continue;
-					const auto heightHash = ParseContentHash(area["heightHash"].get<std::string>());
-					const std::uint64_t generation = root.value("generation", 0ULL);
-					if(!heightHash || generation == 0U) return std::nullopt;
-					return TerrainOriginSource{*heightHash, *heightHash, std::nullopt, generation};
-				}
-			}
-			catch(const nlohmann::json::exception&)
-			{
-				return std::nullopt;
-			}
-			return std::nullopt;
-		}
-
-		std::optional<TerrainOriginSource> DecodeImmutableOrigin(
+		std::optional<TerraEngine::Terrain::TerrainAssetRoot> DecodeImmutableRoot(
 			std::string_view rootText,
 			std::string_view expectedRootHash,
 			const TerraEngine::UUID& expectedAssetId)
 		{
 			const auto expectedHash = ParseContentHash(expectedRootHash);
-			const auto root = TerraEngine::Terrain::DecodeTerrainRootManifest(rootText);
-			if(!expectedHash || !root || root->assetUuid != expectedAssetId
-				|| root->rootContentHash != *expectedHash) return std::nullopt;
+			const auto decoded = TerraEngine::Terrain::DecodeTerrainRootManifest(rootText);
+			if(!expectedHash || !decoded.Succeeded() || !decoded.root
+				|| decoded.root->assetUuid != expectedAssetId || decoded.contentHash != *expectedHash) return std::nullopt;
+			const TerraEngine::Terrain::TerrainAssetRoot& root = *decoded.root;
 
-			const auto rootSnapshot = std::make_shared<TerraEngine::Terrain::TerrainAssetRoot>(*root);
+			const auto rootSnapshot = std::make_shared<TerraEngine::Terrain::TerrainAssetRoot>(root);
 			TerraEngine::Terrain::TerrainAssetStore validator(rootSnapshot);
-			if(!validator.ValidateRoot(*root).Succeeded()) return std::nullopt;
-			const auto descriptor = validator.FindDescriptor(*root, {0, 0});
-			if(!descriptor || !descriptor->channels.heightHash
-				|| descriptor->editGeneration == 0U
-				|| !descriptor->authoredContentHash.IsValid()) return std::nullopt;
-			return TerrainOriginSource{
-				descriptor->authoredContentHash,
-				*descriptor->channels.heightHash,
-				descriptor->channels.holeHash,
-				descriptor->editGeneration};
+			if(!validator.ValidateRoot(root).Succeeded()) return std::nullopt;
+			return root;
 		}
 
 		bool DecodeArea(
@@ -118,6 +83,7 @@ namespace TerraEngine::Runtime
 			const std::filesystem::path& dataRoot,
 			const TerraEngine::Terrain::ContentHash& expectedHash,
 			const TerraEngine::UUID& expectedAssetId,
+			TerraEngine::Terrain::TerrainAreaCoordinate expectedArea,
 			TerraEngine::Terrain::TerrainChannelKind expectedChannel,
 			std::vector<std::uint8_t>& outPayload,
 			std::string& outError)
@@ -140,7 +106,7 @@ namespace TerraEngine::Runtime
 				// Validate its embedded identity before exposing the decoded channel.
 				if(decoded.header.envelopeHash != expectedHash
 					|| decoded.header.assetUuid != expectedAssetId
-					|| decoded.header.area != TerraEngine::Terrain::TerrainAreaCoordinate{0, 0}
+					|| decoded.header.area != expectedArea
 					|| decoded.header.channelKind != expectedChannel)
 				{
 					outError = "The mounted terrain area identity does not match its immutable root.";
@@ -150,7 +116,7 @@ namespace TerraEngine::Runtime
 				return true;
 			}
 
-			// Saved TERRAINROOT2 generations store canonical channel bytes directly
+			// Saved TERRAROOT1 generations may store canonical channel bytes directly
 			// under their content hash. This is the format produced after an editor
 			// sculpt/save; accepting it is required for authored exports while the
 			// exact hash and fixed channel size still fail closed on corruption.
@@ -166,6 +132,73 @@ namespace TerraEngine::Runtime
 			}
 			outPayload = read.bytes;
 			return true;
+		}
+
+		TerraEngine::Physics::TerrainHeightFieldRecipe BuildCollisionRecipe(
+			const DecodedMountedArea& area,
+			const TerraEngine::UUID& assetId,
+			double sampleSpacingMetres)
+		{
+			TerraEngine::Physics::TerrainHeightFieldRecipe recipe{};
+			recipe.terrainAssetId = assetId;
+			recipe.authoredGeneration = area.descriptor.editGeneration;
+			recipe.authoredHash = area.descriptor.authoredContentHash.low64
+				^ area.descriptor.authoredContentHash.high64;
+			if(recipe.authoredHash == 0U) recipe.authoredHash = 1U;
+			recipe.sampleSpacingMetres = static_cast<float>(sampleSpacingMetres);
+			recipe.heightMillimetres.resize(TerraEngine::Physics::TerrainHeightFieldRecipe::kSampleCount);
+			for(std::uint32_t z = 0U; z < TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent; ++z)
+			{
+				for(std::uint32_t x = 0U; x < TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent; ++x)
+				{
+					recipe.heightMillimetres[
+						static_cast<std::size_t>(z) * TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent + x]
+						= area.heights[static_cast<std::size_t>(std::min(z, 255U)) * 256U + std::min(x, 255U)];
+				}
+			}
+			recipe.holeBits = area.holes;
+			if(recipe.holeBits.empty())
+				recipe.holeBits.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount, 0U);
+			return recipe;
+		}
+
+		std::vector<std::int32_t> BuildCookHalo(
+			const std::map<TerraEngine::Terrain::TerrainAreaCoordinate, DecodedMountedArea>& areas,
+			TerraEngine::Terrain::TerrainAreaCoordinate coordinate,
+			bool& outMissingOuterHalo)
+		{
+			constexpr std::uint32_t kHaloExtent = 258U;
+			std::vector<std::int32_t> halo(static_cast<std::size_t>(kHaloExtent) * kHaloExtent);
+			const DecodedMountedArea& current = areas.at(coordinate);
+			for(std::int32_t haloZ = 0; haloZ < static_cast<std::int32_t>(kHaloExtent); ++haloZ)
+			{
+				for(std::int32_t haloX = 0; haloX < static_cast<std::int32_t>(kHaloExtent); ++haloX)
+				{
+					std::int32_t localX = haloX - 1;
+					std::int32_t localZ = haloZ - 1;
+					TerraEngine::Terrain::TerrainAreaCoordinate sourceCoordinate = coordinate;
+					if(localX < 0) { --sourceCoordinate.x; localX += 256; }
+					else if(localX >= 256) { ++sourceCoordinate.x; localX -= 256; }
+					if(localZ < 0) { --sourceCoordinate.z; localZ += 256; }
+					else if(localZ >= 256) { ++sourceCoordinate.z; localZ -= 256; }
+					const auto source = areas.find(sourceCoordinate);
+					if(source == areas.end())
+					{
+						// A missing descriptor is an outer sparse boundary, not a corrupt
+						// interior blob. Clamp only this normal/completion sample; descriptors
+						// that exist but fail decode reject the complete root before this point.
+						outMissingOuterHalo = true;
+						localX = std::clamp(haloX - 1, 0, 255);
+						localZ = std::clamp(haloZ - 1, 0, 255);
+						halo[static_cast<std::size_t>(haloZ) * kHaloExtent + haloX]
+							= current.heights[static_cast<std::size_t>(localZ) * 256U + localX];
+						continue;
+					}
+					halo[static_cast<std::size_t>(haloZ) * kHaloExtent + haloX]
+						= source->second.heights[static_cast<std::size_t>(localZ) * 256U + localX];
+				}
+			}
+			return halo;
 		}
 	}
 
@@ -190,17 +223,18 @@ namespace TerraEngine::Runtime
 			return failed;
 		}
 
-		float sampleSpacingMetres = 1.0F;
+		double descriptorSampleSpacingMetres = 1.0;
 		try
 		{
 			const nlohmann::json descriptor = nlohmann::json::parse(descriptorRead.bytes);
 			const auto descriptorAssetId = descriptor.contains("assetId") && descriptor["assetId"].is_string()
 				? TerraEngine::ParseUUID(descriptor["assetId"].get<std::string>()) : std::nullopt;
-			sampleSpacingMetres = descriptor.value("sampleSpacingMetres", 0.0F);
+			descriptorSampleSpacingMetres = descriptor.value("sampleSpacingMetres", 0.0);
 			if(descriptor.value("format", std::string{}) != "TerraEngineTerrain"
+				|| descriptor.value("rootFormat", std::string{}) != "TERRAROOT1"
 				|| descriptor.value("version", 0U) != 1U || !descriptorAssetId
-				|| *descriptorAssetId != expectedAssetId || !std::isfinite(sampleSpacingMetres)
-				|| sampleSpacingMetres <= 0.0F)
+				|| *descriptorAssetId != expectedAssetId || !std::isfinite(descriptorSampleSpacingMetres)
+				|| descriptorSampleSpacingMetres <= 0.0)
 			{
 				failed.renderProxy.diagnostic = "The mounted terrain descriptor has invalid format, identity, or sample spacing.";
 				return failed;
@@ -234,79 +268,131 @@ namespace TerraEngine::Runtime
 		for(const std::string& candidate : {primary, predecessor})
 		{
 			if(candidate.empty() || candidate == "-" || candidate.find("..") != std::string::npos) continue;
-			std::optional<TerrainOriginSource> origin;
-			if(candidate.starts_with("roots/"))
-			{
-				const auto rootText = ReadMountedText(
-					mount, (dataRoot / std::filesystem::path(candidate)).generic_string(), 4U * 1024U * 1024U);
-				if(rootText) origin = DecodeLegacyOrigin(*rootText, expectedAssetId);
-			}
-			else if(ParseContentHash(candidate))
+			std::optional<TerraEngine::Terrain::TerrainAssetRoot> root;
+			if(ParseContentHash(candidate))
 			{
 				const auto rootText = ReadMountedText(
 					mount, (dataRoot / "roots" / (candidate + ".root")).generic_string(), 64U * 1024U * 1024U);
-				if(rootText) origin = DecodeImmutableOrigin(*rootText, candidate, expectedAssetId);
+				if(rootText) root = DecodeImmutableRoot(*rootText, candidate, expectedAssetId);
 			}
-			if(!origin) continue;
-
-			std::vector<std::uint8_t> heightPayload;
-			if(!DecodeArea(mount, dataRoot, origin->heightHash, expectedAssetId,
-				TerraEngine::Terrain::TerrainChannelKind::Height, heightPayload, failed.renderProxy.diagnostic)) continue;
-			const std::size_t expectedHeightBytes = TerraEngine::Terrain::kTerrainAreaSampleCount
-				* sizeof(std::int32_t);
-			if(heightPayload.size() != expectedHeightBytes)
+			if(!root) continue;
+			if(root->sampleSpacingMetres != descriptorSampleSpacingMetres)
 			{
-				failed.renderProxy.diagnostic = "The mounted terrain origin height payload has the wrong decoded size.";
+				failed.renderProxy.diagnostic = "The public terrain descriptor and canonical TERRAROOT1 disagree on sample spacing.";
 				continue;
 			}
-			std::vector<std::int32_t> heights(TerraEngine::Terrain::kTerrainAreaSampleCount);
-			std::memcpy(heights.data(), heightPayload.data(), heightPayload.size());
 
-			std::vector<std::uint8_t> holes;
-			if(origin->holeHash)
+			std::map<TerraEngine::Terrain::TerrainAreaCoordinate, DecodedMountedArea> decodedAreas;
+			bool generationComplete = true;
+			for(const auto& shard : root->directoryShards)
 			{
-				if(!DecodeArea(mount, dataRoot, *origin->holeHash, expectedAssetId,
-					TerraEngine::Terrain::TerrainChannelKind::Holes, holes, failed.renderProxy.diagnostic)) continue;
-				if(holes.size() != TerraEngine::Terrain::kTerrainAreaSampleCount / 8U)
+				for(const auto& [coordinate, descriptor] : shard.descriptors)
 				{
-					failed.renderProxy.diagnostic = "The mounted terrain origin hole payload has the wrong decoded size.";
-					continue;
+					if(!descriptor.channels.heightHash || descriptor.editGeneration == 0U
+						|| !descriptor.authoredContentHash.IsValid()) { generationComplete = false; break; }
+					DecodedMountedArea decoded{};
+					decoded.descriptor = descriptor;
+					std::vector<std::uint8_t> heightPayload;
+					if(!DecodeArea(mount, dataRoot, *descriptor.channels.heightHash, expectedAssetId,
+						coordinate, TerraEngine::Terrain::TerrainChannelKind::Height,
+						heightPayload, failed.renderProxy.diagnostic)
+						|| heightPayload.size() != TerraEngine::Terrain::kTerrainAreaSampleCount * sizeof(std::int32_t))
+					{
+						generationComplete = false;
+						break;
+					}
+					decoded.heights.resize(TerraEngine::Terrain::kTerrainAreaSampleCount);
+					std::memcpy(decoded.heights.data(), heightPayload.data(), heightPayload.size());
+					if(descriptor.channels.holeHash
+						&& (!DecodeArea(mount, dataRoot, *descriptor.channels.holeHash, expectedAssetId,
+							coordinate, TerraEngine::Terrain::TerrainChannelKind::Holes,
+							decoded.holes, failed.renderProxy.diagnostic)
+							|| decoded.holes.size() != TerraEngine::Terrain::kTerrainAreaSampleCount / 8U))
+					{
+						generationComplete = false;
+						break;
+					}
+					decodedAreas.emplace(coordinate, std::move(decoded));
 				}
+				if(!generationComplete) break;
 			}
+			if(!generationComplete || decodedAreas.empty()) continue;
 
-			TerraEngine::Renderer::Terrain::TerrainDirectMeshInput input{};
-			input.assetId = expectedAssetId;
-			input.authoredHash = origin->authoredHash;
-			input.authoredGeneration = origin->generation;
-			input.sampleSpacingMetres = sampleSpacingMetres;
-			input.heightMillimetres = heights;
-			input.holeCellBits = holes;
 			MountedTerrainRuntimeResult completed{};
-			completed.renderProxy = TerraEngine::Renderer::Terrain::BuildTerrainDirectMesh(input);
-			if(!completed.renderProxy.Succeeded()) return completed;
-			completed.collisionRecipe.terrainAssetId = expectedAssetId;
-			completed.collisionRecipe.authoredGeneration = origin->generation;
-			completed.collisionRecipe.authoredHash = origin->authoredHash.low64 ^ origin->authoredHash.high64;
-			if(completed.collisionRecipe.authoredHash == 0U) completed.collisionRecipe.authoredHash = 1U;
-			completed.collisionRecipe.sampleSpacingMetres = sampleSpacingMetres;
-			completed.collisionRecipe.heightMillimetres.resize(
-				TerraEngine::Physics::TerrainHeightFieldRecipe::kSampleCount);
-			for(std::uint32_t z = 0U; z < TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent; ++z)
-				for(std::uint32_t x = 0U; x < TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent; ++x)
-					completed.collisionRecipe.heightMillimetres[
-						static_cast<std::size_t>(z) * TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent + x]
-						= heights[static_cast<std::size_t>(std::min(z, 255U)) * 256U + std::min(x, 255U)];
-			completed.collisionRecipe.holeBits = std::move(holes);
-			if(completed.collisionRecipe.holeBits.empty())
-				completed.collisionRecipe.holeBits.assign(
-					TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount, 0U);
-			completed.sourceRootHash = origin->authoredHash;
-			completed.sourcePublicationGeneration = origin->generation;
+			completed.areas.reserve(decodedAreas.size());
+			const std::array<TerraEngine::Terrain::TerrainAreaCoordinate, 4U> neighborOffsets{
+				TerraEngine::Terrain::TerrainAreaCoordinate{-1, 0},
+				TerraEngine::Terrain::TerrainAreaCoordinate{1, 0},
+				TerraEngine::Terrain::TerrainAreaCoordinate{0, -1},
+				TerraEngine::Terrain::TerrainAreaCoordinate{0, 1}};
+			for(const auto& [coordinate, decoded] : decodedAreas)
+			{
+				MountedTerrainAreaRuntime areaRuntime{};
+				areaRuntime.area = coordinate;
+				areaRuntime.authoredHash = decoded.descriptor.authoredContentHash;
+				areaRuntime.authoredGeneration = decoded.descriptor.editGeneration;
+				TerraEngine::Renderer::Terrain::TerrainDirectMeshInput directInput{};
+				directInput.assetId = expectedAssetId;
+				directInput.authoredHash = areaRuntime.authoredHash;
+				directInput.authoredGeneration = areaRuntime.authoredGeneration;
+				directInput.sampleSpacingMetres = static_cast<float>(root->sampleSpacingMetres);
+				directInput.heightMillimetres = decoded.heights;
+				directInput.holeCellBits = decoded.holes;
+				areaRuntime.directMesh = TerraEngine::Renderer::Terrain::BuildTerrainDirectMesh(directInput);
+
+				std::vector<std::int32_t> halo = BuildCookHalo(
+					decodedAreas, coordinate, areaRuntime.missingOuterHalo);
+				TerraEngine::Renderer::Terrain::TerrainCookInput cookInput{};
+				cookInput.assetId = expectedAssetId;
+				cookInput.area = coordinate;
+				cookInput.authoredHash = areaRuntime.authoredHash;
+				cookInput.authoredGeneration = areaRuntime.authoredGeneration;
+				cookInput.sampleSpacingMetres = root->sampleSpacingMetres;
+				cookInput.heightMillimetres = halo;
+				cookInput.holeCellBits = decoded.holes;
+				for(std::size_t edge = 0U; edge < neighborOffsets.size(); ++edge)
+				{
+					const TerraEngine::Terrain::TerrainAreaCoordinate neighbor{
+						coordinate.x + neighborOffsets[edge].x,
+						coordinate.z + neighborOffsets[edge].z};
+					const auto found = decodedAreas.find(neighbor);
+					if(found != decodedAreas.end())
+						cookInput.neighborAuthoredHashes[edge] = found->second.descriptor.authoredContentHash;
+				}
+				areaRuntime.pageCook = TerraEngine::Renderer::Terrain::CookTerrainPage(cookInput);
+				areaRuntime.collisionRecipe = BuildCollisionRecipe(decoded, expectedAssetId, root->sampleSpacingMetres);
+				if(!areaRuntime.Succeeded())
+				{
+					failed.renderProxy.diagnostic = "A mounted terrain area failed direct, page, or collision preparation.";
+					generationComplete = false;
+					break;
+				}
+				completed.areas.push_back(std::move(areaRuntime));
+			}
+			if(!generationComplete) continue;
+			const auto origin = std::find_if(completed.areas.begin(), completed.areas.end(), [](const auto& area) {
+				return area.area == TerraEngine::Terrain::TerrainAreaCoordinate{0, 0};
+			});
+			const MountedTerrainAreaRuntime& compatibility = origin == completed.areas.end()
+				? completed.areas.front() : *origin;
+			const DecodedMountedArea& compatibilitySource = decodedAreas.at(compatibility.area);
+			TerraEngine::Renderer::Terrain::TerrainDirectMeshInput compatibilityInput{};
+			compatibilityInput.assetId = expectedAssetId;
+			compatibilityInput.authoredHash = compatibility.authoredHash;
+			compatibilityInput.authoredGeneration = compatibility.authoredGeneration;
+			compatibilityInput.sampleSpacingMetres = static_cast<float>(root->sampleSpacingMetres);
+			compatibilityInput.heightMillimetres = compatibilitySource.heights;
+			compatibilityInput.holeCellBits = compatibilitySource.holes;
+			completed.renderProxy = TerraEngine::Renderer::Terrain::BuildTerrainDirectMesh(compatibilityInput);
+			completed.collisionRecipe = BuildCollisionRecipe(
+				compatibilitySource, expectedAssetId, root->sampleSpacingMetres);
+			completed.sourceRootHash = *ParseContentHash(candidate);
+			completed.sourcePublicationGeneration = root->publicationGeneration;
 			return completed;
 		}
 
 		if(failed.renderProxy.diagnostic.empty())
-			failed.renderProxy.diagnostic = "Neither mounted terrain CURRENT generation contains a complete origin area.";
+			failed.renderProxy.diagnostic = "Neither mounted terrain CURRENT generation contains a complete multi-area runtime set.";
 		return failed;
 	}
 

@@ -5,11 +5,13 @@
 #include "File Formats/TerraEngineMeshFile.h"
 #include "Renderer/RenderSystem.h"
 #include "Renderer/Terrain/TerrainPageCooker.h"
+#include "Renderer/Terrain/TerrainPageFormat.h"
 #include "Runtime/ContentMount/ContentMount.h"
 #include "Runtime/ContentMount/TerrainContentResolver.h"
 #include "Runtime/ContentMount/TerrainRuntimeProxyLoader.h"
 #include "TEPAK/PackWriter.h"
 #include "Terrain/TerrainAreaCodec.h"
+#include "Terrain/TerrainAssetStore.h"
 
 #include <array>
 #include <chrono>
@@ -100,28 +102,44 @@ namespace TerraEngine::Tests
 			std::vector<std::uint8_t> heightBytes(heights.size() * sizeof(std::int32_t));
 			std::memcpy(heightBytes.data(), heights.data(), heightBytes.size());
 			const TerraEngine::Terrain::ContentHash heightHash = TerraEngine::Terrain::HashTerrainBytes(heightBytes);
-			const TerraEngine::Terrain::ContentHash rootHash{0x1234U, 0x5678U};
 			const TerraEngine::Terrain::ContentHash shardHash{0x9ABCU, 0xDEF0U};
 
 			const std::string assetText = TerraEngine::ToHexString(assetId);
-			const std::string rootText = TerraEngine::Terrain::ToHexString(rootHash);
 			const std::string heightText = TerraEngine::Terrain::ToHexString(heightHash);
-			std::ostringstream manifest;
-			manifest << "TERRAINROOT2\n"
-				<< assetText << " 7 1 " << rootText << " 0 0 256 256 1250 1 0\n"
-				<< "LAYERS 0\n1\n"
-				<< "0 0 256 256 " << TerraEngine::Terrain::ToHexString(shardHash) << " 1\n"
-				<< "0 0 7 1250 1250 " << heightText << ' ' << heightText << " - 0\n";
+			TerraEngine::Terrain::TerrainAreaDescriptor area{};
+			area.coordinate = {0, 0};
+			area.editGeneration = 7u;
+			area.channels.heightHash = heightHash;
+			area.minHeightMm = 1250;
+			area.maxHeightMm = 1250;
+			area.authoredContentHash = heightHash;
+			TerraEngine::Terrain::TerrainDirectoryShard shard{};
+			shard.areaBounds = {0, 0, 256, 256};
+			shard.identity = shardHash;
+			shard.descriptors.emplace(area.coordinate, area);
+			TerraEngine::Terrain::TerrainAssetRoot root{};
+			root.assetUuid = assetId;
+			root.publicationGeneration = 7u;
+			root.persistedRootGeneration = 7u;
+			root.sampleSpacingMetres = 2.0;
+			root.authoredBounds = {0, 0, 256, 256};
+			root.defaultHeightMm = 1250;
+			root.defaultLayerId = 1u;
+			root.layerStackGeneration = 1u;
+			root.directoryShards.push_back(std::move(shard));
+			const auto encodedRoot = TerraEngine::Terrain::EncodeTerrainRootManifest(root);
+			const std::string rootText = TerraEngine::Terrain::ToHexString(encodedRoot.contentHash);
 			workspace.WriteText("Terrain/Runtime.teterrain", nlohmann::json{
 				{"format", "TerraEngineTerrain"}, {"version", 1U}, {"assetId", assetText},
-				{"width", 256U}, {"height", 256U}, {"sampleSpacingMetres", 2.0F}}.dump());
+				{"rootFormat", "TERRAROOT1"}, {"width", 256U}, {"height", 256U},
+				{"sampleSpacingMetres", 2.0F}}.dump());
 			workspace.WriteText("Terrain/Runtime.teterrain.data/CURRENT", rootText + "\n-\n");
-			workspace.WriteText("Terrain/Runtime.teterrain.data/roots/" + rootText + ".root", manifest.str());
+			workspace.WriteText("Terrain/Runtime.teterrain.data/roots/" + rootText + ".root", encodedRoot.canonicalBytes);
 			workspace.WriteBytes("Terrain/Runtime.teterrain.data/blobs/" + heightText + ".tearea", heightBytes);
 
 			ContentMount mount;
-			context.Expect(mount.Mount(workspace.CreatePack()),
-				"The saved TERRAINROOT2 runtime fixture must mount through TEPAK.");
+			context.Expect(encodedRoot.Succeeded() && mount.Mount(workspace.CreatePack()),
+				"The saved canonical TERRAROOT1 runtime fixture must mount through TEPAK.");
 			auto loaded = TerraEngine::Runtime::BuildMountedTerrainRuntime(
 				mount, assetId, "Terrain/Runtime.teterrain");
 			context.Expect(loaded.Succeeded() && loaded.renderProxy.mesh->generatedDirectMeshletRoute.IsComplete()
@@ -133,7 +151,10 @@ namespace TerraEngine::Tests
 		});
 
 		registry.Add("Terrain.ExportRuntime.MultiViewPacketsRetainOneCurrentSourceIdentity", [](TestContext& context) {
-			std::vector<std::int32_t> heights(TerraEngine::Terrain::kTerrainAreaSampleCount, 0); Renderer::Terrain::TerrainCookInput input{}; input.assetId = TerraEngine::GenerateUUID(); input.authoredHash = {1u, 2u}; input.authoredGeneration = 3u; input.heightMillimetres = heights;
+			std::vector<std::int32_t> heights(
+				Renderer::Terrain::Format::kCookHaloSampleExtent
+					* Renderer::Terrain::Format::kCookHaloSampleExtent, 0);
+			Renderer::Terrain::TerrainCookInput input{}; input.assetId = TerraEngine::GenerateUUID(); input.authoredHash = {1u, 2u}; input.authoredGeneration = 3u; input.heightMillimetres = heights;
 			const auto cook = Renderer::Terrain::CookTerrainPage(input); Renderer::Terrain::TerrainViewPacket a{}; a.assetId = input.assetId; a.authoredHash = input.authoredHash; a.authoredGeneration = 3u; a.pageSourceIdentity = cook.sourceIdentity; a.frameId = 8u; auto b = a; b.frameId = 9u;
 			const std::array views{a, b};
 			const std::array cooks{cook};

@@ -71,6 +71,69 @@ namespace
 		texture->transcodedData = std::move(pixels);
 		return texture;
 	}
+
+	std::optional<std::uint16_t> FindUnusedTerrainLayerId(
+		const TerraEngine::Terrain::TerrainLayerStack& stack)
+	{
+		// Stable ID 0 is invalid and 0xffff belongs to the renderer's diagnostic
+		// fallback. Searching the bounded authoring range avoids wraparound when an
+		// artist has imported definitions with large, sparse IDs.
+		for(std::uint32_t candidate = 1u;
+			candidate < TerraEngine::Terrain::kTerrainDiagnosticFallbackLayerId;
+			++candidate)
+		{
+			const bool used = std::any_of(stack.layers.begin(), stack.layers.end(),
+				[candidate](const auto& layer) { return layer.stableId == candidate; });
+			if(!used) return static_cast<std::uint16_t>(candidate);
+		}
+		return std::nullopt;
+	}
+
+	bool EqualTerrainLayerName(std::string_view left, std::string_view right) noexcept
+	{
+		// Layer validation uses ASCII case-insensitive names. The editor mirrors
+		// that rule when proposing copy names so a generated action cannot create a
+		// candidate that the protected transaction boundary must reject.
+		if(left.size() != right.size()) return false;
+		for(std::size_t index = 0u; index < left.size(); ++index)
+		{
+			const auto fold = [](unsigned char value) {
+				return value >= 'A' && value <= 'Z'
+					? static_cast<unsigned char>(value - 'A' + 'a') : value;
+			};
+			if(fold(static_cast<unsigned char>(left[index]))
+				!= fold(static_cast<unsigned char>(right[index]))) return false;
+		}
+		return true;
+	}
+
+	std::string MakeUniqueTerrainLayerCopyName(
+		const TerraEngine::Terrain::TerrainLayerStack& stack,
+		std::string_view sourceName)
+	{
+		for(std::uint32_t copyNumber = 1u; copyNumber <= 1'000u; ++copyNumber)
+		{
+			const std::string candidate = std::string(sourceName) + (copyNumber == 1u
+				? " Copy" : " Copy " + std::to_string(copyNumber));
+			const bool used = std::any_of(stack.layers.begin(), stack.layers.end(),
+				[&candidate](const auto& layer) { return EqualTerrainLayerName(layer.name, candidate); });
+			if(!used) return candidate;
+		}
+		return {};
+	}
+
+	const char* TerrainLayerFallbackLabel(
+		TerraEngine::Terrain::TerrainLayerFallbackState state) noexcept
+	{
+		switch(state)
+		{
+		case TerraEngine::Terrain::TerrainLayerFallbackState::Healthy: return "source ready";
+		case TerraEngine::Terrain::TerrainLayerFallbackState::MissingSource: return "material source missing";
+		case TerraEngine::Terrain::TerrainLayerFallbackState::InvalidSource: return "material source invalid";
+		case TerraEngine::Terrain::TerrainLayerFallbackState::FallbackActive: return "intentional fallback active";
+		}
+		return "unknown fallback state";
+	}
 }
 
 TerrainWindow::TerrainWindow()
@@ -516,31 +579,45 @@ void TerrainWindow::SynchronizeTerrainMaterial(bool forceLayerMaterialRefresh)
 	for(const auto& layer : runtimeLayerStack.layers)
 	{
 		if(!layer.enabled || runtimeBinding.layerCount >= runtimeBinding.layers.size()) continue;
-		auto& gpuLayer = runtimeBinding.layers[runtimeBinding.layerCount++];
-		gpuLayer.stableLayerId = layer.stableId;
-		gpuLayer.uvTransform = {
-			static_cast<float>(layer.mapping.scaleX), static_cast<float>(layer.mapping.scaleZ),
-			static_cast<float>(layer.mapping.offsetX), static_cast<float>(layer.mapping.offsetZ)};
+		auto& runtimeLayer = runtimeBinding.layers[runtimeBinding.layerCount++];
+		runtimeLayer.stableLayerId = layer.stableId;
+		runtimeLayer.mapping.tileSizeMetres = {
+			static_cast<float>(layer.mapping.tileSizeXMetres), static_cast<float>(layer.mapping.tileSizeZMetres)};
+		runtimeLayer.mapping.inverseRotationCosSin = {
+			static_cast<float>(std::cos(-layer.mapping.rotationRadians)),
+			static_cast<float>(std::sin(-layer.mapping.rotationRadians))};
+		runtimeLayer.mapping.triplanarSharpness = static_cast<float>(layer.mapping.triplanarSharpness);
+		runtimeLayer.mapping.mode = layer.mapping.mode == TerraEngine::Terrain::TerrainLayerMappingMode::Triplanar
+			? TerraEngine::Renderer::Terrain::TerrainGpuMappingMode::Triplanar
+			: TerraEngine::Renderer::Terrain::TerrainGpuMappingMode::TerrainXZ;
+		runtimeLayer.uvTransform = {
+			static_cast<float>(layer.mapping.tileSizeXMetres), static_cast<float>(layer.mapping.tileSizeZMetres),
+			static_cast<float>(layer.mapping.offsetXMetres), static_cast<float>(layer.mapping.offsetZMetres)};
 		if(layer.materialAssetUuid == TerraEngine::EMPTY_UUID)
 		{
 			// A newly created terrain deliberately starts with a usable flat layer;
 			// magenta is reserved for an authored source that later became invalid.
-			gpuLayer.baseColorFactor = {
+			runtimeLayer.baseColorFactor = {
 				settings.baseColor.r, settings.baseColor.g, settings.baseColor.b, 1.0F};
 			continue;
 		}
 		const Material* layerMaterial = resources.GetMaterial(layer.materialAssetUuid);
 		if(layerMaterial == nullptr || layer.fallbackState != TerraEngine::Terrain::TerrainLayerFallbackState::Healthy)
 		{
-			// Negative alpha is an internal runtime sentinel. Ordinary authored
-			// colors cannot collide with it, and the shader turns it into a clearly
-			// diagnostic yellow/black checker instead of ambiguous solid magenta.
-			gpuLayer.baseColorFactor = {1.0F, 0.8F, 0.0F, -1.0F};
+			// The immutable binding carries an explicit diagnostic state; renderer
+			// preparation resolves it without fabricating a texture UUID.
+			runtimeLayer.fallbackActive = true;
+			runtimeLayer.baseColorFactor = {1.0F, 0.8F, 0.0F, 1.0F};
 			continue;
 		}
-		// Bake the terrain component's tint into each healthy runtime layer once.
-		// Missing sources keep the diagnostic checker instead of being tinted black.
-		gpuLayer.baseColorFactor = {
+		// TMAT is authoritative for all four PBR semantics and their factors. The
+		// generated proxy stays neutral, so this source is applied exactly once.
+		static_cast<TerraEngine::Terrain::TerrainLayerSurfaceSource&>(runtimeLayer) =
+			TerraEngine::Terrain::ResolveTerrainLayerSurfaceSource(*layerMaterial);
+		// The resolved TMAT factor and TerrainComponent tint are independent
+		// authored inputs. Bake their product into the immutable runtime layer once;
+		// the generated proxy material remains neutral and cannot apply it again.
+		runtimeLayer.baseColorFactor = {
 			layerMaterial->header.baseColorFactor[0] * settings.baseColor.r,
 			layerMaterial->header.baseColorFactor[1] * settings.baseColor.g,
 			layerMaterial->header.baseColorFactor[2] * settings.baseColor.b,
@@ -549,11 +626,41 @@ void TerrainWindow::SynchronizeTerrainMaterial(bool forceLayerMaterialRefresh)
 			[](const TextureBinding& binding) { return binding.semantic == TextureSemantic::Base; });
 		if(baseTexture != layerMaterial->textures.end())
 		{
-			gpuLayer.baseColorTextureId = baseTexture->textureUuid;
-			gpuLayer.uvTransform[0] *= baseTexture->uvScale[0];
-			gpuLayer.uvTransform[1] *= baseTexture->uvScale[1];
-			gpuLayer.uvTransform[2] += baseTexture->uvOffset[0];
-			gpuLayer.uvTransform[3] += baseTexture->uvOffset[1];
+			runtimeLayer.uvTransform[0] *= baseTexture->uvScale[0];
+			runtimeLayer.uvTransform[1] *= baseTexture->uvScale[1];
+			runtimeLayer.uvTransform[2] += baseTexture->uvOffset[0];
+			runtimeLayer.uvTransform[3] += baseTexture->uvOffset[1];
+		}
+	}
+	for(const auto& shard : capture.root->directoryShards)
+	{
+		for(const auto& [area, descriptor] : shard.descriptors)
+		{
+			(void)descriptor;
+			TerraEngine::Renderer::Terrain::TerrainAreaMappingBinding areaBinding;
+			areaBinding.area = area;
+			areaBinding.sampleSpacingMetres = capture.root->sampleSpacingMetres;
+			areaBinding.layerCount = runtimeBinding.layerCount;
+			bool complete = true;
+			for(std::uint32_t layerIndex = 0u; layerIndex < runtimeBinding.layerCount; ++layerIndex)
+			{
+				const auto enabledLayer = std::find_if(runtimeLayerStack.layers.begin(), runtimeLayerStack.layers.end(),
+					[&runtimeBinding, layerIndex](const auto& candidate) {
+						return candidate.stableId == runtimeBinding.layers[layerIndex].stableLayerId;
+					});
+				TerraEngine::Terrain::TerrainAreaMaterialPhase phase;
+				if(enabledLayer == runtimeLayerStack.layers.end()
+					|| !TerraEngine::Terrain::PrepareTerrainAreaMaterialPhase(
+						area, capture.root->sampleSpacingMetres, enabledLayer->mapping, phase).Succeeded())
+				{
+					complete = false;
+					break;
+				}
+				areaBinding.layerPhases[layerIndex].stableLayerId = enabledLayer->stableId;
+				areaBinding.layerPhases[layerIndex].phaseMetres = {
+					static_cast<float>(phase.phaseMetres.x), static_cast<float>(phase.phaseMetres.y)};
+			}
+			if(complete) runtimeBinding.areaMappings.push_back(std::move(areaBinding));
 		}
 	}
 	if(!TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeRegistry::Instance().Publish(std::move(runtimeBinding)))
@@ -608,6 +715,11 @@ void TerrainWindow::ResetSceneTerrainState(std::string_view statusMessage)
 	if(terrainStore)
 		TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().ClearPublication(terrainStore.get());
 	authoringSystem.CancelPreparedWork("Terrain component removed from the scene.");
+	// Shutdown joins any in-flight protected publication and detaches its
+	// non-owning service pointers. A workload declared earlier in this frame may
+	// still execute after project close, but it will now observe a disabled session
+	// instead of touching the queue and publication objects destroyed below.
+	authoringSystem.Shutdown();
 	terrainStore.reset();
 	terrainQueue.reset();
 	terrainPublication.reset();
@@ -1089,7 +1201,23 @@ void TerrainWindow::DrawInspectorLayerControls()
 		return StageLayerPatch(patch, outError) && ApplyLayerPreview(outError);
 	};
 	const TerraEngine::Terrain::TerrainLayerStack stack = LayerPreview();
+	const std::size_t enabledLayerCount = static_cast<std::size_t>(std::count_if(
+		stack.layers.begin(), stack.layers.end(),
+		[](const auto& layer) { return layer.enabled; }));
+	const bool definitionLimitReached = stack.layers.size()
+		>= TerraEngine::Terrain::Format::kTerrainMaximumLayers;
+	const bool enabledLimitReached = enabledLayerCount
+		>= TerraEngine::Terrain::Format::kTerrainMaximumEnabledLayers;
+	const bool listEditBlocked = queuedLayerTransactionId.has_value() || layerPreviewActive;
+	const std::optional<std::uint16_t> unusedLayerId = FindUnusedTerrainLayerId(stack);
 	ImGui::TextDisabled("Layers are evaluated from top to bottom and keep stable paint IDs.");
+	ImGui::Text("Definitions: %zu / %zu    Enabled: %zu / %zu",
+		stack.layers.size(), TerraEngine::Terrain::Format::kTerrainMaximumLayers,
+		enabledLayerCount, TerraEngine::Terrain::Format::kTerrainMaximumEnabledLayers);
+	if(listEditBlocked)
+		ImGui::TextDisabled("Apply or cancel the current detached layer operation before starting another list edit.");
+	if(enabledLimitReached)
+		ImGui::TextDisabled("The enabled set is full. New definitions are added disabled and can be enabled after another layer is disabled.");
 	for(std::size_t index = 0u; index < stack.layers.size(); ++index)
 	{
 		const auto& layer = stack.layers[index];
@@ -1102,23 +1230,99 @@ void TerrainWindow::DrawInspectorLayerControls()
 		}
 		if(selected)
 		{
+			const auto stageMappingValue = [this, &layer](auto update, bool edited, bool deactivated) {
+				if(edited)
+				{
+					TerraEngine::Terrain::TerrainLayer replacement = layer;
+					update(replacement.mapping);
+					std::string error;
+					if(!StageLayerPatch({TerraEngine::Terrain::TerrainLayerPatchKind::Replace,
+						0u, layer.stableId, 0xffffffffu, std::move(replacement)}, error))
+						status = std::move(error);
+				}
+				if(deactivated && layerPreviewActive && !queuedLayerTransactionId)
+				{
+					std::string error;
+					if(!ApplyLayerPreview(error)) status = std::move(error);
+				}
+			};
+			ImGui::SeparatorText("Physical Mapping");
+			int mappingMode = static_cast<int>(layer.mapping.mode);
+			const char* mappingModes[] = {"Terrain XZ", "Triplanar"};
+			const bool modeChanged = ImGui::Combo("Mode", &mappingMode, mappingModes, IM_ARRAYSIZE(mappingModes));
+			stageMappingValue([mappingMode](auto& mapping) {
+				mapping.mode = static_cast<TerraEngine::Terrain::TerrainLayerMappingMode>(mappingMode);
+			}, modeChanged, modeChanged);
+
+			double tileSize[2] = {layer.mapping.tileSizeXMetres, layer.mapping.tileSizeZMetres};
+			const bool tileChanged = ImGui::DragScalarN("Tile Size", ImGuiDataType_Double,
+				tileSize, 2, 0.05F, nullptr, nullptr, "%.3f m");
+			stageMappingValue([&tileSize](auto& mapping) {
+				mapping.tileSizeXMetres = tileSize[0];
+				mapping.tileSizeZMetres = tileSize[1];
+			}, tileChanged, ImGui::IsItemDeactivatedAfterEdit());
+
+			double offset[2] = {layer.mapping.offsetXMetres, layer.mapping.offsetZMetres};
+			const bool offsetChanged = ImGui::DragScalarN("Offset", ImGuiDataType_Double,
+				offset, 2, 0.05F, nullptr, nullptr, "%.3f m");
+			stageMappingValue([&offset](auto& mapping) {
+				mapping.offsetXMetres = offset[0];
+				mapping.offsetZMetres = offset[1];
+			}, offsetChanged, ImGui::IsItemDeactivatedAfterEdit());
+
+			double rotation = layer.mapping.rotationRadians;
+			const bool rotationChanged = ImGui::DragScalar("Rotation", ImGuiDataType_Double,
+				&rotation, 0.01F, nullptr, nullptr, "%.3f rad");
+			stageMappingValue([rotation](auto& mapping) {
+				mapping.rotationRadians = rotation;
+			}, rotationChanged, ImGui::IsItemDeactivatedAfterEdit());
+
+			if(layer.mapping.mode == TerraEngine::Terrain::TerrainLayerMappingMode::Triplanar)
+			{
+				double sharpness = layer.mapping.triplanarSharpness;
+				const bool sharpnessChanged = ImGui::DragScalar("Triplanar Sharpness", ImGuiDataType_Double,
+					&sharpness, 0.1F, nullptr, nullptr, "%.2f");
+				stageMappingValue([sharpness](auto& mapping) {
+					mapping.triplanarSharpness = sharpness;
+				}, sharpnessChanged, ImGui::IsItemDeactivatedAfterEdit());
+			}
+			if(layerPreviewActive)
+			{
+				if(ImGui::Button("Apply Mapping Preview"))
+				{
+					std::string error;
+					if(!ApplyLayerPreview(error)) status = std::move(error);
+				}
+				ImGui::SameLine();
+				if(ImGui::Button("Cancel Mapping Preview")) CancelLayerPreview();
+			}
+			ImGui::TextDisabled("Mapping is terrain-local in metres; moving the terrain or render origin does not change phase.");
+
 			const AssetMetadata* materialMetadata = layer.materialAssetUuid != TerraEngine::EMPTY_UUID
 				? AssetDatabase::Instance().FindAssetByGuid(layer.materialAssetUuid) : nullptr;
 			const Material* runtimeMaterial = layer.materialAssetUuid != TerraEngine::EMPTY_UUID
 				? ResourceManager::Instance().GetMaterial(layer.materialAssetUuid) : nullptr;
 			ImGui::TextDisabled("Material: %s", materialMetadata
 				? materialMetadata->sourcePath.filename().string().c_str() : "None (flat fallback)");
-			if(layer.materialAssetUuid != TerraEngine::EMPTY_UUID
-				&& (runtimeMaterial == nullptr
-					|| layer.fallbackState != TerraEngine::Terrain::TerrainLayerFallbackState::Healthy))
+			const bool materialUnavailable = layer.materialAssetUuid != TerraEngine::EMPTY_UUID
+				&& runtimeMaterial == nullptr;
+			const bool fallbackActive = materialUnavailable
+				|| layer.fallbackState != TerraEngine::Terrain::TerrainLayerFallbackState::Healthy;
+			if(fallbackActive)
 			{
 				ImGui::TextColored(ImVec4(1.0F, 0.72F, 0.18F, 1.0F),
-					"Material unavailable: diagnostic checker is shown.");
+					"Fallback: %s. Diagnostic terrain remains visible.",
+					materialUnavailable ? "runtime material unavailable"
+						: TerrainLayerFallbackLabel(layer.fallbackState));
 				ImGui::TextWrapped(
-					"Base Color is intentionally ignored for a broken material source so the failure remains visible.");
+					"Authored paint still references stable layer %u; repair or assign the material source to remove the checker without repainting.",
+					static_cast<unsigned int>(layer.stableId));
 			}
+			else ImGui::TextDisabled("Effective layer source: ready (no diagnostic fallback).");
+			ImGui::BeginDisabled(listEditBlocked);
 			ImGui::Button("Drop Material Here", ImVec2(-1.0F, 0.0F));
-			if(ImGui::BeginDragDropTarget())
+			ImGui::EndDisabled();
+			if(!listEditBlocked && ImGui::BeginDragDropTarget())
 			{
 				if(const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_MATERIAL"))
 				{
@@ -1144,21 +1348,31 @@ void TerrainWindow::DrawInspectorLayerControls()
 				}
 				ImGui::EndDragDropTarget();
 			}
-			if(layer.materialAssetUuid != TerraEngine::EMPTY_UUID
-				&& ImGui::SmallButton("Clear Material"))
+			if(layer.materialAssetUuid != TerraEngine::EMPTY_UUID)
 			{
-				// Clearing restores the flat TerrainComponent Base Color. This is
-				// especially useful when a texture was accidentally assigned to the
-				// always-present base layer instead of a new paint layer.
-				TerraEngine::Terrain::TerrainLayer replacement = layer;
-				replacement.materialAssetUuid = TerraEngine::EMPTY_UUID;
-				replacement.fallbackState = TerraEngine::Terrain::TerrainLayerFallbackState::FallbackActive;
-				std::string error;
-				if(!stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::Replace,
-					0u, layer.stableId, 0xffffffffu, std::move(replacement)}, error))
-					status = std::move(error);
+				ImGui::BeginDisabled(listEditBlocked);
+				const bool clearMaterial = ImGui::SmallButton("Clear Material");
+				ImGui::EndDisabled();
+				if(clearMaterial)
+				{
+					// Clearing is a detached metadata replacement. The protected
+					// publication boundary, rather than this widget, changes runtime state.
+					TerraEngine::Terrain::TerrainLayer replacement = layer;
+					replacement.materialAssetUuid = TerraEngine::EMPTY_UUID;
+					replacement.fallbackState = TerraEngine::Terrain::TerrainLayerFallbackState::FallbackActive;
+					std::string error;
+					if(!stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::Replace,
+						0u, layer.stableId, 0xffffffffu, std::move(replacement)}, error))
+						status = std::move(error);
+				}
 			}
-			if(ImGui::SmallButton(layer.enabled ? "Disable" : "Enable"))
+
+			const bool enableWouldOverflow = !layer.enabled && enabledLimitReached;
+			const bool disableWouldRemoveFinal = layer.enabled && enabledLayerCount <= 1u;
+			ImGui::BeginDisabled(listEditBlocked || enableWouldOverflow || disableWouldRemoveFinal);
+			const bool toggleEnabled = ImGui::SmallButton(layer.enabled ? "Disable" : "Enable");
+			ImGui::EndDisabled();
+			if(toggleEnabled)
 			{
 				std::string error;
 				if(!stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::SetEnabled,
@@ -1166,14 +1380,32 @@ void TerrainWindow::DrawInspectorLayerControls()
 				else EnsureValidPaintLayer();
 			}
 			ImGui::SameLine();
-			if(index > 0u && ImGui::SmallButton("Move Up"))
+			ImGui::BeginDisabled(listEditBlocked || index == 0u);
+			const bool moveUp = ImGui::SmallButton("Move Up");
+			ImGui::EndDisabled();
+			if(moveUp)
 			{
 				std::string error;
 				if(!stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::Move,
 					0u, layer.stableId, static_cast<std::uint32_t>(index - 1u)}, error)) status = std::move(error);
 			}
 			ImGui::SameLine();
-			if(stack.layers.size() > 1u && ImGui::SmallButton("Remove"))
+			ImGui::BeginDisabled(listEditBlocked || index + 1u >= stack.layers.size());
+			const bool moveDown = ImGui::SmallButton("Move Down");
+			ImGui::EndDisabled();
+			if(moveDown)
+			{
+				std::string error;
+				if(!stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::Move,
+					0u, layer.stableId, static_cast<std::uint32_t>(index + 1u)}, error)) status = std::move(error);
+			}
+			ImGui::SameLine();
+			const bool removeWouldRemoveFinal = stack.layers.size() <= 1u
+				|| (layer.enabled && enabledLayerCount <= 1u);
+			ImGui::BeginDisabled(listEditBlocked || removeWouldRemoveFinal);
+			const bool removeLayer = ImGui::SmallButton("Remove");
+			ImGui::EndDisabled();
+			if(removeLayer)
 			{
 				std::string error;
 				if(!stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::Remove,
@@ -1184,27 +1416,58 @@ void TerrainWindow::DrawInspectorLayerControls()
 					if(selectedLayerId == layer.stableId) selectedLayerId = surfaceBrushSettings.layerId;
 				}
 			}
+
+			ImGui::SameLine();
+			ImGui::BeginDisabled(listEditBlocked || definitionLimitReached || !unusedLayerId.has_value());
+			const bool duplicateLayer = ImGui::SmallButton("Duplicate");
+			ImGui::EndDisabled();
+			if(duplicateLayer)
+			{
+				TerraEngine::Terrain::TerrainLayer duplicate = layer;
+				duplicate.stableId = *unusedLayerId;
+				duplicate.name = MakeUniqueTerrainLayerCopyName(stack, layer.name);
+				// A full runtime set can still retain more authoring definitions. The
+				// copy starts disabled so the complete sixteen-layer GPU publication
+				// remains valid and no renderer-side truncation is needed.
+				duplicate.enabled = layer.enabled && !enabledLimitReached;
+				const bool duplicateEnabled = duplicate.enabled;
+				std::string error;
+				if(!stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::Add,
+					0u, 0u, static_cast<std::uint32_t>(index + 1u), std::move(duplicate)}, error))
+					status = std::move(error);
+				else if(!duplicateEnabled)
+					status += " The copied definition is disabled until capacity is available.";
+			}
+			if(enableWouldOverflow)
+				ImGui::TextDisabled("Disable another layer before enabling this definition.");
+			else if(disableWouldRemoveFinal || removeWouldRemoveFinal)
+				ImGui::TextDisabled("At least one enabled terrain layer must remain.");
 		}
 		ImGui::PopID();
 	}
-	if(ImGui::Button("Add Terrain Layer", ImVec2(-1.0F, 0.0F)))
+	ImGui::BeginDisabled(listEditBlocked || definitionLimitReached || !unusedLayerId.has_value());
+	const bool addLayer = ImGui::Button("Add Terrain Layer", ImVec2(-1.0F, 0.0F));
+	ImGui::EndDisabled();
+	if(addLayer)
 	{
-		std::uint16_t nextId = 1u;
-		for(const auto& layer : stack.layers)
-			nextId = std::max<std::uint16_t>(nextId, static_cast<std::uint16_t>(layer.stableId + 1u));
 		TerraEngine::Terrain::TerrainLayer layer;
-		layer.stableId = nextId;
-		layer.name = "Layer " + std::to_string(nextId);
+		layer.stableId = *unusedLayerId;
+		layer.name = "Layer " + std::to_string(*unusedLayerId);
+		layer.enabled = !enabledLimitReached;
 		layer.fallbackState = TerraEngine::Terrain::TerrainLayerFallbackState::FallbackActive;
+		const bool addedEnabled = layer.enabled;
 		std::string error;
 		if(stageAndApply({TerraEngine::Terrain::TerrainLayerPatchKind::Add,
 			0u, 0u, 0xffffffffu, std::move(layer)}, error))
 		{
-			selectedLayerId = nextId;
-			surfaceBrushSettings.layerId = nextId;
+			selectedLayerId = *unusedLayerId;
+			if(addedEnabled) surfaceBrushSettings.layerId = *unusedLayerId;
+			else status += " The new definition is disabled until capacity is available.";
 		}
 		else status = std::move(error);
 	}
+	if(definitionLimitReached)
+		ImGui::TextDisabled("The TERRAROOT1 definition limit is 64. Remove a definition before adding another.");
 }
 
 void TerrainWindow::DrawInspectorSettingsControls()
@@ -1996,14 +2259,14 @@ void TerrainWindow::InitializeAuthoringTerrain(
 	// it. Later list edits therefore use the same CAS/persistence path as paint.
 	auto initialLayerStack = std::make_shared<TerraEngine::Terrain::TerrainLayerStack>();
 	initialLayerStack->generation = 1u;
-	initialLayerStack->layers.push_back({1u, "Base Layer", TerraEngine::EMPTY_UUID, {}, true, TerraEngine::Terrain::TerrainLayerFallbackState::Healthy});
+	initialLayerStack->layers.push_back({1u, "Base Layer", TerraEngine::EMPTY_UUID, {}, true, true, TerraEngine::Terrain::TerrainLayerFallbackState::Healthy});
 	root->layerStack = std::move(initialLayerStack);
 	terrainStore = std::make_unique<TerraEngine::Terrain::TerrainAssetStore>(root); terrainStore->Blobs().PutVerified(heightHash, std::move(bytes));
 	if(!destinationPath.empty() && std::filesystem::exists(destinationPath.string() + ".data/CURRENT"))
 	{
-		// New-format terrain bundles rehydrate their saved/predecessor roots before
-		// history begins. Legacy creation bundles deliberately fall back to the
-		// just-created working root until their loader/migration path is available.
+			// Canonical terrain bundles rehydrate their saved/predecessor roots before
+			// history begins. Unsupported generations fail closed and retain this
+			// unpublished working root, so no partial descriptor reaches rendering.
 		const auto opened = terrainStore->OpenPersistedRoot(destinationPath.string() + ".data");
 		if(opened.Succeeded())
 		{
@@ -2102,13 +2365,37 @@ bool TerrainWindow::SynchronizeCommittedAuthoringStateFromPublishedRoot()
 	}
 	const auto descriptor = terrainStore->FindDescriptor(*capture.root, {0, 0});
 	if(!descriptor) return false;
+	auto resolveCanonicalPayload = [&](TerraEngine::Terrain::ContentHash hash,
+		TerraEngine::Terrain::TerrainChannelKind channelKind, std::uint16_t weightGroup,
+		std::size_t expectedBytes) -> std::optional<std::vector<std::uint8_t>>
+	{
+		const auto stored = terrainStore->Blobs().Resolve(hash);
+		if(!stored) return std::nullopt;
+		// Fresh editor transactions retain raw immutable payloads until Save wraps
+		// them in the durable .tearea ABI. Reopened stores contain that envelope, so
+		// normalize both representations to the same exact authoring bytes here.
+		if(stored->size() == expectedBytes) return stored;
+		TerraEngine::Terrain::DecodedTerrainArea decoded;
+		const auto result = TerraEngine::Terrain::DecodeTerrainArea(*stored, decoded);
+		if(!result.Succeeded() || decoded.header.assetUuid != capture.root->assetUuid
+			|| decoded.header.area != descriptor->coordinate
+			|| decoded.header.channelKind != channelKind
+			|| decoded.header.weightGroup != weightGroup
+			|| decoded.header.envelopeHash != hash
+			|| decoded.canonicalPayload.size() != expectedBytes)
+		{
+			return std::nullopt;
+		}
+		return std::move(decoded.canonicalPayload);
+	};
 
 	bool synchronizedHeight = false;
 	if(descriptor->channels.heightHash)
 	{
-		const auto bytes = terrainStore->Blobs().Resolve(*descriptor->channels.heightHash);
 		const std::size_t expectedBytes = TerraEngine::Terrain::kTerrainAreaSampleCount * sizeof(std::int32_t);
-		if(bytes && bytes->size() == expectedBytes)
+		const auto bytes = resolveCanonicalPayload(*descriptor->channels.heightHash,
+			TerraEngine::Terrain::TerrainChannelKind::Height, 0u, expectedBytes);
+		if(bytes)
 		{
 			committedHeightMm.resize(TerraEngine::Terrain::kTerrainAreaSampleCount);
 			std::memcpy(committedHeightMm.data(), bytes->data(), expectedBytes);
@@ -2122,8 +2409,9 @@ bool TerrainWindow::SynchronizeCommittedAuthoringStateFromPublishedRoot()
 	committedHoleMask.assign(TerraEngine::Terrain::kTerrainAreaSampleCount / 8u, 0u);
 	if(descriptor->channels.holeHash)
 	{
-		const auto bytes = terrainStore->Blobs().Resolve(*descriptor->channels.holeHash);
-		if(bytes && bytes->size() == committedHoleMask.size()) committedHoleMask = *bytes;
+		const auto bytes = resolveCanonicalPayload(*descriptor->channels.holeHash,
+			TerraEngine::Terrain::TerrainChannelKind::Holes, 0u, committedHoleMask.size());
+		if(bytes) committedHoleMask = *bytes;
 	}
 	previewHoleMask = committedHoleMask;
 
@@ -2140,9 +2428,11 @@ bool TerrainWindow::SynchronizeCommittedAuthoringStateFromPublishedRoot()
 	if(const auto weight = descriptor->channels.weightGroupHashes.find(1u);
 		weight != descriptor->channels.weightGroupHashes.end())
 	{
-		const auto bytes = terrainStore->Blobs().Resolve(weight->second);
 		constexpr std::size_t bytesPerSample = 12u;
-		if(bytes && bytes->size() == TerraEngine::Terrain::kTerrainAreaSampleCount * bytesPerSample)
+		const auto bytes = resolveCanonicalPayload(weight->second,
+			TerraEngine::Terrain::TerrainChannelKind::WeightGroup, 1u,
+			TerraEngine::Terrain::kTerrainAreaSampleCount * bytesPerSample);
+		if(bytes)
 		{
 			std::vector<TerraEngine::Terrain::TerrainWeightSample> decoded(TerraEngine::Terrain::kTerrainAreaSampleCount);
 			bool valid = true;
@@ -2164,9 +2454,9 @@ bool TerrainWindow::SynchronizeCommittedAuthoringStateFromPublishedRoot()
 
 bool TerrainWindow::StageLayerPatch(const TerraEngine::Terrain::TerrainLayerPatch& sourcePatch, std::string& outError)
 {
-	if(layerPreviewActive || queuedLayerTransactionId.has_value())
+	if(queuedLayerTransactionId.has_value())
 	{
-		outError = "Apply or Cancel the current detached layer operation before staging another one.";
+		outError = "Wait for the queued layer operation to reach the protected boundary before staging another one.";
 		return false;
 	}
 	const auto& base = committedLayerStack;
@@ -2239,19 +2529,11 @@ bool TerrainWindow::ApplyLayerPreview(std::string& outError)
 		return false;
 	}
 	const auto capture = terrainStore->CaptureRoot();
-	TerraEngine::Terrain::TerrainEditTransaction transaction;
-	transaction.transactionId = TerraEngine::GenerateUUID();
-	transaction.origin = TerraEngine::Terrain::TerrainEditOrigin::VisibleEditor;
-	transaction.targetAssetUuid = capture.root->assetUuid;
-	transaction.historyGroup = "Terrain layer metadata";
-	transaction.inputRootHash = capture.root->rootContentHash;
-	transaction.expectedLayerStackGeneration = capture.root->layerStackGeneration;
-	transaction.affectedBounds = capture.root->authoredBounds;
-	transaction.budget.maximumAreas = 1u;
-	transaction.layerStackPatch = *stagedLayerPatch;
-	transaction.inverseLayerStackPatch = *stagedInverseLayerPatch;
-	const TerraEngine::UUID transactionId = transaction.transactionId;
-	if(!authoringSystem.EnqueueDetachedCommit(std::move(transaction), outError)) return false;
+	auto transaction = TerraEngine::Editor::Terrain::TerrainAuthoringSession::BuildLayerCommitRequest(
+		capture, *stagedLayerPatch, *stagedInverseLayerPatch, "Terrain layer metadata", outError);
+	if(!transaction) return false;
+	const TerraEngine::UUID transactionId = transaction->transactionId;
+	if(!authoringSystem.EnqueueDetachedCommit(std::move(*transaction), outError)) return false;
 	queuedLayerTransactionId = transactionId;
 	status = "Terrain layer preview queued for protected publication; Cancel remains available until the boundary.";
 	return true;
@@ -2966,7 +3248,9 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 	PollRenderProxyBuild();
 	const auto publicationStart = std::chrono::steady_clock::now();
 	authoringSystem.PublishAtProtectedBoundary();
-	bool committedRenderableChange = false;
+	bool committedGeometryChange = false;
+	bool committedControlChange = false;
+	bool committedMaterialChange = false;
 	bool committedCollisionChange = false;
 	for(const auto& receipt : authoringSystem.DrainReceipts())
 	{
@@ -2982,7 +3266,23 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 		const bool wasHistoryReplay = UndoRedoSystem::Instance().CompleteTerrainReplay(receipt);
 		if(receipt.outcome == TerraEngine::Terrain::TerrainEditOutcome::Committed)
 		{
-			committedRenderableChange = true;
+			if(receipt.invalidation)
+			{
+				committedGeometryChange = receipt.invalidation->Contains(
+					TerraEngine::Terrain::TerrainInvalidationKind::GeometryAndCollision) || committedGeometryChange;
+				committedControlChange = receipt.invalidation->Contains(
+					TerraEngine::Terrain::TerrainInvalidationKind::ControlTextures) || committedControlChange;
+				committedMaterialChange = receipt.invalidation->Contains(
+					TerraEngine::Terrain::TerrainInvalidationKind::MaterialBindings) || committedMaterialChange;
+			}
+			else
+			{
+				// Compatibility producers without typed invalidation remain conservative,
+				// while every native terrain transaction above uses the exact union.
+				committedGeometryChange = (!isLayerReceipt && !isSurfaceReceipt) || committedGeometryChange;
+				committedControlChange = isSurfaceReceipt || committedControlChange;
+				committedMaterialChange = isLayerReceipt || committedMaterialChange;
+			}
 			if(receipt.historyPayload)
 			{
 				committedCollisionChange = std::any_of(
@@ -3083,7 +3383,9 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 			status = std::string(isLayerReceipt ? "Terrain layer preview was not published: " : (isSurfaceReceipt ? "Terrain surface preview was not published: " : (isHoleReceipt ? "Terrain hole preview was not published: " : (isProceduralReceipt ? "Terrain procedural preview was not published: " : "Terrain sculpt rejected: ")))) + receipt.message;
 		}
 	}
-	if(committedRenderableChange)
+	if(committedMaterialChange || committedControlChange)
+		SynchronizeTerrainMaterial(true);
+	if(committedGeometryChange)
 		ScheduleRenderProxyBuild();
 	if(committedCollisionChange)
 	{

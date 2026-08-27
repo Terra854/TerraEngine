@@ -3,8 +3,10 @@
 #pragma once
 
 #include "Core/Export.h"
+#include "Terrain/TerrainLayerStack.h"
 #include "Terrain/TerrainTypes.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <atomic>
@@ -13,6 +15,29 @@
 
 namespace TerraEngine::Renderer::Terrain
 {
+	// Magenta is intentionally conspicuous and renderer-owned. Authored layers
+	// cannot claim its reserved stable ID, so broken paint never aliases valid art.
+	struct TerrainDiagnosticSurfaceMaterial
+	{
+		std::uint16_t stableLayerId = TerraEngine::Terrain::kTerrainDiagnosticFallbackLayerId;
+		std::array<float, 4u> baseColor{1.0F, 0.0F, 1.0F, 1.0F};
+		std::array<float, 3u> normal{0.0F, 0.0F, 1.0F};
+		std::array<float, 3u> orm{1.0F, 1.0F, 0.0F};
+		std::array<float, 3u> emissive{0.15F, 0.0F, 0.15F};
+	};
+
+	struct TerrainSurfaceControlResolution
+	{
+		TerraEngine::Terrain::TerrainResolvedWeightSample weights{};
+		bool requiredControlMissing = false;
+	};
+
+	[[nodiscard]] TERRAENGINE_API const TerrainDiagnosticSurfaceMaterial&
+		GetTerrainDiagnosticSurfaceMaterial() noexcept;
+	[[nodiscard]] TERRAENGINE_API TerrainSurfaceControlResolution ResolveTerrainSurfaceControlSample(
+		const TerraEngine::Terrain::TerrainWeightSample* sample,
+		const TerraEngine::Terrain::TerrainLayerStack& stack) noexcept;
+
 	struct TerrainSurfacePageKey
 	{
 		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;

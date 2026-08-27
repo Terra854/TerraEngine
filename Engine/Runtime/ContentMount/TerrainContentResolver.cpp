@@ -4,6 +4,8 @@
 
 #include "ContentMount.h"
 
+#include <nlohmann/json.hpp>
+
 namespace TerraEngine
 {
 	namespace
@@ -68,7 +70,23 @@ namespace TerraEngine
 		const ::ContentMount& mount,
 		std::string_view logicalPath)
 	{
-		return ReadChecked(mount, logicalPath, ".teterrain", kMaximumRootBytes);
+		TerrainContentReadResult result = ReadChecked(mount, logicalPath, ".teterrain", kMaximumRootBytes);
+		if(!result.Succeeded()) return result;
+		try
+		{
+			const nlohmann::json descriptor = nlohmann::json::parse(result.bytes);
+			if(!descriptor.is_object() || descriptor.value("rootFormat", std::string{}) != "TERRAROOT1")
+			{
+				result.status = TerrainContentStatus::WrongAssetClass;
+				result.bytes.clear();
+			}
+		}
+		catch(const nlohmann::json::exception&)
+		{
+			result.status = TerrainContentStatus::WrongAssetClass;
+			result.bytes.clear();
+		}
+		return result;
 	}
 
 	TerrainContentReadResult TerrainContentResolver::ReadAreaBlob(

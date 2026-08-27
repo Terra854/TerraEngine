@@ -4,23 +4,21 @@
 
 #include "Terrain/TerrainMaterial.h"
 
-#include "Components/TerrainComponent.h"
 #include "Core/Logger/Logger.h"
-#include "Core/Object/ObjectManager.h"
-#include "File Formats/TerraEngineMaterialFile.h"
 #include "Physics/PhysicsSystem.h"
 #include "Physics/PhysicsTransactions.h"
 #include "Renderer/Terrain/TerrainRenderProxyRegistry.h"
 #include "Resource/ResourceManager.h"
 #include "Runtime/ContentMount/ContentMount.h"
+#include "Runtime/ContentMount/TerrainRuntimeBootstrap.h"
 #include "Runtime/ContentMount/TerrainRuntimeProxyLoader.h"
 #include "ThreadPool/ThreadPool.h"
 
-#include <cstring>
+#include <algorithm>
 #include <future>
+#include <map>
 #include <memory>
 #include <string>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -50,6 +48,18 @@ namespace TerraEngine::Terrain
 		return {};
 	}
 
+	TerrainDerivedPublicationCheck ValidateTerrainMaterialMappingCandidate(
+		const TerrainMaterialMappingCandidate& candidate, const TerrainAssetStore& store)
+	{
+		if(const TerrainDerivedPublicationCheck source = ValidateTerrainDerivedCandidate(candidate.source, store);
+			!source.Succeeded()) return source;
+		if(!candidate.invalidation.Contains(TerrainInvalidationKind::MaterialBindings)) return {};
+		if(!candidate.mappingComplete || candidate.layerPhases.empty())
+			return {TerrainResultCode::InvalidArgument,
+				"Terrain material invalidation requires a complete immutable mapping candidate."};
+		return {};
+	}
+
 	TerrainDerivedPublicationCheck ValidateTerrainDerivedSurfaceBatch(const TerrainDerivedSurfaceBatch& batch, const TerrainAssetStore& store)
 	{
 		if (const auto source = ValidateTerrainDerivedCandidate(batch.source, store); !source.Succeeded()) return source;
@@ -67,57 +77,32 @@ namespace TerraEngine::Terrain
 
 	void TerrainDerivedSystem::Initialize()
 	{
+		cancelRequested.store(false, std::memory_order_release);
 		initialized.store(true, std::memory_order_release);
 
 		ResourceManager& resources = ResourceManager::Instance();
 		if(!resources.IsExportRuntime() || !ContentMount::Instance().IsMounted()) return;
 
-		// SceneManager has already loaded the startup scene at this protected
-		// lifecycle boundary. Capture only durable IDs and logical paths here; the
-		// worker tasks below never access live ECS or ResourceManager state.
-		std::unordered_set<TerraEngine::UUID> scheduledAssets;
+		// A dedicated protected bootstrap seam copies durable scene values before
+		// this worker-facing system dispatches package decode and terrain cooking.
 		std::vector<PendingRuntimeTerrainProxy> pending;
-		ObjectManager::instance().forEachObjectWithComponents<TerrainComponent>(
-			[&](Object, TerrainComponent& terrain)
-			{
-				if(!terrain.visible || terrain.terrainAssetId == TerraEngine::EMPTY_UUID
-					|| !scheduledAssets.emplace(terrain.terrainAssetId).second) return;
-				const std::filesystem::path logicalPath = resources.GetRegisteredAssetPath(
-					terrain.terrainAssetId, AssetType::Terrain);
-				if(logicalPath.empty())
-				{
-					TERRAENGINE_LOG(LogLevel::Error,
-						"Export terrain asset is absent from game.json: "
-						<< TerraEngine::ToHexString(terrain.terrainAssetId));
-					return;
-				}
-				// ResourceManager stores preferred paths as normalized absolute keys.
-				// ContentMount accepts only archive-relative logical paths, so remove
-				// the configured runtime asset root before crossing into the worker.
-				const std::filesystem::path mountedPath = logicalPath.is_absolute()
-					? logicalPath.lexically_relative(resources.GetAssetRoot()) : logicalPath;
-				const std::string mountedPathText = mountedPath.generic_string();
-				if(mountedPath.empty() || mountedPathText.starts_with(".."))
-				{
-					TERRAENGINE_LOG(LogLevel::Error,
-						"Export terrain path is outside the mounted content root: " << logicalPath);
-					return;
-				}
-
+		for(const TerraEngine::Runtime::MountedTerrainBootstrapRequest& request
+			: TerraEngine::Runtime::CaptureMountedTerrainBootstrapRequests())
+		{
 				auto task = ThreadPool::instance().createTask(
-					[assetId = terrain.terrainAssetId, path = mountedPathText]()
+					[assetId = request.assetId, path = request.logicalPath]()
 					{
 						return TerraEngine::Runtime::BuildMountedTerrainRuntime(
 							ContentMount::Instance(), assetId, path);
 					});
-				pending.push_back({terrain.terrainAssetId, task->getFuture(), terrain.MaterialSettings()});
+				pending.push_back({request.assetId, task->getFuture(), request.materialSettings});
 				ThreadPool::instance().enqueue(task, TerraEngine::Terrain::kTerrainAreaSampleCount);
-			});
+		}
 
 		for(PendingRuntimeTerrainProxy& item : pending)
 		{
-			// Resource registration and registry publication remain on this protected
-			// coordinator boundary; workers return detached value-only meshes.
+			// Registration and provider transactions are protected operations. Worker
+			// results stay detached until every decoded area and derivative is valid.
 			auto completed = item.preparedRuntime.get();
 			if(!completed.Succeeded())
 			{
@@ -126,9 +111,6 @@ namespace TerraEngine::Terrain
 					<< ": " << completed.renderProxy.diagnostic);
 				continue;
 			}
-			// Exported terrain uses the same typed provider transaction as editor
-			// terrain. The package's committed height/hole generation therefore owns a
-			// static Jolt body automatically, without serialized collider components.
 			TerraEngine::Physics::TerrainCollisionReplacementPacket collisionPacket;
 			collisionPacket.id = "runtime-terrain-collision-" + TerraEngine::ToHexString(item.assetId);
 			collisionPacket.sourceRootHash = completed.sourceRootHash;
@@ -143,13 +125,12 @@ namespace TerraEngine::Terrain
 					<< TerraEngine::ToHexString(item.assetId) << ": " << collisionReceipt.message);
 				continue;
 			}
-			// Each durable terrain receives a stable generated material identity. This
-			// preserves independent Terrain Tools values when a scene has many terrains.
 			const TerraEngine::UUID materialId = resources.RegisterMaterial(
 				"terrain/runtime/" + TerraEngine::ToHexString(item.assetId),
 				CreateTerrainMaterial(resources, item.materialSettings));
 			const TerraEngine::UUID meshId = resources.RegisterMesh(
-				"terrain/runtime/" + TerraEngine::ToHexString(item.assetId), std::move(completed.renderProxy.mesh));
+				"terrain/runtime/" + TerraEngine::ToHexString(item.assetId),
+				std::move(completed.renderProxy.mesh));
 			const bool published = TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance().Publish(
 				{item.assetId, meshId, materialId, 0U});
 			if(!published)
@@ -164,6 +145,165 @@ namespace TerraEngine::Terrain
 		}
 	}
 
+	bool TerrainDerivedSystem::EnqueueInvalidation(
+		TerrainDerivedInvalidation invalidation, TerrainAssetStore& store)
+	{
+		const TerrainRootCapture capture = store.CaptureRoot();
+		if(!capture.IsValid() || invalidation.assetUuid == TerraEngine::EMPTY_UUID
+			|| invalidation.kinds.Empty() || capture.root->assetUuid != invalidation.assetUuid
+			|| capture.publicationGeneration != invalidation.publicationGeneration) return false;
+		std::scoped_lock lock(queueMutex);
+		pendingInvalidations.push_back({std::move(invalidation), capture, &store});
+		return true;
+	}
+
+	void TerrainDerivedSystem::PrepareInvalidationUnion()
+	{
+		std::vector<PendingInvalidation> pending;
+		{
+			std::scoped_lock lock(queueMutex);
+			pending.swap(pendingInvalidations);
+		}
+		if(pending.empty() || cancelRequested.load(std::memory_order_acquire)) return;
+
+		// All receipts for one asset become one latest-root work item. Older roots
+		// contribute only their invalidation kinds/areas; the newest immutable root
+		// is sufficient to derive the complete current result.
+		std::vector<PendingInvalidation> unioned;
+		for(PendingInvalidation& request : pending)
+		{
+			auto existing = std::find_if(unioned.begin(), unioned.end(), [&](const PendingInvalidation& item) {
+				return item.invalidation.assetUuid == request.invalidation.assetUuid;
+			});
+			if(existing == unioned.end())
+			{
+				unioned.push_back(std::move(request));
+				continue;
+			}
+			existing->invalidation.kinds.UnionWith(request.invalidation.kinds);
+			existing->invalidation.areas.insert(existing->invalidation.areas.end(),
+				request.invalidation.areas.begin(), request.invalidation.areas.end());
+			existing->invalidation.layerIds.insert(existing->invalidation.layerIds.end(),
+				request.invalidation.layerIds.begin(), request.invalidation.layerIds.end());
+			if(request.capture.publicationGeneration > existing->capture.publicationGeneration)
+			{
+				existing->capture = std::move(request.capture);
+				existing->store = request.store;
+				existing->invalidation.publicationGeneration = existing->capture.publicationGeneration;
+			}
+		}
+
+		std::vector<PreparedCandidate> built;
+		built.reserve(unioned.size());
+		for(PendingInvalidation& request : unioned)
+		{
+			auto& areas = request.invalidation.areas;
+			std::sort(areas.begin(), areas.end());
+			areas.erase(std::unique(areas.begin(), areas.end()), areas.end());
+			auto& layerIds = request.invalidation.layerIds;
+			std::sort(layerIds.begin(), layerIds.end());
+			layerIds.erase(std::unique(layerIds.begin(), layerIds.end()), layerIds.end());
+
+			TerrainMaterialMappingCandidate candidate{};
+			candidate.source.assetUuid = request.capture.root->assetUuid;
+			candidate.source.sourceRootHash = request.capture.root->rootContentHash;
+			candidate.source.sourcePublicationGeneration = request.capture.publicationGeneration;
+			candidate.source.cancellation = &cancelRequested;
+			candidate.invalidation = request.invalidation;
+			candidate.mappingComplete = !candidate.invalidation.Contains(TerrainInvalidationKind::MaterialBindings);
+
+			if(candidate.invalidation.Contains(TerrainInvalidationKind::MaterialBindings)
+				&& request.capture.root->layerStack)
+			{
+				std::vector<TerrainAreaCoordinate> phaseAreas = areas;
+				for(const TerrainDirectoryShard& shard : request.capture.root->directoryShards)
+					for(const auto& [area, descriptor] : shard.descriptors)
+					{
+						(void)descriptor;
+						phaseAreas.push_back(area);
+					}
+				if(phaseAreas.empty())
+				{
+					const auto owner = OwnerArea({request.capture.root->authoredBounds.minX,
+						request.capture.root->authoredBounds.minZ});
+					if(owner.has_value()) phaseAreas.push_back(*owner);
+				}
+				std::sort(phaseAreas.begin(), phaseAreas.end());
+				phaseAreas.erase(std::unique(phaseAreas.begin(), phaseAreas.end()), phaseAreas.end());
+
+				candidate.mappingComplete = !phaseAreas.empty();
+				for(const TerrainAreaCoordinate area : phaseAreas)
+				{
+					for(const TerrainLayer& layer : request.capture.root->layerStack->layers)
+					{
+						if(!layer.enabled) continue;
+						TerrainAreaMaterialPhase phase{};
+						if(!PrepareTerrainAreaMaterialPhase(area, request.capture.root->sampleSpacingMetres,
+							layer.mapping, phase).Succeeded())
+						{
+							candidate.mappingComplete = false;
+							candidate.layerPhases.clear();
+							break;
+						}
+						candidate.layerPhases.push_back({layer.stableId, phase});
+					}
+					if(!candidate.mappingComplete) break;
+				}
+			}
+			candidate.source.complete = !cancelRequested.load(std::memory_order_acquire)
+				&& candidate.mappingComplete;
+			built.push_back({std::move(candidate), request.store});
+		}
+
+		std::scoped_lock lock(queueMutex);
+		preparedCandidates.insert(preparedCandidates.end(),
+			std::make_move_iterator(built.begin()), std::make_move_iterator(built.end()));
+	}
+
+	void TerrainDerivedSystem::PublishPreparedAtProtectedBoundary()
+	{
+		std::vector<PreparedCandidate> prepared;
+		{
+			std::scoped_lock lock(queueMutex);
+			prepared.swap(preparedCandidates);
+		}
+		for(PreparedCandidate& item : prepared)
+		{
+			TerrainDerivedPublicationReceipt receipt{};
+			receipt.invalidation = item.candidate.invalidation;
+			const TerrainDerivedPublicationCheck validation = item.store == nullptr
+				? TerrainDerivedPublicationCheck{TerrainResultCode::InvalidArgument, "Terrain derived candidate lost its asset-store owner."}
+				: ValidateTerrainMaterialMappingCandidate(item.candidate, *item.store);
+			receipt.code = validation.code;
+			receipt.message = validation.message;
+			receipt.committed = validation.Succeeded();
+			receipt.materialBindingsPublished = receipt.committed
+				&& item.candidate.invalidation.Contains(TerrainInvalidationKind::MaterialBindings);
+
+			std::scoped_lock lock(queueMutex);
+			if(receipt.materialBindingsPublished)
+				publishedMaterialCandidates[item.candidate.source.assetUuid] = item.candidate;
+			publicationReceipts.push_back(std::move(receipt));
+		}
+	}
+
+	std::optional<TerrainMaterialMappingCandidate> TerrainDerivedSystem::ResolvePublishedMaterialCandidate(
+		TerraEngine::UUID assetUuid) const
+	{
+		std::scoped_lock lock(queueMutex);
+		const auto found = publishedMaterialCandidates.find(assetUuid);
+		return found == publishedMaterialCandidates.end()
+			? std::nullopt : std::optional<TerrainMaterialMappingCandidate>{found->second};
+	}
+
+	std::vector<TerrainDerivedPublicationReceipt> TerrainDerivedSystem::DrainPublicationReceipts()
+	{
+		std::scoped_lock lock(queueMutex);
+		std::vector<TerrainDerivedPublicationReceipt> drained;
+		drained.swap(publicationReceipts);
+		return drained;
+	}
+
 	void TerrainDerivedSystem::Update(float)
 	{
 		// All future work is declared below; this avoids a hidden sequential path.
@@ -171,6 +311,12 @@ namespace TerraEngine::Terrain
 
 	void TerrainDerivedSystem::Shutdown()
 	{
+		cancelRequested.store(true, std::memory_order_release);
+		std::scoped_lock lock(queueMutex);
+		pendingInvalidations.clear();
+		preparedCandidates.clear();
+		publicationReceipts.clear();
+		publishedMaterialCandidates.clear();
 		TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance().Clear();
 		initialized.store(false, std::memory_order_release);
 	}
@@ -211,8 +357,13 @@ namespace TerraEngine::Terrain
 			{ kResourceTerrainAssetRoots, kResourceTerrainPublishedResidency, kResourceTerrainDerivedInvalidations },
 			{ kResourceTerrainPreparedDerived }, "TerrainDerived.Prepare");
 		prepare.stableDescriptorId = "TerrainDerivedSystem/Render/TerrainDerivedPrepare";
+		prepare.phase = "Render";
 		prepare.activationPredicateKey = "terrain-derived-lifecycle";
+		prepare.boundaryClassification = HardBoundaryClassification::WorkerSafe;
 		prepare.safeSubwork = "Regenerates value-only terrain products without mutating renderer, physics, or authored storage.";
+		// WorkerPrepare workloads are lowered by JobGraph onto the engine ThreadPool;
+		// this callback therefore sees only immutable root captures and value output.
+		prepare.work = [this](TerraEngine::Scheduling::JobGraphContext&) { PrepareInvalidationUnion(); };
 
 		FrameWorkloadDeclaration publish = MakeProtectedCommitPhase(
 			"TerrainDerivedPublish", SystemName(),
@@ -221,9 +372,14 @@ namespace TerraEngine::Terrain
 			"Terrain derived publication requires a complete, generation-matched candidate set.",
 			"TerrainDerived.Publish");
 		publish.stableDescriptorId = "TerrainDerivedSystem/Render/TerrainDerivedPublish";
+		publish.phase = "Render";
 		publish.activationPredicateKey = prepare.activationPredicateKey;
 		publish.explicitDependencies = { prepare.stableDescriptorId };
+		publish.boundaryClassification = HardBoundaryClassification::Protected;
+		publish.hardBoundary = true;
+		publish.protectedCommit = publish.protectedReason;
 		publish.sameFrameVisibilityRequired = true;
+		publish.work = [this](TerraEngine::Scheduling::JobGraphContext&) { PublishPreparedAtProtectedBoundary(); };
 
 		for(FrameWorkloadDeclaration* workload : { &prepare, &publish })
 		{

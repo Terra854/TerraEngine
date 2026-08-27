@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -16,12 +17,16 @@
 namespace TerraEngine::Terrain::Format
 {
 	inline constexpr std::string_view kTerrainRootFormatName = "TerraEngineTerrain";
+	inline constexpr std::string_view kTerrainRootMagic = "TERRAROOT1";
 	inline constexpr std::string_view kTerrainHashAlgorithmName = "xxh3-128-v1";
 	inline constexpr std::uint16_t kTerrainRootMajorVersion = 1u;
 	inline constexpr std::uint16_t kTerrainRootMinorVersion = 0u;
 	inline constexpr std::size_t kTerrainMaximumDirectoryShards = 1u << 20u;
 	inline constexpr std::size_t kTerrainMaximumDirectoryEntriesPerShard = 1u << 20u;
 	inline constexpr std::size_t kTerrainMaximumLayers = 64u;
+	inline constexpr std::size_t kTerrainMaximumEnabledLayers = 16u;
+	inline constexpr std::size_t kTerrainMaximumLayerNameBytes = 256u;
+	inline constexpr std::size_t kTerrainRootMaximumBytes = 64u * 1024u * 1024u;
 	inline constexpr std::array<char, 8u> kTerrainAreaMagic = {'T','E','A','R','E','A','0','1'};
 	inline constexpr std::uint16_t kTerrainAreaMajorVersion = 1u;
 	inline constexpr std::uint16_t kTerrainAreaMinorVersion = 0u;
@@ -32,6 +37,31 @@ namespace TerraEngine::Terrain::Format
 	inline constexpr std::size_t kTerrainAreaMaximumDecodedBytes = 2u * 1024u * 1024u;
 
 	enum class TerrainAreaCompression : std::uint16_t { None = 0u, Zstd = 1u };
+	enum class TerrainRootMappingMode : std::uint8_t { TerrainXZ, Triplanar };
+
+	// These records define the complete persisted TERRAROOT1 vocabulary. They
+	// deliberately avoid runtime-only material state so identical authored input
+	// always produces identical canonical bytes and therefore the same root hash.
+	struct TerrainRootLayerMappingV1
+	{
+		TerrainRootMappingMode mode = TerrainRootMappingMode::TerrainXZ;
+		double tileSizeMetresX = 4.0;
+		double tileSizeMetresZ = 4.0;
+		double offsetMetresX = 0.0;
+		double offsetMetresZ = 0.0;
+		double rotationRadians = 0.0;
+		double triplanarSharpness = 4.0;
+	};
+
+	struct TerrainRootLayerV1
+	{
+		std::uint16_t stableId = 0u;
+		std::string name;
+		bool enabled = false;
+		bool allowFallback = false;
+		TerraEngine::UUID materialAsset = TerraEngine::EMPTY_UUID;
+		TerrainRootLayerMappingV1 mapping{};
+	};
 
 	struct TerrainFormatVersion
 	{
@@ -169,6 +199,32 @@ namespace TerraEngine::Terrain::Format
 			}
 			return true;
 		}
+	};
+
+	struct TerrainRootAreaV1
+	{
+		TerrainDirectoryEntryContract descriptor{};
+	};
+
+	struct TerrainRootShardV1
+	{
+		TerrainAreaBounds bounds{};
+		ContentHash identity{};
+		std::vector<TerrainRootAreaV1> areas;
+	};
+
+	struct TerrainRootV1
+	{
+		TerraEngine::UUID assetUuid = TerraEngine::EMPTY_UUID;
+		Generation publicationGeneration = 0u;
+		Generation persistedRootGeneration = 0u;
+		double sampleSpacingMetres = 1.0;
+		std::int32_t defaultHeightMm = 0;
+		TerrainSampleBounds authoredBounds{};
+		std::uint16_t defaultLayerId = 1u;
+		Generation layerStackGeneration = 0u;
+		std::vector<TerrainRootLayerV1> layers;
+		std::vector<TerrainRootShardV1> shards;
 	};
 
 	// This is an in-memory description, never a packed C++ wire layout. The

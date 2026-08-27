@@ -11,14 +11,24 @@ namespace TerraEngine::Editor::Terrain
 {
 	void TerrainAuthoringSystem::Configure(TerraEngine::Terrain::TerrainMutationQueue& queue, TerraEngine::Terrain::TerrainPublication& terrainPublication)
 	{
+		// Configuration and shutdown share this lock because both replace the
+		// non-owning service pointers used by the protected publication callback.
+		// This makes reconfiguration wait for any in-flight publication to finish.
+		std::scoped_lock lock(authoringMutex);
 		mutationQueue = &queue;
 		publication = &terrainPublication;
 	}
 
 	bool TerrainAuthoringSystem::EnqueueDetachedCommit(TerraEngine::Terrain::TerrainEditTransaction transaction, std::string& outError)
 	{
-		if(!initialized.load(std::memory_order_acquire) || mutationQueue == nullptr) { outError = "Terrain authoring is unavailable until its protected scheduler boundary is initialized."; return false; }
 		std::scoped_lock lock(authoringMutex);
+		// Revalidate after joining the lifecycle lock. A producer may have observed
+		// the previous session immediately before project teardown began.
+		if(!initialized.load(std::memory_order_acquire) || mutationQueue == nullptr || publication == nullptr)
+		{
+			outError = "Terrain authoring is unavailable until its protected scheduler boundary is initialized.";
+			return false;
+		}
 		if(preparedRequests.size() >= kMaximumPreparedRequests)
 		{
 			outError = "Terrain authoring has reached its bounded detached request capacity.";
@@ -80,8 +90,13 @@ namespace TerraEngine::Editor::Terrain
 
 	void TerrainAuthoringSystem::PublishAtProtectedBoundary()
 	{
-		if(publication == nullptr || mutationQueue == nullptr) return;
 		std::scoped_lock lock(authoringMutex);
+		// Frame workload declarations capture this system before EditorSystemUpdate
+		// runs. Project close may detach the terrain services during that update, so
+		// the callback must validate the live session while holding the same lock as
+		// Shutdown instead of trusting declaration-time readiness.
+		if(!initialized.load(std::memory_order_acquire) || publication == nullptr || mutationQueue == nullptr)
+			return;
 		// The lock joins cancellation and the protected boundary: once a request
 		// is handed to TerrainPublication it is a real committed/rejected edit;
 		// before that point lifecycle cancellation removes it without publication.
@@ -122,15 +137,26 @@ namespace TerraEngine::Editor::Terrain
 		return drained;
 	}
 
-	void TerrainAuthoringSystem::Initialize() { initialized.store(true, std::memory_order_release); }
+	void TerrainAuthoringSystem::Initialize()
+	{
+		std::scoped_lock lock(authoringMutex);
+		// Configure supplies the non-owning services first. Keeping an incomplete
+		// configuration disabled ensures its frame workloads are omitted safely.
+		initialized.store(mutationQueue != nullptr && publication != nullptr, std::memory_order_release);
+	}
 	void TerrainAuthoringSystem::Update(float) { /* All authoring publication is declared below. */ }
 	void TerrainAuthoringSystem::Shutdown()
 	{
+		// Publish/producer entry points stop admitting new work before shutdown waits
+		// for the lifecycle lock. Once the lock is acquired, no callback can still be
+		// using the owner-provided queue or publication service.
 		initialized.store(false, std::memory_order_release);
 		std::scoped_lock lock(authoringMutex);
 		preparedRequests.clear();
 		receipts.clear();
 		++authoringEpoch;
+		mutationQueue = nullptr;
+		publication = nullptr;
 	}
 	std::string TerrainAuthoringSystem::SystemName() { return "TerrainAuthoringSystem"; }
 
@@ -152,6 +178,9 @@ namespace TerraEngine::Editor::Terrain
 	std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> TerrainAuthoringSystem::DeclareFrameWorkloads(float)
 	{
 		using namespace TerraEngine::Scheduling;
+		std::scoped_lock lock(authoringMutex);
+		// Read the service binding under the lifecycle lock. The returned active bit
+		// describes declaration time; the callback still revalidates at execution.
 		const bool ready = initialized.load(std::memory_order_acquire) && mutationQueue != nullptr && publication != nullptr;
 		auto prepare = MakeWorkerPreparePhase("TerrainAuthoringPrepare", SystemName(),
 			{ kResourceTerrainAssetRoots, kResourceTerrainPublishedResidency }, { kResourceTerrainPreparedTransactions }, "TerrainAuthoring.Prepare");

@@ -1,12 +1,41 @@
 // TerrainSurfaceCache.cpp -- worker-safe terrain control atlas planning.
 
 #include "Renderer/Terrain/TerrainSurfaceCache.h"
+#include "Renderer/Terrain/TerrainMaterialRuntimeRegistry.h"
 
 #include <algorithm>
 #include <atomic>
 
 namespace TerraEngine::Renderer::Terrain
 {
+	// Cached pages store controls and resolved PBR outputs, never a divergent layer
+	// record. Both cached and direct consumers therefore retain the frozen ABI.
+	static_assert(alignof(TerrainGpuLayerBinding) == 16u && sizeof(TerrainGpuLayerBinding) == 96u);
+
+	const TerrainDiagnosticSurfaceMaterial& GetTerrainDiagnosticSurfaceMaterial() noexcept
+	{
+		static constexpr TerrainDiagnosticSurfaceMaterial material{};
+		return material;
+	}
+
+	TerrainSurfaceControlResolution ResolveTerrainSurfaceControlSample(
+		const TerraEngine::Terrain::TerrainWeightSample* sample,
+		const TerraEngine::Terrain::TerrainLayerStack& stack) noexcept
+	{
+		TerrainSurfaceControlResolution result{};
+		if(sample == nullptr)
+		{
+			// A missing required control page is different from an authored zero
+			// sample, but both resolve to the same finite diagnostic contributor.
+			const TerraEngine::Terrain::TerrainWeightSample empty{};
+			result.weights = TerraEngine::Terrain::ResolveTerrainWeightSample(empty, stack);
+			result.requiredControlMissing = true;
+			return result;
+		}
+		result.weights = TerraEngine::Terrain::ResolveTerrainWeightSample(*sample, stack);
+		return result;
+	}
+
 	bool TerrainSurfacePageKey::IsComplete() const noexcept { return assetId != TerraEngine::EMPTY_UUID && sourceHash.IsValid() && authoredGeneration != 0u; }
 	bool TerrainSurfacePageHandle::IsResident() const noexcept { return key.IsComplete() && atlasTile != 0xffffffffu && byteCount != 0u && publicationGeneration != 0u; }
 

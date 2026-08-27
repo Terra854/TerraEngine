@@ -5,6 +5,12 @@ at the editor boundary. The installed validation runner is
 `Tests/Tools/Terrain/RunTerrainValidation.ps1`; it checks the installed tree
 before any operation is attempted.
 
+Automation operates only on canonical `TERRAROOT1` assets. Legacy
+`TERRAINROOT2`, creation JSON, unknown magic, and non-canonical roots return
+`UnsupportedTerrainRoot` with recreate/recook guidance; no route migrates or
+partially publishes them. Recreate from the source data or recook with the
+current compiler before retrying the original request.
+
 ## Installed validation
 
 ```powershell
@@ -52,6 +58,14 @@ large imports, exports, erosion, spline work, rebuilds, saves, and validation
 may return durable cancellable jobs. Cancellation discards private work before
 the protected publication boundary.
 
+Layer-stack mutations must retain 1–64 definitions and 1–16 enabled layers,
+with non-zero unique stable IDs and unique normalized names. Mapping is physical
+asset-local Terrain-XZ or triplanar data (tile metres, offset metres, layer
+rotation, and triplanar sharpness). Surface materials have Base Color, Normal,
+packed ORM, and Emissive semantics. A request never asks the renderer to
+truncate layers or silently accept a missing source without the layer's
+fallback policy.
+
 Receipts retain operation, correlation, idempotency, transaction, and job
 identities; outcome and structured error category; old/new root and area
 generations; affected bounds; history/dirty visibility; derived packet status;
@@ -81,6 +95,33 @@ The editor advertises only these installed terrain routes: `terrain.asset.inspec
 `terrain.export`, and `terrain.save`. Unsupported service prerequisites return
 an explicit unavailable result; capability discovery does not imply that an
 export pipeline or live physics scheduler has been injected.
+
+Use `terrain.asset.inspect` before a write to capture the current root hash and
+generation, complete enabled layer list with stable IDs, physical mapping, and
+requested/effective sampler quality. Include the returned root identity, layer
+stack generation, and every affected area observation in the typed edit
+envelope. After commit or job completion, call `terrain.diagnostics.get` and
+compare the receipt's published generations rather than polling mutable editor
+objects.
+
+Inspection and diagnostics report per-area desired, balanced, resident, and
+actual LOD; projected error/hysteresis; stitch and hole-pin state; desired and
+actual page plus own-ancestor fallback depth; payload byte/status information;
+material/control generation touches; sampler fallback and descriptor pressure;
+and stable root/layer/page/publication diagnostic codes. Missing fields or an
+unavailable backend remain explicit unavailable evidence, never inferred
+success.
+
+## Publication timing
+
+Automation handlers validate and lower JSON on the protected editor boundary,
+then workers prepare immutable candidates. Accepted root/area, derived
+material/control/geometry, and upload-complete page changes become visible only
+at their declared protected scheduler boundaries. Read-only inspection captures
+an immutable terrain snapshot. Workers never mutate live scene objects,
+components, terrain/material registries, descriptor tables, or page visibility.
+Stale, conflicting, malformed, capacity-exhausted, or cancelled candidates keep
+the last-known-good publication.
 
 ## Parity
 

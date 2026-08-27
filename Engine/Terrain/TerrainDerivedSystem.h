@@ -4,9 +4,14 @@
 
 #include "Core/SystemBase.h"
 #include "Terrain/TerrainAssetStore.h"
+#include "Terrain/TerrainEditTransaction.h"
+#include "Terrain/TerrainMaterial.h"
 
 #include <atomic>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace TerraEngine::Terrain
@@ -49,6 +54,34 @@ namespace TerraEngine::Terrain
 	TERRAENGINE_API TerrainDerivedPublicationCheck ValidateTerrainDerivedCandidate(
 		const TerrainDerivedCandidate& candidate, const TerrainAssetStore& store);
 
+	struct TerrainLayerMaterialPhase
+	{
+		std::uint16_t stableLayerId = 0u;
+		TerrainAreaMaterialPhase phase{};
+	};
+
+	// The worker candidate contains no renderer handles or mutable component
+	// references. A protected boundary can reject it solely from root identity.
+	struct TerrainMaterialMappingCandidate
+	{
+		TerrainDerivedCandidate source{};
+		TerrainDerivedInvalidation invalidation{};
+		std::vector<TerrainLayerMaterialPhase> layerPhases;
+		bool mappingComplete = false;
+	};
+
+	struct TerrainDerivedPublicationReceipt
+	{
+		TerrainDerivedInvalidation invalidation{};
+		TerrainResultCode code = TerrainResultCode::Ok;
+		bool committed = false;
+		bool materialBindingsPublished = false;
+		std::string message;
+	};
+
+	TERRAENGINE_API TerrainDerivedPublicationCheck ValidateTerrainMaterialMappingCandidate(
+		const TerrainMaterialMappingCandidate& candidate, const TerrainAssetStore& store);
+
 	// Render, collision, and surface products are derived from authored terrain.
 	// This system keeps their worker build and protected publication phases visible.
 	class TERRAENGINE_API TerrainDerivedSystem final : public SystemsBase
@@ -62,9 +95,37 @@ namespace TerraEngine::Terrain
 		std::string SystemName() override;
 		TerraEngine::Scheduling::SystemDeclaration SchedulerDeclaration() override;
 		std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> DeclareFrameWorkloads(float deltaTime) override;
+		// Receipts are enqueued only after authored publication. The immutable root
+		// capture lets the following worker phase prepare without live ECS access.
+		[[nodiscard]] bool EnqueueInvalidation(
+			TerrainDerivedInvalidation invalidation, TerrainAssetStore& store);
+		[[nodiscard]] std::optional<TerrainMaterialMappingCandidate> ResolvePublishedMaterialCandidate(
+			TerraEngine::UUID assetUuid) const;
+		[[nodiscard]] std::vector<TerrainDerivedPublicationReceipt> DrainPublicationReceipts();
 
 	private:
 		TerrainDerivedSystem() = default;
+		struct PendingInvalidation
+		{
+			TerrainDerivedInvalidation invalidation{};
+			TerrainRootCapture capture{};
+			TerrainAssetStore* store = nullptr;
+		};
+		struct PreparedCandidate
+		{
+			TerrainMaterialMappingCandidate candidate{};
+			TerrainAssetStore* store = nullptr;
+		};
+
+		void PrepareInvalidationUnion();
+		void PublishPreparedAtProtectedBoundary();
+
 		std::atomic<bool> initialized{ false };
+		std::atomic<bool> cancelRequested{ false };
+		mutable std::mutex queueMutex;
+		std::vector<PendingInvalidation> pendingInvalidations;
+		std::vector<PreparedCandidate> preparedCandidates;
+		std::vector<TerrainDerivedPublicationReceipt> publicationReceipts;
+		std::unordered_map<TerraEngine::UUID, TerrainMaterialMappingCandidate> publishedMaterialCandidates;
 	};
 }

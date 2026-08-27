@@ -14,6 +14,28 @@ namespace TerraEngine::Terrain
 	enum class TerrainEditOrigin : std::uint8_t { VisibleEditor, Undo, Redo, Automation, Import, Repair, Test };
 	enum class TerrainEditOutcome : std::uint8_t { Pending, Committed, Rejected, Cancelled, Failed, Duplicate };
 	enum class TerrainPatchKind : std::uint8_t { ReplaceHeight, ReplaceHoles, ReplaceWeightGroup, ReplaceDescriptorMetadata };
+	enum class TerrainInvalidationKind : std::uint8_t
+	{
+		GeometryAndCollision = 1u << 0u,
+		ControlTextures = 1u << 1u,
+		MaterialBindings = 1u << 2u
+	};
+
+	// A small typed set makes unions explicit while preventing unrelated integer
+	// flags from entering terrain scheduling decisions.
+	struct TerrainInvalidationSet
+	{
+		std::uint8_t bits = 0u;
+
+		void Add(TerrainInvalidationKind kind) noexcept { bits |= static_cast<std::uint8_t>(kind); }
+		void UnionWith(TerrainInvalidationSet other) noexcept { bits |= other.bits; }
+		[[nodiscard]] bool Contains(TerrainInvalidationKind kind) const noexcept
+		{
+			return (bits & static_cast<std::uint8_t>(kind)) != 0u;
+		}
+		[[nodiscard]] bool Empty() const noexcept { return bits == 0u; }
+		[[nodiscard]] constexpr bool operator==(const TerrainInvalidationSet&) const noexcept = default;
+	};
 
 	struct TerrainAreaObservation
 	{
@@ -96,9 +118,13 @@ namespace TerraEngine::Terrain
 		TerraEngine::UUID assetUuid = TerraEngine::EMPTY_UUID;
 		Generation publicationGeneration = 0u;
 		std::vector<TerrainAreaCoordinate> areas;
-		// Hole edits need collision, picking, and visibility products rebuilt from
-		// one authored root; consumers use this without decoding authoring blobs.
-		bool holesChanged = false;
+		std::vector<std::uint16_t> layerIds;
+		TerrainInvalidationSet kinds{};
+
+		[[nodiscard]] bool Contains(TerrainInvalidationKind kind) const noexcept
+		{
+			return kinds.Contains(kind);
+		}
 	};
 
 	struct TerrainTransactionReceipt
@@ -119,4 +145,6 @@ namespace TerraEngine::Terrain
 
 	TERRAENGINE_API TerrainCodecResult ValidateTerrainEditTransaction(const TerrainEditTransaction& transaction, const TerrainAssetRoot& root);
 	TERRAENGINE_API TerrainCodecResult ValidateTerrainExactSpan(const TerrainExactSpan& span);
+	[[nodiscard]] TERRAENGINE_API TerrainInvalidationSet DetermineTerrainInvalidationKinds(
+		const TerrainEditTransaction& transaction) noexcept;
 }

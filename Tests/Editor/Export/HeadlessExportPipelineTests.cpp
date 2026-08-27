@@ -363,6 +363,28 @@ namespace TerraEngine::EditorTests {
 			request.runId = "content-only-run";
 			return request;
 		}
+
+		std::string AddTerrainAsset(const std::filesystem::path& projectRoot)
+		{
+			const TerraEngine::UUID terrainId = TerraEngine::GenerateUUID();
+			const std::string terrainIdText = TerraEngine::ToHexString(terrainId);
+			const std::filesystem::path terrainPath =
+				projectRoot / "Assets" / "Terrain" / "HeadlessTerrain.teterrain";
+			// Export staging treats the .teterrain.data sibling as one private bundle.
+			// A bounded marker is sufficient here because this regression verifies
+			// manifest/path publication; TERRAROOT1 decoding is covered by terrain tests.
+			Touch(terrainPath, R"({"format":"TerraEngineTerrain","version":1})");
+			Touch(terrainPath.string() + ".data/CURRENT", "headless-root\n-\n");
+			Touch(
+				terrainPath.string() + ".meta",
+				nlohmann::json{
+					{"compiledPath", ""},
+					{"guid", terrainIdText},
+					{"importerName", "TerrainImporter"},
+					{"sourcePath", "Terrain/HeadlessTerrain.teterrain"}
+				}.dump(2));
+			return terrainIdText;
+		}
 	}
 
 	void RegisterHeadlessExportPipelineTests(TestRegistry& registry) {
@@ -489,6 +511,40 @@ namespace TerraEngine::EditorTests {
 			context.Expect(std::find(observedStages.begin(), observedStages.end(), ExportStage::AssetStaging) != observedStages.end(), "Progress should identify asset staging separately from archive packaging.");
 			context.Expect(std::find(observedStages.begin(), observedStages.end(), ExportStage::Complete) != observedStages.end(), "Progress should expose the final protected publication outcome.");
 			context.Expect(sourceTimestamp == std::filesystem::last_write_time(sourceScene), "Headless export should read project content without rewriting the live source scene.");
+		});
+
+		registry.Add("Editor.HeadlessExportPipeline.TerrainManifestPathIsAssetsRootRelative", [](TestContext& context) {
+			TempHeadlessPipelineDirectory tempDirectory;
+			ExportRequest request = MakeContentOnlyRequest(tempDirectory.Root());
+			const std::string terrainGuid = AddTerrainAsset(request.projectRoot);
+			ExportPipeline pipeline;
+
+			const ExportResult result = pipeline.Execute(request);
+			context.Expect(result.success,
+				"A terrain root and its private data directory should package without duplicating the Terrain folder: "
+				+ result.message);
+			if(!result.success) return;
+
+			const tepak::PackReader reader = tepak::PackReader::Open(result.packageResult.outputPath);
+			const nlohmann::json gameManifest = nlohmann::json::parse(
+				ReadArchiveText(reader, "game.json"));
+			const auto terrain = std::find_if(
+				gameManifest.at("assets").begin(), gameManifest.at("assets").end(),
+				[&terrainGuid](const nlohmann::json& asset) {
+					return asset.value("guid", std::string{}) == terrainGuid;
+				});
+			context.Expect(terrain != gameManifest.at("assets").end()
+				&& terrain->value("path", std::string{}) == "Terrain/HeadlessTerrain.teterrain",
+				"Terrain metadata sourcePath must remain Assets-root-relative in game.json.");
+			const auto HasEntry = [&reader](std::string_view logicalPath) {
+				return std::any_of(reader.GetEntries().begin(), reader.GetEntries().end(),
+					[logicalPath](const tepak::PackEntry& entry) {
+						return entry.normalizedPath == logicalPath;
+					});
+			};
+			context.Expect(HasEntry("terrain/headlessterrain.teterrain")
+				&& HasEntry("terrain/headlessterrain.teterrain.data/current"),
+				"TEPAK must contain both the terrain root and its private data bundle at the manifest path.");
 		});
 
 		registry.Add("Editor.HeadlessExportPipeline.GeneratedPrefabStaysOutsideResourceAssetMap", [](TestContext& context) {

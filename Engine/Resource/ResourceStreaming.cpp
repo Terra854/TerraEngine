@@ -13,6 +13,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <unordered_map>
 #include <utility>
 
 namespace TerraEngine::Resource
@@ -417,6 +418,154 @@ namespace TerraEngine::Resource
 		}
 		output.status = VirtualGeometryStaticPageReadStatus::Completed;
 		return output;
+	}
+
+	bool TerrainVisibleMaterialArea::IsComplete() const noexcept
+	{
+		if(assetId == TerraEngine::EMPTY_UUID || materialId == TerraEngine::EMPTY_UUID
+			|| weightTextureId == TerraEngine::EMPTY_UUID
+			|| layerIdTextureId == TerraEngine::EMPTY_UUID
+			|| !std::isfinite(nearestViewDistance) || nearestViewDistance < 0.0
+			|| layerCount == 0u || layerCount > layers.size())
+		{
+			return false;
+		}
+		std::unordered_set<std::uint16_t> stableLayerIds;
+		for(std::uint32_t layerIndex = 0u; layerIndex < layerCount; ++layerIndex)
+		{
+			const std::uint16_t stableLayerId = layers[layerIndex].stableLayerId;
+			if(stableLayerId == 0u || !stableLayerIds.emplace(stableLayerId).second)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	TerrainVisibleTextureTouchSnapshot PrepareTerrainVisibleTextureTouchSnapshot(
+		std::uint64_t frameId,
+		std::span<const TerrainVisibleMaterialArea> visibleAreas)
+	{
+		TerrainVisibleTextureTouchSnapshot snapshot{};
+		snapshot.frameId = frameId;
+		snapshot.sourceAreaCount = static_cast<std::uint32_t>(std::min<std::size_t>(
+			visibleAreas.size(), std::numeric_limits<std::uint32_t>::max()));
+		if(frameId == 0u || std::any_of(visibleAreas.begin(), visibleAreas.end(),
+			[](const TerrainVisibleMaterialArea& area) { return !area.IsComplete(); }))
+		{
+			// Reject the complete candidate rather than returning a partial texture
+			// list that could evict one control map or one enabled layer source.
+			return snapshot;
+		}
+
+		struct TouchKey
+		{
+			TerraEngine::UUID textureId = TerraEngine::EMPTY_UUID;
+			TerrainVisibleTextureSemantic semantic = TerrainVisibleTextureSemantic::BaseColor;
+
+			bool operator==(const TouchKey&) const noexcept = default;
+		};
+		struct TouchKeyHasher
+		{
+			std::size_t operator()(const TouchKey& key) const noexcept
+			{
+				const std::size_t uuidHash = std::hash<TerraEngine::UUID>{}(key.textureId);
+				return uuidHash ^ (static_cast<std::size_t>(key.semantic) + 0x9e3779b9u
+					+ (uuidHash << 6u) + (uuidHash >> 2u));
+			}
+		};
+		std::unordered_map<TouchKey, std::size_t, TouchKeyHasher> touchIndices;
+		touchIndices.reserve(visibleAreas.size() * 6u);
+		std::size_t sourceTouchCount = 0u;
+		const auto diagnosticsLess = [](const TerrainVisibleMaterialArea& candidate,
+			const TerrainVisibleTextureTouch& current) {
+			if(candidate.assetId != current.assetId)
+				return UuidLess(candidate.assetId, current.assetId);
+			if(candidate.area.x != current.area.x) return candidate.area.x < current.area.x;
+			return candidate.area.z < current.area.z;
+		};
+		const auto append = [&](const TerrainVisibleMaterialArea& area,
+			TerraEngine::UUID textureId,
+			TerrainVisibleTextureSemantic semantic,
+			std::int32_t priority) {
+			if(textureId == TerraEngine::EMPTY_UUID) return;
+			++sourceTouchCount;
+			const TouchKey key{textureId, semantic};
+			const auto [existing, inserted] = touchIndices.emplace(key, snapshot.touches.size());
+			if(inserted)
+			{
+				snapshot.touches.push_back({textureId, area.nearestViewDistance,
+					area.assetId, area.area, semantic, priority});
+				return;
+			}
+			TerrainVisibleTextureTouch& touch = snapshot.touches[existing->second];
+			if(area.nearestViewDistance < touch.nearestViewDistance
+				|| (area.nearestViewDistance == touch.nearestViewDistance
+					&& diagnosticsLess(area, touch)))
+			{
+				touch.nearestViewDistance = area.nearestViewDistance;
+				touch.assetId = area.assetId;
+				touch.area = area.area;
+			}
+			touch.priority = std::max(touch.priority, priority);
+		};
+
+		for(const TerrainVisibleMaterialArea& area : visibleAreas)
+		{
+			append(area, area.weightTextureId,
+				TerrainVisibleTextureSemantic::ControlWeight, kTerrainVisibleControlPriority);
+			append(area, area.layerIdTextureId,
+				TerrainVisibleTextureSemantic::ControlId, kTerrainVisibleControlPriority);
+			for(std::uint32_t layerIndex = 0u; layerIndex < area.layerCount; ++layerIndex)
+			{
+				const TerrainVisibleLayerTextureSources& layer = area.layers[layerIndex];
+				append(area, layer.baseColorTextureId,
+					TerrainVisibleTextureSemantic::BaseColor, kTerrainVisibleTexturePriority);
+				append(area, layer.normalTextureId,
+					TerrainVisibleTextureSemantic::Normal, kTerrainVisibleTexturePriority);
+				append(area, layer.ormTextureId,
+					TerrainVisibleTextureSemantic::ORM, kTerrainVisibleTexturePriority);
+				append(area, layer.emissiveTextureId,
+					TerrainVisibleTextureSemantic::Emissive, kTerrainVisibleTexturePriority);
+			}
+		}
+		std::sort(snapshot.touches.begin(), snapshot.touches.end(),
+			[](const TerrainVisibleTextureTouch& left, const TerrainVisibleTextureTouch& right) {
+				if(left.semantic != right.semantic)
+					return static_cast<std::uint8_t>(left.semantic)
+						< static_cast<std::uint8_t>(right.semantic);
+				return UuidLess(left.textureId, right.textureId);
+			});
+		snapshot.duplicateEliminationCount = static_cast<std::uint32_t>(
+			std::min<std::size_t>(sourceTouchCount - snapshot.touches.size(),
+				std::numeric_limits<std::uint32_t>::max()));
+		snapshot.sourceTouchCount = static_cast<std::uint32_t>(std::min<std::size_t>(
+			sourceTouchCount, std::numeric_limits<std::uint32_t>::max()));
+		snapshot.complete = true;
+		return snapshot;
+	}
+
+	TerrainTextureStreamingDiagnosticSnapshot BuildTerrainTextureStreamingDiagnosticSnapshot(
+		const TerrainVisibleTextureTouchSnapshot& touches,
+		TerrainDescriptorAliasDiagnosticRecord descriptors) noexcept
+	{
+		TerrainTextureStreamingDiagnosticSnapshot snapshot{};
+		snapshot.frameId = touches.frameId;
+		snapshot.sourceAreaCount = touches.sourceAreaCount;
+		snapshot.sourceTouchCount = touches.sourceTouchCount;
+		snapshot.uniqueTouchCount = static_cast<std::uint32_t>(std::min<std::size_t>(
+			touches.touches.size(), std::numeric_limits<std::uint32_t>::max()));
+		snapshot.duplicateEliminationCount = touches.duplicateEliminationCount;
+		snapshot.descriptors = descriptors;
+		snapshot.descriptorSlotsAvailable = descriptors.descriptorSlotsUsed
+			< descriptors.descriptorCapacity
+			? descriptors.descriptorCapacity - descriptors.descriptorSlotsUsed : 0u;
+		// A full table is visible as exhausted only after an allocation was
+		// rejected. Merely occupying its last valid slot is still a successful
+		// publication and must not be reported as an error.
+		snapshot.descriptorCapacityExhausted = descriptors.descriptorAllocationRejected;
+		snapshot.complete = touches.complete;
+		return snapshot;
 	}
 
 	StreamingPolicy MakeDefaultStreamingPolicy()

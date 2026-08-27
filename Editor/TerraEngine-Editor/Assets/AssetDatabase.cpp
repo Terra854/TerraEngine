@@ -46,6 +46,7 @@
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/File Formats/TerraEngineMeshFile.h"
+#include "Engine/Terrain/TerrainAssetStore.h"
 
 using json = nlohmann::json;
 
@@ -732,6 +733,7 @@ namespace {
 		{
 			if(!input || !(input >> descriptor) || !descriptor.is_object()
 				|| descriptor.value("format", std::string{}) != "TerraEngineTerrain"
+				|| descriptor.value("rootFormat", std::string{}) != "TERRAROOT1"
 				|| descriptor.value("version", 0u) != 1u
 				|| !descriptor.contains("assetId") || !descriptor["assetId"].is_string())
 				return std::nullopt;
@@ -741,7 +743,17 @@ namespace {
 			return std::nullopt;
 		}
 		const auto assetId = TerraEngine::ParseUUID(descriptor["assetId"].get<std::string>());
-		return assetId && *assetId != TerraEngine::EMPTY_UUID ? assetId : std::nullopt;
+		if(!assetId || *assetId == TerraEngine::EMPTY_UUID) return std::nullopt;
+		const std::filesystem::path dataDirectory = path.string() + ".data";
+		std::ifstream current(dataDirectory / "CURRENT", std::ios::binary);
+		std::string rootHash;
+		if(!current || !std::getline(current, rootHash) || rootHash.size() != 32U) return std::nullopt;
+		std::ifstream rootInput(dataDirectory / "roots" / (rootHash + ".root"), std::ios::binary);
+		std::stringstream rootBytes;
+		if(rootInput) rootBytes << rootInput.rdbuf();
+		const auto decoded = TerraEngine::Terrain::DecodeTerrainRootManifest(rootBytes.str());
+		return decoded.Succeeded() && decoded.root && decoded.root->assetUuid == *assetId
+			&& TerraEngine::Terrain::ToHexString(decoded.contentHash) == rootHash ? assetId : std::nullopt;
 	}
 
 	std::optional<GeneratedModelPackageChildKind> GeneratedKindForManifestKind(

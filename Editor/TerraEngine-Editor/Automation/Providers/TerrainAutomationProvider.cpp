@@ -1,5 +1,6 @@
 // TerrainAutomationProvider.cpp -- Canonical terrain automation descriptors.
 #include "TerrainAutomationProvider.h"
+#include "../TerrainAutomationSchema.h"
 #include <utility>
 
 namespace TerraEngine::Editor::Automation
@@ -114,7 +115,11 @@ namespace TerraEngine::Editor::Automation
 			"terrain.validate", "terrain.export", "terrain.save"})
 		{
 			AutomationCapabilityDescriptor descriptor; descriptor.name=std::string(name); descriptor.category="terrain"; descriptor.description="Canonical, generation-checked terrain operation.";
-			descriptor.inputSchema=TerrainInputSchema(name); descriptor.resultSchema={{"type","object"}};
+			descriptor.inputSchema=TerrainInputSchema(name);
+			// Inspection and diagnostics publish the same immutable terrain snapshot
+			// shape. Other commands retain their existing receipt object contract.
+			descriptor.resultSchema = (name == "terrain.asset.inspect" || name == "terrain.diagnostics.get")
+				? TerrainAutomationSnapshotResultSchema() : Json{{"type", "object"}};
 			const bool read=name=="terrain.asset.inspect" || name=="terrain.session.get"
 				|| name=="terrain.job.get" || name=="terrain.diagnostics.get";
 			descriptor.permission=read?AutomationPermission::Read:AutomationPermission::ProjectWrite;

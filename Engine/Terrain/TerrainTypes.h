@@ -104,10 +104,27 @@ namespace TerraEngine::Terrain
 		Failed
 	};
 
+	// Root diagnostics are stable identifiers intended for editor recovery UX,
+	// logs, and automated validation. Keep their spelling stable across releases.
+	enum class TerrainRootDiagnosticCode : std::uint8_t
+	{
+		None,
+		UnsupportedTerrainRoot,
+		TerrainLayerDefinitionLimitExceeded,
+		TerrainEnabledLayerLimitViolated,
+		TerrainLayerIdentityInvalid,
+		TerrainLayerNameInvalid,
+		TerrainLayerMappingInvalid,
+		TerrainAreaReferenceInvalid,
+		TerrainRootMalformed,
+		TerrainRootPublicationRejected
+	};
+
 	TERRAENGINE_API std::int64_t FloorDivideTerrainCoordinate(std::int64_t value, std::int64_t divisor, bool& outOverflow) noexcept;
 	TERRAENGINE_API std::int64_t FloorModuloTerrainCoordinate(std::int64_t value, std::int64_t divisor, bool& outOverflow) noexcept;
 	TERRAENGINE_API std::optional<TerrainAreaCoordinate> OwnerArea(TerrainSampleCoordinate sample) noexcept;
 	TERRAENGINE_API std::optional<TerrainSampleCoordinate> LocalSample(TerrainSampleCoordinate sample) noexcept;
 	TERRAENGINE_API std::string ToHexString(ContentHash hash);
 	TERRAENGINE_API std::string_view ToString(TerrainResultCode code) noexcept;
+	TERRAENGINE_API std::string_view ToString(TerrainRootDiagnosticCode code) noexcept;
 }

@@ -1787,3 +1787,184 @@ elapsed seconds, iteration count, route identity, fixture/benchmark hashes,
 and raw benchmark output. A duration field alone is not evidence. Missing
 executables, fixtures, shaders, ContentMount/TEPAK inputs, backend counters, or
 hardware capability are unavailable failures, never passing zeros.
+
+## Terrain rendering overhaul completion route
+
+The terrain rendering overhaul uses durable CTest names rather than source-file names. Run the
+matrix below three consecutive times before the full suite. Each invocation
+must select every named lane and return zero; an empty selection is a failure.
+
+| Contract | Registered CTest lanes |
+|---|---|
+| `TERRAROOT1` format and compatibility rejection | `Engine.Terrain.Format`, `Editor.Terrain.Compatibility` |
+| Physical mapping and editor preview/apply/cancel | `Engine.Terrain.Mapping`, `Editor.Terrain.MappingPreview` |
+| Layer limits, complete PBR, triplanar signs, and fallbacks | `Engine.Terrain.Surface`, `Editor.Terrain.Layers` |
+| Effective filters, immutable sampler aliases, and residency touches | `Engine.Terrain.Sampler` |
+| 258-sample halo, page cook, LOD, morph, stitch, and seam contracts | `Engine.Terrain.Lod` |
+| Own-ancestor fallback, upload publication, eviction, and recovery | `Engine.Terrain.Residency` |
+| Scheduler boundaries and concurrent rollback/visibility | `Engine.Terrain.MultithreadedStress` |
+| Installed ContentMount/TEPAK runtime behavior | `Engine.Terrain.ExportRuntime` |
+
+```powershell
+$buildRoot = 'out/build/RelWithDebInfo'
+$terrain054Regex = '^(Engine\.Terrain\.(Format|Mapping|Surface|Sampler|Lod|Residency|MultithreadedStress|ExportRuntime)|Editor\.Terrain\.(Compatibility|Layers|MappingPreview))$'
+1..3 | ForEach-Object {
+    Write-Host "Terrain rendering overhaul focused pass $_ of 3"
+    ctest --test-dir $buildRoot -C RelWithDebInfo -R $terrain054Regex `
+        --output-on-failure
+    if ($LASTEXITCODE -ne 0) { throw "Terrain rendering overhaul focused pass $_ failed." }
+}
+```
+
+The broad `Engine.Terrain.Foundation` and `Editor.Terrain.Foundation` lanes are
+useful extra coverage, but do not replace the named matrix: their umbrella
+filters make a missing or misregistered focused lane harder to diagnose.
+
+### Installed audit
+
+Build `install` before auditing, then invoke the audit script from the installed
+tree. The audit rejects missing or empty shaders, the retired vertex-only
+terrain route, stale page ABI headers, reparse-point/source fallbacks, and
+absolute checkout paths. ContentMount and TEPAK are checked separately because
+the artifact audit does not claim live runtime capability.
+
+```powershell
+cmake --build --preset RelWithDebInfo --target install
+$sourceRoot = (Resolve-Path '.').Path
+$installRoot = (Resolve-Path "$buildRoot/Build").Path
+$terrainEvidence = Join-Path $sourceRoot 'out/evidence/terrain-rendering-overhaul'
+$auditOutput = Join-Path $terrainEvidence 'installed-audit'
+$auditScript = Join-Path $installRoot 'Tests/Tools/Terrain/VerifyInstalledTerrainContract.ps1'
+& $auditScript -InstallRoot $installRoot -OutputDirectory $auditOutput `
+    -SourceRoot $sourceRoot
+if ($LASTEXITCODE -ne 0) { throw 'Installed terrain contract audit failed.' }
+$audit = Get-Content -Raw (Join-Path $auditOutput 'terrain-installed-contract.json') `
+    | ConvertFrom-Json
+if ($audit.status -ne 'available' -or $audit.shaderAudit.status -ne 'available' `
+    -or $audit.pageFormatAudit.status -ne 'available' `
+    -or $audit.sourceFallbackAudit.status -ne 'clear' `
+    -or $audit.contentMountAudit.status -ne 'available' `
+    -or $audit.tepakAudit.status -ne 'available') {
+    throw 'Installed terrain audit is incomplete; unavailable ContentMount or TEPAK evidence is not a pass.'
+}
+```
+
+Retain `terrain-installed-contract.json` with the completion evidence. Also
+search the editor/runtime log captured by the live route for the absolute
+`$sourceRoot`, `CMAKE_SOURCE_DIR`, and `PROJECT_SOURCE_DIR`; any match fails the
+installed audit even if the static artifact scan passed.
+
+### Exact 30-minute soak and live traversal
+
+First run the installed CPU preparation/publication soak. Do not pass
+`-DurationSecondsOverride` for acceptance: that switch creates smoke evidence
+only. The script must report `status = measured`, at least 1,800 elapsed seconds,
+a non-zero iteration count, the exact route identity, artifact hashes, and raw
+metrics.
+
+```powershell
+$terrainTools = Join-Path $installRoot 'Tests/Tools/Terrain'
+$soakOutput = Join-Path $terrainEvidence 'soak-30m'
+& (Join-Path $terrainTools 'RunTerrainSoak.ps1') `
+    -InstallRoot $installRoot `
+    -OutputDirectory $soakOutput `
+    -DurationMinutes 30 `
+    -Fixture terrain-256km `
+    -Route terrain-1000km-edit-route `
+    -TepakArchive (Join-Path $installRoot 'Content/Terrain.tpak') `
+    -ContentMountRoot (Join-Path $installRoot 'Content')
+if ($LASTEXITCODE -ne 0) { throw 'Required 30-minute terrain soak failed.' }
+$soak = Get-Content -Raw (Join-Path $soakOutput 'terrain-soak-result.json') `
+    | ConvertFrom-Json
+if ($soak.status -ne 'measured' -or $soak.elapsedSeconds -lt 1800 `
+    -or $soak.iterations -lt 1 -or $soak.route -ne 'terrain-1000km-edit-route') {
+    throw 'Terrain soak did not produce complete measured 30-minute evidence.'
+}
+```
+
+The benchmark soak does not render and explicitly records GPU and live
+ContentMount metrics as unavailable. It therefore never substitutes for the
+live Vulkan traversal. Run the following route with the installed editor on a
+real supported adapter, using an isolated terrain acceptance project:
+
+```powershell
+$terrainAcceptanceProject = (Resolve-Path $env:TERRAENGINE_TERRAIN_ACCEPTANCE_PROJECT).Path
+$editor = Join-Path $installRoot 'Editor/TerraEngine-Editor.exe'
+$liveOutput = Join-Path $terrainEvidence 'live-vulkan-30m'
+New-Item -ItemType Directory -Force -Path $liveOutput | Out-Null
+$editorStdout = Join-Path $liveOutput 'installed-editor.stdout.log'
+$editorStderr = Join-Path $liveOutput 'installed-editor.stderr.log'
+$editorProcess = Start-Process -FilePath $editor `
+    -ArgumentList @('--project', $terrainAcceptanceProject) `
+    -RedirectStandardOutput $editorStdout -RedirectStandardError $editorStderr `
+    -PassThru
+```
+
+Start the 30-minute clock only after the project is loaded and Scene View,
+Game View, Terrain, Resource Residency, and Scheduler Diagnostics are visible.
+Execute this timed route without restarting the editor:
+
+1. Minutes 0-5: traverse `terrain-multi-area-lod` in perspective and
+   orthographic views across positive, negative, and render-origin-shifted area
+   boundaries; exercise Scene, Game, shadow, capture, and picking views.
+2. Minutes 5-10: edit tile metres, metre offsets, rotation, and mapping mode;
+   inspect Base Color, signed-axis Normal, ORM, Emissive, and neutral fallback
+   fixtures; apply one edit and cancel one edit.
+3. Minutes 10-15: request nearest, bilinear, trilinear, and anisotropic policies;
+   record requested and effective policy, sampler aliases, descriptor count,
+   visible streaming touches, and any capability fallback reason.
+4. Minutes 15-20: sweep around the 1.5-pixel threshold in both projections,
+   cross area edges, exercise all 16 stitch masks, height/normal morph, and hole
+   pinning; then hold the camera stationary for at least 60 seconds.
+5. Minutes 20-25: withhold fine textures and pages through the installed
+   residency controls, verify own-ancestor coverage with zero missing areas,
+   publish the fine upload, and observe recovery only at the protected boundary.
+6. Minutes 25-30: repeat the 1,000 km route, return to the initial working set,
+   and capture the final residency/high-water values, diagnostics, profiler
+   counters, screenshots, and log before closing the editor.
+
+The retained live record must identify OS, GPU, driver, Vulkan capabilities,
+filter/anisotropy limits, input/root/page hashes, visible areas and nodes,
+demanded/resident/fallback pages, sampler/descriptor/touch counts, CPU
+preparation/publication time, GPU frame time, allocations, seam/crack results,
+and raw output. A capture is incomplete if any required metric is absent or
+zero without a workload-specific proof that zero work was expected.
+
+Unavailable hardware, adapter initialization failure, missing anisotropy, a
+headless session, interrupted duration, missing capture tooling, or an absent
+automation adapter must be recorded as `unavailable` or `incomplete`. None is a
+pass, and CPU tests, dry-runs, smoke overrides, screenshots, or scheduled-but-
+unexecuted routes may not be used to turn unavailable evidence green.
+
+### Full terrain rendering overhaul completion commands
+
+After the focused matrix, installed audit, measured soak, and live route are
+complete, finish with the authoritative single-job suite and mandatory install
+gate. Any command failure stops completion.
+
+```powershell
+cmake --fresh --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target `
+    TerraEngine `
+    TerraEngine-Editor `
+    TerraEngine-EngineTests `
+    TerraEngine-EditorTests `
+    TerraEngineTerrainBenchmark
+if ($LASTEXITCODE -ne 0) { throw 'Terrain rendering overhaul compile gate failed.' }
+
+1..3 | ForEach-Object {
+    ctest --test-dir $buildRoot -C RelWithDebInfo -R $terrain054Regex `
+        --output-on-failure
+    if ($LASTEXITCODE -ne 0) { throw "Terrain rendering overhaul focused pass $_ failed." }
+}
+
+ctest --test-dir $buildRoot -C RelWithDebInfo -j 1 --output-on-failure
+if ($LASTEXITCODE -ne 0) { throw 'Complete single-job CTest gate failed.' }
+cmake --build --preset RelWithDebInfo --target install
+if ($LASTEXITCODE -ne 0) { throw 'Mandatory terrain rendering overhaul install gate failed.' }
+```
+
+Re-run the installed audit after this final install. Completion requires the
+same installed bytes that were audited, soaked, and traversed; evidence from a
+different build, project identity, workload hash, or hardware identity is not
+comparable.

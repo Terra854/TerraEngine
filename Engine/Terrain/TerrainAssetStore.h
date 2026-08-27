@@ -51,6 +51,7 @@ namespace TerraEngine::Terrain
 		Generation publicationGeneration = 0u;
 		Generation persistedRootGeneration = 0u;
 		ContentHash rootContentHash{};
+		double sampleSpacingMetres = 1.0;
 		TerrainSampleBounds authoredBounds{};
 		std::int32_t defaultHeightMm = 0;
 		std::uint16_t defaultLayerId = 1u;
@@ -68,12 +69,26 @@ namespace TerraEngine::Terrain
 		[[nodiscard]] bool IsValid() const noexcept { return root != nullptr && publicationGeneration != 0u; }
 	};
 
-	// Decodes the immutable TERRAINROOT2 document used by both the editor's
-	// filesystem store and the export runtime's mounted-content loader. Keeping
-	// one checked decoder prevents those two paths from accepting different root
-	// schemas or interpreting channel hashes differently.
-	[[nodiscard]] TERRAENGINE_API std::optional<TerrainAssetRoot>
-		DecodeTerrainRootManifest(std::string_view text);
+	// The root identity is the hash of these exact canonical bytes. The hash is
+	// deliberately absent from the document, avoiding the old self-hash cycle.
+	struct TerrainRootCodecResult
+	{
+		TerrainResultCode code = TerrainResultCode::Ok;
+		TerrainRootDiagnosticCode diagnostic = TerrainRootDiagnosticCode::None;
+		std::optional<TerrainAssetRoot> root;
+		std::string canonicalBytes;
+		ContentHash contentHash{};
+		std::string message;
+		[[nodiscard]] bool Succeeded() const noexcept { return code == TerrainResultCode::Ok && contentHash.IsValid(); }
+		[[nodiscard]] explicit operator bool() const noexcept { return root.has_value(); }
+		[[nodiscard]] const TerrainAssetRoot* operator->() const noexcept { return root ? &*root : nullptr; }
+		[[nodiscard]] TerrainAssetRoot* operator->() noexcept { return root ? &*root : nullptr; }
+		[[nodiscard]] const TerrainAssetRoot& operator*() const { return *root; }
+		[[nodiscard]] TerrainAssetRoot& operator*() { return *root; }
+	};
+
+	[[nodiscard]] TERRAENGINE_API TerrainRootCodecResult EncodeTerrainRootManifest(const TerrainAssetRoot& root);
+	[[nodiscard]] TERRAENGINE_API TerrainRootCodecResult DecodeTerrainRootManifest(std::string_view text);
 
 	// Persistence tracks saved identity separately from the live publication
 	// generation. Saving never rewrites a root that workers may still read.
@@ -105,6 +120,7 @@ namespace TerraEngine::Terrain
 	struct TerrainPersistenceReceipt
 	{
 		TerrainResultCode code = TerrainResultCode::Ok;
+		TerrainRootDiagnosticCode diagnostic = TerrainRootDiagnosticCode::None;
 		ContentHash savedRootHash{};
 		ContentHash predecessorRootHash{};
 		bool usedPredecessor = false;

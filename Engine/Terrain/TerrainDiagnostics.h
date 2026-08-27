@@ -2,8 +2,10 @@
 
 #pragma once
 
+#include "Resource/ResourceStreaming.h"
 #include "Terrain/TerrainEditTransaction.h"
 #include "Terrain/TerrainLayerStack.h"
+#include "Terrain/TerrainMaterial.h"
 
 #include <vector>
 #include <optional>
@@ -27,6 +29,40 @@ namespace TerraEngine::Terrain
 	struct TerrainResourcePressureRecord { std::string resource; std::uint64_t usedBytes = 0u; std::uint64_t budgetBytes = 0u; bool evictionRequired = false; };
 	struct TerrainSeamRecord { TerrainAreaCoordinate coordinate{}; TerrainAreaCoordinate neighbour{}; bool holeBoundary = false; std::string message; };
 
+	enum class TerrainPageByteState : std::uint8_t
+	{
+		Missing,
+		Requested,
+		Reading,
+		Decoded,
+		Uploading,
+		Resident,
+		RetirePending,
+		Rejected
+	};
+
+	struct TerrainAreaLodDiagnosticRecord
+	{
+		TerrainAreaCoordinate coordinate{};
+		std::uint16_t desiredLod = 0u;
+		std::uint16_t balancedLod = 0u;
+		std::uint16_t residentLod = 0u;
+		float projectedErrorPixels = 0.0F;
+		float targetErrorPixels = 1.5F;
+		bool hysteresisActive = false;
+		std::uint8_t stitchMask = 0u;
+		bool holePinned = false;
+		std::uint32_t desiredPageId = 0xffffffffu;
+		std::uint32_t actualPageId = 0xffffffffu;
+		std::uint16_t fallbackDepth = 0u;
+		std::uint64_t residentBytes = 0u;
+		TerrainPageByteState byteState = TerrainPageByteState::Missing;
+		bool missingOuterHalo = false;
+		bool rolledBack = false;
+		std::string stableCode;
+		std::string message;
+	};
+
 	struct TerrainJobRecord
 	{
 		TerraEngine::UUID jobId = TerraEngine::EMPTY_UUID;
@@ -46,7 +82,18 @@ namespace TerraEngine::Terrain
 	enum class TerrainDiagnosticSeverity : std::uint8_t { Information, Warning, Error };
 	enum class TerrainDiagnosticImpact : std::uint8_t { None, DelayedDerivedData, LastKnownGoodActive, MutationRejected, Unavailable };
 	enum class TerrainDiagnosticAction : std::uint8_t { None, Retry, Rebuild, ReloadSource, ResolveConflict, IncreaseBudget, LocateArea };
-	enum class TerrainDiagnosticCategory : std::uint8_t { Job, Conflict, Collision, Derived, Residency, Source, Seam };
+	enum class TerrainDiagnosticCategory : std::uint8_t
+	{
+		Job,
+		Conflict,
+		Collision,
+		Derived,
+		Residency,
+		Source,
+		Seam,
+		LayerValidation,
+		Sampler
+	};
 	struct TerrainDiagnosticItem
 	{
 		TerrainDiagnosticCategory category = TerrainDiagnosticCategory::Job;
@@ -59,6 +106,43 @@ namespace TerraEngine::Terrain
 		std::string message;
 	};
 	struct TerrainStagePercentile { std::string stage; std::uint64_t p50Nanoseconds = 0u; std::uint64_t p95Nanoseconds = 0u; std::size_t sampleCount = 0u; };
+
+	// A validation attempt remains visible even when publication is rejected and
+	// the last-known-good terrain stays live. Counts describe the detached input;
+	// the stable diagnostic code tells UI and automation which repair to offer.
+	struct TerrainLayerValidationDiagnosticRecord
+	{
+		TerrainResultCode resultCode = TerrainResultCode::Ok;
+		TerrainRootDiagnosticCode diagnosticCode = TerrainRootDiagnosticCode::None;
+		std::uint32_t definitionCount = 0u;
+		std::uint32_t enabledCount = 0u;
+		bool accepted = true;
+		bool legacyRootRejected = false;
+		std::string message;
+	};
+
+	// These stable reasons are renderer-neutral diagnostic values. The Vulkan
+	// sampler policy maps its capability result into this record before the
+	// protected publication becomes visible to editor or automation consumers.
+	enum class TerrainSamplerFallbackReason : std::uint8_t
+	{
+		None,
+		RequestedLevelClamped,
+		AnisotropyUnsupported,
+		InvalidDeviceLimit,
+		DescriptorCapacityExceeded
+	};
+
+	struct TerrainSamplerQualityDiagnosticRecord
+	{
+		std::uint16_t stableLayerId = 0u;
+		SamplerFilter requestedQuality = SamplerFilter::Trilinear;
+		SamplerFilter effectiveQuality = SamplerFilter::Trilinear;
+		float requestedAnisotropy = 1.0F;
+		float effectiveAnisotropy = 1.0F;
+		TerrainSamplerFallbackReason fallbackReason = TerrainSamplerFallbackReason::None;
+		std::string message;
+	};
 
 	// Source loss changes presentation only: paint remains keyed by stable IDs.
 	// Editors expose these records so a fallback material is never mistaken for
@@ -105,10 +189,15 @@ namespace TerraEngine::Terrain
 		std::vector<TerrainResidencyRecord> residency;
 		std::vector<TerrainResourcePressureRecord> resourcePressure;
 		std::vector<TerrainSeamRecord> seams;
+		std::vector<TerrainAreaLodDiagnosticRecord> areaLod;
 		std::vector<TerrainJobRecord> jobs;
 		std::vector<TerrainConflictRecord> conflicts;
+		std::vector<TerrainLayerValidationDiagnosticRecord> layerValidations;
+		std::vector<TerrainSamplerQualityDiagnosticRecord> samplerQuality;
 		std::vector<TerrainLayerFallbackRecord> layerFallbacks;
 		std::vector<TerrainCollisionRecord> collisions;
+		std::optional<TerraEngine::Resource::TerrainTextureStreamingDiagnosticSnapshot>
+			textureStreaming;
 		std::vector<TerrainDiagnosticItem> items;
 		std::vector<TerrainStagePercentile> stagePercentiles;
 	};
@@ -125,5 +214,20 @@ namespace TerraEngine::Terrain
 	TERRAENGINE_API TerrainCollisionRecord MakeTerrainCollisionRecord(
 		const TerraEngine::Physics::Terrain::TerrainCollisionSnapshot& snapshot,
 		std::uint64_t ageMilliseconds = 0u, std::uint64_t buildLatencyMilliseconds = 0u);
+	// Converts a resolved control sample into an actionable source diagnostic.
+	// The weights themselves remain untouched and safe for rendering.
+	TERRAENGINE_API void AppendTerrainLayerReferenceDiagnostics(
+		TerrainDiagnosticSnapshot& snapshot,
+		const TerrainResolvedWeightSample& resolved,
+		bool requiredControlMissing = false);
+	[[nodiscard]] TERRAENGINE_API TerrainLayerValidationDiagnosticRecord
+		MakeTerrainLayerValidationDiagnosticRecord(
+			TerrainResultCode resultCode,
+			TerrainRootDiagnosticCode diagnosticCode,
+			std::uint32_t definitionCount,
+			std::uint32_t enabledCount,
+			std::string message);
+	[[nodiscard]] TERRAENGINE_API std::string_view ToString(
+		TerrainSamplerFallbackReason reason) noexcept;
 	TERRAENGINE_API TerrainDiagnosticSnapshot BuildTerrainDiagnosticSnapshot(TerrainDiagnosticBuildInput input);
 }

@@ -3064,7 +3064,20 @@ nlohmann::json MainEditorSubsystem::RunTerrainLiveValidationFixture()
 		return {{"schemaVersion", 1}, {"succeeded", false}, {"failure", "Terrain Tools is unavailable in the live editor workspace."}};
 	const std::string suffix = TerraEngine::ToHexString(TerraEngine::GenerateUUID());
 	const auto destination = ctx->projectManager->GetProjectRoot() / "Assets" / "TerrainLiveValidation" / ("Live-" + suffix + ".teterrain");
-	return terrainTools->RunLiveValidationFixture(destination);
+	nlohmann::json report = terrainTools->RunLiveValidationFixture(destination);
+	if(report.value("succeeded", false))
+	{
+		// The explicit installed-editor fixture also exercises the real project-close
+		// boundary after terrain edits have entered history. This catches lifetime
+		// regressions where a window-owned terrain store is destroyed before the
+		// history commands that release retained immutable blobs.
+		CloseCurrentProject();
+		const bool projectClosed = !ctx->projectManager->HasActiveProject();
+		report["projectClosed"] = projectClosed;
+		report["succeeded"] = projectClosed;
+		if(!projectClosed) report["failure"] = "The live terrain fixture completed, but project close did not release the active project.";
+	}
+	return report;
 }
 
 std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> MainEditorSubsystem::DeclareTerrainAuthoringWorkloads(float deltaTime)
@@ -3895,6 +3908,11 @@ void MainEditorSubsystem::DrawScriptCompilationModal() {
 
 // MainEditorSubsystem::CloseCurrentProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::CloseCurrentProject() {
+	// History commands are project-scoped and may retain references to stores and
+	// queues owned by editor windows. Destroy every command while those owners are
+	// still alive so command destructors can safely release retained resources.
+	UndoRedoSystem::Instance().Clear();
+
 	if(auto terrainTools = GetWindow<TerrainWindow>())
 	{
 		terrainTools->CancelDetachedPreview("Terrain preview cancelled while closing the project.");
@@ -3943,9 +3961,6 @@ void MainEditorSubsystem::CloseCurrentProject() {
 	// Clear Objects
 	ObjectManager::instance().clear();
 
-	// Clear Undo History
-	UndoRedoSystem::Instance().Clear();
-	
 	// Clear Resources
 	ResourceManager::Instance().ClearCaches();
 	ResourceManager::Instance().LoadDefaultResources();

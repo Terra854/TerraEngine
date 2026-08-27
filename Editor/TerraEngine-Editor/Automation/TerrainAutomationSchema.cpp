@@ -215,4 +215,186 @@ namespace TerraEngine::Editor::Automation
 		const auto hash = TerraEngine::Terrain::HashTerrainBytes({reinterpret_cast<const std::uint8_t*>(source.data()), source.size()});
 		return TerraEngine::Terrain::ToHexString(hash);
 	}
+
+	std::string_view TerrainAutomationMappingModeCode(
+		TerraEngine::Terrain::TerrainLayerMappingMode mode) noexcept
+	{
+		switch(mode)
+		{
+		case TerraEngine::Terrain::TerrainLayerMappingMode::TerrainXZ: return "TerrainXZ";
+		case TerraEngine::Terrain::TerrainLayerMappingMode::Triplanar: return "Triplanar";
+		}
+		return "Unknown";
+	}
+
+	std::string_view TerrainAutomationSamplerQualityCode(SamplerFilter quality) noexcept
+	{
+		switch(quality)
+		{
+		case SamplerFilter::Nearest: return "Nearest";
+		case SamplerFilter::Bilinear: return "Bilinear";
+		case SamplerFilter::Trilinear: return "Trilinear";
+		case SamplerFilter::Anisotropic: return "Anisotropic";
+		}
+		return "Unknown";
+	}
+
+	std::string_view TerrainAutomationPageStateCode(
+		TerraEngine::Resource::VirtualGeometryPagePublicationState state) noexcept
+	{
+		using State = TerraEngine::Resource::VirtualGeometryPagePublicationState;
+		switch(state)
+		{
+		case State::Missing: return "Missing";
+		case State::Candidate: return "Candidate";
+		case State::PendingIO: return "PendingIO";
+		case State::PendingDecode: return "PendingDecode";
+		case State::PendingUpload: return "PendingUpload";
+		case State::Resident: return "Resident";
+		case State::Failed: return "Failed";
+		case State::RetirePending: return "RetirePending";
+		case State::Retired: return "Retired";
+		}
+		return "Unknown";
+	}
+
+	nlohmann::json SerializeTerrainAutomationSnapshot(const TerrainAutomationSnapshot& snapshot)
+	{
+		nlohmann::json enabledLayers = nlohmann::json::array();
+		for(const TerrainAutomationEnabledLayerSnapshot& layer : snapshot.enabledLayers)
+		{
+			const auto& mapping = layer.mapping;
+			enabledLayers.push_back({
+				{"runtimeSlot", layer.runtimeSlot},
+				{"stableLayerId", layer.stableLayerId},
+				{"name", layer.name},
+				{"materialAssetUuid", TerraEngine::ToHexString(layer.materialAssetUuid)},
+				{"mapping", {
+					{"mode", TerrainAutomationMappingModeCode(mapping.mode)},
+					{"tileSizeXMetres", mapping.tileSizeXMetres},
+					{"tileSizeZMetres", mapping.tileSizeZMetres},
+					{"offsetXMetres", mapping.offsetXMetres},
+					{"offsetZMetres", mapping.offsetZMetres},
+					{"rotationRadians", mapping.rotationRadians},
+					{"triplanarSharpness", mapping.triplanarSharpness}}},
+				{"requestedSamplerQuality", TerrainAutomationSamplerQualityCode(layer.requestedSamplerQuality)},
+				{"effectiveSamplerQuality", TerrainAutomationSamplerQualityCode(layer.effectiveSamplerQuality)},
+				{"requestedAnisotropy", layer.requestedAnisotropy},
+				{"effectiveAnisotropy", layer.effectiveAnisotropy},
+				{"samplerFallbackReason", TerraEngine::Terrain::ToString(layer.samplerFallbackReason)},
+				{"diagnosticCodes", layer.diagnosticCodes}
+			});
+		}
+
+		nlohmann::json areas = nlohmann::json::array();
+		for(const TerrainAutomationAreaSnapshot& area : snapshot.areas)
+		{
+			areas.push_back({
+				{"coordinate", {{"x", std::to_string(area.coordinate.x)}, {"z", std::to_string(area.coordinate.z)}}},
+				{"stableAreaIdentity", std::to_string(area.stableAreaIdentity)},
+				{"desiredLod", area.desiredLod},
+				{"actualLod", area.actualLod},
+				{"balancedLod", area.balancedLod},
+				{"desiredPageId", area.desiredPageId},
+				{"actualPageId", area.actualPageId},
+				{"pageState", TerrainAutomationPageStateCode(area.pageState)},
+				{"fallbackDepth", area.fallbackDepth},
+				{"fallbackActive", area.fallbackDepth != 0u || area.desiredPageId != area.actualPageId},
+				{"desiredPageResident", area.desiredPageResident},
+				{"pinnedCoarseCoverage", area.pinnedCoarseCoverage},
+				{"completeCoverage", area.completeCoverage},
+				{"balanceRepaired", area.balanceRepaired},
+				{"diagnosticCodes", area.diagnosticCodes}
+			});
+		}
+
+		return {
+			{"schemaVersion", snapshot.schemaVersion},
+			{"assetUuid", TerraEngine::ToHexString(snapshot.assetUuid)},
+			{"rootHash", TerraEngine::Terrain::ToHexString(snapshot.rootHash)},
+			{"rootGeneration", std::to_string(snapshot.rootGeneration)},
+			{"sampleSpacingMetres", snapshot.sampleSpacingMetres},
+			{"enabledLayers", std::move(enabledLayers)},
+			{"areas", std::move(areas)},
+			{"diagnosticCodes", snapshot.diagnosticCodes},
+			{"visibilityBoundary", "immutable_terrain_snapshot"}
+		};
+	}
+
+	nlohmann::json TerrainAutomationSnapshotResultSchema()
+	{
+		using Json = nlohmann::json;
+		const Json decimalString = {{"type", "string"}, {"pattern", "^-?[0-9]+$"}};
+		const Json unsignedString = {{"type", "string"}, {"pattern", "^[0-9]+$"}};
+		const Json diagnosticCodes = {{"type", "array"}, {"items", {{"type", "string"}, {"minLength", 1}}}};
+		const Json mapping = {
+			{"type", "object"},
+			{"properties", {
+				{"mode", {{"type", "string"}, {"enum", Json::array({"TerrainXZ", "Triplanar"})}}},
+				{"tileSizeXMetres", {{"type", "number"}, {"exclusiveMinimum", 0.0}}},
+				{"tileSizeZMetres", {{"type", "number"}, {"exclusiveMinimum", 0.0}}},
+				{"offsetXMetres", {{"type", "number"}}}, {"offsetZMetres", {{"type", "number"}}},
+				{"rotationRadians", {{"type", "number"}}},
+				{"triplanarSharpness", {{"type", "number"}, {"exclusiveMinimum", 0.0}}}
+			}},
+			{"required", Json::array({"mode", "tileSizeXMetres", "tileSizeZMetres", "offsetXMetres", "offsetZMetres", "rotationRadians", "triplanarSharpness"})},
+			{"additionalProperties", false}
+		};
+		const Json samplerQuality = {{"type", "string"}, {"enum", Json::array({"Nearest", "Bilinear", "Trilinear", "Anisotropic"})}};
+		const Json layer = {
+			{"type", "object"},
+			{"properties", {
+				{"runtimeSlot", {{"type", "integer"}, {"minimum", 0}, {"maximum", 15}}},
+				{"stableLayerId", {{"type", "integer"}, {"minimum", 1}, {"maximum", 65534}}},
+				{"name", {{"type", "string"}, {"minLength", 1}}},
+				{"materialAssetUuid", {{"type", "string"}, {"pattern", "^[0-9a-f]{32}$"}}},
+				{"mapping", mapping}, {"requestedSamplerQuality", samplerQuality},
+				{"effectiveSamplerQuality", samplerQuality},
+				{"requestedAnisotropy", {{"type", "number"}, {"minimum", 1.0}}},
+				{"effectiveAnisotropy", {{"type", "number"}, {"minimum", 1.0}}},
+				{"samplerFallbackReason", {{"type", "string"}, {"enum", Json::array({"None", "RequestedLevelClamped", "AnisotropyUnsupported", "InvalidDeviceLimit", "DescriptorCapacityExceeded"})}}},
+				{"diagnosticCodes", diagnosticCodes}
+			}},
+			{"required", Json::array({"runtimeSlot", "stableLayerId", "name", "materialAssetUuid", "mapping", "requestedSamplerQuality", "effectiveSamplerQuality", "requestedAnisotropy", "effectiveAnisotropy", "samplerFallbackReason", "diagnosticCodes"})},
+			{"additionalProperties", false}
+		};
+		const Json area = {
+			{"type", "object"},
+			{"properties", {
+				{"coordinate", {{"type", "object"}, {"properties", {{"x", decimalString}, {"z", decimalString}}}, {"required", Json::array({"x", "z"})}, {"additionalProperties", false}}},
+				{"stableAreaIdentity", unsignedString},
+				{"desiredLod", {{"type", "integer"}, {"minimum", 0}}},
+				{"actualLod", {{"type", "integer"}, {"minimum", 0}}},
+				{"balancedLod", {{"type", "integer"}, {"minimum", 0}}},
+				{"desiredPageId", {{"type", "integer"}, {"minimum", 0}}},
+				{"actualPageId", {{"type", "integer"}, {"minimum", 0}}},
+				{"pageState", {{"type", "string"}, {"enum", Json::array({"Missing", "Candidate", "PendingIO", "PendingDecode", "PendingUpload", "Resident", "Failed", "RetirePending", "Retired"})}}},
+				{"fallbackDepth", {{"type", "integer"}, {"minimum", 0}}},
+				{"fallbackActive", {{"type", "boolean"}}},
+				{"desiredPageResident", {{"type", "boolean"}}},
+				{"pinnedCoarseCoverage", {{"type", "boolean"}}},
+				{"completeCoverage", {{"type", "boolean"}}},
+				{"balanceRepaired", {{"type", "boolean"}}},
+				{"diagnosticCodes", diagnosticCodes}
+			}},
+			{"required", Json::array({"coordinate", "stableAreaIdentity", "desiredLod", "actualLod", "balancedLod", "desiredPageId", "actualPageId", "pageState", "fallbackDepth", "fallbackActive", "desiredPageResident", "pinnedCoarseCoverage", "completeCoverage", "balanceRepaired", "diagnosticCodes"})},
+			{"additionalProperties", false}
+		};
+		return {
+			{"type", "object"},
+			{"properties", {
+				{"schemaVersion", {{"type", "integer"}, {"const", 1}}},
+				{"assetUuid", {{"type", "string"}, {"pattern", "^[0-9a-f]{32}$"}}},
+				{"rootHash", {{"type", "string"}, {"pattern", "^[0-9a-f]{32}$"}}},
+				{"rootGeneration", unsignedString},
+				{"sampleSpacingMetres", {{"type", "number"}, {"exclusiveMinimum", 0.0}}},
+				{"enabledLayers", {{"type", "array"}, {"minItems", 1}, {"maxItems", 16}, {"items", layer}}},
+				{"areas", {{"type", "array"}, {"items", area}}},
+				{"diagnosticCodes", diagnosticCodes},
+				{"visibilityBoundary", {{"type", "string"}, {"const", "immutable_terrain_snapshot"}}}
+			}},
+			{"required", Json::array({"schemaVersion", "assetUuid", "rootHash", "rootGeneration", "sampleSpacingMetres", "enabledLayers", "areas", "diagnosticCodes", "visibilityBoundary"})},
+			{"additionalProperties", false}
+		};
+	}
 }

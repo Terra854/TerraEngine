@@ -12,6 +12,161 @@
 
 namespace TerraEngine::Terrain
 {
+	namespace
+	{
+		glm::dvec2 RotateInverse(glm::dvec2 value, double radians) noexcept
+		{
+			const double cosine = std::cos(radians);
+			const double sine = std::sin(radians);
+			return {cosine * value.x + sine * value.y, -sine * value.x + cosine * value.y};
+		}
+
+	double PositiveModulo(double value, double modulus) noexcept
+		{
+			const double reduced = std::fmod(value, modulus);
+			return reduced < 0.0 ? reduced + modulus : reduced;
+		}
+	}
+
+	TerrainSurfaceFactorSample ApplyTerrainLayerFactors(
+		TerrainSurfaceFactorSample sample, const TerrainLayerSurfaceSource& layer) noexcept
+	{
+		// Factors are consumed here exactly once. The generated proxy remains
+		// neutral, so neither the direct nor page-backed shader route can apply a
+		// second material-wide tint after contributor blending.
+		for(std::size_t channel = 0u; channel < sample.baseColor.size(); ++channel)
+			sample.baseColor[channel] = std::isfinite(sample.baseColor[channel])
+				&& std::isfinite(layer.baseColorFactor[channel])
+				? sample.baseColor[channel] * layer.baseColorFactor[channel]
+				: kTerrainNeutralBaseColor[channel];
+		for(std::size_t channel = 0u; channel < sample.emissive.size(); ++channel)
+			sample.emissive[channel] = std::isfinite(sample.emissive[channel])
+				&& std::isfinite(layer.emissiveFactor[channel])
+				? sample.emissive[channel] * layer.emissiveFactor[channel] : 0.0F;
+
+		const float normalScale = std::isfinite(layer.normalScale)
+			? std::max(layer.normalScale, 0.0F) : 1.0F;
+		sample.normal[0] *= normalScale;
+		sample.normal[1] *= normalScale;
+		const float normalLength = std::sqrt(
+			sample.normal[0] * sample.normal[0]
+			+ sample.normal[1] * sample.normal[1]
+			+ sample.normal[2] * sample.normal[2]);
+		if(std::isfinite(normalLength) && normalLength > 1.0e-8F)
+			for(float& channel : sample.normal) channel /= normalLength;
+		else sample.normal = {0.0F, 0.0F, 1.0F};
+
+		const float occlusionStrength = std::isfinite(layer.occlusionStrength)
+			? std::clamp(layer.occlusionStrength, 0.0F, 1.0F) : 1.0F;
+		sample.ambientOcclusion = std::clamp(
+			1.0F + (sample.ambientOcclusion - 1.0F) * occlusionStrength, 0.0F, 1.0F);
+		sample.roughness = std::clamp(sample.roughness
+			* (std::isfinite(layer.roughnessFactor) ? layer.roughnessFactor : 1.0F), 0.0F, 1.0F);
+		sample.metallic = std::clamp(sample.metallic
+			* (std::isfinite(layer.metallicFactor) ? layer.metallicFactor : 1.0F), 0.0F, 1.0F);
+		return sample;
+	}
+
+	TerrainLayerSurfaceSource ResolveTerrainLayerSurfaceSource(
+		const Material& material, TerraEngine::UUID generatedOrmTextureId) noexcept
+	{
+		TerrainLayerSurfaceSource source{};
+		source.baseColorFactor = {
+			material.header.baseColorFactor[0], material.header.baseColorFactor[1],
+			material.header.baseColorFactor[2], material.header.baseColorFactor[3]};
+		source.emissiveFactor = {
+			material.header.emissiveFactor[0], material.header.emissiveFactor[1],
+			material.header.emissiveFactor[2]};
+		source.normalScale = material.header.normalScale;
+		source.occlusionStrength = material.header.occlusionStrength;
+		source.roughnessFactor = material.header.roughnessFactor;
+		source.metallicFactor = material.header.metallicFactor;
+		for(const TextureBinding& texture : material.textures)
+		{
+			TerrainSurfaceSamplerRequest sampler{};
+			sampler.filter = texture.samplerFilter;
+			sampler.addressU = texture.addressU;
+			sampler.addressV = texture.addressV;
+			sampler.addressW = texture.addressW;
+			switch(texture.semantic)
+			{
+			case TextureSemantic::Base:
+				source.baseColorTextureId = texture.textureUuid;
+				source.samplers[0] = sampler;
+				break;
+			case TextureSemantic::Normal:
+				source.normalTextureId = texture.textureUuid;
+				source.samplers[1] = sampler;
+				break;
+			case TextureSemantic::MetallicRoughness:
+				if(generatedOrmTextureId == TerraEngine::EMPTY_UUID)
+					source.ormTextureId = texture.textureUuid;
+				source.samplers[2] = sampler;
+				break;
+			case TextureSemantic::Occlusion:
+				// A generated packed artifact owns this semantic when supplied. Without
+				// one, retain a usable single-source identity for compatibility.
+				if(source.ormTextureId == TerraEngine::EMPTY_UUID)
+					source.ormTextureId = texture.textureUuid;
+				source.samplers[2] = sampler;
+				break;
+			case TextureSemantic::Emissive:
+				source.emissiveTextureId = texture.textureUuid;
+				source.samplers[3] = sampler;
+				break;
+			default:
+				break;
+			}
+		}
+		if(generatedOrmTextureId != TerraEngine::EMPTY_UUID)
+			source.ormTextureId = generatedOrmTextureId;
+		return source;
+	}
+
+	TerrainCodecResult PrepareTerrainAreaMaterialPhase(
+		TerrainAreaCoordinate area, double sampleSpacingMetres,
+		const TerrainLayerMapping& mapping, TerrainAreaMaterialPhase& outPhase) noexcept
+	{
+		outPhase = {};
+		TerrainLayerMapping canonical{};
+		if(const TerrainCodecResult validation = CanonicalizeTerrainLayerMapping(mapping, canonical);
+			!validation.Succeeded()) return validation;
+		if(!std::isfinite(sampleSpacingMetres) || sampleSpacingMetres <= 0.0)
+			return {TerrainResultCode::InvalidArgument, "Terrain material phase requires finite positive sample spacing."};
+
+		outPhase.area = area;
+		outPhase.sampleSpacingMetres = sampleSpacingMetres;
+		outPhase.areaOriginMetres = {
+			static_cast<double>(area.x) * static_cast<double>(kTerrainAreaExtentSamples) * sampleSpacingMetres,
+			static_cast<double>(area.z) * static_cast<double>(kTerrainAreaExtentSamples) * sampleSpacingMetres};
+		const glm::dvec2 rotatedOrigin = RotateInverse(outPhase.areaOriginMetres, canonical.rotationRadians);
+		outPhase.phaseMetres = {
+			PositiveModulo(rotatedOrigin.x + canonical.offsetXMetres, canonical.tileSizeXMetres),
+			PositiveModulo(rotatedOrigin.y + canonical.offsetZMetres, canonical.tileSizeZMetres)};
+		return {};
+	}
+
+	glm::dvec2 EvaluateTerrainSurfaceUv(
+		const TerrainAreaMaterialPhase& phase, const TerrainLayerMapping& mapping,
+		glm::dvec2 localSample) noexcept
+	{
+		TerrainLayerMapping canonical{};
+		if(!CanonicalizeTerrainLayerMapping(mapping, canonical).Succeeded()
+			|| !std::isfinite(localSample.x) || !std::isfinite(localSample.y)) return {};
+		// Reconstruct in canonical terrain-local metres. Both sides of an area edge
+		// therefore evaluate the identical double before camera-relative conversion.
+		const glm::dvec2 canonicalMetres = phase.areaOriginMetres + localSample * phase.sampleSpacingMetres;
+		const glm::dvec2 rotated = RotateInverse(canonicalMetres, canonical.rotationRadians);
+		return {
+			(rotated.x + canonical.offsetXMetres) / canonical.tileSizeXMetres,
+			(rotated.y + canonical.offsetZMetres) / canonical.tileSizeZMetres};
+	}
+
+	glm::dvec2 ComputeTerrainControlUv(glm::dvec2 localSample) noexcept
+	{
+		return localSample / static_cast<double>(kTerrainAreaExtentSamples);
+	}
+
 	TerrainMaterialSettings SanitizeTerrainMaterialSettings(
 		TerrainMaterialSettings settings) noexcept
 	{
@@ -42,12 +197,18 @@ namespace TerraEngine::Terrain
 		material->header.alphaMode = static_cast<std::uint32_t>(AlphaMode::Opaque);
 		material->header.flags = DoubleSided;
 		material->header.shaderCollectionId = resources.GetDefaultShaderCollectionID();
-		material->header.baseColorFactor[0] = settings.baseColor.r;
-		material->header.baseColorFactor[1] = settings.baseColor.g;
-		material->header.baseColorFactor[2] = settings.baseColor.b;
+		// Terrain layers own every authored factor. The proxy is routing state only,
+		// and neutral values guarantee factors are never applied once in preparation
+		// and again by the ordinary material path.
+		material->header.baseColorFactor[0] = 1.0F;
+		material->header.baseColorFactor[1] = 1.0F;
+		material->header.baseColorFactor[2] = 1.0F;
 		material->header.baseColorFactor[3] = 1.0F;
-		material->header.metallicFactor = settings.metallic;
-		material->header.roughnessFactor = settings.roughness;
+		material->header.emissiveFactor[0] = 0.0F;
+		material->header.emissiveFactor[1] = 0.0F;
+		material->header.emissiveFactor[2] = 0.0F;
+		material->header.metallicFactor = 1.0F;
+		material->header.roughnessFactor = 1.0F;
 		material->header.normalScale = 1.0F;
 		material->header.occlusionStrength = 1.0F;
 		material->shaderCollectionId = material->header.shaderCollectionId;
@@ -65,12 +226,19 @@ namespace TerraEngine::Terrain
 			auto* copiedTextures = reinterpret_cast<TextureBinding*>(material->storage.data());
 			if(mapping != nullptr)
 			{
-				for(std::size_t index = 0u; index < surfaceSource->textures.size(); ++index)
+				TerrainLayerMapping canonical{};
+				if(CanonicalizeTerrainLayerMapping(*mapping, canonical).Succeeded())
 				{
-					copiedTextures[index].uvScale[0] *= static_cast<float>(mapping->scaleX);
-					copiedTextures[index].uvScale[1] *= static_cast<float>(mapping->scaleZ);
-					copiedTextures[index].uvOffset[0] += static_cast<float>(mapping->offsetX);
-					copiedTextures[index].uvOffset[1] += static_cast<float>(mapping->offsetZ);
+					for(std::size_t index = 0u; index < surfaceSource->textures.size(); ++index)
+					{
+						// Convert the source material transform to physical terrain UV.
+						// The shared mapping helper applies the same metre division to
+						// direct and virtual-geometry terrain paths.
+						copiedTextures[index].uvScale[0] /= static_cast<float>(canonical.tileSizeXMetres);
+						copiedTextures[index].uvScale[1] /= static_cast<float>(canonical.tileSizeZMetres);
+						copiedTextures[index].uvOffset[0] += static_cast<float>(canonical.offsetXMetres / canonical.tileSizeXMetres);
+						copiedTextures[index].uvOffset[1] += static_cast<float>(canonical.offsetZMetres / canonical.tileSizeZMetres);
+					}
 				}
 			}
 			material->textures = std::span<const TextureBinding>(copiedTextures, surfaceSource->textures.size());

@@ -3,7 +3,6 @@
 #include "Terrain/TerrainPublication.h"
 
 #include <algorithm>
-#include <array>
 #include <limits>
 #include <utility>
 
@@ -14,26 +13,6 @@ namespace
 	TerrainTransactionReceipt Reject(const TerrainEditTransaction& transaction, TerrainResultCode code, std::string message)
 	{
 		TerrainTransactionReceipt receipt{}; receipt.transactionId = transaction.transactionId; receipt.outcome = code == TerrainResultCode::Cancelled ? TerrainEditOutcome::Cancelled : TerrainEditOutcome::Rejected; receipt.code = code; receipt.message = std::move(message); return receipt;
-	}
-
-	ContentHash BuildRootIdentity(const TerrainEditTransaction& transaction, const TerrainAssetRoot& root)
-	{
-		// This is an in-memory publication identity. Persistence later replaces it
-		// with the hash of the durable canonical root manifest.
-		std::array<std::uint8_t, 48u> bytes{};
-		for (std::size_t byte = 0u; byte < sizeof(root.rootContentHash.low64); ++byte)
-		{
-			bytes[byte] = static_cast<std::uint8_t>(root.rootContentHash.low64 >> (byte * 8u));
-			bytes[byte + 8u] = static_cast<std::uint8_t>(root.rootContentHash.high64 >> (byte * 8u));
-		}
-		for (std::size_t index = 0; index < transaction.patches.size(); ++index)
-		{
-			const ContentHash hash = transaction.patches[index].replacement.authoredContentHash;
-			bytes[(index * 7u) % bytes.size()] ^= static_cast<std::uint8_t>(hash.low64);
-			bytes[(index * 11u + 1u) % bytes.size()] ^= static_cast<std::uint8_t>(hash.high64 >> 8u);
-		}
-		bytes.back() = static_cast<std::uint8_t>(root.publicationGeneration + 1u);
-		ContentHash result = HashTerrainBytes(bytes); if (!result.IsValid()) result.low64 = 1u; return result;
 	}
 }
 
@@ -90,19 +69,29 @@ namespace
 			replacements.push_back(std::move(applied));
 		}
 		std::shared_ptr<const TerrainAssetRoot> candidate;
-		const ContentHash identity = BuildRootIdentity(transaction, *capture.root);
 		TerrainCodecResult built{};
-		if (transaction.layerStackPatch.has_value()) built = assetStore.BuildLayerStackCandidate(*capture.root, *transaction.layerStackPatch, identity, candidate);
-		else built = assetStore.BuildCandidateRoot(*capture.root, replacements, identity, candidate);
+		// Candidate builders derive identity from the complete canonical TERRAROOT1
+		// bytes before the protected swap; callers cannot inject synthetic hashes.
+		if (transaction.layerStackPatch.has_value()) built = assetStore.BuildLayerStackCandidate(*capture.root, *transaction.layerStackPatch, {}, candidate);
+		else built = assetStore.BuildCandidateRoot(*capture.root, replacements, {}, candidate);
 		if (!built.Succeeded()) { releaseRetained(); return Reject(transaction, built.code, built.message); }
 		if (auto published = assetStore.PublishCandidate(capture.root, candidate); !published.Succeeded()) { releaseRetained(); return Reject(transaction, published.code, published.message); }
 		TerrainTransactionReceipt receipt{}; receipt.transactionId = transaction.transactionId; receipt.outcome = TerrainEditOutcome::Committed; receipt.previousRootHash = capture.root->rootContentHash; receipt.publishedRootHash = candidate->rootContentHash; receipt.publicationGeneration = candidate->publicationGeneration; receipt.code = TerrainResultCode::Ok;
-		TerrainDerivedInvalidation invalidation{}; invalidation.assetUuid = candidate->assetUuid; invalidation.publicationGeneration = candidate->publicationGeneration;
+		TerrainDerivedInvalidation invalidation{};
+		invalidation.assetUuid = candidate->assetUuid;
+		invalidation.publicationGeneration = candidate->publicationGeneration;
+		invalidation.kinds = DetermineTerrainInvalidationKinds(transaction);
+		if(transaction.layerStackPatch.has_value())
+		{
+			const TerrainLayerPatch& layerPatch = *transaction.layerStackPatch;
+			const std::uint16_t layerId = layerPatch.kind == TerrainLayerPatchKind::Add
+				? layerPatch.layer.stableId : layerPatch.targetStableId;
+			if(layerId != 0u) invalidation.layerIds.push_back(layerId);
+		}
 		for (const TerrainPatch& patch : transaction.patches)
 		{
 			receipt.affectedAreas.push_back(patch.replacement.coordinate);
 			invalidation.areas.push_back(patch.replacement.coordinate);
-			invalidation.holesChanged = invalidation.holesChanged || patch.kind == TerrainPatchKind::ReplaceHoles;
 		}
 		receipt.invalidation = std::move(invalidation);
 		receipt.retainedHistoryBytes = historyBytes;

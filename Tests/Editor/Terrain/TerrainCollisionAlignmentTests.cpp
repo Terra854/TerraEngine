@@ -6,6 +6,7 @@
 #include "Editor/TerraEngine-Editor/Terrain/TerrainPicking.h"
 #include "Physics/Terrain/TerrainCollisionSystem.h"
 #include "Renderer/Terrain/TerrainPageCooker.h"
+#include "Renderer/Terrain/TerrainPageFormat.h"
 #include "Terrain/TerrainAssetStore.h"
 #include "Terrain/TerrainDiagnostics.h"
 
@@ -57,11 +58,28 @@ namespace TerraEngine::EditorTests
 		registry.Add("Editor.TerrainCollision.AlignmentLatencyAndLastKnownGoodStatusAreVisible", [](TestContext& context) {
 			std::vector<std::int32_t> renderedHeights(TerraEngine::Terrain::kTerrainAreaSampleCount, 0);
 			for(std::size_t index = 0u; index < renderedHeights.size(); ++index) renderedHeights[index] = static_cast<std::int32_t>(index % 256u) * 10;
+			std::vector<std::int32_t> renderHalo(
+				TerraEngine::Renderer::Terrain::Format::kCookHaloSampleExtent
+					* TerraEngine::Renderer::Terrain::Format::kCookHaloSampleExtent,
+				0);
+			// Clamp the synthetic single-area fixture at its outer boundary while
+			// retaining the exact authored samples at halo coordinates [1, 256].
+			for(std::uint32_t haloZ = 0u; haloZ < TerraEngine::Renderer::Terrain::Format::kCookHaloSampleExtent; ++haloZ)
+				for(std::uint32_t haloX = 0u; haloX < TerraEngine::Renderer::Terrain::Format::kCookHaloSampleExtent; ++haloX)
+				{
+					const std::uint32_t sourceX = std::min<std::uint32_t>(
+						haloX == 0u ? 0u : haloX - 1u, 255u);
+					const std::uint32_t sourceZ = std::min<std::uint32_t>(
+						haloZ == 0u ? 0u : haloZ - 1u, 255u);
+					renderHalo[static_cast<std::size_t>(haloZ)
+						* TerraEngine::Renderer::Terrain::Format::kCookHaloSampleExtent + haloX]
+						= renderedHeights[static_cast<std::size_t>(sourceZ) * 256u + sourceX];
+				}
 			std::vector<std::uint8_t> holes(8192u, 0u);
 			const std::size_t holeIndex = 12u * 256u + 11u; holes[holeIndex / 8u] |= static_cast<std::uint8_t>(1u << (holeIndex % 8u));
 			TerraEngine::Renderer::Terrain::TerrainCookInput renderInput;
 			renderInput.assetId = TerraEngine::GenerateUUID(); renderInput.authoredHash = {9u, 10u}; renderInput.authoredGeneration = 18u;
-			renderInput.heightMillimetres = renderedHeights; renderInput.holeCellBits = holes;
+			renderInput.heightMillimetres = renderHalo; renderInput.holeCellBits = holes;
 			const auto cooked = TerraEngine::Renderer::Terrain::CookTerrainPage(renderInput);
 			TerraEngine::Physics::TerrainHeightFieldRecipe recipe;
 			recipe.terrainAssetId = renderInput.assetId; recipe.authoredGeneration = renderInput.authoredGeneration; recipe.authoredHash = renderInput.authoredHash.low64;

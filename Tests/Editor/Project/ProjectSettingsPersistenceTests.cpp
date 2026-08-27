@@ -2,8 +2,10 @@
 #include "Editor/TerraEngine-Editor/Project/ProjectSettings.h"
 #include "Editor/TerraEngine-Editor/Project/ProjectPhysicsSettingsIO.h"
 #include "Editor/TerraEngine-Editor/Project/ProjectManager.h"
+#include "Editor/TerraEngine-Editor/Windows/SceneViewCameraState.h"
 
 #include <filesystem>
+#include <cmath>
 #include <fstream>
 #include <iterator>
 #include <cstdlib>
@@ -87,6 +89,51 @@ namespace TerraEngine::EditorTests
 
 	void RegisterProjectSettingsPersistenceTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.ProjectSettings.SceneViewCameraWorkspaceRoundTrips", [](TestContext& context) {
+			TerraEngine::Editor::SceneView::CameraWorkspaceState expected;
+			expected.position.cell = {1'000'000, -7, -2'000'000};
+			expected.position.offsetMetres = {12.5, 31.25, -42.75};
+			expected.rotationRadians = {-0.61F, 1.42F, 0.0F};
+			expected.focus.cell = expected.position.cell;
+			expected.focus.offsetMetres = {120.0, 18.0, -240.0};
+			expected.focusDistance = 287.5F;
+			expected.focusInitialized = true;
+			expected.fieldOfViewDegrees = 72.0F;
+			expected.orthographicHeight = 144.0F;
+			expected.projectionMode = TerraEngine::Editor::SceneViewOverlay::ProjectionMode::Orthographic;
+
+			const nlohmann::json encoded = TerraEngine::Editor::SceneView::SerializeCameraWorkspaceState(expected);
+			std::string error;
+			const auto restored = TerraEngine::Editor::SceneView::DeserializeCameraWorkspaceState(encoded, &error);
+			context.Expect(restored.has_value(), error.empty() ? "Scene View camera state should round-trip." : error);
+			context.Expect(restored && restored->position == expected.position && restored->focus == expected.focus
+				&& restored->rotationRadians == expected.rotationRadians
+				&& std::abs(restored->focusDistance - expected.focusDistance) < 0.001F
+				&& std::abs(restored->fieldOfViewDegrees - expected.fieldOfViewDegrees) < 0.001F
+				&& std::abs(restored->orthographicHeight - expected.orthographicHeight) < 0.001F
+				&& restored->focusInitialized
+				&& restored->projectionMode == expected.projectionMode,
+				"Workspace persistence must preserve the exact canonical camera composition.");
+		});
+
+		registry.Add("Editor.ProjectSettings.SceneViewCameraWorkspaceRejectsPartialState", [](TestContext& context) {
+			nlohmann::json invalid = TerraEngine::Editor::SceneView::SerializeCameraWorkspaceState({});
+			invalid["rotationRadians"] = {0.0F, "not-a-number", 0.0F};
+			std::string error;
+			const auto restored = TerraEngine::Editor::SceneView::DeserializeCameraWorkspaceState(invalid, &error);
+			context.Expect(!restored.has_value() && !error.empty(),
+				"Malformed camera workspace input must be rejected as one atomic record.");
+		});
+
+		registry.Add("Editor.ProjectSettings.SceneViewCameraUsesProjectLayoutLifecycle", [](TestContext& context) {
+			const std::filesystem::path sourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor" / "TerraEngine-Editor" / "Core" / "EditorSystem.cpp";
+			const std::string source = ReadFileBytes(sourcePath);
+			context.Expect(source.find("layout[\"sceneViewCamera\"] = sceneView->SerializeWorkspaceState()") != std::string::npos
+				&& source.find("sceneView->RestoreWorkspaceState(layout[\"sceneViewCamera\"], cameraError)") != std::string::npos,
+				"Project close and reopen must save and restore Scene View camera state through EditorLayout.terra.");
+		});
+
 		registry.Add("Editor.ProjectSettings.PhysicsQualityLoadsForPlayMode", [](TestContext& context) {
 			const std::filesystem::path root = std::filesystem::temp_directory_path()
 				/ "TerraEngineProjectSettings" / "PhysicsQualityLoadsForPlayMode";

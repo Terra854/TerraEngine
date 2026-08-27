@@ -76,5 +76,68 @@ namespace TerraEngine::EditorTests
 				&& !TerraEngine::Editor::Automation::ParseTerrainAutomationRequest(hash).accepted,
 				"Screen-space, unknown, non-normalized, overflowing, unbounded, duplicate, and non-canonical hash requests must fail before typed mutation preparation.");
 		});
+
+		registry.Add("Editor.TerrainAutomation.SnapshotPreservesLayerSamplerLodAndStableCodes", [](TestContext& context) {
+			using namespace TerraEngine;
+			using namespace TerraEngine::Editor::Automation;
+			TerrainAutomationSnapshot snapshot;
+			snapshot.assetUuid = GenerateUUID();
+			snapshot.rootHash = {11u, 22u};
+			snapshot.rootGeneration = 9u;
+			snapshot.sampleSpacingMetres = 0.5;
+			snapshot.diagnosticCodes = {"TerrainRootPublicationRejected"};
+
+			TerrainAutomationEnabledLayerSnapshot layer;
+			layer.runtimeSlot = 0u;
+			layer.stableLayerId = 17u;
+			layer.name = "Cliff";
+			layer.materialAssetUuid = GenerateUUID();
+			layer.mapping = {Terrain::TerrainLayerMappingMode::Triplanar, 8.0, 12.0, 1.5, -2.0, 0.25, 6.0};
+			layer.requestedSamplerQuality = SamplerFilter::Anisotropic;
+			layer.effectiveSamplerQuality = SamplerFilter::Trilinear;
+			layer.requestedAnisotropy = 16.0F;
+			layer.effectiveAnisotropy = 1.0F;
+			layer.samplerFallbackReason = Terrain::TerrainSamplerFallbackReason::AnisotropyUnsupported;
+			layer.diagnosticCodes = {"AnisotropyUnsupported"};
+			snapshot.enabledLayers.push_back(layer);
+
+			TerrainAutomationAreaSnapshot area;
+			area.coordinate = {-3, 5};
+			area.stableAreaIdentity = 404u;
+			area.desiredLod = 0u;
+			area.actualLod = 2u;
+			area.balancedLod = 1u;
+			area.desiredPageId = 40u;
+			area.actualPageId = 10u;
+			area.pageState = Resource::VirtualGeometryPagePublicationState::Resident;
+			area.fallbackDepth = 2u;
+			area.pinnedCoarseCoverage = true;
+			area.completeCoverage = true;
+			area.balanceRepaired = true;
+			area.diagnosticCodes = {"OwnAncestorFallback", "BalanceRepairApplied"};
+			snapshot.areas.push_back(area);
+
+			const nlohmann::json encoded = SerializeTerrainAutomationSnapshot(snapshot);
+			const nlohmann::json schema = TerrainAutomationSnapshotResultSchema();
+			const auto& encodedLayer = encoded["enabledLayers"][0];
+			const auto& encodedArea = encoded["areas"][0];
+			// Inspect the stable text values as an automation client would; enum
+			// ordinals must never leak into durable MCP evidence.
+			context.Expect(encoded.value("rootGeneration", "") == "9"
+				&& encoded.value("sampleSpacingMetres", 0.0) == 0.5
+				&& encodedLayer["mapping"].value("mode", "") == "Triplanar"
+				&& encodedLayer.value("effectiveSamplerQuality", "") == "Trilinear"
+				&& encodedLayer.value("samplerFallbackReason", "") == "AnisotropyUnsupported"
+				&& encodedArea.value("desiredLod", 99u) == 0u
+				&& encodedArea.value("actualLod", 99u) == 2u
+				&& encodedArea.value("balancedLod", 99u) == 1u
+				&& encodedArea.value("actualPageId", 0u) == 10u
+				&& encodedArea.value("pageState", "") == "Resident"
+				&& encodedArea.value("fallbackActive", false)
+				&& encodedArea["diagnosticCodes"][0] == "OwnAncestorFallback"
+				&& schema["properties"].contains("enabledLayers")
+				&& schema["properties"].contains("areas"),
+				"Terrain automation snapshots must expose physical mapping, effective sampler fallback, per-area desired/actual/balanced LOD, page ancestry, and stable diagnostic names.");
+		});
 	}
 }

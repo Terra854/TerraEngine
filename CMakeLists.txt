@@ -282,6 +282,8 @@ set(ENGINE_SOURCES
 	Engine/Renderer/RHI/Vulkan/VulkanUploadPlanning.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanSamplerPolicy.cpp
+	Engine/Renderer/Terrain/TerrainLodSelection.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanHiZ.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanVRS.cpp
 	Engine/DotNet/DotNetHost.cpp
@@ -1592,6 +1594,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/ProjectBrowserWindow.cpp
 	Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewOrientationWidget.cpp
+	Editor/TerraEngine-Editor/Windows/SceneViewCameraState.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewMarkerPipeline.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewOverlayIcons.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewOverlayMarkers.cpp
@@ -1922,6 +1925,12 @@ if(TERRAENGINE_TERRAIN_COMPILED_EDITOR_SHADERS)
 		add_dependencies(install TerraEngine.Terrain.Shaders)
 	endif()
 endif()
+
+# TerrainPageFormat.h is the public, versioned page ABI shared by offline cooks,
+# mounted runtime decoding, and validation tooling. Install it explicitly rather
+# than exposing every internal terrain header as part of the extension surface.
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Renderer/Terrain/TerrainPageFormat.h"
+	DESTINATION "${ENGINE_INSTALL_DESTINATION}/include/TerraEngine/Renderer/Terrain")
 
 # Install only provider-neutral physics contracts. The Jolt job and allocator
 # adapters remain private implementation details of the engine DLL.

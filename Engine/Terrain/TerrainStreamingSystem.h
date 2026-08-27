@@ -138,6 +138,7 @@ namespace TerraEngine::Terrain
 		mutable std::mutex residencyMutex;
 		TerrainResidencyBudget budget{};
 		TerrainResidencySnapshot publishedResidency{};
+		std::optional<TerrainResidencyPlan> preparedResidency;
 		std::vector<TerrainResidencyDemand> pendingDemands;
 	};
 }

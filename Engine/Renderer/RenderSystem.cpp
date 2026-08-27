@@ -30,8 +30,10 @@
 #include "Core/Object/ObjectManager.h"
 #include "Components/Transform.h"
 #include "Resource/ResourceManager.h"
+#include "Resource/ResourceStreaming.h"
 #include "Resource/VirtualGeometryStreamingSystem.h"
 #include "Renderer/Terrain/TerrainRenderProxyRegistry.h"
+#include "Renderer/Terrain/TerrainMaterialRuntimeRegistry.h"
 #include "Utilities/PlatformUtils.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Profiling/Profiler.h"
@@ -677,6 +679,7 @@ namespace
 		// covered by this record's signature. Cache it with the cut so stable views
 		// do not rebuild hashes and diagnostic strings every frame.
 		TerraEngine::Renderer::VisibleStreamingTouchSet streamingTouchSet;
+		TerraEngine::Resource::TerrainVisibleTextureTouchSnapshot terrainTextureTouches;
 		TerraEngine::Renderer::VisibleCommandReuseTelemetry reuseTelemetry;
 		TerraEngine::Scene::SpatialDiagnosticsSnapshot diagnostics;
 	};
@@ -721,6 +724,7 @@ namespace
 		std::vector<FallbackCoverageChain> fallbackCoverage;
 		std::vector<VirtualGeometryLODTransitionState> lodTransitionStates;
 		TerraEngine::Renderer::VisibleStreamingTouchSet streamingTouchSet;
+		TerraEngine::Resource::TerrainVisibleTextureTouchSnapshot terrainTextureTouches;
 		TerraEngine::Renderer::VisibleCommandReuseTelemetry reuseTelemetry;
 		TerraEngine::Scene::SpatialDiagnosticsSnapshot diagnostics;
 		// A cache hit borrows one stable unordered_map value until this result is
@@ -2596,6 +2600,19 @@ RenderSystem::PrepareCommittedTerrainPackets(
 			packets.push_back(*fallback);
 	}
 	return packets;
+}
+
+TerraEngine::Renderer::Terrain::TerrainAreaRenderPacketResult
+RenderSystem::PrepareCommittedTerrainAreaPackets(
+	const TerraEngine::Renderer::Terrain::TerrainAssetRenderSnapshot& snapshot,
+	std::span<const TerraEngine::Renderer::Terrain::TerrainAreaRenderRequest> requests,
+	std::span<const TerraEngine::Renderer::Terrain::TerrainPageResidencyEntry> residency)
+{
+	// The pure packet builder owns route parity, own-ancestor fallback, page
+	// demand coalescing, and all-or-nothing cut admission. Keeping this wrapper on
+	// RenderSystem makes the production frame path and focused tests share it.
+	return TerraEngine::Renderer::Terrain::PrepareTerrainAreaRenderPackets(
+		snapshot, requests, residency);
 }
 
 bool RenderSystem::SubmitPreparedTerrainPackets(
@@ -4892,6 +4909,11 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		retainedRuntimeMeshResources;
 	std::unordered_map<TerraEngine::UUID, const Material*>& frameMaterialResources =
 		retainedRuntimeMaterialResources;
+	// Terrain material publications are copied while registry mutation is
+	// protected. Later visibility work reads only this frame-owned table.
+	std::unordered_map<TerraEngine::UUID,
+		TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeBinding>
+		frameTerrainMaterialBindings;
 	std::unordered_map<TerraEngine::UUID, TerraEngine::Scene::SpatialAABB>&
 		frameMeshLocalBounds = retainedMeshLocalBounds;
 	std::optional<TerraEngine::Profiling::ProfilerFramePublicationEvidence>
@@ -5037,6 +5059,11 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 					cached.object = object;
 					cached.objectId = meshComp.spatialObjectId != TerraEngine::EMPTY_UUID
 						? meshComp.spatialObjectId : objManager.getUUID(object);
+					if(const TerrainComponent* terrain = registry.try_get<TerrainComponent>(objectEntity);
+						terrain != nullptr && IsRuntimeComponentActive(*terrain) && terrain->visible)
+					{
+						cached.terrainAssetId = terrain->terrainAssetId;
+					}
 					cached.mesh = meshComp;
 					cached.objectIdentity = static_cast<std::uint64_t>(
 						std::hash<TerraEngine::UUID>{}(cached.objectId));
@@ -5482,7 +5509,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 								&& animationBinding.HasCpuPose()
 								&& animationBinding.authorityRow != nullptr);
 					renderables.push_back({
-							object.EntityId(), objectId, cached.objectIdentity,
+							object.EntityId(), objectId, cached.terrainAssetId,
+							cached.objectIdentity,
 							cached.meshIdentity, cached.materialIdentity,
 							std::max<std::uint64_t>(1U,
 								objManager.GetObjectSpatialRevision(object)),
@@ -5548,6 +5576,35 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		if (!graphSummary.valid)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, TerraEngine::Scheduling::FormatEcsSystemGraphFrameSummary(graphSummary));
+		}
+	}
+	frameTerrainMaterialBindings.reserve(renderables.size());
+	for(const RenderableEntry& renderable : renderables)
+	{
+		if(renderable.terrainAssetId == TerraEngine::EMPTY_UUID || renderable.mesh == nullptr
+			|| frameTerrainMaterialBindings.contains(renderable.mesh->materialId))
+		{
+			continue;
+		}
+		if(const auto material = TerraEngine::Renderer::Terrain::
+			TerrainMaterialRuntimeRegistry::Instance().Resolve(renderable.mesh->materialId);
+			material && material->IsComplete())
+		{
+			frameTerrainMaterialBindings.emplace(renderable.mesh->materialId, *material);
+		}
+	}
+	// Command preparation retains object identity, so this compact value map is
+	// enough to join visible commands back to the already copied terrain binding.
+	// No worker callback receives an ECS entity or registry pointer.
+	std::unordered_map<TerraEngine::UUID,
+		std::pair<TerraEngine::UUID, TerraEngine::UUID>> frameTerrainObjects;
+	frameTerrainObjects.reserve(frameTerrainMaterialBindings.size());
+	for(const RenderableEntry& renderable : renderables)
+	{
+		if(renderable.terrainAssetId != TerraEngine::EMPTY_UUID && renderable.mesh != nullptr)
+		{
+			frameTerrainObjects.emplace(renderable.objectId,
+				std::pair{renderable.terrainAssetId, renderable.mesh->materialId});
 		}
 	}
 
@@ -9277,7 +9334,10 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		collectVirtualGeometryDiagnosticsAssets(commands, RenderViewType::Shadow);
 	};
 
-	auto buildVisibleStreamingTouchSet = [&](const std::vector<RenderItemRecord>& commands, RenderViewType viewType, std::uint32_t outputId, const glm::vec3& cameraPosition) {
+	auto buildVisibleStreamingTouchSet = [&](const std::vector<RenderItemRecord>& commands,
+		RenderViewType viewType, std::uint32_t outputId,
+		const glm::vec3& cameraPosition,
+		TerraEngine::Resource::TerrainVisibleTextureTouchSnapshot* terrainTouches) {
 		TerraEngine::Renderer::VisibleStreamingTouchSet touchSet;
 		touchSet.viewType = viewType;
 		touchSet.outputId = outputId;
@@ -9290,6 +9350,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		uniqueMeshes.reserve(commands.size());
 		uniqueMaterials.reserve(commands.size());
 		textureTouchIndices.reserve(commands.size());
+		std::vector<TerraEngine::Resource::TerrainVisibleMaterialArea> visibleTerrainAreas;
+		visibleTerrainAreas.reserve(commands.size());
 
 		std::uint32_t sourceTouchCount = 0u;
 		for (const RenderItemRecord& command : commands)
@@ -9310,6 +9372,59 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 					touchSet.materials.push_back({ command.materialId, ::VisibleStreamingResourceKind::Material, 100 });
 				}
 			}
+			const glm::vec3 objectPosition = glm::vec3(command.modelMatrix[3]);
+			const double viewDistance = static_cast<double>(
+				glm::length(objectPosition - cameraPosition));
+			if(const auto terrainObject = frameTerrainObjects.find(command.objectId);
+				terrainObject != frameTerrainObjects.end())
+			{
+				const auto terrainMaterial = frameTerrainMaterialBindings.find(
+					terrainObject->second.second);
+				if(terrainMaterial != frameTerrainMaterialBindings.end())
+				{
+					const auto appendArea = [&](TerraEngine::Terrain::TerrainAreaCoordinate area,
+						double sampleSpacingMetres) {
+						TerraEngine::Resource::TerrainVisibleMaterialArea visible{};
+						visible.assetId = terrainObject->second.first;
+						visible.area = area;
+						visible.materialId = terrainMaterial->second.materialId;
+						visible.weightTextureId = terrainMaterial->second.weightTextureId;
+						visible.layerIdTextureId = terrainMaterial->second.layerIdTextureId;
+						visible.layerCount = std::min<std::uint32_t>(
+							terrainMaterial->second.layerCount,
+							static_cast<std::uint32_t>(visible.layers.size()));
+						for(std::uint32_t layerIndex = 0u;
+							layerIndex < visible.layerCount; ++layerIndex)
+						{
+							const auto& source = terrainMaterial->second.layers[layerIndex];
+							visible.layers[layerIndex] = {source.stableLayerId,
+								source.baseColorTextureId, source.normalTextureId,
+								source.ormTextureId, source.emissiveTextureId};
+						}
+						// The command translation is already localized to this view. Add the
+						// canonical area offset in double precision so distant signed area
+						// indices do not collapse before nearest-distance aggregation.
+						const glm::dvec3 objectDelta = glm::dvec3(objectPosition - cameraPosition);
+						const glm::dvec3 areaOffset{
+							static_cast<double>(area.x) * 256.0 * sampleSpacingMetres,
+							0.0,
+							static_cast<double>(area.z) * 256.0 * sampleSpacingMetres};
+						visible.nearestViewDistance = glm::length(objectDelta + areaOffset);
+						visibleTerrainAreas.push_back(std::move(visible));
+					};
+					if(terrainMaterial->second.areaMappings.empty())
+					{
+						// Temporary direct origin proxies predate per-area phase tables.
+						// Capture their real sources as area zero until their next publication.
+						appendArea({}, 1.0);
+					}
+					else
+					{
+						for(const auto& area : terrainMaterial->second.areaMappings)
+							appendArea(area.area, area.sampleSpacingMetres);
+					}
+				}
+			}
 
 			const auto capturedMaterial = frameMaterialResources.find(command.materialId);
 			const Material* material = capturedMaterial != frameMaterialResources.end()
@@ -9318,8 +9433,6 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			{
 				continue;
 			}
-			const glm::vec3 objectPosition = glm::vec3(command.modelMatrix[3]);
-			const double viewDistance = static_cast<double>(glm::length(objectPosition - cameraPosition));
 			for (const TextureBinding& binding : material->textures)
 			{
 				if (binding.textureUuid == TerraEngine::EMPTY_UUID)
@@ -9336,6 +9449,34 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				{
 					TerraEngine::Renderer::VisibleTextureTouch& touch = touchSet.textures[existingTexture->second];
 					touch.nearestViewDistance = std::min(touch.nearestViewDistance, viewDistance);
+				}
+			}
+		}
+		const auto preparedTerrainTouches = TerraEngine::Resource::
+			PrepareTerrainVisibleTextureTouchSnapshot(activeRenderFrameId, visibleTerrainAreas);
+		if(terrainTouches != nullptr) *terrainTouches = preparedTerrainTouches;
+		if(preparedTerrainTouches.complete)
+		{
+			sourceTouchCount += static_cast<std::uint32_t>(std::min<std::size_t>(
+				preparedTerrainTouches.touches.size()
+					+ preparedTerrainTouches.duplicateEliminationCount,
+				std::numeric_limits<std::uint32_t>::max() - sourceTouchCount));
+			for(const TerraEngine::Resource::TerrainVisibleTextureTouch& terrainTouch
+				: preparedTerrainTouches.touches)
+			{
+				auto [existingTexture, inserted] = textureTouchIndices.emplace(
+					terrainTouch.textureId, touchSet.textures.size());
+				if(inserted)
+				{
+					touchSet.textures.push_back({terrainTouch.textureId,
+						terrainTouch.nearestViewDistance, terrainTouch.priority});
+				}
+				else
+				{
+					auto& touch = touchSet.textures[existingTexture->second];
+					touch.nearestViewDistance = std::min(
+						touch.nearestViewDistance, terrainTouch.nearestViewDistance);
+					touch.priority = std::max(touch.priority, terrainTouch.priority);
 				}
 			}
 		}
@@ -9514,7 +9655,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 					existing->second.reuseTelemetry.conservativeRefresh = true;
 					existing->second.reuseTelemetry.fallbackReason = "cached visible streaming touch set was unavailable";
 					existing->second.streamingTouchSet = buildVisibleStreamingTouchSet(
-						cachedCommands, viewType, outputId, cameraPosition);
+						cachedCommands, viewType, outputId, cameraPosition,
+						&existing->second.terrainTextureTouches);
 				}
 				pendingStreamingTouchSets.emplace_back(
 					viewType, existing->second.streamingTouchSet);
@@ -9529,6 +9671,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				cachedResult.commands = std::move(cachedCommands);
 				cachedResult.packetEvidenceSignature = existing->second.signature;
 				cachedResult.streamingTouchSet = existing->second.streamingTouchSet;
+				cachedResult.terrainTextureTouches = existing->second.terrainTextureTouches;
 				cachedResult.reuseTelemetry = buildVisibleCommandReuseTelemetry(viewType, outputId, true, true, existing->second.streamingTouchSet);
 				if (existing->second.reuseTelemetry.conservativeRefresh)
 				{
@@ -9592,7 +9735,9 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		result.diagnostics.lastQueryDurationMs = queryDiagnostics.lastQueryDurationMs;
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build Visible Streaming Touch Set", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-			result.streamingTouchSet = buildVisibleStreamingTouchSet(result.commands, viewType, outputId, cameraPosition);
+			result.streamingTouchSet = buildVisibleStreamingTouchSet(
+				result.commands, viewType, outputId, cameraPosition,
+				&result.terrainTextureTouches);
 			result.reuseTelemetry = buildVisibleCommandReuseTelemetry(viewType, outputId, false, false, result.streamingTouchSet);
 		}
 		pendingStreamingTouchSets.emplace_back(viewType, result.streamingTouchSet);
@@ -9672,6 +9817,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			RenderViewCommandLane>>(std::move(recordCommandLanes));
 		record.retainedSelectionEvidence = std::move(retainedSelectionEvidence);
 		record.streamingTouchSet = result.streamingTouchSet;
+		record.terrainTextureTouches = result.terrainTextureTouches;
 		record.reuseTelemetry = result.reuseTelemetry;
 		record.diagnostics = result.diagnostics;
 		visibleCommandCache.recordsBySignature[signature] = std::move(record);
@@ -14762,6 +14908,7 @@ void RenderSystem::ApplyQualityPreset(QualityPreset preset, bool persistProjectS
 	}
 
 	std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
+	const std::uint32_t priorTerrainAnisotropy = currentSettings.anisotropicFiltering;
 	currentPreset = preset;
 	// Dispatch by explicit engine state so each case documents one supported behavior.
 	switch (preset)
@@ -14829,6 +14976,15 @@ void RenderSystem::ApplyQualityPreset(QualityPreset preset, bool persistProjectS
 	}
 
 	currentSettings = SanitizeRenderSettings(currentSettings);
+	if(priorTerrainAnisotropy != currentSettings.anisotropicFiltering)
+	{
+		for(const TerraEngine::UUID& materialId :
+			TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeRegistry::Instance().RepublishSamplerQuality(
+				currentSettings.anisotropicFiltering))
+		{
+			InvalidateGeneratedMaterial(materialId);
+		}
+	}
 	if (persistProjectSettings)
 	{
 		SaveSettings();
@@ -14838,10 +14994,20 @@ void RenderSystem::ApplyQualityPreset(QualityPreset preset, bool persistProjectS
 // RenderSystem::SetRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::SetRenderSettings(const RenderSettings& settings)
 {
+	const std::uint32_t priorTerrainAnisotropy = currentSettings.anisotropicFiltering;
 	{
 		std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
 		currentSettings = SanitizeRenderSettings(settings);
 		currentPreset = QualityPreset::Custom;
+	}
+	if(priorTerrainAnisotropy != currentSettings.anisotropicFiltering)
+	{
+		for(const TerraEngine::UUID& materialId :
+			TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeRegistry::Instance().RepublishSamplerQuality(
+				currentSettings.anisotropicFiltering))
+		{
+			InvalidateGeneratedMaterial(materialId);
+		}
 	}
 	ResourceManager::Instance().SetRenderDebugEnabled(ResolveRenderDebugDiagnosticsEnabled());
 	ApplyRenderDiagnosticsRequest();
@@ -14902,6 +15068,7 @@ void RenderSystem::ApplyQueuedRuntimeRenderSettings()
 	{
 		return;
 	}
+	const std::uint32_t priorTerrainAnisotropy = currentSettings.anisotropicFiltering;
 
 	if (request->usePreset)
 	{
@@ -14912,6 +15079,15 @@ void RenderSystem::ApplyQueuedRuntimeRenderSettings()
 		std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
 		currentSettings = SanitizeRenderSettings(request->settings);
 		currentPreset = QualityPreset::Custom;
+	}
+	if(priorTerrainAnisotropy != currentSettings.anisotropicFiltering)
+	{
+		for(const TerraEngine::UUID& materialId :
+			TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeRegistry::Instance().RepublishSamplerQuality(
+				currentSettings.anisotropicFiltering))
+		{
+			InvalidateGeneratedMaterial(materialId);
+		}
 	}
 
 	// Backend-affecting toggles are now applied by RenderSystem itself rather

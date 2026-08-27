@@ -40,6 +40,18 @@ namespace
 		return value ? "yes" : "no";
 	}
 
+	const char* SamplerFilterLabel(SamplerFilter filter) noexcept
+	{
+		switch(filter)
+		{
+		case SamplerFilter::Nearest: return "Nearest";
+		case SamplerFilter::Bilinear: return "Bilinear";
+		case SamplerFilter::Trilinear: return "Trilinear";
+		case SamplerFilter::Anisotropic: return "Anisotropic";
+		}
+		return "Unknown";
+	}
+
 	void TextStringView(std::string_view value)
 	{
 		ImGui::TextUnformatted(value.data(), value.data() + value.size());
@@ -1457,6 +1469,93 @@ void ResourceResidencyWindow::DrawTerrainSummary()
 		static_cast<unsigned long long>(snapshot.controlGeneration),
 		static_cast<unsigned long long>(snapshot.collisionGeneration), snapshot.historyDepth,
 		static_cast<unsigned long long>(snapshot.historyBytes));
+
+	// Sampler diagnostics are copied at the renderer's protected boundary. This
+	// panel only reads that immutable value: it must never probe or mutate Vulkan
+	// sampler and combined-descriptor caches while a frame is using them.
+	ImGui::SeparatorText("Terrain Filtering");
+	if(snapshot.samplerQuality.empty())
+	{
+		ImGui::TextDisabled("Requested/effective terrain filtering is unavailable until a material publication completes.");
+	}
+	else if(ImGui::BeginTable("TerrainSamplerQuality", 6,
+		ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Stable Layer");
+		ImGui::TableSetupColumn("Requested");
+		ImGui::TableSetupColumn("Effective");
+		ImGui::TableSetupColumn("Requested Aniso");
+		ImGui::TableSetupColumn("Effective Aniso");
+		ImGui::TableSetupColumn("Fallback");
+		ImGui::TableHeadersRow();
+		for(const auto& sampler : snapshot.samplerQuality)
+		{
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::Text("%u", static_cast<unsigned int>(sampler.stableLayerId));
+			ImGui::TableSetColumnIndex(1);
+			ImGui::TextUnformatted(SamplerFilterLabel(sampler.requestedQuality));
+			ImGui::TableSetColumnIndex(2);
+			ImGui::TextUnformatted(SamplerFilterLabel(sampler.effectiveQuality));
+			ImGui::TableSetColumnIndex(3);
+			ImGui::Text("%.1fx", static_cast<double>(sampler.requestedAnisotropy));
+			ImGui::TableSetColumnIndex(4);
+			ImGui::Text("%.1fx", static_cast<double>(sampler.effectiveAnisotropy));
+			ImGui::TableSetColumnIndex(5);
+			const bool usingFallback = sampler.fallbackReason
+				!= TerraEngine::Terrain::TerrainSamplerFallbackReason::None;
+			if(usingFallback)
+				ImGui::TextColored(ImVec4(1.0F, 0.72F, 0.18F, 1.0F), "%s",
+					std::string(TerraEngine::Terrain::ToString(sampler.fallbackReason)).c_str());
+			else ImGui::TextUnformatted("none");
+			if(usingFallback && !sampler.message.empty() && ImGui::IsItemHovered())
+			{
+				ImGui::BeginTooltip();
+				ImGui::TextWrapped("%s", sampler.message.c_str());
+				ImGui::EndTooltip();
+			}
+		}
+		ImGui::EndTable();
+	}
+
+	if(snapshot.textureStreaming)
+	{
+		const auto& streaming = *snapshot.textureStreaming;
+		ImGui::Text("Texture touches: %u source, %u unique, %u deduplicated across %u visible areas",
+			streaming.sourceTouchCount, streaming.uniqueTouchCount,
+			streaming.duplicateEliminationCount, streaming.sourceAreaCount);
+		ImGui::Text("Combined aliases: %u active, %u retiring | Samplers: %u | Descriptor slots: %u / %u (%u available)",
+			streaming.descriptors.activeAliasCount,
+			streaming.descriptors.pendingAliasRetirementCount,
+			streaming.descriptors.samplerCount,
+			streaming.descriptors.descriptorSlotsUsed,
+			streaming.descriptors.descriptorCapacity,
+			streaming.descriptorSlotsAvailable);
+		if(streaming.descriptorCapacityExhausted
+			|| streaming.descriptors.descriptorAllocationRejected)
+		{
+			ImGui::TextColored(ImVec4(1.0F, 0.42F, 0.30F, 1.0F),
+				"Descriptor capacity exhausted. Existing terrain remains on its last complete binding; reduce active texture aliases.");
+		}
+		else if(!streaming.complete)
+		{
+			ImGui::TextDisabled("Texture-touch and descriptor counters are from an incomplete diagnostic capture.");
+		}
+	}
+	else ImGui::TextDisabled("Terrain texture-touch and descriptor-alias counters are unavailable.");
+
+	if(!snapshot.layerFallbacks.empty())
+	{
+		ImGui::SeparatorText("Terrain Material Fallbacks");
+		for(const auto& fallback : snapshot.layerFallbacks)
+		{
+			if(fallback.state == TerraEngine::Terrain::TerrainLayerFallbackState::Healthy) continue;
+			ImGui::TextColored(ImVec4(1.0F, 0.72F, 0.18F, 1.0F),
+				"Layer %u: %s", static_cast<unsigned int>(fallback.stableLayerId),
+				fallback.message.empty() ? "diagnostic material active; authored paint is preserved"
+					: fallback.message.c_str());
+		}
+	}
 	if(snapshot.stagePercentiles.empty())
 		ImGui::TextDisabled("Terrain stage timings are unavailable until a measured scheduler boundary publishes samples.");
 	else for(const auto& stage : snapshot.stagePercentiles)

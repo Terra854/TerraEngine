@@ -8,6 +8,62 @@
 
 namespace TerraEngine::Terrain
 {
+	TerrainLayerValidationDiagnosticRecord MakeTerrainLayerValidationDiagnosticRecord(
+		TerrainResultCode resultCode,
+		TerrainRootDiagnosticCode diagnosticCode,
+		std::uint32_t definitionCount,
+		std::uint32_t enabledCount,
+		std::string message)
+	{
+		TerrainLayerValidationDiagnosticRecord record{};
+		record.resultCode = resultCode;
+		record.diagnosticCode = diagnosticCode;
+		record.definitionCount = definitionCount;
+		record.enabledCount = enabledCount;
+		record.accepted = resultCode == TerrainResultCode::Ok
+			&& diagnosticCode == TerrainRootDiagnosticCode::None;
+		record.legacyRootRejected = diagnosticCode
+			== TerrainRootDiagnosticCode::UnsupportedTerrainRoot;
+		record.message = std::move(message);
+		if(record.message.empty() && !record.accepted)
+		{
+			record.message = record.legacyRootRejected
+				? "Only canonical TERRAROOT1 terrain is supported; recreate or recook this asset."
+				: "Terrain layer validation rejected the detached candidate.";
+		}
+		return record;
+	}
+
+	std::string_view ToString(TerrainSamplerFallbackReason reason) noexcept
+	{
+		switch(reason)
+		{
+		case TerrainSamplerFallbackReason::None: return "None";
+		case TerrainSamplerFallbackReason::RequestedLevelClamped: return "RequestedLevelClamped";
+		case TerrainSamplerFallbackReason::AnisotropyUnsupported: return "AnisotropyUnsupported";
+		case TerrainSamplerFallbackReason::InvalidDeviceLimit: return "InvalidDeviceLimit";
+		case TerrainSamplerFallbackReason::DescriptorCapacityExceeded: return "DescriptorCapacityExceeded";
+		}
+		return "Unknown";
+	}
+
+	void AppendTerrainLayerReferenceDiagnostics(
+		TerrainDiagnosticSnapshot& snapshot,
+		const TerrainResolvedWeightSample& resolved,
+		bool requiredControlMissing)
+	{
+		if(!requiredControlMissing && !resolved.usedDiagnosticFallback) return;
+		TerrainDiagnosticItem item{};
+		item.category = TerrainDiagnosticCategory::Source;
+		item.severity = TerrainDiagnosticSeverity::Warning;
+		item.impact = TerrainDiagnosticImpact::LastKnownGoodActive;
+		item.action = TerrainDiagnosticAction::ReloadSource;
+		item.message = requiredControlMissing
+			? "Required terrain control data is missing; the deterministic diagnostic surface is active."
+			: "Paint references a missing, disabled, or unsupported stable layer ID; only that contribution uses the diagnostic surface.";
+		snapshot.items.push_back(std::move(item));
+	}
+
 	// Terrain diagnostics intentionally have no mutable singleton. Future systems
 	// publish this value as one immutable snapshot at their declared boundary.
 	// Layer fallback records are also values, so an AssetDatabase event can never
@@ -68,6 +124,56 @@ namespace TerraEngine::Terrain
 			item.impact = pressure.evictionRequired ? TerrainDiagnosticImpact::Unavailable : TerrainDiagnosticImpact::DelayedDerivedData;
 			item.action = TerrainDiagnosticAction::IncreaseBudget; item.message = pressure.resource + " exceeds its supplied residency budget."; result.items.push_back(std::move(item));
 		}
+		for(const TerrainLayerValidationDiagnosticRecord& validation : result.layerValidations)
+		{
+			if(validation.accepted) continue;
+			TerrainDiagnosticItem item{};
+			item.category = TerrainDiagnosticCategory::LayerValidation;
+			item.severity = TerrainDiagnosticSeverity::Error;
+			item.impact = validation.legacyRootRejected
+				? TerrainDiagnosticImpact::Unavailable
+				: TerrainDiagnosticImpact::MutationRejected;
+			item.action = validation.legacyRootRejected
+				? TerrainDiagnosticAction::Rebuild
+				: TerrainDiagnosticAction::ResolveConflict;
+			item.message = validation.message.empty()
+				? "Terrain layer validation rejected the detached candidate."
+				: validation.message;
+			result.items.push_back(std::move(item));
+		}
+		for(const TerrainSamplerQualityDiagnosticRecord& sampler : result.samplerQuality)
+		{
+			if(sampler.fallbackReason == TerrainSamplerFallbackReason::None) continue;
+			TerrainDiagnosticItem item{};
+			item.category = TerrainDiagnosticCategory::Sampler;
+			item.severity = sampler.fallbackReason
+				== TerrainSamplerFallbackReason::DescriptorCapacityExceeded
+				? TerrainDiagnosticSeverity::Error : TerrainDiagnosticSeverity::Warning;
+			item.impact = sampler.fallbackReason
+				== TerrainSamplerFallbackReason::DescriptorCapacityExceeded
+				? TerrainDiagnosticImpact::Unavailable : TerrainDiagnosticImpact::None;
+			item.action = sampler.fallbackReason
+				== TerrainSamplerFallbackReason::DescriptorCapacityExceeded
+				? TerrainDiagnosticAction::IncreaseBudget : TerrainDiagnosticAction::None;
+			item.message = sampler.message.empty()
+				? "Terrain sampler used fallback: " + std::string(ToString(sampler.fallbackReason)) + "."
+				: sampler.message;
+			result.items.push_back(std::move(item));
+		}
+		if(result.textureStreaming
+			&& result.textureStreaming->descriptorCapacityExhausted)
+		{
+			TerrainDiagnosticItem item{};
+			item.category = TerrainDiagnosticCategory::Residency;
+			item.severity = TerrainDiagnosticSeverity::Error;
+			item.impact = TerrainDiagnosticImpact::Unavailable;
+			item.action = TerrainDiagnosticAction::IncreaseBudget;
+			item.message = "Terrain sampled-texture aliases exhausted descriptor capacity ("
+				+ std::to_string(result.textureStreaming->descriptors.descriptorSlotsUsed)
+				+ "/" + std::to_string(result.textureStreaming->descriptors.descriptorCapacity)
+				+ " slots used).";
+			result.items.push_back(std::move(item));
+		}
 		for(const TerrainLayerFallbackRecord& fallback : result.layerFallbacks)
 		{
 			if(fallback.state == TerrainLayerFallbackState::Healthy) continue;
@@ -78,6 +184,24 @@ namespace TerraEngine::Terrain
 		{
 			TerrainDiagnosticItem item; item.category = TerrainDiagnosticCategory::Seam; item.severity = TerrainDiagnosticSeverity::Warning;
 			item.impact = TerrainDiagnosticImpact::DelayedDerivedData; item.action = TerrainDiagnosticAction::Rebuild; item.location = seam.coordinate; item.message = seam.message; result.items.push_back(std::move(item));
+		}
+		for(const TerrainAreaLodDiagnosticRecord& area : result.areaLod)
+		{
+			if(!area.rolledBack && !area.missingOuterHalo
+				&& area.byteState != TerrainPageByteState::Missing
+				&& area.byteState != TerrainPageByteState::Rejected) continue;
+			TerrainDiagnosticItem item{};
+			item.category = area.missingOuterHalo
+				? TerrainDiagnosticCategory::Seam : TerrainDiagnosticCategory::Residency;
+			item.location = area.coordinate;
+			item.severity = area.rolledBack || area.byteState == TerrainPageByteState::Rejected
+				? TerrainDiagnosticSeverity::Error : TerrainDiagnosticSeverity::Warning;
+			item.impact = area.rolledBack
+				? TerrainDiagnosticImpact::LastKnownGoodActive : TerrainDiagnosticImpact::DelayedDerivedData;
+			item.action = area.missingOuterHalo
+				? TerrainDiagnosticAction::LocateArea : TerrainDiagnosticAction::Retry;
+			item.message = area.message.empty() ? area.stableCode : area.message;
+			result.items.push_back(std::move(item));
 		}
 		for(const TerrainCollisionRecord& collision : result.collisions)
 		{

@@ -677,6 +677,46 @@ SceneViewWindow::SceneViewWindow(MainEditorSubsystem* owner)
 	m_IconDefinitions = SceneOverlay::BuildDefaultIconDefinitions();
 }
 
+nlohmann::json SceneViewWindow::SerializeWorkspaceState() const
+{
+	TerraEngine::Editor::SceneView::CameraWorkspaceState state;
+	state.position = m_CameraPosition;
+	state.rotationRadians = m_CameraRot;
+	state.focus = m_CameraFocus;
+	state.focusDistance = m_CameraFocusDistance;
+	state.focusInitialized = m_CameraFocusInitialized;
+	state.fieldOfViewDegrees = m_Fov;
+	state.orthographicHeight = m_OrthographicHeight;
+	state.projectionMode = m_ToolState.projectionMode;
+	return TerraEngine::Editor::SceneView::SerializeCameraWorkspaceState(state);
+}
+
+bool SceneViewWindow::RestoreWorkspaceState(const nlohmann::json& value, std::string& outError)
+{
+	const auto state = TerraEngine::Editor::SceneView::DeserializeCameraWorkspaceState(value, &outError);
+	if(!state)
+	{
+		return false;
+	}
+
+	// Load the remaining toolbar preferences first so the later assignment cannot
+	// be replaced by Scene View's lazy first-frame preference initialization.
+	LoadOverlayPreferencesIfNeeded();
+	m_CameraPosition = state->position;
+	m_CameraRot = state->rotationRadians;
+	m_CameraFocus = state->focus;
+	m_CameraFocusDistance = state->focusDistance;
+	m_CameraFocusInitialized = state->focusInitialized;
+	m_Fov = state->fieldOfViewDegrees;
+	m_OrthographicHeight = state->orthographicHeight;
+	m_ToolState.projectionMode = state->projectionMode;
+	m_OverlayPreference.projectionMode = state->projectionMode;
+	// A previous project's saved perspective backup must never leak across the
+	// project boundary when the restored view happens to be orthographic.
+	m_PerspectiveCameraState = PerspectiveCameraState{};
+	return true;
+}
+
 nlohmann::json SceneViewWindow::GetAutomationState() const
 {
 	const auto position = [](const TerraEngine::Scene::WorldPosition& value) {

@@ -91,4 +91,22 @@ namespace TerraEngine::Terrain
 		}
 		return "Unknown";
 	}
+
+	std::string_view ToString(TerrainRootDiagnosticCode code) noexcept
+	{
+		switch (code)
+		{
+		case TerrainRootDiagnosticCode::None: return "None";
+		case TerrainRootDiagnosticCode::UnsupportedTerrainRoot: return "UnsupportedTerrainRoot";
+		case TerrainRootDiagnosticCode::TerrainLayerDefinitionLimitExceeded: return "TerrainLayerDefinitionLimitExceeded";
+		case TerrainRootDiagnosticCode::TerrainEnabledLayerLimitViolated: return "TerrainEnabledLayerLimitViolated";
+		case TerrainRootDiagnosticCode::TerrainLayerIdentityInvalid: return "TerrainLayerIdentityInvalid";
+		case TerrainRootDiagnosticCode::TerrainLayerNameInvalid: return "TerrainLayerNameInvalid";
+		case TerrainRootDiagnosticCode::TerrainLayerMappingInvalid: return "TerrainLayerMappingInvalid";
+		case TerrainRootDiagnosticCode::TerrainAreaReferenceInvalid: return "TerrainAreaReferenceInvalid";
+		case TerrainRootDiagnosticCode::TerrainRootMalformed: return "TerrainRootMalformed";
+		case TerrainRootDiagnosticCode::TerrainRootPublicationRejected: return "TerrainRootPublicationRejected";
+		}
+		return "Unknown";
+	}
 }

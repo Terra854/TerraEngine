@@ -3,6 +3,7 @@
 #include "TestHarness.h"
 
 #include "AssetDatabase.h"
+#include "Engine/Terrain/TerrainAssetStore.h"
 
 #include <chrono>
 #include <filesystem>
@@ -22,16 +23,30 @@ namespace TerraEngine::EditorTests
 			std::filesystem::remove_all(root, error);
 			std::filesystem::create_directories(privateBlob.parent_path(), error);
 			const TerraEngine::UUID terrainId = TerraEngine::GenerateUUID();
+			TerraEngine::Terrain::TerrainAssetRoot canonicalRoot{};
+			canonicalRoot.assetUuid = terrainId;
+			canonicalRoot.publicationGeneration = 1u;
+			canonicalRoot.persistedRootGeneration = 1u;
+			canonicalRoot.authoredBounds = {0, 0, 256, 256};
+			canonicalRoot.layerStackGeneration = 1u;
+			const auto encodedRoot = TerraEngine::Terrain::EncodeTerrainRootManifest(canonicalRoot);
+			const std::string rootHash = TerraEngine::Terrain::ToHexString(encodedRoot.contentHash);
 			std::ofstream(terrainRoot, std::ios::binary | std::ios::trunc)
-				<< "{\"format\":\"TerraEngineTerrain\",\"version\":1,\"width\":256,\"height\":256,\"assetId\":\""
+				<< "{\"format\":\"TerraEngineTerrain\",\"rootFormat\":\"TERRAROOT1\",\"version\":1,\"width\":256,\"height\":256,\"assetId\":\""
 				<< TerraEngine::ToHexString(terrainId) << "\"}";
+			std::filesystem::create_directories(
+				std::filesystem::path(terrainRoot.string() + ".data") / "roots", error);
+			std::ofstream(std::filesystem::path(terrainRoot.string() + ".data") / "CURRENT",
+				std::ios::binary | std::ios::trunc) << rootHash << "\n-\n";
+			std::ofstream(std::filesystem::path(terrainRoot.string() + ".data") / "roots" / (rootHash + ".root"),
+				std::ios::binary | std::ios::trunc) << encodedRoot.canonicalBytes;
 			std::ofstream(privateBlob, std::ios::binary | std::ios::trunc) << "private terrain area";
 
 			AssetDatabase::Instance().Shutdown();
 			AssetDatabase::Instance().Initialize(root);
 			AssetDatabase::Instance().ScanProject();
 			const auto& assets = AssetDatabase::Instance().GetAssets();
-			context.Expect(assets.contains(std::filesystem::absolute(terrainRoot)),
+			context.Expect(encodedRoot.Succeeded() && assets.contains(std::filesystem::absolute(terrainRoot)),
 				"The .teterrain root must be discovered as the one editable project asset.");
 			context.Expect(assets.at(std::filesystem::absolute(terrainRoot)).guid == terrainId
 				&& AssetDatabase::Instance().FindAssetByGuid(terrainId) != nullptr,

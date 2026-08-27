@@ -6,6 +6,50 @@
 #include "VulkanResourceSource.h"
 #include "Renderer/Terrain/TerrainMaterialRuntimeRegistry.h"
 
+namespace
+{
+	VkFilter ToVkFilter(TerraEngine::Renderer::Vulkan::VulkanSamplerFilter filter) noexcept
+	{
+		return filter == TerraEngine::Renderer::Vulkan::VulkanSamplerFilter::Nearest
+			? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+	}
+
+	VkSamplerMipmapMode ToVkMipFilter(
+		TerraEngine::Renderer::Vulkan::VulkanSamplerMipFilter filter) noexcept
+	{
+		return filter == TerraEngine::Renderer::Vulkan::VulkanSamplerMipFilter::Nearest
+			? VK_SAMPLER_MIPMAP_MODE_NEAREST : VK_SAMPLER_MIPMAP_MODE_LINEAR;
+	}
+
+	VkSamplerAddressMode ToVkAddressMode(SamplerAddressMode address) noexcept
+	{
+		switch(address)
+		{
+		case SamplerAddressMode::MirroredRepeat: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+		case SamplerAddressMode::ClampToEdge: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		case SamplerAddressMode::ClampToBorder: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+		case SamplerAddressMode::Repeat:
+		default: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		}
+	}
+
+	TerraEngine::Terrain::TerrainSurfaceSamplerRequest DefaultTextureSamplerRequest() noexcept
+	{
+		return {};
+	}
+
+	TerraEngine::Terrain::TerrainSurfaceSamplerRequest MaterialSamplerRequest(
+		const TextureBinding& binding) noexcept
+	{
+		TerraEngine::Terrain::TerrainSurfaceSamplerRequest request{};
+		request.filter = binding.samplerFilter;
+		request.addressU = binding.addressU;
+		request.addressV = binding.addressV;
+		request.addressW = binding.addressW;
+		return request;
+	}
+}
+
 // VulkanContext::Impl::CreateDefaultTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateDefaultTexture() {
 	// 1. Create Default White Texture (Index 0)
@@ -704,7 +748,7 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 			// texture is cached. Recreate the image when the desired mip tail no
 			// longer matches the cached VkImage dimensions, then fall through to
 			// the normal upload path below.
-			InvalidateTexture(textureId, false);
+			InvalidateTexture(textureId, false, true);
 		}
 		else
 		{
@@ -718,9 +762,8 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 			cachedTexture.sourceMipCount,
 			cachedTexture.residentMipOffset);
 		if (!textureIndexMap.contains(textureId)) {
-			uint32_t index = AllocateTextureIndex();
-			textureIndexMap[textureId] = index;
-			UpdateGlobalTexture(index, cachedTexture);
+			const auto key = NormalizeTextureSampler(DefaultTextureSamplerRequest());
+			textureIndexMap[textureId] = AcquireSampledTextureAlias(textureId, key);
 		}
 		return;
 		}
@@ -917,10 +960,12 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 		sourceMipCount,
 		residentMipOffset);
 
-	// Assign bindless index
-	uint32_t index = AllocateTextureIndex();
-	textureIndexMap[textureId] = index;
-	UpdateGlobalTexture(index, vImage);
+	// A mip replacement retains existing alias indices. Publish the new view to
+	// every sampler variant first, then ensure legacy callers have the ordinary
+	// trilinear-repeat alias recorded in textureIndexMap.
+	UpdateSampledTextureAliases(textureId, vImage);
+	const auto defaultKey = NormalizeTextureSampler(DefaultTextureSamplerRequest());
+	textureIndexMap[textureId] = AcquireSampledTextureAlias(textureId, defaultKey);
 }
 
 // VulkanContext::Impl::EnsureMaterialDescriptorSets is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -978,11 +1023,11 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 		if (binding.textureUuid == TerraEngine::EMPTY_UUID) continue;
 
 		EnsureTexture(binding.textureUuid);
-		uint32_t gpuIndex = 0;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (textureIndexMap.contains(binding.textureUuid)) {
-			gpuIndex = textureIndexMap[binding.textureUuid];
-		}
+		// Combined descriptors need one alias for each effective sampler. The
+		// texture image remains unique even when two TMAT bindings request
+		// different filter or addressing behavior.
+		const auto samplerKey = NormalizeTextureSampler(MaterialSamplerRequest(binding));
+		const uint32_t gpuIndex = AcquireSampledTextureAlias(binding.textureUuid, samplerKey);
 
 		// Dispatch by explicit engine state so each case documents one supported behavior.
 		switch (binding.semantic) {
@@ -1021,14 +1066,21 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 			for(std::uint32_t layerIndex = 0u; layerIndex < terrainBinding->layerCount; ++layerIndex)
 			{
 				const auto& layer = terrainBinding->layers[layerIndex];
-				std::uint32_t textureIndex = 0u;
-				if(layer.baseColorTextureId != TerraEngine::EMPTY_UUID)
+				const std::array<TerraEngine::UUID, 4u> sourceIds{
+					layer.baseColorTextureId, layer.normalTextureId,
+					layer.ormTextureId, layer.emissiveTextureId};
+				std::array<std::uint32_t, 4u> textureIndices{};
+				for(std::size_t semanticIndex = 0u; semanticIndex < sourceIds.size(); ++semanticIndex)
 				{
-					EnsureTexture(layer.baseColorTextureId);
-					if(const auto found = textureIndexMap.find(layer.baseColorTextureId);
-						found != textureIndexMap.end()) textureIndex = found->second;
+					if(sourceIds[semanticIndex] == TerraEngine::EMPTY_UUID) continue;
+					EnsureTexture(sourceIds[semanticIndex]);
+					const auto key = NormalizeTextureSampler(layer.samplers[semanticIndex]);
+					textureIndices[semanticIndex] = AcquireSampledTextureAlias(sourceIds[semanticIndex], key);
 				}
-				data.TerrainLayerTextureIndices[layerIndex / 4u][layerIndex % 4u] = textureIndex;
+				// The compatibility material record currently exposes base color only;
+				// dedicated terrain packets consume all four indices from their fixed
+				// TerrainGpuLayerBinding publication.
+				data.TerrainLayerTextureIndices[layerIndex / 4u][layerIndex % 4u] = textureIndices[0];
 				data.TerrainLayerStableIds[layerIndex / 4u][layerIndex % 4u] = layer.stableLayerId;
 				data.TerrainLayerBaseColorFactors[layerIndex] = glm::vec4(
 					layer.baseColorFactor[0], layer.baseColorFactor[1],
@@ -1143,22 +1195,36 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 }
 
 // VulkanContext::Impl::InvalidateTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId, bool reloadAfterInvalidate) {
+void VulkanContext::Impl::InvalidateTexture(
+	TerraEngine::UUID textureId, bool reloadAfterInvalidate,
+	bool preserveAliasesForReplacement) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	// Texture edits may affect alpha-tested caster silhouettes, so shadow cache
 	// reuse falls back to refresh after the texture changes.
 	shadowCacheEntries.clear();
 	bool textureWasKnown = false;
+	const bool retainAliases = reloadAfterInvalidate || preserveAliasesForReplacement;
+	const bool hasAliases = std::any_of(
+		sampledTextureAliases.begin(), sampledTextureAliases.end(),
+		[textureId](const auto& entry) { return entry.first.textureId == textureId; });
+	if(hasAliases)
+	{
+		if(retainAliases)
+			UpdateSampledTextureAliases(textureId, defaultTexture);
+		else
+			RetireSampledTextureAliases(textureId);
+		textureWasKnown = true;
+	}
 	auto it = textureCache.find(textureId);
 	if (it != textureCache.end()) {
 		// Don't invalidate default texture
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (it->second.image == defaultTexture.image) return;
 
-		// Texture reloads update bindless descriptors and destroy old image
-		// views. Wait for submitted command buffers before those descriptors can
-		// point at replacement resources.
+		// No descriptor may continue naming a view that is about to be destroyed.
+		// Immediate reload and mip-tail replacement retain stable alias indices;
+		// eviction retires the aliases and returns their slots to the global heap.
 		WaitForDescriptorMutationIdle();
 		vkDestroySampler(device, it->second.sampler, nullptr);
 		vkDestroyImageView(device, it->second.view, nullptr);
@@ -1167,16 +1233,12 @@ void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId, bool re
 		textureWasKnown = true;
 	}
 
-	if (auto indexIt = textureIndexMap.find(textureId); indexIt != textureIndexMap.end())
+	if (!reloadAfterInvalidate && !preserveAliasesForReplacement)
 	{
-		const uint32_t releasedIndex = indexIt->second;
-		UpdateGlobalTexture(releasedIndex, defaultTexture);
-		textureIndexMap.erase(indexIt);
-		if (releasedIndex > 2u)
-		{
-			freeTextureIndices.push_back(releasedIndex);
-		}
-		textureWasKnown = true;
+		// RetireSampledTextureAliases owns both descriptor reset and index reuse.
+		// Erase a stale legacy lookup even when a partially uploaded texture never
+		// reached the alias cache.
+		textureIndexMap.erase(textureId);
 	}
 
 	if (!reloadAfterInvalidate && textureWasKnown && !materialIndexMap.empty())
@@ -1690,6 +1752,140 @@ uint32_t VulkanContext::Impl::AllocateTextureIndex() {
 	return nextTextureIndex++;
 }
 
+TerraEngine::Renderer::Vulkan::SamplerKey VulkanContext::Impl::NormalizeTextureSampler(
+	const TerraEngine::Terrain::TerrainSurfaceSamplerRequest& request) const noexcept
+{
+	const TerraEngine::Renderer::Vulkan::VulkanSamplerCapabilities capabilities{
+		samplerAnisotropySupported, maximumSamplerAnisotropy};
+	return TerraEngine::Renderer::Vulkan::NormalizeTerrainSamplerPolicy(
+		request, capabilities, requestedTerrainAnisotropy).key;
+}
+
+VkSampler VulkanContext::Impl::AcquireCachedTextureSampler(
+	const TerraEngine::Renderer::Vulkan::SamplerKey& key)
+{
+	if(const auto found = textureSamplerCache.find(key); found != textureSamplerCache.end())
+		return found->second.handle;
+
+	VkSamplerCreateInfo createInfo{};
+	createInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+	createInfo.magFilter = ToVkFilter(key.magFilter);
+	createInfo.minFilter = ToVkFilter(key.minFilter);
+	createInfo.mipmapMode = ToVkMipFilter(key.mipFilter);
+	createInfo.addressModeU = ToVkAddressMode(key.addressU);
+	createInfo.addressModeV = ToVkAddressMode(key.addressV);
+	createInfo.addressModeW = ToVkAddressMode(key.addressW);
+	createInfo.anisotropyEnable = key.anisotropyEnabled ? VK_TRUE : VK_FALSE;
+	createInfo.maxAnisotropy = key.anisotropyEnabled ? key.effectiveAnisotropy : 1.0F;
+	createInfo.minLod = 0.0F;
+	// The image view bounds available levels, so one normalized sampler can be
+	// reused by full and partial mip views without encoding residency in its key.
+	createInfo.maxLod = VK_LOD_CLAMP_NONE;
+	createInfo.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+
+	VkSampler sampler = VK_NULL_HANDLE;
+	if(vkCreateSampler(device, &createInfo, nullptr, &sampler) != VK_SUCCESS)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to create a normalized sampled-texture alias sampler.");
+		return VK_NULL_HANDLE;
+	}
+	textureSamplerCache.emplace(key, CachedTextureSampler{sampler, 0u});
+	return sampler;
+}
+
+void VulkanContext::Impl::ReleaseCachedTextureSampler(
+	const TerraEngine::Renderer::Vulkan::SamplerKey& key)
+{
+	const auto found = textureSamplerCache.find(key);
+	if(found == textureSamplerCache.end()) return;
+	if(found->second.aliasReferenceCount > 0u) --found->second.aliasReferenceCount;
+	if(found->second.aliasReferenceCount != 0u) return;
+	if(found->second.handle != VK_NULL_HANDLE)
+		vkDestroySampler(device, found->second.handle, nullptr);
+	textureSamplerCache.erase(found);
+}
+
+uint32_t VulkanContext::Impl::AcquireSampledTextureAlias(
+	TerraEngine::UUID textureId,
+	const TerraEngine::Renderer::Vulkan::SamplerKey& key)
+{
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
+	const VulkanSampledTextureAliasKey aliasKey{textureId, key};
+	if(const auto found = sampledTextureAliases.find(aliasKey);
+		found != sampledTextureAliases.end()) return found->second.descriptorIndex;
+
+	const auto image = textureCache.find(textureId);
+	if(image == textureCache.end() || image->second.view == VK_NULL_HANDLE) return 0u;
+	const bool capacityExhausted = freeTextureIndices.empty()
+		&& nextTextureIndex >= MAX_BINDLESS_TEXTURES;
+	if(capacityExhausted)
+	{
+		TERRAENGINE_LOG(LogLevel::Error,
+			"Sampled-texture alias allocation exhausted the 1,024-slot bindless texture heap.");
+		return 0u;
+	}
+	const VkSampler sampler = AcquireCachedTextureSampler(key);
+	if(sampler == VK_NULL_HANDLE) return 0u;
+
+	const uint32_t descriptorIndex = AllocateTextureIndex();
+	CachedTextureSampler& cachedSampler = textureSamplerCache.at(key);
+	++cachedSampler.aliasReferenceCount;
+	const std::uint64_t generation = textureViewGenerations.try_emplace(textureId, 1u).first->second;
+	sampledTextureAliases.emplace(aliasKey,
+		SampledTextureAlias{descriptorIndex, sampler, generation});
+
+	WaitForDescriptorMutationIdle();
+	WriteGlobalTextureAlias(descriptorIndex, image->second.view, sampler);
+	return descriptorIndex;
+}
+
+void VulkanContext::Impl::UpdateSampledTextureAliases(
+	TerraEngine::UUID textureId, const VulkanImage& image)
+{
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
+	if(image.view == VK_NULL_HANDLE) return;
+	const bool hasAliases = std::any_of(
+		sampledTextureAliases.begin(), sampledTextureAliases.end(),
+		[textureId](const auto& entry) { return entry.first.textureId == textureId; });
+	if(!hasAliases) return;
+
+	WaitForDescriptorMutationIdle();
+	const std::uint64_t generation = ++textureViewGenerations[textureId];
+	for(auto& [key, alias] : sampledTextureAliases)
+	{
+		if(key.textureId != textureId) continue;
+		WriteGlobalTextureAlias(alias.descriptorIndex, image.view, alias.sampler);
+		alias.imageViewGeneration = generation;
+	}
+}
+
+void VulkanContext::Impl::RetireSampledTextureAliases(TerraEngine::UUID textureId)
+{
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
+	std::vector<VulkanSampledTextureAliasKey> retiredKeys;
+	for(const auto& [key, alias] : sampledTextureAliases)
+		if(key.textureId == textureId) retiredKeys.push_back(key);
+	if(retiredKeys.empty()) return;
+
+	// Submitted work is completed before descriptors stop naming the old view.
+	// Slots are rewritten to the engine fallback before sampler destruction, so
+	// no live descriptor retains a retired VkSampler handle.
+	WaitForDescriptorMutationIdle();
+	for(const VulkanSampledTextureAliasKey& key : retiredKeys)
+	{
+		const auto found = sampledTextureAliases.find(key);
+		if(found == sampledTextureAliases.end()) continue;
+		WriteGlobalTextureAlias(
+			found->second.descriptorIndex, defaultTexture.view, defaultTexture.sampler);
+		if(found->second.descriptorIndex > 2u)
+			freeTextureIndices.push_back(found->second.descriptorIndex);
+		ReleaseCachedTextureSampler(key.sampler);
+		sampledTextureAliases.erase(found);
+	}
+	textureIndexMap.erase(textureId);
+	textureViewGenerations.erase(textureId);
+}
+
 // VulkanContext::Impl::AllocateMaterialIndex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 uint32_t VulkanContext::Impl::AllocateMaterialIndex() {
 	while (!freeMaterialIndices.empty()) {
@@ -1714,11 +1910,19 @@ uint32_t VulkanContext::Impl::AllocateMaterialIndex() {
 void VulkanContext::Impl::UpdateGlobalTexture(uint32_t index, const VulkanImage& image) {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	WaitForDescriptorMutationIdle();
+	WriteGlobalTextureAlias(index, image.view, image.sampler);
+}
+
+void VulkanContext::Impl::WriteGlobalTextureAlias(
+	uint32_t index, VkImageView view, VkSampler sampler) {
+	// The caller owns descriptorHostAccessMutex and has completed any required
+	// in-flight wait. Keeping this write primitive wait-free lets one view
+	// replacement update every alias after a single synchronization boundary.
 
 	VkDescriptorImageInfo imageInfo{};
 	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	imageInfo.imageView = image.view;
-	imageInfo.sampler = image.sampler;
+	imageInfo.imageView = view;
+	imageInfo.sampler = sampler;
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {

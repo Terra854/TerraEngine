@@ -42,6 +42,47 @@
       "sampleSpacingMetres": 1.0,
       "defaultHeightMillimetres": 0,
       "expectedPurpose": "negative-floor-and-world-region-boundaries"
+    },
+    {
+      "id": "terrain-terraroot1-contract",
+      "kind": "root-contract",
+      "acceptedMagic": "TERRAROOT1",
+      "rejectedRepresentations": [ "TERRAINROOT2", "creation-json", "unknown-magic", "trailing-data" ],
+      "expectedPurpose": "canonical-root-round-trip-and-atomic-compatibility-rejection"
+    },
+    {
+      "id": "terrain-physical-mapping",
+      "kind": "surface-mapping",
+      "areas": [ { "x": -1, "z": 0 }, { "x": 0, "z": 0 }, { "x": 1, "z": 0 } ],
+      "sampleSpacingMetres": 1.0,
+      "tileSizeMetres": [ 4.0, 4.0 ],
+      "offsetMetres": [ -9.5, 18.25 ],
+      "rotationDegrees": 37.0,
+      "expectedPurpose": "physical-period-phase-reference-frame-and-lod-invariance"
+    },
+    {
+      "id": "terrain-full-pbr-layers",
+      "kind": "surface-material-matrix",
+      "fixture": "terrain-flat-4-area",
+      "semantics": [ "base-color", "normal", "orm", "emissive" ],
+      "mappingModes": [ "terrain-xz", "triplanar" ],
+      "expectedPurpose": "four-contributor-pbr-blending-neutral-fallback-and-signed-axis-normals"
+    },
+    {
+      "id": "terrain-sampler-capabilities",
+      "kind": "sampler-capability-matrix",
+      "filters": [ "nearest", "bilinear", "trilinear", "anisotropic" ],
+      "profiles": [ "anisotropy-unsupported", "anisotropy-4x", "anisotropy-16x", "descriptor-capacity" ],
+      "expectedPurpose": "effective-quality-alias-lifecycle-and-safe-fallback"
+    },
+    {
+      "id": "terrain-multi-area-lod",
+      "kind": "lod-matrix",
+      "areas": [ { "x": -1, "z": -1 }, { "x": 0, "z": -1 }, { "x": 1, "z": -1 }, { "x": -1, "z": 0 }, { "x": 0, "z": 0 }, { "x": 1, "z": 0 }, { "x": -1, "z": 1 }, { "x": 0, "z": 1 }, { "x": 1, "z": 1 } ],
+      "sampleSpacingMetres": 1.0,
+      "lodCellExtents": [ 256, 128, 64, 32 ],
+      "cases": [ "flat", "ramp", "impulse", "noise", "hole-boundary", "missing-outer-neighbor", "forced-fine-page-loss" ],
+      "expectedPurpose": "conservative-error-balanced-cuts-stitches-morphs-and-own-ancestor-fallback"
     }
   ]
 }

@@ -192,6 +192,7 @@ namespace
 		initialized.store(false, std::memory_order_release);
 		std::scoped_lock lock(residencyMutex);
 		pendingDemands.clear();
+		preparedResidency.reset();
 		publishedResidency = {};
 	}
 
@@ -232,8 +233,29 @@ namespace
 			{ kResourceTerrainAssetRoots, kResourceTerrainStreamingDemands, kResourceTerrainPublishedResidency },
 			{ kResourceTerrainPreparedResidency }, "TerrainStreaming.Prepare");
 		prepare.stableDescriptorId = "TerrainStreamingSystem/Render/TerrainStreamingPrepare";
+		prepare.phase = "Render";
 		prepare.activationPredicateKey = "terrain-streaming-lifecycle";
+		prepare.boundaryClassification = HardBoundaryClassification::WorkerSafe;
 		prepare.safeSubwork = "Value-only demand coalescing and bounded terrain area load/eviction planning.";
+		prepare.work = [this](TerraEngine::Scheduling::JobGraphContext&)
+		{
+			std::vector<TerrainResidencyDemand> demands;
+			TerrainResidencySnapshot prior;
+			TerrainResidencyBudget capturedBudget;
+			{
+				std::scoped_lock lock(residencyMutex);
+				demands.swap(pendingDemands);
+				prior = publishedResidency;
+				capturedBudget = budget;
+			}
+			Generation observedGeneration = prior.rootGeneration;
+			for(const TerrainResidencyDemand& demand : demands)
+				observedGeneration = std::max(observedGeneration, demand.rootGeneration);
+			TerrainResidencyPlan plan = PrepareTerrainResidencyPlan(
+				observedGeneration, prior, std::move(demands), capturedBudget);
+			std::scoped_lock lock(residencyMutex);
+			preparedResidency = std::move(plan);
+		};
 
 		FrameWorkloadDeclaration publish = MakeProtectedCommitPhase(
 			"TerrainStreamingPublish", SystemName(),
@@ -242,9 +264,24 @@ namespace
 			"Residency publication swaps immutable terrain snapshots only after generation checks.",
 			"TerrainStreaming.Publish");
 		publish.stableDescriptorId = "TerrainStreamingSystem/Render/TerrainStreamingPublish";
+		publish.phase = "Render";
 		publish.activationPredicateKey = prepare.activationPredicateKey;
 		publish.explicitDependencies = { prepare.stableDescriptorId };
-		publish.sameFrameVisibilityRequired = false;
+		publish.boundaryClassification = HardBoundaryClassification::Protected;
+		publish.hardBoundary = true;
+		publish.protectedCommit = publish.protectedReason;
+		publish.sameFrameVisibilityRequired = true;
+		publish.work = [this](TerraEngine::Scheduling::JobGraphContext&)
+		{
+			std::scoped_lock lock(residencyMutex);
+			if(!preparedResidency) return;
+			Generation currentGeneration = std::max(
+				publishedResidency.rootGeneration, preparedResidency->observedRootGeneration);
+			for(const TerrainResidencyDemand& demand : pendingDemands)
+				currentGeneration = std::max(currentGeneration, demand.rootGeneration);
+			PublishTerrainResidencyPlan(publishedResidency, *preparedResidency, currentGeneration);
+			preparedResidency.reset();
+		};
 
 		for(FrameWorkloadDeclaration* workload : { &prepare, &publish })
 		{

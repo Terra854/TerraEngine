@@ -74,6 +74,58 @@ namespace
 			context.Expect(store.CaptureRoot().root == root.root && store.CaptureRoot().publicationGeneration == 1u, "Conflicts, unavailable blobs, and injected failures must leave the prior immutable root visible.");
 		});
 
+		registry.Add("Terrain.AtomicEdit.RejectedLayerMutationPreservesTheCompleteRoot", [](TestContext& context) {
+			Terrain::TerrainAreaDescriptor before{};
+			auto initialRoot = std::make_shared<Terrain::TerrainAssetRoot>(*MakeRoot(before));
+			Terrain::TerrainLayerStack layers{};
+			layers.generation = initialRoot->layerStackGeneration;
+			layers.layers = {
+				{1u, "Grass", TerraEngine::GenerateUUID()},
+				{2u, "Rock", TerraEngine::GenerateUUID()}
+			};
+			initialRoot->defaultLayerId = 1u;
+			initialRoot->layerStack = std::make_shared<const Terrain::TerrainLayerStack>(layers);
+			// The fixture must itself be a complete canonical root before testing a
+			// rejected layer mutation; persisted manifests require shard identities.
+			initialRoot->directoryShards.front().identity = {41u, 42u};
+			const Terrain::TerrainRootCodecResult encoded = Terrain::EncodeTerrainRootManifest(*initialRoot);
+			initialRoot->rootContentHash = encoded.contentHash;
+
+			Terrain::TerrainAssetStore store(initialRoot);
+			Terrain::TerrainPublication publication(store);
+			const Terrain::TerrainRootCapture observed = store.CaptureRoot();
+			Terrain::TerrainEditTransaction transaction{};
+			transaction.transactionId = TerraEngine::GenerateUUID();
+			transaction.targetAssetUuid = observed.root->assetUuid;
+			transaction.inputRootHash = observed.root->rootContentHash;
+			transaction.expectedLayerStackGeneration = observed.root->layerStackGeneration;
+			transaction.affectedBounds = observed.root->authoredBounds;
+			Terrain::TerrainLayer duplicate = observed.root->layerStack->layers.back();
+			duplicate.stableId = observed.root->layerStack->layers.front().stableId;
+			transaction.layerStackPatch = Terrain::TerrainLayerPatch{
+				Terrain::TerrainLayerPatchKind::Add,
+				observed.root->layerStackGeneration,
+				0u,
+				0xffffffffu,
+				duplicate
+			};
+
+			const Terrain::TerrainTransactionReceipt rejected = publication.Publish(std::move(transaction));
+			const Terrain::TerrainRootCapture after = store.CaptureRoot();
+			const auto descriptorAfter = store.FindDescriptor(*after.root, before.coordinate);
+			context.Expect(encoded.Succeeded() && rejected.outcome == Terrain::TerrainEditOutcome::Rejected
+				&& rejected.code == Terrain::TerrainResultCode::InvalidArgument,
+				"A duplicate stable layer ID must reject the whole protected root mutation.");
+			context.Expect(after.root == observed.root
+				&& after.publicationGeneration == observed.publicationGeneration
+				&& after.root->rootContentHash == observed.root->rootContentHash
+				&& after.root->layerStack == observed.root->layerStack
+				&& after.root->layerStack->layers.size() == 2u
+				&& descriptorAfter.has_value()
+				&& descriptorAfter->authoredContentHash == before.authoredContentHash,
+				"Rejected layer metadata must leave the prior root pointer, generation, hash, layer stack, and area descriptor atomically visible.");
+		});
+
 		registry.Add("Terrain.AtomicEdit.MonotonicReplayRetainsExactHistoryAndVisibility", [](TestContext& context) {
 			Terrain::TerrainAreaDescriptor before{};
 			Terrain::TerrainAssetStore store(MakeRoot(before));

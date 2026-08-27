@@ -8,6 +8,12 @@ and 8-bit images are rejected before an authored root is created. Terrain
 instances use signed, canonical world coordinates and may reference shared
 assets only after the editor reports the ownership choice.
 
+Only canonical `TERRAROOT1` terrain can be opened. Older `TERRAINROOT2`, JSON,
+or otherwise incompatible roots are not migrated. If the Terrain window shows
+`UnsupportedTerrainRoot`, recreate from the original PNG16/RAW16 source or
+recook with the current compiler, then replace the old terrain asset. A failed
+load leaves the current scene terrain unchanged.
+
 ## Sculpt, layers, and holes
 
 Use bounded raise, lower, smooth, flatten, terrace, ramp, stamp, noise, and
@@ -26,6 +32,37 @@ whole-area operations. The live proxy resolves four contributors per sample
 against the first 16 enabled layers; unavailable authored materials render
 magenta so they can be repaired without losing their stable paint IDs.
 
+Roots may retain 64 definitions but only 1–16 layers can be enabled. Stable
+layer IDs survive reorder. Enabling a 17th layer, disabling the final enabled
+layer, or introducing a duplicate/zero ID or duplicate normalized name rejects
+the whole edit and keeps the previous stack.
+
+## Mapping and material channels
+
+Terrain-XZ maps textures in asset-local metres; triplanar projects the same
+physical scale across three axes. New layers default to a 4 m by 4 m tile, zero
+offset, zero rotation, and triplanar sharpness 4. Adjust tile width/depth,
+metre offsets, layer rotation, and sharpness in the layer controls. Translating
+the terrain carries the texture with it, while distant render-origin changes do
+not move the pattern. Terrain object rotation and scale are not supported.
+
+Each layer uses four slots: Base Color, tangent-space Normal, packed ORM
+(`R=AO`, `G=roughness`, `B=metallic`), and Emissive. If fallback is enabled,
+missing slots use white, flat normal `(0.5,0.5,1)`, `(1,1,0)`, and black.
+Otherwise Apply is rejected and the last-known-good material remains visible.
+Changing material, mapping, factors, or filter does not rebuild terrain
+geometry; painting weights does not rebuild geometry either.
+
+## Filtering
+
+Choose Nearest for hard texels, Bilinear for linear minification without mip
+blending, Trilinear for mip blending, or Anisotropic for angled surfaces. The
+Terrain window shows both requested and effective quality. When anisotropy is
+unsupported it safely uses Trilinear; a level above the device maximum is
+clamped. `DescriptorCapacityExceeded` means the global 1024 combined texture
+aliases are full: reduce unique texture/filter combinations or release unused
+terrain/material resources.
+
 ## Procedural tools
 
 Height, slope, mask, and layer selections are strict about bounds and budgets.
@@ -41,6 +78,20 @@ and unavailable states. Locate an area before repairing or rebuilding it;
 diagnostics include the affected coordinate, severity, impact, action, source,
 generation, and stage timing. Save writes immutable blobs and a root manifest
 before replacing `CURRENT`; a failed stage retains the predecessor root.
+
+For a visible area, LOD diagnostics distinguish desired, balanced, resident,
+and actually rendered levels. They also show projected error, hysteresis,
+stitch mask, hole-boundary pinning, desired/actual page, own-ancestor fallback
+depth, payload bytes/status, and missing-halo state. A fallback while a fine page
+streams is expected; an unrelated page is never substituted. Missing interior
+halo data, an unbalanced/incomplete cut, bad checksum/range, stale publication,
+or rollback is actionable and retains the prior valid snapshot.
+
+Automation exposes the same root generation, enabled stable layers, mapping,
+requested/effective sampler quality, per-area LOD/page state, and stable
+diagnostic codes through `terrain.asset.inspect` and
+`terrain.diagnostics.get`. See [Terrain automation](../../../Docs/TerrainAutomation.md)
+for bounded requests, generation checks, jobs, and receipts.
 
 ## Heightfield limits
 

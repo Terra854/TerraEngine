@@ -50,8 +50,11 @@ set(_TERRAENGINE_TERRAIN_ENGINE_FILES
 	Engine/Runtime/ContentMount/TerrainContentResolver.h
 	Engine/Runtime/ContentMount/TerrainRuntimeProxyLoader.cpp
 	Engine/Runtime/ContentMount/TerrainRuntimeProxyLoader.h
+	Engine/Runtime/ContentMount/TerrainRuntimeBootstrap.cpp
+	Engine/Runtime/ContentMount/TerrainRuntimeBootstrap.h
 	Engine/Renderer/Terrain/TerrainPageCooker.cpp
 	Engine/Renderer/Terrain/TerrainPageCooker.h
+	Engine/Renderer/Terrain/TerrainPageFormat.h
 	Engine/Renderer/Terrain/TerrainRenderPackets.cpp
 	Engine/Renderer/Terrain/TerrainRenderPackets.h
 	Engine/Renderer/Terrain/TerrainRenderProxyRegistry.cpp
@@ -95,7 +98,9 @@ endforeach()
 
 list(APPEND TERRAENGINE_TERRAIN_COMPILER_SOURCES
 	Editor/TerraEngineTerrainCompiler.cpp
-	Editor/AssetCompilers/TerrainCompiler.cpp)
+	Editor/AssetCompilers/TerrainCompiler.cpp
+	Editor/AssetCompilers/TextureCompiler.cpp
+	Editor/TerraEngine-Editor/Terrain/TerrainMaterialCompiler.cpp)
 
 set(_TERRAENGINE_TERRAIN_EDITOR_FILES
 	Editor/AssetCompilers/TerrainCompiler.cpp
@@ -110,6 +115,8 @@ set(_TERRAENGINE_TERRAIN_EDITOR_FILES
 	Editor/TerraEngine-Editor/Terrain/TerrainPicking.h
 	Editor/TerraEngine-Editor/Terrain/TerrainCreationService.cpp
 	Editor/TerraEngine-Editor/Terrain/TerrainCreationService.h
+	Editor/TerraEngine-Editor/Terrain/TerrainMaterialCompiler.cpp
+	Editor/TerraEngine-Editor/Terrain/TerrainMaterialCompiler.h
 	Editor/TerraEngine-Editor/Terrain/TerrainAuthoringSystem.cpp
 	Editor/TerraEngine-Editor/Terrain/TerrainAuthoringSystem.h
 	Editor/TerraEngine-Editor/Terrain/TerrainHistoryCommand.cpp

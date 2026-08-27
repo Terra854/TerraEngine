@@ -22,8 +22,29 @@ function Write-Lane([string]$id,$metrics) {
 	$available=$null -ne $metrics
 	[ordered]@{status=if($available){'available'}else{'unavailable'};passing=$false;reason=if($available){'Five comparable raw captures recorded; thresholds remain a separate production gate.'}else{'Benchmark cannot measure this installed runtime lane.'};rawMetrics=$metrics;artifactSha256=if($available){$identities[0].sha256}else{$null};sourceCaptures=if($available){$identities}else{@()}} | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $CaptureDirectory "$id.json") -Encoding utf8
 }
-Write-Lane 'authoring' ([ordered]@{preview=Percentiles (Join-Samples 'previewNanoseconds')})
-Write-Lane 'render-culling' ([ordered]@{cook=Percentiles (Join-Samples 'cookNanoseconds');upload=Percentiles (Join-Samples 'uploadNanoseconds');publication=Percentiles (Join-Samples 'publicationNanoseconds')})
+Write-Lane 'authoring' ([ordered]@{
+	preview=Percentiles (Join-Samples 'previewNanoseconds')
+	mappingEdit=Percentiles (Join-Samples 'mappingEditNanoseconds')
+	geometryRebuildCounts=@(Join-Samples 'geometryRebuildCounts')
+})
+$reduction=@($rawCaptures | ForEach-Object { [double]$_.rawMetrics.geometryReductionPercent })
+Write-Lane 'render-culling' ([ordered]@{
+	cook=Percentiles (Join-Samples 'cookNanoseconds')
+	cpuPreparation=Percentiles (Join-Samples 'cpuPreparationNanoseconds')
+	upload=Percentiles (Join-Samples 'uploadNanoseconds')
+	publication=Percentiles (Join-Samples 'publicationNanoseconds')
+	samplerCount=@($rawCaptures | ForEach-Object { [uint32]$_.rawMetrics.samplerCount })
+	sampledAliasCount=@($rawCaptures | ForEach-Object { [uint32]$_.rawMetrics.sampledAliasCount })
+	visibleTextureTouchCount=@($rawCaptures | ForEach-Object { [uint32]$_.rawMetrics.visibleTextureTouchCount })
+	visibleAreaCount=@($rawCaptures | ForEach-Object { [uint32]$_.rawMetrics.visibleAreaCount })
+	selectedNodeCount=@($rawCaptures | ForEach-Object { [uint32]$_.rawMetrics.selectedNodeCount })
+	residentPageCount=@($rawCaptures | ForEach-Object { [uint32]$_.rawMetrics.residentPageCount })
+	fallbackPageCount=@($rawCaptures | ForEach-Object { [uint32]$_.rawMetrics.fallbackPageCount })
+	seamRepairCount=@($rawCaptures | ForEach-Object { [uint32]$_.rawMetrics.seamRepairCount })
+	allocationBytes=@($rawCaptures | ForEach-Object { [uint64]$_.rawMetrics.allocationBytes })
+	geometryReductionPercent=$reduction
+	minimumGeometryReductionPercent=($reduction | Measure-Object -Minimum).Minimum
+})
 Write-Lane 'collision' ([ordered]@{construction=Percentiles (Join-Samples 'collisionNanoseconds')})
 Write-Lane 'streaming-decode-io' $null
 Write-Lane 'save-recovery' $null

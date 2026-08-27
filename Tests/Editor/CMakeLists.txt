@@ -267,6 +267,7 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/AnimationRuntimeOperations.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/AnimationAutomationProvider.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOrientationWidget.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewCameraState.cpp
 	Core/EditorWindowRttiStubs.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewMarkerPipeline.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayIcons.cpp
@@ -593,6 +594,16 @@ add_test(NAME Editor.Terrain.Layers COMMAND $<TARGET_FILE:TerraEngine-EditorTest
 set_tests_properties(Editor.Terrain.Layers PROPERTIES
 	LABELS "Editor;Terrain;Surface;Layers"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.TerrainLayers")
+
+add_test(NAME Editor.Terrain.MappingPreview COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Terrain.MappingPreview PROPERTIES
+	LABELS "Editor;Terrain;Mapping;Preview;Transactions"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.TerrainLayers.Mapping,Editor.TerrainLifecycle.Mapping")
+
+add_test(NAME Editor.Terrain.Compatibility COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Terrain.Compatibility PROPERTIES
+	LABELS "Editor;Terrain;Format;Compatibility;Recovery"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.TerrainCreation.TERRAROOT1,Editor.TerrainSaveRecovery.TERRAROOT1")
 
 add_test(NAME Editor.Terrain.CollisionAlignment COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
 set_tests_properties(Editor.Terrain.CollisionAlignment PROPERTIES

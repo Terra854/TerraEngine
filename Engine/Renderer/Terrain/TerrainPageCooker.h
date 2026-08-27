@@ -61,10 +61,17 @@ namespace TerraEngine::Renderer::Terrain
 		struct MeshletRecord
 		{
 			std::uint32_t meshletId = 0u;
+			// Spatial ownership is explicit so page decoding never has to infer
+			// which quadtree node produced a meshlet from payload ordering.
+			std::uint32_t nodeId = 0u;
 			std::uint16_t minX = 0u;
 			std::uint16_t minZ = 0u;
 			std::uint16_t maxXExclusive = 0u;
 			std::uint16_t maxZExclusive = 0u;
+			std::uint16_t renderedCellWidth = 0u;
+			std::uint16_t renderedCellHeight = 0u;
+			std::uint32_t vertexCount = 0u;
+			std::uint32_t triangleCount = 0u;
 			ConservativeBounds bounds{};
 			std::uint32_t firstPayloadByte = 0u;
 			std::uint32_t payloadByteCount = 0u;
@@ -90,7 +97,16 @@ namespace TerraEngine::Renderer::Terrain
 			std::uint32_t nodeId = 0u;
 			std::uint32_t parentNodeId = 0xffffffffu;
 			std::uint16_t lodLevel = 0u;
+			std::uint16_t cellOriginX = 0u;
+			std::uint16_t cellOriginZ = 0u;
+			std::uint16_t cellExtent = 0u;
+			std::uint32_t firstMeshlet = 0u;
+			std::uint32_t meshletCount = 0u;
 			ConservativeBounds bounds{};
+			// The stored geometric bound includes both values. Keeping them
+			// separately lets diagnostics prove the conservative-error equation.
+			float maximumQuantizationErrorMetres = 0.0f;
+			float maximumMorphDisplacementMetres = 0.0f;
 			float morphStartMetres = 0.0f;
 			float morphEndMetres = 0.0f;
 			bool refinesHoleBoundary = false;
@@ -101,6 +117,9 @@ namespace TerraEngine::Renderer::Terrain
 			TerrainPageEdge edge = TerrainPageEdge::West;
 			std::int8_t neighborLodDelta = 0;
 			bool conservativeBoundary = false;
+			std::uint8_t stitchMask = 0u;
+			std::uint32_t firstIndex = 0u;
+			std::uint32_t indexCount = 0u;
 		};
 		std::vector<ErrorPyramidLevel> errorPyramid;
 		std::vector<MeshletRecord> meshlets;
@@ -109,6 +128,7 @@ namespace TerraEngine::Renderer::Terrain
 		std::vector<EdgeStitchVariant> edgeStitchVariants;
 		std::vector<PageRange> pageRanges;
 		std::vector<std::uint16_t> packedNormals;
+		std::vector<std::uint16_t> stitchIndices;
 		std::vector<std::uint8_t> pagePayload;
 		TerraEngine::Terrain::ContentHash sourceIdentity{};
 		TerraEngine::Terrain::ContentHash neighborDependencyHash{};

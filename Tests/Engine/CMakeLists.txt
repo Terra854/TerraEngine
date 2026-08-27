@@ -708,6 +708,33 @@ set_tests_properties(Engine.Terrain.Surface PROPERTIES
 	LABELS "Engine;Terrain;Surface;Layers"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.Layers,Terrain.Surface")
 
+# The terrain rendering overhaul keeps focused contracts independently runnable so a failure
+# identifies format, mapping, sampler, selection, or residency ownership.
+add_test(NAME Engine.Terrain.Format COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Terrain.Format PROPERTIES
+	LABELS "Engine;Terrain;Format;Contract"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.Format")
+
+add_test(NAME Engine.Terrain.Mapping COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Terrain.Mapping PROPERTIES
+	LABELS "Engine;Terrain;Mapping;LargeWorld"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.Mapping,Terrain.Coordinates,Terrain.LargeWorld")
+
+add_test(NAME Engine.Terrain.Sampler COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Terrain.Sampler PROPERTIES
+	LABELS "Engine;Terrain;Sampler;Vulkan;Residency"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.Sampler")
+
+add_test(NAME Engine.Terrain.Lod COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Terrain.Lod PROPERTIES
+	LABELS "Engine;Terrain;LOD;Seams;VirtualGeometry"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.Lod,Terrain.PageCooker")
+
+add_test(NAME Engine.Terrain.Residency COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Terrain.Residency PROPERTIES
+	LABELS "Engine;Terrain;Residency;Streaming;Fallback"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.Residency")
+
 add_test(NAME Engine.Terrain.Collision COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.Terrain.Collision PROPERTIES
 	LABELS "Engine;Terrain;Physics;Collision"

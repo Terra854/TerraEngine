@@ -3,6 +3,7 @@
 #include "TestHarness.h"
 
 #include "Renderer/Terrain/TerrainPageCooker.h"
+#include "Renderer/Terrain/TerrainPageFormat.h"
 #include "Terrain/TerrainAreaCodec.h"
 #include "Terrain/TerrainEditTransaction.h"
 
@@ -30,7 +31,12 @@ namespace TerraEngine::Tests
 	void RegisterTerrainHoleTests(TestRegistry& registry)
 	{
 		registry.Add("Terrain.Holes.CanonicalMaskRefinesBoundaryMeshlets", [](TestContext& context) {
-			std::vector<std::int32_t> heights(TerraEngine::Terrain::kTerrainAreaSampleCount, 10);
+			// Page cooking consumes the complete 257-by-257 owned vertex grid plus
+			// one west/south normal-only halo sample, not the authored 256 grid.
+			std::vector<std::int32_t> heights(
+				TerraEngine::Renderer::Terrain::Format::kCookHaloSampleExtent
+					* TerraEngine::Renderer::Terrain::Format::kCookHaloSampleExtent,
+				10);
 			std::vector<std::uint8_t> holes(8192u, 0u);
 			const std::uint32_t bit = 16u * 256u + 16u;
 			holes[bit / 8u] |= static_cast<std::uint8_t>(1u << (bit % 8u));

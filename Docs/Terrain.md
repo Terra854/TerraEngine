@@ -6,6 +6,96 @@ signed world coordinates, streamed authored areas, detached previews, typed
 atomic edits, surface layers, holes, derived rendering, and heightfield
 collision.
 
+## Canonical root and compatibility
+
+`TERRAROOT1` is the only terrain root accepted by creation, import, save,
+asset inspection, and runtime loading. This is an intentional compatibility
+break: `TERRAINROOT2`, creation JSON, unknown magic, and non-canonical roots are
+rejected with `UnsupportedTerrainRoot`. There is no compatibility decoder or
+automatic migration. Recreate the terrain from its source heightfield, or
+recook it with the current terrain compiler, then replace the old `.teterrain`
+descriptor and immutable root objects in the project.
+
+The canonical bytes contain the complete ordered layer stack and sorted area
+references. The content hash is calculated from those bytes and is not written
+back into the root. Loading and publication are bounded and atomic: malformed
+input, a stale generation, or a publication conflict leaves the previous root,
+layers, and render snapshot active.
+
+## Physical surface contract
+
+A root stores 1–64 layer definitions and publishes the complete ordered set of
+1–16 enabled layers. Stable non-zero layer IDs survive reorder operations;
+normalized names must be unique. Adding a 17th enabled layer, disabling the
+last enabled layer, or publishing an invalid/missing stable reference rejects
+the entire transaction instead of truncating the renderer's layer list.
+
+Each enabled layer has four material semantics shared by the direct and
+page-backed paths:
+
+| Semantic | Meaning | Neutral fallback |
+|---|---|---|
+| Base Color | Linearized source color | white `(1,1,1,1)` |
+| Normal | Tangent-space normal | encoded `(0.5,0.5,1)` |
+| ORM | red AO, green roughness, blue metallic | `(1,1,0)` |
+| Emissive | Linear emissive color | black `(0,0,0)` |
+
+Source decode and factors are applied once before normalized terrain weights.
+All four semantics use the same contributors and weights. A missing source is
+accepted only when that layer permits its neutral fallback; otherwise the new
+material generation is rejected and the last-known-good binding remains live.
+
+Terrain-XZ and triplanar mapping use asset-local physical metres. For area
+coordinate `A`, local sample `L`, and sample spacing `S`, the mapping position
+is `(A * 256 + L) * S`. The default tile is 4 m by 4 m with zero offset and
+rotation; default triplanar sharpness is 4. Moving a translation-only terrain
+instance carries its appearance, while render-origin changes do not shift the
+texture phase. Terrain instance rotation and scale remain unsupported. Layer
+rotation, metre offsets, non-square tile sizes, and triplanar sharpness are
+authoring controls; control weights and IDs retain their separate area-local UVs.
+
+Nearest, bilinear, trilinear, and anisotropic filters map to normalized sampler
+policies. Unsupported anisotropy becomes trilinear and a requested level above
+the device maximum is clamped; neither condition rejects the terrain. Vulkan
+samplers are reused by normalized policy, while combined aliases are distinct
+per `(texture UUID, sampler policy)` and share the image allocation. The global
+combined descriptor capacity is 1024. View or mip replacement updates every
+alias at the protected RHI boundary and retires old bindings only after in-flight
+frames are safe.
+
+## Multi-area page-backed LOD
+
+Every accepted area is published, not only the origin area. An area owns
+256×256 cells and is cooked from a strict 258×258 height halo so its final east
+and north rows, corner, and cross-area normals are complete. Its spatial
+quadtree covers 256-, 128-, 64-, and 32-cell extents with a fixed 32×32-cell
+grid per node. Base meshlets cover at most 7×7 cells (64 vertices and 98
+triangles); stitch variants remain within the engine's bounded topology limit.
+Page payloads target 64 KiB and carry version, checksum, ranges, morph data,
+conservative error, dependencies, and own-ancestry fallback metadata.
+
+Per-view selection targets 1.5 pixels with hysteresis, produces a complete
+non-overlapping cut, and balances neighbors across node and area edges to at
+most one LOD difference. Hole boundaries stay at the required fine level. If a
+desired page is missing, rendering may use only that node's nearest resident
+ancestor; it never borrows an unrelated page or manufactures upload completion.
+
+## Scheduler and publication boundaries
+
+Terrain streaming workers resolve roots and shards, terrain-derived workers
+prepare material/control/geometry candidates, and VG/RHI workers upload
+immutable page payloads. Protected boundaries publish the accepted root/area,
+derived, and upload-complete page generations in that order. Render capture
+takes one immutable all-area snapshot; worker selection, balancing, demands,
+texture touches, and packet construction use that snapshot without consulting
+mutable registries. Worker code never mutates live objects, components,
+descriptor tables, terrain registries, or page visibility.
+
+Material or mapping edits advance only material bindings; weight/ID paint
+advances only control textures; height/hole edits advance geometry and collision
+together. A stale, conflicting, malformed, or failed candidate leaves every
+previously published generation active.
+
 ## Build and install
 
 From a clean checkout:
@@ -20,6 +110,14 @@ cmake --build --preset RelWithDebInfo --target install
 Validate the installed tree under `out/build/RelWithDebInfo/Build`. Runtime
 terrain content must resolve through loose or TEPAK `ContentMount` paths; do
 not validate against arbitrary source-tree copies.
+
+To remove generated build outputs without deleting the configured build tree,
+run the preset's clean target. Re-run the build, tests, and install commands
+above before collecting evidence:
+
+```powershell
+cmake --build --preset RelWithDebInfo --target clean
+```
 
 ## Validation tools
 
@@ -195,3 +293,17 @@ validation may use durable cancellable jobs. A stale generation, conflict,
 budget violation, missing area, or failed derived build rejects atomically and
 retains the last-known-good published state. Diagnostics identify location,
 severity, impact, action, source, generation, and stage percentiles.
+
+For surface work, inspect requested/effective filtering and sampler fallback,
+descriptor alias/deduplication/capacity counts, enabled stable layer IDs, and
+material/control generation touch counts. For page-backed rendering, inspect
+each visible area's desired/balanced/resident LOD, projected error and
+hysteresis decision, stitch mask, hole pinning, desired/actual page,
+own-ancestor fallback depth, payload bytes/status, and halo state. Root, layer,
+malformed-page, stale-publication, and rollback diagnostics use stable codes so
+the editor, automation, and tests report the same failure.
+
+The normative details are in the terrain rendering overhaul contracts:
+[`TERRAROOT1`](../specs/054-terrain-rendering-overhaul/contracts/terraroot1.md),
+[terrain surface runtime](../specs/054-terrain-rendering-overhaul/contracts/terrain-surface-runtime.md),
+and [terrain LOD publication](../specs/054-terrain-rendering-overhaul/contracts/terrain-lod-publication.md).

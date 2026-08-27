@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
@@ -24,11 +25,111 @@
 #include "Core/Scheduling/FrameWorkload.h"
 #include "File Formats/TerraEngineMeshFile.h"
 #include "Renderer/VirtualGeometry/Selection/RenderViewSelectionData.h"
+#include "Terrain/TerrainTypes.h"
 #include "Utilities/UUID.h"
 
 namespace TerraEngine::Resource
 {
 	using StreamableAssetId = TerraEngine::UUID;
+	inline constexpr std::size_t kTerrainVisibleLayerLimit = 16u;
+	inline constexpr std::int32_t kTerrainVisibleTexturePriority = 90;
+	inline constexpr std::int32_t kTerrainVisibleControlPriority = 100;
+
+	// Semantic identity is retained beside each source UUID for diagnostics and
+	// deduplication. A texture deliberately reused for two semantics therefore
+	// remains two explanatory touches even though ResourceManager may coalesce the
+	// final UUID-only load request at its protected publication boundary.
+	enum class TerrainVisibleTextureSemantic : std::uint8_t
+	{
+		ControlWeight,
+		ControlId,
+		BaseColor,
+		Normal,
+		ORM,
+		Emissive
+	};
+
+	// This fixed value row is copied from one enabled runtime layer while the
+	// renderer owns its protected capture boundary. It contains source identities
+	// only: descriptor aliases and mutable registry handles are intentionally absent.
+	struct TerrainVisibleLayerTextureSources
+	{
+		std::uint16_t stableLayerId = 0u;
+		TerraEngine::UUID baseColorTextureId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID normalTextureId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID ormTextureId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID emissiveTextureId = TerraEngine::EMPTY_UUID;
+	};
+
+	// One record is the complete copied dependency set for one visible terrain
+	// asset area. Workers may aggregate these values but never resolve a material
+	// registry or retain renderer-owned publication storage.
+	struct TerrainVisibleMaterialArea
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		TerraEngine::Terrain::TerrainAreaCoordinate area{};
+		TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
+		double nearestViewDistance = 0.0;
+		TerraEngine::UUID weightTextureId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID layerIdTextureId = TerraEngine::EMPTY_UUID;
+		std::array<TerrainVisibleLayerTextureSources, kTerrainVisibleLayerLimit> layers{};
+		std::uint32_t layerCount = 0u;
+
+		[[nodiscard]] bool IsComplete() const noexcept;
+	};
+
+	struct TerrainVisibleTextureTouch
+	{
+		TerraEngine::UUID textureId = TerraEngine::EMPTY_UUID;
+		double nearestViewDistance = 0.0;
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		TerraEngine::Terrain::TerrainAreaCoordinate area{};
+		TerrainVisibleTextureSemantic semantic = TerrainVisibleTextureSemantic::BaseColor;
+		std::int32_t priority = kTerrainVisibleTexturePriority;
+	};
+
+	// The returned vector owns every row for one frame. Later input mutation or
+	// registry publication cannot alter this snapshot after preparation returns.
+	struct TerrainVisibleTextureTouchSnapshot
+	{
+		std::uint64_t frameId = 0u;
+		std::uint32_t sourceAreaCount = 0u;
+		// sourceTouchCount includes repetitions before UUID/semantic coalescing.
+		// Keeping both counts makes deduplication measurable without recomputing it
+		// from mutable material state after the render capture boundary.
+		std::uint32_t sourceTouchCount = 0u;
+		std::uint32_t duplicateEliminationCount = 0u;
+		std::vector<TerrainVisibleTextureTouch> touches;
+		bool complete = false;
+	};
+
+	// The Vulkan owner copies these counters while holding its protected resource
+	// boundary. No Vulkan handles escape into streaming or editor diagnostics.
+	struct TerrainDescriptorAliasDiagnosticRecord
+	{
+		std::uint32_t samplerCount = 0u;
+		std::uint32_t activeAliasCount = 0u;
+		std::uint32_t pendingAliasRetirementCount = 0u;
+		std::uint32_t descriptorCapacity = 0u;
+		std::uint32_t descriptorSlotsUsed = 0u;
+		bool descriptorAllocationRejected = false;
+	};
+
+	// This is the complete value-only resource view consumed by terrain UI,
+	// automation, and evidence capture. It combines a frame-owned touch result
+	// with a same-boundary descriptor counter copy, never a live backend cache.
+	struct TerrainTextureStreamingDiagnosticSnapshot
+	{
+		std::uint64_t frameId = 0u;
+		std::uint32_t sourceAreaCount = 0u;
+		std::uint32_t sourceTouchCount = 0u;
+		std::uint32_t uniqueTouchCount = 0u;
+		std::uint32_t duplicateEliminationCount = 0u;
+		TerrainDescriptorAliasDiagnosticRecord descriptors{};
+		std::uint32_t descriptorSlotsAvailable = 0u;
+		bool descriptorCapacityExhausted = false;
+		bool complete = false;
+	};
 
 	enum class StreamableAssetType : std::uint8_t
 	{
@@ -473,6 +574,15 @@ namespace TerraEngine::Resource
 	};
 
 	TERRAENGINE_API StreamingPolicy MakeDefaultStreamingPolicy();
+	// Pure worker helper: all source bindings and distances are already copied by
+	// RenderSystem, so this function performs no registry or ResourceManager read.
+	TERRAENGINE_API TerrainVisibleTextureTouchSnapshot PrepareTerrainVisibleTextureTouchSnapshot(
+		std::uint64_t frameId,
+		std::span<const TerrainVisibleMaterialArea> visibleAreas);
+	[[nodiscard]] TERRAENGINE_API TerrainTextureStreamingDiagnosticSnapshot
+		BuildTerrainTextureStreamingDiagnosticSnapshot(
+			const TerrainVisibleTextureTouchSnapshot& touches,
+			TerrainDescriptorAliasDiagnosticRecord descriptors) noexcept;
 	TERRAENGINE_API StreamingPolicy SanitizeStreamingPolicy(const StreamingPolicy& policy);
 	TERRAENGINE_API StreamingAssetPolicy MakeDefaultStreamingAssetPolicy(StreamableAssetType type);
 	TERRAENGINE_API StreamingAssetPolicy SanitizeStreamingAssetPolicy(const StreamingAssetPolicy& policy);

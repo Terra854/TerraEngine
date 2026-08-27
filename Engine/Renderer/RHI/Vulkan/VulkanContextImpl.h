@@ -15,6 +15,7 @@
 #include "VulkanCommandRecording.h"
 #include "VulkanVirtualGeometryExecutor.h"
 #include "VulkanFrameDiagnostics.h"
+#include "VulkanSamplerPolicy.h"
 #include "Renderer/VirtualGeometry/Visibility/VirtualGeometryVisibility.h"
 
 #include "Core/Logger/Logger.h"
@@ -257,6 +258,27 @@ struct PipelineKeyHash {
 	}
 };
 
+// A combined-image-sampler descriptor must distinguish sampler intent even
+// when two aliases share the same VkImageView. UUID identity keeps image
+// ownership stable while SamplerKey captures every normalized Vulkan setting.
+struct VulkanSampledTextureAliasKey
+{
+	TerraEngine::UUID textureId = TerraEngine::EMPTY_UUID;
+	TerraEngine::Renderer::Vulkan::SamplerKey sampler{};
+
+	[[nodiscard]] constexpr bool operator==(const VulkanSampledTextureAliasKey&) const noexcept = default;
+};
+
+struct VulkanSampledTextureAliasKeyHasher
+{
+	[[nodiscard]] std::size_t operator()(const VulkanSampledTextureAliasKey& key) const noexcept
+	{
+		const std::size_t textureHash = std::hash<TerraEngine::UUID>{}(key.textureId);
+		const std::size_t samplerHash = TerraEngine::Renderer::Vulkan::SamplerKeyHasher{}(key.sampler);
+		return textureHash ^ (samplerHash + 0x9e3779b9u + (textureHash << 6u) + (textureHash >> 2u));
+	}
+};
+
 // struct VulkanContext groups related state and operations so callers have one documented contract.
 struct VulkanContext::Impl {
 	VkInstance instance = VK_NULL_HANDLE;
@@ -272,6 +294,13 @@ struct VulkanContext::Impl {
 	// publication can reject oversized storage-buffer descriptors without a
 	// driver query on the render hot path.
 	VkDeviceSize maximumStorageBufferRange = 0U;
+	// Sampler anisotropy is optional. These values are captured once from the
+	// selected physical device and drive normalized terrain sampler aliases.
+	bool samplerAnisotropySupported = false;
+	float maximumSamplerAnisotropy = 1.0F;
+	float requestedTerrainAnisotropy = 1.0F;
+	float effectiveTerrainAnisotropy = 1.0F;
+	bool terrainAnisotropyFallbackActive = false;
 	VkDevice device = VK_NULL_HANDLE;
 	VkQueue graphicsQueue = VK_NULL_HANDLE;
 	VkQueue presentQueue = VK_NULL_HANDLE;
@@ -1126,6 +1155,24 @@ struct VulkanContext::Impl {
 	std::vector<uint32_t> freeTextureIndices;
 	std::unordered_map<TerraEngine::UUID, uint32_t> textureIndexMap;
 	uint32_t nextTextureIndex = 0;
+	struct CachedTextureSampler
+	{
+		VkSampler handle = VK_NULL_HANDLE;
+		std::size_t aliasReferenceCount = 0u;
+	};
+	struct SampledTextureAlias
+	{
+		uint32_t descriptorIndex = 0u;
+		VkSampler sampler = VK_NULL_HANDLE;
+		std::uint64_t imageViewGeneration = 0u;
+	};
+	// Sampler objects are shared by normalized policy, while every texture/key
+	// pair owns its own stable descriptor slot in the existing 1,024-entry heap.
+	std::unordered_map<TerraEngine::Renderer::Vulkan::SamplerKey, CachedTextureSampler,
+		TerraEngine::Renderer::Vulkan::SamplerKeyHasher> textureSamplerCache;
+	std::unordered_map<VulkanSampledTextureAliasKey, SampledTextureAlias,
+		VulkanSampledTextureAliasKeyHasher> sampledTextureAliases;
+	std::unordered_map<TerraEngine::UUID, std::uint64_t> textureViewGenerations;
 
 	std::vector<uint32_t> freeMaterialIndices;
 	std::unordered_map<TerraEngine::UUID, uint32_t> materialIndexMap;
@@ -1213,6 +1260,17 @@ struct VulkanContext::Impl {
 
 	uint32_t AllocateTextureIndex();
 	void UpdateGlobalTexture(uint32_t index, const VulkanImage& image);
+	[[nodiscard]] TerraEngine::Renderer::Vulkan::SamplerKey NormalizeTextureSampler(
+		const TerraEngine::Terrain::TerrainSurfaceSamplerRequest& request) const noexcept;
+	[[nodiscard]] VkSampler AcquireCachedTextureSampler(
+		const TerraEngine::Renderer::Vulkan::SamplerKey& key);
+	void ReleaseCachedTextureSampler(const TerraEngine::Renderer::Vulkan::SamplerKey& key);
+	[[nodiscard]] uint32_t AcquireSampledTextureAlias(
+		TerraEngine::UUID textureId,
+		const TerraEngine::Renderer::Vulkan::SamplerKey& key);
+	void UpdateSampledTextureAliases(TerraEngine::UUID textureId, const VulkanImage& image);
+	void RetireSampledTextureAliases(TerraEngine::UUID textureId);
+	void WriteGlobalTextureAlias(uint32_t index, VkImageView view, VkSampler sampler);
 
 	uint32_t AllocateBufferIndex();
 	void UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range);
@@ -1819,7 +1877,8 @@ struct VulkanContext::Impl {
 	std::vector<VkDescriptorSet> EnsureMaterialDescriptorSets(TerraEngine::UUID shaderCollectionId, TerraEngine::UUID materialId);
 	void InvalidateMaterial(TerraEngine::UUID materialId);
 	void InvalidateMesh(TerraEngine::UUID meshId);
-	void InvalidateTexture(TerraEngine::UUID textureId, bool reloadAfterInvalidate = true);
+	void InvalidateTexture(TerraEngine::UUID textureId, bool reloadAfterInvalidate = true,
+		bool preserveAliasesForReplacement = false);
 	void InvalidateResource(TerraEngine::UUID id, bool reloadTexturesAfterInvalidate = true);
 	void EnsureMesh(TerraEngine::UUID meshId);
 	std::optional<PipelineKey> BuildPipelineKey(

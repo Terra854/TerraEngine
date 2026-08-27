@@ -5,6 +5,7 @@
 #include "Editor/AssetCompilers/TerrainCompiler.h"
 #include "Editor/TerraEngine-Editor/Assets/AssetDatabase.h"
 #include "Editor/TerraEngine-Editor/Terrain/TerrainCreationService.h"
+#include "Terrain/TerrainAssetStore.h"
 
 #include <chrono>
 #include <array>
@@ -144,15 +145,27 @@ namespace TerraEngine::EditorTests
 				"The editor must restore missing terrain derivatives and retire render/collision state when the last component disappears.");
 			const std::size_t projectClose = editorSubsystemSource.find(
 				"void MainEditorSubsystem::CloseCurrentProject()");
+			const std::size_t clearUndoHistory = editorSubsystemSource.find(
+				"UndoRedoSystem::Instance().Clear()", projectClose);
 			const std::size_t releaseProjectTerrain = editorSubsystemSource.find(
 				"terrainTools->ReleaseProjectTerrainState()", projectClose);
 			const std::size_t clearResourceCaches = editorSubsystemSource.find(
 				"ResourceManager::Instance().ClearCaches()", projectClose);
 			context.Expect(projectClose != std::string::npos
+				&& clearUndoHistory != std::string::npos
 				&& releaseProjectTerrain != std::string::npos
 				&& clearResourceCaches != std::string::npos
+				&& clearUndoHistory < releaseProjectTerrain
 				&& releaseProjectTerrain < clearResourceCaches,
-				"Project close must discard cached terrain resource identities before cache clearing so reopening the same terrain rebuilds a valid proxy.");
+				"Project close must destroy project-scoped history before terrain stores, then discard cached terrain resource identities before cache clearing.");
+			const std::size_t liveValidation = editorSubsystemSource.find(
+				"nlohmann::json MainEditorSubsystem::RunTerrainLiveValidationFixture()");
+			const std::size_t liveValidationClose = editorSubsystemSource.find(
+				"CloseCurrentProject()", liveValidation);
+			context.Expect(liveValidation != std::string::npos
+				&& liveValidationClose != std::string::npos
+				&& liveValidationClose < projectClose,
+				"Installed terrain validation must cross the real project-close boundary after creating terrain history.");
 
 			const auto rendererPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine/Renderer/RenderSystem.cpp";
@@ -216,20 +229,44 @@ namespace TerraEngine::EditorTests
 				"Terrain proxy singleton storage must live in the exported engine DLL so editor publication and renderer consumption share one registry.");
 		});
 
-		registry.Add("Editor.TerrainCreation.FlatCreatesPrivateGeneration", [](TestContext& context) {
+		registry.Add("Editor.TerrainCreation.TERRAROOT1FlatCreatesPrivateGeneration", [](TestContext& context) {
 			const auto root = std::filesystem::temp_directory_path() / ("TerrainFlat-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
 			const auto destination = root / "Flat.teterrain";
 			TerraEngine::AssetPipeline::TerrainImportRequest request; request.assetId = TerraEngine::GenerateUUID();
 			TerraEngine::Editor::Terrain::TerrainCreationService service;
 			const auto result = service.CreateOrImport(request, destination);
+			std::ifstream current(destination.string() + ".data/CURRENT", std::ios::binary);
+			std::string rootHash;
+			std::getline(current, rootHash);
+			std::ifstream rootInput(std::filesystem::path(destination.string() + ".data") / "roots" / (rootHash + ".root"), std::ios::binary);
+			const std::string rootBytes((std::istreambuf_iterator<char>(rootInput)), std::istreambuf_iterator<char>());
+			const auto decodedRoot = TerraEngine::Terrain::DecodeTerrainRootManifest(rootBytes);
 			context.Expect(result.succeeded && result.heightfield.heightsMm.size() == 256U * 256U
 				&& std::filesystem::exists(destination) && std::filesystem::exists(destination.string() + ".data/CURRENT")
-				&& std::filesystem::exists(destination.string() + ".data/roots/1.json"),
+				&& rootHash.size() == 32U && decodedRoot.Succeeded() && decodedRoot.root
+				&& decodedRoot.root->assetUuid == request.assetId
+				&& TerraEngine::Terrain::ToHexString(decodedRoot.contentHash) == rootHash,
 				"Flat creation must publish one parent asset plus a complete private CURRENT/root/blob generation.");
 			const auto reopened = service.OpenExisting(destination);
 			context.Expect(reopened.succeeded && reopened.assetId == request.assetId
 				&& reopened.heightfield.heightsMm == result.heightfield.heightsMm,
 				"A scene reload must recover the exact persisted origin area used to rebuild its render proxy.");
+			std::error_code ignored; std::filesystem::remove_all(root, ignored);
+		});
+
+		registry.Add("Editor.TerrainCreation.TERRAROOT1ExistingDescriptorSurvivesRejectedReplacement", [](TestContext& context) {
+			const auto root = std::filesystem::temp_directory_path() / ("TerrainPreserve-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+			const auto destination = root / "Existing.teterrain";
+			std::filesystem::create_directories(root);
+			const std::string priorBytes = "existing descriptor bytes";
+			std::ofstream(destination, std::ios::binary) << priorBytes;
+			TerraEngine::AssetPipeline::TerrainImportRequest request; request.assetId = TerraEngine::GenerateUUID();
+			TerraEngine::Editor::Terrain::TerrainCreationService service;
+			const auto rejected = service.CreateOrImport(request, destination);
+			std::ifstream priorInput(destination, std::ios::binary);
+			const std::string after((std::istreambuf_iterator<char>(priorInput)), std::istreambuf_iterator<char>());
+			context.Expect(!rejected.succeeded && after == priorBytes && !std::filesystem::exists(destination.string() + ".data"),
+				"A failed or rejected create/import must preserve the exact prior descriptor and avoid partial private publication.");
 			std::error_code ignored; std::filesystem::remove_all(root, ignored);
 		});
 

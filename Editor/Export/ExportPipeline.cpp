@@ -1709,10 +1709,13 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 							manifestPath = compiledPath;
 						}
 						else {
-							// If the asset isn't compiled (like a .tescene), use its 
-							// relative path within the Assets/ folder.
-							auto rel = std::filesystem::relative(entry.path().parent_path() / meta.value("sourcePath", ""), rawAssets);
-							manifestPath = rel;
+							// Uncompiled metadata stores sourcePath relative to the project Assets
+							// root. Resolve it through the same helper used by model packages before
+							// making it archive-relative; joining it to the metadata parent would turn
+							// Terrain/Foo.teterrain into Terrain/Terrain/Foo.teterrain.
+							const std::filesystem::path sourceAssetPath = resolveSourceAssetPath(
+								entry.path(), meta.value("sourcePath", std::string{}));
+							manifestPath = std::filesystem::relative(sourceAssetPath, rawAssets);
 						}
 						if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider) {
 							std::string physicsAssetError;

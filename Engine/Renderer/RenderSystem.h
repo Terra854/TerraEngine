@@ -186,6 +186,14 @@ public:
 			std::span<const TerraEngine::Renderer::Terrain::TerrainViewPacket> views,
 			std::span<const TerraEngine::Renderer::Terrain::TerrainPageCookResult> cooks,
 			std::span<const TerraEngine::Resource::VirtualGeometryPagePublication> committedPages);
+	// Captures one immutable multi-area asset snapshot and resolves every view
+	// against the same protected residency image. An incomplete area or missing
+	// own-ancestor page rejects the entire cut and emits only next-frame demands.
+	static TerraEngine::Renderer::Terrain::TerrainAreaRenderPacketResult
+		PrepareCommittedTerrainAreaPackets(
+			const TerraEngine::Renderer::Terrain::TerrainAssetRenderSnapshot& snapshot,
+			std::span<const TerraEngine::Renderer::Terrain::TerrainAreaRenderRequest> requests,
+			std::span<const TerraEngine::Renderer::Terrain::TerrainPageResidencyEntry> residency);
 	// Moves already-validated immutable terrain packets into the VG private queue.
 	// It is not a publication path; PagePublish still owns visibility.
 	static bool SubmitPreparedTerrainPackets(
@@ -435,6 +443,10 @@ private:
 	{
 		entt::entity entity;
 		TerraEngine::UUID objectId;
+		// Non-empty only for a TerrainComponent-derived render binding. This value
+		// is copied at the protected ECS boundary so visibility workers can associate
+		// texture demand with its durable asset without reopening live components.
+		TerraEngine::UUID terrainAssetId = TerraEngine::EMPTY_UUID;
 		std::uint64_t objectIdentity = 0U;
 		std::uint64_t meshIdentity = 0U;
 		std::uint64_t materialIdentity = 0U;
@@ -622,6 +634,7 @@ private:
 		// resource pointers, transforms, and visibility remain freshly resolved.
 		Object object;
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID terrainAssetId = TerraEngine::EMPTY_UUID;
 		// Stable hashes are derived only when authored membership changes. Per-frame
 		// snapshot assembly copies these scalar identities instead of hashing the
 		// same crowd UUIDs again.
