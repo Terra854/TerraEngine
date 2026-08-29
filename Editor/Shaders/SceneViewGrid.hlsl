@@ -40,6 +40,10 @@ struct GridPushConstants {
 
 [[vk::push_constant]] ConstantBuffer<GridPushConstants> PC;
 
+// A world unit is the finest useful construction interval. Smaller
+// subdivisions add shimmer and clutter without helping normal scene placement.
+static const float kMinimumGridSpacing = 1;
+
 float3 UnprojectPoint(float x, float y, float z, float4x4 viewInv, float4x4 projInv) {
     float4 unprojectedPoint = mul(viewInv, mul(projInv, float4(x, y, z, 1.0)));
     return unprojectedPoint.xyz / unprojectedPoint.w;
@@ -122,14 +126,10 @@ float ChooseOrthographicGridSpacing(float2 worldCoord)
 	float2 dx = ddx(worldCoord);
 	float2 dy = ddy(worldCoord);
 	float worldUnitsPerPixel = max(length(dx), length(dy));
-	// Keep roughly editor-sized grid cells on screen. A fixed one-unit grid is
-	// useful up close but turns into dense visual noise when orthographic zoom
-	// shows a large slice of the world.
-	float desiredSpacing = max(worldUnitsPerPixel * 28.0, 0.001);
-	float decade = pow(10.0, floor(log(desiredSpacing) / 2.302585093));
-	float mantissa = desiredSpacing / max(decade, 0.0001);
-	float multiplier = mantissa > 5.0 ? 10.0 : (mantissa > 2.0 ? 5.0 : (mantissa > 1.0 ? 2.0 : 1.0));
-	return decade * multiplier;
+	// Return the continuous target spacing instead of snapping to 1/2/5 steps.
+	// BuildAdaptiveGridLines uses its fractional logarithm to cross-fade nested
+	// decades, which makes wheel zoom feel stable rather than popping abruptly.
+	return max(worldUnitsPerPixel * 28.0, kMinimumGridSpacing);
 }
 
 float ChoosePerspectiveGridSpacing()
@@ -139,11 +139,42 @@ float ChoosePerspectiveGridSpacing()
 	// different decades, which breaks continuous lines into the chaotic wedges
 	// seen when the camera looks across a large terrain.
 	float3 cameraPosition = mul(PC.inverseView, float4(0, 0, 0, 1)).xyz;
-	float desiredSpacing = max(abs(cameraPosition.y) * 0.08, 1.0);
-	float decade = pow(10.0, floor(log(desiredSpacing) / 2.302585093));
-	float mantissa = desiredSpacing / max(decade, 0.0001);
-	float multiplier = mantissa > 5.0 ? 10.0 : (mantissa > 2.0 ? 5.0 : (mantissa > 1.0 ? 2.0 : 1.0));
-	return decade * multiplier;
+	// Keep the one-unit construction floor when the camera approaches the plane.
+	// Above that floor, the logarithmic blend reveals progressively coarser detail
+	// without a discontinuous spacing choice.
+	return max(abs(cameraPosition.y) * 0.08, kMinimumGridSpacing);
+}
+
+void BuildAdaptiveGridLines(
+	float2 worldCoord,
+	float desiredSpacing,
+	out float opacity,
+	out float majorInfluence)
+{
+	// Each level is an exact ten-times subdivision of the next, matching the
+	// predictable hierarchy used by common scene editors. Three simultaneous
+	// levels make the end of one decade identical to the start of the next:
+	// fine lines disappear, major lines become the new fine lines, and a new
+	// major anchor arrives. Smoothstep softens both ends of the transition.
+	float logarithmicSpacing = log(max(desiredSpacing, kMinimumGridSpacing)) / 2.302585093;
+	float baseSpacing = pow(10.0, floor(logarithmicSpacing));
+	float lodBlend = smoothstep(0.0, 1.0, frac(logarithmicSpacing));
+
+	float fineCoverage = GridLineAlpha(worldCoord, baseSpacing, 0.92);
+	float middleThickness = lerp(1.25, 0.92, lodBlend);
+	float middleCoverage = GridLineAlpha(worldCoord, baseSpacing * 10.0, middleThickness);
+	float coarseCoverage = GridLineAlpha(worldCoord, baseSpacing * 100.0, 1.25);
+
+	float fineOpacity = fineCoverage * (1.0 - lodBlend) * 0.52;
+	float middleOpacity = middleCoverage * lerp(0.82, 0.52, lodBlend);
+	float coarseOpacity = coarseCoverage * lodBlend * 0.82;
+	opacity = max(fineOpacity, max(middleOpacity, coarseOpacity));
+
+	// Dark emphasis also migrates between nested levels instead of changing on
+	// a single frame, so line weight and colour tell the same scale story.
+	majorInfluence = max(
+		middleCoverage * (1.0 - lodBlend),
+		coarseCoverage * lodBlend);
 }
 
 float4 BuildPerspectiveGridColor(float3 worldPos)
@@ -151,11 +182,12 @@ float4 BuildPerspectiveGridColor(float3 worldPos)
 	float2 coord = worldPos.xz;
 	// The camera-height LOD is constant across the draw, keeping every grid line
 	// continuous while still reducing density when a large object is framed.
-	float spacing = ChoosePerspectiveGridSpacing();
-	float minorAlpha = GridLineAlpha(coord, spacing, 0.92);
-	float majorAlpha = GridLineAlpha(coord, spacing * 5.0, 1.25);
-	float4 color = float4(0.20, 0.22, 0.24, max(minorAlpha * 0.52, majorAlpha * 0.82));
-	color.rgb = lerp(color.rgb, float3(0.13, 0.15, 0.17), majorAlpha);
+	float desiredSpacing = ChoosePerspectiveGridSpacing();
+	float gridOpacity = 0.0;
+	float majorInfluence = 0.0;
+	BuildAdaptiveGridLines(coord, desiredSpacing, gridOpacity, majorInfluence);
+	float4 color = float4(0.20, 0.22, 0.24, gridOpacity);
+	color.rgb = lerp(color.rgb, float3(0.13, 0.15, 0.17), majorInfluence);
 	float minimumz = max(fwidth(worldPos.z), 0.0001);
 	float minimumx = max(fwidth(worldPos.x), 0.0001);
 
@@ -171,7 +203,7 @@ float4 BuildPerspectiveGridColor(float3 worldPos)
 	// Preserve roughly two hundred visible cells at every adaptive spacing. A
 	// large framed terrain therefore keeps contextual grid lines without making
 	// a close-up view extend all the way to the projection far plane.
-	float fadeDistance = max(100.0, spacing * 100.0);
+	float fadeDistance = max(100.0, desiredSpacing * 100.0);
 	float fade = max(0.0, 1.0 - (dist / fadeDistance));
 	color.a *= fade;
 	return color;
@@ -180,15 +212,16 @@ float4 BuildPerspectiveGridColor(float3 worldPos)
 float4 BuildOrthographicGridColor(float3 worldPos)
 {
 	float2 coord = worldPos.xz;
-	float spacing = ChooseOrthographicGridSpacing(coord);
-	float minorAlpha = GridLineAlpha(coord, spacing, 0.92);
-	float majorAlpha = GridLineAlpha(coord, spacing * 5.0, 1.25);
+	float desiredSpacing = ChooseOrthographicGridSpacing(coord);
+	float gridOpacity = 0.0;
+	float majorInfluence = 0.0;
+	BuildAdaptiveGridLines(coord, desiredSpacing, gridOpacity, majorInfluence);
 
 	// Orthographic mode uses a pale drafting background, so the grid needs more
 	// contrast than the perspective grid while still staying behind authored
-	// geometry. Keep minor lines readable and let every fifth line anchor scale.
-	float4 color = float4(0.20, 0.24, 0.27, max(minorAlpha * 0.52, majorAlpha * 0.82));
-	color.rgb = lerp(color.rgb, float3(0.13, 0.16, 0.18), majorAlpha);
+	// geometry. Keep minor lines readable and let every tenth line anchor scale.
+	float4 color = float4(0.20, 0.24, 0.27, gridOpacity);
+	color.rgb = lerp(color.rgb, float3(0.13, 0.16, 0.18), majorInfluence);
 
 	// Draw world axes at a stable screen thickness. They remain useful in ortho
 	// even when the regular grid steps up to larger spacing.

@@ -29,6 +29,14 @@ namespace TerraEngine::EditorTests
 			const std::string gridShaderSource = ReadSceneViewOverlaySourceForTest("Editor/Shaders/SceneViewGrid.hlsl");
 			context.Expect(gridShaderSource.find("BuildOrthographicGridColor") != std::string::npos, "Orthographic Scene View should use a dedicated grid color path.");
 			context.Expect(gridShaderSource.find("ChooseOrthographicGridSpacing") != std::string::npos, "Orthographic Scene View grid should choose spacing from zoom/pixel scale.");
+			context.Expect(gridShaderSource.find("BuildAdaptiveGridLines") != std::string::npos,
+				"Perspective and orthographic Scene View grids should share the smooth zoom-level transition path.");
+			context.Expect(gridShaderSource.find("smoothstep(0.0, 1.0, frac(logarithmicSpacing))") != std::string::npos,
+				"Scene View grid levels should cross-fade continuously over each logarithmic zoom decade.");
+			context.Expect(gridShaderSource.find("baseSpacing * 100.0") != std::string::npos,
+				"Scene View grid transitions should retain the next major anchor while fine lines fade away.");
+			context.Expect(gridShaderSource.find("mantissa > 5.0") == std::string::npos,
+				"Scene View grid spacing should not retain hard 1/2/5 zoom thresholds that visibly pop.");
 			context.Expect(gridShaderSource.find("TryResolveGridWorldPosition") != std::string::npos, "Orthographic Scene View grid should resolve ground intersections without near-plane cutoffs.");
 			context.Expect(gridShaderSource.find("!IsOrthographicGrid() && t < 0.0") != std::string::npos, "Only perspective grid rays should be discarded when the ground is behind the near ray.");
 			context.Expect(gridShaderSource.find("const float kGridPlaneY = -0.02") != std::string::npos,
