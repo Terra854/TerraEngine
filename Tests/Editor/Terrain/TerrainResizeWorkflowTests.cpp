@@ -76,6 +76,16 @@ namespace TerraEngine::EditorTests
 			jobs.Cancel("test cancellation");
 			context.Expect(jobs.Progress().stage == TerraEngine::Editor::Terrain::TerrainResizeStage::Cancelled,
 				"Cancellation must remain a detached job state and publish no partial root.");
+			const auto cancelledDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+			std::optional<TerraEngine::Editor::Terrain::TerrainPreparedResize> cancelledPreview;
+			while(std::chrono::steady_clock::now() < cancelledDeadline)
+			{
+				cancelledPreview = jobs.TakeReadyPreview();
+				if(cancelledPreview) break;
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			}
+			context.Expect(!cancelledPreview,
+				"A worker result that finishes after cancellation must never resurrect the detached preview.");
 
 			TerraEngine::Terrain::TerrainAssetStore store(root);
 			TerraEngine::Editor::Terrain::TerrainPreparedResize prepared{};

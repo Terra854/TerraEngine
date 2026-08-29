@@ -6,8 +6,10 @@
 #include "Terrain/TerrainTypes.h"
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 
@@ -22,6 +24,12 @@ namespace TerraEngine::Renderer::Terrain
 		TerraEngine::Terrain::ContentHash authoredHash{};
 		std::uint64_t authoredGeneration = 0u;
 		float sampleSpacingMetres = 1.0F;
+		// Editor overview proxies may represent more than one authored area with a
+		// bounded 256-by-256 grid. Zero step values preserve the normal per-area
+		// spacing, while an explicit origin/step places that overview over its exact
+		// authored sample bounds without changing durable terrain coordinates.
+		std::optional<std::array<double, 2u>> sampleOriginMetres;
+		std::array<float, 2u> sampleStepMetres{0.0F, 0.0F};
 		TerraEngine::Terrain::TerrainAreaActiveRect activeRect{0u, 0u, 256u, 256u};
 		std::span<const std::int32_t> heightMillimetres{};
 		// One bit per terrain cell. An empty span means that every cell is solid.

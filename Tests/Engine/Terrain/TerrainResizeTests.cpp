@@ -4,6 +4,7 @@
 #include "Terrain/TerrainResize.h"
 #include "TerrainResizeTestFixtures.h"
 
+#include <algorithm>
 #include <array>
 #include <limits>
 
@@ -53,6 +54,47 @@ namespace TerraEngine::Tests
 			delta.proposedBounds = {-256, 0, 128, 256};
 			context.Expect(!Terrain::ValidateTerrainResizeDelta(delta, root).Succeeded(),
 				"One resize may not hide data on one side while adding data on another.");
+		});
+
+		registry.Add("Terrain.Resize.PreviewRegionsPartitionExpansionAndCrop", [](TestContext& context) {
+			Terrain::TerrainResizeDelta delta{};
+			delta.previousBounds = {0, 0, 512, 512};
+			delta.proposedBounds = {-256, -512, 768, 1024};
+			const auto expansion = Terrain::BuildTerrainResizePreviewRegions(delta);
+			context.ExpectEqual(static_cast<std::size_t>(5u), expansion.size(),
+				"Four non-overlapping expansion strips plus retained coverage should drive the viewport overlay.");
+			context.Expect(expansion.front() == Terrain::TerrainResizePreviewRegion{
+				{0, 0, 512, 512}, Terrain::TerrainResizePreviewRegionKind::Retained},
+				"Expansion preview must preserve the exact previous footprint as retained coverage.");
+			std::uint64_t changedSamples = 0u;
+			for(const auto& region : expansion)
+				if(region.kind == Terrain::TerrainResizePreviewRegionKind::Changed)
+					changedSamples += static_cast<std::uint64_t>(region.bounds.maxXExclusive - region.bounds.minX)
+						* static_cast<std::uint64_t>(region.bounds.maxZExclusive - region.bounds.minZ);
+			context.ExpectEqual(static_cast<std::uint64_t>(1'310'720u), changedSamples,
+				"Expansion strips must cover outer minus retained exactly once without translucent overlap.");
+
+			delta.kind = Terrain::TerrainResizeKind::Crop;
+			delta.previousBounds = {-256, -512, 768, 1024};
+			delta.proposedBounds = {0, 0, 512, 512};
+			const auto crop = Terrain::BuildTerrainResizePreviewRegions(delta);
+			context.Expect(crop == expansion,
+				"Crop must reuse the same footprint partition while presentation changes blue expansion to red discard.");
+
+			delta.kind = Terrain::TerrainResizeKind::Expand;
+			delta.previousBounds = {0, 0, 1024, 1024};
+			delta.proposedBounds = {-512, -512, 1536, 1536};
+			const auto grid = Terrain::BuildTerrainResizePreviewGrid(delta, 64u);
+			const auto containsX = [&grid](std::int64_t coordinate) {
+				return std::binary_search(grid.sampleX.begin(), grid.sampleX.end(), coordinate);
+			};
+			context.Expect(grid.sampleX.size() <= 69u && grid.sampleZ.size() <= 69u,
+				"Adaptive resize mesh axes must remain bounded by their segment budget plus exact seam samples.");
+			context.Expect(grid.sampleX.front() == -512 && grid.sampleX.back() == 1535
+				&& containsX(-1) && containsX(0) && containsX(1023) && containsX(1024),
+				"Adaptive resize mesh axes must preserve the proposal edges and both sides of the former boundary.");
+			context.Expect(Terrain::BuildTerrainResizePreviewGrid(delta, 0u).sampleX.empty(),
+				"A zero presentation budget must fail closed without allocating preview mesh coordinates.");
 		});
 
 		registry.Add("Terrain.Resize.EdgeBlendIsGlobalAndDeterministic", [](TestContext& context) {

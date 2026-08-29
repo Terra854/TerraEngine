@@ -598,6 +598,18 @@ namespace TerraEngine::Editor::Terrain
 		if (!future.valid() || future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return std::nullopt;
 		Completed completed = future.get();
 		std::scoped_lock lock(mutex);
+		// Cancel may race with a worker that has already assembled its return value.
+		// The shared token remains authoritative until this future is consumed, so a
+		// late ready result can never reattach a preview the user just dismissed.
+		if(cancellation && cancellation->load(std::memory_order_acquire))
+		{
+			progress = completed.progress;
+			progress.stage = TerrainResizeStage::Cancelled;
+			progress.cancellationAvailable = false;
+			if(progress.message.empty()) progress.message = "Terrain resize preview cancelled.";
+			runningState.reset();
+			return std::nullopt;
+		}
 		progress = completed.progress;
 		runningState.reset();
 		return std::move(completed.prepared);

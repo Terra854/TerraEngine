@@ -271,6 +271,136 @@ void DrawLocalLine(
 	drawList->AddLine(screenStart, screenEnd, color, thickness);
 }
 
+bool ProjectTerrainResizeRegion(
+	const TerraEngine::Terrain::TerrainResizePreviewRegion& region,
+	double sampleSpacingMetres,
+	const glm::mat4& terrainLocalWorld,
+	const glm::mat4& viewProjection,
+	const ImVec2& viewportPos,
+	const ImVec2& viewportSize,
+	std::array<ImVec2, 4u>& outScreenCorners)
+{
+	// Terrain components permit translation only, but applying the complete
+	// canonical object matrix keeps this presentation helper aligned with the
+	// renderer and fails safely if an invalid legacy transform is encountered.
+	const std::array<glm::dvec2, 4u> sampleCorners{{
+		{static_cast<double>(region.bounds.minX), static_cast<double>(region.bounds.minZ)},
+		{static_cast<double>(region.bounds.maxXExclusive), static_cast<double>(region.bounds.minZ)},
+		{static_cast<double>(region.bounds.maxXExclusive), static_cast<double>(region.bounds.maxZExclusive)},
+		{static_cast<double>(region.bounds.minX), static_cast<double>(region.bounds.maxZExclusive)}}};
+	for(std::size_t index = 0u; index < sampleCorners.size(); ++index)
+	{
+		const glm::dvec2 metres = sampleCorners[index] * sampleSpacingMetres;
+		const glm::vec3 localMetres(
+			static_cast<float>(metres.x), 0.05F, static_cast<float>(metres.y));
+		const glm::vec3 frameLocal = glm::vec3(terrainLocalWorld * glm::vec4(localMetres, 1.0F));
+		if(!ProjectLocalPoint(frameLocal, viewProjection, viewportPos, viewportSize, outScreenCorners[index]))
+			return false;
+	}
+	return true;
+}
+
+bool ProjectTerrainResizeSample(
+	TerraEngine::Terrain::TerrainSampleCoordinate sample,
+	std::int32_t heightMillimetres,
+	double sampleSpacingMetres,
+	const glm::mat4& terrainLocalWorld,
+	const glm::mat4& viewProjection,
+	const ImVec2& viewportPos,
+	const ImVec2& viewportSize,
+	ImVec2& outScreenPosition)
+{
+	const glm::dvec3 metres(
+		static_cast<double>(sample.x) * sampleSpacingMetres,
+		static_cast<double>(heightMillimetres) * 0.001 + 0.05,
+		static_cast<double>(sample.z) * sampleSpacingMetres);
+	const glm::vec3 frameLocal = glm::vec3(terrainLocalWorld * glm::vec4(glm::vec3(metres), 1.0F));
+	return ProjectLocalPoint(frameLocal, viewProjection, viewportPos, viewportSize, outScreenPosition);
+}
+
+void DrawTerrainResizeHeightMesh(
+	ImDrawList* drawList,
+	const TerrainWindow& terrainTools,
+	const TerraEngine::Terrain::TerrainResizePreview& preview,
+	double sampleSpacingMetres,
+	const glm::mat4& terrainLocalWorld,
+	const glm::mat4& viewProjection,
+	const ImVec2& viewportPos,
+	const ImVec2& viewportSize)
+{
+	const auto grid = TerraEngine::Terrain::BuildTerrainResizePreviewGrid(preview.delta, 64u);
+	if(grid.sampleX.size() < 2u || grid.sampleZ.size() < 2u) return;
+	struct ProjectedSample
+	{
+		ImVec2 screen{};
+		bool visible = false;
+	};
+	std::vector<ProjectedSample> projected(grid.sampleX.size() * grid.sampleZ.size());
+	for(std::size_t z = 0u; z < grid.sampleZ.size(); ++z)
+		for(std::size_t x = 0u; x < grid.sampleX.size(); ++x)
+		{
+			const TerraEngine::Terrain::TerrainSampleCoordinate sample{grid.sampleX[x], grid.sampleZ[z]};
+			const auto height = terrainTools.SampleActiveResizePreviewHeight(sample);
+			if(!height) continue;
+			auto& vertex = projected[z * grid.sampleX.size() + x];
+			vertex.visible = ProjectTerrainResizeSample(sample, *height, sampleSpacingMetres,
+				terrainLocalWorld, viewProjection, viewportPos, viewportSize, vertex.screen);
+		}
+
+	const bool crop = preview.delta.kind == TerraEngine::Terrain::TerrainResizeKind::Crop;
+	for(std::size_t z = 0u; z + 1u < grid.sampleZ.size(); ++z)
+		for(std::size_t x = 0u; x + 1u < grid.sampleX.size(); ++x)
+		{
+			const auto& p00 = projected[z * grid.sampleX.size() + x];
+			const auto& p10 = projected[z * grid.sampleX.size() + x + 1u];
+			const auto& p01 = projected[(z + 1u) * grid.sampleX.size() + x];
+			const auto& p11 = projected[(z + 1u) * grid.sampleX.size() + x + 1u];
+			if(!p00.visible || !p10.visible || !p01.visible || !p11.visible) continue;
+			const TerraEngine::Terrain::TerrainSampleCoordinate minimum{grid.sampleX[x], grid.sampleZ[z]};
+			const TerraEngine::Terrain::TerrainSampleCoordinate maximum{grid.sampleX[x + 1u], grid.sampleZ[z + 1u]};
+			const auto& retainedBounds = crop ? preview.delta.proposedBounds : preview.delta.previousBounds;
+			const bool retained = retainedBounds.Contains(minimum) && retainedBounds.Contains(maximum);
+			const ImU32 fill = retained ? IM_COL32(65, 190, 95, 20)
+				: crop ? IM_COL32(220, 70, 65, 62) : IM_COL32(55, 125, 235, 62);
+			const ImU32 wire = retained ? IM_COL32(105, 235, 135, 105)
+				: crop ? IM_COL32(255, 115, 105, 205) : IM_COL32(105, 175, 255, 205);
+			// Two screen-space triangles display the exact sampled height surface.
+			// The adaptive grid caps presentation work while former-edge samples are
+			// always retained, so Edge Blend remains visible at its critical seam.
+			drawList->AddTriangleFilled(p00.screen, p01.screen, p10.screen, fill);
+			drawList->AddTriangleFilled(p10.screen, p01.screen, p11.screen, fill);
+			drawList->AddLine(p00.screen, p10.screen, wire, retained ? 0.7F : 1.0F);
+			drawList->AddLine(p00.screen, p01.screen, wire, retained ? 0.7F : 1.0F);
+			if(x + 2u == grid.sampleX.size())
+				drawList->AddLine(p10.screen, p11.screen, wire, retained ? 0.7F : 1.0F);
+			if(z + 2u == grid.sampleZ.size())
+				drawList->AddLine(p01.screen, p11.screen, wire, retained ? 0.7F : 1.0F);
+		}
+}
+
+void DrawTerrainResizeFootprint(
+	ImDrawList* drawList,
+	const TerraEngine::Terrain::TerrainResizePreview& preview,
+	double sampleSpacingMetres,
+	const glm::mat4& terrainLocalWorld,
+	const glm::mat4& viewProjection,
+	const ImVec2& viewportPos,
+	const ImVec2& viewportSize)
+{
+	const bool crop = preview.delta.kind == TerraEngine::Terrain::TerrainResizeKind::Crop;
+	for(const auto& region : TerraEngine::Terrain::BuildTerrainResizePreviewRegions(preview.delta))
+	{
+		std::array<ImVec2, 4u> corners{};
+		if(!ProjectTerrainResizeRegion(region, sampleSpacingMetres, terrainLocalWorld,
+			viewProjection, viewportPos, viewportSize, corners)) continue;
+		const bool retained = region.kind == TerraEngine::Terrain::TerrainResizePreviewRegionKind::Retained;
+		const ImU32 outline = retained ? IM_COL32(105, 235, 135, 235)
+			: crop ? IM_COL32(255, 105, 95, 245) : IM_COL32(95, 165, 255, 245);
+		drawList->AddPolyline(corners.data(), static_cast<int>(corners.size()), outline,
+			retained ? 1.5F : 2.5F, ImDrawFlags_Closed);
+	}
+}
+
 void DrawWorldCircle(
 	ImDrawList* drawList,
 	const glm::vec3& center,
@@ -2881,6 +3011,18 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 		// destructive crop coverage; the authored terrain itself remains unchanged.
 		const auto& resize = *terrainTools->ActiveResizePreview();
 		ImDrawList* drawList = ImGui::GetWindowDrawList();
+		if(const auto placement = terrainTools->ActiveResizeViewportPlacement())
+		{
+			ObjectManager& objects = ObjectManager::instance();
+			if(const auto object = objects.getObject(placement->objectId))
+				if(const auto terrainLocalWorld = ComputeEntityLocalWorldMatrix(object->EntityId(), m_CameraPosition))
+				{
+					DrawTerrainResizeHeightMesh(drawList, *terrainTools, resize, placement->sampleSpacingMetres,
+						*terrainLocalWorld, proj * view, viewportPos, viewportSize);
+					DrawTerrainResizeFootprint(drawList, resize, placement->sampleSpacingMetres,
+						*terrainLocalWorld, proj * view, viewportPos, viewportSize);
+				}
+		}
 		const ImVec2 legendMin(viewportPos.x + 12.0F, viewportPos.y + 12.0F);
 		const ImVec2 legendMax(legendMin.x + 280.0F, legendMin.y + 58.0F);
 		drawList->AddRectFilled(legendMin, legendMax, IM_COL32(20, 24, 30, 220), 4.0F);

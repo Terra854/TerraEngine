@@ -14,6 +14,23 @@ namespace TerraEngine::Terrain
 	enum class TerrainExpansionPolicy : std::uint8_t { EdgeBlend, ExtendEdge, FlatDefault };
 	enum class TerrainBoundaryHolePolicy : std::uint8_t { CloseAtFormerEdge, ExtendConnectedBoundaryHoles };
 	enum class TerrainResizeSide : std::uint8_t { MinimumX, MaximumX, MinimumZ, MaximumZ };
+	enum class TerrainResizePreviewRegionKind : std::uint8_t { Retained, Changed };
+
+	// Resize previews describe a small set of non-overlapping rectangles instead
+	// of asking editor presentation code to infer an outer-minus-inner footprint.
+	// Bounds remain in exact sample coordinates until a viewport localizes them.
+	struct TerrainResizePreviewRegion
+	{
+		TerrainSampleBounds bounds{};
+		TerrainResizePreviewRegionKind kind = TerrainResizePreviewRegionKind::Retained;
+		[[nodiscard]] constexpr bool operator==(const TerrainResizePreviewRegion&) const noexcept = default;
+	};
+
+	struct TerrainResizePreviewGrid
+	{
+		std::vector<std::int64_t> sampleX;
+		std::vector<std::int64_t> sampleZ;
+	};
 
 	struct TerrainResizeBudget
 	{
@@ -140,6 +157,10 @@ namespace TerraEngine::Terrain
 	[[nodiscard]] TERRAENGINE_API std::string_view ToString(TerrainResizeKind value) noexcept;
 	[[nodiscard]] TERRAENGINE_API std::string_view ToString(TerrainExpansionPolicy value) noexcept;
 	[[nodiscard]] TERRAENGINE_API std::string_view ToString(TerrainBoundaryHolePolicy value) noexcept;
+	[[nodiscard]] TERRAENGINE_API std::vector<TerrainResizePreviewRegion> BuildTerrainResizePreviewRegions(
+		const TerrainResizeDelta& delta);
+	[[nodiscard]] TERRAENGINE_API TerrainResizePreviewGrid BuildTerrainResizePreviewGrid(
+		const TerrainResizeDelta& delta, std::size_t maximumSegmentsPerAxis = 64u);
 	[[nodiscard]] TERRAENGINE_API std::int32_t InitializeExpandedTerrainHeight(
 		const TerrainAssetRoot& root, const TerrainResizeDelta& delta,
 		TerrainSampleCoordinate sample, const TerrainHeightSampler& source) noexcept;

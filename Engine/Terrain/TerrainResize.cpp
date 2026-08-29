@@ -3,6 +3,7 @@
 #include "Terrain/TerrainResize.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <locale>
@@ -274,6 +275,81 @@ namespace TerraEngine::Terrain
 	{
 		return value == TerrainBoundaryHolePolicy::CloseAtFormerEdge
 			? "close-at-former-edge" : "extend-connected-boundary-holes";
+	}
+
+	std::vector<TerrainResizePreviewRegion> BuildTerrainResizePreviewRegions(
+		const TerrainResizeDelta& delta)
+	{
+		const TerrainSampleBounds retained = delta.kind == TerrainResizeKind::Expand
+			? delta.previousBounds : delta.proposedBounds;
+		const TerrainSampleBounds outer = delta.kind == TerrainResizeKind::Expand
+			? delta.proposedBounds : delta.previousBounds;
+		if(!retained.IsValid() || !outer.IsValid()
+			|| !ContainsBounds(outer, retained)) return {};
+
+		std::vector<TerrainResizePreviewRegion> regions;
+		regions.reserve(5u);
+		if(retained.minX < retained.maxXExclusive && retained.minZ < retained.maxZExclusive)
+			regions.push_back({retained, TerrainResizePreviewRegionKind::Retained});
+
+		// The four strips exactly partition outer minus retained. Left and right
+		// own the corners, while the Z strips cover only the retained X interval,
+		// so translucent preview fills never overlap and become visually darker.
+		const std::array<TerrainSampleBounds, 4u> changed{{
+			{outer.minX, outer.minZ, retained.minX, outer.maxZExclusive},
+			{retained.maxXExclusive, outer.minZ, outer.maxXExclusive, outer.maxZExclusive},
+			{retained.minX, outer.minZ, retained.maxXExclusive, retained.minZ},
+			{retained.minX, retained.maxZExclusive, retained.maxXExclusive, outer.maxZExclusive}}};
+		for(const TerrainSampleBounds bounds : changed)
+			if(bounds.minX < bounds.maxXExclusive && bounds.minZ < bounds.maxZExclusive)
+				regions.push_back({bounds, TerrainResizePreviewRegionKind::Changed});
+		return regions;
+	}
+
+	TerrainResizePreviewGrid BuildTerrainResizePreviewGrid(
+		const TerrainResizeDelta& delta,
+		std::size_t maximumSegmentsPerAxis)
+	{
+		TerrainResizePreviewGrid grid{};
+		const TerrainSampleBounds outer = delta.kind == TerrainResizeKind::Expand
+			? delta.proposedBounds : delta.previousBounds;
+		if(!outer.IsValid() || maximumSegmentsPerAxis == 0u) return grid;
+			auto buildAxis = [maximumSegmentsPerAxis](std::int64_t minimum, std::int64_t maximumExclusive,
+			std::int64_t criticalMinimum, std::int64_t criticalMaximumExclusive) {
+			std::vector<std::int64_t> coordinates;
+			if(minimum >= maximumExclusive) return coordinates;
+			const std::int64_t last = maximumExclusive - 1;
+			const std::uint64_t span = static_cast<std::uint64_t>(last) - static_cast<std::uint64_t>(minimum);
+			const std::uint64_t segmentBudget = static_cast<std::uint64_t>(maximumSegmentsPerAxis);
+			const std::uint64_t stride = std::max<std::uint64_t>(1u,
+				span / segmentBudget + (span % segmentBudget == 0u ? 0u : 1u));
+			coordinates.push_back(minimum);
+			for(std::uint64_t offset = stride; offset < span; )
+			{
+				coordinates.push_back(static_cast<std::int64_t>(static_cast<std::uint64_t>(minimum) + offset));
+				if(span - offset <= stride) break;
+				offset += stride;
+			}
+			if(last != minimum) coordinates.push_back(last);
+
+			// Samples on both sides of the former boundary keep a coarse adaptive
+			// mesh from skipping the exact seam or flattening a short Edge Blend.
+			const std::array<std::int64_t, 4u> critical{{
+				criticalMinimum - (criticalMinimum > (std::numeric_limits<std::int64_t>::min)() ? 1 : 0),
+				criticalMinimum,
+				criticalMaximumExclusive - 1,
+				criticalMaximumExclusive}};
+			for(const std::int64_t coordinate : critical)
+				if(coordinate >= minimum && coordinate <= last) coordinates.push_back(coordinate);
+			std::sort(coordinates.begin(), coordinates.end());
+			coordinates.erase(std::unique(coordinates.begin(), coordinates.end()), coordinates.end());
+			return coordinates;
+		};
+		grid.sampleX = buildAxis(outer.minX, outer.maxXExclusive,
+			delta.previousBounds.minX, delta.previousBounds.maxXExclusive);
+		grid.sampleZ = buildAxis(outer.minZ, outer.maxZExclusive,
+			delta.previousBounds.minZ, delta.previousBounds.maxZExclusive);
+		return grid;
 	}
 
 	std::int32_t InitializeExpandedTerrainHeight(const TerrainAssetRoot& root, const TerrainResizeDelta& delta,

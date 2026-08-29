@@ -214,12 +214,7 @@ bool TerrainWindow::QueueAutomaticTerrainCollision(std::string& outError)
 void TerrainWindow::ScheduleRenderProxyBuild()
 {
 	const bool useDetachedPreview = authoringSession.IsDirty() || holePreviewActive;
-	const std::vector<std::int32_t>& sourceHeights = useDetachedPreview
-		? previewHeightMm : committedHeightMm;
-	const std::vector<std::uint8_t>& sourceHoles = useDetachedPreview && holePreviewActive
-		? previewHoleMask : committedHoleMask;
-	if(!terrainStore || sourceHeights.size() != TerraEngine::Terrain::kTerrainAreaSampleCount)
-		return;
+	if(!terrainStore) return;
 	if(terrainRenderProxyBuildActive)
 	{
 		// Let the current immutable preview finish so a continuous drag still gets
@@ -230,16 +225,50 @@ void TerrainWindow::ScheduleRenderProxyBuild()
 	}
 	const auto capture = terrainStore->CaptureRoot();
 	if(!capture.IsValid()) return;
-	const auto descriptor = terrainStore->ResolveDescriptorOrImplicit(*capture.root, selectedTerrainArea);
-	const auto activeRect = TerraEngine::Terrain::TerrainActiveRectForArea(
-		capture.root->authoredBounds, selectedTerrainArea);
-	if(!activeRect) return;
+	const auto& bounds = capture.root->authoredBounds;
+	const std::int64_t spanX = bounds.maxXExclusive - bounds.minX;
+	const std::int64_t spanZ = bounds.maxZExclusive - bounds.minZ;
+	if(spanX < 2 || spanZ < 2) return;
+	const std::uint32_t overviewSamplesX = static_cast<std::uint32_t>(std::min<std::int64_t>(256, spanX));
+	const std::uint32_t overviewSamplesZ = static_cast<std::uint32_t>(std::min<std::int64_t>(256, spanZ));
+	const auto& heightAreas = authoringSession.IsDirty() ? previewAreaHeightMm : committedAreaHeightMm;
+	const auto& holeAreas = holePreviewActive ? previewAreaHoleMasks : committedAreaHoleMasks;
+	std::vector<std::int32_t> heights(
+		TerraEngine::Terrain::kTerrainAreaSampleCount, capture.root->defaultHeightMm);
+	std::vector<std::uint8_t> holes(TerraEngine::Terrain::kTerrainAreaSampleCount / 8u, 0u);
+	const auto sourceCoordinate = [](std::int64_t minimum, std::int64_t span,
+		std::uint32_t output, std::uint32_t outputCount) {
+		// The overview is capped at 256 samples per axis. Rounding the immutable
+		// source coordinate keeps both authored endpoints exact while bounding the
+		// editor proxy cost independently of the number of expanded areas.
+		const long double numerator = static_cast<long double>(span - 1)
+			* static_cast<long double>(output);
+		return minimum + static_cast<std::int64_t>(std::llround(
+			numerator / static_cast<long double>(outputCount - 1u)));
+	};
+	for(std::uint32_t z = 0u; z < overviewSamplesZ; ++z)
+		for(std::uint32_t x = 0u; x < overviewSamplesX; ++x)
+		{
+			const TerraEngine::Terrain::TerrainSampleCoordinate sample{
+				sourceCoordinate(bounds.minX, spanX, x, overviewSamplesX),
+				sourceCoordinate(bounds.minZ, spanZ, z, overviewSamplesZ)};
+			const auto area = TerraEngine::Terrain::OwnerArea(sample);
+			const auto local = TerraEngine::Terrain::LocalSample(sample);
+			if(!area || !local) continue;
+			const std::size_t sourceIndex = static_cast<std::size_t>(local->z) * 256u + local->x;
+			const std::size_t destinationIndex = static_cast<std::size_t>(z) * 256u + x;
+			if(const auto found = heightAreas.find(*area);
+				found != heightAreas.end() && found->second.size() == TerraEngine::Terrain::kTerrainAreaSampleCount)
+				heights[destinationIndex] = found->second[sourceIndex];
+			if(const auto found = holeAreas.find(*area);
+				found != holeAreas.end() && found->second.size() == TerraEngine::Terrain::kTerrainAreaSampleCount / 8u
+				&& (found->second[sourceIndex / 8u] & static_cast<std::uint8_t>(1u << (sourceIndex % 8u))) != 0u)
+				holes[destinationIndex / 8u] |= static_cast<std::uint8_t>(1u << (destinationIndex % 8u));
+		}
 	const auto cancellation = std::make_shared<std::atomic_bool>(false);
-	auto heights = sourceHeights;
-	auto holes = sourceHoles;
 	const TerraEngine::UUID assetId = capture.root->assetUuid;
-	auto authoredHash = descriptor.authoredContentHash;
-	std::uint64_t generation = descriptor.editGeneration;
+	auto authoredHash = capture.root->rootContentHash;
+	std::uint64_t generation = std::max<std::uint64_t>(1u, capture.publicationGeneration);
 	if(useDetachedPreview)
 	{
 		// Preview identity is derived only from copied editor buffers. It never enters
@@ -250,21 +279,29 @@ void TerrainWindow::ScheduleRenderProxyBuild()
 		if(!holes.empty())
 			std::memcpy(previewBytes.data() + heights.size() * sizeof(std::int32_t), holes.data(), holes.size());
 		authoredHash = TerraEngine::Terrain::HashTerrainBytes(previewBytes);
-		generation = descriptor.editGeneration == std::numeric_limits<std::uint64_t>::max()
-			? descriptor.editGeneration : descriptor.editGeneration + 1u;
+		generation = generation == std::numeric_limits<std::uint64_t>::max()
+			? generation : generation + 1u;
 	}
 	const float spacing = authoredSampleSpacingMetres;
-	const auto selectedArea = selectedTerrainArea;
-	auto work = [assetId, selectedArea, activeRect = *activeRect, authoredHash, generation, spacing,
+	const std::array<double, 2u> originMetres{
+		static_cast<double>(bounds.minX) * spacing,
+		static_cast<double>(bounds.minZ) * spacing};
+	const std::array<float, 2u> overviewStep{
+		static_cast<float>(static_cast<double>(spanX - 1) * spacing / static_cast<double>(overviewSamplesX - 1u)),
+		static_cast<float>(static_cast<double>(spanZ - 1) * spacing / static_cast<double>(overviewSamplesZ - 1u))};
+	const TerraEngine::Terrain::TerrainAreaActiveRect activeRect{
+		0u, 0u, static_cast<std::uint16_t>(overviewSamplesX), static_cast<std::uint16_t>(overviewSamplesZ)};
+	auto work = [assetId, activeRect, authoredHash, generation, spacing, originMetres, overviewStep,
 		heights = std::move(heights), holes = std::move(holes), cancellation]() mutable
 	{
 		TerraEngine::Renderer::Terrain::TerrainDirectMeshInput input{};
 		input.assetId = assetId;
-		input.area = selectedArea;
 		input.activeRect = activeRect;
 		input.authoredHash = authoredHash;
 		input.authoredGeneration = generation;
 		input.sampleSpacingMetres = spacing;
+		input.sampleOriginMetres = originMetres;
+		input.sampleStepMetres = overviewStep;
 		input.heightMillimetres = heights;
 		input.holeCellBits = holes;
 		return TerraEngine::Renderer::Terrain::BuildTerrainDirectMesh(input, cancellation.get());
@@ -454,13 +491,13 @@ void TerrainWindow::PollRenderProxyBuild()
 	terrainRenderProxyCancellation.reset();
 	const bool completedWasPreview = terrainRenderProxyBuildWasPreview;
 	const auto capture = terrainStore ? terrainStore->CaptureRoot() : TerraEngine::Terrain::TerrainRootCapture{};
-	const auto descriptor = capture.IsValid()
-		? std::optional{terrainStore->ResolveDescriptorOrImplicit(*capture.root, selectedTerrainArea)} : std::nullopt;
-	const bool currentAsset = descriptor && completed.assetId == capture.root->assetUuid;
+	const bool currentAsset = capture.IsValid() && completed.assetId == capture.root->assetUuid;
+	const std::uint64_t currentRootGeneration = capture.IsValid()
+		? std::max<std::uint64_t>(1u, capture.publicationGeneration) : 0u;
 	const bool current = completedWasPreview
 		? currentAsset && (authoringSession.IsDirty() || holePreviewActive)
-		: currentAsset && completed.authoredHash == descriptor->authoredContentHash
-			&& completed.authoredGeneration == descriptor->editGeneration;
+		: currentAsset && completed.authoredHash == capture.root->rootContentHash
+			&& completed.authoredGeneration == currentRootGeneration;
 	const bool rebuildRequested = terrainRenderProxyRebuildRequested;
 	terrainRenderProxyRebuildRequested = false;
 	if(!completed.Succeeded() || !current)
@@ -961,7 +998,7 @@ TerraEngine::Editor::Terrain::TerrainAutomationCommandResult TerrainWindow::Exec
 			|| arguments["jobId"].get<std::string>() != TerraEngine::ToHexString(progress.jobId))
 			return {false, "Unavailable", "The requested terrain resize job is not active in this editor session."};
 		resizeJobs.Cancel("Terrain resize job cancelled through automation.");
-		resizePreview.reset();
+		ClearResizePreview();
 		return {true, "Cancelled", "Terrain resize preparation cancelled before protected publication."};
 	}
 	if(capability == "terrain.expand.start" || capability == "terrain.crop.start")
@@ -1678,8 +1715,9 @@ void TerrainWindow::DrawResizeControls()
 	if(progress.stage != TerraEngine::Editor::Terrain::TerrainResizeStage::Idle)
 	{
 		ImGui::ProgressBar(progress.fraction, ImVec2(-1.0F, 0.0F), progress.message.c_str());
-		if(progress.cancellationAvailable && ImGui::Button("Cancel Resize Preview"))
-			resizeJobs.Cancel("Terrain resize preview cancelled by the user.");
+		if(!queuedResizeTransactionId && (progress.cancellationAvailable || resizePreview)
+			&& ImGui::Button("Cancel Resize Preview"))
+			CancelResizePreview("Terrain resize preview cancelled by the user.");
 	}
 	if(!resizePreview) return;
 	const auto& preview = resizePreview->preview;
@@ -1798,7 +1836,7 @@ bool TerrainWindow::StartResizePreview(TerraEngine::Terrain::TerrainResizeKind k
 			}
 			request.sourceAreas.emplace(coordinate, std::move(source));
 		}
-	resizePreview.reset();
+	ClearResizePreview();
 	return resizeJobs.Start(std::move(request), outError);
 }
 
@@ -1807,8 +1845,68 @@ void TerrainWindow::PollResizePreview()
 	if(auto ready = resizeJobs.TakeReadyPreview())
 	{
 		resizePreview = std::move(*ready);
+		RebuildResizeViewportHeightCache();
 		status = resizePreview->preview.message;
 	}
+}
+
+void TerrainWindow::RebuildResizeViewportHeightCache()
+{
+	resizePreviewAreaHeightMm.clear();
+	if(!resizePreview || resizePreview->preview.delta.kind != TerraEngine::Terrain::TerrainResizeKind::Expand)
+		return;
+	for(const auto& descriptor : resizePreview->preview.delta.descriptorUpserts)
+	{
+		if(!descriptor.channels.heightHash) continue;
+		const auto blob = std::find_if(resizePreview->preparedBlobs.begin(), resizePreview->preparedBlobs.end(),
+			[&descriptor](const auto& candidate) { return candidate.first == *descriptor.channels.heightHash; });
+		if(blob == resizePreview->preparedBlobs.end()
+			|| blob->second.size() != TerraEngine::Terrain::kTerrainAreaSampleCount * sizeof(std::int32_t)) continue;
+		auto& heights = resizePreviewAreaHeightMm[descriptor.coordinate];
+		heights.resize(TerraEngine::Terrain::kTerrainAreaSampleCount);
+		std::memcpy(heights.data(), blob->second.data(), blob->second.size());
+	}
+}
+
+void TerrainWindow::ClearResizePreview() noexcept
+{
+	resizePreview.reset();
+	resizePreviewAreaHeightMm.clear();
+	resizeCropAcknowledged = false;
+}
+
+void TerrainWindow::CancelResizePreview(std::string_view reason)
+{
+	// Cancellation is immediately visible in the editor even if a worker is
+	// between its final cancellation check and future completion. The job owner
+	// also suppresses that late result, so PollResizePreview cannot resurrect it.
+	resizeJobs.Cancel(reason);
+	ClearResizePreview();
+	status.assign(reason);
+}
+
+std::optional<std::int32_t> TerrainWindow::SampleActiveResizePreviewHeight(
+	TerraEngine::Terrain::TerrainSampleCoordinate sample) const noexcept
+{
+	if(!resizePreview) return std::nullopt;
+	const auto& delta = resizePreview->preview.delta;
+	const TerraEngine::Terrain::TerrainSampleBounds visibleBounds = delta.kind == TerraEngine::Terrain::TerrainResizeKind::Expand
+		? delta.proposedBounds : delta.previousBounds;
+	if(!visibleBounds.Contains(sample)) return std::nullopt;
+	const auto area = TerraEngine::Terrain::OwnerArea(sample);
+	const auto local = TerraEngine::Terrain::LocalSample(sample);
+	if(!area || !local) return std::nullopt;
+	const auto sampleArea = [&](const auto& areas) -> std::optional<std::int32_t> {
+		const auto found = areas.find(*area);
+		if(found == areas.end() || found->second.size() != TerraEngine::Terrain::kTerrainAreaSampleCount)
+			return std::nullopt;
+		return found->second[static_cast<std::size_t>(local->z) * 256u + local->x];
+	};
+	if(const auto prepared = sampleArea(resizePreviewAreaHeightMm)) return prepared;
+	if(const auto committed = sampleArea(committedAreaHeightMm)) return committed;
+	return resizePreview->observedRoot.root
+		? std::optional<std::int32_t>{resizePreview->observedRoot.root->defaultHeightMm}
+		: std::nullopt;
 }
 
 bool TerrainWindow::CommitResizePreview(bool confirmDataLoss, std::string& outError)
@@ -2617,7 +2715,7 @@ void TerrainWindow::InitializeAuthoringTerrain(
 	const TerraEngine::Terrain::TerrainSampleBounds bounds = authoredBounds.value_or(
 		TerraEngine::Terrain::TerrainSampleBounds{0, 0, static_cast<std::int64_t>(heightfield.width), static_cast<std::int64_t>(heightfield.height)});
 	resizeJobs.Cancel("Terrain session changed.");
-	resizePreview.reset();
+	ClearResizePreview();
 	queuedResizeTransactionId.reset();
 	resizeCropBounds = {bounds.minX, bounds.minZ, bounds.maxXExclusive, bounds.maxZExclusive};
 	committedAreaHeightMm.clear();
@@ -4044,12 +4142,17 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 					const auto resizedAreas = TerraEngine::Terrain::EnumerateTerrainAreas(resized.root->authoredBounds, 4096u);
 					if(resizedAreas && std::find(resizedAreas->begin(), resizedAreas->end(), selectedTerrainArea) == resizedAreas->end())
 						selectedTerrainArea = resizedAreas->front();
+					// Expansion/crop changes both directory membership and authored bounds.
+					// Refresh every area mirror after repairing selection and before scheduling
+					// the overview proxy; using the former selected-area buffer here made a
+					// successful expansion look identical to its pre-commit footprint.
+					(void)SynchronizeCommittedAuthoringStateFromPublishedRoot();
 					resizeCropBounds = {resized.root->authoredBounds.minX, resized.root->authoredBounds.minZ,
 						resized.root->authoredBounds.maxXExclusive, resized.root->authoredBounds.maxZExclusive};
 					(void)TerraEngine::Terrain::TerrainStreamingSystem::Instance().SubmitCoarseCoverage(
 						resized.root->assetUuid, resized.publicationGeneration,
 						resized.root->authoredBounds, 4096u, 64u);
-					resizePreview.reset();
+					ClearResizePreview();
 				}
 			}
 			if(wasHistoryReplay)
@@ -4065,6 +4168,10 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 				holeBrushActive = false;
 				displacedLayerWarning = 0u;
 				status = "Terrain undo/redo applied at the protected boundary.";
+			}
+			else if(isResizeReceipt)
+			{
+				status = "Terrain resize applied at the protected boundary; the full authored footprint is rebuilding.";
 			}
 			else if(isLayerReceipt)
 			{
@@ -4113,7 +4220,7 @@ void TerrainWindow::ProcessProtectedAuthoringBoundary()
 		}
 		else
 		{
-			if(isResizeReceipt) resizePreview.reset();
+			if(isResizeReceipt) ClearResizePreview();
 			if(isLayerReceipt) { queuedLayerTransactionId.reset(); layerPreviewActive = false; previewLayerStack = committedLayerStack; }
 			if(isSurfaceReceipt) { queuedSurfaceTransactionId.reset(); surfacePreviewActive = false; previewSurfaceWeights = committedSurfaceWeights; previewAreaSurfaceWeights = committedAreaSurfaceWeights; }
 			if(isHoleReceipt) { queuedHoleTransactionId.reset(); holePreviewActive = false; holeBrushActive = false; previewHoleMask = committedHoleMask; previewAreaHoleMasks = committedAreaHoleMasks; }

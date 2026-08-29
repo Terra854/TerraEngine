@@ -23,6 +23,7 @@
 
 #include <atomic>
 #include <array>
+#include <cmath>
 #include <filesystem>
 #include <future>
 #include <map>
@@ -120,6 +121,24 @@ public:
 	{
 		return resizePreview ? &resizePreview->preview : nullptr;
 	}
+	struct TerrainResizeViewportPlacement
+	{
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		double sampleSpacingMetres = 1.0;
+	};
+	// Scene View receives only immutable placement values. The detached resize
+	// remains owned by TerrainWindow and cannot leak into live scene storage.
+	[[nodiscard]] std::optional<TerrainResizeViewportPlacement> ActiveResizeViewportPlacement() const noexcept
+	{
+		if(!resizePreview || terrainRenderProxyTargetObjectId == TerraEngine::EMPTY_UUID
+			|| !std::isfinite(authoredSampleSpacingMetres) || authoredSampleSpacingMetres <= 0.0F)
+			return std::nullopt;
+		return TerrainResizeViewportPlacement{terrainRenderProxyTargetObjectId, authoredSampleSpacingMetres};
+	}
+	// Height lookup reads only immutable preview/committed mirrors on the editor
+	// thread. Missing sparse expansion areas intentionally resolve to root default.
+	[[nodiscard]] std::optional<std::int32_t> SampleActiveResizePreviewHeight(
+		TerraEngine::Terrain::TerrainSampleCoordinate sample) const noexcept;
 	// Lifecycle owners call this before a scene/project/play-mode/device boundary.
 	// It only discards detached data, so an uncommitted brush can never mutate
 	// a new scene or project after that boundary becomes visible.
@@ -181,6 +200,9 @@ private:
 	void DrawResizeControls();
 	void DrawDiagnosticControls();
 	void PollResizePreview();
+	void RebuildResizeViewportHeightCache();
+	void ClearResizePreview() noexcept;
+	void CancelResizePreview(std::string_view reason);
 	[[nodiscard]] bool StartResizePreview(TerraEngine::Terrain::TerrainResizeKind kind, std::string& outError);
 	[[nodiscard]] bool CommitResizePreview(bool confirmDataLoss, std::string& outError);
 	[[nodiscard]] TerraEngine::Editor::Terrain::TerrainAutomationCommandResult ExecuteAutomationCommand(
@@ -284,6 +306,10 @@ private:
 	std::int32_t proceduralHeightDeltaMm = 100;
 	TerraEngine::Editor::Terrain::TerrainResizeJobs resizeJobs;
 	std::optional<TerraEngine::Editor::Terrain::TerrainPreparedResize> resizePreview;
+	// Only materialized expansion heights are duplicated here. Existing areas
+	// continue to read committedAreaHeightMm, and sparse default areas allocate no
+	// 256-by-256 buffer, keeping large previews bounded by prepared job work.
+	std::map<TerraEngine::Terrain::TerrainAreaCoordinate, std::vector<std::int32_t>> resizePreviewAreaHeightMm;
 	std::optional<TerraEngine::UUID> queuedResizeTransactionId;
 	std::array<int, 4u> resizeExpansionAreas{0, 1, 0, 0};
 	std::array<std::int64_t, 4u> resizeCropBounds{0, 0, 256, 256};

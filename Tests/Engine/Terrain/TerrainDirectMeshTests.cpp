@@ -64,6 +64,14 @@ namespace TerraEngine::Tests
 			context.Expect(!RenderSystem::IsDirectMeshletRouteEligible(mesh),
 				"Direct-route admission must fail closed when a generated terrain stream count no longer matches its immutable payload.");
 			--mesh.runtimeLayout.meshletVertexRemapCount;
+			input.sampleOriginMetres = std::array<double, 2u>{-512.0, -256.0};
+			input.sampleStepMetres = {4.0F, 2.0F};
+			auto overview = TerraEngine::Renderer::Terrain::BuildTerrainDirectMesh(input);
+			context.Expect(overview.Succeeded() && overview.mesh->localBoundsMin[0] == -512.0F
+				&& overview.mesh->localBoundsMin[2] == -256.0F
+				&& overview.mesh->localBoundsMax[0] == 508.0F
+				&& overview.mesh->localBoundsMax[2] == 254.0F,
+				"A bounded overview proxy must cover its explicit authored origin and independent X/Z sample steps.");
 			TerraEngine::VirtualGeometryPackedVertex first{};
 			std::memcpy(&first, mesh.meshletVertexData.data(), sizeof(first));
 			const auto decoded = TerraEngine::DecodeVirtualGeometryPackedPosition(first);

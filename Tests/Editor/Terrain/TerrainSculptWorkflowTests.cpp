@@ -161,6 +161,9 @@ namespace TerraEngine::EditorTests
 			const std::string schedule = methodBody(
 				"void TerrainWindow::ScheduleRenderProxyBuild()",
 				"void TerrainWindow::QueueRenderProxySceneInstance()");
+			const std::string publish = methodBody(
+				"void TerrainWindow::PollRenderProxyBuild()",
+				"void TerrainWindow::SynchronizeTerrainMaterial");
 			const std::string stamp = methodBody(
 				"void TerrainWindow::ApplyBrushAt",
 				"bool TerrainWindow::QueuePreviewForPublication()");
@@ -168,11 +171,16 @@ namespace TerraEngine::EditorTests
 				"void TerrainWindow::HandleSceneViewPointer",
 				"void TerrainWindow::ApplyHoleBrushAt");
 			context.Expect(schedule.find("authoringSession.IsDirty() || holePreviewActive") != std::string::npos
-				&& schedule.find("previewHeightMm") != std::string::npos
-				&& schedule.find("previewHoleMask") != std::string::npos,
-				"The render worker must consume detached height and hole buffers while a brush preview is active.");
+				&& schedule.find("previewAreaHeightMm") != std::string::npos
+				&& schedule.find("previewAreaHoleMasks") != std::string::npos,
+				"The render worker must consume detached all-area height and hole buffers while a brush preview is active.");
 			context.Expect(schedule.find("terrainRenderProxyCancellation->store") == std::string::npos,
 				"Continuous pointer samples must coalesce behind one worker without cancelling every intermediate preview before it can appear.");
+			context.Expect(schedule.find("capture.root->rootContentHash") != std::string::npos
+				&& schedule.find("capture.publicationGeneration") != std::string::npos
+				&& publish.find("completed.authoredHash == capture.root->rootContentHash") != std::string::npos
+				&& publish.find("completed.authoredGeneration == currentRootGeneration") != std::string::npos,
+				"Whole-terrain proxies must be accepted against the immutable root identity rather than one selected area descriptor.");
 			context.Expect(stamp.find("previewHeightMm = std::move(after)") != std::string::npos
 				&& stamp.find("ScheduleRenderProxyBuild();") != std::string::npos,
 				"Every accepted height stamp must request a detached render-proxy refresh during the drag.");

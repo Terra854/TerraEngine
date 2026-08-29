@@ -42,7 +42,8 @@ namespace TerraEngine::Renderer::Terrain
 			std::span<const std::int32_t> heights,
 			std::uint32_t x,
 			std::uint32_t z,
-			float spacing) noexcept
+			float spacingX,
+			float spacingZ) noexcept
 		{
 			const std::uint32_t left = x == 0u ? 0u : x - 1u;
 			const std::uint32_t right = std::min<std::uint32_t>(255u, x + 1u);
@@ -52,8 +53,8 @@ namespace TerraEngine::Renderer::Terrain
 			const float heightRight = static_cast<float>(heights[z * 256u + right]) * 0.001F;
 			const float heightSouth = static_cast<float>(heights[south * 256u + x]) * 0.001F;
 			const float heightNorth = static_cast<float>(heights[north * 256u + x]) * 0.001F;
-			const float xDistance = static_cast<float>(right - left) * spacing;
-			const float zDistance = static_cast<float>(north - south) * spacing;
+			const float xDistance = static_cast<float>(right - left) * spacingX;
+			const float zDistance = static_cast<float>(north - south) * spacingZ;
 			// Cross the positive-Z derivative with positive-X so a flat terrain has
 			// an upward normal in TerraEngine's Y-up coordinate system.
 			return Normalize({
@@ -86,9 +87,15 @@ namespace TerraEngine::Renderer::Terrain
 		result.assetId = input.assetId;
 		result.authoredHash = input.authoredHash;
 		result.authoredGeneration = input.authoredGeneration;
+		const float sampleStepX = input.sampleStepMetres[0] > 0.0F
+			? input.sampleStepMetres[0] : input.sampleSpacingMetres;
+		const float sampleStepZ = input.sampleStepMetres[1] > 0.0F
+			? input.sampleStepMetres[1] : input.sampleSpacingMetres;
 		if(input.assetId == TerraEngine::EMPTY_UUID || !input.authoredHash.IsValid()
 			|| input.authoredGeneration == 0u || !std::isfinite(input.sampleSpacingMetres)
 			|| input.sampleSpacingMetres <= 0.0F
+			|| !std::isfinite(sampleStepX) || sampleStepX <= 0.0F
+			|| !std::isfinite(sampleStepZ) || sampleStepZ <= 0.0F
 			|| !input.activeRect.IsValid()
 			|| input.heightMillimetres.size() != TerraEngine::Terrain::kTerrainAreaSampleCount
 			|| (!input.holeCellBits.empty() && input.holeCellBits.size() != TerraEngine::Terrain::kTerrainAreaSampleCount / 8u))
@@ -110,8 +117,12 @@ namespace TerraEngine::Renderer::Terrain
 			}
 		const float minimumY = static_cast<float>(minimumHeight) * 0.001F;
 		const float maximumY = static_cast<float>(maximumHeight) * 0.001F;
-		const double areaOriginX = static_cast<double>(input.area.x) * 256.0 * input.sampleSpacingMetres;
-		const double areaOriginZ = static_cast<double>(input.area.z) * 256.0 * input.sampleSpacingMetres;
+		const double areaOriginX = input.sampleOriginMetres
+			? (*input.sampleOriginMetres)[0]
+			: static_cast<double>(input.area.x) * 256.0 * input.sampleSpacingMetres;
+		const double areaOriginZ = input.sampleOriginMetres
+			? (*input.sampleOriginMetres)[1]
+			: static_cast<double>(input.area.z) * 256.0 * input.sampleSpacingMetres;
 		if(!std::isfinite(areaOriginX) || !std::isfinite(areaOriginZ)
 			|| std::abs(areaOriginX) > std::numeric_limits<float>::max()
 			|| std::abs(areaOriginZ) > std::numeric_limits<float>::max())
@@ -121,10 +132,10 @@ namespace TerraEngine::Renderer::Terrain
 		}
 		const float areaMinimumX = static_cast<float>(areaOriginX);
 		const float areaMinimumZ = static_cast<float>(areaOriginZ);
-		const float minimumX = areaMinimumX + input.activeRect.minX * input.sampleSpacingMetres;
-		const float minimumZ = areaMinimumZ + input.activeRect.minZ * input.sampleSpacingMetres;
-		const float maximumX = areaMinimumX + (input.activeRect.maxXExclusive - 1u) * input.sampleSpacingMetres;
-		const float maximumZ = areaMinimumZ + (input.activeRect.maxZExclusive - 1u) * input.sampleSpacingMetres;
+		const float minimumX = areaMinimumX + input.activeRect.minX * sampleStepX;
+		const float minimumZ = areaMinimumZ + input.activeRect.minZ * sampleStepZ;
+		const float maximumX = areaMinimumX + (input.activeRect.maxXExclusive - 1u) * sampleStepX;
+		const float maximumZ = areaMinimumZ + (input.activeRect.maxZExclusive - 1u) * sampleStepZ;
 		const std::array<float, 3u> boundsMinimum{minimumX, minimumY, minimumZ};
 		const std::array<float, 3u> boundsMaximum{maximumX, maximumY, maximumZ};
 		for(std::size_t axis = 0u; axis < 3u; ++axis)
@@ -153,11 +164,11 @@ namespace TerraEngine::Renderer::Terrain
 			{
 				const std::size_t sample = static_cast<std::size_t>(z) * 256u + x;
 				const std::array<float, 3u> position{
-					(areaMinimumX + static_cast<float>(x) * input.sampleSpacingMetres - mesh->runtimeLayout.quantization.positionOffset[0]) / mesh->runtimeLayout.quantization.positionScale[0],
+					(areaMinimumX + static_cast<float>(x) * sampleStepX - mesh->runtimeLayout.quantization.positionOffset[0]) / mesh->runtimeLayout.quantization.positionScale[0],
 					(static_cast<float>(input.heightMillimetres[sample]) * 0.001F - mesh->runtimeLayout.quantization.positionOffset[1]) / mesh->runtimeLayout.quantization.positionScale[1],
-					(areaMinimumZ + static_cast<float>(z) * input.sampleSpacingMetres - mesh->runtimeLayout.quantization.positionOffset[2]) / mesh->runtimeLayout.quantization.positionScale[2]};
+					(areaMinimumZ + static_cast<float>(z) * sampleStepZ - mesh->runtimeLayout.quantization.positionOffset[2]) / mesh->runtimeLayout.quantization.positionScale[2]};
 				const auto packed = TerraEngine::PackVirtualGeometryVertex(
-					position, ComputeNormal(input.heightMillimetres, x, z, input.sampleSpacingMetres),
+					position, ComputeNormal(input.heightMillimetres, x, z, sampleStepX, sampleStepZ),
 					{1.0F, 0.0F, 0.0F}, 1.0F,
 					// TexCoord0 is the independent area-local control address. Dividing
 					// by the owned 256-sample extent lets the shader recover the exact
@@ -211,12 +222,12 @@ namespace TerraEngine::Renderer::Terrain
 				}
 				mesh->meshletRecords.push_back(record);
 				MeshletBounds bounds{};
-				bounds.center[0] = minimumX + (static_cast<float>(minX) + static_cast<float>(cellsX) * 0.5F) * input.sampleSpacingMetres;
+				bounds.center[0] = areaMinimumX + (static_cast<float>(minX) + static_cast<float>(cellsX) * 0.5F) * sampleStepX;
 				bounds.center[1] = (minimumY + maximumY) * 0.5F;
-				bounds.center[2] = minimumZ + (static_cast<float>(minZ) + static_cast<float>(cellsZ) * 0.5F) * input.sampleSpacingMetres;
-				const float halfX = static_cast<float>(cellsX) * input.sampleSpacingMetres * 0.5F;
+				bounds.center[2] = areaMinimumZ + (static_cast<float>(minZ) + static_cast<float>(cellsZ) * 0.5F) * sampleStepZ;
+				const float halfX = static_cast<float>(cellsX) * sampleStepX * 0.5F;
 				const float halfY = (maximumY - minimumY) * 0.5F;
-				const float halfZ = static_cast<float>(cellsZ) * input.sampleSpacingMetres * 0.5F;
+				const float halfZ = static_cast<float>(cellsZ) * sampleStepZ * 0.5F;
 				bounds.radius = std::sqrt(halfX * halfX + halfY * halfY + halfZ * halfZ);
 				bounds.coneCutoff = 2.0F;
 				mesh->meshletBounds.push_back(bounds);
