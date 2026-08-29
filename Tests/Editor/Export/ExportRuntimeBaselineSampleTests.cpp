@@ -42,10 +42,10 @@ namespace TerraEngine::EditorTests {
 	void RegisterExportRuntimeBaselineSampleTests(TestRegistry& registry) {
 		registry.Add("Editor.ExportRuntimeBaseline.UsesStandaloneProfileAndManagedProject", [](TestContext& context) {
 			const std::filesystem::path root = SampleRoot();
-			const nlohmann::json project = nlohmann::json::parse(ReadText(root / "project.json"));
+			const nlohmann::json project = nlohmann::json::parse(ReadText(root / "game.json"));
 			context.ExpectEqual(std::string("Export Runtime Baseline"), project.value("name", ""), "Sample project should have stable product metadata.");
 			context.ExpectEqual(std::string("Scenes/Startup.tescene"), project.value("startupScene", ""), "Sample project should identify its startup scene.");
-			context.Expect(!project.contains("buildProfiles"), "project.json must not duplicate the standalone build profile.");
+			context.Expect(!project.contains("buildProfiles"), "game.json must not duplicate the standalone build profile.");
 
 			const std::filesystem::path profilePath = root / "BuildProfiles" / "baseline.json";
 			context.Expect(std::filesystem::exists(profilePath), "Baseline sample should include its standalone editor/headless profile.");

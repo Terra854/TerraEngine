@@ -92,12 +92,5 @@ namespace TerraEngine::EditorTests {
 			ExpectContains(context, helper, "compileStatus -ne \"Ready\"", "The baseline must reject an editor script build that did not reach Ready.");
 			ExpectContains(context, helper, "Library/NativeAot", "The export lane must reject project-local NativeAOT workspace leakage.");
 		});
-
-		registry.Add("Editor.HeadlessExportBaseline.LegacyEntryPointForwardsToCanonicalTool", [](TestContext& context) {
-			const std::string legacy = ReadText(RepositoryRoot() / "Tests" / "Tools" / "ExportRuntimeBaseline" / "ExportSample.ps1");
-			ExpectContains(context, legacy, "Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1", "Historical helper should forward to the canonical installed-tree gate.");
-			ExpectContains(context, legacy, "$Profile -ne \"baseline\"", "Historical profile parameter should fail explicitly for unsupported names.");
-			context.Expect(legacy.find("Run the editor export command") == std::string::npos, "Historical helper must no longer be report-only.");
-		});
 	}
 }

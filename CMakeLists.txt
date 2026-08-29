@@ -2473,12 +2473,29 @@ file(COPY \"\${shader_stage_root}/\"
 		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)
-	# Install the non-interactive exporter beside the editor tools so it can
-	# derive Engine, Launcher, shader, font, and managed paths from argv[0].
+	# TerraEngine-Export is an editor-side command-line tool, not part of the
+	# runtime copied into exported games.
 	install(TARGETS TerraEngine-Export
 		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)
+	# Keep only the native files staged into exported games in ExportRuntime.
+	install(TARGETS TerraEngine-Launcher
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/ExportRuntime
+		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/ExportRuntime
+	)
+	install(FILES
+		$<TARGET_FILE:TerraEngine-Engine>
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/ExportRuntime
+	)
+	if(WIN32)
+		install(FILES
+			$<TARGET_RUNTIME_DLLS:TerraEngine-Launcher>
+			$<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/ExportRuntime
+			OPTIONAL
+		)
+	endif()
 
 	# Install Engine DLLs to Editor folder so it can run
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
@@ -2665,9 +2682,10 @@ file(COPY \"\${shader_stage_root}/\"
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
 	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
+	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/ExportRuntime)
 	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed)
 	if(UNIX AND NOT APPLE)
-		foreach(TERRAENGINE_GLFW_RUNTIME_DIR Launcher Editor Editor/Managed)
+		foreach(TERRAENGINE_GLFW_RUNTIME_DIR Launcher Editor Editor/ExportRuntime Editor/Managed)
 			# Linux binaries need the GLFW SONAME link beside the copied real
 			# shared object, otherwise the loader looks for libglfw.so.3 and
 			# ignores the libglfw.so.3.4 file.

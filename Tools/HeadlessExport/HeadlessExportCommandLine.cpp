@@ -153,17 +153,13 @@ HeadlessExportParseResult ParseHeadlessExportCommandLine(
 		result.message = pathError;
 		return result;
 	}
-	// Projects created by the installed editor use game.json as their canonical
-	// project manifest. Older automation fixtures still carry project.json, so
-	// accept either marker during the compatibility window instead of requiring
-	// users to manufacture a duplicate file solely for headless export.
+	// The editor creates game.json at every valid project root. Requiring that
+	// canonical marker prevents an arbitrary directory from being exported.
 	const bool hasGameManifest =
 		std::filesystem::is_regular_file(result.request.projectRoot / "game.json");
-	const bool hasLegacyProjectManifest =
-		std::filesystem::is_regular_file(result.request.projectRoot / "project.json");
 	if(!std::filesystem::is_directory(result.request.projectRoot)
-		|| (!hasGameManifest && !hasLegacyProjectManifest)) {
-		result.message = "Project root must contain game.json or legacy project.json: "
+		|| !hasGameManifest) {
+		result.message = "Project root must contain game.json: "
 			+ PathToUtf8(result.request.projectRoot);
 		return result;
 	}

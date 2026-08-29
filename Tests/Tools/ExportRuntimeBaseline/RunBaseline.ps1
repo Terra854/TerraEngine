@@ -307,7 +307,7 @@ New-Item -ItemType Directory -Force -Path $projectRoot, $logRoot, $evidenceRoot 
 
 # Copy only authored input directories. Ignored Build/obj folders that a local
 # editor may have left beside the fixture are deliberately not copied.
-foreach ($fileName in @("project.json", "Assembly-CSharp.csproj")) {
+foreach ($fileName in @("game.json", "Assembly-CSharp.csproj")) {
 	Copy-Item -LiteralPath (Join-Path $fixtureSource $fileName) -Destination $projectRoot
 }
 foreach ($directoryName in @("Assets", "BuildProfiles", "ProjectSettings")) {

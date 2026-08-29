@@ -54,19 +54,20 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -RunId export-runtime-long-path
 ```
 
-The compatibility script at
-`Tests/Tools/ExportRuntimeBaseline/ExportSample.ps1` forwards to the same
-authoritative helper. It does not contain a second export implementation.
-
 After installation, the gate requires these files:
 
 ```text
 out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe
 out/build/RelWithDebInfo/Build/Editor/TerraEngineModelPackageCompiler.exe
+out/build/RelWithDebInfo/Build/Editor/ExportRuntime/TerraEngine-Launcher.exe
+out/build/RelWithDebInfo/Build/Editor/ExportRuntime/TerraEngine.dll
+out/build/RelWithDebInfo/Build/Editor/ExportRuntime/glfw3.dll
 out/build/RelWithDebInfo/Build/Editor/Managed/TerraEngine.CSharp.dll
 out/build/RelWithDebInfo/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll
-out/build/RelWithDebInfo/Build/Launcher/TerraEngine-Launcher.exe
 ```
+
+Only files copied into exported games are grouped under `Editor/ExportRuntime`.
+The exporter CLI, compilers, and shared managed references remain editor tools.
 
 To invoke the installed CLI directly after the disposable project has been
 prepared, use explicit project, profile, output, and evidence paths:

@@ -77,7 +77,8 @@ namespace TerraEngine::EditorTests {
 			HeadlessContractFixture fixture;
 			const std::filesystem::path installRoot = tempDirectory.Root() / "Installed Runtime";
 			const std::filesystem::path editorDirectory = installRoot / "Editor";
-			const std::filesystem::path launcherDirectory = installRoot / "Launcher";
+			// Only binaries copied into a game belong to the export runtime payload.
+			const std::filesystem::path exportRuntimeDirectory = editorDirectory / "ExportRuntime";
 
 #ifdef _WIN32
 			fixture.executable = editorDirectory / "TerraEngine-Export.exe";
@@ -88,10 +89,9 @@ namespace TerraEngine::EditorTests {
 #endif
 			Touch(fixture.executable);
 			Touch(editorDirectory / ("TerraEngineModelPackageCompiler" + GetExportExecutableSuffix(platform)));
-			Touch(launcherDirectory / GetExportLauncherFileName("TerraEngine-Launcher", platform));
-			Touch(launcherDirectory / GetExportEngineLibraryName(platform));
-			Touch(launcherDirectory / GetExportGlfwLibraryName(platform));
-			std::filesystem::create_directories(installRoot / "Engine");
+			Touch(exportRuntimeDirectory / GetExportLauncherFileName("TerraEngine-Launcher", platform));
+			Touch(exportRuntimeDirectory / GetExportEngineLibraryName(platform));
+			Touch(exportRuntimeDirectory / GetExportGlfwLibraryName(platform));
 			std::filesystem::create_directories(editorDirectory / "Shaders");
 			std::filesystem::create_directories(editorDirectory / "Fonts");
 			std::filesystem::create_directories(editorDirectory / "Managed");
@@ -108,7 +108,7 @@ namespace TerraEngine::EditorTests {
 			fixture.project = tempDirectory.Root() / (useUnicodePaths
 				? std::filesystem::path(std::u8string(u8"Project \u00e9 space"))
 				: std::filesystem::path("Project With Spaces"));
-			Touch(fixture.project / "project.json", R"({"name":"Contract fixture"})");
+			Touch(fixture.project / "game.json", R"({"name":"Contract fixture"})");
 			fixture.profile = tempDirectory.Root() / "Profiles" / "headless.json";
 			Touch(fixture.profile,
 				std::string("{\n")
@@ -190,17 +190,19 @@ namespace TerraEngine::EditorTests {
 			context.Expect(std::filesystem::path("Builds/StoredValue") == sourceProfile.outputDirectory, "Parsing must not persist the command-line output override to the profile source.");
 		});
 
-		registry.Add("Editor.HeadlessExport.AcceptsCanonicalEditorGameManifest", [](TestContext& context) {
+		registry.Add("Editor.HeadlessExport.RejectsProjectWithoutCanonicalGameManifest", [](TestContext& context) {
 			TempHeadlessContractDirectory tempDirectory;
 			const HeadlessContractFixture fixture = MakeValidFixture(tempDirectory);
-			std::filesystem::remove(fixture.project / "project.json");
-			Touch(fixture.project / "game.json", R"({"name":"Installed editor project"})");
+			std::filesystem::remove(fixture.project / "game.json");
+			Touch(fixture.project / "project.json", R"({"name":"Unsupported project marker"})");
 
 			const HeadlessExportParseResult parsed = ParseHeadlessExportCommandLine(
 				ValidArguments(fixture), fixture.executable, tempDirectory.Root());
 
-			context.Expect(parsed.success,
-				"A project created by the installed editor must export with its canonical game.json and no synthetic project.json.");
+			context.Expect(!parsed.success,
+				"Headless export must reject a directory that lacks the editor's canonical game.json marker.");
+			context.Expect(parsed.message.find("game.json") != std::string::npos,
+				"The invalid-project error should identify the required canonical manifest.");
 		});
 
 		registry.Add("Editor.HeadlessExport.ResolvesRelativePathsAgainstLaunchDirectory", [](TestContext& context) {

@@ -32,7 +32,7 @@ derive stable generated child GUIDs:
 - texture `803d94e355222334826da82c660ecda8` at
   `Models/Baseline_Generated/BaselineTexture.tetf`
 
-`BuildProfiles/baseline.json` is the only build-profile source. `project.json`
+`BuildProfiles/baseline.json` is the only build-profile source. `game.json`
 intentionally contains no duplicate embedded profile. The managed project
 expects the baseline helper to stage the installed TerraEngine managed
 reference and export analyzer into `Build/Assembly-CSharp/References`.

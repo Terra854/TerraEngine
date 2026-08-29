@@ -64,8 +64,10 @@ namespace TerraEngine::EditorTests {
 			ExportRuntimeLayout layout;
 			layout.installRoot = installRoot;
 			layout.editorDirectory = installRoot / "Editor";
-			layout.engineDirectory = installRoot / "Engine";
-			layout.launcherDirectory = installRoot / "Launcher";
+			// Editor and headless exports share one game-runtime payload directory.
+			layout.exportRuntimeDirectory = layout.editorDirectory / "ExportRuntime";
+			layout.engineDirectory = layout.exportRuntimeDirectory;
+			layout.launcherDirectory = layout.exportRuntimeDirectory;
 			layout.shaderDirectory = layout.editorDirectory / "Shaders";
 			layout.fontDirectory = layout.editorDirectory / "Fonts";
 			layout.managedDirectory = layout.editorDirectory / "Managed";
@@ -305,11 +307,12 @@ namespace TerraEngine::EditorTests {
 			const std::filesystem::path installRoot = tempDirectory.Root() / "Installed";
 			const ExportRuntimeLayout runtimeLayout = MakeParityRuntimeLayout(
 				installRoot,
-				installRoot / "Editor" / ("TerraEngine-Export" + GetExportExecutableSuffix(platform)),
+				installRoot / "Editor"
+					/ ("TerraEngine-Export" + GetExportExecutableSuffix(platform)),
 				platform);
 
 			const std::filesystem::path projectRoot = tempDirectory.Root() / "Parity Project";
-			TouchParityFile(projectRoot / "project.json", R"({"name":"Parity Project"})");
+			TouchParityFile(projectRoot / "game.json", R"({"name":"Parity Project"})");
 			TouchParityFile(projectRoot / "Assets" / "Scenes" / "Startup.tescene", R"({"objects":[]})");
 			TouchParityFile(projectRoot / "Assets" / "Scenes" / "Secondary.tescene", R"({"objects":[]})");
 			TouchParityFile(projectRoot / "Assets" / "UI" / "Parity.teui", R"({"root":{}})");

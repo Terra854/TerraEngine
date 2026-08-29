@@ -20,6 +20,9 @@ The install must contain:
 
 - `out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe`
 - `out/build/RelWithDebInfo/Build/Editor/TerraEngineModelPackageCompiler.exe`
+- `out/build/RelWithDebInfo/Build/Editor/ExportRuntime/TerraEngine-Launcher.exe`
+- `out/build/RelWithDebInfo/Build/Editor/ExportRuntime/TerraEngine.dll`
+- `out/build/RelWithDebInfo/Build/Editor/ExportRuntime/glfw3.dll`
 - `out/build/RelWithDebInfo/Build/Editor/TerraEnginePhysicsColliderCompiler.exe`
 - `out/build/RelWithDebInfo/Build/Editor/Managed/TerraEngine.CSharp.dll`
 - `out/build/RelWithDebInfo/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll`
@@ -31,9 +34,6 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntim
 	-InstallRoot out/build/RelWithDebInfo/Build `
 	-WorkRoot out/ci/export-runtime-baseline
 ```
-
-The historical `Tests/Tools/ExportRuntimeBaseline/ExportSample.ps1` forwards
-to this canonical command for older test invocations.
 
 ## Inputs and generated output
 

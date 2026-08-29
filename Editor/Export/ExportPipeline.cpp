@@ -1228,15 +1228,6 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 	// stops copying them.
 	RemoveDirectoryIfExists(managedOutputDir);
 
-	// Old projects may still contain interop sources that conflict with the source
-	// generator. Export reports the problem but never deletes project source; the
-	// user remains in control of their checked-in content.
-	std::filesystem::path obsoleteExportDir = projectRoot / "Project" / "Internal" / "Export";
-	if (std::filesystem::exists(obsoleteExportDir)) {
-		result.errorMessage = "Obsolete 'Project/Internal/Export' source exists. Remove it manually before exporting so the source generator has one interop definition.";
-		return false;
-	}
-
 	// Restore first with PublishAot=true so all SDK-selected compiler packages
 	// come only from the installed feed. Publish then consumes that exact assets
 	// file with --no-restore and cannot silently contact a user or network source.
@@ -2033,22 +2024,10 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 	std::filesystem::path outputDir = ResolveOutputDirectory(profile, projectRoot);
 	const std::string projectName = ResolveProjectExportName(projectRoot, profile);
 	const std::string launcherFileName = GetExportLauncherFileName(projectName, profile.platform);
-	const std::string legacyLauncherFileName = GetExportLauncherFileName(profile.name, profile.platform);
 	const std::string archiveFileName = ResolveArchiveFileName(projectName);
 	std::filesystem::create_directories(outputDir);
 
 	result.outputDirectory = outputDir;
-
-	// Remove the legacy sidecar manifest and the old fixed-name archive so the
-	// export folder reflects the current convention after repeated exports.
-	RemoveIfExists(outputDir / "game.json");
-	if (archiveFileName != "content.tepak") {
-		RemoveIfExists(outputDir / "content.tepak");
-	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (legacyLauncherFileName != launcherFileName) {
-		RemoveIfExists(outputDir / std::filesystem::u8path(legacyLauncherFileName));
-	}
 
 	// Copy runtime binaries from the explicitly validated installed layout. This
 	// keeps export independent of the caller's current working directory.

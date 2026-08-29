@@ -15,6 +15,11 @@ struct ExportRuntimeLayout {
 	std::filesystem::path executablePath;
 	std::filesystem::path installRoot;
 	std::filesystem::path editorDirectory;
+	// Only binaries copied into exported builds live below Editor/ExportRuntime.
+	// Exporter and compiler tools remain in the editor tool directory.
+	std::filesystem::path exportRuntimeDirectory;
+	// These named paths remain separate so staging code communicates whether it
+	// is looking for an engine library or the launcher executable.
 	std::filesystem::path engineDirectory;
 	std::filesystem::path launcherDirectory;
 	std::filesystem::path shaderDirectory;
@@ -34,8 +39,7 @@ struct ExportRuntimeLayout {
 };
 
 /// Resolves an installed layout from an editor-side executable. The executable
-/// is expected below <install-root>/Editor, which is also where export tools are
-/// installed by CMake.
+/// is expected below <install-root>/Editor.
 bool DiscoverExportRuntimeLayout(
 	const std::filesystem::path& executablePath,
 	ExportRuntimeLayout& outLayout,

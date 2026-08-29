@@ -1027,10 +1027,15 @@ installed dependencies before running the baseline:
 ```text
 out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe
 out/build/RelWithDebInfo/Build/Editor/TerraEngineModelPackageCompiler.exe
+out/build/RelWithDebInfo/Build/Editor/ExportRuntime/TerraEngine-Launcher.exe
+out/build/RelWithDebInfo/Build/Editor/ExportRuntime/TerraEngine.dll
+out/build/RelWithDebInfo/Build/Editor/ExportRuntime/glfw3.dll
 out/build/RelWithDebInfo/Build/Editor/Managed/TerraEngine.CSharp.dll
 out/build/RelWithDebInfo/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll
-out/build/RelWithDebInfo/Build/Launcher/TerraEngine-Launcher.exe
 ```
+
+Only files copied into exported games live below `Editor/ExportRuntime`.
+Exporter/compiler tools and shared managed references remain editor-side.
 
 The direct headless CLI contract is:
 

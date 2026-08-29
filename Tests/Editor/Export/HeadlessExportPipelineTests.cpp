@@ -272,8 +272,10 @@ namespace TerraEngine::EditorTests {
 			ExportRuntimeLayout layout;
 			layout.installRoot = root / "Installed";
 			layout.editorDirectory = layout.installRoot / "Editor";
-			layout.engineDirectory = layout.installRoot / "Engine";
-			layout.launcherDirectory = layout.installRoot / "Launcher";
+			// Only game runtime binaries stay grouped below ExportRuntime.
+			layout.exportRuntimeDirectory = layout.editorDirectory / "ExportRuntime";
+			layout.engineDirectory = layout.exportRuntimeDirectory;
+			layout.launcherDirectory = layout.exportRuntimeDirectory;
 			layout.shaderDirectory = layout.editorDirectory / "Shaders";
 			layout.fontDirectory = layout.editorDirectory / "Fonts";
 			layout.managedDirectory = layout.editorDirectory / "Managed";
@@ -346,7 +348,7 @@ namespace TerraEngine::EditorTests {
 		ExportRequest MakeContentOnlyRequest(const std::filesystem::path& root) {
 			ExportRequest request;
 			request.projectRoot = root / "Content Only Project";
-			Touch(request.projectRoot / "project.json", R"({"name":"Content Only Project"})");
+			Touch(request.projectRoot / "game.json", R"({"name":"Content Only Project"})");
 			Touch(request.projectRoot / "Assets" / "Scenes" / "Startup.tescene", R"({"objects":[]})");
 			Touch(request.projectRoot / "Assets" / "UI" / "Baseline.teui", R"({"root":{}})");
 

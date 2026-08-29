@@ -59,6 +59,7 @@ bool DiscoverExportRuntimeLayout(
 	if(executableDirectory.filename() == "Editor") {
 		outLayout.editorDirectory = executableDirectory;
 		outLayout.installRoot = executableDirectory.parent_path();
+		outLayout.exportRuntimeDirectory = outLayout.editorDirectory / "ExportRuntime";
 	} else {
 		// CMake keeps developer executables at <build-dir> while the required
 		// install target materializes the self-contained tree below Build/. The
@@ -66,9 +67,11 @@ bool DiscoverExportRuntimeLayout(
 		// depending on its working directory or forcing a different dev layout.
 		outLayout.installRoot = executableDirectory / "Build";
 		outLayout.editorDirectory = outLayout.installRoot / "Editor";
+		outLayout.exportRuntimeDirectory = outLayout.editorDirectory / "ExportRuntime";
 	}
-	outLayout.engineDirectory = outLayout.installRoot / "Engine";
-	outLayout.launcherDirectory = outLayout.installRoot / "Launcher";
+	// Only the payload copied into a built game comes from ExportRuntime.
+	outLayout.engineDirectory = outLayout.exportRuntimeDirectory;
+	outLayout.launcherDirectory = outLayout.exportRuntimeDirectory;
 	outLayout.shaderDirectory = outLayout.editorDirectory / "Shaders";
 	outLayout.fontDirectory = outLayout.editorDirectory / "Fonts";
 	outLayout.managedDirectory = outLayout.editorDirectory / "Managed";
