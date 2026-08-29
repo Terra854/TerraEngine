@@ -6,6 +6,7 @@
 #include "ExportRuntimeLayout.h"
 #include "MaterialAssetWriter.h"
 #include "TEPAK/PackReader.h"
+#include "Terrain/TerrainAssetStore.h"
 #include "Utilities/UUID.h"
 #include "validation/AnimationPackValidator.h"
 
@@ -370,11 +371,23 @@ namespace TerraEngine::EditorTests {
 			const std::string terrainIdText = TerraEngine::ToHexString(terrainId);
 			const std::filesystem::path terrainPath =
 				projectRoot / "Assets" / "Terrain" / "HeadlessTerrain.teterrain";
-			// Export staging treats the .teterrain.data sibling as one private bundle.
-			// A bounded marker is sufficient here because this regression verifies
-			// manifest/path publication; TERRAROOT1 decoding is covered by terrain tests.
-			Touch(terrainPath, R"({"format":"TerraEngineTerrain","version":1})");
-			Touch(terrainPath.string() + ".data/CURRENT", "headless-root\n-\n");
+			// Export now rejects incomplete CURRENT generations before packaging, so
+			// even this path-focused fixture uses a valid sparse TERRAROOT1 bundle.
+			TerraEngine::Terrain::TerrainAssetRoot root{};
+			root.assetUuid = terrainId;
+			root.publicationGeneration = 1u;
+			root.persistedRootGeneration = 1u;
+			root.authoredBounds = {0, 0, 256, 256};
+			root.sampleSpacingMetres = 1.0;
+			root.defaultLayerId = 1u;
+			root.layerStackGeneration = 1u;
+			const auto encoded = TerraEngine::Terrain::EncodeTerrainRootManifest(root);
+			const std::string rootHash = TerraEngine::Terrain::ToHexString(encoded.contentHash);
+			Touch(terrainPath, nlohmann::json{{"format", "TerraEngineTerrain"},
+				{"version", 1u}, {"rootFormat", "TERRAROOT1"}, {"assetId", terrainIdText},
+				{"width", 256u}, {"height", 256u}, {"sampleSpacingMetres", 1.0}}.dump());
+			Touch(terrainPath.string() + ".data/CURRENT", rootHash + "\n-\n");
+			Touch(terrainPath.string() + ".data/roots/" + rootHash + ".root", encoded.canonicalBytes);
 			Touch(
 				terrainPath.string() + ".meta",
 				nlohmann::json{

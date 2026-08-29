@@ -20,6 +20,8 @@ namespace TerraEngine::Runtime
 		TerraEngine::Terrain::TerrainAreaCoordinate area{};
 		TerraEngine::Terrain::ContentHash authoredHash{};
 		TerraEngine::Terrain::Generation authoredGeneration = 0U;
+		TerraEngine::Terrain::TerrainAreaActiveRect activeRect{};
+		bool implicitDefault = false;
 		TerraEngine::Renderer::Terrain::TerrainDirectMeshResult directMesh;
 		TerraEngine::Renderer::Terrain::TerrainPageCookResult pageCook;
 		TerraEngine::Physics::TerrainHeightFieldRecipe collisionRecipe;
@@ -42,13 +44,15 @@ namespace TerraEngine::Runtime
 		TerraEngine::Physics::TerrainHeightFieldRecipe collisionRecipe;
 		TerraEngine::Terrain::ContentHash sourceRootHash{};
 		TerraEngine::Terrain::Generation sourcePublicationGeneration = 0U;
+		TerraEngine::Terrain::TerrainSampleBounds authoredBounds{};
 
 		[[nodiscard]] bool Succeeded() const noexcept
 		{
 			return !areas.empty()
 				&& std::all_of(areas.begin(), areas.end(), [](const auto& area) { return area.Succeeded(); })
 				&& renderProxy.Succeeded() && collisionRecipe.IsComplete()
-				&& sourceRootHash.IsValid() && sourcePublicationGeneration != 0U;
+				&& sourceRootHash.IsValid() && sourcePublicationGeneration != 0U
+				&& authoredBounds.IsValid();
 		}
 	};
 

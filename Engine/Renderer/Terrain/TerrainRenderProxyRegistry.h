@@ -47,6 +47,7 @@ namespace TerraEngine::Renderer::Terrain
 		TerraEngine::Terrain::TerrainAreaCoordinate coordinate{};
 		TerraEngine::Terrain::ContentHash stableAreaIdentity{};
 		TerraEngine::Terrain::TerrainSampleBounds sampleBounds{};
+		TerraEngine::Terrain::TerrainAreaActiveRect activeRect{0u, 0u, 256u, 256u};
 		TerraEngine::Terrain::ContentHash authoredHash{};
 		std::uint64_t authoredGeneration = 0u;
 		TerraEngine::Terrain::ContentHash pageSourceIdentity{};
@@ -61,7 +62,7 @@ namespace TerraEngine::Renderer::Terrain
 
 		[[nodiscard]] bool IsComplete() const noexcept
 		{
-			return stableAreaIdentity.IsValid() && sampleBounds.IsValid()
+			return stableAreaIdentity.IsValid() && sampleBounds.IsValid() && activeRect.IsValid()
 				&& authoredHash.IsValid() && authoredGeneration != 0u
 				&& pageSourceIdentity.IsValid() && controlIdentity.IsValid()
 				&& holeIdentity.IsValid() && hierarchyIdentity.IsValid()

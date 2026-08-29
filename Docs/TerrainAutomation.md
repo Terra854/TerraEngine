@@ -90,7 +90,8 @@ The editor advertises only these installed terrain routes: `terrain.asset.inspec
 `terrain.create`, `terrain.import_heightmap`, `terrain.session.begin`,
 `terrain.session.get`, `terrain.session.cancel`, `terrain.session.commit`,
 `terrain.stroke.apply`, `terrain.layers.set`, `terrain.holes.set`,
-`terrain.operation.start`, `terrain.rebuild`, `terrain.job.get`,
+`terrain.operation.start`, `terrain.resize.preview`, `terrain.expand.start`,
+`terrain.crop.start`, `terrain.rebuild`, `terrain.job.get`,
 `terrain.job.cancel`, `terrain.diagnostics.get`, `terrain.validate`,
 `terrain.export`, and `terrain.save`. Unsupported service prerequisites return
 an explicit unavailable result; capability discovery does not imply that an
@@ -103,6 +104,24 @@ stack generation, and every affected area observation in the typed edit
 envelope. After commit or job completion, call `terrain.diagnostics.get` and
 compare the receipt's published generations rather than polling mutable editor
 objects.
+
+### Resize envelopes
+
+Call `terrain.resize.preview` with `kind: "expand"` and zero-or-positive area
+counts for each side, or `kind: "crop"` and exact signed half-open sample bounds.
+Expansion also accepts `policy` (`edge-blend`, `extend-edge`, or `flat-default`),
+`transitionSamples`, and `holePolicy`. Poll the returned `jobId` through
+`terrain.job.get` until it reports the ready proposal.
+
+The ready result includes the root-bound `proposalFingerprint`, previous/proposed
+bounds and area counts, policy, hole policy, transition size, physical dimensions,
+ready generation, crop-loss object, warnings, and a human-readable diagnostic.
+Commit exactly that proposal with `terrain.expand.start`, or with
+`terrain.crop.start` plus `acknowledgeDataLoss: true`. A changed root, changed
+settings, mismatched kind, missing hole choice, or different fingerprint is
+rejected before publication. Start and terminal receipts retain transaction,
+fingerprint, bounds, ready generation, outcome, published root identity, and the
+`terrain_authoring_publish` visibility boundary.
 
 Inspection and diagnostics report per-area desired, balanced, resident, and
 actual LOD; projected error/hysteresis; stitch and hole-pin state; desired and

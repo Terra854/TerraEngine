@@ -26,7 +26,9 @@ namespace TerraEngine::EditorTests
 				std::istreambuf_iterator<char>());
 			context.Expect(source.find("Terrain (.teterrain)") != std::string::npos
 				&& source.find("CreateProjectTerrainCreationService()") != std::string::npos
-				&& source.find("service.CreateOrImport(request, targetPath)") != std::string::npos,
+				&& source.find("service.CreateOrImportAsync(request, targetPath") != std::string::npos
+				&& source.find("ProgressBar") != std::string::npos
+				&& source.find("Cancel creation") != std::string::npos,
 				"Project Browser must expose terrain creation through the checked atomic service instead of writing an empty descriptor.");
 			context.Expect(source.find("IsTerrainPrivateDataDirectory") != std::string::npos
 				&& source.find("[TER]") != std::string::npos,
@@ -245,6 +247,7 @@ namespace TerraEngine::EditorTests
 				&& std::filesystem::exists(destination) && std::filesystem::exists(destination.string() + ".data/CURRENT")
 				&& rootHash.size() == 32U && decodedRoot.Succeeded() && decodedRoot.root
 				&& decodedRoot.root->assetUuid == request.assetId
+				&& decodedRoot.root->directoryShards.empty()
 				&& TerraEngine::Terrain::ToHexString(decodedRoot.contentHash) == rootHash,
 				"Flat creation must publish one parent asset plus a complete private CURRENT/root/blob generation.");
 			const auto reopened = service.OpenExisting(destination);
@@ -252,6 +255,55 @@ namespace TerraEngine::EditorTests
 				&& reopened.heightfield.heightsMm == result.heightfield.heightsMm,
 				"A scene reload must recover the exact persisted origin area used to rebuild its render proxy.");
 			std::error_code ignored; std::filesystem::remove_all(root, ignored);
+		});
+
+		registry.Add("Editor.TerrainCreation.VariableSizesSpacingAndBudgetsAreChecked", [](TestContext& context) {
+			const std::array<std::pair<std::uint32_t, std::uint32_t>, 4u> sizes{{
+				{256u, 256u}, {512u, 1024u}, {1024u, 512u}, {2048u, 2048u}}};
+			bool allValid = true;
+			for(const float spacing : {0.25F, 1.0F, 4.0F})
+				for(const auto [width, depth] : sizes)
+				{
+					TerraEngine::AssetPipeline::TerrainImportRequest request{};
+					request.assetId = TerraEngine::GenerateUUID();
+					request.flatWidth = width;
+					request.flatDepth = depth;
+					request.sampleSpacingMetres = spacing;
+					const auto compiled = TerraEngine::AssetPipeline::CompileTerrainHeightfield(request);
+					allValid = allValid && compiled.succeeded && compiled.heightfield.width == width
+						&& compiled.heightfield.height == depth;
+				}
+			TerraEngine::AssetPipeline::TerrainImportRequest overBudget{};
+			overBudget.assetId = TerraEngine::GenerateUUID();
+			overBudget.flatWidth = 2048u;
+			overBudget.flatDepth = 2048u;
+			overBudget.maximumSamples = 1024u;
+			const auto rejected = TerraEngine::AssetPipeline::CompileTerrainHeightfield(overBudget);
+			context.Expect(allValid && !rejected.succeeded,
+				"Square and non-square 1x1 through 8x8 flat terrain must honor immutable spacing and reject sample-budget overflow before publication.");
+		});
+
+		registry.Add("Editor.TerrainCreation.VariableNonSquareReopensEveryArea", [](TestContext& context) {
+			const auto root = std::filesystem::temp_directory_path() / ("TerrainVariable-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+			const auto destination = root / "NonSquare.teterrain";
+			TerraEngine::AssetPipeline::TerrainImportRequest request;
+			request.assetId = TerraEngine::GenerateUUID();
+			request.flatWidth = 300u;
+			request.flatDepth = 513u;
+			request.sampleSpacingMetres = 2.0F;
+			TerraEngine::Editor::Terrain::TerrainCreationService service;
+			const auto created = service.CreateOrImport(request, destination);
+			const auto reopened = service.OpenExisting(destination);
+			const auto areas = reopened.store && reopened.store->CaptureRoot().IsValid()
+				? TerraEngine::Terrain::EnumerateTerrainAreas(reopened.authoredBounds, 16u) : std::nullopt;
+			context.Expect(created.succeeded && reopened.succeeded
+				&& reopened.heightfield.width == 300u && reopened.heightfield.height == 513u
+				&& reopened.heightfield.heightsMm.size() == 300u * 513u
+				&& reopened.authoredBounds == TerraEngine::Terrain::TerrainSampleBounds{0, 0, 300, 513}
+				&& areas && areas->size() == 6u,
+				"A non-square partial-edge terrain must reopen from its complete root instead of clamping to the origin area.");
+			std::error_code ignored;
+			std::filesystem::remove_all(root, ignored);
 		});
 
 		registry.Add("Editor.TerrainCreation.TERRAROOT1ExistingDescriptorSurvivesRejectedReplacement", [](TestContext& context) {

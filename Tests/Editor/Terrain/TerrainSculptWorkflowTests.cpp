@@ -195,9 +195,9 @@ namespace TerraEngine::EditorTests
 			const std::string synchronization = synchronizationBegin != std::string::npos && synchronizationEnd != std::string::npos
 				? source.substr(synchronizationBegin, synchronizationEnd - synchronizationBegin) : std::string{};
 			context.Expect(synchronization.find("capture.root->layerStack") != std::string::npos
-				&& synchronization.find("descriptor->channels.heightHash") != std::string::npos
-				&& synchronization.find("descriptor->channels.holeHash") != std::string::npos
-				&& synchronization.find("descriptor->channels.weightGroupHashes.find(1u)") != std::string::npos
+				&& synchronization.find("descriptor.channels.heightHash") != std::string::npos
+				&& synchronization.find("descriptor.channels.holeHash") != std::string::npos
+				&& synchronization.find("descriptor.channels.weightGroupHashes.find(1u)") != std::string::npos
 				&& synchronization.find("DecodeTerrainWeightSample") != std::string::npos,
 				"History replay must rebuild height, holes, surface weights, and layer metadata from the published root.");
 			context.Expect(source.find("if(wasHistoryReplay)") != std::string::npos

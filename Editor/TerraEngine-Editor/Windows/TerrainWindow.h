@@ -11,6 +11,7 @@
 #include "../Terrain/TerrainAutomationAdapter.h"
 #include "../Terrain/TerrainDirtyState.h"
 #include "../Terrain/TerrainPicking.h"
+#include "../Terrain/TerrainResizeJobs.h"
 
 #include "Terrain/TerrainAssetStore.h"
 #include "Terrain/TerrainDiagnostics.h"
@@ -21,8 +22,10 @@
 #include "Editor/AssetCompilers/TerrainCompiler.h"
 
 #include <atomic>
+#include <array>
 #include <filesystem>
 #include <future>
+#include <map>
 #include <memory>
 #include <limits>
 #include <optional>
@@ -113,6 +116,10 @@ public:
 	// users never need to add or configure a separate collider component.
 	[[nodiscard]] bool QueueAutomaticTerrainCollision(std::string& outError);
 	[[nodiscard]] bool HasDetachedPreview() const noexcept { return authoringSession.IsDirty(); }
+	[[nodiscard]] const TerraEngine::Terrain::TerrainResizePreview* ActiveResizePreview() const noexcept
+	{
+		return resizePreview ? &resizePreview->preview : nullptr;
+	}
 	// Lifecycle owners call this before a scene/project/play-mode/device boundary.
 	// It only discards detached data, so an uncommitted brush can never mutate
 	// a new scene or project after that boundary becomes visible.
@@ -171,7 +178,11 @@ private:
 	void DrawMaterialControls();
 	void DrawSurfaceControls();
 	void DrawProceduralControls();
+	void DrawResizeControls();
 	void DrawDiagnosticControls();
+	void PollResizePreview();
+	[[nodiscard]] bool StartResizePreview(TerraEngine::Terrain::TerrainResizeKind kind, std::string& outError);
+	[[nodiscard]] bool CommitResizePreview(bool confirmDataLoss, std::string& outError);
 	[[nodiscard]] TerraEngine::Editor::Terrain::TerrainAutomationCommandResult ExecuteAutomationCommand(
 		std::string_view capability, const nlohmann::json& arguments);
 	void PollProceduralPreview();
@@ -184,7 +195,8 @@ private:
 	void InitializeAuthoringTerrain(
 		TerraEngine::UUID assetId,
 		const TerraEngine::AssetPipeline::TerrainHeightfield& heightfield,
-		TerraEngine::UUID existingObjectId = TerraEngine::EMPTY_UUID);
+		TerraEngine::UUID existingObjectId = TerraEngine::EMPTY_UUID,
+		std::optional<TerraEngine::Terrain::TerrainSampleBounds> authoredBounds = std::nullopt);
 	// Undo and redo publish immutable terrain roots without rebuilding the detached
 	// editor buffers. Mirror every authored channel so the next tool operation
 	// starts from the replayed value instead of overwriting it with stale state.
@@ -220,9 +232,20 @@ private:
 	TerraEngine::Editor::Terrain::TerrainDirtyState terrainDirtyState;
 	std::vector<std::int32_t> previewHeightMm;
 	std::vector<std::int32_t> committedHeightMm;
+	std::map<TerraEngine::Terrain::TerrainAreaCoordinate, std::vector<std::int32_t>> committedAreaHeightMm;
+	// Height sculpting can cross area boundaries in one detached session. The
+	// map holds only copied canonical area buffers and is published as one typed
+	// multi-area transaction on release.
+	std::map<TerraEngine::Terrain::TerrainAreaCoordinate, std::vector<std::int32_t>> previewAreaHeightMm;
+	TerraEngine::Terrain::TerrainAreaCoordinate selectedTerrainArea{};
 	std::vector<std::uint8_t> brushMask;
 	std::vector<std::uint8_t> committedHoleMask;
 	std::vector<std::uint8_t> previewHoleMask;
+	// Hole and surface mirrors are area-keyed for the same reason as height:
+	// a single brush footprint may cross a signed area boundary and must publish
+	// all changed channels in one protected transaction.
+	std::map<TerraEngine::Terrain::TerrainAreaCoordinate, std::vector<std::uint8_t>> committedAreaHoleMasks;
+	std::map<TerraEngine::Terrain::TerrainAreaCoordinate, std::vector<std::uint8_t>> previewAreaHoleMasks;
 	TerraEngine::Editor::Terrain::TerrainHoleBrushSettings holeBrushSettings{};
 	std::optional<TerraEngine::Editor::Terrain::TerrainBrushStamp> previousStamp;
 	std::optional<TerraEngine::Editor::Terrain::TerrainSurfaceBrushStamp> previousSurfaceStamp;
@@ -235,6 +258,8 @@ private:
 	TerraEngine::Terrain::TerrainLayerStack previewLayerStack;
 	std::vector<TerraEngine::Terrain::TerrainWeightSample> committedSurfaceWeights;
 	std::vector<TerraEngine::Terrain::TerrainWeightSample> previewSurfaceWeights;
+	std::map<TerraEngine::Terrain::TerrainAreaCoordinate, std::vector<TerraEngine::Terrain::TerrainWeightSample>> committedAreaSurfaceWeights;
+	std::map<TerraEngine::Terrain::TerrainAreaCoordinate, std::vector<TerraEngine::Terrain::TerrainWeightSample>> previewAreaSurfaceWeights;
 	TerraEngine::Editor::Terrain::TerrainSurfaceBrushSettings surfaceBrushSettings{};
 	std::uint16_t selectedLayerId = 1u;
 	std::uint64_t observedTerrainMaterialGeneration = 0u;
@@ -257,6 +282,15 @@ private:
 	int proceduralOperation = 0;
 	std::int32_t proceduralMinimumHeightMm = std::numeric_limits<std::int32_t>::min();
 	std::int32_t proceduralHeightDeltaMm = 100;
+	TerraEngine::Editor::Terrain::TerrainResizeJobs resizeJobs;
+	std::optional<TerraEngine::Editor::Terrain::TerrainPreparedResize> resizePreview;
+	std::optional<TerraEngine::UUID> queuedResizeTransactionId;
+	std::array<int, 4u> resizeExpansionAreas{0, 1, 0, 0};
+	std::array<std::int64_t, 4u> resizeCropBounds{0, 0, 256, 256};
+	int resizeExpansionPolicy = static_cast<int>(TerraEngine::Terrain::TerrainExpansionPolicy::EdgeBlend);
+	int resizeHolePolicy = static_cast<int>(TerraEngine::Terrain::TerrainBoundaryHolePolicy::CloseAtFormerEdge);
+	int resizeTransitionSamples = 64;
+	bool resizeCropAcknowledged = false;
 	char diagnosticFilter[96]{};
 	std::optional<TerraEngine::Terrain::TerrainAreaCoordinate> diagnosticLocateRequest;
 	// Automation sessions are logical approval/history scopes. They never own a

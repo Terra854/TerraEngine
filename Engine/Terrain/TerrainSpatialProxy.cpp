@@ -31,15 +31,22 @@ namespace
 		double sampleSpacingMetres,
 		double heightDatumMetres,
 		const TerraEngine::Scene::WorldPosition& terrainOrigin,
-		const TerraEngine::Scene::SpatialReferenceFrame& frame)
+		const TerraEngine::Scene::SpatialReferenceFrame& frame,
+		TerrainAreaActiveRect activeRect)
 	{
 		if (assetId == TerraEngine::EMPTY_UUID || descriptor.editGeneration == 0u
-			|| !std::isfinite(sampleSpacingMetres) || sampleSpacingMetres <= 0.0 || !std::isfinite(heightDatumMetres)) return std::nullopt;
+			|| !std::isfinite(sampleSpacingMetres) || sampleSpacingMetres <= 0.0
+			|| !std::isfinite(heightDatumMetres) || !activeRect.IsValid()) return std::nullopt;
 		const long double extent = static_cast<long double>(kTerrainAreaExtentSamples) * sampleSpacingMetres;
-		const long double x = static_cast<long double>(descriptor.coordinate.x) * extent;
-		const long double z = static_cast<long double>(descriptor.coordinate.z) * extent;
+		const long double areaX = static_cast<long double>(descriptor.coordinate.x) * extent;
+		const long double areaZ = static_cast<long double>(descriptor.coordinate.z) * extent;
+		const long double x = areaX + static_cast<long double>(activeRect.minX) * sampleSpacingMetres;
+		const long double z = areaZ + static_cast<long double>(activeRect.minZ) * sampleSpacingMetres;
+		const long double oppositeX = areaX + static_cast<long double>(activeRect.maxXExclusive) * sampleSpacingMetres;
+		const long double oppositeZ = areaZ + static_cast<long double>(activeRect.maxZExclusive) * sampleSpacingMetres;
 		const auto owner = OffsetOrigin(terrainOrigin, x, heightDatumMetres + static_cast<long double>(descriptor.minHeightMm) / 1000.0L, z);
-		const auto opposite = OffsetOrigin(terrainOrigin, x + extent, heightDatumMetres + static_cast<long double>(descriptor.maxHeightMm) / 1000.0L, z + extent);
+		const auto opposite = OffsetOrigin(terrainOrigin, oppositeX,
+			heightDatumMetres + static_cast<long double>(descriptor.maxHeightMm) / 1000.0L, oppositeZ);
 		if (!owner.has_value() || !opposite.has_value()) return std::nullopt;
 		const auto localOwner = TerraEngine::Scene::LocalizeToSpatialFrame(*owner, frame);
 		const auto localOpposite = TerraEngine::Scene::LocalizeToSpatialFrame(*opposite, frame);

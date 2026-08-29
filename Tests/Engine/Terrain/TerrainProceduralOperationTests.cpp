@@ -112,6 +112,35 @@ namespace TerraEngine::Tests
 				"Seeded noise on a negative canonical lattice must be byte-deterministic and selection bounded.");
 		});
 
+		registry.Add("Terrain.Procedural.SignedCrossAreaBatchIsSortedAndDeterministic", [](TestContext& context) {
+			using namespace Editor::Terrain;
+			TerrainProceduralRequest request;
+			request.budget.maximumAreas = 2u;
+			request.budget.maximumSamples = 2u * Terrain::kTerrainAreaSampleCount;
+			for(const Terrain::TerrainAreaCoordinate coordinate : {
+				Terrain::TerrainAreaCoordinate{0, 0}, Terrain::TerrainAreaCoordinate{-1, 0}})
+			{
+				TerrainProceduralArea area{};
+				area.coordinate = coordinate;
+				area.observedGeneration = coordinate.x < 0 ? 0u : 4u;
+				area.heightMm.assign(Terrain::kTerrainAreaSampleCount, coordinate.x < 0 ? 0 : 100);
+				area.selectionMask.assign(Terrain::kTerrainAreaSampleCount, 0u);
+				area.selectionMask[coordinate.x < 0 ? Terrain::kTerrainAreaSampleCount - 1u : 0u] = 255u;
+				request.areas.push_back(std::move(area));
+			}
+			const TerrainHeightRemapSettings settings{1, 1, 50};
+			const auto first = ApplyTerrainHeightRemap(request, settings);
+			const auto second = ApplyTerrainHeightRemap(request, settings);
+			context.Expect(first.Succeeded() && second.Succeeded() && first.outputHash == second.outputHash
+				&& first.areas.size() == 2u && first.areas[0].coordinate == Terrain::TerrainAreaCoordinate{-1, 0}
+				&& first.areas[0].heightMm.back() == 50 && first.areas[1].heightMm.front() == 150,
+				"A procedural operation must sort signed explicit/implicit inputs and produce one deterministic cross-boundary result.");
+			auto duplicate = request;
+			duplicate.areas[1].coordinate = duplicate.areas[0].coordinate;
+			context.Expect(ApplyTerrainHeightRemap(duplicate, settings).code == Terrain::TerrainResultCode::InvalidArgument,
+				"Duplicate coordinates must reject the complete procedural batch before any area can publish.");
+		});
+
 		registry.Add("Terrain.Procedural.StampAndErosionPreserveEveryOutsideSample", [](TestContext& context) {
 			using namespace Editor::Terrain;
 			auto request = MakeProceduralRequest(0);

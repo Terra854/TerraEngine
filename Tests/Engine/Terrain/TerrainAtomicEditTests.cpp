@@ -160,6 +160,72 @@ namespace
 			context.Expect(rejectedReplay.code == Terrain::TerrainResultCode::Conflict && store.CaptureRoot().publicationGeneration == 3u, "A replay prepared for an older root must be rejected without moving visibility or history state.");
 		});
 
+		registry.Add("Terrain.AtomicEdit.SignedImplicitCrossAreaCommitAndUndoRemainAtomic", [](TestContext& context) {
+			Terrain::TerrainAreaDescriptor explicitArea{};
+			Terrain::TerrainAssetStore store(MakeRoot(explicitArea));
+			Terrain::TerrainPublication publication(store);
+			const auto observed = store.CaptureRoot();
+			const auto implicitBefore = store.ResolveDescriptorOrImplicit(*observed.root, {-1, 0});
+			const auto explicitBefore = store.ResolveDescriptorOrImplicit(*observed.root, {0, 0});
+			Terrain::TerrainEditTransaction transaction{};
+			transaction.transactionId = TerraEngine::GenerateUUID();
+			transaction.targetAssetUuid = observed.root->assetUuid;
+			transaction.inputRootHash = observed.root->rootContentHash;
+			transaction.expectedLayerStackGeneration = observed.root->layerStackGeneration;
+			transaction.affectedBounds = observed.root->authoredBounds;
+			transaction.budget.maximumAreas = 2u;
+			transaction.budget.maximumSamples = 2u * Terrain::kTerrainAreaSampleCount;
+			for(const auto& before : {implicitBefore, explicitBefore})
+			{
+				Terrain::TerrainPatch patch{};
+				patch.kind = Terrain::TerrainPatchKind::ReplaceHeight;
+				patch.replacement = before;
+				patch.replacement.editGeneration++;
+				patch.replacement.authoredContentHash = before.coordinate.x < 0
+					? Terrain::ContentHash{101u, 102u} : Terrain::ContentHash{103u, 104u};
+				transaction.readSet.push_back({before.coordinate, before.editGeneration, before.authoredContentHash});
+				transaction.patches.push_back(std::move(patch));
+			}
+			context.Expect(transaction.patches.size() == 2u && transaction.readSet.size() == 2u
+				&& transaction.readSet.front().coordinate == Terrain::TerrainAreaCoordinate{-1, 0},
+				"A signed brush batch must describe both sides in deterministic coordinate order, including implicit coverage.");
+			for(const auto& before : {implicitBefore, explicitBefore})
+			{
+				Terrain::TerrainPatch inverse{};
+				inverse.kind = Terrain::TerrainPatchKind::ReplaceHeight;
+				inverse.replacement = before;
+				inverse.replacement.editGeneration++;
+				transaction.inversePatches.push_back(std::move(inverse));
+			}
+			const auto committed = publication.Publish(transaction);
+			const auto afterCommit = store.CaptureRoot();
+			context.Expect(committed.outcome == Terrain::TerrainEditOutcome::Committed
+				&& afterCommit.publicationGeneration == observed.publicationGeneration + 1u
+				&& store.FindDescriptor(*afterCommit.root, {-1, 0}).has_value(),
+				"Both signed areas, including materialized implicit coverage, must become visible at one root generation.");
+
+			if(!committed.historyPayload) return;
+			Terrain::TerrainEditTransaction undo{};
+			undo.transactionId = TerraEngine::GenerateUUID();
+			undo.origin = Terrain::TerrainEditOrigin::Undo;
+			undo.targetAssetUuid = afterCommit.root->assetUuid;
+			undo.inputRootHash = afterCommit.root->rootContentHash;
+			undo.expectedLayerStackGeneration = afterCommit.root->layerStackGeneration;
+			undo.affectedBounds = transaction.affectedBounds;
+			undo.budget.maximumAreas = 2u;
+			undo.budget.maximumSamples = 2u * Terrain::kTerrainAreaSampleCount;
+			undo.patches = committed.historyPayload->inversePatches;
+			for(const auto coordinate : {Terrain::TerrainAreaCoordinate{-1, 0}, Terrain::TerrainAreaCoordinate{0, 0}})
+			{
+				const auto current = store.ResolveDescriptorOrImplicit(*afterCommit.root, coordinate);
+				undo.readSet.push_back({coordinate, current.editGeneration, current.authoredContentHash});
+			}
+			const auto undone = publication.Publish(std::move(undo));
+			context.Expect(undone.outcome == Terrain::TerrainEditOutcome::Committed
+				&& store.CaptureRoot().publicationGeneration == observed.publicationGeneration + 2u,
+				"Undo must restore both sides through one newer atomic root rather than exposing a half-replayed seam.");
+		});
+
 		registry.Add("Terrain.AtomicEdit.PersistenceGcAndDerivedChecksFailClosed", [](TestContext& context) {
 			Terrain::TerrainAreaDescriptor descriptor{};
 			Terrain::TerrainAssetStore store(MakeRoot(descriptor));
@@ -190,6 +256,38 @@ namespace
 			context.Expect(saved.Succeeded() && interrupted.code == Terrain::TerrainResultCode::Failed && recovery.Succeeded() && recovered.CaptureRoot().root->rootContentHash == saved.savedRootHash, "Manifest-last persistence must preserve a complete predecessor CURRENT root when replacement is interrupted.");
 			std::error_code cleanupError;
 			std::filesystem::remove_all(persistenceDirectory, cleanupError);
+		});
+
+		registry.Add("Terrain.AtomicEdit.CommonReadyBarrierRejectsMixedGenerations", [](TestContext& context) {
+			Terrain::TerrainAreaDescriptor descriptor{};
+			Terrain::TerrainAssetStore store(MakeRoot(descriptor));
+			const auto capture = store.CaptureRoot();
+			Terrain::TerrainCommonReadyCandidate candidate{};
+			candidate.assetUuid = capture.root->assetUuid;
+			candidate.rootHash = capture.root->rootContentHash;
+			candidate.derivedHaloIdentity = {301u, 302u};
+			candidate.publicationGeneration = capture.publicationGeneration;
+			candidate.renderGeneration = capture.publicationGeneration;
+			candidate.pickingGeneration = capture.publicationGeneration;
+			candidate.spatialGeneration = capture.publicationGeneration;
+			candidate.residencyGeneration = capture.publicationGeneration;
+			candidate.collisionGeneration = capture.publicationGeneration;
+			candidate.rootComplete = true;
+			candidate.derivedHalosComplete = true;
+			candidate.renderComplete = true;
+			candidate.pickingComplete = true;
+			candidate.spatialComplete = true;
+			candidate.residencyRetirementsComplete = true;
+			candidate.demandedCollisionComplete = true;
+			const auto valid = Terrain::ValidateTerrainCommonReadyCandidate(candidate, store);
+			candidate.collisionGeneration++;
+			const auto mixed = Terrain::ValidateTerrainCommonReadyCandidate(candidate, store);
+			candidate.collisionGeneration = capture.publicationGeneration;
+			candidate.pickingComplete = false;
+			const auto incomplete = Terrain::ValidateTerrainCommonReadyCandidate(candidate, store);
+			context.Expect(valid.Succeeded() && mixed.code == Terrain::TerrainResultCode::Conflict
+				&& incomplete.code == Terrain::TerrainResultCode::InvalidArgument,
+				"Common-ready publication must accept one complete generation and fail closed for mixed or incomplete downstream products.");
 		});
 	}
 }

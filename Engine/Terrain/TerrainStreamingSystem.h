@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <span>
 #include <vector>
 
 namespace TerraEngine::Terrain
@@ -102,11 +103,19 @@ namespace TerraEngine::Terrain
 		const TerrainResidencySnapshot& prior,
 		std::vector<TerrainResidencyDemand> demands,
 		TerrainResidencyBudget budget,
-		const std::atomic_bool* cancellation = nullptr);
+		const std::atomic_bool* cancellation = nullptr,
+		std::span<const TerrainAreaCoordinate> forcedRetirements = {});
 	TERRAENGINE_API bool PublishTerrainResidencyPlan(
 		TerrainResidencySnapshot& inOutPublished,
 		const TerrainResidencyPlan& plan,
 		Generation currentRootGeneration);
+	// Builds one cheap regional-root demand for every authoritative in-bounds
+	// area, including sparse implicit defaults. Detail demand can raise the byte
+	// estimates later without losing complete coarse coverage.
+	[[nodiscard]] TERRAENGINE_API std::optional<std::vector<TerrainResidencyDemand>>
+		BuildTerrainCoarseCoverageDemands(TerraEngine::UUID assetId,
+			Generation rootGeneration, TerrainSampleBounds authoredBounds,
+			std::size_t maximumAreas, std::size_t coarseRenderBytesPerArea);
 
 	// This system owns demand aggregation and immutable residency snapshots. Blob
 	// decode stays in TerrainAssetStore worker helpers, so this scheduler owner
@@ -126,6 +135,13 @@ namespace TerraEngine::Terrain
 		// Demand submission accepts copied packets from all views and editor modes.
 		// It merely queues data; Update never mutates the visible snapshot.
 		void SubmitDemands(std::vector<TerrainResidencyDemand> demands);
+		[[nodiscard]] bool SubmitCoarseCoverage(TerraEngine::UUID assetId,
+			Generation rootGeneration, TerrainSampleBounds authoredBounds,
+			std::size_t maximumAreas, std::size_t coarseRenderBytesPerArea);
+		// Crop retirement bypasses ordinary priority/pin eviction, but remains
+		// deferred until the protected residency snapshot swap.
+		void SubmitForcedRetirements(Generation rootGeneration,
+			std::vector<TerrainAreaCoordinate> areas);
 		void SetBudget(TerrainResidencyBudget budget);
 		[[nodiscard]] TerrainResidencySnapshot ResidencySnapshot() const;
 		[[nodiscard]] std::optional<TerrainResidencyPlan> PrepareSnapshot(
@@ -140,5 +156,7 @@ namespace TerraEngine::Terrain
 		TerrainResidencySnapshot publishedResidency{};
 		std::optional<TerrainResidencyPlan> preparedResidency;
 		std::vector<TerrainResidencyDemand> pendingDemands;
+		Generation forcedRetirementGeneration = 0u;
+		std::vector<TerrainAreaCoordinate> pendingForcedRetirements;
 	};
 }

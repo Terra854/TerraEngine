@@ -22,6 +22,8 @@ set(TERRAENGINE_TERRAIN_PHYSICS_HEADERS)
 set(_TERRAENGINE_TERRAIN_ENGINE_FILES
 	Engine/Terrain/TerrainTypes.cpp
 	Engine/Terrain/TerrainTypes.h
+	Engine/Terrain/TerrainResize.cpp
+	Engine/Terrain/TerrainResize.h
 	Engine/Terrain/TerrainAreaCodec.cpp
 	Engine/Terrain/TerrainAreaCodec.h
 	Engine/Terrain/TerrainAssetStore.cpp
@@ -139,6 +141,8 @@ set(_TERRAENGINE_TERRAIN_EDITOR_FILES
 	Editor/TerraEngine-Editor/Terrain/TerrainSplineGrader.h
 	Editor/TerraEngine-Editor/Terrain/TerrainProceduralJobs.cpp
 	Editor/TerraEngine-Editor/Terrain/TerrainProceduralJobs.h
+	Editor/TerraEngine-Editor/Terrain/TerrainResizeJobs.cpp
+	Editor/TerraEngine-Editor/Terrain/TerrainResizeJobs.h
 )
 foreach(_terrain_file IN LISTS _TERRAENGINE_TERRAIN_EDITOR_FILES)
 	if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_terrain_file}")
@@ -187,6 +191,8 @@ set(_TERRAENGINE_TERRAIN_ENGINE_TEST_FILES
 	Tests/Engine/Terrain/TerrainAutomationDiagnosticTests.cpp
 	Tests/Engine/Terrain/TerrainMultithreadedStressTests.cpp
 	Tests/Engine/Terrain/TerrainExportRuntimeTests.cpp
+	Tests/Engine/Terrain/TerrainResizeTests.cpp
+	Tests/Engine/Terrain/TerrainResizeAtomicityTests.cpp
 )
 foreach(_terrain_test IN LISTS _TERRAENGINE_TERRAIN_ENGINE_TEST_FILES)
 	if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_terrain_test}")
@@ -214,6 +220,8 @@ set(_TERRAENGINE_TERRAIN_EDITOR_TEST_FILES
 	Tests/Editor/Terrain/TerrainAutomationContractTests.cpp
 	Tests/Editor/Terrain/TerrainAutomationJobTests.cpp
 	Tests/Editor/Terrain/TerrainAutomationParityTests.cpp
+	Tests/Editor/Terrain/TerrainResizeWorkflowTests.cpp
+	Tests/Editor/Terrain/TerrainResizeHistoryTests.cpp
 )
 foreach(_terrain_test IN LISTS _TERRAENGINE_TERRAIN_EDITOR_TEST_FILES)
 	if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_terrain_test}")

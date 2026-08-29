@@ -47,7 +47,9 @@ namespace TerraEngine::EditorTests
 				root->publicationGeneration = 1U;
 				root->persistedRootGeneration = 1U;
 				root->rootContentHash = {1U, 2U};
-				root->authoredBounds = {0, 0, 256, 256};
+				// The unrelated descriptor is deliberately current and must therefore be
+				// inside the authoritative root bounds after bounds validation became strict.
+				root->authoredBounds = {0, 0, 512, 256};
 				root->layerStackGeneration = 1U;
 				const std::vector<std::uint8_t> initialHeightBytes{0x10U, 0x11U};
 				const std::vector<std::uint8_t> initialHoleBytes{0x20U, 0x21U};
@@ -63,7 +65,7 @@ namespace TerraEngine::EditorTests
 				descriptor.channels.holeHash = initialHoleHash;
 				descriptor.channels.weightGroupHashes.emplace(1U, initialWeightHash);
 				TerraEngine::Terrain::TerrainDirectoryShard shard;
-				shard.areaBounds = root->authoredBounds;
+				shard.areaBounds = {0, 0, 2, 1};
 				shard.identity = {9U, 10U};
 				shard.descriptors.emplace(descriptor.coordinate, descriptor);
 				root->directoryShards.push_back(std::move(shard));

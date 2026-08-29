@@ -2874,6 +2874,33 @@ bool RayAABB(const glm::vec3& rayOrigin, const glm::vec3& rayDir, const glm::vec
 
 // SceneViewWindow::HandlePicking is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize) {
+	if(auto terrainTools = m_Owner->GetWindow<TerrainWindow>(); terrainTools && terrainTools->ActiveResizePreview())
+	{
+		// The resize legend is drawn in Scene View while the immutable proposal is
+		// active. Green is retained coverage, blue is expansion, and red hatching is
+		// destructive crop coverage; the authored terrain itself remains unchanged.
+		const auto& resize = *terrainTools->ActiveResizePreview();
+		ImDrawList* drawList = ImGui::GetWindowDrawList();
+		const ImVec2 legendMin(viewportPos.x + 12.0F, viewportPos.y + 12.0F);
+		const ImVec2 legendMax(legendMin.x + 280.0F, legendMin.y + 58.0F);
+		drawList->AddRectFilled(legendMin, legendMax, IM_COL32(20, 24, 30, 220), 4.0F);
+		drawList->AddRect(legendMin, legendMax, IM_COL32(110, 125, 140, 220), 4.0F);
+		drawList->AddRectFilled(ImVec2(legendMin.x + 10.0F, legendMin.y + 10.0F),
+			ImVec2(legendMin.x + 28.0F, legendMin.y + 28.0F), IM_COL32(65, 190, 95, 220));
+		drawList->AddText(ImVec2(legendMin.x + 34.0F, legendMin.y + 11.0F), IM_COL32_WHITE, "Retained");
+		const bool crop = resize.delta.kind == TerraEngine::Terrain::TerrainResizeKind::Crop;
+		const ImU32 changedColor = crop ? IM_COL32(220, 70, 65, 210) : IM_COL32(55, 125, 235, 210);
+		drawList->AddRectFilled(ImVec2(legendMin.x + 112.0F, legendMin.y + 10.0F),
+			ImVec2(legendMin.x + 130.0F, legendMin.y + 28.0F), changedColor);
+		if(crop) for(float offset = 0.0F; offset < 18.0F; offset += 5.0F)
+			drawList->AddLine(ImVec2(legendMin.x + 112.0F + offset, legendMin.y + 28.0F),
+				ImVec2(legendMin.x + 112.0F + offset + 18.0F, legendMin.y + 10.0F), IM_COL32(255, 190, 185, 230), 1.0F);
+		drawList->AddText(ImVec2(legendMin.x + 136.0F, legendMin.y + 11.0F), IM_COL32_WHITE,
+			crop ? "Discarded (crop)" : "Added (expansion)");
+		const std::string bounds = "Proposed areas: " + std::to_string(resize.proposedAreaCount)
+			+ ", partial: " + std::to_string(resize.partialAreaCount);
+		drawList->AddText(ImVec2(legendMin.x + 10.0F, legendMin.y + 36.0F), IM_COL32(205, 215, 225, 255), bounds.c_str());
+	}
 	// Terrain receives pointer input before ordinary object selection, but only
 	// when the exact terrain instance opened in Terrain Tools remains selected.
 	if(auto terrainTools = m_Owner->GetWindow<TerrainWindow>(); terrainTools && terrainTools->IsSculpting())

@@ -48,5 +48,12 @@ namespace TerraEngine
 		[[nodiscard]] static TerrainContentReadResult ReadAreaBlob(
 			const ::ContentMount& mount,
 			std::string_view logicalPath);
+		// CURRENT and immutable .root files are ordinary package data rather than
+		// public assets. This checked route keeps runtime bundle traversal inside the
+		// same archive-only path policy as descriptor and area reads.
+		[[nodiscard]] static TerrainContentReadResult ReadPrivateBundleFile(
+			const ::ContentMount& mount,
+			std::string_view logicalPath,
+			std::uint64_t maximumBytes);
 	};
 }

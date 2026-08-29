@@ -173,7 +173,7 @@ namespace
 		TerrainPageCookResult result{};
 		if(input.assetId == TerraEngine::EMPTY_UUID || !input.authoredHash.IsValid()
 			|| input.authoredGeneration == 0u || !std::isfinite(input.sampleSpacingMetres)
-			|| input.sampleSpacingMetres <= 0.0
+			|| input.sampleSpacingMetres <= 0.0 || !input.activeRect.IsValid()
 			|| input.heightMillimetres.size() != static_cast<std::size_t>(kHaloExtent) * kHaloExtent
 			|| (!input.holeCellBits.empty() && input.holeCellBits.size() != 8192u))
 		{
@@ -185,6 +185,21 @@ namespace
 		result.area = input.area;
 		result.authoredHash = input.authoredHash;
 		result.authoredGeneration = input.authoredGeneration;
+		// Canonical storage remains a full area, while inactive partial-edge cells
+		// are holes in every derived LOD. This prevents cropped padding from being
+		// rendered, picked, or shadowed without changing persisted channel layout.
+		std::vector<std::uint8_t> activeHoleStorage(8192u, 0u);
+		if (!input.holeCellBits.empty())
+			std::copy(input.holeCellBits.begin(), input.holeCellBits.end(), activeHoleStorage.begin());
+		for (std::uint32_t z = 0u; z < kOwnedCellExtent; ++z)
+			for (std::uint32_t x = 0u; x < kOwnedCellExtent; ++x)
+				if (x < input.activeRect.minX || z < input.activeRect.minZ
+					|| x >= input.activeRect.maxXExclusive || z >= input.activeRect.maxZExclusive)
+				{
+					const std::uint32_t bit = z * kOwnedCellExtent + x;
+					activeHoleStorage[bit / 8u] |= static_cast<std::uint8_t>(1u << (bit % 8u));
+				}
+		const std::span<const std::uint8_t> activeHoleBits(activeHoleStorage);
 		std::vector<std::uint8_t> neighborBytes;
 		for(const auto& hash : input.neighborAuthoredHashes)
 		{
@@ -195,9 +210,11 @@ namespace
 
 		std::int32_t minimumMm = std::numeric_limits<std::int32_t>::max();
 		std::int32_t maximumMm = std::numeric_limits<std::int32_t>::min();
-		for(std::uint32_t z = 0u; z < kOwnedVertexExtent; ++z)
+		// Active rectangles describe owned cells. Conservative height bounds also
+		// include the east/north completion vertices used by those cells.
+		for(std::uint32_t z = input.activeRect.minZ; z <= input.activeRect.maxZExclusive; ++z)
 		{
-			for(std::uint32_t x = 0u; x < kOwnedVertexExtent; ++x)
+			for(std::uint32_t x = input.activeRect.minX; x <= input.activeRect.maxXExclusive; ++x)
 			{
 				const std::int32_t height = ReadOwnedHeight(input.heightMillimetres, x, z);
 				minimumMm = std::min(minimumMm, height);
@@ -227,7 +244,7 @@ namespace
 					node.maximumQuantizationErrorMetres = 0.0005F;
 					node.maximumMorphDisplacementMetres = 0.0F;
 					node.refinesHoleBoundary = ContainsHoleBoundary(
-						input.holeCellBits, originX, originZ, extent);
+						activeHoleBits, originX, originZ, extent);
 
 					std::int32_t nodeMinimumMm = std::numeric_limits<std::int32_t>::max();
 					std::int32_t nodeMaximumMm = std::numeric_limits<std::int32_t>::min();
@@ -391,7 +408,7 @@ namespace
 						static_cast<std::size_t>(sourceZ) * kOwnedVertexExtent + sourceX];
 					const std::uint32_t holeX = std::min(sourceX, kOwnedCellExtent - 1u);
 					const std::uint32_t holeZ = std::min(sourceZ, kOwnedCellExtent - 1u);
-					const std::uint16_t flags = IsHoleCell(input.holeCellBits, holeX, holeZ) ? 1u : 0u;
+					const std::uint16_t flags = IsHoleCell(activeHoleBits, holeX, holeZ) ? 1u : 0u;
 					AppendU16(result.pagePayload, static_cast<std::uint16_t>(sourceX));
 					AppendU16(result.pagePayload, static_cast<std::uint16_t>(sourceZ));
 					AppendI32(result.pagePayload, childHeight);

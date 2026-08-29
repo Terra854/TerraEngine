@@ -412,6 +412,8 @@ namespace TerraEngine::Terrain
 
 	std::optional<TerrainAreaDescriptor> TerrainAssetStore::FindDescriptor(const TerrainAssetRoot& root, TerrainAreaCoordinate coordinate) const
 	{
+		const auto currentAreas = TerrainAreasForSamples(root.authoredBounds);
+		if (!currentAreas || !currentAreas->Contains(coordinate)) return std::nullopt;
 		for (const TerrainDirectoryShard& shard : root.directoryShards)
 		{
 			if (!shard.areaBounds.Contains({coordinate.x, coordinate.z})) continue;
@@ -504,12 +506,26 @@ namespace TerraEngine::Terrain
 	TerrainAreaDescriptor TerrainAssetStore::ResolveDescriptorOrImplicit(const TerrainAssetRoot& root, TerrainAreaCoordinate coordinate) const
 	{
 		if (const auto descriptor = FindDescriptor(root, coordinate)) return *descriptor;
-		TerrainAreaDescriptor implicit{}; implicit.coordinate = coordinate; implicit.editGeneration = root.publicationGeneration; implicit.minHeightMm = root.defaultHeightMm; implicit.maxHeightMm = root.defaultHeightMm; return implicit;
+		TerrainAreaDescriptor implicit{};
+		implicit.coordinate = coordinate;
+		implicit.editGeneration = root.publicationGeneration;
+		implicit.minHeightMm = root.defaultHeightMm;
+		implicit.maxHeightMm = root.defaultHeightMm;
+		implicit.layerPresence = {root.defaultLayerId};
+		// The identity depends only on immutable root defaults and the signed area
+		// coordinate. It is stable across worker order and needs no stored blob.
+		const std::string identityText = TerraEngine::ToHexString(root.assetUuid) + ":implicit:"
+			+ std::to_string(coordinate.x) + ":" + std::to_string(coordinate.z) + ":"
+			+ std::to_string(root.defaultHeightMm) + ":" + std::to_string(root.defaultLayerId);
+		implicit.authoredContentHash = HashTerrainBytes(std::vector<std::uint8_t>(identityText.begin(), identityText.end()));
+		return implicit;
 	}
 
 	TerrainCodecResult TerrainAssetStore::ValidateRoot(const TerrainAssetRoot& root) const
 	{
 		if (root.publicationGeneration == 0u || !root.authoredBounds.IsValid()) return {TerrainResultCode::InvalidArgument, "Terrain root requires a non-zero publication generation and valid bounds."};
+		const auto currentAreas = TerrainAreasForSamples(root.authoredBounds);
+		if (!currentAreas) return {TerrainResultCode::InvalidArgument, "Terrain root requires a non-empty checked authored extent."};
 		if (root.layerStack && (root.layerStack->generation != root.layerStackGeneration || !ValidateTerrainLayerStack(*root.layerStack).Succeeded()))
 			return {TerrainResultCode::InvalidArgument, "Terrain root layer metadata does not match its immutable stack generation."};
 		for (std::size_t left = 0; left < root.directoryShards.size(); ++left)
@@ -518,7 +534,9 @@ namespace TerraEngine::Terrain
 			if (!shard.areaBounds.IsValid()) return {TerrainResultCode::InvalidArgument, "Terrain directory shard bounds are invalid."};
 			for (const auto& [coordinate, descriptor] : shard.descriptors)
 			{
-				if (coordinate != descriptor.coordinate || !shard.areaBounds.Contains({coordinate.x, coordinate.z}) || descriptor.editGeneration == 0u || !descriptor.authoredContentHash.IsValid()) return {TerrainResultCode::InvalidArgument, "Terrain directory descriptor violates immutable root invariants."};
+				if (coordinate != descriptor.coordinate || !shard.areaBounds.Contains({coordinate.x, coordinate.z})
+					|| !currentAreas->Contains(coordinate) || descriptor.editGeneration == 0u
+					|| !descriptor.authoredContentHash.IsValid()) return {TerrainResultCode::InvalidArgument, "Terrain directory descriptor violates immutable root invariants."};
 			}
 			for (std::size_t right = left + 1u; right < root.directoryShards.size(); ++right)
 			{
@@ -833,7 +851,8 @@ namespace TerraEngine::Terrain
 
 	TerrainPersistenceReceipt TerrainAssetStore::RecoverPersistedRoot(const std::filesystem::path& dataDirectory)
 	{
-		TerrainPersistenceReceipt receipt{}; std::ifstream current(dataDirectory / "CURRENT", std::ios::binary); std::string primary; std::string predecessor;
+		TerrainPersistenceReceipt receipt{};
+		std::ifstream current(dataDirectory / "CURRENT", std::ios::binary); std::string primary; std::string predecessor;
 		if (!current || !std::getline(current, primary) || !std::getline(current, predecessor)) { receipt.code = TerrainResultCode::CorruptData; receipt.message = "Terrain recovery could not read a complete CURRENT pointer."; return receipt; }
 		for (const std::string& candidateText : {primary, predecessor})
 		{
@@ -843,11 +862,13 @@ namespace TerraEngine::Terrain
 			if (!manifestFile.is_open()) continue;
 			std::stringstream buffer; buffer << manifestFile.rdbuf();
 			const TerrainRootCodecResult decodedRoot = DecodeRootManifest(buffer.str());
-			if (!decodedRoot.Succeeded() || !decodedRoot.root || decodedRoot.contentHash != *candidateHash || !ValidateRoot(*decodedRoot.root).Succeeded()) continue;
+			if (!decodedRoot.Succeeded() || !decodedRoot.root || decodedRoot.contentHash != *candidateHash
+				|| !ValidateRoot(*decodedRoot.root).Succeeded()) continue;
 			const TerrainAssetRoot& root = *decodedRoot.root;
 			bool allBlobsPresent = true; for (const ContentHash hash : CollectReferencedBlobHashes(root)) if (!std::filesystem::exists(dataDirectory / "blobs" / (ToHexString(hash) + ".tearea"))) { allBlobsPresent = false; break; }
 			if (!allBlobsPresent) continue;
 			std::shared_ptr<const TerrainAssetRoot> predecessorSnapshot;
+			ContentHash validatedPredecessorHash{};
 			if (candidateText == primary && predecessor != "-")
 			{
 				const auto predecessorHash = ParseContentHash(predecessor);
@@ -857,8 +878,26 @@ namespace TerraEngine::Terrain
 				if (predecessorHash && predecessorFile.is_open())
 				{
 					const TerrainRootCodecResult decodedPredecessor = DecodeRootManifest(predecessorBuffer.str());
-					if (decodedPredecessor.Succeeded() && decodedPredecessor.root && decodedPredecessor.contentHash == *predecessorHash && ValidateRoot(*decodedPredecessor.root).Succeeded())
+					bool predecessorComplete = decodedPredecessor.Succeeded() && decodedPredecessor.root
+						&& decodedPredecessor.contentHash == *predecessorHash
+						&& decodedPredecessor.root->assetUuid == root.assetUuid
+						&& decodedPredecessor.root->publicationGeneration <= root.publicationGeneration
+						&& ValidateRoot(*decodedPredecessor.root).Succeeded();
+					if(predecessorComplete)
+						for(const ContentHash hash : CollectReferencedBlobHashes(*decodedPredecessor.root))
+						{
+							const auto bytes = ReadBinaryFile(dataDirectory / "blobs" / (ToHexString(hash) + ".tearea"));
+							if(!bytes || !MatchesTerrainBlobIdentity(hash, *bytes))
+							{
+								predecessorComplete = false;
+								break;
+							}
+						}
+					if(predecessorComplete)
+					{
 						predecessorSnapshot = std::make_shared<TerrainAssetRoot>(*decodedPredecessor.root);
+						validatedPredecessorHash = *predecessorHash;
+					}
 				}
 			}
 			for (const ContentHash hash : CollectReferencedBlobHashes(root))
@@ -871,9 +910,10 @@ namespace TerraEngine::Terrain
 				std::unique_lock lock(rootMutex); currentRoot = std::make_shared<TerrainAssetRoot>(root);
 			}
 			{
-				const std::optional<ContentHash> predecessorHash = predecessor == "-" ? std::optional<ContentHash>{ContentHash{}} : ParseContentHash(predecessor);
 				std::scoped_lock lock(persistenceMutex);
-				persistedRoot = {*candidateHash, candidateText == primary && predecessorHash ? *predecessorHash : ContentHash{}, root.publicationGeneration, candidateText != primary};
+				persistedRoot = {*candidateHash,
+					candidateText == primary ? validatedPredecessorHash : ContentHash{},
+					root.publicationGeneration, candidateText != primary};
 				savedRootSnapshot = std::make_shared<TerrainAssetRoot>(root);
 				predecessorRootSnapshot = std::move(predecessorSnapshot);
 			}
@@ -897,6 +937,57 @@ namespace TerraEngine::Terrain
 		// Directories and descriptors intentionally remain untouched. This makes
 		// implicit default areas visible without resampling any existing channel.
 		RefreshDirectoryIdentities(*candidate);
+		const TerrainRootCodecResult encoded = EncodeRootManifest(*candidate);
+		if (!encoded.Succeeded()) return {encoded.code, encoded.message};
+		candidate->rootContentHash = encoded.contentHash;
+		outCandidate = std::move(candidate);
+		return {};
+	}
+
+	TerrainCodecResult TerrainAssetStore::BuildResizeCandidate(const TerrainAssetRoot& base,
+		TerrainSampleBounds proposedBounds, const std::vector<TerrainAreaDescriptor>& upserts,
+		const std::vector<TerrainAreaCoordinate>& removals,
+		std::shared_ptr<const TerrainAssetRoot>& outCandidate) const
+	{
+		outCandidate.reset();
+		if (const TerrainCodecResult validation = ValidateRoot(base); !validation.Succeeded()) return validation;
+		const auto proposedAreas = TerrainAreasForSamples(proposedBounds);
+		if (!proposedAreas) return {TerrainResultCode::InvalidArgument, "Terrain resize requires non-empty checked sample bounds."};
+		for (std::size_t index = 1u; index < removals.size(); ++index)
+			if (!(removals[index - 1u] < removals[index]))
+				return {TerrainResultCode::InvalidArgument, "Terrain resize removals must be sorted and unique."};
+		for (std::size_t index = 1u; index < upserts.size(); ++index)
+			if (!(upserts[index - 1u].coordinate < upserts[index].coordinate))
+				return {TerrainResultCode::InvalidArgument, "Terrain resize upserts must be sorted and unique."};
+		std::map<TerrainAreaCoordinate, TerrainAreaDescriptor> descriptors;
+		for (const TerrainDirectoryShard& shard : base.directoryShards)
+			for (const auto& [coordinate, descriptor] : shard.descriptors)
+				if (proposedAreas->Contains(coordinate)) descriptors[coordinate] = descriptor;
+		for (const TerrainAreaCoordinate coordinate : removals) descriptors.erase(coordinate);
+		for (const TerrainAreaDescriptor& descriptor : upserts)
+		{
+			if (!proposedAreas->Contains(descriptor.coordinate) || descriptor.editGeneration == 0u
+				|| !descriptor.authoredContentHash.IsValid()
+				|| std::binary_search(removals.begin(), removals.end(), descriptor.coordinate))
+				return {TerrainResultCode::OutOfBounds, "A resized terrain descriptor is invalid or outside the proposed extent."};
+			descriptors[descriptor.coordinate] = descriptor;
+		}
+		auto candidate = std::make_shared<TerrainAssetRoot>(base);
+		candidate->authoredBounds = proposedBounds;
+		candidate->publicationGeneration = base.publicationGeneration + 1u;
+		if (candidate->publicationGeneration == 0u)
+			return {TerrainResultCode::Overflow, "Terrain resize overflowed the publication generation."};
+		candidate->directoryShards.clear();
+		if (!descriptors.empty())
+		{
+			TerrainDirectoryShard shard{};
+			shard.areaBounds = {proposedAreas->minX, proposedAreas->minZ,
+				proposedAreas->maxXExclusive, proposedAreas->maxZExclusive};
+			shard.descriptors = std::move(descriptors);
+			candidate->directoryShards.push_back(std::move(shard));
+		}
+		RefreshDirectoryIdentities(*candidate);
+		if (const TerrainCodecResult validation = ValidateRoot(*candidate); !validation.Succeeded()) return validation;
 		const TerrainRootCodecResult encoded = EncodeRootManifest(*candidate);
 		if (!encoded.Succeeded()) return {encoded.code, encoded.message};
 		candidate->rootContentHash = encoded.contentHash;

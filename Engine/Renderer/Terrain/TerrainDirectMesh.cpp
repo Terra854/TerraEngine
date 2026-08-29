@@ -89,6 +89,7 @@ namespace TerraEngine::Renderer::Terrain
 		if(input.assetId == TerraEngine::EMPTY_UUID || !input.authoredHash.IsValid()
 			|| input.authoredGeneration == 0u || !std::isfinite(input.sampleSpacingMetres)
 			|| input.sampleSpacingMetres <= 0.0F
+			|| !input.activeRect.IsValid()
 			|| input.heightMillimetres.size() != TerraEngine::Terrain::kTerrainAreaSampleCount
 			|| (!input.holeCellBits.empty() && input.holeCellBits.size() != TerraEngine::Terrain::kTerrainAreaSampleCount / 8u))
 		{
@@ -98,10 +99,17 @@ namespace TerraEngine::Renderer::Terrain
 
 		auto mesh = std::make_unique<Mesh>();
 		ConfigureRuntimeLayout(mesh->runtimeLayout);
-		const auto [minimumHeight, maximumHeight] = std::minmax_element(
-			input.heightMillimetres.begin(), input.heightMillimetres.end());
-		const float minimumY = static_cast<float>(*minimumHeight) * 0.001F;
-		const float maximumY = static_cast<float>(*maximumHeight) * 0.001F;
+		std::int32_t minimumHeight = (std::numeric_limits<std::int32_t>::max)();
+		std::int32_t maximumHeight = (std::numeric_limits<std::int32_t>::min)();
+		for (std::uint32_t z = input.activeRect.minZ; z < input.activeRect.maxZExclusive; ++z)
+			for (std::uint32_t x = input.activeRect.minX; x < input.activeRect.maxXExclusive; ++x)
+			{
+				const std::int32_t height = input.heightMillimetres[static_cast<std::size_t>(z) * 256u + x];
+				minimumHeight = std::min(minimumHeight, height);
+				maximumHeight = std::max(maximumHeight, height);
+			}
+		const float minimumY = static_cast<float>(minimumHeight) * 0.001F;
+		const float maximumY = static_cast<float>(maximumHeight) * 0.001F;
 		const double areaOriginX = static_cast<double>(input.area.x) * 256.0 * input.sampleSpacingMetres;
 		const double areaOriginZ = static_cast<double>(input.area.z) * 256.0 * input.sampleSpacingMetres;
 		if(!std::isfinite(areaOriginX) || !std::isfinite(areaOriginZ)
@@ -111,10 +119,12 @@ namespace TerraEngine::Renderer::Terrain
 			result.diagnostic = "Terrain area placement exceeds the direct render proxy coordinate range.";
 			return result;
 		}
-		const float minimumX = static_cast<float>(areaOriginX);
-		const float minimumZ = static_cast<float>(areaOriginZ);
-		const float maximumX = minimumX + 255.0F * input.sampleSpacingMetres;
-		const float maximumZ = minimumZ + 255.0F * input.sampleSpacingMetres;
+		const float areaMinimumX = static_cast<float>(areaOriginX);
+		const float areaMinimumZ = static_cast<float>(areaOriginZ);
+		const float minimumX = areaMinimumX + input.activeRect.minX * input.sampleSpacingMetres;
+		const float minimumZ = areaMinimumZ + input.activeRect.minZ * input.sampleSpacingMetres;
+		const float maximumX = areaMinimumX + (input.activeRect.maxXExclusive - 1u) * input.sampleSpacingMetres;
+		const float maximumZ = areaMinimumZ + (input.activeRect.maxZExclusive - 1u) * input.sampleSpacingMetres;
 		const std::array<float, 3u> boundsMinimum{minimumX, minimumY, minimumZ};
 		const std::array<float, 3u> boundsMaximum{maximumX, maximumY, maximumZ};
 		for(std::size_t axis = 0u; axis < 3u; ++axis)
@@ -143,9 +153,9 @@ namespace TerraEngine::Renderer::Terrain
 			{
 				const std::size_t sample = static_cast<std::size_t>(z) * 256u + x;
 				const std::array<float, 3u> position{
-					(minimumX + static_cast<float>(x) * input.sampleSpacingMetres - mesh->runtimeLayout.quantization.positionOffset[0]) / mesh->runtimeLayout.quantization.positionScale[0],
+					(areaMinimumX + static_cast<float>(x) * input.sampleSpacingMetres - mesh->runtimeLayout.quantization.positionOffset[0]) / mesh->runtimeLayout.quantization.positionScale[0],
 					(static_cast<float>(input.heightMillimetres[sample]) * 0.001F - mesh->runtimeLayout.quantization.positionOffset[1]) / mesh->runtimeLayout.quantization.positionScale[1],
-					(minimumZ + static_cast<float>(z) * input.sampleSpacingMetres - mesh->runtimeLayout.quantization.positionOffset[2]) / mesh->runtimeLayout.quantization.positionScale[2]};
+					(areaMinimumZ + static_cast<float>(z) * input.sampleSpacingMetres - mesh->runtimeLayout.quantization.positionOffset[2]) / mesh->runtimeLayout.quantization.positionScale[2]};
 				const auto packed = TerraEngine::PackVirtualGeometryVertex(
 					position, ComputeNormal(input.heightMillimetres, x, z, input.sampleSpacingMetres),
 					{1.0F, 0.0F, 0.0F}, 1.0F,
@@ -160,18 +170,21 @@ namespace TerraEngine::Renderer::Terrain
 		}
 
 		std::vector<std::uint8_t> primitiveIndices;
-		primitiveIndices.reserve(255u * 255u * 6u);
-		for(std::uint32_t minZ = 0u; minZ < 255u; minZ += kMeshletCellExtent)
+		const std::uint32_t cellMaxXExclusive = input.activeRect.maxXExclusive - 1u;
+		const std::uint32_t cellMaxZExclusive = input.activeRect.maxZExclusive - 1u;
+		primitiveIndices.reserve(static_cast<std::size_t>(cellMaxXExclusive - input.activeRect.minX)
+			* (cellMaxZExclusive - input.activeRect.minZ) * 6u);
+		for(std::uint32_t minZ = input.activeRect.minZ; minZ < cellMaxZExclusive; minZ += kMeshletCellExtent)
 		{
 			if(cancellation != nullptr && cancellation->load(std::memory_order_acquire))
 			{
 				result.cancelled = true;
 				return result;
 			}
-			const std::uint32_t cellsZ = std::min(kMeshletCellExtent, 255u - minZ);
-			for(std::uint32_t minX = 0u; minX < 255u; minX += kMeshletCellExtent)
+			const std::uint32_t cellsZ = std::min(kMeshletCellExtent, cellMaxZExclusive - minZ);
+			for(std::uint32_t minX = input.activeRect.minX; minX < cellMaxXExclusive; minX += kMeshletCellExtent)
 			{
-				const std::uint32_t cellsX = std::min(kMeshletCellExtent, 255u - minX);
+				const std::uint32_t cellsX = std::min(kMeshletCellExtent, cellMaxXExclusive - minX);
 				const std::uint32_t rowVertices = cellsX + 1u;
 				MeshletRecord record{};
 				record.vertexOffset = static_cast<std::uint32_t>(mesh->meshletVertexRemapDecoded.size());

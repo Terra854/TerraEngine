@@ -22,7 +22,7 @@ namespace TerraEngine::Editor::Automation
 				{"heightScaleMetres", {{"type", "number"}}},
 				{"heightOffsetMetres", {{"type", "number"}}}
 			};
-			Json required = Json::array({"destination"});
+			Json required = Json::array({"destination", "sampleSpacingMetres"});
 			if(importing)
 			{
 				properties["source"] = {{"type", "string"}, {"description", "Source PNG16 or RAW16 little-endian heightmap path."}};
@@ -30,6 +30,13 @@ namespace TerraEngine::Editor::Automation
 				properties["width"] = {{"type", "integer"}, {"minimum", 1}};
 				properties["height"] = {{"type", "integer"}, {"minimum", 1}};
 				required.push_back("source");
+			}
+			else
+			{
+				properties["widthSamples"] = {{"type", "integer"}, {"minimum", 1}, {"maximum", 2048}};
+				properties["depthSamples"] = {{"type", "integer"}, {"minimum", 1}, {"maximum", 2048}};
+				required.push_back("widthSamples");
+				required.push_back("depthSamples");
 			}
 			return {{"type", "object"}, {"properties", std::move(properties)}, {"required", std::move(required)}, {"additionalProperties", false}};
 		}
@@ -90,6 +97,28 @@ namespace TerraEngine::Editor::Automation
 			if(name == "terrain.layers.set") return TerrainEditSchema({"paint", "erase-layer", "fill-layer", "normalize-layers"});
 			if(name == "terrain.holes.set") return TerrainEditSchema({"paint-hole", "erase-hole"});
 			if(name == "terrain.operation.start") return TerrainEditSchema({"terrace", "noise", "hydraulic-erosion", "thermal-erosion", "spline-grade"});
+			if(name == "terrain.resize.preview")
+				return {{"type", "object"}, {"properties", {
+					{"kind", {{"type", "string"}, {"enum", Json::array({"expand", "crop"})}}},
+					{"minX", {{"type", "integer"}}}, {"minZ", {{"type", "integer"}}},
+					{"maxXExclusive", {{"type", "integer"}}}, {"maxZExclusive", {{"type", "integer"}}},
+					{"minimumXAreas", {{"type", "integer"}, {"minimum", 0}, {"maximum", 32}}},
+					{"maximumXAreas", {{"type", "integer"}, {"minimum", 0}, {"maximum", 32}}},
+					{"minimumZAreas", {{"type", "integer"}, {"minimum", 0}, {"maximum", 32}}},
+					{"maximumZAreas", {{"type", "integer"}, {"minimum", 0}, {"maximum", 32}}},
+					{"policy", {{"type", "string"}, {"enum", Json::array({"edge-blend", "extend-edge", "flat-default"})}, {"default", "edge-blend"}}},
+					{"transitionSamples", {{"type", "integer"}, {"minimum", 1}, {"maximum", 1024}}},
+					{"holePolicy", {{"type", "string"}, {"enum", Json::array({"close-at-former-edge", "extend-connected-boundary-holes"})}}}
+				}}, {"required", Json::array({"kind"})}, {"additionalProperties", false}};
+			if(name == "terrain.expand.start" || name == "terrain.crop.start")
+			{
+				Json required = Json::array({"proposalFingerprint"});
+				if(name == "terrain.crop.start") required.push_back("acknowledgeDataLoss");
+				return {{"type", "object"}, {"properties", {
+					{"proposalFingerprint", {{"type", "string"}, {"pattern", "^[0-9a-f]{32}$"}}},
+					{"acknowledgeDataLoss", {{"type", "boolean"}}}
+				}}, {"required", std::move(required)}, {"additionalProperties", false}};
+			}
 			if(name == "terrain.job.get" || name == "terrain.job.cancel")
 				return {{"type", "object"}, {"properties", {{"jobId", {{"type", "string"}, {"minLength", 1}}}}}, {"required", Json::array({"jobId"})}, {"additionalProperties", false}};
 			if(name == "terrain.rebuild")
@@ -97,6 +126,41 @@ namespace TerraEngine::Editor::Automation
 			if(name == "terrain.export")
 				return {{"type", "object"}, {"properties", {{"profile", {{"type", "string"}, {"minLength", 1}}}, {"correlationId", {{"type", "string"}}}, {"idempotencyKey", {{"type", "string"}}}}}, {"required", Json::array({"profile"})}, {"additionalProperties", false}};
 			return NoArgumentsSchema();
+		}
+
+		Json TerrainResizeResultSchema(std::string_view name)
+		{
+			const Json bounds = {{"type", "object"}, {"properties", {
+				{"minX", {{"type", "integer"}}}, {"minZ", {{"type", "integer"}}},
+				{"maxXExclusive", {{"type", "integer"}}},
+				{"maxZExclusive", {{"type", "integer"}}}}}, {"additionalProperties", false}};
+			Json properties = {
+				{"jobId", {{"type", "string"}}}, {"transactionId", {{"type", "string"}}},
+				{"stage", {{"type", "integer"}}}, {"progress", {{"type", "number"}}},
+				{"completedAreas", {{"type", "integer"}}}, {"totalAreas", {{"type", "integer"}}},
+				{"cancellationAvailable", {{"type", "boolean"}}},
+				{"proposalFingerprint", {{"type", "string"}, {"pattern", "^[0-9a-f]{32}$"}}},
+				{"kind", {{"type", "string"}, {"enum", Json::array({"expand", "crop"})}}},
+				{"previousBounds", bounds}, {"proposedBounds", bounds},
+				{"policy", {{"type", "string"}}}, {"holePolicy", {{"type", "string"}}},
+				{"transitionSamples", {{"type", "integer"}}},
+				{"readyGeneration", {{"type", "integer"}}},
+				{"previousAreaCount", {{"type", "integer"}}},
+				{"proposedAreaCount", {{"type", "integer"}}},
+				{"physicalWidthMetres", {{"type", "number"}}},
+				{"physicalDepthMetres", {{"type", "number"}}},
+				{"requiresDataLossConfirmation", {{"type", "boolean"}}},
+				{"cropLoss", {{"type", "object"}}},
+				{"warnings", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+				{"diagnostic", {{"type", "string"}}},
+				{"visibilityBoundary", {{"type", "string"}}}
+			};
+			Json required = Json::array();
+			if(name == "terrain.resize.preview") required = Json::array({"jobId", "stage", "visibilityBoundary"});
+			else if(name == "terrain.job.get") required = Json::array({"jobId", "stage", "progress"});
+			else required = Json::array({"transactionId", "proposalFingerprint", "visibilityBoundary"});
+			return {{"type", "object"}, {"properties", std::move(properties)},
+				{"required", std::move(required)}, {"additionalProperties", true}};
 		}
 	}
 
@@ -111,6 +175,7 @@ namespace TerraEngine::Editor::Automation
 		for(const std::string_view name : {"terrain.asset.inspect", "terrain.create", "terrain.import_heightmap",
 			"terrain.session.begin", "terrain.session.get", "terrain.session.cancel", "terrain.session.commit",
 			"terrain.stroke.apply", "terrain.layers.set", "terrain.holes.set", "terrain.operation.start",
+			"terrain.resize.preview", "terrain.expand.start", "terrain.crop.start",
 			"terrain.rebuild", "terrain.job.get", "terrain.job.cancel", "terrain.diagnostics.get",
 			"terrain.validate", "terrain.export", "terrain.save"})
 		{
@@ -118,12 +183,16 @@ namespace TerraEngine::Editor::Automation
 			descriptor.inputSchema=TerrainInputSchema(name);
 			// Inspection and diagnostics publish the same immutable terrain snapshot
 			// shape. Other commands retain their existing receipt object contract.
-			descriptor.resultSchema = (name == "terrain.asset.inspect" || name == "terrain.diagnostics.get")
-				? TerrainAutomationSnapshotResultSchema() : Json{{"type", "object"}};
+			if(name == "terrain.asset.inspect" || name == "terrain.diagnostics.get")
+				descriptor.resultSchema = TerrainAutomationSnapshotResultSchema();
+			else if(name == "terrain.resize.preview" || name == "terrain.expand.start"
+				|| name == "terrain.crop.start" || name == "terrain.job.get")
+				descriptor.resultSchema = TerrainResizeResultSchema(name);
+			else descriptor.resultSchema = Json{{"type", "object"}};
 			const bool read=name=="terrain.asset.inspect" || name=="terrain.session.get"
 				|| name=="terrain.job.get" || name=="terrain.diagnostics.get";
 			descriptor.permission=read?AutomationPermission::Read:AutomationPermission::ProjectWrite;
-			descriptor.approvalPolicy=(name=="terrain.import_heightmap"||name=="terrain.export"||name=="terrain.rebuild")?AutomationApprovalPolicy::HighImpact:AutomationApprovalPolicy::None;
+			descriptor.approvalPolicy=(name=="terrain.import_heightmap"||name=="terrain.export"||name=="terrain.rebuild"||name=="terrain.crop.start")?AutomationApprovalPolicy::HighImpact:AutomationApprovalPolicy::None;
 			descriptor.mutationMode=read?MutationMode::ReadOnly:MutationMode::AssetMutation; descriptor.availability.requiresProject=true;
 			descriptor.execution.workerPreparation=!read; descriptor.execution.protectedCommit=!read; descriptor.execution.visibilityBoundary=read?"immutable_terrain_snapshot":"terrain_authoring_publish";
 			descriptor.execution.preparationReads={"TerrainAssetRoots"}; descriptor.execution.commitWrites=read?std::vector<std::string>{}:std::vector<std::string>{"TerrainPreparedTransactions","TerrainPublishedTransactions"};

@@ -121,7 +121,12 @@ namespace TerraEngine::Tests
 			Terrain::TerrainDirectoryShard shard{};
 			shard.areaBounds = {distantArea.x, distantArea.z, distantArea.x + 1, distantArea.z + 1}; shard.identity = {2u, 7u}; shard.descriptors.emplace(distantArea, descriptor);
 			auto root = std::make_shared<Terrain::TerrainAssetRoot>();
-			root->assetUuid = asset; root->publicationGeneration = 7u; root->rootContentHash = {3u, 7u}; root->authoredBounds = {-256'000'000, 0, 1, 1}; root->directoryShards = {shard};
+			root->assetUuid = asset; root->publicationGeneration = 7u; root->rootContentHash = {3u, 7u};
+			root->authoredBounds = {distantArea.x * Terrain::kTerrainAreaExtentSamples,
+				distantArea.z * Terrain::kTerrainAreaExtentSamples,
+				(distantArea.x + 1) * Terrain::kTerrainAreaExtentSamples,
+				(distantArea.z + 1) * Terrain::kTerrainAreaExtentSamples};
+			root->directoryShards = {shard};
 			Terrain::TerrainAssetStore store(root);
 			context.Expect(encodedResult.Succeeded() && store.Blobs().PutVerified(blobHash, encoded.bytes), "The million-area fixture must contain one verified immutable height blob.");
 			const auto first = store.LoadHeightAreaLazy(store.CaptureRoot(), distantArea);

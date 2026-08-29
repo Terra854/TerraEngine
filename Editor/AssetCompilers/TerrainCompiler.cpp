@@ -39,6 +39,20 @@ namespace TerraEngine::AssetPipeline
 				error = "An image or RAW source path is required for terrain import.";
 				return false;
 			}
+			if(request.sourceFormat == TerrainSourceFormat::Flat
+				&& (request.flatWidth == 0U || request.flatDepth == 0U))
+			{
+				error = "Flat terrain width and depth must both be positive.";
+				return false;
+			}
+			const std::uint64_t requestedSamples = request.sourceFormat == TerrainSourceFormat::Flat
+				? static_cast<std::uint64_t>(request.flatWidth) * request.flatDepth
+				: static_cast<std::uint64_t>(request.rawWidth) * request.rawHeight;
+			if (requestedSamples > request.maximumSamples || requestedSamples > (std::numeric_limits<std::size_t>::max)())
+			{
+				error = "Terrain dimensions exceed the configured creation sample budget.";
+				return false;
+			}
 			if(request.sourceFormat == TerrainSourceFormat::Raw16LittleEndian && (request.rawWidth == 0U || request.rawHeight == 0U))
 			{
 				error = "RAW16 imports require declared non-zero width and height.";
@@ -77,9 +91,9 @@ namespace TerraEngine::AssetPipeline
 		if(!Report(progress, 0.05F, "Terrain Validate", "Validated source dimensions and height range.")) { result.cancelled = true; result.message = "Terrain import cancelled before decoding."; return result; }
 		if(request.sourceFormat == TerrainSourceFormat::Flat)
 		{
-			std::vector<std::uint16_t> flat(256U * 256U, 0U);
-			result = ScaleSamples(std::move(flat), 256U, 256U, request);
-			if(result.succeeded && !Report(progress, 1.0F, "Terrain Complete", "Created a flat 256 by 256 terrain area.")) { result = {}; result.cancelled = true; result.message = "Terrain creation cancelled."; }
+			std::vector<std::uint16_t> flat(static_cast<std::size_t>(request.flatWidth) * request.flatDepth, 0U);
+			result = ScaleSamples(std::move(flat), request.flatWidth, request.flatDepth, request);
+			if(result.succeeded && !Report(progress, 1.0F, "Terrain Complete", "Created a variable-size flat terrain.")) { result = {}; result.cancelled = true; result.message = "Terrain creation cancelled."; }
 			return result;
 		}
 
@@ -92,6 +106,13 @@ namespace TerraEngine::AssetPipeline
 			stbi_us* pixels = stbi_load_16(request.sourcePath.string().c_str(), &decodedWidth, &decodedHeight, &components, 1);
 			if(!pixels || decodedWidth <= 0 || decodedHeight <= 0) { result.message = "PNG16 decoding failed; the source must be a readable 16-bit grayscale PNG."; if(pixels) stbi_image_free(pixels); return result; }
 			width = static_cast<std::uint32_t>(decodedWidth); height = static_cast<std::uint32_t>(decodedHeight);
+			const std::uint64_t decodedSamples = static_cast<std::uint64_t>(width) * height;
+			if(decodedSamples > request.maximumSamples || decodedSamples > (std::numeric_limits<std::size_t>::max)())
+			{
+				stbi_image_free(pixels);
+				result.message = "The decoded PNG dimensions exceed the configured terrain sample budget.";
+				return result;
+			}
 			samples.assign(pixels, pixels + static_cast<std::size_t>(width) * height);
 			stbi_image_free(pixels);
 		}
@@ -109,5 +130,20 @@ namespace TerraEngine::AssetPipeline
 		result = ScaleSamples(std::move(samples), width, height, request);
 		if(result.succeeded && !Report(progress, 1.0F, "Terrain Complete", "Decoded a precise 16-bit heightfield.")) { result = {}; result.cancelled = true; result.message = "Terrain import cancelled."; }
 		return result;
+	}
+
+	std::optional<std::pair<std::uint32_t, std::uint32_t>>
+		TerrainCompatibilityDimensions(TerraEngine::Terrain::TerrainSampleBounds bounds) noexcept
+	{
+		if(!bounds.IsValid() || bounds.minX >= bounds.maxXExclusive
+			|| bounds.minZ >= bounds.maxZExclusive) return std::nullopt;
+		const long double width = static_cast<long double>(bounds.maxXExclusive)
+			- static_cast<long double>(bounds.minX);
+		const long double depth = static_cast<long double>(bounds.maxZExclusive)
+			- static_cast<long double>(bounds.minZ);
+		if(width <= 0.0L || depth <= 0.0L
+			|| width > static_cast<long double>((std::numeric_limits<std::uint32_t>::max)())
+			|| depth > static_cast<long double>((std::numeric_limits<std::uint32_t>::max)())) return std::nullopt;
+		return std::pair{static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(depth)};
 	}
 }

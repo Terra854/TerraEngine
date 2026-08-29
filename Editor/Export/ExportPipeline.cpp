@@ -19,6 +19,7 @@
 #include "File Formats/TerraEngineAudioFile.h"
 #include "Resource/ResourceResidency.h"
 #include "Resource/ResourceStreaming.h"
+#include "Terrain/TerrainAssetStore.h"
 
 #include <algorithm>
 #include <array>
@@ -275,6 +276,64 @@ static bool ValidateStagedTerrainBundles(const std::filesystem::path& stagingDir
 		const std::filesystem::path dataDirectory = entry.path().string() + ".data";
 		if(!std::filesystem::is_directory(dataDirectory)) {
 			error = "Staged terrain root is missing its managed data bundle: " + PathToUtf8(entry.path());
+			return false;
+		}
+		std::ifstream currentInput(dataDirectory / "CURRENT", std::ios::binary);
+		std::string currentHash;
+		std::string predecessorHash;
+		if(!currentInput || !std::getline(currentInput, currentHash)
+			|| !std::getline(currentInput, predecessorHash) || currentHash.size() != 32u) {
+			error = "Staged terrain bundle has no complete CURRENT pointer: " + PathToUtf8(entry.path());
+			return false;
+		}
+		std::ifstream rootInput(dataDirectory / "roots" / (currentHash + ".root"), std::ios::binary);
+		std::stringstream rootBuffer;
+		if(rootInput) rootBuffer << rootInput.rdbuf();
+		const auto decoded = TerraEngine::Terrain::DecodeTerrainRootManifest(rootBuffer.str());
+		if(!decoded.Succeeded() || !decoded.root
+			|| TerraEngine::Terrain::ToHexString(decoded.contentHash) != currentHash) {
+			error = "Staged terrain CURRENT does not name a canonical TERRAROOT1 manifest: " + PathToUtf8(entry.path());
+			return false;
+		}
+		const auto rootSnapshot = std::make_shared<const TerraEngine::Terrain::TerrainAssetRoot>(*decoded.root);
+		TerraEngine::Terrain::TerrainAssetStore store(rootSnapshot);
+		const auto opened = store.OpenPersistedRoot(dataDirectory);
+		if(!opened.Succeeded() || opened.usedPredecessor || opened.savedRootHash != decoded.contentHash) {
+			error = "Staged terrain CURRENT generation is incomplete; export will not mix or fall back to an older resize generation: "
+				+ opened.message;
+			return false;
+		}
+
+		// The editor store is append-only for recovery and undo. An exported package
+		// needs only the validated current root and the blobs reachable from it; this
+		// prevents removed crop areas or stale resize products from shipping.
+		const auto reachableList = store.CollectReferencedBlobHashes(*decoded.root);
+		std::unordered_set<std::string> reachable;
+		for(const auto hash : reachableList) reachable.insert(TerraEngine::Terrain::ToHexString(hash));
+		std::error_code pruneError;
+		for(const auto& rootEntry : std::filesystem::directory_iterator(dataDirectory / "roots", pruneError)) {
+			if(pruneError) break;
+			if(rootEntry.is_regular_file()
+				&& rootEntry.path().filename() != std::filesystem::path(currentHash + ".root"))
+				std::filesystem::remove(rootEntry.path(), pruneError);
+			if(pruneError) break;
+		}
+		if(!pruneError && std::filesystem::is_directory(dataDirectory / "blobs"))
+			for(const auto& blobEntry : std::filesystem::directory_iterator(dataDirectory / "blobs", pruneError)) {
+				if(pruneError) break;
+				if(blobEntry.is_regular_file() && blobEntry.path().extension() == ".tearea"
+					&& !reachable.contains(blobEntry.path().stem().string()))
+					std::filesystem::remove(blobEntry.path(), pruneError);
+				if(pruneError) break;
+			}
+		if(pruneError) {
+			error = "Could not prune stale terrain generations from staged export: " + pruneError.message();
+			return false;
+		}
+		std::ofstream currentOutput(dataDirectory / "CURRENT", std::ios::binary | std::ios::trunc);
+		currentOutput << currentHash << "\n-\n";
+		if(!currentOutput.good()) {
+			error = "Could not publish the single-generation terrain CURRENT pointer in export staging.";
 			return false;
 		}
 	}

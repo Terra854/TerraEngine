@@ -24,10 +24,34 @@ namespace TerraEngine::Editor::Terrain
 		observedGeneration = capture.publicationGeneration;
 		observedLayerStackGeneration = capture.root->layerStackGeneration;
 		observedRootHash = capture.root->rootContentHash;
-		for(const TerraEngine::Terrain::TerrainDirectoryShard& shard : capture.root->directoryShards)
+		constexpr std::size_t kMaximumObservedAreas = 4096u;
+		const auto coveredAreas = TerraEngine::Terrain::EnumerateTerrainAreas(
+			capture.root->authoredBounds, kMaximumObservedAreas);
+		const bool declaresCoverage = capture.root->authoredBounds.IsValid()
+			&& capture.root->authoredBounds.minX < capture.root->authoredBounds.maxXExclusive
+			&& capture.root->authoredBounds.minZ < capture.root->authoredBounds.maxZExclusive;
+		if(!coveredAreas && declaresCoverage)
 		{
-			for(const auto& [coordinate, descriptor] : shard.descriptors)
-				observations.emplace(coordinate, TerraEngine::Terrain::TerrainAreaObservation{coordinate, descriptor.editGeneration, descriptor.authoredContentHash});
+			Cancel();
+			outError = "The terrain extent exceeds the bounded authoring observation cache.";
+			return false;
+		}
+		TerraEngine::Terrain::TerrainAssetStore resolver(capture.root);
+		if(coveredAreas) for(const auto coordinate : *coveredAreas)
+		{
+			const auto descriptor = resolver.ResolveDescriptorOrImplicit(*capture.root, coordinate);
+			observations.emplace(coordinate, TerraEngine::Terrain::TerrainAreaObservation{
+				coordinate, descriptor.editGeneration, descriptor.authoredContentHash});
+		}
+		else
+		{
+			// Legacy in-memory tests and compatibility roots may predate authored
+			// bounds. Preserve their explicit descriptor observations while all new
+			// persisted roots use the authoritative bounds-driven path above.
+			for(const auto& shard : capture.root->directoryShards)
+				for(const auto& [coordinate, descriptor] : shard.descriptors)
+					observations.emplace(coordinate, TerraEngine::Terrain::TerrainAreaObservation{
+						coordinate, descriptor.editGeneration, descriptor.authoredContentHash});
 		}
 		return true;
 	}

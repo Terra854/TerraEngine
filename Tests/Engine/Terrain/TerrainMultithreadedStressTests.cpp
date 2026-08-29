@@ -7,12 +7,15 @@
 #include "Renderer/Terrain/TerrainPageCooker.h"
 #include "Resource/VirtualGeometryPagePublication.h"
 #include "Terrain/TerrainMutationQueue.h"
+#include "Terrain/TerrainResize.h"
 #include "Terrain/TerrainStreamingSystem.h"
 
 #include <array>
 #include <atomic>
 #include <barrier>
+#include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -95,10 +98,100 @@ namespace TerraEngine::Tests
 			}
 			return entries;
 		}
+
+		Terrain::ContentHash HashExpandedSamples(
+			const Terrain::TerrainAssetRoot& root,
+			const Terrain::TerrainResizeDelta& delta,
+			std::size_t workerCount)
+		{
+			const std::int64_t width = delta.proposedBounds.maxXExclusive - delta.proposedBounds.minX;
+			const std::int64_t depth = delta.proposedBounds.maxZExclusive - delta.proposedBounds.minZ;
+			std::vector<std::int32_t> values(static_cast<std::size_t>(width * depth), root.defaultHeightMm);
+			const auto source = [](Terrain::TerrainSampleCoordinate sample) -> std::optional<std::int32_t> {
+				return static_cast<std::int32_t>(12'000 + sample.x * 31 + sample.z * 17);
+			};
+			workerCount = std::max<std::size_t>(1u, workerCount);
+			std::vector<std::jthread> workers;
+			workers.reserve(workerCount);
+			for(std::size_t worker = 0u; worker < workerCount; ++worker)
+			{
+				workers.emplace_back([&, worker] {
+					// Static index partitioning varies the scheduling width but retains one
+					// canonical output slot per global sample coordinate.
+					for(std::size_t index = worker; index < values.size(); index += workerCount)
+					{
+						const Terrain::TerrainSampleCoordinate sample{
+							delta.proposedBounds.minX + static_cast<std::int64_t>(index % static_cast<std::size_t>(width)),
+							delta.proposedBounds.minZ + static_cast<std::int64_t>(index / static_cast<std::size_t>(width))};
+						values[index] = delta.previousBounds.Contains(sample)
+							? source(sample).value_or(root.defaultHeightMm)
+							: Terrain::InitializeExpandedTerrainHeight(root, delta, sample, source);
+					}
+				});
+			}
+			workers.clear();
+			std::vector<std::uint8_t> bytes(values.size() * sizeof(std::int32_t));
+			std::memcpy(bytes.data(), values.data(), bytes.size());
+			return Terrain::HashTerrainBytes(bytes);
+		}
 	}
 
 	void RegisterTerrainMultithreadedStressTests(TestRegistry& registry)
 	{
+		registry.Add("Terrain.Stress.ResizeShapeMatrixRemainsBoundedAndResponsive", [](TestContext& context) {
+			const auto started = std::chrono::steady_clock::now();
+			bool valid = true;
+			for(std::int64_t extent = 1; extent <= 8; ++extent)
+			{
+				const Terrain::TerrainSampleBounds square{-extent * 256, -extent * 256, 0, 0};
+				const auto areas = Terrain::EnumerateTerrainAreas(square, 64u);
+				valid = valid && areas && areas->size() == static_cast<std::size_t>(extent * extent)
+					&& areas->front() == Terrain::TerrainAreaCoordinate{-extent, -extent}
+					&& areas->back() == Terrain::TerrainAreaCoordinate{-1, -1};
+			}
+			const Terrain::TerrainSampleBounds longNarrow{-2048, -3, 2048, 260};
+			const auto longAreas = Terrain::EnumerateTerrainAreas(longNarrow, 128u);
+			const auto negativeTail = Terrain::TerrainActiveRectForArea(longNarrow, {-8, -1});
+			const auto positiveTail = Terrain::TerrainActiveRectForArea(longNarrow, {7, 1});
+			const auto leftOwner = Terrain::OwnerArea({-1, 0});
+			const auto rightOwner = Terrain::OwnerArea({0, 0});
+			const auto elapsed = std::chrono::steady_clock::now() - started;
+			context.Expect(valid && longAreas && longAreas->size() == 48u
+				&& negativeTail == Terrain::TerrainAreaActiveRect{0u, 253u, 256u, 256u}
+				&& positiveTail == Terrain::TerrainAreaActiveRect{0u, 0u, 256u, 4u}
+				&& leftOwner == Terrain::TerrainAreaCoordinate{-1, 0}
+				&& rightOwner == Terrain::TerrainAreaCoordinate{0, 0}
+				&& elapsed < std::chrono::seconds(2),
+				"The 1x1 through 8x8, long-narrow, signed, partial-tail, and cross-boundary matrix must enumerate within a bounded interactive interval.");
+		});
+
+		registry.Add("Terrain.Stress.ResizeExpansionHashesAreWorkerCountIndependent", [](TestContext& context) {
+			Terrain::TerrainAssetRoot root{};
+			root.authoredBounds = {0, 0, 64, 64};
+			root.defaultHeightMm = -250;
+			root.sampleSpacingMetres = 1.0;
+			const std::array<Terrain::TerrainSampleBounds, 3u> proposals{{
+				{0, 0, 96, 64}, {-32, 0, 96, 64}, {-32, -32, 96, 96}}};
+			const std::size_t maximumWorkers = std::max<std::size_t>(4u,
+				std::min<std::size_t>(16u, std::thread::hardware_concurrency()));
+			const std::array<std::size_t, 4u> workerCounts{{1u, 2u, 4u, maximumWorkers}};
+			bool deterministic = true;
+			for(const auto proposed : proposals)
+			{
+				Terrain::TerrainResizeDelta delta{};
+				delta.kind = Terrain::TerrainResizeKind::Expand;
+				delta.previousBounds = root.authoredBounds;
+				delta.proposedBounds = proposed;
+				delta.expansionPolicy = Terrain::TerrainExpansionPolicy::EdgeBlend;
+				delta.transitionSamples = 24u;
+				const auto expected = HashExpandedSamples(root, delta, workerCounts.front());
+				for(const std::size_t count : workerCounts)
+					deterministic = deterministic && HashExpandedSamples(root, delta, count) == expected;
+			}
+			context.Expect(deterministic,
+				"One-side, opposite-side, and four-side Edge Blend hashes must match at 1, 2, 4, and maximum workers.");
+		});
+
 		registry.Add("Terrain.Stress.BoundedTypedIngressAndCancellationRemainAtomic", [](TestContext& context) {
 			Terrain::TerrainMutationQueue queue(2u);
 			std::atomic_uint accepted{0u};

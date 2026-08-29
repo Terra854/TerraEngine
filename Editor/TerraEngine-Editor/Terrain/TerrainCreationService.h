@@ -3,8 +3,13 @@
 #pragma once
 
 #include "Editor/AssetCompilers/TerrainCompiler.h"
+#include "Terrain/TerrainAssetStore.h"
 
 #include <functional>
+#include <map>
+#include <future>
+#include <memory>
+#include <atomic>
 #include <string>
 
 namespace TerraEngine::Editor::Terrain
@@ -23,6 +28,11 @@ namespace TerraEngine::Editor::Terrain
 		bool succeeded = false;
 		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
 		float sampleSpacingMetres = 1.0F;
+		TerraEngine::Terrain::TerrainSampleBounds authoredBounds{};
+		std::shared_ptr<TerraEngine::Terrain::TerrainAssetStore> store;
+		std::map<TerraEngine::Terrain::TerrainAreaCoordinate,
+			TerraEngine::Terrain::TerrainAreaDescriptor> areaSnapshots;
+		bool compatibilityHeightfieldComplete = false;
 		TerraEngine::AssetPipeline::TerrainHeightfield heightfield{};
 		std::string message;
 	};
@@ -38,10 +48,21 @@ namespace TerraEngine::Editor::Terrain
 			const TerraEngine::AssetPipeline::TerrainImportRequest& request,
 			const std::filesystem::path& destination,
 			TerraEngine::AssetPipeline::TerrainCompileProgressCallback progress = {}) const;
-		// Scene reload uses the same checked area codec as terrain creation. Only
-		// the first authored area is materialized because the current direct proxy
-		// is explicitly a one-area authoring surface.
+		// Large terrain creation uses the shared task pool. All filesystem and asset
+		// registration work remains inside the same atomic synchronous implementation.
+		[[nodiscard]] std::future<TerrainCreationResult> CreateOrImportAsync(
+			TerraEngine::AssetPipeline::TerrainImportRequest request,
+			std::filesystem::path destination,
+			std::shared_ptr<std::atomic_bool> cancellation,
+			TerraEngine::AssetPipeline::TerrainCompileProgressCallback progress = {}) const;
+		// Scene reload returns the validated root/store and also assembles a bounded
+		// compatibility heightfield for existing editor callers. No origin-area
+		// shortcut may override the root's authored extent.
 		[[nodiscard]] TerrainOpenResult OpenExisting(const std::filesystem::path& source) const;
+		[[nodiscard]] static bool SynchronizeCompatibilityDescriptor(
+			const std::filesystem::path& descriptorPath,
+			const TerraEngine::Terrain::TerrainAssetRoot& committedRoot,
+			std::string& outError);
 	private:
 		ParentAssetRegistration registerParentAsset;
 	};

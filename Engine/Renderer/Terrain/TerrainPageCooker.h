@@ -23,6 +23,7 @@ namespace TerraEngine::Renderer::Terrain
 		TerraEngine::Terrain::ContentHash authoredHash{};
 		std::uint64_t authoredGeneration = 0u;
 		double sampleSpacingMetres = 1.0;
+		TerraEngine::Terrain::TerrainAreaActiveRect activeRect{0u, 0u, 256u, 256u};
 		std::span<const std::int32_t> heightMillimetres{};
 		// One bit per authoritative cell. Empty input means no holes for backwards
 		// compatible callers; a supplied mask must contain exactly 256 by 256 bits.

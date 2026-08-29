@@ -162,5 +162,79 @@ namespace TerraEngine::Tests
 			context.Expect(packets.size() == 2u && packets[0].pick.pageSourceIdentity == packets[1].pick.pageSourceIdentity && !packets[0].usesLastKnownGood && !packets[1].usesLastKnownGood,
 				"Two runtime views must consume packets carrying the same current terrain source and picking identity rather than editor-owned state.");
 		});
+
+		registry.Add("Terrain.ExportRuntime.SignedSparsePartialCoverageUsesOneCurrentRoot", [](TestContext& context) {
+			TerrainExportWorkspace workspace;
+			const TerraEngine::UUID assetId = TerraEngine::GenerateUUID();
+			const TerraEngine::Terrain::TerrainSampleBounds authoredBounds{-256, -256, 258, 258};
+			std::vector<std::int32_t> heights(TerraEngine::Terrain::kTerrainAreaSampleCount, 3210);
+			std::vector<std::uint8_t> heightBytes(heights.size() * sizeof(std::int32_t));
+			std::memcpy(heightBytes.data(), heights.data(), heightBytes.size());
+			const auto heightHash = TerraEngine::Terrain::HashTerrainBytes(heightBytes);
+			TerraEngine::Terrain::TerrainAreaDescriptor explicitArea{};
+			explicitArea.coordinate = {-1, -1};
+			explicitArea.editGeneration = 11u;
+			explicitArea.channels.heightHash = heightHash;
+			explicitArea.minHeightMm = 3210;
+			explicitArea.maxHeightMm = 3210;
+			explicitArea.authoredContentHash = heightHash;
+			TerraEngine::Terrain::TerrainDirectoryShard shard{};
+			shard.areaBounds = {-1, -1, 0, 0};
+			shard.identity = {0x101u, 0x202u};
+			shard.descriptors.emplace(explicitArea.coordinate, explicitArea);
+			TerraEngine::Terrain::TerrainAssetRoot root{};
+			root.assetUuid = assetId;
+			root.publicationGeneration = 11u;
+			root.persistedRootGeneration = 11u;
+			root.sampleSpacingMetres = 1.5;
+			root.authoredBounds = authoredBounds;
+			root.defaultHeightMm = -750;
+			root.defaultLayerId = 3u;
+			root.layerStackGeneration = 1u;
+			root.directoryShards.push_back(std::move(shard));
+			const auto encodedRoot = TerraEngine::Terrain::EncodeTerrainRootManifest(root);
+			const std::string rootText = TerraEngine::Terrain::ToHexString(encodedRoot.contentHash);
+			const std::string assetText = TerraEngine::ToHexString(assetId);
+			const std::string heightText = TerraEngine::Terrain::ToHexString(heightHash);
+			workspace.WriteText("Terrain/Sparse.teterrain", nlohmann::json{
+				{"format", "TerraEngineTerrain"}, {"version", 1u}, {"assetId", assetText},
+				{"rootFormat", "TERRAROOT1"},
+				// Compatibility dimensions intentionally agree but do not enumerate
+				// coverage; the immutable root remains the export authority.
+				{"width", 514u}, {"height", 514u}, {"sampleSpacingMetres", 1.5}}.dump());
+			workspace.WriteText("Terrain/Sparse.teterrain.data/CURRENT", rootText + "\n-\n");
+			workspace.WriteText("Terrain/Sparse.teterrain.data/roots/" + rootText + ".root", encodedRoot.canonicalBytes);
+			workspace.WriteBytes("Terrain/Sparse.teterrain.data/blobs/" + heightText + ".tearea", heightBytes);
+
+			ContentMount mount;
+			context.Expect(encodedRoot.Succeeded() && mount.Mount(workspace.CreatePack()),
+				"The signed sparse runtime fixture must mount as one immutable root generation.");
+			const auto loaded = TerraEngine::Runtime::BuildMountedTerrainRuntime(
+				mount, assetId, "Terrain/Sparse.teterrain");
+			const auto negative = std::find_if(loaded.areas.begin(), loaded.areas.end(), [](const auto& area) {
+				return area.area == TerraEngine::Terrain::TerrainAreaCoordinate{-1, -1};
+			});
+			const auto partial = std::find_if(loaded.areas.begin(), loaded.areas.end(), [](const auto& area) {
+				return area.area == TerraEngine::Terrain::TerrainAreaCoordinate{1, 1};
+			});
+			const bool oneGeneration = std::all_of(loaded.areas.begin(), loaded.areas.end(), [](const auto& area) {
+				return area.authoredGeneration == 11u;
+			});
+			const bool removedAreaAbsent = std::none_of(loaded.areas.begin(), loaded.areas.end(), [](const auto& area) {
+				return area.area.x < -1 || area.area.z < -1 || area.area.x > 1 || area.area.z > 1;
+			});
+			context.Expect(loaded.Succeeded() && loaded.areas.size() == 9u
+				&& loaded.sourceRootHash == encodedRoot.contentHash
+				&& loaded.sourcePublicationGeneration == 11u
+				&& loaded.authoredBounds == authoredBounds && oneGeneration && removedAreaAbsent
+				&& negative != loaded.areas.end() && !negative->implicitDefault
+				&& negative->collisionRecipe.areaX == -1 && negative->collisionRecipe.areaZ == -1
+				&& negative->collisionRecipe.heightMillimetres.front() == 3210
+				&& partial != loaded.areas.end() && partial->implicitDefault
+				&& partial->activeRect == TerraEngine::Terrain::TerrainAreaActiveRect{0u, 0u, 2u, 2u}
+				&& partial->collisionRecipe.heightMillimetres.front() == -750,
+				"Export/runtime must derive signed explicit, sparse implicit, and partial active coverage exclusively from one complete current root. "
+					+ loaded.renderProxy.diagnostic);
+		});
 	}
 }

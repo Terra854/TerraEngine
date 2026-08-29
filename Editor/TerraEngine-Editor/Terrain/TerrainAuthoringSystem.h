@@ -37,6 +37,7 @@ namespace TerraEngine::Editor::Terrain
 		// boundary. It is also the callback installed in the scheduler workload.
 		void PublishAtProtectedBoundary();
 		[[nodiscard]] std::vector<TerraEngine::Terrain::TerrainTransactionReceipt> DrainReceipts();
+		[[nodiscard]] std::vector<TerraEngine::Terrain::TerrainAuthoringCompletion> DrainCompletions();
 
 		void Initialize() override;
 		void Update(float deltaTime) override;
@@ -57,7 +58,7 @@ namespace TerraEngine::Editor::Terrain
 		std::atomic<bool> initialized{false};
 		std::mutex authoringMutex;
 		std::deque<PreparedRequest> preparedRequests;
-		std::vector<TerraEngine::Terrain::TerrainTransactionReceipt> receipts;
+		std::vector<TerraEngine::Terrain::TerrainAuthoringCompletion> completions;
 		std::uint64_t authoringEpoch = 1U;
 		static constexpr std::size_t kMaximumPreparedRequests = 256U;
 	};

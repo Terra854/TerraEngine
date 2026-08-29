@@ -215,6 +215,8 @@ namespace TerraEngine::EditorTests {
 	void RegisterTerrainCollisionAlignmentTests(TestRegistry& registry);
 	void RegisterTerrainSplineGradingTests(TestRegistry& registry);
 	void RegisterTerrainProceduralJobTests(TestRegistry& registry);
+	void RegisterTerrainResizeWorkflowTests(TestRegistry& registry);
+	void RegisterTerrainResizeHistoryTests(TestRegistry& registry);
 #if defined(TERRAENGINE_HAS_TERRAIN_AUTOMATION_CONTRACT_TESTS)
 	void RegisterTerrainAutomationContractTests(TestRegistry& registry);
 #endif
@@ -257,6 +259,8 @@ int main() {
 	TerraEngine::EditorTests::RegisterTerrainCollisionAlignmentTests(registry);
 	TerraEngine::EditorTests::RegisterTerrainSplineGradingTests(registry);
 	TerraEngine::EditorTests::RegisterTerrainProceduralJobTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainResizeWorkflowTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainResizeHistoryTests(registry);
 #if defined(TERRAENGINE_HAS_TERRAIN_AUTOMATION_CONTRACT_TESTS)
 	TerraEngine::EditorTests::RegisterTerrainAutomationContractTests(registry);
 #endif

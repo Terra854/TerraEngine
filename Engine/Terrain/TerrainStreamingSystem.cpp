@@ -49,7 +49,8 @@ namespace
 		const TerrainResidencySnapshot& prior,
 		std::vector<TerrainResidencyDemand> demands,
 		TerrainResidencyBudget budget,
-		const std::atomic_bool* cancellation)
+		const std::atomic_bool* cancellation,
+		std::span<const TerrainAreaCoordinate> forcedRetirements)
 	{
 		TerrainResidencyPlan plan{};
 		plan.observedRootGeneration = observedRootGeneration;
@@ -68,6 +69,19 @@ namespace
 			return plan;
 		}
 
+		// Removed or newly inactive crop coverage cannot remain visible merely
+		// because an old view demand pinned it. The candidate drops it now; resource
+		// owners release the old snapshot only after protected publication succeeds.
+		for(const TerrainAreaCoordinate coordinate : forcedRetirements)
+		{
+			auto area = std::find_if(plan.candidate.areas.begin(), plan.candidate.areas.end(),
+				[coordinate](const TerrainResidentArea& value) { return value.area == coordinate; });
+			if(area == plan.candidate.areas.end()) continue;
+			plan.evictAreas.push_back(coordinate);
+			plan.candidate.areas.erase(area);
+			++plan.candidate.evictions;
+		}
+
 		// Coalesce identical requests deterministically. A stronger source and the
 		// largest byte estimate win so a worker cannot under-budget merged demand.
 		std::sort(demands.begin(), demands.end(), [](const auto& left, const auto& right)
@@ -78,6 +92,11 @@ namespace
 		std::vector<TerrainResidencyDemand> merged;
 		for (const TerrainResidencyDemand& demand : demands)
 		{
+			if(std::find(forcedRetirements.begin(), forcedRetirements.end(), demand.area) != forcedRetirements.end())
+			{
+				++plan.candidate.cancelledDemands;
+				continue;
+			}
 			if (demand.assetId == TerraEngine::EMPTY_UUID || demand.rootGeneration != observedRootGeneration)
 			{
 				++plan.candidate.cancelledDemands;
@@ -170,6 +189,31 @@ namespace
 		return true;
 	}
 
+	std::optional<std::vector<TerrainResidencyDemand>> BuildTerrainCoarseCoverageDemands(
+		TerraEngine::UUID assetId, Generation rootGeneration,
+		TerrainSampleBounds authoredBounds, std::size_t maximumAreas,
+		std::size_t coarseRenderBytesPerArea)
+	{
+		if(assetId == TerraEngine::EMPTY_UUID || rootGeneration == 0u || maximumAreas == 0u) return std::nullopt;
+		const auto coordinates = EnumerateTerrainAreas(authoredBounds, maximumAreas);
+		if(!coordinates) return std::nullopt;
+		std::vector<TerrainResidencyDemand> demands;
+		demands.reserve(coordinates->size());
+		for(const auto coordinate : *coordinates)
+		{
+			TerrainResidencyDemand demand{};
+			demand.assetId = assetId;
+			demand.area = coordinate;
+			demand.rootGeneration = rootGeneration;
+			demand.source = TerrainDemandSource::SceneView;
+			demand.priority = 1u;
+			demand.renderBytes = coarseRenderBytesPerArea;
+			demand.regionalRoot = true;
+			demands.push_back(demand);
+		}
+		return demands;
+	}
+
 	TerrainStreamingSystem& TerrainStreamingSystem::Instance()
 	{
 		static TerrainStreamingSystem instance;
@@ -192,6 +236,8 @@ namespace
 		initialized.store(false, std::memory_order_release);
 		std::scoped_lock lock(residencyMutex);
 		pendingDemands.clear();
+		pendingForcedRetirements.clear();
+		forcedRetirementGeneration = 0u;
 		preparedResidency.reset();
 		publishedResidency = {};
 	}
@@ -242,17 +288,19 @@ namespace
 			std::vector<TerrainResidencyDemand> demands;
 			TerrainResidencySnapshot prior;
 			TerrainResidencyBudget capturedBudget;
+			std::vector<TerrainAreaCoordinate> forcedRetirements;
 			{
 				std::scoped_lock lock(residencyMutex);
 				demands.swap(pendingDemands);
 				prior = publishedResidency;
 				capturedBudget = budget;
+				forcedRetirements = pendingForcedRetirements;
 			}
 			Generation observedGeneration = prior.rootGeneration;
 			for(const TerrainResidencyDemand& demand : demands)
 				observedGeneration = std::max(observedGeneration, demand.rootGeneration);
 			TerrainResidencyPlan plan = PrepareTerrainResidencyPlan(
-				observedGeneration, prior, std::move(demands), capturedBudget);
+				observedGeneration, prior, std::move(demands), capturedBudget, nullptr, forcedRetirements);
 			std::scoped_lock lock(residencyMutex);
 			preparedResidency = std::move(plan);
 		};
@@ -276,10 +324,16 @@ namespace
 			std::scoped_lock lock(residencyMutex);
 			if(!preparedResidency) return;
 			Generation currentGeneration = std::max(
-				publishedResidency.rootGeneration, preparedResidency->observedRootGeneration);
+				std::max(publishedResidency.rootGeneration, preparedResidency->observedRootGeneration),
+				forcedRetirementGeneration);
 			for(const TerrainResidencyDemand& demand : pendingDemands)
 				currentGeneration = std::max(currentGeneration, demand.rootGeneration);
-			PublishTerrainResidencyPlan(publishedResidency, *preparedResidency, currentGeneration);
+			if(PublishTerrainResidencyPlan(publishedResidency, *preparedResidency, currentGeneration)
+				&& currentGeneration >= forcedRetirementGeneration)
+			{
+				pendingForcedRetirements.clear();
+				forcedRetirementGeneration = 0u;
+			}
 			preparedResidency.reset();
 		};
 
@@ -298,6 +352,29 @@ namespace
 		pendingDemands.insert(pendingDemands.end(), std::make_move_iterator(demands.begin()), std::make_move_iterator(demands.end()));
 	}
 
+	bool TerrainStreamingSystem::SubmitCoarseCoverage(TerraEngine::UUID assetId,
+		Generation rootGeneration, TerrainSampleBounds authoredBounds,
+		std::size_t maximumAreas, std::size_t coarseRenderBytesPerArea)
+	{
+		auto demands = BuildTerrainCoarseCoverageDemands(assetId, rootGeneration,
+			authoredBounds, maximumAreas, coarseRenderBytesPerArea);
+		if(!demands) return false;
+		SubmitDemands(std::move(*demands));
+		return true;
+	}
+
+	void TerrainStreamingSystem::SubmitForcedRetirements(Generation rootGeneration,
+		std::vector<TerrainAreaCoordinate> areas)
+	{
+		std::sort(areas.begin(), areas.end());
+		areas.erase(std::unique(areas.begin(), areas.end()), areas.end());
+		std::scoped_lock lock(residencyMutex);
+		forcedRetirementGeneration = std::max(forcedRetirementGeneration, rootGeneration);
+		pendingForcedRetirements.insert(pendingForcedRetirements.end(), areas.begin(), areas.end());
+		std::sort(pendingForcedRetirements.begin(), pendingForcedRetirements.end());
+		pendingForcedRetirements.erase(std::unique(pendingForcedRetirements.begin(), pendingForcedRetirements.end()), pendingForcedRetirements.end());
+	}
+
 	void TerrainStreamingSystem::SetBudget(TerrainResidencyBudget nextBudget)
 	{
 		std::scoped_lock lock(residencyMutex);
@@ -314,7 +391,8 @@ namespace
 	{
 		std::scoped_lock lock(residencyMutex);
 		if (!initialized.load(std::memory_order_acquire)) return std::nullopt;
-		TerrainResidencyPlan plan = PrepareTerrainResidencyPlan(observedRootGeneration, publishedResidency, std::move(pendingDemands), budget, cancellation);
+		TerrainResidencyPlan plan = PrepareTerrainResidencyPlan(observedRootGeneration, publishedResidency,
+			std::move(pendingDemands), budget, cancellation, pendingForcedRetirements);
 		pendingDemands.clear();
 		return plan;
 	}
@@ -322,6 +400,12 @@ namespace
 	bool TerrainStreamingSystem::PublishPreparedSnapshot(const TerrainResidencyPlan& plan, Generation currentRootGeneration)
 	{
 		std::scoped_lock lock(residencyMutex);
-		return PublishTerrainResidencyPlan(publishedResidency, plan, currentRootGeneration);
+		const bool published = PublishTerrainResidencyPlan(publishedResidency, plan, currentRootGeneration);
+		if(published && currentRootGeneration >= forcedRetirementGeneration)
+		{
+			pendingForcedRetirements.clear();
+			forcedRetirementGeneration = 0u;
+		}
+		return published;
 	}
 }

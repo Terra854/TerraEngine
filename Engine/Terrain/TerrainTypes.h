@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <vector>
 #include <string>
 #include <string_view>
 
@@ -82,6 +83,34 @@ namespace TerraEngine::Terrain
 		[[nodiscard]] bool Contains(TerrainSampleCoordinate sample) const noexcept;
 	};
 
+	// Area bounds use the same half-open convention as sample bounds, but their
+	// coordinates address fixed 256x256 storage areas rather than samples.
+	struct TerrainAreaBounds
+	{
+		std::int64_t minX = 0;
+		std::int64_t minZ = 0;
+		std::int64_t maxXExclusive = 0;
+		std::int64_t maxZExclusive = 0;
+
+		[[nodiscard]] constexpr bool operator==(const TerrainAreaBounds&) const noexcept = default;
+		[[nodiscard]] bool IsValid() const noexcept;
+		[[nodiscard]] bool Contains(TerrainAreaCoordinate area) const noexcept;
+		[[nodiscard]] std::optional<std::size_t> AreaCount() const noexcept;
+	};
+
+	// Active rectangles stop partial edge storage from leaking padded cells into
+	// rendering, collision, picking, export, or a later resize operation.
+	struct TerrainAreaActiveRect
+	{
+		std::uint16_t minX = 0u;
+		std::uint16_t minZ = 0u;
+		std::uint16_t maxXExclusive = 0u;
+		std::uint16_t maxZExclusive = 0u;
+
+		[[nodiscard]] constexpr bool operator==(const TerrainAreaActiveRect&) const noexcept = default;
+		[[nodiscard]] bool IsValid() const noexcept;
+	};
+
 	enum class TerrainChannelKind : std::uint16_t
 	{
 		Height = 1u,
@@ -124,6 +153,11 @@ namespace TerraEngine::Terrain
 	TERRAENGINE_API std::int64_t FloorModuloTerrainCoordinate(std::int64_t value, std::int64_t divisor, bool& outOverflow) noexcept;
 	TERRAENGINE_API std::optional<TerrainAreaCoordinate> OwnerArea(TerrainSampleCoordinate sample) noexcept;
 	TERRAENGINE_API std::optional<TerrainSampleCoordinate> LocalSample(TerrainSampleCoordinate sample) noexcept;
+	TERRAENGINE_API std::optional<TerrainAreaBounds> TerrainAreasForSamples(TerrainSampleBounds bounds) noexcept;
+	TERRAENGINE_API std::optional<TerrainAreaActiveRect> TerrainActiveRectForArea(
+		TerrainSampleBounds bounds, TerrainAreaCoordinate area) noexcept;
+	TERRAENGINE_API std::optional<std::vector<TerrainAreaCoordinate>> EnumerateTerrainAreas(
+		TerrainSampleBounds bounds, std::size_t maximumAreas) noexcept;
 	TERRAENGINE_API std::string ToHexString(ContentHash hash);
 	TERRAENGINE_API std::string_view ToString(TerrainResultCode code) noexcept;
 	TERRAENGINE_API std::string_view ToString(TerrainRootDiagnosticCode code) noexcept;

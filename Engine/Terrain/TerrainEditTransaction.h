@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Terrain/TerrainAssetStore.h"
+#include "Terrain/TerrainResize.h"
 
 #include <cstdint>
 #include <optional>
@@ -90,6 +91,8 @@ namespace TerraEngine::Terrain
 		std::size_t retainedByteCount = 0u;
 		std::optional<TerrainLayerPatch> forwardLayerStackPatch;
 		std::optional<TerrainLayerPatch> inverseLayerStackPatch;
+		std::optional<TerrainResizeDelta> forwardResize;
+		std::optional<TerrainResizeDelta> inverseResize;
 	};
 
 	struct TerrainEditTransaction
@@ -109,6 +112,10 @@ namespace TerraEngine::Terrain
 		// channels, but carry no bulk area payload through the mutation queue.
 		std::optional<TerrainLayerPatch> layerStackPatch;
 		std::optional<TerrainLayerPatch> inverseLayerStackPatch;
+		// Bounds and descriptor membership travel beside channel patches so resize
+		// publication and history still cross one protected root boundary.
+		std::optional<TerrainResizeDelta> resizeDelta;
+		std::optional<TerrainResizeDelta> inverseResizeDelta;
 		ContentHash operationFingerprint{};
 		bool cancelled = false;
 	};

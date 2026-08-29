@@ -13,7 +13,13 @@ namespace TerraEngine::Editor::Terrain
 		if(!capture.IsValid() || capture.root->assetUuid!=request.assetId) return {false,"StaleGeneration","The requested terrain asset is not the active authored root."};
 		if(TerraEngine::Terrain::ToHexString(capture.root->rootContentHash)!=request.expectedRootHash) return {false,"StaleGeneration","The expected terrain root hash is stale."};
 		if(request.observations.size()>request.budget.maximumAreas) return {false,"BudgetExceeded","Observed terrain areas exceed the declared budget."};
-		for(const auto& observation:request.observations) { const auto descriptor=store->FindDescriptor(*capture.root, observation.coordinate); if(!descriptor || descriptor->editGeneration!=observation.editGeneration || descriptor->authoredContentHash!=observation.authoredContentHash) return {false,"StaleGeneration","A required terrain area observation is stale or unavailable."}; }
+		for(const auto& observation:request.observations)
+		{
+			const auto areas=TerraEngine::Terrain::TerrainAreasForSamples(capture.root->authoredBounds);
+			if(!areas || !areas->Contains(observation.coordinate)) return {false,"StaleGeneration","A required terrain area observation is outside the authored bounds."};
+			const auto descriptor=store->ResolveDescriptorOrImplicit(*capture.root,observation.coordinate);
+			if(descriptor.editGeneration!=observation.editGeneration || descriptor.authoredContentHash!=observation.authoredContentHash) return {false,"StaleGeneration","A required terrain area observation is stale or unavailable."};
+		}
 		const std::string fingerprint=Automation::TerrainApprovalFingerprint(request);
 		if(!request.previewOnly && request.approvalFingerprint!=fingerprint) return {false,"ApprovalRequired","Commit requires the matching protected preflight fingerprint."};
 		return {true,{},"Preflight accepted.",fingerprint,capture};

@@ -250,6 +250,41 @@ The weight and stable-ID control textures publish together at a protected
 boundary. A missing authored material is intentionally rendered magenta so the
 broken layer is visible instead of silently changing the terrain's appearance.
 
+## Terrain sizing, expansion, and cropping
+
+Creation and import accept any positive width/depth within the configured sample
+budget; dimensions do not need to be square or multiples of 256. Sample spacing
+is immutable after creation. `TERRAROOT1::authoredBounds` is authoritative, while
+the parent `.teterrain` width/height fields are synchronized compatibility data.
+
+Resize starts as a detached preview and becomes visible only after confirmation
+and one protected publication boundary. Expansion can add whole 256-sample area
+bands on any side, including into negative coordinates. Existing samples remain
+byte-identical. New samples use one selected policy:
+
+- **Edge Blend** (default) inspects the developer-modified boundary and continues
+	its local slope while fading toward the terrain default over the transition.
+- **Extend Edge** repeats the nearest authored edge sample.
+- **Flat Default** fills the root default height and warns when this can form a
+	cliff against an uneven edge.
+
+If an open hole reaches the former edge, choose either **Close at Former Edge**
+or **Extend Connected Boundary Holes**; the preview cannot commit without that
+explicit choice. Expansion never reveals old inactive padding.
+
+Cropping uses exact signed half-open sample bounds. The preview reports discarded
+samples, non-default heights, holes, painted samples, removed/partial descriptors,
+and retained history bytes. It requires explicit data-loss confirmation. Undo
+retains content-addressed blobs and restores the exact prior root; redo reapplies
+the crop. Saving synchronizes compatibility dimensions, reopening trusts the
+committed root, and export prunes predecessor roots and unreachable area blobs.
+
+Terrain diagnostics expose selected signed area, current/proposed bounds, resize
+stage and progress, availability, common-ready generation mismatches, forced
+retirements, streaming coverage, and collision regions. A stale fingerprint,
+budget violation, unavailable area, failed derived candidate, or conflicting root
+rejects atomically and keeps the last-known-good authored/render/collision state.
+
 ## Clean-checkout installed contract
 
 Configure, build, install, and audit only the installed tree:

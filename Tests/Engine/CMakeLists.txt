@@ -672,6 +672,12 @@ set_tests_properties(Engine.Terrain.Sculpt PROPERTIES
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.BrushKernel,Terrain.PageCooker"
 )
 
+add_test(NAME Engine.Terrain.Resize COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Terrain.Resize PROPERTIES
+	LABELS "Engine;Terrain;Resize;Expansion;Crop;Atomicity"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.Resize"
+)
+
 add_test(NAME Engine.Terrain.AtomicEdit COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.Terrain.AtomicEdit PROPERTIES
 	LABELS "Engine;Terrain;Transactions;AtomicEdit"

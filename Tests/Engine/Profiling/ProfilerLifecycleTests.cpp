@@ -145,6 +145,9 @@ void RegisterProfilerLifecycleTests(TestRegistry& registry)
 
 	registry.Add("Engine.ProfilerLifecycle.DurableWorkerPreservesDeferredScopesViewportAndAccounting", [](TestContext& context) {
 		using namespace TerraEngine::Profiling;
+		// This test owns the worker pool it needs so filtered or reordered registry
+		// runs cannot depend on a previously executed profiler fixture.
+		ProfilerThreadPoolSession pool;
 		ProfilerTestSupport::TemporaryWorkspace workspace("ProfilerLifecycleDeferredWorker");
 		ProfilerCaptureSettings settings;
 		settings.detailLevel = ProfilerCaptureDetailLevel::Detailed;

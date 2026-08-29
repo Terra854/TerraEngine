@@ -128,5 +128,47 @@ namespace TerraEngine::Tests
 			system.ClearPublication(&store);
 			system.Shutdown();
 		});
+
+		registry.Add("Terrain.CollisionPublication.RegionalBatchAddReplaceRemoveIsAtomic", [](TestContext& context) {
+			auto root = std::make_shared<TerraEngine::Terrain::TerrainAssetRoot>();
+			root->assetUuid = TerraEngine::GenerateUUID();
+			root->publicationGeneration = 12u;
+			root->rootContentHash = {120u, 121u};
+			root->authoredBounds = {-256, 0, 512, 256};
+			TerraEngine::Terrain::TerrainAssetStore store(root);
+			auto recipe = [&](std::uint64_t authoredHash) {
+				TerraEngine::Physics::TerrainHeightFieldRecipe value{};
+				value.terrainAssetId = root->assetUuid;
+				value.authoredGeneration = root->publicationGeneration;
+				value.authoredHash = authoredHash;
+				value.heightMillimetres.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kSampleCount,
+					static_cast<std::int32_t>(authoredHash));
+				value.holeBits.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount, 0u);
+				return value;
+			};
+			TerraEngine::Physics::Terrain::TerrainCollisionSnapshot snapshot{};
+			TerraEngine::Physics::Terrain::TerrainCollisionRegionBatch initial{};
+			initial.assetId = root->assetUuid;
+			initial.sourceRootHash = root->rootContentHash;
+			initial.sourcePublicationGeneration = root->publicationGeneration;
+			initial.upserts = {{{-1, 0}, recipe(1u)}, {{0, 0}, recipe(2u)}};
+			initial.complete = true;
+			const bool added = TerraEngine::Physics::Terrain::PublishTerrainCollisionRegionBatch(snapshot, initial, store);
+			const auto prior = snapshot.regions;
+			auto rejected = initial;
+			rejected.upserts = {{{0, 0}, recipe(3u)}, {{1, 0}, recipe(4u)}};
+			rejected.removals = {{-1, 0}};
+			const bool providerRejected = TerraEngine::Physics::Terrain::PublishTerrainCollisionRegionBatch(snapshot, rejected, store, false);
+			const bool preserved = snapshot.regions.size() == prior.size()
+				&& snapshot.regions.at(TerraEngine::Terrain::TerrainAreaCoordinate{-1, 0}).authoredHash == 1u
+				&& snapshot.regions.at(TerraEngine::Terrain::TerrainAreaCoordinate{0, 0}).authoredHash == 2u;
+			const bool replaced = TerraEngine::Physics::Terrain::PublishTerrainCollisionRegionBatch(snapshot, rejected, store, true);
+			context.Expect(added && !providerRejected && preserved && replaced
+				&& !snapshot.regions.contains(TerraEngine::Terrain::TerrainAreaCoordinate{-1, 0})
+				&& snapshot.regions.contains(TerraEngine::Terrain::TerrainAreaCoordinate{0, 0})
+				&& snapshot.regions.contains(TerraEngine::Terrain::TerrainAreaCoordinate{1, 0})
+				&& snapshot.regions.at(TerraEngine::Terrain::TerrainAreaCoordinate{0, 0}).authoredHash == 3u,
+				"Area-keyed collision additions, replacements, and removals must swap together only after provider acceptance.");
+		});
 	}
 }

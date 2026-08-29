@@ -4,11 +4,15 @@
 
 #include "Editor/TerraEngine-Editor/Terrain/TerrainAuthoringSystem.h"
 #include "Physics/Terrain/TerrainCollisionSystem.h"
+#include "Renderer/Terrain/TerrainDirectMesh.h"
 #include "Terrain/TerrainDiagnostics.h"
 #include "Terrain/TerrainPublication.h"
+#include "Terrain/TerrainStreamingSystem.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <vector>
 
 namespace TerraEngine::EditorTests
 {
@@ -32,6 +36,7 @@ namespace TerraEngine::EditorTests
 			const std::array<std::string_view, 5u> boundaries{
 				"project close", "scene switch", "play transition", "device loss", "device recovery"};
 			bool allContained = true;
+			for(std::size_t run = 0u; run < 100u; ++run)
 			for(const auto boundary : boundaries)
 			{
 				auto root = MakeFailureRoot();
@@ -74,10 +79,29 @@ namespace TerraEngine::EditorTests
 				recipe, root->rootContentHash, root->publicationGeneration);
 			TerraEngine::Physics::Terrain::TerrainCollisionSnapshot snapshot;
 			const bool published = TerraEngine::Physics::Terrain::PublishTerrainCollisionCandidate(snapshot, current, store);
-			auto corrupt = current;
-			corrupt.recipe.heightMillimetres.clear();
-			const bool rejected = !TerraEngine::Physics::Terrain::PublishTerrainCollisionCandidate(snapshot, corrupt, store);
-			context.Expect(published && rejected
+			bool allRejected = true;
+			for(std::size_t run = 0u; run < 100u; ++run)
+			{
+				auto corrupt = current;
+				corrupt.recipe.heightMillimetres.clear();
+				allRejected = allRejected
+					&& !TerraEngine::Physics::Terrain::PublishTerrainCollisionCandidate(snapshot, corrupt, store)
+					&& snapshot.currentRecipe.IsComplete();
+				std::atomic_bool cancelled = true;
+				TerraEngine::Terrain::TerrainResidencyBudget budget{};
+				const auto residency = TerraEngine::Terrain::PrepareTerrainResidencyPlan(
+					root->publicationGeneration, {}, {}, budget, &cancelled);
+				TerraEngine::Renderer::Terrain::TerrainDirectMeshInput renderInput{};
+				renderInput.assetId = root->assetUuid;
+				renderInput.authoredHash = root->rootContentHash;
+				renderInput.authoredGeneration = root->publicationGeneration;
+				std::vector<std::int32_t> renderHeights(TerraEngine::Terrain::kTerrainAreaSampleCount, 0);
+				renderInput.heightMillimetres = renderHeights;
+				const auto renderer = TerraEngine::Renderer::Terrain::BuildTerrainDirectMesh(
+					renderInput, &cancelled);
+				allRejected = allRejected && residency.cancelled && renderer.cancelled;
+			}
+			context.Expect(published && allRejected
 				&& snapshot.status == TerraEngine::Physics::Terrain::TerrainCollisionStatus::Failed
 				&& snapshot.currentRecipe.IsComplete(),
 				"A corrupt derived collision candidate must fail atomically while the complete last-known-good shape remains queryable.");

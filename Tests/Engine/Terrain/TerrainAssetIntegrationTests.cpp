@@ -9,6 +9,7 @@
 #include "Resource/ResourceManager.h"
 #include "Runtime/ContentMount/ContentMount.h"
 #include "Runtime/ContentMount/TerrainContentResolver.h"
+#include "Terrain/TerrainAssetStore.h"
 
 #include <filesystem>
 
@@ -47,6 +48,30 @@ namespace TerraEngine::Tests
 			context.Expect(read.status == TerrainContentStatus::NotMounted,
 				"A packaged terrain root must fail closed when no TEPAK archive is mounted.");
 			ResourceManager::Instance().DeleteResource(terrainId, AssetType::Terrain);
+		});
+
+		registry.Add("Terrain.Creation.AuthoredBoundsEnumerateExplicitAndImplicitAreas", [](TestContext& context) {
+			auto root = std::make_shared<Terrain::TerrainAssetRoot>();
+			root->assetUuid = TerraEngine::GenerateUUID();
+			root->publicationGeneration = 1u;
+			root->rootContentHash = {1u, 2u};
+			root->authoredBounds = {-1, -1, 513, 257};
+			root->defaultLayerId = 1u;
+			Terrain::TerrainAreaDescriptor explicitArea{};
+			explicitArea.coordinate = {0, 0};
+			explicitArea.editGeneration = 1u;
+			explicitArea.authoredContentHash = {3u, 4u};
+			Terrain::TerrainDirectoryShard shard{};
+			shard.areaBounds = {-1, -1, 3, 2};
+			shard.descriptors.emplace(explicitArea.coordinate, explicitArea);
+			root->directoryShards.push_back(std::move(shard));
+			Terrain::TerrainAssetStore store(root);
+			const auto areas = Terrain::EnumerateTerrainAreas(root->authoredBounds, 32u);
+			bool allResolvable = areas.has_value();
+			if(areas) for(const auto coordinate : *areas)
+				allResolvable = allResolvable && store.ResolveDescriptorOrImplicit(*root, coordinate).authoredContentHash.IsValid();
+			context.Expect(areas && areas->size() == 12u && allResolvable,
+				"Root-authored bounds must expose every signed explicit or implicit area, including partial edges.");
 		});
 	}
 }

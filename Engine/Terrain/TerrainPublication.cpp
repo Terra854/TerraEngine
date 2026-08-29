@@ -16,6 +16,37 @@ namespace
 	}
 }
 
+	TerrainCodecResult ValidateTerrainCommonReadyCandidate(
+		const TerrainCommonReadyCandidate& candidate,
+		const TerrainAssetStore& store)
+	{
+		const TerrainRootCapture capture = store.CaptureRoot();
+		if(!capture.IsValid())
+			return {TerrainResultCode::Failed, "Terrain common-ready validation requires a published authored root."};
+		if(candidate.assetUuid != capture.root->assetUuid
+			|| candidate.rootHash != capture.root->rootContentHash
+			|| candidate.publicationGeneration != capture.publicationGeneration)
+		{
+			return {TerrainResultCode::Conflict, "Terrain common-ready candidate observed a stale authored generation."};
+		}
+		if(!candidate.rootComplete || !candidate.derivedHalosComplete
+			|| !candidate.renderComplete || !candidate.pickingComplete
+			|| !candidate.spatialComplete || !candidate.residencyRetirementsComplete
+			|| !candidate.demandedCollisionComplete || !candidate.derivedHaloIdentity.IsValid())
+		{
+			return {TerrainResultCode::InvalidArgument,
+				"Terrain common-ready publication requires complete root, halo, render, picking, spatial, residency, and collision products."};
+		}
+		const Generation expected = candidate.publicationGeneration;
+		if(candidate.renderGeneration != expected || candidate.pickingGeneration != expected
+			|| candidate.spatialGeneration != expected || candidate.residencyGeneration != expected
+			|| candidate.collisionGeneration != expected)
+		{
+			return {TerrainResultCode::Conflict, "Terrain common-ready products do not share one publication generation."};
+		}
+		return {};
+	}
+
 	TerrainTransactionReceipt TerrainPublication::Publish(TerrainEditTransaction transaction)
 	{
 		const TerrainRootCapture capture = assetStore.CaptureRoot();
@@ -43,6 +74,24 @@ namespace
 			}
 			for (const TerrainExactSpan& span : patch.beforeSpans) { if (span.immutableBlobHash.IsValid()) historyBlobs.push_back(span.immutableBlobHash); else inlineHistoryBytes += span.compressedBytes.size(); }
 			for (const TerrainExactSpan& span : patch.afterSpans) { if (span.immutableBlobHash.IsValid()) historyBlobs.push_back(span.immutableBlobHash); else inlineHistoryBytes += span.compressedBytes.size(); }
+		}
+		if (transaction.resizeDelta)
+		{
+			for (const ContentHash hash : transaction.resizeDelta->retainedBlobHashes)
+				historyBlobs.push_back(hash);
+		}
+		if (transaction.inverseResizeDelta.has_value())
+		{
+			for (const TerrainAreaDescriptor& descriptor : transaction.inverseResizeDelta->descriptorUpserts)
+			{
+				if (descriptor.channels.heightHash) historyBlobs.push_back(*descriptor.channels.heightHash);
+				if (descriptor.channels.holeHash) historyBlobs.push_back(*descriptor.channels.holeHash);
+				for (const auto& [group, hash] : descriptor.channels.weightGroupHashes)
+				{
+					(void)group;
+					historyBlobs.push_back(hash);
+				}
+			}
 		}
 		std::sort(historyBlobs.begin(), historyBlobs.end(), [](const ContentHash& left, const ContentHash& right) { return left.low64 != right.low64 ? left.low64 < right.low64 : left.high64 < right.high64; });
 		historyBlobs.erase(std::unique(historyBlobs.begin(), historyBlobs.end()), historyBlobs.end());
@@ -72,7 +121,37 @@ namespace
 		TerrainCodecResult built{};
 		// Candidate builders derive identity from the complete canonical TERRAROOT1
 		// bytes before the protected swap; callers cannot inject synthetic hashes.
-		if (transaction.layerStackPatch.has_value()) built = assetStore.BuildLayerStackCandidate(*capture.root, *transaction.layerStackPatch, {}, candidate);
+		if (transaction.resizeDelta.has_value())
+		{
+			std::vector<TerrainAreaDescriptor> resizeUpserts = transaction.resizeDelta->descriptorUpserts;
+			for (TerrainAreaDescriptor& descriptor : resizeUpserts)
+			{
+				const auto patched = std::find_if(replacements.begin(), replacements.end(), [&](const TerrainAreaDescriptor& value) {
+					return value.coordinate == descriptor.coordinate;
+				});
+				if (patched != replacements.end()) descriptor = *patched;
+				else
+				{
+					const auto current = assetStore.ResolveDescriptorOrImplicit(*capture.root, descriptor.coordinate);
+					if (current.editGeneration == std::numeric_limits<Generation>::max())
+					{
+						releaseRetained();
+						return Reject(transaction, TerrainResultCode::Overflow, "Terrain resize descriptor generation overflowed.");
+					}
+					descriptor.editGeneration = current.editGeneration + 1u;
+				}
+			}
+			for (const TerrainAreaDescriptor& replacement : replacements)
+				if (std::none_of(resizeUpserts.begin(), resizeUpserts.end(), [&](const TerrainAreaDescriptor& value) {
+					return value.coordinate == replacement.coordinate;
+				})) resizeUpserts.push_back(replacement);
+			std::sort(resizeUpserts.begin(), resizeUpserts.end(), [](const auto& left, const auto& right) {
+				return left.coordinate < right.coordinate;
+			});
+			built = assetStore.BuildResizeCandidate(*capture.root, transaction.resizeDelta->proposedBounds,
+				resizeUpserts, transaction.resizeDelta->descriptorRemovals, candidate);
+		}
+		else if (transaction.layerStackPatch.has_value()) built = assetStore.BuildLayerStackCandidate(*capture.root, *transaction.layerStackPatch, {}, candidate);
 		else built = assetStore.BuildCandidateRoot(*capture.root, replacements, {}, candidate);
 		if (!built.Succeeded()) { releaseRetained(); return Reject(transaction, built.code, built.message); }
 		if (auto published = assetStore.PublishCandidate(capture.root, candidate); !published.Succeeded()) { releaseRetained(); return Reject(transaction, published.code, published.message); }
@@ -93,6 +172,27 @@ namespace
 			receipt.affectedAreas.push_back(patch.replacement.coordinate);
 			invalidation.areas.push_back(patch.replacement.coordinate);
 		}
+		if (transaction.resizeDelta)
+		{
+			for (const TerrainAreaDescriptor& descriptor : transaction.resizeDelta->descriptorUpserts)
+			{
+				receipt.affectedAreas.push_back(descriptor.coordinate);
+				invalidation.areas.push_back(descriptor.coordinate);
+			}
+			for (const TerrainAreaCoordinate coordinate : transaction.resizeDelta->descriptorRemovals)
+			{
+				receipt.affectedAreas.push_back(coordinate);
+				invalidation.areas.push_back(coordinate);
+			}
+			invalidation.areas.insert(invalidation.areas.end(), transaction.resizeDelta->affectedOneRing.begin(),
+				transaction.resizeDelta->affectedOneRing.end());
+		}
+		auto sortUniqueAreas = [](std::vector<TerrainAreaCoordinate>& areas) {
+			std::sort(areas.begin(), areas.end());
+			areas.erase(std::unique(areas.begin(), areas.end()), areas.end());
+		};
+		sortUniqueAreas(receipt.affectedAreas);
+		sortUniqueAreas(invalidation.areas);
 		receipt.invalidation = std::move(invalidation);
 		receipt.retainedHistoryBytes = historyBytes;
 		receipt.retainedBlobHashes = historyBlobs;
@@ -115,13 +215,32 @@ namespace
 		}
 		if (recordsNewHistory)
 		{
-			receipt.historyPayload = TerrainHistoryPayload{transaction.patches, std::move(inverse), historyBytes, transaction.layerStackPatch, transaction.inverseLayerStackPatch};
+			receipt.historyPayload = TerrainHistoryPayload{transaction.patches, std::move(inverse), historyBytes,
+				transaction.layerStackPatch, transaction.inverseLayerStackPatch,
+				transaction.resizeDelta, transaction.inverseResizeDelta};
 		}
 		return receipt;
 	}
 
 	std::vector<TerrainTransactionReceipt> TerrainPublication::PublishQueued(TerrainMutationQueue& queue)
 	{
-		std::vector<TerrainTransactionReceipt> receipts; for (TerrainEditTransaction& transaction : queue.DrainPending()) { TerrainTransactionReceipt receipt = Publish(std::move(transaction)); queue.Complete(receipt); receipts.push_back(std::move(receipt)); } return receipts;
+		std::vector<TerrainTransactionReceipt> receipts;
+		for (TerrainAuthoringCompletion& completion : PublishQueuedCompletions(queue))
+			receipts.push_back(std::move(completion.receipt));
+		return receipts;
+	}
+
+	std::vector<TerrainAuthoringCompletion> TerrainPublication::PublishQueuedCompletions(TerrainMutationQueue& queue)
+	{
+		std::vector<TerrainAuthoringCompletion> completions;
+		for (TerrainEditTransaction& transaction : queue.DrainPending())
+		{
+			TerrainAuthoringCompletion completion{};
+			completion.transaction = transaction;
+			completion.receipt = Publish(std::move(transaction));
+			queue.Complete(completion.receipt);
+			completions.push_back(std::move(completion));
+		}
+		return completions;
 	}
 }

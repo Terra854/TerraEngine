@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <functional>
+#include <map>
 #include <optional>
 #include <mutex>
 #include <string>
@@ -26,11 +27,29 @@ namespace TerraEngine::Physics::Terrain
 		double buildLatencyMilliseconds = 0.0;
 		const std::atomic_bool* cancellation = nullptr;
 	};
+	struct TerrainCollisionRegionCandidate
+	{
+		TerraEngine::Terrain::TerrainAreaCoordinate coordinate{};
+		TerrainHeightFieldRecipe recipe{};
+	};
+	struct TerrainCollisionRegionBatch
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		TerraEngine::Terrain::ContentHash sourceRootHash{};
+		TerraEngine::Terrain::Generation sourcePublicationGeneration = 0u;
+		std::vector<TerrainCollisionRegionCandidate> upserts;
+		std::vector<TerraEngine::Terrain::TerrainAreaCoordinate> removals;
+		bool complete = false;
+		const std::atomic_bool* cancellation = nullptr;
+	};
 	struct TerrainCollisionSnapshot
 	{
 		TerrainCollisionStatus status = TerrainCollisionStatus::Absent;
 		TerrainHeightFieldRecipe currentRecipe{};
 		TerrainHeightFieldRecipe lastKnownGoodRecipe{};
+		// Regional recipes are swapped as one value map. The legacy currentRecipe
+		// remains a compatibility view for one-area physics backends.
+		std::map<TerraEngine::Terrain::TerrainAreaCoordinate, TerrainHeightFieldRecipe> regions;
 		TerraEngine::Terrain::ContentHash sourceRootHash{};
 		TerraEngine::Terrain::Generation sourcePublicationGeneration = 0u;
 		// The previous full root identity remains visible while a newer collision
@@ -48,6 +67,9 @@ namespace TerraEngine::Physics::Terrain
 	TERRAENGINE_API bool PublishTerrainCollisionCandidate(
 		TerrainCollisionSnapshot& inOutSnapshot, const TerrainCollisionCandidate& candidate,
 		const TerraEngine::Terrain::TerrainAssetStore& store);
+	TERRAENGINE_API bool PublishTerrainCollisionRegionBatch(
+		TerrainCollisionSnapshot& inOutSnapshot, const TerrainCollisionRegionBatch& batch,
+		const TerraEngine::Terrain::TerrainAssetStore& store, bool providerBatchAccepted = true);
 
 	class TERRAENGINE_API TerrainCollisionSystem final : public SystemsBase
 	{
@@ -64,9 +86,11 @@ namespace TerraEngine::Physics::Terrain
 		// seam. Worker preparation never receives a live PhysicsWorld pointer.
 		void ConfigurePublication(
 			const TerraEngine::Terrain::TerrainAssetStore* store,
-			std::function<TerrainCollisionReplacementReceipt(TerrainCollisionReplacementPacket)> commit);
+			std::function<TerrainCollisionReplacementReceipt(TerrainCollisionReplacementPacket)> commit,
+			std::function<bool(const TerrainCollisionRegionBatch&)> commitRegions = {});
 		void ClearPublication(const TerraEngine::Terrain::TerrainAssetStore* store) noexcept;
 		void SetPreparedCandidate(TerrainCollisionCandidate candidate);
+		void SetPreparedRegionBatch(TerrainCollisionRegionBatch batch);
 		// Physics worlds are generation-scoped. When Play Mode or a settings change
 		// creates a fresh world, stage the latest authored terrain again so users do
 		// not have to rebuild or attach collision components by hand.
@@ -79,8 +103,11 @@ namespace TerraEngine::Physics::Terrain
 		mutable std::mutex mutex;
 		std::optional<TerrainCollisionCandidate> prepared;
 		std::optional<TerrainCollisionCandidate> desired;
+		std::optional<TerrainCollisionRegionBatch> preparedRegions;
+		std::optional<TerrainCollisionRegionBatch> desiredRegions;
 		TerrainCollisionSnapshot snapshot{};
 		const TerraEngine::Terrain::TerrainAssetStore* publicationStore = nullptr;
 		std::function<TerrainCollisionReplacementReceipt(TerrainCollisionReplacementPacket)> commitReplacement;
+		std::function<bool(const TerrainCollisionRegionBatch&)> commitRegionBatch;
 	};
 }

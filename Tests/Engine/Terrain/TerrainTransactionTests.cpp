@@ -17,6 +17,30 @@ namespace
 	{
 		Terrain::TerrainEditTransaction transaction{}; transaction.transactionId = TerraEngine::GenerateUUID(); transaction.targetAssetUuid = root.assetUuid; transaction.inputRootHash = root.rootContentHash; transaction.expectedLayerStackGeneration = root.layerStackGeneration; transaction.affectedBounds = {0, 0, 1, 1}; transaction.readSet.push_back({before.coordinate, before.editGeneration, before.authoredContentHash}); Terrain::TerrainPatch patch{}; patch.replacement = before; patch.replacement.editGeneration = 2u; patch.replacement.authoredContentHash = {5u, 6u}; transaction.patches.push_back(patch); return transaction;
 	}
+
+	Terrain::TerrainEditTransaction MakeResizeTransaction(const Terrain::TerrainAssetRoot& root,
+		const Terrain::TerrainAreaDescriptor& observed)
+	{
+		Terrain::TerrainEditTransaction transaction{};
+		transaction.transactionId = TerraEngine::GenerateUUID();
+		transaction.targetAssetUuid = root.assetUuid;
+		transaction.inputRootHash = root.rootContentHash;
+		transaction.expectedLayerStackGeneration = root.layerStackGeneration;
+		transaction.affectedBounds = {-256, -256, 256, 256};
+		transaction.budget.maximumAreas = 4u;
+		transaction.budget.maximumSamples = 4u * Terrain::kTerrainAreaSampleCount;
+		transaction.readSet.push_back({observed.coordinate, observed.editGeneration, observed.authoredContentHash});
+		Terrain::TerrainResizeDelta forward{};
+		forward.previousBounds = root.authoredBounds;
+		forward.proposedBounds = transaction.affectedBounds;
+		Terrain::TerrainResizeDelta inverse = forward;
+		inverse.kind = Terrain::TerrainResizeKind::Crop;
+		inverse.previousBounds = forward.proposedBounds;
+		inverse.proposedBounds = forward.previousBounds;
+		transaction.resizeDelta = forward;
+		transaction.inverseResizeDelta = inverse;
+		return transaction;
+	}
 }
 
 	void RegisterTerrainTransactionTests(TestRegistry& registry)
@@ -32,6 +56,32 @@ namespace
 			publication.SetInjectFailureForTests(true); const auto failureReceipt = publication.Publish(MakeTransaction(*store.CaptureRoot().root, before));
 			context.Expect(staleReceipt.outcome == Terrain::TerrainEditOutcome::Rejected && failureReceipt.outcome == Terrain::TerrainEditOutcome::Rejected, "Conflicting and failed terrain edits should reject.");
 			context.Expect(generationAfterStale == 1u && store.CaptureRoot().publicationGeneration == 1u, "Rejected terrain edits must leave zero partial root publication.");
+		});
+
+		registry.Add("Terrain.Transaction.ResizeRequiresSortedObservationsAndExactInverse", [](TestContext& context) {
+			Terrain::TerrainAreaDescriptor before{};
+			const auto root = MakeRoot(before);
+			auto valid = MakeResizeTransaction(*root, before);
+			context.Expect(Terrain::ValidateTerrainEditTransaction(valid, *root).Succeeded(),
+				"A resize with a captured observation and exact inverse should validate.");
+			auto missingInverse = valid;
+			missingInverse.inverseResizeDelta.reset();
+			context.Expect(!Terrain::ValidateTerrainEditTransaction(missingInverse, *root).Succeeded(),
+				"A resize without an exact inverse must reject before publication.");
+			auto duplicateObservation = valid;
+			duplicateObservation.readSet.push_back(duplicateObservation.readSet.front());
+			context.Expect(!Terrain::ValidateTerrainEditTransaction(duplicateObservation, *root).Succeeded(),
+				"Duplicate or unsorted observations must reject deterministically.");
+		});
+
+		registry.Add("Terrain.Transaction.ResizePublishesExactlyOneGeneration", [](TestContext& context) {
+			Terrain::TerrainAreaDescriptor before{};
+			Terrain::TerrainAssetStore store(MakeRoot(before));
+			Terrain::TerrainPublication publication(store);
+			const auto receipt = publication.Publish(MakeResizeTransaction(*store.CaptureRoot().root, before));
+			context.Expect(receipt.outcome == Terrain::TerrainEditOutcome::Committed
+				&& store.CaptureRoot().publicationGeneration == 2u,
+				"A resize must replace bounds and directory membership in one root generation.");
 		});
 	}
 }

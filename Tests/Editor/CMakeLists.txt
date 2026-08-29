@@ -31,6 +31,7 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainHydraulicErosion.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainThermalErosion.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainProceduralJobs.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainResizeJobs.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainSplineGrader.cpp
 	# The schema contract test links the same lowering implementation used by
 	# the installed automation provider, avoiding a test-only validator fork.
@@ -628,6 +629,12 @@ add_test(NAME Editor.Terrain.History COMMAND $<TARGET_FILE:TerraEngine-EditorTes
 set_tests_properties(Editor.Terrain.History PROPERTIES
 	LABELS "Editor;Terrain;History"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.TerrainHistory"
+)
+
+add_test(NAME Editor.Terrain.Resize COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Terrain.Resize PROPERTIES
+	LABELS "Editor;Terrain;Resize;Expansion;Crop;History"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.TerrainResize"
 )
 
 add_test(NAME Editor.Terrain.SaveRecovery COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)

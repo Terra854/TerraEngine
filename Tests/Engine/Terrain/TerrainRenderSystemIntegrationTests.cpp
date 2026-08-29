@@ -161,6 +161,7 @@ namespace TerraEngine::Tests
 			area.coordinate = {-2, 6};
 			area.stableAreaIdentity = {21u, 22u};
 			area.sampleBounds = {-512, 1536, -256, 1792};
+			area.activeRect = {16u, 28u, 33u, 40u};
 			area.authoredHash = {31u, 32u};
 			area.authoredGeneration = 8u;
 			area.pageSourceIdentity = {41u, 42u};
@@ -250,6 +251,12 @@ namespace TerraEngine::Tests
 				&& pickingPacket.pick.localCellZ == picking.localCellZ
 				&& pickingPacket.pick.area == area.coordinate,
 				"Picking must preserve non-origin area identity and exact local-cell coordinates independently of geometry route.");
+			TerrainAreaRenderRequest inactiveTail = picking;
+			inactiveTail.localCellX = area.activeRect.maxXExclusive;
+			context.Expect(directPacket.activeRect == area.activeRect
+				&& !PrepareTerrainAreaRenderPackets(snapshot,
+					std::span<const TerrainAreaRenderRequest>(&inactiveTail, 1u), residency).complete,
+				"Camera, shadow, and picking packets must reject cells in a partial area's inactive canonical tail.");
 			context.Expect(demandPacket.actualPageId == root.pageId
 				&& demandPacket.desiredPageId == missing.pageId
 				&& demandPacket.usesAncestorPage

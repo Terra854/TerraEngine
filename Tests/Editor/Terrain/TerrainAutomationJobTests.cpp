@@ -30,18 +30,35 @@ namespace TerraEngine::EditorTests
 			const auto hasCapability = [&](std::string_view name) { return std::any_of(capabilities.begin(), capabilities.end(), [&](const auto& value) { return value.descriptor.name == name; }); };
 			const auto create = std::find_if(capabilities.begin(), capabilities.end(), [](const auto& value) { return value.descriptor.name == "terrain.create"; });
 			const auto operation = std::find_if(capabilities.begin(), capabilities.end(), [](const auto& value) { return value.descriptor.name == "terrain.operation.start"; });
+			const auto resizePreview = std::find_if(capabilities.begin(), capabilities.end(), [](const auto& value) { return value.descriptor.name == "terrain.resize.preview"; });
+			const auto resizeJob = std::find_if(capabilities.begin(), capabilities.end(), [](const auto& value) { return value.descriptor.name == "terrain.job.get"; });
+			const auto expand = std::find_if(capabilities.begin(), capabilities.end(), [](const auto& value) { return value.descriptor.name == "terrain.expand.start"; });
+			const auto crop = std::find_if(capabilities.begin(), capabilities.end(), [](const auto& value) { return value.descriptor.name == "terrain.crop.start"; });
 			const bool schemasDescribeArguments = create != capabilities.end() && operation != capabilities.end()
+				&& expand != capabilities.end() && crop != capabilities.end()
+				&& resizePreview != capabilities.end() && resizeJob != capabilities.end()
 				&& create->descriptor.inputSchema["properties"].contains("destination")
 				&& operation->descriptor.inputSchema["properties"].contains("operation")
+				&& expand->descriptor.inputSchema["properties"].contains("proposalFingerprint")
+				&& crop->descriptor.inputSchema["properties"].contains("acknowledgeDataLoss")
+				&& resizeJob->descriptor.resultSchema["properties"].contains("proposalFingerprint")
+				&& resizeJob->descriptor.resultSchema["properties"].contains("proposedBounds")
+				&& resizeJob->descriptor.resultSchema["properties"].contains("cropLoss")
+				&& resizeJob->descriptor.resultSchema["properties"].contains("diagnostic")
+				&& std::find(crop->descriptor.inputSchema["required"].begin(), crop->descriptor.inputSchema["required"].end(),
+					"acknowledgeDataLoss") != crop->descriptor.inputSchema["required"].end()
 				&& operation->descriptor.inputSchema.value("required", nlohmann::json::array()).size() >= 10u;
-			context.Expect(provider.GetProviderId() == "terrain" && capabilities.size() == 18u && allExecutable && rebuild != capabilities.end()
+			context.Expect(provider.GetProviderId() == "terrain" && capabilities.size() == 21u && allExecutable && rebuild != capabilities.end()
 				&& hasCapability("terrain.asset.inspect") && hasCapability("terrain.session.begin")
 				&& hasCapability("terrain.stroke.apply") && hasCapability("terrain.layers.set")
 				&& hasCapability("terrain.holes.set") && hasCapability("terrain.operation.start")
+				&& hasCapability("terrain.resize.preview") && hasCapability("terrain.expand.start")
+				&& hasCapability("terrain.crop.start")
 				&& hasCapability("terrain.diagnostics.get")
 				&& schemasDescribeArguments
+				&& crop->descriptor.approvalPolicy == AutomationApprovalPolicy::HighImpact
 				&& rebuild->descriptor.approvalPolicy == AutomationApprovalPolicy::HighImpact && rebuild->descriptor.execution.protectedCommit,
-				"Terrain discovery must register executable handlers, usable input schemas, bounded visibility metadata, and high-impact approval for rebuild work.");
+				"Terrain discovery must register executable resize handlers, usable schemas, bounded visibility metadata, and high-impact approval for crop/rebuild work.");
 		});
 
 		registry.Add("Editor.TerrainAutomation.DurableJobReconnectCancellationAndTerminalReceipt", [](TestContext& context) {

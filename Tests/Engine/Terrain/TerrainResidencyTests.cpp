@@ -43,6 +43,40 @@ namespace TerraEngine::Tests
 				"A current immutable plan must publish all selected residency at one boundary.");
 		});
 
+		registry.Add("Terrain.Residency.CropForcesProtectedAreaRetirementAtPublication", [](TestContext& context) {
+			Terrain::TerrainResidencySnapshot prior{};
+			prior.rootGeneration = 4u;
+			const auto asset = TerraEngine::GenerateUUID();
+			prior.areas.push_back({asset, {0, 0}, 4u, {1u, 2u}, 10u, 10u, 10u, 10u, 100u, true, true});
+			prior.areas.push_back({asset, {1, 0}, 4u, {3u, 4u}, 10u, 10u, 10u, 10u, 100u, true, false});
+			const std::array<Terrain::TerrainAreaCoordinate, 1u> forced{{{1, 0}}};
+			const auto plan = Terrain::PrepareTerrainResidencyPlan(5u, prior, {}, {}, nullptr, forced);
+			context.Expect(plan.candidate.areas.size() == 1u && plan.evictAreas == std::vector<Terrain::TerrainAreaCoordinate>{{1, 0}}
+				&& prior.areas.size() == 2u,
+				"Crop retirement must remove even pinned old coverage from the detached candidate while the published snapshot stays intact.");
+			Terrain::TerrainResidencySnapshot published = prior;
+			context.Expect(Terrain::PublishTerrainResidencyPlan(published, plan, 5u) && published.areas.size() == 1u,
+				"Forced retirement becomes visible only with the complete matching-generation residency swap.");
+		});
+
+		registry.Add("Terrain.Residency.CoarseCoverageEnumeratesImplicitSignedPartialAreas", [](TestContext& context) {
+			const auto asset = TerraEngine::GenerateUUID();
+			const auto demands = Terrain::BuildTerrainCoarseCoverageDemands(
+				asset, 7u, {-1, -257, 257, 1}, 16u, 8u);
+			Terrain::TerrainResidencyBudget budget{};
+			budget.renderBytes = 80u;
+			const auto plan = demands
+				? Terrain::PrepareTerrainResidencyPlan(7u, {}, *demands, budget)
+				: Terrain::TerrainResidencyPlan{};
+			context.Expect(demands && demands->size() == 9u
+				&& std::all_of(demands->begin(), demands->end(), [](const auto& demand) { return demand.regionalRoot; })
+				&& plan.candidate.areas.size() == 9u && plan.candidate.hasCoherentFallbackCoverage,
+				"Sparse roots must expose coarse fallback for every signed full or partial in-bounds area without materializing authored blobs.");
+			context.Expect(!Terrain::BuildTerrainCoarseCoverageDemands(asset, 7u,
+				{-1, -257, 257, 1}, 5u, 8u),
+				"Coarse coverage enumeration must reject before exceeding its bounded area budget.");
+		});
+
 		registry.Add("Terrain.Residency.AggregatesEveryDemandClassAndRetainsOnlyMatchingLkg", [](TestContext& context) {
 			const auto asset = TerraEngine::GenerateUUID();
 			Terrain::TerrainResidencyBudget budget{};

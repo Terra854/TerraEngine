@@ -36,7 +36,7 @@ namespace TerraEngine::Renderer::Terrain
 		return result;
 	}
 
-	bool TerrainSurfacePageKey::IsComplete() const noexcept { return assetId != TerraEngine::EMPTY_UUID && sourceHash.IsValid() && authoredGeneration != 0u; }
+	bool TerrainSurfacePageKey::IsComplete() const noexcept { return assetId != TerraEngine::EMPTY_UUID && sourceHash.IsValid() && authoredGeneration != 0u && activeRect.IsValid(); }
 	bool TerrainSurfacePageHandle::IsResident() const noexcept { return key.IsComplete() && atlasTile != 0xffffffffu && byteCount != 0u && publicationGeneration != 0u; }
 
 	TerrainSurfaceCachePlan PrepareTerrainSurfaceCachePlan(std::uint64_t observedGeneration, std::span<const TerrainSurfacePageHandle> prior, std::vector<TerrainSurfaceCacheRequest> requests, std::size_t budgetBytes, const std::atomic_bool* cancellation)
@@ -53,7 +53,8 @@ namespace TerraEngine::Renderer::Terrain
 			auto existing = std::find_if(plan.candidate.begin(), plan.candidate.end(), [&request](const auto& page)
 			{
 				return page.key.assetId == request.key.assetId && page.key.area == request.key.area
-					&& page.key.sourceHash == request.key.sourceHash && page.key.authoredGeneration == request.key.authoredGeneration;
+					&& page.key.sourceHash == request.key.sourceHash && page.key.authoredGeneration == request.key.authoredGeneration
+					&& page.key.activeRect == request.key.activeRect;
 			});
 			if (existing != plan.candidate.end()) continue;
 			auto previous = std::find_if(plan.candidate.begin(), plan.candidate.end(), [&request](const auto& page) { return page.key.assetId == request.key.assetId && page.key.area == request.key.area && !page.lastKnownGood; });

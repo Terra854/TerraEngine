@@ -2,9 +2,13 @@
 
 #include "TestHarness.h"
 
+#include "Editor/TerraEngine-Editor/Terrain/TerrainCreationService.h"
 #include "Terrain/TerrainPublication.h"
 
 #include <filesystem>
+#include <fstream>
+
+#include <nlohmann/json.hpp>
 
 namespace TerraEngine::EditorTests
 {
@@ -99,6 +103,54 @@ namespace TerraEngine::EditorTests
 				"Recovery must choose the complete predecessor and decode its canonical .tearea hole envelope without losing masks. first='"
 					+ first.message + "' second='" + second.message + "' recovered='" + recovered.message
 					+ "' opened='" + opened.message + "' decoded='" + decodedHoleResult.message + "'.");
+		});
+
+		registry.Add("Editor.TerrainSaveRecovery.ResizedSignedBoundsRemainAuthoritativeAcrossSaveAndReopen", [](TestContext& context) {
+			SaveFixture fixture;
+			const auto before = fixture.store->CaptureRoot();
+			const TerraEngine::Terrain::TerrainSampleBounds resizedBounds{-257, -3, 258, 260};
+			std::shared_ptr<const TerraEngine::Terrain::TerrainAssetRoot> resized;
+			const auto built = fixture.store->BuildResizeCandidate(
+				*before.root, resizedBounds, {}, {}, resized);
+			const auto published = built.Succeeded() && resized
+				? fixture.store->PublishCandidate(before.root, resized)
+				: TerraEngine::Terrain::TerrainCodecResult{
+					TerraEngine::Terrain::TerrainResultCode::Failed,
+					"The resize candidate was unavailable."};
+			const std::filesystem::path descriptorPath = fixture.directory / "Resized.teterrain";
+			const std::filesystem::path dataDirectory = descriptorPath.string() + ".data";
+			std::filesystem::create_directories(descriptorPath.parent_path());
+			{
+				// Deliberately stale compatibility dimensions prove that opening uses
+				// TERRAROOT1 authored bounds instead of treating this JSON as authority.
+				std::ofstream descriptor(descriptorPath, std::ios::binary | std::ios::trunc);
+				descriptor << nlohmann::json{
+					{"format", "TerraEngineTerrain"}, {"version", 1u},
+					{"rootFormat", "TERRAROOT1"},
+					{"assetId", TerraEngine::ToHexString(before.root->assetUuid)},
+					{"width", 1u}, {"height", 1u},
+					{"sampleSpacingMetres", before.root->sampleSpacingMetres}}.dump();
+			}
+			const auto saved = fixture.store->PersistAtomically({dataDirectory});
+			std::string syncError;
+			const auto committed = fixture.store->CaptureRoot();
+			const bool synchronized = saved.Succeeded() && committed.IsValid()
+				&& TerraEngine::Editor::Terrain::TerrainCreationService::SynchronizeCompatibilityDescriptor(
+					descriptorPath, *committed.root, syncError);
+			nlohmann::json compatibility;
+			{
+				std::ifstream descriptor(descriptorPath, std::ios::binary);
+				if(descriptor) descriptor >> compatibility;
+			}
+			const auto reopened = TerraEngine::Editor::Terrain::TerrainCreationService{}.OpenExisting(descriptorPath);
+			context.Expect(built.Succeeded() && published.Succeeded() && saved.Succeeded()
+				&& synchronized && compatibility.value("width", 0u) == 515u
+				&& compatibility.value("height", 0u) == 263u
+				&& reopened.succeeded && reopened.authoredBounds == resizedBounds
+				&& reopened.heightfield.width == 515u && reopened.heightfield.height == 263u,
+				"A save must synchronize legacy dimensions from the committed root while reopen keeps signed, partial TERRAROOT1 bounds authoritative. built='"
+					+ built.message + "' published='" + published.message + "' saved='" + saved.message
+					+ "' sync='" + syncError + "' reopened='" + reopened.message + "'.");
 		});
 	}
 }

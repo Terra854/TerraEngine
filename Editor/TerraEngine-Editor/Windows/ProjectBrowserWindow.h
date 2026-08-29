@@ -5,6 +5,7 @@
 
 #pragma once
 #include "../Assets/AnimationAssetActions.h"
+#include "../Terrain/TerrainCreationService.h"
 #include "../Framework/EditorWindow.h"
 #include <array>
 #include <atomic>
@@ -13,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <filesystem>
+#include <future>
 #include <unordered_set>
 
 class MainEditorSubsystem;
@@ -59,6 +61,19 @@ private:
 	std::string m_CreateAssetTitle;
 	std::string m_CreateAssetExtension;
 	std::array<char, 128> m_NewAssetName{};
+	std::uint32_t m_TerrainWidthSamples = 256u;
+	std::uint32_t m_TerrainDepthSamples = 256u;
+	float m_TerrainSampleSpacingMetres = 1.0F;
+	struct TerrainCreationWorkerState {
+		std::mutex mutex;
+		float progress = 0.0F;
+		std::string stage;
+		std::string message;
+	};
+	std::shared_ptr<TerrainCreationWorkerState> m_TerrainCreationState = std::make_shared<TerrainCreationWorkerState>();
+	std::shared_ptr<std::atomic_bool> m_TerrainCreationCancellation;
+	std::future<TerraEngine::Editor::Terrain::TerrainCreationResult> m_TerrainCreationFuture;
+	std::filesystem::path m_TerrainCreationTarget;
 	std::array<char, 128> m_NewScriptName{};
 	std::array<char, 128> m_AnimationLifecycleValue{};
 	std::string m_CreateAssetError;

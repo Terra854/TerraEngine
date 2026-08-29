@@ -6,6 +6,7 @@
 #include "Terrain/TerrainAssetStore.h"
 #include "Terrain/TerrainEditTransaction.h"
 #include "Terrain/TerrainMaterial.h"
+#include "Terrain/TerrainPublication.h"
 
 #include <atomic>
 #include <mutex>
@@ -101,6 +102,12 @@ namespace TerraEngine::Terrain
 			TerrainDerivedInvalidation invalidation, TerrainAssetStore& store);
 		[[nodiscard]] std::optional<TerrainMaterialMappingCandidate> ResolvePublishedMaterialCandidate(
 			TerraEngine::UUID assetUuid) const;
+		// A candidate is queued from worker-safe subsystem observations and becomes
+		// visible only in the system's protected publish workload after revalidation.
+		[[nodiscard]] bool EnqueueCommonReadyCandidate(
+			TerrainCommonReadyCandidate candidate, TerrainAssetStore& store);
+		[[nodiscard]] std::optional<TerrainCommonReadyCandidate> ResolveCommonReadyCandidate(
+			TerraEngine::UUID assetUuid) const;
 		[[nodiscard]] std::vector<TerrainDerivedPublicationReceipt> DrainPublicationReceipts();
 
 	private:
@@ -125,7 +132,14 @@ namespace TerraEngine::Terrain
 		mutable std::mutex queueMutex;
 		std::vector<PendingInvalidation> pendingInvalidations;
 		std::vector<PreparedCandidate> preparedCandidates;
+		struct PendingCommonReady
+		{
+			TerrainCommonReadyCandidate candidate{};
+			TerrainAssetStore* store = nullptr;
+		};
+		std::vector<PendingCommonReady> pendingCommonReady;
 		std::vector<TerrainDerivedPublicationReceipt> publicationReceipts;
 		std::unordered_map<TerraEngine::UUID, TerrainMaterialMappingCandidate> publishedMaterialCandidates;
+		std::unordered_map<TerraEngine::UUID, TerrainCommonReadyCandidate> publishedCommonReadyCandidates;
 	};
 }

@@ -176,6 +176,13 @@ namespace TerraEngine::Terrain
 			const std::vector<TerrainAreaDescriptor>& replacements,
 			ContentHash candidateRootHash,
 			std::shared_ptr<const TerrainAssetRoot>& outCandidate) const;
+		// Resize uses one candidate builder so bounds, descriptor membership, and
+		// directory identities can never become visible as separate generations.
+		[[nodiscard]] TerrainCodecResult BuildResizeCandidate(
+			const TerrainAssetRoot& base, TerrainSampleBounds proposedBounds,
+			const std::vector<TerrainAreaDescriptor>& upserts,
+			const std::vector<TerrainAreaCoordinate>& removals,
+			std::shared_ptr<const TerrainAssetRoot>& outCandidate) const;
 		// Expansion changes declared coverage only. Existing immutable areas are
 		// copied verbatim; callers choose which newly covered areas to materialize.
 		[[nodiscard]] TerrainCodecResult ExpandAuthoredBounds(

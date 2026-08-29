@@ -94,6 +94,7 @@ namespace TerraEngine::Renderer::Terrain
 		TerraEngine::Terrain::ContentHash stableAreaIdentity{};
 		TerraEngine::Terrain::ContentHash controlIdentity{};
 		TerraEngine::Terrain::ContentHash holeIdentity{};
+		TerraEngine::Terrain::TerrainAreaActiveRect activeRect{};
 		TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
 		TerrainPickIdentity pick{};
 		std::uint32_t desiredPageId = kInvalidTerrainPageId;

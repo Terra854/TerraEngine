@@ -92,7 +92,8 @@ namespace TerraEngine::Terrain
 		Source,
 		Seam,
 		LayerValidation,
-		Sampler
+		Sampler,
+		Resize
 	};
 	struct TerrainDiagnosticItem
 	{
@@ -106,6 +107,35 @@ namespace TerraEngine::Terrain
 		std::string message;
 	};
 	struct TerrainStagePercentile { std::string stage; std::uint64_t p50Nanoseconds = 0u; std::uint64_t p95Nanoseconds = 0u; std::size_t sampleCount = 0u; };
+
+	// Resize diagnostics are value-only so UI, automation, and tests can observe
+	// the same proposal/publication state without reaching into a running job.
+	struct TerrainResizeDiagnosticRecord
+	{
+		TerraEngine::UUID jobId = TerraEngine::EMPTY_UUID;
+		TerrainResizeKind kind = TerrainResizeKind::Expand;
+		TerrainSampleBounds currentBounds{};
+		TerrainSampleBounds proposedBounds{};
+		TerrainExpansionPolicy expansionPolicy = TerrainExpansionPolicy::EdgeBlend;
+		TerrainBoundaryHolePolicy holePolicy = TerrainBoundaryHolePolicy::CloseAtFormerEdge;
+		ContentHash sourceRootHash{};
+		ContentHash proposalFingerprint{};
+		Generation sourceGeneration = 0u;
+		Generation commonReadyGeneration = 0u;
+		float progress = 0.0F;
+		std::size_t affectedAreas = 0u;
+		std::size_t retiredAreas = 0u;
+		std::size_t retainedHistoryBytes = 0u;
+		TerrainResizeBudget budget{};
+		TerrainCropLossSummary cropLoss{};
+		bool cancellationAvailable = false;
+		bool confirmationRequired = false;
+		bool confirmationAcknowledged = false;
+		bool rolledBack = false;
+		TerrainResultCode terminalCode = TerrainResultCode::Ok;
+		std::string stage;
+		std::string message;
+	};
 
 	// A validation attempt remains visible even when publication is rejected and
 	// the last-known-good terrain stays live. Counts describe the detached input;
@@ -182,6 +212,13 @@ namespace TerraEngine::Terrain
 		Generation renderGeneration = 0u;
 		Generation controlGeneration = 0u;
 		Generation collisionGeneration = 0u;
+		Generation commonReadyGeneration = 0u;
+		std::optional<TerrainAreaCoordinate> selectedArea;
+		std::size_t availableAreaCount = 0u;
+		std::size_t retiringAreaCount = 0u;
+		std::size_t collisionRegionCount = 0u;
+		float streamingProgress = 0.0F;
+		bool commonReadyMismatch = false;
 		bool dirty = false;
 		std::size_t pendingTransactions = 0u;
 		std::size_t historyDepth = 0u;
@@ -196,6 +233,7 @@ namespace TerraEngine::Terrain
 		std::vector<TerrainSamplerQualityDiagnosticRecord> samplerQuality;
 		std::vector<TerrainLayerFallbackRecord> layerFallbacks;
 		std::vector<TerrainCollisionRecord> collisions;
+		std::vector<TerrainResizeDiagnosticRecord> resizes;
 		std::optional<TerraEngine::Resource::TerrainTextureStreamingDiagnosticSnapshot>
 			textureStreaming;
 		std::vector<TerrainDiagnosticItem> items;

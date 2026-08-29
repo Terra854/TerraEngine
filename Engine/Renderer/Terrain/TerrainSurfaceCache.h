@@ -44,6 +44,7 @@ namespace TerraEngine::Renderer::Terrain
 		TerraEngine::Terrain::TerrainAreaCoordinate area{};
 		TerraEngine::Terrain::ContentHash sourceHash{};
 		std::uint64_t authoredGeneration = 0u;
+		TerraEngine::Terrain::TerrainAreaActiveRect activeRect{0u, 0u, 256u, 256u};
 		[[nodiscard]] bool IsComplete() const noexcept;
 	};
 	struct TerrainSurfacePageHandle

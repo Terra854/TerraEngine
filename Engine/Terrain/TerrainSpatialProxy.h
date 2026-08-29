@@ -32,5 +32,6 @@ namespace TerraEngine::Terrain
 		double sampleSpacingMetres,
 		double heightDatumMetres,
 		const TerraEngine::Scene::WorldPosition& terrainOrigin,
-		const TerraEngine::Scene::SpatialReferenceFrame& frame);
+		const TerraEngine::Scene::SpatialReferenceFrame& frame,
+		TerrainAreaActiveRect activeRect = {0u, 0u, 256u, 256u});
 }

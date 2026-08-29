@@ -64,7 +64,7 @@ namespace TerraEngine::Editor::Terrain
 			receipt.outcome = TerraEngine::Terrain::TerrainEditOutcome::Cancelled;
 			receipt.code = TerraEngine::Terrain::TerrainResultCode::Cancelled;
 			receipt.message = std::string(reason);
-			receipts.push_back(std::move(receipt));
+			completions.push_back({request.transaction, std::move(receipt)});
 		}
 		preparedRequests.clear();
 		++authoringEpoch;
@@ -83,7 +83,7 @@ namespace TerraEngine::Editor::Terrain
 		receipt.outcome = TerraEngine::Terrain::TerrainEditOutcome::Cancelled;
 		receipt.code = TerraEngine::Terrain::TerrainResultCode::Cancelled;
 		receipt.message = std::string(reason);
-		receipts.push_back(std::move(receipt));
+		completions.push_back({found->transaction, std::move(receipt)});
 		preparedRequests.erase(found);
 		return true;
 	}
@@ -111,10 +111,11 @@ namespace TerraEngine::Editor::Terrain
 				receipt.outcome = TerraEngine::Terrain::TerrainEditOutcome::Cancelled;
 				receipt.code = TerraEngine::Terrain::TerrainResultCode::Cancelled;
 				receipt.message = "A stale terrain authoring request was cancelled before publication.";
-				receipts.push_back(std::move(receipt));
+				completions.push_back({request.transaction, std::move(receipt)});
 				continue;
 			}
 			const TerraEngine::UUID transactionId = request.transaction.transactionId;
+			TerraEngine::Terrain::TerrainEditTransaction immutableRequest = request.transaction;
 			if(const auto queued = mutationQueue->Enqueue(std::move(request.transaction)); !queued.Succeeded())
 			{
 				TerraEngine::Terrain::TerrainTransactionReceipt receipt;
@@ -122,18 +123,28 @@ namespace TerraEngine::Editor::Terrain
 				receipt.outcome = TerraEngine::Terrain::TerrainEditOutcome::Rejected;
 				receipt.code = queued.code;
 				receipt.message = queued.message;
-				receipts.push_back(std::move(receipt));
+				completions.push_back({std::move(immutableRequest), std::move(receipt)});
 			}
 		}
-		auto completed = publication->PublishQueued(*mutationQueue);
-		receipts.insert(receipts.end(), std::make_move_iterator(completed.begin()), std::make_move_iterator(completed.end()));
+		auto completed = publication->PublishQueuedCompletions(*mutationQueue);
+		completions.insert(completions.end(), std::make_move_iterator(completed.begin()), std::make_move_iterator(completed.end()));
 	}
 
 	std::vector<TerraEngine::Terrain::TerrainTransactionReceipt> TerrainAuthoringSystem::DrainReceipts()
 	{
 		std::scoped_lock lock(authoringMutex);
 		std::vector<TerraEngine::Terrain::TerrainTransactionReceipt> drained;
-		drained.swap(receipts);
+		drained.reserve(completions.size());
+		for (auto& completion : completions) drained.push_back(std::move(completion.receipt));
+		completions.clear();
+		return drained;
+	}
+
+	std::vector<TerraEngine::Terrain::TerrainAuthoringCompletion> TerrainAuthoringSystem::DrainCompletions()
+	{
+		std::scoped_lock lock(authoringMutex);
+		std::vector<TerraEngine::Terrain::TerrainAuthoringCompletion> drained;
+		drained.swap(completions);
 		return drained;
 	}
 
@@ -153,7 +164,7 @@ namespace TerraEngine::Editor::Terrain
 		initialized.store(false, std::memory_order_release);
 		std::scoped_lock lock(authoringMutex);
 		preparedRequests.clear();
-		receipts.clear();
+		completions.clear();
 		++authoringEpoch;
 		mutationQueue = nullptr;
 		publication = nullptr;

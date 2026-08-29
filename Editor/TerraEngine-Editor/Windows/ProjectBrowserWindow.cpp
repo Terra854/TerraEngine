@@ -17,6 +17,7 @@
 #include <imgui.h>
 #include <ImGuiFileDialog.h>
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -750,16 +751,54 @@ void ProjectBrowserWindow::DrawCreateAssetModal()
 	}
 
 	if (ImGui::BeginPopupModal(m_CreateAssetTitle.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		if(m_TerrainCreationFuture.valid()
+			&& m_TerrainCreationFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+		{
+			const auto result = m_TerrainCreationFuture.get();
+			m_TerrainCreationCancellation.reset();
+			if(result.succeeded)
+			{
+				m_Owner->SetSelectedAsset(std::filesystem::absolute(result.assetPath));
+				ImGui::CloseCurrentPopup();
+			}
+			else m_CreateAssetError = result.message.empty() ? "The terrain asset could not be created." : result.message;
+		}
+		const bool terrainCreationRunning = m_TerrainCreationFuture.valid();
+		if(terrainCreationRunning) ImGui::BeginDisabled();
 		ImGui::InputText("Name", m_NewAssetName.data(), m_NewAssetName.size());
+		if (m_CreateAssetExtension == ".teterrain") {
+			ImGui::InputScalar("Width (samples)", ImGuiDataType_U32, &m_TerrainWidthSamples);
+			ImGui::InputScalar("Depth (samples)", ImGuiDataType_U32, &m_TerrainDepthSamples);
+			ImGui::InputFloat("Sample spacing (metres)", &m_TerrainSampleSpacingMetres, 0.05F, 0.5F, "%.3f");
+			const std::uint64_t areaCountX = (static_cast<std::uint64_t>(m_TerrainWidthSamples) + 255u) / 256u;
+			const std::uint64_t areaCountZ = (static_cast<std::uint64_t>(m_TerrainDepthSamples) + 255u) / 256u;
+			const double physicalWidth = static_cast<double>(m_TerrainWidthSamples) * m_TerrainSampleSpacingMetres;
+			const double physicalDepth = static_cast<double>(m_TerrainDepthSamples) * m_TerrainSampleSpacingMetres;
+			ImGui::Text("Footprint: %.2f m x %.2f m", physicalWidth, physicalDepth);
+			ImGui::Text("Coverage: %llu x %llu areas (%llu total)",
+				static_cast<unsigned long long>(areaCountX), static_cast<unsigned long long>(areaCountZ),
+				static_cast<unsigned long long>(areaCountX * areaCountZ));
+			ImGui::TextDisabled("Horizontal sample spacing is fixed after creation.");
+		}
 		if (!m_CreateAssetError.empty()) {
 			ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", m_CreateAssetError.c_str());
 		}
+		if(terrainCreationRunning)
+		{
+			ImGui::EndDisabled();
+			std::scoped_lock progressLock(m_TerrainCreationState->mutex);
+			ImGui::ProgressBar(m_TerrainCreationState->progress, ImVec2(320.0F, 0.0F), m_TerrainCreationState->stage.c_str());
+			if(!m_TerrainCreationState->message.empty()) ImGui::TextWrapped("%s", m_TerrainCreationState->message.c_str());
+		}
 
-		if (ImGui::Button("Create", ImVec2(120, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter)) {
+		if(!terrainCreationRunning && (ImGui::Button("Create", ImVec2(120, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter))) {
 			CreateNamedAsset();
 		}
-		ImGui::SameLine();
-		if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+		if(!terrainCreationRunning) ImGui::SameLine();
+		if (ImGui::Button(terrainCreationRunning ? "Cancel creation" : "Cancel", ImVec2(120, 0))) {
+			if(terrainCreationRunning && m_TerrainCreationCancellation)
+				m_TerrainCreationCancellation->store(true, std::memory_order_release);
+			else
 			ImGui::CloseCurrentPopup();
 		}
 		ImGui::EndPopup();
@@ -809,21 +848,31 @@ void ProjectBrowserWindow::CreateNamedAsset()
 		TerraEngine::AssetPipeline::TerrainImportRequest request;
 		request.sourceFormat = TerraEngine::AssetPipeline::TerrainSourceFormat::Flat;
 		request.assetId = TerraEngine::GenerateUUID();
-		// The initial flat 256x256 generation is bounded and must finish its
-		// atomic database registration before the modal closes. Heavier PNG/RAW
-		// imports continue to use Terrain Tools with cancellable progress.
+		request.flatWidth = m_TerrainWidthSamples;
+		request.flatDepth = m_TerrainDepthSamples;
+		request.sampleSpacingMetres = m_TerrainSampleSpacingMetres;
+		// Validation occurs before any descriptor or private generation is staged,
+		// so an invalid preview can never register a partial terrain asset.
 		TerraEngine::Editor::Terrain::TerrainCreationService service =
 			TerraEngine::Editor::Terrain::CreateProjectTerrainCreationService();
-		const TerraEngine::Editor::Terrain::TerrainCreationResult result =
-			service.CreateOrImport(request, targetPath);
-		if(!result.succeeded) {
-			m_CreateAssetError = result.message.empty()
-				? "The terrain asset could not be created."
-				: result.message;
-			return;
+		m_TerrainCreationCancellation = std::make_shared<std::atomic_bool>(false);
+		m_TerrainCreationTarget = targetPath;
+		const auto state = m_TerrainCreationState;
+		{
+			std::scoped_lock lock(state->mutex);
+			state->progress = 0.0F;
+			state->stage = "Queued";
+			state->message = "Terrain creation is waiting for a worker.";
 		}
-		m_Owner->SetSelectedAsset(std::filesystem::absolute(result.assetPath));
-		ImGui::CloseCurrentPopup();
+		m_TerrainCreationFuture = service.CreateOrImportAsync(request, targetPath,
+			m_TerrainCreationCancellation,
+			[state](float progress, std::string_view stage, std::string_view message) {
+				std::scoped_lock lock(state->mutex);
+				state->progress = progress;
+				state->stage = std::string(stage);
+				state->message = std::string(message);
+				return true;
+			});
 		return;
 	}
 
@@ -1341,6 +1390,8 @@ void ProjectBrowserWindow::DrawAnimationLifecycleModal()
 
 // ProjectBrowserWindow::Reset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectBrowserWindow::Reset() {
+	if(m_TerrainCreationCancellation)
+		m_TerrainCreationCancellation->store(true, std::memory_order_release);
 	m_CurrentDirectory.clear();
 	m_CollapsedPackageGroups.clear();
 	m_InitializedPackageGroups.clear();

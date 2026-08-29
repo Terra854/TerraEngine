@@ -18,7 +18,10 @@ namespace TerraEngine::Editor::Terrain
 		~TerrainHistoryCommand() override;
 		void Undo() override;
 		void Redo() override;
-		std::string GetName() const override { return "Terrain Stroke"; }
+		std::string GetName() const override
+		{
+			return forwardTransaction.historyGroup.empty() ? "Terrain Stroke" : forwardTransaction.historyGroup;
+		}
 		std::string GetHistoryId() const override { return historyId; }
 		std::string_view GetHistoryDomain() const override { return "terrain-authoring"; }
 		std::string GetPendingReplayTransactionId() const override { return pendingReplayId; }

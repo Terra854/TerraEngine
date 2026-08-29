@@ -101,6 +101,7 @@ namespace TerraEngine::Tests
 			patch.beforeSpans.push_back(MakeHoleSpan({0x00u}));
 			patch.afterSpans.push_back(MakeHoleSpan({0x01u}));
 			edit.patches.push_back(patch);
+			edit.readSet.push_back({before.coordinate, before.editGeneration, before.authoredContentHash});
 			context.Expect(Terrain::ValidateTerrainEditTransaction(edit, root).Succeeded(),
 				"A hole edit with exact canonical before/after bytes must be accepted for protected publication.");
 			edit.patches.front().beforeSpans.clear();

@@ -117,6 +117,22 @@ namespace TerraEngine::Terrain
 			item.action = conflict.code == TerrainResultCode::Conflict ? TerrainDiagnosticAction::ResolveConflict : TerrainDiagnosticAction::Retry;
 			item.message = conflict.message; result.items.push_back(std::move(item));
 		}
+		for(const TerrainResizeDiagnosticRecord& resize : result.resizes)
+		{
+			if(resize.terminalCode == TerrainResultCode::Ok && !resize.rolledBack) continue;
+			TerrainDiagnosticItem item{};
+			item.category = TerrainDiagnosticCategory::Resize;
+			item.severity = resize.terminalCode == TerrainResultCode::Cancelled
+				? TerrainDiagnosticSeverity::Warning : TerrainDiagnosticSeverity::Error;
+			item.impact = resize.rolledBack
+				? TerrainDiagnosticImpact::LastKnownGoodActive : TerrainDiagnosticImpact::MutationRejected;
+			item.action = resize.terminalCode == TerrainResultCode::Conflict
+				? TerrainDiagnosticAction::ResolveConflict : TerrainDiagnosticAction::Retry;
+			item.sourceHash = resize.sourceRootHash;
+			item.sourceGeneration = resize.sourceGeneration;
+			item.message = resize.message.empty() ? "Terrain resize did not publish." : resize.message;
+			result.items.push_back(std::move(item));
+		}
 		for(const TerrainResourcePressureRecord& pressure : result.resourcePressure)
 		{
 			if(pressure.budgetBytes == 0u || pressure.usedBytes <= pressure.budgetBytes) continue;

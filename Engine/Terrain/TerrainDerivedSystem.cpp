@@ -157,6 +157,17 @@ namespace TerraEngine::Terrain
 		return true;
 	}
 
+	bool TerrainDerivedSystem::EnqueueCommonReadyCandidate(
+		TerrainCommonReadyCandidate candidate, TerrainAssetStore& store)
+	{
+		// Cheap worker-side validation rejects obviously stale bundles before they
+		// occupy the protected queue; the root is checked again at publication.
+		if(!ValidateTerrainCommonReadyCandidate(candidate, store).Succeeded()) return false;
+		std::scoped_lock lock(queueMutex);
+		pendingCommonReady.push_back({std::move(candidate), &store});
+		return true;
+	}
+
 	void TerrainDerivedSystem::PrepareInvalidationUnion()
 	{
 		std::vector<PendingInvalidation> pending;
@@ -263,9 +274,11 @@ namespace TerraEngine::Terrain
 	void TerrainDerivedSystem::PublishPreparedAtProtectedBoundary()
 	{
 		std::vector<PreparedCandidate> prepared;
+		std::vector<PendingCommonReady> commonReady;
 		{
 			std::scoped_lock lock(queueMutex);
 			prepared.swap(preparedCandidates);
+			commonReady.swap(pendingCommonReady);
 		}
 		for(PreparedCandidate& item : prepared)
 		{
@@ -285,6 +298,20 @@ namespace TerraEngine::Terrain
 				publishedMaterialCandidates[item.candidate.source.assetUuid] = item.candidate;
 			publicationReceipts.push_back(std::move(receipt));
 		}
+		for(PendingCommonReady& item : commonReady)
+		{
+			const TerrainCodecResult validation = item.store == nullptr
+				? TerrainCodecResult{TerrainResultCode::InvalidArgument, "Terrain common-ready candidate lost its asset-store owner."}
+				: ValidateTerrainCommonReadyCandidate(item.candidate, *item.store);
+			TerrainDerivedPublicationReceipt receipt{};
+			receipt.code = validation.code;
+			receipt.message = validation.message;
+			receipt.committed = validation.Succeeded();
+			std::scoped_lock lock(queueMutex);
+			if(receipt.committed)
+				publishedCommonReadyCandidates[item.candidate.assetUuid] = item.candidate;
+			publicationReceipts.push_back(std::move(receipt));
+		}
 	}
 
 	std::optional<TerrainMaterialMappingCandidate> TerrainDerivedSystem::ResolvePublishedMaterialCandidate(
@@ -294,6 +321,15 @@ namespace TerraEngine::Terrain
 		const auto found = publishedMaterialCandidates.find(assetUuid);
 		return found == publishedMaterialCandidates.end()
 			? std::nullopt : std::optional<TerrainMaterialMappingCandidate>{found->second};
+	}
+
+	std::optional<TerrainCommonReadyCandidate> TerrainDerivedSystem::ResolveCommonReadyCandidate(
+		TerraEngine::UUID assetUuid) const
+	{
+		std::scoped_lock lock(queueMutex);
+		const auto found = publishedCommonReadyCandidates.find(assetUuid);
+		return found == publishedCommonReadyCandidates.end()
+			? std::nullopt : std::optional<TerrainCommonReadyCandidate>{found->second};
 	}
 
 	std::vector<TerrainDerivedPublicationReceipt> TerrainDerivedSystem::DrainPublicationReceipts()
@@ -315,8 +351,10 @@ namespace TerraEngine::Terrain
 		std::scoped_lock lock(queueMutex);
 		pendingInvalidations.clear();
 		preparedCandidates.clear();
+		pendingCommonReady.clear();
 		publicationReceipts.clear();
 		publishedMaterialCandidates.clear();
+		publishedCommonReadyCandidates.clear();
 		TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance().Clear();
 		initialized.store(false, std::memory_order_release);
 	}

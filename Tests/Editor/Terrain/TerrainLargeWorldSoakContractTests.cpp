@@ -40,6 +40,8 @@ namespace TerraEngine::EditorTests
 		registry.Add("Editor.TerrainLargeWorldSoak.ReturnRouteBoundedGrowthAndCoverage", [](TestContext& context) {
 			const std::vector<TerrainSoakCounter> route{
 				{0.0, 100U, 120U, true, true},
+				{64'000.0, 105U, 124U, true, true},
+				{128'000.0, 110U, 128U, true, true},
 				{500'000.0, 116U, 128U, true, true},
 				{1'000'000.0, 104U, 128U, true, true}};
 			context.Expect(MeetsSoakContract(route),

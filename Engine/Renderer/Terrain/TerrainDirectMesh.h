@@ -22,6 +22,7 @@ namespace TerraEngine::Renderer::Terrain
 		TerraEngine::Terrain::ContentHash authoredHash{};
 		std::uint64_t authoredGeneration = 0u;
 		float sampleSpacingMetres = 1.0F;
+		TerraEngine::Terrain::TerrainAreaActiveRect activeRect{0u, 0u, 256u, 256u};
 		std::span<const std::int32_t> heightMillimetres{};
 		// One bit per terrain cell. An empty span means that every cell is solid.
 		std::span<const std::uint8_t> holeCellBits{};

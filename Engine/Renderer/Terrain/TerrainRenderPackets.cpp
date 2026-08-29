@@ -18,7 +18,11 @@ namespace TerraEngine::Renderer::Terrain
 		pageRequests.reserve(requests.size());
 		for(const TerrainAreaRenderRequest& request : requests)
 		{
-			if(snapshot.FindArea(request.area) == nullptr) return result;
+			const TerrainAreaRenderBinding* area = snapshot.FindArea(request.area);
+			if(area == nullptr || request.localCellX < area->activeRect.minX
+				|| request.localCellZ < area->activeRect.minZ
+				|| request.localCellX >= area->activeRect.maxXExclusive
+				|| request.localCellZ >= area->activeRect.maxZExclusive) return result;
 			pageRequests.push_back({request.frameId, request.viewId, snapshot.assetId,
 				request.area, request.desiredPageId, request.priority});
 		}
@@ -37,6 +41,7 @@ namespace TerraEngine::Renderer::Terrain
 			packet.stableAreaIdentity = area->stableAreaIdentity;
 			packet.controlIdentity = area->controlIdentity;
 			packet.holeIdentity = area->holeIdentity;
+			packet.activeRect = area->activeRect;
 			packet.materialId = area->materialId;
 			packet.desiredPageId = resolution.desiredPageId;
 			packet.actualPageId = resolution.actualPageId;

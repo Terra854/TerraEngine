@@ -8,11 +8,13 @@
 #include "File Formats/TerraEngineTerrainFile.h"
 #include "Resource/ResourceManager.h"
 #include "Utilities/UUID.h"
+#include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <system_error>
 
@@ -38,6 +40,9 @@ namespace TerraEngine::Editor::Terrain
 			TerraEngine::Terrain::TerrainDirectoryShard shard{};
 			shard.areaBounds = {0, 0, static_cast<std::int64_t>(areaCountX), static_cast<std::int64_t>(areaCountZ)};
 			std::vector<std::uint8_t> shardIdentityBytes;
+			// Flat creation is represented by the root's stable implicit defaults.
+			// Imported heightmaps still materialize every source-covered area.
+			if(request.sourceFormat != TerraEngine::AssetPipeline::TerrainSourceFormat::Flat)
 			for(std::uint32_t areaZ = 0U; areaZ < areaCountZ; ++areaZ) for(std::uint32_t areaX = 0U; areaX < areaCountX; ++areaX)
 			{
 				// The final edge area repeats its nearest authored sample outside the
@@ -78,7 +83,8 @@ namespace TerraEngine::Editor::Terrain
 				shard.descriptors.emplace(descriptor.coordinate, std::move(descriptor));
 				shardIdentityBytes.insert(shardIdentityBytes.end(), areaHash.begin(), areaHash.end());
 			}
-			shard.identity = TerraEngine::Terrain::HashTerrainBytes(shardIdentityBytes);
+			if(!shard.descriptors.empty())
+				shard.identity = TerraEngine::Terrain::HashTerrainBytes(shardIdentityBytes);
 			TerraEngine::Terrain::TerrainLayerStack layerStack{};
 			layerStack.generation = 1U;
 			TerraEngine::Terrain::TerrainLayer defaultLayer{};
@@ -94,10 +100,11 @@ namespace TerraEngine::Editor::Terrain
 			root.persistedRootGeneration = 1U;
 			root.sampleSpacingMetres = request.sampleSpacingMetres;
 			root.authoredBounds = {0, 0, static_cast<std::int64_t>(heightfield.width), static_cast<std::int64_t>(heightfield.height)};
+			root.defaultHeightMm = heightfield.heightsMm.front();
 			root.defaultLayerId = 1U;
 			root.layerStackGeneration = 1U;
 			root.layerStack = std::make_shared<const TerraEngine::Terrain::TerrainLayerStack>(std::move(layerStack));
-			root.directoryShards = {std::move(shard)};
+			if(!shard.descriptors.empty()) root.directoryShards = {std::move(shard)};
 			const auto encodedRoot = TerraEngine::Terrain::EncodeTerrainRootManifest(root);
 			if(!encodedRoot.Succeeded()) { outError = encodedRoot.message; return false; }
 			const std::string rootHash = TerraEngine::Terrain::ToHexString(encodedRoot.contentHash);
@@ -205,6 +212,32 @@ namespace TerraEngine::Editor::Terrain
 		return result;
 	}
 
+	std::future<TerrainCreationResult> TerrainCreationService::CreateOrImportAsync(
+		TerraEngine::AssetPipeline::TerrainImportRequest request,
+		std::filesystem::path destination,
+		std::shared_ptr<std::atomic_bool> cancellation,
+		TerraEngine::AssetPipeline::TerrainCompileProgressCallback progress) const
+	{
+		const TerrainCreationService service = *this;
+		const std::uint64_t sampleCount = request.sourceFormat == TerraEngine::AssetPipeline::TerrainSourceFormat::Flat
+			? static_cast<std::uint64_t>(request.flatWidth) * request.flatDepth
+			: static_cast<std::uint64_t>(request.rawWidth) * request.rawHeight;
+		auto work = [service, request = std::move(request), destination = std::move(destination),
+			cancellation = std::move(cancellation), progress = std::move(progress)]() mutable {
+			return service.CreateOrImport(request, destination,
+				[cancellation, progress](float fraction, std::string_view stage, std::string_view message) {
+					if(cancellation && cancellation->load(std::memory_order_acquire)) return false;
+					return !progress || progress(fraction, stage, message);
+				});
+		};
+		auto task = ThreadPool::instance().createTask(std::move(work));
+		std::future<TerrainCreationResult> result = task->getFuture();
+		ThreadPool::instance().enqueue(task, std::max<std::size_t>(1u,
+			static_cast<std::size_t>(std::min<std::uint64_t>(sampleCount,
+				(std::numeric_limits<std::size_t>::max)()))));
+		return result;
+	}
+
 	TerrainOpenResult TerrainCreationService::OpenExisting(const std::filesystem::path& source) const
 	{
 		TerrainOpenResult result;
@@ -228,10 +261,10 @@ namespace TerraEngine::Editor::Terrain
 		}
 		const auto assetId = descriptor.contains("assetId") && descriptor["assetId"].is_string()
 			? TerraEngine::ParseUUID(descriptor["assetId"].get<std::string>()) : std::nullopt;
-		const std::uint32_t width = descriptor.value("width", 0u);
-		const std::uint32_t height = descriptor.value("height", 0u);
+		const std::uint32_t compatibilityWidth = descriptor.value("width", 0u);
+		const std::uint32_t compatibilityHeight = descriptor.value("height", 0u);
 		const double spacing = descriptor.value("sampleSpacingMetres", 1.0);
-		if(!assetId || *assetId == TerraEngine::EMPTY_UUID || width == 0u || height == 0u
+		if(!assetId || *assetId == TerraEngine::EMPTY_UUID || compatibilityWidth == 0u || compatibilityHeight == 0u
 			|| !std::isfinite(spacing) || spacing <= 0.0)
 		{
 			result.message = "The terrain descriptor has invalid identity, dimensions, or spacing.";
@@ -240,11 +273,6 @@ namespace TerraEngine::Editor::Terrain
 
 		result.assetId = *assetId;
 		result.sampleSpacingMetres = spacing;
-		result.heightfield.width = std::min<std::uint32_t>(width, 256u);
-		result.heightfield.height = std::min<std::uint32_t>(height, 256u);
-		result.heightfield.heightsMm.assign(
-			static_cast<std::size_t>(result.heightfield.width) * result.heightfield.height, 0);
-
 		const std::filesystem::path dataDirectory = source.string() + ".data";
 		std::ifstream current(dataDirectory / "CURRENT", std::ios::binary);
 		std::string rootReference;
@@ -271,47 +299,170 @@ namespace TerraEngine::Editor::Terrain
 			return result;
 		}
 		const auto rootSnapshot = std::make_shared<const TerraEngine::Terrain::TerrainAssetRoot>(*decodedRoot.root);
-		TerraEngine::Terrain::TerrainAssetStore validator(rootSnapshot);
-		const auto area = validator.FindDescriptor(*decodedRoot.root, {0, 0});
-		if(!area || !area->channels.heightHash)
+		result.store = std::make_shared<TerraEngine::Terrain::TerrainAssetStore>(rootSnapshot);
+		const auto opened = result.store->OpenPersistedRoot(dataDirectory);
+		if (!opened.Succeeded())
 		{
-			result.message = "The terrain CURRENT root has no origin height area.";
+			result.store.reset();
+			result.message = opened.message;
 			return result;
 		}
-		const std::filesystem::path blobPath = dataDirectory / "blobs"
-			/ (TerraEngine::Terrain::ToHexString(*area->channels.heightHash) + ".tearea");
-			std::ifstream blobInput(blobPath, std::ios::binary | std::ios::ate);
-			if(!blobInput || blobInput.tellg() <= 0)
+		const auto capture = result.store->CaptureRoot();
+		if (!capture.IsValid() || capture.root->assetUuid != result.assetId)
+		{
+			result.store.reset();
+			result.message = "The persisted terrain root changed identity while opening.";
+			return result;
+		}
+		result.authoredBounds = capture.root->authoredBounds;
+		const long double widthValue = static_cast<long double>(result.authoredBounds.maxXExclusive)
+			- static_cast<long double>(result.authoredBounds.minX);
+		const long double depthValue = static_cast<long double>(result.authoredBounds.maxZExclusive)
+			- static_cast<long double>(result.authoredBounds.minZ);
+		if (widthValue > (std::numeric_limits<std::uint32_t>::max)()
+			|| depthValue > (std::numeric_limits<std::uint32_t>::max)()
+			|| widthValue <= 0.0L || depthValue <= 0.0L)
+		{
+			result.store.reset();
+			result.message = "The authored terrain extent is too large for the compatibility editor heightfield.";
+			return result;
+		}
+		const auto width64 = static_cast<std::uint64_t>(widthValue);
+		const auto depth64 = static_cast<std::uint64_t>(depthValue);
+		if (width64 > (std::numeric_limits<std::uint32_t>::max)()
+			|| depth64 > (std::numeric_limits<std::uint32_t>::max)()
+			|| (width64 != 0u && depth64 > (std::numeric_limits<std::size_t>::max)() / width64))
+		{
+			result.store.reset();
+			result.message = "The authored terrain extent is too large for the compatibility editor heightfield.";
+			return result;
+		}
+		const auto areaBounds = TerraEngine::Terrain::TerrainAreasForSamples(result.authoredBounds);
+		const auto areaCount = areaBounds ? areaBounds->AreaCount() : std::nullopt;
+		constexpr std::size_t kMaximumCompatibilityAreas = 64u;
+		if(!areaCount)
+		{
+			result.store.reset();
+			result.message = "The authored terrain area range overflows the opening budget.";
+			return result;
+		}
+		if(*areaCount > kMaximumCompatibilityAreas)
+		{
+			// The store-oriented result remains usable for streaming consumers. Avoid
+			// allocating one monolithic compatibility heightfield for large terrain.
+			result.succeeded = true;
+			result.message = "The terrain root opened; detail will stream through its bounded area cache.";
+			return result;
+		}
+		result.heightfield.width = static_cast<std::uint32_t>(width64);
+		result.heightfield.height = static_cast<std::uint32_t>(depth64);
+		result.heightfield.heightsMm.assign(static_cast<std::size_t>(width64 * depth64), capture.root->defaultHeightMm);
+		const auto areas = TerraEngine::Terrain::EnumerateTerrainAreas(result.authoredBounds,
+			kMaximumCompatibilityAreas);
+		if (!areas)
+		{
+			result.store.reset();
+			result.message = "The authored terrain area range exceeds the opening budget.";
+			return result;
+		}
+		for (const auto coordinate : *areas)
+		{
+			const auto descriptor = result.store->ResolveDescriptorOrImplicit(*capture.root, coordinate);
+			result.areaSnapshots.emplace(coordinate, descriptor);
+			if (!descriptor.channels.heightHash) continue;
+			const auto loaded = result.store->LoadHeightAreaLazy(capture, coordinate);
+			const auto active = TerraEngine::Terrain::TerrainActiveRectForArea(result.authoredBounds, coordinate);
+			if (!loaded.Succeeded() || !active)
 			{
-				result.message = "The terrain origin height blob is missing.";
+				result.store.reset();
+				result.message = loaded.message.empty() ? "A persisted terrain area could not be decoded." : loaded.message;
 				return result;
 			}
-			const auto byteCount = static_cast<std::size_t>(blobInput.tellg());
-			std::vector<std::uint8_t> encoded(byteCount);
-			blobInput.seekg(0, std::ios::beg);
-			if(!blobInput.read(reinterpret_cast<char*>(encoded.data()), static_cast<std::streamsize>(encoded.size())))
-			{
-				result.message = "The terrain origin height blob could not be read.";
-				return result;
-			}
-			TerraEngine::Terrain::DecodedTerrainArea decoded;
-			const auto decodedResult = TerraEngine::Terrain::DecodeTerrainArea(encoded, decoded);
-			const std::size_t expectedBytes = TerraEngine::Terrain::kTerrainAreaSampleCount * sizeof(std::int32_t);
-			if(!decodedResult.Succeeded() || decoded.header.assetUuid != result.assetId
-				|| decoded.header.area != TerraEngine::Terrain::TerrainAreaCoordinate{0, 0}
-				|| decoded.canonicalPayload.size() != expectedBytes)
-			{
-				result.message = decodedResult.Succeeded()
-					? "The terrain origin height blob does not match its descriptor."
-					: decodedResult.message;
-				return result;
-			}
-			for(std::uint32_t z = 0u; z < result.heightfield.height; ++z)
-				std::memcpy(result.heightfield.heightsMm.data() + static_cast<std::size_t>(z) * result.heightfield.width,
-					decoded.canonicalPayload.data() + static_cast<std::size_t>(z) * 256u * sizeof(std::int32_t),
-					static_cast<std::size_t>(result.heightfield.width) * sizeof(std::int32_t));
+			const std::int64_t areaOriginX = coordinate.x * TerraEngine::Terrain::kTerrainAreaExtentSamples;
+			const std::int64_t areaOriginZ = coordinate.z * TerraEngine::Terrain::kTerrainAreaExtentSamples;
+			for (std::uint16_t localZ = active->minZ; localZ < active->maxZExclusive; ++localZ)
+				for (std::uint16_t localX = active->minX; localX < active->maxXExclusive; ++localX)
+				{
+					const auto destinationX = static_cast<std::size_t>(areaOriginX + localX - result.authoredBounds.minX);
+					const auto destinationZ = static_cast<std::size_t>(areaOriginZ + localZ - result.authoredBounds.minZ);
+					std::int32_t height = 0;
+					const std::size_t sourceIndex = static_cast<std::size_t>(localZ) * 256u + localX;
+					std::memcpy(&height, loaded.decodedHeight->canonicalPayload.data() + sourceIndex * sizeof(height), sizeof(height));
+					result.heightfield.heightsMm[destinationZ * result.heightfield.width + destinationX] = height;
+				}
+		}
 		result.succeeded = true;
-		result.message = "The persisted terrain origin area was decoded for rendering.";
+		result.compatibilityHeightfieldComplete = true;
+		result.message = "The complete root-authoritative terrain extent was opened for authoring.";
 		return result;
+	}
+
+	bool TerrainCreationService::SynchronizeCompatibilityDescriptor(
+		const std::filesystem::path& descriptorPath,
+		const TerraEngine::Terrain::TerrainAssetRoot& committedRoot,
+		std::string& outError)
+	{
+		const auto dimensions = TerraEngine::AssetPipeline::TerrainCompatibilityDimensions(
+			committedRoot.authoredBounds);
+		if(!dimensions)
+		{
+			outError = "The committed terrain bounds cannot be represented by compatibility dimensions.";
+			return false;
+		}
+		nlohmann::json descriptor;
+		try
+		{
+			std::ifstream input(descriptorPath, std::ios::binary);
+			if(!input || !(input >> descriptor) || !descriptor.is_object())
+			{
+				outError = "The terrain parent descriptor could not be decoded before save.";
+				return false;
+			}
+		}
+		catch(const nlohmann::json::exception& exception)
+		{
+			outError = std::string("The terrain parent descriptor is invalid: ") + exception.what();
+			return false;
+		}
+		descriptor["width"] = dimensions->first;
+		descriptor["height"] = dimensions->second;
+		descriptor["sampleSpacingMetres"] = committedRoot.sampleSpacingMetres;
+		descriptor["assetId"] = TerraEngine::ToHexString(committedRoot.assetUuid);
+		const std::filesystem::path staged = descriptorPath.string() + ".sync-"
+			+ TerraEngine::ToHexString(TerraEngine::GenerateUUID());
+		const std::filesystem::path backup = staged.string() + ".previous";
+		{
+			std::ofstream output(staged, std::ios::binary | std::ios::trunc);
+			if(!output || !(output << descriptor.dump()))
+			{
+				outError = "The synchronized terrain descriptor could not be staged.";
+				return false;
+			}
+			output.flush();
+			if(!output)
+			{
+				outError = "The synchronized terrain descriptor could not be flushed.";
+				return false;
+			}
+		}
+		std::error_code error;
+		std::filesystem::rename(descriptorPath, backup, error);
+		if(error)
+		{
+			std::filesystem::remove(staged, error);
+			outError = "The previous terrain descriptor could not be retained for atomic replacement.";
+			return false;
+		}
+		std::filesystem::rename(staged, descriptorPath, error);
+		if(error)
+		{
+			std::error_code restoreError;
+			std::filesystem::rename(backup, descriptorPath, restoreError);
+			std::filesystem::remove(staged, restoreError);
+			outError = "The synchronized terrain descriptor could not be atomically published.";
+			return false;
+		}
+		std::filesystem::remove(backup, error);
+		return true;
 	}
 }

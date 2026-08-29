@@ -15,6 +15,24 @@ namespace TerraEngine::Editor::Terrain
 		historyId = "terrain-history-" + TerraEngine::ToHexString(TerraEngine::GenerateUUID());
 		for(const auto& patch : forwardTransaction.patches)
 			retainedBlobHashes.insert(retainedBlobHashes.end(), patch.retainedBlobHashes.begin(), patch.retainedBlobHashes.end());
+		const auto collectResize = [&](const std::optional<TerraEngine::Terrain::TerrainResizeDelta>& resize) {
+			if(!resize) return;
+			retainedBlobHashes.insert(retainedBlobHashes.end(), resize->retainedBlobHashes.begin(), resize->retainedBlobHashes.end());
+			for(const auto& descriptor : resize->descriptorUpserts)
+			{
+				if(descriptor.channels.heightHash) retainedBlobHashes.push_back(*descriptor.channels.heightHash);
+				if(descriptor.channels.holeHash) retainedBlobHashes.push_back(*descriptor.channels.holeHash);
+				for(const auto& [group, hash] : descriptor.channels.weightGroupHashes)
+				{
+					(void)group;
+					retainedBlobHashes.push_back(hash);
+				}
+			}
+		};
+		// Crop history pins the descriptors restored by its inverse. Expansion may
+		// also retain a canonical partial-edge predecessor, so inspect both sides.
+		collectResize(forwardTransaction.resizeDelta);
+		collectResize(inverseTransaction.resizeDelta);
 		std::sort(retainedBlobHashes.begin(), retainedBlobHashes.end(), [](const auto& left, const auto& right) {
 			return left.low64 != right.low64 ? left.low64 < right.low64 : left.high64 < right.high64;
 		});
@@ -54,6 +72,33 @@ namespace TerraEngine::Editor::Terrain
 				patch.beforeSpans.clear();
 				patch.afterSpans.clear();
 			}
+		}
+		if(replay.resizeDelta)
+		{
+			// A replay is valid only when its source extent is still current. Refresh
+			// observations from that complete immutable root immediately before queueing.
+			if(replay.resizeDelta->previousBounds != capture.root->authoredBounds)
+			{
+				pendingReplayId.clear();
+				return;
+			}
+			replay.affectedBounds = replay.resizeDelta->proposedBounds;
+			const auto areas = TerraEngine::Terrain::EnumerateTerrainAreas(capture.root->authoredBounds,
+				std::max<std::size_t>(replay.budget.maximumAreas, 1u));
+			if(!areas)
+			{
+				pendingReplayId.clear();
+				return;
+			}
+			for(const auto coordinate : *areas)
+			{
+				const auto current = assetStore.ResolveDescriptorOrImplicit(*capture.root, coordinate);
+				replay.readSet.push_back({coordinate, current.editGeneration, current.authoredContentHash});
+			}
+			std::sort(replay.readSet.begin(), replay.readSet.end(), [](const auto& left, const auto& right) {
+				return left.coordinate < right.coordinate;
+			});
+			replay.budget.maximumAreas = std::max(replay.budget.maximumAreas, replay.readSet.size());
 		}
 		pendingReplayId = TerraEngine::ToHexString(replay.transactionId);
 		if(!mutationQueue.Enqueue(std::move(replay)).Succeeded()) pendingReplayId.clear();

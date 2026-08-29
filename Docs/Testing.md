@@ -1788,6 +1788,31 @@ and raw benchmark output. A duration field alone is not evidence. Missing
 executables, fixtures, shaders, ContentMount/TEPAK inputs, backend counters, or
 hardware capability are unavailable failures, never passing zeros.
 
+## Terrain size expansion and crop gate
+
+Terrain size expansion and crop adds the following focused registrations. Run them from a clean
+RelWithDebInfo configure before the complete serial suite:
+
+```powershell
+cmake --fresh --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineTerrainBenchmark
+$terrain055Regex = '^(Engine\.Terrain\.(Foundation|Resize|AtomicEdit|Surface|Lod|Residency|Collision|Procedural|MultithreadedStress|ExportRuntime)|Editor\.Terrain\.(CreateSculpt|CollisionAlignment|Procedural|Automation|History|Resize|SaveRecovery|LargeWorld))$'
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R $terrain055Regex --output-on-failure
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -j 1 --output-on-failure
+cmake --build --preset RelWithDebInfo --target install
+$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+& (Join-Path $installRoot 'Tests/Tools/Terrain/VerifyInstalledTerrainContract.ps1') -InstallRoot $installRoot
+```
+
+The expected resize coverage is the signed/partial runtime fixture in
+`Engine.Terrain.ExportRuntime`, the durable predecessor fixture in
+`Editor.Terrain.SaveRecovery`, the 1x1-through-8x8 and long-narrow matrix in
+`Engine.Terrain.MultithreadedStress`, and visible/automation fingerprint parity
+in `Editor.Terrain.Automation`. The audit must find editor/runtime binaries,
+terrain shaders, `terrain-edit-v1.schema.json`, save-recovery fixtures, workload
+records, benchmark/stress executables, and architecture verification scripts in
+the installed tree. Source-tree artifacts do not satisfy this gate.
+
 ## Terrain rendering overhaul completion route
 
 The terrain rendering overhaul uses durable CTest names rather than source-file names. Run the

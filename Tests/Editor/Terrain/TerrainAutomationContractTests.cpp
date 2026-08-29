@@ -5,6 +5,9 @@
 #include "Editor/TerraEngine-Editor/Automation/TerrainAutomationSchema.h"
 
 #include <string>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 
 namespace TerraEngine::EditorTests
 {
@@ -45,6 +48,22 @@ namespace TerraEngine::EditorTests
 
 	void RegisterTerrainAutomationContractTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.TerrainAutomation.CreationSchemaRequiresDimensionsSpacingAndFootprintResult", [](TestContext& context) {
+			const std::filesystem::path providerPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor/TerraEngine-Editor/Automation/Providers/TerrainAutomationProvider.cpp";
+			const std::filesystem::path windowPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor/TerraEngine-Editor/Windows/TerrainWindow.cpp";
+			std::ifstream providerInput(providerPath);
+			std::ifstream windowInput(windowPath);
+			const std::string provider((std::istreambuf_iterator<char>(providerInput)), std::istreambuf_iterator<char>());
+			const std::string window((std::istreambuf_iterator<char>(windowInput)), std::istreambuf_iterator<char>());
+			context.Expect(provider.find("widthSamples") != std::string::npos
+				&& provider.find("depthSamples") != std::string::npos
+				&& provider.find("sampleSpacingMetres") != std::string::npos
+				&& window.find("physicalWidthMetres") != std::string::npos
+				&& window.find("coveredAreaCount") != std::string::npos,
+				"Terrain creation discovery and receipts must expose required sample dimensions, immutable spacing, footprint, and area coverage.");
+		});
 		registry.Add("Editor.TerrainAutomation.AcceptsCanonicalBoundedRequestAndStableFingerprint", [](TestContext& context) {
 			const auto parsed = TerraEngine::Editor::Automation::ParseTerrainAutomationRequest(ValidRequest());
 			const std::string fingerprint = parsed.accepted ? TerraEngine::Editor::Automation::TerrainApprovalFingerprint(parsed.request) : std::string{};

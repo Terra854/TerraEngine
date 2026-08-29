@@ -1,11 +1,14 @@
 // TerrainAutomationParityTests.cpp -- Shared typed-boundary parity evidence.
 
 #include "TestHarness.h"
+#include "TerrainResizeTestFixtures.h"
 
 #include "Editor/TerraEngine-Editor/Terrain/TerrainAutomationAdapter.h"
 #include "Terrain/TerrainPublication.h"
 
+#include <chrono>
 #include <memory>
+#include <thread>
 #include <vector>
 
 namespace TerraEngine::EditorTests
@@ -62,6 +65,18 @@ namespace TerraEngine::EditorTests
 			transaction.patches.push_back(std::move(patch));
 			transaction.inversePatches.push_back(std::move(inverse));
 			return transaction;
+		}
+
+		std::optional<TerraEngine::Editor::Terrain::TerrainPreparedResize> WaitForResizePreview(
+			TerraEngine::Editor::Terrain::TerrainResizeJobs& jobs)
+		{
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+			while(std::chrono::steady_clock::now() < deadline)
+			{
+				if(auto ready = jobs.TakeReadyPreview()) return ready;
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			}
+			return std::nullopt;
 		}
 	}
 
@@ -166,6 +181,79 @@ namespace TerraEngine::EditorTests
 			context.Expect(!queued && !error.empty() && store.CaptureRoot().publicationGeneration == 1u,
 				"A capability without an exact editor-owned producer must report unavailable and leave authored visibility unchanged.");
 			authoring.Shutdown();
+		});
+
+		registry.Add("Editor.TerrainAutomation.ResizePreviewAndPublishMatchVisibleEditor", [](TestContext& context) {
+			using namespace TerraEngine;
+			const auto root = TerraEngine::Tests::TerrainResizeFixtures::MakeRoot();
+			auto visibleRequest = TerraEngine::Tests::TerrainResizeEditorFixtures::MakeExpansionRequest(
+				root, {-256, 0, 512, 256});
+			visibleRequest.delta.expansionPolicy = Terrain::TerrainExpansionPolicy::FlatDefault;
+			visibleRequest.delta.holePolicy = Terrain::TerrainBoundaryHolePolicy::CloseAtFormerEdge;
+			visibleRequest.holePolicyExplicit = true;
+			visibleRequest.sourceHeight = [](Terrain::TerrainSampleCoordinate) {
+				return std::optional<std::int32_t>{2400};
+			};
+			auto automatedRequest = visibleRequest;
+			Editor::Terrain::TerrainResizeJobs visibleJobs;
+			Editor::Terrain::TerrainResizeJobs automatedJobs;
+			std::string visibleError;
+			std::string automatedError;
+			const bool visibleStarted = visibleJobs.Start(std::move(visibleRequest), visibleError);
+			const bool automatedStarted = automatedJobs.Start(std::move(automatedRequest), automatedError);
+			auto visiblePreview = WaitForResizePreview(visibleJobs);
+			auto automatedPreview = WaitForResizePreview(automatedJobs);
+
+			Terrain::TerrainAssetStore visibleStore(root);
+			Terrain::TerrainAssetStore automatedStore(root);
+			auto visibleTransaction = visiblePreview
+				? visibleJobs.BuildTransaction(visibleStore, *visiblePreview, false, visibleError) : std::nullopt;
+			auto automatedTransaction = automatedPreview
+				? automatedJobs.BuildTransaction(automatedStore, *automatedPreview, false, automatedError) : std::nullopt;
+			Terrain::TerrainPublication visiblePublication(visibleStore);
+			Terrain::TerrainPublication automatedPublication(automatedStore);
+			const auto visibleReceipt = visibleTransaction
+				? visiblePublication.Publish(std::move(*visibleTransaction)) : Terrain::TerrainTransactionReceipt{};
+			const auto automatedReceipt = automatedTransaction
+				? automatedPublication.Publish(std::move(*automatedTransaction)) : Terrain::TerrainTransactionReceipt{};
+			const auto visibleRoot = visibleStore.CaptureRoot();
+			const auto automatedRoot = automatedStore.CaptureRoot();
+
+			context.Expect(visibleStarted && automatedStarted && visiblePreview && automatedPreview
+				&& visiblePreview->preview.proposalFingerprint == automatedPreview->preview.proposalFingerprint
+				&& visiblePreview->preview.warnings == automatedPreview->preview.warnings
+				&& visiblePreview->preview.discontinuityWarning
+				&& visiblePreview->preview.delta.proposedBounds == automatedPreview->preview.delta.proposedBounds
+				&& visibleReceipt.outcome == Terrain::TerrainEditOutcome::Committed
+				&& automatedReceipt.outcome == Terrain::TerrainEditOutcome::Committed
+				&& visibleReceipt.publishedRootHash == automatedReceipt.publishedRootHash
+				&& visibleRoot.root->authoredBounds == automatedRoot.root->authoredBounds
+				&& visibleRoot.root->rootContentHash == automatedRoot.root->rootContentHash,
+				"Equivalent visible-editor and automation expansion inputs must return identical fingerprints, warnings, receipts, authored bounds, and hashes. visible='"
+					+ visibleError + "' automated='" + automatedError + "'.");
+
+			// Crop parity uses the same typed preview and confirmation values. The
+			// proposal remains detached, and both producers must report the same loss.
+			auto cropRoot = TerraEngine::Tests::TerrainResizeFixtures::MakeRoot({0, 0, 512, 256});
+			Editor::Terrain::TerrainResizeJobRequest visibleCrop{};
+			visibleCrop.observedRoot = {cropRoot, cropRoot->publicationGeneration};
+			visibleCrop.delta.kind = Terrain::TerrainResizeKind::Crop;
+			visibleCrop.delta.previousBounds = cropRoot->authoredBounds;
+			visibleCrop.delta.proposedBounds = {0, 0, 128, 256};
+			auto automatedCrop = visibleCrop;
+			Editor::Terrain::TerrainResizeJobs visibleCropJobs;
+			Editor::Terrain::TerrainResizeJobs automatedCropJobs;
+			const bool visibleCropStarted = visibleCropJobs.Start(std::move(visibleCrop), visibleError);
+			const bool automatedCropStarted = automatedCropJobs.Start(std::move(automatedCrop), automatedError);
+			auto visibleCropPreview = WaitForResizePreview(visibleCropJobs);
+			auto automatedCropPreview = WaitForResizePreview(automatedCropJobs);
+			context.Expect(visibleCropStarted && automatedCropStarted && visibleCropPreview && automatedCropPreview
+				&& visibleCropPreview->preview.requiresDataLossConfirmation
+				&& visibleCropPreview->preview.proposalFingerprint == automatedCropPreview->preview.proposalFingerprint
+				&& visibleCropPreview->preview.cropLoss.discardedSamples
+					== automatedCropPreview->preview.cropLoss.discardedSamples
+				&& visibleCropPreview->preview.warnings == automatedCropPreview->preview.warnings,
+				"Equivalent visible-editor and automation crop inputs must return the same approval fingerprint, loss summary, warnings, and confirmation requirement.");
 		});
 	}
 }
