@@ -1,5 +1,23 @@
 # TerraEngine Testing
 
+## Shared utilities and TEPAK validation
+
+The engine utility tests cover the fixed-capacity ring container and the shared
+TEPAK binary/worker helpers. Configure from a clean checkout, build the native
+engine test target, run the focused registrations, and install the same build:
+
+```powershell
+cmake --fresh --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-Export
+$env:TERRAENGINE_TEST_FILTER = "Engine.Utilities;Engine.BinaryIO;Engine.WorkerPool"
+& .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+cmake --build --preset RelWithDebInfo --target install
+```
+
+The filter is an iteration aid. The complete CTest run remains the final native
+regression gate because export/runtime archive code is linked into several tools.
+
 ## Physics optimization evidence
 
 The physics performance workflow is install-tree based. Configure and install a

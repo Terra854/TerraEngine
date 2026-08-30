@@ -8,17 +8,15 @@
 
 #include "Animation/AnimationTypes.h"
 #include "Core/Export.h"
+#include "Utilities/Containers/BoundedRingBuffer.h"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <span>
 #include <string_view>
-#include <type_traits>
 #include <utility>
-#include <vector>
 
 namespace TerraEngine::Animation {
 	// Every long-lived animation allocation belongs to one diagnostic class. The
@@ -217,94 +215,74 @@ namespace TerraEngine::Animation {
 	// half-written record if a user-defined move operation fails.
 	template<typename T>
 	class AnimationBoundedMemoryRing {
-		static_assert(std::is_nothrow_move_constructible_v<T>);
-		static_assert(std::is_nothrow_move_assignable_v<T>);
-
 	public:
 		[[nodiscard]] AnimationMemoryStatus Configure(
 			std::size_t capacity,
 			std::size_t hardMaximum) noexcept
 		{
-			if(capacity > hardMaximum) {
+			const TerraEngine::Utilities::BoundedRingBufferConfigureStatus status =
+				ring_.Configure(capacity, hardMaximum);
+			if(status == TerraEngine::Utilities::BoundedRingBufferConfigureStatus::CapacityExceeded) {
 				return AnimationMemoryStatus::InvalidArgument;
 			}
-
-			try {
-				std::vector<std::optional<T>> staged(capacity);
-				entries_.swap(staged);
-			} catch(...) {
+			if(status == TerraEngine::Utilities::BoundedRingBufferConfigureStatus::AllocationFailure) {
 				return AnimationMemoryStatus::AllocationFailure;
 			}
 
-			head_ = 0U;
-			size_ = 0U;
-			counters_ = {};
-			counters_.capacity = capacity;
-			configured_ = true;
+			RefreshCounters();
 			return AnimationMemoryStatus::Reserved;
 		}
 
 		[[nodiscard]] AnimationMemoryStatus Push(T value) noexcept
 		{
-			if(!configured_) {
+			const TerraEngine::Utilities::BoundedRingBufferPushStatus status =
+				ring_.Push(std::move(value));
+			if(status == TerraEngine::Utilities::BoundedRingBufferPushStatus::Unconfigured) {
 				return AnimationMemoryStatus::Uninitialized;
 			}
-			if(entries_.empty()) {
+			if(status == TerraEngine::Utilities::BoundedRingBufferPushStatus::NoCapacity) {
 				return AnimationMemoryStatus::BudgetExceeded;
 			}
 
-			std::size_t target = (head_ + size_) % entries_.size();
-			if(size_ == entries_.size()) {
-				target = head_;
-				head_ = (head_ + 1U) % entries_.size();
-				++counters_.evictions;
-			} else {
-				++size_;
-			}
-
-			entries_[target].reset();
-			entries_[target].emplace(std::move(value));
-			++counters_.pushes;
-			counters_.size = size_;
-			if(counters_.highWaterEntries < size_) {
-				counters_.highWaterEntries = size_;
-			}
+			RefreshCounters();
 			return AnimationMemoryStatus::Reserved;
 		}
 
 		void Clear() noexcept
 		{
-			for(std::optional<T>& entry : entries_) {
-				entry.reset();
-			}
-			head_ = 0U;
-			size_ = 0U;
-			counters_.size = 0U;
+			ring_.Clear();
+			RefreshCounters();
 		}
 
 		[[nodiscard]] const T* At(std::size_t logicalIndex) const noexcept
 		{
-			if(logicalIndex >= size_ || entries_.empty()) {
-				return nullptr;
-			}
-			const std::optional<T>& entry = entries_[(head_ + logicalIndex) % entries_.size()];
-			return entry ? std::addressof(*entry) : nullptr;
+			return ring_.At(logicalIndex);
 		}
 
-		[[nodiscard]] const T* Oldest() const noexcept { return At(0U); }
+		[[nodiscard]] const T* Oldest() const noexcept { return ring_.Oldest(); }
 		[[nodiscard]] const T* Newest() const noexcept {
-			return size_ == 0U ? nullptr : At(size_ - 1U);
+			return ring_.Newest();
 		}
 		[[nodiscard]] const AnimationMemoryRingCounters& Counters() const noexcept {
 			return counters_;
 		}
 
 	private:
-		std::vector<std::optional<T>> entries_;
-		std::size_t head_ = 0U;
-		std::size_t size_ = 0U;
+		void RefreshCounters() noexcept
+		{
+			// Animation diagnostics retain their existing vocabulary while the shared
+			// container reports the provider-neutral overwrite statistics.
+			const TerraEngine::Utilities::BoundedRingBufferStatistics& statistics =
+				ring_.Statistics();
+			counters_.size = statistics.size;
+			counters_.capacity = statistics.capacity;
+			counters_.highWaterEntries = statistics.highWaterEntries;
+			counters_.pushes = statistics.pushes;
+			counters_.evictions = statistics.overwrites;
+		}
+
+		TerraEngine::Utilities::BoundedRingBuffer<T> ring_;
 		AnimationMemoryRingCounters counters_{};
-		bool configured_ = false;
 	};
 
 	[[nodiscard]] TERRAENGINE_API std::string_view ToString(AnimationMemoryClass memoryClass) noexcept;

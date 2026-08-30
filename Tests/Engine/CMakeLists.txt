@@ -67,6 +67,7 @@ add_executable(TerraEngine-EngineTests
 	Runtime/WorkerPoolTelemetryTests.cpp
 	Runtime/ExportRuntimePresentationTests.cpp
 	Runtime/RendererStabilitySmokeToolTests.cpp
+	Utilities/BoundedRingBufferTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackagingRequest.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackPlanner.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackWriter.cpp

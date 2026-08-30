@@ -302,7 +302,7 @@ set(ENGINE_SOURCES
 	Engine/Runtime/ContentMount/archive/ArchiveSerialization.cpp
 	Engine/Runtime/ContentMount/codec/CodecProvider.cpp
 	Engine/Runtime/ContentMount/io/PathNormalizer.cpp
-	Engine/Runtime/ContentMount/util/WorkerPool.cpp
+	Engine/Utilities/Tepak/WorkerPool.cpp
 	${TERRAENGINE_ANIMATION_ENGINE_SOURCES}
 	${TERRAENGINE_VIRTUAL_GEOMETRY_ENGINE_SOURCES}
 	${TERRAENGINE_TERRAIN_ENGINE_SOURCES}
@@ -396,6 +396,9 @@ set(ENGINE_HEADERS
 	Engine/Input/GLFW/GlfwInputBackend.h
 	Engine/Utilities/PlatformUtils.h
 	Engine/Utilities/UUID.h
+	Engine/Utilities/Containers/BoundedRingBuffer.h
+	Engine/Utilities/Tepak/BinaryIO.h
+	Engine/Utilities/Tepak/WorkerPool.h
 	Engine/Window/WindowBackend.h
 	Engine/Window/WindowConfig.h
 	Engine/Window/WindowSystem.h
@@ -1495,7 +1498,6 @@ add_library(TerraEngine-ExportSupport STATIC
 	Editor/Export/archive/PackWriter.cpp
 	Editor/Export/codec/CodecProvider.cpp
 	Editor/Export/io/PathNormalizer.cpp
-	Editor/Export/util/WorkerPool.cpp
 	Editor/Export/validation/PackValidator.cpp
 	Editor/Export/validation/AnimationPackValidator.cpp
 )

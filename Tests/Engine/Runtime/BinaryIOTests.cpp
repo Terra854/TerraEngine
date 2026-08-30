@@ -1,6 +1,6 @@
 #include "TestHarness.h"
 
-#include "Runtime/ContentMount/util/BinaryIO.h"
+#include "Utilities/Tepak/BinaryIO.h"
 
 #include <cstdint>
 #include <sstream>

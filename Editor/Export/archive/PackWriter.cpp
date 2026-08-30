@@ -7,7 +7,7 @@
 #include "archive/ArchiveWorkflow.h"
 #include "codec/CodecProvider.h"
 #include "model/PackModel.h"
-#include "util/BinaryIO.h"
+#include "Utilities/Tepak/BinaryIO.h"
 
 #include "xxhash.h"
 
