@@ -255,6 +255,13 @@ namespace TerraEngine::Animation {
 		std::size_t cacheEntryCount = 0U;
 		std::size_t reusedItemCount = 0U;
 		std::size_t fallbackItemCount = 0U;
+		// Authored-component reconciliation is a distinct protected preparation
+		// episode. Publishing its latest completed non-empty episode lets editor
+		// diagnostics distinguish real binding work from dormant frame timing.
+		std::uint64_t bindingEpisodeCount = 0U;
+		std::uint64_t bindingReconciliationNanoseconds = 0U;
+		std::size_t bindingReconciledCount = 0U;
+		std::size_t bindingFailureCount = 0U;
 		AnimationMemorySnapshot memory{};
 		bool deterministicPublicationValidated = false;
 		bool cancellationRequested = false;

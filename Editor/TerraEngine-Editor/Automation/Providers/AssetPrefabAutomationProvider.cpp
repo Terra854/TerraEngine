@@ -146,7 +146,7 @@ namespace TerraEngine::Editor::Automation
 	std::vector<AutomationCapabilityRegistration> AssetPrefabAutomationProvider::GetCapabilities()
 	{
 		std::vector<AutomationCapabilityRegistration> capabilities;
-		capabilities.reserve(21);
+		capabilities.reserve(22);
 		capabilities.push_back(MakeRegistration(
 			resolveHandler,
 			"asset.list",
@@ -170,6 +170,18 @@ namespace TerraEngine::Editor::Automation
 				{"dryRun", {{"type", "boolean"}}}
 			}, {"path"}),
 			MutationMode::AssetMutation,
+			AutomationApprovalPolicy::None));
+		capabilities.push_back(MakeRegistration(
+			resolveHandler,
+			"asset.content.verify",
+			"Read one project asset repeatedly through ResourceManager's default reusable staging and return bounded integrity and timing evidence.",
+			ObjectSchema({
+				{"path", AssetReferenceSchema()},
+				{"requestCount", {{"type", "integer"}, {"minimum", 1}, {"maximum", 32768}}},
+				{"cancellationEvery", {{"type", "integer"}, {"minimum", 0}, {"maximum", 32768}}},
+				{"expectedPayloadBytes", {{"type", "integer"}, {"minimum", 1}, {"maximum", 268435456}}}
+			}, {"path", "requestCount"}),
+			MutationMode::ReadOnly,
 			AutomationApprovalPolicy::None));
 		capabilities.push_back(MakeRegistration(
 			resolveHandler,

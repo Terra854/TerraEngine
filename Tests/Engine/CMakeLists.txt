@@ -68,6 +68,7 @@ add_executable(TerraEngine-EngineTests
 	Runtime/ExportRuntimePresentationTests.cpp
 	Runtime/RendererStabilitySmokeToolTests.cpp
 	Utilities/BoundedRingBufferTests.cpp
+	Memory/MemoryFoundationTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackagingRequest.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackPlanner.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackWriter.cpp
@@ -672,6 +673,11 @@ set_tests_properties(Engine.Terrain.Sculpt PROPERTIES
 	LABELS "Engine;Terrain;Sculpt"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.BrushKernel,Terrain.PageCooker"
 )
+
+add_test(NAME Engine.MemoryFoundation COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.MemoryFoundation PROPERTIES
+	LABELS "Engine;Memory"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Engine.Memory")
 
 add_test(NAME Engine.Terrain.Resize COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.Terrain.Resize PROPERTIES

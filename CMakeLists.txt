@@ -161,6 +161,8 @@ set(ENGINE_SOURCES
 	Engine/Core/MainEngine.cpp
 	Engine/Core/FatalErrorReport.cpp
 	Engine/Core/Timer.cpp
+	Engine/Core/Memory/MemoryStrategy.cpp
+	Engine/Core/Memory/ReusableArenaResource.cpp
 	Engine/Core/Scheduling/ComponentAccess.cpp
 	Engine/Core/Scheduling/EcsQueryTaskGraph.cpp
 	Engine/Core/Scheduling/FrameWorkload.cpp
@@ -315,6 +317,10 @@ set(ENGINE_HEADERS
 	Engine/Core/Logger/Logger.h
 	Engine/Core/SystemBase.h
 	Engine/Core/Timer.h
+	Engine/Core/Memory/FixedBlockPool.h
+	Engine/Core/Memory/MemoryStrategy.h
+	Engine/Core/Memory/ReusableArenaResource.h
+	Engine/Core/Memory/TrackingMemoryResource.h
 	Engine/Core/Scheduling/ComponentAccess.h
 	Engine/Core/Scheduling/EcsQueryTaskGraph.h
 	Engine/Core/Scheduling/FrameWorkload.h
@@ -876,10 +882,18 @@ endif()
 # compile every declared stage before CMake tries to copy the packages.
 add_custom_target(TerraEngine.Terrain.Shaders ALL)
 if(TERRAENGINE_TERRAIN_RUNTIME_SHADER_SOURCES)
+	# Visual Studio otherwise assigns its legacy FXCompile rule to HLSL files
+	# listed on a target. The bundled DXC/TSPF command below is the authoritative
+	# compiler, so keep these entries visible in the IDE without compiling them a
+	# second time as shader model 2.0.
+	set_source_files_properties(${TERRAENGINE_TERRAIN_RUNTIME_SHADER_SOURCES}
+		PROPERTIES HEADER_FILE_ONLY TRUE VS_TOOL_OVERRIDE "None")
 	target_sources(TerraEngine.Terrain.Shaders PRIVATE ${TERRAENGINE_TERRAIN_RUNTIME_SHADER_SOURCES})
 	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Terrain PREFIX "Terrain Shaders" FILES ${TERRAENGINE_TERRAIN_RUNTIME_SHADER_SOURCES})
 endif()
 if(TERRAENGINE_TERRAIN_EDITOR_SHADER_SOURCES)
+	set_source_files_properties(${TERRAENGINE_TERRAIN_EDITOR_SHADER_SOURCES}
+		PROPERTIES HEADER_FILE_ONLY TRUE VS_TOOL_OVERRIDE "None")
 	target_sources(TerraEngine.Terrain.Shaders PRIVATE ${TERRAENGINE_TERRAIN_EDITOR_SHADER_SOURCES})
 	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Editor/Shaders/Terrain PREFIX "Terrain Editor Shaders" FILES ${TERRAENGINE_TERRAIN_EDITOR_SHADER_SOURCES})
 endif()

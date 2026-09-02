@@ -8,6 +8,8 @@
 #include "Components/AnimatorComponent.h"
 #include "Components/AudioListenerComponent.h"
 #include "Components/AudioSourceComponent.h"
+#include "Components/CameraComponent.h"
+#include "Components/MeshRenderComponent.h"
 #include "Components/TerrainComponent.h"
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
@@ -1029,6 +1031,12 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 	AnimatorComponent::registerType();
 	AudioSourceComponent::registerType();
 	AudioListenerComponent::registerType();
+	// Scene files can be loaded before an editor window or renderer constructs
+	// either component. Register their reflection contracts explicitly so an
+	// authored camera/renderable is not silently skipped because startup order
+	// happened not to instantiate that C++ type first.
+	CameraComponent::registerType();
+	MeshRenderComponent::registerType();
 	// Register the small terrain-instance contract before generic reflection
 	// deserialization attempts to create TerrainComponent from scene JSON.
 	TerrainComponent::registerType();

@@ -92,6 +92,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <chrono>
+#include <string_view>
 #include <unordered_set>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/geometric.hpp>
@@ -3097,6 +3098,7 @@ namespace TerraEngine::Editor::Automation
 		add("component.get", "component", MutationMode::ReadOnly, false, true, false, "object: target, component: string");
 		add("component.set_property", "component", MutationMode::SceneMutation, false, true, false, "object/component/property/value");
 		add("asset.list", "asset", MutationMode::ReadOnly, true, false, false, "type?: string, search?: string");
+		add("asset.content.verify", "asset", MutationMode::ReadOnly, true, false, false, "path: project-relative asset path, requestCount: 1..32768, cancellationEvery?: 0..32768, expectedPayloadBytes?: integer");
 		add("asset.import", "asset", MutationMode::AssetMutation, true, false, false, "path: project-relative asset path, force?: bool; model packages such as glTF/FBX return generated asset ids and diagnostics");
 		add("asset.virtualGeometry.settings.get", "asset", MutationMode::ReadOnly, true, false, false, "asset?: asset path|uuid, includeResolved?: bool");
 		add("asset.virtualGeometry.settings.set", "asset", MutationMode::AssetMutation, true, false, false, "asset: asset path|uuid, override: sparse settings, validateOnly?: bool, rebuildAfterSave?: bool");
@@ -4478,6 +4480,12 @@ namespace TerraEngine::Editor::Automation
 					{"cacheEntryCount", integration.cacheEntryCount},
 					{"reusedItemCount", integration.reusedItemCount},
 					{"fallbackItemCount", integration.fallbackItemCount},
+					{"bindingEpisodeCount", integration.bindingEpisodeCount},
+					{"bindingReconciledCount", integration.bindingReconciledCount},
+					{"bindingFailureCount", integration.bindingFailureCount},
+					{"bindingReconciliationMs",
+						static_cast<double>(integration.bindingReconciliationNanoseconds)
+							/ 1000000.0},
 					{"deterministicPublicationValidated", integration.deterministicPublicationValidated},
 					{"cancellationRequested", integration.cancellationRequested},
 					{"memory", {
@@ -5345,6 +5353,7 @@ namespace TerraEngine::Editor::Automation
 		if (operation == AutomationOperation("component.get")) return HandleComponentGet(arguments, requestId);
 		if (operation == AutomationOperation("component.set_property")) return HandleComponentSetProperty(arguments, requestId);
 		if (operation == AutomationOperation("asset.list")) return HandleAssetList(arguments, requestId);
+		if (operation == AutomationOperation("asset.content.verify")) return HandleAssetContentVerify(arguments, requestId);
 		if (operation == AutomationOperation("asset.import")) return HandleAssetImport(arguments, requestId);
 		if (operation == AutomationOperation("asset.virtualGeometry.settings.get")) return HandleVirtualGeometrySettingsGet(arguments, requestId);
 		if (operation == AutomationOperation("asset.virtualGeometry.settings.set")) return HandleVirtualGeometrySettingsSet(arguments, requestId);
@@ -5660,6 +5669,7 @@ namespace TerraEngine::Editor::Automation
 		}
 		if (operation == AutomationOperation("transaction.execute"))
 		{
+			const auto transactionStarted = std::chrono::steady_clock::now();
 			if (arguments.value("cancelRequested", false))
 			{
 				nlohmann::json canceled = BuildError(requestId, ErrorCategory::Canceled, "Transaction was canceled before protected commit.");
@@ -5673,6 +5683,7 @@ namespace TerraEngine::Editor::Automation
 			const std::string transactionId = "transaction-" + std::to_string(nextTransactionId++);
 			PreparedAutomationTransaction prepared = PrepareAutomationTransaction(arguments, objects, transactionId);
 			if (!prepared.valid) return BuildError(requestId, prepared.error, prepared.message);
+			const auto preparationFinished = std::chrono::steady_clock::now();
 
 			// History commands capture before-state while the transaction is still
 			// wholly unapplied. They are published only after the engine commit succeeds.
@@ -5733,6 +5744,7 @@ namespace TerraEngine::Editor::Automation
 			}
 
 			const TerraEngine::Scene::TransactionResult commit = TerraEngine::Scene::CommitTransaction(objects, prepared.transaction);
+			const auto commitFinished = std::chrono::steady_clock::now();
 			if (commit.status != TerraEngine::Scene::TransactionStatus::Committed)
 			{
 				nlohmann::json error = BuildError(
@@ -5875,9 +5887,19 @@ namespace TerraEngine::Editor::Automation
 				if (const std::optional<Object> selection = resolveCommittedRef(*prepared.selectionTarget)) setSelectedEntity(selection->EntityId());
 			}
 			SceneManager::Instance().ForceMarkActiveSceneDirty();
+			const auto transactionFinished = std::chrono::steady_clock::now();
+			const auto millisecondsBetween = [](const auto begin, const auto end) {
+				return std::chrono::duration<double, std::milli>(end - begin).count();
+			};
 			return BuildSuccess(requestId, "Committed automation transaction.", {
 				{"transactionId", transactionId}, {"historyId", historyId}, {"visibilityBoundary", "post_editor_automation_flush"},
-				{"affectedTargets", affectedTargets}, {"appliedOperationCount", arguments["operations"].size()}, {"inverseDeltaCount", commit.inverseDeltas.size()}
+				{"affectedTargets", affectedTargets}, {"appliedOperationCount", arguments["operations"].size()}, {"inverseDeltaCount", commit.inverseDeltas.size()},
+				{"timings", {
+					{"preparationMs", millisecondsBetween(transactionStarted, preparationFinished)},
+					{"commitMs", millisecondsBetween(preparationFinished, commitFinished)},
+					{"historyAndPublicationMs", millisecondsBetween(commitFinished, transactionFinished)},
+					{"totalMs", millisecondsBetween(transactionStarted, transactionFinished)}
+				}}
 			});
 		}
 		const auto projectAssetPath = [this](const std::string& value) -> std::optional<std::pair<std::string, std::filesystem::path>> {
@@ -8082,6 +8104,7 @@ namespace TerraEngine::Editor::Automation
 
 	nlohmann::json EditorAutomationService::HandleAssetList(const nlohmann::json& arguments, const std::string& requestId)
 	{
+		const auto listStarted = std::chrono::steady_clock::now();
 		const std::string search = arguments.value("search", "");
 		nlohmann::json assets = nlohmann::json::array();
 		if (editorContext != nullptr && editorContext->assetDatabase != nullptr)
@@ -8102,7 +8125,112 @@ namespace TerraEngine::Editor::Automation
 				}
 			}
 		}
-		return BuildSuccess(requestId, "Listed project assets.", {{"assets", assets}});
+		const auto listFinished = std::chrono::steady_clock::now();
+		return BuildSuccess(requestId, "Listed project assets.", {
+			{"assets", assets},
+			{"timings", {{"listMs", std::chrono::duration<double, std::milli>(
+				listFinished - listStarted).count()}}}
+		});
+	}
+
+	nlohmann::json EditorAutomationService::HandleAssetContentVerify(const nlohmann::json& arguments, const std::string& requestId)
+	{
+		// This read-only operation is useful to integrity tools as well as performance
+		// diagnostics: paths remain project-contained, request counts are bounded, and
+		// no payload bytes are copied into the JSON response.
+		nlohmann::json validation = ValidateAssetPath(arguments, requestId);
+		if (!validation.value("ok", false)) return validation;
+		if (editorContext == nullptr || editorContext->assetDatabase == nullptr)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget, "Asset database is not available.");
+		}
+		if (!arguments.contains("requestCount")
+			|| (!arguments["requestCount"].is_number_unsigned() && !arguments["requestCount"].is_number_integer()))
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "requestCount must be an integer from 1 through 32768.");
+		}
+		const std::int64_t signedRequestCount = arguments["requestCount"].get<std::int64_t>();
+		if (signedRequestCount < 1 || signedRequestCount > 32768)
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "requestCount must be an integer from 1 through 32768.");
+		}
+		const std::uint32_t requestCount = static_cast<std::uint32_t>(signedRequestCount);
+		const std::int64_t signedCancellationEvery = arguments.value("cancellationEvery", std::int64_t{0});
+		if (signedCancellationEvery < 0 || signedCancellationEvery > 32768)
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "cancellationEvery must be an integer from 0 through 32768.");
+		}
+		const std::uint32_t cancellationEvery = static_cast<std::uint32_t>(signedCancellationEvery);
+		const std::uint64_t expectedPayloadBytes = arguments.value("expectedPayloadBytes", std::uint64_t{0});
+		if (expectedPayloadBytes > 268435456u)
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "expectedPayloadBytes exceeds the 256 MiB verification limit.");
+		}
+
+		const std::filesystem::path relative = validation["path"].get<std::string>();
+		const std::filesystem::path absolutePath = editorContext->assetDatabase->GetAssetRoot() / relative;
+		if (!std::filesystem::exists(absolutePath) || std::filesystem::is_directory(absolutePath))
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget, "Asset content file was not found.", relative.generic_string());
+		}
+
+		std::uint64_t fingerprint = 1469598103934665603ull;
+		std::uint64_t totalBytesRead = 0u;
+		std::uint32_t completedCount = 0u;
+		std::uint32_t cancelledCount = 0u;
+		std::uint64_t stagingAllocationCount = 0u;
+		std::uint64_t stagingReuseCount = 0u;
+		std::uint64_t hiddenFallbackCount = 0u;
+		std::vector<std::uint8_t> reusableStaging;
+		const auto loadStarted = std::chrono::steady_clock::now();
+		for (std::uint32_t requestIndex = 0u; requestIndex < requestCount; ++requestIndex)
+		{
+			// Cancellation is decided before IO, matching the resource streaming
+			// contract that a cancelled private publication token exposes no payload.
+			if (cancellationEvery != 0u && (requestIndex + 1u) % cancellationEvery == 0u)
+			{
+				++cancelledCount;
+				continue;
+			}
+			// Reusable staging passed the allocation, correctness, memory, and soak
+			// gates, so repeated verification has one production path. The vector
+			// owns its bytes for the operation and retains capacity between reads.
+			const std::size_t previousCapacity = reusableStaging.capacity();
+			if (!ResourceManager::Instance().ReadFileBytesInto(absolutePath, reusableStaging)) {
+				return BuildError(requestId, ErrorCategory::Internal,
+					"Asset content could not be read into reusable staging.", relative.generic_string());
+			}
+			if (reusableStaging.capacity() != previousCapacity) ++stagingAllocationCount;
+			else ++stagingReuseCount;
+			const std::vector<std::uint8_t>& bytes = reusableStaging;
+			if (expectedPayloadBytes != 0u && bytes.size() != expectedPayloadBytes)
+			{
+				return BuildError(requestId, ErrorCategory::Conflict, "Asset content size changed during verification.", relative.generic_string());
+			}
+			for (const std::uint8_t value : bytes)
+			{
+				fingerprint ^= value;
+				fingerprint *= 1099511628211ull;
+			}
+			totalBytesRead += bytes.size();
+			++completedCount;
+		}
+		const auto loadFinished = std::chrono::steady_clock::now();
+		std::ostringstream fingerprintText;
+		fingerprintText << std::hex << fingerprint;
+		return BuildSuccess(requestId, "Verified project asset content through ResourceManager.", {
+			{"path", relative.generic_string()}, {"requestedCount", requestCount},
+			{"completedCount", completedCount}, {"cancelledCount", cancelledCount},
+			{"bytesRead", totalBytesRead}, {"contentFingerprint", fingerprintText.str()},
+			{"memoryStrategy", "reusable-arena"},
+			{"memoryStrategySource", "built-in-default"},
+			{"stagingPolicy", "reusable-buffer"},
+			{"stagingAllocationCount", stagingAllocationCount},
+			{"stagingReuseCount", stagingReuseCount},
+			{"stagingCapacityBytes", reusableStaging.capacity()},
+			{"hiddenFallbackCount", hiddenFallbackCount},
+			{"timings", {{"loadMs", std::chrono::duration<double, std::milli>(loadFinished - loadStarted).count()}}}
+		});
 	}
 
 	nlohmann::json EditorAutomationService::HandleAssetImport(const nlohmann::json& arguments, const std::string& requestId)
@@ -9558,6 +9686,17 @@ namespace TerraEngine::Editor::Automation
 			{"diagnosticsFrameId", shadowDiagnosticsOnly
 				? requestedViewDiagnosticsFrameId : 0u},
 			{"frameTimeMs", stats.frameTimeMs},
+			{"timings", {
+				{"preparationMs", static_cast<double>(
+					stats.optimization.topologyBuildNanoseconds
+					+ stats.optimization.dynamicMaterializationNanoseconds) / 1000000.0},
+				{"topologyBuildMs", static_cast<double>(
+					stats.optimization.topologyBuildNanoseconds) / 1000000.0},
+				{"dynamicMaterializationMs", static_cast<double>(
+					stats.optimization.dynamicMaterializationNanoseconds) / 1000000.0},
+				{"visibleInstanceCount", stats.optimization.visibleInstanceCount},
+				{"optimizationValid", stats.optimization.valid != 0U}
+			}},
 			{"fps", stats.fps},
 			{"drawCalls", stats.drawCalls},
 			{"triangles", stats.triangleCount},

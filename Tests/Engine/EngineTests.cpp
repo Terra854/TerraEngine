@@ -10,6 +10,7 @@ namespace TerraEngine::Tests {
 	void RegisterAnimationParityValidatorTests(TestRegistry& registry);
 	void RegisterBinaryIOTests(TestRegistry& registry);
 	void RegisterBoundedRingBufferTests(TestRegistry& registry);
+	void RegisterMemoryFoundationTests(TestRegistry& registry);
 	void RegisterBootSummaryValidationTests(TestRegistry& registry);
 	void RegisterCodecProviderTests(TestRegistry& registry);
 	void RegisterContentMountPathNormalizerTests(TestRegistry& registry);
@@ -364,6 +365,7 @@ int main() {
 	TerraEngine::Tests::RegisterAnimationParityValidatorTests(registry);
 	TerraEngine::Tests::RegisterBinaryIOTests(registry);
 	TerraEngine::Tests::RegisterBoundedRingBufferTests(registry);
+	TerraEngine::Tests::RegisterMemoryFoundationTests(registry);
 	TerraEngine::Tests::RegisterBootSummaryValidationTests(registry);
 	TerraEngine::Tests::RegisterCodecProviderTests(registry);
 	TerraEngine::Tests::RegisterContentMountPathNormalizerTests(registry);

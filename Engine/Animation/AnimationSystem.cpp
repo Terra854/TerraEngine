@@ -1442,6 +1442,13 @@ namespace TerraEngine::Animation {
 		std::unique_ptr<AdvancedAnimationCommandStore> advancedCommands =
 			std::make_unique<AdvancedAnimationCommandStore>();
 		AnimatorComponentBindingCoordinator componentBindings;
+		// The coordinator publishes only the latest completed non-empty episode.
+		// Atomics keep diagnostic readers independent from the coordinator thread
+		// and avoid extending the runtime-ownership critical section.
+		std::atomic<std::uint64_t> bindingEpisodeCount{ 0U };
+		std::atomic<std::uint64_t> bindingReconciliationNanoseconds{ 0U };
+		std::atomic<std::size_t> bindingReconciledCount{ 0U };
+		std::atomic<std::size_t> bindingFailureCount{ 0U };
 		// This is coordinator-thread domain state, not per-frame worker input.
 		// Runtime applications keep the default enabled; the editor explicitly
 		// switches it at protected Play Mode entry and exit boundaries.
@@ -12021,8 +12028,25 @@ namespace TerraEngine::Animation {
 			// frame. Existing membership still synchronizes once after removal so
 			// handles, streaming retains, and published state are retired atomically.
 			if(hadScheduledMembership || hasAuthoredComponentStorage) {
-				(void)impl_->componentBindings.Synchronize(
-					*this, objects, ResourceManager::Instance());
+				const auto bindingStart = std::chrono::steady_clock::now();
+				const AnimatorComponentSynchronizationSummary binding =
+					impl_->componentBindings.Synchronize(
+						*this, objects, ResourceManager::Instance());
+				const auto bindingNanoseconds =
+					std::chrono::duration_cast<std::chrono::nanoseconds>(
+						std::chrono::steady_clock::now() - bindingStart).count();
+				// Stable frames intentionally return a zero-work summary. Retain the
+				// latest real reconciliation instead of replacing it with a dormant poll.
+				if(binding.reconciledBindingCount != 0U) {
+					impl_->bindingReconciliationNanoseconds.store(
+						static_cast<std::uint64_t>(std::max<std::int64_t>(0, bindingNanoseconds)),
+						std::memory_order_release);
+					impl_->bindingReconciledCount.store(
+						binding.reconciledBindingCount, std::memory_order_release);
+					impl_->bindingFailureCount.store(
+						binding.failedCount, std::memory_order_release);
+					impl_->bindingEpisodeCount.fetch_add(1U, std::memory_order_acq_rel);
+				}
 			}
 		}
 
@@ -14238,6 +14262,14 @@ namespace TerraEngine::Animation {
 			+ impl_->sharedPoseAnimatorCount.load(std::memory_order_acquire);
 		snapshot.fallbackItemCount =
 			impl_->fallbackAnimatorCount.load(std::memory_order_acquire);
+		snapshot.bindingEpisodeCount =
+			impl_->bindingEpisodeCount.load(std::memory_order_acquire);
+		snapshot.bindingReconciliationNanoseconds =
+			impl_->bindingReconciliationNanoseconds.load(std::memory_order_acquire);
+		snapshot.bindingReconciledCount =
+			impl_->bindingReconciledCount.load(std::memory_order_acquire);
+		snapshot.bindingFailureCount =
+			impl_->bindingFailureCount.load(std::memory_order_acquire);
 		snapshot.memory = impl_->memoryController.Snapshot();
 		snapshot.deterministicPublicationValidated =
 			impl_->deterministicPublicationValidated;

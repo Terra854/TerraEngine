@@ -5218,6 +5218,43 @@ std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::
 	return buffer;
 }
 
+bool ResourceManager::ReadFileBytesInto(
+	const std::filesystem::path& path,
+	std::vector<std::uint8_t>& output) const
+{
+	const std::filesystem::path absolutePath = ResolveAssetPath(path);
+	// Mounted and exported content has additional authority and validation rules.
+	// Preserve the established owned-result implementation for those uncommon
+	// paths; repeated loose editor reads use this buffer directly and retain it.
+	if (IsExportRuntime() || ContentMount::Instance().IsMounted()) {
+		output = ReadFileBytes(path);
+		return !output.empty() || std::filesystem::exists(absolutePath);
+	}
+	if (!std::filesystem::exists(absolutePath) || std::filesystem::is_directory(absolutePath)) {
+		output.clear();
+		return false;
+	}
+
+	std::ifstream file(absolutePath, std::ios::binary | std::ios::ate);
+	if (!file) {
+		output.clear();
+		return false;
+	}
+	const std::streamsize length = file.tellg();
+	if (length < 0) {
+		output.clear();
+		return false;
+	}
+	output.resize(static_cast<std::size_t>(length));
+	if (length == 0) return true;
+	file.seekg(0, std::ios::beg);
+	if (!file.read(reinterpret_cast<char*>(output.data()), length)) {
+		output.clear();
+		return false;
+	}
+	return true;
+}
+
 AnimationRangeReadResult ResourceManager::ReadAnimationAssetRange(
 	const std::filesystem::path& path,
 	std::uint64_t offset,

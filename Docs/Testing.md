@@ -1,5 +1,43 @@
 # TerraEngine Testing
 
+## External memory benchmark
+
+The memory qualification work keeps all benchmark implementation under
+`specs/056-benchmark-memory-system/benchmark`; it is not part of the engine CMake
+graph and is not installed with TerraEngine. Rejected custom memory tests are
+removed with their production candidates; the normal engine/editor suites remain
+the correctness gate for the candidate-free production tree.
+
+From a clean checkout, build and run the production tests, then produce the
+mandatory install tree:
+
+```powershell
+cmake --fresh --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target `
+	TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+cmake --build --preset RelWithDebInfo --target install
+```
+
+This repository installs to `<build directory>/Build`; `--prefix` does not
+redirect that production tree. Build and self-test the independent benchmark
+against the exact installed bytes:
+
+```powershell
+$benchmarkRoot = (Resolve-Path 'specs/056-benchmark-memory-system/benchmark').Path
+$benchmarkBuild = Join-Path $benchmarkRoot 'out/build/RelWithDebInfo'
+$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+cmake -S $benchmarkRoot -B $benchmarkBuild -DTERRAENGINE_INSTALL_ROOT=$installRoot
+cmake --build $benchmarkBuild --config RelWithDebInfo
+ctest --test-dir $benchmarkBuild -C RelWithDebInfo --output-on-failure
+```
+
+Capture commands, identity checks, A/A and A/B minimums, exit classifications,
+and soak gates are documented in the standalone benchmark README. Duration or
+warmup overrides create a non-admissible tooling probe and cannot freeze a
+baseline. An unavailable production metric is recorded with a reason and is
+never interpreted as zero.
+
 ## Shared utilities and TEPAK validation
 
 The engine utility tests cover the fixed-capacity ring container and the shared

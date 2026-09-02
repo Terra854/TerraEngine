@@ -743,6 +743,11 @@ public:
 	// Utility entry point used by format-specific loader helpers to pull
 	// bytes from disk after the path has been resolved.
 	std::vector<std::uint8_t> ReadFileBytes(const std::filesystem::path& path) const;
+	// Repeated resource-streaming callers retain private staging capacity across
+	// reads. One-shot callers can continue using the owned-result overload above.
+	[[nodiscard]] bool ReadFileBytesInto(
+		const std::filesystem::path& path,
+		std::vector<std::uint8_t>& output) const;
 	// Streaming workers use this checked range path for clip segments and motion
 	// database blocks. Export runtimes read only from the mounted TEPAK; editor
 	// sessions may use a loose cooked artifact for iteration.
