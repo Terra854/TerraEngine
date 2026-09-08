@@ -308,11 +308,35 @@ namespace TerraEngine
 		{
 			try
 			{
+				// Check the value-only navigation records before gameplay can issue an
+				// interop call. A bad managed layout must fail at startup, never after a
+				// native worker has copied a request packet.
+				ValidateNavigationAbiLayout();
 				Log.Info("TerraEngine Managed Initialized!");
 			}
 			catch (Exception ex)
 			{
 				Console.WriteLine($"[C#] Critical failure in Initialize:\n{ex}");
+			}
+		}
+
+		// ValidateNavigationAbiLayout pins the public fixed-width values used by
+		// gameplay code. Native records remain private to ScriptGlue, so this
+		// guard verifies the public boundary without exposing provider state.
+		public static void ValidateNavigationAbiLayout()
+		{
+			if (Navigation.AbiVersionConstant != 1U
+				|| Marshal.SizeOf<NavigationWorldHandle>() != 16
+				|| Marshal.SizeOf<NavigationOwnerHandle>() != 32
+				|| Marshal.SizeOf<NavigationRequestHandle>() != 48
+				|| Marshal.SizeOf<NavigationRouteHandle>() != 48
+				|| Marshal.SizeOf<NavigationLocation>() != 64
+				|| Marshal.SizeOf<NavigationProfile>() != 336
+				|| Marshal.OffsetOf<NavigationRequestHandle>(nameof(NavigationRequestHandle.SlotIndex)).ToInt32() != 32
+				|| Marshal.OffsetOf<NavigationRequestHandle>(nameof(NavigationRequestHandle.SlotGeneration)).ToInt32() != 40
+				|| Marshal.OffsetOf<NavigationLocation>(nameof(NavigationLocation.OffsetX)).ToInt32() != 40)
+			{
+				throw new TypeLoadException("The managed navigation ABI layout no longer matches its fixed v1 contract.");
 			}
 		}
 
@@ -1700,6 +1724,48 @@ namespace TerraEngine
 		[DllImport("TerraEngine")]
 		// Native_Log bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_Log(int level, string message, string function, int line);
+
+		// Navigation packets are fixed-width copied records mirrored in
+		// NavigationTypes. Managed wrappers initialise their ABI header before
+		// crossing this boundary; no provider or native container crosses it.
+		[DllImport("TerraEngine")]
+		internal static extern uint Native_Navigation_GetAbiVersion();
+
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_Navigation_SubmitRoute(ref NativeNavigationRouteRequest request, ref NativeNavigationSubmitReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_Navigation_ReadRequest(ref NavigationRequestHandle request, ref NativeNavigationRequestSnapshot snapshot);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe NavigationStatus Native_Navigation_CopyRoute(ref NavigationRouteHandle route, NativeNavigationRoutePoint* points, uint capacity, ref NativeNavigationBufferInfo info);
+
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_Navigation_CancelRequest(ref NativeNavigationCancellationRequest request, ref NativeNavigationSubmitReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_Navigation_ReleaseResult(ref NativeNavigationCancellationRequest request, ref NativeNavigationSubmitReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_Navigation_ValidateRoute(ref NativeNavigationRouteValidationRequest request, ref NativeNavigationRouteValidationResult result);
+
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_Navigation_SetDestination(ref NativeNavigationDestinationRequest request, ref NativeNavigationCommandReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_Navigation_ReadCommand(ref NativeNavigationCommandQuery query, ref NativeNavigationCommandReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_Navigation_ResolveObjectAgent(uint objectEntity, ref NativeNavigationAgentSnapshot snapshot);
+
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_Navigation_ReadAgent(ref NavigationAgentHandle agent, ref NativeNavigationAgentSnapshot snapshot);
+
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_Navigation_ReleaseAgent(ref NavigationAgentHandle agent);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe NavigationStatus Native_Navigation_CopyInvalidations(ref NativeNavigationInvalidationCursor cursor, NativeNavigationInvalidationRecord* records, uint capacity, ref NativeNavigationBufferInfo info);
 
 		[DllImport("TerraEngine")]
 		// Native_Application_Quit bridges managed callers to engine state; validate arguments before forwarding to native code.

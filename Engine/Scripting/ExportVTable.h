@@ -106,6 +106,10 @@ struct ManagedVTable {
 	uint16_t (__cdecl* getAnimationAbiVersion)();
 	void     (__cdecl* dispatchAnimationEventBatch)(const void* events, uint32_t eventCount, int64_t sourceTick,
 		uint64_t publicationGeneration, uint32_t overflowed, uint32_t droppedCountLowerBound);
+	// v4 tail: this probe roots the managed navigation facade in NativeAOT and
+	// lets the host reject a mixed native/managed ABI before any route packet is
+	// copied across the boundary.
+	uint32_t (__cdecl* getNavigationAbiVersion)();
 #else
 	int32_t  (*getScriptCount)();
 	void     (*getScriptIds)(uint64_t* outBuffer, int32_t capacity);
@@ -126,20 +130,24 @@ struct ManagedVTable {
 	uint16_t (*getAnimationAbiVersion)();
 	void     (*dispatchAnimationEventBatch)(const void* events, uint32_t eventCount, int64_t sourceTick,
 		uint64_t publicationGeneration, uint32_t overflowed, uint32_t droppedCountLowerBound);
+	uint32_t (*getNavigationAbiVersion)();
 #endif
 };
 
 #pragma pack(pop)
 
 // NativeAOT libraries retain the v1-only legacy export for old hosts and add a
-// capacity-aware v3 export for current hosts. The engine selects one exactly
-// once during startup; each initializer returns 0 on success.
+// Capacity-aware exports preserve their named released sizes. The host prefers
+// v4, then v3, and finally the legacy v1 prefix; each initializer returns 0 on
+// success without writing past the capacity it was given.
 #ifdef _WIN32
 using InitManagedRuntimeFn = int32_t(__cdecl*)(ManagedVTable* outTable);
 using InitManagedRuntimeV3Fn = int32_t(__cdecl*)(ManagedVTable* outTable, uint64_t hostCapacity);
+using InitManagedRuntimeV4Fn = int32_t(__cdecl*)(ManagedVTable* outTable, uint64_t hostCapacity);
 #else
 using InitManagedRuntimeFn = int32_t(*)(ManagedVTable* outTable);
 using InitManagedRuntimeV3Fn = int32_t(*)(ManagedVTable* outTable, uint64_t hostCapacity);
+using InitManagedRuntimeV4Fn = int32_t(*)(ManagedVTable* outTable, uint64_t hostCapacity);
 #endif
 
 // V1 and V2 sizes stay pinned for older exports. V3 appends the fixed-width
@@ -147,14 +155,18 @@ using InitManagedRuntimeV3Fn = int32_t(*)(ManagedVTable* outTable, uint64_t host
 inline constexpr uint32_t kManagedVTableMinVersion = 1;
 inline constexpr uint32_t kManagedVTablePhysicsVersion = 2;
 inline constexpr uint32_t kManagedVTableAnimationVersion = 3;
+inline constexpr uint32_t kManagedVTableNavigationVersion = 4;
 inline constexpr uint32_t kManagedPhysicsAbiVersion = 1;
 inline constexpr uint16_t kManagedAnimationAbiVersion = 1;
+inline constexpr uint32_t kManagedNavigationAbiVersion = 1;
 inline constexpr uint64_t kManagedVTableV1Size = 112;
 inline constexpr uint64_t kManagedVTableV2Size = 136;
 inline constexpr uint64_t kManagedVTableV3Size = 152;
+inline constexpr uint64_t kManagedVTableV4Size = 160;
 
 // Pin every released tail independently. A later v4 append must introduce its
 // own size constant instead of silently changing what a v3 host accepts.
 static_assert(offsetof(ManagedVTable, getAnimationAbiVersion) == kManagedVTableV2Size);
 static_assert(offsetof(ManagedVTable, dispatchAnimationEventBatch) == 144U);
-static_assert(sizeof(ManagedVTable) == kManagedVTableV3Size);
+static_assert(offsetof(ManagedVTable, getNavigationAbiVersion) == kManagedVTableV3Size);
+static_assert(sizeof(ManagedVTable) == kManagedVTableV4Size);

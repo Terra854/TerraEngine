@@ -32,10 +32,12 @@
 #include "Engine/Scene/TransactionalMutation.h"
 #include "Engine/Utilities/UUID.h"
 #include "../Core/ViewportTextureRegistry.h"
+#include "../Navigation/NavigationAuthoringTransactions.h"
 
 class Object;
 class VulkanContext;
 class TerrainWindow;
+namespace TerraEngine::Editor::Navigation { class NavigationWindow; }
 namespace TerraEngine::Runtime { struct PhysicsInvariantReport; }
 
 // PrefabAuthoringService owns the semantic prefab operations shared by the
@@ -198,6 +200,10 @@ public:
 	// API for Windows
 	// GetContext is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	EditorContext* GetContext() const { return ctx; }
+	// Automation may submit an authored navigation replacement, but it never owns
+	// this coordinator or bypasses its protected post-commit history boundary.
+	[[nodiscard]] TerraEngine::Editor::Navigation::NavigationAuthoringTransactions*
+	GetNavigationAuthoringTransactions() noexcept;
 
 	std::optional<entt::entity> GetSelectedEntity() const;
 	// Multi-selection stores authored UUIDs instead of transient EnTT handles, so
@@ -320,6 +326,11 @@ private:
 	// terrain authoring state, but it is a service consumed only by the Terrain
 	// Inspector, Scene View, automation, and editor lifecycle.
 	std::shared_ptr<TerrainWindow> m_TerrainTools;
+	// Navigation authoring keeps its own complete-state history snapshot so Play
+	// Mode can restore source/profile/connection settings at the same lifecycle
+	// boundary as the scene graph.
+	std::unique_ptr<TerraEngine::Editor::Navigation::NavigationAuthoringTransactions>
+		m_NavigationAuthoringTransactions;
 
 	// Internal State
 	bool showDemoWindow = false;

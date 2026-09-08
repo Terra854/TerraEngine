@@ -61,6 +61,11 @@ namespace TerraEngine::Audio
 {
 	class AudioClipAsset;
 }
+namespace TerraEngine::Navigation
+{
+	class NavigationGeometrySnapshot;
+	struct NavigationGeometrySnapshotDescriptor;
+}
 // ShaderStage names the supported states explicitly so serialization and switches stay readable.
 enum class ShaderStage : std::uint32_t;
 
@@ -173,6 +178,15 @@ struct AnimationRangeReadResult
 	{
 		return status == AnimationRangeReadStatus::Ok;
 	}
+};
+
+struct NavigationGeometryLoadResult
+{
+	bool accepted = false;
+	std::string reason;
+	std::filesystem::path resolvedPath;
+	std::size_t sourceBytes = 0U;
+	std::shared_ptr<const TerraEngine::Navigation::NavigationGeometrySnapshot> snapshot;
 };
 
 // Animation binding reconciliation needs only a compact proof of a mesh's
@@ -595,6 +609,22 @@ public:
 	// central GUID registry to resolve a cooked/material asset without a path in
 	// scene data. The returned path is the exact registered runtime artifact.
 	std::filesystem::path GetRegisteredAssetPath(const TerraEngine::UUID& id, AssetType type) const;
+	// Navigation companions use a separate typed registry because they are
+	// derived CPU geometry attached to a mesh/collider identity, not a renderer
+	// asset type. Logical mounted paths and editor paths share this same loader.
+	void RegisterNavigationGeometryPath(const TerraEngine::UUID& id, const std::filesystem::path& path);
+	[[nodiscard]] NavigationGeometryLoadResult LoadNavigationGeometryCompanion(
+		const TerraEngine::UUID& id,
+		const std::filesystem::path& path,
+		const TerraEngine::Navigation::NavigationGeometrySnapshotDescriptor& descriptor,
+		std::size_t maximumBytes = 256U * 1024U * 1024U);
+	[[nodiscard]] NavigationGeometryLoadResult LoadRegisteredNavigationGeometryCompanion(
+		const TerraEngine::UUID& id,
+		const TerraEngine::Navigation::NavigationGeometrySnapshotDescriptor& descriptor,
+		std::size_t maximumBytes = 256U * 1024U * 1024U);
+	[[nodiscard]] std::shared_ptr<const TerraEngine::Navigation::NavigationGeometrySnapshot>
+		GetNavigationGeometrySnapshot(const TerraEngine::UUID& id) const;
+	bool ReleaseNavigationGeometrySnapshot(const TerraEngine::UUID& id);
 	// Resolve a script-facing asset reference into the UUID the renderer uses
 	// internally. The lookup accepts either an exact relative path or a simple
 	// asset name/stem so gameplay code does not need to memorize UUIDs.
@@ -1045,6 +1075,10 @@ private:
 	// A terrain path is a root-manifest lookup; its heavy area data never enters
 	// the generic ResourceManager cache.
 	AssetPathRegistry terrainPaths;
+	AssetPathRegistry navigationGeometryPaths;
+	std::unordered_map<TerraEngine::UUID,
+		std::shared_ptr<const TerraEngine::Navigation::NavigationGeometrySnapshot>> navigationGeometrySnapshots;
+	mutable std::shared_mutex navigationGeometryMutex;
 	std::unordered_map<TerraEngine::UUID, std::shared_ptr<const TerraEngine::Audio::AudioClipAsset>> audioClipAssets;
 	std::unordered_map<TerraEngine::UUID, std::uint64_t> audioClipGenerations;
 	mutable std::shared_mutex audioClipMutex;

@@ -4,6 +4,7 @@
 // It handles editor-specific rendering features like the grid, selection outlines, and camera movement controls.
 
 #include "SceneViewWindow.h"
+#include "NavigationWindow.h"
 #include "TerrainWindow.h"
 #include "../Core/EditorContext.h"
 #include "../Project/ProjectManager.h"
@@ -2533,6 +2534,7 @@ void SceneViewWindow::OnGui() {
 	HandlePicking(view, projNoFlip, cursorPos, contentSize);
 
 	DrawPhysicsDebugOverlay(view, projNoFlip, cursorPos, contentSize);
+	DrawNavigationDebugOverlay(view, projNoFlip, cursorPos, contentSize);
 	PublishSceneViewDiagnostics(true);
 }
 
@@ -2965,6 +2967,42 @@ void SceneViewWindow::DrawPhysicsDebugOverlay(const glm::mat4& view, const glm::
 			}
 		}
 	}
+}
+
+void SceneViewWindow::DrawNavigationDebugOverlay(
+	const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize)
+{
+	if(m_Owner == nullptr) return;
+	const auto navigationWindow = m_Owner->GetWindow<TerraEngine::Editor::Navigation::NavigationWindow>();
+	// Do not even copy overlay input while the diagnostics window is closed. This
+	// keeps the Scene View overlay an observer of already-published data only.
+	if(!navigationWindow || !navigationWindow->IsDiagnosticsWindowOpen()) return;
+	navigationWindow->Update();
+	const auto& overlay = navigationWindow->Overlay();
+	if(overlay.connectionEndpoints.empty() && overlay.routePoints.empty()) return;
+
+	const auto project = [&](const TerraEngine::Scene::WorldPosition& point, ImVec2& screen) {
+		const glm::vec4 clip = proj * view * glm::vec4(LocalizeForCamera(point), 1.0F);
+		if(clip.w <= 0.0001F) return false;
+		const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+		screen = ImVec2(viewportPos.x + (ndc.x * 0.5F + 0.5F) * viewportSize.x,
+			viewportPos.y + (-ndc.y * 0.5F + 0.5F) * viewportSize.y);
+		return std::isfinite(screen.x) && std::isfinite(screen.y);
+	};
+	const auto drawSegments = [&](const auto& points, ImU32 color, float thickness) {
+		ImDrawList* drawList = ImGui::GetWindowDrawList();
+		for(std::size_t index = 1U; index < points.size(); ++index)
+		{
+			ImVec2 first;
+			ImVec2 second;
+			if(project(points[index - 1U], first) && project(points[index], second))
+				drawList->AddLine(first, second, color, thickness);
+		}
+	};
+	// Connection endpoints are stored in pairs, whereas a preview route is one
+	// ordered polyline. Draw both from the immutable bounded presentation copy.
+	drawSegments(overlay.connectionEndpoints, IM_COL32(96, 220, 255, 255), 2.0F);
+	drawSegments(overlay.routePoints, IM_COL32(128, 255, 128, 255), 2.5F);
 }
 
 // RayAABB is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

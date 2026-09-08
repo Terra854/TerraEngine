@@ -21,6 +21,7 @@
 #include "UI/UISystem.h"
 #include "Input/InputSystem.h"
 #include "Physics/PhysicsSystem.h"
+#include "Navigation/NavigationSystem.h"
 #include "Scene/SceneManager.h"
 #include "Scene/SceneMutationQueue.h"
 #include "Utilities/PlatformUtils.h"
@@ -1044,9 +1045,407 @@ namespace {
 		return true;
 	}
 
+	// Navigation ABI helpers convert every caller value into provider-neutral
+	// engine records before NavigationSystem receives it. No managed packet can
+	// retain a native pointer or mutate a route in place.
+	template<typename Record>
+	bool HasNavigationAbiRecord(const Record* record) noexcept {
+		return record != nullptr && record->header.abiVersion == kNativeNavigationAbiVersion
+			&& record->header.structSize == sizeof(Record);
+	}
+
+	void WriteNavigationDiagnostic(char (&destination)[kNativeNavigationDiagnosticBytes], std::string_view message) noexcept {
+		std::memset(destination, 0, sizeof(destination));
+		const std::size_t count = std::min(message.size(), sizeof(destination) - 1U);
+		std::memcpy(destination, message.data(), count);
+	}
+
+	TerraEngine::Navigation::NavigationWorldHandle ToNavigationWorld(NativeNavigationWorldHandle value) noexcept {
+		return {{value.worldId}, value.worldGeneration};
+	}
+	NativeNavigationWorldHandle FromNavigationWorld(TerraEngine::Navigation::NavigationWorldHandle value) noexcept {
+		return {value.worldId.value, value.worldGeneration};
+	}
+	TerraEngine::Navigation::NavigationOwnerHandle ToNavigationOwner(NativeNavigationOwnerHandle value) noexcept {
+		return {ToNavigationWorld(value.world), {value.ownerId}, value.ownerGeneration};
+	}
+	NativeNavigationOwnerHandle FromNavigationOwner(TerraEngine::Navigation::NavigationOwnerHandle value) noexcept {
+		return {FromNavigationWorld(value.world), value.ownerId.value, value.ownerGeneration};
+	}
+	TerraEngine::Navigation::NavigationRequestHandle ToNavigationRequest(NativeNavigationRequestHandle value) noexcept {
+		return {ToNavigationOwner(value.owner), value.slotIndex, value.slotGeneration};
+	}
+	TerraEngine::Navigation::NavigationRouteHandle ToNavigationRoute(NativeNavigationRouteHandle value) noexcept {
+		return {ToNavigationOwner(value.owner), value.slotIndex, value.slotGeneration};
+	}
+	TerraEngine::Navigation::NavigationAgentHandle ToNavigationAgent(NativeNavigationAgentHandle value) noexcept {
+		return {ToNavigationOwner(value.owner), value.slotIndex, value.slotGeneration};
+	}
+	TerraEngine::Navigation::NavigationCommandHandle ToNavigationCommand(NativeNavigationCommandHandle value) noexcept {
+		return {ToNavigationOwner(value.owner), value.slotIndex, value.slotGeneration};
+	}
+	NativeNavigationRequestHandle FromNavigationRequest(TerraEngine::Navigation::NavigationRequestHandle value) noexcept {
+		return {FromNavigationOwner(value.owner), value.slotIndex, 0U, value.slotGeneration};
+	}
+	NativeNavigationRouteHandle FromNavigationRoute(TerraEngine::Navigation::NavigationRouteHandle value) noexcept {
+		return {FromNavigationOwner(value.owner), value.slotIndex, 0U, value.slotGeneration};
+	}
+	NativeNavigationAgentHandle FromNavigationAgent(TerraEngine::Navigation::NavigationAgentHandle value) noexcept {
+		return {FromNavigationOwner(value.owner), value.slotIndex, 0U, value.slotGeneration};
+	}
+	NativeNavigationCommandHandle FromNavigationCommand(TerraEngine::Navigation::NavigationCommandHandle value) noexcept {
+		return {FromNavigationOwner(value.owner), value.slotIndex, 0U, value.slotGeneration};
+	}
+
+	bool ToNavigationLocation(NativeNavigationLocation value, TerraEngine::Navigation::NavigationLocation& destination) noexcept {
+		if(!std::isfinite(value.offsetX) || !std::isfinite(value.offsetY) || !std::isfinite(value.offsetZ)) return false;
+		TerraEngine::Scene::WorldPosition position{};
+		position.cell = {value.cellX, value.cellY, value.cellZ};
+		position.offsetMetres = {value.offsetX, value.offsetY, value.offsetZ};
+		const TerraEngine::Scene::WorldCoordinateResult normalized = TerraEngine::Scene::NormalizeWorldPosition(position);
+		// Preserve the exact canonical address supplied by managed code. Accepting
+		// an address that only becomes canonical after normalization would make the
+		// audit record differ from the packet that an owner actually submitted.
+		if(!normalized.Succeeded() || normalized.position != position) return false;
+		destination = {ToNavigationWorld(value.world), normalized.position};
+		return TerraEngine::Navigation::ValidateNavigationLocation(destination).Succeeded();
+	}
+	NativeNavigationLocation FromNavigationLocation(TerraEngine::Navigation::NavigationLocation value) noexcept {
+		return {FromNavigationWorld(value.world), value.position.cell.x, value.position.cell.y, value.position.cell.z,
+			value.position.offsetMetres.x, value.position.offsetMetres.y, value.position.offsetMetres.z};
+	}
+	bool ToNavigationProfile(const NativeNavigationProfile& value, TerraEngine::Navigation::NavigationProfile& destination) noexcept {
+		destination.profileId = value.profileId;
+		destination.revision = value.revision;
+		destination.radiusMetres = value.radiusMetres;
+		destination.heightMetres = value.heightMetres;
+		destination.stepHeightMetres = value.stepHeightMetres;
+		destination.maxSlopeDegrees = value.maxSlopeDegrees;
+		destination.clearanceMarginMetres = value.clearanceMarginMetres;
+		destination.horizontalResolutionMetres = value.horizontalResolutionMetres;
+		destination.verticalResolutionMetres = value.verticalResolutionMetres;
+		destination.excludedAreasMask = value.excludedAreasMask;
+		for(std::size_t index = 0U; index < destination.areaPenalties.size(); ++index)
+			destination.areaPenalties[index] = value.areaPenalties[index];
+		return destination.Validate().accepted;
+	}
+
+	NativeNavigationStatus ToNativeNavigationStatus(TerraEngine::Navigation::NavigationHandleStatus status) noexcept {
+		using namespace TerraEngine::Navigation;
+		switch(status) {
+		case NavigationHandleStatus::Alive: return NativeNavigationStatus::Success;
+		case NavigationHandleStatus::Expired: return NativeNavigationStatus::Expired;
+		case NavigationHandleStatus::CapacityExceeded: return NativeNavigationStatus::LimitExceeded;
+		case NavigationHandleStatus::InvalidOwner: return NativeNavigationStatus::InvalidOwner;
+		case NavigationHandleStatus::StaleSlot:
+		case NavigationHandleStatus::StaleOwner:
+		case NavigationHandleStatus::StaleWorld:
+		case NavigationHandleStatus::Destroyed:
+		case NavigationHandleStatus::Retired: return NativeNavigationStatus::StaleTarget;
+		default: return NativeNavigationStatus::InvalidArgument;
+		}
+	}
+	NativeNavigationStatus ToNativeNavigationStatus(TerraEngine::Navigation::NavigationOutcome outcome) noexcept {
+		using TerraEngine::Navigation::NavigationOutcome;
+		switch(outcome) {
+		case NavigationOutcome::Queued:
+		case NavigationOutcome::PendingPreparation:
+		case NavigationOutcome::Searching: return NativeNavigationStatus::Accepted;
+		case NavigationOutcome::Complete:
+		case NavigationOutcome::Partial:
+		case NavigationOutcome::Cancelled: return NativeNavigationStatus::Success;
+		case NavigationOutcome::Expired: return NativeNavigationStatus::Expired;
+		case NavigationOutcome::RejectedCapacity:
+		case NavigationOutcome::BudgetExhausted: return NativeNavigationStatus::LimitExceeded;
+		case NavigationOutcome::UnavailableCoverage: return NativeNavigationStatus::Unavailable;
+		case NavigationOutcome::Stale: return NativeNavigationStatus::StaleTarget;
+		default: return NativeNavigationStatus::InvalidArgument;
+		}
+	}
+	NativeNavigationCommandState ToNativeNavigationCommandState(
+		TerraEngine::Navigation::NavigationCommandState state) noexcept {
+		using TerraEngine::Navigation::NavigationCommandState;
+		switch(state) {
+		case NavigationCommandState::Queued: return NativeNavigationCommandState::Queued;
+		case NavigationCommandState::Applied: return NativeNavigationCommandState::Applied;
+		case NavigationCommandState::Rejected: return NativeNavigationCommandState::Rejected;
+		case NavigationCommandState::Expired: return NativeNavigationCommandState::Expired;
+		}
+		return NativeNavigationCommandState::Rejected;
+	}
+	void FillNavigationSubmitReceipt(NativeNavigationSubmitReceipt& destination, NativeNavigationStatus status,
+		TerraEngine::Navigation::NavigationRequestHandle request, std::uint64_t correlationId,
+		std::string_view diagnostic) noexcept {
+		destination.header = {kNativeNavigationAbiVersion, sizeof(destination)};
+		destination.status = status;
+		destination.reserved = 0U;
+		destination.request = FromNavigationRequest(request);
+		destination.correlationId = correlationId;
+		WriteNavigationDiagnostic(destination.diagnostic, diagnostic);
+	}
+	NativeNavigationStatus FillNavigationAgentSnapshot(
+		TerraEngine::Navigation::NavigationAgentHandle handle,
+		NativeNavigationAgentSnapshot& snapshot) noexcept {
+		const auto read = TerraEngine::Navigation::NavigationSystem::Instance().ReadAgent(handle);
+		const NativeNavigationAbiHeader header{kNativeNavigationAbiVersion, sizeof(snapshot)};
+		snapshot = {};
+		snapshot.header = header;
+		snapshot.status = ToNativeNavigationStatus(read.status);
+		if(!read.record) return snapshot.status;
+		snapshot.agent = FromNavigationAgent(handle);
+		snapshot.routePolicy = read.record->routePolicy;
+		snapshot.intentGeneration = read.record->intentGeneration;
+		snapshot.poseGeneration = read.record->poseGeneration;
+		snapshot.activeRequest = FromNavigationRequest(read.record->activeRequest);
+		snapshot.activeRoute = FromNavigationRoute(read.record->activeRoute);
+		snapshot.currentPosition = FromNavigationLocation(read.record->currentPosition);
+		snapshot.destination = FromNavigationLocation(read.record->destination);
+		return snapshot.status;
+	}
+
 }
 
 extern "C" {
+	std::uint32_t Native_Navigation_GetAbiVersion() { return kNativeNavigationAbiVersion; }
+
+	NativeNavigationStatus Native_Navigation_SubmitRoute(
+		const NativeNavigationRouteRequest* request, NativeNavigationSubmitReceipt* receipt) {
+		if(!HasNavigationAbiRecord(receipt)) return NativeNavigationStatus::VersionMismatch;
+		if(!HasNavigationAbiRecord(request)) {
+			FillNavigationSubmitReceipt(*receipt, NativeNavigationStatus::VersionMismatch, {}, 0U, "Route request ABI version or size is unsupported.");
+			return receipt->status;
+		}
+		TerraEngine::Navigation::NavigationLocation start{};
+		TerraEngine::Navigation::NavigationLocation destination{};
+		TerraEngine::Navigation::NavigationProfile profile{};
+		const TerraEngine::Navigation::NavigationOwnerHandle owner = ToNavigationOwner(request->owner);
+		if(!owner.IsValid() || !ToNavigationLocation(request->start, start) || !ToNavigationLocation(request->destination, destination)
+			|| !ToNavigationProfile(request->profile, profile) || start.world != owner.world || destination.world != owner.world
+			|| request->allowPartial > 1U || request->allowEndpointAdjustment > 1U || request->maximumExpansions == 0U) {
+			FillNavigationSubmitReceipt(*receipt, NativeNavigationStatus::InvalidArgument, {}, request->correlationId,
+				"Route request has an invalid owner, profile, canonical location, or bounded policy.");
+			return receipt->status;
+		}
+		auto& navigation = TerraEngine::Navigation::NavigationSystem::Instance();
+		const auto world = navigation.PublishedWorld();
+		if(!world || world->world != owner.world) {
+			FillNavigationSubmitReceipt(*receipt, NativeNavigationStatus::Unavailable, {}, request->correlationId,
+				"Navigation world is unavailable or belongs to a different lifetime.");
+			return receipt->status;
+		}
+		TerraEngine::Navigation::Ground::GroundRouteQuery::Request nativeRequest{};
+		nativeRequest.owner = owner;
+		nativeRequest.start = start;
+		nativeRequest.destination = destination;
+		nativeRequest.profile = profile;
+		nativeRequest.allowPartial = request->allowPartial != 0U;
+		nativeRequest.maxExpansions = request->maximumExpansions;
+		// NavigationSystem captures the currently published root and shard
+		// generations. Managed callers cannot provide a synthetic topology that
+		// turns absent or dirty coverage into a complete straight route.
+		const auto handle = navigation.SubmitOneShotRoute(std::move(nativeRequest));
+		const NativeNavigationStatus status = handle.IsValid() ? NativeNavigationStatus::Accepted : NativeNavigationStatus::LimitExceeded;
+		FillNavigationSubmitReceipt(*receipt, status, handle, request->correlationId,
+			handle.IsValid() ? "" : "Navigation request admission rejected.");
+		return receipt->status;
+	}
+
+	NativeNavigationStatus Native_Navigation_ReadRequest(
+		const NativeNavigationRequestHandle* request, NativeNavigationRequestSnapshot* snapshot) {
+		if(request == nullptr || !HasNavigationAbiRecord(snapshot)) return NativeNavigationStatus::VersionMismatch;
+		const auto handle = ToNavigationRequest(*request);
+		if(!handle.IsValid()) return NativeNavigationStatus::InvalidArgument;
+		const auto read = TerraEngine::Navigation::NavigationSystem::Instance().ReadRequest(handle);
+		*snapshot = {};
+		snapshot->header = {kNativeNavigationAbiVersion, sizeof(*snapshot)};
+		snapshot->status = ToNativeNavigationStatus(read.status);
+		if(!read.record) return snapshot->status;
+		const auto route = TerraEngine::Navigation::NavigationSystem::Instance().PublishedRouteForRequest(handle);
+		snapshot->lifecycle = static_cast<std::uint32_t>(read.record->lifecycle);
+		snapshot->outcome = static_cast<std::uint32_t>(read.record->outcome);
+		snapshot->reason = static_cast<std::uint32_t>(read.record->reason);
+		snapshot->request = FromNavigationRequest(handle);
+		snapshot->route = FromNavigationRoute(route);
+		snapshot->intentGeneration = read.record->intentGeneration;
+		snapshot->start = FromNavigationLocation(read.record->start);
+		snapshot->destination = FromNavigationLocation(read.record->destination);
+		snapshot->createdTick = read.record->createdTick;
+		snapshot->expiryTick = read.record->expiryTick;
+		return snapshot->status = ToNativeNavigationStatus(read.record->outcome);
+	}
+
+	NativeNavigationStatus Native_Navigation_CopyRoute(
+		const NativeNavigationRouteHandle* route, NativeNavigationRoutePoint* points,
+		std::uint32_t capacity, NativeNavigationBufferInfo* info) {
+		if(route == nullptr || !HasNavigationAbiRecord(info)) return NativeNavigationStatus::VersionMismatch;
+		const auto handle = ToNavigationRoute(*route);
+		if(!handle.IsValid()) return NativeNavigationStatus::InvalidArgument;
+		const auto retained = TerraEngine::Navigation::NavigationSystem::Instance().ReadRoute(handle);
+		*info = {{kNativeNavigationAbiVersion, sizeof(*info)}, NativeNavigationStatus::Unavailable, 0U, 0U, 0U, retained.sourceRevision};
+		if(!retained.IsValid()) return info->status;
+		if(retained.points.size() > std::numeric_limits<std::uint32_t>::max()) {
+			info->status = NativeNavigationStatus::LimitExceeded;
+			return info->status;
+		}
+		info->requiredCount = static_cast<std::uint32_t>(retained.points.size());
+		if(points == nullptr && capacity == 0U) { info->status = NativeNavigationStatus::Success; return info->status; }
+		if(points == nullptr || capacity < info->requiredCount) { info->status = NativeNavigationStatus::LimitExceeded; return info->status; }
+		for(std::size_t index = 0U; index < retained.points.size(); ++index)
+			points[index] = {{kNativeNavigationAbiVersion, sizeof(NativeNavigationRoutePoint)}, FromNavigationLocation(retained.points[index])};
+		info->copiedCount = info->requiredCount;
+		info->status = NativeNavigationStatus::Success;
+		return info->status;
+	}
+
+	NativeNavigationStatus Native_Navigation_CancelRequest(
+		const NativeNavigationCancellationRequest* request, NativeNavigationSubmitReceipt* receipt) {
+		if(!HasNavigationAbiRecord(receipt)) return NativeNavigationStatus::VersionMismatch;
+		if(!HasNavigationAbiRecord(request) || !ToNavigationRequest(request->request).IsValid()) {
+			FillNavigationSubmitReceipt(*receipt, NativeNavigationStatus::InvalidArgument, {}, 0U, "Cancellation request is malformed.");
+			return receipt->status;
+		}
+		const auto handle = ToNavigationRequest(request->request);
+		const bool cancelled = TerraEngine::Navigation::NavigationSystem::Instance().CancelRequest(handle);
+		FillNavigationSubmitReceipt(*receipt, cancelled ? NativeNavigationStatus::Success : NativeNavigationStatus::StaleTarget,
+			handle, 0U, cancelled ? "" : "Request is terminal, expired, or belongs to another owner.");
+		return receipt->status;
+	}
+
+	NativeNavigationStatus Native_Navigation_ReleaseResult(
+		const NativeNavigationCancellationRequest* request, NativeNavigationSubmitReceipt* receipt) {
+		if(!HasNavigationAbiRecord(receipt)) return NativeNavigationStatus::VersionMismatch;
+		if(!HasNavigationAbiRecord(request) || !ToNavigationRequest(request->request).IsValid()) {
+			FillNavigationSubmitReceipt(*receipt, NativeNavigationStatus::InvalidArgument, {}, 0U,
+				"Navigation result release is malformed.");
+			return receipt->status;
+		}
+		const auto handle = ToNavigationRequest(request->request);
+		const bool released = TerraEngine::Navigation::NavigationSystem::Instance().ReleaseRequestResult(handle);
+		FillNavigationSubmitReceipt(*receipt, released ? NativeNavigationStatus::Success : NativeNavigationStatus::StaleTarget,
+			handle, 0U, released ? "" : "Request is active, expired, or has already been released.");
+		return receipt->status;
+	}
+
+	NativeNavigationStatus Native_Navigation_ValidateRoute(
+		const NativeNavigationRouteValidationRequest* request, NativeNavigationRouteValidationResult* result) {
+		if(!HasNavigationAbiRecord(result)) return NativeNavigationStatus::VersionMismatch;
+		if(!HasNavigationAbiRecord(request)) return NativeNavigationStatus::VersionMismatch;
+		const auto handle = ToNavigationRoute(request->route);
+		TerraEngine::Navigation::NavigationLocation current{};
+		if(!handle.IsValid() || !ToNavigationLocation(request->currentPosition, current) || current.world != handle.owner.world)
+			return NativeNavigationStatus::InvalidArgument;
+		const auto retained = TerraEngine::Navigation::NavigationSystem::Instance().ReadRoute(handle);
+		*result = {};
+		result->header = {kNativeNavigationAbiVersion, sizeof(*result)};
+		result->observedSourceRevision = retained.sourceRevision;
+		const bool usable = retained.IsValid() && (request->expectedSourceRevision == 0U
+			|| request->expectedSourceRevision == retained.sourceRevision);
+		result->status = retained.IsValid() ? NativeNavigationStatus::Success : NativeNavigationStatus::Unavailable;
+		result->usable = usable ? 1U : 0U;
+		result->reason = static_cast<std::uint32_t>(usable ? TerraEngine::Navigation::NavigationReason::None
+			: TerraEngine::Navigation::NavigationReason::SceneReplaced);
+		return result->status;
+	}
+
+	NativeNavigationStatus Native_Navigation_SetDestination(
+		const NativeNavigationDestinationRequest* request, NativeNavigationCommandReceipt* receipt) {
+		if(!HasNavigationAbiRecord(receipt)) return NativeNavigationStatus::VersionMismatch;
+		if(!HasNavigationAbiRecord(request)) return NativeNavigationStatus::VersionMismatch;
+		TerraEngine::Navigation::NavigationLocation destination{};
+		const auto agent = ToNavigationAgent(request->agent);
+		if(!agent.IsValid() || !ToNavigationLocation(request->destination, destination)
+			|| destination.world != agent.owner.world || request->routePolicy > 1U) return NativeNavigationStatus::InvalidArgument;
+		const auto queued = TerraEngine::Navigation::NavigationSystem::Instance().QueueSetDestination(
+			agent, destination, request->routePolicy, request->expectedIntentGeneration);
+		*receipt = {};
+		receipt->header = {kNativeNavigationAbiVersion, sizeof(*receipt)};
+		receipt->status = queued.status == TerraEngine::Navigation::NavigationHandleStatus::Alive
+			? NativeNavigationStatus::Accepted : ToNativeNavigationStatus(queued.status);
+		receipt->state = NativeNavigationCommandState::Queued;
+		receipt->command = FromNavigationCommand(queued.command);
+		WriteNavigationDiagnostic(receipt->diagnostic, queued.command.IsValid() ? "" : "Destination command admission rejected.");
+		return receipt->status;
+	}
+
+	NativeNavigationStatus Native_Navigation_ReadCommand(
+		const NativeNavigationCommandQuery* query, NativeNavigationCommandReceipt* receipt) {
+		if(!HasNavigationAbiRecord(receipt)) return NativeNavigationStatus::VersionMismatch;
+		if(!HasNavigationAbiRecord(query) || !ToNavigationCommand(query->command).IsValid()) return NativeNavigationStatus::InvalidArgument;
+		const auto handle = ToNavigationCommand(query->command);
+		const auto read = TerraEngine::Navigation::NavigationSystem::Instance().ReadCommand(handle);
+		*receipt = {};
+		receipt->header = {kNativeNavigationAbiVersion, sizeof(*receipt)};
+		receipt->status = ToNativeNavigationStatus(read.status);
+		receipt->command = FromNavigationCommand(handle);
+		if(!read.record) return receipt->status;
+		receipt->status = ToNativeNavigationStatus(read.record->outcome);
+		receipt->state = ToNativeNavigationCommandState(read.record->state);
+		receipt->resultingRequest = FromNavigationRequest(read.record->resultingRequest);
+		receipt->resultingIntentGeneration = read.record->resultingIntentGeneration;
+		WriteNavigationDiagnostic(receipt->diagnostic, TerraEngine::Navigation::ToString(read.record->state));
+		return receipt->status;
+	}
+
+	NativeNavigationStatus Native_Navigation_ResolveObjectAgent(
+		std::uint32_t objectEntity, NativeNavigationAgentSnapshot* snapshot) {
+		if(!HasNavigationAbiRecord(snapshot)) return NativeNavigationStatus::VersionMismatch;
+		const NativeNavigationAbiHeader header = snapshot->header;
+		*snapshot = {};
+		snapshot->header = header;
+		snapshot->status = NativeNavigationStatus::StaleTarget;
+		ObjectManager& objects = ObjectManager::instance();
+		const std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectEntity));
+		if(!object) return snapshot->status;
+		const TerraEngine::UUID objectId = objects.getUUID(*object);
+		const auto handle = TerraEngine::Navigation::NavigationSystem::Instance().ResolveObjectAgent(objectId);
+		if(!handle.IsValid()) {
+			snapshot->status = NativeNavigationStatus::Unavailable;
+			return snapshot->status;
+		}
+		return FillNavigationAgentSnapshot(handle, *snapshot);
+	}
+
+	NativeNavigationStatus Native_Navigation_ReadAgent(
+		const NativeNavigationAgentHandle* agent, NativeNavigationAgentSnapshot* snapshot) {
+		if(agent == nullptr || !HasNavigationAbiRecord(snapshot)) return NativeNavigationStatus::VersionMismatch;
+		const auto handle = ToNavigationAgent(*agent);
+		if(!handle.IsValid()) return NativeNavigationStatus::InvalidArgument;
+		return FillNavigationAgentSnapshot(handle, *snapshot);
+	}
+
+	NativeNavigationStatus Native_Navigation_ReleaseAgent(const NativeNavigationAgentHandle* agent) {
+		if(agent == nullptr) return NativeNavigationStatus::InvalidArgument;
+		const auto handle = ToNavigationAgent(*agent);
+		if(!handle.IsValid()) return NativeNavigationStatus::InvalidArgument;
+		return TerraEngine::Navigation::NavigationSystem::Instance().ReleaseAgent(handle)
+			? NativeNavigationStatus::Success : NativeNavigationStatus::StaleTarget;
+	}
+
+	NativeNavigationStatus Native_Navigation_CopyInvalidations(
+		const NativeNavigationInvalidationCursor* cursor, NativeNavigationInvalidationRecord* records,
+		std::uint32_t capacity, NativeNavigationBufferInfo* info) {
+		if(!HasNavigationAbiRecord(info)) return NativeNavigationStatus::VersionMismatch;
+		if(!HasNavigationAbiRecord(cursor)) return NativeNavigationStatus::VersionMismatch;
+		const auto owner = ToNavigationOwner(cursor->owner);
+		if(!owner.IsValid()) return NativeNavigationStatus::InvalidOwner;
+		const auto read = TerraEngine::Navigation::NavigationSystem::Instance().ReadInvalidations(owner, cursor->cursor);
+		*info = {{kNativeNavigationAbiVersion, sizeof(*info)}, ToNativeNavigationStatus(read.status), 0U, 0U,
+			read.overflowed ? 1U : 0U, read.newestCursor};
+		if(read.records.size() > std::numeric_limits<std::uint32_t>::max()) { info->status = NativeNavigationStatus::LimitExceeded; return info->status; }
+		info->requiredCount = static_cast<std::uint32_t>(read.records.size());
+		if(records == nullptr && capacity == 0U) { info->status = NativeNavigationStatus::Success; return info->status; }
+		if(records == nullptr || capacity < info->requiredCount) { info->status = NativeNavigationStatus::LimitExceeded; return info->status; }
+		for(std::size_t index = 0U; index < read.records.size(); ++index) {
+			const auto& source = read.records[index];
+			records[index] = {{kNativeNavigationAbiVersion, sizeof(NativeNavigationInvalidationRecord)},
+				FromNavigationOwner(source.owner), FromNavigationRoute(source.route), static_cast<std::uint32_t>(source.reason),
+				static_cast<std::uint32_t>(source.outcome), source.sourceRevision, source.observationGeneration};
+		}
+		info->copiedCount = info->requiredCount;
+		info->status = NativeNavigationStatus::Success;
+		return info->status;
+	}
+
 	std::uint16_t Native_Animation_GetAbiVersion()
 	{
 		return kNativeAnimationAbiVersion;
@@ -2587,6 +2986,18 @@ void FlushManagedRuntimeRequests()
 		resourceReleases.swap(g_PendingManagedResourceReleases);
 		unloadAll = std::exchange(g_PendingManagedSceneUnloadAll, false);
 		frameId = ++g_ManagedRuntimeFrameId;
+	}
+
+	const bool replacesSceneLifetime = unloadAll || activeScene.has_value()
+		|| std::any_of(sceneLoads.begin(), sceneLoads.end(), [](const ManagedSceneLoadRequest& request) {
+			return !request.prefab;
+		});
+	if(replacesSceneLifetime) {
+		// Scene activation and replacement revoke the old generation before the
+		// object store changes. Worker completions retained from that generation
+		// therefore fail their owner check instead of publishing into the new scene.
+		TerraEngine::Navigation::NavigationSystem::Instance().RevokeAllOwners(
+			TerraEngine::Navigation::NavigationReason::SceneReplaced);
 	}
 
 	if (unloadAll)

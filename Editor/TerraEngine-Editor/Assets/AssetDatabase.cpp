@@ -38,6 +38,7 @@
 #include "Editor/AssetCompilers/ModelPackageImporter.h"
 #include "Editor/AssetCompilers/PhysicsColliderCompiler.h"
 #include "Editor/AssetCompilers/AudioClipCompiler.h"
+#include "Editor/AssetCompilers/NavigationGeometryCompiler.h"
 #include "AssetImportResult.h"
 #include "Engine/File Formats/TerraEngineTextureFile.h"
 #include "Engine/File Formats/TerraEngineAnimationFile.h"
@@ -1974,7 +1975,8 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 	// the generated TEAF envelope remains the only runtime-facing payload.
 	else if (metadata.importerName == "AudioClipImporter") compiledRelativePath.replace_extension(".teaudio");
 	else if (metadata.importerName == "ScriptImporter") compiledRelativePath.clear();
-	else if (metadata.importerName == "GenericImporter" || metadata.importerName == "TerrainImporter") compiledRelativePath.clear();
+	else if (metadata.importerName == "GenericImporter" || metadata.importerName == "TerrainImporter"
+		|| metadata.importerName == "NavigationGeometryCompanionImporter") compiledRelativePath.clear();
 	
 	// Store relative path in metadata
 	metadata.compiledPath = compiledRelativePath;
@@ -2121,6 +2123,13 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 		// Terrain roots are already durable runtime manifests. Their private data
 		// directory stays next to the root, so no generic one-file compiler runs.
 		ResourceManager::Instance().RegisterAssetPath(metadata.guid, absSourcePath, AssetType::Terrain);
+	}
+	if(metadata.importerName == "NavigationGeometryCompanionImporter") {
+		// Navigation companions are immutable CPU geometry artifacts rather than
+		// renderer resources. Register their durable path in the typed navigation
+		// registry so worker jobs can acquire a generation-qualified snapshot
+		// without depending on mesh GPU residency.
+		ResourceManager::Instance().RegisterNavigationGeometryPath(metadata.guid, absSourcePath);
 	}
 
 	// Register with Engine ResourceManager so it can resolve GUIDs to compiled paths
@@ -3229,6 +3238,9 @@ std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath
 	if (ext == ".teterrain") return "TerrainImporter";
 	if (ext == ".wav" || ext == ".ogg") return "AudioClipImporter";
 	if (ext == ".teaudio") return "CookedAudioClipImporter";
+	// Navigation companions are complete runtime-decodable derived data. They do
+	// not recursively compile when discovered by the asset watcher.
+	if (ext == ".tenavgeom") return "NavigationGeometryCompanionImporter";
 	if (ext == ".teskel") return "SkeletonAssetImporter";
 	if (ext == ".teanim") return "AnimationClipAssetImporter";
 	if (ext == ".teanimctrl") return "AnimationControllerAssetImporter";

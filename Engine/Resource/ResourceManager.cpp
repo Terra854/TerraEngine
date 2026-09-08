@@ -2722,6 +2722,16 @@ void ResourceManager::ClearCaches()
 		terrainPaths.pathToId.clear();
 		terrainPaths.idToPath.clear();
 	}
+	{
+		// Navigation companions are derived CPU data. Teardown drops the registry
+		// and current immutable roots; in-flight workers keep prior snapshots alive
+		// only through their explicit shared leases.
+		std::unique_lock pathLock(navigationGeometryPaths.mutex);
+		navigationGeometryPaths.pathToId.clear();
+		navigationGeometryPaths.idToPath.clear();
+		std::unique_lock snapshotLock(navigationGeometryMutex);
+		navigationGeometrySnapshots.clear();
+	}
 	ClearResidencyState();
 	ClearStreamingState();
 	// Mesh and animation cache ownership changed as one protected teardown
@@ -4395,7 +4405,8 @@ bool ResourceManager::HasResource(const TerraEngine::UUID& id) const
 		|| isAvailable(retargetProfileCache) || isAvailable(motionDatabaseCache)
 		|| isAvailable(ragdollProfileCache)
 		|| hasRegisteredPath(physicsMaterialPaths) || hasRegisteredPath(cookedColliderPaths)
-		|| hasRegisteredPath(audioClipPaths) || hasRegisteredPath(terrainPaths);
+		|| hasRegisteredPath(audioClipPaths) || hasRegisteredPath(terrainPaths)
+		|| hasRegisteredPath(navigationGeometryPaths);
 }
 
 // ResourceManager::RegisterAssetPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

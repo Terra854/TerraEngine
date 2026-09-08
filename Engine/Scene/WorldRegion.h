@@ -64,6 +64,7 @@ namespace TerraEngine::Scene
 		std::string leaseId;
 		std::uint64_t generation = 0;
 		std::uint64_t expiresAtFrame = 0;
+		std::uint64_t expiresAtTimeNanoseconds = 0;
 	};
 
 	struct WorldRegionDirectoryEntry
@@ -130,6 +131,9 @@ namespace TerraEngine::Scene
 		std::uint64_t generation = 0;
 		std::unordered_map<WorldRegionKey, std::shared_ptr<const WorldRegionSnapshot>, WorldRegionKeyHash> residentRegions;
 		std::vector<OversizedSpatialProxy> coarseProxies;
+		// Keys are published before their old snapshots become reclaimable. Readers
+		// retaining the previous root can finish safely while new requests fail closed.
+		std::vector<WorldRegionKey> invalidatedRegions;
 		std::uint32_t residentObjectCount = 0;
 	};
 
@@ -140,7 +144,12 @@ namespace TerraEngine::Scene
 		[[nodiscard]] bool SetHomeRegion(const TerraEngine::UUID& objectId, WorldRegionKey key);
 		[[nodiscard]] bool Transition(WorldRegionKey key, WorldRegionState next, std::string failure = {});
 		[[nodiscard]] bool AcquireLease(WorldRegionKey key, WorldRegionLease lease);
+		[[nodiscard]] bool RenewLease(WorldRegionKey key, WorldRegionLease lease);
 		[[nodiscard]] bool ReleaseLease(WorldRegionKey key, std::string_view leaseId, std::uint64_t generation);
+		[[nodiscard]] std::size_t ExpireLeases(
+			std::uint64_t currentFrame,
+			std::uint64_t currentTimeNanoseconds,
+			std::size_t maximumExpirations);
 		[[nodiscard]] std::optional<WorldRegionDirectoryEntry> Find(WorldRegionKey key) const;
 		[[nodiscard]] std::optional<WorldRegionKey> FindHomeRegion(const TerraEngine::UUID& objectId) const;
 		[[nodiscard]] std::vector<WorldRegionDirectoryEntry> Entries() const;

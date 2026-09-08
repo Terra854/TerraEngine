@@ -8,6 +8,7 @@
 #include "Core/Scheduling/JobGraph.h"
 #include "DotNet/DotNetHost.h"
 #include "Profiling/ProfilerScope.h"
+#include "Navigation/NavigationSystem.h"
 #include "Scene/SceneManager.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Utilities/PlatformUtils.h"
@@ -1295,6 +1296,11 @@ void ScriptingSystem::FlushScriptMutationsIntoResult(ScriptingFrameResult& resul
 	}
 
 	TerraEngine::Scene::SceneMutationBatchResult mutationResult = SceneManager::Instance().ApplySceneMutations("scripting-mutation-flush");
+	(void)TerraEngine::Navigation::NavigationSystem::Instance().ObserveSceneMutationReceipts(
+		mutationResult.navigationSourceMutationReceipts);
+	TerraEngine::Navigation::NavigationSystem::Instance().ObserveProtectedBoundary(
+		TerraEngine::Navigation::NavigationProtectedBoundary::Scripting,
+		ObjectManager::instance().GetSceneGeneration());
 	for (const TerraEngine::Scene::SceneMutationResult& entry : mutationResult.results)
 	{
 		if (entry.accepted)
@@ -1752,6 +1758,12 @@ bool ScriptingSystem::LoadGameplayAssembly(const std::filesystem::path& assembly
 // ScriptingSystem::ClearGameplayAssembly is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::ClearGameplayAssembly() {
 	const bool invalidatesManagedWrappers = m_GameplayAssemblyLoaded;
+	if(invalidatesManagedWrappers) {
+		// Managed request owners belong to the unloading script-domain generation.
+		// Revoke them before callbacks disappear so late workers cannot publish.
+		TerraEngine::Navigation::NavigationSystem::Instance().RevokeAllOwners(
+			TerraEngine::Navigation::NavigationReason::SceneReplaced);
+	}
 	if (managedUnloadGameplayAssembly != nullptr) {
 		managedUnloadGameplayAssembly();
 	}

@@ -45,12 +45,16 @@ namespace TerraEngine.Export
 		public int WorkerDispatch;
 	}
 
-	[StructLayout(LayoutKind.Explicit, Size = 152)]
+	[StructLayout(LayoutKind.Explicit, Size = 160)]
 	public unsafe struct ManagedVTable
 	{
 		// This released ABI size belongs to InitManagedRuntimeV3 forever. A future
 		// tail must add a new constant and initializer instead of changing this one.
 		public const ulong V3Size = 152;
+		// V4 appends the navigation ABI probe. V1 through V3 initializers retain
+		// their released prefixes and sizes, so older NativeAOT libraries remain
+		// loadable without a write past their host-owned destination.
+		public const ulong V4Size = 160;
 
 		[FieldOffset(0)]  public ulong Version;
 		[FieldOffset(8)]  public delegate* unmanaged[Cdecl]<int>                                          GetScriptCount;
@@ -74,5 +78,8 @@ namespace TerraEngine.Export
 		// calling either animation pointer, preserving v1/v2 binary compatibility.
 		[FieldOffset(136)] public delegate* unmanaged[Cdecl]<ushort> GetAnimationAbiVersion;
 		[FieldOffset(144)] public delegate* unmanaged[Cdecl]<void*, uint, long, ulong, uint, uint, void> DispatchAnimationEventBatch;
+		// Appended v4 tail. The native host validates this fixed ABI version before
+		// enabling NativeAOT navigation calls.
+		[FieldOffset(152)] public delegate* unmanaged[Cdecl]<uint> GetNavigationAbiVersion;
 	}
 }

@@ -12,6 +12,13 @@ add_executable(TerraEngine-EditorTests
 	Audio/AudioEditorControlTests.cpp
 	Audio/AudioExportTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/AudioClipCompiler.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/NavigationGeometryCompiler.cpp
+	${CMAKE_SOURCE_DIR}/Editor/Export/NavigationExportDependencies.cpp
+	# Navigation editor contract tests link the same deterministic support code
+	# used by the production editor; only the thin ImGui window remains UI-facing.
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Navigation/NavigationInspectorSupport.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Navigation/NavigationAuthoringTransactions.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/NavigationAutomationProvider.cpp
 	${TERRAENGINE_EDITOR_ANIMATION_TEST_SOURCES}
 	${TERRAENGINE_TERRAIN_EDITOR_TEST_SOURCES}
 	# Terrain editor tests exercise the real provider-neutral creation/session
@@ -56,6 +63,9 @@ add_executable(TerraEngine-EditorTests
 	Export/PhysicsExportManifestTests.cpp
 	Export/PhysicsExportValidationTests.cpp
 	Export/PhysicsExportParityTests.cpp
+	Export/NavigationExportParityTests.cpp
+	Project/NavigationProjectLifecycleTests.cpp
+	Export/NavigationExportTests.cpp
 	Export/HeadlessExportBaselineTests.cpp
 	Export/HeadlessExportContractTests.cpp
 	Export/HeadlessExportDocumentationTests.cpp
@@ -144,6 +154,11 @@ add_executable(TerraEngine-EditorTests
 	AssetPipeline/FbxReadOnlySubAssetTests.cpp
 	AssetPipeline/AssetDatabaseCancellationTests.cpp
 	AssetPipeline/TextureCompilerWorkerTests.cpp
+	AssetPipeline/NavigationGeometryCompilerTests.cpp
+	Navigation/NavigationAuthoringTests.cpp
+	Navigation/NavigationHistoryTests.cpp
+	Navigation/NavigationDiagnosticsTests.cpp
+	Navigation/NavigationAutomationTests.cpp
 	AssetPipeline/GltfPackageImporterTests.cpp
 	AssetPipeline/GltfMaterialTextureTests.cpp
 	AssetPipeline/GltfMaterialAssignmentTests.cpp
@@ -558,6 +573,24 @@ add_test(NAME Editor.PhysicsSoak COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
 set_tests_properties(Editor.PhysicsSoak PROPERTIES
 	LABELS "Editor;Physics;Stress;Soak"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Editor.Soak"
+)
+
+# Keep design-time navigation evidence split by authoring, saved-cache/export,
+# and automation diagnostics so an installed-editor regression is actionable.
+add_test(NAME Editor.Navigation.Authoring COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Navigation.Authoring PROPERTIES
+	LABELS "Editor;Navigation;Authoring;History"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.NavigationAuthoring,Editor.NavigationHistory,Navigation.Editor.Compiler"
+)
+add_test(NAME Editor.Navigation.DiagnosticsAutomation COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Navigation.DiagnosticsAutomation PROPERTIES
+	LABELS "Editor;Navigation;Diagnostics;Automation"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.Navigation.Diagnostics,Editor.Navigation.Automation,Editor.NavigationProjectLifecycle"
+)
+add_test(NAME Editor.Navigation.Export COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Navigation.Export PROPERTIES
+	LABELS "Editor;Navigation;Export;Headless"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.NavigationExport,Editor.NavigationExportParity"
 )
 
 # Editor animation tests share one durable filter so later authoring and MCP

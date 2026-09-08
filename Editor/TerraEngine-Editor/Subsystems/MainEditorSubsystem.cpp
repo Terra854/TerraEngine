@@ -42,6 +42,7 @@
 #include "Engine/Components/Physics/RigidBodyComponent.h"
 #include "Engine/Physics/Assets/CookedColliderAsset.h"
 #include "Engine/Physics/PhysicsSystem.h"
+#include "Engine/Navigation/NavigationSystem.h"
 #include "Engine/Runtime/ExportStartupCoordinator.h"
 #include "Engine/Scene/SceneMutationQueue.h"
 #include "Engine/Utilities/PlatformUtils.h"
@@ -70,6 +71,7 @@
 #include "../Windows/ProjectBrowserWindow.h"
 #include "../Windows/GameViewWindow.h"
 #include "../Windows/SceneViewWindow.h"
+#include "../Windows/NavigationWindow.h"
 #include "../Windows/BuildProfilesWindow.h"
 #include "../Windows/ProfilerWindow.h"
 #include "../Windows/PhysicsDiagnosticsWindow.h"
@@ -1479,6 +1481,9 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	m_Windows.push_back(std::make_shared<ProjectBrowserWindow>(this));
 	m_Windows.push_back(std::make_shared<GameViewWindow>(this));
 	m_Windows.push_back(std::make_shared<SceneViewWindow>(this));
+	// Navigation diagnostics is a regular dockable window. Its data extraction
+	// remains opt-in and is additionally gated by its visible state in Scene View.
+	m_Windows.push_back(std::make_shared<TerraEngine::Editor::Navigation::NavigationWindow>());
 	m_Windows.push_back(std::make_shared<ProjectSettingsWindow>(this));
 	m_Windows.push_back(std::make_shared<PreferencesWindow>(this));
 	m_Windows.push_back(std::make_shared<BuildProfilesWindow>(this));
@@ -1504,6 +1509,10 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	m_Windows.push_back(std::make_shared<AnimationDiagnosticsWindow>());
 
 	UndoRedoSystem::Instance().Initialize(context);
+	// The coordinator records authoring history only when a protected completion
+	// reports success; wiring it here lets Play Mode preserve the same state.
+	m_NavigationAuthoringTransactions = std::make_unique<
+		TerraEngine::Editor::Navigation::NavigationAuthoringTransactions>(UndoRedoSystem::Instance());
 	ScriptCompilationSubsystem::Instance().Initialize(context);
 
 	ObjectManager::instance().SetOnModifiedCallback([this]() {
@@ -2504,6 +2513,11 @@ void MainEditorSubsystem::Shutdown() {
 	ctx = nullptr;
 	m_Windows.clear();
 	m_TerrainTools.reset();
+	if(m_NavigationAuthoringTransactions)
+		m_NavigationAuthoringTransactions->ExitPlayMode();
+	TerraEngine::Navigation::NavigationSystem::Instance().RevokeAllOwners(
+		TerraEngine::Navigation::NavigationReason::SceneReplaced);
+	m_NavigationAuthoringTransactions.reset();
 }
 
 bool MainEditorSubsystem::StartPlayMode()
@@ -2552,6 +2566,10 @@ bool MainEditorSubsystem::StartPlayMode()
 	// Commit pending authoring transactions before capturing the exact pre-play
 	// snapshot consumed and later restored by both scripting and physics.
 	SceneManager::Instance().ApplySceneMutations("play-mode-entry");
+	// Capture navigation's complete authoring revision with the scene snapshot;
+	// runtime changes must never leak back into the editor configuration on Stop.
+	if(m_NavigationAuthoringTransactions)
+		m_NavigationAuthoringTransactions->EnterPlayMode();
 	CapturePlayModeSceneState();
 	if (!m_HasPlayModeSceneSnapshot)
 	{
@@ -2559,11 +2577,15 @@ bool MainEditorSubsystem::StartPlayMode()
 		// leave Play Mode unable to return the editor to a complete scene.
 		TERRAENGINE_LOG(LogLevel::Error,
 			"Play Mode entry rejected because the authored scene restore snapshot could not be captured.");
+		if(m_NavigationAuthoringTransactions)
+			m_NavigationAuthoringTransactions->ExitPlayMode();
 		return false;
 	}
 	if(!TerraEngine::Physics::PhysicsSystem::Instance().StartWorld())
 	{
 		ClearPlayModeSceneState();
+		if(m_NavigationAuthoringTransactions)
+			m_NavigationAuthoringTransactions->ExitPlayMode();
 		return false;
 	}
 	if(auto terrainTools = GetWindow<TerrainWindow>())
@@ -2578,6 +2600,8 @@ bool MainEditorSubsystem::StartPlayMode()
 				"Play Mode terrain collision preparation failed: " << collisionError);
 			TerraEngine::Physics::PhysicsSystem::Instance().StopWorld();
 			ClearPlayModeSceneState();
+			if(m_NavigationAuthoringTransactions)
+				m_NavigationAuthoringTransactions->ExitPlayMode();
 			return false;
 		}
 	}
@@ -2648,12 +2672,24 @@ void MainEditorSubsystem::StopPlayMode()
 	TerraEngine::Audio::AudioSystem::Instance().SetRuntimePlaybackEnabled(false);
 	ScriptingSystem::Instance().SetRunning(false);
 	ScriptingSystem::Instance().SetPaused(false);
+	TerraEngine::Navigation::NavigationSystem::Instance().RevokeAllOwners(
+		TerraEngine::Navigation::NavigationReason::SceneReplaced);
 	// Recreate component-owned playback at tick zero before the authored snapshot
 	// returns. Edit Mode continues publishing that frozen reference palette, so
 	// Stop cannot retain the last runtime deformation or expose raw skin vertices.
 	TerraEngine::Animation::AnimationSystem::Instance()
 		.SetAuthoredComponentPlaybackAdvancing(false);
 	RestorePlayModeSceneState();
+	// Restore the matching source/profile/connection revision after the scene
+	// packet has published, so navigation authoring never observes mixed modes.
+	if(m_NavigationAuthoringTransactions)
+		m_NavigationAuthoringTransactions->ExitPlayMode();
+}
+
+TerraEngine::Editor::Navigation::NavigationAuthoringTransactions*
+MainEditorSubsystem::GetNavigationAuthoringTransactions() noexcept
+{
+	return m_NavigationAuthoringTransactions.get();
 }
 
 TerraEngine::Runtime::PhysicsInvariantReport MainEditorSubsystem::RunPhysicsExportInvariantFixture()

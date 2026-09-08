@@ -26,6 +26,7 @@
 #include "Providers/ProjectSceneAutomationProvider.h"
 #include "Providers/PhysicsAutomationProvider.h"
 #include "Providers/AudioAutomationProvider.h"
+#include "Providers/NavigationAutomationProvider.h"
 #include "Providers/ScriptBuildAutomationProvider.h"
 
 #include "../Assets/AssetImportResult.h"
@@ -73,12 +74,14 @@
 #include "Engine/Physics/Assets/ColliderRecipe.h"
 #include "Engine/Physics/Assets/CookedColliderAsset.h"
 #include "Engine/Physics/Assets/PhysicsMaterial.h"
+#include "Engine/Navigation/NavigationSystem.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Utilities/UUID.h"
 #include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <filesystem>
@@ -2379,6 +2382,12 @@ namespace TerraEngine::Editor::Automation
 			}};
 		};
 		(void)capabilityRegistry.RegisterProvider(std::make_shared<AudioAutomationProvider>(resolveAudioHandler));
+		// Navigation names resolve to a typed domain boundary. In particular, no
+		// navigation request can fall through the legacy FindCapability dispatcher.
+		const AutomationHandlerResolver resolveNavigationHandler = [this](std::string_view name) {
+			return ResolveNavigationAutomationHandler(name);
+		};
+		(void)capabilityRegistry.RegisterProvider(std::make_shared<NavigationAutomationProvider>(resolveNavigationHandler));
 		RegisterDefaultCapabilities();
 	}
 
@@ -2416,6 +2425,20 @@ namespace TerraEngine::Editor::Automation
 		}
 		return [this, operation, operationName](const AutomationRequestContext& request) {
 			return ExecutePhysicsAutomationHandler(operation, operationName, request);
+		};
+	}
+
+	AutomationHandler EditorAutomationService::ResolveNavigationAutomationHandler(std::string_view name)
+	{
+		const AutomationOperationId operation = AutomationOperation(name);
+		const std::string operationName(name);
+		const auto [existing, inserted] = boundProviderOperationNames.emplace(operation, operationName);
+		if (!inserted && existing->second != operationName)
+		{
+			throw std::logic_error("Navigation automation operation ID collision between " + existing->second + " and " + operationName + ".");
+		}
+		return [this, operation, operationName](const AutomationRequestContext& request) {
+			return ExecuteNavigationAutomationHandler(operation, operationName, request);
 		};
 	}
 
@@ -5297,6 +5320,293 @@ namespace TerraEngine::Editor::Automation
 		}
 
 		return reject(ErrorCategory::UnsupportedCapability, "Physics capability has no bound implementation.");
+	}
+
+	AutomationDispatchResult EditorAutomationService::ExecuteNavigationAutomationHandler(
+		AutomationOperationId operation,
+		std::string_view operationName,
+		const AutomationRequestContext& request)
+	{
+		using namespace TerraEngine::Navigation;
+		const auto reject = [](ErrorCategory category, std::string message) {
+			return AutomationDispatchResult{false, category, std::move(message), nlohmann::json::object()};
+		};
+		const auto succeed = [](std::string message, nlohmann::json data) {
+			return AutomationDispatchResult{true, ErrorCategory::Internal, std::move(message), std::move(data)};
+		};
+		const auto hasOnlyFields = [](const nlohmann::json& value, std::initializer_list<std::string_view> allowed) {
+			if (!value.is_object()) return false;
+			for (auto entry = value.begin(); entry != value.end(); ++entry)
+			{
+				if (std::find(allowed.begin(), allowed.end(), entry.key()) == allowed.end()) return false;
+			}
+			return true;
+		};
+		const auto readBoundedCount = [](const nlohmann::json& value, std::string_view key,
+			std::size_t fallback, std::size_t maximum, std::size_t& count) {
+			count = fallback;
+			const auto found = value.find(std::string(key));
+			if (found == value.end()) return true;
+			if (!found->is_number_unsigned()) return false;
+			const std::uint64_t candidate = found->get<std::uint64_t>();
+			if (candidate == 0U || candidate > maximum) return false;
+			count = static_cast<std::size_t>(candidate);
+			return true;
+		};
+		const auto parseOwner = [](const nlohmann::json& value, NavigationOwnerHandle& owner) {
+			if (!value.is_object()
+				|| !value.contains("worldId") || !value["worldId"].is_number_unsigned()
+				|| !value.contains("worldGeneration") || !value["worldGeneration"].is_number_unsigned()
+				|| !value.contains("ownerId") || !value["ownerId"].is_number_unsigned()
+				|| !value.contains("ownerGeneration") || !value["ownerGeneration"].is_number_unsigned()) return false;
+			owner = {{value["worldId"].get<std::uint64_t>(), value["worldGeneration"].get<NavigationGeneration>()},
+				{value["ownerId"].get<std::uint64_t>()}, value["ownerGeneration"].get<NavigationGeneration>()};
+			return owner.IsValid();
+		};
+		const auto parseRequest = [&parseOwner](const nlohmann::json& value, NavigationRequestHandle& handle) {
+			if (!value.is_object() || !value.contains("owner")
+				|| !value.contains("slotIndex") || !value["slotIndex"].is_number_unsigned()
+				|| !value.contains("slotGeneration") || !value["slotGeneration"].is_number_unsigned()) return false;
+			const std::uint64_t index = value["slotIndex"].get<std::uint64_t>();
+			if (index >= static_cast<std::uint64_t>(kInvalidNavigationSlot)) return false;
+			NavigationOwnerHandle owner{};
+			if (!parseOwner(value["owner"], owner)) return false;
+			handle = {owner, static_cast<NavigationSlotIndex>(index), value["slotGeneration"].get<NavigationGeneration>()};
+			return handle.IsValid();
+		};
+		const auto serializeOwner = [](const NavigationOwnerHandle& owner) {
+			return nlohmann::json{{"worldId", owner.world.worldId.value}, {"worldGeneration", owner.world.worldGeneration},
+				{"ownerId", owner.ownerId.value}, {"ownerGeneration", owner.ownerGeneration}};
+		};
+		const auto serializeRequest = [&serializeOwner](const NavigationRequestHandle& handle) {
+			return nlohmann::json{{"owner", serializeOwner(handle.owner)}, {"slotIndex", handle.slotIndex},
+				{"slotGeneration", handle.slotGeneration}};
+		};
+		const auto serializeLocation = [](const NavigationLocation& location) {
+			return nlohmann::json{{"worldId", location.world.worldId.value}, {"worldGeneration", location.world.worldGeneration},
+				{"position", Serializer::SerializeWorldPosition(location.position)}};
+		};
+
+		if (!request.state.projectAvailable || request.state.projectGeneration == 0U)
+			return reject(ErrorCategory::Unavailable, "Navigation automation requires an already-open project with a stable generation.");
+		if (!request.arguments.is_object())
+			return reject(ErrorCategory::Validation, "Navigation automation arguments must be an object.");
+		if (request.arguments.contains("schemaVersion")
+			&& (!request.arguments["schemaVersion"].is_number_unsigned()
+				|| request.arguments["schemaVersion"].get<std::uint64_t>() != 1U))
+			return reject(ErrorCategory::Validation, "Navigation automation supports only schemaVersion 1.");
+
+		NavigationSystem& navigation = NavigationSystem::Instance();
+		const std::shared_ptr<const NavigationWorldRoot> root = navigation.PublishedWorld();
+		const auto requireWorld = [&root, &reject]() -> std::optional<AutomationDispatchResult> {
+			if (!root || !root->world.IsValid())
+				return reject(ErrorCategory::Unavailable, "No immutable navigation world is published for this project.");
+			return std::nullopt;
+		};
+
+		if (operation == AutomationOperation("navigation.settings.get"))
+		{
+			if (!hasOnlyFields(request.arguments, {"schemaVersion"}))
+				return reject(ErrorCategory::Validation, "navigation.settings.get accepts only schemaVersion.");
+			// NavigationSystem deliberately exposes no mutable settings reference. The
+			// defaults are copied into this result, so automation cannot alter runtime limits.
+			return succeed("Read the immutable navigation settings reference profile.", {
+				{"schemaVersion", 1U}, {"snapshot", Serializer::SerializeNavigationSettings(NavigationSettings::Defaults())},
+				{"configuredRuntimeSettingsAvailable", false}, {"source", "frozen_defaults"}});
+		}
+
+		if (operation == AutomationOperation("navigation.diagnostics.get"))
+		{
+			if (!hasOnlyFields(request.arguments, {"schemaVersion", "maxItems"}))
+				return reject(ErrorCategory::Validation, "navigation.diagnostics.get accepts only schemaVersion and maxItems.");
+			std::size_t maximumRecords = 256U;
+			if (!readBoundedCount(request.arguments, "maxItems", 256U, 1024U, maximumRecords))
+				return reject(ErrorCategory::Validation, "maxItems must be an unsigned value from 1 through 1024.");
+			const std::shared_ptr<const NavigationDiagnosticSnapshot> diagnostics = navigation.PublishedDiagnostics();
+			nlohmann::json records = nlohmann::json::array();
+			if (diagnostics)
+			{
+				for (std::size_t index = 0U; index < diagnostics->records.size() && index < maximumRecords; ++index)
+				{
+					const NavigationDiagnosticRecord& record = diagnostics->records[index];
+					records.push_back({{"severity", static_cast<std::uint32_t>(record.severity)},
+						{"measurementReason", static_cast<std::uint32_t>(record.measurementReason)},
+						{"publishedGeneration", record.publishedGeneration}, {"measuredNanoseconds", record.measuredNanoseconds},
+						{"code", record.code}, {"message", record.message}});
+				}
+			}
+			return succeed("Read copied immutable navigation diagnostics.", {{"schemaVersion", 1U}, {"snapshot", {
+				{"revision", diagnostics ? diagnostics->revision : 0U}, {"records", std::move(records)},
+				{"truncated", diagnostics && diagnostics->records.size() > maximumRecords},
+				{"droppedRecordCount", diagnostics ? diagnostics->droppedRecordCount : 0U},
+				{"droppedByteCount", diagnostics ? diagnostics->droppedByteCount : 0U},
+				{"retainedByteCount", diagnostics ? diagnostics->retainedByteCount : 0U},
+				{"queueDepth", diagnostics ? diagnostics->queueDepth : 0U}, {"staleDropCount", diagnostics ? diagnostics->staleDropCount : 0U}}}});
+		}
+
+		if (operation == AutomationOperation("navigation.sources.inspect"))
+		{
+			if (!hasOnlyFields(request.arguments, {"schemaVersion", "maxItems"}))
+				return reject(ErrorCategory::Validation, "navigation.sources.inspect accepts only schemaVersion and maxItems.");
+			std::size_t maximumSources = 256U;
+			if (!readBoundedCount(request.arguments, "maxItems", 256U, 1024U, maximumSources))
+				return reject(ErrorCategory::Validation, "maxItems must be an unsigned value from 1 through 1024.");
+			if (const auto unavailable = requireWorld()) return *unavailable;
+			nlohmann::json sources = nlohmann::json::array();
+			for (std::size_t index = 0U; index < root->sources.size() && index < maximumSources; ++index)
+			{
+				const NavigationSourceIndexRecord& source = root->sources[index];
+				sources.push_back({{"sourceId", TerraEngine::ToHexString(source.sourceId)}, {"sourceRevision", source.sourceRevision},
+					{"geometryRevision", source.geometryRevision}, {"enabled", source.enabled}});
+			}
+			return succeed("Inspected copied navigation source index records.", {{"schemaVersion", 1U}, {"snapshot", {
+				{"worldId", root->world.worldId.value}, {"worldGeneration", root->world.worldGeneration},
+				{"rootGeneration", root->rootGeneration}, {"sources", std::move(sources)},
+				{"truncated", root->sources.size() > maximumSources}}}});
+		}
+
+		if (operation == AutomationOperation("navigation.route.request"))
+		{
+			if (!hasOnlyFields(request.arguments, {"schemaVersion", "owner", "start", "destination", "profileId", "allowPartial", "maxItems"}))
+				return reject(ErrorCategory::Validation, "navigation.route.request contains an unsupported field.");
+			if (const auto unavailable = requireWorld()) return *unavailable;
+			if (!request.arguments.contains("owner") || !request.arguments.contains("start")
+				|| !request.arguments.contains("destination") || !request.arguments.contains("profileId"))
+				return reject(ErrorCategory::Validation, "A route request requires owner, start, destination, and profileId.");
+			NavigationOwnerHandle owner{};
+			if (!parseOwner(request.arguments["owner"], owner) || owner.world != root->world)
+				return reject(ErrorCategory::Conflict, "The route owner does not belong to the published navigation world.");
+			std::string positionError;
+			const auto start = Serializer::DeserializeWorldPosition(request.arguments["start"], &positionError);
+			if (!start) return reject(ErrorCategory::Validation, "start is not a canonical finite world position: " + positionError);
+			const auto destination = Serializer::DeserializeWorldPosition(request.arguments["destination"], &positionError);
+			if (!destination) return reject(ErrorCategory::Validation, "destination is not a canonical finite world position: " + positionError);
+			if (!request.arguments["profileId"].is_string())
+				return reject(ErrorCategory::Validation, "profileId must be a decimal string.");
+			std::uint64_t profileId = 0U;
+			const std::string profileText = request.arguments["profileId"].get<std::string>();
+			const auto [profileEnd, profileError] = std::from_chars(profileText.data(), profileText.data() + profileText.size(), profileId);
+			if (profileError != std::errc{} || profileEnd != profileText.data() + profileText.size() || profileId == 0U)
+				return reject(ErrorCategory::Validation, "profileId must be a non-zero canonical decimal string.");
+			if (request.arguments.contains("allowPartial") && !request.arguments["allowPartial"].is_boolean())
+				return reject(ErrorCategory::Validation, "allowPartial must be boolean when supplied.");
+			std::size_t requestedPoints = 4096U;
+			if (!readBoundedCount(request.arguments, "maxItems", 4096U, 4096U, requestedPoints))
+				return reject(ErrorCategory::Validation, "maxItems must be an unsigned value from 1 through 4096.");
+			if (mainEditor == nullptr || mainEditor->GetNavigationAuthoringTransactions() == nullptr)
+				return reject(ErrorCategory::Unavailable, "Navigation authoring profiles are not available outside an initialized editor session.");
+			const auto& authoredProfiles = mainEditor->GetNavigationAuthoringTransactions()->CurrentState().profiles;
+			const auto profile = std::find_if(authoredProfiles.begin(), authoredProfiles.end(), [profileId](const NavigationProfile& value) {
+				return value.profileId == profileId;
+			});
+			if (profile == authoredProfiles.end()) return reject(ErrorCategory::MissingTarget, "profileId does not name an authored navigation profile.");
+			Ground::GroundRouteQuery::Request routeRequest;
+			routeRequest.owner = owner;
+			routeRequest.start = {root->world, *start};
+			routeRequest.destination = {root->world, *destination};
+			routeRequest.profile = *profile;
+			routeRequest.allowPartial = request.arguments.value("allowPartial", false);
+			routeRequest.maxExpansions = static_cast<std::uint32_t>(std::min<std::size_t>(requestedPoints * 8U, 32768U));
+			if (!ValidateNavigationLocation(routeRequest.start).Succeeded() || !ValidateNavigationLocation(routeRequest.destination).Succeeded())
+				return reject(ErrorCategory::Validation, "Route endpoints must be canonical finite locations in the owner world.");
+			// The system captures immutable published coverage and private shard data;
+			// automation supplies endpoints and policy, never a synthetic topology.
+			const NavigationRequestHandle handle = navigation.SubmitOneShotRoute(routeRequest);
+			if (!handle.IsValid()) return reject(ErrorCategory::QueueFull, "Navigation route admission rejected the copied request.");
+			return succeed("Submitted a copied provider-neutral navigation route request.", {{"schemaVersion", 1U}, {"commitReceipt", {
+				{"accepted", true}, {"operation", std::string(operationName)}, {"request", serializeRequest(handle)},
+				{"worldGeneration", root->world.worldGeneration}, {"maxItems", requestedPoints}}}});
+		}
+
+		if (operation == AutomationOperation("navigation.route.read") || operation == AutomationOperation("navigation.route.cancel"))
+		{
+			if (!hasOnlyFields(request.arguments, {"schemaVersion", "request", "maxItems"}))
+				return reject(ErrorCategory::Validation, "Navigation route read/cancel accepts only schemaVersion, request, and maxItems.");
+			if (const auto unavailable = requireWorld()) return *unavailable;
+			if (!request.arguments.contains("request")) return reject(ErrorCategory::Validation, "Navigation route read/cancel requires a generation-qualified request object.");
+			NavigationRequestHandle handle{};
+			if (!parseRequest(request.arguments["request"], handle) || handle.owner.world != root->world)
+				return reject(ErrorCategory::Conflict, "The navigation request handle is malformed or belongs to another world.");
+			if (operation == AutomationOperation("navigation.route.cancel"))
+			{
+				if (!navigation.CancelRequest(handle)) return reject(ErrorCategory::StaleTarget, "The navigation request is no longer cancelable for this owner generation.");
+				return succeed("Requested cooperative cancellation of the copied navigation route.", {{"schemaVersion", 1U}, {"commitReceipt", {
+					{"accepted", true}, {"request", serializeRequest(handle)}, {"worldGeneration", root->world.worldGeneration}}}});
+			}
+			std::size_t maximumPoints = 1024U;
+			if (!readBoundedCount(request.arguments, "maxItems", 1024U, 4096U, maximumPoints))
+				return reject(ErrorCategory::Validation, "maxItems must be an unsigned value from 1 through 4096.");
+			const NavigationStoreReadResult<NavigationRequestRecord> read = navigation.ReadRequest(handle);
+			if (!read.HasRecord()) return reject(ErrorCategory::StaleTarget, "The navigation request handle is stale, expired, or not owned by this world.");
+			const NavigationRequestRecord& record = *read.record;
+			nlohmann::json points = nlohmann::json::array();
+			const NavigationRouteHandle routeHandle = navigation.PublishedRouteForRequest(handle);
+			const Ground::GroundRouteQuery::RetainedRoute route = navigation.ReadRoute(routeHandle);
+			for (std::size_t index = 0U; index < route.points.size() && index < maximumPoints; ++index)
+				points.push_back(serializeLocation(route.points[index]));
+			return succeed("Read copied navigation request and route state.", {{"schemaVersion", 1U}, {"route", {
+				{"request", serializeRequest(handle)}, {"status", std::string(ToString(read.status))},
+				{"lifecycle", std::string(ToString(record.lifecycle))}, {"outcome", std::string(ToString(record.outcome))},
+				{"reason", std::string(ToString(record.reason))}, {"start", serializeLocation(record.start)},
+				{"destination", serializeLocation(record.destination)}, {"routeValid", route.IsValid()},
+				{"points", std::move(points)}, {"truncated", route.points.size() > maximumPoints}}}});
+		}
+
+		if (operation == AutomationOperation("navigation.authoring.apply"))
+		{
+			if (!hasOnlyFields(request.arguments, {"schemaVersion", "operations"}) || !request.arguments.contains("operations")
+				|| !request.arguments["operations"].is_array() || request.arguments["operations"].empty()
+				|| request.arguments["operations"].size() > 1024U)
+				return reject(ErrorCategory::Validation, "navigation.authoring.apply requires 1 through 1024 typed operations.");
+			if (mainEditor == nullptr) return reject(ErrorCategory::Unavailable, "Navigation authoring is unavailable without the main editor subsystem.");
+			auto* authoring = mainEditor->GetNavigationAuthoringTransactions();
+			if (authoring == nullptr) return reject(ErrorCategory::Unavailable, "Navigation authoring history is unavailable before editor initialization.");
+			TerraEngine::Editor::Navigation::NavigationAuthoredState before = authoring->Save();
+			auto after = before;
+			for (const nlohmann::json& operationValue : request.arguments["operations"])
+			{
+				if (!operationValue.is_object() || !hasOnlyFields(operationValue, {"kind", "profiles"})
+					|| operationValue.value("kind", std::string{}) != "replaceProfiles"
+					|| !operationValue.contains("profiles") || !operationValue["profiles"].is_array()
+					|| operationValue["profiles"].size() > 64U)
+					return reject(ErrorCategory::Validation, "Each authoring operation must be a bounded replaceProfiles operation.");
+				std::vector<NavigationProfile> replacement;
+				replacement.reserve(operationValue["profiles"].size());
+				for (const nlohmann::json& encodedProfile : operationValue["profiles"])
+				{
+					std::string profileError;
+					const auto profile = Serializer::DeserializeNavigationProfile(encodedProfile, &profileError);
+					if (!profile) return reject(ErrorCategory::Validation, "A navigation profile is invalid: " + profileError);
+					replacement.push_back(*profile);
+				}
+				after.profiles = std::move(replacement);
+			}
+			// The service is running in the provider-declared protected commit portion
+			// of the request. Queue then complete through the existing transaction so
+			// rejected input cannot leave partial authoring or undo history behind.
+			const auto queued = authoring->QueueReplace("Navigation automation profile replacement", std::move(before), std::move(after));
+			const auto completed = authoring->CompleteAtProtectedBoundary(queued.transactionId, true);
+			if (!completed.IsCommitted()) return reject(ErrorCategory::Conflict, "Navigation authoring transaction was rejected before its protected commit.");
+			return succeed("Committed typed navigation authoring profiles at the protected boundary.", {{"schemaVersion", 1U}, {"commitReceipt", {
+				{"transactionId", completed.transactionId}, {"state", "committed"}, {"projectGeneration", request.state.projectGeneration}}}});
+		}
+
+		if (operation == AutomationOperation("navigation.cache.prepare") || operation == AutomationOperation("navigation.cache.status"))
+		{
+			const bool isPrepare = operation == AutomationOperation("navigation.cache.prepare");
+			if (!hasOnlyFields(request.arguments, isPrepare ? std::initializer_list<std::string_view>{"schemaVersion"}
+				: std::initializer_list<std::string_view>{"schemaVersion", "jobId"}))
+				return reject(ErrorCategory::Validation, "Navigation cache operation contains an unsupported field.");
+			if (!isPrepare && (!request.arguments.contains("jobId") || !request.arguments["jobId"].is_string()
+				|| request.arguments["jobId"].get<std::string>().empty() || request.arguments["jobId"].get<std::string>().size() > 128U))
+				return reject(ErrorCategory::Validation, "navigation.cache.status requires a bounded non-empty jobId.");
+			// No cache-builder service is currently registered with NavigationSystem.
+			// Returning unavailable is deliberate: creating a synthetic job would claim
+			// progress that no scheduler-owned cache worker can actually perform.
+			return reject(ErrorCategory::Unavailable, "Navigation cache preparation is unavailable because no cache builder is registered.");
+		}
+
+		return reject(ErrorCategory::UnsupportedCapability, "Navigation capability has no bound implementation.");
 	}
 
 	nlohmann::json EditorAutomationService::ExecuteProviderHandler(AutomationOperationId operation, std::string_view operationName, const nlohmann::json& arguments, WriteMode writeMode, const std::string& requestId)

@@ -6,6 +6,7 @@
 #include "ExportEvidence.h"
 #include "ExportMeshClassification.h"
 #include "AnimationExportDependencies.h"
+#include "NavigationExportDependencies.h"
 #include "ExportOutputTransaction.h"
 #include "ExportPackageValidator.h"
 #include "ExportScriptBindingRewriter.h"
@@ -1927,6 +1928,34 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 					: stagedAssetIdentityError;
 				return false;
 			}
+		}
+
+		// Navigation companions are engine-owned cooked data. Saved `.tenav` files
+		// remain optional, and a project with no navigation sources is a valid
+		// source-free package rather than an export error.
+		const TerraEngine::Export::NavigationExportClosure navigationClosure =
+			TerraEngine::Export::NavigationExportDependencyResolver::Resolve(stagingDir);
+		if(!navigationClosure.Complete()) {
+			for(const TerraEngine::Export::NavigationExportIssue& issue : navigationClosure.issues) {
+				ExportDiagnostic diagnostic;
+				diagnostic.severity = ExportDiagnosticSeverity::Error;
+				diagnostic.category = "Navigation";
+				diagnostic.stage = "asset_staging";
+				diagnostic.code = issue.code;
+				diagnostic.message = issue.message;
+				diagnostic.filePath = issue.path;
+				result.diagnostics.push_back(std::move(diagnostic));
+			}
+			result.errorMessage = navigationClosure.issues.empty()
+				? "Navigation export dependency closure is incomplete."
+				: navigationClosure.issues.front().message;
+			return false;
+		}
+		std::string navigationManifestError;
+		if(!TerraEngine::Export::NavigationExportDependencyResolver::WriteRuntimeManifest(
+			navigationClosure, stagingDir, navigationManifestError)) {
+			result.errorMessage = navigationManifestError;
+			return false;
 		}
 
 		// Directory iteration order is platform-dependent. Sort durable records

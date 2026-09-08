@@ -61,17 +61,25 @@ namespace TerraEngine::Tests {
 				&& kManagedVTableV2Size == 136U
 				&& offsetof(ManagedVTable, getAnimationAbiVersion) == kManagedVTableV2Size
 				&& kManagedVTableAnimationVersion == 3U
-				&& sizeof(ManagedVTable) == kManagedVTableV3Size,
-				"The NativeAOT physics hooks must remain an append-only v2 tail after the v1 table.");
+				&& kManagedVTableV3Size == 152U
+				&& kManagedVTableNavigationVersion == 4U
+				&& offsetof(ManagedVTable, getNavigationAbiVersion) == kManagedVTableV3Size
+				&& kManagedVTableV4Size == 160U
+				&& sizeof(ManagedVTable) == kManagedVTableV4Size,
+				"The NativeAOT physics v2 tail and animation v3 tail must remain fixed when navigation appends v4.");
 
 			std::ifstream managedMirror{std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Managed/Source/Export/ExportVTable.cs"};
 			const std::string source{std::istreambuf_iterator<char>(managedMirror), std::istreambuf_iterator<char>()};
-			context.Expect(source.find("Size = 152") != std::string::npos
+			context.Expect(source.find("Size = 160") != std::string::npos
+				&& source.find("V3Size = 152") != std::string::npos
+				&& source.find("V4Size = 160") != std::string::npos
 				&& source.find("FieldOffset(120)") != std::string::npos
 				&& source.find("FieldOffset(128)") != std::string::npos
+				&& source.find("FieldOffset(152)") != std::string::npos
 				&& source.find("GetPhysicsAbiVersion") != std::string::npos
-				&& source.find("DispatchPhysicsEventBatch") != std::string::npos,
-				"The managed NativeAOT mirror must expose the native physics ABI version and protected event-dispatch hooks at matching offsets.");
+				&& source.find("DispatchPhysicsEventBatch") != std::string::npos
+				&& source.find("GetNavigationAbiVersion") != std::string::npos,
+				"The managed NativeAOT mirror must retain the physics ABI offsets and append navigation at v4.");
 		});
 	}
 }

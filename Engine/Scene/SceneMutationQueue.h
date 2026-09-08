@@ -10,6 +10,7 @@
 #include "Core/Object/Reflection.h"
 #include "SceneGraphRuntime.h"
 #include "TransactionalMutation.h"
+#include "WorldCoordinate.h"
 #include "Utilities/UUID.h"
 
 #include <cstdint>
@@ -95,6 +96,48 @@ namespace TerraEngine::Scene {
 		std::vector<SceneDiagnostic> diagnostics;
 	};
 
+	// Navigation observes committed source changes through copied values. Producers
+	// never hand workers a live component, transform, or collider pointer that may
+	// change while a detached navigation candidate is being prepared.
+	enum class NavigationSourceMutationOperation : std::uint8_t {
+		Create,
+		Enable,
+		Disable,
+		Move,
+		Rotate,
+		Scale,
+		Delete,
+		Replace,
+		Reshape
+	};
+
+	struct NavigationSourceMutationBounds {
+		WorldPosition minimum{};
+		WorldPosition maximum{};
+		bool valid = false;
+	};
+
+	struct NavigationSourceMutationIntent {
+		std::string intentId;
+		std::string transactionId;
+		TerraEngine::UUID sourceId = TerraEngine::EMPTY_UUID;
+		NavigationSourceMutationOperation operation = NavigationSourceMutationOperation::Create;
+		NavigationSourceMutationBounds oldBounds{};
+		NavigationSourceMutationBounds newBounds{};
+		std::uint64_t expectedSourceRevision = 0U;
+		std::uint64_t committedSourceRevision = 0U;
+		std::uint64_t physicalReadyRevision = 0U;
+		bool oldEnabled = false;
+		bool newEnabled = false;
+	};
+
+	struct NavigationSourceMutationReceipt {
+		NavigationSourceMutationIntent intent{};
+		TransactionStatus transactionStatus = TransactionStatus::Pending;
+		bool accepted = false;
+		std::string message;
+	};
+
 	struct SceneMutationBatchResult {
 		bool applied = false;
 		std::string commitName;
@@ -114,6 +157,9 @@ namespace TerraEngine::Scene {
 		// Typed animation receipts become visible only because Apply owns a declared
 		// protected boundary; systems can consume them without JSON conversion.
 		std::vector<AnimationMutationPublication> acceptedAnimationPublications;
+		// Dynamic navigation consumes only decisions that share the scene commit's
+		// protected observation boundary.
+		std::vector<NavigationSourceMutationReceipt> navigationSourceMutationReceipts;
 		std::vector<SceneDiagnostic> diagnostics;
 		std::string formattedCommitSummary;
 	};
@@ -139,6 +185,7 @@ namespace TerraEngine::Scene {
 		void EnqueueFromWorker(std::uint32_t workerIndex, SceneMutationRequest request);
 		void EnqueueTransaction(Transaction transaction);
 		void EnqueuePublicationGroup(TransactionPublicationGroup group);
+		[[nodiscard]] bool EnqueueNavigationSourceMutationIntent(NavigationSourceMutationIntent intent);
 		TransactionResult PreflightTransaction(const Transaction& transaction, ObjectManager& objects) const;
 		bool CancelTransaction(const std::string& transactionId);
 		bool CancelPublicationGroup(const std::string& groupId);
@@ -152,6 +199,7 @@ namespace TerraEngine::Scene {
 		// short-lived receipt channel at the beginning of its following frame.
 		std::vector<TransactionResult> DrainCompletedEditorTransactionResults();
 		std::vector<EditorTransactionCompletion> DrainCompletedEditorTransactions();
+		std::vector<NavigationSourceMutationReceipt> DrainCompletedNavigationSourceMutationReceipts();
 		TransactionDiagnostics GetTransactionDiagnostics() const;
 		void Clear();
 		SceneMutationBatchResult Validate(const SceneGraph& graph) const;
@@ -165,7 +213,9 @@ namespace TerraEngine::Scene {
 		std::vector<SceneMutationWorkerBuffer> workerBuffers;
 		std::vector<Transaction> transactions;
 		std::vector<TransactionPublicationGroup> publicationGroups;
+		std::vector<NavigationSourceMutationIntent> navigationSourceMutationIntents;
 		std::vector<EditorTransactionCompletion> completedEditorTransactions;
+		std::vector<NavigationSourceMutationReceipt> completedNavigationSourceMutationReceipts;
 		TransactionDiagnostics transactionDiagnostics;
 		mutable std::mutex requestsMutex;
 	};

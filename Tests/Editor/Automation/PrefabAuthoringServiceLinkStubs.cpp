@@ -210,6 +210,15 @@ void MainEditorSubsystem::StopPlayMode()
 {
 }
 
+TerraEngine::Editor::Navigation::NavigationAuthoringTransactions*
+MainEditorSubsystem::GetNavigationAuthoringTransactions() noexcept
+{
+	// The automation unit-test executable intentionally omits the full editor
+	// workspace. Returning no authoring service exercises the production handler's
+	// explicit unavailable result without manufacturing mutable editor state.
+	return nullptr;
+}
+
 // The editor-test target links automation services without the complete main
 // workspace/UI graph. This test-side implementation mirrors the owning prefab
 // service contract; the installed editor links the production implementation

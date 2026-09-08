@@ -6,6 +6,7 @@
 // features like the ObjectManager and ThreadPool.
 
 #pragma once
+#include <cstdint>
 #include <iostream>
 #include <vector>
 
@@ -110,6 +111,18 @@ class TERRAENGINE_API Engine {
 		SystemsBase* editorSystem = nullptr;
 		bool editorMode = false;
 		bool headlessPhysicsValidation = false;
+		// Zero means bootstrap capture has not yet admitted the current protected
+		// scene-component revision. Failed captures intentionally remain retryable
+		// because terrain collision or resource companions can publish later.
+		std::uint64_t lastNavigationBootstrapComponentRevision = 0U;
+		// Profile configuration selects distinct Recast/Detour shard build keys.
+		// Track its copied revision beside scene components so editor/project profile
+		// changes receive coverage even if no object was touched in that frame.
+		std::uint64_t lastNavigationBootstrapProfileRevision = 0U;
+		// Terrain collision can publish a newer physically authoritative heightfield
+		// without rewriting the TerrainComponent itself. Track that generation so
+		// navigation recaptures holes/heights at the next normal frame-end boundary.
+		std::uint64_t lastNavigationBootstrapTerrainPublicationGeneration = 0U;
 
 		ObjectManager& objManager = ObjectManager::instance();
 		ThreadPool& pool = ThreadPool::instance();

@@ -12,6 +12,64 @@ function(terraengine_install_physics_dependency_metadata destination)
 	)
 endfunction()
 
+# Recast/Detour are statically linked private implementation details. The
+# installed tree needs their approved scope record and upstream Zlib notice, but
+# must never publish provider headers, static libraries, demos, or source files.
+function(terraengine_install_recast_navigation_metadata destination)
+	install(FILES
+		"${CMAKE_SOURCE_DIR}/Docs/Navigation.md"
+		DESTINATION "${destination}/Docs"
+	)
+	install(FILES
+		"${CMAKE_SOURCE_DIR}/Docs/Dependencies/RecastNavigation.md"
+		DESTINATION "${destination}/Docs/Dependencies"
+	)
+	install(FILES
+		"${CMAKE_SOURCE_DIR}/External/recastnavigation/License.txt"
+		DESTINATION "${destination}/ThirdPartyNotices"
+		RENAME "RecastNavigation-Zlib.txt"
+	)
+endfunction()
+
+# Navigation acceptance is installed as one complete, source-free bundle. The
+# runner must be beside its scripts, schema, fixtures, and Windows DLL closure;
+# using this absolute destination also avoids the generic CMAKE_INSTALL_PREFIX.
+function(terraengine_install_navigation_foundation destination)
+	terraengine_install_recast_navigation_metadata("${destination}")
+	if(NOT BUILD_TESTING OR NOT TARGET TerraEngineNavigationValidation)
+		return()
+	endif()
+
+	install(TARGETS TerraEngineNavigationValidation
+		RUNTIME DESTINATION "${destination}/Tests/Tools/Navigation"
+		LIBRARY DESTINATION "${destination}/Tests/Tools/Navigation"
+		ARCHIVE DESTINATION "${destination}/Tests/Tools/Navigation"
+	)
+	install(FILES
+		"${CMAKE_SOURCE_DIR}/Tests/Tools/Navigation/RunInstalledNavigationAcceptance.ps1"
+		"${CMAKE_SOURCE_DIR}/Tests/Tools/Navigation/CompareNavigationEvidence.ps1"
+		"${CMAKE_SOURCE_DIR}/Tests/Tools/Navigation/VerifyNavigationArchitecture.ps1"
+		"${CMAKE_SOURCE_DIR}/Tests/Tools/Navigation/navigation-evidence.schema.json"
+		DESTINATION "${destination}/Tests/Tools/Navigation"
+	)
+	install(DIRECTORY "${CMAKE_SOURCE_DIR}/Tests/Fixtures/Navigation/"
+		DESTINATION "${destination}/Tests/Fixtures/Navigation"
+		FILES_MATCHING PATTERN "*.json"
+	)
+	install(FILES "${CMAKE_SOURCE_DIR}/Tests/Fixtures/Performance/Navigation/workloads.json"
+		DESTINATION "${destination}/Tests/Fixtures/Performance/Navigation"
+	)
+	if(WIN32)
+		# The PowerShell wrapper launches this executable directly, so copy both
+		# the engine DLL and all transitive runtime DLLs beside the acceptance tool.
+		install(FILES "$<TARGET_FILE:TerraEngine-Engine>"
+			DESTINATION "${destination}/Tests/Tools/Navigation")
+		install(FILES $<TARGET_RUNTIME_DLLS:TerraEngineNavigationValidation>
+			DESTINATION "${destination}/Tests/Tools/Navigation"
+			OPTIONAL)
+	endif()
+endfunction()
+
 # Audio installs only the provider-neutral extension contract. The concrete
 # miniaudio adapter and all upstream SDK headers remain private build inputs.
 function(terraengine_install_audio_foundation destination)

@@ -127,5 +127,65 @@ namespace TerraEngine::Tests {
 			context.Expect(queue.Empty(), "Applied remove-component requests should clear the queue.");
 			objects.clear();
 		});
+
+		registry.Add("SceneMutationQueue.NavigationSourceIntentPublishesWithCommittedTransaction", [](TestContext& context) {
+			using namespace TerraEngine::Scene;
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			SceneMutationQueue queue;
+			TransactionalMutationBuilder builder("navigation-source-create", TransactionOrigin::System, "NavigationTest");
+			builder.CreateObject(1, "Dynamic Support");
+			queue.EnqueueTransaction(std::move(builder).Build());
+
+			NavigationSourceMutationIntent intent{};
+			intent.intentId = "navigation-intent-create";
+			intent.transactionId = "navigation-source-create";
+			intent.sourceId = TerraEngine::GenerateUUID();
+			intent.operation = NavigationSourceMutationOperation::Create;
+			intent.newBounds = {{{0, 0, 0}, {-2.0, 0.0, -2.0}}, {{0, 0, 0}, {2.0, 1.0, 2.0}}, true};
+			intent.committedSourceRevision = 1U;
+			intent.physicalReadyRevision = 1U;
+			intent.newEnabled = true;
+			context.Expect(queue.EnqueueNavigationSourceMutationIntent(intent),
+				"A valid copied navigation intent should be admitted before the scene transaction flush.");
+
+			const SceneMutationBatchResult result = queue.Apply(objects, "navigation-source-commit");
+			context.Expect(result.navigationSourceMutationReceipts.size() == 1U
+				&& result.navigationSourceMutationReceipts.front().accepted,
+				"The source change must become observable at the same protected boundary as its committed transaction.");
+			objects.clear();
+		});
+
+		registry.Add("SceneMutationQueue.NavigationSourceIntentRejectsAtomicallyWithTransaction", [](TestContext& context) {
+			using namespace TerraEngine::Scene;
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			const TerraEngine::UUID missingObject = TerraEngine::GenerateUUID();
+			SceneMutationQueue queue;
+			TransactionalMutationBuilder builder("navigation-source-rejected", TransactionOrigin::System, "NavigationTest");
+			builder.DeleteObject(missingObject);
+			queue.EnqueueTransaction(std::move(builder).Build());
+
+			NavigationSourceMutationIntent intent{};
+			intent.intentId = "navigation-intent-delete";
+			intent.transactionId = "navigation-source-rejected";
+			intent.sourceId = missingObject;
+			intent.operation = NavigationSourceMutationOperation::Delete;
+			intent.oldBounds = {{{0, 0, 0}, {-2.0, 0.0, -2.0}}, {{0, 0, 0}, {2.0, 1.0, 2.0}}, true};
+			intent.expectedSourceRevision = 1U;
+			intent.committedSourceRevision = 2U;
+			intent.physicalReadyRevision = 2U;
+			intent.oldEnabled = true;
+			context.Expect(queue.EnqueueNavigationSourceMutationIntent(intent),
+				"The copied navigation deletion should wait for the owning transaction decision.");
+
+			const SceneMutationBatchResult result = queue.Apply(objects, "navigation-source-reject");
+			context.Expect(result.navigationSourceMutationReceipts.size() == 1U
+				&& !result.navigationSourceMutationReceipts.front().accepted,
+				"A rejected scene transaction must reject its navigation change without partial visibility.");
+			context.Expect(result.navigationSourceMutationReceipts.front().transactionStatus != TransactionStatus::Committed,
+				"A rejected source change receipt must retain the exact non-committed transaction decision.");
+			objects.clear();
+		});
 	}
 }

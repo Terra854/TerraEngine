@@ -21,6 +21,10 @@ inline constexpr std::uint32_t kNativeInputKeyCapacity = 128U;
 inline constexpr std::uint32_t kNativeInputMouseButtonCapacity = 8U;
 inline constexpr std::uint32_t kNativeAudioAbiVersion = 1U;
 inline constexpr std::uint32_t kNativeAudioDiagnosticBytes = 192U;
+// Navigation records use their own ABI version so gameplay route data can grow
+// independently of audio, physics, and the generic runtime dispatcher.
+inline constexpr std::uint32_t kNativeNavigationAbiVersion = 1U;
+inline constexpr std::uint32_t kNativeNavigationDiagnosticBytes = 192U;
 
 #pragma pack(push, 8)
 struct NativePhysicsAbiHeader { std::uint32_t abiVersion; std::uint32_t structSize; };
@@ -564,6 +568,216 @@ static_assert(offsetof(NativeAudioCommandReceipt, header) == 0U);
 static_assert(offsetof(NativeAudioPlaybackState, header) == 0U);
 static_assert(offsetof(NativeAudioMixState, header) == 0U);
 
+// Navigation ABI v1 carries only fixed-width, copied engine values. In
+// particular, provider objects, STL containers, bool fields, and borrowed route
+// memory never cross this boundary into managed or NativeAOT callers.
+#pragma pack(push, 8)
+struct NativeNavigationAbiHeader { std::uint32_t abiVersion; std::uint32_t structSize; };
+struct NativeNavigationWorldHandle { std::uint64_t worldId; std::uint64_t worldGeneration; };
+struct NativeNavigationOwnerHandle {
+	NativeNavigationWorldHandle world;
+	std::uint64_t ownerId;
+	std::uint64_t ownerGeneration;
+};
+struct NativeNavigationRequestHandle {
+	NativeNavigationOwnerHandle owner;
+	std::uint32_t slotIndex;
+	std::uint32_t reserved;
+	std::uint64_t slotGeneration;
+};
+struct NativeNavigationRouteHandle {
+	NativeNavigationOwnerHandle owner;
+	std::uint32_t slotIndex;
+	std::uint32_t reserved;
+	std::uint64_t slotGeneration;
+};
+struct NativeNavigationAgentHandle {
+	NativeNavigationOwnerHandle owner;
+	std::uint32_t slotIndex;
+	std::uint32_t reserved;
+	std::uint64_t slotGeneration;
+};
+struct NativeNavigationCommandHandle {
+	NativeNavigationOwnerHandle owner;
+	std::uint32_t slotIndex;
+	std::uint32_t reserved;
+	std::uint64_t slotGeneration;
+};
+struct NativeNavigationLocation {
+	NativeNavigationWorldHandle world;
+	std::int64_t cellX;
+	std::int64_t cellY;
+	std::int64_t cellZ;
+	double offsetX;
+	double offsetY;
+	double offsetZ;
+};
+struct NativeNavigationProfile {
+	std::uint64_t profileId;
+	std::uint64_t revision;
+	double radiusMetres;
+	double heightMetres;
+	double stepHeightMetres;
+	double maxSlopeDegrees;
+	double clearanceMarginMetres;
+	double horizontalResolutionMetres;
+	double verticalResolutionMetres;
+	std::uint32_t excludedAreasMask;
+	std::uint32_t reserved;
+	double areaPenalties[32];
+};
+
+enum class NativeNavigationStatus : std::uint32_t {
+	Success = 0U,
+	Accepted,
+	InvalidArgument,
+	InvalidOwner,
+	StaleTarget,
+	Expired,
+	LimitExceeded,
+	Unavailable,
+	Unsupported,
+	VersionMismatch,
+	Failed
+};
+
+enum class NativeNavigationCommandState : std::uint32_t { Queued = 0U, Applied, Rejected, Expired };
+
+struct NativeNavigationRouteRequest {
+	NativeNavigationAbiHeader header;
+	NativeNavigationOwnerHandle owner;
+	NativeNavigationProfile profile;
+	NativeNavigationLocation start;
+	NativeNavigationLocation destination;
+	std::uint32_t allowPartial;
+	std::uint32_t allowEndpointAdjustment;
+	std::uint32_t maximumExpansions;
+	std::uint32_t reserved;
+	std::uint64_t correlationId;
+};
+struct NativeNavigationSubmitReceipt {
+	NativeNavigationAbiHeader header;
+	NativeNavigationStatus status;
+	std::uint32_t reserved;
+	NativeNavigationRequestHandle request;
+	std::uint64_t correlationId;
+	char diagnostic[kNativeNavigationDiagnosticBytes];
+};
+struct NativeNavigationRequestSnapshot {
+	NativeNavigationAbiHeader header;
+	NativeNavigationStatus status;
+	std::uint32_t lifecycle;
+	std::uint32_t outcome;
+	std::uint32_t reason;
+	NativeNavigationRequestHandle request;
+	NativeNavigationRouteHandle route;
+	std::uint64_t intentGeneration;
+	NativeNavigationLocation start;
+	NativeNavigationLocation destination;
+	std::uint64_t createdTick;
+	std::uint64_t expiryTick;
+};
+struct NativeNavigationRoutePoint {
+	NativeNavigationAbiHeader header;
+	NativeNavigationLocation location;
+};
+struct NativeNavigationBufferInfo {
+	NativeNavigationAbiHeader header;
+	NativeNavigationStatus status;
+	std::uint32_t requiredCount;
+	std::uint32_t copiedCount;
+	// Invalidation readers must discard cached owner state when the bounded
+	// ledger has overwritten records newer than their requested cursor.
+	std::uint32_t overflowed;
+	std::uint64_t pinnedGeneration;
+};
+struct NativeNavigationRouteValidationRequest {
+	NativeNavigationAbiHeader header;
+	NativeNavigationRouteHandle route;
+	NativeNavigationLocation currentPosition;
+	std::uint64_t expectedSourceRevision;
+};
+struct NativeNavigationRouteValidationResult {
+	NativeNavigationAbiHeader header;
+	NativeNavigationStatus status;
+	std::uint32_t usable;
+	std::uint32_t reason;
+	std::uint32_t reserved;
+	std::uint64_t observedSourceRevision;
+};
+struct NativeNavigationCancellationRequest {
+	NativeNavigationAbiHeader header;
+	NativeNavigationRequestHandle request;
+};
+struct NativeNavigationDestinationRequest {
+	NativeNavigationAbiHeader header;
+	NativeNavigationAgentHandle agent;
+	NativeNavigationLocation destination;
+	std::uint32_t routePolicy;
+	std::uint32_t capabilityMask;
+	std::uint64_t expectedIntentGeneration;
+	std::uint64_t correlationId;
+};
+struct NativeNavigationCommandReceipt {
+	NativeNavigationAbiHeader header;
+	NativeNavigationStatus status;
+	NativeNavigationCommandState state;
+	NativeNavigationCommandHandle command;
+	NativeNavigationRequestHandle resultingRequest;
+	std::uint64_t resultingIntentGeneration;
+	char diagnostic[kNativeNavigationDiagnosticBytes];
+};
+struct NativeNavigationCommandQuery {
+	NativeNavigationAbiHeader header;
+	NativeNavigationCommandHandle command;
+};
+struct NativeNavigationAgentSnapshot {
+	NativeNavigationAbiHeader header;
+	NativeNavigationStatus status;
+	std::uint32_t routePolicy;
+	NativeNavigationAgentHandle agent;
+	std::uint64_t intentGeneration;
+	std::uint64_t poseGeneration;
+	NativeNavigationRequestHandle activeRequest;
+	NativeNavigationRouteHandle activeRoute;
+	NativeNavigationLocation currentPosition;
+	NativeNavigationLocation destination;
+};
+struct NativeNavigationInvalidationCursor {
+	NativeNavigationAbiHeader header;
+	NativeNavigationOwnerHandle owner;
+	std::uint64_t cursor;
+};
+struct NativeNavigationInvalidationRecord {
+	NativeNavigationAbiHeader header;
+	NativeNavigationOwnerHandle owner;
+	NativeNavigationRouteHandle route;
+	std::uint32_t reason;
+	std::uint32_t outcome;
+	std::uint64_t sourceRevision;
+	std::uint64_t observationGeneration;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(NativeNavigationAbiHeader) == 8U);
+static_assert(sizeof(NativeNavigationWorldHandle) == 16U);
+static_assert(sizeof(NativeNavigationOwnerHandle) == 32U);
+static_assert(sizeof(NativeNavigationRequestHandle) == 48U);
+static_assert(sizeof(NativeNavigationRouteHandle) == 48U);
+static_assert(sizeof(NativeNavigationLocation) == 64U);
+static_assert(sizeof(NativeNavigationProfile) == 336U);
+static_assert(sizeof(NativeNavigationRouteRequest) == 528U);
+static_assert(sizeof(NativeNavigationSubmitReceipt) == 264U);
+static_assert(sizeof(NativeNavigationRoutePoint) == 72U);
+static_assert(sizeof(NativeNavigationBufferInfo) == 32U);
+static_assert(sizeof(NativeNavigationAgentSnapshot) == 304U);
+static_assert(offsetof(NativeNavigationRouteRequest, header) == 0U);
+static_assert(offsetof(NativeNavigationSubmitReceipt, header) == 0U);
+static_assert(offsetof(NativeNavigationRequestSnapshot, header) == 0U);
+static_assert(offsetof(NativeNavigationRouteValidationRequest, header) == 0U);
+static_assert(offsetof(NativeNavigationInvalidationRecord, header) == 0U);
+static_assert(offsetof(NativeNavigationAgentSnapshot, header) == 0U);
+
 class Engine;
 
 // The editor executable registers a plain function pointer so gameplay code can
@@ -642,6 +856,39 @@ extern "C" {
 		NativeAudioPlaybackState* state);
 	TERRAENGINE_API NativeAudioStatus Native_Audio_ReadMasterMix(NativeAudioMixState* state);
 	TERRAENGINE_API NativeAudioStatus Native_Audio_SetMasterMix(const NativeAudioMixState* state);
+
+	// Navigation ABI v1. Every submission is copied and all route/invalidation
+	// arrays use explicit caller-owned capacity/count records. No API returns a
+	// provider pointer or invokes a managed callback from a worker thread.
+	TERRAENGINE_API std::uint32_t Native_Navigation_GetAbiVersion();
+	TERRAENGINE_API NativeNavigationStatus Native_Navigation_SubmitRoute(
+		const NativeNavigationRouteRequest* request, NativeNavigationSubmitReceipt* receipt);
+	TERRAENGINE_API NativeNavigationStatus Native_Navigation_ReadRequest(
+		const NativeNavigationRequestHandle* request, NativeNavigationRequestSnapshot* snapshot);
+	TERRAENGINE_API NativeNavigationStatus Native_Navigation_CopyRoute(
+		const NativeNavigationRouteHandle* route, NativeNavigationRoutePoint* points,
+		std::uint32_t capacity, NativeNavigationBufferInfo* info);
+	TERRAENGINE_API NativeNavigationStatus Native_Navigation_CancelRequest(
+		const NativeNavigationCancellationRequest* request, NativeNavigationSubmitReceipt* receipt);
+	TERRAENGINE_API NativeNavigationStatus Native_Navigation_ReleaseResult(
+		const NativeNavigationCancellationRequest* request, NativeNavigationSubmitReceipt* receipt);
+	TERRAENGINE_API NativeNavigationStatus Native_Navigation_ValidateRoute(
+		const NativeNavigationRouteValidationRequest* request, NativeNavigationRouteValidationResult* result);
+	TERRAENGINE_API NativeNavigationStatus Native_Navigation_SetDestination(
+		const NativeNavigationDestinationRequest* request, NativeNavigationCommandReceipt* receipt);
+	TERRAENGINE_API NativeNavigationStatus Native_Navigation_ReadCommand(
+		const NativeNavigationCommandQuery* query, NativeNavigationCommandReceipt* receipt);
+	// Scene objects receive their opaque agent handle from the engine. Gameplay
+	// never fabricates owner/world generations or reads live ECS storage.
+	TERRAENGINE_API NativeNavigationStatus Native_Navigation_ResolveObjectAgent(
+		std::uint32_t objectEntity, NativeNavigationAgentSnapshot* snapshot);
+	TERRAENGINE_API NativeNavigationStatus Native_Navigation_ReadAgent(
+		const NativeNavigationAgentHandle* agent, NativeNavigationAgentSnapshot* snapshot);
+	TERRAENGINE_API NativeNavigationStatus Native_Navigation_ReleaseAgent(
+		const NativeNavigationAgentHandle* agent);
+	TERRAENGINE_API NativeNavigationStatus Native_Navigation_CopyInvalidations(
+		const NativeNavigationInvalidationCursor* cursor, NativeNavigationInvalidationRecord* records,
+		std::uint32_t capacity, NativeNavigationBufferInfo* info);
 
 	// Graphics ABI v1 queues runtime-only settings for RenderSystem's protected
 	// boundary. These calls never persist project authoring files from gameplay.

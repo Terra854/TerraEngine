@@ -1,5 +1,62 @@
 # TerraEngine Testing
 
+## Installed navigation acceptance
+
+Navigation acceptance is an installed-only gate. From a clean checkout,
+configure, build the engine/editor/export and their tests, and install before
+running the matrix. The runner is copied into the install tree; its manifest,
+editor/export executables, and acceptance executable are required inputs.
+
+```powershell
+git submodule update --init --recursive
+cmake --fresh --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target `
+    TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Export
+cmake --build --preset RelWithDebInfo --target install
+
+$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$navigationTool = Join-Path $installRoot 'Tests/Tools/Navigation/RunInstalledNavigationAcceptance.ps1'
+$navigationEvidence = [IO.Path]::GetFullPath('out/evidence/navigation')
+```
+
+Use `-DryRun` first to validate installed discovery without launching a lane.
+Run the editor, rendered-export, and headless-export semantic flows together so
+the comparator can enforce parity; a source checkout or build-tree executable
+must not be substituted.
+
+```powershell
+& $navigationTool -InstallRoot $installRoot -OutputDirectory (Join-Path $navigationEvidence 'semantic') `
+    -Lanes @('editor', 'export-rendered', 'export-headless') -Matrices semantic
+```
+
+The installed-only audit can validate all three lane packages together without
+launching runtime work:
+
+```powershell
+& $navigationTool -InstallRoot $installRoot -OutputDirectory (Join-Path $navigationEvidence 'installed-audit') `
+    -Lanes @('editor', 'export-rendered', 'export-headless') -Matrices @('semantic') -DryRun
+```
+
+Run the remaining installed matrices as separate evidence sets. Runtime
+navigation generation is mandatory; caches are optional accelerators and their
+absence must not invalidate a valid generation path.
+
+```powershell
+& $navigationTool -InstallRoot $installRoot -OutputDirectory (Join-Path $navigationEvidence 'performance') -Lanes export-rendered -Matrices performance -DurationMinutes 5 -Qualification
+& $navigationTool -InstallRoot $installRoot -OutputDirectory (Join-Path $navigationEvidence 'idle-overload') -Lanes export-rendered -Matrices idle-overload -DurationMinutes 5 -IdlePairs 5 -Qualification
+& $navigationTool -InstallRoot $installRoot -OutputDirectory (Join-Path $navigationEvidence 'soak-30m') -Lanes @('export-rendered', 'export-headless') -Matrices soak -DurationMinutes 30 -Qualification
+& $navigationTool -InstallRoot $installRoot -OutputDirectory (Join-Path $navigationEvidence 'lifecycle-100') -Lanes editor -Matrices lifecycle -Cycles 100 -Qualification
+& $navigationTool -InstallRoot $installRoot -OutputDirectory (Join-Path $navigationEvidence 'usability') -Lanes editor -Matrices usability -UsabilityInvalidCases 5 -Qualification
+```
+
+`-DurationSecondsOverride` is only for bounded smoke checks and cannot satisfy
+the 30-minute soak requirement. Each invocation preserves
+`navigation-acceptance-result.json` plus per-lane raw stdout, stderr, and
+result JSON beneath its contained work directory. Any missing artifact,
+nonzero lane, missing result, or unavailable measurement is a failed gate.
+Retain the complete `out/evidence/navigation` directory and audit the exact
+installed bytes used by the run.
+
 ## External memory benchmark
 
 The memory qualification work keeps all benchmark implementation under

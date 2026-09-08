@@ -1,0 +1,15 @@
+{
+	"schemaVersion": 1,
+	"deterministicSeeds": [57001, 57002, 57003],
+	"reference": {"areaMetres": [1000, 1000, 256], "agents": 256, "requestsPerSecond": 100, "sourceTrianglesMaximum": 100000, "profiles": 2},
+	"schedules": [
+		{"id": "reviewed-reference", "durationSeconds": 300, "mode": "rendered-and-headless", "expected": "full denominator outcomes and route correctness"},
+		{"id": "local-change", "durationSeconds": 300, "changes": ["create", "enable", "disable", "move", "rotate", "scale", "delete", "replace", "reshape"], "expected": "local affected coverage only"},
+		{"id": "idle-ab", "durationSeconds": 300, "variants": ["no-navigation-consumers", "active-navigation-consumers"], "expected": "idle allowance evidence"},
+		{"id": "overload", "durationSeconds": 300, "requestsPerSecond": 400, "expected": "explicit capacity and budget outcomes"},
+		{"id": "soak", "durationSeconds": 1800, "mode": "rendered-and-headless", "expected": "no leaks, stale publication, or unbounded retention"},
+		{"id": "lifecycle", "cycles": 100, "operations": ["scene-replace", "script-reload", "play-exit", "shutdown"], "expected": "owner revocation and no late completion"},
+		{"id": "usability", "reviewers": 3, "tasks": ["configure-profile", "inspect-route", "diagnose-capacity", "export-source-free"], "expected": "recorded completion and issue evidence"}
+	],
+	"evidence": {"includeAllAttempts": true, "denominatorRequired": true, "recordHostRendererPower": true, "recordSeeds": true, "recordBuildAndContentHashes": true, "reportPercentiles": [50, 95, 99], "retainRawOutcomes": true}
+}

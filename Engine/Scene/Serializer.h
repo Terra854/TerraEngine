@@ -7,6 +7,7 @@
 #pragma once
 
 #include "Core/Object/Object.h"
+#include "Navigation/NavigationSettings.h"
 #include "Renderer/RenderTypes.h"
 #include "Scene/WorldCoordinate.h"
 #include <entt/entt.hpp>
@@ -59,6 +60,16 @@ public:
 	// Scenes may omit the sceneSettings block entirely, so deserialization falls
 	// back to sanitized defaults for the remaining non-sky settings.
 	static SceneRenderSettings DeserializeSceneRenderSettings(const nlohmann::json& json);
+
+	// Navigation profiles and limits are durable project values rather than live
+	// provider state. Deserializers build and validate a detached candidate first;
+	// malformed JSON therefore returns no value and cannot partially update state.
+	static nlohmann::json SerializeNavigationProfile(const TerraEngine::Navigation::NavigationProfile& profile);
+	static std::optional<TerraEngine::Navigation::NavigationProfile> DeserializeNavigationProfile(
+		const nlohmann::json& json, std::string* outError = nullptr);
+	static nlohmann::json SerializeNavigationSettings(const TerraEngine::Navigation::NavigationSettings& settings);
+	static std::optional<TerraEngine::Navigation::NavigationSettings> DeserializeNavigationSettings(
+		const nlohmann::json& json, std::string* outError = nullptr);
 	
 	// Reconstructs an object graph from JSON data. If a parent is provided,
 	// the root of the deserialized branch is attached to it. Stable IDs (UUIDs)

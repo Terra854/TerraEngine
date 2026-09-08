@@ -33,6 +33,48 @@ namespace TerraEngine.Export
 		[LibraryImport(EngineDll, EntryPoint = "Native_Animation_GetAbiVersion")]
 		public static partial ushort GetAnimationAbiVersion();
 
+		// NativeAOT gameplay uses the same fixed-width, caller-owned navigation
+		// packet contract as the editor host. The record definitions mirror
+		// ScriptGlue and have their ABI header checked before native state changes.
+		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_GetAbiVersion")]
+		public static partial uint GetNavigationAbiVersion();
+
+		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_SubmitRoute")]
+		internal static partial global::TerraEngine.NavigationStatus SubmitNavigationRoute(ref global::TerraEngine.NativeNavigationRouteRequest request, ref global::TerraEngine.NativeNavigationSubmitReceipt receipt);
+
+		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_ReadRequest")]
+		internal static partial global::TerraEngine.NavigationStatus ReadNavigationRequest(ref global::TerraEngine.NavigationRequestHandle request, ref global::TerraEngine.NativeNavigationRequestSnapshot snapshot);
+
+		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_CopyRoute")]
+		internal static unsafe partial global::TerraEngine.NavigationStatus CopyNavigationRoute(ref global::TerraEngine.NavigationRouteHandle route, global::TerraEngine.NativeNavigationRoutePoint* points, uint capacity, ref global::TerraEngine.NativeNavigationBufferInfo info);
+
+		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_CancelRequest")]
+		internal static partial global::TerraEngine.NavigationStatus CancelNavigationRequest(ref global::TerraEngine.NativeNavigationCancellationRequest request, ref global::TerraEngine.NativeNavigationSubmitReceipt receipt);
+
+		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_ReleaseResult")]
+		internal static partial global::TerraEngine.NavigationStatus ReleaseNavigationResult(ref global::TerraEngine.NativeNavigationCancellationRequest request, ref global::TerraEngine.NativeNavigationSubmitReceipt receipt);
+
+		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_ValidateRoute")]
+		internal static partial global::TerraEngine.NavigationStatus ValidateNavigationRoute(ref global::TerraEngine.NativeNavigationRouteValidationRequest request, ref global::TerraEngine.NativeNavigationRouteValidationResult result);
+
+		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_SetDestination")]
+		internal static partial global::TerraEngine.NavigationStatus SetNavigationDestination(ref global::TerraEngine.NativeNavigationDestinationRequest request, ref global::TerraEngine.NativeNavigationCommandReceipt receipt);
+
+		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_ReadCommand")]
+		internal static partial global::TerraEngine.NavigationStatus ReadNavigationCommand(ref global::TerraEngine.NativeNavigationCommandQuery query, ref global::TerraEngine.NativeNavigationCommandReceipt receipt);
+
+		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_ResolveObjectAgent")]
+		internal static partial global::TerraEngine.NavigationStatus ResolveObjectNavigationAgent(uint objectEntity, ref global::TerraEngine.NativeNavigationAgentSnapshot snapshot);
+
+		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_ReadAgent")]
+		internal static partial global::TerraEngine.NavigationStatus ReadNavigationAgent(ref global::TerraEngine.NavigationAgentHandle agent, ref global::TerraEngine.NativeNavigationAgentSnapshot snapshot);
+
+		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_ReleaseAgent")]
+		internal static partial global::TerraEngine.NavigationStatus ReleaseNavigationAgent(ref global::TerraEngine.NavigationAgentHandle agent);
+
+		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_CopyInvalidations")]
+		internal static unsafe partial global::TerraEngine.NavigationStatus CopyNavigationInvalidations(ref global::TerraEngine.NativeNavigationInvalidationCursor cursor, global::TerraEngine.NativeNavigationInvalidationRecord* records, uint capacity, ref global::TerraEngine.NativeNavigationBufferInfo info);
+
 		/// <summary>
 		/// Writes a message to the engine's log stream.
 		/// </summary>

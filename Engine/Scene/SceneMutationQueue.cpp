@@ -24,6 +24,28 @@
 
 namespace TerraEngine::Scene {
 	namespace {
+		constexpr std::size_t kMaximumPendingNavigationSourceMutationIntents = 16384U;
+		[[nodiscard]] bool NormalizeNavigationMutationBounds(NavigationSourceMutationBounds& bounds)
+		{
+			if(!bounds.valid) return true;
+			const WorldCoordinateResult minimum = NormalizeWorldPosition(bounds.minimum);
+			const WorldCoordinateResult maximum = NormalizeWorldPosition(bounds.maximum);
+			if(!minimum.Succeeded() || !maximum.Succeeded()) return false;
+			bounds.minimum = minimum.position;
+			bounds.maximum = maximum.position;
+			const auto ordered = [](std::int64_t minimumCell, double minimumOffset,
+				std::int64_t maximumCell, double maximumOffset) {
+				return minimumCell < maximumCell
+					|| (minimumCell == maximumCell && minimumOffset <= maximumOffset);
+			};
+			return ordered(bounds.minimum.cell.x, bounds.minimum.offsetMetres.x,
+				bounds.maximum.cell.x, bounds.maximum.offsetMetres.x)
+				&& ordered(bounds.minimum.cell.y, bounds.minimum.offsetMetres.y,
+					bounds.maximum.cell.y, bounds.maximum.offsetMetres.y)
+				&& ordered(bounds.minimum.cell.z, bounds.minimum.offsetMetres.z,
+					bounds.maximum.cell.z, bounds.maximum.offsetMetres.z);
+		}
+
 		SceneDiagnostic MakeMutationDiagnostic(SceneDiagnosticSeverity severity, const SceneMutationRequest& request, std::string message, std::string action)
 		{
 			return SceneDiagnostic{
@@ -185,6 +207,43 @@ namespace TerraEngine::Scene {
 		publicationGroups.push_back(std::move(group));
 	}
 
+	bool SceneMutationQueue::EnqueueNavigationSourceMutationIntent(NavigationSourceMutationIntent intent)
+	{
+		std::scoped_lock lock(requestsMutex);
+		using Operation = NavigationSourceMutationOperation;
+		const bool needsOld = intent.operation != Operation::Create && intent.operation != Operation::Enable;
+		const bool needsNew = intent.operation != Operation::Delete && intent.operation != Operation::Disable;
+		const bool valid = !intent.intentId.empty() && !intent.transactionId.empty()
+			&& intent.sourceId != TerraEngine::EMPTY_UUID && intent.committedSourceRevision != 0U
+			&& intent.physicalReadyRevision != 0U && (!needsOld || intent.oldBounds.valid)
+			&& (!needsNew || intent.newBounds.valid)
+			&& NormalizeNavigationMutationBounds(intent.oldBounds)
+			&& NormalizeNavigationMutationBounds(intent.newBounds);
+		const bool hasCapacity = navigationSourceMutationIntents.size()
+			< kMaximumPendingNavigationSourceMutationIntents;
+		const bool duplicate = std::any_of(navigationSourceMutationIntents.begin(),
+			navigationSourceMutationIntents.end(), [&intent](const NavigationSourceMutationIntent& pending) {
+				return pending.intentId == intent.intentId;
+			});
+		if(valid && hasCapacity && !duplicate)
+		{
+			navigationSourceMutationIntents.push_back(std::move(intent));
+			return true;
+		}
+
+		// Capacity and validation failures are observable. Silently discarding a
+		// removal could leave navigation claiming removed support is traversable.
+		NavigationSourceMutationReceipt receipt;
+		receipt.intent = std::move(intent);
+		receipt.transactionStatus = TransactionStatus::Rejected;
+		receipt.accepted = false;
+		receipt.message = !valid ? "Navigation source intent is missing stable identity or revision."
+			: (!hasCapacity ? "Navigation source intent capacity is exhausted."
+				: "Navigation source intent identity is already pending.");
+		completedNavigationSourceMutationReceipts.push_back(std::move(receipt));
+		return false;
+	}
+
 	TransactionResult SceneMutationQueue::PreflightTransaction(const Transaction& transaction, ObjectManager& objects) const
 	{
 		return TerraEngine::Scene::PreflightTransaction(objects, transaction);
@@ -221,7 +280,8 @@ namespace TerraEngine::Scene {
 	bool SceneMutationQueue::Empty() const
 	{
 		std::scoped_lock lock(requestsMutex);
-		return requests.empty() && transactions.empty() && publicationGroups.empty() && std::all_of(workerBuffers.begin(), workerBuffers.end(), [](const SceneMutationWorkerBuffer& buffer) {
+		return requests.empty() && transactions.empty() && publicationGroups.empty()
+			&& navigationSourceMutationIntents.empty() && std::all_of(workerBuffers.begin(), workerBuffers.end(), [](const SceneMutationWorkerBuffer& buffer) {
 			return buffer.requests.empty();
 		});
 	}
@@ -236,6 +296,7 @@ namespace TerraEngine::Scene {
 		}
 		total += transactions.size();
 		total += publicationGroups.size();
+		total += navigationSourceMutationIntents.size();
 		return total;
 	}
 
@@ -325,6 +386,14 @@ namespace TerraEngine::Scene {
 		return completed;
 	}
 
+	std::vector<NavigationSourceMutationReceipt> SceneMutationQueue::DrainCompletedNavigationSourceMutationReceipts()
+	{
+		std::scoped_lock lock(requestsMutex);
+		std::vector<NavigationSourceMutationReceipt> completed;
+		completed.swap(completedNavigationSourceMutationReceipts);
+		return completed;
+	}
+
 	TransactionDiagnostics SceneMutationQueue::GetTransactionDiagnostics() const
 	{
 		std::scoped_lock lock(requestsMutex);
@@ -338,7 +407,9 @@ namespace TerraEngine::Scene {
 		workerBuffers.clear();
 		transactions.clear();
 		publicationGroups.clear();
+		navigationSourceMutationIntents.clear();
 		completedEditorTransactions.clear();
+		completedNavigationSourceMutationReceipts.clear();
 	}
 
 	SceneMutationBatchResult SceneMutationQueue::Validate(const SceneGraph& graph) const
@@ -727,6 +798,46 @@ namespace TerraEngine::Scene {
 			{
 				batch.rejectedMutationCount += groupResult.rejectedWriteCount;
 			}
+		}
+
+		// Resolve copied navigation intents from the same immutable receipts used by
+		// every other transactional producer. An intent with no receipt remains
+		// queued; it cannot become visible ahead of its associated scene commit.
+		std::unordered_map<std::string, TransactionStatus> navigationTransactionStatuses;
+		for(const TransactionResult& result : batch.transactionResults)
+		{
+			navigationTransactionStatuses[result.transactionId] = result.status;
+		}
+		for(const TransactionPublicationGroupResult& groupResult : batch.publicationGroupResults)
+		{
+			for(const TransactionPublicationChunkReceipt& chunk : groupResult.chunkReceipts)
+			{
+				navigationTransactionStatuses[chunk.transactionId] = groupResult.status;
+			}
+		}
+		{
+			std::scoped_lock lock(requestsMutex);
+			std::vector<NavigationSourceMutationIntent> unresolved;
+			unresolved.reserve(navigationSourceMutationIntents.size());
+			for(NavigationSourceMutationIntent& intent : navigationSourceMutationIntents)
+			{
+				const auto decision = navigationTransactionStatuses.find(intent.transactionId);
+				if(decision == navigationTransactionStatuses.end())
+				{
+					unresolved.push_back(std::move(intent));
+					continue;
+				}
+				NavigationSourceMutationReceipt receipt;
+				receipt.intent = std::move(intent);
+				receipt.transactionStatus = decision->second;
+				receipt.accepted = decision->second == TransactionStatus::Committed;
+				receipt.message = receipt.accepted
+					? "Navigation source change committed with its scene transaction."
+					: "Navigation source change rejected with its scene transaction.";
+				batch.navigationSourceMutationReceipts.push_back(receipt);
+				completedNavigationSourceMutationReceipts.push_back(std::move(receipt));
+			}
+			navigationSourceMutationIntents.swap(unresolved);
 		}
 		{
 			std::scoped_lock lock(requestsMutex);

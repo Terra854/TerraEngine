@@ -231,6 +231,62 @@ namespace TerraEngine::Runtime {
 		return result;
 	}
 
+	PackagedNavigationRuntime LoadPackagedNavigationRuntime(const ContentMount& mount)
+	{
+		PackagedNavigationRuntime result{};
+		if(!mount.IsMounted() || !mount.Exists("navigation/runtime-manifest.json")) {
+			result.diagnostic = "Package does not declare navigation content.";
+			result.loaded = true;
+			return result;
+		}
+		result.declared = true;
+		try {
+			const std::vector<std::uint8_t> bytes = mount.ReadAll("navigation/runtime-manifest.json");
+			const nlohmann::json manifest = nlohmann::json::parse(bytes.begin(), bytes.end());
+			if(!manifest.is_object() || manifest.value("schemaVersion", 0U) != 1U
+				|| !manifest.contains("dependencies") || !manifest["dependencies"].is_array()
+				|| manifest["dependencies"].size() > 4096U) {
+				result.diagnostic = "Navigation runtime manifest is malformed or exceeds its dependency limit.";
+				return result;
+			}
+			result.sourceFree = manifest.value("sourceFree", true);
+			for(const nlohmann::json& dependency : manifest["dependencies"]) {
+				if(!dependency.is_object() || !dependency.contains("path") || !dependency["path"].is_string()) {
+					result.diagnostic = "Navigation runtime manifest contains a malformed dependency.";
+					return result;
+				}
+				const std::string path = dependency["path"].get<std::string>();
+				const bool optionalCache = dependency.value("optionalCache", false);
+				if(path.empty() || std::filesystem::path(path).is_absolute()
+					|| path.find("..") != std::string::npos) {
+					result.diagnostic = "Navigation dependency path is not a contained logical path.";
+					return result;
+				}
+				if(optionalCache) {
+					if(mount.Exists(path)) result.optionalCachePaths.push_back(path);
+					continue;
+				}
+				if(std::filesystem::path(path).extension() != ".tenavgeom" || !mount.Exists(path)) {
+					result.diagnostic = "Required navigation geometry companion is missing from mounted content.";
+					return result;
+				}
+				result.geometryPaths.push_back(path);
+			}
+			if(result.sourceFree != result.geometryPaths.empty()) {
+				result.diagnostic = "Navigation source-free declaration does not match packaged geometry companions.";
+				return result;
+			}
+			result.loaded = true;
+			result.diagnostic = result.sourceFree
+				? "Source-free navigation runtime initialized."
+				: "Packaged navigation geometry companions initialized.";
+		}
+		catch(const std::exception& exception) {
+			result.diagnostic = std::string("Packaged navigation content is invalid: ") + exception.what();
+		}
+		return result;
+	}
+
 	ExportStartupCoordinatorResult CoordinateExportStartup(const ExportStartupCoordinatorInput& input) {
 		ExportStartupCoordinatorResult result{};
 		BootSummary& summary = result.summary;
@@ -277,6 +333,16 @@ namespace TerraEngine::Runtime {
 		if(mountedPhysics.has_value() && mountedPhysics->declared) {
 			AddGate(summary, "Physics", mountedPhysics->loaded && mountedPhysics->providerRuntimeReady && mountedPhysics->managedBindingsLoaded,
 				"Packaged physics runtime loaded", mountedPhysics->diagnostic);
+		}
+
+		const std::optional<PackagedNavigationRuntime> mountedNavigation = input.packagedNavigation.has_value()
+			? input.packagedNavigation
+			: (input.exportRuntime && input.contentMounted
+				? std::optional<PackagedNavigationRuntime>(LoadPackagedNavigationRuntime(ContentMount::Instance()))
+				: std::nullopt);
+		if(mountedNavigation.has_value() && mountedNavigation->declared) {
+			AddGate(summary, "Navigation", mountedNavigation->loaded,
+				"Packaged navigation runtime loaded", mountedNavigation->diagnostic);
 		}
 
 		for (const ExportStartupSystemCheck& check : input.requiredSystems)

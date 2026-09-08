@@ -126,6 +126,12 @@ file(GLOB TERRAENGINE_VIRTUAL_GEOMETRY_ASSET_COMPILER_SOURCES CONFIGURE_DEPENDS
 file(GLOB_RECURSE TERRAENGINE_ANIMATION_MANAGED_CORE_SOURCES CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/Source/Animation/*.cs"
 )
+# Navigation's gameplay facade is engine supplied. Keep its managed files in
+# the CMake source dependency graph so a clean publish cannot silently omit a
+# new ABI mirror while native navigation continues to build.
+file(GLOB_RECURSE TERRAENGINE_NAVIGATION_MANAGED_CORE_SOURCES CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/Source/Navigation/*.cs"
+)
 file(GLOB_RECURSE TERRAENGINE_ANIMATION_MANAGED_EDITOR_SOURCES CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Editor/Source/Animation/*.cs"
 )
@@ -157,6 +163,44 @@ file(GLOB_RECURSE TERRAENGINE_VIRTUAL_GEOMETRY_ENGINE_HEADERS CONFIGURE_DEPENDS
 # remains valid while the staged implementation tasks add their files.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/TerraEngineTerrain.cmake)
 
+# Navigation files stay in their provider-neutral engine domain. This
+# configure-dependent discovery starts empty during dependency setup and picks
+# up reviewed navigation sources as their paired implementation tasks land.
+file(GLOB_RECURSE TERRAENGINE_NAVIGATION_ENGINE_SOURCES CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/*.cpp"
+)
+file(GLOB_RECURSE TERRAENGINE_NAVIGATION_ENGINE_HEADERS CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/*.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/*.hpp"
+)
+# Keep the production scene bridge explicit even though the broader navigation
+# glob discovers it as well. A missing bridge source must fail configuration
+# instead of silently leaving ordinary scene navigation unlinked.
+set(TERRAENGINE_NAVIGATION_INTEGRATION_SOURCES
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/Integration/NavigationProfileResolver.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/Integration/NavigationSceneBootstrap.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/Integration/NavigationRuntimeSceneCapture.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/Dynamic/NavigationRebuildPipeline.cpp"
+)
+foreach(TERRAENGINE_NAVIGATION_INTEGRATION_SOURCE IN LISTS TERRAENGINE_NAVIGATION_INTEGRATION_SOURCES)
+	if(NOT EXISTS "${TERRAENGINE_NAVIGATION_INTEGRATION_SOURCE}")
+		message(FATAL_ERROR "Required navigation integration source is missing: ${TERRAENGINE_NAVIGATION_INTEGRATION_SOURCE}")
+	endif()
+endforeach()
+list(APPEND TERRAENGINE_NAVIGATION_ENGINE_SOURCES ${TERRAENGINE_NAVIGATION_INTEGRATION_SOURCES})
+list(REMOVE_DUPLICATES TERRAENGINE_NAVIGATION_ENGINE_SOURCES)
+
+# These integration-heavy translation units instantiate large EnTT/STL helper
+# surfaces. Keep them behind the same private static-runtime boundary used by
+# Physics so Windows auto-export sees only their deliberate TERRAENGINE_API
+# contract instead of exceeding LINK's 65,535 import-library member limit.
+set(TERRAENGINE_NAVIGATION_RUNTIME_SOURCES
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/NavigationSystem.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/Integration/NavigationSceneBootstrap.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/Ground/GroundTraversalConnectionStore.cpp"
+)
+list(REMOVE_ITEM TERRAENGINE_NAVIGATION_ENGINE_SOURCES ${TERRAENGINE_NAVIGATION_RUNTIME_SOURCES})
+
 set(ENGINE_SOURCES
 	Engine/Core/MainEngine.cpp
 	Engine/Core/FatalErrorReport.cpp
@@ -175,11 +219,15 @@ set(ENGINE_SOURCES
 	Engine/Core/Object/Object.cpp
 	Engine/Core/Object/ObjectManager.cpp
 	Engine/Core/Object/ComponentRegistry.cpp
+	Engine/Components/Navigation/NavigationSourceComponent.h
+	Engine/Components/Navigation/NavigationAgentComponent.h
+	Engine/Components/Navigation/NavigationConnectionComponent.h
 	Engine/Components/Physics/RigidBodyComponent.cpp
 	Engine/Components/Physics/ColliderSetComponent.cpp
 	Engine/Components/Physics/ConstraintSetComponent.cpp
 	Engine/Components/Physics/CharacterControllerComponent.cpp
 	Engine/Resource/ResourceManager.cpp
+	Engine/Resource/ResourceManagerNavigation.cpp
 	Engine/Resource/MaterialRuntimeContract.cpp
 	Engine/Resource/ResourceResidency.cpp
 	Engine/Resource/ResourceStreaming.cpp
@@ -309,6 +357,7 @@ set(ENGINE_SOURCES
 	${TERRAENGINE_VIRTUAL_GEOMETRY_ENGINE_SOURCES}
 	${TERRAENGINE_TERRAIN_ENGINE_SOURCES}
 	${TERRAENGINE_TERRAIN_PHYSICS_SOURCES}
+	${TERRAENGINE_NAVIGATION_ENGINE_SOURCES}
 )
 
 set(ENGINE_HEADERS
@@ -465,6 +514,7 @@ set(ENGINE_HEADERS
 	${TERRAENGINE_VIRTUAL_GEOMETRY_ENGINE_HEADERS}
 	${TERRAENGINE_TERRAIN_ENGINE_HEADERS}
 	${TERRAENGINE_TERRAIN_PHYSICS_HEADERS}
+	${TERRAENGINE_NAVIGATION_ENGINE_HEADERS}
 )
 
 set(BASISU_SOURCES
@@ -608,6 +658,29 @@ target_compile_definitions(TerraEngineAudioRuntime PRIVATE TERRAENGINE_SHARED TE
 target_link_libraries(TerraEngineAudioRuntime PRIVATE TerraEngineAudioMiniaudioRuntime)
 if(MSVC)
 	target_compile_options(TerraEngineAudioRuntime PRIVATE /FS)
+endif()
+
+# Navigation's public classes and capture entry point are explicitly exported.
+# Whole-archiving this small private library retains those entry points even
+# when a particular host does not reference every one during its own link.
+add_library(TerraEngineNavigationRuntime STATIC
+	${TERRAENGINE_NAVIGATION_RUNTIME_SOURCES}
+)
+target_include_directories(TerraEngineNavigationRuntime
+	PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine/Core/Object
+		${CMAKE_CURRENT_SOURCE_DIR}/External/entt/src
+		${CMAKE_CURRENT_SOURCE_DIR}/External/glm
+		${CMAKE_CURRENT_SOURCE_DIR}/External/json/single_include
+)
+target_compile_definitions(TerraEngineNavigationRuntime
+	PRIVATE
+		TERRAENGINE_SHARED
+		TERRAENGINE_ENGINE_BUILD
+)
+if(MSVC)
+	target_compile_options(TerraEngineNavigationRuntime PRIVATE /FS /bigobj)
 endif()
 
 # Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
@@ -761,6 +834,7 @@ if(BUILD_TESTING)
 	add_subdirectory(Tests/Tools/VirtualGeometry)
 	add_subdirectory(Tests/Tools/FramePublication)
 	add_subdirectory(Tests/Tools/UnboundedScenes)
+	add_subdirectory(Tests/Tools/Navigation)
 endif()
 
 set(FASTGLTF_ENABLE_TESTS OFF CACHE BOOL "Disable fastgltf tests" FORCE)
@@ -800,6 +874,12 @@ target_link_libraries(TerraEngine-Engine
 		TerraEnginePhysicsRuntime
 		TerraEnginePhysicsJoltRuntime
 		TerraEngineAudioRuntime
+		$<LINK_LIBRARY:WHOLE_ARCHIVE,TerraEngineNavigationRuntime>
+		# Recast/Detour remain private implementation dependencies. The later
+		# Navigation backend is the only engine domain permitted to include their
+		# headers; no provider include directory reaches installed consumers.
+		TerraEngineRecastCore
+		TerraEngineDetourCore
 		# TEPAK reader dependencies (zstd for decompression, xxhash for hashing)
 		libzstd_static
 		xxhash
@@ -1015,6 +1095,7 @@ set(MANAGED_CORE_SOURCES
 	Engine/Managed/Source/ScriptReflection.cs
 	Engine/Managed/Source/Export/ExportVTable.cs
 	${TERRAENGINE_ANIMATION_MANAGED_CORE_SOURCES}
+	${TERRAENGINE_NAVIGATION_MANAGED_CORE_SOURCES}
 )
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed PREFIX "Engine/Managed" FILES ${MANAGED_CORE_SOURCES})
@@ -1494,6 +1575,7 @@ add_library(TerraEngine-ExportSupport STATIC
 	Editor/TerraEngine-Editor/Assets/AssetImportResult.cpp
 	Editor/Export/BuildProfile.cpp
 	Editor/Export/AnimationExportDependencies.cpp
+	Editor/Export/NavigationExportDependencies.cpp
 	Editor/Export/ExportEvidence.cpp
 	Editor/Export/ExportOutputTransaction.cpp
 	Editor/Export/ExportPackageValidator.cpp
@@ -1591,6 +1673,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Automation/Providers/AuthoringAutomationProvider.cpp
 	Editor/TerraEngine-Editor/Automation/Providers/PhysicsAutomationProvider.cpp
 	Editor/TerraEngine-Editor/Automation/Providers/AudioAutomationProvider.cpp
+	Editor/TerraEngine-Editor/Automation/Providers/NavigationAutomationProvider.cpp
 	Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/PrefabAuthoringSubsystem.cpp
@@ -1616,6 +1699,10 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/SceneViewOverlayMarkers.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewOverlayTypes.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp
+	Editor/TerraEngine-Editor/Windows/NavigationWindow.cpp
+	Editor/TerraEngine-Editor/Navigation/NavigationInspectorSupport.cpp
+	Editor/TerraEngine-Editor/Navigation/NavigationSceneOverlay.cpp
+	Editor/TerraEngine-Editor/Navigation/NavigationAuthoringTransactions.cpp
 	Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp
 	Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp
 	Editor/TerraEngine-Editor/Windows/PhysicsDiagnosticsWindow.cpp
@@ -1637,6 +1724,8 @@ add_executable(TerraEngine-Editor
 	Editor/AssetCompilers/PhysicsColliderCompiler.cpp
 	Editor/AssetCompilers/PhysicsMaterialAssetWriter.cpp
 	Editor/AssetCompilers/AudioClipCompiler.cpp
+	Editor/AssetCompilers/NavigationGeometryCompiler.cpp
+	Editor/AssetCompilers/NavigationGeometryCompiler.h
 	${IMGUI_FILE_DIALOG_DIR}/ImGuiFileDialog.cpp
 	${TERRAENGINE_ANIMATION_EDITOR_SOURCES}
 	${TERRAENGINE_VIRTUAL_GEOMETRY_ASSET_COMPILER_SOURCES}
@@ -1953,8 +2042,14 @@ install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Renderer/Terrain/TerrainPageFo
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/TerraEngineInstall.cmake")
 terraengine_install_physics_foundation("${ENGINE_INSTALL_DESTINATION}")
 terraengine_install_audio_foundation("${ENGINE_INSTALL_DESTINATION}")
+terraengine_install_navigation_foundation("${ENGINE_INSTALL_DESTINATION}")
 terraengine_install_offline_nuget_notices("${ENGINE_INSTALL_DESTINATION}")
 terraengine_install_nativeaot_nuget_toolchain("${ENGINE_INSTALL_DESTINATION}")
+# The installed acceptance runner is an install prerequisite, not an optional
+# side target. It writes to the exact Build/Tests path consumed by the wrapper.
+if(BUILD_TESTING AND TARGET install AND TARGET TerraEngineNavigationValidation)
+	add_dependencies(install TerraEngineNavigationValidation)
+endif()
 # Script compilation and NativeAOT export are editor features. Install the
 # validated SDK beside the editor so shipped tools invoke the same bits as the
 # source build and never depend on an SDK registered on the user's machine.

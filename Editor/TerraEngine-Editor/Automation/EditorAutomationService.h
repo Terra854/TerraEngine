@@ -196,6 +196,14 @@ namespace TerraEngine::Editor::Automation
 			std::uint64_t operation,
 			std::string_view operationName,
 			const AutomationRequestContext& request);
+		// Navigation capabilities bind here once during provider registration. Keeping
+		// their resolver separate prevents JSON requests from reaching the generic
+		// provider dispatcher, which has no navigation identity or snapshot contract.
+		AutomationHandler ResolveNavigationAutomationHandler(std::string_view name);
+		AutomationDispatchResult ExecuteNavigationAutomationHandler(
+			std::uint64_t operation,
+			std::string_view operationName,
+			const AutomationRequestContext& request);
 		nlohmann::json ValidateCaptureArguments(const nlohmann::json& arguments, const std::string& requestId) const;
 		ErrorCategory MapCaptureFailureCategory(std::string_view category) const;
 		nlohmann::json ValidateProjectRelativePath(const nlohmann::json& arguments, std::string_view key, const std::string& requestId) const;

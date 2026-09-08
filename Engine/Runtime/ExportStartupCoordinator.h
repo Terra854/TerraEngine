@@ -62,6 +62,16 @@ struct PackagedPhysicsRuntime
 	std::string diagnostic;
 };
 
+	struct PackagedNavigationRuntime
+	{
+		bool declared = false;
+		bool loaded = false;
+		bool sourceFree = true;
+		std::vector<std::string> geometryPaths;
+		std::vector<std::string> optionalCachePaths;
+		std::string diagnostic;
+	};
+
 // This compact record is shared by Play Mode, the exported validation launcher,
 // and the baseline script. It retains only engine-owned observations, so parity
 // never depends on a Jolt pointer, enum value, callback object, or byte layout.
@@ -107,6 +117,7 @@ struct ExportStartupCoordinatorInput
 	// Callers which mounted physics content during early startup pass this result
 	// here. When omitted, CoordinateExportStartup reads the active mount itself.
 	std::optional<PackagedPhysicsRuntime> packagedPhysics;
+	std::optional<PackagedNavigationRuntime> packagedNavigation;
 	std::vector<ExportStartupSystemCheck> requiredSystems;
 };
 
@@ -129,6 +140,9 @@ TERRAENGINE_API PackagedPhysicsRuntime LoadPackagedPhysicsRuntime(
 	const ContentMount& mount,
 	bool requireManagedBindings = true,
 	const std::filesystem::path& externalManagedBindingsPath = {});
+
+	TERRAENGINE_API PackagedNavigationRuntime LoadPackagedNavigationRuntime(
+		const ContentMount& mount);
 
 // Stable JSON is used as a durable evidence record by the installed baseline.
 // The comparator rejects any schema, field, or observed-value drift.

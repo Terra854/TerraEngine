@@ -1,0 +1,82 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://terraengine.dev/schemas/navigation-evidence-v1.schema.json",
+	"title": "TerraEngine Navigation Evidence v1",
+	"description": "One measured navigation workload in one installed runtime lane. contentSha256 is the SHA-256 digest of canonical JSON for content, whose object keys are sorted recursively and UTF-8 encoded without a byte-order mark.",
+	"type": "object",
+	"additionalProperties": false,
+	"required": [
+		"schemaVersion",
+		"identity",
+		"content",
+		"contentSha256",
+		"lane",
+		"workloadId",
+		"success",
+		"denominator",
+		"latency",
+		"safety"
+	],
+	"properties": {
+		"schemaVersion": { "const": 1 },
+		"identity": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [ "buildSha256", "sourceSha256", "settingsSha256", "workloadSha256", "renderer", "powerMode", "workerCount" ],
+			"properties": {
+				"buildSha256": { "$ref": "#/$defs/sha256" },
+				"sourceSha256": { "$ref": "#/$defs/sha256" },
+				"settingsSha256": { "$ref": "#/$defs/sha256" },
+				"workloadSha256": { "$ref": "#/$defs/sha256" },
+				"renderer": { "type": "string", "minLength": 1 },
+				"powerMode": { "type": "string", "minLength": 1 },
+				"workerCount": { "type": "integer", "minimum": 1 }
+			}
+		},
+		"content": { "type": "object" },
+		"contentSha256": { "$ref": "#/$defs/sha256" },
+		"lane": { "enum": [ "rendered", "headless" ] },
+		"workloadId": { "type": "string", "minLength": 1 },
+		"success": { "const": true },
+		"denominator": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [ "attempted", "completed", "cancelled", "rejected", "failed", "timedOut" ],
+			"properties": {
+				"attempted": { "type": "integer", "minimum": 1 },
+				"completed": { "type": "integer", "minimum": 0 },
+				"cancelled": { "type": "integer", "minimum": 0 },
+				"rejected": { "type": "integer", "minimum": 0 },
+				"failed": { "type": "integer", "minimum": 0 },
+				"timedOut": { "type": "integer", "minimum": 0 }
+			}
+		},
+		"latency": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [ "p95Milliseconds", "p99Milliseconds" ],
+			"properties": {
+				"p95Milliseconds": { "type": "number", "minimum": 0, "maximum": 100 },
+				"p99Milliseconds": { "type": "number", "minimum": 0, "maximum": 250 }
+			}
+		},
+		"safety": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [ "noCrash", "noDeadlock", "noStaleOwnerPublications", "removalSafety", "boundedStatus" ],
+			"properties": {
+				"noCrash": { "const": true },
+				"noDeadlock": { "const": true },
+				"noStaleOwnerPublications": { "const": true },
+				"removalSafety": { "const": true },
+				"boundedStatus": { "const": true }
+			}
+		}
+	},
+	"$defs": {
+		"sha256": {
+			"type": "string",
+			"pattern": "^[A-Fa-f0-9]{64}$"
+		}
+	}
+}

@@ -109,6 +109,19 @@ namespace TerraEngine::Scheduling {
 	inline constexpr const char kResourcePublishedSpatialSnapshot[] = "PublishedSpatialSnapshot";
 	inline constexpr const char kResourceSpatialTransitionQueue[] = "SpatialTransitionQueue";
 	inline constexpr const char kResourcePreparedSpatialTransitions[] = "PreparedSpatialTransitions";
+	// Ground navigation consumes only immutable scene, spatial, residency, and
+	// authoring publications. Separate input, worker-completion, and authoritative
+	// output names make the protected publication boundary visible to diagnostics.
+	inline constexpr const char kResourcePublishedWorldRegionResidency[] = "PublishedWorldRegionResidency";
+	inline constexpr const char kResourceNavigationAuthoring[] = "NavigationAuthoring";
+	inline constexpr const char kResourceGeometryPublications[] = "GeometryPublications";
+	inline constexpr const char kResourceNavigationCommandQueue[] = "NavigationCommandQueue";
+	inline constexpr const char kResourceNavigationPreparedResults[] = "NavigationPreparedResults";
+	inline constexpr const char kResourceNavigationSourceSnapshot[] = "NavigationSourceSnapshot";
+	inline constexpr const char kResourceNavigationCoverageRoot[] = "NavigationCoverageRoot";
+	inline constexpr const char kResourceNavigationAgentState[] = "NavigationAgentState";
+	inline constexpr const char kResourceNavigationResults[] = "NavigationResults";
+	inline constexpr const char kResourceNavigationDiagnostics[] = "NavigationDiagnostics";
 	inline constexpr const char kResourcePhysicsFrameRegistry[] = "PhysicsFrameRegistry";
 	inline constexpr const char kResourcePhysicsFrameMigrations[] = "PhysicsFrameMigrations";
 	// Protected capture owns only immutable values borrowed by the following

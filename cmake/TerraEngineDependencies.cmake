@@ -215,5 +215,13 @@ endfunction()
 function(terraengine_configure_dependencies)
 	terraengine_configure_jolt_dependency()
 	terraengine_configure_miniaudio_dependency()
+	terraengine_configure_recast_dependency()
 	set(TERRAENGINE_MINIAUDIO_ROOT "${TERRAENGINE_MINIAUDIO_ROOT}" PARENT_SCOPE)
+	set(TERRAENGINE_RECAST_ROOT "${TERRAENGINE_RECAST_ROOT}" PARENT_SCOPE)
+	set(TERRAENGINE_RECAST_REVISION "${TERRAENGINE_RECAST_REVISION}" PARENT_SCOPE)
 endfunction()
+
+# Recast Navigation is configured through TerraEngine's core-only wrapper.
+# Keep this include after the revision helper above because the wrapper uses it
+# to enforce the exact approved submodule source identity during configuration.
+include("${CMAKE_CURRENT_LIST_DIR}/TerraEngineRecast.cmake")

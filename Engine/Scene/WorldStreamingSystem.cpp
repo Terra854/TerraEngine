@@ -7,6 +7,7 @@
 #include "Resource/ResourceManager.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <unordered_set>
 
@@ -57,7 +58,12 @@ namespace TerraEngine::Scene
 
 	WorldStreamingSystem& WorldStreamingSystem::Instance() { static WorldStreamingSystem instance; return instance; }
 	void WorldStreamingSystem::Initialize() { std::scoped_lock lock(mutex); observerInterests.clear(); queuedPublications.clear(); interestPlan = {}; residency = {}; initialized = true; }
-	void WorldStreamingSystem::Update(float) { }
+	void WorldStreamingSystem::Update(float) {
+		// Direct hosts use the same bounded planning functions as scheduler jobs.
+		// Production frames normally invoke these through DeclareFrameWorkloads.
+		PrepareInterestPlan();
+		PrepareRetirementPlan();
+	}
 	void WorldStreamingSystem::Shutdown() { std::scoped_lock lock(mutex); initialized = false; observerInterests.clear(); queuedPublications.clear(); residency = {}; }
 	std::string WorldStreamingSystem::SystemName() { return "WorldStreamingSystem"; }
 	TerraEngine::Scheduling::SystemDeclaration WorldStreamingSystem::SchedulerDeclaration()
@@ -76,8 +82,14 @@ namespace TerraEngine::Scene
 		return { std::move(workload) };
 	}
 	void WorldStreamingSystem::SetBudget(WorldStreamingBudget nextBudget) { std::scoped_lock lock(mutex); budget = nextBudget; }
-	void WorldStreamingSystem::SubmitObserverInterest(ObserverInterest interest) { std::scoped_lock lock(mutex); observerInterests.push_back(std::move(interest)); }
-	void WorldStreamingSystem::SubmitPreparedRegion(PreparedRegionPublication publication) { std::scoped_lock lock(mutex); queuedPublications.push_back(std::move(publication)); }
+	void WorldStreamingSystem::SubmitObserverInterest(ObserverInterest interest) {
+		std::scoped_lock lock(mutex);
+		if(observerInterests.size() < 4096U) observerInterests.push_back(std::move(interest));
+	}
+	void WorldStreamingSystem::SubmitPreparedRegion(PreparedRegionPublication publication) {
+		std::scoped_lock lock(mutex);
+		if(queuedPublications.size() < budget.maximumPreparedRegions) queuedPublications.push_back(std::move(publication));
+	}
 	RegionInterestPlan WorldStreamingSystem::CurrentInterestPlan() const { std::scoped_lock lock(mutex); return interestPlan; }
 	PublishedWorldRegionResidency WorldStreamingSystem::CurrentResidency() const { std::scoped_lock lock(mutex); return residency; }
 	void WorldStreamingSystem::PrepareInterestPlan()
@@ -91,10 +103,15 @@ namespace TerraEngine::Scene
 	bool WorldStreamingSystem::PublishAtFrameEnd(ResourceManager& resources, std::uint64_t frameId)
 	{
 		if (TerraEngine::Scheduling::IsWorkerSafetyScopeActive()) return false;
+		const auto now = std::chrono::steady_clock::now().time_since_epoch();
+		const std::uint64_t nowNanoseconds = static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+		(void)directory.ExpireLeases(frameId, nowNanoseconds, 4096U);
 		std::scoped_lock lock(mutex);
 		if (!initialized) return false;
 		if (queuedPublications.empty() && interestPlan.retirements.empty()) return false;
 		PublishedWorldRegionResidency next = residency;
+		next.invalidatedRegions.clear();
 		for (const PreparedRegionPublication& publication : queuedPublications)
 		{
 			const std::optional<WorldRegionDirectoryEntry> entry = directory.Find(publication.key);
@@ -108,8 +125,12 @@ namespace TerraEngine::Scene
 		}
 		for (const WorldRegionKey& key : interestPlan.retirements)
 		{
-			if (const auto entry = directory.Find(key); entry && entry->leases.empty()) next.residentRegions.erase(key);
+			if (const auto entry = directory.Find(key); entry && entry->leases.empty()) {
+				next.invalidatedRegions.push_back(key);
+				next.residentRegions.erase(key);
+			}
 		}
+		std::sort(next.invalidatedRegions.begin(), next.invalidatedRegions.end());
 		for (const PreparedRegionPublication& publication : queuedPublications)
 		{
 			next.residentRegions[publication.key] = publication.snapshot;

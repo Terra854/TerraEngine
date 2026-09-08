@@ -77,3 +77,6 @@
 [submodule "External/miniaudio"]
 	path = External/miniaudio
 	url = https://github.com/mackron/miniaudio.git
+[submodule "External/recastnavigation"]
+	path = External/recastnavigation
+	url = https://github.com/recastnavigation/recastnavigation.git

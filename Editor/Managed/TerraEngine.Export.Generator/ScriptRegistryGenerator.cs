@@ -762,8 +762,8 @@ namespace TerraEngine.Export.Generator
 			source.AppendLine("\tpublic static unsafe class ExportBootstrap");
 			source.AppendLine("\t{");
 			// The legacy caller cannot report its buffer capacity, so it may receive
-			// only the released v1 prefix. New hosts select the capacity-aware v3
-			// entry point before the generator writes the physics and animation tails.
+			// only the released v1 prefix. New hosts select a capacity-aware entry
+			// point before the generator writes any append-only ABI tail.
 			source.AppendLine("\t\t[UnmanagedCallersOnly(EntryPoint = \"InitManagedRuntime\", CallConvs = new[] { typeof(CallConvCdecl) })]");
 			source.AppendLine("\t\tpublic static int InitManagedRuntime(global::TerraEngine.Export.ManagedVTable* outTable)");
 			source.AppendLine("\t\t{");
@@ -785,14 +785,36 @@ namespace TerraEngine.Export.Generator
 			source.AppendLine("\t\t\t}");
 			source.AppendLine("\t\t}");
 			source.AppendLine();
-			source.AppendLine("\t\t[UnmanagedCallersOnly(EntryPoint = \"InitManagedRuntimeV3\", CallConvs = new[] { typeof(CallConvCdecl) })]");
-			source.AppendLine("\t\tpublic static int InitManagedRuntimeV3(global::TerraEngine.Export.ManagedVTable* outTable, ulong hostCapacity)");
+			source.AppendLine("\t\t[UnmanagedCallersOnly(EntryPoint = \"InitManagedRuntimeV4\", CallConvs = new[] { typeof(CallConvCdecl) })]");
+			source.AppendLine("\t\tpublic static int InitManagedRuntimeV4(global::TerraEngine.Export.ManagedVTable* outTable, ulong hostCapacity)");
 			source.AppendLine("\t\t{");
-			source.AppendLine("\t\t\tif ((ulong)sizeof(global::TerraEngine.Export.ManagedVTable) != global::TerraEngine.Export.ManagedVTable.V3Size)");
+			source.AppendLine("\t\t\tif ((ulong)sizeof(global::TerraEngine.Export.ManagedVTable) != global::TerraEngine.Export.ManagedVTable.V4Size)");
 			source.AppendLine("\t\t\t{");
 			source.AppendLine("\t\t\t\treturn -3;");
 			source.AppendLine("\t\t\t}");
 			source.AppendLine();
+			source.AppendLine("\t\t\tif (outTable == null || hostCapacity < global::TerraEngine.Export.ManagedVTable.V4Size)");
+			source.AppendLine("\t\t\t{");
+			source.AppendLine("\t\t\t\treturn -2;");
+			source.AppendLine("\t\t\t}");
+			source.AppendLine();
+			source.AppendLine("\t\t\ttry");
+			source.AppendLine("\t\t\t{");
+			source.AppendLine("\t\t\t\tglobal::TerraEngine.InternalCalls.ValidateNavigationAbiLayout();");
+			source.AppendLine("\t\t\t\tPopulateV4(outTable);");
+			source.AppendLine("\t\t\t\tLogRegisteredScripts();");
+			source.AppendLine("\t\t\t\treturn 0;");
+			source.AppendLine("\t\t\t}");
+			source.AppendLine("\t\t\tcatch (Exception ex)");
+			source.AppendLine("\t\t\t{");
+			source.AppendLine("\t\t\t\tglobal::TerraEngine.Log.Error($\"InitManagedRuntimeV4 failed: {ex}\");");
+			source.AppendLine("\t\t\t\treturn -1;");
+			source.AppendLine("\t\t\t}");
+			source.AppendLine("\t\t}");
+			source.AppendLine();
+			source.AppendLine("\t\t[UnmanagedCallersOnly(EntryPoint = \"InitManagedRuntimeV3\", CallConvs = new[] { typeof(CallConvCdecl) })]");
+			source.AppendLine("\t\tpublic static int InitManagedRuntimeV3(global::TerraEngine.Export.ManagedVTable* outTable, ulong hostCapacity)");
+			source.AppendLine("\t\t{");
 			source.AppendLine("\t\t\tif (outTable == null || hostCapacity < global::TerraEngine.Export.ManagedVTable.V3Size)");
 			source.AppendLine("\t\t\t{");
 			source.AppendLine("\t\t\t\treturn -2;");
@@ -840,6 +862,14 @@ namespace TerraEngine.Export.Generator
 			source.AppendLine("\t\t\toutTable->DispatchAnimationEventBatch = &DispatchAnimationEventBatch;");
 			source.AppendLine("\t\t}");
 			source.AppendLine();
+			source.AppendLine("\t\tprivate static void PopulateV4(global::TerraEngine.Export.ManagedVTable* outTable)");
+			source.AppendLine("\t\t{");
+			source.AppendLine("\t\t\tPopulateV3(outTable);");
+			source.AppendLine("\t\t\toutTable->Version = 4;");
+			source.AppendLine("\t\t\toutTable->TableSize = global::TerraEngine.Export.ManagedVTable.V4Size;");
+			source.AppendLine("\t\t\toutTable->GetNavigationAbiVersion = &GetNavigationAbiVersion;");
+			source.AppendLine("\t\t}");
+			source.AppendLine();
 			source.AppendLine("\t\tprivate static void LogRegisteredScripts()");
 			source.AppendLine("\t\t{");
 			source.AppendLine("\t\t\tfor (int index = 0; index < GeneratedScriptRegistry.Entries.Length; ++index)");
@@ -857,6 +887,9 @@ namespace TerraEngine.Export.Generator
 			source.AppendLine();
 			source.AppendLine("\t\t[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]");
 			source.AppendLine("\t\tprivate static ushort GetAnimationAbiVersion() => global::TerraEngine.Animation.AnimationAbi.Version;");
+			source.AppendLine();
+			source.AppendLine("\t\t[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]");
+			source.AppendLine("\t\tprivate static uint GetNavigationAbiVersion() => global::TerraEngine.Navigation.AbiVersionConstant;");
 			source.AppendLine();
 			source.AppendLine("\t\t[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]");
 			source.AppendLine("\t\tprivate static void DispatchPhysicsEventBatch(void* events, uint eventCount, ulong worldId, uint worldGeneration, ulong tick)");

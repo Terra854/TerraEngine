@@ -58,36 +58,45 @@ namespace TerraEngine::Tests {
 				"Payloads must remain bounded before crossing into managed memory.");
 		});
 
-		registry.Add("Animation.ManagedLifecycle.NativeAotTailIsAppendOnly", [](TestContext& context) {
+		registry.Add("Animation.ManagedLifecycle.NativeAotTailsRemainAppendOnly", [](TestContext& context) {
 			context.Expect(kManagedVTableAnimationVersion == 3U
 				&& kManagedVTableV2Size == 136U
 				&& offsetof(ManagedVTable, getAnimationAbiVersion) == kManagedVTableV2Size
 				&& offsetof(ManagedVTable, dispatchAnimationEventBatch) == 144U
-				&& sizeof(ManagedVTable) == 152U
-				&& kManagedVTableV3Size == sizeof(ManagedVTable),
-				"NativeAOT animation callbacks must occupy an append-only v3 tail after the complete v2 table.");
+				&& kManagedVTableV3Size == 152U
+				&& kManagedVTableNavigationVersion == 4U
+				&& offsetof(ManagedVTable, getNavigationAbiVersion) == kManagedVTableV3Size
+				&& kManagedVTableV4Size == 160U
+				&& sizeof(ManagedVTable) == kManagedVTableV4Size,
+				"NativeAOT animation v3 fields must stay fixed while navigation appends its separate v4 tail.");
 
 			const std::string mirror = ReadAnimationLifecycleSource("Engine/Managed/Source/Export/ExportVTable.cs");
 			const std::string generator = ReadAnimationLifecycleSource(
 				"Editor/Managed/TerraEngine.Export.Generator/ScriptRegistryGenerator.cs");
 			const std::string host = ReadAnimationLifecycleSource("Engine/DotNet/DotNetHost.cpp");
 			const std::string scripting = ReadAnimationLifecycleSource("Engine/Scripting/ScriptingSystem.cpp");
-			context.Expect(mirror.find("Size = 152") != std::string::npos
+			context.Expect(mirror.find("Size = 160") != std::string::npos
 				&& mirror.find("public const ulong V3Size = 152") != std::string::npos
+				&& mirror.find("public const ulong V4Size = 160") != std::string::npos
 				&& mirror.find("FieldOffset(136)") != std::string::npos
 				&& mirror.find("FieldOffset(144)") != std::string::npos
-				&& mirror.find("DispatchAnimationEventBatch") != std::string::npos,
-				"The managed NativeAOT table must mirror the exact native v3 offsets and callback shape.");
+				&& mirror.find("DispatchAnimationEventBatch") != std::string::npos
+				&& mirror.find("FieldOffset(152)") != std::string::npos
+				&& mirror.find("GetNavigationAbiVersion") != std::string::npos,
+				"The managed NativeAOT table must retain exact v3 offsets and append the navigation probe at v4.");
 			context.Expect(generator.find("outTable->Version = 3") != std::string::npos
 				&& generator.find("outTable->GetAnimationAbiVersion = &GetAnimationAbiVersion") != std::string::npos
 				&& generator.find("outTable->DispatchAnimationEventBatch = &DispatchAnimationEventBatch") != std::string::npos
+				&& generator.find("outTable->GetNavigationAbiVersion = &GetNavigationAbiVersion") != std::string::npos
 				&& generator.find("AnimationEvents.DispatchProtectedNativeCore") != std::string::npos,
-				"Generated NativeAOT bootstraps must publish the validated animation callback and use the shared managed dispatcher.");
+				"Generated NativeAOT bootstraps must retain the animation callback and append the navigation ABI probe.");
 			context.Expect(host.find("outTable->version >= kManagedVTableAnimationVersion") != std::string::npos
 				&& host.find("outTable->tableSize < kManagedVTableV3Size") != std::string::npos
 				&& host.find("getAnimationAbiVersion() != kManagedAnimationAbiVersion") != std::string::npos
+				&& host.find("outTable->version >= kManagedVTableNavigationVersion") != std::string::npos
+				&& host.find("getNavigationAbiVersion() != kManagedNavigationAbiVersion") != std::string::npos
 				&& scripting.find("m_ExportVTable.version >= kManagedVTableAnimationVersion") != std::string::npos,
-				"NativeAOT hosts must reject malformed advertised v3 tails while preserving v1/v2 compatibility.");
+				"NativeAOT hosts must reject malformed advertised tails while preserving v1 through v3 compatibility.");
 		});
 
 		registry.Add("Animation.ManagedLifecycle.NativeAotInitializersPreserveOlderHostBuffers", [](TestContext& context) {
@@ -95,13 +104,17 @@ namespace TerraEngine::Tests {
 				"Editor/Managed/TerraEngine.Export.Generator/ScriptRegistryGenerator.cs");
 			const std::string host = ReadAnimationLifecycleSource("Engine/DotNet/DotNetHost.cpp");
 			const std::string legacyInitializer = SliceSource(
-				generator, "public static int InitManagedRuntime(", "InitManagedRuntimeV3");
+				generator, "public static int InitManagedRuntime(", "InitManagedRuntimeV4");
+			const std::string v4Initializer = SliceSource(
+				generator, "public static int InitManagedRuntimeV4(", "InitManagedRuntimeV3");
 			const std::string v3Initializer = SliceSource(
 				generator, "public static int InitManagedRuntimeV3(", "private static void PopulateV1");
 			const std::string v1Population = SliceSource(
 				generator, "private static void PopulateV1(", "private static void PopulateV3");
 			const std::string v3Population = SliceSource(
-				generator, "private static void PopulateV3(", "private static void LogRegisteredScripts");
+				generator, "private static void PopulateV3(", "private static void PopulateV4");
+			const std::string v4Population = SliceSource(
+				generator, "private static void PopulateV4(", "private static void LogRegisteredScripts");
 
 			context.Expect(!legacyInitializer.empty()
 				&& legacyInitializer.find("PopulateV1(outTable)") != std::string::npos
@@ -114,24 +127,39 @@ namespace TerraEngine::Tests {
 				&& v1Population.find("outTable->GetAnimationAbiVersion") == std::string::npos,
 				"A current gameplay library must not overwrite a v1 or v2 host buffer through its legacy export.");
 			context.Expect(!v3Initializer.empty()
-				&& v3Initializer.find("sizeof(global::TerraEngine.Export.ManagedVTable) != global::TerraEngine.Export.ManagedVTable.V3Size") != std::string::npos
 				&& v3Initializer.find("hostCapacity < global::TerraEngine.Export.ManagedVTable.V3Size") != std::string::npos
 				&& v3Initializer.find("return -2") != std::string::npos
-				&& v3Initializer.find("PopulateV3(outTable)") != std::string::npos,
-				"The v3 export must reject undersized destinations before writing any v3 field.");
+				&& v3Initializer.find("PopulateV3(outTable)") != std::string::npos
+				&& v3Initializer.find("V4Size") == std::string::npos,
+				"The v3 export must retain its 152-byte capacity gate without requiring the later v4 tail.");
 			context.Expect(!v3Population.empty()
 				&& v3Population.find("outTable->Version = 3") != std::string::npos
 				&& v3Population.find("outTable->TableSize = global::TerraEngine.Export.ManagedVTable.V3Size") != std::string::npos
 				&& v3Population.find("outTable->GetPhysicsAbiVersion") != std::string::npos
-				&& v3Population.find("outTable->GetAnimationAbiVersion") != std::string::npos,
+				&& v3Population.find("outTable->GetAnimationAbiVersion") != std::string::npos
+				&& v3Population.find("outTable->GetNavigationAbiVersion") == std::string::npos,
 				"A capacity-approved v3 export must retain both physics and animation tails.");
-			context.Expect(host.find("GetNativeExport(nativeAotLibraryHandle, \"InitManagedRuntimeV3\")") != std::string::npos
+			context.Expect(!v4Initializer.empty()
+				&& v4Initializer.find("ManagedVTable.V4Size") != std::string::npos
+				&& v4Initializer.find("hostCapacity < global::TerraEngine.Export.ManagedVTable.V4Size") != std::string::npos
+				&& v4Initializer.find("ValidateNavigationAbiLayout") != std::string::npos
+				&& v4Initializer.find("PopulateV4(outTable)") != std::string::npos,
+				"The v4 export must validate managed navigation layout before publishing its new tail.");
+			context.Expect(!v4Population.empty()
+				&& v4Population.find("outTable->Version = 4") != std::string::npos
+				&& v4Population.find("outTable->TableSize = global::TerraEngine.Export.ManagedVTable.V4Size") != std::string::npos
+				&& v4Population.find("outTable->GetNavigationAbiVersion") != std::string::npos,
+				"The v4 population must append only the navigation ABI probe after the complete v3 table.");
+			context.Expect(host.find("GetNativeExport(nativeAotLibraryHandle, \"InitManagedRuntimeV4\")") != std::string::npos
+				&& host.find("GetNativeExport(nativeAotLibraryHandle, \"InitManagedRuntimeV3\")") != std::string::npos
 				&& host.find("GetNativeExport(nativeAotLibraryHandle, \"InitManagedRuntime\")") != std::string::npos
-				&& host.find("initV3Fn(outTable, sizeof(ManagedVTable))") != std::string::npos
+				&& host.find("initV4Fn(outTable, sizeof(ManagedVTable))") != std::string::npos
+				&& host.find("initV3Fn(outTable, kManagedVTableV3Size)") != std::string::npos
 				&& host.find(": initFn(outTable)") != std::string::npos
 				&& host.find("outTable->version >= kManagedVTablePhysicsVersion") != std::string::npos
-				&& host.find("outTable->version >= kManagedVTableAnimationVersion") != std::string::npos,
-				"Current hosts must prefer the bounded export, fall back to legacy v1/v2 libraries, and guard each optional tail.");
+				&& host.find("outTable->version >= kManagedVTableAnimationVersion") != std::string::npos
+				&& host.find("outTable->version >= kManagedVTableNavigationVersion") != std::string::npos,
+				"Current hosts must prefer v4, fall back to v3 then legacy v1, and guard every optional tail.");
 		});
 
 		registry.Add("Animation.ManagedLifecycle.SubscriptionsFilterDisposeAndInvalidateOnReload", [](TestContext& context) {

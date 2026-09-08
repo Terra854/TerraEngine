@@ -19,6 +19,12 @@
        ExportBootstrap is injected by the Source Generator during export. -->
   <ItemGroup>
     <Compile Remove="Source\Export\ExportBootstrap.cs" />
+    <!-- The SDK default glob compiles every managed navigation facade. Keep an
+         explicit update so export project customisation cannot silently omit
+         the NativeAOT ABI root while avoiding a duplicate Compile include. -->
+    <Compile Update="Source\Navigation\**\*.cs">
+      <Visible>true</Visible>
+    </Compile>
   </ItemGroup>
 
 </Project>

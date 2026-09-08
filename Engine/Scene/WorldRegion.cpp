@@ -161,7 +161,8 @@ namespace TerraEngine::Scene
 
 	bool WorldRegionDirectory::AcquireLease(WorldRegionKey key, WorldRegionLease lease)
 	{
-		if (lease.leaseId.empty() || lease.generation == 0U) return false;
+		if (lease.leaseId.empty() || lease.generation == 0U
+			|| (lease.expiresAtFrame == 0U && lease.expiresAtTimeNanoseconds == 0U)) return false;
 		std::unique_lock lock(mutex);
 		auto entry = entries.find(key);
 		if (entry == entries.end()) return false;
@@ -169,6 +170,46 @@ namespace TerraEngine::Scene
 		if (existing != entry->second.leases.end() && existing->generation > lease.generation) return false;
 		if (existing == entry->second.leases.end()) entry->second.leases.push_back(std::move(lease)); else *existing = std::move(lease);
 		return true;
+	}
+
+	bool WorldRegionDirectory::RenewLease(WorldRegionKey key, WorldRegionLease lease)
+	{
+		if(lease.leaseId.empty() || lease.generation == 0U
+			|| (lease.expiresAtFrame == 0U && lease.expiresAtTimeNanoseconds == 0U)) return false;
+		std::unique_lock lock(mutex);
+		auto entry = entries.find(key);
+		if(entry == entries.end()) return false;
+		auto existing = std::find_if(entry->second.leases.begin(), entry->second.leases.end(),
+			[&lease](const WorldRegionLease& value) { return value.leaseId == lease.leaseId; });
+		if(existing == entry->second.leases.end() || lease.generation <= existing->generation) return false;
+		*existing = std::move(lease);
+		return true;
+	}
+
+	std::size_t WorldRegionDirectory::ExpireLeases(
+		std::uint64_t currentFrame,
+		std::uint64_t currentTimeNanoseconds,
+		std::size_t maximumExpirations)
+	{
+		if(maximumExpirations == 0U) return 0U;
+		std::unique_lock lock(mutex);
+		std::size_t expired = 0U;
+		for(auto& [key, entry] : entries) {
+			(void)key;
+			for(auto lease = entry.leases.begin(); lease != entry.leases.end() && expired < maximumExpirations;) {
+				const bool frameExpired = lease->expiresAtFrame != 0U && lease->expiresAtFrame <= currentFrame;
+				const bool timeExpired = lease->expiresAtTimeNanoseconds != 0U
+					&& lease->expiresAtTimeNanoseconds <= currentTimeNanoseconds;
+				if(frameExpired || timeExpired) {
+					lease = entry.leases.erase(lease);
+					++expired;
+				} else {
+					++lease;
+				}
+			}
+			if(expired >= maximumExpirations) break;
+		}
+		return expired;
 	}
 
 	bool WorldRegionDirectory::ReleaseLease(WorldRegionKey key, std::string_view leaseId, std::uint64_t generation)

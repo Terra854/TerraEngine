@@ -100,6 +100,29 @@ add_executable(TerraEngine-EngineTests
 	Platform/PlatformUtilsTests.cpp
 	Platform/FatalErrorDialogTests.cpp
 	Physics/PhysicsDependencyContractTests.cpp
+	Navigation/NavigationDependencyContractTests.cpp
+	Navigation/NavigationTypesTests.cpp
+	Navigation/NavigationGeometrySnapshotTests.cpp
+	Navigation/NavigationComponentTests.cpp
+	Navigation/NavigationSchedulerContractTests.cpp
+	Navigation/NavigationQueryTests.cpp
+	Navigation/NavigationConnectionTests.cpp
+	Navigation/MeshGroundNavigationTests.cpp
+	Navigation/TerrainGroundNavigationTests.cpp
+	Navigation/NavigationClearanceKernelTests.cpp
+	Navigation/NavigationStreamingTests.cpp
+	Navigation/NavigationLargeWorldTests.cpp
+	Scripting/NavigationManagedTests.cpp
+	Scripting/NavigationAbiTests.cpp
+	Navigation/NavigationLifecycleTests.cpp
+	Navigation/RecastDetourGroundBackendTests.cpp
+	Navigation/DynamicNavigationGeometryTests.cpp
+	Navigation/NavigationMutationPublicationTests.cpp
+	Navigation/NavigationRouteValidityTests.cpp
+	Navigation/NavigationConcurrencyTests.cpp
+	Navigation/NavigationObjectIntegrationTests.cpp
+	Scripting/NavigationObjectManagedTests.cpp
+	Navigation/SavedNavigationTests.cpp
 	Physics/PhysicsHandleTests.cpp
 	Physics/PhysicsSettingsTests.cpp
 	Physics/PhysicsBackendBoundaryTests.cpp
@@ -321,6 +344,7 @@ add_executable(TerraEngine-EngineTests
 	Scene/WorldSpatialTransactionTests.cpp
 	Scene/WorldSpatialTransitionTests.cpp
 	Scene/WorldStreamingSystemTests.cpp
+	Scene/WorldStreamingNavigationIntegrationTests.cpp
 	Scene/UnboundedWorldMemoryTests.cpp
 	Scene/UnboundedSceneSerializationTests.cpp
 	Scene/UnboundedPrefabAndCacheTests.cpp
@@ -534,6 +558,36 @@ add_test(NAME Engine.PhysicsStress COMMAND $<TARGET_FILE:TerraEngine-EngineTests
 set_tests_properties(Engine.PhysicsStress PROPERTIES
 	LABELS "Engine;Physics;Stress;Determinism;Lifecycle"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.DeterminismStress,Physics.LifecycleStress"
+)
+
+# Navigation has deliberately narrow CTest lanes so contributors can isolate
+# foundation, terrain-free/terrain ground routing, dynamic publication, and
+# managed ABI regressions without selecting unrelated engine workloads.
+add_test(NAME Engine.Navigation.Foundation COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Navigation.Foundation PROPERTIES
+	LABELS "Engine;Navigation;Foundation;Dependency;Scheduler"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Engine.Navigation.DependencyContract,Engine.Navigation.Types,Navigation.Geometry,Navigation.Components,Navigation.Scheduler,Navigation.Backend"
+)
+add_test(NAME Engine.Navigation.Ground COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Navigation.Ground PROPERTIES
+	LABELS "Engine;Navigation;Ground;Terrain;TerrainFree"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Navigation.MeshGround,Navigation.GroundTerrain,Navigation.ClearanceKernel,Navigation.Query,Navigation.Connections"
+)
+add_test(NAME Engine.Navigation.Dynamic COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Navigation.Dynamic PROPERTIES
+	LABELS "Engine;Navigation;Dynamic;Streaming;Concurrency;Lifecycle"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Navigation.Dynamic,Navigation.Streaming,Navigation.LargeWorld,Navigation.RouteValidity,Engine.NavigationLifecycle,Navigation.SavedNavigation"
+)
+add_test(NAME Engine.Navigation.ManagedAbi COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Navigation.ManagedAbi PROPERTIES
+	LABELS "Engine;Navigation;Managed;ABI"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=NavigationManaged,Navigation.ManagedAbi,Navigation.ObjectManaged"
+)
+
+add_test(NAME Engine.Navigation.ObjectIntegration COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Navigation.ObjectIntegration PROPERTIES
+	LABELS "Engine;Navigation;Object;Integration"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Navigation.ObjectIntegration"
 )
 
 add_test(NAME Engine.VirtualGeometryFoundation COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)

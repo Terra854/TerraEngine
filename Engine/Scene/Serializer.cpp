@@ -18,11 +18,15 @@
 #include "Components/Physics/ColliderSetComponent.h"
 #include "Components/Physics/ConstraintSetComponent.h"
 #include "Components/Physics/RigidBodyComponent.h"
+#include "Components/Navigation/NavigationAgentComponent.h"
+#include "Components/Navigation/NavigationConnectionComponent.h"
+#include "Components/Navigation/NavigationSourceComponent.h"
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <charconv>
 #include <cmath>
 #include <limits>
+#include <type_traits>
 
 namespace {
 	using namespace TerraEngine::Physics;
@@ -802,6 +806,128 @@ namespace {
 		return true;
 	}
 
+	const char* NavigationSourceKindName(TerraEngine::Navigation::NavigationSourceKind value) {
+		using enum TerraEngine::Navigation::NavigationSourceKind;
+		if(value == Mesh) return "Mesh";
+		if(value == Collider) return "Collider";
+		if(value == Terrain) return "Terrain";
+		return "Auto";
+	}
+
+	bool ReadNavigationSourceKind(const nlohmann::json& value, TerraEngine::Navigation::NavigationSourceKind& result) {
+		if(!value.is_string()) return false;
+		const std::string name = value.get<std::string>();
+		if(name == "Auto") result = TerraEngine::Navigation::NavigationSourceKind::Auto;
+		else if(name == "Mesh") result = TerraEngine::Navigation::NavigationSourceKind::Mesh;
+		else if(name == "Collider") result = TerraEngine::Navigation::NavigationSourceKind::Collider;
+		else if(name == "Terrain") result = TerraEngine::Navigation::NavigationSourceKind::Terrain;
+		else return false;
+		return true;
+	}
+
+	const char* NavigationRoutePolicyName(TerraEngine::Navigation::NavigationRoutePolicy value) {
+		return value == TerraEngine::Navigation::NavigationRoutePolicy::NearestReachable ? "NearestReachable" : "ExactDestination";
+	}
+
+	bool ReadNavigationRoutePolicy(const nlohmann::json& value, TerraEngine::Navigation::NavigationRoutePolicy& result) {
+		if(!value.is_string()) return false;
+		const std::string name = value.get<std::string>();
+		if(name == "ExactDestination") result = TerraEngine::Navigation::NavigationRoutePolicy::ExactDestination;
+		else if(name == "NearestReachable") result = TerraEngine::Navigation::NavigationRoutePolicy::NearestReachable;
+		else return false;
+		return true;
+	}
+
+	const char* NavigationConnectionDirectionName(TerraEngine::Navigation::NavigationConnectionDirection value) {
+		using enum TerraEngine::Navigation::NavigationConnectionDirection;
+		if(value == ForwardOnly) return "ForwardOnly";
+		if(value == ReverseOnly) return "ReverseOnly";
+		return "Bidirectional";
+	}
+
+	bool ReadNavigationConnectionDirection(const nlohmann::json& value, TerraEngine::Navigation::NavigationConnectionDirection& result) {
+		if(!value.is_string()) return false;
+		const std::string name = value.get<std::string>();
+		if(name == "Bidirectional") result = TerraEngine::Navigation::NavigationConnectionDirection::Bidirectional;
+		else if(name == "ForwardOnly") result = TerraEngine::Navigation::NavigationConnectionDirection::ForwardOnly;
+		else if(name == "ReverseOnly") result = TerraEngine::Navigation::NavigationConnectionDirection::ReverseOnly;
+		else return false;
+		return true;
+	}
+
+	nlohmann::json SerializeNavigationSource(const NavigationSourceComponent& source) {
+		return {{"active", source.active}, {"sourceId", TerraEngine::ToHexString(source.sourceId)}, {"enabled", source.enabled},
+			{"sourceKind", NavigationSourceKindName(source.sourceKind)}, {"sourceAssetId", TerraEngine::ToHexString(source.sourceAssetId)},
+			{"subshapeSelection", source.subshapeSelection}, {"inclusionMask", source.inclusionMask}, {"areaId", source.areaId},
+			{"deduplicationGroup", source.deduplicationGroup}, {"geometryRevision", source.geometryRevision}};
+	}
+
+	bool DeserializeNavigationSource(const nlohmann::json& json, NavigationSourceComponent& destination) {
+		if(!json.is_object()) return false;
+		NavigationSourceComponent value;
+		try {
+			value.active = json.value("active", value.active);
+			if(auto id = TerraEngine::ParseUUID(json.value("sourceId", std::string{}))) value.sourceId = *id; else return false;
+			value.enabled = json.value("enabled", value.enabled);
+			if(!ReadNavigationSourceKind(json.at("sourceKind"), value.sourceKind)) return false;
+			if(auto id = TerraEngine::ParseUUID(json.value("sourceAssetId", std::string{}))) value.sourceAssetId = *id; else return false;
+			value.subshapeSelection = json.value("subshapeSelection", value.subshapeSelection);
+			value.inclusionMask = json.value("inclusionMask", value.inclusionMask);
+			value.areaId = json.value("areaId", value.areaId);
+			value.deduplicationGroup = json.value("deduplicationGroup", value.deduplicationGroup);
+			value.geometryRevision = json.value("geometryRevision", value.geometryRevision);
+		} catch(...) { return false; }
+		if(!value.Validate().accepted) return false;
+		destination = value;
+		return true;
+	}
+
+	nlohmann::json SerializeNavigationAgent(const NavigationAgentComponent& agent) {
+		return {{"active", agent.active}, {"profileId", TerraEngine::ToHexString(agent.profileId)}, {"routePolicy", NavigationRoutePolicyName(agent.routePolicy)}, {"enabled", agent.enabled}};
+	}
+
+	bool DeserializeNavigationAgent(const nlohmann::json& json, NavigationAgentComponent& destination) {
+		if(!json.is_object()) return false;
+		NavigationAgentComponent value;
+		try {
+			value.active = json.value("active", value.active);
+			if(auto id = TerraEngine::ParseUUID(json.value("profileId", std::string{}))) value.profileId = *id; else return false;
+			if(!ReadNavigationRoutePolicy(json.at("routePolicy"), value.routePolicy)) return false;
+			value.enabled = json.value("enabled", value.enabled);
+		} catch(...) { return false; }
+		if(!value.Validate().accepted) return false;
+		destination = value;
+		return true;
+	}
+
+	nlohmann::json SerializeNavigationConnection(const NavigationConnectionComponent& connection) {
+		return {{"active", connection.active}, {"connectionId", TerraEngine::ToHexString(connection.connectionId)}, {"revision", connection.revision},
+			{"enabled", connection.enabled}, {"firstEndpoint", Serializer::SerializeWorldPosition(connection.firstEndpoint)},
+			{"secondEndpoint", Serializer::SerializeWorldPosition(connection.secondEndpoint)}, {"direction", NavigationConnectionDirectionName(connection.direction)},
+			{"capabilityMask", connection.capabilityMask}, {"gameplayCondition", connection.gameplayCondition}, {"areaId", connection.areaId}, {"traversalCost", connection.traversalCost}};
+	}
+
+	bool DeserializeNavigationConnection(const nlohmann::json& json, NavigationConnectionComponent& destination) {
+		if(!json.is_object()) return false;
+		NavigationConnectionComponent value;
+		try {
+			value.active = json.value("active", value.active);
+			if(auto id = TerraEngine::ParseUUID(json.value("connectionId", std::string{}))) value.connectionId = *id; else return false;
+			value.revision = json.value("revision", value.revision);
+			value.enabled = json.value("enabled", value.enabled);
+			if(auto endpoint = Serializer::DeserializeWorldPosition(json.at("firstEndpoint"))) value.firstEndpoint = *endpoint; else return false;
+			if(auto endpoint = Serializer::DeserializeWorldPosition(json.at("secondEndpoint"))) value.secondEndpoint = *endpoint; else return false;
+			if(!ReadNavigationConnectionDirection(json.at("direction"), value.direction)) return false;
+			value.capabilityMask = json.value("capabilityMask", value.capabilityMask);
+			value.gameplayCondition = json.value("gameplayCondition", value.gameplayCondition);
+			value.areaId = json.value("areaId", value.areaId);
+			value.traversalCost = json.value("traversalCost", value.traversalCost);
+		} catch(...) { return false; }
+		if(!value.Validate().accepted) return false;
+		destination = value;
+		return true;
+	}
+
 	nlohmann::json SerializeCanonicalTransform(const Transform& transform)
 	{
 		// Transform has no reflected float position alias.  Persist both exact
@@ -920,6 +1046,27 @@ nlohmann::json SerializeObjectRecursive(Object object) {
 				}
 				continue;
 			}
+			if(compName == NavigationSourceComponent::kComponentName) {
+				if(const NavigationSourceComponent* source = enttRegistry.try_get<NavigationSourceComponent>(entity)) {
+					auto guard = source->acquireReadLock();
+					objJson["components"][compName] = SerializeNavigationSource(*source);
+				}
+				continue;
+			}
+			if(compName == NavigationAgentComponent::kComponentName) {
+				if(const NavigationAgentComponent* agent = enttRegistry.try_get<NavigationAgentComponent>(entity)) {
+					auto guard = agent->acquireReadLock();
+					objJson["components"][compName] = SerializeNavigationAgent(*agent);
+				}
+				continue;
+			}
+			if(compName == NavigationConnectionComponent::kComponentName) {
+				if(const NavigationConnectionComponent* connection = enttRegistry.try_get<NavigationConnectionComponent>(entity)) {
+					auto guard = connection->acquireReadLock();
+					objJson["components"][compName] = SerializeNavigationConnection(*connection);
+				}
+				continue;
+			}
 			nlohmann::json compJson = nlohmann::json::object();
 			TerraEngine::Reflection::Type type = functions.reflectionType;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1021,6 +1168,188 @@ SceneRenderSettings Serializer::DeserializeSceneRenderSettings(const nlohmann::j
 	return SanitizeSceneRenderSettings(settings);
 }
 
+namespace {
+	constexpr std::uint32_t kNavigationSettingsSchemaVersion = 1U;
+
+	// JSON numbers do not retain a C++ integer width. Read through uint64_t, then
+	// prove the value fits the authored destination before assigning it.
+	template<typename Unsigned>
+	bool ReadNavigationUnsigned(const nlohmann::json& value, Unsigned& destination)
+	{
+		static_assert(std::is_unsigned_v<Unsigned>);
+		std::uint64_t raw = 0U;
+		if(value.is_number_unsigned()) {
+			raw = value.get<std::uint64_t>();
+		} else if(value.is_number_integer()) {
+			const std::int64_t signedRaw = value.get<std::int64_t>();
+			if(signedRaw < 0) return false;
+			raw = static_cast<std::uint64_t>(signedRaw);
+		} else {
+			return false;
+		}
+		if(raw > std::numeric_limits<Unsigned>::max()) return false;
+		destination = static_cast<Unsigned>(raw);
+		return true;
+	}
+
+	bool ReadNavigationFiniteNumber(const nlohmann::json& value, double& destination)
+	{
+		if(!value.is_number()) return false;
+		const double candidate = value.get<double>();
+		if(!std::isfinite(candidate)) return false;
+		destination = candidate;
+		return true;
+	}
+
+	template<typename Value>
+	bool ReadNavigationMember(const nlohmann::json& object, std::string_view key, Value& destination)
+	{
+		const auto found = object.find(std::string(key));
+		if(found == object.end()) return false;
+		if constexpr(std::is_same_v<Value, double>) return ReadNavigationFiniteNumber(*found, destination);
+		else return ReadNavigationUnsigned(*found, destination);
+	}
+
+	std::optional<TerraEngine::Navigation::NavigationProfile> RejectNavigationProfile(
+		std::string* outError, std::string reason)
+	{
+		if(outError) *outError = std::move(reason);
+		return std::nullopt;
+	}
+
+	std::optional<TerraEngine::Navigation::NavigationSettings> RejectNavigationSettings(
+		std::string* outError, std::string reason)
+	{
+		if(outError) *outError = std::move(reason);
+		return std::nullopt;
+	}
+}
+
+nlohmann::json Serializer::SerializeNavigationProfile(const TerraEngine::Navigation::NavigationProfile& profile)
+{
+	// Saving invalid values would create a document that a later load must reject.
+	// Return an empty object, matching the checked WorldPosition serializer's policy.
+	if(!profile.Validate().accepted) return nlohmann::json::object();
+
+	nlohmann::json penalties = nlohmann::json::array();
+	for(const double penalty : profile.areaPenalties) penalties.push_back(penalty);
+	return {
+		{"schemaVersion", kNavigationSettingsSchemaVersion},
+		{"profileId", profile.profileId},
+		{"revision", profile.revision},
+		{"radiusMetres", profile.radiusMetres},
+		{"heightMetres", profile.heightMetres},
+		{"stepHeightMetres", profile.stepHeightMetres},
+		{"maxSlopeDegrees", profile.maxSlopeDegrees},
+		{"clearanceMarginMetres", profile.clearanceMarginMetres},
+		{"horizontalResolutionMetres", profile.horizontalResolutionMetres},
+		{"verticalResolutionMetres", profile.verticalResolutionMetres},
+		{"excludedAreasMask", profile.excludedAreasMask},
+		{"areaPenalties", std::move(penalties)}
+	};
+}
+
+std::optional<TerraEngine::Navigation::NavigationProfile> Serializer::DeserializeNavigationProfile(
+	const nlohmann::json& json, std::string* outError)
+{
+	using TerraEngine::Navigation::NavigationProfile;
+	if(!json.is_object()) return RejectNavigationProfile(outError, "navigation profile must be an object");
+
+	std::uint32_t schemaVersion = 0U;
+	NavigationProfile candidate{};
+	if(!ReadNavigationMember(json, "schemaVersion", schemaVersion)
+		|| schemaVersion != kNavigationSettingsSchemaVersion
+		|| !ReadNavigationMember(json, "profileId", candidate.profileId)
+		|| !ReadNavigationMember(json, "revision", candidate.revision)
+		|| !ReadNavigationMember(json, "radiusMetres", candidate.radiusMetres)
+		|| !ReadNavigationMember(json, "heightMetres", candidate.heightMetres)
+		|| !ReadNavigationMember(json, "stepHeightMetres", candidate.stepHeightMetres)
+		|| !ReadNavigationMember(json, "maxSlopeDegrees", candidate.maxSlopeDegrees)
+		|| !ReadNavigationMember(json, "clearanceMarginMetres", candidate.clearanceMarginMetres)
+		|| !ReadNavigationMember(json, "horizontalResolutionMetres", candidate.horizontalResolutionMetres)
+		|| !ReadNavigationMember(json, "verticalResolutionMetres", candidate.verticalResolutionMetres)
+		|| !ReadNavigationMember(json, "excludedAreasMask", candidate.excludedAreasMask)) {
+		return RejectNavigationProfile(outError, "navigation profile has a missing, unsupported, or out-of-range field");
+	}
+
+	const auto penalties = json.find("areaPenalties");
+	if(penalties == json.end() || !penalties->is_array()
+		|| penalties->size() != candidate.areaPenalties.size()) {
+		return RejectNavigationProfile(outError, "navigation profile must contain exactly 32 area penalties");
+	}
+	for(std::size_t index = 0U; index < candidate.areaPenalties.size(); ++index) {
+		if(!ReadNavigationFiniteNumber((*penalties)[index], candidate.areaPenalties[index])) {
+			return RejectNavigationProfile(outError, "navigation profile area penalties must be finite numbers");
+		}
+	}
+	if(!candidate.Validate().accepted) {
+		return RejectNavigationProfile(outError, "navigation profile violates its durable validation contract");
+	}
+	return candidate;
+}
+
+nlohmann::json Serializer::SerializeNavigationSettings(const TerraEngine::Navigation::NavigationSettings& settings)
+{
+	if(!settings.Validate().accepted) return nlohmann::json::object();
+	return {
+		{"schemaVersion", kNavigationSettingsSchemaVersion},
+		{"maxActiveProfileBuilds", settings.maxActiveProfileBuilds},
+		{"maxActiveAgents", settings.maxActiveAgents},
+		{"maxAdmittedRequests", settings.maxAdmittedRequests},
+		{"maxConcurrentBuilds", settings.maxConcurrentBuilds},
+		{"maxConcurrentSearches", settings.maxConcurrentSearches},
+		{"maxDetourNodesPerQuery", settings.maxDetourNodesPerQuery},
+		{"maxEngineNodesPerRequest", settings.maxEngineNodesPerRequest},
+		{"maxRoutePoints", settings.maxRoutePoints},
+		{"workerExpansionQuantum", settings.workerExpansionQuantum},
+		{"maxGeometryBytes", settings.maxGeometryBytes},
+		{"maxPublishedAndRetiredBytes", settings.maxPublishedAndRetiredBytes},
+		{"maxBuildScratchBytes", settings.maxBuildScratchBytes},
+		{"maxRequestAndRouteBytes", settings.maxRequestAndRouteBytes},
+		{"maxDiagnosticBytes", settings.maxDiagnosticBytes},
+		{"defaultRequestDeadlineMilliseconds", settings.defaultRequestDeadlineMilliseconds},
+		{"maximumRequestLifetimeMilliseconds", settings.maximumRequestLifetimeMilliseconds},
+		{"defaultRouteRetentionMilliseconds", settings.defaultRouteRetentionMilliseconds},
+		{"terminalRequestRetentionMilliseconds", settings.terminalRequestRetentionMilliseconds}
+	};
+}
+
+std::optional<TerraEngine::Navigation::NavigationSettings> Serializer::DeserializeNavigationSettings(
+	const nlohmann::json& json, std::string* outError)
+{
+	using TerraEngine::Navigation::NavigationSettings;
+	if(!json.is_object()) return RejectNavigationSettings(outError, "navigation settings must be an object");
+
+	std::uint32_t schemaVersion = 0U;
+	NavigationSettings candidate{};
+	if(!ReadNavigationMember(json, "schemaVersion", schemaVersion)
+		|| schemaVersion != kNavigationSettingsSchemaVersion
+		|| !ReadNavigationMember(json, "maxActiveProfileBuilds", candidate.maxActiveProfileBuilds)
+		|| !ReadNavigationMember(json, "maxActiveAgents", candidate.maxActiveAgents)
+		|| !ReadNavigationMember(json, "maxAdmittedRequests", candidate.maxAdmittedRequests)
+		|| !ReadNavigationMember(json, "maxConcurrentBuilds", candidate.maxConcurrentBuilds)
+		|| !ReadNavigationMember(json, "maxConcurrentSearches", candidate.maxConcurrentSearches)
+		|| !ReadNavigationMember(json, "maxDetourNodesPerQuery", candidate.maxDetourNodesPerQuery)
+		|| !ReadNavigationMember(json, "maxEngineNodesPerRequest", candidate.maxEngineNodesPerRequest)
+		|| !ReadNavigationMember(json, "maxRoutePoints", candidate.maxRoutePoints)
+		|| !ReadNavigationMember(json, "workerExpansionQuantum", candidate.workerExpansionQuantum)
+		|| !ReadNavigationMember(json, "maxGeometryBytes", candidate.maxGeometryBytes)
+		|| !ReadNavigationMember(json, "maxPublishedAndRetiredBytes", candidate.maxPublishedAndRetiredBytes)
+		|| !ReadNavigationMember(json, "maxBuildScratchBytes", candidate.maxBuildScratchBytes)
+		|| !ReadNavigationMember(json, "maxRequestAndRouteBytes", candidate.maxRequestAndRouteBytes)
+		|| !ReadNavigationMember(json, "maxDiagnosticBytes", candidate.maxDiagnosticBytes)
+		|| !ReadNavigationMember(json, "defaultRequestDeadlineMilliseconds", candidate.defaultRequestDeadlineMilliseconds)
+		|| !ReadNavigationMember(json, "maximumRequestLifetimeMilliseconds", candidate.maximumRequestLifetimeMilliseconds)
+		|| !ReadNavigationMember(json, "defaultRouteRetentionMilliseconds", candidate.defaultRouteRetentionMilliseconds)
+		|| !ReadNavigationMember(json, "terminalRequestRetentionMilliseconds", candidate.terminalRequestRetentionMilliseconds)) {
+		return RejectNavigationSettings(outError, "navigation settings have a missing, unsupported, or out-of-range field");
+	}
+	if(!candidate.Validate().accepted) {
+		return RejectNavigationSettings(outError, "navigation settings violate their durable validation contract");
+	}
+	return candidate;
+}
+
 // Serializer::DeserializeObjectEntity restores authored state through manager
 // APIs so stale identity and component access stay centralized.
 entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std::optional<entt::entity> parent) {
@@ -1037,6 +1366,9 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 	// happened not to instantiate that C++ type first.
 	CameraComponent::registerType();
 	MeshRenderComponent::registerType();
+	NavigationSourceComponent::registerType();
+	NavigationAgentComponent::registerType();
+	NavigationConnectionComponent::registerType();
 	// Register the small terrain-instance contract before generic reflection
 	// deserialization attempts to create TerrainComponent from scene JSON.
 	TerrainComponent::registerType();
@@ -1145,6 +1477,27 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 				if(compName == CharacterControllerComponent::kComponentName) {
 					CharacterControllerComponent* character = enttRegistry.try_get<CharacterControllerComponent>(entity);
 					if(character == nullptr || !DeserializeCharacterController(compData, *character)) {
+						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
+					}
+					continue;
+				}
+				if(compName == NavigationSourceComponent::kComponentName) {
+					NavigationSourceComponent* source = enttRegistry.try_get<NavigationSourceComponent>(entity);
+					if(source == nullptr || !DeserializeNavigationSource(compData, *source)) {
+						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
+					}
+					continue;
+				}
+				if(compName == NavigationAgentComponent::kComponentName) {
+					NavigationAgentComponent* agent = enttRegistry.try_get<NavigationAgentComponent>(entity);
+					if(agent == nullptr || !DeserializeNavigationAgent(compData, *agent)) {
+						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
+					}
+					continue;
+				}
+				if(compName == NavigationConnectionComponent::kComponentName) {
+					NavigationConnectionComponent* connection = enttRegistry.try_get<NavigationConnectionComponent>(entity);
+					if(connection == nullptr || !DeserializeNavigationConnection(compData, *connection)) {
 						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
 					}
 					continue;
