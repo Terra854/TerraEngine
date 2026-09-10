@@ -111,9 +111,13 @@ class TERRAENGINE_API Engine {
 		SystemsBase* editorSystem = nullptr;
 		bool editorMode = false;
 		bool headlessPhysicsValidation = false;
-		// Zero means bootstrap capture has not yet admitted the current protected
-		// scene-component revision. Failed captures intentionally remain retryable
-		// because terrain collision or resource companions can publish later.
+		// Track attempts separately because zero is a valid initial revision. A
+		// deterministic rejection is cached until one of the protected inputs below
+		// changes, preventing an unchanged editor scene from being rescanned and
+		// logged every frame.
+		bool navigationBootstrapAttempted = false;
+		// This is the component revision examined by the latest bootstrap attempt,
+		// whether that attempt queued work or found no eligible navigation geometry.
 		std::uint64_t lastNavigationBootstrapComponentRevision = 0U;
 		// Profile configuration selects distinct Recast/Detour shard build keys.
 		// Track its copied revision beside scene components so editor/project profile

@@ -43,6 +43,16 @@ namespace TerraEngine::Tests
 			const auto declaration = TerraEngine::Scene::WorldStreamingSystem::Instance().SchedulerDeclaration();
 			context.Expect(declaration.phase == "Streaming" && !declaration.mainThread,
 				"World streaming must expose worker-safe preparation in the Streaming phase.");
+
+			// Validate the declaration against the production defaults, not only its
+			// individual fields. This catches missing resource registrations during
+			// tests instead of aborting the editor on its first startup.
+			auto& streamingSystem = TerraEngine::Scene::WorldStreamingSystem::Instance();
+			TerraEngine::Scheduling::SystemScheduler scheduler;
+			scheduler.RegisterSystem(streamingSystem, declaration);
+			const auto& summary = scheduler.BuildSchedule();
+			context.Expect(summary.valid,
+				"World streaming scheduler resources must all exist in the production default registry.");
 		});
 
 		registry.Add("Navigation.StreamingIntegration.InterestAndLeaseWorkRemainBounded", [](TestContext& context) {

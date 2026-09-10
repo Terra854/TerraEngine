@@ -191,6 +191,7 @@ void Engine::Initialize()
 	SetApplicationHostEngine(this);
 	// A reused Engine instance must recapture the new scene/profile lifetime even
 	// when its first component revisions happen to match the previous run.
+	navigationBootstrapAttempted = false;
 	lastNavigationBootstrapComponentRevision = 0U;
 	lastNavigationBootstrapProfileRevision = 0U;
 	lastNavigationBootstrapTerrainPublicationGeneration = 0U;
@@ -594,9 +595,17 @@ bool Engine::Update(float deltaTime)
 				const auto terrainCollision =
 					TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().Snapshot();
 				const std::uint64_t terrainPublicationGeneration = terrainCollision.sourcePublicationGeneration;
-				if(componentRevision != lastNavigationBootstrapComponentRevision
+				if(!navigationBootstrapAttempted
+					|| componentRevision != lastNavigationBootstrapComponentRevision
 					|| profileRevision != lastNavigationBootstrapProfileRevision
 					|| terrainPublicationGeneration != lastNavigationBootstrapTerrainPublicationGeneration) {
+					// Record the immutable input tuple before capture. Rejections are
+					// deterministic for this tuple, so retry only after a scene, profile,
+					// or terrain publication change instead of stalling every editor frame.
+					navigationBootstrapAttempted = true;
+					lastNavigationBootstrapComponentRevision = componentRevision;
+					lastNavigationBootstrapProfileRevision = profileRevision;
+					lastNavigationBootstrapTerrainPublicationGeneration = terrainPublicationGeneration;
 					const TerraEngine::Navigation::NavigationProfileResolver profiles =
 						navigation.ProfileResolverSnapshot();
 					const TerraEngine::Navigation::NavigationRuntimeSceneCaptureSettings settings{
@@ -606,11 +615,7 @@ bool Engine::Update(float deltaTime)
 						terrainCollision, settings);
 					const auto submission = TerraEngine::Navigation::SubmitNavigationRuntimeSceneCapture(
 						navigation, capture);
-					if(submission.accepted) {
-						lastNavigationBootstrapComponentRevision = componentRevision;
-						lastNavigationBootstrapProfileRevision = profileRevision;
-						lastNavigationBootstrapTerrainPublicationGeneration = terrainPublicationGeneration;
-					} else if(!capture.reason.empty()) {
+					if(!submission.accepted && !capture.reason.empty()) {
 						TERRAENGINE_LOG(LogLevel::Debug, "Navigation bootstrap pending: " << capture.reason);
 					}
 				}

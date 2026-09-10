@@ -109,6 +109,12 @@ namespace TerraEngine::Scheduling {
 	inline constexpr const char kResourcePublishedSpatialSnapshot[] = "PublishedSpatialSnapshot";
 	inline constexpr const char kResourceSpatialTransitionQueue[] = "SpatialTransitionQueue";
 	inline constexpr const char kResourcePreparedSpatialTransitions[] = "PreparedSpatialTransitions";
+	// World streaming keeps its mutable directory, transient observer requests,
+	// worker-prepared candidates, and published residency in separate resources.
+	// This makes the scheduler validate each ownership transition explicitly.
+	inline constexpr const char kResourceWorldRegionDirectory[] = "WorldRegionDirectory";
+	inline constexpr const char kResourceObserverInterests[] = "ObserverInterests";
+	inline constexpr const char kResourcePreparedWorldRegionResidency[] = "PreparedWorldRegionResidency";
 	// Ground navigation consumes only immutable scene, spatial, residency, and
 	// authoring publications. Separate input, worker-completion, and authoritative
 	// output names make the protected publication boundary visible to diagnostics.

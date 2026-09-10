@@ -70,14 +70,14 @@ namespace TerraEngine::Scene
 	{
 		using namespace TerraEngine::Scheduling;
 		SystemDeclaration declaration{}; declaration.name = SystemName(); declaration.phase = "Streaming";
-		declaration.reads = { "WorldRegionDirectory", "ObserverInterests", "PublishedWorldRegionResidency" };
-		declaration.writes = { "PreparedWorldRegionResidency" }; declaration.mainThread = false; declaration.usesDefaultMetadata = false; declaration.profilingLabel = "World Region Streaming";
+		declaration.reads = { kResourceWorldRegionDirectory, kResourceObserverInterests, kResourcePublishedWorldRegionResidency };
+		declaration.writes = { kResourcePreparedWorldRegionResidency }; declaration.mainThread = false; declaration.usesDefaultMetadata = false; declaration.profilingLabel = "World Region Streaming";
 		return declaration;
 	}
 	std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> WorldStreamingSystem::DeclareFrameWorkloads(float)
 	{
 		using namespace TerraEngine::Scheduling;
-		FrameWorkloadDeclaration workload = MakeWorkerPreparePhase("WorldRegionInterestPrepare", SystemName(), { "WorldRegionDirectory", "ObserverInterests", "PublishedWorldRegionResidency" }, { "PreparedWorldRegionResidency" }, "World Region Interest Prepare");
+		FrameWorkloadDeclaration workload = MakeWorkerPreparePhase("WorldRegionInterestPrepare", SystemName(), { kResourceWorldRegionDirectory, kResourceObserverInterests, kResourcePublishedWorldRegionResidency }, { kResourcePreparedWorldRegionResidency }, "World Region Interest Prepare");
 		workload.work = [this](JobGraphContext&) { PrepareInterestPlan(); PrepareRetirementPlan(); };
 		return { std::move(workload) };
 	}
