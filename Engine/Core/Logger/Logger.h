@@ -82,10 +82,9 @@ public:
 
 	// Retrieve the singleton instance.
 	// Instance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	static Logger& Instance() {
-		static Logger instance;
-		return instance;
-	}
+	// The storage must live in the engine DLL, not in an inline function: each
+	// Windows module would otherwise own a separate logger and sink collection.
+	static Logger& Instance();
 
 	// Delete copy constructor and assignment operator.
 	Logger(const Logger&) = delete;

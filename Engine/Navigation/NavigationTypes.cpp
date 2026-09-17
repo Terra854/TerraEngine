@@ -51,6 +51,7 @@ namespace TerraEngine::Navigation {
 	std::string_view ToString(NavigationReason reason) noexcept {
 		switch(reason) {
 		case NavigationReason::None: return "None";
+		case NavigationReason::MissingTerrain: return "MissingTerrain";
 		case NavigationReason::MissingSource: return "MissingSource";
 		case NavigationReason::DirtyCoverage: return "DirtyCoverage";
 		case NavigationReason::MissingNeighbor: return "MissingNeighbor";
@@ -106,5 +107,70 @@ namespace TerraEngine::Navigation {
 		case NavigationLocationValidationCode::UnnormalizedPosition: return "UnnormalizedPosition";
 		}
 		return "UnknownNavigationLocationValidationCode";
+	}
+
+	NavigationEndpointValidation ValidateNavigationObjectEndpoint(
+		const NavigationObjectEndpoint& endpoint) noexcept {
+		if(!endpoint.object.IsValid()) {
+			return { false, NavigationEndpointValidationCode::InvalidObject };
+		}
+		if(!endpoint.activeInHierarchy) {
+			return { false, NavigationEndpointValidationCode::InactiveObject };
+		}
+		if(endpoint.transformRevision == 0U) {
+			return { false, NavigationEndpointValidationCode::MissingTransformRevision };
+		}
+		if(!ValidateNavigationLocation(endpoint.location).accepted) {
+			return { false, NavigationEndpointValidationCode::InvalidLocation };
+		}
+		return { true, NavigationEndpointValidationCode::None };
+	}
+
+	NavigationEndpointValidation ValidateNavigationRequestedDestination(
+		const NavigationRequestedDestination& destination) noexcept {
+		switch(destination.kind) {
+		case NavigationDestinationKind::Location:
+			if(!ValidateNavigationLocation(destination.location).accepted) {
+				return { false, NavigationEndpointValidationCode::InvalidLocation };
+			}
+			if(destination.object.IsValid()) {
+				return { false, NavigationEndpointValidationCode::WrongDestinationVariant };
+			}
+			return { true, NavigationEndpointValidationCode::None };
+		case NavigationDestinationKind::Object:
+			if(!destination.object.IsValid()) {
+				return { false, NavigationEndpointValidationCode::InvalidObject };
+			}
+			return { true, NavigationEndpointValidationCode::None };
+		}
+		return { false, NavigationEndpointValidationCode::WrongDestinationVariant };
+	}
+
+	std::string_view ToString(NavigationDestinationKind kind) noexcept {
+		switch(kind) {
+		case NavigationDestinationKind::Location: return "Location";
+		case NavigationDestinationKind::Object: return "Object";
+		}
+		return "UnknownNavigationDestinationKind";
+	}
+
+	std::string_view ToString(NavigationRoutePolicy policy) noexcept {
+		switch(policy) {
+		case NavigationRoutePolicy::ExactDestination: return "ExactDestination";
+		case NavigationRoutePolicy::NearestReachable: return "NearestReachable";
+		}
+		return "UnknownNavigationRoutePolicy";
+	}
+
+	std::string_view ToString(NavigationEndpointValidationCode code) noexcept {
+		switch(code) {
+		case NavigationEndpointValidationCode::None: return "None";
+		case NavigationEndpointValidationCode::InvalidObject: return "InvalidObject";
+		case NavigationEndpointValidationCode::InactiveObject: return "InactiveObject";
+		case NavigationEndpointValidationCode::InvalidLocation: return "InvalidLocation";
+		case NavigationEndpointValidationCode::MissingTransformRevision: return "MissingTransformRevision";
+		case NavigationEndpointValidationCode::WrongDestinationVariant: return "WrongDestinationVariant";
+		}
+		return "UnknownNavigationEndpointValidationCode";
 	}
 }

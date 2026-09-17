@@ -2,7 +2,6 @@
 
 #include "Navigation/NavigationSystem.h"
 
-#include "Components/Navigation/NavigationAgentComponent.h"
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
 #include "Core/Scheduling/SystemScheduler.h"
@@ -157,23 +156,23 @@ namespace TerraEngine::Navigation {
 		world_ = std::make_unique<NavigationWorld>(NavigationWorldHandle{NavigationWorldId{1U}, 1U});
 		requestStore_ = std::make_unique<NavigationRequestStore>(settings_.maxAdmittedRequests);
 		routeStore_ = std::make_unique<NavigationRouteStore>(settings_.maxAdmittedRequests);
-		agentStore_ = std::make_unique<NavigationAgentStore>(settings_.maxActiveAgents);
-		commandStore_ = std::make_unique<NavigationCommandStore>(settings_.maxAdmittedRequests);
 		pendingGroundBuilds_.clear();
 		preparedGroundBuilds_.clear();
 		pendingDynamicChanges_.clear();
 		pendingDynamicRebuilds_.clear();
 		preparedDynamicRebuilds_.clear();
 		dynamicSourceStages_.clear();
+		automaticGroundSourceStage_.reset();
 		pendingRoutes_.clear();
+		deferredRoutes_.clear();
 		preparedRoutes_.clear();
 		publishedShards_.clear();
 		publishedRouteData_.clear();
 		requestRoutes_.clear();
-		pendingDestinations_.clear();
-		objectAgents_.clear();
+		replacementIntents_.clear();
 		invalidations_.clear();
 		nextInvalidationCursor_ = 1U;
+		latestAutomaticSourceIndexRevision_ = 0U;
 		initialized_.store(true, std::memory_order_release);
 	}
 
@@ -196,16 +195,16 @@ namespace TerraEngine::Navigation {
 		pendingDynamicRebuilds_.clear();
 		preparedDynamicRebuilds_.clear();
 		dynamicSourceStages_.clear();
+		automaticGroundSourceStage_.reset();
 		pendingRoutes_.clear();
+		deferredRoutes_.clear();
 		preparedRoutes_.clear();
 		publishedShards_.clear();
 		publishedRouteData_.clear();
 		requestRoutes_.clear();
-		objectAgents_.clear();
+		replacementIntents_.clear();
 		requestStore_.reset();
 		routeStore_.reset();
-		agentStore_.reset();
-		commandStore_.reset();
 		world_.reset();
 		initialized_.store(false, std::memory_order_release);
 	}
@@ -225,15 +224,16 @@ namespace TerraEngine::Navigation {
 			kResourceSceneChangePublication,
 			kResourcePublishedSpatialSnapshot,
 			kResourcePublishedWorldRegionResidency,
-			kResourceNavigationAuthoring,
-			kResourceGeometryPublications,
-			kResourceNavigationCommandQueue,
-			kResourceNavigationPreparedResults
+			kResourceTerrainPublishedCollision,
+			kResourceNavigationCaptureInputs,
+			kResourceNavigationGeometryPublications,
+			kResourceNavigationRequestQueue,
+			kResourceNavigationPreparedCandidates
 		};
 		declaration.writes = {
-			kResourceNavigationSourceSnapshot,
-			kResourceNavigationCoverageRoot,
-			kResourceNavigationAgentState,
+			kResourceNavigationEligibleSourceIndex,
+			kResourceNavigationWorldRoot,
+			kResourceNavigationRouteValidity,
 			kResourceNavigationResults,
 			kResourceNavigationDiagnostics
 		};
@@ -243,7 +243,7 @@ namespace TerraEngine::Navigation {
 		declaration.boundaryClassification = HardBoundaryClassification::PartiallyWorkerSafe;
 		declaration.hardBoundary = true;
 		declaration.safeSubwork = "Prepare bounded geometry, BVH, tile, seam, and route candidates from retained immutable inputs.";
-		declaration.protectedCommit = "Capture active scene-agent canonical poses, revalidate complete candidate groups, and exchange immutable navigation roots, state, results, and diagnostics.";
+		declaration.protectedCommit = "Capture active object endpoint values, revalidate complete candidate groups, and exchange immutable navigation roots, route validity, results, and diagnostics.";
 		declaration.protectedReason = "Scene, owner, source, profile, intent, and dependency generations must match atomically before publication.";
 		declaration.profilingLabel = "Navigation";
 		declaration.omitWhenNoFrameWorkloads = true;
@@ -262,10 +262,12 @@ namespace TerraEngine::Navigation {
 		auto prepare = MakeWorkerPreparePhase(
 			"NavigationPrepare",
 			SystemName(),
-			{kResourceNavigationSourceSnapshot, kResourceNavigationCoverageRoot,
+			{kResourceNavigationCaptureInputs, kResourceNavigationEligibleSourceIndex,
+				kResourceNavigationWorldRoot,
 				kResourcePublishedSpatialSnapshot, kResourcePublishedWorldRegionResidency,
-				kResourceGeometryPublications, kResourceNavigationCommandQueue},
-			{kResourceNavigationPreparedResults},
+				kResourceTerrainPublishedCollision, kResourceNavigationGeometryPublications,
+				kResourceNavigationRequestQueue},
+			{kResourceNavigationPreparedCandidates},
 			"NavigationPrepare");
 		prepare.phase = "Navigation";
 		prepare.stableDescriptorId = "NavigationSystem/Navigation/Prepare";
@@ -276,9 +278,11 @@ namespace TerraEngine::Navigation {
 		auto publish = MakeProtectedCommitPhase(
 			"NavigationPublish",
 			SystemName(),
-			{kResourceNavigationPreparedResults, kResourceSceneChangePublication,
-				kResourceNavigationSourceSnapshot, kResourceNavigationCoverageRoot},
-			{kResourceNavigationCoverageRoot, kResourceNavigationAgentState,
+			{kResourceNavigationPreparedCandidates, kResourceSceneChangePublication,
+				kResourceNavigationCaptureInputs, kResourceNavigationEligibleSourceIndex,
+				kResourceNavigationWorldRoot},
+			{kResourceNavigationEligibleSourceIndex, kResourceNavigationWorldRoot,
+				kResourceNavigationRouteValidity,
 				kResourceNavigationResults, kResourceNavigationDiagnostics},
 			"Generation-qualified navigation authority can change only at the protected Navigation boundary.",
 			"NavigationPublish");
@@ -289,7 +293,7 @@ namespace TerraEngine::Navigation {
 		// hard protected boundary rather than an ordinary main-thread callback.
 		publish.boundaryClassification = HardBoundaryClassification::Protected;
 		publish.hardBoundary = true;
-		publish.protectedCommit = "Validate scene-agent pose/intent generations and exchange one complete navigation publication group.";
+		publish.protectedCommit = "Validate captured object endpoint and intent generations, then exchange one complete navigation publication group.";
 		publish.estimatedWorkItemCount = 1U;
 		publish.work = [this](JobGraphContext&) { PublishPreparedWork(); };
 
@@ -317,15 +321,50 @@ namespace TerraEngine::Navigation {
 		for(const InitialGroundBuildInput& build : builds) {
 			if(!build.profile.Validate().accepted || build.sources.empty()) return false;
 			for(const auto& source : build.sources) if(!source) return false;
+			if(build.eligibleSourceIndex != nullptr
+				&& (!build.eligibleSourceIndex->HasCurrentTerrain()
+					|| build.terrainPublicationGeneration == 0U)) return false;
 			profileKeys.push_back(MakeGroundProfileBuildKey(build.profile));
 		}
 		std::sort(profileKeys.begin(), profileKeys.end());
 		if(std::adjacent_find(profileKeys.begin(), profileKeys.end()) != profileKeys.end()) return false;
 		std::lock_guard<std::mutex> lock(mutex_);
-		if(!initialized_.load(std::memory_order_acquire)
-			|| pendingGroundBuilds_.size() + preparedGroundBuilds_.size() + builds.size()
-				> settings_.maxActiveProfileBuilds) return false;
+		if(!initialized_.load(std::memory_order_acquire)) return false;
+		std::unordered_set<std::uint64_t> retainedProfiles;
+		if(const std::shared_ptr<const NavigationWorldRoot> root = world_ ? world_->PublishedRoot() : nullptr) {
+			for(const NavigationCoverageRecord& coverage : root->coverage)
+				retainedProfiles.insert(coverage.key.profileBuildKey);
+		}
+		for(const PendingGroundBuild& pending : pendingGroundBuilds_)
+			retainedProfiles.insert(MakeGroundProfileBuildKey(pending.profile));
+		for(const PreparedGroundBuild& prepared : preparedGroundBuilds_)
+			retainedProfiles.insert(MakeGroundProfileBuildKey(prepared.profile));
+		for(const std::uint64_t profileKey : profileKeys) {
+			if(!retainedProfiles.contains(profileKey)
+				&& retainedProfiles.size() >= settings_.maxActiveProfileBuilds) return false;
+			retainedProfiles.insert(profileKey);
+		}
+		for(const std::uint64_t profileKey : profileKeys) {
+			// A newer captured packet supersedes queued work for the same copied
+			// profile. Coalescing happens only after every admission check succeeds,
+			// so a rejected batch cannot mutate live queued work.
+			std::erase_if(pendingGroundBuilds_, [profileKey](const PendingGroundBuild& pending) {
+				return MakeGroundProfileBuildKey(pending.profile) == profileKey;
+			});
+			std::erase_if(preparedGroundBuilds_, [profileKey](const PreparedGroundBuild& prepared) {
+				return MakeGroundProfileBuildKey(prepared.profile) == profileKey;
+			});
+		}
 		for(InitialGroundBuildInput& build : builds) {
+			if(build.eligibleSourceIndex != nullptr) {
+				latestAutomaticSourceIndexRevision_ = build.eligibleSourceIndex->Revision();
+				// Retain the captured immutable packet rather than a profile-specific
+				// result. A caller may provide any valid copied profile after bootstrap,
+				// and that profile must be able to build coverage from this same evidence.
+				automaticGroundSourceStage_ = AutomaticGroundSourceStage{
+					build.sources, build.sourceIndex, build.eligibleSourceIndex,
+					build.terrainPublicationGeneration, profileConfigurationRevision_};
+			}
 			// Keep the same immutable source packet available for later dynamic
 			// replacements. This is a shared-pointer copy, not a retained scene or
 			// resource-manager reference.
@@ -338,9 +377,67 @@ namespace TerraEngine::Navigation {
 				dynamicSourceStages_.push_back({build.profile, build.sources});
 			else *staged = {build.profile, build.sources};
 			pendingGroundBuilds_.push_back({std::move(build.profile), std::move(build.sources),
-				std::move(build.sourceIndex)});
+				std::move(build.sourceIndex), std::move(build.eligibleSourceIndex),
+				build.terrainPublicationGeneration, profileConfigurationRevision_});
 		}
 		contractTestWorkAvailable_.store(true, std::memory_order_release);
+		return true;
+	}
+
+	bool NavigationSystem::PublishUnavailableTerrain(
+		std::shared_ptr<const NavigationEligibleSourceIndex> eligibleSourceIndex) {
+		std::lock_guard<std::mutex> lock(mutex_);
+		if(!initialized_.load(std::memory_order_acquire) || !world_) return false;
+		if(eligibleSourceIndex != nullptr) {
+			latestAutomaticSourceIndexRevision_ = eligibleSourceIndex->Revision();
+		}
+		const std::shared_ptr<const NavigationWorldRoot> current = world_->PublishedRoot();
+		if(!current) return false;
+		NavigationWorldRoot candidate = world_->CreateCandidate();
+		candidate.terrainState = NavigationTerrainState::Unavailable;
+		candidate.terrainPublicationGeneration = 0U;
+		candidate.sourceIndexRevision = eligibleSourceIndex != nullptr ? eligibleSourceIndex->Revision()
+			: candidate.rootGeneration;
+		candidate.eligibleSourceIndex = std::move(eligibleSourceIndex);
+		candidate.coverage.clear();
+		candidate.shards.clear();
+		candidate.generatedPortals.clear();
+		candidate.routeValidityGeneration = candidate.rootGeneration;
+		candidate.routeValidity = {candidate.routeValidityGeneration, 0U};
+		if(!world_->Publish(std::move(candidate), current->rootGeneration)) return false;
+
+		// The root becomes unavailable before any later build. Clear the detached
+		// route topology under this same system lock so no request can observe the
+		// unavailable root alongside old shards or portals.
+		publishedShards_.clear();
+		automaticGroundSourceStage_.reset();
+		for(const DeferredRoute& deferred : deferredRoutes_) {
+			if(!requestStore_) break;
+			(void)requestStore_->Update(deferred.handle,
+				[](NavigationRequestRecord& request) {
+					request.lifecycle = NavigationRequestLifecycle::Terminal;
+					request.outcome = NavigationOutcome::UnavailableCoverage;
+					request.reason = NavigationReason::MissingTerrain;
+				});
+		}
+		deferredRoutes_.clear();
+		const Ground::GroundPortalGraphSnapshot portals = portalGraph_.AcquireSnapshot();
+		(void)portalGraph_.PublishBoundaryIntervals({}, portals.Revision());
+		for(const NavigationRouteHandle route : requestRoutes_) {
+			if(!route.IsValid() || !routeStore_ || routeStore_->Status(route) != NavigationHandleStatus::Alive) continue;
+			const auto routeRecord = routeStore_->Read(route);
+			if(!routeRecord.record) continue;
+			if(invalidations_.size() >= settings_.maxAdmittedRequests) invalidations_.erase(invalidations_.begin());
+			invalidations_.push_back({nextInvalidationCursor_++, route.owner, route,
+				NavigationReason::MissingTerrain, NavigationOutcome::UnavailableCoverage, 0U,
+				lastProtectedBoundaryGeneration_});
+			if(requestStore_) (void)requestStore_->Update(routeRecord.record->request,
+				[](NavigationRequestRecord& request) {
+					request.lifecycle = NavigationRequestLifecycle::Terminal;
+					request.outcome = NavigationOutcome::UnavailableCoverage;
+					request.reason = NavigationReason::MissingTerrain;
+				});
+		}
 		return true;
 	}
 
@@ -364,6 +461,118 @@ namespace TerraEngine::Navigation {
 		return true;
 	}
 
+	bool NavigationSystem::HasReadyCoverageForProfileLocked(const NavigationProfile& profile) const {
+		if(!world_) return false;
+		const std::shared_ptr<const NavigationWorldRoot> root = world_->PublishedRoot();
+		if(!root || root->terrainState != NavigationTerrainState::Available) return false;
+		const std::uint64_t profileBuildKey = MakeGroundProfileBuildKey(profile);
+		return std::any_of(root->coverage.begin(), root->coverage.end(),
+			[profileBuildKey](const NavigationCoverageRecord& coverage) {
+				return coverage.key.profileBuildKey == profileBuildKey
+					&& coverage.state == NavigationCoverageState::Ready
+					&& coverage.complete && coverage.coverageGeneration != 0U;
+			});
+	}
+
+	bool NavigationSystem::HasProfileBuildCapacityLocked(const NavigationProfile& profile) const {
+		std::unordered_set<std::uint64_t> retainedProfiles;
+		if(world_) {
+			const std::shared_ptr<const NavigationWorldRoot> root = world_->PublishedRoot();
+			if(root) {
+				for(const NavigationCoverageRecord& coverage : root->coverage) {
+					retainedProfiles.insert(coverage.key.profileBuildKey);
+				}
+			}
+		}
+		for(const PendingGroundBuild& build : pendingGroundBuilds_)
+			retainedProfiles.insert(MakeGroundProfileBuildKey(build.profile));
+		for(const PreparedGroundBuild& build : preparedGroundBuilds_)
+			retainedProfiles.insert(MakeGroundProfileBuildKey(build.profile));
+		const std::uint64_t profileBuildKey = MakeGroundProfileBuildKey(profile);
+		return retainedProfiles.contains(profileBuildKey)
+			|| retainedProfiles.size() < settings_.maxActiveProfileBuilds;
+	}
+
+	bool NavigationSystem::QueueOnDemandProfileBuildLocked(const NavigationProfile& profile) {
+		if(!profile.Validate().accepted || !automaticGroundSourceStage_ || !world_) return false;
+		const std::shared_ptr<const NavigationWorldRoot> root = world_->PublishedRoot();
+		const AutomaticGroundSourceStage& stage = *automaticGroundSourceStage_;
+		if(!root || root->terrainState != NavigationTerrainState::Available
+			|| !stage.eligibleSourceIndex || !stage.eligibleSourceIndex->HasCurrentTerrain()
+			|| stage.terrainPublicationGeneration == 0U
+			|| stage.profileConfigurationRevision != profileConfigurationRevision_) return false;
+
+		const std::uint64_t profileBuildKey = MakeGroundProfileBuildKey(profile);
+		const auto matchesProfile = [profileBuildKey](const auto& build) {
+			return MakeGroundProfileBuildKey(build.profile) == profileBuildKey;
+		};
+		if(HasReadyCoverageForProfileLocked(profile)
+			|| std::any_of(pendingGroundBuilds_.begin(), pendingGroundBuilds_.end(), matchesProfile)
+			|| std::any_of(preparedGroundBuilds_.begin(), preparedGroundBuilds_.end(), matchesProfile)) return true;
+		if(!HasProfileBuildCapacityLocked(profile)) return false;
+
+		// The staged packet was captured as one unit. Reusing only its immutable
+		// values guarantees the new profile cannot mix terrain or source revisions.
+		pendingGroundBuilds_.push_back({profile, stage.sources, stage.sourceIndex,
+			stage.eligibleSourceIndex, stage.terrainPublicationGeneration,
+			stage.profileConfigurationRevision});
+		auto staged = std::find_if(dynamicSourceStages_.begin(), dynamicSourceStages_.end(),
+			[profileBuildKey](const DynamicSourceStage& current) {
+				return MakeGroundProfileBuildKey(current.profile) == profileBuildKey;
+			});
+		if(staged == dynamicSourceStages_.end()) dynamicSourceStages_.push_back({profile, stage.sources});
+		else *staged = {profile, stage.sources};
+		contractTestWorkAvailable_.store(true, std::memory_order_release);
+		return true;
+	}
+
+	void NavigationSystem::QueueRouteAgainstPublishedWorldLocked(NavigationRequestHandle handle,
+		std::uint64_t intentGeneration, Ground::GroundRouteQuery::Request request) {
+		// Admission snapshots the completed publication only after matching profile
+		// coverage exists. The worker can therefore remain wholly scene-independent.
+		pendingRoutes_.push_back({handle, intentGeneration, std::move(request),
+			world_ ? world_->PublishedRoot() : nullptr, publishedShards_, portalGraph_.AcquireSnapshot()});
+	}
+
+	void NavigationSystem::PromoteDeferredRoutesForProfileLocked(const NavigationProfile& profile) {
+		const std::uint64_t profileBuildKey = MakeGroundProfileBuildKey(profile);
+		for(auto iterator = deferredRoutes_.begin(); iterator != deferredRoutes_.end();) {
+			if(MakeGroundProfileBuildKey(iterator->request.profile) != profileBuildKey) {
+				++iterator;
+				continue;
+			}
+			if(requestStore_ && requestStore_->Status(iterator->handle) == NavigationHandleStatus::Alive) {
+				QueueRouteAgainstPublishedWorldLocked(iterator->handle, iterator->intentGeneration,
+					std::move(iterator->request));
+			}
+			iterator = deferredRoutes_.erase(iterator);
+		}
+	}
+
+	void NavigationSystem::ResolveDeferredProfileBuildFailureLocked(const NavigationProfile& profile,
+		bool mayRequeueFromNewCapture) {
+		// A newly captured automatic packet may have replaced the failed candidate.
+		// Requeue from that complete packet when possible; otherwise make the request
+		// terminal so callers never wait forever for coverage that cannot be built.
+		if(mayRequeueFromNewCapture && QueueOnDemandProfileBuildLocked(profile)) return;
+		const std::uint64_t profileBuildKey = MakeGroundProfileBuildKey(profile);
+		for(auto iterator = deferredRoutes_.begin(); iterator != deferredRoutes_.end();) {
+			if(MakeGroundProfileBuildKey(iterator->request.profile) != profileBuildKey) {
+				++iterator;
+				continue;
+			}
+			if(requestStore_) {
+				(void)requestStore_->Update(iterator->handle,
+					[](NavigationRequestRecord& request) {
+						request.lifecycle = NavigationRequestLifecycle::Terminal;
+						request.outcome = NavigationOutcome::UnavailableCoverage;
+						request.reason = NavigationReason::MissingNeighbor;
+					});
+			}
+			iterator = deferredRoutes_.erase(iterator);
+		}
+	}
+
 	NavigationRequestHandle NavigationSystem::SubmitOneShotRoute(
 		Ground::GroundRouteQuery::Request request) {
 		if(!request.owner.IsValid() || !request.profile.Validate().accepted
@@ -380,46 +589,254 @@ namespace TerraEngine::Navigation {
 		record.outcome = NavigationOutcome::Queued;
 		record.start = request.start;
 		record.destination = request.destination;
+		record.profile = request.profile;
 		record.allowPartial = request.allowPartial;
 		const auto created = requestStore_->Create(request.owner, std::move(record));
 		if(!created.Succeeded()) return {};
 		if(requestRoutes_.size() <= created.handle.slotIndex) requestRoutes_.resize(created.handle.slotIndex + 1U);
 		requestRoutes_[created.handle.slotIndex] = {};
-		// Retain exactly the immutable root and provider-neutral shard generations
-		// visible at admission. A later build or dirty source cannot change this
-		// worker's meaning; publication revalidates the request separately.
-		pendingRoutes_.push_back({created.handle, {}, 0U, 0U, std::move(request), world_->PublishedRoot(), publishedShards_,
-			portalGraph_.AcquireSnapshot()});
+		// If automatic capture retained current terrain inputs, demand exact coverage
+		// for this caller-provided profile before a route worker snapshots the world.
+		// Direct low-level callers without that capture keep the existing fail-closed
+		// unavailable-coverage result instead of silently substituting a preset.
+		if(HasReadyCoverageForProfileLocked(request.profile)
+			|| !QueueOnDemandProfileBuildLocked(request.profile)) {
+			QueueRouteAgainstPublishedWorldLocked(created.handle, 0U, std::move(request));
+		} else {
+			deferredRoutes_.push_back({created.handle, 0U, std::move(request)});
+		}
 		contractTestWorkAvailable_.store(true, std::memory_order_release);
 		return created.handle;
+	}
+
+	std::optional<NavigationObjectEndpoint> NavigationSystem::CaptureObjectEndpointLocked(
+		ObjectManager& objects, const TerraEngine::UUID& objectId) const {
+		if(!world_ || objectId == TerraEngine::EMPTY_UUID) {
+			return std::nullopt;
+		}
+		const std::optional<Object> object = objects.getObject(objectId);
+		if(!object || !objects.isObjectActiveInHierarchy(*object)) {
+			return std::nullopt;
+		}
+		const std::optional<Scene::WorldPose> pose = objects.GetCanonicalWorldPose(*object);
+		const NavigationGeneration lifetime = objects.getObjectLifetimeGeneration(*object);
+		const NavigationGeneration transformRevision = objects.GetObjectTransformRevision(*object);
+		if(!pose || lifetime == 0U || transformRevision == 0U) {
+			return std::nullopt;
+		}
+		const Scene::WorldCoordinateResult normalized = Scene::NormalizeWorldPosition(pose->position);
+		if(!normalized.Succeeded()) {
+			return std::nullopt;
+		}
+		NavigationObjectEndpoint endpoint{};
+		endpoint.object = {objectId, lifetime};
+		endpoint.location = {world_->Handle(), normalized.position};
+		endpoint.transformRevision = transformRevision;
+		endpoint.activeInHierarchy = true;
+		return ValidateNavigationObjectEndpoint(endpoint).accepted
+			? std::optional<NavigationObjectEndpoint>{endpoint} : std::nullopt;
+	}
+
+	NavigationSystem::ObjectRouteReceipt NavigationSystem::RequestRoute(
+		ObjectManager& objects, const TerraEngine::UUID& sourceObject,
+		NavigationLocation destination, NavigationProfile profile,
+		NavigationRoutePolicy policy, std::uint64_t replacementKey) {
+		std::lock_guard<std::mutex> lock(mutex_);
+		if(!initialized_.load(std::memory_order_acquire) || !world_ || !requestStore_) {
+			return {{}, NavigationHandleStatus::Invalid, NavigationOutcome::InvalidRequest, NavigationReason::SceneReplaced};
+		}
+		const std::optional<NavigationObjectEndpoint> source = CaptureObjectEndpointLocked(objects, sourceObject);
+		if(!source) {
+			return {{}, NavigationHandleStatus::Invalid, NavigationOutcome::InvalidEndpoint, NavigationReason::InvalidStart};
+		}
+		return SubmitCapturedObjectRouteLocked(*source, nullptr, std::move(destination), std::move(profile), policy, replacementKey);
+	}
+
+	NavigationSystem::ObjectRouteReceipt NavigationSystem::RequestRoute(
+		ObjectManager& objects, const TerraEngine::UUID& sourceObject,
+		const TerraEngine::UUID& targetObject, NavigationProfile profile,
+		NavigationRoutePolicy policy, std::uint64_t replacementKey) {
+		std::lock_guard<std::mutex> lock(mutex_);
+		if(!initialized_.load(std::memory_order_acquire) || !world_ || !requestStore_) {
+			return {{}, NavigationHandleStatus::Invalid, NavigationOutcome::InvalidRequest, NavigationReason::SceneReplaced};
+		}
+		const std::optional<NavigationObjectEndpoint> source = CaptureObjectEndpointLocked(objects, sourceObject);
+		if(!source) {
+			return {{}, NavigationHandleStatus::Invalid, NavigationOutcome::InvalidEndpoint, NavigationReason::InvalidStart};
+		}
+		const std::optional<NavigationObjectEndpoint> target = CaptureObjectEndpointLocked(objects, targetObject);
+		if(!target) {
+			return {{}, NavigationHandleStatus::Invalid, NavigationOutcome::InvalidEndpoint, NavigationReason::InvalidDestination};
+		}
+		return SubmitCapturedObjectRouteLocked(*source, &*target, target->location, std::move(profile), policy, replacementKey);
+	}
+
+	NavigationSystem::ObjectRouteReceipt NavigationSystem::SubmitCapturedObjectRouteLocked(
+		const NavigationObjectEndpoint& source, const NavigationObjectEndpoint* target,
+		NavigationLocation destination, NavigationProfile profile,
+		NavigationRoutePolicy policy, std::uint64_t replacementKey) {
+		if(!world_ || !requestStore_ || !ValidateNavigationObjectEndpoint(source).accepted
+			|| !profile.Validate().accepted || !ValidateNavigationLocation(destination).accepted
+			|| source.location.world != world_->Handle() || destination.world != world_->Handle()) {
+			return {{}, NavigationHandleStatus::Invalid, NavigationOutcome::InvalidRequest, NavigationReason::InvalidDestination};
+		}
+		if(target != nullptr && !ValidateNavigationObjectEndpoint(*target).accepted) {
+			return {{}, NavigationHandleStatus::Invalid, NavigationOutcome::InvalidEndpoint, NavigationReason::InvalidDestination};
+		}
+		if(policy != NavigationRoutePolicy::ExactDestination && policy != NavigationRoutePolicy::NearestReachable) {
+			return {{}, NavigationHandleStatus::Invalid, NavigationOutcome::InvalidRequest, NavigationReason::InvalidDestination};
+		}
+
+		NavigationOwnerId ownerId{TerraEngine::MakeObjectStableHash(source.object.objectId)};
+		if(!ownerId.IsValid()) {
+			return {{}, NavigationHandleStatus::InvalidOwner, NavigationOutcome::InvalidEndpoint, NavigationReason::InvalidStart};
+		}
+		const NavigationOwnerHandle owner{world_->Handle(), ownerId, source.object.lifetimeGeneration};
+		NavigationRequestRecord record{};
+		record.createdTick = lastProtectedBoundaryGeneration_;
+		record.lifecycle = NavigationRequestLifecycle::Queued;
+		record.outcome = NavigationOutcome::Queued;
+		// Each admission owns one immutable intent. A replacement receives a new
+		// record instead of mutating this value while a worker may still read it.
+		record.intentGeneration = 1U;
+		record.sourceEndpoint = source;
+		if(target != nullptr) {
+			record.destinationEndpoint = *target;
+		}
+		record.profile = profile;
+		record.routePolicy = policy;
+		record.replacementKey = replacementKey;
+		record.start = source.location;
+		record.destination = destination;
+		record.allowPartial = policy == NavigationRoutePolicy::NearestReachable;
+		const std::shared_ptr<const NavigationWorldRoot> root = world_->PublishedRoot();
+		record.observation = {lastProtectedBoundaryGeneration_, source.transformRevision,
+			target != nullptr ? target->transformRevision : 0U,
+			root ? root->terrainPublicationGeneration : 0U,
+			root ? root->rootGeneration : 0U,
+			root ? root->sourceIndexRevision : 0U};
+		const NavigationStoreCreateResult<NavigationRequestHandle> created = requestStore_->Create(owner, std::move(record));
+		if(!created.Succeeded()) {
+			return {{}, created.status, NavigationOutcome::RejectedCapacity, NavigationReason::OutputLimit};
+		}
+		if(replacementKey != 0U) {
+			for(auto iterator = replacementIntents_.begin(); iterator != replacementIntents_.end();) {
+				if(iterator->owner != owner || iterator->key != replacementKey) {
+					++iterator;
+					continue;
+				}
+				const NavigationRequestHandle replacedRequest = iterator->request;
+				(void)requestStore_->Cancel(replacedRequest);
+				if(replacedRequest.slotIndex < requestRoutes_.size()
+					&& requestRoutes_[replacedRequest.slotIndex].IsValid()) {
+					if(invalidations_.size() >= settings_.maxAdmittedRequests) {
+						invalidations_.erase(invalidations_.begin());
+					}
+					invalidations_.push_back({nextInvalidationCursor_++, iterator->owner,
+						requestRoutes_[replacedRequest.slotIndex], NavigationReason::SupersededRequest,
+						NavigationOutcome::Stale, 0U, lastProtectedBoundaryGeneration_});
+				}
+				std::erase_if(pendingRoutes_, [replacedRequest](const PendingRoute& pending) {
+					return pending.handle == replacedRequest;
+				});
+				std::erase_if(deferredRoutes_, [replacedRequest](const DeferredRoute& deferred) {
+					return deferred.handle == replacedRequest;
+				});
+				iterator = replacementIntents_.erase(iterator);
+			}
+			replacementIntents_.push_back({owner, replacementKey, created.handle});
+		}
+		if(requestRoutes_.size() <= created.handle.slotIndex) {
+			requestRoutes_.resize(created.handle.slotIndex + 1U);
+		}
+		requestRoutes_[created.handle.slotIndex] = {};
+		Ground::GroundRouteQuery::Request request{};
+		request.owner = owner;
+		request.start = source.location;
+		request.destination = destination;
+		request.profile = profile;
+		request.allowPartial = policy == NavigationRoutePolicy::NearestReachable;
+		request.maxExpansions = settings_.maxDetourNodesPerQuery;
+		if(HasReadyCoverageForProfileLocked(request.profile)
+			|| !QueueOnDemandProfileBuildLocked(request.profile)) {
+			QueueRouteAgainstPublishedWorldLocked(created.handle, 1U, std::move(request));
+		} else {
+			deferredRoutes_.push_back({created.handle, 1U, std::move(request)});
+		}
+		contractTestWorkAvailable_.store(true, std::memory_order_release);
+		return {created.handle, NavigationHandleStatus::Alive, NavigationOutcome::Queued, NavigationReason::None};
 	}
 
 	NavigationStoreReadResult<NavigationRequestRecord> NavigationSystem::ReadRequest(
 		NavigationRequestHandle handle) const {
 		std::lock_guard<std::mutex> lock(mutex_);
-		return requestStore_ ? requestStore_->Read(handle) : NavigationStoreReadResult<NavigationRequestRecord>{};
+		if(!requestStore_ || !world_) return {};
+		NavigationOwnerHandle currentOwner = handle.owner;
+		currentOwner.world = world_->Handle();
+		return requestStore_->Read(handle, currentOwner);
 	}
 
 	NavigationRouteHandle NavigationSystem::PublishedRouteForRequest(NavigationRequestHandle handle) const {
 		std::lock_guard<std::mutex> lock(mutex_);
-		if(!requestStore_ || requestStore_->Status(handle) != NavigationHandleStatus::Alive
+		if(!requestStore_ || !world_) return {};
+		NavigationOwnerHandle currentOwner = handle.owner;
+		currentOwner.world = world_->Handle();
+		if(requestStore_->Status(handle, currentOwner) != NavigationHandleStatus::Alive
 			|| handle.slotIndex >= requestRoutes_.size()) return {};
 		return requestRoutes_[handle.slotIndex];
 	}
 
 	Ground::GroundRouteQuery::RetainedRoute NavigationSystem::ReadRoute(NavigationRouteHandle handle) const {
 		std::lock_guard<std::mutex> lock(mutex_);
-		if(!routeStore_ || routeStore_->Status(handle) != NavigationHandleStatus::Alive
+		if(!routeStore_ || !world_) return {};
+		NavigationOwnerHandle currentOwner = handle.owner;
+		currentOwner.world = world_->Handle();
+		if(routeStore_->Status(handle, currentOwner) != NavigationHandleStatus::Alive
 			|| handle.slotIndex >= publishedRouteData_.size()) return {};
 		return publishedRouteData_[handle.slotIndex];
 	}
 
+	NavigationSystem::RouteValidation NavigationSystem::ValidateRoute(NavigationRouteHandle handle) const {
+		std::lock_guard<std::mutex> lock(mutex_);
+		if(!routeStore_ || !requestStore_ || !world_) {
+			return {false, NavigationOutcome::Stale, NavigationReason::SceneReplaced};
+		}
+		const auto route = routeStore_->Read(handle);
+		if(!route.record) {
+			return {false, NavigationOutcome::Stale, NavigationReason::SceneReplaced};
+		}
+		const auto request = requestStore_->Read(route.record->request);
+		if(!request.record) {
+			return {false, NavigationOutcome::Stale, NavigationReason::SceneReplaced};
+		}
+		if(request.record->outcome != NavigationOutcome::Complete) {
+			return {false, request.record->outcome, request.record->reason};
+		}
+		const std::shared_ptr<const NavigationWorldRoot> root = world_->PublishedRoot();
+		if(!root || root->world != handle.owner.world) {
+			return {false, NavigationOutcome::Stale, NavigationReason::SceneReplaced};
+		}
+		const NavigationObservationEvidence current{
+			lastProtectedBoundaryGeneration_, 0U, 0U, root->terrainPublicationGeneration,
+			root->rootGeneration, root->sourceIndexRevision};
+		const NavigationRouteObservationValidation validation =
+			ValidateNavigationRouteObservation(route.record->observation, current);
+		return {validation.usable, validation.outcome, validation.reason};
+	}
+
 	bool NavigationSystem::CancelRequest(NavigationRequestHandle handle) {
 		std::lock_guard<std::mutex> lock(mutex_);
-		if(!requestStore_) return false;
+		if(!requestStore_ || !world_) return false;
+		NavigationOwnerHandle currentOwner = handle.owner;
+		currentOwner.world = world_->Handle();
+		if(requestStore_->Status(handle, currentOwner) != NavigationHandleStatus::Alive) return false;
 		const bool cancelled = requestStore_->Cancel(handle);
 		if(cancelled) {
 			std::erase_if(pendingRoutes_, [handle](const PendingRoute& pending) { return pending.handle == handle; });
+			std::erase_if(deferredRoutes_, [handle](const DeferredRoute& deferred) { return deferred.handle == handle; });
+			std::erase_if(replacementIntents_, [handle](const ReplacementIntent& intent) {
+				return intent.request == handle;
+			});
 			if(handle.slotIndex < requestRoutes_.size() && requestRoutes_[handle.slotIndex].IsValid()) {
 				if(invalidations_.size() >= settings_.maxAdmittedRequests) invalidations_.erase(invalidations_.begin());
 				invalidations_.push_back({nextInvalidationCursor_++, handle.owner, requestRoutes_[handle.slotIndex],
@@ -431,8 +848,10 @@ namespace TerraEngine::Navigation {
 
 	bool NavigationSystem::ReleaseRequestResult(NavigationRequestHandle handle) {
 		std::lock_guard<std::mutex> lock(mutex_);
-		if(!requestStore_) return false;
-		const auto request = requestStore_->Read(handle);
+		if(!requestStore_ || !world_) return false;
+		NavigationOwnerHandle currentOwner = handle.owner;
+		currentOwner.world = world_->Handle();
+		const auto request = requestStore_->Read(handle, currentOwner);
 		if(!request.record || request.record->lifecycle != NavigationRequestLifecycle::Terminal)
 			return false;
 		if(handle.slotIndex < requestRoutes_.size()) {
@@ -442,121 +861,16 @@ namespace TerraEngine::Navigation {
 			if(route.IsValid() && route.slotIndex < publishedRouteData_.size())
 				publishedRouteData_[route.slotIndex] = {};
 		}
-		return requestStore_->Release(handle);
-	}
-
-	NavigationAgentHandle NavigationSystem::RegisterAgentLocked(
-		NavigationOwnerHandle owner, NavigationLocation currentPosition, NavigationProfile profile) {
-		if(!owner.IsValid() || !profile.Validate().accepted
-			|| !ValidateNavigationLocation(currentPosition).Succeeded()
-			|| currentPosition.world != owner.world) return {};
-		if(!initialized_.load(std::memory_order_acquire) || !agentStore_ || !world_
-			|| world_->Handle() != owner.world) return {};
-		NavigationAgentRecord record{};
-		record.createdTick = lastProtectedBoundaryGeneration_;
-		record.profile = std::move(profile);
-		record.currentPosition = currentPosition;
-		record.destination = currentPosition;
-		record.poseGeneration = 1U;
-		return agentStore_->Create(owner, std::move(record)).handle;
-	}
-
-	NavigationAgentHandle NavigationSystem::RegisterAgent(
-		NavigationOwnerHandle owner, NavigationLocation currentPosition, NavigationProfile profile) {
-		std::lock_guard<std::mutex> lock(mutex_);
-		return RegisterAgentLocked(owner, std::move(currentPosition), std::move(profile));
-	}
-
-	NavigationSystem::DestinationCommandReceipt NavigationSystem::QueueSetDestination(
-		NavigationAgentHandle agent, NavigationLocation destination, std::uint32_t routePolicy,
-		std::uint64_t expectedIntentGeneration) {
-		if(!agent.IsValid() || !ValidateNavigationLocation(destination).Succeeded()
-			|| destination.world != agent.owner.world || routePolicy > 1U) {
-			return {{}, NavigationHandleStatus::Invalid};
-		}
-		std::lock_guard<std::mutex> lock(mutex_);
-		if(!initialized_.load(std::memory_order_acquire) || !agentStore_ || !commandStore_ || !world_)
-			return {{}, NavigationHandleStatus::Invalid};
-		if(world_->Handle() != agent.owner.world)
-			return {{}, NavigationHandleStatus::StaleWorld};
-		const auto agentRead = agentStore_->Read(agent);
-		if(!agentRead.record) return {{}, agentRead.status};
-		if(expectedIntentGeneration != 0U && agentRead.record->intentGeneration != expectedIntentGeneration)
-			return {{}, NavigationHandleStatus::StaleSlot};
-		NavigationCommandRecord record{};
-		record.createdTick = lastProtectedBoundaryGeneration_;
-		record.state = NavigationCommandState::Queued;
-		record.lifecycle = NavigationRequestLifecycle::Queued;
-		record.outcome = NavigationOutcome::Queued;
-		const auto command = commandStore_->Create(agent.owner, std::move(record));
-		if(!command.Succeeded()) return {{}, command.status};
-		pendingDestinations_.push_back({command.handle, agent, destination, routePolicy, expectedIntentGeneration});
-		contractTestWorkAvailable_.store(true, std::memory_order_release);
-		return {command.handle, NavigationHandleStatus::Alive};
-	}
-
-	NavigationStoreReadResult<NavigationCommandRecord> NavigationSystem::ReadCommand(
-		NavigationCommandHandle handle) const {
-		std::lock_guard<std::mutex> lock(mutex_);
-		return commandStore_ ? commandStore_->Read(handle) : NavigationStoreReadResult<NavigationCommandRecord>{};
-	}
-
-	NavigationStoreReadResult<NavigationAgentRecord> NavigationSystem::ReadAgent(
-		NavigationAgentHandle handle) const {
-		std::lock_guard<std::mutex> lock(mutex_);
-		return agentStore_ ? agentStore_->Read(handle) : NavigationStoreReadResult<NavigationAgentRecord>{};
-	}
-
-	NavigationAgentHandle NavigationSystem::ResolveObjectAgent(const TerraEngine::UUID& objectId) const {
-		std::lock_guard<std::mutex> lock(mutex_);
-		const auto found = objectAgents_.find(objectId);
-		if(found == objectAgents_.end() || !agentStore_
-			|| agentStore_->Status(found->second.agent) != NavigationHandleStatus::Alive) return {};
-		return found->second.agent;
-	}
-
-	bool NavigationSystem::ReleaseAgentLocked(NavigationAgentHandle handle, NavigationReason reason) {
-		if(!agentStore_) return false;
-		const auto read = agentStore_->Read(handle);
-		if(!read.record || read.status != NavigationHandleStatus::Alive) return false;
-		const NavigationAgentRecord agent = *read.record;
-		if(agent.activeRequest.IsValid() && requestStore_) {
-			// This helper already owns mutex_. Calling the public cancellation entry
-			// point would recursively lock it, so perform the same bounded state
-			// transition directly at this protected boundary.
-			(void)requestStore_->Cancel(agent.activeRequest);
-			std::erase_if(pendingRoutes_, [&agent](const PendingRoute& pending) {
-				return pending.handle == agent.activeRequest;
+		const bool released = requestStore_->Release(handle);
+		if(released) {
+			std::erase_if(deferredRoutes_, [handle](const DeferredRoute& deferred) {
+				return deferred.handle == handle;
+			});
+			std::erase_if(replacementIntents_, [handle](const ReplacementIntent& intent) {
+				return intent.request == handle;
 			});
 		}
-		if(agent.activeRoute.IsValid()) {
-			if(invalidations_.size() >= settings_.maxAdmittedRequests) invalidations_.erase(invalidations_.begin());
-			invalidations_.push_back({nextInvalidationCursor_++, handle.owner, agent.activeRoute,
-				reason, NavigationOutcome::Stale, 0U, lastProtectedBoundaryGeneration_});
-		}
-		for(auto iterator = pendingDestinations_.begin(); iterator != pendingDestinations_.end();) {
-			if(iterator->agent != handle) { ++iterator; continue; }
-			if(commandStore_) (void)commandStore_->Update(iterator->command, [](NavigationCommandRecord& command) {
-				command.state = NavigationCommandState::Rejected;
-				command.lifecycle = NavigationRequestLifecycle::Terminal;
-				command.outcome = NavigationOutcome::Stale;
-				command.reason = NavigationReason::SceneReplaced;
-			});
-			iterator = pendingDestinations_.erase(iterator);
-		}
-		return agentStore_->Release(handle);
-	}
-
-	bool NavigationSystem::ReleaseAgent(NavigationAgentHandle handle) {
-		std::lock_guard<std::mutex> lock(mutex_);
-		const bool released = ReleaseAgentLocked(handle, NavigationReason::SceneReplaced);
-		if(released) std::erase_if(objectAgents_, [handle](const auto& entry) { return entry.second.agent == handle; });
 		return released;
-	}
-
-	void NavigationSystem::SynchronizeSceneObjectAgents(ObjectManager& objects) {
-		std::lock_guard<std::mutex> lock(mutex_);
-		SynchronizeSceneObjectAgentsLocked(objects);
 	}
 
 	void NavigationSystem::ConfigureProfileRegistrations(
@@ -581,60 +895,6 @@ namespace TerraEngine::Navigation {
 	std::uint64_t NavigationSystem::ProfileConfigurationRevision() const {
 		std::lock_guard<std::mutex> lock(mutex_);
 		return profileConfigurationRevision_;
-	}
-
-	void NavigationSystem::SynchronizeSceneObjectAgentsLocked(ObjectManager& objects) {
-		if(!initialized_.load(std::memory_order_acquire) || !world_ || !agentStore_) return;
-		std::unordered_set<TerraEngine::UUID> observed;
-		for(const Object& object : objects.SnapshotObjectsWithComponents<NavigationAgentComponent, Transform>()) {
-			const TerraEngine::UUID objectId = objects.getUUID(object);
-			NavigationAgentComponent* component = objects.GetComponent<NavigationAgentComponent>(object);
-			Transform* transform = objects.GetComponent<Transform>(object);
-			if(objectId == TerraEngine::EMPTY_UUID || component == nullptr || transform == nullptr) continue;
-			auto componentGuard = component->acquireReadLock();
-			auto transformGuard = transform->acquireReadLock();
-			if(!component->enabled) continue;
-			const NavigationProfileResolution resolvedProfile = profileResolver_.Resolve(*component);
-			if(!resolvedProfile.accepted) continue;
-			const Scene::WorldCoordinateResult normalized = Scene::NormalizeWorldPosition(transform->worldPose.position);
-			if(!normalized.Succeeded()) continue;
-			const NavigationLocation pose{world_->Handle(), normalized.position};
-			if(!ValidateNavigationLocation(pose).Succeeded()) continue;
-			observed.insert(objectId);
-			const std::uint64_t lifetime = objects.getObjectLifetimeGeneration(object);
-			auto bound = objectAgents_.find(objectId);
-			const bool canReuse = bound != objectAgents_.end()
-				&& bound->second.objectLifetimeGeneration == lifetime
-				&& bound->second.profileId == resolvedProfile.profile.profileId
-				&& bound->second.profileRevision == resolvedProfile.profile.revision
-				&& agentStore_->Status(bound->second.agent) == NavigationHandleStatus::Alive;
-			if(!canReuse) {
-				if(bound != objectAgents_.end()) (void)ReleaseAgentLocked(bound->second.agent, NavigationReason::SceneReplaced);
-				NavigationOwnerId ownerId{TerraEngine::MakeObjectStableHash(objectId)};
-				if(!ownerId.IsValid()) ownerId.value = 1U;
-				NavigationOwnerHandle owner{world_->Handle(), ownerId, lifetime == 0U ? 1U : lifetime};
-				const NavigationAgentHandle agent = RegisterAgentLocked(owner, pose, resolvedProfile.profile);
-				if(!agent.IsValid()) { objectAgents_.erase(objectId); continue; }
-				const std::uint32_t authoredRoutePolicy = component->GetRoutePolicyValue();
-				(void)agentStore_->Update(agent, [authoredRoutePolicy](NavigationAgentRecord& runtimeAgent) {
-					runtimeAgent.routePolicy = authoredRoutePolicy;
-				});
-				objectAgents_[objectId] = {
-					agent, lifetime, resolvedProfile.profile.profileId, resolvedProfile.profile.revision};
-				continue;
-			}
-			(void)agentStore_->Update(bound->second.agent, [&pose](NavigationAgentRecord& agent) {
-				if(agent.currentPosition != pose) {
-					agent.currentPosition = pose;
-					++agent.poseGeneration;
-				}
-			});
-		}
-		for(auto iterator = objectAgents_.begin(); iterator != objectAgents_.end();) {
-			if(observed.contains(iterator->first)) { ++iterator; continue; }
-			(void)ReleaseAgentLocked(iterator->second.agent, NavigationReason::SceneReplaced);
-			iterator = objectAgents_.erase(iterator);
-		}
 	}
 
 	NavigationSystem::NavigationInvalidationRead NavigationSystem::ReadInvalidations(
@@ -670,21 +930,20 @@ namespace TerraEngine::Navigation {
 		world_ = std::make_unique<NavigationWorld>(NavigationWorldHandle{previous.worldId, nextGeneration});
 		requestStore_ = std::make_unique<NavigationRequestStore>(settings_.maxAdmittedRequests);
 		routeStore_ = std::make_unique<NavigationRouteStore>(settings_.maxAdmittedRequests);
-		agentStore_ = std::make_unique<NavigationAgentStore>(settings_.maxActiveAgents);
-		commandStore_ = std::make_unique<NavigationCommandStore>(settings_.maxAdmittedRequests);
 		pendingGroundBuilds_.clear();
 		preparedGroundBuilds_.clear();
 		pendingDynamicChanges_.clear();
 		pendingDynamicRebuilds_.clear();
 		preparedDynamicRebuilds_.clear();
 		dynamicSourceStages_.clear();
+		automaticGroundSourceStage_.reset();
 		pendingRoutes_.clear();
+		deferredRoutes_.clear();
 		preparedRoutes_.clear();
 		publishedShards_.clear();
 		publishedRouteData_.clear();
 		requestRoutes_.clear();
-		pendingDestinations_.clear();
-		objectAgents_.clear();
+		replacementIntents_.clear();
 		invalidations_.clear();
 		nextInvalidationCursor_ = 1U;
 		contractTestWorkAvailable_.store(false, std::memory_order_release);
@@ -692,17 +951,6 @@ namespace TerraEngine::Navigation {
 			NavigationMeasurementReason::MeasurementUnavailable, nextGeneration, 0U,
 			"navigation.owner_lifetime_revoked",
 			std::string("Revoked navigation owners: ") + std::string(ToString(reason))});
-	}
-
-	Ground::GroundTraversalConnectionUpsertResult NavigationSystem::PublishConnection(
-		NavigationOwnerHandle owner,
-		const NavigationConnectionComponent& component,
-		Ground::GroundTraversalConnectionStore::SupportCertificate certificate) {
-		return connectionStore_.Upsert(owner, component, certificate);
-	}
-
-	Ground::GroundTraversalConnectionSnapshot NavigationSystem::PublishedConnections() const {
-		return connectionStore_.AcquireSnapshot();
 	}
 
 	std::vector<std::shared_ptr<const DetourGroundShardGeneration>> NavigationSystem::PublishedGroundShards() const {
@@ -743,23 +991,26 @@ namespace TerraEngine::Navigation {
 			// Compare the route's profile-inflated swept bounds with the committed old
 			// and new source coverage. A spatially unrelated route remains usable;
 			// an uncertain localization fails safe and requests a replan.
-			for(const auto& [objectId, binding] : objectAgents_) {
-				(void)objectId;
-				if(!agentStore_) break;
-				const auto agent = agentStore_->Read(binding.agent);
-				if(!agent.record || !agent.record->activeRoute.IsValid()) continue;
-				const NavigationRouteHandle route = agent.record->activeRoute;
+			for(const NavigationRouteHandle route : requestRoutes_) {
+				if(!route.IsValid()) continue;
 				if(!routeStore_ || routeStore_->Status(route) != NavigationHandleStatus::Alive
 					|| route.slotIndex >= publishedRouteData_.size()) continue;
-				if(!RouteIntersectsLocalizedChange(publishedRouteData_[route.slotIndex], agent.record->profile,
+				const auto routeRecord = routeStore_->Read(route);
+				if(!routeRecord.record) continue;
+				const auto request = requestStore_ ? requestStore_->Read(routeRecord.record->request)
+					: NavigationStoreReadResult<NavigationRequestRecord>{};
+				if(!request.record || !RouteIntersectsLocalizedChange(publishedRouteData_[route.slotIndex], request.record->profile,
 					origin, intent, change)) continue;
 				if(invalidations_.size() >= settings_.maxAdmittedRequests) invalidations_.erase(invalidations_.begin());
-				invalidations_.push_back({nextInvalidationCursor_++, binding.agent.owner, route,
+				invalidations_.push_back({nextInvalidationCursor_++, route.owner, route,
 					NavigationReason::DirtyCoverage, NavigationOutcome::Stale, change.sourceRevision,
 					lastProtectedBoundaryGeneration_});
-				(void)agentStore_->Update(binding.agent, [route](NavigationAgentRecord& runtimeAgent) {
-					if(runtimeAgent.activeRoute == route) runtimeAgent.activeRoute = {};
-				});
+				if(requestStore_) (void)requestStore_->Update(routeRecord.record->request,
+					[](NavigationRequestRecord& current) {
+						current.outcome = NavigationOutcome::Stale;
+						current.reason = NavigationReason::DirtyCoverage;
+						current.lifecycle = NavigationRequestLifecycle::Terminal;
+					});
 			}
 		}
 		if(acceptedCount == 0U) return 0U;
@@ -820,10 +1071,9 @@ namespace TerraEngine::Navigation {
 		std::lock_guard<std::mutex> lock(mutex_);
 		if(!initialized_.load(std::memory_order_acquire)) return;
 		lastProtectedBoundaryGeneration_ = std::max(lastProtectedBoundaryGeneration_, publicationGeneration);
-		// ObjectManager is read only at this declared protected boundary. The scan
-		// copies pose/profile inputs into NavigationAgentStore; workers never retain
-		// a Transform or NavigationAgentComponent pointer.
-		SynchronizeSceneObjectAgentsLocked(ObjectManager::instance());
+		// Object route admission is the only operation that captures a live pose.
+		// This boundary therefore performs bookkeeping only and never scans objects
+		// for a navigation component or keeps Transform storage for workers.
 		// Boundary observations are deliberately bounded bookkeeping only. Tile
 		// generation and route search remain in scheduler worker preparation.
 		dynamicDiagnostics_.dynamicSourceLagCount = dirtyIndex_.PendingPreparationCount();
@@ -866,7 +1116,12 @@ namespace TerraEngine::Navigation {
 		if(!worldRoot || worldRoot->world != request.owner.world
 			|| request.start.world != worldRoot->world || request.destination.world != worldRoot->world) {
 			result.outcome = NavigationOutcome::UnavailableCoverage;
-			result.reason = NavigationReason::MissingNeighbor;
+			result.reason = NavigationReason::MissingTerrain;
+			return result;
+		}
+		if(worldRoot->terrainState == NavigationTerrainState::Unavailable) {
+			result.outcome = NavigationOutcome::UnavailableCoverage;
+			result.reason = NavigationReason::MissingTerrain;
 			return result;
 		}
 		result.sourceRevision = worldRoot->rootGeneration;
@@ -1128,7 +1383,11 @@ namespace TerraEngine::Navigation {
 			const RecastGroundBuildResult tiles = BuildRecastGroundTiles(buildInput);
 			PreparedGroundBuild prepared{};
 			prepared.accepted = tiles.Succeeded();
+			prepared.profile = groundBuild->profile;
 			prepared.sourceIndex = std::move(groundBuild->sourceIndex);
+			prepared.eligibleSourceIndex = std::move(groundBuild->eligibleSourceIndex);
+			prepared.terrainPublicationGeneration = groundBuild->terrainPublicationGeneration;
+			prepared.profileConfigurationRevision = groundBuild->profileConfigurationRevision;
 			if(prepared.accepted) {
 				using GroupKey = std::tuple<std::int32_t, std::int32_t, std::int32_t>;
 				std::map<GroupKey, std::vector<GroundTileBlob>> groups;
@@ -1162,7 +1421,7 @@ namespace TerraEngine::Navigation {
 
 		std::optional<PreparedRoute> searchedRoute;
 		if(route) {
-			searchedRoute = PreparedRoute{route->handle, route->agent, route->intentGeneration, route->poseGeneration,
+			searchedRoute = PreparedRoute{route->handle, route->intentGeneration,
 				SearchPublishedGroundRoute(route->request, route->worldRoot, route->shards, route->portals),
 				route->worldRoot ? route->worldRoot->world : NavigationWorldHandle{},
 				route->worldRoot ? route->worldRoot->rootGeneration : 0U};
@@ -1177,92 +1436,52 @@ namespace TerraEngine::Navigation {
 
 	void NavigationSystem::PublishPreparedWork() {
 		std::lock_guard<std::mutex> lock(mutex_);
-		// NavigationPublish is itself a protected commit. Refresh the copied poses
-		// immediately before applying queued destinations so their route starts use
-		// the newest scene-authoritative Transform state.
-		SynchronizeSceneObjectAgentsLocked(ObjectManager::instance());
-		// Destination changes become visible only at this protected publication
-		// boundary. A command either replaces the whole active intent or records a
-		// terminal rejection; it never leaves a half-updated agent record behind.
-		while(!pendingDestinations_.empty()) {
-			PendingDestination pending = std::move(pendingDestinations_.front());
-			pendingDestinations_.pop_front();
-			if(!commandStore_ || !agentStore_ || !requestStore_) continue;
-			const auto agentRead = agentStore_->Read(pending.agent);
-			const bool accepted = agentRead.record.has_value()
-				&& (pending.expectedIntentGeneration == 0U
-					|| agentRead.record->intentGeneration == pending.expectedIntentGeneration);
-			if(!accepted) {
-				(void)commandStore_->Update(pending.command, [](NavigationCommandRecord& command) {
-					command.state = NavigationCommandState::Rejected;
-					command.lifecycle = NavigationRequestLifecycle::Terminal;
-					command.outcome = NavigationOutcome::Stale;
-					command.reason = NavigationReason::SupersededRequest;
-				});
-				continue;
-			}
-
-			const NavigationAgentRecord previous = *agentRead.record;
-			Ground::GroundRouteQuery::Request routeRequest{};
-			routeRequest.owner = pending.agent.owner;
-			routeRequest.start = previous.currentPosition;
-			routeRequest.destination = pending.destination;
-			routeRequest.profile = previous.profile;
-			// Policy bit zero is complete-only; bit one allows the route query to
-			// publish its documented bounded partial result when that is possible.
-			routeRequest.allowPartial = pending.routePolicy != 0U;
-			NavigationRequestRecord requestRecord{};
-			requestRecord.createdTick = lastProtectedBoundaryGeneration_;
-			requestRecord.intentGeneration = previous.intentGeneration + 1U;
-			requestRecord.start = routeRequest.start;
-			requestRecord.destination = routeRequest.destination;
-			requestRecord.allowPartial = routeRequest.allowPartial;
-			const auto request = requestStore_->Create(pending.agent.owner, std::move(requestRecord));
-			if(!request.Succeeded()) {
-				(void)commandStore_->Update(pending.command, [](NavigationCommandRecord& command) {
-					command.state = NavigationCommandState::Rejected;
-					command.lifecycle = NavigationRequestLifecycle::Terminal;
-					command.outcome = NavigationOutcome::RejectedCapacity;
-					command.reason = NavigationReason::OutputLimit;
-				});
-				continue;
-			}
-			if(requestRoutes_.size() <= request.handle.slotIndex) requestRoutes_.resize(request.handle.slotIndex + 1U);
-			requestRoutes_[request.handle.slotIndex] = {};
-			// Destination commands are admitted at the protected boundary, so capture
-			// the same complete root/shard generations that were current with the new
-			// intent. Worker search must never synthesize a route from endpoints alone.
-			pendingRoutes_.push_back({request.handle, pending.agent, previous.intentGeneration + 1U,
-				previous.poseGeneration, std::move(routeRequest),
-				world_ ? world_->PublishedRoot() : nullptr, publishedShards_, portalGraph_.AcquireSnapshot()});
-			(void)agentStore_->Update(pending.agent, [&pending, &request, &previous](NavigationAgentRecord& agent) {
-				agent.intentGeneration = previous.intentGeneration + 1U;
-				agent.destination = pending.destination;
-				agent.routePolicy = pending.routePolicy;
-				agent.activeRequest = request.handle;
-				agent.activeRoute = {};
-			});
-			if(previous.activeRequest.IsValid()) (void)requestStore_->Cancel(previous.activeRequest);
-			if(previous.activeRoute.IsValid()) {
-				if(invalidations_.size() >= settings_.maxAdmittedRequests) invalidations_.erase(invalidations_.begin());
-				invalidations_.push_back({nextInvalidationCursor_++, pending.agent.owner, previous.activeRoute,
-					NavigationReason::SupersededRequest, NavigationOutcome::Stale, 0U, lastProtectedBoundaryGeneration_});
-			}
-			(void)commandStore_->Update(pending.command, [&request, &previous](NavigationCommandRecord& command) {
-				command.state = NavigationCommandState::Applied;
-				command.lifecycle = NavigationRequestLifecycle::Terminal;
-				command.outcome = NavigationOutcome::Complete;
-				command.reason = NavigationReason::None;
-				command.resultingIntentGeneration = previous.intentGeneration + 1U;
-				command.resultingRequest = request.handle;
-			});
-		}
 		if(world_ && !preparedGroundBuilds_.empty()) {
 			PreparedGroundBuild preparedGroundBuild = std::move(preparedGroundBuilds_.front());
 			preparedGroundBuilds_.pop_front();
 			if(preparedGroundBuild.accepted) {
+				if(preparedGroundBuild.profileConfigurationRevision != 0U
+					&& preparedGroundBuild.profileConfigurationRevision != profileConfigurationRevision_) {
+					// Profile edits select different traversal constraints and shard keys.
+					// Rejecting the older copied packet prevents a mixed world tuple.
+					++dynamicDiagnostics_.staleDropCount;
+					ResolveDeferredProfileBuildFailureLocked(preparedGroundBuild.profile, true);
+					return;
+				}
+				if(preparedGroundBuild.eligibleSourceIndex != nullptr
+					&& preparedGroundBuild.eligibleSourceIndex->Revision()
+						!= latestAutomaticSourceIndexRevision_) {
+					// A later protected capture observed scene, transform, terrain,
+					// resource, streaming, or procedural evidence. Drop this complete
+					// old candidate before it can exchange only part of the world tuple.
+					++dynamicDiagnostics_.staleDropCount;
+					ResolveDeferredProfileBuildFailureLocked(preparedGroundBuild.profile, true);
+					return;
+				}
 				const auto current = world_->PublishedRoot();
 				NavigationWorldRoot candidate = world_->CreateCandidate();
+				const bool replacesAutomaticCapture = preparedGroundBuild.eligibleSourceIndex != nullptr
+					&& (!current->eligibleSourceIndex || current->eligibleSourceIndex->Revision()
+						!= preparedGroundBuild.eligibleSourceIndex->Revision());
+				if(replacesAutomaticCapture) {
+					// A new automatic capture changes the source evidence for every profile.
+					// Drop old profile coverage as one candidate group; subsequent requests
+					// demand fresh profile-specific coverage instead of searching old geometry.
+					candidate.coverage.clear();
+					candidate.shards.clear();
+					candidate.sources.clear();
+				}
+				// QueueInitialGroundBuild is a direct prepared-terrain test/runtime
+				// input. Its accepted immutable packet establishes the first available
+				// terrain generation; automatic capture supplies the same fields in play.
+				candidate.terrainState = NavigationTerrainState::Available;
+				candidate.terrainPublicationGeneration = preparedGroundBuild.terrainPublicationGeneration != 0U
+					? preparedGroundBuild.terrainPublicationGeneration : candidate.rootGeneration;
+				candidate.sourceIndexRevision = preparedGroundBuild.eligibleSourceIndex != nullptr
+					? preparedGroundBuild.eligibleSourceIndex->Revision() : candidate.rootGeneration;
+				candidate.eligibleSourceIndex = preparedGroundBuild.eligibleSourceIndex;
+				candidate.routeValidityGeneration = candidate.rootGeneration;
+				candidate.routeValidity = {candidate.routeValidityGeneration, 0U};
 				for(const NavigationCoverageRecord& replacement : preparedGroundBuild.coverage) {
 					auto existing = std::find_if(candidate.coverage.begin(), candidate.coverage.end(),
 						[&replacement](const NavigationCoverageRecord& currentCoverage) {
@@ -1280,6 +1499,16 @@ namespace TerraEngine::Navigation {
 					else *existing = replacement;
 				}
 				if(world_->Publish(std::move(candidate), current->rootGeneration)) {
+					if(replacesAutomaticCapture) {
+						// The root exchange succeeded, so detached shards/stages can now be
+						// replaced safely. Clearing earlier would violate rejected-candidate
+						// atomicity by leaving the current root without its matching shards.
+						publishedShards_.clear();
+						const std::uint64_t retainedProfileKey = MakeGroundProfileBuildKey(preparedGroundBuild.profile);
+						std::erase_if(dynamicSourceStages_, [retainedProfileKey](const DynamicSourceStage& stage) {
+							return MakeGroundProfileBuildKey(stage.profile) != retainedProfileKey;
+						});
+					}
 					for(const auto& replacement : preparedGroundBuild.shards) {
 						if(!replacement) continue;
 						auto existing = std::find_if(publishedShards_.begin(), publishedShards_.end(),
@@ -1305,7 +1534,13 @@ namespace TerraEngine::Navigation {
 					}
 					const Ground::GroundPortalGraphSnapshot priorPortals = portalGraph_.AcquireSnapshot();
 					(void)portalGraph_.PublishBoundaryIntervals(intervals, priorPortals.Revision());
+					// The complete profile-qualified root and its portal snapshot are now
+					// published together. Only then may requests awaiting this profile enter
+					// a worker, preventing a stale default-profile route from being searched.
+					PromoteDeferredRoutesForProfileLocked(preparedGroundBuild.profile);
 				}
+			} else {
+				ResolveDeferredProfileBuildFailureLocked(preparedGroundBuild.profile, false);
 			}
 		}
 		while(world_ && !preparedDynamicRebuilds_.empty()) {
@@ -1365,6 +1600,10 @@ namespace TerraEngine::Navigation {
 				continue;
 			}
 			publishedShards_ = std::move(nextShards);
+			// The root, shards, and generated portals now expose one coherent source
+			// revision. Retire its copied dirty backlog so a long-running world cannot
+			// exhaust the bounded admission queue with already-published changes.
+			(void)dirtyIndex_.AcknowledgePublishedThrough(prepared.change.sourceRevision);
 		}
 		while(!preparedRoutes_.empty()) {
 			PreparedRoute prepared = std::move(preparedRoutes_.front());
@@ -1377,35 +1616,44 @@ namespace TerraEngine::Navigation {
 			if(!currentRoot || currentRoot->world != prepared.world
 				|| currentRoot->rootGeneration != prepared.rootGeneration) {
 				prepared.result.points.clear();
-				prepared.result.outcome = NavigationOutcome::UnavailableCoverage;
-				prepared.result.reason = NavigationReason::MissingNeighbor;
-			}
-			if(prepared.agent.IsValid()) {
-				const auto agentRead = agentStore_ ? agentStore_->Read(prepared.agent)
-					: NavigationStoreReadResult<NavigationAgentRecord>{};
-				const bool sameIntent = agentRead.record.has_value()
-					&& agentRead.record->intentGeneration == prepared.intentGeneration
-					&& agentRead.record->activeRequest == prepared.handle;
-				const bool samePose = sameIntent
-					&& agentRead.record->poseGeneration == prepared.poseGeneration;
-				if(!sameIntent || !samePose) {
-					// The character changed intent or moved after this worker captured its
-					// start. A route from the old pose must not snap back into gameplay.
-					prepared.result.points.clear();
-					prepared.result.outcome = NavigationOutcome::Stale;
-					prepared.result.reason = sameIntent ? NavigationReason::InvalidStart
-						: NavigationReason::SupersededRequest;
-				}
+				prepared.result.outcome = NavigationOutcome::Stale;
+				prepared.result.reason = NavigationReason::DirtyCoverage;
 			}
 			const auto requestRead = requestStore_->Read(prepared.handle);
 			// A cancellation keeps its slot allocated for deterministic reads, so the
 			// handle can still be alive while the result is no longer publishable.
 			if(!requestRead.record || requestRead.record->lifecycle == NavigationRequestLifecycle::Terminal)
 				continue;
+			// Re-read only at this protected publication boundary. A deleted/reused
+			// object cannot receive a worker route that was captured for an older
+			// UUID lifetime or transform generation.
+			const NavigationRequestRecord& requestRecord = *requestRead.record;
+			if(requestRecord.sourceEndpoint.object.IsValid()) {
+				const auto currentSource = CaptureObjectEndpointLocked(
+					ObjectManager::instance(), requestRecord.sourceEndpoint.object.objectId);
+				if(!currentSource || currentSource->object != requestRecord.sourceEndpoint.object
+					|| currentSource->transformRevision != requestRecord.sourceEndpoint.transformRevision) {
+					prepared.result.points.clear();
+					prepared.result.outcome = NavigationOutcome::InvalidEndpoint;
+					prepared.result.reason = NavigationReason::InvalidStart;
+				}
+			}
+			if(requestRecord.destinationEndpoint.object.IsValid()) {
+				const auto currentDestination = CaptureObjectEndpointLocked(
+					ObjectManager::instance(), requestRecord.destinationEndpoint.object.objectId);
+				if(!currentDestination || currentDestination->object != requestRecord.destinationEndpoint.object
+					|| currentDestination->transformRevision != requestRecord.destinationEndpoint.transformRevision) {
+					prepared.result.points.clear();
+					prepared.result.outcome = NavigationOutcome::InvalidEndpoint;
+					prepared.result.reason = NavigationReason::InvalidDestination;
+				}
+			}
 			NavigationRouteHandle routeHandle{};
 			if(prepared.result.outcome == NavigationOutcome::Complete && routeStore_) {
 				NavigationRouteRecord routeRecord{};
 				routeRecord.request = prepared.handle;
+				routeRecord.intentGeneration = requestRecord.intentGeneration;
+				routeRecord.observation = requestRecord.observation;
 				routeRecord.lifecycle = NavigationRequestLifecycle::Terminal;
 				routeRecord.outcome = prepared.result.outcome;
 				routeRecord.reason = prepared.result.reason;
@@ -1417,16 +1665,6 @@ namespace TerraEngine::Navigation {
 				}
 			}
 			if(prepared.handle.slotIndex < requestRoutes_.size()) requestRoutes_[prepared.handle.slotIndex] = routeHandle;
-			if(routeHandle.IsValid() && prepared.agent.IsValid() && agentStore_) {
-				// Route and agent state publish as one protected operation. A late route
-				// cannot replace a newer intent because the generation checks above have
-				// already rejected it.
-				(void)agentStore_->Update(prepared.agent, [&prepared, routeHandle](NavigationAgentRecord& agent) {
-					if(agent.intentGeneration == prepared.intentGeneration
-						&& agent.poseGeneration == prepared.poseGeneration
-						&& agent.activeRequest == prepared.handle) agent.activeRoute = routeHandle;
-				});
-			}
 			(void)requestStore_->Update(prepared.handle, [&prepared](NavigationRequestRecord& record) {
 				record.lifecycle = NavigationRequestLifecycle::Terminal;
 				record.outcome = prepared.result.outcome;

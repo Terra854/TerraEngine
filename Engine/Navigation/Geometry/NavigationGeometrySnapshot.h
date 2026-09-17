@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -33,6 +34,22 @@ namespace TerraEngine::Navigation
 		std::uint64_t physicalReadyRevision = 0U;
 		NavigationSourceKind sourceKind = NavigationSourceKind::Mesh;
 		std::uint32_t subshapeIndex = 0U;
+	};
+
+	// This outcome records why a physically observed candidate did not enter the
+	// worker-visible index. The capture boundary can aggregate these values into
+	// bounded diagnostics without retaining a scene object or resource pointer.
+	enum class NavigationEligibleSourceSelectionCode : std::uint8_t
+	{
+		Selected,
+		Inactive,
+		PhysicalBackingUnavailable,
+		InvalidIdentity,
+		IncompleteRevisionEvidence,
+		SnapshotMismatch,
+		UnsupportedKind,
+		DuplicateSourceIdentity,
+		SupersededByCollider
 	};
 
 	struct NavigationGeometryTriangleRecord
@@ -123,4 +140,80 @@ namespace TerraEngine::Navigation
 		std::uint64_t contentFingerprint = 0U;
 		mutable std::atomic<std::uint32_t> leaseCount{0U};
 	};
+
+	// A protected scene/physics/resource capture fills this value packet before
+	// worker work begins. Its shared snapshot owns copied geometry, and every
+	// other member is immutable identity or revision evidence.
+	struct NavigationEligibleSourceCandidate
+	{
+		NavigationEligibleSourceIdentity identity{};
+		NavigationSourceRevisionEvidence revisions{};
+		std::shared_ptr<const NavigationGeometrySnapshot> geometry;
+		bool activeInHierarchy = false;
+		bool physicalBackingCurrent = false;
+	};
+
+	struct NavigationEligibleSourceRecord
+	{
+		NavigationEligibleSourceIdentity identity{};
+		NavigationSourceRevisionEvidence revisions{};
+		std::shared_ptr<const NavigationGeometrySnapshot> geometry;
+
+		[[nodiscard]] constexpr bool operator==(const NavigationEligibleSourceRecord& other) const noexcept
+		{
+			return identity == other.identity && revisions == other.revisions && geometry == other.geometry;
+		}
+	};
+
+	struct NavigationEligibleSourceSelection
+	{
+		NavigationEligibleSourceIdentity identity{};
+		NavigationEligibleSourceSelectionCode code = NavigationEligibleSourceSelectionCode::InvalidIdentity;
+	};
+
+	// The source index is sorted by stable source identity. It is built entirely
+	// from captured values, so dirty workers can compare index revisions without
+	// rereading object, collider, mesh, terrain, or renderer state.
+	struct NavigationEligibleSourceIndexBuildResult;
+	[[nodiscard]] TERRAENGINE_API NavigationEligibleSourceIndexBuildResult BuildNavigationEligibleSourceIndex(
+		std::span<const NavigationEligibleSourceCandidate> candidates);
+
+	class TERRAENGINE_API NavigationEligibleSourceIndex final
+	{
+	public:
+		[[nodiscard]] const std::vector<NavigationEligibleSourceRecord>& Records() const noexcept;
+		[[nodiscard]] const std::vector<NavigationEligibleSourceSelection>& Exclusions() const noexcept;
+		[[nodiscard]] NavigationGeneration Revision() const noexcept;
+		[[nodiscard]] bool HasCurrentTerrain() const noexcept;
+
+	private:
+		// Keep this private-access redeclaration aligned with the public exported
+		// declaration above. MSVC diagnoses mismatched DLL linkage otherwise.
+		friend TERRAENGINE_API NavigationEligibleSourceIndexBuildResult BuildNavigationEligibleSourceIndex(
+			std::span<const NavigationEligibleSourceCandidate> candidates);
+		std::vector<NavigationEligibleSourceRecord> records_;
+		std::vector<NavigationEligibleSourceSelection> exclusions_;
+		NavigationGeneration revision_ = 0U;
+		bool hasCurrentTerrain_ = false;
+	};
+
+	struct NavigationEligibleSourceIndexBuildResult
+	{
+		bool accepted = false;
+		std::string reason;
+		NavigationEligibleSourceIndex index{};
+	};
+
+	// Combines each physical revision field with the representation identity. A
+	// source descriptor carrying a different value is stale or incomplete and is
+	// excluded before it can reach a route worker.
+	[[nodiscard]] TERRAENGINE_API NavigationGeneration ComputeNavigationEligibleSourceRevision(
+		const NavigationEligibleSourceIdentity& identity,
+		const NavigationSourceRevisionEvidence& revisions) noexcept;
+	// Applies the automatic eligibility policy: active/current terrain, collider,
+	// mesh, and procedural inputs only; collider wins over an equivalent mesh.
+	// Excluded inputs are recorded deterministically, while malformed candidates
+	// never partially modify an already constructed index.
+	[[nodiscard]] TERRAENGINE_API std::string_view ToString(
+		NavigationEligibleSourceSelectionCode code) noexcept;
 }

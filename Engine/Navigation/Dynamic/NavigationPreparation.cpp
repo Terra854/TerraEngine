@@ -36,7 +36,8 @@ namespace TerraEngine::Navigation
 		if(request.kind == NavigationDynamicWorkKind::RemovalTombstone) {
 			return SubmitRemovalTombstone(request.source, request.revision);
 		}
-		if(request.revision == 0U || request.copiedInput == nullptr || request.estimatedBytes == 0U) return {};
+		if(request.source.value == TerraEngine::EMPTY_UUID || request.revision == 0U
+			|| request.copiedInput == nullptr || request.estimatedBytes == 0U) return {};
 
 		std::lock_guard<std::mutex> lock(mutex_);
 		if(request.estimatedBytes > limits_.maximumPreparationBytes - std::min(preparationBytesReserved_, limits_.maximumPreparationBytes)) return {};
@@ -61,7 +62,7 @@ namespace TerraEngine::Navigation
 
 	NavigationDynamicWorkHandle NavigationPreparationCoordinator::SubmitRemovalTombstone(NavigationUuid source, NavigationGeneration revision)
 	{
-		if(revision == 0U) return {};
+		if(source.value == TerraEngine::EMPTY_UUID || revision == 0U) return {};
 		std::lock_guard<std::mutex> lock(mutex_);
 		const NavigationDynamicWorkHandle handle{ source, revision, nextSequence_++ };
 		pending_.push_back({ handle, NavigationDynamicWorkKind::RemovalTombstone, {}, 0U, false });

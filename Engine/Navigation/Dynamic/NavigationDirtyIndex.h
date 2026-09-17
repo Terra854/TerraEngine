@@ -68,6 +68,10 @@ namespace TerraEngine::Navigation {
 		explicit NavigationDirtyIndex(NavigationDirtyIndexSettings settings);
 
 		[[nodiscard]] NavigationDynamicChangeReceipt CommitSourceChange(const NavigationDynamicSourceChange& change);
+		// A successful protected publication contains every dirty dependency up to
+		// its global source revision. Retire that copied preparation backlog while
+		// retaining source revisions and removal tombstones for stale-work checks.
+		[[nodiscard]] bool AcknowledgePublishedThrough(NavigationGeneration sourceRevision);
 		[[nodiscard]] NavigationSourceTombstoneSnapshot ObserveAtProtectedBoundary() const;
 		[[nodiscard]] std::size_t PendingPreparationCount() const noexcept;
 		[[nodiscard]] NavigationGeneration LatestSourceRevision() const noexcept;
@@ -79,6 +83,10 @@ namespace TerraEngine::Navigation {
 		struct SourceRevisionRecord {
 			NavigationUuid source{};
 			NavigationGeneration revision = 0U;
+			// Physical publications are independently revisioned. Retaining the last
+			// observed value prevents an older terrain, resource, or streamed payload
+			// from being lowered after a newer copied source revision was accepted.
+			NavigationGeneration physicalReadyRevision = 0U;
 		};
 
 		NavigationDirtyIndexSettings settings_{};

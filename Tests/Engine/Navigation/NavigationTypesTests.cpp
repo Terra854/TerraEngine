@@ -1,7 +1,9 @@
 #include "TestHarness.h"
 
 #include "Navigation/NavigationSettings.h"
+#include "Navigation/NavigationStores.h"
 #include "Navigation/NavigationTypes.h"
+#include "Navigation/NavigationWorld.h"
 
 #include <cmath>
 #include <cstdint>
@@ -11,6 +13,109 @@ namespace TerraEngine::Tests {
 	using namespace TerraEngine::Navigation;
 
 	void RegisterNavigationTypesTests(TestRegistry& registry) {
+		registry.Add("Engine.Navigation.Types.ObjectEndpointsCaptureLifetimeAndCanonicalPose", [](TestContext& context) {
+			const NavigationWorldHandle world{NavigationWorldId{70U}, 4U};
+			UUID sourceId{};
+			sourceId[0] = 0xA1U;
+			NavigationObjectEndpoint endpoint{};
+			endpoint.object = {sourceId, 7U};
+			endpoint.location.world = world;
+			endpoint.location.position.offsetMetres = {2.0, 0.0, -3.0};
+			endpoint.transformRevision = 19U;
+			endpoint.activeInHierarchy = true;
+
+			context.Expect(ValidateNavigationObjectEndpoint(endpoint).accepted,
+				"A protected endpoint capture must retain a live object lifetime, canonical pose, and transform revision.");
+			endpoint.object.lifetimeGeneration = 0U;
+			context.Expect(ValidateNavigationObjectEndpoint(endpoint).code == NavigationEndpointValidationCode::InvalidObject,
+				"An endpoint without lifetime evidence must fail before a worker can observe a recycled object UUID.");
+			endpoint.object.lifetimeGeneration = 7U;
+			endpoint.activeInHierarchy = false;
+			context.Expect(ValidateNavigationObjectEndpoint(endpoint).code == NavigationEndpointValidationCode::InactiveObject,
+				"Inactive objects are invalid navigation endpoints rather than implicit static geometry.");
+
+			NavigationRequestedDestination location{};
+			location.kind = NavigationDestinationKind::Location;
+			location.location = endpoint.location;
+			context.Expect(ValidateNavigationRequestedDestination(location).accepted,
+				"A fixed canonical location must be a valid component-free route destination.");
+			location.object = {sourceId, 1U};
+			context.Expect(ValidateNavigationRequestedDestination(location).code == NavigationEndpointValidationCode::WrongDestinationVariant,
+				"A location request cannot silently carry an object target at the same time.");
+		});
+
+		registry.Add("Engine.Navigation.Types.AutomaticSourcesAndWorldTuplesRequireCompleteEvidence", [](TestContext& context) {
+			const NavigationWorldHandle handle{NavigationWorldId{74U}, 6U};
+			UUID sourceId{};
+			sourceId[0] = 0xB2U;
+			NavigationEligibleSourceIdentity identity{};
+			identity.sourceId = sourceId;
+			identity.objectId = sourceId;
+			identity.objectLifetimeGeneration = 9U;
+			identity.kind = NavigationSourceKind::Terrain;
+			NavigationSourceRevisionEvidence evidence{9U, 12U, 14U, 18U, 21U};
+			context.Expect(identity.IsValid() && evidence.IsComplete(),
+				"Automatic terrain sources must use stable identities and complete publication evidence, not authoring markers.");
+
+			NavigationWorld world{handle};
+			NavigationWorldRoot candidate = world.CreateCandidate();
+			candidate.terrainState = NavigationTerrainState::Available;
+			candidate.terrainPublicationGeneration = 18U;
+			candidate.sourceIndexRevision = 22U;
+			candidate.routeValidityGeneration = 23U;
+			candidate.routeValidity = {23U, 0U};
+			candidate.sources.push_back({sourceId, 14U, 14U, true, identity, evidence});
+			candidate.shards.push_back({{0, 0, 0, 1U}, 24U, 3U, true});
+			candidate.generatedPortals.push_back({{0, 0, 0, 1U}, {1, 0, 0, 1U}, 24U, 25U});
+			context.Expect(candidate.IsCoherent(),
+				"Terrain, source index, shard, portal, validity, and observation generations must form one publishable world tuple.");
+			context.Expect(world.Publish(candidate, 1U),
+				"A coherent candidate must publish atomically from its expected root generation.");
+
+			NavigationWorldRoot malformed = world.CreateCandidate();
+			malformed.terrainState = NavigationTerrainState::Available;
+			malformed.terrainPublicationGeneration = 31U;
+			malformed.sourceIndexRevision = 32U;
+			malformed.sources.push_back({sourceId, 1U, 1U, true, identity, {}});
+			context.Expect(!malformed.IsCoherent(),
+				"An incomplete automatic-source revision must reject the entire candidate before partial publication.");
+		});
+
+		registry.Add("Engine.Navigation.Types.BoundedStoresRetainComponentFreeRequestEvidence", [](TestContext& context) {
+			const NavigationWorldHandle world{NavigationWorldId{75U}, 2U};
+			const NavigationOwnerHandle owner{world, NavigationOwnerId{904U}, 8U};
+			UUID objectId{};
+			objectId[0] = 0xC3U;
+			NavigationRequestRecord record{};
+			record.sourceEndpoint.object = {objectId, 4U};
+			record.sourceEndpoint.location.world = world;
+			record.sourceEndpoint.transformRevision = 12U;
+			record.sourceEndpoint.activeInHierarchy = true;
+			record.destinationEndpoint = record.sourceEndpoint;
+			record.destinationEndpoint.transformRevision = 13U;
+			record.profile = NavigationProfile::Defaults();
+			record.routePolicy = NavigationRoutePolicy::NearestReachable;
+			record.observation = {5U, 12U, 13U, 16U, 17U, 18U};
+			record.replacementKey = 99U;
+			NavigationRequestStore requests{1U};
+			const NavigationStoreCreateResult<NavigationRequestHandle> created = requests.Create(owner, record);
+			const NavigationStoreReadResult<NavigationRequestRecord> stored = requests.Read(created.handle, owner);
+
+			context.Expect(created.Succeeded() && stored.HasRecord(),
+				"A bounded request store must copy a component-free request record for its generation-qualified owner.");
+			context.Expect(stored.HasRecord() && stored.record->profile.Validate().accepted
+				&& stored.record->routePolicy == NavigationRoutePolicy::NearestReachable
+				&& stored.record->observation.HasWorldEvidence()
+				&& stored.record->replacementKey == 99U,
+				"Stored requests must retain explicit profile, policy, replacement intent, and coherent world evidence.");
+
+			NavigationRequestStore replacementStore{1U};
+			NavigationOwnerHandle replacementOwner = owner;
+			replacementOwner.world.worldGeneration++;
+			context.Expect(replacementStore.Status(created.handle, replacementOwner) == NavigationHandleStatus::StaleWorld,
+				"A valid handle from the previous world must report StaleWorld even when the replacement store is still empty.");
+		});
+
 		registry.Add("Engine.Navigation.Types.RequestHandlesKeepOwnerLifetimeAndNeverResurrect", [](TestContext& context) {
 			// Runtime handles carry a world lifetime, owner generation, slot, and
 			// 64-bit generation. Reusing a slot must invalidate the old value.
@@ -66,6 +171,8 @@ namespace TerraEngine::Tests {
 				"Pending preparation is not a usable route outcome.");
 			context.Expect(NavigationReason::MissingSupport != NavigationReason::InvalidDestination,
 				"Loss of physical support and an invalid destination need distinct gameplay-visible reasons.");
+			context.Expect(NavigationReason::MissingTerrain != NavigationReason::MissingSupport,
+				"Missing mandatory terrain must remain distinct from an unreachable route over available support.");
 			context.Expect(NavigationReason::SupersededRequest != NavigationReason::SceneReplaced,
 				"Intent replacement and scene-lifetime replacement need distinct stale-work reasons.");
 			context.Expect(ToString(NavigationOutcome::UnavailableCoverage) == "UnavailableCoverage",

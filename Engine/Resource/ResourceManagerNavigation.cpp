@@ -6,9 +6,28 @@
 #include "Navigation/Geometry/NavigationGeometrySnapshot.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <limits>
 #include <system_error>
+
+namespace {
+	[[nodiscard]] bool IsNavigationGeometryCompanionPath(const std::filesystem::path& path) {
+		std::string extension = path.extension().string();
+		std::transform(extension.begin(), extension.end(), extension.begin(),
+			[](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+		return extension == ".tenavgeom";
+	}
+
+	[[nodiscard]] bool SameDescriptor(
+		const TerraEngine::Navigation::NavigationGeometrySnapshotDescriptor& left,
+		const TerraEngine::Navigation::NavigationGeometrySnapshotDescriptor& right) noexcept {
+		return left.sourceUuid == right.sourceUuid && left.sourceRevision == right.sourceRevision
+			&& left.canonicalPlacementRevision == right.canonicalPlacementRevision
+			&& left.physicalReadyRevision == right.physicalReadyRevision
+			&& left.sourceKind == right.sourceKind && left.subshapeIndex == right.subshapeIndex;
+	}
+}
 
 void ResourceManager::RegisterNavigationGeometryPath(
 	const TerraEngine::UUID& id, const std::filesystem::path& path) {
@@ -31,6 +50,13 @@ NavigationGeometryLoadResult ResourceManager::LoadNavigationGeometryCompanion(
 	result.resolvedPath = ResolveAssetPath(path);
 	if(id == TerraEngine::EMPTY_UUID || path.empty() || maximumBytes == 0U) {
 		result.reason = "InvalidNavigationGeometryRequest";
+		return result;
+	}
+	if(!IsNavigationGeometryCompanionPath(result.resolvedPath)) {
+		// A mesh can participate only through its checked immutable companion.
+		// Refusing every other extension keeps automatic capture independent of
+		// removed authored metadata and prevents source-file fallback.
+		result.reason = "NavigationGeometryCompanionExtensionRejected";
 		return result;
 	}
 	std::error_code sizeError;
@@ -71,15 +97,31 @@ NavigationGeometryLoadResult ResourceManager::LoadNavigationGeometryCompanion(
 		return result;
 	}
 
+	bool publishedReplacement = false;
 	{
 		// Exchange one immutable generation only after the complete file and copied
 		// snapshot validate. Existing worker leases retain the prior shared object.
 		std::unique_lock lock(navigationGeometryMutex);
-		navigationGeometrySnapshots[id] = created.snapshot;
+		const auto existing = navigationGeometrySnapshots.find(id);
+		if(existing != navigationGeometrySnapshots.end()
+			&& existing->second->ContentFingerprint() == created.snapshot->ContentFingerprint()
+			&& SameDescriptor(existing->second->Descriptor(), created.snapshot->Descriptor())) {
+			// Capture may ask for the same companion on later frames. Reuse the
+			// immutable generation so observing resource publication does not create
+			// a self-triggered capture loop.
+			result.snapshot = existing->second;
+		} else {
+			navigationGeometrySnapshots[id] = created.snapshot;
+			result.snapshot = created.snapshot;
+			publishedReplacement = true;
+		}
 	}
+	// This generation changes only after the map holds a complete immutable
+	// snapshot. Frame-end capture can therefore use it as resource evidence
+	// without observing a partly decoded companion.
+	if(publishedReplacement) navigationGeometryPublicationGeneration.fetch_add(1U, std::memory_order_acq_rel);
 	RegisterNavigationGeometryPath(id, path);
 	result.accepted = true;
-	result.snapshot = std::move(created.snapshot);
 	return result;
 }
 
@@ -95,6 +137,13 @@ NavigationGeometryLoadResult ResourceManager::LoadRegisteredNavigationGeometryCo
 			path = found->second;
 		}
 	}
+	if(path.empty()) {
+		// Mesh identity is already the eligibility key used by automatic capture.
+		// Resolve its adjacent cooked companion directly rather than consulting an
+		// authored navigation-source record or inferring renderer residency.
+		path = GetRegisteredAssetPath(id, AssetType::Mesh);
+		if(!path.empty()) path.replace_extension(".tenavgeom");
+	}
 	return LoadNavigationGeometryCompanion(id, path, descriptor, maximumBytes);
 }
 
@@ -107,5 +156,7 @@ ResourceManager::GetNavigationGeometrySnapshot(const TerraEngine::UUID& id) cons
 
 bool ResourceManager::ReleaseNavigationGeometrySnapshot(const TerraEngine::UUID& id) {
 	std::unique_lock lock(navigationGeometryMutex);
-	return navigationGeometrySnapshots.erase(id) != 0U;
+	const bool released = navigationGeometrySnapshots.erase(id) != 0U;
+	if(released) navigationGeometryPublicationGeneration.fetch_add(1U, std::memory_order_acq_rel);
+	return released;
 }

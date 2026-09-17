@@ -213,13 +213,19 @@ namespace TerraEngine::Physics {
 				|| command.type == PhysicsCommandType::ResizeCharacter
 				|| characterTeleport) {
 				const PhysicsCharacterMotionPayload* payload = std::get_if<PhysicsCharacterMotionPayload>(&command.payload);
-				if(payload == nullptr || !payload->desiredVelocity.IsFinite() || !payload->pose.IsFinite()
-					|| !command.character.IsValid() || !std::isfinite(payload->jumpSpeed)
-					|| !std::isfinite(payload->resizeHeight)) return false;
+				if(payload == nullptr || !command.character.IsValid()) return false;
 				if(command.character.worldId != command.worldId
 					|| command.character.worldGeneration != command.worldGeneration) return false;
-				if(command.type == PhysicsCommandType::JumpCharacter && payload->jumpSpeed < 0.0F) return false;
-				if(command.type == PhysicsCommandType::ResizeCharacter && payload->resizeHeight <= 0.0F) return false;
+				// Each character command intentionally validates only the fields it
+				// consumes. Move, jump, and resize packets carry a default pose over
+				// the fixed-width ABI, so requiring a usable rotation there would reject
+				// valid gameplay intent before it reaches the protected boundary.
+				if(command.type == PhysicsCommandType::MoveCharacter && !payload->desiredVelocity.IsFinite()) return false;
+				if(command.type == PhysicsCommandType::JumpCharacter
+					&& (!std::isfinite(payload->jumpSpeed) || payload->jumpSpeed < 0.0F)) return false;
+				if(command.type == PhysicsCommandType::ResizeCharacter
+					&& (!std::isfinite(payload->resizeHeight) || payload->resizeHeight <= 0.0F)) return false;
+				if(characterTeleport && !payload->pose.IsFinite()) return false;
 			}
 			if(command.type == PhysicsCommandType::UpdateCharacter) {
 				if(!command.character.IsValid() || command.character.worldId != command.worldId

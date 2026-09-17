@@ -16,6 +16,7 @@ public:
 	explicit SchedulerDiagnosticsWindow(MainEditorSubsystem* owner);
 
 protected:
+	void OnBeforeBegin() override;
 	void OnGui() override;
 	bool OnCloseRequested() override;
 

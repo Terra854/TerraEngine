@@ -442,6 +442,80 @@ namespace TerraEngine::Tests {
 			objects.clear();
 		});
 
+		registry.Add("Physics.Performance.AuthoredTransformUpdatesPreserveStaticBodyIdentity", [](TestContext& context) {
+			ThreadPoolSession pool;
+			PhysicsPerformanceCleanup cleanup;
+			ComponentRegistry::RegisterAllComponents();
+			ObjectManager& objects = ObjectManager::instance();
+			auto& mutations = Scene::SceneMutationQueue::Instance();
+			objects.clear();
+			mutations.Clear();
+
+			const Object object = objects.createObject("Authored Static Transform Update");
+			Transform* transform = objects.AddComponent<Transform>(object);
+			RigidBodyComponent* body = objects.AddComponent<RigidBodyComponent>(object);
+			ColliderSetComponent* colliders = objects.AddComponent<ColliderSetComponent>(object);
+			context.Expect(transform != nullptr && body != nullptr && colliders != nullptr,
+				"The authored-transform fixture requires one static body and collider.");
+			if(body != nullptr) {
+				body->motionType = Physics::PhysicsMotionType::Static;
+				body->useGravity = false;
+			}
+			if(colliders != nullptr) colliders->Add();
+			(void)objects.SetCanonicalWorldPose(object, PoseAt(0.0F, 0.0F, 0.0F));
+			objects.MarkObjectTransformDirty(object);
+
+			auto& physics = Physics::PhysicsSystem::Instance();
+			physics.Shutdown();
+			physics.SetEditorLifecycleControlled(true);
+			physics.Initialize();
+			context.Expect(physics.StartWorld(),
+				"The authored-transform fixture must start an isolated physics world.");
+			(void)objects.PublishSceneChangePacket();
+			physics.Update(physics.FixedTimeStep());
+
+			const auto initialDiagnostics = physics.LatestDiagnostics();
+			const auto initialStates = physics.LatestIncrementalBodySnapshot();
+			const TerraEngine::UUID objectId = objects.getUUID(object);
+			// Flatten once per immutable snapshot because the value-owned vector must
+			// outlive the lookup iterator used by the assertions below.
+			const std::vector<Physics::PhysicsBodyState> initialFlat = initialStates
+				? initialStates->Flatten() : std::vector<Physics::PhysicsBodyState>{};
+			const auto initialFound = std::find_if(initialFlat.begin(), initialFlat.end(),
+				[objectId](const Physics::PhysicsBodyState& state) { return state.objectId == objectId; });
+			context.Expect(initialDiagnostics != nullptr && initialFound != initialFlat.end(),
+				"The authored-transform fixture must publish an initial stable body state.");
+			const Physics::PhysicsBodyHandle initialHandle = initialFound != initialFlat.end()
+				? initialFound->handle : Physics::PhysicsBodyHandle{};
+			const std::uint64_t initialOrderGeneration = initialDiagnostics
+				? initialDiagnostics->extraction.providerOrderGeneration : 0U;
+			const std::uint64_t initialRejectedBatches = initialDiagnostics
+				? initialDiagnostics->stateStore.rejectedBatchCount : 0U;
+
+			for(std::uint32_t tick = 1U; tick <= 3U; ++tick) {
+				(void)objects.SetCanonicalWorldPose(object, PoseAt(static_cast<float>(tick), 0.0F, 0.0F));
+				objects.MarkObjectTransformDirty(object);
+				(void)objects.PublishSceneChangePacket();
+				physics.Update(physics.FixedTimeStep());
+			}
+
+			const auto updatedDiagnostics = physics.LatestDiagnostics();
+			const auto updatedStates = physics.LatestIncrementalBodySnapshot();
+			const std::vector<Physics::PhysicsBodyState> updatedFlat = updatedStates
+				? updatedStates->Flatten() : std::vector<Physics::PhysicsBodyState>{};
+			const auto updatedFound = std::find_if(updatedFlat.begin(), updatedFlat.end(),
+				[objectId](const Physics::PhysicsBodyState& state) { return state.objectId == objectId; });
+			context.Expect(updatedDiagnostics != nullptr && updatedFound != updatedFlat.end()
+				&& updatedFound->handle == initialHandle,
+				"Repeated authored Transform edits must update the existing static body rather than replace its handle.");
+			context.Expect(updatedDiagnostics != nullptr
+				&& updatedDiagnostics->extraction.providerOrderGeneration == initialOrderGeneration,
+				"Transform-only edits must not change provider body membership or order generation.");
+			context.Expect(updatedDiagnostics != nullptr
+				&& updatedDiagnostics->stateStore.rejectedBatchCount == initialRejectedBatches,
+				"Transform-only edits must not accumulate rejected state-store removal batches.");
+		});
+
 		registry.Add("Physics.Performance.FixedTickThroughputPublishesBarrierAllocationAndDiagnosticTelemetry", [](TestContext& context) {
 			ThreadPoolSession pool;
 			PhysicsPerformanceCleanup cleanup;

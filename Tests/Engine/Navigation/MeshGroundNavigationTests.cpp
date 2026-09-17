@@ -1,9 +1,9 @@
-// Test-first contract tests for terrain-free mesh and collider ground routing.
+// Test-first contract tests for terrain-backed mesh and collider ground routing.
 //
 // These tests deliberately include the planned provider-neutral source and route
 // headers. The runtime must supply those headers and the API exercised here;
-// silently skipping the matrix would make a mesh-only scene appear supported
-// before it can actually be queried.
+// silently skipping the matrix would hide a physical-geometry regression before
+// the terrain capability boundary admits it to a complete world.
 
 #include "../TestHarness.h"
 
@@ -32,8 +32,6 @@ namespace TerraEngine::Tests
 		NavigationProfile MakeSmallProfile()
 		{
 			NavigationProfile profile = NavigationProfile::Defaults();
-			profile.profileId = 101U;
-			profile.revision = 1U;
 			profile.radiusMetres = 0.25;
 			profile.heightMetres = 1.20;
 			profile.stepHeightMetres = 0.25;
@@ -44,8 +42,6 @@ namespace TerraEngine::Tests
 		NavigationProfile MakeLargeProfile()
 		{
 			NavigationProfile profile = NavigationProfile::Defaults();
-			profile.profileId = 102U;
-			profile.revision = 1U;
 			profile.radiusMetres = 0.55;
 			profile.heightMetres = 2.10;
 			profile.stepHeightMetres = 0.25;
@@ -179,9 +175,9 @@ namespace TerraEngine::Tests
 
 		std::vector<MeshGroundCase> MakeMeshGroundMatrix()
 		{
-			// 26 terrain-free cases multiplied by two profiles produce 52 deterministic
-			// requests. They intentionally mix mesh and collider sources, so support is
-			// never inferred from render visibility or from the presence of terrain.
+			// 26 terrain-backed cases multiplied by two profiles produce 52 deterministic
+			// requests. The route kernel receives geometry after bootstrap has confirmed
+			// current terrain, so support is never inferred from render visibility.
 			std::vector<MeshGroundCase> cases;
 			cases.reserve(26U);
 			auto add = [&cases](std::string_view name, GroundRouteScene scene,
@@ -248,35 +244,35 @@ namespace TerraEngine::Tests
 
 	void RegisterMeshGroundNavigationTests(TestRegistry& registry)
 	{
-		registry.Add("Navigation.MeshGround.TerrainFreeMatrixHasFiftyTwoProfileCheckedRequests", [](TestContext& context) {
+		registry.Add("Navigation.MeshGround.TerrainBackedMatrixHasFiftyTwoProfileCheckedRequests", [](TestContext& context) {
 			const NavigationProfile smallProfile = MakeSmallProfile();
 			const NavigationProfile largeProfile = MakeLargeProfile();
 			const std::vector<MeshGroundCase> cases = MakeMeshGroundMatrix();
 			context.ExpectEqual(std::size_t(26U), cases.size(),
-				"The terrain-free matrix must keep 26 distinct mesh/collider cases per reference profile.");
+				"The terrain-backed matrix must keep 26 distinct mesh/collider cases per reference profile.");
 
 			std::size_t smallRequests = 0U;
 			std::size_t largeRequests = 0U;
 			for(const MeshGroundCase& testCase : cases) {
 				const GroundRouteResult small = Evaluate(testCase.scene, smallProfile, testCase.start, testCase.destination);
 				context.Expect(testCase.smallOutcome == small.outcome,
-					std::string("Small-profile terrain-free outcome mismatch for ") + std::string(testCase.name));
+					std::string("Small-profile terrain-backed outcome mismatch for ") + std::string(testCase.name));
 				context.Expect(testCase.smallReason == small.reason,
-					std::string("Small-profile terrain-free reason mismatch for ") + std::string(testCase.name));
+					std::string("Small-profile terrain-backed reason mismatch for ") + std::string(testCase.name));
 				++smallRequests;
 
 				const GroundRouteResult large = Evaluate(testCase.scene, largeProfile, testCase.start, testCase.destination);
 				context.Expect(testCase.largeOutcome == large.outcome,
-					std::string("Large-profile terrain-free outcome mismatch for ") + std::string(testCase.name));
+					std::string("Large-profile terrain-backed outcome mismatch for ") + std::string(testCase.name));
 				context.Expect(testCase.largeReason == large.reason,
-					std::string("Large-profile terrain-free reason mismatch for ") + std::string(testCase.name));
+					std::string("Large-profile terrain-backed reason mismatch for ") + std::string(testCase.name));
 				++largeRequests;
 			}
 
 			context.Expect(smallRequests >= 25U && largeRequests >= 25U,
-				"The no-terrain matrix must execute at least 25 deterministic requests for each reference capsule profile.");
+				"The terrain-backed matrix must execute at least 25 deterministic requests for each reference capsule profile.");
 			context.Expect(smallRequests + largeRequests >= 50U,
-				"The no-terrain mesh/collider matrix must execute at least 50 deterministic requests in total.");
+				"The terrain-backed mesh/collider matrix must execute at least 50 deterministic requests in total.");
 		});
 	}
 }

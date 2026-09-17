@@ -30,6 +30,9 @@ namespace TerraEngine::Scene {
 		std::uint64_t reservedComponentCount = 0U;
 		std::uint64_t reservedHierarchyCount = 0U;
 		bool cancelled = false;
+		// Rejected detached decodes carry only their generic schema reason. They
+		// never carry partial objects into the protected publication boundary.
+		std::string rejectionReason;
 		std::vector<PreparedSceneObjectRecord> objects;
 		// Stable identity is validated before the protected materialization loop.
 		// This prevents a worker packet from replacing a live UUID with a new one.

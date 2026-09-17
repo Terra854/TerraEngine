@@ -1985,7 +1985,16 @@ namespace TerraEngine::Editor::Automation
 				{"jsonMutationFallbackCount", scripting.jsonMutationFallbacks},
 				{"coalescedMutationCount", scripting.coalescedMutations},
 				{"deferredMutationCount", scripting.accessReport.deferredMutations},
-				{"accessRejectedMutationCount", scripting.accessReport.rejectedMutations}
+				{"accessRejectedMutationCount", scripting.accessReport.rejectedMutations},
+				// Frame outcomes distinguish an empty workload from callbacks that were
+				// deliberately skipped or failed after managed dispatch was attempted.
+				{"scriptingFrame", {
+					{"frameId", scripting.frameId},
+					{"totalScripts", scripting.accessReport.totalScripts},
+					{"updatedScripts", scripting.updatedScripts},
+					{"skippedScripts", scripting.skippedScripts},
+					{"failedScripts", scripting.failedScripts}
+				}}
 			};
 		}
 	}
@@ -5444,35 +5453,14 @@ namespace TerraEngine::Editor::Automation
 				{"queueDepth", diagnostics ? diagnostics->queueDepth : 0U}, {"staleDropCount", diagnostics ? diagnostics->staleDropCount : 0U}}}});
 		}
 
-		if (operation == AutomationOperation("navigation.sources.inspect"))
-		{
-			if (!hasOnlyFields(request.arguments, {"schemaVersion", "maxItems"}))
-				return reject(ErrorCategory::Validation, "navigation.sources.inspect accepts only schemaVersion and maxItems.");
-			std::size_t maximumSources = 256U;
-			if (!readBoundedCount(request.arguments, "maxItems", 256U, 1024U, maximumSources))
-				return reject(ErrorCategory::Validation, "maxItems must be an unsigned value from 1 through 1024.");
-			if (const auto unavailable = requireWorld()) return *unavailable;
-			nlohmann::json sources = nlohmann::json::array();
-			for (std::size_t index = 0U; index < root->sources.size() && index < maximumSources; ++index)
-			{
-				const NavigationSourceIndexRecord& source = root->sources[index];
-				sources.push_back({{"sourceId", TerraEngine::ToHexString(source.sourceId)}, {"sourceRevision", source.sourceRevision},
-					{"geometryRevision", source.geometryRevision}, {"enabled", source.enabled}});
-			}
-			return succeed("Inspected copied navigation source index records.", {{"schemaVersion", 1U}, {"snapshot", {
-				{"worldId", root->world.worldId.value}, {"worldGeneration", root->world.worldGeneration},
-				{"rootGeneration", root->rootGeneration}, {"sources", std::move(sources)},
-				{"truncated", root->sources.size() > maximumSources}}}});
-		}
-
 		if (operation == AutomationOperation("navigation.route.request"))
 		{
 			if (!hasOnlyFields(request.arguments, {"schemaVersion", "owner", "start", "destination", "profileId", "allowPartial", "maxItems"}))
 				return reject(ErrorCategory::Validation, "navigation.route.request contains an unsupported field.");
 			if (const auto unavailable = requireWorld()) return *unavailable;
 			if (!request.arguments.contains("owner") || !request.arguments.contains("start")
-				|| !request.arguments.contains("destination") || !request.arguments.contains("profileId"))
-				return reject(ErrorCategory::Validation, "A route request requires owner, start, destination, and profileId.");
+				|| !request.arguments.contains("destination") || !request.arguments.contains("profile"))
+				return reject(ErrorCategory::Validation, "A route request requires owner, start, destination, and an explicit profile value.");
 			NavigationOwnerHandle owner{};
 			if (!parseOwner(request.arguments["owner"], owner) || owner.world != root->world)
 				return reject(ErrorCategory::Conflict, "The route owner does not belong to the published navigation world.");
@@ -5481,25 +5469,15 @@ namespace TerraEngine::Editor::Automation
 			if (!start) return reject(ErrorCategory::Validation, "start is not a canonical finite world position: " + positionError);
 			const auto destination = Serializer::DeserializeWorldPosition(request.arguments["destination"], &positionError);
 			if (!destination) return reject(ErrorCategory::Validation, "destination is not a canonical finite world position: " + positionError);
-			if (!request.arguments["profileId"].is_string())
-				return reject(ErrorCategory::Validation, "profileId must be a decimal string.");
-			std::uint64_t profileId = 0U;
-			const std::string profileText = request.arguments["profileId"].get<std::string>();
-			const auto [profileEnd, profileError] = std::from_chars(profileText.data(), profileText.data() + profileText.size(), profileId);
-			if (profileError != std::errc{} || profileEnd != profileText.data() + profileText.size() || profileId == 0U)
-				return reject(ErrorCategory::Validation, "profileId must be a non-zero canonical decimal string.");
+			std::string profileError;
+			const auto profile = Serializer::DeserializeNavigationProfile(request.arguments["profile"], &profileError);
+			if (!profile)
+				return reject(ErrorCategory::Validation, "profile must be a complete identity-free navigation profile: " + profileError);
 			if (request.arguments.contains("allowPartial") && !request.arguments["allowPartial"].is_boolean())
 				return reject(ErrorCategory::Validation, "allowPartial must be boolean when supplied.");
 			std::size_t requestedPoints = 4096U;
 			if (!readBoundedCount(request.arguments, "maxItems", 4096U, 4096U, requestedPoints))
 				return reject(ErrorCategory::Validation, "maxItems must be an unsigned value from 1 through 4096.");
-			if (mainEditor == nullptr || mainEditor->GetNavigationAuthoringTransactions() == nullptr)
-				return reject(ErrorCategory::Unavailable, "Navigation authoring profiles are not available outside an initialized editor session.");
-			const auto& authoredProfiles = mainEditor->GetNavigationAuthoringTransactions()->CurrentState().profiles;
-			const auto profile = std::find_if(authoredProfiles.begin(), authoredProfiles.end(), [profileId](const NavigationProfile& value) {
-				return value.profileId == profileId;
-			});
-			if (profile == authoredProfiles.end()) return reject(ErrorCategory::MissingTarget, "profileId does not name an authored navigation profile.");
 			Ground::GroundRouteQuery::Request routeRequest;
 			routeRequest.owner = owner;
 			routeRequest.start = {root->world, *start};
@@ -5550,45 +5528,6 @@ namespace TerraEngine::Editor::Automation
 				{"reason", std::string(ToString(record.reason))}, {"start", serializeLocation(record.start)},
 				{"destination", serializeLocation(record.destination)}, {"routeValid", route.IsValid()},
 				{"points", std::move(points)}, {"truncated", route.points.size() > maximumPoints}}}});
-		}
-
-		if (operation == AutomationOperation("navigation.authoring.apply"))
-		{
-			if (!hasOnlyFields(request.arguments, {"schemaVersion", "operations"}) || !request.arguments.contains("operations")
-				|| !request.arguments["operations"].is_array() || request.arguments["operations"].empty()
-				|| request.arguments["operations"].size() > 1024U)
-				return reject(ErrorCategory::Validation, "navigation.authoring.apply requires 1 through 1024 typed operations.");
-			if (mainEditor == nullptr) return reject(ErrorCategory::Unavailable, "Navigation authoring is unavailable without the main editor subsystem.");
-			auto* authoring = mainEditor->GetNavigationAuthoringTransactions();
-			if (authoring == nullptr) return reject(ErrorCategory::Unavailable, "Navigation authoring history is unavailable before editor initialization.");
-			TerraEngine::Editor::Navigation::NavigationAuthoredState before = authoring->Save();
-			auto after = before;
-			for (const nlohmann::json& operationValue : request.arguments["operations"])
-			{
-				if (!operationValue.is_object() || !hasOnlyFields(operationValue, {"kind", "profiles"})
-					|| operationValue.value("kind", std::string{}) != "replaceProfiles"
-					|| !operationValue.contains("profiles") || !operationValue["profiles"].is_array()
-					|| operationValue["profiles"].size() > 64U)
-					return reject(ErrorCategory::Validation, "Each authoring operation must be a bounded replaceProfiles operation.");
-				std::vector<NavigationProfile> replacement;
-				replacement.reserve(operationValue["profiles"].size());
-				for (const nlohmann::json& encodedProfile : operationValue["profiles"])
-				{
-					std::string profileError;
-					const auto profile = Serializer::DeserializeNavigationProfile(encodedProfile, &profileError);
-					if (!profile) return reject(ErrorCategory::Validation, "A navigation profile is invalid: " + profileError);
-					replacement.push_back(*profile);
-				}
-				after.profiles = std::move(replacement);
-			}
-			// The service is running in the provider-declared protected commit portion
-			// of the request. Queue then complete through the existing transaction so
-			// rejected input cannot leave partial authoring or undo history behind.
-			const auto queued = authoring->QueueReplace("Navigation automation profile replacement", std::move(before), std::move(after));
-			const auto completed = authoring->CompleteAtProtectedBoundary(queued.transactionId, true);
-			if (!completed.IsCommitted()) return reject(ErrorCategory::Conflict, "Navigation authoring transaction was rejected before its protected commit.");
-			return succeed("Committed typed navigation authoring profiles at the protected boundary.", {{"schemaVersion", 1U}, {"commitReceipt", {
-				{"transactionId", completed.transactionId}, {"state", "committed"}, {"projectGeneration", request.state.projectGeneration}}}});
 		}
 
 		if (operation == AutomationOperation("navigation.cache.prepare") || operation == AutomationOperation("navigation.cache.status"))
@@ -5644,7 +5583,9 @@ namespace TerraEngine::Editor::Automation
 			// its root. MCP paths are project-relative, so remove that one boundary
 			// component before loading instead of accidentally resolving Assets/Assets.
 			const std::filesystem::path assetRelativePath = projectRelativePath.lexically_relative("Assets");
-			const TerraEngine::UUID sceneId = SceneManager::Instance().LoadScene(assetRelativePath);
+			// An explicit MCP open is an authoring reread boundary. Do not reuse an
+			// earlier document just because an offline tool preserved its filename.
+			const TerraEngine::UUID sceneId = SceneManager::Instance().ReloadScene(assetRelativePath);
 			if (sceneId == TerraEngine::EMPTY_UUID || !SceneManager::Instance().SetActiveScene(sceneId))
 			{
 				return BuildError(requestId, ErrorCategory::MissingTarget, "Scene could not be loaded.", projectRelativePath.generic_string());
@@ -6540,6 +6481,7 @@ namespace TerraEngine::Editor::Automation
 			const ScriptCompilationSubsystem& compiler = ScriptCompilationSubsystem::Instance();
 			const ScriptCompilationStatus& status = compiler.GetStatus();
 			const ScriptWorkspaceService& workspace = compiler.GetWorkspaceService();
+			const ScriptingSystem::ScriptingFrameResult& scripting = ScriptingSystem::Instance().GetLatestScriptingFrameResult();
 			const std::string profile = status.activeProfile == ScriptBuildProfile::Debug ? "Debug" : "Release";
 			const ManagedReadinessInputs fingerprints = workspace.BuildManagedReadinessInputs(profile);
 			const std::filesystem::path assemblyPath = workspace.GetAssemblyPath();
@@ -6565,6 +6507,15 @@ namespace TerraEngine::Editor::Automation
 					{"identity", relativeError ? assemblyPath.filename().generic_string() : relativeAssembly.generic_string()},
 					{"fingerprint", ManagedReadinessManifest::FingerprintFile(assemblyPath)},
 					{"published", status.gameplayAssemblyLoaded && !assemblyPath.empty()}
+				}},
+				// The latest protected scripting frame identifies whether there was no
+				// runnable work or managed callbacks were skipped or failed.
+				{"frame", {
+					{"frameId", scripting.frameId},
+					{"totalScripts", scripting.accessReport.totalScripts},
+					{"updatedScripts", scripting.updatedScripts},
+					{"skippedScripts", scripting.skippedScripts},
+					{"failedScripts", scripting.failedScripts}
 				}}
 			});
 		}
@@ -7889,6 +7840,14 @@ namespace TerraEngine::Editor::Automation
 			result.message = "component.set_property requires object, component, property, and value.";
 			return result;
 		}
+		if (component == Transform::kComponentName)
+		{
+			// Transform owns the exact world coordinate. Reflection cannot prove the
+			// required coordinate normalization or parent-space propagation, so MCP
+			// callers must use the dedicated typed world operations instead.
+			result.message = "Transform reflection writes are unsupported; use world.set_transform or world.translate through transaction.apply.";
+			return result;
+		}
 
 		std::lock_guard lock(ComponentAccessRegistryMutex());
 		auto componentIt = ComponentAccessRegistry().find(component);
@@ -8350,33 +8309,74 @@ namespace TerraEngine::Editor::Automation
 		}
 		ObjectManager& objectManager = ObjectManager::instance();
 		const entt::entity object = *target.entity;
-		std::lock_guard lock(ComponentAccessRegistryMutex());
-		auto it = ComponentAccessRegistry().find(component);
-		if (it == ComponentAccessRegistry().end() || !it->second.entityHasComponent(objectManager.getRegistry(), object))
+		const std::optional<Object> objectHandle = objectManager.getObject(object);
+		if (!objectHandle)
 		{
-			return BuildError(requestId, ErrorCategory::MissingTarget, "Component is not present on the object.", component);
+			return BuildError(requestId, ErrorCategory::MissingTarget, "Object was not found.", target.input);
 		}
-		const nlohmann::json oldPayload = it->second.entitySerialize(objectManager.getRegistry(), object);
-		it->second.entityDeserialize(objectManager.getRegistry(), object, nlohmann::json{{property, arguments["value"]}});
-		const nlohmann::json newPayload = it->second.entitySerialize(objectManager.getRegistry(), object);
-		if (std::optional<Object> objectHandle = objectManager.getObject(object))
+
+		// The public one-property tool lowers to the same typed transaction as a
+		// multi-operation MCP request. This keeps validation, conflict detection,
+		// rollback, and reflected setter success at one protected commit boundary.
+		const std::string transactionId = "component-property-" + std::to_string(nextTransactionId++);
+		const nlohmann::json transactionArguments = {
+			{"format", "TerraSpatialTransactionV1"},
+			{"label", "MCP component property edit"},
+			{"operations", nlohmann::json::array({{
+				{"kind", "component.set_property"},
+				{"target", TerraEngine::ToHexString(objectManager.getUUID(*objectHandle))},
+				{"component", component},
+				{"property", property},
+				{"value", arguments["value"]}
+			}})}
+		};
+		PreparedAutomationTransaction prepared = PrepareAutomationTransaction(
+			transactionArguments, objectManager, transactionId);
+		if (!prepared.valid)
 		{
-			// Transform values feed the renderer's world-transform cache and
-			// spatial bounds. Generic component invalidation does not advance
-			// those revisions, so use the same typed notification as queued and
-			// transactional component-property mutations.
-			if (component == Transform::kComponentName)
-			{
-				objectManager.MarkObjectTransformDirty(*objectHandle);
-			}
-			else
-			{
-				objectManager.notifyObjectStructureChanged(*objectHandle);
-			}
+			return BuildError(requestId, prepared.error, prepared.message);
 		}
-		UndoRedoSystem::Instance().PushCommand(std::make_unique<SetComponentPayloadCommand>(object, component, oldPayload, newPayload));
-		MarkSceneMutated(ActivityEventType::Mutation, requestId, "component.set_property", "Updated component property.");
-		return BuildSuccess(requestId, "Updated component property.", {{"component", component}, {"property", property}});
+
+		nlohmann::json oldPayload;
+		{
+			std::lock_guard lock(ComponentAccessRegistryMutex());
+			const auto registered = ComponentAccessRegistry().find(component);
+			if (registered == ComponentAccessRegistry().end()
+				|| !registered->second.entityHasComponent(objectManager.getRegistry(), object))
+			{
+				return BuildError(requestId, ErrorCategory::MissingTarget, "Component is not present on the object.", component);
+			}
+			oldPayload = registered->second.entitySerialize(objectManager.getRegistry(), object);
+		}
+
+		const TerraEngine::Scene::TransactionResult commit =
+			TerraEngine::Scene::CommitTransaction(objectManager, prepared.transaction);
+		if (commit.status != TerraEngine::Scene::TransactionStatus::Committed)
+		{
+			const ErrorCategory category = commit.status == TerraEngine::Scene::TransactionStatus::Conflicted
+				? ErrorCategory::Conflict : ErrorCategory::Validation;
+			return BuildError(requestId, category, commit.message);
+		}
+
+		nlohmann::json newPayload;
+		{
+			std::lock_guard lock(ComponentAccessRegistryMutex());
+			const auto registered = ComponentAccessRegistry().find(component);
+			if (registered == ComponentAccessRegistry().end()
+				|| !registered->second.entityHasComponent(objectManager.getRegistry(), object))
+			{
+				return BuildError(requestId, ErrorCategory::Internal, "Committed component property could not be read back.", component);
+			}
+			newPayload = registered->second.entitySerialize(objectManager.getRegistry(), object);
+		}
+
+		UndoRedoSystem::Instance().PushCommand(
+			std::make_unique<SetComponentPayloadCommand>(object, component, oldPayload, newPayload));
+		MarkSceneMutated(ActivityEventType::Mutation, requestId, "component.set_property", "Updated component property through a typed transaction.");
+		return BuildSuccess(requestId, "Updated component property.", {
+			{"component", component}, {"property", property}, {"transactionId", transactionId},
+			{"visibilityBoundary", "post_editor_automation_flush"}
+		});
 	}
 
 	nlohmann::json EditorAutomationService::ValidateProjectRelativePath(const nlohmann::json& arguments, std::string_view key, const std::string& requestId) const

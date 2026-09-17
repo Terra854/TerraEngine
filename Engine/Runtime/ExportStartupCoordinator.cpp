@@ -272,8 +272,8 @@ namespace TerraEngine::Runtime {
 				}
 				result.geometryPaths.push_back(path);
 			}
-			if(result.sourceFree != result.geometryPaths.empty()) {
-				result.diagnostic = "Navigation source-free declaration does not match packaged geometry companions.";
+			if(!result.sourceFree) {
+				result.diagnostic = "Navigation runtime manifest declares authored source data; exports must be source-free.";
 				return result;
 			}
 			result.loaded = true;

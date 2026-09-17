@@ -7,9 +7,9 @@
 #include "Navigation/Dynamic/NavigationDirtyIndex.h"
 #include "Navigation/Dynamic/NavigationRebuildPipeline.h"
 #include "Navigation/Ground/GroundRouteQuery.h"
-#include "Navigation/Ground/GroundTraversalConnectionStore.h"
 #include "Navigation/Integration/NavigationProfileResolver.h"
 #include "Navigation/NavigationDiagnostics.h"
+#include "Navigation/NavigationRouteValidity.h"
 #include "Navigation/NavigationSettings.h"
 #include "Navigation/NavigationStores.h"
 #include "Navigation/NavigationWorld.h"
@@ -44,10 +44,24 @@ namespace TerraEngine::Navigation {
 			NavigationProfile profile{};
 			std::vector<std::shared_ptr<const NavigationGeometrySnapshot>> sources;
 			std::vector<NavigationSourceIndexRecord> sourceIndex;
+			// Automatic capture retains this complete immutable index and the terrain
+			// publication that made it eligible. Worker builds never reconstruct either
+			// value from live scene, resource, or streaming state.
+			std::shared_ptr<const NavigationEligibleSourceIndex> eligibleSourceIndex;
+			NavigationGeneration terrainPublicationGeneration = 0U;
+			NavigationGeneration profileConfigurationRevision = 0U;
 		};
-		struct DestinationCommandReceipt {
-			NavigationCommandHandle command{};
+		// Admission is explicit because malformed object/profile input must not
+		// overwrite an earlier caller intent or silently create a partial request.
+		struct ObjectRouteReceipt {
+			NavigationRequestHandle request{};
 			NavigationHandleStatus status = NavigationHandleStatus::Invalid;
+			NavigationOutcome outcome = NavigationOutcome::InvalidRequest;
+			NavigationReason reason = NavigationReason::None;
+
+			[[nodiscard]] constexpr bool Succeeded() const noexcept {
+				return status == NavigationHandleStatus::Alive && request.IsValid();
+			}
 		};
 		struct NavigationInvalidation {
 			std::uint64_t cursor = 0U;
@@ -63,6 +77,11 @@ namespace TerraEngine::Navigation {
 			std::uint64_t newestCursor = 0U;
 			bool overflowed = false;
 			std::vector<NavigationInvalidation> records;
+		};
+		struct RouteValidation {
+			bool usable = false;
+			NavigationOutcome outcome = NavigationOutcome::Stale;
+			NavigationReason reason = NavigationReason::SceneReplaced;
 		};
 
 		static NavigationSystem& Instance();
@@ -89,41 +108,39 @@ namespace TerraEngine::Navigation {
 		// each resulting build is merged by its profile-qualified shard key, so a
 		// second character profile never erases the first profile's navigation.
 		[[nodiscard]] bool QueueInitialGroundBuilds(std::vector<InitialGroundBuildInput> builds);
+		// Terrain is mandatory. A rejected/missing terrain capture publishes one
+		// unavailable root so retained routes cannot continue over stale support.
+		[[nodiscard]] bool PublishUnavailableTerrain(
+			std::shared_ptr<const NavigationEligibleSourceIndex> eligibleSourceIndex);
 		[[nodiscard]] NavigationRequestHandle SubmitOneShotRoute(
 			Ground::GroundRouteQuery::Request request);
+		// These protected-boundary entry points make every active object eligible
+		// to request navigation. They copy identity and pose values before any
+		// worker runs; navigation never stores a component on either object.
+		[[nodiscard]] ObjectRouteReceipt RequestRoute(
+			ObjectManager& objects, const TerraEngine::UUID& sourceObject,
+			NavigationLocation destination, NavigationProfile profile,
+			NavigationRoutePolicy policy = NavigationRoutePolicy::ExactDestination,
+			std::uint64_t replacementKey = 0U);
+		[[nodiscard]] ObjectRouteReceipt RequestRoute(
+			ObjectManager& objects, const TerraEngine::UUID& sourceObject,
+			const TerraEngine::UUID& targetObject, NavigationProfile profile,
+			NavigationRoutePolicy policy = NavigationRoutePolicy::ExactDestination,
+			std::uint64_t replacementKey = 0U);
 		[[nodiscard]] NavigationStoreReadResult<NavigationRequestRecord> ReadRequest(
 			NavigationRequestHandle handle) const;
 		[[nodiscard]] NavigationRouteHandle PublishedRouteForRequest(
 			NavigationRequestHandle handle) const;
 		[[nodiscard]] Ground::GroundRouteQuery::RetainedRoute ReadRoute(
 			NavigationRouteHandle handle) const;
+		// Gameplay validates a retained route immediately before consuming a
+		// waypoint. This fails closed when a newer immutable world supersedes it.
+		[[nodiscard]] RouteValidation ValidateRoute(NavigationRouteHandle handle) const;
 		[[nodiscard]] bool CancelRequest(NavigationRequestHandle handle);
 		// Explicit result release reclaims both the request record and its copied
 		// route atomically. Recycled slots advance their generation, so a historic
 		// managed/native handle can never alias the next admitted result.
 		[[nodiscard]] bool ReleaseRequestResult(NavigationRequestHandle handle);
-		// Agent registration belongs to a scene/component integration, but keeping
-		// this copied entry point typed lets that integration publish one stable
-		// owner handle before managed destination commands arrive.
-		[[nodiscard]] NavigationAgentHandle RegisterAgent(
-			NavigationOwnerHandle owner, NavigationLocation currentPosition, NavigationProfile profile);
-		[[nodiscard]] DestinationCommandReceipt QueueSetDestination(
-			NavigationAgentHandle agent, NavigationLocation destination, std::uint32_t routePolicy,
-			std::uint64_t expectedIntentGeneration);
-		[[nodiscard]] NavigationStoreReadResult<NavigationCommandRecord> ReadCommand(
-			NavigationCommandHandle handle) const;
-		// Object bindings are refreshed only at protected scene boundaries. They
-		// expose copied runtime state without ever giving gameplay a live ECS
-		// component pointer.
-		[[nodiscard]] NavigationStoreReadResult<NavigationAgentRecord> ReadAgent(
-			NavigationAgentHandle handle) const;
-		[[nodiscard]] NavigationAgentHandle ResolveObjectAgent(
-			const TerraEngine::UUID& objectId) const;
-		[[nodiscard]] bool ReleaseAgent(NavigationAgentHandle handle);
-		// MainEngine calls this only after a protected scene/physics/scripting
-		// publication. It discovers active authoring components, captures their
-		// canonical Transform poses, and revokes bindings no longer in the scene.
-		void SynchronizeSceneObjectAgents(ObjectManager& objects);
 		// Project/scene loading supplies a copied immutable registry. Replacing it
 		// is protected by the navigation mutex and affects the next scene scan.
 		void ConfigureProfileRegistrations(
@@ -140,11 +157,6 @@ namespace TerraEngine::Navigation {
 		// Project, scene, script-domain, and Play Mode lifetimes revoke all copied
 		// work in one protected operation. Old handles cannot address the new world.
 		void RevokeAllOwners(NavigationReason reason);
-		[[nodiscard]] Ground::GroundTraversalConnectionUpsertResult PublishConnection(
-			NavigationOwnerHandle owner,
-			const NavigationConnectionComponent& component,
-			Ground::GroundTraversalConnectionStore::SupportCertificate certificate);
-		[[nodiscard]] Ground::GroundTraversalConnectionSnapshot PublishedConnections() const;
 		[[nodiscard]] std::vector<std::shared_ptr<const DetourGroundShardGeneration>> PublishedGroundShards() const;
 		// Scene flushes call this while they still own the protected observation
 		// boundary. Accepted receipts are copied into the dirty index and their
@@ -162,26 +174,43 @@ namespace TerraEngine::Navigation {
 		NavigationSystem() = default;
 		void PrepareAvailableWork();
 		void PublishPreparedWork();
-		[[nodiscard]] NavigationAgentHandle RegisterAgentLocked(
-			NavigationOwnerHandle owner, NavigationLocation currentPosition, NavigationProfile profile);
-		[[nodiscard]] bool ReleaseAgentLocked(NavigationAgentHandle handle, NavigationReason reason);
-		void SynchronizeSceneObjectAgentsLocked(ObjectManager& objects);
+		[[nodiscard]] std::optional<NavigationObjectEndpoint> CaptureObjectEndpointLocked(
+			ObjectManager& objects, const TerraEngine::UUID& objectId) const;
+		[[nodiscard]] ObjectRouteReceipt SubmitCapturedObjectRouteLocked(
+			const NavigationObjectEndpoint& source, const NavigationObjectEndpoint* target,
+			NavigationLocation destination, NavigationProfile profile,
+			NavigationRoutePolicy policy, std::uint64_t replacementKey);
 		[[nodiscard]] Ground::GroundRouteQuery::Result SearchPublishedGroundRoute(
 			const Ground::GroundRouteQuery::Request& request,
 			const std::shared_ptr<const NavigationWorldRoot>& worldRoot,
 			const std::vector<std::shared_ptr<const DetourGroundShardGeneration>>& shards,
 			const Ground::GroundPortalGraphSnapshot& portals) const;
+		[[nodiscard]] bool HasReadyCoverageForProfileLocked(const NavigationProfile& profile) const;
+		[[nodiscard]] bool HasProfileBuildCapacityLocked(const NavigationProfile& profile) const;
+		[[nodiscard]] bool QueueOnDemandProfileBuildLocked(const NavigationProfile& profile);
+		void QueueRouteAgainstPublishedWorldLocked(NavigationRequestHandle handle,
+			std::uint64_t intentGeneration, Ground::GroundRouteQuery::Request request);
+		void PromoteDeferredRoutesForProfileLocked(const NavigationProfile& profile);
+		void ResolveDeferredProfileBuildFailureLocked(const NavigationProfile& profile,
+			bool mayRequeueFromNewCapture);
 
 		struct PendingGroundBuild {
 			NavigationProfile profile{};
 			std::vector<std::shared_ptr<const NavigationGeometrySnapshot>> sources;
 			std::vector<NavigationSourceIndexRecord> sourceIndex;
+			std::shared_ptr<const NavigationEligibleSourceIndex> eligibleSourceIndex;
+			NavigationGeneration terrainPublicationGeneration = 0U;
+			NavigationGeneration profileConfigurationRevision = 0U;
 		};
 		struct PreparedGroundBuild {
 			bool accepted = false;
+			NavigationProfile profile{};
 			std::vector<std::shared_ptr<const DetourGroundShardGeneration>> shards;
 			std::vector<NavigationCoverageRecord> coverage;
 			std::vector<NavigationSourceIndexRecord> sourceIndex;
+			std::shared_ptr<const NavigationEligibleSourceIndex> eligibleSourceIndex;
+			NavigationGeneration terrainPublicationGeneration = 0U;
+			NavigationGeneration profileConfigurationRevision = 0U;
 		};
 		struct PendingDynamicRebuild {
 			// The request is a full copied worker packet: no field may point into ECS
@@ -197,13 +226,19 @@ namespace TerraEngine::Navigation {
 			NavigationProfile profile{};
 			std::vector<std::shared_ptr<const NavigationGeometrySnapshot>> sources;
 		};
+		struct AutomaticGroundSourceStage {
+			// This is the last complete protected capture. It owns only immutable
+			// geometry and copied evidence, so arbitrary caller profiles can request
+			// coverage without consulting ECS, physics, or resource state on a worker.
+			std::vector<std::shared_ptr<const NavigationGeometrySnapshot>> sources;
+			std::vector<NavigationSourceIndexRecord> sourceIndex;
+			std::shared_ptr<const NavigationEligibleSourceIndex> eligibleSourceIndex;
+			NavigationGeneration terrainPublicationGeneration = 0U;
+			NavigationGeneration profileConfigurationRevision = 0U;
+		};
 		struct PendingRoute {
 			NavigationRequestHandle handle{};
-			// One-shot requests have no agent. Agent-owned requests retain the exact
-			// pose and intent generations observed when their search started.
-			NavigationAgentHandle agent{};
 			std::uint64_t intentGeneration = 0U;
-			std::uint64_t poseGeneration = 0U;
 			Ground::GroundRouteQuery::Request request{};
 			// Capture published generations at admission; worker code receives no
 			// live scene, mutable root, or provider-owned address.
@@ -211,30 +246,22 @@ namespace TerraEngine::Navigation {
 			std::vector<std::shared_ptr<const DetourGroundShardGeneration>> shards;
 			Ground::GroundPortalGraphSnapshot portals;
 		};
+		struct DeferredRoute {
+			NavigationRequestHandle handle{};
+			std::uint64_t intentGeneration = 0U;
+			Ground::GroundRouteQuery::Request request{};
+		};
 		struct PreparedRoute {
 			NavigationRequestHandle handle{};
-			NavigationAgentHandle agent{};
 			std::uint64_t intentGeneration = 0U;
-			std::uint64_t poseGeneration = 0U;
 			Ground::GroundRouteQuery::Result result{};
 			NavigationWorldHandle world{};
 			NavigationGeneration rootGeneration = 0U;
 		};
-		struct PendingDestination {
-			NavigationCommandHandle command{};
-			NavigationAgentHandle agent{};
-			NavigationLocation destination{};
-			std::uint32_t routePolicy = 0U;
-			std::uint64_t expectedIntentGeneration = 0U;
-		};
-
 		mutable std::mutex mutex_;
 		std::unique_ptr<NavigationWorld> world_;
 		std::unique_ptr<NavigationRequestStore> requestStore_;
 		std::unique_ptr<NavigationRouteStore> routeStore_;
-		std::unique_ptr<NavigationAgentStore> agentStore_;
-		std::unique_ptr<NavigationCommandStore> commandStore_;
-		Ground::GroundTraversalConnectionStore connectionStore_;
 		// The portal graph contains only boundary spans extracted from published
 		// Detour generations. It is not a synthetic neighboring-shard shortcut.
 		Ground::GroundPortalGraph portalGraph_;
@@ -252,24 +279,28 @@ namespace TerraEngine::Navigation {
 		// Immutable geometry staged by bootstrap/source integration. Copying shared
 		// pointers into a worker packet is safe because snapshots never mutate.
 		std::vector<DynamicSourceStage> dynamicSourceStages_;
+		std::optional<AutomaticGroundSourceStage> automaticGroundSourceStage_;
 		std::deque<PendingRoute> pendingRoutes_;
+		std::deque<DeferredRoute> deferredRoutes_;
 		std::deque<PreparedRoute> preparedRoutes_;
-		std::deque<PendingDestination> pendingDestinations_;
-		struct ObjectAgentBinding {
-			NavigationAgentHandle agent{};
-			std::uint64_t objectLifetimeGeneration = 0U;
-			std::uint64_t profileId = 0U;
-			NavigationGeneration profileRevision = 0U;
+		struct ReplacementIntent {
+			NavigationOwnerHandle owner{};
+			std::uint64_t key = 0U;
+			NavigationRequestHandle request{};
 		};
-		// UUID avoids aliasing a recycled EnTT entity. The associated runtime
-		// handle independently carries scene/world/slot generations.
-		std::unordered_map<TerraEngine::UUID, ObjectAgentBinding> objectAgents_;
+		// Replacement keys are caller-owned intent tokens, not state attached to
+		// an object. The bounded list is pruned with request release/revocation.
+		std::vector<ReplacementIntent> replacementIntents_;
 		NavigationProfileResolver profileResolver_ = NavigationProfileResolver::Create(
 			NavigationProfile::Defaults(), {});
 		// This protected token changes whenever project/editor profile configuration
 		// is replaced. MainEngine combines it with component revision so new profiles
 		// receive terrain/mesh coverage even when scene objects were not edited.
 		std::uint64_t profileConfigurationRevision_ = 1U;
+		// The latest automatic index revision is capture-wide evidence for scene,
+		// transform/spatial, terrain, resource, streaming, and procedural inputs.
+		// Publication rejects a prepared older index as one atomic stale candidate.
+		NavigationGeneration latestAutomaticSourceIndexRevision_ = 0U;
 		std::vector<std::shared_ptr<const DetourGroundShardGeneration>> publishedShards_;
 		std::vector<Ground::GroundRouteQuery::RetainedRoute> publishedRouteData_;
 		std::vector<NavigationRouteHandle> requestRoutes_;

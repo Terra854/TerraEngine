@@ -8,6 +8,8 @@
 #include "TestHarness.h"
 
 #include "Navigation/Ground/GroundRouteQuery.h"
+#include "Navigation/Integration/NavigationSceneBootstrap.h"
+#include "Navigation/Geometry/NavigationGeometrySnapshot.h"
 #include "Navigation/NavigationSettings.h"
 #include "Navigation/NavigationTypes.h"
 
@@ -15,6 +17,7 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace TerraEngine::Tests {
 	namespace {
@@ -91,7 +94,6 @@ namespace TerraEngine::Tests {
 		Navigation::NavigationProfile MakeReferenceProfile(ReferenceCapsule capsule) {
 			Navigation::NavigationProfile profile = Navigation::NavigationProfile::Defaults();
 			if(capsule == ReferenceCapsule::Large) {
-				profile.profileId = 2U;
 				profile.radiusMetres = 0.7;
 				profile.heightMetres = 2.2;
 				profile.stepHeightMetres = 0.3;
@@ -168,6 +170,58 @@ namespace TerraEngine::Tests {
 			request.allowPartial = false;
 			return request;
 		}
+
+		Navigation::NavigationEligibleSourceCandidate MakeAutomaticCandidate(
+			std::string_view sourceId, Navigation::NavigationSourceKind kind) {
+			Navigation::NavigationEligibleSourceCandidate candidate{};
+			candidate.identity.sourceId = Navigation::NavigationUuid::FromString(sourceId).value;
+			candidate.identity.objectId = Navigation::NavigationUuid::FromString("a1f77899-1ef3-4c1a-8a32-f4a0f96077c3").value;
+			candidate.identity.objectLifetimeGeneration = 1U;
+			candidate.identity.assetId = Navigation::NavigationUuid::FromString("eae00c9d-3515-4c9a-abdb-1a6df3cb4f04").value;
+			candidate.identity.kind = kind;
+			candidate.revisions = {1U, 2U, 3U, 4U, 5U};
+			candidate.activeInHierarchy = true;
+			candidate.physicalBackingCurrent = true;
+			return candidate;
+		}
+
+		Navigation::NavigationBootstrapSourceInput MakeAutomaticTerrainSource() {
+			Navigation::NavigationBootstrapSourceInput source{};
+			source.candidate = MakeAutomaticCandidate("4e4a0ddf-2c35-4d75-8cb8-fa0b6e1061d8",
+				Navigation::NavigationSourceKind::Terrain);
+			Navigation::TerrainNavigationPublishedSamples terrain{};
+			terrain.terrainPresent = true;
+			terrain.descriptor.sourceUuid.value = source.candidate.identity.sourceId;
+			terrain.descriptor.sourceRevision = Navigation::ComputeNavigationEligibleSourceRevision(
+				source.candidate.identity, source.candidate.revisions);
+			terrain.descriptor.canonicalPlacementRevision = source.candidate.revisions.transformRevision;
+			terrain.descriptor.physicalReadyRevision = source.candidate.revisions.physicalPublicationGeneration;
+			terrain.descriptor.sourceKind = Navigation::NavigationSourceKind::Terrain;
+			terrain.sampleColumns = 2U;
+			terrain.sampleRows = 2U;
+			terrain.sampleSpacingMetres = 1.0F;
+			terrain.heights = {0.0F, 0.0F, 0.0F, 0.0F};
+			source.terrain = std::move(terrain);
+			return source;
+		}
+
+		Navigation::NavigationBootstrapSourceInput MakeAutomaticMeshSource() {
+			Navigation::NavigationBootstrapSourceInput source{};
+			source.candidate = MakeAutomaticCandidate("a35d7ef4-fc86-41df-a516-c2d03df2916e",
+				Navigation::NavigationSourceKind::Mesh);
+			Navigation::NavigationGeometrySnapshotDescriptor descriptor{};
+			descriptor.sourceUuid.value = source.candidate.identity.sourceId;
+			descriptor.sourceRevision = Navigation::ComputeNavigationEligibleSourceRevision(
+				source.candidate.identity, source.candidate.revisions);
+			descriptor.canonicalPlacementRevision = source.candidate.revisions.transformRevision;
+			descriptor.physicalReadyRevision = source.candidate.revisions.physicalPublicationGeneration;
+			descriptor.sourceKind = Navigation::NavigationSourceKind::Mesh;
+			Navigation::NavigationGeometryDocument geometry{};
+			geometry.vertices = {{0.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 1.0F}};
+			geometry.triangles = {{0U, 1U, 2U}};
+			source.candidate.geometry = Navigation::NavigationGeometrySnapshot::Create(descriptor, geometry).snapshot;
+			return source;
+		}
 	}
 
 	void RegisterTerrainGroundNavigationTests(TestRegistry& registry) {
@@ -189,6 +243,25 @@ namespace TerraEngine::Tests {
 		registry.Add("Navigation.GroundTerrain.MatrixHasFiftyCasesAndTwoReferenceCapsules", [smallCount, largeCount](TestContext& context) {
 			context.Expect(kTerrainCases.size() >= 50U && smallCount >= 25U && largeCount >= 25U,
 				"GroundTerrain must retain at least 50 stable cases and at least 25 for each reference capsule.");
+		});
+
+		registry.Add("Navigation.GroundTerrain.AutomaticBootstrapRequiresCurrentTerrain", [](TestContext& context) {
+			Navigation::NavigationSceneBootstrapInput meshOnly{};
+			meshOnly.sources.push_back(MakeAutomaticMeshSource());
+			const Navigation::NavigationSceneBootstrapCapture unavailable =
+				Navigation::CaptureNavigationSceneBootstrap(meshOnly);
+			context.Expect(!unavailable.accepted && !unavailable.terrainAvailable
+				&& unavailable.reason == "NavigationUnavailableMissingTerrain",
+				"Mesh and collider geometry must not create a terrain-free navigation capability.");
+
+			Navigation::NavigationSceneBootstrapInput terrainBacked{};
+			terrainBacked.sources.push_back(MakeAutomaticTerrainSource());
+			terrainBacked.sources.push_back(MakeAutomaticMeshSource());
+			const Navigation::NavigationSceneBootstrapCapture captured =
+				Navigation::CaptureNavigationSceneBootstrap(terrainBacked);
+			context.Expect(captured.accepted && captured.terrainAvailable && captured.eligibleSourceIndex
+				&& captured.eligibleSourceIndex->Records().size() == 2U,
+				"A current active terrain must automatically enable a complete copied terrain-plus-mesh source index.");
 		});
 	}
 }

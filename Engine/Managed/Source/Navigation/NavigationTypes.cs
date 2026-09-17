@@ -30,16 +30,11 @@ namespace TerraEngine
 
 	public enum NavigationReason : uint
 	{
-		None = 0, MissingSource = 1, DirtyCoverage = 2, MissingNeighbor = 3,
-		DomainLimit = 4, ResolutionLimit = 5, NodeLimit = 6, OutputLimit = 7,
-		InvalidStart = 8, InvalidDestination = 9, InsufficientClearance = 10,
-		MissingSupport = 11, SupersededRequest = 12, SceneReplaced = 13,
-		ProviderFailure = 14, Cancelled = 15, Expired = 16
-	}
-
-	public enum NavigationCommandState : uint
-	{
-		Queued = 0, Applied = 1, Rejected = 2, Expired = 3
+		None = 0, MissingTerrain = 1, MissingSource = 2, DirtyCoverage = 3,
+		MissingNeighbor = 4, DomainLimit = 5, ResolutionLimit = 6, NodeLimit = 7,
+		OutputLimit = 8, InvalidStart = 9, InvalidDestination = 10,
+		InsufficientClearance = 11, MissingSupport = 12, SupersededRequest = 13,
+		SceneReplaced = 14, ProviderFailure = 15, Cancelled = 16, Expired = 17
 	}
 
 	[StructLayout(LayoutKind.Sequential, Pack = 8)]
@@ -80,26 +75,6 @@ namespace TerraEngine
 	}
 
 	[StructLayout(LayoutKind.Sequential, Pack = 8)]
-	public struct NavigationAgentHandle
-	{
-		public NavigationOwnerHandle Owner;
-		public uint SlotIndex;
-		internal uint Reserved;
-		public ulong SlotGeneration;
-		public readonly bool IsValid => Owner.IsValid && SlotIndex != uint.MaxValue && SlotGeneration != 0;
-	}
-
-	[StructLayout(LayoutKind.Sequential, Pack = 8)]
-	public struct NavigationCommandHandle
-	{
-		public NavigationOwnerHandle Owner;
-		public uint SlotIndex;
-		internal uint Reserved;
-		public ulong SlotGeneration;
-		public readonly bool IsValid => Owner.IsValid && SlotIndex != uint.MaxValue && SlotGeneration != 0;
-	}
-
-	[StructLayout(LayoutKind.Sequential, Pack = 8)]
 	public struct NavigationLocation
 	{
 		public NavigationWorldHandle World;
@@ -114,8 +89,6 @@ namespace TerraEngine
 	[StructLayout(LayoutKind.Sequential, Pack = 8)]
 	public unsafe struct NavigationProfile
 	{
-		public ulong ProfileId;
-		public ulong Revision;
 		public double RadiusMetres;
 		public double HeightMetres;
 		public double StepHeightMetres;
@@ -142,36 +115,12 @@ namespace TerraEngine
 		public bool Complete => Status == NavigationStatus.Success && Outcome == NavigationOutcome.Complete;
 	}
 
-	public sealed class NavigationCommandResult
-	{
-		public NavigationStatus Status { get; internal init; }
-		public NavigationCommandState State { get; internal init; }
-		public NavigationCommandHandle Command { get; internal init; }
-		public NavigationRequestHandle ResultingRequest { get; internal init; }
-		public ulong ResultingIntentGeneration { get; internal init; }
-		public string Diagnostic { get; internal init; } = string.Empty;
-	}
-
-	public sealed class NavigationAgentState
-	{
-		public NavigationStatus Status { get; internal init; }
-		public NavigationAgentHandle Agent { get; internal init; }
-		public ulong IntentGeneration { get; internal init; }
-		public ulong PoseGeneration { get; internal init; }
-		public NavigationRequestHandle ActiveRequest { get; internal init; }
-		public NavigationRouteHandle ActiveRoute { get; internal init; }
-		public NavigationLocation CurrentPosition { get; internal init; }
-		public NavigationLocation Destination { get; internal init; }
-		public uint RoutePolicy { get; internal init; }
-		public bool IsAvailable => Status == NavigationStatus.Success && Agent.IsValid;
-	}
-
 	public readonly struct NavigationRouteValidation
 	{
 		public NavigationStatus Status { get; init; }
 		public bool Usable { get; init; }
+		public NavigationOutcome Outcome { get; init; }
 		public NavigationReason Reason { get; init; }
-		public ulong ObservedSourceRevision { get; init; }
 	}
 
 	public readonly struct NavigationInvalidation
@@ -205,17 +154,27 @@ namespace TerraEngine
 	}
 
 	[StructLayout(LayoutKind.Sequential, Pack = 8)]
-	internal unsafe struct NativeNavigationRouteRequest
+	internal unsafe struct NativeNavigationObjectToLocationRequest
 	{
 		internal NavigationAbiHeader Header;
-		internal NavigationOwnerHandle Owner;
+		internal uint SourceObjectEntity;
+		internal uint RoutePolicy;
 		internal NavigationProfile Profile;
-		internal NavigationLocation Start;
 		internal NavigationLocation Destination;
-		internal uint AllowPartial;
-		internal uint AllowEndpointAdjustment;
-		internal uint MaximumExpansions;
+		internal ulong ReplacementKey;
+		internal ulong CorrelationId;
+	}
+
+	[StructLayout(LayoutKind.Sequential, Pack = 8)]
+	internal unsafe struct NativeNavigationObjectToObjectRequest
+	{
+		internal NavigationAbiHeader Header;
+		internal uint SourceObjectEntity;
+		internal uint TargetObjectEntity;
+		internal NavigationProfile Profile;
+		internal uint RoutePolicy;
 		internal uint Reserved;
+		internal ulong ReplacementKey;
 		internal ulong CorrelationId;
 	}
 
@@ -270,8 +229,6 @@ namespace TerraEngine
 	{
 		internal NavigationAbiHeader Header;
 		internal NavigationRouteHandle Route;
-		internal NavigationLocation CurrentPosition;
-		internal ulong ExpectedSourceRevision;
 	}
 
 	[StructLayout(LayoutKind.Sequential, Pack = 8)]
@@ -280,9 +237,8 @@ namespace TerraEngine
 		internal NavigationAbiHeader Header;
 		internal NavigationStatus Status;
 		internal uint Usable;
+		internal NavigationOutcome Outcome;
 		internal NavigationReason Reason;
-		internal uint Reserved;
-		internal ulong ObservedSourceRevision;
 	}
 
 	[StructLayout(LayoutKind.Sequential, Pack = 8)]
@@ -290,52 +246,6 @@ namespace TerraEngine
 	{
 		internal NavigationAbiHeader Header;
 		internal NavigationRequestHandle Request;
-	}
-
-	[StructLayout(LayoutKind.Sequential, Pack = 8)]
-	internal struct NativeNavigationDestinationRequest
-	{
-		internal NavigationAbiHeader Header;
-		internal NavigationAgentHandle Agent;
-		internal NavigationLocation Destination;
-		internal uint RoutePolicy;
-		internal uint CapabilityMask;
-		internal ulong ExpectedIntentGeneration;
-		internal ulong CorrelationId;
-	}
-
-	[StructLayout(LayoutKind.Sequential, Pack = 8)]
-	internal unsafe struct NativeNavigationCommandReceipt
-	{
-		internal NavigationAbiHeader Header;
-		internal NavigationStatus Status;
-		internal NavigationCommandState State;
-		internal NavigationCommandHandle Command;
-		internal NavigationRequestHandle ResultingRequest;
-		internal ulong ResultingIntentGeneration;
-		internal fixed byte Diagnostic[Navigation.MaximumDiagnosticBytes];
-	}
-
-	[StructLayout(LayoutKind.Sequential, Pack = 8)]
-	internal struct NativeNavigationCommandQuery
-	{
-		internal NavigationAbiHeader Header;
-		internal NavigationCommandHandle Command;
-	}
-
-	[StructLayout(LayoutKind.Sequential, Pack = 8)]
-	internal struct NativeNavigationAgentSnapshot
-	{
-		internal NavigationAbiHeader Header;
-		internal NavigationStatus Status;
-		internal uint RoutePolicy;
-		internal NavigationAgentHandle Agent;
-		internal ulong IntentGeneration;
-		internal ulong PoseGeneration;
-		internal NavigationRequestHandle ActiveRequest;
-		internal NavigationRouteHandle ActiveRoute;
-		internal NavigationLocation CurrentPosition;
-		internal NavigationLocation Destination;
 	}
 
 	[StructLayout(LayoutKind.Sequential, Pack = 8)]

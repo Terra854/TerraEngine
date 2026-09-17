@@ -1144,7 +1144,15 @@ namespace TerraEngine::Scene {
 				for (std::size_t updateIndex = 0U; updateIndex < operation.transformUpdates.size(); ++updateIndex)
 				{
 					const TransactionTransformUpdate& update = operation.transformUpdates[updateIndex];
-					if (objects.SetCanonicalWorldPose(targets[updateIndex].first, update.pose) != WorldCoordinateError::None)
+					WorldPose publishedPose = update.pose;
+					if (update.preserveScale)
+					{
+						// Provider poses contain no scale. Read it only after the entire
+						// batch has passed protected target/revision validation, so worker
+						// publication cannot replace an authored scale with the default 1.
+						publishedPose.scale = targets[updateIndex].second->worldPose.scale;
+					}
+					if (objects.SetCanonicalWorldPose(targets[updateIndex].first, publishedPose) != WorldCoordinateError::None)
 					{
 						AddConflict(result, TransactionConflictReason::InvalidCoordinate, update.objectId, index,
 							"Canonical transform batch entry was rejected during protected publication.", 0, 0,

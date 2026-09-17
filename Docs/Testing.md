@@ -1,5 +1,64 @@
 # TerraEngine Testing
 
+## Live navigation regression checks
+
+After building and installing with the preset below, run the focused native
+navigation matrix and editor authoring/logging checks:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R 'Navigation|Editor.Animation' --output-on-failure
+$env:TERRAENGINE_TEST_FILTER = 'Editor.Automation.Service,Editor.MCP.StructuredLogs'
+& ./out/build/RelWithDebInfo/TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+For the interactive check, create terrain with published collision, place an
+ordinary scripted object and a target on opposite sides of a static box collider,
+and request a route using an explicit non-default profile. Verify copied route
+points avoid the box and the script reaches its target. Stop and repeat Play
+without restarting the editor; terrain availability must recover after physics
+republishes its retained recipe. Confirm script messages appear in the MCP log
+query as well as the editor console. Open Scheduler Diagnostics at both a small
+and maximized editor size: its title bar must remain on-screen and long table
+columns must remain readable via horizontal scrolling.
+
+The focused editor checks also cover an externally rewritten scene reopened at
+the same path, unsupported component-property writes rejected without mutation,
+and managed native-export logs reaching the editor's engine sink.
+
+### Collision-safe route following
+
+Use `Tests/Fixtures/Navigation/NavigationCollisionLiveTest.cs` as the reproducible
+live script (save it as `NavigationLiveTest.cs` in the test project's Assets).
+Its header specifies the terrain, controller, target, and kinematic box setup.
+Disable the duck's separate collider: the character controller supplies its
+collision shape. The target is a destination marker, not a blocking collider.
+The box must be nonstatic so it is not baked into the planned route.
+
+Press Play. The box enters the already-planned path, the duck must remain on the
+near side for at least 0.8 seconds, and after the box clears the duck must resume.
+A second controller-only duck then blocks the path until it moves away; only
+then should the follower reach the destination. Require `NAVCOLL PASS held before moving blocker`,
+`NAVCOLL PASS held before character`, and `NAVCOLL PASS resumed and arrived`,
+with no `NAVCOLL FAIL`. Repeat Play without
+restarting. Movement must use `NavigationRouteFollower`/`CharacterController`,
+never direct actor Transform writes. The fixture's kinematic-body commands and
+controller commands are resolved at protected physics boundaries.
+
+The fixture also logs scene and physics positions every five seconds. They must
+track one another (apart from the declared publication boundary), and repeated
+render-frame velocity commands must not multiply movement speed: characters
+advance on fixed physics ticks, not once per command.
+
+Also compare the rendered ducks before Play and after controller initialization.
+Both imported meshes must remain visible at their authored `.01` scale while
+moving. The fixture checks that scale on every update: position-only diagnostics
+cannot detect an accidentally reset mesh scale or prove correct rendering.
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R 'Navigation|Engine.PhysicsConstraintsAndCharacters|Engine.PhysicsManaged' --output-on-failure
+```
+
 ## Installed navigation acceptance
 
 Navigation acceptance is an installed-only gate. From a clean checkout,
@@ -18,6 +77,58 @@ $installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
 $navigationTool = Join-Path $installRoot 'Tests/Tools/Navigation/RunInstalledNavigationAcceptance.ps1'
 $navigationEvidence = [IO.Path]::GetFullPath('out/evidence/navigation')
 ```
+
+### Navigation hard-break qualification
+
+Run the focused native navigation tests, then the complete suite and mandatory
+install gate. Use a Visual Studio developer environment with MSVC and the
+Windows SDK available.
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R 'Navigation|BulkScenePublication' --output-on-failure
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -j 1 --output-on-failure
+cmake --build --preset RelWithDebInfo --target install
+$audit = Join-Path $installRoot 'Tests/Tools/Navigation/VerifyNavigationArchitecture.ps1'
+& $audit -Root $installRoot
+if ($LASTEXITCODE -ne 0) { throw 'Installed navigation architecture audit failed.' }
+```
+
+Capture five baseline and five candidate runs with the installed acceptance
+runner. Keep evidence outside both install trees. Every run within one cohort
+must share its build hash; the baseline and candidate build hashes must differ.
+The two cohorts must match on source/settings/workload hashes, renderer, power
+mode, worker count, lane, and workload so the code revision is the only intended
+comparison variable.
+
+```powershell
+$baselineInstallRoot = (Resolve-Path 'out/prechange-baseline-worktree/out/build/RelWithDebInfo/Build').Path
+$candidateInstallRoot = $installRoot
+$baselineTool = Join-Path $baselineInstallRoot 'Tests/Tools/Navigation/RunInstalledNavigationAcceptance.ps1'
+$candidateTool = Join-Path $candidateInstallRoot 'Tests/Tools/Navigation/RunInstalledNavigationAcceptance.ps1'
+$baseline = Join-Path $navigationEvidence '058-remove-navigation-components/baseline'
+$candidate = Join-Path $navigationEvidence '058-remove-navigation-components/candidate'
+1..5 | ForEach-Object {
+    & $baselineTool -InstallRoot $baselineInstallRoot -OutputDirectory (Join-Path $baseline ("qualification-{0:D2}" -f $_)) `
+        -Lanes export-rendered -Matrices performance -DurationMinutes 5 -Qualification
+    if ($LASTEXITCODE -ne 0) { throw "Baseline run $_ failed." }
+}
+1..5 | ForEach-Object {
+    & $candidateTool -InstallRoot $candidateInstallRoot -OutputDirectory (Join-Path $candidate ("qualification-{0:D2}" -f $_)) `
+        -Lanes export-rendered -Matrices performance -DurationMinutes 5 -Qualification
+    if ($LASTEXITCODE -ne 0) { throw "Candidate run $_ failed." }
+}
+$baselineResults = 1..5 | ForEach-Object { Join-Path $baseline ("qualification-{0:D2}/work/export-rendered/performance/result.json" -f $_) }
+$candidateResults = 1..5 | ForEach-Object { Join-Path $candidate ("qualification-{0:D2}/work/export-rendered/performance/result.json" -f $_) }
+& (Join-Path $candidateInstallRoot 'Tests/Tools/Navigation/CompareNavigationEvidence.ps1') `
+    -BaselineFiles $baselineResults -CandidateFiles $candidateResults -MinimumRuns 5 `
+    -OutputPath (Join-Path $navigationEvidence '058-remove-navigation-components/comparison.json')
+```
+
+The comparator fails closed when either side has fewer than five valid runs, a
+metric or identity is missing, or identity matching fails. Candidate median
+route latency and dynamic-publication responsiveness must each be no greater
+than `baseline median * 1.05`. Missing dynamic timing is unavailable evidence,
+never zero.
 
 Use `-DryRun` first to validate installed discovery without launching a lane.
 Run the editor, rendered-export, and headless-export semantic flows together so

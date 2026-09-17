@@ -70,6 +70,14 @@ namespace TerraEngine::Navigation
 				receipt.reason = NavigationPublicationRejection::InvalidCandidate;
 				return receipt;
 			}
+			if(changed.identity.IsValid()
+				&& (!changed.revisionEvidence.IsComplete()
+					|| changed.identity.sourceId != changed.sourceId
+					|| ComputeNavigationEligibleSourceRevision(changed.identity, changed.revisionEvidence)
+						!= changed.sourceRevision)) {
+				receipt.reason = NavigationPublicationRejection::InvalidCandidate;
+				return receipt;
+			}
 			auto existing = std::find_if(replacement.sources.begin(), replacement.sources.end(), [&changed](const NavigationSourceIndexRecord& current) {
 				return current.sourceId == changed.sourceId;
 			});
@@ -90,6 +98,11 @@ namespace TerraEngine::Navigation
 			}
 			coverageBytes += coverage.chargedBytes;
 		}
+		// A successful local replacement creates a new world observation. Store the
+		// matching validity generation in the same root so retained routes cannot
+		// observe new coverage alongside an old validity publication.
+		replacement.routeValidityGeneration = replacement.rootGeneration;
+		replacement.routeValidity = {replacement.routeValidityGeneration, 0U};
 
 		if(!world.Publish(std::move(replacement), candidate.expectedRootGeneration)) {
 			// NavigationWorld performs its own root byte/residency admission. A failed

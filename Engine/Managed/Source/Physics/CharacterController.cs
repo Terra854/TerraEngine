@@ -1,9 +1,18 @@
 // CharacterController.cs - deferred, generation-safe character commands.
 
+using System.Threading;
+
 namespace TerraEngine
 {
 	public sealed class CharacterController : Component
 	{
+		// Rigidbodies use producer 1, so character commands use their own managed
+		// producer lane. A process-wide sequence prevents two controller instances
+		// from reusing an ordering key in one protected physics-command queue.
+		private const ulong ManagedCharacterProducerId = 2UL;
+		private static long s_managedProducerSequence;
+		private static readonly object s_submissionGate = new();
+
 		public PhysicsCharacterHandle Handle { get; internal set; }
 		public PhysicsIdentity Identity { get; internal set; }
 		public uint SchemaVersion => GetProperty<uint>("schemaVersion");
@@ -49,10 +58,31 @@ namespace TerraEngine
 		private PhysicsCommandReceipt Submit(NativePhysicsCharacterCommandKind kind, Vector3 velocity, PhysicsPose pose, float scalar, ulong effectiveTick, ulong correlationId)
 		{
 			if (!Handle.IsValid) Physics.BindComponent(this, Object);
-			NativePhysicsCharacterCommandRequest request = new() { Header = PhysicsAbiHeader.For<NativePhysicsCharacterCommandRequest>(), Character = Handle, Identity = Identity, Kind = kind, DesiredVelocity = velocity, Pose = pose, Scalar = scalar, EffectiveTick = effectiveTick, ProducerId = 1, ProducerSequence = correlationId == 0 ? 1UL : correlationId, CorrelationId = correlationId };
-			NativePhysicsCommandReceipt receipt = new() { Header = PhysicsAbiHeader.For<NativePhysicsCommandReceipt>() };
-			InternalCalls.Native_Physics_SubmitCharacterCommand(ref request, ref receipt);
-			return new PhysicsCommandReceipt(receipt);
+			// The native queue rejects a lower sequence after a higher one is admitted.
+			// Keep reservation and this synchronous enqueue together, but never hold the
+			// gate around component binding or later asynchronous physics execution.
+			lock (s_submissionGate)
+			{
+				ulong producerSequence = NextManagedProducerSequence();
+				// A zero caller correlation means "unspecified". Reusing the monotonic
+				// producer sequence gives the receipt a useful stable trace value without
+				// changing an explicit caller correlation.
+				ulong resolvedCorrelation = correlationId == 0 ? producerSequence : correlationId;
+				NativePhysicsCharacterCommandRequest request = new() { Header = PhysicsAbiHeader.For<NativePhysicsCharacterCommandRequest>(), Character = Handle, Identity = Identity, Kind = kind, DesiredVelocity = velocity, Pose = pose, Scalar = scalar, EffectiveTick = effectiveTick, ProducerId = ManagedCharacterProducerId, ProducerSequence = producerSequence, CorrelationId = resolvedCorrelation };
+				NativePhysicsCommandReceipt receipt = new() { Header = PhysicsAbiHeader.For<NativePhysicsCommandReceipt>() };
+				InternalCalls.Native_Physics_SubmitCharacterCommand(ref request, ref receipt);
+				return new PhysicsCommandReceipt(receipt);
+			}
+		}
+
+		private static ulong NextManagedProducerSequence()
+		{
+			// The submission gate preserves arrival order; Interlocked reserves the
+			// next unique value. The signed counter wraps only after an impractical
+			// number of commands; skip the one invalid zero sequence if it ever does.
+			long sequence = Interlocked.Increment(ref s_managedProducerSequence);
+			if (sequence == 0) sequence = Interlocked.Increment(ref s_managedProducerSequence);
+			return unchecked((ulong)sequence);
 		}
 	}
 }

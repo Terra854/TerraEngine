@@ -2,8 +2,6 @@
 
 #pragma once
 
-#include "Components/Navigation/NavigationConnectionComponent.h"
-#include "Components/Navigation/NavigationSourceComponent.h"
 #include "Navigation/NavigationSettings.h"
 
 #include <optional>
@@ -15,9 +13,8 @@ class UndoRedoSystem;
 
 namespace TerraEngine::Editor::Navigation {
 	struct NavigationAuthoredState {
-		std::vector<NavigationSourceComponent> sources;
 		std::vector<TerraEngine::Navigation::NavigationProfile> profiles;
-		std::vector<NavigationConnectionComponent> connections;
+		TerraEngine::Navigation::NavigationSettings settings = TerraEngine::Navigation::NavigationSettings::Defaults();
 
 		[[nodiscard]] bool operator==(const NavigationAuthoredState& other) const noexcept;
 	};

@@ -612,6 +612,17 @@ namespace TerraEngine::Physics {
 				PhysicsBackendStagingToken& staging) = 0;
 			virtual PhysicsBackendResult UpdateCharacter(const PhysicsCharacterUpdateRequest& request) = 0;
 			virtual PhysicsBackendResult DestroyCharacter(PhysicsCharacterHandle handle) = 0;
+			// Character intent is accumulated by ApplyCommand, then advanced exactly
+			// once for each engine-owned fixed step. Providers without virtual
+			// characters retain a no-op implementation instead of inventing a render
+			// frame update path.
+			virtual PhysicsBackendResult AdvanceCharacters(
+				PhysicsWorldHandle world, PhysicsTick tick, float fixedDeltaTime) {
+				(void)world;
+				(void)tick;
+				(void)fixedDeltaTime;
+				return {};
+			}
 
 			virtual PhysicsBackendResult ApplyCommand(const PhysicsCommand& command) = 0;
 			virtual PhysicsBackendResult Step(const PhysicsBackendStepRequest& request) = 0;

@@ -5,6 +5,7 @@
 #include "Navigation/Dynamic/NavigationDirtyIndex.h"
 
 #include <array>
+#include <string>
 #include <string_view>
 
 namespace TerraEngine::Tests {
@@ -80,6 +81,71 @@ namespace TerraEngine::Tests {
 				"The qualification workload must not silently coalesce or discard committed source changes before observation.");
 			context.Expect(dirty.ObserveAtProtectedBoundary().Contains(source, latestRemovalRevision),
 				"The latest removal tombstone must remain observable throughout the 10,000-change workload.");
+		});
+		registry.Add("Navigation.DynamicGeometry.DiffsAutomaticSourceGenerationsWithoutSceneMarkers", [](TestContext& context) {
+			NavigationDirtyIndex dirty({});
+			const NavigationGeometryBounds bounds{{-2.0F, 0.0F, -2.0F}, {2.0F, 2.0F, 2.0F}};
+			const std::array<NavigationDynamicChangeKind, 6U> automaticChanges{{
+				NavigationDynamicChangeKind::Created,
+				NavigationDynamicChangeKind::Enabled,
+				NavigationDynamicChangeKind::Moved,
+				NavigationDynamicChangeKind::Replaced,
+				NavigationDynamicChangeKind::Reshaped,
+				NavigationDynamicChangeKind::Removed
+			}};
+			for(std::size_t index = 0U; index < automaticChanges.size(); ++index) {
+				// Each UUID stands for one copied terrain, collider, mesh-companion,
+				// procedural, resource-reload, or streamed source. The dirty path sees
+				// only stable identities and revisions, never scene marker components.
+				NavigationDynamicSourceChange change{};
+				change.source = NavigationUuid::FromString("1a6d9e5b-bf61-4734-9954-0fcf0e6a0c0" + std::to_string(index));
+				change.sourceRevision = 1U;
+				change.physicalReadyRevision = 10U + index;
+				change.kind = automaticChanges[index];
+				change.previousBounds = bounds;
+				change.currentBounds = bounds;
+				context.Expect(dirty.CommitSourceChange(change).accepted,
+					"Every copied automatic source generation must enter local dirty preparation.");
+			}
+			context.Expect(dirty.PendingPreparationCount() == automaticChanges.size(),
+				"Automatic terrain/resource/streaming changes must not require a navigation source marker.");
+		});
+		registry.Add("Navigation.DynamicGeometry.PublishedWatermarkDrainsBoundedPreparationBacklog", [](TestContext& context) {
+			NavigationDirtyIndex dirty({.maximumPendingChanges = 2U});
+			const NavigationUuid source = NavigationUuid::FromString("8a17dc46-bdf4-40d7-b90d-77d9abf57a65");
+			auto change = [source](NavigationGeneration revision) {
+				NavigationDynamicSourceChange value{};
+				value.source = source;
+				value.sourceRevision = revision;
+				value.physicalReadyRevision = revision;
+				value.kind = NavigationDynamicChangeKind::Moved;
+				value.previousBounds = {{0.0F, 0.0F, 0.0F}, {2.0F, 2.0F, 2.0F}};
+				value.currentBounds = {{1.0F, 0.0F, 0.0F}, {3.0F, 2.0F, 2.0F}};
+				return value;
+			};
+			context.Expect(dirty.CommitSourceChange(change(1U)).accepted
+				&& dirty.CommitSourceChange(change(2U)).accepted,
+				"The bounded dirty queue must admit changes up to its configured limit.");
+			context.Expect(!dirty.CommitSourceChange(change(3U)).accepted,
+				"An unacknowledged full queue must fail closed instead of dropping copied work.");
+			context.Expect(!dirty.AcknowledgePublishedThrough(1U),
+				"A stale publication watermark must not retire newer dirty dependencies.");
+			context.Expect(dirty.AcknowledgePublishedThrough(2U)
+				&& dirty.PendingPreparationCount() == 0U
+				&& dirty.DirtyCoverage().empty() && dirty.DirtySeams().empty(),
+				"A coherent latest publication must retire its complete preparation backlog.");
+			context.Expect(dirty.LatestSourceRevision(source) == 2U
+				&& dirty.CommitSourceChange(change(3U)).accepted,
+				"Acknowledgement must retain revision evidence while reopening bounded admission.");
+			context.Expect(dirty.AcknowledgePublishedThrough(3U),
+				"The reopened queue must acknowledge its next coherent publication.");
+			bool remainedBounded = true;
+			for(NavigationGeneration revision = 4U; revision <= 20000U; ++revision) {
+				remainedBounded = remainedBounded && dirty.CommitSourceChange(change(revision)).accepted
+					&& dirty.AcknowledgePublishedThrough(revision);
+			}
+			context.Expect(remainedBounded && dirty.PendingPreparationCount() == 0U,
+				"More than the former queue cap of coherent publications must drain without exhausting admission.");
 		});
 	}
 }

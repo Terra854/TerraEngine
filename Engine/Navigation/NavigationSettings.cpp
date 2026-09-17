@@ -21,12 +21,6 @@ namespace TerraEngine::Navigation {
 	}
 
 	NavigationProfileValidation NavigationProfile::Validate() const noexcept {
-		if(profileId == 0U) {
-			return { false, NavigationProfileValidationCode::InvalidId };
-		}
-		if(revision == 0U) {
-			return { false, NavigationProfileValidationCode::InvalidRevision };
-		}
 		if(!IsFinite(radiusMetres) || radiusMetres <= 0.0) {
 			return { false, NavigationProfileValidationCode::InvalidRadius };
 		}
@@ -151,8 +145,6 @@ namespace TerraEngine::Navigation {
 	std::string_view ToString(NavigationProfileValidationCode code) noexcept {
 		switch(code) {
 		case NavigationProfileValidationCode::None: return "None";
-		case NavigationProfileValidationCode::InvalidId: return "InvalidId";
-		case NavigationProfileValidationCode::InvalidRevision: return "InvalidRevision";
 		case NavigationProfileValidationCode::InvalidRadius: return "InvalidRadius";
 		case NavigationProfileValidationCode::InvalidHeight: return "InvalidHeight";
 		case NavigationProfileValidationCode::InvalidStepHeight: return "InvalidStepHeight";

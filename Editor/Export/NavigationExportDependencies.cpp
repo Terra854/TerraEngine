@@ -52,7 +52,8 @@ namespace TerraEngine::Export
 						"Navigation geometry companion is missing, empty, oversized, or malformed: " + decoded.reason});
 					continue;
 				}
-				result.sourceFree = false;
+				// Cooked geometry is runtime data, not an authored navigation source.
+				// Keep the package source-free even when it contains this companion.
 				result.dependencies.push_back({logicalPath, false});
 			} else if(extension == ".tenav") {
 				// Saved navigation is derived and optional. It is staged for fast startup,
@@ -63,13 +64,6 @@ namespace TerraEngine::Export
 					continue;
 				}
 				result.dependencies.push_back({logicalPath, true});
-			} else if(extension == ".tenavsource") {
-				std::filesystem::path companion = entry.path();
-				companion.replace_extension(".tenavgeom");
-				if(!std::filesystem::is_regular_file(companion, error)) {
-					result.issues.push_back({"navigation.companion_missing", logicalPath,
-						"Authored navigation source is missing its cooked .tenavgeom companion."});
-				}
 			}
 		}
 		std::sort(result.dependencies.begin(), result.dependencies.end(), [](const auto& left, const auto& right) {

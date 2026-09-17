@@ -9,6 +9,7 @@
 #include "GltfPackageImporter.h"
 
 #include "Animation/AnimationTypes.h"
+#include "Scene/Serializer.h"
 
 #include <algorithm>
 #include <atomic>
@@ -542,10 +543,16 @@ namespace TerraEngine::AssetPipeline
 
 		nlohmann::json MakeIdentityTransformJson()
 		{
+			// Imported prefabs must use the same generation-safe transform document
+			// Serializer writes. The historic Position/Rotation/Scale aliases are not
+			// accepted by the unbounded scene contract.
 			return {
-				{ "Position", { 0.0f, 0.0f, 0.0f } },
-				{ "Rotation", { 1.0f, 0.0f, 0.0f, 0.0f } },
-				{ "Scale", { 1.0f, 1.0f, 1.0f } }
+				{ "WorldPose", {{"position", {{"cell", {{"x", "0"}, {"y", "0"}, {"z", "0"}}},
+					{"offsetMetres", {0.0, 0.0, 0.0}}}}, {"rotation", {1.0f, 0.0f, 0.0f, 0.0f}},
+					{"scale", {1.0f, 1.0f, 1.0f}}} },
+				{ "ParentRelativePose", {{"translationMetres", {0.0, 0.0, 0.0}},
+					{"rotation", {1.0f, 0.0f, 0.0f, 0.0f}}, {"scale", {1.0f, 1.0f, 1.0f}},
+					{"transformSpaceId", 0U}} }
 			};
 		}
 
@@ -733,6 +740,8 @@ namespace TerraEngine::AssetPipeline
 			prefab.sourcePath = result.package.importRoot / (prefabName + ".teprefab");
 
 			nlohmann::json prefabDocument;
+			prefabDocument["format"] = TerraEngine::Scene::kTerraPrefabUnboundedFormat;
+			prefabDocument["sourceId"] = TerraEngine::ToHexString(prefab.guid);
 			prefabDocument["name"] = prefab.displayName;
 			prefabDocument["objects"] = nlohmann::json::array();
 			const ModelPackagePrefabAnimationBindings animationBindings =

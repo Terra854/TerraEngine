@@ -134,6 +134,16 @@ namespace TerraEngine::Physics {
 		bool allowStairWalking = true;
 		bool useGravity = true;
 		bool enabled = true;
+		// Transform publication revalidates this captured hierarchy identity before a
+		// controller pose becomes visible to the scene at the protected boundary.
+		std::uint64_t objectTransformRevision = 0U;
+		std::uint64_t hierarchyGeneration = 0U;
+		TerraEngine::UUID parentObjectId = TerraEngine::EMPTY_UUID;
+		std::uint64_t parentObjectGeneration = 0U;
+		std::uint64_t parentTransformRevision = 0U;
+		PhysicsPose parentWorldPose;
+		PhysicsVector3 parentWorldScale{1.0F, 1.0F, 1.0F};
+		bool hasParent = false;
 	};
 
 	struct PhysicsDirtyObjectGeneration {

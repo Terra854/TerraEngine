@@ -7,8 +7,7 @@
 
 #pragma once
 
-#include "Components/Navigation/NavigationSourceComponent.h"
-#include "Navigation/Geometry/MeshColliderNavigationSource.h"
+#include "Navigation/Geometry/NavigationGeometrySnapshot.h"
 #include "Navigation/Geometry/TerrainNavigationSource.h"
 #include "Navigation/Integration/NavigationProfileResolver.h"
 #include "Navigation/NavigationWorld.h"
@@ -19,31 +18,18 @@
 #include <vector>
 
 namespace TerraEngine::Navigation {
+	// The protected capture boundary has already applied physical eligibility
+	// before constructing this packet. Bootstrap only consumes immutable values;
+	// it never reads scene component markers or makes a renderer-visibility call.
 	struct NavigationBootstrapSourceInput {
-		::NavigationSourceComponent component{};
+		NavigationEligibleSourceCandidate candidate{};
 		std::optional<TerrainNavigationPublishedSamples> terrain;
-		std::optional<MeshColliderNavigationSourceInput> meshOrCollider;
-		// ResourceManager returns a shared immutable companion after validating its
-		// content. Reusing it avoids decoding or borrowing renderer/physics data
-		// while this protected capture is preparing navigation work.
-		std::shared_ptr<const NavigationGeometrySnapshot> immutableGeometry;
-	};
-
-	struct NavigationBootstrapAgentInput {
-		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
-		::NavigationAgentComponent component{};
 	};
 
 	struct NavigationSceneBootstrapInput {
 		NavigationProfile defaultProfile = NavigationProfile::Defaults();
 		std::vector<NavigationProfileRegistration> registeredProfiles;
 		std::vector<NavigationBootstrapSourceInput> sources;
-		std::vector<NavigationBootstrapAgentInput> agents;
-	};
-
-	struct NavigationBootstrapAgentResolution {
-		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
-		NavigationProfileResolution resolution{};
 	};
 
 	// One build input exists per resolved profile. It can be passed directly to
@@ -52,18 +38,25 @@ namespace TerraEngine::Navigation {
 		NavigationProfile profile{};
 		std::vector<std::shared_ptr<const NavigationGeometrySnapshot>> sources;
 		std::vector<NavigationSourceIndexRecord> sourceIndex;
+		std::shared_ptr<const NavigationEligibleSourceIndex> eligibleSourceIndex;
+		// The terrain physical publication is copied with the index so a prepared
+		// available world can be rejected if terrain changed before commit.
+		NavigationGeneration terrainPublicationGeneration = 0U;
 	};
 
 	struct NavigationSceneBootstrapCapture {
 		bool accepted = false;
+		// A terrain-free capture is a known unavailable capability, not a mesh-only
+		// fallback. Publication owners use this signal to replace stale coverage.
+		bool terrainAvailable = false;
 		std::string reason;
 		std::vector<NavigationBootstrapBuildInput> builds;
-		std::vector<NavigationBootstrapAgentResolution> agents;
+		std::shared_ptr<const NavigationEligibleSourceIndex> eligibleSourceIndex;
 	};
 
-	// Captures all eligible terrain and mesh/collider data atomically. A malformed
-	// source rejects the complete geometry capture; an invalid agent profile is
-	// returned as an explicit per-agent rejection and cannot enter a build.
+	// Builds one detached, deterministic source index from automatic terrain and
+	// physical geometry capture. A missing terrain reports unavailable capability;
+	// it never falls back to a terrain-free mesh/collider navigation world.
 	[[nodiscard]] TERRAENGINE_API NavigationSceneBootstrapCapture CaptureNavigationSceneBootstrap(
 		const NavigationSceneBootstrapInput& input);
 }

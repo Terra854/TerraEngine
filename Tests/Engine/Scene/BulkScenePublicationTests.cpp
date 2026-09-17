@@ -100,5 +100,18 @@ namespace TerraEngine::Tests {
 			context.Expect(objects.isObjectValid(previous), "The previous scene object must survive a rejected bulk packet.");
 			objects.clear();
 		});
+
+		registry.Add("Engine.BulkScenePublication.UnregisteredComponentRejectsBeforePublication", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Object previous = objects.createObject("Previous");
+			nlohmann::json document = {{"format", TerraEngine::Scene::kTerraSceneUnboundedFormat},
+				{"objects", nlohmann::json::array({MakeObject("Rejected", "77777777777777777777777777777777")})}};
+			document["objects"][0]["components"]["RemovedNavigationComponent"] = nlohmann::json::object();
+			const auto prepared = Serializer::PrepareSceneDecode(document);
+			context.Expect(!prepared.accepted && objects.isObjectValid(previous),
+				"An unregistered component must reject the detached scene before live publication and preserve the active scene.");
+			objects.clear();
+		});
 	}
 }

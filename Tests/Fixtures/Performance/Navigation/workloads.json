@@ -1,5 +1,16 @@
 {
-	"schemaVersion": 1,
+	"schemaVersion": 2,
+	"qualification": {
+		"minimumRuns": 5,
+		"cohortIdentityFields": ["buildSha256", "sourceSha256", "settingsSha256", "workloadSha256", "renderer", "powerMode", "workerCount", "lane"],
+		"comparisonIdentityFields": ["sourceSha256", "settingsSha256", "workloadSha256", "renderer", "powerMode", "workerCount", "lane"],
+		"metrics": {
+			"routeLatency": "latency.p95Milliseconds",
+			"dynamicPublicationResponsiveness": "metrics.dynamicPublicationResponsivenessMilliseconds"
+		},
+		"regressionMultiplier": 1.05,
+		"failClosedWhenMetricMissing": true
+	},
 	"deterministicSeeds": [57001, 57002, 57003],
 	"reference": {"areaMetres": [1000, 1000, 256], "agents": 256, "requestsPerSecond": 100, "sourceTrianglesMaximum": 100000, "profiles": 2},
 	"schedules": [

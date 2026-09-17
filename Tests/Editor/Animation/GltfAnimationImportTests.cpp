@@ -11,6 +11,7 @@
 #include "ModelPackageImporter.h"
 #include "File Formats/TerraEngineMeshFile.h"
 #include "Resource/ResourceManager.h"
+#include "Scene/Serializer.h"
 
 #include <algorithm>
 #include <array>
@@ -330,11 +331,19 @@ namespace TerraEngine::EditorTests
 			nlohmann::json prefab = nlohmann::json::parse(prefabFile);
 			const nlohmann::json& prefabRoot = prefab["objects"][0U];
 			const nlohmann::json& meshObject = prefabRoot["children"][0U];
-			context.Expect(prefabRoot["components"]["AnimatorComponent"]["skeletonOverrideAssetId"]
+			context.Expect(prefab["format"].is_string()
+				&& prefab["format"].get<std::string>() == TerraEngine::Scene::kTerraPrefabUnboundedFormat
+				&& prefab["sourceId"].is_string()
+				&& meshObject["components"]["Transform"].contains("WorldPose")
+				&& meshObject["components"]["Transform"].contains("ParentRelativePose")
+				&& !meshObject["components"]["Transform"].contains("Position")
+				&& !meshObject["components"]["Transform"].contains("Rotation")
+				&& !meshObject["components"]["Transform"].contains("Scale")
+				&& prefabRoot["components"]["AnimatorComponent"]["skeletonOverrideAssetId"]
 				== TerraEngine::ToHexString(skeletonRecord->guid)
 				&& meshObject["components"].count("AnimatorComponent") == 0U
-				&& meshObject["components"]["Transform"]["Scale"] == nlohmann::json::array({ 1.0F, 1.0F, 1.0F }),
-				"The prefab root must own the palette animator while its mesh child stays identity-transformed, preventing a double node scale.");
+				&& meshObject["components"]["Transform"]["WorldPose"]["scale"] == nlohmann::json::array({ 1.0F, 1.0F, 1.0F }),
+				"The imported prefab must use the canonical envelope and transform schema while its root owns the palette animator.");
 
 			std::filesystem::remove(root / "AnimatedMorphCube.gltf");
 			std::filesystem::remove(root / "AnimatedMorphCube.bin");

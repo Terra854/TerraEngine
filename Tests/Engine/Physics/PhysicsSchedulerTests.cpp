@@ -5,16 +5,21 @@
 #include "Core/Object/ComponentRegistry.h"
 #include "Core/Object/ObjectManager.h"
 #include "Components/Transform.h"
+#include "Components/Physics/CharacterControllerComponent.h"
 #include "Components/Physics/ColliderSetComponent.h"
 #include "Components/Physics/RigidBodyComponent.h"
 #include "Physics/PhysicsAuthoringSnapshot.h"
+#include "Physics/PhysicsCommands.h"
 #include "Physics/PhysicsEvents.h"
 #include "Physics/PhysicsSystem.h"
 #include "Scene/SceneMutationQueue.h"
 #include "Scene/TransactionalMutation.h"
+#include "Scripting/ScriptGlue.h"
 #include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
+#include <cmath>
+#include <optional>
 
 namespace TerraEngine::Tests {
 	namespace {
@@ -164,7 +169,7 @@ namespace TerraEngine::Tests {
 
 			const auto resources = TerraEngine::Scheduling::DefaultSchedulerResources();
 			for(const char* required : {"PhysicsSettingsUpdateQueue", "PhysicsSettings", "PhysicsAuthoringSnapshot", "PhysicsPreparedWork", "PhysicsWorld",
-				"PhysicsPublishedSnapshots", "PhysicsTransformTransactions"}) {
+				"PhysicsPublishedSnapshots", TerraEngine::Scheduling::kResourcePhysicsCharacterStatePackets, "PhysicsTransformTransactions"}) {
 				context.Expect(std::any_of(resources.begin(), resources.end(), [required](const auto& resource) {
 					return resource.name == required;
 				}), "Each physics workload resource must be visible in scheduler diagnostics.");
@@ -440,14 +445,21 @@ namespace TerraEngine::Tests {
 			objects.clear();
 			const Object colliderOnly = objects.createObject("Static Collider");
 			const Object unsupportedBody = objects.createObject("Body Without Collider");
+			const Object controllerOnly = objects.createObject("Controller With Disabled Own Collider");
 			context.Expect(objects.AddComponent<Transform>(colliderOnly) != nullptr
-				&& objects.AddComponent<Transform>(unsupportedBody) != nullptr,
-				"Both authoring objects need Transforms before the immutable physics snapshot is captured.");
+				&& objects.AddComponent<Transform>(unsupportedBody) != nullptr
+				&& objects.AddComponent<Transform>(controllerOnly) != nullptr,
+				"Every authoring object needs a Transform before the immutable physics snapshot is captured.");
 			ColliderSetComponent* colliders = objects.AddComponent<ColliderSetComponent>(colliderOnly);
 			context.Expect(colliders != nullptr, "The collider-only fixture must own a valid collider collection.");
 			colliders->Add();
 			context.Expect(objects.AddComponent<RigidBodyComponent>(unsupportedBody) != nullptr,
 				"The exclusion fixture must contain an explicit rigid body without a collider.");
+			ColliderSetComponent* disabledControllerCollider = objects.AddComponent<ColliderSetComponent>(controllerOnly);
+			CharacterControllerComponent* controller = objects.AddComponent<CharacterControllerComponent>(controllerOnly);
+			context.Expect(disabledControllerCollider != nullptr && controller != nullptr,
+				"The character-only fixture must retain both independently-authored components.");
+			if(disabledControllerCollider != nullptr) disabledControllerCollider->active = false;
 
 			const PhysicsWorldHandle world{{1U}, 1U};
 			const auto snapshot = PhysicsAuthoringSnapshot::Capture(objects, world, PhysicsSettings::Defaults(), 1U);
@@ -459,6 +471,14 @@ namespace TerraEngine::Tests {
 				"A valid collider without an explicit RigidBodyComponent must become static geometry.");
 			context.ExpectEqual(static_cast<std::size_t>(1), snapshot->Data().colliders.size(),
 				"The implicit static body must retain its authored collider record.");
+			context.ExpectEqual(static_cast<std::size_t>(1), snapshot->Data().characters.size(),
+				"An enabled controller must be captured even when its own ColliderSet is intentionally inactive.");
+			const auto generation = snapshot
+				? PhysicsAuthoringSnapshot::BuildGeneration(nullptr, *snapshot)
+				: std::nullopt;
+			context.Expect(generation && generation->Data().characterObjectIds.size() == 1U
+				&& generation->Data().characterObjectIds.front() == objects.getUUID(controllerOnly),
+				"A controller-only owner must enter the typed character closure instead of being skipped with collider-only body changes.");
 			context.ExpectEqual(static_cast<std::size_t>(1), snapshot->Data().diagnostics.size(),
 				"The excluded rigid body must publish one bounded authoring diagnostic.");
 			if(!snapshot->Data().diagnostics.empty()) {
@@ -470,6 +490,117 @@ namespace TerraEngine::Tests {
 					"The diagnostic must use a stable code and tell the creator how to repair the object.");
 			}
 			objects.clear();
+		});
+
+		registry.Add("Physics.Scheduler.CharacterCommandsAcceptUnusedZeroPoseFields", [](TestContext& context) {
+			using namespace TerraEngine::Physics;
+			ScheduledPhysicsRuntimeGuard runtimeGuard;
+			ComponentRegistry::RegisterAllComponents();
+			ObjectManager& objects = ObjectManager::instance();
+			auto& mutations = TerraEngine::Scene::SceneMutationQueue::Instance();
+			objects.clear();
+			mutations.Clear();
+			const Object controllerOnly = objects.createObject("Deferred Character Commands");
+			context.Expect(objects.AddComponent<Transform>(controllerOnly) != nullptr
+				&& objects.AddComponent<CharacterControllerComponent>(controllerOnly) != nullptr,
+				"The command fixture must author one controller without a body or ColliderSet.");
+			// Imported meshes often use a small scale. The provider publishes only a
+			// rigid pose, so initializing or moving this controller must not resize it.
+			Scene::WorldPose authoredPose;
+			authoredPose.scale = {0.01F, 0.02F, 0.03F};
+			context.Expect(objects.SetCanonicalWorldPose(controllerOnly, authoredPose) == Scene::WorldCoordinateError::None,
+				"The character fixture must retain its authored non-unit visual scale.");
+
+			auto& physics = PhysicsSystem::Instance();
+			physics.Shutdown();
+			physics.SetEditorLifecycleControlled(true);
+			physics.Initialize();
+			context.Expect(physics.StartWorld(), "The deferred-character command fixture must start its isolated world.");
+			const auto advancePhysics = [&]() {
+				(void)objects.PublishSceneChangePacket();
+				physics.Update(physics.FixedTimeStep());
+			};
+			const auto flushPhysics = [&]() {
+				const auto flushed = mutations.Apply(objects, "physics-character-command-zero-pose");
+				physics.OnAfterPhysicsFlush(flushed.transactionResults, flushed.publicationGroupResults);
+			};
+			const auto advanceFrame = [&]() {
+				advancePhysics();
+				flushPhysics();
+			};
+			std::shared_ptr<const PhysicsCharacterStatePacket> states;
+			for(std::uint32_t frame = 0U; frame < 3U && (!states || !states->states || states->states->empty()); ++frame) {
+				advanceFrame();
+				states = physics.LatestCharacterStatePacket();
+			}
+			context.Expect(states != nullptr && states->states != nullptr && states->states->size() == 1U,
+				"The controller-only fixture must publish a generation-validated runtime character before command submission.");
+			if(states == nullptr || states->states == nullptr || states->states->empty()) return;
+			Transform* transform = objects.GetComponent<Transform>(controllerOnly);
+			context.Expect(transform != nullptr, "The controller command fixture must retain its visible Transform target.");
+			if(transform == nullptr) return;
+			context.Expect(transform->worldPose.scale == authoredPose.scale,
+				"Controller initialization must not reset the authored mesh scale.");
+			const double initialX = transform->worldPose.position.offsetMetres.x;
+			const PhysicsCharacterState& state = states->states->front();
+			const PhysicsCharacterCommandTarget target{state.world, state.handle, state.objectId,
+				state.objectGeneration, state.componentGeneration};
+			const auto metadata = [](PhysicsSequence sequence) {
+				PhysicsCommandMetadata result;
+				result.producerId = 2U;
+				result.producerSequence = sequence;
+				return result;
+			};
+			const PhysicsCommandReceipt move = physics.SubmitCommand(PhysicsCommand::MakeCharacterMove(
+				target, {3.0F, 0.0F, 0.0F}, metadata(1U)));
+			const PhysicsCommandReceipt jump = physics.SubmitCommand(PhysicsCommand::MakeCharacterJump(
+				target, 2.0F, metadata(2U)));
+			const PhysicsCommandReceipt resize = physics.SubmitCommand(PhysicsCommand::MakeCharacterResize(
+				target, 2.0F, metadata(3U)));
+			context.Expect(move.accepted && jump.accepted && resize.accepted,
+				"Move, jump, and resize must enqueue through PhysicsSystem even though their ABI pose fields are zero-initialized.");
+
+			NativePhysicsCharacterState nativeState{};
+			nativeState.header = {kNativePhysicsAbiVersion, sizeof(nativeState)};
+			context.Expect(Native_Physics_ResolveCharacter(static_cast<std::uint32_t>(controllerOnly.EntityId()), &nativeState)
+				== NativePhysicsStatus::Success,
+				"The copied scripting ABI must resolve the same published controller target used by gameplay commands.");
+			const auto submitNative = [&nativeState](NativePhysicsCharacterCommandKind kind, float scalar, std::uint64_t sequence) {
+				NativePhysicsCharacterCommandRequest request{};
+				request.header = {kNativePhysicsAbiVersion, sizeof(request)};
+				request.character = nativeState.character;
+				request.identity = nativeState.identity;
+				request.kind = kind;
+				request.scalar = scalar;
+				request.producerId = 1U;
+				request.producerSequence = sequence;
+				NativePhysicsCommandReceipt receipt{};
+				receipt.header = {kNativePhysicsAbiVersion, sizeof(receipt)};
+				return Native_Physics_SubmitCharacterCommand(&request, &receipt) == NativePhysicsStatus::Accepted
+					&& receipt.status == NativePhysicsStatus::Accepted;
+			};
+			context.Expect(submitNative(NativePhysicsCharacterCommandKind::Move, 0.0F, 1U)
+				&& submitNative(NativePhysicsCharacterCommandKind::Jump, 2.0F, 2U)
+				&& submitNative(NativePhysicsCharacterCommandKind::Resize, 2.0F, 3U),
+				"The exported character ABI must admit move, jump, and resize with its intentionally default zero pose fields.");
+			advancePhysics();
+			context.Expect(std::abs(transform->worldPose.position.offsetMetres.x - initialX) < 0.001,
+				"A prepared controller pose must remain invisible until the declared Physics flush boundary.");
+			flushPhysics();
+			const auto results = physics.LatestCommandResults();
+			const auto succeeded = [results](PhysicsCommandId commandId) {
+				return results != nullptr && results->results != nullptr
+					&& std::any_of(results->results->begin(), results->results->end(),
+						[commandId](const PhysicsCommandResult& result) {
+							return result.commandId == commandId && result.status == PhysicsResultStatus::Success;
+						});
+			};
+			context.Expect(succeeded(move.commandId) && succeeded(jump.commandId) && succeeded(resize.commandId),
+				"PhysicsCommandCommit must accept all non-teleport character commands without validating their unused zero pose rotations.");
+			context.Expect(transform->worldPose.position.offsetMetres.x > initialX + 0.001,
+				"A controller-only character pose must reach its Transform through the declared deferred Physics publication boundary.");
+			context.Expect(transform->worldPose.scale == authoredPose.scale,
+				"Controller movement must preserve non-unit scale after protected pose publication.");
 		});
 	}
 }

@@ -19,6 +19,27 @@ namespace TerraEngine::Navigation {
 			for(const std::vector<std::byte>& tile : shard.ownedTileBytes) bytes += tile.size();
 			return bytes;
 		}
+
+		[[nodiscard]] bool HasCoherentAutomaticSourceIndex(
+			const std::vector<NavigationSourceIndexRecord>& sourceIndex) noexcept {
+			for(std::size_t left = 0U; left < sourceIndex.size(); ++left) {
+				const NavigationSourceIndexRecord& record = sourceIndex[left];
+				if(record.sourceId == EMPTY_UUID || record.sourceRevision == 0U
+					|| record.geometryRevision == 0U) return false;
+				if(record.identity.IsValid()) {
+					// Automatic records carry the complete source identity/evidence tuple.
+					// Recomputing it here keeps a worker from assembling a shard from a
+					// stale resource, terrain, or streamed physical publication.
+					if(!record.revisionEvidence.IsComplete()
+						|| record.identity.sourceId != record.sourceId
+						|| ComputeNavigationEligibleSourceRevision(record.identity, record.revisionEvidence)
+							!= record.sourceRevision) return false;
+				}
+				for(std::size_t right = left + 1U; right < sourceIndex.size(); ++right)
+					if(record.sourceId == sourceIndex[right].sourceId) return false;
+			}
+			return true;
+		}
 	}
 
 	NavigationDynamicRebuildPlan PrepareDynamicGroundReplacement(
@@ -31,9 +52,22 @@ namespace TerraEngine::Navigation {
 			result.reason = "Dynamic rebuild request is missing a valid source, profile, root generation, or dirty coverage.";
 			return result;
 		}
+		if(!HasCoherentAutomaticSourceIndex(request.sourceIndex)) {
+			result.reason = "Dynamic rebuild source index has duplicate, incomplete, or stale automatic source evidence.";
+			return result;
+		}
 		for(const auto& source : request.sources) {
 			if(!source) {
 				result.reason = "Dynamic rebuild request contains a null immutable source snapshot.";
+				return result;
+			}
+			const auto indexed = std::find_if(request.sourceIndex.begin(), request.sourceIndex.end(),
+				[&source](const NavigationSourceIndexRecord& entry) {
+					return entry.enabled && entry.sourceId == source->Descriptor().sourceUuid.value
+						&& entry.sourceRevision == source->Descriptor().sourceRevision;
+				});
+			if(!request.sourceIndex.empty() && indexed == request.sourceIndex.end()) {
+				result.reason = "Dynamic rebuild source snapshot does not match its immutable eligible-source index.";
 				return result;
 			}
 		}

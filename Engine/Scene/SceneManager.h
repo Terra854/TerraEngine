@@ -86,6 +86,11 @@ public:
 	// file is read and lightly validated, but they reuse cached data if the
 	// same path was requested earlier.
 	TerraEngine::UUID LoadScene(const std::filesystem::path& path);
+	// Explicit open/reload requests must read the current authoritative bytes even
+	// when this path already has a resident document. This deliberately avoids a
+	// timestamp heuristic: an external tool can replace a scene with the same
+	// timestamp or byte length, and stale authored state must never be activated.
+	TerraEngine::UUID ReloadScene(const std::filesystem::path& path);
 	TerraEngine::UUID LoadPreparedScene(
 		const std::filesystem::path& path,
 		nlohmann::json sceneDocument,

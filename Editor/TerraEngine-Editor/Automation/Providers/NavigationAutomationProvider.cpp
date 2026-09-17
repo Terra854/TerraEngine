@@ -34,9 +34,9 @@ namespace TerraEngine::Editor::Automation
 					{"ownerGeneration", {{"type", "integer"}, {"minimum", 1U}}}}}, {"additionalProperties", false}};
 			if(name == "navigation.route.request") {
 				schema["properties"] = {{"start", {{"type", "object"}}}, {"destination", {{"type", "object"}}},
-					{"owner", owner}, {"profileId", {{"type", "string"}}},
+					{"owner", owner}, {"profile", {{"type", "object"}}},
 					{"allowPartial", {{"type", "boolean"}}}, {"maxItems", {{"type", "integer"}, {"minimum", 1U}, {"maximum", 4096U}}}};
-				schema["required"] = {"owner", "start", "destination", "profileId"};
+				schema["required"] = {"owner", "start", "destination", "profile"};
 			} else if(name == "navigation.route.read" || name == "navigation.route.cancel") {
 				const Json request = {{"type", "object"}, {"required", {"owner", "slotIndex", "slotGeneration"}},
 					{"properties", {{"owner", owner}, {"slotIndex", {{"type", "integer"}, {"minimum", 0U}}},
@@ -46,8 +46,6 @@ namespace TerraEngine::Editor::Automation
 				schema["required"] = {"request"};
 			} else if(name == "navigation.cache.status")
 				schema["properties"] = {{"jobId", {{"type", "string"}, {"minLength", 1}}}};
-			else if(name == "navigation.authoring.apply")
-				schema["properties"] = {{"operations", {{"type", "array"}, {"maxItems", 1024U}}}};
 			return schema;
 		}
 
@@ -72,12 +70,11 @@ namespace TerraEngine::Editor::Automation
 	{
 		std::vector<AutomationCapabilityRegistration> result;
 		for(const std::string_view name : {"navigation.settings.get", "navigation.diagnostics.get",
-			"navigation.sources.inspect", "navigation.route.request", "navigation.route.read",
-			"navigation.route.cancel", "navigation.authoring.apply", "navigation.cache.prepare",
+			"navigation.route.request", "navigation.route.read", "navigation.route.cancel", "navigation.cache.prepare",
 			"navigation.cache.status"})
 		{
 			const bool read = name == "navigation.settings.get" || name == "navigation.diagnostics.get"
-				|| name == "navigation.sources.inspect" || name == "navigation.route.read"
+				|| name == "navigation.route.read"
 				|| name == "navigation.cache.status";
 			AutomationCapabilityDescriptor descriptor;
 			descriptor.name = std::string(name);
@@ -90,7 +87,7 @@ namespace TerraEngine::Editor::Automation
 			descriptor.execution.workerPreparation = !read;
 			descriptor.execution.protectedCommit = !read;
 			descriptor.execution.visibilityBoundary = read ? "immutable_navigation_snapshot" : "navigation_commit_receipt";
-			descriptor.execution.preparationReads = {"NavigationSourceSnapshot", "NavigationCoverageRoot"};
+			descriptor.execution.preparationReads = {"NavigationEligibleSourceIndex", "NavigationCoverageRoot"};
 			descriptor.execution.commitWrites = read ? std::vector<std::string>{}
 				: std::vector<std::string>{"NavigationCommandQueue", "NavigationResults"};
 			result.push_back({std::move(descriptor), resolveHandler(name), {}});

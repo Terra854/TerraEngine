@@ -3,6 +3,7 @@
 
 #include "BuildProfile.h"
 #include "Components/AnimatorComponent.h"
+#include "Components/Physics/ColliderSetComponent.h"
 #include "Components/SkyComponent.h"
 #include "EditorContext.h"
 #include "AssetDatabase.h"
@@ -21,6 +22,8 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <unordered_set>
 
 namespace TerraEngine::EditorTests
@@ -313,7 +316,8 @@ namespace TerraEngine::EditorTests
 			const nlohmann::json add = service.HandleTool("component.add", {{"object", objectName}, {"component", "SkyComponent"}}, WriteMode::WritesEnabled, "cmp-1");
 			context.Expect(add.value("ok", false), "Component add should succeed.");
 			const nlohmann::json set = service.HandleTool("component.set_property", {{"object", objectName}, {"component", "SkyComponent"}, {"property", "sourceAsset"}, {"value", "Textures/Sky/Automation.tetf"}}, WriteMode::WritesEnabled, "cmp-2");
-			context.Expect(set.value("ok", false), "Component property edit should succeed.");
+			context.Expect(set.value("ok", false) && !set["data"].value("transactionId", std::string{}).empty(),
+				"Component property edits should commit through a typed transaction.");
 			const nlohmann::json get = service.HandleTool("component.get", {{"object", objectName}, {"component", "SkyComponent"}}, WriteMode::ReadOnly, "cmp-3");
 			context.ExpectEqual(std::string("Textures/Sky/Automation.tetf"), get["data"]["properties"].value("sourceAsset", std::string()), "Component get should return reflected property data.");
 			const nlohmann::json remove = service.HandleTool("component.remove", {{"object", objectName}, {"component", "SkyComponent"}}, WriteMode::WritesEnabled, "cmp-4");
@@ -336,22 +340,45 @@ namespace TerraEngine::EditorTests
 
 			const nlohmann::json set = service.HandleTool(
 				"component.set_property",
-				{{"object", objectId}, {"component", "Transform"}, {"property", "Scale"}, {"value", {0.25f, 0.5f, 0.75f}}},
+				{{"object", objectId}, {"component", "Transform"}, {"property", "WorldPose"}, {"value", {{"position", CanonicalPosition(10.0, 20.0, 30.0)}}}},
 				WriteMode::WritesEnabled,
 				"transform-revision-1");
-			context.Expect(!set.value("ok", true), "Generic reflected Transform property edits must be rejected by the canonical spatial authority boundary.");
+			context.Expect(!set.value("ok", true), "Generic reflected Transform WorldPose edits must be rejected by the canonical spatial authority boundary.");
 			const std::uint64_t afterEdit = ObjectManager::instance().GetObjectTransformRevision(object);
 			context.ExpectEqual(beforeEdit, afterEdit, "Rejected generic Transform edits must not advance world-transform history.");
-			context.Expect(ObjectManager::instance().GetComponent<Transform>(object)->worldPose.scale == glm::vec3(1.0f), "Rejected Transform edits must leave canonical scale unchanged.");
+			context.Expect(ObjectManager::instance().GetComponent<Transform>(object)->worldPose.position.offsetMetres == glm::dvec3(0.0), "Rejected Transform edits must leave the canonical world pose unchanged.");
 
 			UndoRedoSystem::Instance().Undo();
 			const std::uint64_t afterUndo = ObjectManager::instance().GetObjectTransformRevision(object);
 			context.ExpectEqual(afterEdit, afterUndo, "No undo entry should be created for a rejected Transform edit.");
-			context.Expect(ObjectManager::instance().GetComponent<Transform>(object)->worldPose.scale == glm::vec3(1.0f), "Rejected edits must retain the original Transform scale.");
+			context.Expect(ObjectManager::instance().GetComponent<Transform>(object)->worldPose.position.offsetMetres == glm::dvec3(0.0), "Rejected edits must retain the original Transform world pose.");
 
 			UndoRedoSystem::Instance().Redo();
 			context.ExpectEqual(afterUndo, ObjectManager::instance().GetObjectTransformRevision(object), "Rejected edits must not create a redo entry.");
-			context.Expect(ObjectManager::instance().GetComponent<Transform>(object)->worldPose.scale == glm::vec3(1.0f), "Rejected edits must retain the original Transform scale after redo attempt.");
+			context.Expect(ObjectManager::instance().GetComponent<Transform>(object)->worldPose.position.offsetMetres == glm::dvec3(0.0), "Rejected edits must retain the original Transform world pose after redo attempt.");
+			ObjectManager::instance().clear();
+			UndoRedoSystem::Instance().Clear();
+		});
+
+		registry.Add("Editor.Automation.Service.RejectsNonRepresentableColliderCollectionPayloads", [](TestContext& context) {
+			ObjectManager::instance().clear();
+			UndoRedoSystem::Instance().Clear();
+			ColliderSetComponent::registerType();
+			EditorAutomationService service;
+			Object object = ObjectManager::instance().createObject("Collider Collection Source");
+			ColliderSetComponent* colliders = ObjectManager::instance().AddComponent<ColliderSetComponent>(object);
+			context.Expect(colliders != nullptr, "The fixture requires an authored collider collection.");
+
+			const nlohmann::json set = service.HandleTool(
+				"component.set_property",
+				{{"object", TerraEngine::ToHexString(ObjectManager::instance().getUUID(object))}, {"component", "ColliderSetComponent"}, {"property", "colliders"}, {"value", nlohmann::json::array()}},
+				WriteMode::WritesEnabled,
+				"collider-collection-reject");
+			context.Expect(!set.value("ok", true)
+				&& set["error"].value("category", std::string{}) == "validation",
+				"A JSON payload that cannot represent typed collider records must be rejected.");
+			context.Expect(colliders != nullptr && colliders->colliders.empty(),
+				"Rejected collider collection payloads must not mutate the live component.");
 			ObjectManager::instance().clear();
 			UndoRedoSystem::Instance().Clear();
 		});
@@ -423,6 +450,50 @@ namespace TerraEngine::EditorTests
 			SceneManager::Instance().UnloadAll();
 		});
 
+		registry.Add("Editor.Automation.Service.SceneOpenRereadsExternallyChangedSource", [](TestContext& context) {
+			TempAutomationProject workspace("SceneOpenReread");
+			EditorContext editorContext = MakeProjectContext(workspace);
+			const std::filesystem::path scenePath = editorContext.projectManager->GetProjectRoot()
+				/ "Assets" / "Scenes" / "Reread.tescene";
+			const auto makeSceneWithObjectCount = [](std::string_view name, std::size_t objectCount) {
+				nlohmann::json document = MakeSceneJson(std::string(name));
+				for (std::size_t index = 0U; index < objectCount; ++index)
+				{
+					// These fixed-width identities keep the fixture valid while making
+					// each replacement document observably distinct to the live scene.
+					const std::string id = std::string(31U, '0') + static_cast<char>('1' + index);
+					document["objects"].push_back({
+						{"uuid", id}, {"name", "Offline Object " + std::to_string(index + 1U)},
+						{"tag", "Untagged"}, {"layer", "Default"}, {"active", true},
+						{"isStatic", false}, {"components", nlohmann::json::object()}});
+				}
+				return document;
+			};
+
+			WriteTextFile(scenePath, makeSceneWithObjectCount("Before Offline Rewrite", 2U).dump(4));
+			SceneManager::Instance().UnloadAll();
+			SceneManager::Instance().SetSceneRoot(editorContext.projectManager->GetProjectRoot() / "Assets");
+			EditorAutomationService service;
+			service.SetEditorContext(&editorContext);
+			const nlohmann::json firstOpen = service.HandleTool("scene.open",
+				{{"path", "Assets/Scenes/Reread.tescene"}}, WriteMode::WritesEnabled, "scene-reread-1");
+			const nlohmann::json firstListing = service.HandleTool("scene.list_objects",
+				{{"limit", 256U}}, WriteMode::ReadOnly, "scene-reread-2");
+
+			// Simulate an offline authoring tool replacing the exact same source path.
+			WriteTextFile(scenePath, makeSceneWithObjectCount("After Offline Rewrite", 7U).dump(4));
+			const nlohmann::json secondOpen = service.HandleTool("scene.open",
+				{{"path", "Assets/Scenes/Reread.tescene"}}, WriteMode::WritesEnabled, "scene-reread-3");
+			const nlohmann::json secondListing = service.HandleTool("scene.list_objects",
+				{{"limit", 256U}}, WriteMode::ReadOnly, "scene-reread-4");
+
+			context.Expect(firstOpen.value("ok", false) && firstListing["data"].value("returned", 0U) == 2U
+				&& secondOpen.value("ok", false) && secondListing["data"].value("returned", 0U) == 7U,
+				"Opening the same authored path after an offline rewrite must publish the new object set rather than its cached JSON.");
+			ObjectManager::instance().clear();
+			SceneManager::Instance().UnloadAll();
+		});
+
 		registry.Add("Editor.Automation.Service.DiagnosticsEmptyAndDetailedStatesAreSafe", [](TestContext& context) {
 			EditorAutomationService service;
 			const nlohmann::json empty = service.HandleTool("diagnostics.get_summary", nlohmann::json::object(), WriteMode::ReadOnly, "diag-1");
@@ -436,6 +507,9 @@ namespace TerraEngine::EditorTests
 			context.Expect(!detailed["data"]["surfaces"].empty(), "Detailed diagnostics should include surfaces.");
 			context.Expect(detailed["data"]["mutationDiagnostics"].contains("acceptedMutationCount"), "Mutation diagnostics should expose accepted mutation counts.");
 			context.Expect(detailed["data"]["mutationDiagnostics"].contains("rollbackCount"), "Mutation diagnostics should expose rollback counts.");
+			context.Expect(detailed["data"]["mutationDiagnostics"].contains("scriptingFrame")
+				&& detailed["data"]["mutationDiagnostics"]["scriptingFrame"].contains("totalScripts"),
+				"Mutation diagnostics should expose scripting frame workload outcomes.");
 			context.Expect(detailed["data"]["mutationDiagnostics"].value("rejectedBatchesPreventPartialState", false), "Mutation diagnostics should document rollback safety.");
 		});
 

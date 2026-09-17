@@ -69,7 +69,15 @@ namespace TerraEngine::Navigation {
 		if(!settingsValid || change.source.value == EMPTY_UUID || change.sourceRevision == 0U
 			|| change.physicalReadyRevision == 0U || (needsPrevious && !IsFiniteBounds(change.previousBounds))
 			|| (needsCurrent && !IsFiniteBounds(change.currentBounds))) return receipt;
-		if(change.sourceRevision <= LatestSourceRevision(change.source)
+		const auto sourceRevision = std::find_if(sourceRevisions_.begin(), sourceRevisions_.end(),
+			[&change](const SourceRevisionRecord& entry) { return entry.source == change.source; });
+		// A source identity has two ordered observations: the logical source value
+		// and its checked physical input. Logical changes may reuse unchanged
+		// physical geometry (for example a transform), but a late companion,
+		// terrain, or streaming result must never regress that physical evidence.
+		if((sourceRevision != sourceRevisions_.end()
+			&& (change.sourceRevision <= sourceRevision->revision
+				|| change.physicalReadyRevision < sourceRevision->physicalReadyRevision))
 			|| pending_.size() >= settings_.maximumPendingChanges) return receipt;
 
 		NavigationGeometryBounds affected = needsPrevious ? change.previousBounds : change.currentBounds;
@@ -112,10 +120,12 @@ namespace TerraEngine::Navigation {
 		});
 		dirtyCoverage_.erase(std::unique(dirtyCoverage_.begin(), dirtyCoverage_.end()), dirtyCoverage_.end());
 
-		auto sourceRevision = std::find_if(sourceRevisions_.begin(), sourceRevisions_.end(),
-			[&change](const SourceRevisionRecord& entry) { return entry.source == change.source; });
-		if(sourceRevision == sourceRevisions_.end()) sourceRevisions_.push_back({change.source, change.sourceRevision});
-		else sourceRevision->revision = change.sourceRevision;
+		if(sourceRevision == sourceRevisions_.end()) {
+			sourceRevisions_.push_back({change.source, change.sourceRevision, change.physicalReadyRevision});
+		} else {
+			sourceRevision->revision = change.sourceRevision;
+			sourceRevision->physicalReadyRevision = change.physicalReadyRevision;
+		}
 		latestRevision_ = std::max(latestRevision_, change.sourceRevision);
 		if(IsRemovalLike(change.kind)) {
 			auto tombstone = std::find_if(tombstones_.begin(), tombstones_.end(),
@@ -125,6 +135,17 @@ namespace TerraEngine::Navigation {
 		}
 		receipt = {true, affected, localCoverage.size(), localSeams.size()};
 		return receipt;
+	}
+
+	bool NavigationDirtyIndex::AcknowledgePublishedThrough(NavigationGeneration sourceRevision) {
+		// Publication accepts only the globally latest copied source revision. If a
+		// newer change arrived after preparation, its candidate is stale and must not
+		// retire any dependency that the newer publication still needs.
+		if(sourceRevision == 0U || sourceRevision != latestRevision_ || pending_.empty()) return false;
+		pending_.clear();
+		dirtyCoverage_.clear();
+		dirtySeams_.clear();
+		return true;
 	}
 
 	NavigationSourceTombstoneSnapshot NavigationDirtyIndex::ObserveAtProtectedBoundary() const { return {tombstones_}; }

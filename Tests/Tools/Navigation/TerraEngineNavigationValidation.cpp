@@ -2,13 +2,14 @@
 
 #include "Navigation/Ground/GroundRouteQuery.h"
 #include "Navigation/Geometry/NavigationGeometrySnapshot.h"
+#include "Navigation/Integration/NavigationSceneBootstrap.h"
 #include "Navigation/NavigationSettings.h"
 #include "Navigation/NavigationSystem.h"
-#include "Components/Navigation/NavigationAgentComponent.h"
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
 #include "Resource/ResourceManager.h"
 #include "Scene/SceneMutationQueue.h"
+#include "Scene/Serializer.h"
 #include "Scene/WorldStreamingSystem.h"
 #include "ThreadPool/ThreadPool.h"
 
@@ -26,6 +27,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <span>
@@ -218,7 +220,10 @@ namespace
 	TerraEngine::Navigation::NavigationLocation Location(
 		TerraEngine::Navigation::NavigationWorldHandle world, double x)
 	{
-		return {world, {{0, 0, 0}, {x, 0.0, 0.0}}};
+		// Keep acceptance endpoints one metre inside the captured terrain. Tile and
+		// vertical-band boundaries are independent missing-neighbour scenarios, not
+		// the ordinary-object route this installed contract intends to measure.
+		return {world, {{0, 0, 0}, {x, 0.0, 1.0}}};
 	}
 
 	std::string_view DynamicOperationName(TerraEngine::Scene::NavigationSourceMutationOperation operation)
@@ -237,6 +242,181 @@ namespace
 		}
 		return "unknown";
 	}
+
+	// The installed manifest is a reviewed semantic contract, not merely an input
+	// to hash. Parse its required scenario groups before running any workload so a
+	// truncated or unrelated installed fixture cannot become passing evidence.
+	struct ManifestContract
+	{
+		bool parsed = false;
+		bool semanticCasesValid = false;
+		bool dynamicCasesValid = false;
+		bool streamingCasesValid = false;
+		bool lifecycleCasesValid = false;
+		std::size_t fixtureCaseCount = 0U;
+		std::size_t expandedCaseCount = 0U;
+		nlohmann::json document;
+	};
+
+	ManifestContract ParseManifestContract(const std::filesystem::path& path)
+	{
+		ManifestContract result{};
+		try {
+			std::ifstream input(path, std::ios::binary);
+			if(!input) return result;
+			input >> result.document;
+			result.parsed = result.document.value("schemaVersion", 0U) == 1U
+				&& result.document.value("fixtureFormat", std::string{}) == "TerraEngineGroundNavigationV1";
+			if(!result.parsed) return result;
+			const nlohmann::json& fixtures = result.document.at("fixtures");
+			const nlohmann::json& cases = result.document.at("cases");
+			const nlohmann::json& dynamic = result.document.at("dynamicGeometry");
+			const nlohmann::json& streaming = result.document.at("streamingLargeWorld");
+			const nlohmann::json& lifecycle = result.document.at("lifecycle");
+			const nlohmann::json& expansion = result.document.at("expansion");
+			result.fixtureCaseCount = cases.size();
+			result.expandedCaseCount = expansion.value("totalStableCaseCount", 0U);
+			bool hasAutomaticTerrain = false;
+			bool hasAutomaticGeometry = false;
+			for(const nlohmann::json& fixture : fixtures) {
+				if(!fixture.contains("id") || !fixture.contains("profiles") || !fixture.contains("sources")) continue;
+				for(const nlohmann::json& source : fixture.at("sources")) {
+					hasAutomaticTerrain = hasAutomaticTerrain || source == "terrain-height-triangles-v1";
+					hasAutomaticGeometry = hasAutomaticGeometry || source == "automatic-geometry-v1";
+				}
+			}
+			result.semanticCasesValid = fixtures.size() >= 2U && cases.size() >= 25U
+				&& result.expandedCaseCount >= 100U && hasAutomaticTerrain && hasAutomaticGeometry;
+			result.dynamicCasesValid = dynamic.value("revisionCount", 0U) >= 9U
+				&& dynamic.contains("revisions") && dynamic.at("revisions").size() >= 9U;
+			result.streamingCasesValid = streaming.contains("cases") && streaming.at("cases").size() >= 4U
+				&& streaming.contains("coverageSequences") && streaming.at("coverageSequences").size() >= 4U;
+			result.lifecycleCasesValid = lifecycle.contains("cases") && lifecycle.at("cases").size() >= 2U
+				&& lifecycle.contains("publicationSequence") && lifecycle.at("publicationSequence").size() >= 5U;
+		} catch(const std::exception&) {
+			return ManifestContract{};
+		}
+		return result;
+	}
+
+	TerraEngine::Navigation::NavigationEligibleSourceCandidate MakeAutomaticCandidate(
+		std::string_view sourceId, TerraEngine::Navigation::NavigationSourceKind kind)
+	{
+		using namespace TerraEngine::Navigation;
+		NavigationEligibleSourceCandidate candidate{};
+		candidate.identity.sourceId = NavigationUuid::FromString(sourceId).value;
+		candidate.identity.objectId = NavigationUuid::FromString("a1f77899-1ef3-4c1a-8a32-f4a0f96077c3").value;
+		candidate.identity.objectLifetimeGeneration = 1U;
+		candidate.identity.assetId = NavigationUuid::FromString("eae00c9d-3515-4c9a-abdb-1a6df3cb4f04").value;
+		candidate.identity.kind = kind;
+		candidate.revisions = {1U, 2U, 3U, 4U, 5U};
+		candidate.activeInHierarchy = true;
+		candidate.physicalBackingCurrent = true;
+		return candidate;
+	}
+
+	TerraEngine::Navigation::NavigationBootstrapSourceInput MakeAutomaticTerrainSource()
+	{
+		using namespace TerraEngine::Navigation;
+		NavigationBootstrapSourceInput source{};
+		source.candidate = MakeAutomaticCandidate("4e4a0ddf-2c35-4d75-8cb8-fa0b6e1061d8", NavigationSourceKind::Terrain);
+		TerrainNavigationPublishedSamples terrain{};
+		terrain.terrainPresent = true;
+		terrain.descriptor.sourceUuid.value = source.candidate.identity.sourceId;
+		terrain.descriptor.sourceRevision = ComputeNavigationEligibleSourceRevision(source.candidate.identity, source.candidate.revisions);
+		terrain.descriptor.canonicalPlacementRevision = source.candidate.revisions.transformRevision;
+		terrain.descriptor.physicalReadyRevision = source.candidate.revisions.physicalPublicationGeneration;
+		terrain.descriptor.sourceKind = NavigationSourceKind::Terrain;
+		terrain.sampleColumns = 2U;
+		terrain.sampleRows = 2U;
+		terrain.sampleSpacingMetres = 32.0F;
+		terrain.heights = {0.0F, 0.0F, 0.0F, 0.0F};
+		source.terrain = std::move(terrain);
+		return source;
+	}
+
+	TerraEngine::Navigation::NavigationBootstrapSourceInput MakeAutomaticMeshSource()
+	{
+		using namespace TerraEngine::Navigation;
+		NavigationBootstrapSourceInput source{};
+		source.candidate = MakeAutomaticCandidate("a35d7ef4-fc86-41df-a516-c2d03df2916e", NavigationSourceKind::Mesh);
+		NavigationGeometrySnapshotDescriptor descriptor{};
+		descriptor.sourceUuid.value = source.candidate.identity.sourceId;
+		descriptor.sourceRevision = ComputeNavigationEligibleSourceRevision(source.candidate.identity, source.candidate.revisions);
+		descriptor.canonicalPlacementRevision = source.candidate.revisions.transformRevision;
+		descriptor.physicalReadyRevision = source.candidate.revisions.physicalPublicationGeneration;
+		descriptor.sourceKind = NavigationSourceKind::Mesh;
+		NavigationGeometryDocument geometry{};
+		geometry.kind = NavigationGeometryPayloadKind::TriangleMesh;
+		geometry.vertices = {{0.0F, 0.0F, 0.0F}, {32.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 32.0F}};
+		geometry.triangles = {{0U, 1U, 2U}};
+		source.candidate.geometry = NavigationGeometrySnapshot::Create(descriptor, geometry).snapshot;
+		return source;
+	}
+
+	TerraEngine::Navigation::NavigationSceneBootstrapCapture CaptureAutomaticBootstrap(bool includeTerrain)
+	{
+		using namespace TerraEngine::Navigation;
+		NavigationSceneBootstrapInput input{};
+		if(includeTerrain) input.sources.push_back(MakeAutomaticTerrainSource());
+		input.sources.push_back(MakeAutomaticMeshSource());
+		return CaptureNavigationSceneBootstrap(input);
+	}
+
+	std::shared_ptr<const TerraEngine::Navigation::NavigationGeometrySnapshot> MakeDynamicSnapshot(
+		TerraEngine::Navigation::NavigationUuid source, TerraEngine::Navigation::NavigationGeneration revision,
+		double shift)
+	{
+		using namespace TerraEngine::Navigation;
+		// Dynamic publication consumes this detached mesh rather than an authoring
+		// object. Its revision deliberately matches the mutation receipt so worker
+		// preparation can reject a late physical companion without guessing.
+		NavigationGeometrySnapshotDescriptor descriptor{};
+		descriptor.sourceUuid.value = source.value;
+		descriptor.sourceRevision = revision;
+		descriptor.canonicalPlacementRevision = revision;
+		descriptor.physicalReadyRevision = revision;
+		descriptor.sourceKind = NavigationSourceKind::Procedural;
+		NavigationGeometryDocument geometry{};
+		geometry.kind = NavigationGeometryPayloadKind::TriangleMesh;
+		const float left = static_cast<float>(shift - 1.5);
+		const float right = static_cast<float>(shift + 2.5);
+		geometry.vertices = {{left, 0.0F, -2.0F}, {right, 0.0F, -2.0F}, {left, 0.0F, 2.0F}};
+		geometry.triangles = {{0U, 1U, 2U}};
+		const NavigationGeometrySnapshotCreateResult created = NavigationGeometrySnapshot::Create(descriptor, geometry);
+		return created.accepted ? created.snapshot : nullptr;
+	}
+
+	bool StageDynamicMutationGeometry(TerraEngine::Navigation::NavigationSystem& system,
+		TerraEngine::Navigation::NavigationUuid source,
+		TerraEngine::Scene::NavigationSourceMutationOperation operation,
+		TerraEngine::Navigation::NavigationGeneration revision, double shift)
+	{
+		using namespace TerraEngine::Navigation;
+		// Removals have no replacement mesh. Supplying an empty stage makes the
+		// worker produce the tombstone-only publication instead of rebuilding an
+		// unrelated automatic terrain mesh for the removed tile.
+		if(operation == TerraEngine::Scene::NavigationSourceMutationOperation::Disable
+			|| operation == TerraEngine::Scene::NavigationSourceMutationOperation::Delete)
+			return system.StageDynamicGroundSources(NavigationProfile::Defaults(), {});
+		const std::shared_ptr<const NavigationGeometrySnapshot> snapshot = MakeDynamicSnapshot(source, revision, shift);
+		return snapshot != nullptr && system.StageDynamicGroundSources(
+			NavigationProfile::Defaults(), {snapshot});
+	}
+
+	bool QueueAutomaticBootstrap(TerraEngine::Navigation::NavigationSystem& system,
+		const TerraEngine::Navigation::NavigationSceneBootstrapCapture& capture)
+	{
+		using namespace TerraEngine::Navigation;
+		if(!capture.accepted) return false;
+		std::vector<NavigationSystem::InitialGroundBuildInput> builds;
+		builds.reserve(capture.builds.size());
+		for(const NavigationBootstrapBuildInput& build : capture.builds) {
+			builds.push_back({build.profile, build.sources, build.sourceIndex, build.eligibleSourceIndex,
+				build.terrainPublicationGeneration, 0U});
+		}
+		return system.QueueInitialGroundBuilds(std::move(builds));
+	}
 }
 
 int main(int argc, char** argv)
@@ -248,24 +428,22 @@ int main(int argc, char** argv)
 	}
 
 	using namespace TerraEngine::Navigation;
+	const ManifestContract manifestContract = ParseManifestContract(options.manifest);
+	if(!manifestContract.parsed) {
+		std::cerr << "Installed navigation manifest is missing or malformed.\n";
+		return 6;
+	}
 	NavigationSystem& system = NavigationSystem::Instance();
 	system.Shutdown();
 	system.Initialize();
-	// The acceptance runner publishes real immutable ground data before issuing
-	// public requests. It must not make a synthetic straight snapshot look like
-	// evidence of available coverage.
-	NavigationGeometryDocument groundDocument{};
-	groundDocument.kind = NavigationGeometryPayloadKind::TriangleMesh;
-	groundDocument.vertices = {{-1.0F, 0.0F, -1.0F}, {33.0F, 0.0F, 33.0F},
-		{33.0F, 0.0F, -1.0F}, {-1.0F, 0.0F, 33.0F}};
-	groundDocument.triangles = {{0U, 1U, 2U}, {0U, 3U, 1U}};
-	NavigationGeometrySnapshotDescriptor groundDescriptor{};
-	groundDescriptor.sourceRevision = 1U;
-	groundDescriptor.canonicalPlacementRevision = 1U;
-	groundDescriptor.physicalReadyRevision = 1U;
-	const auto ground = NavigationGeometrySnapshot::Create(groundDescriptor, groundDocument);
-	if(!ground.accepted || !ground.snapshot
-		|| !system.QueueInitialGroundBuild(NavigationProfile::Defaults(), {ground.snapshot})) {
+	// Route availability must come from the same automatic terrain-plus-physical
+	// geometry capture boundary used by an installed scene, never a hand-built
+	// source that could hide a missing-terrain or eligibility regression.
+	const NavigationSceneBootstrapCapture automaticBootstrap = CaptureAutomaticBootstrap(true);
+	const bool automaticCapturePassed = automaticBootstrap.accepted && automaticBootstrap.terrainAvailable
+		&& automaticBootstrap.eligibleSourceIndex != nullptr
+		&& automaticBootstrap.eligibleSourceIndex->Records().size() >= 2U;
+	if(!automaticCapturePassed || !QueueAutomaticBootstrap(system, automaticBootstrap)) {
 		system.Shutdown();
 		return 3;
 	}
@@ -288,29 +466,52 @@ int main(int argc, char** argv)
 	mutations.Clear();
 	const Object navigatorObject = objects.createObject("Installed Navigating Object");
 	Transform* navigatorTransform = objects.AddComponent<Transform>(navigatorObject);
-	NavigationAgentComponent* navigatorAuthoring = objects.AddComponent<NavigationAgentComponent>(navigatorObject);
 	const Object targetObject = objects.createObject("Installed Target Object");
 	Transform* targetTransform = objects.AddComponent<Transform>(targetObject);
-	if(targetTransform != nullptr) targetTransform->worldPose.position = destination.position;
-	system.SynchronizeSceneObjectAgents(objects);
-	const NavigationAgentHandle destinationAgent = system.ResolveObjectAgent(objects.getUUID(navigatorObject));
-	const auto destinationCommand = system.QueueSetDestination(
-		destinationAgent, destination, navigatorAuthoring ? navigatorAuthoring->GetRoutePolicyValue() : 0U, 0U);
-	system.Update(0.0F);
-	const auto destinationCommandState = system.ReadCommand(destinationCommand.command);
-	system.Update(0.0F);
-	const auto destinationAgentState = system.ReadAgent(destinationAgent);
-	const Ground::GroundRouteQuery::RetainedRoute destinationRoute = destinationAgentState.record
-		? system.ReadRoute(destinationAgentState.record->activeRoute)
+	// Endpoint capture reads canonical object state. Publish fixture positions
+	// through the transactional scene boundary rather than assigning Transform
+	// fields directly, which would leave the canonical-pose cache stale.
+	TerraEngine::Scene::WorldPose navigatorPose{};
+	navigatorPose.position = Location(root->world, 1.0).position;
+	TerraEngine::Scene::WorldPose targetPose{};
+	targetPose.position = destination.position;
+	TerraEngine::Scene::TransactionalMutationBuilder initialPlacement(
+		"installed-navigation-initial-placement", TerraEngine::Scene::TransactionOrigin::Test,
+		"InstalledNavigationAcceptance");
+	initialPlacement.SetWorldTransform(objects, objects.getUUID(navigatorObject), navigatorPose);
+	initialPlacement.SetWorldTransform(objects, objects.getUUID(targetObject), targetPose);
+	mutations.EnqueueTransaction(std::move(initialPlacement).Build());
+	const TerraEngine::Scene::SceneMutationBatchResult initialPlacementResult = mutations.Apply(
+		objects, "Installed navigation initial placement");
+	if(navigatorTransform == nullptr || targetTransform == nullptr
+		|| initialPlacementResult.transactionResults.size() != 1U
+		|| initialPlacementResult.transactionResults.front().status != TerraEngine::Scene::TransactionStatus::Committed
+		|| initialPlacementResult.transactionResults.front().appliedWriteCount != 2U) {
+		objects.clear();
+		system.Shutdown();
+		return 3;
+	}
+	const auto locationReceipt = system.RequestRoute(objects, objects.getUUID(navigatorObject),
+		Location(root->world, 10.0), NavigationProfile::Defaults());
+	const auto destinationReceipt = system.RequestRoute(objects, objects.getUUID(navigatorObject),
+		objects.getUUID(targetObject), NavigationProfile::Defaults());
+	// Preparation is deliberately bounded to one copied route packet per update.
+	// Advance enough protected turns to observe both independently admitted public
+	// requests rather than mistaking an honest queued record for a failed route.
+	for(std::uint32_t frame = 0U; frame < 4U; ++frame) system.Update(0.0F);
+	const auto locationRequest = locationReceipt.request.IsValid()
+		? system.ReadRequest(locationReceipt.request) : NavigationStoreReadResult<NavigationRequestRecord>{};
+	const auto destinationRoute = destinationReceipt.request.IsValid()
+		? system.ReadRoute(system.PublishedRouteForRequest(destinationReceipt.request))
 		: Ground::GroundRouteQuery::RetainedRoute{};
+	const bool objectLocationRoutePassed = locationReceipt.Succeeded() && locationRequest.record.has_value()
+		&& locationRequest.record->outcome == NavigationOutcome::Complete;
 	const bool objectDestinationRoutePassed = navigatorTransform != nullptr
-		&& navigatorAuthoring != nullptr && targetTransform != nullptr && destinationAgent.IsValid()
-		&& destinationCommand.command.IsValid() && destinationCommandState.record.has_value()
-		&& destinationCommandState.record->state == NavigationCommandState::Applied
+		&& targetTransform != nullptr && destinationReceipt.Succeeded()
 		&& destinationRoute.IsValid() && !destinationRoute.points.empty()
 		&& destinationRoute.points.front().position == navigatorTransform->worldPose.position
 		&& destinationRoute.points.back().position == targetTransform->worldPose.position;
-	bool objectTargetMovementPassed = objectDestinationRoutePassed;
+	bool objectTargetMovementPassed = objectLocationRoutePassed && objectDestinationRoutePassed;
 	std::size_t objectTargetMovementSteps = 0U;
 	const TerraEngine::UUID navigatorId = objects.getUUID(navigatorObject);
 	for(std::size_t pointIndex = 1U; objectTargetMovementPassed && pointIndex < destinationRoute.points.size(); ++pointIndex) {
@@ -328,19 +529,62 @@ int main(int argc, char** argv)
 		objectTargetMovementPassed = committed.transactionResults.size() == 1U
 			&& committed.transactionResults.front().status == TerraEngine::Scene::TransactionStatus::Committed
 			&& committed.transactionResults.front().appliedWriteCount == 1U;
-		if(objectTargetMovementPassed) {
-			++objectTargetMovementSteps;
-			system.SynchronizeSceneObjectAgents(objects);
-		}
+		if(objectTargetMovementPassed) ++objectTargetMovementSteps;
 	}
 	navigatorTransform = objects.GetComponent<Transform>(navigatorObject);
 	targetTransform = objects.GetComponent<Transform>(targetObject);
-	const auto destinationAgentAfterMovement = system.ReadAgent(destinationAgent);
 	objectTargetMovementPassed = objectTargetMovementPassed && objectTargetMovementSteps > 0U
 		&& navigatorTransform != nullptr && targetTransform != nullptr
-		&& navigatorTransform->worldPose.position == targetTransform->worldPose.position
-		&& destinationAgentAfterMovement.record.has_value()
-		&& destinationAgentAfterMovement.record->currentPosition.position == targetTransform->worldPose.position;
+		&& navigatorTransform->worldPose.position == targetTransform->worldPose.position;
+	// Qualification must exercise real ordinary scene objects. Owner IDs alone
+	// are not evidence that the public capture path survives a 256-object load.
+	const std::uint32_t workloadObjectCount = options.qualification ? 256U
+		: std::max<std::uint32_t>(options.agents, 2U);
+	std::vector<TerraEngine::UUID> workloadObjectIds;
+	workloadObjectIds.reserve(workloadObjectCount);
+	for(std::uint32_t index = 0U; index < workloadObjectCount; ++index) {
+		const Object object = objects.createObject("Installed Navigation Workload Object " + std::to_string(index));
+		Transform* transform = objects.AddComponent<Transform>(object);
+		if(transform == nullptr) {
+			objects.clear();
+			system.Shutdown();
+			return 3;
+		}
+		workloadObjectIds.push_back(objects.getUUID(object));
+	}
+	TerraEngine::Scene::TransactionalMutationBuilder workloadPlacement(
+		"installed-navigation-workload-placement", TerraEngine::Scene::TransactionOrigin::Test,
+		"InstalledNavigationAcceptance");
+	for(const TerraEngine::UUID& objectId : workloadObjectIds) {
+		TerraEngine::Scene::WorldPose pose{};
+		pose.position = Location(root->world, 1.0).position;
+		workloadPlacement.SetWorldTransform(objects, objectId, pose);
+	}
+	mutations.EnqueueTransaction(std::move(workloadPlacement).Build());
+	const TerraEngine::Scene::SceneMutationBatchResult workloadPlacementResult = mutations.Apply(
+		objects, "Installed navigation workload placement");
+	if(workloadPlacementResult.transactionResults.size() != 1U
+		|| workloadPlacementResult.transactionResults.front().status != TerraEngine::Scene::TransactionStatus::Committed
+		|| workloadPlacementResult.transactionResults.front().appliedWriteCount != workloadObjectIds.size()) {
+		objects.clear();
+		system.Shutdown();
+		return 3;
+	}
+	// Prove the first ordinary workload object can use the identical public route
+	// entry point before pacing the full qualification schedule.  Retaining its
+	// captured record in evidence makes a future spatial-cache regression
+	// diagnosable without replacing a failed request with synthetic metadata.
+	const NavigationSystem::ObjectRouteReceipt workloadProbeReceipt = system.RequestRoute(
+		objects, workloadObjectIds.front(), destination, NavigationProfile::Defaults());
+	NavigationStoreReadResult<NavigationRequestRecord> workloadProbeRead{};
+	for(std::uint32_t frame = 0U; workloadProbeReceipt.Succeeded() && frame < 4U; ++frame) {
+		system.Update(0.0F);
+		workloadProbeRead = system.ReadRequest(workloadProbeReceipt.request);
+		if(workloadProbeRead.record && workloadProbeRead.record->lifecycle == NavigationRequestLifecycle::Terminal) break;
+	}
+	const bool workloadProbePassed = workloadProbeReceipt.Succeeded() && workloadProbeRead.record.has_value()
+		&& workloadProbeRead.record->outcome == NavigationOutcome::Complete;
+	if(workloadProbeReceipt.Succeeded()) (void)system.ReleaseRequestResult(workloadProbeReceipt.request);
 	const std::string manifestHash = HashFile(options.manifest);
 	const std::string buildHash = HashFile(std::filesystem::absolute(argv[0]));
 	// The installed manifest is the source-free semantic corpus. Hashing __FILE__
@@ -357,17 +601,69 @@ int main(int argc, char** argv)
 	const std::string settingsHash = Sha256Hex(std::string_view(settingsInput.dump()));
 	const std::string workloadHash = Sha256Hex(std::string_view(workloadInput.dump()));
 	if(manifestHash.empty() || buildHash.empty()) return 6;
-	// Register one real agent per scheduled owner before measurements begin. The
-	// route workload below still uses copied one-shot requests so each submission
-	// has a directly readable terminal record, but it is no longer merely a
-	// numerical simulation of 256 gameplay participants.
-	std::vector<NavigationAgentHandle> registeredAgents;
-	registeredAgents.reserve(options.agents);
-	for(std::uint32_t index = 0U; index < options.agents; ++index) {
-		const NavigationOwnerHandle agentOwner{root->world, {static_cast<std::uint64_t>(index) + 1U}, 1U};
-		const NavigationAgentHandle agent = system.RegisterAgent(agentOwner, start, NavigationProfile::Defaults());
-		if(agent.IsValid()) registeredAgents.push_back(agent);
+	// The route workload uses copied one-shot requests so each submission has a
+	// directly readable terminal record without creating navigation-owned agents.
+	// Measure dynamic publication directly from an accepted scene receipt to the
+	// first protected observation of its newer immutable world root. This is a
+	// timing measurement, not a proxy based on route latency or sample counts.
+	double dynamicPublicationResponsivenessMilliseconds = -1.0;
+	const TerraEngine::UUID timingProbeSource = TerraEngine::GenerateUUID();
+	const TerraEngine::UUID soakDynamicSource = TerraEngine::GenerateUUID();
+	bool dynamicPublicationProbePassed = false;
+	{
+		TerraEngine::Scene::NavigationSourceMutationReceipt receipt{};
+		receipt.accepted = true;
+		receipt.transactionStatus = TerraEngine::Scene::TransactionStatus::Committed;
+		receipt.intent.sourceId = timingProbeSource;
+		receipt.intent.operation = TerraEngine::Scene::NavigationSourceMutationOperation::Move;
+	// Time a real publication away from the reference corridor. The timing probe
+	// must not deliberately invalidate the route whose availability the same
+	// workload measures for 30 minutes.
+	receipt.intent.oldBounds = {{{0, 0, 0}, {1024.0, 0.0, 2.0}}, {{0, 0, 0}, {1026.0, 1.0, 4.0}}, true};
+	receipt.intent.newBounds = {{{0, 0, 0}, {1025.0, 0.0, 3.0}}, {{0, 0, 0}, {1027.0, 1.0, 5.0}}, true};
+		receipt.intent.expectedSourceRevision = 0U;
+		receipt.intent.committedSourceRevision = 1U;
+	receipt.intent.physicalReadyRevision = 1U;
+	receipt.intent.oldEnabled = true;
+	receipt.intent.newEnabled = true;
+	const auto before = system.PublishedWorld();
+	const auto began = std::chrono::steady_clock::now();
+	// Preserve the frozen baseline boundary: it measures admission through the
+	// immediate atomic dirty-root publication, not the later Recast replacement.
+	// The matching physical companion is staged and drained immediately afterward,
+	// outside this timed interval, so the probe cannot leak retained dirty work.
+	const std::size_t accepted = system.ObserveSceneMutationReceipts(
+		std::span<const TerraEngine::Scene::NavigationSourceMutationReceipt>{&receipt, 1U});
+	const auto dirtyObserved = system.PublishedWorld();
+	if(accepted != 0U && before && dirtyObserved
+		&& dirtyObserved->rootGeneration > before->rootGeneration) {
+		dynamicPublicationResponsivenessMilliseconds = static_cast<double>(
+			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count()) / 1000.0;
+		const bool timingGeometryStaged = StageDynamicMutationGeometry(system,
+			NavigationUuid{timingProbeSource}, receipt.intent.operation, receipt.intent.committedSourceRevision, 1025.0);
+		for(std::uint32_t attempt = 0U; attempt < 1000U; ++attempt) {
+			if(!timingGeometryStaged) break;
+			system.ObserveProtectedBoundary(NavigationProtectedBoundary::FrameEnd, attempt + 1U);
+			system.Update(0.0F);
+			const auto after = system.PublishedWorld();
+			if(after && after->rootGeneration > dirtyObserved->rootGeneration
+				&& system.DynamicDirtyIndexForTesting().PendingPreparationCount() == 0U) {
+				dynamicPublicationProbePassed = true;
+				break;
+			}
+		}
 	}
+	}
+	// The synthetic off-corridor receipt intentionally invalidates the published
+	// source revision.  Recover the automatic terrain/physical capture before
+	// measuring the ordinary-object corridor, exactly as a streamed-in scene
+	// rebuild would; otherwise this qualification would only measure the expected
+	// unavailable interval rather than its required usable recovery.
+	const NavigationSceneBootstrapCapture postDynamicCapture = CaptureAutomaticBootstrap(true);
+	bool postDynamicWorldRecovered = QueueAutomaticBootstrap(system, postDynamicCapture);
+	for(std::uint32_t frame = 0U; postDynamicWorldRecovered && frame < 4U; ++frame) system.Update(0.0F);
+	postDynamicWorldRecovered = postDynamicWorldRecovered && system.PublishedWorld() != nullptr
+		&& system.PublishedWorld()->terrainState == NavigationTerrainState::Available;
 
 	std::uint64_t submitted = 0U;
 	std::uint64_t completed = 0U;
@@ -389,6 +685,11 @@ int main(int argc, char** argv)
 	std::uint64_t droppedRawSamples = 0U;
 	std::uint64_t dynamicReceiptsAccepted = 0U;
 	std::uint64_t dynamicRemovalReceiptsAccepted = 0U;
+	std::uint64_t expectedSoakDynamicReceipts = 0U;
+	std::uint64_t dynamicGeometryStagesAccepted = 0U;
+	bool everySoakDynamicReceiptAccepted = true;
+	bool everySoakGeometryStageAccepted = true;
+	bool soakDirtyIndexDrained = true;
 	nlohmann::json dynamicSamples = nlohmann::json::array();
 	std::uint64_t streamingPlansPrepared = 0U;
 	bool streamingPublicationMeasured = false;
@@ -398,15 +699,6 @@ int main(int argc, char** argv)
 	bool firstRouteMeasured = false;
 	std::vector<std::uint64_t> frameSamplesMicroseconds;
 	frameSamplesMicroseconds.reserve(std::min<std::uint32_t>(options.rawSampleLimit, 200'000U));
-	bool ownsSharedTaskPool = false;
-	ThreadPool& taskPool = ThreadPool::instance();
-	if(taskPool.getThreadCount() == 0U) {
-		// The runner uses the engine-wide task pool rather than creating a
-		// navigation-specific worker. Standalone tool invocation owns only this
-		// temporary shared-pool lifetime.
-		taskPool.initialize(std::min<std::size_t>(options.agents, 32U));
-		ownsSharedTaskPool = true;
-	}
 	TerraEngine::Scene::WorldStreamingSystem& streaming = TerraEngine::Scene::WorldStreamingSystem::Instance();
 	streaming.Initialize();
 	// Prepare a concrete, asset-free region snapshot. Publishing it through the
@@ -451,29 +743,22 @@ int main(int argc, char** argv)
 	};
 
 	auto submitScheduledRoute = [&](const std::string& mode, std::uint64_t sequence) {
-		const std::uint32_t agentIndex = static_cast<std::uint32_t>(sequence % options.agents);
-		Ground::GroundRouteQuery::Request request{};
-		request.owner = {root->world, {static_cast<std::uint64_t>(agentIndex) + 1U}, 1U};
-		request.start = start;
-		request.destination = destination;
-		request.profile = NavigationProfile::Defaults();
-		request.maxExpansions = 32768U;
+		const std::uint32_t agentIndex = static_cast<std::uint32_t>(sequence % workloadObjectIds.size());
 		const auto began = std::chrono::steady_clock::now();
-		// Submission is scheduled through the engine task facility; the main tool
-		// thread alone advances protected publication before it reads the result.
-		auto task = taskPool.createTask([&system, request]() mutable {
-			return system.SubmitOneShotRoute(std::move(request));
-		});
-		std::future<NavigationRequestHandle> admitted = task->getFuture();
-		taskPool.enqueue(task, 1U);
-		const NavigationRequestHandle handle = admitted.get();
-		if(!handle.IsValid()) {
-			recordOutcome(mode, agentIndex, NavigationOutcome::RejectedCapacity,
-				NavigationReason::OutputLimit, 0U);
+		// Object capture is a protected API, so retain the public object-to-location
+		// route call on this boundary rather than borrowing object state in a worker.
+		const NavigationSystem::ObjectRouteReceipt receipt = system.RequestRoute(
+			objects, workloadObjectIds[agentIndex], destination, NavigationProfile::Defaults());
+		if(!receipt.Succeeded()) {
+			recordOutcome(mode, agentIndex, receipt.outcome, receipt.reason, 0U);
 			return;
 		}
-		advanceNavigationFrame();
-		const auto read = system.ReadRequest(handle);
+		NavigationStoreReadResult<NavigationRequestRecord> read{};
+		for(std::uint32_t frame = 0U; frame < 4U; ++frame) {
+			advanceNavigationFrame();
+			read = system.ReadRequest(receipt.request);
+			if(read.record && read.record->lifecycle == NavigationRequestLifecycle::Terminal) break;
+		}
 		const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
 			std::chrono::steady_clock::now() - began).count();
 		if(!read.record) {
@@ -486,52 +771,43 @@ int main(int argc, char** argv)
 		// The workload has copied every value it needs into evidence. Explicitly
 		// release the terminal result so long qualification runs exercise bounded
 		// generation reuse instead of exhausting a fixed request store.
-		(void)system.ReleaseRequestResult(handle);
+		(void)system.ReleaseRequestResult(receipt.request);
 	};
 
 	auto submitOverloadBurst = [&](const std::string& mode, std::uint64_t firstSequence, std::uint64_t count) {
 		struct PendingSubmission {
 			std::uint32_t agentIndex = 0U;
 			std::chrono::steady_clock::time_point began{};
-			std::future<NavigationRequestHandle> admitted;
-			NavigationRequestHandle handle{};
+			NavigationSystem::ObjectRouteReceipt receipt{};
 		};
 		std::vector<PendingSubmission> pending;
 		pending.reserve(static_cast<std::size_t>(count));
 		for(std::uint64_t offset = 0U; offset < count; ++offset) {
-			const std::uint32_t agentIndex = static_cast<std::uint32_t>((firstSequence + offset) % options.agents);
-			Ground::GroundRouteQuery::Request request{};
-			request.owner = {root->world, {static_cast<std::uint64_t>(agentIndex) + 1U}, 1U};
-			request.start = start;
-			request.destination = destination;
-			request.profile = NavigationProfile::Defaults();
-			request.maxExpansions = 32768U;
-			auto task = taskPool.createTask([&system, request]() mutable {
-				return system.SubmitOneShotRoute(std::move(request));
-			});
-			pending.push_back({agentIndex, std::chrono::steady_clock::now(), task->getFuture()});
-			taskPool.enqueue(task, 1U);
+			const std::uint32_t agentIndex = static_cast<std::uint32_t>((firstSequence + offset) % workloadObjectIds.size());
+			pending.push_back({agentIndex, std::chrono::steady_clock::now(), system.RequestRoute(
+				objects, workloadObjectIds[agentIndex], destination, NavigationProfile::Defaults())});
 		}
 		// A burst deliberately defers the protected update until all shared-pool
 		// submissions have competed for the real request store. Rejections below
 		// are therefore genuine capacity outcomes, not synthetic overload counts.
 		std::size_t admittedCount = 0U;
-		for(PendingSubmission& entry : pending) {
-			entry.handle = entry.admitted.get();
-			admittedCount += entry.handle.IsValid() ? 1U : 0U;
-		}
+		for(const PendingSubmission& entry : pending) admittedCount += entry.receipt.Succeeded() ? 1U : 0U;
 		// Worker submissions can complete in a different order than the vector.
 		// Prepare every admitted route before reading any particular handle so the
 		// evidence cannot misclassify a still-queued request as a provider failure.
 		for(std::size_t index = 0U; index < admittedCount; ++index) advanceNavigationFrame();
 		for(PendingSubmission& entry : pending) {
-			const NavigationRequestHandle handle = entry.handle;
-			if(!handle.IsValid()) {
-				recordOutcome(mode, entry.agentIndex, NavigationOutcome::RejectedCapacity,
-					NavigationReason::OutputLimit, 0U);
+			if(!entry.receipt.Succeeded()) {
+				recordOutcome(mode, entry.agentIndex, entry.receipt.outcome, entry.receipt.reason, 0U);
 				continue;
 			}
-			const auto read = system.ReadRequest(handle);
+			NavigationStoreReadResult<NavigationRequestRecord> read = system.ReadRequest(entry.receipt.request);
+			for(std::uint32_t frame = 0U; !read.record || read.record->lifecycle != NavigationRequestLifecycle::Terminal;
+				++frame) {
+				if(frame >= 4U) break;
+				advanceNavigationFrame();
+				read = system.ReadRequest(entry.receipt.request);
+			}
 			const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
 				std::chrono::steady_clock::now() - entry.began).count();
 			if(!read.record) {
@@ -540,7 +816,7 @@ int main(int argc, char** argv)
 			} else {
 				recordOutcome(mode, entry.agentIndex, read.record->outcome, read.record->reason,
 					static_cast<std::uint64_t>(std::max<std::int64_t>(0, elapsed)));
-				(void)system.ReleaseRequestResult(handle);
+				(void)system.ReleaseRequestResult(entry.receipt.request);
 			}
 		}
 	};
@@ -555,7 +831,6 @@ int main(int argc, char** argv)
 		TerraEngine::Scene::NavigationSourceMutationOperation::Delete,
 		TerraEngine::Scene::NavigationSourceMutationOperation::Replace,
 		TerraEngine::Scene::NavigationSourceMutationOperation::Reshape};
-	const TerraEngine::UUID dynamicSource = TerraEngine::GenerateUUID();
 	for(const std::string& mode : options.matrices) {
 		const std::uint32_t effectiveRequestsPerSecond = (mode == "overload" || mode == "idle-overload")
 			? options.requestsPerSecond * 4U : options.requestsPerSecond;
@@ -614,12 +889,13 @@ int main(int argc, char** argv)
 				++modeSubmitted;
 			}
 			if(mode == "soak" && modeSubmitted % 10U == 0U) {
-				// This is a real copied dynamic receipt and protected observation; it
-				// exercises removal/update publication without a special bridge object.
+				// This is a real copied dynamic receipt and its matching immutable
+				// companion. The protected observation must never infer geometry from a
+				// live source object or accept a mutation without physical evidence.
 				TerraEngine::Scene::NavigationSourceMutationReceipt receipt{};
 				receipt.accepted = true;
 				receipt.transactionStatus = TerraEngine::Scene::TransactionStatus::Committed;
-				receipt.intent.sourceId = dynamicSource;
+				receipt.intent.sourceId = soakDynamicSource;
 				receipt.intent.operation = dynamicOperations[(modeSubmitted / 10U - 1U) % dynamicOperations.size()];
 				// Exercise every dynamic operation away from the measured route. This
 				// proves unaffected coverage remains usable while the changed shard is
@@ -637,15 +913,27 @@ int main(int argc, char** argv)
 				receipt.intent.oldEnabled = receipt.intent.operation != TerraEngine::Scene::NavigationSourceMutationOperation::Create;
 				receipt.intent.newEnabled = receipt.intent.operation != TerraEngine::Scene::NavigationSourceMutationOperation::Delete
 					&& receipt.intent.operation != TerraEngine::Scene::NavigationSourceMutationOperation::Disable;
-				const std::size_t accepted = system.ObserveSceneMutationReceipts(
-					std::span<const TerraEngine::Scene::NavigationSourceMutationReceipt>{&receipt, 1U});
+				++expectedSoakDynamicReceipts;
+				const bool geometryStaged = StageDynamicMutationGeometry(system, NavigationUuid{soakDynamicSource},
+					receipt.intent.operation, receipt.intent.committedSourceRevision, shift);
+				everySoakGeometryStageAccepted = everySoakGeometryStageAccepted && geometryStaged;
+				if(geometryStaged) ++dynamicGeometryStagesAccepted;
+				const std::size_t accepted = geometryStaged ? system.ObserveSceneMutationReceipts(
+					std::span<const TerraEngine::Scene::NavigationSourceMutationReceipt>{&receipt, 1U}) : 0U;
+				everySoakDynamicReceiptAccepted = everySoakDynamicReceiptAccepted && accepted == 1U;
 				dynamicReceiptsAccepted += accepted;
 				if(accepted != 0U && (receipt.intent.operation == TerraEngine::Scene::NavigationSourceMutationOperation::Disable
 					|| receipt.intent.operation == TerraEngine::Scene::NavigationSourceMutationOperation::Delete))
 					++dynamicRemovalReceiptsAccepted;
 				dynamicSamples.push_back({{"operation", DynamicOperationName(receipt.intent.operation)},
-					{"committedRevision", receipt.intent.committedSourceRevision}, {"accepted", accepted != 0U}});
+					{"committedRevision", receipt.intent.committedSourceRevision}, {"geometryStaged", geometryStaged},
+					{"accepted", accepted == 1U}});
 				system.ObserveProtectedBoundary(NavigationProtectedBoundary::FrameEnd, modeSubmitted);
+				// Publish this off-corridor mutation before admitting the next paced
+				// route. A route prepared from the just-retired root must fail stale by
+				// design, so deferring this boundary until the next request would turn a
+				// valid independent route into a scheduling artifact.
+				system.Update(0.0F);
 				streaming.SubmitObserverInterest({"navigation-soak", TerraEngine::Scene::ObserverInterestKind::Automation, start.position, {}, 128.0,
 					TerraEngine::Scene::ObserverInterestPriority::Normal, modeSubmitted});
 				streaming.Update(0.0F);
@@ -667,6 +955,24 @@ int main(int argc, char** argv)
 			std::this_thread::sleep_until(deadline);
 		}
 	}
+	const bool soakRequested = std::find(options.matrices.begin(), options.matrices.end(), "soak") != options.matrices.end();
+	if(soakRequested) {
+		// The final mutation is submitted after the last paced route. Drive bounded
+		// protected frames so its worker candidate either publishes and acknowledges
+		// the complete dirty tuple or remains visible as a fail-closed test failure.
+		for(std::uint32_t frame = 0U; frame < 64U
+			&& system.DynamicDirtyIndexForTesting().PendingPreparationCount() != 0U; ++frame) {
+			system.ObserveProtectedBoundary(NavigationProtectedBoundary::FrameEnd, 1'000'000U + frame);
+			system.Update(0.0F);
+		}
+		const NavigationDirtyIndex& dirty = system.DynamicDirtyIndexForTesting();
+		soakDirtyIndexDrained = dirty.PendingPreparationCount() == 0U
+			&& dirty.DirtyCoverage().empty() && dirty.DirtySeams().empty();
+	}
+	const NavigationDirtyIndex& finalSoakDirtyIndex = system.DynamicDirtyIndexForTesting();
+	const std::size_t finalSoakPendingPreparationCount = finalSoakDirtyIndex.PendingPreparationCount();
+	const std::size_t finalSoakDirtyCoverageCount = finalSoakDirtyIndex.DirtyCoverage().size();
+	const std::size_t finalSoakDirtySeamCount = finalSoakDirtyIndex.DirtySeams().size();
 
 	std::uint64_t lifecycleFailures = 0U;
 	std::uint64_t lifecycleRevocations = 0U;
@@ -702,6 +1008,16 @@ int main(int argc, char** argv)
 			lifecycleSamples.push_back({{"cycle", cycle + 1U}, {"kind", lifecycleKinds[cycle % lifecycleKinds.size()]},
 				{"lateCompletionContained", revoked}});
 		}
+		// RevokeAllOwners intentionally replaces the world and clears its published
+		// root. Restore an ordinary automatic bootstrap before the shared semantic
+		// probes below so lifecycle isolation cannot make missing-terrain admission
+		// depend on which matrix happened to run first.
+		const NavigationSceneBootstrapCapture postLifecycleCapture = CaptureAutomaticBootstrap(true);
+		bool postLifecycleWorldReady = QueueAutomaticBootstrap(system, postLifecycleCapture);
+		for(std::uint32_t frame = 0U; postLifecycleWorldReady && frame < 4U; ++frame) system.Update(0.0F);
+		postLifecycleWorldReady = postLifecycleWorldReady && system.PublishedWorld() != nullptr
+			&& system.PublishedWorld()->terrainState == NavigationTerrainState::Available;
+		if(!postLifecycleWorldReady) ++lifecycleFailures;
 	}
 
 	std::vector<std::string> invalidExplanations;
@@ -759,6 +1075,179 @@ int main(int argc, char** argv)
 				measuredReason, 0U);
 		}
 	}
+	// Execute every declared fixture/profile pair through the installed semantic
+	// oracle. The manifest therefore controls the measured corpus instead of
+	// serving only as a provenance hash in the final JSON.
+	bool manifestFixtureExecutionPassed = manifestContract.semanticCasesValid;
+	std::size_t executedManifestCaseCount = 0U;
+	if(manifestFixtureExecutionPassed) {
+		for(const nlohmann::json& fixture : manifestContract.document.at("fixtures")) {
+			for(auto profile = fixture.at("profiles").begin(); profile != fixture.at("profiles").end(); ++profile) {
+				for(const nlohmann::json& scenario : manifestContract.document.at("cases")) {
+					Ground::GroundRouteFixtureRequest request{};
+					request.fixtureId = fixture.at("id").get<std::string>();
+					request.caseId = scenario.at("id").get<std::string>();
+					request.sourceHash = fixture.at("sourceHash").get<std::string>();
+					request.profileHash = profile.value().get<std::string>();
+					request.profile = NavigationProfile::Defaults();
+					const Ground::GroundRouteFixtureResult actual = Ground::GroundRouteQuery::EvaluateFixture(request);
+					const nlohmann::json& expected = scenario.at("expected");
+					manifestFixtureExecutionPassed = manifestFixtureExecutionPassed
+						&& ToString(actual.outcome) == expected.at("outcome").get<std::string>()
+						&& ToString(actual.reason) == expected.at("reason").get<std::string>();
+					++executedManifestCaseCount;
+				}
+			}
+		}
+	}
+
+	// The explicit failure contract is exercised through public entry points. No
+	// branch below labels a synthetic result as a real navigation outcome.
+	const NavigationSystem::ObjectRouteReceipt invalidEndpointReceipt = system.RequestRoute(
+		objects, TerraEngine::EMPTY_UUID, destination, NavigationProfile::Defaults());
+	NavigationProfile invalidProfile = NavigationProfile::Defaults();
+	invalidProfile.radiusMetres = 0.0;
+	const NavigationSystem::ObjectRouteReceipt invalidProfileReceipt = system.RequestRoute(
+		objects, workloadObjectIds.front(), destination, invalidProfile);
+	const Ground::GroundRouteFixtureResult unreachableResult = Ground::GroundRouteQuery::EvaluateFixture(
+		{"GroundTerrain", "connection-disabled", "fixture", "profile", NavigationProfile::Defaults(), false});
+
+	const NavigationSceneBootstrapCapture missingTerrainCapture = CaptureAutomaticBootstrap(false);
+	const bool unavailableWorldPublished = !missingTerrainCapture.accepted && !missingTerrainCapture.terrainAvailable
+		&& missingTerrainCapture.reason == "NavigationUnavailableMissingTerrain"
+		&& system.PublishUnavailableTerrain(missingTerrainCapture.eligibleSourceIndex);
+	NavigationLocation unavailableDestination = destination;
+	if(unavailableWorldPublished && system.PublishedWorld())
+		unavailableDestination.world = system.PublishedWorld()->world;
+	const NavigationSystem::ObjectRouteReceipt unavailableReceipt = system.RequestRoute(
+		objects, workloadObjectIds.front(), unavailableDestination, NavigationProfile::Defaults());
+	system.Update(0.0F);
+	const auto unavailableRead = system.ReadRequest(unavailableReceipt.request);
+	const bool unavailableMissingTerrainPassed = unavailableWorldPublished && unavailableReceipt.Succeeded()
+		&& unavailableRead.record.has_value() && unavailableRead.record->outcome == NavigationOutcome::UnavailableCoverage
+		&& unavailableRead.record->reason == NavigationReason::MissingTerrain;
+
+	const NavigationSceneBootstrapCapture recoveredCapture = CaptureAutomaticBootstrap(true);
+	bool recoveredAutomaticWorld = QueueAutomaticBootstrap(system, recoveredCapture);
+	for(std::uint32_t frame = 0U; recoveredAutomaticWorld && frame < 4U; ++frame) system.Update(0.0F);
+	recoveredAutomaticWorld = recoveredAutomaticWorld && system.PublishedWorld() != nullptr
+		&& system.PublishedWorld()->terrainState == NavigationTerrainState::Available;
+	const NavigationWorldHandle recoveredWorld = recoveredAutomaticWorld ? system.PublishedWorld()->world : NavigationWorldHandle{};
+	NavigationLocation recoveredDestination = destination;
+	recoveredDestination.world = recoveredWorld;
+	const NavigationSystem::ObjectRouteReceipt cancellationReceipt = recoveredAutomaticWorld ? system.RequestRoute(
+		objects, workloadObjectIds.front(), recoveredDestination, NavigationProfile::Defaults()) : NavigationSystem::ObjectRouteReceipt{};
+	const bool cancellationRequested = cancellationReceipt.Succeeded() && system.CancelRequest(cancellationReceipt.request);
+	const auto cancellationRead = system.ReadRequest(cancellationReceipt.request);
+	const bool cancellationPassed = cancellationRequested && cancellationRead.record.has_value()
+		&& cancellationRead.record->outcome == NavigationOutcome::Cancelled
+		&& cancellationRead.record->reason == NavigationReason::Cancelled;
+	const bool releasedCancelledRequest = cancellationPassed && system.ReleaseRequestResult(cancellationReceipt.request);
+	const bool releasedHandleRejected = releasedCancelledRequest
+		&& system.ReadRequest(cancellationReceipt.request).status != NavigationHandleStatus::Alive;
+
+	const NavigationSystem::ObjectRouteReceipt staleReceipt = recoveredAutomaticWorld ? system.RequestRoute(
+		objects, workloadObjectIds.front(), recoveredDestination, NavigationProfile::Defaults()) : NavigationSystem::ObjectRouteReceipt{};
+	system.RevokeAllOwners(NavigationReason::SceneReplaced);
+	const NavigationHandleStatus staleHandleStatus = staleReceipt.Succeeded()
+		? system.ReadRequest(staleReceipt.request).status : NavigationHandleStatus::Invalid;
+	const bool staleLifetimePassed = staleReceipt.Succeeded()
+		&& staleHandleStatus == NavigationHandleStatus::StaleWorld;
+	const NavigationSceneBootstrapCapture postRevokeCapture = CaptureAutomaticBootstrap(true);
+	bool postRevokeWorldReady = QueueAutomaticBootstrap(system, postRevokeCapture);
+	for(std::uint32_t frame = 0U; postRevokeWorldReady && frame < 4U; ++frame) system.Update(0.0F);
+	postRevokeWorldReady = postRevokeWorldReady && system.PublishedWorld() != nullptr
+		&& system.PublishedWorld()->terrainState == NavigationTerrainState::Available;
+	NavigationLocation postRevokeDestination = destination;
+	postRevokeDestination.world = postRevokeWorldReady ? system.PublishedWorld()->world : NavigationWorldHandle{};
+
+	// Fill the real bounded request store before its protected update. At least one
+	// public object request must return RejectedCapacity; all admitted records are
+	// then cancelled and released so the evidence itself does not retain memory.
+	std::vector<NavigationRequestHandle> capacityRequests;
+	capacityRequests.reserve(NavigationSettings::Defaults().maxAdmittedRequests + 1U);
+	bool capacityRejected = false;
+	for(std::uint32_t attempt = 0U; postRevokeWorldReady
+		&& attempt <= NavigationSettings::Defaults().maxAdmittedRequests; ++attempt) {
+		const NavigationSystem::ObjectRouteReceipt receipt = system.RequestRoute(objects,
+			workloadObjectIds[attempt % workloadObjectIds.size()], postRevokeDestination, NavigationProfile::Defaults());
+		if(receipt.Succeeded()) capacityRequests.push_back(receipt.request);
+		else capacityRejected = capacityRejected || (receipt.outcome == NavigationOutcome::RejectedCapacity
+			&& receipt.reason == NavigationReason::OutputLimit);
+	}
+	for(const NavigationRequestHandle request : capacityRequests) {
+		(void)system.CancelRequest(request);
+		(void)system.ReleaseRequestResult(request);
+	}
+
+	// Legacy authoring must reject before touching the live graph. The sentinel
+	// proves both scene and prefab decode remain detached and atomic.
+	const Object sceneSentinel = objects.createObject("Installed Legacy-Rejection Sentinel");
+	const std::size_t rootsBeforeLegacyDecode = objects.getRootObjects().size();
+	auto legacyDocument = [](std::string_view format, std::string_view retiredType, bool prefab) {
+		nlohmann::json document{{"format", format}, {"objects", nlohmann::json::array({
+			{{"name", "Rejected Legacy Navigation"}, {"uuid", "77777777777777777777777777777777"},
+				{"components", {{std::string(retiredType), nlohmann::json::object()}}}}})}};
+		// Prefab decoding first validates its envelope. Supply the ordinary source
+		// identity so both documents reach the same unknown-component hard break.
+		if(prefab) document["sourceId"] = "installed-navigation-legacy-rejection";
+		return document;
+	};
+	const TerraEngine::Scene::PreparedSceneDecode rejectedScene = Serializer::PrepareSceneDecode(
+		legacyDocument(TerraEngine::Scene::kTerraSceneUnboundedFormat, "NavigationAgentComponent", false));
+	const TerraEngine::Scene::PreparedSceneDecode rejectedPrefab = Serializer::PreparePrefabDecode(
+		legacyDocument(TerraEngine::Scene::kTerraPrefabUnboundedFormat, "NavigationSourceComponent", true));
+	const bool atomicLegacyRejectionPassed = !rejectedScene.accepted && !rejectedPrefab.accepted
+		&& rejectedScene.objects.empty() && rejectedPrefab.objects.empty()
+		&& rejectedScene.objectCount == 0U && rejectedPrefab.objectCount == 0U
+		&& rejectedScene.componentCount == 0U && rejectedPrefab.componentCount == 0U
+		&& rejectedScene.reason.find("unregistered component") != std::string::npos
+		&& rejectedPrefab.reason.find("unregistered component") != std::string::npos
+		&& objects.isObjectValid(sceneSentinel) && objects.getRootObjects().size() == rootsBeforeLegacyDecode;
+
+	// Publish a real streamed region and pair it with source loss/recovery. The
+	// stream-out first publishes an unavailable navigation world and query result;
+	// stream-in then rebuilds an automatic terrain-backed world before a new route.
+	streaming.SubmitObserverInterest({"navigation-validation-stream", TerraEngine::Scene::ObserverInterestKind::Automation,
+		postRevokeDestination.position, {}, 128.0, TerraEngine::Scene::ObserverInterestPriority::Normal, 1U});
+	streaming.Update(0.0F);
+	// The soak workload may already have published its own region and advanced
+	// that directory entry to Resident. Use an independent Prepared entry here so
+	// this semantic stream-out/stream-in check never depends on matrix ordering.
+	const TerraEngine::Scene::WorldRegionKey semanticStreamRegion{1, 0, 0};
+	const bool semanticStreamRegionPrepared = streaming.Directory().Upsert({semanticStreamRegion,
+		"navigation-semantic-stream.tenregion", manifestHash, 1U, 0U,
+		TerraEngine::Scene::WorldRegionState::Prepared, {}, {}});
+	auto streamSnapshot = std::make_shared<TerraEngine::Scene::WorldRegionSnapshot>();
+	streamSnapshot->key = semanticStreamRegion;
+	streamSnapshot->directoryRevision = 1U;
+	streamSnapshot->residencyGeneration = 1U;
+	streamSnapshot->contentHash = manifestHash;
+	streamSnapshot->correlationId = "navigation-validation-stream";
+	streaming.SubmitPreparedRegion({semanticStreamRegion, 1U, 1U, false, {}, std::move(streamSnapshot)});
+	const bool streamedRegionPublished = semanticStreamRegionPrepared
+		&& streaming.PublishAtFrameEnd(ResourceManager::Instance(), 1U);
+	const NavigationSceneBootstrapCapture streamOutCapture = CaptureAutomaticBootstrap(false);
+	const bool streamedOut = !streamOutCapture.accepted && system.PublishUnavailableTerrain(streamOutCapture.eligibleSourceIndex);
+	const NavigationSystem::ObjectRouteReceipt streamUnavailableReceipt = system.RequestRoute(objects,
+		workloadObjectIds.front(), postRevokeDestination, NavigationProfile::Defaults());
+	system.Update(0.0F);
+	const auto streamUnavailableRead = system.ReadRequest(streamUnavailableReceipt.request);
+	const NavigationSceneBootstrapCapture streamInCapture = CaptureAutomaticBootstrap(true);
+	bool streamedIn = QueueAutomaticBootstrap(system, streamInCapture);
+	for(std::uint32_t frame = 0U; streamedIn && frame < 4U; ++frame) system.Update(0.0F);
+	NavigationLocation streamDestination = postRevokeDestination;
+	streamDestination.world = streamedIn && system.PublishedWorld() ? system.PublishedWorld()->world : NavigationWorldHandle{};
+	const NavigationSystem::ObjectRouteReceipt streamRecoveredReceipt = streamedIn ? system.RequestRoute(objects,
+		workloadObjectIds.front(), streamDestination, NavigationProfile::Defaults()) : NavigationSystem::ObjectRouteReceipt{};
+	system.Update(0.0F);
+	const auto streamRecoveredRead = system.ReadRequest(streamRecoveredReceipt.request);
+	const bool streamingWorldQueryPassed = streamedRegionPublished && streamedOut
+		&& streamUnavailableRead.record.has_value() && streamUnavailableRead.record->outcome == NavigationOutcome::UnavailableCoverage
+		&& streamUnavailableRead.record->reason == NavigationReason::MissingTerrain
+		&& streamRecoveredReceipt.Succeeded() && streamRecoveredRead.record.has_value()
+		&& streamRecoveredRead.record->outcome == NavigationOutcome::Complete;
+
 	const std::set<std::string> distinctInvalidExplanations(invalidExplanations.begin(), invalidExplanations.end());
 	const bool usabilityPassed = invalidExplanations.empty() || distinctInvalidExplanations.size() >= 5U;
 	nlohmann::json modeDenominatorEvidence = nlohmann::json::object();
@@ -789,9 +1278,34 @@ int main(int argc, char** argv)
 	const double measuredFramesPerSecond = medianFrameMicroseconds == 0U ? 1'000'000.0
 		: 1'000'000.0 / static_cast<double>(medianFrameMicroseconds);
 	const bool performanceRequested = std::find(options.matrices.begin(), options.matrices.end(), "performance") != options.matrices.end();
-	const bool success = objectDestinationRoutePassed && objectTargetMovementPassed
-		&& submitted > 0U && registeredAgents.size() == options.agents
+	// A successful soak must prove every generated mutation had a matching copied
+	// companion and that publication retired the entire dirty dependency batch.
+	// Route success alone is insufficient because an off-corridor source can leave
+	// a bounded rebuild queue permanently full without changing that route.
+	const bool soakDynamicMutationContractPassed = !soakRequested
+		|| (expectedSoakDynamicReceipts != 0U
+			&& dynamicGeometryStagesAccepted == expectedSoakDynamicReceipts
+			&& dynamicReceiptsAccepted == expectedSoakDynamicReceipts
+			&& everySoakGeometryStageAccepted && everySoakDynamicReceiptAccepted
+			&& soakDirtyIndexDrained && finalSoakPendingPreparationCount == 0U
+			&& finalSoakDirtyCoverageCount == 0U && finalSoakDirtySeamCount == 0U);
+	const bool semanticContractPassed = manifestContract.parsed && manifestContract.semanticCasesValid
+		&& manifestContract.dynamicCasesValid && manifestContract.streamingCasesValid && manifestContract.lifecycleCasesValid
+		&& manifestFixtureExecutionPassed && automaticCapturePassed && postDynamicWorldRecovered && objectLocationRoutePassed
+		&& objectDestinationRoutePassed && workloadProbePassed && unavailableMissingTerrainPassed
+		&& invalidEndpointReceipt.outcome == NavigationOutcome::InvalidEndpoint
+		&& invalidEndpointReceipt.reason == NavigationReason::InvalidStart
+		&& invalidProfileReceipt.outcome == NavigationOutcome::InvalidRequest
+		&& unreachableResult.outcome == NavigationOutcome::Unreachable
+		&& unreachableResult.reason == NavigationReason::MissingSupport
+		&& cancellationPassed && staleLifetimePassed && releasedHandleRejected && dynamicPublicationProbePassed
+		&& capacityRejected && atomicLegacyRejectionPassed && streamingWorldQueryPassed && soakDynamicMutationContractPassed;
+	const bool qualificationObjectLoadPassed = !options.qualification
+		|| (workloadObjectIds.size() == 256U && options.agents == 256U && options.requestsPerSecond == 100U);
+	const bool success = semanticContractPassed && objectTargetMovementPassed
+		&& submitted > 0U && objects.getRootObjects().size() >= workloadObjectIds.size() + 2U
 		&& failed == 0U && lifecycleFailures == 0U && usabilityPassed
+		&& qualificationObjectLoadPassed
 		&& postIdleUnexpectedWork == 0U && (!options.qualification || (droppedRawSamples == 0U
 			&& scheduleCountSatisfied && normalWorkloadsHealthy
 			&& (!performanceRequested || (!frameSamplesMicroseconds.empty() && measuredFramesPerSecond >= 60.0))
@@ -802,17 +1316,46 @@ int main(int argc, char** argv)
 	const nlohmann::json content = {
 		{"completed", completed}, {"durationSeconds", options.durationSeconds}, {"failed", failed},
 		{"lane", lane}, {"matrices", options.matrices}, {"rejected", rejected}, {"submitted", submitted},
-		{"agents", options.agents}, {"registeredAgents", registeredAgents.size()}, {"requestsPerSecond", options.requestsPerSecond},
+		{"agents", options.agents}, {"registeredObjects", options.agents}, {"requestsPerSecond", options.requestsPerSecond},
+		{"ordinaryWorkloadObjectCount", workloadObjectIds.size()},
+		{"semanticChecks", {
+			{"manifestParsed", manifestContract.parsed}, {"manifestSemanticCasesValid", manifestContract.semanticCasesValid},
+			{"manifestDynamicCasesValid", manifestContract.dynamicCasesValid}, {"manifestStreamingCasesValid", manifestContract.streamingCasesValid},
+			{"manifestLifecycleCasesValid", manifestContract.lifecycleCasesValid}, {"manifestFixtureExecutionPassed", manifestFixtureExecutionPassed},
+			{"executedManifestCaseCount", executedManifestCaseCount}, {"automaticTerrainAndGeometryCapturePassed", automaticCapturePassed},
+			{"objectToLocationPassed", objectLocationRoutePassed}, {"objectToObjectPassed", objectDestinationRoutePassed},
+			{"unavailableMissingTerrainPassed", unavailableMissingTerrainPassed},
+			{"invalidEndpointPassed", invalidEndpointReceipt.outcome == NavigationOutcome::InvalidEndpoint},
+			{"invalidProfilePassed", invalidProfileReceipt.outcome == NavigationOutcome::InvalidRequest},
+			{"unreachablePassed", unreachableResult.outcome == NavigationOutcome::Unreachable},
+			{"cancellationPassed", cancellationPassed}, {"staleLifetimePassed", staleLifetimePassed},
+			{"releasedHandleRejected", releasedHandleRejected}, {"capacityRejected", capacityRejected},
+			{"atomicLegacyRejectionPassed", atomicLegacyRejectionPassed},
+			{"dynamicPublicationProbePassed", dynamicPublicationProbePassed},
+			{"streamingWorldQueryPassed", streamingWorldQueryPassed},
+			{"soakDynamicMutationContractPassed", soakDynamicMutationContractPassed},
+			{"qualificationObjectLoadPassed", qualificationObjectLoadPassed}, {"ordinaryWorkloadProbePassed", workloadProbePassed}}},
 		{"objectDestinationRoutePassed", objectDestinationRoutePassed},
 		{"objectDestinationRoutePointCount", destinationRoute.points.size()},
 		{"objectTargetMovementPassed", objectTargetMovementPassed},
 		{"objectTargetMovementSteps", objectTargetMovementSteps},
+		{"staleHandleStatus", std::string(ToString(staleHandleStatus))},
 		{"modeDenominators", modeDenominatorEvidence},
 		{"rawSamples", rawSamples}, {"rawSamplesDropped", droppedRawSamples},
 		{"firstRouteMicroseconds", firstRouteMeasured ? firstRouteMicroseconds : 0U},
 		{"idlePairs", options.idlePairs}, {"postIdleChecks", postIdleChecks}, {"postIdleUnexpectedWork", postIdleUnexpectedWork},
+		{"expectedSoakDynamicReceipts", expectedSoakDynamicReceipts},
+		{"dynamicGeometryStagesAccepted", dynamicGeometryStagesAccepted},
 		{"dynamicReceiptsAccepted", dynamicReceiptsAccepted}, {"dynamicRemovalReceiptsAccepted", dynamicRemovalReceiptsAccepted},
+		{"everySoakGeometryStageAccepted", everySoakGeometryStageAccepted},
+		{"everySoakDynamicReceiptAccepted", everySoakDynamicReceiptAccepted},
+		{"soakDirtyIndexDrained", soakDirtyIndexDrained},
+		{"finalSoakPendingPreparationCount", finalSoakPendingPreparationCount},
+		{"finalSoakDirtyCoverageCount", finalSoakDirtyCoverageCount},
+		{"finalSoakDirtySeamCount", finalSoakDirtySeamCount},
 		{"dynamicSamples", dynamicSamples},
+		{"metrics", { {"dynamicPublicationResponsivenessMilliseconds",
+			dynamicPublicationResponsivenessMilliseconds >= 0.0 ? nlohmann::json(dynamicPublicationResponsivenessMilliseconds) : nlohmann::json(nullptr)} }},
 		{"streamingPlansPrepared", streamingPlansPrepared}, {"streamingPublicationMeasured", streamingPublicationMeasured},
 		{"frameRateMeasured", !frameSamplesMicroseconds.empty()}, {"measuredFramesPerSecond", measuredFramesPerSecond},
 		{"medianFrameMicroseconds", medianFrameMicroseconds}, {"frameSamplesMicroseconds", frameSamplesMicroseconds},
@@ -824,6 +1367,9 @@ int main(int argc, char** argv)
 			{"buildSha256", buildHash}, {"sourceSha256", sourceHash}, {"settingsSha256", settingsHash},
 			{"workloadSha256", workloadHash}, {"renderer", "TerraEngine"}, {"powerMode", "unknown"}, {"workerCount", options.agents}}},
 		{"content", content}, {"contentSha256", Sha256Hex(std::string_view(content.dump()))},
+		{"metrics", { {"routeLatencyMilliseconds", Percentile(latencyMicroseconds, 0.95) / 1000.0},
+			{"dynamicPublicationResponsivenessMilliseconds", dynamicPublicationResponsivenessMilliseconds >= 0.0
+				? nlohmann::json(dynamicPublicationResponsivenessMilliseconds) : nlohmann::json(nullptr)} }},
 		{"lane", lane}, {"workloadId", workloadId}, {"success", success},
 		{"denominator", {{"attempted", submitted}, {"completed", completed}, {"cancelled", cancelled},
 			{"rejected", rejected}, {"failed", failed}, {"timedOut", timedOut}}},
@@ -840,7 +1386,6 @@ int main(int argc, char** argv)
 	output << evidence.dump(2);
 	if(!output.good()) return 5;
 	streaming.Shutdown();
-	if(ownsSharedTaskPool) taskPool.shutdown();
 	mutations.Clear();
 	objects.clear();
 	system.Shutdown();

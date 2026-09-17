@@ -7,6 +7,7 @@
 
 #include "Navigation/Ground/GroundRouteQuery.h"
 #include "Navigation/NavigationSettings.h"
+#include "Navigation/NavigationRouteValidity.h"
 #include "Navigation/NavigationSystem.h"
 #include "Navigation/NavigationTypes.h"
 
@@ -130,9 +131,26 @@ namespace TerraEngine::Tests
 			system.Update(0.0F);
 			const auto read = system.ReadRequest(handle);
 			context.Expect(read.record.has_value() && read.record->outcome == NavigationOutcome::UnavailableCoverage
-				&& read.record->reason == NavigationReason::MissingNeighbor,
+				&& (read.record->reason == NavigationReason::MissingTerrain
+					|| read.record->reason == NavigationReason::MissingNeighbor),
 				"Absent published coverage must terminate as UnavailableCoverage, never a synthetic Complete route.");
 			system.Shutdown();
+		});
+
+		registry.Add("Navigation.Query.RetainedObjectRoutesRejectStaleWorldAndMissingTerrain", [](TestContext& context) {
+			const NavigationObservationEvidence captured{
+				1U, 3U, 4U, 6U, 7U, 8U};
+			const NavigationRouteObservationValidation stale = ValidateNavigationRouteObservation(
+				captured, {2U, 3U, 4U, 6U, 9U, 8U});
+			const NavigationRouteObservationValidation missingTerrain = ValidateNavigationRouteObservation(
+				captured, {2U, 3U, 4U, 0U, 7U, 8U});
+
+			context.Expect(!stale.usable && stale.outcome == NavigationOutcome::Stale
+				&& stale.reason == NavigationReason::DirtyCoverage,
+				"A retained route must reject a newer world publication instead of consuming mixed-generation coverage.");
+			context.Expect(!missingTerrain.usable && missingTerrain.outcome == NavigationOutcome::UnavailableCoverage
+				&& missingTerrain.reason == NavigationReason::MissingTerrain,
+				"An unavailable terrain publication must stay distinct from a geometrically unreachable destination.");
 		});
 	}
 }

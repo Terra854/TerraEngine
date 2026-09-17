@@ -105,5 +105,27 @@ namespace TerraEngine::Tests
 				"Readers holding the old immutable root must remain safe after retirement.");
 			streaming.Shutdown();
 		});
+
+		registry.Add("Navigation.StreamingIntegration.ResidencyGenerationsAdvanceForAutomaticCapture", [](TestContext& context) {
+			auto& streaming = TerraEngine::Scene::WorldStreamingSystem::Instance();
+			streaming.Shutdown();
+			streaming.Initialize();
+			const std::uint64_t before = streaming.CurrentResidency().generation;
+			const WorldRegionKey key{11, 0, 11};
+			context.Expect(streaming.Directory().Upsert(MakeEntry(key, WorldRegionState::Prepared)),
+				"A region must be registered before its immutable residency can be observed by automatic capture.");
+			auto snapshot = std::make_shared<WorldRegionSnapshot>();
+			snapshot->key = key;
+			snapshot->directoryRevision = 1U;
+			// Publication validates the copied content identity before advancing the
+			// residency generation; use the directory's published hash, not a
+			// component mutation, to exercise the automatic-capture signal.
+			snapshot->contentHash = std::string(64U, 'a');
+			streaming.SubmitPreparedRegion({key, 1U, 1U, false, {}, snapshot});
+			context.Expect(streaming.PublishAtFrameEnd(ResourceManager::Instance(), 3U)
+				&& streaming.CurrentResidency().generation > before,
+				"A published streaming generation must signal engine capture even without a navigation component mutation.");
+			streaming.Shutdown();
+		});
 	}
 }

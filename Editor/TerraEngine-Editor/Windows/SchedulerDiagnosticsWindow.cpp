@@ -188,6 +188,22 @@ SchedulerDiagnosticsWindow::SchedulerDiagnosticsWindow(MainEditorSubsystem* wind
 {
 }
 
+void SchedulerDiagnosticsWindow::OnBeforeBegin()
+{
+	// Diagnostics tables expose many columns and are intended for inspection,
+	// not compact docking. Re-center the window on each appearance so stale
+	// saved coordinates cannot reopen the diagnostics surface off-screen.
+	const ImGuiViewport* viewport = ImGui::GetMainViewport();
+	const ImVec2 preferredSize(
+		std::min(1200.0f, viewport->WorkSize.x * 0.88f),
+		std::min(900.0f, viewport->WorkSize.y * 0.88f));
+	const ImVec2 center(
+		viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+		viewport->WorkPos.y + viewport->WorkSize.y * 0.5f);
+	ImGui::SetNextWindowSize(preferredSize, ImGuiCond_Appearing);
+	ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+}
+
 void SchedulerDiagnosticsWindow::OnGui()
 {
 	if (!m_IsVisible)
@@ -217,7 +233,7 @@ void SchedulerDiagnosticsWindow::OnGui()
 	{
 		ImGui::TextDisabled("Waiting for UI preparation diagnostics.");
 	}
-	else if (ImGui::BeginTable("SchedulerDiagnosticsUiPreparation", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	else if (ImGui::BeginTable("SchedulerDiagnosticsUiPreparation", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX | ImGuiTableFlags_NoSavedSettings))
 	{
 		ImGui::TableSetupColumn("Docs");
 		ImGui::TableSetupColumn("Requests");
@@ -312,13 +328,13 @@ void SchedulerDiagnosticsWindow::DrawSchedulerSummary()
 		ImGui::TextDisabled("No issues.");
 	}
 
-	if (!summary.diagnostics.empty() && ImGui::BeginTable("SchedulerDiagnosticsTable", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+	if (!summary.diagnostics.empty() && ImGui::BeginTable("SchedulerDiagnosticsTable", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX | ImGuiTableFlags_NoSavedSettings))
 	{
-		ImGui::TableSetupColumn("Severity");
-		ImGui::TableSetupColumn("Category");
-		ImGui::TableSetupColumn("System");
-		ImGui::TableSetupColumn("Resource");
-		ImGui::TableSetupColumn("Message");
+		ImGui::TableSetupColumn("Severity", ImGuiTableColumnFlags_WidthFixed, 88.0f);
+		ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthFixed, 130.0f);
+		ImGui::TableSetupColumn("System", ImGuiTableColumnFlags_WidthFixed, 190.0f);
+		ImGui::TableSetupColumn("Resource", ImGuiTableColumnFlags_WidthFixed, 190.0f);
+		ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthFixed, 430.0f);
 		ImGui::TableHeadersRow();
 		for (const TerraEngine::Scheduling::ScheduleDiagnostic& diagnostic : summary.diagnostics)
 		{
@@ -466,13 +482,13 @@ void SchedulerDiagnosticsWindow::DrawExecutionTelemetrySummary()
 	{
 		ImGui::TextDisabled("Waiting for workload decision records.");
 	}
-	else if (ImGui::BeginTable("SchedulerDiagnosticsExecutionRecords", 13, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+	else if (ImGui::BeginTable("SchedulerDiagnosticsExecutionRecords", 13, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX | ImGuiTableFlags_NoSavedSettings))
 	{
-		ImGui::TableSetupColumn("Workload");
+		ImGui::TableSetupColumn("Workload", ImGuiTableColumnFlags_WidthFixed, 240.0f);
 		ImGui::TableSetupColumn("Active");
 		ImGui::TableSetupColumn("Ready");
-		ImGui::TableSetupColumn("Path");
-		ImGui::TableSetupColumn("Status");
+		ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+		ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 140.0f);
 		ImGui::TableSetupColumn("Partition");
 		ImGui::TableSetupColumn("Worker");
 		ImGui::TableSetupColumn("Queue");
@@ -553,7 +569,7 @@ void SchedulerDiagnosticsWindow::DrawExecutionTelemetrySummary()
 		{
 			ImGui::TextDisabled("ThreadPool has not initialized workers.");
 		}
-		else if (ImGui::BeginTable("SchedulerDiagnosticsThreadPoolWorkers", 10, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+		else if (ImGui::BeginTable("SchedulerDiagnosticsThreadPoolWorkers", 10, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX | ImGuiTableFlags_NoSavedSettings))
 		{
 			ImGui::TableSetupColumn("Worker");
 			ImGui::TableSetupColumn("State");
@@ -617,7 +633,7 @@ void SchedulerDiagnosticsWindow::DrawHardBoundarySummary()
 		return;
 	}
 
-	if (ImGui::BeginTable("SchedulerDiagnosticsHardBoundaries", 1, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	if (ImGui::BeginTable("SchedulerDiagnosticsHardBoundaries", 1, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX | ImGuiTableFlags_NoSavedSettings))
 	{
 		ImGui::TableSetupColumn("Boundary");
 		ImGui::TableHeadersRow();
@@ -641,12 +657,12 @@ void SchedulerDiagnosticsWindow::DrawSafetyViolationSummary()
 		return;
 	}
 
-	if (ImGui::BeginTable("SchedulerDiagnosticsWorkerSafetyViolations", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+	if (ImGui::BeginTable("SchedulerDiagnosticsWorkerSafetyViolations", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX | ImGuiTableFlags_NoSavedSettings))
 	{
-		ImGui::TableSetupColumn("Severity");
-		ImGui::TableSetupColumn("Workload");
-		ImGui::TableSetupColumn("Operation");
-		ImGui::TableSetupColumn("Message");
+		ImGui::TableSetupColumn("Severity", ImGuiTableColumnFlags_WidthFixed, 88.0f);
+		ImGui::TableSetupColumn("Workload", ImGuiTableColumnFlags_WidthFixed, 220.0f);
+		ImGui::TableSetupColumn("Operation", ImGuiTableColumnFlags_WidthFixed, 220.0f);
+		ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthFixed, 430.0f);
 		ImGui::TableHeadersRow();
 		for (const TerraEngine::Scheduling::WorkerSafetyViolation& violation : violations)
 		{
@@ -782,7 +798,7 @@ void SchedulerDiagnosticsWindow::DrawScriptingSummary()
 	const ScriptingSystem::ScriptFrameReadView& readView = ScriptingSystem::Instance().GetLatestScriptFrameReadView();
 	if (!readView.scriptRecords.empty() && ImGui::TreeNode("Script Instances"))
 	{
-		if (ImGui::BeginTable("SchedulerDiagnosticsScriptInstances", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+		if (ImGui::BeginTable("SchedulerDiagnosticsScriptInstances", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX | ImGuiTableFlags_NoSavedSettings))
 		{
 			ImGui::TableSetupColumn("Object");
 			ImGui::TableSetupColumn("Script Type");
@@ -1151,9 +1167,9 @@ void SchedulerDiagnosticsWindow::DrawEcsGraphSummaries()
 		}
 
 		ImGui::Text("State: %s, %s", summary.valid ? "valid" : "invalid", summary.completed ? "completed" : "incomplete");
-		if (ImGui::BeginTable((graphId + "Queries").c_str(), 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+		if (ImGui::BeginTable((graphId + "Queries").c_str(), 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX | ImGuiTableFlags_NoSavedSettings))
 		{
-			ImGui::TableSetupColumn("Query");
+			ImGui::TableSetupColumn("Query", ImGuiTableColumnFlags_WidthFixed, 260.0f);
 			ImGui::TableSetupColumn("Policy");
 			ImGui::TableSetupColumn("Work");
 			ImGui::TableSetupColumn("Invalidated");

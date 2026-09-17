@@ -327,7 +327,7 @@ private:
 	// Inspector, Scene View, automation, and editor lifecycle.
 	std::shared_ptr<TerrainWindow> m_TerrainTools;
 	// Navigation authoring keeps its own complete-state history snapshot so Play
-	// Mode can restore source/profile/connection settings at the same lifecycle
+	// Mode can restore profile/settings history at the same lifecycle
 	// boundary as the scene graph.
 	std::unique_ptr<TerraEngine::Editor::Navigation::NavigationAuthoringTransactions>
 		m_NavigationAuthoringTransactions;

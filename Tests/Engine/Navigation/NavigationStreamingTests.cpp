@@ -3,7 +3,9 @@
 #include "../TestHarness.h"
 
 #include "Navigation/Geometry/ProceduralNavigationSource.h"
+#include "Navigation/Dynamic/NavigationDirtyIndex.h"
 #include "Navigation/Streaming/NavigationContentProvider.h"
+#include "Resource/ResourceManager.h"
 
 namespace TerraEngine::Tests
 {
@@ -49,6 +51,36 @@ namespace TerraEngine::Tests
 			const auto cache = NavigationContentProvider::LoadCacheChunk(unmounted, "Navigation/Cache/chunk.tenav");
 			context.Expect(!geometry.Succeeded() && !cache.Succeeded(),
 				"Missing mounted companions and cache chunks must fail closed without loose-file fallback.");
+		});
+
+		registry.Add("Navigation.Streaming.LoadAndUnloadUseStableCopiedSourceGenerations", [](TestContext& context) {
+			NavigationDirtyIndex dirty({});
+			const NavigationUuid streamedSource = NavigationUuid::FromString("522c21a0-d927-4771-96df-42f8b10a004d");
+			const NavigationGeometryBounds bounds{{10.0F, 0.0F, 10.0F}, {14.0F, 2.0F, 14.0F}};
+			NavigationDynamicSourceChange loaded{};
+			loaded.source = streamedSource;
+			loaded.sourceRevision = 44U;
+			loaded.physicalReadyRevision = 17U;
+			loaded.kind = NavigationDynamicChangeKind::Created;
+			loaded.currentBounds = bounds;
+			context.Expect(dirty.CommitSourceChange(loaded).accepted,
+				"A streamed-in eligible source must enter dirty preparation using its copied identity and generation.");
+			NavigationDynamicSourceChange unloaded = loaded;
+			unloaded.sourceRevision = 45U;
+			unloaded.physicalReadyRevision = 18U;
+			unloaded.kind = NavigationDynamicChangeKind::Removed;
+			unloaded.previousBounds = bounds;
+			context.Expect(dirty.CommitSourceChange(unloaded).accepted
+				&& dirty.ObserveAtProtectedBoundary().Contains(streamedSource, unloaded.sourceRevision),
+				"A streamed-out source must invalidate at the protected boundary before any replacement build completes.");
+		});
+
+		registry.Add("Navigation.Streaming.CheckedMeshCompanionRejectsRemovedAuthoringMetadata", [](TestContext& context) {
+			NavigationGeometrySnapshotDescriptor descriptor{};
+			const auto result = ResourceManager::Instance().LoadNavigationGeometryCompanion(
+				TerraEngine::GenerateUUID(), "Navigation/Geometry/legacy.tenavsource", descriptor, 1U);
+			context.Expect(!result.accepted && result.reason == "NavigationGeometryCompanionExtensionRejected",
+				"Automatic mesh eligibility must accept checked .tenavgeom companions only, never removed .tenavsource metadata.");
 		});
 	}
 }

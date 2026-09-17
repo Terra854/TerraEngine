@@ -59,6 +59,9 @@ namespace TerraEngine::Physics {
 		// the authored component generation kept by the existing generation map.
 		std::unordered_map<TerraEngine::UUID, PhysicsBodyHandle> bodyHandles;
 		std::unordered_map<TerraEngine::UUID, PhysicsGeneration> bodyGenerations;
+		// Character-only objects publish through the same deferred Transform
+		// transaction protocol, but validate against their own provider handle.
+		std::unordered_map<TerraEngine::UUID, PhysicsCharacterHandle> characterHandles;
 		std::unordered_map<TerraEngine::UUID, PhysicsGeneration> constraintGenerations;
 		std::unordered_map<TerraEngine::UUID, PhysicsGeneration> characterGenerations;
 		std::uint64_t scenePublicationGeneration = 0;

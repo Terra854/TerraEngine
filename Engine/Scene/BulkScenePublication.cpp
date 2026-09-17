@@ -22,6 +22,17 @@ namespace TerraEngine::Scene {
 		packet.reservedComponentCount = prepared.componentCount;
 		packet.reservedHierarchyCount = prepared.hierarchyCount;
 		packet.cancelled = prepared.cancelled || !prepared.accepted;
+		packet.rejectionReason = prepared.reason;
+		if (packet.cancelled)
+		{
+			// A rejected worker decode is diagnostic-only. Keeping the packet empty
+			// prevents a future caller from bypassing preflight and materializing a
+			// valid prefix of an unsupported document.
+			packet.reservedObjectCount = 0U;
+			packet.reservedComponentCount = 0U;
+			packet.reservedHierarchyCount = 0U;
+			return packet;
+		}
 		packet.objects = prepared.objects;
 		for (const PreparedSceneObjectRecord& record : packet.objects) {
 			if (record.object.contains("uuid") && record.object["uuid"].is_string()) {
@@ -33,7 +44,12 @@ namespace TerraEngine::Scene {
 
 	BulkScenePublicationPreflight PreflightBulkScenePublication(const BulkScenePublicationPacket& packet, const ObjectManager& objects)
 	{
-		if (packet.cancelled) return {false, "prepared scene packet was cancelled or rejected"};
+		if (packet.cancelled)
+		{
+			return {false, packet.rejectionReason.empty()
+				? "prepared scene packet was cancelled or rejected"
+				: packet.rejectionReason};
+		}
 		if (packet.expectedSceneGeneration == 0U || packet.expectedSceneGeneration != objects.GetSceneGeneration()) {
 			return {false, "prepared scene packet belongs to a stale scene generation"};
 		}

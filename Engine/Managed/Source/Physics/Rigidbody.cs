@@ -1,11 +1,19 @@
 // Rigidbody.cs - generation-safe managed rigid body command façade.
 
 using System;
+using System.Threading;
 
 namespace TerraEngine
 {
 	public sealed class Rigidbody : Component
 	{
+		// Rigidbodies use producer 1 at the native boundary. A process-wide sequence
+		// prevents separate managed bodies from reusing a queue ordering key while
+		// preserving the dedicated character-controller producer lane.
+		private const ulong ManagedRigidbodyProducerId = 1UL;
+		private static long s_managedProducerSequence;
+		private static readonly object s_submissionGate = new();
+
 		// The engine fills this identity when a component is resolved. Scripts can
 		// retain it, but every native call revalidates it at the protected boundary.
 		public PhysicsBodyHandle Handle { get; internal set; }
@@ -152,15 +160,34 @@ namespace TerraEngine
 			// A component added during the current frame may not have had a physics
 			// publication when its wrapper was constructed, so resolve again here.
 			if (!Handle.IsValid) Physics.BindComponent(this, Object);
-			NativePhysicsBodyCommandRequest request = new()
+			// The native queue admits only increasing producer sequences. Keep sequence
+			// reservation and this immediate enqueue together, without locking component
+			// binding or the deferred physics work that follows the protected boundary.
+			lock (s_submissionGate)
 			{
-				Header = PhysicsAbiHeader.For<NativePhysicsBodyCommandRequest>(), Body = Handle, Identity = Identity, Kind = kind,
-				Value = value, Point = point, Pose = pose, AngularValue = angularValue, Duration = duration,
-				EffectiveTick = effectiveTick, ProducerId = 1, ProducerSequence = correlationId == 0 ? 1UL : correlationId, CorrelationId = correlationId
-			};
-			NativePhysicsCommandReceipt receipt = new() { Header = PhysicsAbiHeader.For<NativePhysicsCommandReceipt>() };
-			InternalCalls.Native_Physics_SubmitBodyCommand(ref request, ref receipt);
-			return new PhysicsCommandReceipt(receipt);
+				ulong producerSequence = NextManagedProducerSequence();
+				// A zero caller correlation means "unspecified". Use the unique producer
+				// sequence as trace evidence while preserving caller-provided correlations.
+				ulong resolvedCorrelation = correlationId == 0 ? producerSequence : correlationId;
+				NativePhysicsBodyCommandRequest request = new()
+				{
+					Header = PhysicsAbiHeader.For<NativePhysicsBodyCommandRequest>(), Body = Handle, Identity = Identity, Kind = kind,
+					Value = value, Point = point, Pose = pose, AngularValue = angularValue, Duration = duration,
+					EffectiveTick = effectiveTick, ProducerId = ManagedRigidbodyProducerId, ProducerSequence = producerSequence, CorrelationId = resolvedCorrelation
+				};
+				NativePhysicsCommandReceipt receipt = new() { Header = PhysicsAbiHeader.For<NativePhysicsCommandReceipt>() };
+				InternalCalls.Native_Physics_SubmitBodyCommand(ref request, ref receipt);
+				return new PhysicsCommandReceipt(receipt);
+			}
+		}
+
+		private static ulong NextManagedProducerSequence()
+		{
+			// The submission gate preserves arrival order; Interlocked reserves a
+			// unique value. Skip the invalid zero value if the signed counter wraps.
+			long sequence = Interlocked.Increment(ref s_managedProducerSequence);
+			if (sequence == 0) sequence = Interlocked.Increment(ref s_managedProducerSequence);
+			return unchecked((ulong)sequence);
 		}
 	}
 }

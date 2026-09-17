@@ -8,6 +8,9 @@
 
 #include "Navigation/Dynamic/NavigationPreparation.h"
 #include "Navigation/Dynamic/NavigationPublication.h"
+#include "Navigation/NavigationSystem.h"
+#include "Components/Transform.h"
+#include "Core/Object/ObjectManager.h"
 
 #include <array>
 #include <cstddef>
@@ -130,6 +133,37 @@ namespace TerraEngine::Tests
 				"Worker packets must not observe caller mutation after submission; shared input is copied or frozen before dispatch.");
 			context.Expect(coordinator.SharedInputBytesCharged() == 64U,
 				"One shared immutable buffer must be charged once, not once per build/search consumer.");
+		});
+
+		registry.Add("Navigation.DynamicConcurrency.IndependentObjectRequestsDoNotShareCancellation", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			NavigationSystem& system = NavigationSystem::Instance();
+			system.Shutdown();
+			system.Initialize();
+			const auto world = system.PublishedWorld();
+			const Object firstObject = objects.createObject("Concurrent First");
+			const Object secondObject = objects.createObject("Concurrent Second");
+			(void)objects.AddComponent<Transform>(firstObject);
+			(void)objects.AddComponent<Transform>(secondObject);
+			NavigationLocation destination{};
+			if(world) destination.world = world->world;
+			destination.position.offsetMetres = {3.0, 0.0, 0.0};
+			const auto first = world ? system.RequestRoute(objects, objects.getUUID(firstObject),
+				destination, NavigationProfile::Defaults()) : NavigationSystem::ObjectRouteReceipt{};
+			const auto second = world ? system.RequestRoute(objects, objects.getUUID(secondObject),
+				destination, NavigationProfile::Defaults()) : NavigationSystem::ObjectRouteReceipt{};
+			const bool firstCancelled = system.CancelRequest(first.request);
+			const auto firstRead = system.ReadRequest(first.request);
+			const auto secondRead = system.ReadRequest(second.request);
+
+			context.Expect(first.Succeeded() && second.Succeeded() && firstCancelled,
+				"Two ordinary objects must admit independent generation-qualified requests without shared agent state.");
+			context.Expect(firstRead.record.has_value() && firstRead.record->outcome == NavigationOutcome::Cancelled
+				&& secondRead.record.has_value() && secondRead.record->outcome != NavigationOutcome::Cancelled,
+				"Cancelling one object route must not cancel another owner’s request.");
+			system.Shutdown();
+			objects.clear();
 		});
 	}
 }

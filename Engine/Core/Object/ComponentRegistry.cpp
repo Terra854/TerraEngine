@@ -22,9 +22,6 @@
 #include "Components/Physics/ColliderSetComponent.h"
 #include "Components/Physics/ConstraintSetComponent.h"
 #include "Components/Physics/RigidBodyComponent.h"
-#include "Components/Navigation/NavigationAgentComponent.h"
-#include "Components/Navigation/NavigationConnectionComponent.h"
-#include "Components/Navigation/NavigationSourceComponent.h"
 #include "Physics/PhysicsTypes.h"
 
 void ComponentRegistry::RegisterAllComponents() {
@@ -96,7 +93,4 @@ void ComponentRegistry::RegisterAllComponents() {
 	ColliderSetComponent::registerType();
 	ConstraintSetComponent::registerType();
 	CharacterControllerComponent::registerType();
-	NavigationSourceComponent::registerType();
-	NavigationAgentComponent::registerType();
-	NavigationConnectionComponent::registerType();
 }

@@ -18,6 +18,7 @@
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Collision/CollidePointResult.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/CollisionDispatch.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/CastResult.h>
@@ -38,6 +39,7 @@
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/TaperedCapsuleShape.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
+#include <Jolt/Geometry/RayAABox.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
 #include <Jolt/Physics/Constraints/PointConstraint.h>
 #include <Jolt/Physics/Constraints/DistanceConstraint.h>
@@ -837,6 +839,135 @@ namespace TerraEngine::Physics::Backend {
 			std::array<bool, kJoltObjectLayerCount> enabled{};
 		};
 
+		// Jolt deliberately leaves virtual-character membership to the host. This
+		// world-owned registry supplies that missing relationship while retaining
+		// TerraEngine's symmetric layer and mask policy for every pair. Every method
+		// is called under JoltPhysicsBackend::Impl::mutex because Jolt documents
+		// virtual-character pair traversal as a serialized provider boundary.
+		class TerraCharacterVsCharacterCollision final : public JPH::CharacterVsCharacterCollision {
+		public:
+			void Configure(const TerraObjectLayerPairFilter& configuredPairs) {
+				pairs = &configuredPairs;
+				characters.clear();
+			}
+
+			void Add(JPH::CharacterVirtual* character, std::uint8_t layer, std::uint32_t mask) {
+				if(character == nullptr || layer >= kJoltObjectLayerCount) return;
+				const auto found = std::find_if(characters.begin(), characters.end(),
+					[character](const Entry& candidate) { return candidate.character == character; });
+				if(found == characters.end()) characters.push_back({character, layer, mask});
+			}
+
+			void Remove(const JPH::CharacterVirtual* character) {
+				characters.erase(std::remove_if(characters.begin(), characters.end(),
+					[character](const Entry& candidate) { return candidate.character == character; }), characters.end());
+			}
+
+			void Clear() { characters.clear(); }
+
+			void CollideCharacter(
+				const JPH::CharacterVirtual* source,
+				JPH::RMat44Arg sourceTransform,
+				const JPH::CollideShapeSettings& sourceSettings,
+				JPH::RVec3Arg baseOffset,
+				JPH::CollideShapeCollector& collector) const override {
+				const Entry* sourceEntry = Find(source);
+				if(sourceEntry == nullptr) return;
+				const JPH::Mat44 transform = sourceTransform.PostTranslated(-baseOffset).ToMat44();
+				const JPH::Shape* sourceShape = source->GetShape();
+				if(sourceShape == nullptr) return;
+				const JPH::AABox sourceBounds = sourceShape->GetWorldSpaceBounds(transform, JPH::Vec3::sOne());
+				for(const Entry& candidate : characters) {
+					if(candidate.character == source || collector.ShouldEarlyOut() || !ShouldCollide(*sourceEntry, candidate)) continue;
+					const JPH::Mat44 candidateTransform = candidate.character->GetCenterOfMassTransform().PostTranslated(-baseOffset).ToMat44();
+					const JPH::Shape* candidateShape = candidate.character->GetShape();
+					if(candidateShape == nullptr) continue;
+					JPH::CollideShapeSettings settings = sourceSettings;
+					settings.mMaxSeparationDistance = sourceSettings.mMaxSeparationDistance + candidate.character->GetCharacterPadding();
+					JPH::AABox candidateBounds = candidateShape->GetWorldSpaceBounds(candidateTransform, JPH::Vec3::sOne());
+					candidateBounds.ExpandBy(JPH::Vec3::sReplicate(settings.mMaxSeparationDistance));
+					if(!sourceBounds.Overlaps(candidateBounds)) continue;
+					collector.SetUserData(reinterpret_cast<JPH::uint64>(candidate.character));
+					JPH::CollisionDispatch::sCollideShapeVsShape(sourceShape, candidateShape,
+						JPH::Vec3::sOne(), JPH::Vec3::sOne(), transform, candidateTransform,
+						JPH::SubShapeIDCreator(), JPH::SubShapeIDCreator(), settings, collector);
+				}
+				collector.SetUserData(0U);
+			}
+
+			void CastCharacter(
+				const JPH::CharacterVirtual* source,
+				JPH::RMat44Arg sourceTransform,
+				JPH::Vec3Arg direction,
+				const JPH::ShapeCastSettings& sourceSettings,
+				JPH::RVec3Arg baseOffset,
+				JPH::CastShapeCollector& collector) const override {
+				const Entry* sourceEntry = Find(source);
+				if(sourceEntry == nullptr) return;
+				const JPH::Mat44 transform = sourceTransform.PostTranslated(-baseOffset).ToMat44();
+				const JPH::Shape* sourceShape = source->GetShape();
+				if(sourceShape == nullptr) return;
+				const JPH::ShapeCast shapeCast(sourceShape, JPH::Vec3::sOne(), transform, direction);
+				const JPH::Vec3 origin = shapeCast.mShapeWorldBounds.GetCenter();
+				const JPH::Vec3 extents = shapeCast.mShapeWorldBounds.GetExtent()
+					+ JPH::Vec3::sReplicate(sourceSettings.mExtraConvexRadius);
+				for(const Entry& candidate : characters) {
+					if(candidate.character == source || collector.ShouldEarlyOut() || !ShouldCollide(*sourceEntry, candidate)) continue;
+					const JPH::Mat44 candidateTransform = candidate.character->GetCenterOfMassTransform().PostTranslated(-baseOffset).ToMat44();
+					const JPH::Shape* candidateShape = candidate.character->GetShape();
+					if(candidateShape == nullptr) continue;
+					JPH::ShapeCastSettings settings = sourceSettings;
+					settings.mExtraConvexRadius = sourceSettings.mExtraConvexRadius + candidate.character->GetCharacterPadding();
+					JPH::AABox candidateBounds = candidateShape->GetWorldSpaceBounds(candidateTransform, JPH::Vec3::sOne());
+					candidateBounds.ExpandBy(extents + JPH::Vec3::sReplicate(candidate.character->GetCharacterPadding()));
+					if(!JPH::RayAABoxHits(origin, direction, candidateBounds.mMin, candidateBounds.mMax)) continue;
+					collector.SetUserData(reinterpret_cast<JPH::uint64>(candidate.character));
+					JPH::CollisionDispatch::sCastShapeVsShapeWorldSpace(shapeCast, settings, candidateShape,
+						JPH::Vec3::sOne(), {}, candidateTransform, JPH::SubShapeIDCreator(), JPH::SubShapeIDCreator(), collector);
+				}
+				collector.SetUserData(0U);
+			}
+
+		private:
+			struct Entry {
+				JPH::CharacterVirtual* character = nullptr;
+				std::uint8_t layer = 0U;
+				std::uint32_t mask = 0U;
+			};
+
+			const Entry* Find(const JPH::CharacterVirtual* character) const {
+				const auto found = std::find_if(characters.begin(), characters.end(),
+					[character](const Entry& candidate) { return candidate.character == character; });
+				return found != characters.end() ? &*found : nullptr;
+			}
+
+			bool ShouldCollide(const Entry& source, const Entry& candidate) const {
+				return pairs != nullptr && source.layer < kJoltObjectLayerCount && candidate.layer < kJoltObjectLayerCount
+					&& (source.mask & (1U << candidate.layer)) != 0U
+					&& (candidate.mask & (1U << source.layer)) != 0U
+					&& pairs->ShouldCollide(source.layer, candidate.layer);
+			}
+
+			const TerraObjectLayerPairFilter* pairs = nullptr;
+			std::vector<Entry> characters;
+		};
+
+		// Virtual characters are kinematic gameplay actors: each actor owns its
+		// motion intent, so a moving controller must not transfer its velocity into
+		// a stationary controller merely because both touch during the same step.
+		class TerraCharacterContactListener final : public JPH::CharacterContactListener {
+		public:
+			void OnCharacterContactAdded(
+				const JPH::CharacterVirtual*, const JPH::CharacterContact&, JPH::CharacterContactSettings& settings) override {
+				settings.mCanPushCharacter = false;
+			}
+
+			void OnCharacterContactPersisted(
+				const JPH::CharacterVirtual*, const JPH::CharacterContact&, JPH::CharacterContactSettings& settings) override {
+				settings.mCanPushCharacter = false;
+			}
+		};
+
 		class TerraObjectVsBroadPhaseFilter final : public JPH::ObjectVsBroadPhaseLayerFilter {
 		public:
 			void Configure(
@@ -982,6 +1113,18 @@ namespace TerraEngine::Physics::Backend {
 		};
 
 		struct CharacterRecord {
+			// Commands update this copied intent at their protected admission boundary.
+			// AdvanceCharacters consumes the one-shot flags exactly once per fixed tick.
+			struct PendingIntent {
+				PhysicsVector3 desiredVelocity;
+				PhysicsPose pose;
+				float jumpSpeed = 0.0F;
+				float resizeHeight = 0.0F;
+				bool jumpRequested = false;
+				bool resizeRequested = false;
+				bool teleportRequested = false;
+				bool recoverPenetration = true;
+			};
 			PhysicsCharacterHandle handle;
 			TerraEngine::UUID objectId{};
 			PhysicsGeneration objectGeneration = 0U;
@@ -991,6 +1134,7 @@ namespace TerraEngine::Physics::Backend {
 			float height = 0.0F;
 			PhysicsCharacterCreateRequest settings;
 			std::unique_ptr<JPH::CharacterVirtual> character;
+			PendingIntent intent;
 			bool enabled = true;
 			bool committed = false;
 			std::uint64_t stagingToken = 0U;
@@ -1423,6 +1567,8 @@ namespace TerraEngine::Physics::Backend {
 		TerraBroadPhaseLayerInterface broadPhaseLayers;
 		TerraObjectLayerPairFilter objectPairFilter;
 		TerraObjectVsBroadPhaseFilter objectVsBroadPhaseFilter;
+		TerraCharacterVsCharacterCollision characterCollisions;
+		TerraCharacterContactListener characterContactListener;
 		PhysicsBackendWorldConfiguration worldConfiguration;
 		std::unordered_map<std::uint64_t, ShapeRecord> shapes;
 		// Recipes with the same nonzero stable hash share one immutable provider
@@ -1568,6 +1714,7 @@ namespace TerraEngine::Physics::Backend {
 				(void)key;
 				if(constraint.added) impl->physicsSystem->RemoveConstraint(constraint.constraint);
 			}
+			impl->characterCollisions.Clear();
 			impl->characters.clear();
 			impl->constraints.clear();
 			for(auto& [key, body] : impl->bodies) {
@@ -1586,6 +1733,7 @@ namespace TerraEngine::Physics::Backend {
 		impl->activeBodiesScratch.shrink_to_fit();
 		impl->pendingRemovedBodies.clear();
 		impl->constraints.clear();
+		impl->characterCollisions.Clear();
 		impl->characters.clear();
 		impl->constraintOrder.clear();
 		impl->characterOrder.clear();
@@ -1637,6 +1785,7 @@ namespace TerraEngine::Physics::Backend {
 			impl->broadPhaseLayers.Configure(configuration.settings);
 			impl->objectPairFilter.Configure(configuration.settings);
 			impl->objectVsBroadPhaseFilter.Configure(configuration.settings, impl->objectPairFilter);
+			impl->characterCollisions.Configure(impl->objectPairFilter);
 			impl->physicsSystem = std::make_unique<JPH::PhysicsSystem>();
 			impl->physicsSystem->Init(
 				configuration.maximumBodies,
@@ -1693,6 +1842,7 @@ namespace TerraEngine::Physics::Backend {
 			(void)key;
 			if(constraint.added) impl->physicsSystem->RemoveConstraint(constraint.constraint);
 		}
+		impl->characterCollisions.Clear();
 		impl->characters.clear();
 		impl->constraints.clear();
 		for(auto& [key, body] : impl->bodies) {
@@ -2507,6 +2657,10 @@ namespace TerraEngine::Physics::Backend {
 			|| request.collisionLayer >= kJoltObjectLayerCount) return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The virtual-character request is invalid or stale.");
 		const std::uint64_t key = HandleKey(request.handle);
 		if(impl->characters.contains(key)) return Rejected(PhysicsBackendErrorCode::InvalidState, "The character handle is already populated.");
+		if(impl->characters.size() >= impl->worldConfiguration.maximumBodies) {
+			return Rejected(PhysicsBackendErrorCode::CapacityExceeded,
+				"The virtual-character registry reached the active world's bounded admission capacity.");
+		}
 		PhysicsBackendResult staged = impl->EnsureStaging(staging, impl->worldConfiguration.world);
 		if(!staged.Succeeded()) return staged;
 		try {
@@ -2526,8 +2680,13 @@ namespace TerraEngine::Physics::Backend {
 			settings.mMaxSlopeAngle = request.maximumSlopeAngleRadians; settings.mCharacterPadding = request.contactPadding;
 			settings.mMass = request.mass; settings.mMaxStrength = request.maximumStrength; settings.mPenetrationRecoverySpeed = request.penetrationRecoverySpeed;
 			auto character = std::make_unique<JPH::CharacterVirtual>(&settings, ToJoltPosition(request.pose.position), ToJoltRotation(request.pose.rotation), impl->physicsSystem.get());
+			// The Jolt world does not discover virtual characters itself. Store the
+			// provider-owned registry at the world boundary so later updates can
+			// sweep against other committed controllers without an authored ColliderSet.
+			character->SetCharacterVsCharacterCollision(&impl->characterCollisions);
+			character->SetListener(&impl->characterContactListener);
 			impl->characters.emplace(key, Impl::CharacterRecord{request.handle, request.objectId, request.objectGeneration, request.componentGeneration,
-				request.shapeKind, request.radius, request.height, request, std::move(character), request.enabled, false, staging.value});
+				request.shapeKind, request.radius, request.height, request, std::move(character), {}, request.enabled, false, staging.value});
 			impl->staging.at(staging.value).characterKeys.push_back(key);
 			return Success("The Jolt virtual character was staged without update visibility.");
 		} catch(const std::exception& exception) {
@@ -2540,55 +2699,141 @@ namespace TerraEngine::Physics::Backend {
 		const PhysicsBackendResult ready = impl->CheckReady();
 		if(!ready.Succeeded()) return ready;
 		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(request.handle, impl->worldConfiguration.world)
-			|| !request.desiredVelocity.IsFinite() || !request.pose.IsFinite() || !IsUsableRotation(request.pose.rotation)
-			|| !std::isfinite(request.fixedDeltaTime) || request.fixedDeltaTime <= 0.0F) return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The virtual-character update is invalid or stale.");
+			|| !request.desiredVelocity.IsFinite()
+			// Move, jump, resize, and stop commands carry a zero-initialized pose
+			// across the fixed ABI because they never consume it. Validate that pose
+			// only for teleport, the one operation that actually applies it.
+			|| (request.teleportRequested && (!request.pose.IsFinite() || !IsUsableRotation(request.pose.rotation)))) {
+			return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The virtual-character update is invalid or stale.");
+		}
+		if((request.jumpRequested && (!std::isfinite(request.jumpSpeed) || request.jumpSpeed < 0.0F))
+			|| (request.resizeRequested && (!std::isfinite(request.resizeHeight) || request.resizeHeight <= 0.0F))) {
+			return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The virtual-character one-shot intent is invalid.");
+		}
 		auto found = impl->characters.find(HandleKey(request.handle));
 		if(found == impl->characters.end() || found->second.handle != request.handle || found->second.stagingToken != 0U
 			|| found->second.objectId != request.objectId || found->second.objectGeneration != request.objectGeneration || found->second.componentGeneration != request.componentGeneration) return Rejected(PhysicsBackendErrorCode::StaleHandle, "The virtual character identity is stale.");
 		auto& record = found->second;
+		if(request.resizeRequested && request.resizeHeight < 2.0F * record.radius) {
+			return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The requested character resize is invalid.");
+		}
 		record.enabled = request.enabled;
-		if(!record.enabled) return Success("The disabled virtual character retained its last published state.");
-		// Jolt documents character-vs-character callbacks as non-thread-safe. This
-		// provider boundary is therefore serialized under the backend mutex; Jolt's
-		// rigid-body solver still uses the engine-owned ThreadPool job adapter.
-		JPH::DefaultBroadPhaseLayerFilter broadPhase(impl->objectVsBroadPhaseFilter, static_cast<JPH::ObjectLayer>(record.settings.collisionLayer));
-		class CharacterObjectLayerFilter final : public JPH::ObjectLayerFilter {
-		public:
-			CharacterObjectLayerFilter(const TerraObjectLayerPairFilter& pairs, JPH::ObjectLayer source, std::uint32_t mask)
-				: pairs(pairs), source(source), mask(mask) { }
-			bool ShouldCollide(JPH::ObjectLayer candidate) const override {
-				return candidate < 32U && (mask & (1U << candidate)) != 0U && pairs.ShouldCollide(source, candidate);
-			}
-		private:
-			const TerraObjectLayerPairFilter& pairs;
-			JPH::ObjectLayer source;
-			std::uint32_t mask;
-		} objectLayer(impl->objectPairFilter, static_cast<JPH::ObjectLayer>(record.settings.collisionLayer), record.settings.collisionMask);
-		JPH::BodyFilter bodyFilter;
-		JPH::ShapeFilter shapeFilter;
-		if(request.teleportRequested) {
-			record.character->SetPosition(ToJoltPosition(request.pose.position)); record.character->SetRotation(ToJoltRotation(request.pose.rotation));
-			record.character->RefreshContacts(broadPhase, objectLayer, bodyFilter, shapeFilter, *impl->temporaryAllocator);
+		if(!record.enabled) {
+			// Disable is a cancellation boundary: a controller that is later enabled
+			// must not replay a delayed jump, resize, teleport, or stale velocity.
+			record.intent = {};
+			return Success("The disabled virtual character discarded pending motion intent.");
+		}
+		record.intent.desiredVelocity = request.desiredVelocity;
+		if(request.jumpRequested) {
+			record.intent.jumpRequested = true;
+			record.intent.jumpSpeed = request.jumpSpeed;
 		}
 		if(request.resizeRequested) {
-			if(!std::isfinite(request.resizeHeight) || request.resizeHeight < 2.0F * record.radius) return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The requested character height is invalid.");
-			JPH::ShapeSettings::ShapeResult shape = record.shapeKind == PhysicsShapeKind::Capsule
-				? JPH::CapsuleShapeSettings(0.5F * (request.resizeHeight - 2.0F * record.radius), record.radius).Create()
-				: JPH::CylinderShapeSettings(0.5F * request.resizeHeight, record.radius).Create();
-			if(!shape.IsValid() || !record.character->SetShape(shape.Get(), request.recoverPenetration ? FLT_MAX : 0.0F, broadPhase, objectLayer, bodyFilter, shapeFilter, *impl->temporaryAllocator)) return Rejected(PhysicsBackendErrorCode::ProviderFailure, "Jolt rejected the requested character resize.");
-			record.height = request.resizeHeight;
+			record.intent.resizeRequested = true;
+			record.intent.resizeHeight = request.resizeHeight;
+			record.intent.recoverPenetration = request.recoverPenetration;
 		}
-		const JPH::Vec3 up = ToNormalizedJoltAxis(record.settings.upDirection);
-		JPH::Vec3 velocity = ToJoltVector(request.desiredVelocity);
-		if(record.settings.useGravity) velocity += ToJoltVector(impl->worldConfiguration.settings.gravity) * record.settings.gravityScale * request.fixedDeltaTime;
-		if(record.character->IsSupported()) velocity += record.character->GetGroundVelocity();
-		if(request.jumpRequested) velocity += up * (request.jumpSpeed > 0.0F ? request.jumpSpeed : record.settings.jumpSpeed);
-		record.character->SetLinearVelocity(velocity);
-		JPH::CharacterVirtual::ExtendedUpdateSettings settings;
-		settings.mStickToFloorStepDown = -up * record.settings.groundAdhesion;
-		settings.mWalkStairsStepUp = record.settings.allowStairWalking ? up * record.settings.stepHeight : JPH::Vec3::sZero();
-		record.character->ExtendedUpdate(request.fixedDeltaTime, ToJoltVector(impl->worldConfiguration.settings.gravity) * record.settings.gravityScale,
-			settings, broadPhase, objectLayer, bodyFilter, shapeFilter, *impl->temporaryAllocator);
+		if(request.teleportRequested) {
+			record.intent.teleportRequested = true;
+			record.intent.pose = request.pose;
+		}
+		return Success("The virtual-character intent was stored for the next fixed step.");
+	}
+
+	PhysicsBackendResult JoltPhysicsBackend::AdvanceCharacters(
+		PhysicsWorldHandle world, PhysicsTick tick, float fixedDeltaTime) {
+		std::lock_guard lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
+		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(world, impl->worldConfiguration.world)
+			|| tick == 0U || !std::isfinite(fixedDeltaTime) || fixedDeltaTime <= 0.0F) {
+			return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The character fixed-step request is invalid or stale.");
+		}
+		for(const std::uint64_t key : impl->characterOrder) {
+			auto found = impl->characters.find(key);
+			if(found == impl->characters.end()) continue;
+			auto& record = found->second;
+			if(!record.committed || record.character == nullptr || !record.enabled) continue;
+			auto& intent = record.intent;
+			if(!intent.desiredVelocity.IsFinite()) {
+				return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The stored desired character velocity is invalid.");
+			}
+			// Snapshot and consume one-shot commands before calling Jolt. A later
+			// provider failure must never replay an already-applied teleport or jump
+			// on the next fixed step, while desired velocity intentionally persists.
+			const Impl::CharacterRecord::PendingIntent pending = intent;
+			intent.jumpRequested = false;
+			intent.resizeRequested = false;
+			intent.teleportRequested = false;
+			// Jolt documents character-vs-character callbacks as non-thread-safe. This
+			// provider boundary is therefore serialized under the backend mutex; Jolt's
+			// rigid-body solver still uses the engine-owned ThreadPool job adapter.
+			JPH::DefaultBroadPhaseLayerFilter broadPhase(impl->objectVsBroadPhaseFilter, static_cast<JPH::ObjectLayer>(record.settings.collisionLayer));
+			class CharacterObjectLayerFilter final : public JPH::ObjectLayerFilter {
+			public:
+				CharacterObjectLayerFilter(const TerraObjectLayerPairFilter& pairs, JPH::ObjectLayer source, std::uint32_t mask)
+					: pairs(pairs), source(source), mask(mask) { }
+				bool ShouldCollide(JPH::ObjectLayer candidate) const override {
+					return candidate < 32U && (mask & (1U << candidate)) != 0U && pairs.ShouldCollide(source, candidate);
+				}
+			private:
+				const TerraObjectLayerPairFilter& pairs;
+				JPH::ObjectLayer source;
+				std::uint32_t mask;
+			} objectLayer(impl->objectPairFilter, static_cast<JPH::ObjectLayer>(record.settings.collisionLayer), record.settings.collisionMask);
+			JPH::BodyFilter bodyFilter;
+			JPH::ShapeFilter shapeFilter;
+			if(pending.teleportRequested) {
+				record.character->SetPosition(ToJoltPosition(pending.pose.position)); record.character->SetRotation(ToJoltRotation(pending.pose.rotation));
+				record.character->RefreshContacts(broadPhase, objectLayer, bodyFilter, shapeFilter, *impl->temporaryAllocator);
+			}
+			if(pending.resizeRequested) {
+				JPH::ShapeSettings::ShapeResult shape = record.shapeKind == PhysicsShapeKind::Capsule
+					? JPH::CapsuleShapeSettings(0.5F * (pending.resizeHeight - 2.0F * record.radius), record.radius).Create()
+					: JPH::CylinderShapeSettings(0.5F * pending.resizeHeight, record.radius).Create();
+				if(!shape.IsValid() || !record.character->SetShape(shape.Get(), pending.recoverPenetration ? FLT_MAX : 0.0F, broadPhase, objectLayer, bodyFilter, shapeFilter, *impl->temporaryAllocator)) {
+					// A one-shot resize must not poison later fixed steps when Jolt cannot
+					// apply it, for example because recovery would overlap a new obstacle.
+					return Rejected(PhysicsBackendErrorCode::ProviderFailure, "Jolt rejected the requested character resize.");
+				}
+				record.height = pending.resizeHeight;
+			}
+			const JPH::Vec3 up = ToNormalizedJoltAxis(record.settings.upDirection);
+			JPH::Vec3 velocity = ToJoltVector(intent.desiredVelocity);
+			if(record.settings.useGravity) {
+				// Desired controller velocity is planar. While unsupported, carry the
+				// prior vertical velocity so gravity and a one-shot jump evolve once per
+				// fixed step instead of being erased by render-rate Move commands.
+				velocity -= up * velocity.Dot(up);
+				if(!record.character->IsSupported()) velocity += up * record.character->GetLinearVelocity().Dot(up);
+				velocity += ToJoltVector(impl->worldConfiguration.settings.gravity) * record.settings.gravityScale * fixedDeltaTime;
+			}
+			const auto& activeContacts = record.character->GetActiveContacts();
+			const bool touchesAnotherCharacter = std::any_of(activeContacts.begin(), activeContacts.end(),
+				[](const JPH::CharacterContact& contact) {
+					return contact.mHadCollision && !contact.mCharacterIDB.IsInvalid();
+				});
+			if(record.character->IsSupported() && !record.character->GetGroundBodyID().IsInvalid()
+				&& !touchesAnotherCharacter) {
+				// Jolt averages support velocities across contacts. A real ground BodyID
+				// alone is insufficient when a controller contact is also present, so
+				// conservatively retain platform velocity only without any character hit.
+				velocity += record.character->GetGroundVelocity();
+			}
+			if(pending.jumpRequested) {
+				velocity -= up * velocity.Dot(up);
+				velocity += up * (pending.jumpSpeed > 0.0F ? pending.jumpSpeed : record.settings.jumpSpeed);
+			}
+			record.character->SetLinearVelocity(velocity);
+			JPH::CharacterVirtual::ExtendedUpdateSettings settings;
+			settings.mStickToFloorStepDown = -up * record.settings.groundAdhesion;
+			settings.mWalkStairsStepUp = record.settings.allowStairWalking ? up * record.settings.stepHeight : JPH::Vec3::sZero();
+			record.character->ExtendedUpdate(fixedDeltaTime, ToJoltVector(impl->worldConfiguration.settings.gravity) * record.settings.gravityScale,
+				settings, broadPhase, objectLayer, bodyFilter, shapeFilter, *impl->temporaryAllocator);
+			// Desired velocity persists until another Move/stop command arrives. The
+			// snapshot above already consumed the one-shot operations for this tick.
+		}
 		return Success("The serialized Jolt virtual-character update completed.");
 	}
 
@@ -2597,6 +2842,7 @@ namespace TerraEngine::Physics::Backend {
 		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(handle, impl->worldConfiguration.world)) return Rejected(PhysicsBackendErrorCode::StaleHandle, "The character handle is stale.");
 		auto found = impl->characters.find(HandleKey(handle));
 		if(found == impl->characters.end() || found->second.handle != handle) return Rejected(PhysicsBackendErrorCode::StaleHandle, "The character handle was not found.");
+		impl->characterCollisions.Remove(found->second.character.get());
 		impl->characters.erase(found);
 		impl->RebuildCharacterOrder();
 		return Success("The virtual character was destroyed before provider-world teardown.");
@@ -2629,17 +2875,37 @@ namespace TerraEngine::Physics::Backend {
 			|| (command.type == PhysicsCommandType::Teleport && command.character.IsValid())) {
 			const PhysicsCharacterMotionPayload* payload = std::get_if<PhysicsCharacterMotionPayload>(&command.payload);
 			if(payload == nullptr) return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The character command payload is missing.");
-			PhysicsCharacterUpdateRequest update;
-			update.handle = command.character; update.objectId = command.targetObjectId; update.objectGeneration = command.objectGeneration;
-			update.componentGeneration = command.componentGeneration; update.desiredVelocity = payload->desiredVelocity; update.pose = payload->pose;
-			update.fixedDeltaTime = impl->worldConfiguration.settings.fixedTimeStep;
-			update.jumpRequested = command.type == PhysicsCommandType::JumpCharacter; update.jumpSpeed = payload->jumpSpeed;
-			update.resizeRequested = command.type == PhysicsCommandType::ResizeCharacter; update.resizeHeight = payload->resizeHeight;
-			update.teleportRequested = command.type == PhysicsCommandType::Teleport;
-			// UpdateCharacter owns the serial character boundary. Drop this outer lock
-			// before delegating so the worker command never falls through body lookup.
-			lock.unlock();
-			return UpdateCharacter(update);
+			auto found = impl->characters.find(HandleKey(command.character));
+			if(found == impl->characters.end() || found->second.handle != command.character || found->second.stagingToken != 0U
+				|| found->second.objectId != command.targetObjectId || found->second.objectGeneration != command.objectGeneration
+				|| found->second.componentGeneration != command.componentGeneration) {
+				return Rejected(PhysicsBackendErrorCode::StaleHandle, "The character command identity is stale.");
+			}
+			auto& intent = found->second.intent;
+			switch(command.type) {
+			case PhysicsCommandType::MoveCharacter:
+				if(!payload->desiredVelocity.IsFinite()) return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The desired character velocity is invalid.");
+				intent.desiredVelocity = payload->desiredVelocity;
+				break;
+			case PhysicsCommandType::JumpCharacter:
+				if(!std::isfinite(payload->jumpSpeed) || payload->jumpSpeed < 0.0F) return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The requested character jump is invalid.");
+				intent.jumpRequested = true;
+				intent.jumpSpeed = payload->jumpSpeed;
+				break;
+			case PhysicsCommandType::ResizeCharacter:
+				if(!std::isfinite(payload->resizeHeight) || payload->resizeHeight < 2.0F * found->second.radius) return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The requested character resize is invalid.");
+				intent.resizeRequested = true;
+				intent.resizeHeight = payload->resizeHeight;
+				break;
+			case PhysicsCommandType::Teleport:
+				if(!payload->pose.IsFinite() || !IsUsableRotation(payload->pose.rotation)) return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The requested character teleport is invalid.");
+				intent.teleportRequested = true;
+				intent.pose = payload->pose;
+				break;
+			default:
+				break;
+			}
+			return Success("The virtual-character command intent was coalesced for the next fixed step.");
 		}
 		Impl::BodyRecord* record = impl->FindBodyByObject(command.targetObjectId);
 		// Validate both object and component generations before touching provider state so a
@@ -3064,9 +3330,15 @@ namespace TerraEngine::Physics::Backend {
 		// or accidental oversized batch from allocating memory it can never commit.
 		const std::uint64_t requestedBodies = static_cast<std::uint64_t>(impl->bodies.size())
 			+ reservation.bodyCount;
+		const std::uint64_t requestedCharacters = static_cast<std::uint64_t>(impl->characters.size())
+			+ reservation.characterCount;
 		if(requestedBodies > impl->worldConfiguration.maximumBodies) {
 			return Rejected(PhysicsBackendErrorCode::CapacityExceeded,
 				"The provider admission reservation exceeds the active world's body capacity.");
+		}
+		if(requestedCharacters > impl->worldConfiguration.maximumBodies) {
+			return Rejected(PhysicsBackendErrorCode::CapacityExceeded,
+				"The provider admission reservation exceeds the active world's virtual-character capacity.");
 		}
 		PhysicsBackendStagingToken staging;
 		const PhysicsBackendResult staged = impl->EnsureStaging(staging, reservation.world);
@@ -3705,7 +3977,13 @@ namespace TerraEngine::Physics::Backend {
 		if(!record->second.constraintKeys.empty()) impl->RebuildConstraintOrder();
 		for(std::uint64_t characterKey : record->second.characterKeys) {
 			auto character = impl->characters.find(characterKey);
-			if(character != impl->characters.end()) character->second.stagingToken = 0U;
+			if(character != impl->characters.end()) {
+				character->second.stagingToken = 0U;
+				if(character->second.committed && character->second.character != nullptr) {
+					impl->characterCollisions.Add(character->second.character.get(),
+						character->second.settings.collisionLayer, character->second.settings.collisionMask);
+				}
+			}
 		}
 		if(!record->second.characterKeys.empty()) impl->RebuildCharacterOrder();
 		for(std::uint64_t shapeKey : record->second.shapeKeys) {
@@ -3733,7 +4011,11 @@ namespace TerraEngine::Physics::Backend {
 			}
 		}
 		for(auto characterKey = record->second.characterKeys.rbegin(); characterKey != record->second.characterKeys.rend(); ++characterKey) {
-			impl->characters.erase(*characterKey);
+			auto character = impl->characters.find(*characterKey);
+			if(character != impl->characters.end()) {
+				impl->characterCollisions.Remove(character->second.character.get());
+				impl->characters.erase(character);
+			}
 		}
 		for(auto bodyKey = record->second.bodyKeys.rbegin(); bodyKey != record->second.bodyKeys.rend(); ++bodyKey) {
 			auto body = impl->bodies.find(*bodyKey);

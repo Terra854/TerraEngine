@@ -2,7 +2,7 @@
 	"$schema": "https://json-schema.org/draft/2020-12/schema",
 	"$id": "https://terraengine.dev/schemas/navigation-evidence-v1.schema.json",
 	"title": "TerraEngine Navigation Evidence v1",
-	"description": "One measured navigation workload in one installed runtime lane. contentSha256 is the SHA-256 digest of canonical JSON for content, whose object keys are sorted recursively and UTF-8 encoded without a byte-order mark.",
+	"description": "One measured navigation workload in one installed runtime lane. Qualification requires internally identical baseline and candidate cohorts; the two cohorts share fixture, settings, workload, renderer, power, worker, and lane identity while retaining distinct executable hashes. Optional metrics make repeated baseline/candidate qualification explicit; contentSha256 is the SHA-256 digest of canonical JSON for content, whose object keys are sorted recursively and UTF-8 encoded without a byte-order mark.",
 	"type": "object",
 	"additionalProperties": false,
 	"required": [
@@ -35,6 +35,15 @@
 		},
 		"content": { "type": "object" },
 		"contentSha256": { "$ref": "#/$defs/sha256" },
+		"metrics": {
+			"type": "object",
+			"additionalProperties": false,
+			"description": "Qualification metrics. Dynamic responsiveness is the elapsed time from an accepted geometry change until the corresponding published navigation generation is observable.",
+			"properties": {
+				"routeLatencyMilliseconds": { "type": "number", "minimum": 0 },
+				"dynamicPublicationResponsivenessMilliseconds": { "type": "number", "minimum": 0 }
+			}
+		},
 		"lane": { "enum": [ "rendered", "headless" ] },
 		"workloadId": { "type": "string", "minLength": 1 },
 		"success": { "const": true },

@@ -9,6 +9,14 @@
 
 thread_local LogContext Logger::currentContext{};
 
+Logger& Logger::Instance()
+{
+	// Native managed-call exports and editor subscribers share this one owner,
+	// so gameplay messages reach the same sinks as editor-originated messages.
+	static Logger instance;
+	return instance;
+}
+
 Logger::ScopedContext::ScopedContext(LogContext context)
 	: previous(Logger::currentContext)
 {

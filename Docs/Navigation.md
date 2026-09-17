@@ -1,203 +1,118 @@
 # TerraEngine Navigation
 
-TerraEngine navigation is an engine-owned, ground-only runtime service. Public
-gameplay and managed APIs use provider-neutral records and commands; Recast and
-Detour remain private to the native navigation backend.
+Navigation is an engine-owned, ground-only service. Objects do not carry
+navigation components. Gameplay submits object-to-location or
+object-to-object requests with an explicit `NavigationProfile`; gameplay owns
+movement, cancellation, replacement, and replanning.
 
-## Approved dependency and scope
+## Requests and outcomes
 
-The approved provider is Recast Navigation `1.6.0` at exact source commit
-`6dc1667f580357e8a2154c28b7867bea7e8ad3a7`, checked out as the pristine
-`External/recastnavigation` submodule. The engine-owned
-`cmake/TerraEngineRecast.cmake` integration statically compiles only
-`Recast/Source` and `Detour/Source`.
+Requests capture stable object identity, lifetime, world, and current pose at a
+protected boundary. A route is immutable and generation-qualified. `Complete`
+returns route points; `PendingPreparation` means coverage is rebuilding;
+`Stale` requires a new request; `Cancelled` is an explicit caller outcome; and
+`UnavailableCoverage`, `InvalidEndpoint`, `Unreachable`, `QueueFull`, and
+`ProviderFailure` remain distinct diagnostics. Navigation never writes
+transforms, velocity, physics, animation, or locomotion state.
 
-The approved boundary excludes RecastDemo, DetourCrowd, DetourTileCache,
-DebugUtils, examples, upstream tests, SDL, Catch2, provider-owned worker pools,
-and a new managed navigation package. Provider headers are private build
-inputs and are not part of the TerraEngine public API or installed SDK.
-Runtime generation is mandatory; optional caches only accelerate generation and
-must never become required inputs.
+## Automatic geometry discovery
 
-The engine adapter and static provider libraries must share the C++20 baseline
-and 64-bit Detour polygon-reference configuration. TerraEngine owns the CMake
-target and integration boundary, and no upstream Recast source files may be
-modified.
+Current published terrain collision is mandatory. Without it, navigation
+reports unavailable coverage and does not fabricate a flat world. Eligible
+static and dynamic geometry is discovered from physical scene/resource
+publications: collider-backed geometry is preferred, then cooked mesh
+companions, with physically-ready procedural typed sources included. Render
+visibility does not control eligibility.
 
-## Notice and redistribution
+Dynamic create, enable, disable, move, rotate, scale, delete, replace, and
+reshape changes carry stable identity and revision evidence. Workers rebuild
+affected coverage from immutable packets; root, shard, portal, terrain,
+source-index, validity, and diagnostic state becomes visible together at one
+protected boundary. Stale work is discarded.
 
-The upstream notice is preserved at
-`External/recastnavigation/License.txt`. It must accompany source or binary
-redistributions that contain Recast or Detour, including the installed
-third-party notice bundle. The install surface must contain the notice without
-publishing provider headers, demos, tests, or unrelated tools. See
-[Recast Navigation dependency](Dependencies/RecastNavigation.md) for the full
-pin, scope, and verification record.
+## Streaming and export
 
-## Verification status
+Streaming uses world/cell generations and reports missing coverage or expired
+leases explicitly. Export packages contain automatically discovered cooked
+`.tenavgeom` companions and optional `.tenav` caches. Caches accelerate startup
+but are never required; runtime generation remains authoritative. Recast
+Navigation is private to the native backend and its zlib notice is retained in
+the installed notice bundle.
 
-Initial dependency verification completed on 2026-09-06 with the Windows x64
-Visual Studio developer environment, MSVC 19.51.36252.0, Ninja, and the
-`RelWithDebInfo` preset. The host's normal shell did not expose the compiler,
-Ninja, or Windows SDK tools, so this work must run from a configured developer
-prompt rather than treating those ambient tools as engine dependencies.
+## Hard-break document rules
 
-```powershell
-git -C External/recastnavigation rev-parse HEAD
-git -C External/recastnavigation status --porcelain
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine-Engine
-cmake --build --preset RelWithDebInfo --target install
-```
+The removed navigation component types are not registered, reflected,
+serialized, scripted, exported, or exposed by editor automation. There is no
+migration, alias, tombstone, compatibility loader, deprecated ABI, or automatic
+conversion path. A scene or prefab containing an unregistered type is rejected
+before publication, and the active scene remains unchanged. Generic editor and
+automation operations use the standard unknown-component rejection path.
 
-The revision command returned
-`6dc1667f580357e8a2154c28b7867bea7e8ad3a7`, and the porcelain status was
-empty before and after the build. Configuration, the native
-`TerraEngine-Engine` build, and the `install` target all returned success. The
-first native build compiled and linked `TerraEngineRecastCore.lib` and
-`TerraEngineDetourCore.lib` before linking `TerraEngine.dll`.
+Profiles and navigation settings remain durable editor configuration and may be
+saved, restored, and recorded in history. Geometry authoring and explicit
+connection authoring are not part of the scene API.
 
-The installed product tree is
-`out/build/RelWithDebInfo/Build`. Its audited navigation artifacts are:
+## Collision-safe script movement
 
-- `ThirdPartyNotices/RecastNavigation-Zlib.txt`, byte-identical to the pristine
-  upstream `External/recastnavigation/License.txt` and containing its copyright,
-  warranty, permission, and notice-preservation clauses.
-- `Docs/Navigation.md` and `Docs/Dependencies/RecastNavigation.md`.
+`NavigationRouteFollower` is an optional managed helper for gameplay that
+already owns a `CharacterController`. It is not a navigation component and it
+does not move a transform. `FixedStep` reads the controller object's published
+position, then sends `CharacterController.SetDesiredVelocity`; the physics
+controller therefore remains responsible for collision, stepping, and final
+transform publication.
 
-The installed-tree scan found no Recast or Detour provider headers, standalone
-libraries, source files, or provider directories. Focused navigation tests are
-not part of this dependency-only checkpoint; they are introduced with the runtime
-foundation test tasks and remain required before that phase is complete.
+Velocity commands set persistent movement intent; submitting more commands does
+not advance time. The physics scheduler advances characters once per fixed tick
+and publishes their poses through the protected scene mutation boundary. Send
+zero velocity (or stop the follower) to stop movement.
 
-## Approval boundary
-
-Any dependency revision, source patch, module-scope expansion, provider-owned
-runtime service, or public provider-header exposure requires renewed explicit
-approval and a return to planning. The approved dependency supplies ground
-generation and queries only; it does not provide flight navigation, gameplay
-decisions, locomotion, or engine publication guarantees.
-
-## Clean-checkout installed acceptance
-
-The acceptance matrix is source-free: after configuring, building, and
-installing from a clean checkout, invoke the runner from the installed tree and
-use an evidence directory outside the install tree. Do not point it at binaries
-or fixtures in the build tree.
-
-```powershell
-git submodule update --init --recursive
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor `
-    TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Export
-cmake --build --preset RelWithDebInfo --target install
-
-$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
-$navigationTool = Join-Path $installRoot 'Tests/Tools/Navigation/RunInstalledNavigationAcceptance.ps1'
-$evidenceRoot = [IO.Path]::GetFullPath('out/evidence/navigation')
-```
-
-Runtime generation is mandatory. Navigation caches are optional accelerators:
-an absent or invalid cache must cause deterministic regeneration, not a passing
-or failing result based on cache presence alone. The installed manifest and
-runtime binaries remain mandatory inputs.
-
-Run the semantic matrix as one three-lane comparison so the installed editor,
-rendered export, and headless export all share one checked provenance set. The
-command uses only installed files and retains raw lane evidence beneath the
-supplied output directory:
-
-```powershell
-& $navigationTool -InstallRoot $installRoot -OutputDirectory (Join-Path $evidenceRoot 'semantic') `
-    -Lanes @('editor', 'export-rendered', 'export-headless') -Matrices semantic
-```
-
-For the installed-only audit, validate all lane artifacts in one dry run from
-the repository root (or from a separate validation working directory):
-
-```powershell
-& $navigationTool -InstallRoot $installRoot -OutputDirectory (Join-Path $evidenceRoot 'installed-audit') `
-    -Lanes @('editor', 'export-rendered', 'export-headless') -Matrices @('semantic') -DryRun
-```
-
-The full installed matrix uses all three lanes. Performance, idle-overload,
-and usability are bounded acceptance matrices; the soak command below is the
-required 30-minute run and the lifecycle command runs 100 cycles:
-
-```powershell
-& $navigationTool -InstallRoot $installRoot -OutputDirectory (Join-Path $evidenceRoot 'performance') `
-    -Lanes export-rendered -Matrices performance -DurationMinutes 5 -Qualification
-& $navigationTool -InstallRoot $installRoot -OutputDirectory (Join-Path $evidenceRoot 'idle-overload') `
-    -Lanes export-rendered -Matrices idle-overload -DurationMinutes 5 -IdlePairs 5 -Qualification
-& $navigationTool -InstallRoot $installRoot -OutputDirectory (Join-Path $evidenceRoot 'soak-30m') `
-    -Lanes @('export-rendered', 'export-headless') -Matrices soak -DurationMinutes 30 -Qualification
-& $navigationTool -InstallRoot $installRoot -OutputDirectory (Join-Path $evidenceRoot 'lifecycle-100') `
-    -Lanes editor -Matrices lifecycle -Cycles 100 -Qualification
-& $navigationTool -InstallRoot $installRoot -OutputDirectory (Join-Path $evidenceRoot 'usability') `
-    -Lanes editor -Matrices usability -UsabilityInvalidCases 5 -Qualification
-```
-
-`-DurationSecondsOverride` is a smoke-test aid and cannot replace the
-30-minute soak gate. Every run writes `navigation-acceptance-result.json` and
-per-lane `stdout.txt`, `stderr.txt`, and `result.json` files under its contained
-work directory. A missing installed artifact, failed lane, missing raw result,
-or unavailable measurement is a nonzero/failed acceptance outcome; do not
-reinterpret it as zero work. The installed audit must retain the complete
-`out/evidence/navigation` tree and record the exact install-tree identity used.
-
-## Ordinary object gameplay workflow
-
-Navigation is useful to a game object through an engine-owned agent binding. Add
-an enabled `NavigationAgentComponent` beside the object's canonical `Transform`
-using the normal scene transaction path. At the protected navigation boundary,
-the engine resolves the object's stable identity, world, profile, and current
-pose into a generation-qualified runtime agent. Native gameplay or the supplied
-C# facade then sets a destination, polls the command receipt, reads the request,
-and copies the immutable route points.
-
-The caller owns movement. Before each step, gameplay/physics validates the next
-route segment against the current pose and route generation, then submits the
-pose or movement intent through the existing typed transform/physics path. A
-stale or invalidated route must stop movement and trigger a bounded replan from
-the newly published pose. Navigation never writes `Transform`, velocity,
-physics, or animation and does not teleport an object to a route endpoint.
-
-Minimal native flow (status/error handling abbreviated):
-
-```cpp
-auto agent = navigation.ResolveObjectAgent(objectId); // scene-owned generation handle
-auto command = navigation.QueueSetDestination(agent, destination, routePolicy, expectedIntentGeneration);
-auto applied = navigation.ReadCommand(command.command);
-auto request = navigation.ReadRequest(applied.record->resultingRequest);
-auto state = navigation.ReadAgent(agent);
-auto route = navigation.ReadRoute(state.record->activeRoute);
-gameplayController.MoveAlong(route.points); // caller validates and owns movement
-```
-
-Equivalent C# gameplay starts from the component already attached to the object:
+Virtual characters block one another without automatically inheriting another
+character's contact velocity. A stationary character therefore holds its place;
+rigid-body contact and impulse behavior remains governed by physics. Direct
+transform assignments and explicit teleports are not collision-safe movement.
 
 ```csharp
-NavigationAgent? agent = navigationAgentComponent.RuntimeAgent;
-if (agent == null)
-    return; // the component has not crossed its publication boundary yet
+private NavigationRouteFollower? _follower;
 
-NavigationCommandResult command = agent.SetDestination(targetWorldPosition);
+void Start()
+{
+	CharacterController controller = Object.GetComponent<CharacterController>()!;
+	NavigationProfile profile = /* copied, conservative traversal values */;
+	_follower = new NavigationRouteFollower(Object, controller, profile,
+		speedMetresPerSecond: 4.0F, replacementKey: 0x4455434BUL);
+	_follower.Begin(destination);
+}
 
-// In later updates, keep polling the same resolved agent until the command is
-// applied and its asynchronous request publishes a route.
-command = agent.RefreshDestinationCommand();
-NavigationRouteResult route = agent.ReadRoute();
-if (route.Complete)
-    gameplayController.MoveAlong(route.Points);
+void OnFixedUpdate(float fixedDeltaSeconds)
+{
+	NavigationRouteFollowerState state = _follower!.FixedStep(fixedDeltaSeconds);
+	if (state == NavigationRouteFollowerState.Arrived) { /* choose next goal */ }
+}
+
+void OnDisable() => _follower?.Stop();
 ```
 
-`SetDestination` is asynchronous. Gameplay refreshes the command and request,
-then reads the route points. Keep the resolved `NavigationAgent` instance while
-that request is in flight; receiving a route does not itself move the object.
+The profile must be conservative for the controller: its radius and height are
+at least the controller capsule dimensions, its clearance margin covers contact
+padding, and it allows no larger step or slope than the controller. Ground-only
+following also requires an upright controller with its local center halfway up
+the capsule. The follower rejects a disabled controller or an object that also
+has an enabled `ColliderSet`, which would make the controller contact itself.
+Configure the controller and profile before `Begin`; if their geometry changes,
+call `Stop`, apply the configuration, and begin a new route. If movement stops against a dynamic blocker,
+the helper clears velocity, releases the old request, and retries a route at a
+bounded interval. Each retry sends safe controller velocity again, so clearing
+the blocker lets the actor continue without transform writes or a persistent
+navigation agent.
 
-Managed gameplay follows the same sequence with the engine-supplied
-`NavigationAgent` facade. No Recast/Detour reference or developer-provided
-navigation library is required. Terrain support is mandatory in the engine,
-but terrain presence is scene-dependent: the acceptance workflow must prove
-both an object routing over eligible terrain and an object routing in a
-terrain-free mesh/collider scene.
+## Verification
+
+Use [Testing.md](Testing.md) for focused CTest, installed acceptance, five-run
+evidence comparison, and mandatory install commands. The provider integration
+is documented in [Dependencies/RecastNavigation.md](Dependencies/RecastNavigation.md).
+## Navigation profiles
+
+Navigation profiles are copied traversal values: capsule dimensions, slope and
+step limits, build resolution, and area preferences. They do not carry a
+profile ID or revision. Project presets are selected by their registration UUID,
+while runtime build sharing is derived from the copied traversal values.

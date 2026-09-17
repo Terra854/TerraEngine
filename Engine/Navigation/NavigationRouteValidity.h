@@ -10,6 +10,20 @@
 
 namespace TerraEngine::Navigation
 {
+	// The route store retains this value beside every completed object request.
+	// It is intentionally independent of provider geometry so gameplay can
+	// reject an obsolete route before using one of its copied waypoints.
+	struct NavigationRouteObservationValidation
+	{
+		bool usable = false;
+		NavigationOutcome outcome = NavigationOutcome::Stale;
+		NavigationReason reason = NavigationReason::DirtyCoverage;
+	};
+
+	[[nodiscard]] TERRAENGINE_API NavigationRouteObservationValidation
+		ValidateNavigationRouteObservation(const NavigationObservationEvidence& captured,
+			const NavigationObservationEvidence& current) noexcept;
+
 	struct NavigationBounds
 	{
 		NavigationGeometryVector3 minimum{};

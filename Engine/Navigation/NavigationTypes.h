@@ -8,6 +8,7 @@
 
 #include "Core/Export.h"
 #include "Scene/WorldCoordinate.h"
+#include "Utilities/UUID.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -22,9 +23,9 @@ namespace TerraEngine::Navigation {
 
 	inline constexpr NavigationSlotIndex kInvalidNavigationSlot = std::numeric_limits<NavigationSlotIndex>::max();
 
-	// Source selection is shared by reflected authoring and immutable geometry
-	// capture. Keeping the enum here prevents the two boundaries from assigning
-	// different numeric meanings to the same persisted source kind.
+	// Source representations are physical inputs to immutable geometry capture.
+	// They describe how a source was observed, never an object-side navigation
+	// component or a traversal command.
 	enum class NavigationSourceKind : std::uint8_t {
 		Auto,
 		Mesh,
@@ -91,28 +92,6 @@ namespace TerraEngine::Navigation {
 			return owner.IsValid() && slotIndex != kInvalidNavigationSlot && slotGeneration != 0U;
 		}
 		[[nodiscard]] constexpr bool operator==(const NavigationRouteHandle&) const = default;
-	};
-
-	struct NavigationAgentHandle {
-		NavigationOwnerHandle owner{};
-		NavigationSlotIndex slotIndex = kInvalidNavigationSlot;
-		NavigationGeneration slotGeneration = 0U;
-
-		[[nodiscard]] constexpr bool IsValid() const noexcept {
-			return owner.IsValid() && slotIndex != kInvalidNavigationSlot && slotGeneration != 0U;
-		}
-		[[nodiscard]] constexpr bool operator==(const NavigationAgentHandle&) const = default;
-	};
-
-	struct NavigationCommandHandle {
-		NavigationOwnerHandle owner{};
-		NavigationSlotIndex slotIndex = kInvalidNavigationSlot;
-		NavigationGeneration slotGeneration = 0U;
-
-		[[nodiscard]] constexpr bool IsValid() const noexcept {
-			return owner.IsValid() && slotIndex != kInvalidNavigationSlot && slotGeneration != 0U;
-		}
-		[[nodiscard]] constexpr bool operator==(const NavigationCommandHandle&) const = default;
 	};
 
 	// Handle status is deliberately richer than a boolean so callers can tell an
@@ -315,6 +294,7 @@ namespace TerraEngine::Navigation {
 
 	enum class NavigationReason : std::uint8_t {
 		None,
+		MissingTerrain,
 		MissingSource,
 		DirtyCoverage,
 		MissingNeighbor,
@@ -351,6 +331,131 @@ namespace TerraEngine::Navigation {
 		Scene::WorldPosition position{};
 
 		[[nodiscard]] bool operator==(const NavigationLocation&) const = default;
+	};
+
+	// A UUID alone is not enough at an asynchronous boundary: a scene can reuse
+	// the same persistent UUID after replacement. The lifetime generation makes
+	// that replacement visible to request admission and worker completion checks.
+	struct NavigationObjectIdentity {
+		UUID objectId = EMPTY_UUID;
+		NavigationGeneration lifetimeGeneration = 0U;
+
+		[[nodiscard]] constexpr bool IsValid() const noexcept {
+			return objectId != EMPTY_UUID && lifetimeGeneration != 0U;
+		}
+		[[nodiscard]] constexpr bool operator==(const NavigationObjectIdentity&) const = default;
+	};
+
+	// This is a copied protected-boundary observation. Worker jobs may retain it
+	// freely because it contains no ObjectManager pointer, Transform pointer, or
+	// mutable scene storage reference.
+	struct NavigationObjectEndpoint {
+		NavigationObjectIdentity object{};
+		NavigationLocation location{};
+		NavigationGeneration transformRevision = 0U;
+		bool activeInHierarchy = false;
+
+		[[nodiscard]] bool operator==(const NavigationObjectEndpoint&) const = default;
+	};
+
+	enum class NavigationDestinationKind : std::uint8_t {
+		Location,
+		Object
+	};
+
+	// Request policy is deliberately a value passed by gameplay. The navigation
+	// system never persists it on a scene object or changes gameplay movement.
+	enum class NavigationRoutePolicy : std::uint8_t {
+		ExactDestination,
+		NearestReachable
+	};
+
+	// An object request first describes its desired target without resolving live
+	// scene state. The protected capture step then creates NavigationObjectEndpoint
+	// values for both source and destination before a worker receives the request.
+	struct NavigationRequestedDestination {
+		NavigationDestinationKind kind = NavigationDestinationKind::Location;
+		NavigationLocation location{};
+		NavigationObjectIdentity object{};
+
+		[[nodiscard]] bool operator==(const NavigationRequestedDestination&) const = default;
+	};
+
+	enum class NavigationEndpointValidationCode : std::uint8_t {
+		None,
+		InvalidObject,
+		InactiveObject,
+		InvalidLocation,
+		MissingTransformRevision,
+		WrongDestinationVariant
+	};
+
+	struct NavigationEndpointValidation {
+		bool accepted = false;
+		NavigationEndpointValidationCode code = NavigationEndpointValidationCode::InvalidObject;
+
+		[[nodiscard]] constexpr bool Succeeded() const noexcept { return accepted; }
+	};
+
+	TERRAENGINE_API NavigationEndpointValidation ValidateNavigationObjectEndpoint(
+		const NavigationObjectEndpoint& endpoint) noexcept;
+	TERRAENGINE_API NavigationEndpointValidation ValidateNavigationRequestedDestination(
+		const NavigationRequestedDestination& destination) noexcept;
+	TERRAENGINE_API std::string_view ToString(NavigationDestinationKind kind) noexcept;
+	TERRAENGINE_API std::string_view ToString(NavigationRoutePolicy policy) noexcept;
+	TERRAENGINE_API std::string_view ToString(NavigationEndpointValidationCode code) noexcept;
+
+	// These values are copied with each admitted request and route result. They
+	// make mixed world generations observable and allow completion to fail stale
+	// rather than publishing a route from an incoherent navigation world.
+	struct NavigationObservationEvidence {
+		NavigationGeneration sceneGeneration = 0U;
+		NavigationGeneration sourceTransformRevision = 0U;
+		NavigationGeneration destinationTransformRevision = 0U;
+		NavigationGeneration terrainPublicationGeneration = 0U;
+		NavigationGeneration worldPublicationGeneration = 0U;
+		NavigationGeneration sourceIndexRevision = 0U;
+
+		[[nodiscard]] constexpr bool HasWorldEvidence() const noexcept {
+			return terrainPublicationGeneration != 0U && worldPublicationGeneration != 0U
+				&& sourceIndexRevision != 0U;
+		}
+		[[nodiscard]] constexpr bool operator==(const NavigationObservationEvidence&) const = default;
+	};
+
+	// Automatic geometry uses a stable representation identity rather than an
+	// authored source component. Source ID is deterministic at capture time from
+	// the object/procedural producer, representation, asset, and subshape.
+	struct NavigationEligibleSourceIdentity {
+		UUID sourceId = EMPTY_UUID;
+		UUID objectId = EMPTY_UUID;
+		NavigationGeneration objectLifetimeGeneration = 0U;
+		UUID assetId = EMPTY_UUID;
+		NavigationSourceKind kind = NavigationSourceKind::Mesh;
+		std::uint32_t subshapeIndex = 0U;
+
+		[[nodiscard]] constexpr bool IsValid() const noexcept {
+			return sourceId != EMPTY_UUID && kind != NavigationSourceKind::Auto;
+		}
+		[[nodiscard]] constexpr bool operator==(const NavigationEligibleSourceIdentity&) const = default;
+	};
+
+	// Revision evidence identifies exactly which physical publication supplied a
+	// source. A nonzero value in every field prevents a worker from treating an
+	// unready or partially captured source as current geometry.
+	struct NavigationSourceRevisionEvidence {
+		NavigationGeneration objectLifetimeGeneration = 0U;
+		NavigationGeneration transformRevision = 0U;
+		NavigationGeneration geometryRevision = 0U;
+		NavigationGeneration physicalPublicationGeneration = 0U;
+		NavigationGeneration resourcePublicationGeneration = 0U;
+
+		[[nodiscard]] constexpr bool IsComplete() const noexcept {
+			return objectLifetimeGeneration != 0U && transformRevision != 0U
+				&& geometryRevision != 0U && physicalPublicationGeneration != 0U
+				&& resourcePublicationGeneration != 0U;
+		}
+		[[nodiscard]] constexpr bool operator==(const NavigationSourceRevisionEvidence&) const = default;
 	};
 
 	enum class NavigationLocationValidationCode : std::uint8_t {

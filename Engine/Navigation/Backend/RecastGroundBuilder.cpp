@@ -44,14 +44,17 @@ namespace TerraEngine::Navigation {
 		}
 
 		void AppendTriangle(std::vector<float>& vertices, std::vector<int>& triangles,
-			NavigationGeometryVector3 first, NavigationGeometryVector3 second, NavigationGeometryVector3 third) {
+			std::vector<unsigned char>& obstructionTriangles, NavigationGeometryVector3 first,
+			NavigationGeometryVector3 second, NavigationGeometryVector3 third, bool obstruction) {
 			const int base = static_cast<int>(vertices.size() / 3U);
 			vertices.insert(vertices.end(), {first.x, first.y, first.z, second.x, second.y, second.z, third.x, third.y, third.z});
 			triangles.insert(triangles.end(), {base, base + 1, base + 2});
+			obstructionTriangles.push_back(obstruction ? 1U : 0U);
 		}
 
 		void AppendBox(std::vector<float>& vertices, std::vector<int>& triangles,
-			const NavigationGeometryPrimitive& box) {
+			std::vector<unsigned char>& obstructionTriangles,
+			const NavigationGeometryPrimitive& box, bool obstruction) {
 			const auto point = [&box](float x, float y, float z) {
 				return NavigationGeometryVector3{box.center.x + x * box.halfExtents.x,
 					box.center.y + y * box.halfExtents.y, box.center.z + z * box.halfExtents.z};
@@ -62,16 +65,18 @@ namespace TerraEngine::Navigation {
 			const auto p110 = point(1, 1, -1), p111 = point(1, 1, 1);
 			// Final clearance checks retain the analytic box; these faces provide
 			// conservative voxel support and obstruction during Recast generation.
-			AppendTriangle(vertices, triangles, p010, p111, p110); AppendTriangle(vertices, triangles, p010, p011, p111);
-			AppendTriangle(vertices, triangles, p000, p100, p101); AppendTriangle(vertices, triangles, p000, p101, p001);
-			AppendTriangle(vertices, triangles, p001, p101, p111); AppendTriangle(vertices, triangles, p001, p111, p011);
-			AppendTriangle(vertices, triangles, p000, p010, p110); AppendTriangle(vertices, triangles, p000, p110, p100);
-			AppendTriangle(vertices, triangles, p100, p110, p111); AppendTriangle(vertices, triangles, p100, p111, p101);
-			AppendTriangle(vertices, triangles, p000, p001, p011); AppendTriangle(vertices, triangles, p000, p011, p010);
+			AppendTriangle(vertices, triangles, obstructionTriangles, p010, p111, p110, obstruction); AppendTriangle(vertices, triangles, obstructionTriangles, p010, p011, p111, obstruction);
+			AppendTriangle(vertices, triangles, obstructionTriangles, p000, p100, p101, obstruction); AppendTriangle(vertices, triangles, obstructionTriangles, p000, p101, p001, obstruction);
+			AppendTriangle(vertices, triangles, obstructionTriangles, p001, p101, p111, obstruction); AppendTriangle(vertices, triangles, obstructionTriangles, p001, p111, p011, obstruction);
+			AppendTriangle(vertices, triangles, obstructionTriangles, p000, p010, p110, obstruction); AppendTriangle(vertices, triangles, obstructionTriangles, p000, p110, p100, obstruction);
+			AppendTriangle(vertices, triangles, obstructionTriangles, p100, p110, p111, obstruction); AppendTriangle(vertices, triangles, obstructionTriangles, p100, p111, p101, obstruction);
+			AppendTriangle(vertices, triangles, obstructionTriangles, p000, p001, p011, obstruction); AppendTriangle(vertices, triangles, obstructionTriangles, p000, p011, p010, obstruction);
 		}
 
 		[[nodiscard]] bool GatherGeometry(const RecastGroundBuildInput& input,
 			std::vector<float>& vertices, std::vector<int>& triangles,
+			std::vector<unsigned char>& obstructionTriangles,
+			std::vector<NavigationGeometryBounds>& obstructionBounds,
 			std::vector<std::uint64_t>& fingerprints, std::set<GroundTileKey>& keys,
 			std::string& reason) {
 			const std::uint64_t buildKey = MakeGroundProfileBuildKey(input.profile);
@@ -101,17 +106,23 @@ namespace TerraEngine::Navigation {
 					keys.insert({x, z, band, buildKey});
 					if(keys.size() > input.maximumTiles) { reason = "CanonicalTileCountExceedsBound"; return false; }
 				}
+				// Automatic colliders are solid physical volumes, never authored floor
+				// support. Their spans still rasterize, but Recast must not mark an upward
+				// box face as a navigable polygon.
+				const bool obstruction = source->Descriptor().sourceKind == NavigationSourceKind::Collider;
+				if(obstruction) obstructionBounds.push_back(bounds);
 				for(const auto& triangle : source->Triangles()) {
 					if(vertices.size() / 3U > static_cast<std::size_t>(std::numeric_limits<int>::max() - 3)) {
 						reason = "SourceVertexCountExceedsProviderBound"; return false;
 					}
-					AppendTriangle(vertices, triangles, triangle.firstVertex, triangle.secondVertex, triangle.thirdVertex);
+					AppendTriangle(vertices, triangles, obstructionTriangles,
+						triangle.firstVertex, triangle.secondVertex, triangle.thirdVertex, obstruction);
 				}
 				for(const auto& primitive : source->Primitives()) {
 					if(primitive.kind != NavigationGeometryPrimitiveKind::Box) {
 						reason = "UnsupportedAnalyticPrimitiveForRecast"; return false;
 					}
-					AppendBox(vertices, triangles, primitive);
+					AppendBox(vertices, triangles, obstructionTriangles, primitive, obstruction);
 				}
 				fingerprints.push_back(source->ContentFingerprint());
 			}
@@ -122,7 +133,9 @@ namespace TerraEngine::Navigation {
 
 		[[nodiscard]] RecastGroundBuildStatus BuildTile(const RecastGroundBuildInput& input,
 			const GroundTileKey& key, const std::vector<float>& vertices,
-			const std::vector<int>& triangles, const std::vector<std::uint64_t>& fingerprints,
+			const std::vector<int>& triangles, const std::vector<unsigned char>& obstructionTriangles,
+			const std::vector<NavigationGeometryBounds>& obstructionBounds,
+			const std::vector<std::uint64_t>& fingerprints,
 			GroundTileBlob& blob, std::string& reason) {
 			rcConfig config{};
 			config.cs = static_cast<float>(input.profile.horizontalResolutionMetres);
@@ -162,9 +175,15 @@ namespace TerraEngine::Navigation {
 			}
 			if(Cancelled(input)) { reason = "CancelledBeforeRasterization"; return RecastGroundBuildStatus::Cancelled; }
 			const int triangleCount = static_cast<int>(triangles.size() / 3U);
+			if(obstructionTriangles.size() != static_cast<std::size_t>(triangleCount)) {
+				reason = "RecastTriangleRoleCountMismatch"; return RecastGroundBuildStatus::InvalidGeometry;
+			}
 			std::vector<unsigned char> areas(static_cast<std::size_t>(triangleCount), RC_NULL_AREA);
 			rcMarkWalkableTriangles(&context, config.walkableSlopeAngle, vertices.data(),
 				static_cast<int>(vertices.size() / 3U), triangles.data(), triangleCount, areas.data());
+			for(std::size_t index = 0U; index < areas.size(); ++index) {
+				if(obstructionTriangles[index] != 0U) areas[index] = RC_NULL_AREA;
+			}
 			if(!rcRasterizeTriangles(&context, vertices.data(), static_cast<int>(vertices.size() / 3U),
 				triangles.data(), areas.data(), triangleCount, *heightfield, config.walkableClimb)) {
 				reason = "RecastTriangleRasterizationFailed"; return RecastGroundBuildStatus::RecastRasterizationFailed;
@@ -177,6 +196,14 @@ namespace TerraEngine::Navigation {
 				reason = "RecastCompactHeightfieldBuildFailed"; return RecastGroundBuildStatus::RecastCompactHeightfieldFailed;
 			}
 			heightfield.reset();
+			for(const NavigationGeometryBounds& obstruction : obstructionBounds) {
+				const float minimum[] = {obstruction.minimum.x, obstruction.minimum.y, obstruction.minimum.z};
+				const float maximum[] = {obstruction.maximum.x, obstruction.maximum.y, obstruction.maximum.z};
+				// A collider is a filled physical volume, while Recast triangle input is
+				// surface-only. Marking its compact cells removes the ground beneath a box
+				// and prevents a route from crossing a locally captured static obstacle.
+				rcMarkBoxArea(&context, minimum, maximum, RC_NULL_AREA, *compact);
+			}
 			if(Cancelled(input)) { reason = "CancelledAfterCompactHeightfield"; return RecastGroundBuildStatus::Cancelled; }
 			if(!rcErodeWalkableArea(&context, config.walkableRadius, *compact)
 				|| !rcBuildDistanceField(&context, *compact)
@@ -269,9 +296,12 @@ namespace TerraEngine::Navigation {
 		if(input.sources.empty() || input.maximumTiles == 0U) { result.status = RecastGroundBuildStatus::InvalidGeometry; result.reason = "NoImmutableGeometrySourcesOrTileCapacity"; return result; }
 		std::vector<float> vertices;
 		std::vector<int> triangles;
+		std::vector<unsigned char> obstructionTriangles;
+		std::vector<NavigationGeometryBounds> obstructionBounds;
 		std::vector<std::uint64_t> fingerprints;
 		std::set<GroundTileKey> keys;
-		if(!GatherGeometry(input, vertices, triangles, fingerprints, keys, result.reason)) {
+		if(!GatherGeometry(input, vertices, triangles, obstructionTriangles, obstructionBounds,
+			fingerprints, keys, result.reason)) {
 			result.status = result.reason.starts_with("Cancelled") ? RecastGroundBuildStatus::Cancelled
 				: result.reason == "CanonicalTileCountExceedsBound" ? RecastGroundBuildStatus::BudgetExceeded
 				: result.reason == "SourceBoundsOutsideCanonicalTileRange" ? RecastGroundBuildStatus::LocalizationFailed
@@ -281,7 +311,8 @@ namespace TerraEngine::Navigation {
 		for(const GroundTileKey& key : keys) {
 			if(Cancelled(input)) { result.status = RecastGroundBuildStatus::Cancelled; result.reason = "CancelledDuringTileBuild"; result.tiles.clear(); return result; }
 			GroundTileBlob blob{};
-			result.status = BuildTile(input, key, vertices, triangles, fingerprints, blob, result.reason);
+			result.status = BuildTile(input, key, vertices, triangles, obstructionTriangles,
+				obstructionBounds, fingerprints, blob, result.reason);
 			if(result.status != RecastGroundBuildStatus::Success) { result.tiles.clear(); return result; }
 			if(input.budget != nullptr && !blob.pristineBytes.empty()) {
 				auto reservation = std::make_shared<NavigationBudgetReservation>(input.budget->TryReserve(

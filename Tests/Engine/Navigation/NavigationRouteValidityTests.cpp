@@ -94,5 +94,25 @@ namespace TerraEngine::Tests
 			context.Expect(observed.state == NavigationRouteValidityState::Valid,
 				"Changes outside the retained swept corridor must not invalidate its immutable route.");
 		});
+
+		registry.Add("Navigation.RouteValidity.TerrainLossMakesRetainedRoutesUnavailableBeforeStale", [](TestContext& context) {
+			const NavigationObservationEvidence captured{7U, 3U, 4U, 19U, 31U, 23U};
+			const NavigationObservationEvidence terrainLost{8U, 3U, 4U, 0U, 32U, 24U};
+			const NavigationRouteObservationValidation observed =
+				ValidateNavigationRouteObservation(captured, terrainLost);
+			context.Expect(!observed.usable && observed.outcome == NavigationOutcome::UnavailableCoverage
+				&& observed.reason == NavigationReason::MissingTerrain,
+				"Terrain disappearance must invalidate retained routes as unavailable before a mixed or stale route can be consumed.");
+		});
+
+		registry.Add("Navigation.RouteValidity.RejectsAnyChangedPublishedWorldEvidence", [](TestContext& context) {
+			const NavigationObservationEvidence captured{7U, 3U, 4U, 19U, 31U, 23U};
+			const NavigationObservationEvidence changedStreaming{8U, 3U, 4U, 19U, 32U, 24U};
+			const NavigationRouteObservationValidation observed =
+				ValidateNavigationRouteObservation(captured, changedStreaming);
+			context.Expect(!observed.usable && observed.outcome == NavigationOutcome::Stale
+				&& observed.reason == NavigationReason::DirtyCoverage,
+				"Streaming, source, terrain, resource, or profile publication must reject a route prepared against the older complete tuple.");
+		});
 	}
 }

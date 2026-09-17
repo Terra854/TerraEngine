@@ -51,11 +51,21 @@ namespace TerraEngine::Physics {
 		std::uint64_t expectedSpatialRevision = 0;
 	};
 
+	// A Transform may be authoritative from either a simulated rigid body or a
+	// standalone virtual character. Keeping the authority explicit prevents a
+	// controller-only object from borrowing a fake body handle at validation.
+	enum class TransformPublicationAuthority : std::uint8_t {
+		Body,
+		Character
+	};
+
 	// Worker conversion receives no Object or component pointer. Every generation
 	// needed for protected validation travels with the compact record instead.
 	struct TransformPublicationSourceRecord {
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		TransformPublicationAuthority authority = TransformPublicationAuthority::Body;
 		PhysicsBodyHandle body;
+		PhysicsCharacterHandle character;
 		PhysicsFrameHandle frame;
 		std::uint64_t objectLifetimeGeneration = 0;
 		PhysicsGeneration bodyGeneration = 0;
@@ -77,7 +87,9 @@ namespace TerraEngine::Physics {
 
 	struct TransformPublicationEntry {
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		TransformPublicationAuthority authority = TransformPublicationAuthority::Body;
 		PhysicsBodyHandle body;
+		PhysicsCharacterHandle character;
 		PhysicsFrameHandle frame;
 		std::uint64_t objectLifetimeGeneration = 0;
 		PhysicsGeneration bodyGeneration = 0;
@@ -137,7 +149,9 @@ namespace TerraEngine::Physics {
 
 	struct TransformPublicationEntryReceipt {
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		TransformPublicationAuthority authority = TransformPublicationAuthority::Body;
 		PhysicsBodyHandle body;
+		PhysicsCharacterHandle character;
 		PhysicsPose worldPose;
 	};
 

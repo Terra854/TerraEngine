@@ -78,7 +78,7 @@ namespace TerraEngine.Export
 		// calling either animation pointer, preserving v1/v2 binary compatibility.
 		[FieldOffset(136)] public delegate* unmanaged[Cdecl]<ushort> GetAnimationAbiVersion;
 		[FieldOffset(144)] public delegate* unmanaged[Cdecl]<void*, uint, long, ulong, uint, uint, void> DispatchAnimationEventBatch;
-		// Appended v4 tail. The native host validates this fixed ABI version before
+		// Appended v4 tail. The native host validates the v2 object-route ABI before
 		// enabling NativeAOT navigation calls.
 		[FieldOffset(152)] public delegate* unmanaged[Cdecl]<uint> GetNavigationAbiVersion;
 	}

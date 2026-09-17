@@ -19,8 +19,6 @@ namespace TerraEngine::Navigation {
 
 	enum class NavigationProfileValidationCode : std::uint8_t {
 		None,
-		InvalidId,
-		InvalidRevision,
 		InvalidRadius,
 		InvalidHeight,
 		InvalidStepHeight,
@@ -32,7 +30,7 @@ namespace TerraEngine::Navigation {
 
 	struct NavigationProfileValidation {
 		bool accepted = false;
-		NavigationProfileValidationCode code = NavigationProfileValidationCode::InvalidId;
+		NavigationProfileValidationCode code = NavigationProfileValidationCode::InvalidRadius;
 
 		[[nodiscard]] constexpr bool Succeeded() const noexcept { return accepted; }
 	};
@@ -41,8 +39,6 @@ namespace TerraEngine::Navigation {
 	// ground character is always an upright capsule; navigation never selects a
 	// different locomotion mode for it.
 	struct NavigationProfile {
-		std::uint64_t profileId = 1U;
-		NavigationGeneration revision = 1U;
 		double radiusMetres = 0.4;
 		double heightMetres = 1.8;
 		double stepHeightMetres = 0.35;
@@ -52,6 +48,10 @@ namespace TerraEngine::Navigation {
 		double verticalResolutionMetres = 0.05;
 		std::uint32_t excludedAreasMask = 0U;
 		std::array<double, kNavigationAreaCount> areaPenalties{};
+
+		// Exact value equality lets bootstrap collapse identical copied presets
+		// without introducing a second identity or revision namespace.
+		[[nodiscard]] friend bool operator==(const NavigationProfile&, const NavigationProfile&) = default;
 
 		[[nodiscard]] static NavigationProfile Defaults() noexcept;
 		[[nodiscard]] NavigationProfileValidation Validate() const noexcept;

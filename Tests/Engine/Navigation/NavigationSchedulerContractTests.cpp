@@ -77,24 +77,25 @@ namespace TerraEngine::Tests
 				"Navigation declarations must make worker scope, protected reason, and profiling visible to diagnostics.");
 			context.Expect(Contains(declaration.reads, "SceneChangePublication")
 				&& Contains(declaration.reads, "PublishedSpatialSnapshot")
+				&& Contains(declaration.reads, "TerrainPublishedCollision")
 				&& Contains(declaration.reads, "PublishedWorldRegionResidency")
-				&& Contains(declaration.reads, "NavigationAuthoring")
-				&& Contains(declaration.reads, "GeometryPublications")
-				&& Contains(declaration.reads, "NavigationCommandQueue")
-				&& Contains(declaration.reads, "NavigationPreparedResults"),
-				"Navigation workers must receive only declared immutable inputs and the bounded completion handoff.");
-			context.Expect(Contains(declaration.writes, "NavigationSourceSnapshot")
-				&& Contains(declaration.writes, "NavigationCoverageRoot")
-				&& Contains(declaration.writes, "NavigationAgentState")
+				&& Contains(declaration.reads, "NavigationCaptureInputs")
+				&& Contains(declaration.reads, "NavigationGeometryPublications")
+				&& Contains(declaration.reads, "NavigationRequestQueue")
+				&& Contains(declaration.reads, "NavigationPreparedCandidates"),
+				"Navigation workers must declare scene, spatial, terrain, resource, streaming, profile, request, and prepared inputs.");
+			context.Expect(Contains(declaration.writes, "NavigationEligibleSourceIndex")
+				&& Contains(declaration.writes, "NavigationWorldRoot")
+				&& Contains(declaration.writes, "NavigationRouteValidity")
 				&& Contains(declaration.writes, "NavigationResults")
 				&& Contains(declaration.writes, "NavigationDiagnostics"),
-				"Navigation publication must declare every authoritative root/result/diagnostic output.");
+				"Navigation publication must declare every automatic index/world/route-validity/result/diagnostic output.");
 			context.Expect(!Contains(declaration.reads, "Renderer") && !Contains(declaration.writes, "Renderer"),
 				"Navigation must not depend on renderer state, so the same declaration is valid in rendered and headless lanes.");
 
 			const std::vector<SchedulerResourceDefinition> resources = DefaultSchedulerResources();
-			for(const std::string_view required : { "NavigationAuthoring", "GeometryPublications", "NavigationCommandQueue",
-				"NavigationPreparedResults", "NavigationSourceSnapshot", "NavigationCoverageRoot", "NavigationAgentState",
+			for(const std::string_view required : { "NavigationCaptureInputs", "NavigationGeometryPublications", "NavigationRequestQueue",
+				"NavigationPreparedCandidates", "NavigationEligibleSourceIndex", "NavigationWorldRoot", "NavigationRouteValidity",
 				"NavigationResults", "NavigationDiagnostics" }) {
 				context.Expect(std::any_of(resources.begin(), resources.end(), [required](const SchedulerResourceDefinition& resource) {
 					return resource.name == required;

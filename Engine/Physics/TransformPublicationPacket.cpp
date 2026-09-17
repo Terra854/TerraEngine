@@ -70,7 +70,9 @@ namespace TerraEngine::Physics {
 			}
 			packet.entries.push_back(TransformPublicationEntry{
 				.objectId = record.objectId,
+				.authority = record.authority,
 				.body = record.body,
+				.character = record.character,
 				.frame = record.frame,
 				.objectLifetimeGeneration = record.objectLifetimeGeneration,
 				.bodyGeneration = record.bodyGeneration,
@@ -127,10 +129,14 @@ namespace TerraEngine::Physics {
 			const TransformPublicationEntry& entry = packet.entries[index];
 			result.entryIndex = index;
 			result.objectId = entry.objectId;
-			if (entry.objectId == TerraEngine::EMPTY_UUID || !entry.body.IsValid())
+			const bool validAuthority = (entry.authority == TransformPublicationAuthority::Body
+				&& entry.body.IsValid() && !entry.character.IsValid())
+				|| (entry.authority == TransformPublicationAuthority::Character
+					&& entry.character.IsValid() && !entry.body.IsValid());
+			if (entry.objectId == TerraEngine::EMPTY_UUID || !validAuthority)
 			{
 				result.reason = TransformPublicationValidationReason::InvalidIdentity;
-				result.message = "A publication entry has an invalid object or body identity.";
+				result.message = "A publication entry has an invalid or mixed provider authority identity.";
 				return result;
 			}
 			if (!objectIds.insert(entry.objectId).second)
@@ -145,11 +151,17 @@ namespace TerraEngine::Physics {
 				result.message = "A publication entry belongs to a stale physics frame generation.";
 				return result;
 			}
-			if (entry.body.worldId != packet.snapshot.world.worldId
-				|| entry.body.worldGeneration != packet.snapshot.world.worldGeneration
+			const PhysicsWorldId authorityWorldId = entry.authority == TransformPublicationAuthority::Body
+				? entry.body.worldId : entry.character.worldId;
+			const PhysicsGeneration authorityWorldGeneration = entry.authority == TransformPublicationAuthority::Body
+				? entry.body.worldGeneration : entry.character.worldGeneration;
+			const PhysicsGeneration authoritySlotGeneration = entry.authority == TransformPublicationAuthority::Body
+				? entry.body.slotGeneration : entry.character.slotGeneration;
+			if (authorityWorldId != packet.snapshot.world.worldId
+				|| authorityWorldGeneration != packet.snapshot.world.worldGeneration
 				|| entry.objectLifetimeGeneration == 0U || entry.bodyGeneration == 0U
 				|| entry.componentGeneration == 0U || entry.expectedTransformRevision == 0U
-				|| entry.body.slotGeneration != entry.bodyGeneration
+				|| authoritySlotGeneration != entry.bodyGeneration
 				|| entry.expectedHierarchyGeneration != packet.hierarchyGeneration)
 			{
 				result.reason = TransformPublicationValidationReason::InvalidGeneration;
@@ -256,7 +268,10 @@ namespace TerraEngine::Physics {
 					.parentTransformRevision = entry.expectedParentTransformRevision});
 				operation.transformUpdates.push_back(Scene::TransactionTransformUpdate{
 					.objectId = entry.objectId,
-					.pose = ToCanonicalPose(entry.canonicalFrameOrigin, entry.localPose)});
+					.pose = ToCanonicalPose(entry.canonicalFrameOrigin, entry.localPose),
+					// Body and character simulation publish rigid poses only; the mesh's
+					// authored scale must survive initialization and every later step.
+					.preserveScale = true});
 			}
 			transaction.writeSet.operations.push_back(std::move(operation));
 			group.chunks.push_back(std::move(transaction));
@@ -287,7 +302,8 @@ namespace TerraEngine::Physics {
 		receipt.acknowledgedEntries.reserve(packet.entries.size());
 		for (const TransformPublicationEntry& entry : packet.entries)
 		{
-			receipt.acknowledgedEntries.push_back({entry.objectId, entry.body, entry.worldPoseReceipt});
+			receipt.acknowledgedEntries.push_back({entry.objectId, entry.authority,
+				entry.body, entry.character, entry.worldPoseReceipt});
 		}
 		return receipt;
 	}

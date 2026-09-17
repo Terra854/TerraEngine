@@ -121,6 +121,20 @@ namespace TerraEngine::Tests
 				"Out-of-order completion must leave the newer authoritative root untouched.");
 		});
 
+		registry.Add("Navigation.DynamicMutation.RejectsOlderPhysicalPublicationForOneStableSource", [](TestContext& context) {
+			NavigationDirtyIndex dirty({});
+			NavigationDynamicSourceChange current = MakeChange(NavigationDynamicChangeKind::Replaced, 31U,
+				Bounds(-1.0F, 1.0F), Bounds(-2.0F, 2.0F));
+			current.physicalReadyRevision = 91U;
+			context.Expect(dirty.CommitSourceChange(current).accepted,
+				"A newer checked companion generation must produce a dirty source change.");
+			NavigationDynamicSourceChange olderPhysical = MakeChange(NavigationDynamicChangeKind::Replaced, 32U,
+				Bounds(-2.0F, 2.0F), Bounds(-1.0F, 1.0F));
+			olderPhysical.physicalReadyRevision = 90U;
+			context.Expect(!dirty.CommitSourceChange(olderPhysical).accepted,
+				"A resource, terrain, or streaming publication cannot move a stable source back to an older physical generation.");
+		});
+
 		registry.Add("Navigation.DynamicPublication.KeepsUnrelatedCoverageWhenOneCandidateFails", [](TestContext& context) {
 			NavigationWorld world({ { 412U }, 3U });
 			NavigationDirtyIndex dirty({});

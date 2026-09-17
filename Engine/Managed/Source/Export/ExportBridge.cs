@@ -39,8 +39,11 @@ namespace TerraEngine.Export
 		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_GetAbiVersion")]
 		public static partial uint GetNavigationAbiVersion();
 
-		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_SubmitRoute")]
-		internal static partial global::TerraEngine.NavigationStatus SubmitNavigationRoute(ref global::TerraEngine.NativeNavigationRouteRequest request, ref global::TerraEngine.NativeNavigationSubmitReceipt receipt);
+		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_RequestObjectToLocation")]
+		internal static partial global::TerraEngine.NavigationStatus RequestObjectNavigationRoute(ref global::TerraEngine.NativeNavigationObjectToLocationRequest request, ref global::TerraEngine.NativeNavigationSubmitReceipt receipt);
+
+		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_RequestObjectToObject")]
+		internal static partial global::TerraEngine.NavigationStatus RequestObjectTargetNavigationRoute(ref global::TerraEngine.NativeNavigationObjectToObjectRequest request, ref global::TerraEngine.NativeNavigationSubmitReceipt receipt);
 
 		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_ReadRequest")]
 		internal static partial global::TerraEngine.NavigationStatus ReadNavigationRequest(ref global::TerraEngine.NavigationRequestHandle request, ref global::TerraEngine.NativeNavigationRequestSnapshot snapshot);
@@ -56,21 +59,6 @@ namespace TerraEngine.Export
 
 		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_ValidateRoute")]
 		internal static partial global::TerraEngine.NavigationStatus ValidateNavigationRoute(ref global::TerraEngine.NativeNavigationRouteValidationRequest request, ref global::TerraEngine.NativeNavigationRouteValidationResult result);
-
-		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_SetDestination")]
-		internal static partial global::TerraEngine.NavigationStatus SetNavigationDestination(ref global::TerraEngine.NativeNavigationDestinationRequest request, ref global::TerraEngine.NativeNavigationCommandReceipt receipt);
-
-		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_ReadCommand")]
-		internal static partial global::TerraEngine.NavigationStatus ReadNavigationCommand(ref global::TerraEngine.NativeNavigationCommandQuery query, ref global::TerraEngine.NativeNavigationCommandReceipt receipt);
-
-		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_ResolveObjectAgent")]
-		internal static partial global::TerraEngine.NavigationStatus ResolveObjectNavigationAgent(uint objectEntity, ref global::TerraEngine.NativeNavigationAgentSnapshot snapshot);
-
-		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_ReadAgent")]
-		internal static partial global::TerraEngine.NavigationStatus ReadNavigationAgent(ref global::TerraEngine.NavigationAgentHandle agent, ref global::TerraEngine.NativeNavigationAgentSnapshot snapshot);
-
-		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_ReleaseAgent")]
-		internal static partial global::TerraEngine.NavigationStatus ReleaseNavigationAgent(ref global::TerraEngine.NavigationAgentHandle agent);
 
 		[LibraryImport(EngineDll, EntryPoint = "Native_Navigation_CopyInvalidations")]
 		internal static unsafe partial global::TerraEngine.NavigationStatus CopyNavigationInvalidations(ref global::TerraEngine.NativeNavigationInvalidationCursor cursor, global::TerraEngine.NativeNavigationInvalidationRecord* records, uint capacity, ref global::TerraEngine.NativeNavigationBufferInfo info);

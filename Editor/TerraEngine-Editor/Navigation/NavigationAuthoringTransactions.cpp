@@ -11,32 +11,9 @@
 
 namespace TerraEngine::Editor::Navigation {
 	namespace {
-		[[nodiscard]] bool SameSource(const NavigationSourceComponent& left, const NavigationSourceComponent& right) noexcept {
-			return left.sourceId == right.sourceId && left.enabled == right.enabled && left.sourceKind == right.sourceKind
-				&& left.sourceAssetId == right.sourceAssetId && left.subshapeSelection == right.subshapeSelection
-				&& left.inclusionMask == right.inclusionMask && left.areaId == right.areaId
-				&& left.deduplicationGroup == right.deduplicationGroup
-				&& left.geometryRevision == right.geometryRevision && left.renderVisible == right.renderVisible;
-		}
-
 		[[nodiscard]] bool SameProfile(const TerraEngine::Navigation::NavigationProfile& left,
 			const TerraEngine::Navigation::NavigationProfile& right) noexcept {
-			return left.profileId == right.profileId && left.revision == right.revision
-				&& left.radiusMetres == right.radiusMetres && left.heightMetres == right.heightMetres
-				&& left.stepHeightMetres == right.stepHeightMetres && left.maxSlopeDegrees == right.maxSlopeDegrees
-				&& left.clearanceMarginMetres == right.clearanceMarginMetres
-				&& left.horizontalResolutionMetres == right.horizontalResolutionMetres
-				&& left.verticalResolutionMetres == right.verticalResolutionMetres
-				&& left.excludedAreasMask == right.excludedAreasMask && left.areaPenalties == right.areaPenalties;
-		}
-
-		[[nodiscard]] bool SameConnection(const NavigationConnectionComponent& left,
-			const NavigationConnectionComponent& right) noexcept {
-			return left.connectionId == right.connectionId && left.revision == right.revision
-				&& left.enabled == right.enabled && left.firstEndpoint == right.firstEndpoint
-				&& left.secondEndpoint == right.secondEndpoint && left.direction == right.direction
-				&& left.capabilityMask == right.capabilityMask && left.gameplayCondition == right.gameplayCondition
-				&& left.areaId == right.areaId && left.traversalCost == right.traversalCost;
+			return left == right;
 		}
 
 		class NavigationStateCommand final : public ICommand {
@@ -57,11 +34,11 @@ namespace TerraEngine::Editor::Navigation {
 	}
 
 	bool NavigationAuthoredState::operator==(const NavigationAuthoredState& other) const noexcept {
-		return sources.size() == other.sources.size() && profiles.size() == other.profiles.size()
-			&& connections.size() == other.connections.size()
-			&& std::equal(sources.begin(), sources.end(), other.sources.begin(), SameSource)
+		return profiles.size() == other.profiles.size()
 			&& std::equal(profiles.begin(), profiles.end(), other.profiles.begin(), SameProfile)
-			&& std::equal(connections.begin(), connections.end(), other.connections.begin(), SameConnection);
+			&& settings.maxActiveAgents == other.settings.maxActiveAgents
+			&& settings.maxAdmittedRequests == other.settings.maxAdmittedRequests
+			&& settings.maxPublishedAndRetiredBytes == other.settings.maxPublishedAndRetiredBytes;
 	}
 
 	NavigationAuthoringTransactions::NavigationAuthoringTransactions(UndoRedoSystem& history) : history_(history) {}
@@ -109,12 +86,8 @@ namespace TerraEngine::Editor::Navigation {
 	NavigationAuthoredState NavigationAuthoringTransactions::Save() const { return current_; }
 
 	bool NavigationAuthoringTransactions::Reload(const NavigationAuthoredState& saved) {
-		for(const NavigationSourceComponent& source : saved.sources)
-			if(!ValidateNavigationSourceDraft(source).accepted) return false;
 		for(const auto& profile : saved.profiles)
 			if(!ValidateNavigationProfileDraft(profile).accepted) return false;
-		for(const NavigationConnectionComponent& connection : saved.connections)
-			if(!ValidateNavigationConnectionDraft(connection).accepted) return false;
 		current_ = saved;
 		return true;
 	}

@@ -22,11 +22,15 @@ namespace TerraEngine::Navigation {
 	struct NavigationRuntimeSceneCaptureSettings {
 		NavigationProfile defaultProfile = NavigationProfile::Defaults();
 		std::vector<NavigationProfileRegistration> registeredProfiles;
+		// Typed producers publish these complete immutable values at their own
+		// protected boundary. Runtime capture copies them alongside scene geometry
+		// and never accepts an untyped renderer or script pointer.
+		std::vector<NavigationEligibleSourceCandidate> proceduralSources;
 	};
 
 	struct NavigationRuntimeSceneCapture {
 		bool accepted = false;
-		std::uint64_t componentRevision = 0U;
+		std::uint64_t sourceCaptureRevision = 0U;
 		std::string reason;
 		NavigationSceneBootstrapCapture bootstrap{};
 	};
@@ -37,15 +41,14 @@ namespace TerraEngine::Navigation {
 		std::string reason;
 	};
 
-	// Captures active authoring components, registered immutable geometry
-	// companions, and the currently published terrain collision heightfield. It
-	// never queues worker work itself, so a caller can revalidate the captured
-	// component revision before admitting the returned build inputs.
+	// Captures active terrain, collider, mesh-companion, and typed procedural
+	// physical values. It never queues worker work itself, so a caller can
+	// revalidate the captured component revision before admitting the build.
 	[[nodiscard]] TERRAENGINE_API NavigationRuntimeSceneCapture CaptureNavigationRuntimeScene(
 		ObjectManager& objects, ResourceManager& resources,
 		const TerraEngine::Physics::Terrain::TerrainCollisionSnapshot& terrainCollision,
 		const NavigationRuntimeSceneCaptureSettings& settings = {});
-	// Invoke only after the caller has compared componentRevision with its last
+	// Invoke only after the caller has compared sourceCaptureRevision with its last
 	// admitted capture revision. The NavigationSystem copies every snapshot again
 	// before returning, so no live ECS/resource state reaches worker execution.
 	[[nodiscard]] TERRAENGINE_API NavigationRuntimeSceneSubmission SubmitNavigationRuntimeSceneCapture(

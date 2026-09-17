@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Core/Export.h"
+#include "Navigation/Geometry/NavigationGeometrySnapshot.h"
 #include "Navigation/NavigationBudget.h"
 #include "Navigation/NavigationTypes.h"
 #include "Utilities/UUID.h"
@@ -40,6 +41,11 @@ namespace TerraEngine::Navigation {
 		NavigationGeneration sourceRevision = 0U;
 		NavigationGeneration geometryRevision = 0U;
 		bool enabled = false;
+		// New captures retain the complete automatic-source identity and evidence.
+		// The scalar fields above remain until every dynamic caller switches in the
+		// following tasks, so a partial rollout cannot publish a mixed root.
+		NavigationEligibleSourceIdentity identity{};
+		NavigationSourceRevisionEvidence revisionEvidence{};
 	};
 
 	struct NavigationCoverageRecord {
@@ -55,14 +61,45 @@ namespace TerraEngine::Navigation {
 		NavigationGeneration removedRevision = 0U;
 	};
 
-	struct NavigationAgentTableRecord {
-		NavigationAgentHandle handle{};
-		NavigationGeneration intentGeneration = 0U;
-	};
-
 	struct NavigationRequestTableRecord {
 		NavigationRequestHandle handle{};
 		NavigationOutcome outcome = NavigationOutcome::Queued;
+	};
+
+	// Terrain is a capability boundary, not just another optional mesh. An
+	// unavailable publication is intentional state that prevents callers from
+	// searching stale terrain after the active terrain has disappeared.
+	enum class NavigationTerrainState : std::uint8_t {
+		Unavailable,
+		Available
+	};
+
+	// Provider shards and portals remain provider-private. These copied records
+	// are the coherent publication evidence a route result may retain safely.
+	struct NavigationWorldShardRecord {
+		NavigationCoverageKey coverage{};
+		NavigationGeneration shardGeneration = 0U;
+		NavigationGeneration profileRevision = 0U;
+		bool ready = false;
+	};
+
+	struct NavigationGeneratedPortalRecord {
+		NavigationCoverageKey fromCoverage{};
+		NavigationCoverageKey toCoverage{};
+		NavigationGeneration fromShardGeneration = 0U;
+		NavigationGeneration toShardGeneration = 0U;
+	};
+
+	struct NavigationRouteValidityPublicationState {
+		NavigationGeneration generation = 0U;
+		std::size_t retainedRouteCount = 0U;
+	};
+
+	struct NavigationWorldDiagnostics {
+		std::uint32_t excludedSourceCount = 0U;
+		std::uint32_t pendingSourceCount = 0U;
+		std::uint32_t rejectedCandidateCount = 0U;
+		std::uint32_t invalidatedRouteCount = 0U;
 	};
 
 	// Every reader retains one const root. A writer prepares a complete detached
@@ -70,14 +107,29 @@ namespace TerraEngine::Navigation {
 	struct NavigationWorldRoot {
 		NavigationWorldHandle world{};
 		NavigationGeneration rootGeneration = 0U;
+		// Every field below becomes visible together. A route records this tuple's
+		// generations and rejects itself stale if a later root replaces any input.
+		NavigationGeneration observationGeneration = 0U;
+		NavigationTerrainState terrainState = NavigationTerrainState::Unavailable;
+		NavigationGeneration terrainPublicationGeneration = 0U;
+		NavigationGeneration sourceIndexRevision = 0U;
+		NavigationGeneration routeValidityGeneration = 0U;
+		// The complete captured index is swapped with this root; workers never
+		// reconstruct it by consulting mutable scene data after publication.
+		std::shared_ptr<const NavigationEligibleSourceIndex> eligibleSourceIndex;
 		std::vector<NavigationSourceIndexRecord> sources;
 		std::vector<NavigationCoverageRecord> coverage;
 		std::vector<NavigationSourceTombstone> tombstones;
-		std::vector<NavigationAgentTableRecord> agents;
+		std::vector<NavigationWorldShardRecord> shards;
+		std::vector<NavigationGeneratedPortalRecord> generatedPortals;
+		NavigationRouteValidityPublicationState routeValidity{};
+		NavigationWorldDiagnostics diagnostics{};
 		std::vector<NavigationRequestTableRecord> requests;
 		// NavigationWorld recomputes this owned allocation estimate before
 		// publication; producers cannot use it to bypass the byte budget.
 		std::size_t chargedBytes = 0U;
+
+		[[nodiscard]] bool IsCoherent() const noexcept;
 	};
 
 	class TERRAENGINE_API NavigationWorld final {
@@ -92,7 +144,7 @@ namespace TerraEngine::Navigation {
 		[[nodiscard]] NavigationWorldRoot CreateCandidate() const;
 
 		// Publication is all-or-nothing: a stale candidate leaves the current root
-		// and every source, coverage, tombstone, request, and agent row unchanged.
+		// and every source, coverage, tombstone, and request row unchanged.
 		[[nodiscard]] bool Publish(NavigationWorldRoot candidate, NavigationGeneration expectedRootGeneration);
 		void CollectRetiredRoots();
 		[[nodiscard]] std::size_t RetiredRootCount() const;

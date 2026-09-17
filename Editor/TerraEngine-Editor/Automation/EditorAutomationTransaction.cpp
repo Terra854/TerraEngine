@@ -422,7 +422,7 @@ namespace TerraEngine::Editor::Automation
 				}
 				if (componentName == "Transform")
 				{
-					prepared.message = "Transform reflection writes are unsupported; use world.set_transform or world.translate.";
+					prepared.message = "Transform reflection writes are unsupported; use world.set_transform or world.translate through transaction.apply.";
 					return prepared;
 				}
 				TerraEngine::Reflection::Variant value;
@@ -435,6 +435,13 @@ namespace TerraEngine::Editor::Automation
 						return prepared;
 					}
 					const TerraEngine::Reflection::Property property = TerraEngine::Reflection::FindProperty(component->second.reflectionType, propertyName);
+					if (!TerraEngine::Reflection::IsValid(property))
+					{
+						// A missing reflection property has no typed destination. Reject it
+						// before decoding JSON so a malformed request cannot look committed.
+						prepared.message = "Component property is not registered for automation.";
+						return prepared;
+					}
 					value = JsonToVariant(operation["value"], TerraEngine::Reflection::GetPropertyType(property));
 				}
 				if (!TerraEngine::Reflection::IsValid(value))

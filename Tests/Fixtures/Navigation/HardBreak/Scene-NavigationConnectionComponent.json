@@ -1,0 +1,8 @@
+{
+	"format": "TerraSceneUnboundedV1",
+	"objects": [{
+		"uuid": "580000000000000000000000000003",
+		"name": "Unsupported Connection Scene Object",
+		"components": {"NavigationConnectionComponent": {}}
+	}]
+}

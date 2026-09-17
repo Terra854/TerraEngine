@@ -195,6 +195,12 @@ void Engine::Initialize()
 	lastNavigationBootstrapComponentRevision = 0U;
 	lastNavigationBootstrapProfileRevision = 0U;
 	lastNavigationBootstrapTerrainPublicationGeneration = 0U;
+	lastNavigationBootstrapTerrainCollisionStatus = 0U;
+	lastNavigationBootstrapTerrainRecipeGeneration = 0U;
+	lastNavigationBootstrapPhysicsWorldGeneration = 0U;
+	lastNavigationBootstrapSpatialGeneration = 0U;
+	lastNavigationBootstrapResidencyGeneration = 0U;
+	lastNavigationBootstrapGeometryPublicationGeneration = 0U;
 	pool.initialize();
 	
 	systems.clear();
@@ -595,17 +601,42 @@ bool Engine::Update(float deltaTime)
 				const auto terrainCollision =
 					TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().Snapshot();
 				const std::uint64_t terrainPublicationGeneration = terrainCollision.sourcePublicationGeneration;
+				const std::uint8_t terrainCollisionStatus =
+					static_cast<std::uint8_t>(terrainCollision.status);
+				const std::uint64_t terrainRecipeGeneration =
+					terrainCollision.currentRecipe.authoredGeneration;
+				const std::uint64_t physicsWorldGeneration =
+					TerraEngine::Physics::PhysicsSystem::Instance().WorldHandle().worldGeneration;
+				const std::uint64_t spatialGeneration =
+					TerraEngine::Scene::WorldSpatialSystem::Instance().CurrentSnapshot().spatialGeneration;
+				const std::uint64_t residencyGeneration =
+					TerraEngine::Scene::WorldStreamingSystem::Instance().CurrentResidency().generation;
+				const std::uint64_t geometryPublicationGeneration =
+					ResourceManager::Instance().NavigationGeometryPublicationGeneration();
 				if(!navigationBootstrapAttempted
 					|| componentRevision != lastNavigationBootstrapComponentRevision
 					|| profileRevision != lastNavigationBootstrapProfileRevision
-					|| terrainPublicationGeneration != lastNavigationBootstrapTerrainPublicationGeneration) {
+					|| terrainPublicationGeneration != lastNavigationBootstrapTerrainPublicationGeneration
+					|| terrainCollisionStatus != lastNavigationBootstrapTerrainCollisionStatus
+					|| terrainRecipeGeneration != lastNavigationBootstrapTerrainRecipeGeneration
+					|| physicsWorldGeneration != lastNavigationBootstrapPhysicsWorldGeneration
+					|| spatialGeneration != lastNavigationBootstrapSpatialGeneration
+					|| residencyGeneration != lastNavigationBootstrapResidencyGeneration
+					|| geometryPublicationGeneration != lastNavigationBootstrapGeometryPublicationGeneration) {
 					// Record the immutable input tuple before capture. Rejections are
 					// deterministic for this tuple, so retry only after a scene, profile,
-					// or terrain publication change instead of stalling every editor frame.
+					// spatial, terrain, resource-backed component, or streaming publication
+					// change instead of stalling every editor frame.
 					navigationBootstrapAttempted = true;
 					lastNavigationBootstrapComponentRevision = componentRevision;
 					lastNavigationBootstrapProfileRevision = profileRevision;
 					lastNavigationBootstrapTerrainPublicationGeneration = terrainPublicationGeneration;
+					lastNavigationBootstrapTerrainCollisionStatus = terrainCollisionStatus;
+					lastNavigationBootstrapTerrainRecipeGeneration = terrainRecipeGeneration;
+					lastNavigationBootstrapPhysicsWorldGeneration = physicsWorldGeneration;
+					lastNavigationBootstrapSpatialGeneration = spatialGeneration;
+					lastNavigationBootstrapResidencyGeneration = residencyGeneration;
+					lastNavigationBootstrapGeometryPublicationGeneration = geometryPublicationGeneration;
 					const TerraEngine::Navigation::NavigationProfileResolver profiles =
 						navigation.ProfileResolverSnapshot();
 					const TerraEngine::Navigation::NavigationRuntimeSceneCaptureSettings settings{
@@ -621,7 +652,7 @@ bool Engine::Update(float deltaTime)
 				}
 				TerraEngine::Navigation::NavigationSystem::Instance().ObserveProtectedBoundary(
 					TerraEngine::Navigation::NavigationProtectedBoundary::FrameEnd,
-					TerraEngine::Scene::WorldSpatialSystem::Instance().CurrentSnapshot().spatialGeneration);
+					spatialGeneration);
 			}
 			state.pendingAfterFlush = queue.Size();
 			return state;

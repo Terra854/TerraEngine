@@ -3,11 +3,6 @@
 #include "NavigationInspectorSupport.h"
 
 namespace TerraEngine::Editor::Navigation {
-	NavigationAuthoringValidation ValidateNavigationSourceDraft(const NavigationSourceComponent& source) {
-		const TerraEngine::Navigation::NavigationSourceValidationResult validation = source.Validate();
-		return {validation.accepted, validation.accepted ? std::string{} : validation.message};
-	}
-
 	NavigationAuthoringValidation ValidateNavigationProfileDraft(
 		const TerraEngine::Navigation::NavigationProfile& profile) {
 		const auto validation = profile.Validate();
@@ -17,21 +12,15 @@ namespace TerraEngine::Editor::Navigation {
 				+ std::string(TerraEngine::Navigation::ToString(validation.code))};
 	}
 
-	NavigationAuthoringValidation ValidateNavigationConnectionDraft(
-		const NavigationConnectionComponent& connection) {
-		const auto validation = connection.Validate();
-		return {validation.accepted, validation.accepted ? std::string{} : validation.message};
-	}
-
 	NavigationTerrainControlDescription DescribeNavigationTerrainControls(
 		const NavigationTerrainAuthoringState& state) noexcept {
-		return {true, !state.terrainExistsInScene, state.terrainExistsInScene};
+		return {false, !state.terrainExistsInScene, false};
 	}
 
 	NavigationAuthoringValidation ValidateNavigationTerrainAuthoring(
 		const NavigationTerrainAuthoringState& state) {
-		if(state.terrainExistsInScene && !state.hasEnabledEligibleTerrainSource)
-			return {false, "Terrain is present, so enable one eligible Terrain navigation source."};
+		if(state.terrainExistsInScene && !state.hasCurrentTerrainCollision)
+			return {false, "Terrain is present, but current published terrain collision is unavailable."};
 		return {true, {}};
 	}
 }

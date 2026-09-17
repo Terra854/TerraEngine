@@ -2,6 +2,7 @@
 
 #include "EditorAutomationLogStore.h"
 #include "EditorAutomationService.h"
+#include "Scripting/ScriptGlue.h"
 
 #include <array>
 #include <chrono>
@@ -33,6 +34,17 @@ namespace TerraEngine::EditorTests
 
 	void RegisterEditorMcpStructuredLogTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.MCP.StructuredLogs.ManagedNativeExportReachesEditorSink", [](TestContext& context) {
+			EditorAutomationLogStore logs;
+			// Invoke the engine DLL export used by C#, rather than logging from this
+			// executable: this catches accidentally module-local logger singletons.
+			Native_Log(static_cast<int>(LogLevel::Info), "managed cross-module probe", "NavigationProbe.OnStart", 1);
+			StructuredLogQuery query;
+			query.text = "managed cross-module probe";
+			context.ExpectEqual(std::size_t(1), logs.Query(query).records.size(),
+				"Managed gameplay logs must reach the editor's subscribed engine sink.");
+		});
+
 		registry.Add("Editor.MCP.StructuredLogs.EngineSinkPreservesScopedCorrelation", [](TestContext& context) {
 			EditorAutomationLogStore logs;
 			{

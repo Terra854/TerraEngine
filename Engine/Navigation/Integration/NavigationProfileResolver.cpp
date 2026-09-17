@@ -18,45 +18,52 @@ namespace TerraEngine::Navigation {
 		// binary-search resolve path avoid retaining mutable editor containers.
 		std::sort(result.registrations_.begin(), result.registrations_.end(),
 			[](const NavigationProfileRegistration& left, const NavigationProfileRegistration& right) {
-				return left.authoredProfileId < right.authoredProfileId;
+				return left.registeredProfileId < right.registeredProfileId;
 			});
 		for(std::size_t index = 0U; index < result.registrations_.size(); ++index) {
 			const NavigationProfileRegistration& entry = result.registrations_[index];
-			if(entry.authoredProfileId == TerraEngine::EMPTY_UUID
+			if(entry.registeredProfileId == TerraEngine::EMPTY_UUID
 				|| !entry.profile.Validate().Succeeded()
-				|| (index != 0U && result.registrations_[index - 1U].authoredProfileId == entry.authoredProfileId)) {
+				|| (index != 0U && result.registrations_[index - 1U].registeredProfileId == entry.registeredProfileId)) {
 				result.configurationValid_ = false;
 			}
 		}
 		return result;
 	}
 
-	NavigationProfileResolution NavigationProfileResolver::Resolve(
-		const ::NavigationAgentComponent& component) const {
-		const NavigationAgentValidationResult agentValidation = component.Validate();
-		if(!agentValidation.accepted) {
-			return {false, NavigationProfileResolutionCode::InvalidAgent, {}, agentValidation.message};
-		}
+	NavigationProfileResolution NavigationProfileResolver::ResolveExplicit(NavigationProfile profile) const {
 		if(!configurationValid_) {
 			return {false, NavigationProfileResolutionCode::InvalidProfile, {},
 				"Navigation profile configuration contains an invalid or duplicate registration."};
 		}
-		if(component.profileId == TerraEngine::EMPTY_UUID) {
-			return {true, NavigationProfileResolutionCode::ResolvedDefault, defaultProfile_,
-				"Agent has no authored profile UUID; using the project default ground profile."};
+		if(!profile.Validate().Succeeded()) {
+			return {false, NavigationProfileResolutionCode::InvalidRequest, {},
+				"Navigation route request supplies an invalid explicit profile."};
 		}
+		return {true, NavigationProfileResolutionCode::ResolvedExplicit, std::move(profile), {}};
+	}
 
-		const auto found = std::lower_bound(registrations_.begin(), registrations_.end(), component.profileId,
+	NavigationProfileResolution NavigationProfileResolver::ResolveRegistered(
+		const TerraEngine::UUID& registeredProfileId) const {
+		if(!configurationValid_) {
+			return {false, NavigationProfileResolutionCode::InvalidProfile, {},
+				"Navigation profile configuration contains an invalid or duplicate registration."};
+		}
+		if(registeredProfileId == TerraEngine::EMPTY_UUID) {
+			return {false, NavigationProfileResolutionCode::InvalidRequest, {},
+				"Navigation route request must name a non-empty registered profile ID."};
+		}
+		const auto found = std::lower_bound(registrations_.begin(), registrations_.end(), registeredProfileId,
 			[](const NavigationProfileRegistration& registration, const TerraEngine::UUID& profileId) {
-				return registration.authoredProfileId < profileId;
+				return registration.registeredProfileId < profileId;
 			});
-		if(found == registrations_.end() || found->authoredProfileId != component.profileId) {
+		if(found == registrations_.end() || found->registeredProfileId != registeredProfileId) {
 			return {false, NavigationProfileResolutionCode::UnknownProfile, {},
-				"NavigationAgentComponent references an unknown authored navigation profile."};
+				"Navigation route request references an unknown registered profile."};
 		}
 		if(!found->profile.Validate().Succeeded()) {
 			return {false, NavigationProfileResolutionCode::InvalidProfile, {},
-				"NavigationAgentComponent references an invalid authored navigation profile."};
+				"Navigation route request references an invalid registered profile."};
 		}
 		return {true, NavigationProfileResolutionCode::ResolvedRegistered, found->profile, {}};
 	}
@@ -67,9 +74,9 @@ namespace TerraEngine::Navigation {
 
 	std::string_view ToString(NavigationProfileResolutionCode code) noexcept {
 		switch(code) {
-		case NavigationProfileResolutionCode::ResolvedDefault: return "ResolvedDefault";
+		case NavigationProfileResolutionCode::ResolvedExplicit: return "ResolvedExplicit";
 		case NavigationProfileResolutionCode::ResolvedRegistered: return "ResolvedRegistered";
-		case NavigationProfileResolutionCode::InvalidAgent: return "InvalidAgent";
+		case NavigationProfileResolutionCode::InvalidRequest: return "InvalidRequest";
 		case NavigationProfileResolutionCode::UnknownProfile: return "UnknownProfile";
 		case NavigationProfileResolutionCode::InvalidProfile: return "InvalidProfile";
 		case NavigationProfileResolutionCode::DuplicateProfile: return "DuplicateProfile";

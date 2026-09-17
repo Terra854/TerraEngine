@@ -127,6 +127,24 @@ class TERRAENGINE_API Engine {
 		// without rewriting the TerrainComponent itself. Track that generation so
 		// navigation recaptures holes/heights at the next normal frame-end boundary.
 		std::uint64_t lastNavigationBootstrapTerrainPublicationGeneration = 0U;
+		// A Play Mode restart reuses the authored terrain generation but replaces its
+		// provider body. Pending-to-current collision publication must therefore
+		// invalidate a previous MissingTerrain result even when terrain bytes match.
+		std::uint8_t lastNavigationBootstrapTerrainCollisionStatus = 0U;
+		std::uint64_t lastNavigationBootstrapTerrainRecipeGeneration = 0U;
+		// Physics world identity is a physical-ownership boundary. A fresh world
+		// has no terrain body until the retained recipe republishes into it.
+		std::uint64_t lastNavigationBootstrapPhysicsWorldGeneration = 0U;
+		// Canonical transforms may change through protected spatial publication
+		// without a component write. Preserve its exact generation for automatic
+		// eligible-source capture instead of folding it into an unrelated revision.
+		std::uint64_t lastNavigationBootstrapSpatialGeneration = 0U;
+		// Streamed terrain and geometry enter or leave through residency publication.
+		// This copied generation wakes capture even when no local object was edited.
+		std::uint64_t lastNavigationBootstrapResidencyGeneration = 0U;
+		// Checked mesh companion reloads are resource publications, not component
+		// edits. Keep their exact generation to recapture eligible mesh geometry.
+		std::uint64_t lastNavigationBootstrapGeometryPublicationGeneration = 0U;
 
 		ObjectManager& objManager = ObjectManager::instance();
 		ThreadPool& pool = ThreadPool::instance();

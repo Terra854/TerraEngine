@@ -11,10 +11,12 @@
 #include "Navigation/Geometry/NavigationGeometrySnapshot.h"
 #include "Navigation/NavigationBudget.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -62,6 +64,29 @@ namespace TerraEngine::Tests
 			descriptor.sourceKind = NavigationSourceKind::Mesh;
 			descriptor.subshapeIndex = 0U;
 			return descriptor;
+		}
+
+		NavigationEligibleSourceCandidate MakeEligibleCandidate(
+			std::string_view sourceId, NavigationSourceKind kind, std::uint32_t subshapeIndex = 0U)
+		{
+			NavigationEligibleSourceCandidate candidate{};
+			candidate.identity.sourceId = NavigationUuid::FromString(sourceId).value;
+			candidate.identity.objectId = NavigationUuid::FromString("c9ed7ec1-0441-460b-bd23-9af6736b4abc").value;
+			candidate.identity.objectLifetimeGeneration = 3U;
+			candidate.identity.assetId = NavigationUuid::FromString("be548fbc-2e49-49ec-8a0a-1e67f0453fdb").value;
+			candidate.identity.kind = kind;
+			candidate.identity.subshapeIndex = subshapeIndex;
+			candidate.revisions = {3U, 5U, 7U, 11U, 13U};
+			candidate.activeInHierarchy = true;
+			candidate.physicalBackingCurrent = true;
+			NavigationGeometrySnapshotDescriptor descriptor = MakeSnapshotDescriptor();
+			descriptor.sourceUuid.value = candidate.identity.sourceId;
+			descriptor.sourceKind = kind;
+			descriptor.subshapeIndex = subshapeIndex;
+			descriptor.sourceRevision = ComputeNavigationEligibleSourceRevision(
+				candidate.identity, candidate.revisions);
+			candidate.geometry = NavigationGeometrySnapshot::Create(descriptor, MakeTriangleDocument()).snapshot;
+			return candidate;
 		}
 	}
 
@@ -169,6 +194,60 @@ namespace TerraEngine::Tests
 				"A rejected reservation must leave the published accounting unchanged.");
 			context.Expect(Contains(budget.RejectionReasons(), "GeometryBudgetExceeded"),
 				"Budget rejection must retain a stable observable reason instead of silently dropping geometry.");
+		});
+
+		registry.Add("Navigation.GeometrySnapshot.SelectsColliderBeforeEquivalentMesh", [](TestContext& context) {
+			NavigationEligibleSourceCandidate mesh = MakeEligibleCandidate(
+				"c569d771-40a2-481c-8e89-1a4d12c0620f", NavigationSourceKind::Mesh);
+			NavigationEligibleSourceCandidate collider = MakeEligibleCandidate(
+				"c569d771-40a2-481c-8e89-1a4d12c06210", NavigationSourceKind::Collider);
+			// Deliberately submit mesh first: selection must use representation policy,
+			// not input arrival order, when an object owns both alternatives.
+			const NavigationEligibleSourceIndexBuildResult built = BuildNavigationEligibleSourceIndex(
+				std::span<const NavigationEligibleSourceCandidate>{&mesh, 1U});
+			const NavigationEligibleSourceIndexBuildResult colliderOnly = BuildNavigationEligibleSourceIndex(
+				std::span<const NavigationEligibleSourceCandidate>{&collider, 1U});
+			const std::array<NavigationEligibleSourceCandidate, 2U> alternatives{mesh, collider};
+			const NavigationEligibleSourceIndexBuildResult selected = BuildNavigationEligibleSourceIndex(alternatives);
+			context.Expect(built.accepted && colliderOnly.accepted && selected.accepted,
+				"Valid copied physical candidates must build deterministic immutable source indexes.");
+			context.Expect(selected.index.Records().size() == 1U
+				&& selected.index.Records().front().identity.kind == NavigationSourceKind::Collider,
+				"A current collider must replace the equivalent mesh representation before worker publication.");
+			context.Expect(selected.index.Exclusions().size() == 1U
+				&& selected.index.Exclusions().front().code == NavigationEligibleSourceSelectionCode::SupersededByCollider,
+				"Collider preference must remain observable as an immutable exclusion diagnostic.");
+		});
+
+		registry.Add("Navigation.GeometrySnapshot.ExcludesStaleAndInactiveSourcesWithoutMutatingIndex", [](TestContext& context) {
+			NavigationEligibleSourceCandidate active = MakeEligibleCandidate(
+				"2b7330fd-1aa2-4a7a-a5ed-4b87b6e95d01", NavigationSourceKind::Terrain);
+			NavigationEligibleSourceCandidate inactive = MakeEligibleCandidate(
+				"2b7330fd-1aa2-4a7a-a5ed-4b87b6e95d02", NavigationSourceKind::Mesh);
+			inactive.activeInHierarchy = false;
+			const std::array<NavigationEligibleSourceCandidate, 2U> candidates{active, inactive};
+			const NavigationEligibleSourceIndexBuildResult built = BuildNavigationEligibleSourceIndex(candidates);
+			context.Expect(built.accepted && built.index.Records().size() == 1U && built.index.HasCurrentTerrain(),
+				"Inactive supplementary geometry must not remove an active current terrain source from the candidate index.");
+			context.Expect(built.index.Exclusions().size() == 1U
+				&& built.index.Exclusions().front().code == NavigationEligibleSourceSelectionCode::Inactive,
+				"An inactive object must be excluded with a stable reason rather than captured from live state later.");
+			active.revisions.transformRevision++;
+			context.Expect(ComputeNavigationEligibleSourceRevision(active.identity, active.revisions)
+				!= built.index.Records().front().geometry->Descriptor().sourceRevision,
+				"A changed canonical transform revision must invalidate the previously captured source revision.");
+		});
+
+		registry.Add("Navigation.GeometrySnapshot.AcceptsTypedProceduralInputWithoutRenderVisibility", [](TestContext& context) {
+			NavigationEligibleSourceCandidate procedural = MakeEligibleCandidate(
+				"739bd917-50a2-4ca5-a8f6-7f325af95d23", NavigationSourceKind::Procedural);
+			// Eligibility has no render-visible flag: typed physical publication and
+			// stable revisions are the complete worker-safe admission evidence.
+			const NavigationEligibleSourceIndexBuildResult built = BuildNavigationEligibleSourceIndex(
+				std::span<const NavigationEligibleSourceCandidate>{&procedural, 1U});
+			context.Expect(built.accepted && built.index.Records().size() == 1U
+				&& built.index.Records().front().identity.kind == NavigationSourceKind::Procedural,
+				"A current typed procedural packet must participate without a renderer visibility dependency.");
 		});
 	}
 }

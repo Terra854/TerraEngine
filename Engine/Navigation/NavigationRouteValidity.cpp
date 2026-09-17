@@ -5,6 +5,22 @@
 
 namespace TerraEngine::Navigation
 {
+	NavigationRouteObservationValidation ValidateNavigationRouteObservation(
+		const NavigationObservationEvidence& captured,
+		const NavigationObservationEvidence& current) noexcept
+	{
+		if(current.terrainPublicationGeneration == 0U) {
+			return {false, NavigationOutcome::UnavailableCoverage, NavigationReason::MissingTerrain};
+		}
+		if(captured.worldPublicationGeneration == 0U
+			|| captured.worldPublicationGeneration != current.worldPublicationGeneration
+			|| captured.sourceIndexRevision != current.sourceIndexRevision
+			|| captured.terrainPublicationGeneration != current.terrainPublicationGeneration) {
+			return {false, NavigationOutcome::Stale, NavigationReason::DirtyCoverage};
+		}
+		return {true, NavigationOutcome::Complete, NavigationReason::None};
+	}
+
 	bool NavigationBounds::Intersects(const NavigationBounds& other) const noexcept
 	{
 		return minimum.x <= other.maximum.x && maximum.x >= other.minimum.x

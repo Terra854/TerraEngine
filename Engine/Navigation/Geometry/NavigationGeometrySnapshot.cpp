@@ -5,11 +5,79 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <set>
+#include <tuple>
 
 namespace TerraEngine::Navigation
 {
 	namespace
 	{
+		constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
+		constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+
+		void MixBytes(std::uint64_t& hash, const void* data, std::size_t count) noexcept
+		{
+			const auto* bytes = static_cast<const unsigned char*>(data);
+			for(std::size_t index = 0U; index < count; ++index) {
+				hash ^= bytes[index];
+				hash *= kFnvPrime;
+			}
+		}
+
+		template<typename Value>
+		void MixValue(std::uint64_t& hash, const Value& value) noexcept
+		{
+			MixBytes(hash, &value, sizeof(value));
+		}
+
+		void MixUuid(std::uint64_t& hash, const TerraEngine::UUID& value) noexcept
+		{
+			MixBytes(hash, value.data(), value.size());
+		}
+
+		void MixIdentity(std::uint64_t& hash, const NavigationEligibleSourceIdentity& identity) noexcept
+		{
+			MixUuid(hash, identity.sourceId);
+			MixUuid(hash, identity.objectId);
+			MixValue(hash, identity.objectLifetimeGeneration);
+			MixUuid(hash, identity.assetId);
+			MixValue(hash, identity.kind);
+			MixValue(hash, identity.subshapeIndex);
+		}
+
+		[[nodiscard]] bool IsSupportedEligibleKind(NavigationSourceKind kind) noexcept
+		{
+			return kind == NavigationSourceKind::Terrain || kind == NavigationSourceKind::Collider
+				|| kind == NavigationSourceKind::Mesh || kind == NavigationSourceKind::Procedural;
+		}
+
+		[[nodiscard]] bool LessIdentity(
+			const NavigationEligibleSourceIdentity& left,
+			const NavigationEligibleSourceIdentity& right) noexcept
+		{
+			return std::tie(left.sourceId, left.objectId, left.objectLifetimeGeneration,
+				left.assetId, left.kind, left.subshapeIndex)
+				< std::tie(right.sourceId, right.objectId, right.objectLifetimeGeneration,
+					right.assetId, right.kind, right.subshapeIndex);
+		}
+
+		[[nodiscard]] bool IsSamePhysicalRepresentation(
+			const NavigationEligibleSourceIdentity& left,
+			const NavigationEligibleSourceIdentity& right) noexcept
+		{
+			// Collider-first preference applies only to alternative mesh/collider
+			// views of one object subshape. Terrain can share an owning object in
+			// tests or tools, but it is independent ground support and must remain.
+			const bool leftIsMeshOrCollider = left.kind == NavigationSourceKind::Mesh
+				|| left.kind == NavigationSourceKind::Collider;
+			const bool rightIsMeshOrCollider = right.kind == NavigationSourceKind::Mesh
+				|| right.kind == NavigationSourceKind::Collider;
+			return leftIsMeshOrCollider && rightIsMeshOrCollider
+				&& left.objectId != TerraEngine::EMPTY_UUID && left.objectId == right.objectId
+				&& left.objectLifetimeGeneration == right.objectLifetimeGeneration
+				&& left.subshapeIndex == right.subshapeIndex;
+		}
+
 		[[nodiscard]] std::uint64_t HashSnapshotDocument(const NavigationGeometryDocument& document) noexcept
 		{
 			// This fingerprint is an ownership identity, not a cryptographic promise.
@@ -102,4 +170,130 @@ namespace TerraEngine::Navigation
 	}
 	bool NavigationGeometrySnapshot::CanRetire() const noexcept { return leaseCount.load(std::memory_order_acquire) == 0U; }
 	void NavigationGeometrySnapshot::ReleaseLease() const noexcept { leaseCount.fetch_sub(1U, std::memory_order_acq_rel); }
+
+	NavigationGeneration ComputeNavigationEligibleSourceRevision(
+		const NavigationEligibleSourceIdentity& identity,
+		const NavigationSourceRevisionEvidence& revisions) noexcept
+	{
+		std::uint64_t hash = kFnvOffset;
+		MixIdentity(hash, identity);
+		MixValue(hash, revisions.objectLifetimeGeneration);
+		MixValue(hash, revisions.transformRevision);
+		MixValue(hash, revisions.geometryRevision);
+		MixValue(hash, revisions.physicalPublicationGeneration);
+		MixValue(hash, revisions.resourcePublicationGeneration);
+		// Zero is the invalid/unobserved generation sentinel throughout navigation.
+		return hash == 0U ? 1U : hash;
+	}
+
+	const std::vector<NavigationEligibleSourceRecord>& NavigationEligibleSourceIndex::Records() const noexcept
+	{
+		return records_;
+	}
+
+	const std::vector<NavigationEligibleSourceSelection>& NavigationEligibleSourceIndex::Exclusions() const noexcept
+	{
+		return exclusions_;
+	}
+
+	NavigationGeneration NavigationEligibleSourceIndex::Revision() const noexcept { return revision_; }
+	bool NavigationEligibleSourceIndex::HasCurrentTerrain() const noexcept { return hasCurrentTerrain_; }
+
+	NavigationEligibleSourceIndexBuildResult BuildNavigationEligibleSourceIndex(
+		std::span<const NavigationEligibleSourceCandidate> candidates)
+	{
+		NavigationEligibleSourceIndexBuildResult result{};
+		std::vector<NavigationEligibleSourceCandidate> ordered{candidates.begin(), candidates.end()};
+		std::sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) {
+			return LessIdentity(left.identity, right.identity);
+		});
+
+		std::set<TerraEngine::UUID> seenSourceIds;
+		for(const NavigationEligibleSourceCandidate& candidate : ordered) {
+			NavigationEligibleSourceSelectionCode exclusion = NavigationEligibleSourceSelectionCode::Selected;
+			if(!candidate.identity.IsValid()) exclusion = NavigationEligibleSourceSelectionCode::InvalidIdentity;
+			else if(!IsSupportedEligibleKind(candidate.identity.kind)) exclusion = NavigationEligibleSourceSelectionCode::UnsupportedKind;
+			else if(!candidate.activeInHierarchy) exclusion = NavigationEligibleSourceSelectionCode::Inactive;
+			else if(!candidate.physicalBackingCurrent) exclusion = NavigationEligibleSourceSelectionCode::PhysicalBackingUnavailable;
+			else if(!candidate.revisions.IsComplete()
+				|| candidate.revisions.objectLifetimeGeneration != candidate.identity.objectLifetimeGeneration) {
+				exclusion = NavigationEligibleSourceSelectionCode::IncompleteRevisionEvidence;
+			} else if(candidate.geometry == nullptr
+				|| candidate.geometry->Descriptor().sourceUuid.value != candidate.identity.sourceId
+				|| candidate.geometry->Descriptor().sourceKind != candidate.identity.kind
+				|| candidate.geometry->Descriptor().sourceRevision
+					!= ComputeNavigationEligibleSourceRevision(candidate.identity, candidate.revisions)) {
+				exclusion = NavigationEligibleSourceSelectionCode::SnapshotMismatch;
+			} else if(!seenSourceIds.insert(candidate.identity.sourceId).second) {
+				exclusion = NavigationEligibleSourceSelectionCode::DuplicateSourceIdentity;
+			}
+			if(exclusion != NavigationEligibleSourceSelectionCode::Selected) {
+				result.index.exclusions_.push_back({candidate.identity, exclusion});
+				continue;
+			}
+
+			auto equivalent = std::find_if(result.index.records_.begin(), result.index.records_.end(),
+				[&candidate](const NavigationEligibleSourceRecord& current) {
+					return IsSamePhysicalRepresentation(current.identity, candidate.identity);
+				});
+			if(equivalent != result.index.records_.end()) {
+				if(candidate.identity.kind == NavigationSourceKind::Collider
+					&& equivalent->identity.kind == NavigationSourceKind::Mesh) {
+					result.index.exclusions_.push_back({equivalent->identity,
+						NavigationEligibleSourceSelectionCode::SupersededByCollider});
+					*equivalent = {candidate.identity, candidate.revisions, candidate.geometry};
+					continue;
+				}
+				if(candidate.identity.kind == NavigationSourceKind::Mesh
+					&& equivalent->identity.kind == NavigationSourceKind::Collider) {
+					result.index.exclusions_.push_back({candidate.identity,
+						NavigationEligibleSourceSelectionCode::SupersededByCollider});
+					continue;
+				}
+				result.index.exclusions_.push_back({candidate.identity,
+					NavigationEligibleSourceSelectionCode::DuplicateSourceIdentity});
+				continue;
+			}
+			result.index.records_.push_back({candidate.identity, candidate.revisions, candidate.geometry});
+		}
+
+		std::sort(result.index.records_.begin(), result.index.records_.end(),
+			[](const auto& left, const auto& right) { return LessIdentity(left.identity, right.identity); });
+		std::sort(result.index.exclusions_.begin(), result.index.exclusions_.end(),
+			[](const auto& left, const auto& right) {
+				return std::tie(left.identity.sourceId, left.code) < std::tie(right.identity.sourceId, right.code);
+			});
+
+		std::uint64_t revision = kFnvOffset;
+		for(const NavigationEligibleSourceRecord& record : result.index.records_) {
+			MixIdentity(revision, record.identity);
+			MixValue(revision, record.revisions.objectLifetimeGeneration);
+			MixValue(revision, record.revisions.transformRevision);
+			MixValue(revision, record.revisions.geometryRevision);
+			MixValue(revision, record.revisions.physicalPublicationGeneration);
+			MixValue(revision, record.revisions.resourcePublicationGeneration);
+			MixValue(revision, record.geometry->ContentFingerprint());
+			if(record.identity.kind == NavigationSourceKind::Terrain) result.index.hasCurrentTerrain_ = true;
+		}
+		result.index.revision_ = revision == 0U ? 1U : revision;
+		result.accepted = true;
+		result.reason = "Captured immutable eligible navigation sources.";
+		return result;
+	}
+
+	std::string_view ToString(NavigationEligibleSourceSelectionCode code) noexcept
+	{
+		switch(code) {
+		case NavigationEligibleSourceSelectionCode::Selected: return "Selected";
+		case NavigationEligibleSourceSelectionCode::Inactive: return "Inactive";
+		case NavigationEligibleSourceSelectionCode::PhysicalBackingUnavailable: return "PhysicalBackingUnavailable";
+		case NavigationEligibleSourceSelectionCode::InvalidIdentity: return "InvalidIdentity";
+		case NavigationEligibleSourceSelectionCode::IncompleteRevisionEvidence: return "IncompleteRevisionEvidence";
+		case NavigationEligibleSourceSelectionCode::SnapshotMismatch: return "SnapshotMismatch";
+		case NavigationEligibleSourceSelectionCode::UnsupportedKind: return "UnsupportedKind";
+		case NavigationEligibleSourceSelectionCode::DuplicateSourceIdentity: return "DuplicateSourceIdentity";
+		case NavigationEligibleSourceSelectionCode::SupersededByCollider: return "SupersededByCollider";
+		}
+		return "UnknownNavigationEligibleSourceSelectionCode";
+	}
 }

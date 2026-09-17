@@ -58,16 +58,24 @@ namespace TerraEngine::Tests {
 				&& physics.find("Native_Physics_CopyCharacterStates") != std::string::npos,
 				"Managed query receipts, query results, and character state reads must retain the versioned caller-owned ABI boundary.");
 			context.Expect(rigidbody.find("NativePhysicsCommandReceipt") != std::string::npos
-				&& rigidbody.find("CorrelationId = correlationId") != std::string::npos
-				&& rigidbody.find("Identity = Identity") != std::string::npos,
-				"Managed commands must return copied correlation-bearing receipts and submit the complete generation-bearing identity.");
+				&& rigidbody.find("CorrelationId = resolvedCorrelation") != std::string::npos
+				&& rigidbody.find("Identity = Identity") != std::string::npos
+				&& rigidbody.find("Interlocked.Increment") != std::string::npos
+				&& rigidbody.find("ManagedRigidbodyProducerId") != std::string::npos
+				&& rigidbody.find("lock (s_submissionGate)") != std::string::npos
+				&& rigidbody.find("ProducerSequence = producerSequence") != std::string::npos,
+				"Managed rigidbody commands must return copied correlation-bearing receipts, submit generation identity, and monotonically order repeated commands.");
 			context.Expect(events.find("eventCount > 4096") != std::string::npos
 				&& events.find("stale or incompatible records") != std::string::npos
 				&& events.find("Native_Physics_UnsubscribeEvents") != std::string::npos,
 				"Managed subscriptions must reject oversized or stale event packets and release every native subscription during reset.");
 			context.Expect(characters.find("NativePhysicsCharacterCommandRequest") != std::string::npos
-				&& characters.find("Identity = Identity") != std::string::npos,
-				"Managed character commands must use the same copied, generation-validated native ABI as rigid-body commands.");
+				&& characters.find("Identity = Identity") != std::string::npos
+				&& characters.find("Interlocked.Increment") != std::string::npos
+				&& characters.find("ManagedCharacterProducerId") != std::string::npos
+				&& characters.find("lock (s_submissionGate)") != std::string::npos
+				&& characters.find("ProducerSequence = producerSequence") != std::string::npos,
+				"Managed character commands must use copied generation identity and a globally monotonic producer sequence so repeated velocity commands are admitted.");
 		});
 	}
 }

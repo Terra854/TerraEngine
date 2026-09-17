@@ -151,6 +151,11 @@ namespace TerraEngine::Physics {
 			std::string diagnostic;
 		};
 
+		struct PreparedBodyTransformUpdate {
+			PhysicsBodyDescriptor body;
+			std::uint8_t collisionLayer = 0U;
+		};
+
 		struct RuntimeConstraint {
 			TerraEngine::UUID ownerObjectId{};
 			PhysicsGeneration ownerObjectGeneration = 0U;
@@ -167,6 +172,16 @@ namespace TerraEngine::Physics {
 			PhysicsGeneration objectGeneration = 0U;
 			PhysicsGeneration componentGeneration = 0U;
 			PhysicsCharacterHandle handle;
+			PhysicsPose parentWorldPose;
+			PhysicsVector3 parentWorldScale{1.0F, 1.0F, 1.0F};
+			bool hasParent = false;
+			std::uint64_t objectTransformRevision = 0U;
+			std::uint64_t hierarchyGeneration = 0U;
+			TerraEngine::UUID parentObjectId = TerraEngine::EMPTY_UUID;
+			std::uint64_t parentObjectGeneration = 0U;
+			std::uint64_t parentTransformRevision = 0U;
+			bool hasPublishedPose = false;
+			PhysicsPose lastPublishedPose;
 		};
 
 		// Ragdoll provider objects deliberately live outside the scene rigid-body
@@ -342,6 +357,7 @@ namespace TerraEngine::Physics {
 			runtimeCharacters.clear();
 			runtimeRagdolls.clear();
 			preparedBodies.clear();
+			preparedBodyTransformUpdates.clear();
 			for(auto& [id, frame] : frameBackends) {
 				(void)id;
 				frame.preparedBodies.clear();
@@ -770,6 +786,7 @@ namespace TerraEngine::Physics {
 			lastPreparationRejected = false;
 			preparationPlanExecutedThisFrame = false;
 			preparedBodies.clear();
+			preparedBodyTransformUpdates.clear();
 			for(auto& [id, frame] : frameBackends) {
 				(void)id;
 				frame.preparedBodies.clear();
@@ -919,6 +936,20 @@ namespace TerraEngine::Physics {
 					// velocity every tick, turning gravity into a slow constant drift.
 					// Exact pose and generation agreement proves there is no editor or
 					// script-authored change to send back to the provider.
+					continue;
+				}
+				if(reasons != bodyPreparationReasons.end()
+					&& reasons->second == PhysicsAuthoringChangeReason::Transform
+					&& runtime != runtimeBodies.end()
+					&& runtime->second.objectGeneration == body.objectGeneration
+					&& runtime->second.componentGeneration == body.componentGeneration
+					&& descriptor->colliderCount > 0U) {
+					// A script/editor Transform edit changes only the provider pose. Reusing
+					// this stable body identity avoids a destroy/create pair, which would
+					// otherwise leave a retryable removed-body receipt behind every frame.
+					const PhysicsColliderDescriptor& collider =
+						authoring->Data().colliders[descriptor->colliderBegin];
+					preparedBodyTransformUpdates.push_back({body, collider.collisionLayer});
 					continue;
 				}
 				if(descriptor->colliderCount > 0U) {
@@ -2028,8 +2059,20 @@ namespace TerraEngine::Physics {
 					rejectTransaction(result.message);
 					break;
 				}
-				stagedCharacters.push_back({prepared.objectId, RuntimeCharacter{
-					prepared.objectId, prepared.objectGeneration, prepared.componentGeneration, handle}});
+				RuntimeCharacter runtime;
+				runtime.objectId = prepared.objectId;
+				runtime.objectGeneration = prepared.objectGeneration;
+				runtime.componentGeneration = prepared.componentGeneration;
+				runtime.handle = handle;
+				runtime.parentWorldPose = prepared.parentWorldPose;
+				runtime.parentWorldScale = prepared.parentWorldScale;
+				runtime.hasParent = prepared.hasParent;
+				runtime.objectTransformRevision = prepared.objectTransformRevision;
+				runtime.hierarchyGeneration = prepared.hierarchyGeneration;
+				runtime.parentObjectId = prepared.parentObjectId;
+				runtime.parentObjectGeneration = prepared.parentObjectGeneration;
+				runtime.parentTransformRevision = prepared.parentTransformRevision;
+				stagedCharacters.push_back({prepared.objectId, std::move(runtime)});
 			}
 
 			// Register engine-owned constraint state before provider publication. The
@@ -2054,6 +2097,42 @@ namespace TerraEngine::Physics {
 					transactionDiagnostic.empty() ? "The physics mutation batch was rejected atomically."
 						: transactionDiagnostic);
 			} else {
+				for(const PreparedBodyTransformUpdate& update : preparedBodyTransformUpdates) {
+					auto runtime = runtimeBodies.find(update.body.objectId);
+					if(runtime == runtimeBodies.end()
+						|| runtime->second.objectGeneration != update.body.objectGeneration
+						|| runtime->second.componentGeneration != update.body.componentGeneration) {
+						++diagnosticCounters.staleCount;
+						continue;
+					}
+					// This packet deliberately covers only values the backend can update
+					// without replacing the shape, mass, damping, or stable body handle.
+					// It is built in Prepare and applied at this protected boundary.
+					Backend::PhysicsBodyUpdateRequest request;
+					request.handle = runtime->second.body;
+					request.pose = update.body.worldPose;
+					request.linearVelocity = update.body.initialLinearVelocity;
+					request.angularVelocity = update.body.initialAngularVelocity;
+					request.collisionLayer = update.collisionLayer;
+					request.collisionMask = update.body.collisionMask;
+					request.enabled = update.body.enabled;
+					request.wake = update.body.motionType == PhysicsMotionType::Dynamic;
+					const Backend::PhysicsBackendResult updated = backend->UpdateBody(request);
+					if(!updated.Succeeded()) {
+						++diagnosticCounters.rejectedCount;
+						AppendCommandResult(0U, PhysicsResultStatus::ProviderFailure, world.Timing().tick,
+							"The provider rejected an authored Transform body update: " + updated.message);
+						continue;
+					}
+					runtime->second.objectTransformRevision = update.body.objectTransformRevision;
+					runtime->second.hierarchyGeneration = authoring->Data().hierarchyGeneration;
+					runtime->second.parentWorldPose = update.body.parentWorldPose;
+					runtime->second.parentWorldScale = update.body.parentWorldScale;
+					runtime->second.hasParent = update.body.hasParent;
+					runtime->second.parentObjectId = update.body.parentObjectId;
+					runtime->second.parentObjectGeneration = update.body.parentObjectGeneration;
+					runtime->second.parentTransformRevision = update.body.parentTransformRevision;
+				}
 				std::unordered_set<TerraEngine::UUID> retiringConstraints(
 					preparedConstraintRemovals.begin(), preparedConstraintRemovals.end());
 				for(const PhysicsConstraintDescriptor& prepared : preparedConstraints) {
@@ -2172,6 +2251,16 @@ namespace TerraEngine::Physics {
 			const Clock::time_point start = Clock::now();
 			completedSteps.clear();
 			for(const PhysicsFixedStepRequest& request : plannedSteps.requests) {
+				// Commands only update persistent character intent. Advancing it here
+				// ties virtual-controller motion to fixed simulation time rather than
+				// the variable number of render-frame gameplay submissions.
+				const Backend::PhysicsBackendResult characters = backend->AdvanceCharacters(
+					request.world, request.tick, request.deltaTime);
+				if(!characters.Succeeded()) {
+					world.MarkFailed();
+					AppendCommandResult(0U, PhysicsResultStatus::ProviderFailure, request.tick, characters.message);
+					break;
+				}
 				const Backend::PhysicsBackendResult result = backend->Step({
 					request.world, request.tick, request.deltaTime, 1U});
 				if(!result.Succeeded()) {
@@ -2410,9 +2499,12 @@ namespace TerraEngine::Physics {
 			}
 
 			if(preparedBodyStateBatch) {
-				preparedTransformSources.reserve(preparedBodyStateBatch->updates.size());
+				preparedTransformSources.reserve(preparedBodyStateBatch->updates.size() + extraction.characters.size());
 				for(const IncrementalBodyStateUpdate& update : preparedBodyStateBatch->updates) {
 					if(update.removed || !HasPhysicsBodyStateFields(update.fields, PhysicsBodyStateFieldMask::Pose)) continue;
+					// Character ownership is chosen before packet preparation so an object
+					// with both providers cannot produce a duplicate Transform target.
+					if(runtimeCharacters.contains(update.state.objectId)) continue;
 					const auto runtime = runtimeBodies.find(update.state.objectId);
 					if(runtime == runtimeBodies.end() || runtime->second.body != update.state.handle
 						|| runtime->second.motionType != PhysicsMotionType::Dynamic) continue;
@@ -2451,6 +2543,53 @@ namespace TerraEngine::Physics {
 						.poseChanged = !body.hasPublishedPose
 							|| !SamePose(body.lastPublishedPose, update.state.worldPose)});
 				}
+			}
+			// Virtual characters have no rigid body by design. Their extracted poses
+			// still own the visible Transform, so prepare the same deferred mutation
+			// record with character authority instead of silently skipping them.
+			for(const Backend::PhysicsBackendCharacterState& provider : extraction.characters) {
+				const auto runtime = runtimeCharacters.find(provider.objectId);
+				if(runtime == runtimeCharacters.end() || runtime->second.handle != provider.handle
+					|| runtime->second.objectGeneration != provider.objectGeneration
+					|| runtime->second.componentGeneration != provider.componentGeneration) {
+					++diagnosticCounters.staleCount;
+					continue;
+				}
+				const RuntimeCharacter& character = runtime->second;
+				// The body loop already skipped this object when it owns both provider
+				// families, so character authority is deterministic without a costly
+				// vector search in the physics hot path.
+				PhysicsPose localPose = provider.pose;
+				if(character.hasParent) {
+					glm::vec3 position = ToGlmPosition(provider.pose.position);
+					glm::quat rotation = ToGlmRotation(provider.pose.rotation);
+					const glm::vec3 parentPosition = ToGlmPosition(character.parentWorldPose.position);
+					const glm::quat parentRotation = ToGlmRotation(character.parentWorldPose.rotation);
+					const glm::vec3 parentScale = ToGlmPosition(character.parentWorldScale);
+					position = glm::inverse(parentRotation) * (position - parentPosition);
+					position = {position.x / parentScale.x, position.y / parentScale.y, position.z / parentScale.z};
+					rotation = glm::normalize(glm::inverse(parentRotation) * rotation);
+					localPose = {{position.x, position.y, position.z},
+						{rotation.x, rotation.y, rotation.z, rotation.w}};
+				}
+				preparedTransformSources.push_back({
+					.objectId = character.objectId,
+					.authority = TransformPublicationAuthority::Character,
+					.character = character.handle,
+					.frame = {kPrimaryPhysicsFrameId, world.Handle().worldGeneration},
+					.objectLifetimeGeneration = character.objectGeneration,
+					.bodyGeneration = character.handle.slotGeneration,
+					.componentGeneration = character.componentGeneration,
+					.expectedTransformRevision = character.objectTransformRevision,
+					.expectedHierarchyGeneration = character.hierarchyGeneration,
+					.parentObjectId = character.parentObjectId,
+					.expectedParentLifetimeGeneration = character.parentObjectGeneration,
+					.expectedParentTransformRevision = character.parentTransformRevision,
+					.canonicalFrameOrigin = {},
+					.localPose = localPose,
+					.worldPoseReceipt = provider.pose,
+					.poseChanged = !character.hasPublishedPose
+						|| !SamePose(character.lastPublishedPose, provider.pose)});
 			}
 			if(result.Succeeded()) PublishRagdollExtractionLocked();
 			ExecutePreparedQueriesLocked();
@@ -2621,9 +2760,15 @@ namespace TerraEngine::Physics {
 			runtime.world = world.Handle();
 			runtime.bodyHandles.reserve(runtimeBodies.size());
 			runtime.bodyGenerations.reserve(runtimeBodies.size());
+			runtime.characterHandles.reserve(runtimeCharacters.size());
+			runtime.characterGenerations.reserve(runtimeCharacters.size());
 			for(const auto& [objectId, body] : runtimeBodies) {
 				runtime.bodyHandles.emplace(objectId, body.body);
 				runtime.bodyGenerations.emplace(objectId, body.body.slotGeneration);
+			}
+			for(const auto& [objectId, character] : runtimeCharacters) {
+				runtime.characterHandles.emplace(objectId, character.handle);
+				runtime.characterGenerations.emplace(objectId, character.handle.slotGeneration);
 			}
 			const TransformPublicationValidationResult validation =
 				ValidatePhysicsTransformPublication(ObjectManager::instance(), runtime, packet);
@@ -3085,9 +3230,9 @@ namespace TerraEngine::Physics {
 				true, "prepared provider mutation, command, or ragdoll request work available", "PhysicsPrepare", diagnosticCounters.commandCount + ragdollPhysicsBridge.PendingCount()});
 			scheduler->push_back({"PhysicsSimulate", "Physics", "PhysicsWorld", "PhysicsWorld", "provider ownership", true,
 				!completedSteps.empty(), completedSteps.empty() ? "no fixed step planned" : "fixed step planned", "PhysicsCommandCommit", completedSteps.size()});
-			scheduler->push_back({"PhysicsExtract", "Physics", "PhysicsWorld,PhysicsPreparedQueries", "PhysicsPublishedSnapshots,PhysicsBackendQueryResults,PhysicsRawEvents", "immutable provider snapshot then protected event drain", true,
+			scheduler->push_back({"PhysicsExtract", "Physics", "PhysicsWorld,PhysicsPreparedQueries", "PhysicsPublishedSnapshots,PhysicsCharacterStatePackets,PhysicsBackendQueryResults,PhysicsRawEvents", "immutable provider snapshot then protected event drain", true,
 				!completedSteps.empty(), completedSteps.empty() ? "no completed provider step" : "provider step completed", "PhysicsSimulate", extractionDiagnostics.extractedBodies});
-			scheduler->push_back({"PhysicsPublish", "Physics", "PhysicsPublishedSnapshots,PhysicsEventSubscriptions", "PhysicsQueryResults,PhysicsEventPackets,PhysicsTransformTransactions", "hard boundary", false,
+			scheduler->push_back({"PhysicsPublish", "Physics", "PhysicsPublishedSnapshots,PhysicsCharacterStatePackets,PhysicsEventSubscriptions", "PhysicsQueryResults,PhysicsEventPackets,PhysicsTransformTransactions", "hard boundary", false,
 				!completedSteps.empty(), completedSteps.empty() ? "no extracted packet" : "extracted packet ready", "PhysicsExtract", publicationDiagnostics.currentEntries});
 			scheduler->push_back({"PhysicsPublicationBarrier", "Physics", "PhysicsTransformTransactions", "SceneGraph",
 				publicationState.active ? "After Physics" : "Frame End", false,
@@ -3214,13 +3359,20 @@ namespace TerraEngine::Physics {
 						publicationDiagnostics.acknowledgedEntries += receipt.acknowledgedEntries.size();
 						publicationDiagnostics.lastFailure.clear();
 						for(const TransformPublicationEntryReceipt& acknowledged : receipt.acknowledgedEntries) {
-							auto runtime = runtimeBodies.find(acknowledged.objectId);
-							if(runtime == runtimeBodies.end() || runtime->second.body != acknowledged.body) continue;
-							runtime->second.lastPublishedPose = acknowledged.worldPose;
-							runtime->second.hasPublishedPose = true;
 							const auto object = ObjectManager::instance().getObject(acknowledged.objectId);
-							if(object) {
-								runtime->second.objectTransformRevision =
+							if(acknowledged.authority == TransformPublicationAuthority::Body) {
+								auto runtime = runtimeBodies.find(acknowledged.objectId);
+								if(runtime == runtimeBodies.end() || runtime->second.body != acknowledged.body) continue;
+								runtime->second.lastPublishedPose = acknowledged.worldPose;
+								runtime->second.hasPublishedPose = true;
+								if(object) runtime->second.objectTransformRevision =
+									ObjectManager::instance().GetObjectTransformRevision(*object);
+							} else if(acknowledged.authority == TransformPublicationAuthority::Character) {
+								auto runtime = runtimeCharacters.find(acknowledged.objectId);
+								if(runtime == runtimeCharacters.end() || runtime->second.handle != acknowledged.character) continue;
+								runtime->second.lastPublishedPose = acknowledged.worldPose;
+								runtime->second.hasPublishedPose = true;
+								if(object) runtime->second.objectTransformRevision =
 									ObjectManager::instance().GetObjectTransformRevision(*object);
 							}
 						}
@@ -3310,6 +3462,7 @@ namespace TerraEngine::Physics {
 		bool lastPreparationRejected = false;
 		bool preparationPlanExecutedThisFrame = false;
 		std::vector<PreparedBody> preparedBodies;
+		std::vector<PreparedBodyTransformUpdate> preparedBodyTransformUpdates;
 		std::vector<TerraEngine::UUID> preparedRemovals;
 		std::vector<PhysicsConstraintDescriptor> preparedConstraints;
 		std::vector<TerraEngine::UUID> preparedConstraintRemovals;
@@ -3439,14 +3592,14 @@ namespace TerraEngine::Physics {
 		declaration.after = {"ScriptingSystem"};
 		declaration.before = {"UISystem"};
 		declaration.reads = {"SceneGraph", "ObjectManager", "PhysicsSettingsUpdateQueue", "PhysicsAuthoringSnapshot", "PhysicsQueryQueue", "PhysicsEventSubscriptions", "RagdollPhysicsQueue", TerraEngine::Scheduling::kResourceTerrainPublishedCollision, TerraEngine::Scheduling::kResourcePhysicsFrameRegistry, TerraEngine::Scheduling::kResourcePhysicsFrameMigrations};
-		declaration.writes = {"PhysicsSettings", "PhysicsPreparedWork", "PhysicsWorld", "PhysicsQueryResults", "PhysicsEventPackets", "PhysicsPublishedSnapshots", "RagdollPhysicsSnapshots", "RagdollPhysicsResults", "PhysicsTransformTransactions", "SceneMutationQueue", TerraEngine::Scheduling::kResourcePhysicsFrameRegistry, TerraEngine::Scheduling::kResourcePhysicsFrameMigrations};
+		declaration.writes = {"PhysicsSettings", "PhysicsPreparedWork", "PhysicsWorld", "PhysicsQueryResults", "PhysicsEventPackets", "PhysicsPublishedSnapshots", TerraEngine::Scheduling::kResourcePhysicsCharacterStatePackets, "RagdollPhysicsSnapshots", "RagdollPhysicsResults", "PhysicsTransformTransactions", "SceneMutationQueue", TerraEngine::Scheduling::kResourcePhysicsFrameRegistry, TerraEngine::Scheduling::kResourcePhysicsFrameMigrations};
 		declaration.mainThread = true;
 		declaration.requiresFlushedSceneMutations = true;
 		declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
 		declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 		declaration.hardBoundary = true;
 		declaration.safeSubwork = "Immutable authoring preparation, provider stepping through the shared job adapter, and extraction into typed packets.";
-		declaration.protectedCommit = "World generation changes, provider staging commit, typed ragdoll request drain, immutable ragdoll snapshot/result swap, command ordering, and transform transaction publication.";
+		declaration.protectedCommit = "World generation changes, provider staging commit, typed ragdoll request drain, immutable character/ragdoll snapshot/result swap, command ordering, and transform transaction publication.";
 		declaration.protectedReason = declaration.protectedCommit;
 		declaration.profilingLabel = "Physics";
 		declaration.usesDefaultMetadata = false;
@@ -3499,9 +3652,9 @@ namespace TerraEngine::Physics {
 				{"PhysicsWorld", kResourceTerrainPublishedCollision}, {"PhysicsWorld"}, true, WorkerSystemPhaseKind::WorkerPrepare);
 			configure(descriptors[4], "PhysicsExtract",
 				{"PhysicsWorld", "PhysicsPreparedQueries"},
-				{"PhysicsPublishedSnapshots", "PhysicsBackendQueryResults", "PhysicsRawEvents"}, true, WorkerSystemPhaseKind::WorkerPrepare);
+				{"PhysicsPublishedSnapshots", kResourcePhysicsCharacterStatePackets, "PhysicsBackendQueryResults", "PhysicsRawEvents"}, true, WorkerSystemPhaseKind::WorkerPrepare);
 			configure(descriptors[5], "PhysicsPublish",
-				{"PhysicsPublishedSnapshots", "PhysicsBackendQueryResults", "PhysicsRawEvents", "PhysicsEventSubscriptions"},
+				{"PhysicsPublishedSnapshots", kResourcePhysicsCharacterStatePackets, "PhysicsBackendQueryResults", "PhysicsRawEvents", "PhysicsEventSubscriptions"},
 				{"PhysicsQueryResults", "PhysicsEventPackets", "PhysicsTransformTransactions", "SceneMutationQueue"}, false, WorkerSystemPhaseKind::ProtectedCommit);
 			configure(descriptors[6], "PhysicsPublicationBarrier",
 				{"PhysicsTransformTransactions"}, {"PhysicsPublishedSnapshots"}, false, WorkerSystemPhaseKind::Barrier);

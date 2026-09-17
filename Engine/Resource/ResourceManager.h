@@ -610,8 +610,9 @@ public:
 	// scene data. The returned path is the exact registered runtime artifact.
 	std::filesystem::path GetRegisteredAssetPath(const TerraEngine::UUID& id, AssetType type) const;
 	// Navigation companions use a separate typed registry because they are
-	// derived CPU geometry attached to a mesh/collider identity, not a renderer
-	// asset type. Logical mounted paths and editor paths share this same loader.
+	// checked CPU geometry attached directly to an eligible mesh/collider asset,
+	// not renderer state or authored navigation-source metadata. Logical mounted
+	// paths and editor paths share this same loader.
 	void RegisterNavigationGeometryPath(const TerraEngine::UUID& id, const std::filesystem::path& path);
 	[[nodiscard]] NavigationGeometryLoadResult LoadNavigationGeometryCompanion(
 		const TerraEngine::UUID& id,
@@ -624,6 +625,13 @@ public:
 		std::size_t maximumBytes = 256U * 1024U * 1024U);
 	[[nodiscard]] std::shared_ptr<const TerraEngine::Navigation::NavigationGeometrySnapshot>
 		GetNavigationGeometrySnapshot(const TerraEngine::UUID& id) const;
+	// Advances only after a complete checked companion snapshot is exchanged or
+	// released. Automatic navigation capture observes this instead of polling
+	// renderer state, so a companion reload wakes the next protected capture.
+	[[nodiscard]] std::uint64_t NavigationGeometryPublicationGeneration() const noexcept
+	{
+		return navigationGeometryPublicationGeneration.load(std::memory_order_acquire);
+	}
 	bool ReleaseNavigationGeometrySnapshot(const TerraEngine::UUID& id);
 	// Resolve a script-facing asset reference into the UUID the renderer uses
 	// internally. The lookup accepts either an exact relative path or a simple
@@ -1079,6 +1087,7 @@ private:
 	std::unordered_map<TerraEngine::UUID,
 		std::shared_ptr<const TerraEngine::Navigation::NavigationGeometrySnapshot>> navigationGeometrySnapshots;
 	mutable std::shared_mutex navigationGeometryMutex;
+	std::atomic_uint64_t navigationGeometryPublicationGeneration{1U};
 	std::unordered_map<TerraEngine::UUID, std::shared_ptr<const TerraEngine::Audio::AudioClipAsset>> audioClipAssets;
 	std::unordered_map<TerraEngine::UUID, std::uint64_t> audioClipGenerations;
 	mutable std::shared_mutex audioClipMutex;

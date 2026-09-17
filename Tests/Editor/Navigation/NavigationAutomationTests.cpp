@@ -35,13 +35,29 @@ namespace TerraEngine::EditorTests
 			context.Expect(!source.empty(), "Navigation automation must have a registered provider implementation.");
 			if(source.empty()) return;
 			for(const std::string_view command : {"navigation.settings.get", "navigation.diagnostics.get",
-				"navigation.sources.inspect", "navigation.route.request", "navigation.route.read",
-				"navigation.route.cancel", "navigation.authoring.apply", "navigation.cache.prepare", "navigation.cache.status"})
+				"navigation.route.request", "navigation.route.read", "navigation.route.cancel",
+				"navigation.cache.prepare", "navigation.cache.status"})
 				context.Expect(source.find(command) != std::string::npos, "Every navigation capability must have a stable provider command.");
 			context.Expect(source.find("schemaVersion") != std::string::npos && source.find("maxItems") != std::string::npos,
 				"Navigation responses must identify their schema version and bounded array policy.");
 			context.Expect(source.find("dtNav") == std::string::npos && source.find("Recast") == std::string::npos,
 				"Public navigation automation schemas must not expose provider internals.");
+			context.Expect(source.find("profileId") == std::string::npos,
+				"Route automation must accept copied traversal values without restoring profile identity.");
+		});
+
+		registry.Add("Editor.Navigation.Automation.UnknownComponentUsesStandardRejection", [](TestContext& context) {
+			const std::string provider = ReadSource("Editor/TerraEngine-Editor/Automation/Providers/NavigationAutomationProvider.cpp");
+			const std::string transaction = ReadSource("Editor/TerraEngine-Editor/Automation/EditorAutomationTransaction.cpp");
+			context.Expect(provider.find("NavigationSourceComponent") == std::string::npos
+				&& provider.find("NavigationConnectionComponent") == std::string::npos,
+				"Navigation automation must not classify retired component names specially.");
+			context.Expect(transaction.find("Component type is not registered for automation.") != std::string::npos,
+				"Unknown component names must use the generic unregistered-component rejection path.");
+			context.Expect(transaction.find("NavigationSourceComponent") == std::string::npos
+				&& transaction.find("NavigationConnectionComponent") == std::string::npos
+				&& transaction.find("tombstone") == std::string::npos,
+				"Generic rejection must not queue navigation-specific mutation, history, or tombstones.");
 		});
 
 		registry.Add("Editor.Navigation.AutomationReadsHaveNoSideEffects", [](TestContext& context) {
@@ -95,8 +111,8 @@ namespace TerraEngine::EditorTests
 				"Navigation provider registration must not use the generic resolver.");
 			context.Expect(source.find("NavigationSystem::Instance") != std::string::npos,
 				"Route operations must use the provider-neutral NavigationSystem boundary.");
-			context.Expect(source.find("GetNavigationAuthoringTransactions") != std::string::npos,
-				"Authoring must use the protected typed navigation transaction coordinator.");
+			context.Expect(source.find("DeserializeNavigationProfile") != std::string::npos,
+				"Route automation must validate and copy the complete identity-free profile value.");
 		});
 	}
 }

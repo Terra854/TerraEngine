@@ -1,12 +1,11 @@
-// NavigationProfileResolver.h - immutable authored-profile resolution.
+// NavigationProfileResolver.h - immutable caller/profile configuration resolution.
 //
-// The scene/component bridge owns the relationship between authored UUIDs and
-// runtime profile values. Navigation workers receive the resolved value only;
-// they never read component storage or editor configuration directly.
+// The project-configuration boundary owns the relationship between registered
+// UUIDs and runtime profile values. Navigation workers receive the resolved
+// value only; they never read scene-object storage or editor configuration.
 
 #pragma once
 
-#include "Components/Navigation/NavigationAgentComponent.h"
 #include "Core/Export.h"
 #include "Navigation/NavigationSettings.h"
 
@@ -18,14 +17,16 @@
 
 namespace TerraEngine::Navigation {
 	struct NavigationProfileRegistration {
-		TerraEngine::UUID authoredProfileId = TerraEngine::EMPTY_UUID;
+		// This ID names a project-level preset. It is configuration identity, not
+		// state attached to a scene object or a navigation component.
+		TerraEngine::UUID registeredProfileId = TerraEngine::EMPTY_UUID;
 		NavigationProfile profile{};
 	};
 
 	enum class NavigationProfileResolutionCode : std::uint8_t {
-		ResolvedDefault,
+		ResolvedExplicit,
 		ResolvedRegistered,
-		InvalidAgent,
+		InvalidRequest,
 		UnknownProfile,
 		InvalidProfile,
 		DuplicateProfile
@@ -39,16 +40,23 @@ namespace TerraEngine::Navigation {
 	};
 
 	// This registry is assembled from copied project configuration at a protected
-	// boundary. Empty component UUIDs deliberately resolve to the documented
-	// default profile, while a non-empty unknown UUID is an explicit rejection.
+	// boundary. A request must supply either a complete profile value or one
+	// registered-profile ID; it never inherits a value from a scene object.
 	class TERRAENGINE_API NavigationProfileResolver final {
 	public:
 		[[nodiscard]] static NavigationProfileResolver Create(
 			NavigationProfile defaultProfile,
 			std::span<const NavigationProfileRegistration> registrations);
 
-		[[nodiscard]] NavigationProfileResolution Resolve(
-			const ::NavigationAgentComponent& component) const;
+		// ResolveExplicit copies the supplied value into its result after checking
+		// all limits. Callers can safely retain that result after their own input
+		// object or script frame has changed.
+		[[nodiscard]] NavigationProfileResolution ResolveExplicit(
+			NavigationProfile profile) const;
+		// ResolveRegistered copies a project preset selected by a non-empty ID.
+		// Unknown and malformed IDs fail closed rather than choosing a default.
+		[[nodiscard]] NavigationProfileResolution ResolveRegistered(
+			const TerraEngine::UUID& registeredProfileId) const;
 		[[nodiscard]] const NavigationProfile& DefaultProfile() const noexcept;
 		[[nodiscard]] const std::vector<NavigationProfileRegistration>& Registrations() const noexcept;
 		[[nodiscard]] bool IsConfigurationValid() const noexcept;

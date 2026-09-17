@@ -115,21 +115,24 @@ namespace TerraEngine::Scheduling {
 	inline constexpr const char kResourceWorldRegionDirectory[] = "WorldRegionDirectory";
 	inline constexpr const char kResourceObserverInterests[] = "ObserverInterests";
 	inline constexpr const char kResourcePreparedWorldRegionResidency[] = "PreparedWorldRegionResidency";
-	// Ground navigation consumes only immutable scene, spatial, residency, and
-	// authoring publications. Separate input, worker-completion, and authoritative
-	// output names make the protected publication boundary visible to diagnostics.
+	// Navigation captures ordinary physical scene state into immutable automatic
+	// source values. Separate capture, worker, and authoritative names expose the
+	// protected boundary without source/agent authoring component compatibility.
 	inline constexpr const char kResourcePublishedWorldRegionResidency[] = "PublishedWorldRegionResidency";
-	inline constexpr const char kResourceNavigationAuthoring[] = "NavigationAuthoring";
-	inline constexpr const char kResourceGeometryPublications[] = "GeometryPublications";
-	inline constexpr const char kResourceNavigationCommandQueue[] = "NavigationCommandQueue";
-	inline constexpr const char kResourceNavigationPreparedResults[] = "NavigationPreparedResults";
-	inline constexpr const char kResourceNavigationSourceSnapshot[] = "NavigationSourceSnapshot";
-	inline constexpr const char kResourceNavigationCoverageRoot[] = "NavigationCoverageRoot";
-	inline constexpr const char kResourceNavigationAgentState[] = "NavigationAgentState";
+	inline constexpr const char kResourceNavigationCaptureInputs[] = "NavigationCaptureInputs";
+	inline constexpr const char kResourceNavigationGeometryPublications[] = "NavigationGeometryPublications";
+	inline constexpr const char kResourceNavigationRequestQueue[] = "NavigationRequestQueue";
+	inline constexpr const char kResourceNavigationPreparedCandidates[] = "NavigationPreparedCandidates";
+	inline constexpr const char kResourceNavigationEligibleSourceIndex[] = "NavigationEligibleSourceIndex";
+	inline constexpr const char kResourceNavigationWorldRoot[] = "NavigationWorldRoot";
+	inline constexpr const char kResourceNavigationRouteValidity[] = "NavigationRouteValidity";
 	inline constexpr const char kResourceNavigationResults[] = "NavigationResults";
 	inline constexpr const char kResourceNavigationDiagnostics[] = "NavigationDiagnostics";
 	inline constexpr const char kResourcePhysicsFrameRegistry[] = "PhysicsFrameRegistry";
 	inline constexpr const char kResourcePhysicsFrameMigrations[] = "PhysicsFrameMigrations";
+	// Virtual characters publish immutable state separately from body pages, then
+	// PhysicsPublish revalidates their typed Transform authority at the boundary.
+	inline constexpr const char kResourcePhysicsCharacterStatePackets[] = "PhysicsCharacterStatePackets";
 	// Protected capture owns only immutable values borrowed by the following
 	// renderer workers. Keeping this resource separate from the persistent and
 	// dynamic roots makes scheduler diagnostics reflect the real ownership split.

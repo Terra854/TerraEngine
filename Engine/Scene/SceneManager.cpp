@@ -213,6 +213,36 @@ TerraEngine::UUID SceneManager::LoadScene(const std::filesystem::path& path)
 	}, SceneFileType::Scene);
 }
 
+// SceneManager::ReloadScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+TerraEngine::UUID SceneManager::ReloadScene(const std::filesystem::path& path)
+{
+	const std::filesystem::path resolvedPath = ResolveScenePath(path);
+	const std::string key = NormalizeKey(resolvedPath);
+
+	// An explicit reread cannot allow an older worker load to publish after the
+	// new document. Finish that one first; the old resident document remains
+	// readable until FinalizeLoad atomically replaces it below.
+	std::shared_future<TerraEngine::UUID> pendingLoad;
+	{
+		std::shared_lock lock(sceneCache.mutex);
+		if (const auto pending = sceneCache.inFlight.find(key); pending != sceneCache.inFlight.end())
+		{
+			pendingLoad = pending->second;
+		}
+	}
+	if (pendingLoad.valid())
+	{
+		(void)pendingLoad.get();
+	}
+
+	const TerraEngine::UUID id = EnsureResourceId(key, sceneCache);
+	// Loading is intentionally unconditional here. Scene-open is an authoring
+	// boundary, so reusing JSON solely because its path is unchanged would make
+	// offline edits invisible until a full project restart.
+	auto resource = LoadSceneDocument(resolvedPath, SceneFileType::Scene);
+	return FinalizeLoad(key, sceneCache, id, std::move(resource));
+}
+
 TerraEngine::UUID SceneManager::LoadPreparedScene(
 	const std::filesystem::path& path,
 	nlohmann::json sceneDocument,

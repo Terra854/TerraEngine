@@ -4,7 +4,6 @@
 #include "Navigation/Geometry/MeshColliderNavigationSource.h"
 #include "Navigation/Ground/GroundClearanceKernel.h"
 #include "Navigation/Ground/GroundPortalGraph.h"
-#include "Navigation/Ground/GroundTraversalConnectionStore.h"
 
 #include <cstdint>
 #include <memory>
@@ -85,13 +84,19 @@ namespace TerraEngine::Navigation::Ground
 			std::uint32_t maxExpansions = 32768U;
 		};
 
+		struct RetainedRouteValidation
+		{
+			bool usable = false;
+			NavigationReason reason = NavigationReason::SceneReplaced;
+		};
+
 		struct RetainedRoute
 		{
 			std::vector<NavigationLocation> points;
 			std::uint64_t sourceRevision = 0U;
 			bool valid = false;
 			[[nodiscard]] bool IsValid() const noexcept { return valid; }
-			[[nodiscard]] GroundTraversalRouteValidation ValidateAgainst(const Snapshot& snapshot) const noexcept
+			[[nodiscard]] RetainedRouteValidation ValidateAgainst(const Snapshot& snapshot) const noexcept
 			{
 				return {valid && sourceRevision == snapshot.revision_, sourceRevision == snapshot.revision_ ? NavigationReason::None : NavigationReason::SceneReplaced};
 			}

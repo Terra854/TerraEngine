@@ -1,0 +1,9 @@
+{
+	"format": "TerraPrefabUnboundedV1",
+	"sourceId": "navigation-hard-break-connection",
+	"objects": [{
+		"uuid": "580000000000000000000000000006",
+		"name": "Unsupported Connection Prefab Object",
+		"components": {"NavigationConnectionComponent": {}}
+	}]
+}

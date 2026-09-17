@@ -78,6 +78,10 @@ namespace TerraEngine::Physics::Backend {
 			const PhysicsCharacterCreateRequest& request,
 			PhysicsBackendStagingToken& staging) override;
 		PhysicsBackendResult UpdateCharacter(const PhysicsCharacterUpdateRequest& request) override;
+		// Consumes copied controller intent once at the scheduler-owned fixed-step
+		// boundary, keeping movement independent from render-frame command cadence.
+		PhysicsBackendResult AdvanceCharacters(
+			PhysicsWorldHandle world, PhysicsTick tick, float fixedDeltaTime) override;
 		PhysicsBackendResult DestroyCharacter(PhysicsCharacterHandle handle) override;
 
 		PhysicsBackendResult ApplyCommand(const PhysicsCommand& command) override;

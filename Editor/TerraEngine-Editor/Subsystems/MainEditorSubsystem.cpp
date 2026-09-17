@@ -2162,7 +2162,9 @@ void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
 	}
 	else
 	{
-		sceneId = SceneManager::Instance().LoadScene(path);
+		// Projects use a prepared source/derived packet above. The standalone
+		// editor path still needs an authoritative reread for explicit open.
+		sceneId = SceneManager::Instance().ReloadScene(path);
 	}
 		if (sceneId != TerraEngine::EMPTY_UUID && SceneManager::Instance().SetActiveScene(sceneId)) {
 			sceneLoaded = true;
@@ -2680,7 +2682,7 @@ void MainEditorSubsystem::StopPlayMode()
 	TerraEngine::Animation::AnimationSystem::Instance()
 		.SetAuthoredComponentPlaybackAdvancing(false);
 	RestorePlayModeSceneState();
-	// Restore the matching source/profile/connection revision after the scene
+	// Restore the matching profile/settings revision after the scene
 	// packet has published, so navigation authoring never observes mixed modes.
 	if(m_NavigationAuthoringTransactions)
 		m_NavigationAuthoringTransactions->ExitPlayMode();

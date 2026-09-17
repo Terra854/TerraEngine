@@ -3,20 +3,28 @@
 	"fixtureFormat": "TerraEngineGroundNavigationV1",
 	"caseIdFormat": "{fixtureId}.{profileId}.{caseId}",
 	"referenceCasesPerProfile": 25,
+	"hardBreakDocuments": [
+		{"id": "scene-agent-component", "kind": "scene", "path": "HardBreak/Scene-NavigationAgentComponent.json", "unknownComponent": "NavigationAgentComponent"},
+		{"id": "scene-source-component", "kind": "scene", "path": "HardBreak/Scene-NavigationSourceComponent.json", "unknownComponent": "NavigationSourceComponent"},
+		{"id": "scene-connection-component", "kind": "scene", "path": "HardBreak/Scene-NavigationConnectionComponent.json", "unknownComponent": "NavigationConnectionComponent"},
+		{"id": "prefab-agent-component", "kind": "prefab", "path": "HardBreak/Prefab-NavigationAgentComponent.json", "unknownComponent": "NavigationAgentComponent"},
+		{"id": "prefab-source-component", "kind": "prefab", "path": "HardBreak/Prefab-NavigationSourceComponent.json", "unknownComponent": "NavigationSourceComponent"},
+		{"id": "prefab-connection-component", "kind": "prefab", "path": "HardBreak/Prefab-NavigationConnectionComponent.json", "unknownComponent": "NavigationConnectionComponent"}
+	],
 	"fixtures": [
 		{
 			"id": "GroundTerrain",
 			"sourceHash": "4b9f3d957b0905fc2cae5bdc7b44532fdb1439f08ca49e1d71694f2419f3a7c1",
-			"sources": ["terrain-height-triangles-v1", "terrain-hole-mask-v1", "transition-mesh-v1", "explicit-connection-v1"],
+			"sources": ["terrain-height-triangles-v1", "terrain-hole-mask-v1", "transition-mesh-v1", "automatic-geometry-v1"],
 			"profiles": {
 				"small": "0f7b8a452e5d8c1bbd7a4f3c16ef17a602c6fb763ab9c4c7e0a2d612973c5aa8",
 				"large": "d1f19e9648d7c6a2459fd49f074d6c8bd5acfe57b46d8e801f15f9b2b0479a66"
 			}
 		},
 		{
-			"id": "GroundNoTerrain",
+			"id": "GroundAutomaticGeometry",
 			"sourceHash": "8c2fd68930fcd40ea1a64bdf079cdb23e56d921fd4b0ce8674b16b3aa59ec701",
-			"sources": ["mesh-ground-v1", "collider-primitives-v1", "layered-floor-mesh-v1", "explicit-connection-v1"],
+			"sources": ["mesh-ground-v1", "collider-primitives-v1", "layered-floor-mesh-v1", "automatic-geometry-v1"],
 			"profiles": {
 				"small": "0f7b8a452e5d8c1bbd7a4f3c16ef17a602c6fb763ab9c4c7e0a2d612973c5aa8",
 				"large": "d1f19e9648d7c6a2459fd49f074d6c8bd5acfe57b46d8e801f15f9b2b0479a66"
@@ -112,7 +120,7 @@
 		]
 	},
 	"expansion": {
-		"fixtureIds": ["GroundTerrain", "GroundNoTerrain"],
+		"fixtureIds": ["GroundTerrain", "GroundAutomaticGeometry"],
 		"profileIds": ["small", "large"],
 		"caseCountPerFixture": 50,
 		"totalStableCaseCount": 100,

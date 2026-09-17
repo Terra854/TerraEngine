@@ -53,5 +53,14 @@ namespace TerraEngine::EditorTests
 				&& navigation.find("GLFW") == std::string::npos,
 				"Headless navigation startup and query semantics must not depend on editor UI libraries.");
 		});
+
+		registry.Add("Editor.NavigationExportParity.RuntimePackageUsesOnlyAutomaticGeometryCompanions", [](TestContext& context) {
+			const std::string dependencies = ReadSource("Editor/Export/NavigationExportDependencies.cpp");
+			const std::string startup = ReadSource("Engine/Runtime/ExportStartupCoordinator.cpp");
+			context.Expect(dependencies.find(".tenavsource") == std::string::npos
+				&& dependencies.find(".tenavgeom") != std::string::npos
+				&& startup.find("authored source data") != std::string::npos,
+				"Export and runtime startup must consume automatic cooked geometry/cache data without authored source files.");
+		});
 	}
 }

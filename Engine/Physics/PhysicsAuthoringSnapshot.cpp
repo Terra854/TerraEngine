@@ -107,6 +107,37 @@ namespace TerraEngine::Physics {
 			return hash == 0U ? 1U : hash;
 		}
 
+		std::uint64_t HashCharacterProperties(const PhysicsCharacterDescriptor& character) {
+			// Characters have no body descriptor or ColliderSet dependency. Hash their
+			// complete authored packet independently so a character-only object enters
+			// the typed runtime closure when its pose or configuration changes.
+			std::uint64_t hash = 14695981039346656037ULL;
+			hash = HashValue(hash, character.worldPose.position);
+			hash = HashValue(hash, character.worldPose.rotation);
+			hash = HashValue(hash, character.shapeKind);
+			hash = HashValue(hash, character.radius);
+			hash = HashValue(hash, character.height);
+			hash = HashValue(hash, character.localCenter);
+			hash = HashValue(hash, character.upDirection);
+			hash = HashValue(hash, character.stepHeight);
+			hash = HashValue(hash, character.supportVolumeRadius);
+			hash = HashValue(hash, character.supportVolumeHeight);
+			hash = HashValue(hash, character.maximumSlopeAngleDegrees);
+			hash = HashValue(hash, character.contactPadding);
+			hash = HashValue(hash, character.mass);
+			hash = HashValue(hash, character.maximumStrength);
+			hash = HashValue(hash, character.collisionLayer);
+			hash = HashValue(hash, character.collisionMask);
+			hash = HashValue(hash, character.groundAdhesion);
+			hash = HashValue(hash, character.gravityScale);
+			hash = HashValue(hash, character.jumpSpeed);
+			hash = HashValue(hash, character.rotationPolicy);
+			hash = HashValue(hash, character.allowStairWalking);
+			hash = HashValue(hash, character.useGravity);
+			hash = HashValue(hash, character.enabled);
+			return hash == 0U ? 1U : hash;
+		}
+
 		std::uint64_t HashColliderProperties(const PhysicsColliderDescriptor& collider) {
 			std::uint64_t hash = collider.stableRecipeHash == 0U
 				? 14695981039346656037ULL
@@ -472,6 +503,12 @@ namespace TerraEngine::Physics {
 				|| !std::isfinite(character.height) || character.radius <= 0.0F || character.height <= 0.0F
 				|| !character.localCenter.IsFinite() || !character.upDirection.IsFinite()
 				|| !std::isfinite(character.stepHeight) || !std::isfinite(character.maximumSlopeAngleDegrees)
+				|| character.objectTransformRevision == 0U || character.hierarchyGeneration == 0U
+				|| (character.hasParent && (!ValidPose(character.parentWorldPose)
+					|| !character.parentWorldScale.IsFinite() || character.parentObjectId == TerraEngine::EMPTY_UUID
+					|| character.parentObjectGeneration == 0U || character.parentTransformRevision == 0U))
+				|| (!character.hasParent && (character.parentObjectId != TerraEngine::EMPTY_UUID
+					|| character.parentObjectGeneration != 0U || character.parentTransformRevision != 0U))
 				|| character.collisionLayer >= kPhysicsCollisionLayerCount) {
 				return std::nullopt;
 			}
@@ -703,7 +740,7 @@ namespace TerraEngine::Physics {
 				character != nullptr && character->active) {
 				const CharacterControllerValidationResult validation = character->Validate();
 				if(!validation.accepted) return std::nullopt;
-				data.characters.push_back({
+				PhysicsCharacterDescriptor descriptor{
 					entry.objectId,
 					objectGeneration,
 					componentGeneration,
@@ -728,7 +765,21 @@ namespace TerraEngine::Physics {
 					character->rotationPolicy,
 					character->allowStairWalking,
 					character->useGravity,
-					character->enabled});
+					character->enabled};
+				descriptor.objectTransformRevision = localTransformRevision;
+				descriptor.hierarchyGeneration = data.hierarchyGeneration;
+				if(entry.parentIndex >= 0) {
+					const Scene::HierarchySnapshotEntry& parentEntry =
+						hierarchy.orderedObjects[static_cast<std::size_t>(entry.parentIndex)];
+					const ResolvedTransform& parent = transforms[static_cast<std::size_t>(entry.parentIndex)];
+					descriptor.parentObjectId = parentEntry.objectId;
+					descriptor.parentObjectGeneration = objects.getObjectLifetimeGeneration(parentEntry.object);
+					descriptor.parentTransformRevision = objects.GetObjectTransformRevision(parentEntry.object);
+					descriptor.parentWorldPose = {ToPhysicsVector(parent.position), ToPhysicsRotation(parent.rotation)};
+					descriptor.parentWorldScale = ToPhysicsVector(parent.scale);
+					descriptor.hasParent = true;
+				}
+				data.characters.push_back(std::move(descriptor));
 			}
 
 			RigidBodyComponent* authoredBody = objects.GetComponent<RigidBodyComponent>(entry.object);
@@ -994,13 +1045,21 @@ namespace TerraEngine::Physics {
 
 		std::unordered_map<TerraEngine::UUID, const PhysicsBodyDescriptor*> previousBodies;
 		std::unordered_map<TerraEngine::UUID, const PhysicsBodyDescriptor*> currentBodies;
+		std::unordered_map<TerraEngine::UUID, const PhysicsCharacterDescriptor*> previousCharacters;
+		std::unordered_map<TerraEngine::UUID, const PhysicsCharacterDescriptor*> currentCharacters;
 		if(retainedPrevious != nullptr) {
 			for(const PhysicsBodyDescriptor& body : retainedPrevious->Data().bodies) {
 				previousBodies.emplace(body.objectId, &body);
 			}
+			for(const PhysicsCharacterDescriptor& character : retainedPrevious->Data().characters) {
+				previousCharacters.emplace(character.objectId, &character);
+			}
 		}
 		for(const PhysicsBodyDescriptor& body : current.Data().bodies) {
 			currentBodies.emplace(body.objectId, &body);
+		}
+		for(const PhysicsCharacterDescriptor& character : current.Data().characters) {
+			currentCharacters.emplace(character.objectId, &character);
 		}
 		const std::unordered_map<TerraEngine::UUID, std::uint64_t> previousColliderHashes =
 			retainedPrevious != nullptr ? BuildColliderHashes(retainedPrevious->Data())
@@ -1075,6 +1134,34 @@ namespace TerraEngine::Physics {
 			}
 		}
 
+		// Character controllers are an independent provider family. They are not
+		// allowed to invent a rigid body merely to enter the change map: doing so
+		// would make a valid controller-only owner disappear when its ColliderSet
+		// is intentionally disabled. Track their exact lifecycle/configuration
+		// changes as a separate closure consumed by PhysicsPrepare.
+		std::set<TerraEngine::UUID> changedCharacterObjects;
+		for(const auto& [objectId, character] : currentCharacters) {
+			const auto previousCharacter = previousCharacters.find(objectId);
+			if(previousCharacter == previousCharacters.end()
+				|| previousCharacter->second->objectGeneration != character->objectGeneration
+				|| previousCharacter->second->componentGeneration != character->componentGeneration
+				|| HashCharacterProperties(*previousCharacter->second) != HashCharacterProperties(*character)) {
+				changedCharacterObjects.insert(objectId);
+			}
+		}
+		if(retainedPrevious != nullptr) {
+			for(const auto& [objectId, character] : previousCharacters) {
+				(void)character;
+				if(!currentCharacters.contains(objectId)) changedCharacterObjects.insert(objectId);
+			}
+			if(HashSettings(retainedPrevious->Data().settings) != generation.settingsHash) {
+				for(const auto& [objectId, character] : currentCharacters) {
+					(void)character;
+					changedCharacterObjects.insert(objectId);
+				}
+			}
+		}
+
 		auto addAssetReason = [&](const TerraEngine::UUID& objectId, PhysicsAssetKind kind) {
 			const auto body = currentBodies.find(objectId);
 			if(body == currentBodies.end()) return;
@@ -1125,6 +1212,8 @@ namespace TerraEngine::Physics {
 				dependentConstraints.begin(), dependentConstraints.end());
 			if(closureSnapshot.HasCharacter(objectId)) generation.characterObjectIds.push_back(objectId);
 		}
+		generation.characterObjectIds.insert(generation.characterObjectIds.end(),
+			changedCharacterObjects.begin(), changedCharacterObjects.end());
 		return PhysicsAuthoringGeneration::Create(std::move(generation));
 	}
 }

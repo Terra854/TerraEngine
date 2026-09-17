@@ -561,17 +561,17 @@ set_tests_properties(Engine.PhysicsStress PROPERTIES
 )
 
 # Navigation has deliberately narrow CTest lanes so contributors can isolate
-# foundation, terrain-free/terrain ground routing, dynamic publication, and
+# foundation, terrain-backed ground routing, hard-break absence, dynamic publication, and
 # managed ABI regressions without selecting unrelated engine workloads.
 add_test(NAME Engine.Navigation.Foundation COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.Navigation.Foundation PROPERTIES
 	LABELS "Engine;Navigation;Foundation;Dependency;Scheduler"
-	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Engine.Navigation.DependencyContract,Engine.Navigation.Types,Navigation.Geometry,Navigation.Components,Navigation.Scheduler,Navigation.Backend"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Engine.Navigation.DependencyContract,Engine.Navigation.Types,Navigation.Geometry,Navigation.HardBreak,Navigation.Scheduler,Navigation.Backend"
 )
 add_test(NAME Engine.Navigation.Ground COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.Navigation.Ground PROPERTIES
-	LABELS "Engine;Navigation;Ground;Terrain;TerrainFree"
-	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Navigation.MeshGround,Navigation.GroundTerrain,Navigation.ClearanceKernel,Navigation.Query,Navigation.Connections"
+	LABELS "Engine;Navigation;Ground;Terrain;HardBreak"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Navigation.MeshGround,Navigation.GroundTerrain,Navigation.ClearanceKernel,Navigation.Query,Navigation.HardBreak"
 )
 add_test(NAME Engine.Navigation.Dynamic COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.Navigation.Dynamic PROPERTIES

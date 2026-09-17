@@ -40,6 +40,42 @@ function Assert-Outside([string]$Path, [string]$Root, [string]$Label) {
 	return $fullPath
 }
 
+function Test-InstalledManifestContract([string]$Path) {
+	try {
+		$manifest = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+		if($manifest.schemaVersion -ne 1 -or $manifest.fixtureFormat -ne 'TerraEngineGroundNavigationV1') { return $false }
+		if(@($manifest.fixtures).Count -lt 2 -or @($manifest.cases).Count -lt 25) { return $false }
+		if($manifest.expansion.totalStableCaseCount -lt 100 -or @($manifest.dynamicGeometry.revisions).Count -lt 9) { return $false }
+		if(@($manifest.streamingLargeWorld.cases).Count -lt 4 -or @($manifest.lifecycle.cases).Count -lt 2) { return $false }
+		$sourceNames = @($manifest.fixtures | ForEach-Object { $_.sources } | ForEach-Object { [string]$_ })
+		return $sourceNames -contains 'terrain-height-triangles-v1' -and $sourceNames -contains 'automatic-geometry-v1'
+	} catch {
+		return $false
+	}
+}
+
+function Test-SemanticEvidence([string]$Path) {
+	try {
+		$record = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+		$checks = $record.content.semanticChecks
+		$requiredChecks = @('manifestParsed', 'manifestSemanticCasesValid', 'manifestDynamicCasesValid',
+			'manifestStreamingCasesValid', 'manifestLifecycleCasesValid', 'manifestFixtureExecutionPassed',
+			'automaticTerrainAndGeometryCapturePassed', 'objectToLocationPassed', 'objectToObjectPassed',
+			'ordinaryWorkloadProbePassed',
+			'unavailableMissingTerrainPassed', 'invalidEndpointPassed', 'invalidProfilePassed', 'unreachablePassed',
+			'cancellationPassed', 'staleLifetimePassed', 'releasedHandleRejected', 'capacityRejected',
+			'atomicLegacyRejectionPassed', 'streamingWorldQueryPassed', 'qualificationObjectLoadPassed')
+		if($record.success -ne $true -or $null -eq $checks) { return $false }
+		foreach($name in $requiredChecks) {
+			$property = $checks.PSObject.Properties[$name]
+			if($null -eq $property -or $property.Value -ne $true) { return $false }
+		}
+		return $checks.executedManifestCaseCount -ge 100
+	} catch {
+		return $false
+	}
+}
+
 foreach ($lane in $Lanes) { if ($lane -notin $allowedLanes) { throw "Unsupported lane '$lane'." } }
 foreach ($matrix in $Matrices) { if ($matrix -notin $allowedMatrices) { throw "Unsupported matrix '$matrix'." } }
 if (($Matrices -contains "soak") -and (($Lanes -notcontains "export-rendered") -or ($Lanes -notcontains "export-headless"))) { throw "The soak matrix requires rendered and headless export lanes." }
@@ -62,6 +98,9 @@ $laneExecutables = [ordered]@{
 }
 $required = [Collections.Generic.List[string]]::new()
 foreach ($path in @($manifest, $runner, $comparator)) { if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { $required.Add($path) } }
+if((Test-Path -LiteralPath $manifest -PathType Leaf) -and -not (Test-InstalledManifestContract $manifest)) {
+	$required.Add("$manifest (invalid installed navigation semantic contract)")
+}
 foreach ($lane in $Lanes) { if (-not (Test-Path -LiteralPath $laneExecutables[$lane] -PathType Leaf)) { $required.Add($laneExecutables[$lane]) } }
 
 $evidence = [ordered]@{
@@ -106,7 +145,10 @@ if ($required.Count -eq 0 -and -not $DryRun) {
 				$stderr = Join-Path $laneDirectory "stderr.txt"
 				$laneResult = Join-Path $laneDirectory "result.json"
 				$duration = if ($matrix -eq "soak" -and $DurationSecondsOverride -eq 0) { 1800 } elseif ($DurationSecondsOverride -gt 0) { $DurationSecondsOverride } elseif ($matrix -in @("semantic", "lifecycle", "usability")) { 1 } else { $DurationMinutes * 60 }
-				$agents = if ($Qualification -or $matrix -eq "performance" -or $matrix -eq "idle-overload") { 256 } else { 1 }
+				# Every installed lane uses ordinary-object capture. Keeping the reviewed
+				# 256-object population for smoke and qualification runs prevents a short
+				# semantic invocation from silently exercising a different public path.
+				$agents = 256
 				$requests = 100
 				$matrixCycles = if ($matrix -eq "lifecycle") { 100 } elseif ($matrix -eq "usability") { $UsabilityInvalidCases } else { 1 }
 				$matrixArgument = $matrix
@@ -130,12 +172,14 @@ if ($required.Count -eq 0 -and -not $DryRun) {
 					& $runner @arguments > $stdout 2> $stderr
 					$exitCode = $LASTEXITCODE
 					$hasResult = Test-Path -LiteralPath $laneResult -PathType Leaf
-					if ($exitCode -ne 0 -or -not $hasResult) {
+					$semanticEvidencePassed = $hasResult -and (Test-SemanticEvidence $laneResult)
+					if ($exitCode -ne 0 -or -not $hasResult -or -not $semanticEvidencePassed) {
 						$failed = $true
 						if (-not $hasResult) { "Lane '$lane' workload '$workloadName' did not publish result.json." | Set-Content -LiteralPath $stderr -Encoding utf8 }
+						elseif(-not $semanticEvidencePassed) { "Lane '$lane' workload '$workloadName' omitted or failed a required installed semantic check." | Set-Content -LiteralPath $stderr -Encoding utf8 }
 					}
 					if ($hasResult) { $resultFiles.Add($laneResult) }
-					$evidence.workloads += [ordered]@{ lane = $lane; matrix = $matrix; iteration = $iteration; durationSeconds = $duration; status = if ($exitCode -eq 0 -and $hasResult) { "passed" } else { "failed" }; exitCode = $exitCode; stdout = $stdout; stderr = $stderr; result = $laneResult }
+					$evidence.workloads += [ordered]@{ lane = $lane; matrix = $matrix; iteration = $iteration; durationSeconds = $duration; status = if ($exitCode -eq 0 -and $hasResult -and $semanticEvidencePassed) { "passed" } else { "failed" }; exitCode = $exitCode; stdout = $stdout; stderr = $stderr; result = $laneResult }
 				} catch {
 					$failed = $true
 					$_.Exception.Message | Set-Content -LiteralPath $stderr -Encoding utf8
@@ -151,12 +195,14 @@ if ($required.Count -eq 0 -and -not $DryRun) {
 			$pending.process.WaitForExit()
 			$exitCode = $pending.process.ExitCode
 			$hasResult = Test-Path -LiteralPath $pending.laneResult -PathType Leaf
-			if ($exitCode -ne 0 -or -not $hasResult) {
+			$semanticEvidencePassed = $hasResult -and (Test-SemanticEvidence $pending.laneResult)
+			if ($exitCode -ne 0 -or -not $hasResult -or -not $semanticEvidencePassed) {
 				$failed = $true
 				if (-not $hasResult) { "Lane '$($pending.lane)' workload '$($pending.workloadName)' did not publish result.json." | Set-Content -LiteralPath $pending.stderr -Encoding utf8 }
+				elseif(-not $semanticEvidencePassed) { "Lane '$($pending.lane)' workload '$($pending.workloadName)' omitted or failed a required installed semantic check." | Set-Content -LiteralPath $pending.stderr -Encoding utf8 }
 			}
 			if ($hasResult) { $resultFiles.Add($pending.laneResult) }
-			$evidence.workloads += [ordered]@{ lane = $pending.lane; matrix = $pending.matrix; iteration = $pending.iteration; durationSeconds = $pending.duration; status = if ($exitCode -eq 0 -and $hasResult) { "passed" } else { "failed" }; exitCode = $exitCode; stdout = $pending.stdout; stderr = $pending.stderr; result = $pending.laneResult }
+			$evidence.workloads += [ordered]@{ lane = $pending.lane; matrix = $pending.matrix; iteration = $pending.iteration; durationSeconds = $pending.duration; status = if ($exitCode -eq 0 -and $hasResult -and $semanticEvidencePassed) { "passed" } else { "failed" }; exitCode = $exitCode; stdout = $pending.stdout; stderr = $pending.stderr; result = $pending.laneResult }
 		} catch {
 			$failed = $true
 			$_.Exception.Message | Set-Content -LiteralPath $pending.stderr -Encoding utf8

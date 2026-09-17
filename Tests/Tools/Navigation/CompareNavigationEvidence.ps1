@@ -2,7 +2,12 @@
 param(
 	[string[]]$EvidenceFiles = @(),
 	[string]$Manifest,
-	[string]$OutputPath
+	[string]$OutputPath,
+	[string[]]$BaselineFiles = @(),
+	[string[]]$CandidateFiles = @(),
+	[string]$BaselineDirectory,
+	[string]$CandidateDirectory,
+	[ValidateRange(5, 100)][int]$MinimumRuns = 5
 )
 
 Set-StrictMode -Version Latest
@@ -58,7 +63,9 @@ function Get-ManifestFiles {
 	param([string]$ManifestPath)
 	if([string]::IsNullOrWhiteSpace($ManifestPath)) { return @() }
 	$absoluteManifest = [IO.Path]::GetFullPath($ManifestPath)
-	$manifestObject = Get-Content -LiteralPath $absoluteManifest -Raw | ConvertFrom-Json -Depth 64
+	# Windows PowerShell 5.1 has no ConvertFrom-Json -Depth parameter; nested
+	# manifest/evidence objects are still fully parsed by its JSON reader.
+	$manifestObject = Get-Content -LiteralPath $absoluteManifest -Raw | ConvertFrom-Json
 	$manifestFiles = @(Get-PropertyValue $manifestObject 'evidenceFiles')
 	if($manifestFiles.Count -eq 0) { throw "Manifest '$absoluteManifest' has no evidenceFiles entries." }
 	$manifestDirectory = [IO.Path]::GetDirectoryName($absoluteManifest)
@@ -83,6 +90,7 @@ function Test-NonNegativeInteger {
 }
 
 $inputFailures = [System.Collections.Generic.List[string]]::new()
+$qualificationRequested = $BaselineFiles.Count -gt 0 -or $CandidateFiles.Count -gt 0 -or -not [string]::IsNullOrWhiteSpace($BaselineDirectory) -or -not [string]::IsNullOrWhiteSpace($CandidateDirectory)
 $paths = [System.Collections.Generic.List[string]]::new()
 foreach($path in @($EvidenceFiles)) {
 	if(-not [string]::IsNullOrWhiteSpace($path)) { $paths.Add([IO.Path]::GetFullPath($path)) }
@@ -91,7 +99,7 @@ try { foreach($path in Get-ManifestFiles $Manifest) { $paths.Add($path) } }
 catch { Add-Failure $inputFailures $_.Exception.Message }
 
 $uniquePaths = @($paths | Sort-Object -Unique)
-if($uniquePaths.Count -eq 0) { Add-Failure $inputFailures 'No evidence files were supplied.' }
+if($uniquePaths.Count -eq 0 -and -not $qualificationRequested) { Add-Failure $inputFailures 'No evidence files were supplied.' }
 if($uniquePaths.Count -gt 64) { Add-Failure $inputFailures 'At most 64 evidence files may be compared at once.' }
 
 $records = [System.Collections.Generic.List[object]]::new()
@@ -99,7 +107,7 @@ foreach($path in $uniquePaths) {
 	$failures = [System.Collections.Generic.List[string]]::new()
 	$evidence = $null
 	try {
-		$evidence = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -Depth 64
+		$evidence = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
 	} catch {
 		Add-Failure $failures "Unreadable JSON: $($_.Exception.Message)"
 	}
@@ -165,6 +173,117 @@ foreach($path in $uniquePaths) {
 	})
 }
 
+# Qualification deliberately has a separate, fail-closed input path. A single
+# valid record is useful for absolute gates, but cannot establish a performance
+# claim. Require five identity-matched runs on each side and require the
+# runner-emitted dynamic publication metric; sample counts are not a timing
+# substitute and must never be treated as one.
+$qualificationFailures = [System.Collections.Generic.List[string]]::new()
+$qualification = $null
+if($qualificationRequested) {
+	function Get-Median([double[]]$Values) {
+		$sorted = @($Values | Sort-Object)
+		if($sorted.Count -eq 0) { throw 'Cannot calculate a median for an empty set.' }
+		$middle = [int][Math]::Floor($sorted.Count / 2)
+		if($sorted.Count % 2 -eq 1) { return [double]$sorted[$middle] }
+		return ([double]$sorted[$middle - 1] + [double]$sorted[$middle]) / 2.0
+	}
+	function Get-IdentityKey([object]$Evidence, [bool]$IncludeBuild) {
+		$identity = Get-PropertyValue $Evidence 'identity'
+		$parts = [System.Collections.Generic.List[string]]::new()
+		$parts.Add([string](Get-PropertyValue $Evidence 'workloadId'))
+		$parts.Add([string](Get-PropertyValue $Evidence 'lane'))
+		if($IncludeBuild) { $parts.Add([string](Get-PropertyValue $identity 'buildSha256')) }
+		foreach($name in @('sourceSha256', 'settingsSha256', 'workloadSha256', 'renderer', 'powerMode', 'workerCount')) {
+			$parts.Add([string](Get-PropertyValue $identity $name))
+		}
+		return [string]::Join('|', $parts)
+	}
+	function Get-QualificationPaths([string[]]$Files, [string]$Directory, [string]$Label) {
+		$paths = [System.Collections.Generic.List[string]]::new()
+		foreach($file in @($Files)) { if(-not [string]::IsNullOrWhiteSpace($file)) { $paths.Add([IO.Path]::GetFullPath($file)) } }
+		if(-not [string]::IsNullOrWhiteSpace($Directory)) {
+			$root = [IO.Path]::GetFullPath($Directory)
+			if(-not (Test-Path -LiteralPath $root -PathType Container)) { Add-Failure $qualificationFailures "$Label directory does not exist: $root" }
+			else { foreach($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -Filter '*.json')) { $paths.Add($file.FullName) } }
+		}
+		return @($paths | Sort-Object -Unique)
+	}
+	$baselinePaths = @(Get-QualificationPaths $BaselineFiles $BaselineDirectory 'Baseline')
+	$candidatePaths = @(Get-QualificationPaths $CandidateFiles $CandidateDirectory 'Candidate')
+	function Read-QualificationRecords([string[]]$Paths, [string]$Label) {
+		$result = [System.Collections.Generic.List[object]]::new()
+		foreach($path in $Paths) {
+			try { $value = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json }
+			catch { Add-Failure $qualificationFailures "$Label file '$path' is unreadable: $($_.Exception.Message)"; continue }
+			if($null -eq $value -or (Get-PropertyValue $value 'schemaVersion') -ne 1 -or -not (Test-BooleanTrue (Get-PropertyValue $value 'success'))) { Add-Failure $qualificationFailures "$Label file '$path' is not a successful schema-v1 evidence record."; continue }
+			$identity = Get-PropertyValue $value 'identity'
+			$identityValid = $true
+			foreach($name in @('buildSha256', 'sourceSha256', 'settingsSha256', 'workloadSha256')) {
+				if((Get-PropertyValue $identity $name) -notmatch $sha256Pattern) { Add-Failure $qualificationFailures "$Label file '$path' has invalid identity.$name."; $identityValid = $false }
+			}
+			foreach($name in @('renderer', 'powerMode')) {
+				if([string]::IsNullOrWhiteSpace([string](Get-PropertyValue $identity $name))) { Add-Failure $qualificationFailures "$Label file '$path' lacks identity.$name."; $identityValid = $false }
+			}
+			if(-not (Test-NonNegativeInteger (Get-PropertyValue $identity 'workerCount') $true)) { Add-Failure $qualificationFailures "$Label file '$path' has invalid identity.workerCount."; $identityValid = $false }
+			if((Get-PropertyValue $value 'lane') -notin @('rendered', 'headless') -or [string]::IsNullOrWhiteSpace([string](Get-PropertyValue $value 'workloadId'))) { Add-Failure $qualificationFailures "$Label file '$path' has invalid lane or workloadId."; $identityValid = $false }
+			$content = Get-PropertyValue $value 'content'
+			$contentHash = Get-PropertyValue $value 'contentSha256'
+			if($contentHash -notmatch $sha256Pattern -or $null -eq $content -or (Get-CanonicalSha256 $content) -ne $contentHash.ToLowerInvariant()) { Add-Failure $qualificationFailures "$Label file '$path' has invalid content evidence."; $identityValid = $false }
+			$denominator = Get-PropertyValue $value 'denominator'
+			try {
+				$attempted = [decimal](Get-PropertyValue $denominator 'attempted')
+				$accounted = [decimal](Get-PropertyValue $denominator 'completed') + [decimal](Get-PropertyValue $denominator 'cancelled') + [decimal](Get-PropertyValue $denominator 'rejected') + [decimal](Get-PropertyValue $denominator 'failed') + [decimal](Get-PropertyValue $denominator 'timedOut')
+				if($attempted -le 0 -or $accounted -ne $attempted) { throw 'invalid denominator' }
+			} catch { Add-Failure $qualificationFailures "$Label file '$path' has an invalid denominator."; $identityValid = $false }
+			$latency = Get-PropertyValue $value 'latency'
+			try {
+				$p95 = [double](Get-PropertyValue $latency 'p95Milliseconds'); $p99 = [double](Get-PropertyValue $latency 'p99Milliseconds')
+				if([double]::IsNaN($p95) -or [double]::IsInfinity($p95) -or $p95 -lt 0 -or $p95 -gt $p95LimitMilliseconds -or [double]::IsNaN($p99) -or [double]::IsInfinity($p99) -or $p99 -lt $p95 -or $p99 -gt $p99LimitMilliseconds) { throw 'invalid latency' }
+			} catch { Add-Failure $qualificationFailures "$Label file '$path' fails the absolute latency gates."; $identityValid = $false }
+			$safety = Get-PropertyValue $value 'safety'
+			foreach($name in @('noCrash', 'noDeadlock', 'noStaleOwnerPublications', 'removalSafety', 'boundedStatus')) {
+				if(-not (Test-BooleanTrue (Get-PropertyValue $safety $name))) { Add-Failure $qualificationFailures "$Label file '$path' fails safety.$name."; $identityValid = $false }
+			}
+			$metrics = Get-PropertyValue $value 'metrics'
+			$dynamic = Get-PropertyValue $metrics 'dynamicPublicationResponsivenessMilliseconds'
+			$route = Get-PropertyValue $metrics 'routeLatencyMilliseconds'
+			if($null -eq $route) { Add-Failure $qualificationFailures "$Label file '$path' lacks metrics.routeLatencyMilliseconds."; continue }
+			if($null -eq $dynamic) { Add-Failure $qualificationFailures "$Label file '$path' lacks metrics.dynamicPublicationResponsivenessMilliseconds."; continue }
+			try { $route = [double]$route; $dynamic = [double]$dynamic } catch { Add-Failure $qualificationFailures "$Label file '$path' has non-numeric qualification metrics."; continue }
+			if([double]::IsNaN($route) -or [double]::IsInfinity($route) -or $route -lt 0 -or [double]::IsNaN($dynamic) -or [double]::IsInfinity($dynamic) -or $dynamic -lt 0) { Add-Failure $qualificationFailures "$Label file '$path' has invalid qualification metrics."; continue }
+			if(-not $identityValid) { continue }
+			$result.Add([pscustomobject]@{ cohortKey = Get-IdentityKey $value $true; comparisonKey = Get-IdentityKey $value $false; buildSha256 = Get-PropertyValue $identity 'buildSha256'; route = $route; dynamic = $dynamic; path = $path })
+		}
+		return @($result)
+	}
+	$baseline = @(Read-QualificationRecords $baselinePaths 'Baseline')
+	$candidate = @(Read-QualificationRecords $candidatePaths 'Candidate')
+	if($baseline.Count -lt $MinimumRuns) { Add-Failure $qualificationFailures "Baseline requires at least $MinimumRuns valid runs; found $($baseline.Count)." }
+	if($candidate.Count -lt $MinimumRuns) { Add-Failure $qualificationFailures "Candidate requires at least $MinimumRuns valid runs; found $($candidate.Count)." }
+	$comparisons = [System.Collections.Generic.List[object]]::new()
+	$baselineCohorts = @($baseline | Group-Object cohortKey)
+	$candidateCohorts = @($candidate | Group-Object cohortKey)
+	if($baselineCohorts.Count -ne 1) { Add-Failure $qualificationFailures "Baseline must contain exactly one internally identity-matched cohort; found $($baselineCohorts.Count)." }
+	if($candidateCohorts.Count -ne 1) { Add-Failure $qualificationFailures "Candidate must contain exactly one internally identity-matched cohort; found $($candidateCohorts.Count)." }
+	if($baselineCohorts.Count -eq 1 -and $candidateCohorts.Count -eq 1) {
+		$baselineGroup = @($baselineCohorts[0].Group)
+		$candidateGroup = @($candidateCohorts[0].Group)
+		if($baselineGroup.Count -lt $MinimumRuns) { Add-Failure $qualificationFailures "Baseline cohort requires at least $MinimumRuns runs; found $($baselineGroup.Count)." }
+		if($candidateGroup.Count -lt $MinimumRuns) { Add-Failure $qualificationFailures "Candidate cohort requires at least $MinimumRuns runs; found $($candidateGroup.Count)." }
+		if($baselineGroup[0].comparisonKey -ne $candidateGroup[0].comparisonKey) { Add-Failure $qualificationFailures 'Baseline and candidate fixture/settings/workload/runtime identities do not match.' }
+		elseif($baselineGroup.Count -ge $MinimumRuns -and $candidateGroup.Count -ge $MinimumRuns) {
+			$bRoute = Get-Median @($baselineGroup | Select-Object -ExpandProperty route)
+			$cRoute = Get-Median @($candidateGroup | Select-Object -ExpandProperty route)
+			$bDynamic = Get-Median @($baselineGroup | Select-Object -ExpandProperty dynamic)
+			$cDynamic = Get-Median @($candidateGroup | Select-Object -ExpandProperty dynamic)
+			$comparisons.Add([ordered]@{ identity = $baselineGroup[0].comparisonKey; baselineBuildSha256 = $baselineGroup[0].buildSha256; candidateBuildSha256 = $candidateGroup[0].buildSha256; baselineRouteLatencyMilliseconds = $bRoute; candidateRouteLatencyMilliseconds = $cRoute; routeLimitMilliseconds = $bRoute * 1.05; routePassed = $cRoute -le ($bRoute * 1.05); baselineDynamicPublicationResponsivenessMilliseconds = $bDynamic; candidateDynamicPublicationResponsivenessMilliseconds = $cDynamic; dynamicLimitMilliseconds = $bDynamic * 1.05; dynamicPassed = $cDynamic -le ($bDynamic * 1.05) })
+		}
+	}
+	if($comparisons.Count -eq 0) { Add-Failure $qualificationFailures 'No identity-matched baseline/candidate workload group was available.' }
+	$qualification = [ordered]@{ minimumRuns = $MinimumRuns; passed = $qualificationFailures.Count -eq 0 -and @($comparisons | Where-Object { -not $_.routePassed -or -not $_.dynamicPassed }).Count -eq 0; failures = @($qualificationFailures); comparisons = @($comparisons) }
+}
+
 # Semantic and soak workloads must be represented in both installed lanes with
 # the same frozen provenance. Performance and lifecycle/usability records are
 # intentionally single-lane measurements.
@@ -192,13 +311,16 @@ foreach($workloadId in $workloadIds) {
 	if($identityValues.Count -ne 1) { Add-Failure $parityFailures "workload '$workloadId' has non-identical lane identities." }
 }
 
-$passed = $inputFailures.Count -eq 0 -and $records.Count -gt 0 -and @($records | Where-Object { -not $_.passed }).Count -eq 0 -and $parityFailures.Count -eq 0
+$hasRequiredRecords = $records.Count -gt 0 -or $qualificationRequested
+$passed = $inputFailures.Count -eq 0 -and $hasRequiredRecords -and @($records | Where-Object { -not $_.passed }).Count -eq 0 -and $parityFailures.Count -eq 0
+$passed = $passed -and ($null -eq $qualification -or $qualification.passed)
 $comparison = [pscustomobject][ordered]@{
 	schemaVersion = 1
 	passed = $passed
 	thresholds = [ordered]@{ p95Milliseconds = $p95LimitMilliseconds; p99Milliseconds = $p99LimitMilliseconds }
 	inputFailures = @($inputFailures)
 	parityFailures = @($parityFailures)
+	qualification = $qualification
 	evidence = @($records)
 }
 

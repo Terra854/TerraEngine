@@ -197,7 +197,6 @@ list(REMOVE_DUPLICATES TERRAENGINE_NAVIGATION_ENGINE_SOURCES)
 set(TERRAENGINE_NAVIGATION_RUNTIME_SOURCES
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/NavigationSystem.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/Integration/NavigationSceneBootstrap.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/Ground/GroundTraversalConnectionStore.cpp"
 )
 list(REMOVE_ITEM TERRAENGINE_NAVIGATION_ENGINE_SOURCES ${TERRAENGINE_NAVIGATION_RUNTIME_SOURCES})
 
@@ -219,9 +218,6 @@ set(ENGINE_SOURCES
 	Engine/Core/Object/Object.cpp
 	Engine/Core/Object/ObjectManager.cpp
 	Engine/Core/Object/ComponentRegistry.cpp
-	Engine/Components/Navigation/NavigationSourceComponent.h
-	Engine/Components/Navigation/NavigationAgentComponent.h
-	Engine/Components/Navigation/NavigationConnectionComponent.h
 	Engine/Components/Physics/RigidBodyComponent.cpp
 	Engine/Components/Physics/ColliderSetComponent.cpp
 	Engine/Components/Physics/ConstraintSetComponent.cpp

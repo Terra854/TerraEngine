@@ -2,8 +2,6 @@
 
 #pragma once
 
-#include "Components/Navigation/NavigationConnectionComponent.h"
-#include "Components/Navigation/NavigationSourceComponent.h"
 #include "Navigation/NavigationSettings.h"
 
 #include <string>
@@ -16,7 +14,7 @@ namespace TerraEngine::Editor::Navigation {
 
 	struct NavigationTerrainAuthoringState {
 		bool terrainExistsInScene = false;
-		bool hasEnabledEligibleTerrainSource = false;
+		bool hasCurrentTerrainCollision = false;
 	};
 
 	struct NavigationTerrainControlDescription {
@@ -25,11 +23,8 @@ namespace TerraEngine::Editor::Navigation {
 		bool terrainSourceRequired = false;
 	};
 
-	[[nodiscard]] NavigationAuthoringValidation ValidateNavigationSourceDraft(const NavigationSourceComponent& source);
 	[[nodiscard]] NavigationAuthoringValidation ValidateNavigationProfileDraft(
 		const TerraEngine::Navigation::NavigationProfile& profile);
-	[[nodiscard]] NavigationAuthoringValidation ValidateNavigationConnectionDraft(
-		const NavigationConnectionComponent& connection);
 	[[nodiscard]] NavigationTerrainControlDescription DescribeNavigationTerrainControls(
 		const NavigationTerrainAuthoringState& state) noexcept;
 	[[nodiscard]] NavigationAuthoringValidation ValidateNavigationTerrainAuthoring(

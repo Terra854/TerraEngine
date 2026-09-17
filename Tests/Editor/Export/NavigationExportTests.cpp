@@ -45,7 +45,7 @@ namespace TerraEngine::EditorTests
 				"The export fixture must contain one optional cache candidate.");
 
 			const auto closure = TerraEngine::Export::NavigationExportDependencyResolver::Resolve(root);
-			context.Expect(closure.Complete() && !closure.sourceFree && closure.dependencies.size() == 2U,
+			context.Expect(closure.Complete() && closure.sourceFree && closure.dependencies.size() == 2U,
 				"Export must discover required geometry and optional cache dependencies.");
 			std::string error;
 			context.Expect(TerraEngine::Export::NavigationExportDependencyResolver::WriteRuntimeManifest(
@@ -59,17 +59,15 @@ namespace TerraEngine::EditorTests
 			std::filesystem::remove_all(root);
 		});
 
-		registry.Add("Editor.NavigationExport.MissingCompanionRejectsWithoutPartialManifest", [](TestContext& context) {
+		registry.Add("Editor.NavigationExport.AuthoredSourceFilesAreNotRuntimeDependencies", [](TestContext& context) {
 			const auto root = MakeRoot();
 			std::ofstream(root / "Assets" / "broken.tenavsource") << "authored source";
 			const auto closure = TerraEngine::Export::NavigationExportDependencyResolver::Resolve(root);
-			context.Expect(!closure.Complete() && !closure.issues.empty(),
-				"An authored source without cooked geometry must reject export with a concrete issue.");
+			context.Expect(closure.Complete() && closure.sourceFree && closure.dependencies.empty(),
+				"Authored navigation source files must not participate in runtime export dependency discovery.");
 			std::string error;
-			context.Expect(!TerraEngine::Export::NavigationExportDependencyResolver::WriteRuntimeManifest(
-				closure, root, error)
-				&& !std::filesystem::exists(root / "navigation" / "runtime-manifest.json"),
-				"Rejected dependency closure must leave no partial runtime manifest.");
+			context.Expect(TerraEngine::Export::NavigationExportDependencyResolver::WriteRuntimeManifest(
+				closure, root, error), "Source-free export must write a valid runtime manifest.");
 			std::filesystem::remove_all(root);
 		});
 

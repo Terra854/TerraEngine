@@ -325,18 +325,18 @@ namespace TerraEngine
 		// guard verifies the public boundary without exposing provider state.
 		public static void ValidateNavigationAbiLayout()
 		{
-			if (Navigation.AbiVersionConstant != 1U
+			if (Navigation.AbiVersionConstant != 2U
 				|| Marshal.SizeOf<NavigationWorldHandle>() != 16
 				|| Marshal.SizeOf<NavigationOwnerHandle>() != 32
 				|| Marshal.SizeOf<NavigationRequestHandle>() != 48
 				|| Marshal.SizeOf<NavigationRouteHandle>() != 48
 				|| Marshal.SizeOf<NavigationLocation>() != 64
-				|| Marshal.SizeOf<NavigationProfile>() != 336
+				|| Marshal.SizeOf<NavigationProfile>() != 320
 				|| Marshal.OffsetOf<NavigationRequestHandle>(nameof(NavigationRequestHandle.SlotIndex)).ToInt32() != 32
 				|| Marshal.OffsetOf<NavigationRequestHandle>(nameof(NavigationRequestHandle.SlotGeneration)).ToInt32() != 40
 				|| Marshal.OffsetOf<NavigationLocation>(nameof(NavigationLocation.OffsetX)).ToInt32() != 40)
 			{
-				throw new TypeLoadException("The managed navigation ABI layout no longer matches its fixed v1 contract.");
+				throw new TypeLoadException("The managed navigation ABI layout no longer matches its fixed v2 contract.");
 			}
 		}
 
@@ -1732,7 +1732,10 @@ namespace TerraEngine
 		internal static extern uint Native_Navigation_GetAbiVersion();
 
 		[DllImport("TerraEngine")]
-		internal static extern NavigationStatus Native_Navigation_SubmitRoute(ref NativeNavigationRouteRequest request, ref NativeNavigationSubmitReceipt receipt);
+		internal static extern NavigationStatus Native_Navigation_RequestObjectToLocation(ref NativeNavigationObjectToLocationRequest request, ref NativeNavigationSubmitReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_Navigation_RequestObjectToObject(ref NativeNavigationObjectToObjectRequest request, ref NativeNavigationSubmitReceipt receipt);
 
 		[DllImport("TerraEngine")]
 		internal static extern NavigationStatus Native_Navigation_ReadRequest(ref NavigationRequestHandle request, ref NativeNavigationRequestSnapshot snapshot);
@@ -1748,21 +1751,6 @@ namespace TerraEngine
 
 		[DllImport("TerraEngine")]
 		internal static extern NavigationStatus Native_Navigation_ValidateRoute(ref NativeNavigationRouteValidationRequest request, ref NativeNavigationRouteValidationResult result);
-
-		[DllImport("TerraEngine")]
-		internal static extern NavigationStatus Native_Navigation_SetDestination(ref NativeNavigationDestinationRequest request, ref NativeNavigationCommandReceipt receipt);
-
-		[DllImport("TerraEngine")]
-		internal static extern NavigationStatus Native_Navigation_ReadCommand(ref NativeNavigationCommandQuery query, ref NativeNavigationCommandReceipt receipt);
-
-		[DllImport("TerraEngine")]
-		internal static extern NavigationStatus Native_Navigation_ResolveObjectAgent(uint objectEntity, ref NativeNavigationAgentSnapshot snapshot);
-
-		[DllImport("TerraEngine")]
-		internal static extern NavigationStatus Native_Navigation_ReadAgent(ref NavigationAgentHandle agent, ref NativeNavigationAgentSnapshot snapshot);
-
-		[DllImport("TerraEngine")]
-		internal static extern NavigationStatus Native_Navigation_ReleaseAgent(ref NavigationAgentHandle agent);
 
 		[DllImport("TerraEngine")]
 		internal static extern unsafe NavigationStatus Native_Navigation_CopyInvalidations(ref NativeNavigationInvalidationCursor cursor, NativeNavigationInvalidationRecord* records, uint capacity, ref NativeNavigationBufferInfo info);

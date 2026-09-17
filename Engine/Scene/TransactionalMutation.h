@@ -108,6 +108,9 @@ namespace TerraEngine::Scene {
 		// Physics and animation publish an exact canonical pose. A transform batch
 		// intentionally has no vec3 absolute-position compatibility field.
 		WorldPose pose{};
+		// Physics owns position and rotation, not authored mesh size. When requested,
+		// retain the target's scale at the protected, revision-validated boundary.
+		bool preserveScale = false;
 	};
 
 	struct AnimationMutationPublication {

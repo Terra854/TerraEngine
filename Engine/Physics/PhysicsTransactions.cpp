@@ -626,17 +626,26 @@ namespace TerraEngine::Physics {
 		for (std::size_t index = 0U; index < packet.entries.size(); ++index)
 		{
 			const TransformPublicationEntry& entry = packet.entries[index];
-			const auto liveHandle = runtime.bodyHandles.find(entry.objectId);
-			const auto liveBody = runtime.bodyGenerations.find(entry.objectId);
-			if (liveHandle == runtime.bodyHandles.end() || liveHandle->second != entry.body
-				|| liveBody == runtime.bodyGenerations.end()
-				|| liveBody->second != entry.bodyGeneration)
-			{
+			bool authorityStillCurrent = false;
+			if(entry.authority == TransformPublicationAuthority::Body) {
+				const auto liveHandle = runtime.bodyHandles.find(entry.objectId);
+				const auto liveBody = runtime.bodyGenerations.find(entry.objectId);
+				authorityStillCurrent = liveHandle != runtime.bodyHandles.end()
+					&& liveHandle->second == entry.body && liveBody != runtime.bodyGenerations.end()
+					&& liveBody->second == entry.bodyGeneration;
+			} else if(entry.authority == TransformPublicationAuthority::Character) {
+				const auto liveHandle = runtime.characterHandles.find(entry.objectId);
+				const auto liveCharacter = runtime.characterGenerations.find(entry.objectId);
+				authorityStillCurrent = liveHandle != runtime.characterHandles.end()
+					&& liveHandle->second == entry.character && liveCharacter != runtime.characterGenerations.end()
+					&& liveCharacter->second == entry.bodyGeneration;
+			}
+			if(!authorityStillCurrent) {
 				validation.accepted = false;
 				validation.reason = TransformPublicationValidationReason::StaleBody;
 				validation.entryIndex = index;
 				validation.objectId = entry.objectId;
-				validation.message = "A body generation changed after state extraction.";
+				validation.message = "A provider authority generation changed after state extraction.";
 				return validation;
 			}
 		}

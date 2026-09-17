@@ -1,0 +1,9 @@
+{
+	"format": "TerraPrefabUnboundedV1",
+	"sourceId": "navigation-hard-break-agent",
+	"objects": [{
+		"uuid": "580000000000000000000000000004",
+		"name": "Unsupported Agent Prefab Object",
+		"components": {"NavigationAgentComponent": {}}
+	}]
+}

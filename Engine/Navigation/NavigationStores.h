@@ -19,15 +19,8 @@
 #include <vector>
 
 namespace TerraEngine::Navigation {
-	enum class NavigationCommandState : std::uint8_t {
-		Queued,
-		Applied,
-		Rejected,
-		Expired
-	};
-
 	// Common retained metadata makes expiry and cancellation deterministic across
-	// request, route, agent, and command records. An expiry value of zero means
+	// request and route records. An expiry value of zero means
 	// the owner must explicitly release the record before it can be reclaimed.
 	struct NavigationStoredRecord {
 		std::uint64_t createdTick = 0U;
@@ -40,6 +33,18 @@ namespace TerraEngine::Navigation {
 	struct NavigationRequestRecord : NavigationStoredRecord {
 		NavigationRequestHandle handle{};
 		std::uint64_t intentGeneration = 0U;
+		// The component-free values are captured before worker admission. They
+		// retain no live object pointers and do not authorize navigation to move an
+		// object; gameplay consumes the resulting route through its own mutation path.
+		NavigationObjectEndpoint sourceEndpoint{};
+		NavigationObjectEndpoint destinationEndpoint{};
+		NavigationProfile profile = NavigationProfile::Defaults();
+		NavigationRoutePolicy routePolicy = NavigationRoutePolicy::ExactDestination;
+		NavigationObservationEvidence observation{};
+		std::uint64_t replacementKey = 0U;
+		// Canonical worker inputs keep the established one-shot query interface
+		// typed. They are populated from the endpoints above and
+		// never carry component-owned state.
 		NavigationLocation start{};
 		NavigationLocation destination{};
 		bool allowPartial = false;
@@ -49,30 +54,7 @@ namespace TerraEngine::Navigation {
 		NavigationRouteHandle handle{};
 		NavigationRequestHandle request{};
 		std::uint64_t intentGeneration = 0U;
-	};
-
-	struct NavigationAgentRecord : NavigationStoredRecord {
-		NavigationAgentHandle handle{};
-		std::uint64_t intentGeneration = 0U;
-		// A protected scene-object scan advances this value only when the
-		// canonical pose changes. Route publication compares the captured value so
-		// a result can never attach to an object that moved while it was searching.
-		std::uint64_t poseGeneration = 0U;
-		NavigationRequestHandle activeRequest{};
-		NavigationRouteHandle activeRoute{};
-		// Agents retain copied profile and endpoint state so a protected destination
-		// command can replace intent without borrowing an ECS component from a job.
-		NavigationProfile profile = NavigationProfile::Defaults();
-		NavigationLocation currentPosition{};
-		NavigationLocation destination{};
-		std::uint32_t routePolicy = 0U;
-	};
-
-	struct NavigationCommandRecord : NavigationStoredRecord {
-		NavigationCommandHandle handle{};
-		NavigationCommandState state = NavigationCommandState::Queued;
-		std::uint64_t resultingIntentGeneration = 0U;
-		NavigationRequestHandle resultingRequest{};
+		NavigationObservationEvidence observation{};
 	};
 
 	template<typename Handle>
@@ -303,14 +285,21 @@ namespace TerraEngine::Navigation {
 			if(!owner.IsValid()) {
 				return NavigationHandleStatus::InvalidOwner;
 			}
-			if(!handle.IsValid() || handle.slotIndex >= slots_.size()) {
+			if(!handle.IsValid()) {
 				return NavigationHandleStatus::Invalid;
 			}
+			// Compare the generation-qualified owner before consulting this store's
+			// slots. Scene replacement intentionally installs an empty fresh store;
+			// an old valid handle must still report why it is stale instead of being
+			// misclassified as an arbitrary out-of-range slot.
 			if(handle.owner.world != owner.world) {
 				return NavigationHandleStatus::StaleWorld;
 			}
 			if(handle.owner.ownerId != owner.ownerId || handle.owner.ownerGeneration != owner.ownerGeneration) {
 				return NavigationHandleStatus::StaleOwner;
+			}
+			if(handle.slotIndex >= slots_.size()) {
+				return NavigationHandleStatus::Invalid;
 			}
 
 			const Slot& slot = slots_[handle.slotIndex];
@@ -341,8 +330,4 @@ namespace TerraEngine::Navigation {
 
 	using NavigationRequestStore = NavigationGenerationStore<NavigationRequestHandle, NavigationRequestRecord>;
 	using NavigationRouteStore = NavigationGenerationStore<NavigationRouteHandle, NavigationRouteRecord>;
-	using NavigationAgentStore = NavigationGenerationStore<NavigationAgentHandle, NavigationAgentRecord>;
-	using NavigationCommandStore = NavigationGenerationStore<NavigationCommandHandle, NavigationCommandRecord>;
-
-	TERRAENGINE_API std::string_view ToString(NavigationCommandState state) noexcept;
 }
