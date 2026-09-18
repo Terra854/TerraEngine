@@ -14725,7 +14725,11 @@ void RenderSystem::DrainConventionalVisibilityIdentityReadbacks()
 					&& candidate.meshId != TerraEngine::EMPTY_UUID;
 			});
 		if (identityRecord == identityTable.end()) {
-			failureReason = "The completed Vulkan identity did not match the immutable frame object table.";
+			// Include the failed key so editor diagnostics can distinguish a missing
+			// producer key from a nonzero key belonging to a different object table.
+			failureReason = "The completed Vulkan identity key " + std::to_string(result.identity.y)
+				+ " did not match the immutable frame object table ("
+				+ std::to_string(identityTable.size()) + " entries).";
 			continue;
 		}
 		VirtualGeometryVisibilityPick pick{};

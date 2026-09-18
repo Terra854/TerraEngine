@@ -1,5 +1,34 @@
 # TerraEngine Testing
 
+## Scene View click selection
+
+Build and install the editor and `TerraEngine-EditorTests` with the preset below.
+Run the focused picking/overlay regressions from the build directory:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER = 'SceneViewOverlay'
+& ./out/build/RelWithDebInfo/TerraEngine-EditorTests.exe
+$env:TERRAENGINE_TEST_FILTER = 'Renderer.VulkanRecording'
+& ./out/build/RelWithDebInfo/TerraEngine-EngineTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+In the installed editor, single-click visible meshes near both the top and bottom
+of Scene View. Each click must select the clicked object after its GPU readback,
+without a second click. Click empty space to clear selection. While a readback is
+pending, a newer click, Hierarchy selection, camera move, viewport resize, or scene
+replacement must invalidate it rather than selecting an outdated target. Repeat
+after Play/Stop. The renderer's qualified GPU identity remains authoritative;
+projected bounding boxes are not substituted for visible-surface selection.
+Include a small/distant virtual-geometry object using compute raster as well as
+a close-up mesh: both routes must publish the object's nonzero identity key.
+
+Verified on 2026-09-18 in `ProjectCreationRetest-20260916`: single viewport clicks
+selected both ducks and the red obstacle, empty-space selection cleared, and the
+distant duck remained selectable after Play/Stop. Build/install evidence is in
+`out/scene-picking-build.log`; all 30 overlay tests and 27 Vulkan recording tests
+passed (`out/scene-picking-tests.log`, `out/scene-picking-renderer-tests.log`).
+
 ## Live navigation regression checks
 
 After building and installing with the preset below, run the focused native

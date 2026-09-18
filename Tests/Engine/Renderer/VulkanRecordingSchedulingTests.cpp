@@ -710,6 +710,24 @@ namespace TerraEngine::Tests {
 				"Grouped transforms and direct typed picks must resolve through whole-stream bounds and the immutable frame identity table.");
 		});
 
+		registry.Add("Renderer.VulkanRecording.ComputeRasterPreservesPickingIdentity", [](TestContext& context) {
+			// Source-contract coverage spans the CPU packet and shared shader ABI;
+			// the installed-editor click check additionally verifies actual readback.
+			const auto read = [](const char* path) {
+				std::ifstream stream(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / path, std::ios::binary);
+				return std::string(std::istreambuf_iterator<char>(stream), {});
+			};
+			const auto resources = read("Engine/Renderer/RHI/Vulkan/VulkanVirtualGeometryResources.cpp");
+			const auto setup = read("Engine/Shaders/VirtualGeometry/VirtualGeometryTriangleSetup.comp.hlsl");
+			const auto composite = read("Engine/Shaders/VirtualGeometry/VirtualGeometryComposite.frag.hlsl");
+			context.Expect(resources.find("command.conventionalVisibilityIdentityIndex });") != std::string::npos
+				&& resources.find("drawEvidence->visibilityIdentityIndex,") != std::string::npos,
+				"Compute packet setup must retain the resolved command's immutable object key, not zero.");
+			context.Expect(setup.find("output.debugState = packet.debugState;") != std::string::npos
+				&& composite.find("source.debugState.y,") != std::string::npos,
+				"Triangle setup and composite must carry the object key into the typed identity attachment.");
+		});
+
 		registry.Add("Renderer.VulkanRecording.DedicatedCaptureIdentityUsesRetainedSnapshot", [](TestContext& context) {
 			const std::filesystem::path renderSystemPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine" / "Renderer" / "RenderSystem.cpp";

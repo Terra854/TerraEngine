@@ -28,7 +28,7 @@ struct RasterTriangle
 	uint4 shadingOffsets;
 	// shadingState: light-index offset, VG flags, meshlet, packet descriptor.
 	uint4 shadingState;
-	// debugState: packed visualizer data, mesh data, packet, page needs.
+	// debugState: packed visualizer data, immutable object-table key, packet, page needs.
 	uint4 debugState;
 };
 

@@ -110,7 +110,9 @@ CompositeOutput main(float4 pixelPosition : SV_Position)
 	uniforms.selectedVirtualClusterCount =
 		(source.debugState.x >> 8u) & 0xffu;
 	uniforms.selectedVirtualPageNeedCount = source.debugState.w;
-	uniforms.meshDataIndex = source.debugState.y;
+	// Compute geometry is already decoded; this legacy shading selector is not
+	// the immutable picking key carried in debugState.y.
+	uniforms.meshDataIndex = 0u;
 	uniforms.virtualGeometryPacketDescriptorIndex = source.debugState.z;
 	uniforms.editorTint = source.editorTint;
 
@@ -121,7 +123,7 @@ CompositeOutput main(float4 pixelPosition : SV_Position)
 		source.debugState.y,
 		source.debugState.z,
 		// Keep a valid first triangle distinct from the cleared attachment.
-		// Readback matching uses the packet lane; this final lane is diagnostic.
+		// Readback matching uses the object-table key; the final lane is diagnostic.
 		source.shadingOffsets.y + 1u);
 	output.depth = depth;
 	return output;

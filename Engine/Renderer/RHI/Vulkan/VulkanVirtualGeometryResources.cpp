@@ -1040,6 +1040,7 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 			std::uint32_t meshletOffset = 0u;
 			std::uint32_t meshletCount = 0u;
 			std::uint32_t selectedLod = 0u;
+			std::uint32_t visibilityIdentityIndex = 0u;
 		};
 		std::vector<PublicationDrawEvidence> publicationDraws;
 		if(publicationViewIndex < publication.views.size()
@@ -1057,7 +1058,8 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 				publicationDraws.push_back({ command.objectId,
 					command.meshId, command.materialId, command.modelMatrix,
 					command.editorTint, command.virtualMeshletOffset,
-					command.virtualMeshletCount, command.selectedVirtualLod });
+					command.virtualMeshletCount, command.selectedVirtualLod,
+					command.conventionalVisibilityIdentityIndex });
 			}
 		}
 		std::unordered_multimap<TerraEngine::UUID, const PublicationDrawEvidence*>
@@ -1157,7 +1159,9 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 				| (selectedClusterCount << 8u)
 				| (selectedPageNeedCount << 16u)
 				| ((packet.debugIdentity & 0xffu) << 24u),
-			0u,
+			// The composite's integer attachment must name the same immutable
+			// object table as direct mesh draws, including distant compute LODs.
+			drawEvidence->visibilityIdentityIndex,
 			packet.packetId,
 			selectedPageNeedCount);
 		setup.deformationState = glm::uvec4(
@@ -1433,4 +1437,3 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 	// executor stages record successfully, the main mesh-task pass consumes the
 	// GPU-authored 16-byte indirect records from this frame-owned buffer.
 }
-

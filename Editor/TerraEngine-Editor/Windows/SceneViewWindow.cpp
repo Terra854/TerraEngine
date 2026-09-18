@@ -3042,6 +3042,35 @@ bool RayAABB(const glm::vec3& rayOrigin, const glm::vec3& rayDir, const glm::vec
 
 // SceneViewWindow::HandlePicking is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize) {
+	TerraEngine::Editor::SceneViewPickRequest currentPick;
+	currentPick.viewport = {viewportPos.x, viewportPos.y, viewportSize.x, viewportSize.y};
+	currentPick.viewProjection = proj * view;
+	currentPick.camera = m_CameraPosition;
+	currentPick.sceneGeneration = ObjectManager::instance().GetSceneGeneration();
+	currentPick.selection = m_Owner->GetSelectedEntity();
+	// Poll on every editor frame, not only on mouse-down: a fence cannot normally
+	// complete on the same frame that submitted its readback. Selection is editor
+	// state applied here on the UI boundary; no worker mutates scene storage.
+	if (m_PendingPick)
+	{
+		if (!m_PendingPick->IsCurrent(currentPick, ImGui::GetTime())
+			|| ImGui::IsMouseClicked(ImGuiMouseButton_Left) || m_IsFlyCamActive
+			|| m_IsSceneViewPanning || m_TerrainBrushCapture || ImGuizmo::IsUsing())
+			m_PendingPick.reset();
+		else
+		{
+			const auto state = RenderSystem::Instance().GetConventionalVisibilityIdentityPickState(
+				RenderViewType::Scene, m_PendingPick->pixel);
+			if (state.status != TerraEngine::Renderer::AuthoritativeVisibilityPickStatus::Pending)
+			{
+				const auto frame = RenderSystem::Instance().GetLatestRenderReferenceFrame(RenderViewType::Scene);
+				if (state.pick && frame && m_PendingPick->Accepts(*state.pick, *frame))
+					if (const auto object = ObjectManager::instance().getObject(state.pick->objectId))
+						m_Owner->SetSelectedEntity(object->EntityId());
+				m_PendingPick.reset();
+			}
+		}
+	}
 	if(auto terrainTools = m_Owner->GetWindow<TerrainWindow>(); terrainTools && terrainTools->ActiveResizePreview())
 	{
 		// The resize legend is drawn in Scene View while the immutable proposal is
@@ -3180,37 +3209,19 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 	if (mousePos.x < viewportPos.x || mousePos.x > viewportPos.x + viewportSize.x ||
 		mousePos.y < viewportPos.y || mousePos.y > viewportPos.y + viewportSize.y) return;
 
-	const float localPixelX = std::clamp(mousePos.x - viewportPos.x, 0.0f, viewportSize.x - 1.0f);
-	const float localPixelY = std::clamp(mousePos.y - viewportPos.y, 0.0f, viewportSize.y - 1.0f);
-	// ImGui mouse coordinates start at the top while Vulkan image copies start
-	// at the bottom, so invert Y before requesting the exact attachment texel.
-	const glm::uvec2 identityPixel(
-		static_cast<std::uint32_t>(localPixelX),
-		static_cast<std::uint32_t>(viewportSize.y - 1.0f - localPixelY));
-	// A completed identity copy is the only GPU-authoritative selection source.
-	// Queue the next non-blocking copy before falling back so a later click can
-	// consume a fence-proven result without treating CPU projection as GPU work.
-	const std::optional<TerraEngine::Renderer::RenderReferenceFrame> currentReferenceFrame =
-		RenderSystem::Instance().GetLatestRenderReferenceFrame(RenderViewType::Scene);
-	if (const std::optional<VirtualGeometryVisibilityPick> authoritativePick =
-		RenderSystem::Instance().GetLatestAuthoritativeConventionalVisibilityIdentityPick(
-			RenderViewType::Scene, identityPixel);
-		authoritativePick && currentReferenceFrame
-		&& authoritativePick->IsQualifiedFor(*currentReferenceFrame))
-	{
-		if (const std::optional<Object> pickedObject =
-			ObjectManager::instance().getObject(authoritativePick->objectId))
-		{
-			m_Owner->SetSelectedEntity(pickedObject->EntityId());
-			return;
-		}
-	}
-	RenderSystem::Instance().RequestConventionalVisibilityIdentityPick(
-		RenderViewType::Scene, identityPixel);
-	// CPU-projected packet selection cannot carry the renderer's origin, spatial,
-	// and residency identities. Do not promote it to a selectable result: only a
-	// qualified GPU readback proves that this click targets the current frame.
+	currentPick.pixel = TerraEngine::Editor::SceneViewPickPixel(
+		{mousePos.x - viewportPos.x, mousePos.y - viewportPos.y}, {viewportSize.x, viewportSize.y});
+	// Each click requests fresh proof; never reuse a previous click at this pixel.
+	// Empty space clears selection, while a completed hit is applied next frame.
 	m_Owner->SetSelectedEntity(std::nullopt);
+	currentPick.selection = std::nullopt;
+	currentPick.expiresAt = ImGui::GetTime() + 2.0;
+	const auto requestedFrame = RenderSystem::Instance().GetLatestRenderReferenceFrame(RenderViewType::Scene);
+	if (requestedFrame && RenderSystem::Instance().RequestConventionalVisibilityIdentityPick(RenderViewType::Scene, currentPick.pixel))
+	{
+		currentPick.referenceFrame = *requestedFrame;
+		m_PendingPick = currentPick;
+	}
 }
 
 // SceneViewWindow::HandleCameraInput is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

@@ -1,6 +1,7 @@
 #include "../TestHarness.h"
 #include "Editor/TerraEngine-Editor/Windows/SceneViewMarkerPipeline.h"
 #include "Editor/TerraEngine-Editor/Windows/SceneViewOverlayMarkers.h"
+#include "Editor/TerraEngine-Editor/Windows/SceneViewPicking.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -95,6 +96,57 @@ namespace TerraEngine::EditorTests
 
 	void RegisterSceneViewMarkerSelectionTests(TestRegistry& registry)
 	{
+		registry.Add("SceneViewOverlay.Picking.TopLeftTexelsAndDeferredContext", [](TestContext& context) {
+			using namespace TerraEngine::Editor;
+			// Picking uses the same top-left image orientation as ImGui, including
+			// clamping edge clicks to a valid texel rather than mirroring Y.
+			context.Expect(SceneViewPickPixel({20.0F, 30.0F}, {640.0F, 480.0F}) == glm::uvec2(20, 30), "Click Y must not be mirrored.");
+			context.Expect(SceneViewPickPixel({700.0F, -2.0F}, {640.0F, 480.0F}) == glm::uvec2(639, 0), "Edge clicks must stay in the image.");
+			SceneViewPickRequest pending;
+			pending.viewport = {10, 20, 640, 480};
+			pending.sceneGeneration = 7;
+			pending.expiresAt = 2.0;
+			context.Expect(pending.IsCurrent(pending, 1.0), "A later frame without another click must retain the request.");
+			context.Expect(!pending.IsCurrent(pending, 2.0), "A stalled request must expire.");
+			auto changed = pending;
+			changed.selection = static_cast<entt::entity>(5);
+			context.Expect(!pending.IsCurrent(changed, 1.0), "Hierarchy selection must supersede the pending click.");
+			changed = pending;
+			++changed.sceneGeneration;
+			context.Expect(!pending.IsCurrent(changed, 1.0), "Scene replacement must invalidate pending picks.");
+			changed = pending;
+			changed.viewport.z += 1.0F;
+			context.Expect(!pending.IsCurrent(changed, 1.0), "Resize must invalidate pending picks.");
+			changed = pending;
+			changed.viewProjection[0][0] += 1.0F;
+			context.Expect(!pending.IsCurrent(changed, 1.0), "Camera rotation or zoom must invalidate pending picks.");
+			changed = pending;
+			changed.camera.offsetMetres.x += 1.0;
+			context.Expect(!pending.IsCurrent(changed, 1.0), "Canonical camera movement must invalidate pending picks.");
+			// The renderer gives each stationary frame a new origin identity. Fence
+			// latency must not invalidate a correctly qualified hit from the click.
+			pending.referenceFrame.frameId = 10;
+			pending.referenceFrame.viewId = pending.referenceFrame.outputId = 1;
+			pending.referenceFrame.originGeneration = 10;
+			pending.referenceFrame.spatialGeneration = pending.referenceFrame.residencyGeneration = 1;
+			VirtualGeometryVisibilityPick hit;
+			hit.objectId = MakeSelectionMarkerId(1);
+			hit.meshId = MakeSelectionMarkerId(2);
+			hit.frameId = hit.originGeneration = 10;
+			hit.spatialGeneration = hit.residencyGeneration = 1;
+			auto nextFrame = pending.referenceFrame;
+			nextFrame.frameId = nextFrame.originGeneration = 11;
+			context.Expect(pending.Accepts(hit, nextFrame), "A completed click must survive normal frame advancement.");
+			++nextFrame.spatialGeneration;
+			context.Expect(!pending.Accepts(hit, nextFrame), "Changed spatial data must reject the old hit.");
+			nextFrame = pending.referenceFrame;
+			++nextFrame.residencyGeneration;
+			context.Expect(!pending.Accepts(hit, nextFrame), "Changed residency must reject the old hit.");
+			nextFrame = pending.referenceFrame;
+			++hit.frameId;
+			context.Expect(!pending.Accepts(hit, nextFrame), "Another request's completion must not satisfy this click.");
+		});
+
 		registry.Add("SceneViewOverlay.Markers.SelectedCameraAndLightAreBudgetExempt", [](TestContext& context) {
 			using namespace TerraEngine::Editor::SceneViewOverlay;
 			context.Expect(IsMarkerReserved(MarkerCategory::SelectedObject, false), "Selected-object markers must be reserved before the general budget.");

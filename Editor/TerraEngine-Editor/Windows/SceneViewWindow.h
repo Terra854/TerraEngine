@@ -7,6 +7,7 @@
 #include "../Framework/EditorWindow.h"
 #include "SceneViewOrientationWidget.h"
 #include "SceneViewCameraState.h"
+#include "SceneViewPicking.h"
 #include "SceneViewMarkerPipeline.h"
 #include "SceneViewOverlayIcons.h"
 #include "SceneViewOverlayMarkers.h"
@@ -125,6 +126,7 @@ private:
 	bool m_IsFlyCamActive = false;
 	bool m_IsSceneViewPanning = false;
 	bool m_TerrainBrushCapture = false;
+	std::optional<TerraEngine::Editor::SceneViewPickRequest> m_PendingPick;
 	std::pair<double, double> m_StoredCursorPos;
 	// Scene View camera snaps orbit around this authoring focus so orthographic
 	// axis clicks rotate the scene instead of spinning the camera in place.
