@@ -199,6 +199,11 @@ namespace TerraEngine::EditorTests {
 	void RegisterNavigationHistoryTests(TestRegistry& registry);
 	void RegisterNavigationDiagnosticsTests(TestRegistry& registry);
 	void RegisterNavigationAutomationTests(TestRegistry& registry);
+	void RegisterNavigationAgentAutomationTests(TestRegistry& registry);
+	void RegisterNavigationOutcomeParityTests(TestRegistry& registry);
+	void RegisterNavigationAgentAuthoringTests(TestRegistry& registry);
+	void RegisterNavigationAgentPreviewTests(TestRegistry& registry);
+	void RegisterNavigationAgentPersistenceParityTests(TestRegistry& registry);
 	void RegisterPhysicsMaterialAssetTests(TestRegistry& registry);
 	void RegisterPhysicsInspectorTests(TestRegistry& registry);
 	void RegisterPhysicsPrefabUndoTests(TestRegistry& registry);
@@ -466,6 +471,11 @@ int main() {
 	TerraEngine::EditorTests::RegisterNavigationHistoryTests(registry);
 	TerraEngine::EditorTests::RegisterNavigationDiagnosticsTests(registry);
 	TerraEngine::EditorTests::RegisterNavigationAutomationTests(registry);
+	TerraEngine::EditorTests::RegisterNavigationAgentAutomationTests(registry);
+	TerraEngine::EditorTests::RegisterNavigationOutcomeParityTests(registry);
+	TerraEngine::EditorTests::RegisterNavigationAgentAuthoringTests(registry);
+	TerraEngine::EditorTests::RegisterNavigationAgentPreviewTests(registry);
+	TerraEngine::EditorTests::RegisterNavigationAgentPersistenceParityTests(registry);
 	TerraEngine::EditorTests::RegisterPhysicsMaterialAssetTests(registry);
 	TerraEngine::EditorTests::RegisterPhysicsInspectorTests(registry);
 	TerraEngine::EditorTests::RegisterPhysicsPrefabUndoTests(registry);

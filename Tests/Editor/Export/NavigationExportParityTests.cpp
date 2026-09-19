@@ -62,5 +62,16 @@ namespace TerraEngine::EditorTests
 				&& startup.find("authored source data") != std::string::npos,
 				"Export and runtime startup must consume automatic cooked geometry/cache data without authored source files.");
 		});
+
+		registry.Add("Editor.NavigationExportParity.OptionalCacheIsObservedAndFailsOpen", [](TestContext& context) {
+			const std::string startup = ReadSource("Engine/Runtime/ExportStartupCoordinator.cpp");
+			const std::string header = ReadSource("Engine/Runtime/ExportStartupCoordinator.h");
+			context.Expect(header.find("OptionalCacheObservation") != std::string::npos
+				&& header.find("optionalCacheObservations") != std::string::npos,
+				"Packaged navigation startup must expose per-cache observations instead of only path names.");
+			context.Expect(startup.find("present_deferred_until_authoritative_descriptor") != std::string::npos
+				&& startup.find("authoritative source/settings descriptor") != std::string::npos,
+				"Optional caches must never be trusted from self-declared fingerprints and must fall back to fresh generation.");
+		});
 	}
 }

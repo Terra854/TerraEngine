@@ -3,6 +3,9 @@
 #include "../TestHarness.h"
 #include "Audio/AudioSystem.h"
 #include "Core/Scheduling/FrameWorkload.h"
+#include "Core/Scheduling/SystemScheduler.h"
+
+#include <algorithm>
 
 namespace TerraEngine::Tests {
 	void RegisterAudioSchedulerTests(TestRegistry& registry) {
@@ -39,6 +42,18 @@ namespace TerraEngine::Tests {
 
 			system.Shutdown();
 			system.SetConfiguredProvider("terra.miniaudio");
+		});
+
+		registry.Add("Audio.Scheduler.HeadlessDeclarationOmitsOptionalPresentationTargets", [](TestContext& context) {
+			auto& system = Audio::AudioSystem::Instance();
+			TerraEngine::Scheduling::SystemScheduler scheduler;
+			auto declaration = system.SchedulerDeclaration();
+			std::erase(declaration.before, "UISystem");
+			std::erase(declaration.before, "RenderSystem");
+			scheduler.RegisterSystem(system, std::move(declaration));
+			const auto& summary = scheduler.BuildSchedule();
+			context.Expect(summary.valid,
+				"The headless audio declaration must remain valid when optional UI and Render systems are omitted.");
 		});
 	}
 }

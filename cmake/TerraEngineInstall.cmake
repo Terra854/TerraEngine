@@ -47,6 +47,11 @@ function(terraengine_install_navigation_foundation destination)
 	)
 	install(FILES
 		"${CMAKE_SOURCE_DIR}/Tests/Tools/Navigation/RunInstalledNavigationAcceptance.ps1"
+		"${CMAKE_SOURCE_DIR}/Tests/Tools/Navigation/RunInstalledNavigationAgentAcceptance.ps1"
+		"${CMAKE_SOURCE_DIR}/Tests/Tools/Navigation/NewNavigationAgentWorkloadProject.ps1"
+		# Both install layouts need the scene verifier before acceptance can launch.
+		"${CMAKE_SOURCE_DIR}/Tests/Tools/Navigation/VerifyNavigationWorkloadScene.ps1"
+		"${CMAKE_BINARY_DIR}/Tests/Tools/Navigation/navigation-build-metadata.json"
 		"${CMAKE_SOURCE_DIR}/Tests/Tools/Navigation/CompareNavigationEvidence.ps1"
 		"${CMAKE_SOURCE_DIR}/Tests/Tools/Navigation/VerifyNavigationArchitecture.ps1"
 		"${CMAKE_SOURCE_DIR}/Tests/Tools/Navigation/navigation-evidence.schema.json"
@@ -56,6 +61,10 @@ function(terraengine_install_navigation_foundation destination)
 		DESTINATION "${destination}/Tests/Fixtures/Navigation"
 		FILES_MATCHING PATTERN "*.json"
 	)
+	# Terrain roots include binary height data and CURRENT pointers, not only
+	# JSON. Ship the complete seed so the installed generator needs no checkout.
+	install(DIRECTORY "${CMAKE_SOURCE_DIR}/Tests/Fixtures/Navigation/AgentWorkload/TerrainSeed/"
+		DESTINATION "${destination}/Tests/Fixtures/Navigation/AgentWorkload/TerrainSeed")
 	install(FILES "${CMAKE_SOURCE_DIR}/Tests/Fixtures/Performance/Navigation/workloads.json"
 		DESTINATION "${destination}/Tests/Fixtures/Performance/Navigation"
 	)

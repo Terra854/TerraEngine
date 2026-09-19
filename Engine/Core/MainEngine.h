@@ -116,6 +116,9 @@ class TERRAENGINE_API Engine {
 		// changes, preventing an unchanged editor scene from being rescanned and
 		// logged every frame.
 		bool navigationBootstrapAttempted = false;
+		// Incremented only when the protected input tuple changes. The matching
+		// one-shot log is deliberately an integration diagnostic, not a frame metric.
+		std::uint64_t navigationBootstrapAttemptCount = 0U;
 		// This is the component revision examined by the latest bootstrap attempt,
 		// whether that attempt queued work or found no eligible navigation geometry.
 		std::uint64_t lastNavigationBootstrapComponentRevision = 0U;
@@ -135,10 +138,11 @@ class TERRAENGINE_API Engine {
 		// Physics world identity is a physical-ownership boundary. A fresh world
 		// has no terrain body until the retained recipe republishes into it.
 		std::uint64_t lastNavigationBootstrapPhysicsWorldGeneration = 0U;
-		// Canonical transforms may change through protected spatial publication
-		// without a component write. Preserve its exact generation for automatic
-		// eligible-source capture instead of folding it into an unrelated revision.
-		std::uint64_t lastNavigationBootstrapSpatialGeneration = 0U;
+		// Typed transform transactions can commit without a WorldSpatialSystem
+		// candidate. Observe their source revisions at Frame End as well. A spatial
+		// snapshot generation alone is intentionally not a navigation input: the
+		// static-collider bridge publishes precise source evidence for its own move.
+		std::uint64_t lastNavigationObservedObjectSpatialRevision = 0U;
 		// Streamed terrain and geometry enter or leave through residency publication.
 		// This copied generation wakes capture even when no local object was edited.
 		std::uint64_t lastNavigationBootstrapResidencyGeneration = 0U;

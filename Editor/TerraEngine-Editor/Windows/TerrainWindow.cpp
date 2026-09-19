@@ -16,6 +16,7 @@
 #include "File Formats/TerraEngineMeshFile.h"
 #include "File Formats/TerraEngineTextureFile.h"
 #include "Physics/Terrain/TerrainCollisionSystem.h"
+#include "Physics/Terrain/TerrainHeightFieldActiveRect.h"
 #include "Physics/PhysicsSystem.h"
 #include "Renderer/RenderSystem.h"
 #include "Renderer/Terrain/TerrainRenderProxyRegistry.h"
@@ -186,6 +187,11 @@ bool TerrainWindow::QueueAutomaticTerrainCollision(std::string& outError)
 	const auto started = std::chrono::steady_clock::now();
 	TerraEngine::Physics::TerrainHeightFieldRecipe recipe;
 	recipe.terrainAssetId = capture.root->assetUuid;
+	// One editor session can select any signed fixed-storage area. Preserve that
+	// address in the recipe so physics and navigation reconstruct the same canonical
+	// origin as mounted export terrain.
+	recipe.areaX = selectedTerrainArea.x;
+	recipe.areaZ = selectedTerrainArea.z;
 	recipe.authoredGeneration = capture.publicationGeneration;
 	recipe.authoredHash = capture.root->rootContentHash.low64 ^ capture.root->rootContentHash.high64;
 	if(recipe.authoredHash == 0u) recipe.authoredHash = 1u;
@@ -198,6 +204,15 @@ bool TerrainWindow::QueueAutomaticTerrainCollision(std::string& outError)
 	recipe.holeBits = committedHoleMask;
 	if(recipe.holeBits.size() != TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount)
 		recipe.holeBits.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount, 0u);
+	const auto active = TerraEngine::Terrain::TerrainActiveRectForArea(
+		capture.root->authoredBounds, selectedTerrainArea);
+	if(!active || !TerraEngine::Physics::Terrain::ApplyTerrainActiveRectToRecipe(recipe, *active))
+	{
+		// Keep the committed authoring mask untouched. Only this detached candidate is
+		// rejected, so the next valid root publication can retry without data loss.
+		outError = "Automatic terrain collision requires a valid authored active rectangle.";
+		return false;
+	}
 	auto candidate = TerraEngine::Physics::Terrain::PrepareTerrainCollisionCandidate(
 		std::move(recipe), capture.root->rootContentHash, capture.publicationGeneration);
 	candidate.buildLatencyMilliseconds = std::chrono::duration<double, std::milli>(

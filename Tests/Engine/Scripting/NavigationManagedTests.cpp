@@ -28,10 +28,8 @@ namespace TerraEngine::Tests {
 				&& navigation.find("ReleaseResult") != std::string::npos,
 				"Managed gameplay must retain explicit request read, validate, cancel, and release operations.");
 			context.Expect(imports.find("Native_Navigation_RequestObjectToLocation") != std::string::npos
-				&& imports.find("Native_Navigation_RequestObjectToObject") != std::string::npos
-				&& imports.find("Native_Navigation_ReadAgent") == std::string::npos
-				&& imports.find("Native_Navigation_ReadCommand") == std::string::npos,
-				"Managed imports must use object routes and physically omit the retired agent and command imports.");
+				&& imports.find("Native_Navigation_RequestObjectToObject") != std::string::npos,
+				"Managed imports must retain both direct object route request shapes.");
 		});
 
 		registry.Add("Engine.NavigationManaged.RouteFollowerUsesPhysicsAndBoundedReplans", [](TestContext& context) {

@@ -2977,9 +2977,21 @@ void SceneViewWindow::DrawNavigationDebugOverlay(
 	// Do not even copy overlay input while the diagnostics window is closed. This
 	// keeps the Scene View overlay an observer of already-published data only.
 	if(!navigationWindow || !navigationWindow->IsDiagnosticsWindowOpen()) return;
+	// Selection is resolved to a stable UUID while the editor owns this protected
+	// UI read. NavigationWindow later crosses into navigation only through its
+	// immutable published binding map, never through this live ObjectManager.
+	if(const std::optional<entt::entity> selectedEntity = m_Owner->GetSelectedEntity()) {
+		const auto object = ObjectManager::instance().getObject(*selectedEntity);
+		navigationWindow->SetSelectedAgentObject(object
+			? ObjectManager::instance().getUUID(*object) : TerraEngine::EMPTY_UUID);
+	} else {
+		navigationWindow->SetSelectedAgentObject(TerraEngine::EMPTY_UUID);
+	}
 	navigationWindow->Update();
 	const auto& overlay = navigationWindow->Overlay();
-	if(overlay.connectionEndpoints.empty() && overlay.routePoints.empty()) return;
+	const bool hasSelectedRoute = overlay.selectedAgent && overlay.selectedAgent->routeCurrent
+		&& !overlay.selectedAgent->routePoints.empty();
+	if(overlay.connectionEndpoints.empty() && overlay.routePoints.empty() && !hasSelectedRoute) return;
 
 	const auto project = [&](const TerraEngine::Scene::WorldPosition& point, ImVec2& screen) {
 		const glm::vec4 clip = proj * view * glm::vec4(LocalizeForCamera(point), 1.0F);
@@ -2999,10 +3011,25 @@ void SceneViewWindow::DrawNavigationDebugOverlay(
 				drawList->AddLine(first, second, color, thickness);
 		}
 	};
+	const auto drawMarker = [&](const TerraEngine::Scene::WorldPosition& point, ImU32 color, float radius) {
+		ImVec2 screen;
+		if(project(point, screen)) ImGui::GetWindowDrawList()->AddCircleFilled(screen, radius, color);
+	};
 	// Connection endpoints are stored in pairs, whereas a preview route is one
 	// ordered polyline. Draw both from the immutable bounded presentation copy.
 	drawSegments(overlay.connectionEndpoints, IM_COL32(96, 220, 255, 255), 2.0F);
 	drawSegments(overlay.routePoints, IM_COL32(128, 255, 128, 255), 2.5F);
+	if(hasSelectedRoute) {
+		// Orange is reserved for the selected optional agent. A distinct color and
+		// endpoint markers keep its advisory route separate from direct previews.
+		const auto& agent = *overlay.selectedAgent;
+		drawSegments(agent.routePoints, IM_COL32(255, 176, 64, 255), 3.0F);
+		if(!agent.routeTruncated)
+			drawMarker(agent.routePoints.back(), IM_COL32(255, 104, 64, 255), 5.0F);
+		else if(agent.guidance.destination.kind == TerraEngine::Navigation::NavigationDestinationKind::Location)
+			drawMarker(agent.guidance.destination.location.position, IM_COL32(255, 104, 64, 255), 5.0F);
+		drawMarker(agent.guidance.nextWaypoint.position, IM_COL32(64, 224, 255, 255), 4.0F);
+	}
 }
 
 // RayAABB is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

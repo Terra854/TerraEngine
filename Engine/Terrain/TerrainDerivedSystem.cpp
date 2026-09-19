@@ -5,8 +5,7 @@
 #include "Terrain/TerrainMaterial.h"
 
 #include "Core/Logger/Logger.h"
-#include "Physics/PhysicsSystem.h"
-#include "Physics/PhysicsTransactions.h"
+#include "Physics/Terrain/TerrainCollisionSystem.h"
 #include "Renderer/Terrain/TerrainRenderProxyRegistry.h"
 #include "Resource/ResourceManager.h"
 #include "Runtime/ContentMount/ContentMount.h"
@@ -111,18 +110,19 @@ namespace TerraEngine::Terrain
 					<< ": " << completed.renderProxy.diagnostic);
 				continue;
 			}
-			TerraEngine::Physics::TerrainCollisionReplacementPacket collisionPacket;
-			collisionPacket.id = "runtime-terrain-collision-" + TerraEngine::ToHexString(item.assetId);
-			collisionPacket.sourceRootHash = completed.sourceRootHash;
-			collisionPacket.sourcePublicationGeneration = completed.sourcePublicationGeneration;
-			collisionPacket.recipe = std::move(completed.collisionRecipe);
-			const auto collisionReceipt = TerraEngine::Physics::PhysicsSystem::Instance()
-				.CommitTerrainCollisionReplacement(std::move(collisionPacket));
-			if(!collisionReceipt.committed)
+			// The mounted package has already produced immutable bytes and a complete
+			// recipe. Stage that value for TerrainCollisionSystem's declared protected
+			// Before Physics publish; do not mutate the active provider during startup.
+			const auto collisionCandidate = TerraEngine::Physics::Terrain::PrepareMountedTerrainCollisionCandidate(
+				std::move(completed.collisionRecipe), completed.sourceRootHash,
+				completed.sourcePublicationGeneration);
+			if(!TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance()
+				.SetMountedRuntimeCandidate(collisionCandidate))
 			{
 				TERRAENGINE_LOG(LogLevel::Error,
-					"Failed to publish exported terrain collision "
-					<< TerraEngine::ToHexString(item.assetId) << ": " << collisionReceipt.message);
+					"Failed to stage exported terrain collision "
+					<< TerraEngine::ToHexString(item.assetId)
+					<< " for the protected physics boundary.");
 				continue;
 			}
 			const TerraEngine::UUID materialId = resources.RegisterMaterial(

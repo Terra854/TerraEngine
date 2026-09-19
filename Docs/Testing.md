@@ -107,7 +107,94 @@ $navigationTool = Join-Path $installRoot 'Tests/Tools/Navigation/RunInstalledNav
 $navigationEvidence = [IO.Path]::GetFullPath('out/evidence/navigation')
 ```
 
-### Navigation hard-break qualification
+### Optional navigation-agent application qualification
+
+Use PowerShell 7 and the installed optional-agent runner. Unlike the
+older standalone runner below, this starts the actual editor in Play Mode and
+the exported project's launcher. Rendered lanes must prove renderer execution;
+the headless lane executes the normal engine scheduler without a render device.
+Run it from a Visual Studio x64 developer environment with MSVC, the Windows
+SDK, and Windows system tools on PATH (`where.exe` and `link.exe` must resolve).
+The export uses the installed bundled .NET toolchain and offline package feed.
+The editor must be closed before complete editor tests or installation, because
+its MCP listener and loaded DLLs otherwise conflict with those operations.
+
+```powershell
+$agentRunner = Join-Path $installRoot 'Tests/Tools/Navigation/RunInstalledNavigationAgentAcceptance.ps1'
+$agentEvidence = [IO.Path]::GetFullPath('out/evidence/navigation/059-agent-components')
+& $agentRunner -InstallRoot $installRoot -OutputDirectory $agentEvidence `
+    -Lanes editor,export-rendered,export-headless -Cohorts direct,agent `
+    -Population 1000 -WorkerCount 8 -WarmupSeconds 30 -MeasurementSeconds 600 -Qualification
+```
+
+The two headless cohorts each measure 600 real wall-clock seconds after warmup.
+Editor/rendered lanes run the same generated project for semantic checks, not
+performance comparisons. Runs are sequential. Short `-MeasurementSeconds`
+values without `-Qualification` are smoke tests and cannot qualify performance or soak acceptance.
+Five-second (or similarly short) diagnostic runs are useful for startup,
+publication, cache-status, and wiring evidence only; they do not substitute for
+the required 600-second wall-clock qualification or prove moving-blocker
+coverage churn. Keep their reports separate from qualification evidence.
+The margin-safe `navigation-agent-workload-v2` manifest is
+`Tests/Fixtures/Navigation/AgentWorkload/manifest.json`, SHA-256
+`CBC042C1FF2231AC252123611B5620590D886D98B472AFCA5E7E75887FE37995`.
+It pins seed 59001, terrain/obstacles, endpoint pairs, 100 changes/s and one
+moving blocker update/s. Evidence records actual CPU, RAM, OS, power scheme,
+worker count, installed engine hash, raw child-process logs and reports.
+The process runner also samples OS-reported working-set and paged-memory peaks;
+these are separate from the native navigation-owned allocation estimate.
+The `dynamicTileReuse` report separates incremental attempts, reused tiles,
+rebuilt tiles, and full-shard fallbacks. These count prepared work observed at
+publication, not successful root commits. A fallback is a correctness safeguard
+when immutable tile evidence is insufficient; inspect its recorded reason rather
+than treating every fallback as an error. Root-transition and async-build
+counters help distinguish search CPU time from coverage-recovery waiting.
+`asyncBuildObservations.timings` records baseline and last-observed cumulative
+ground/dynamic completion counts, worker execution time, admission-to-worker wait,
+and worker-completion-to-protected-poll wait. Totals include failed and retired
+packets; subtract total baselines to isolate the measured interval. Maxima are
+cumulative (often dominated by startup), so do not subtract them or label them
+dynamic-only. Protected polling is not necessarily the root-publication instant.
+Provider-build wait is not route-request wait. `routeStageTimingObservations`
+separately records ready-admission-to-capture, worker search,
+worker-completion-to-publication, and deferred-coverage wait. Their populations
+differ: captured requests, executed searches, successfully stored routes, and
+requests promoted from deferred coverage respectively. Count/sum deltas include
+measurement and drain; maxima remain cumulative and must not be subtracted.
+These stage diagnostics do not change the end-to-end latency denominator or gate.
+The reference target is Windows x64 RelWithDebInfo on i9-14900HX with eight
+workers; results must not infer mains power or other unobserved metadata.
+
+Do not equate a successful archive/codec test with cached runtime acceleration.
+The installed agent runner first verifies each generated scene's sky/light
+ownership, camera, terrain material, and cohort population. This authored-data
+check is not a pixel test: inspect the actual exported window separately.
+`-Qualification` also requests the cache parity matrix; `-CacheParity` requests
+that matrix without a performance claim. It captures genuine published coverage
+before blocker motion, then exports current, stale and truncated cache variants
+through `Assets/Navigation/ground.tenav`. Every requested application lane must
+prove current-cache use, explicit stale/malformed rejection with fresh fallback,
+and identical per-query warmup reachability. Cache fingerprints are checked
+against runtime-captured geometry and registered profiles, not trusted manifest
+claims. Authoring tests separately prove that caches never restore agent intent.
+
+`-Scenarios clearance-parity` selects a separate low-roof semantic fixture without
+changing the pinned performance scene. It runs small and large profiles against
+absent, current, stale, and malformed coverage, using each profile's own generated
+cache and comparing exact outcome and reason across the requested editor/export
+lanes. Stale/malformed input must be explicitly rejected. Qualification includes this
+matrix automatically. Small-profile completion and large-profile rejection must
+both be observed; an identical failure for both profiles is not a parity pass.
+
+The completed 2026-09-19 run `navigation-20260919-101315-261` records 48 passing
+application/cache/profile combinations and 240 semantic checks. Its two 600-second
+headless cohorts each admitted/finalized 60,000 requests: direct p95 31.2581 ms,
+agent p95 36.8347 ms, with zero residual runtime records. This is measured evidence
+on the recorded machine, not a guarantee for arbitrary scenes or hardware. See
+`specs/059-component-free-navigation/implementation-evidence.md` for raw logs,
+hashes, final build gates, and actual UI/MCP managed-outcome verification.
+
+### Navigation hard-break qualification (historical standalone runner)
 
 Run the focused native navigation tests, then the complete suite and mandatory
 install gate. Use a Visual Studio developer environment with MSVC and the

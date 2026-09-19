@@ -4,6 +4,7 @@
 
 #include "Physics/Assets/ColliderRecipe.h"
 #include "Physics/Backend/IPhysicsBackend.h"
+#include "Physics/Terrain/TerrainHeightFieldActiveRect.h"
 
 #include <limits>
 
@@ -72,6 +73,35 @@ namespace TerraEngine::Tests
 			invalid.holeBits.pop_back();
 			context.Expect(!TerraEngine::Physics::ValidateTerrainHeightFieldRecipe(invalid).accepted,
 				"A partial hole mask must be rejected instead of changing collision ownership at the boundary.");
+		});
+
+		registry.Add("Terrain.HeightFieldRecipe.MasksPaddedCellsWithoutErasingAuthoredHoles", [](TestContext& context) {
+			TerraEngine::Physics::TerrainHeightFieldRecipe recipe{};
+			recipe.terrainAssetId = TerraEngine::GenerateUUID();
+			recipe.authoredGeneration = 9U;
+			recipe.authoredHash = 73U;
+			recipe.heightMillimetres.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kSampleCount, 0);
+			recipe.holeBits.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount, 0U);
+			const auto setHole = [&recipe](std::uint32_t x, std::uint32_t z) {
+				const std::uint32_t bit = z * 256U + x;
+				recipe.holeBits[bit / 8U] |= static_cast<std::uint8_t>(1U << (bit % 8U));
+			};
+			const auto isHole = [&recipe](std::uint32_t x, std::uint32_t z) {
+				const std::uint32_t bit = z * 256U + x;
+				return (recipe.holeBits[bit / 8U] & (1U << (bit % 8U))) != 0U;
+			};
+			setHole(7U, 9U);
+			const TerraEngine::Terrain::TerrainAreaActiveRect authored{0U, 0U, 129U, 129U};
+			const bool masked = TerraEngine::Physics::Terrain::ApplyTerrainActiveRectToRecipe(recipe, authored);
+			const auto beforeInvalid = recipe.holeBits;
+			const TerraEngine::Terrain::TerrainAreaActiveRect invalid{0U, 0U, 257U, 129U};
+			const bool rejectedWithoutMutation = !TerraEngine::Physics::Terrain::ApplyTerrainActiveRectToRecipe(recipe, invalid)
+				&& recipe.holeBits == beforeInvalid;
+
+			context.Expect(masked && !isHole(0U, 0U) && !isHole(127U, 127U)
+				&& isHole(7U, 9U) && isHole(128U, 0U) && isHole(0U, 128U)
+				&& isHole(255U, 255U) && rejectedWithoutMutation,
+				"A 129-sample authored edge must retain its 128 by 128 cells and authored holes while every padded fixed-grid cell is masked atomically.");
 		});
 	}
 }

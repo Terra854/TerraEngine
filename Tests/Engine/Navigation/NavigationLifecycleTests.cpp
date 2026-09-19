@@ -3,10 +3,13 @@
 #include "../TestHarness.h"
 
 #include "Navigation/NavigationSystem.h"
+#include "Scene/SceneMutationQueue.h"
 
 #include <filesystem>
 #include <fstream>
+#include <regex>
 #include <sstream>
+#include <span>
 #include <string>
 
 namespace TerraEngine::Tests
@@ -43,15 +46,11 @@ namespace TerraEngine::Tests
 				"Revocation/shutdown must clear pending and prepared route work before the next world can publish.");
 		});
 
-		registry.Add("Engine.NavigationLifecycle.ObjectRequestsHaveNoAgentOrCommandSynchronization", [](TestContext& context) {
+		registry.Add("Engine.NavigationLifecycle.DirectRequestsRemainIndependentOfAgentState", [](TestContext& context) {
 			const std::string system = ReadSource("Engine/Navigation/NavigationSystem.cpp");
-			const std::string stores = ReadSource("Engine/Navigation/NavigationStores.h");
-			context.Expect(system.find("SynchronizeSceneObjectAgents") == std::string::npos
-				&& system.find("QueueSetDestination") == std::string::npos,
-				"Component-free navigation must admit object routes directly instead of synchronizing agent destination commands.");
-			context.Expect(stores.find("NavigationAgentStore") == std::string::npos
-				&& stores.find("NavigationCommandStore") == std::string::npos,
-				"Bounded stores must retain only request and route records after agent and command state removal.");
+			context.Expect(system.find("SubmitOneShotRoute") != std::string::npos
+				&& system.find("RequestRoute") != std::string::npos,
+				"Direct route queries must remain available independently of optional agent state and commands.");
 		});
 
 		registry.Add("Engine.NavigationLifecycle.PlayModeTerrainRepublishInvalidatesBootstrap", [](TestContext& context) {
@@ -61,10 +60,75 @@ namespace TerraEngine::Tests
 				&& header.find("lastNavigationBootstrapTerrainRecipeGeneration") != std::string::npos
 				&& header.find("lastNavigationBootstrapPhysicsWorldGeneration") != std::string::npos,
 				"The bootstrap cache must retain collision availability and physics-world ownership beside authored terrain generation.");
-			context.Expect(source.find("terrainCollisionStatus != lastNavigationBootstrapTerrainCollisionStatus") != std::string::npos
-				&& source.find("terrainRecipeGeneration != lastNavigationBootstrapTerrainRecipeGeneration") != std::string::npos
-				&& source.find("physicsWorldGeneration != lastNavigationBootstrapPhysicsWorldGeneration") != std::string::npos,
+			// Match comparison semantics without coupling this source contract to
+			// wrapping: diagnostic declarations may split a comparison across lines.
+			context.Expect(std::regex_search(source, std::regex(R"(terrainCollisionStatus\s*!=\s*lastNavigationBootstrapTerrainCollisionStatus)"))
+				&& std::regex_search(source, std::regex(R"(terrainRecipeGeneration\s*!=\s*lastNavigationBootstrapTerrainRecipeGeneration)"))
+				&& std::regex_search(source, std::regex(R"(physicsWorldGeneration\s*!=\s*lastNavigationBootstrapPhysicsWorldGeneration)")),
 				"A Pending-to-Current terrain republish or fresh physics world must reattempt automatic navigation capture after Play Mode restart.");
+		});
+
+		registry.Add("Engine.NavigationLifecycle.StaticColliderBridgeDoesNotEscalateSpatialPublication", [](TestContext& context) {
+			const std::string source = ReadSource("Engine/Core/MainEngine.cpp");
+			// A static-collider SetWorldTransform publishes a WorldSpatial snapshot as
+			// part of ordinary scene visibility. Its source-specific bridge has already
+			// staged the replacement before this Frame End decision, so a global spatial
+			// generation must not discard that bounded work and recapture every source.
+			context.Expect(source.find("ObserveCommittedNavigationSceneMutations(result)") != std::string::npos
+				&& source.find("FindNavigationSourceTransformMismatch") != std::string::npos
+				&& source.find("spatialGeneration != lastNavigationBootstrapSpatialGeneration") == std::string::npos,
+				"A bridged static-collider transform must use source evidence rather than trigger a full bootstrap solely because spatial publication advanced.");
+		});
+
+		registry.Add("Engine.NavigationLifecycle.ResetsDirtySequenceForNewWorld", [](TestContext& context) {
+			Navigation::NavigationSystem& system = Navigation::NavigationSystem::Instance();
+			system.Shutdown();
+			system.Initialize();
+
+			const TerraEngine::UUID sourceId = TerraEngine::GenerateUUID();
+			const auto receipt = [sourceId](Navigation::NavigationGeneration sequence) {
+				// A committed transform receipt is the same immutable input delivered by
+				// the scene boundary. The test varies only its per-world sequence.
+				Scene::NavigationSourceMutationReceipt value{};
+				value.accepted = true;
+				value.transactionStatus = Scene::TransactionStatus::Committed;
+				value.intent.sourceId = sourceId;
+				value.intent.operation = Scene::NavigationSourceMutationOperation::Move;
+				value.intent.oldBounds = {{{0, 0, 0}, {-2.0, -1.0, -2.0}},
+					{{0, 0, 0}, {0.0, 2.0, 2.0}}, true};
+				value.intent.newBounds = {{{0, 0, 0}, {-1.0, -1.0, -2.0}},
+					{{0, 0, 0}, {1.0, 2.0, 2.0}}, true};
+				value.intent.committedSourceRevision = sequence;
+				value.intent.committedChangeSequence = sequence;
+				value.intent.physicalReadyRevision = 1U;
+				value.intent.oldEnabled = true;
+				value.intent.newEnabled = true;
+				return value;
+			};
+
+			const auto oldWorldReceipt = receipt(1000U);
+			const bool oldWorldAccepted = system.ObserveSceneMutationReceipts(
+				std::span<const Scene::NavigationSourceMutationReceipt>{&oldWorldReceipt, 1U}) == 1U;
+
+			// Shutdown/Initialize begins an unrelated scene transaction sequence.
+			system.Shutdown();
+			system.Initialize();
+			const auto newWorldReceipt = receipt(1U);
+			const bool newWorldAccepted = system.ObserveSceneMutationReceipts(
+				std::span<const Scene::NavigationSourceMutationReceipt>{&newWorldReceipt, 1U}) == 1U;
+
+			// Revocation creates another world in the same singleton, so it must reset
+			// the ordering certificate just as a full shutdown does.
+			system.RevokeAllOwners(Navigation::NavigationReason::SceneReplaced);
+			const auto revokedWorldReceipt = receipt(1U);
+			const bool revokedWorldAccepted = system.ObserveSceneMutationReceipts(
+				std::span<const Scene::NavigationSourceMutationReceipt>{&revokedWorldReceipt, 1U}) == 1U;
+
+			context.Expect(oldWorldAccepted && newWorldAccepted && revokedWorldAccepted
+				&& system.DynamicDirtyIndexForTesting().LatestChangeSequence() == 1U
+				&& system.DynamicDirtyIndexForTesting().PendingPreparationCount() == 1U,
+				"Each new navigation world must accept its fresh lower receipt sequence instead of inheriting retired-world ordering.");
+			system.Shutdown();
 		});
 	}
 }

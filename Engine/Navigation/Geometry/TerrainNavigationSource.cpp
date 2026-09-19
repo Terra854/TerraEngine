@@ -104,10 +104,18 @@ namespace TerraEngine::Navigation {
 				if((index % kCancellationQuantum) == 0U && CancellationRequested(options)) {
 					return RejectedTerrainCapture(published, "TerrainCaptureCancelled", true);
 				}
-				const float x = static_cast<float>(column) * published.sampleSpacingMetres;
-				const float z = static_cast<float>(row) * published.sampleSpacingMetres;
-				if(!std::isfinite(x) || !std::isfinite(z)) return RejectedTerrainCapture(published, "TerrainGridCoordinateNonFinite");
-				document.vertices.push_back({x, published.heights[index], z});
+				// Vertices are local to the published canonical origin. The builder applies
+				// that origin only while producing its bounded shard-local provider packet.
+				const double x = static_cast<double>(column) * static_cast<double>(published.sampleSpacingMetres);
+				const double y = static_cast<double>(published.heights[index]);
+				const double z = static_cast<double>(row) * static_cast<double>(published.sampleSpacingMetres);
+				constexpr double kMaximumFloatCoordinate = static_cast<double>(std::numeric_limits<float>::max());
+				if(!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)
+					|| std::abs(x) > kMaximumFloatCoordinate || std::abs(y) > kMaximumFloatCoordinate
+					|| std::abs(z) > kMaximumFloatCoordinate) {
+					return RejectedTerrainCapture(published, "TerrainGridCoordinateNonFinite");
+				}
+				document.vertices.push_back({static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)});
 			}
 		}
 

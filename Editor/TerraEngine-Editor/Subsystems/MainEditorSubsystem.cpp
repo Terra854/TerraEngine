@@ -42,7 +42,9 @@
 #include "Engine/Components/Physics/RigidBodyComponent.h"
 #include "Engine/Physics/Assets/CookedColliderAsset.h"
 #include "Engine/Physics/PhysicsSystem.h"
+#include "Engine/Navigation/Agents/NavigationAgentSystem.h"
 #include "Engine/Navigation/NavigationSystem.h"
+#include "NavigationApplicationValidation.h"
 #include "Engine/Runtime/ExportStartupCoordinator.h"
 #include "Engine/Scene/SceneMutationQueue.h"
 #include "Engine/Utilities/PlatformUtils.h"
@@ -2519,6 +2521,8 @@ void MainEditorSubsystem::Shutdown() {
 		m_NavigationAuthoringTransactions->ExitPlayMode();
 	TerraEngine::Navigation::NavigationSystem::Instance().RevokeAllOwners(
 		TerraEngine::Navigation::NavigationReason::SceneReplaced);
+	TerraEngine::Navigation::NavigationAgentSystem::Instance().RevokeAllAgents(
+		TerraEngine::Navigation::NavigationReason::SceneReplaced);
 	m_NavigationAuthoringTransactions.reset();
 }
 
@@ -2607,6 +2611,29 @@ bool MainEditorSubsystem::StartPlayMode()
 			return false;
 		}
 	}
+	// Optional saved navigation is read as bounded bytes and deferred to the
+	// navigation protected boundary. The candidate is never trusted by path or
+	// self-declared fingerprints; NavigationSystem compares it with captured
+	// scene geometry before allowing any cache reuse.
+	if(ctx != nullptr && ctx->projectManager != nullptr && ctx->projectManager->HasActiveProject())
+	{
+		const std::filesystem::path cachePath = ctx->projectManager->GetProjectRoot()
+			/ "Assets" / "Navigation" / "ground.tenav";
+		std::error_code cacheError;
+		const std::uintmax_t cacheSize = std::filesystem::file_size(cachePath, cacheError);
+		if(!cacheError && cacheSize != 0U && cacheSize <= TerraEngine::Navigation::kMaximumSavedNavigationBytes)
+		{
+			std::ifstream cacheInput(cachePath, std::ios::binary);
+			std::vector<std::byte> cacheBytes(static_cast<std::size_t>(cacheSize));
+			if(cacheInput.read(reinterpret_cast<char*>(cacheBytes.data()), static_cast<std::streamsize>(cacheBytes.size())))
+			{
+				TerraEngine::Navigation::NavigationSystem::SavedNavigationCacheCandidate candidate{};
+				candidate.bytes = std::move(cacheBytes);
+				candidate.logicalPath = "Assets/Navigation/ground.tenav";
+				(void)TerraEngine::Navigation::NavigationSystem::Instance().QueueSavedGroundCacheImport(std::move(candidate));
+			}
+		}
+	}
 	if(ctx != nullptr && ctx->engine != nullptr)
 		ctx->engine->ResetFrameTimer();
 	// The world is now live, so no entry failure can leave an otherwise valid edit
@@ -2676,6 +2703,8 @@ void MainEditorSubsystem::StopPlayMode()
 	ScriptingSystem::Instance().SetPaused(false);
 	TerraEngine::Navigation::NavigationSystem::Instance().RevokeAllOwners(
 		TerraEngine::Navigation::NavigationReason::SceneReplaced);
+	TerraEngine::Navigation::NavigationAgentSystem::Instance().RevokeAllAgents(
+		TerraEngine::Navigation::NavigationReason::SceneReplaced);
 	// Recreate component-owned playback at tick zero before the authored snapshot
 	// returns. Edit Mode continues publishing that frozen reference palette, so
 	// Stop cannot retain the last runtime deformation or expose raw skin vertices.
@@ -2686,6 +2715,71 @@ void MainEditorSubsystem::StopPlayMode()
 	// packet has published, so navigation authoring never observes mixed modes.
 	if(m_NavigationAuthoringTransactions)
 		m_NavigationAuthoringTransactions->ExitPlayMode();
+}
+
+nlohmann::json MainEditorSubsystem::RunNavigationAgentPlayValidationFrame(nlohmann::json options)
+{
+	// EditorSystem calls this only from its protected post-frame work. The shared
+	// validator therefore observes a completed real editor frame and must never
+	// recursively enter Engine::Update from inside the scheduler callback.
+	if(ctx == nullptr || ctx->engine == nullptr || ctx->projectManager == nullptr
+		|| !ctx->projectManager->HasActiveProject())
+		return {{"succeeded", false}, {"pending", false},
+			{"failure", "Navigation validation requires an open editor project."}};
+	if(!ctx->projectManager->GetReadinessState().simulationEssentialReady)
+		return {{"succeeded", false}, {"pending", false},
+			{"failure", "Navigation validation started before simulation-essential project content was published."}};
+
+	try
+	{
+		const bool enteringPlayMode = !ScriptingSystem::Instance().IsRunning();
+		// Installed navigation lanes are intentionally source-free, but their terrain
+		// collision still comes from the ordinary TerrainWindow authoring service.
+		// There is no user selection in the validation host, so synchronize the first
+		// authored terrain once, before Play Mode captures the scene. This is test-host
+		// setup matching interactive selection, not a general multi-terrain policy.
+		if(enteringPlayMode) {
+			auto terrainTools = GetWindow<TerrainWindow>();
+			if(!terrainTools) return {{"succeeded", false}, {"pending", true}};
+			std::optional<TerraEngine::UUID> terrainObjectId;
+			ObjectManager::instance().forEachObjectWithComponents<TerrainComponent>(
+				[&terrainObjectId](const Object& object, const TerrainComponent& terrain) {
+					if(!terrainObjectId && terrain.visible && terrain.terrainAssetId != TerraEngine::EMPTY_UUID)
+						terrainObjectId = ObjectManager::instance().getUUID(object);
+				});
+			if(terrainObjectId) {
+				terrainTools->SynchronizeEditingSelection(terrainObjectId);
+				// AssetDatabase reconciliation is asynchronous. Do not enter Play
+				// Mode while the authored terrain GUID is still unregistered: the
+				// normal terrain authoring window must first open its real persisted
+				// root so StartPlayMode can queue its collision recipe.
+				if(!terrainTools->IsEditingTargetSelected(terrainObjectId))
+					return {{"succeeded", false}, {"pending", true}};
+			}
+		}
+		if(enteringPlayMode && !StartPlayMode())
+			return {{"succeeded", false}, {"pending", false},
+				{"failure", "The normal editor Play Mode lifecycle could not start navigation validation."}};
+		if(enteringPlayMode) {
+			// StartPlayMode runs from this PostFrame callback, after Navigation and
+			// rendering for the current edit frame have already completed. Defer the
+			// first observation until the next PostFrame so the validator sees one
+			// complete real Play Mode scheduler and presentation frame.
+			return {{"succeeded", false}, {"pending", true}};
+		}
+
+		// The editor host always requires the renderer-backed proof. The shared
+		// core obtains the evidence from RenderSystem, not from this input flag.
+		options["executionMode"] = "editor-play";
+		options["headlessCpuFallback"] = false;
+		options["requireRenderedPresentation"] = true;
+		return TerraEngine::Navigation::Validation::RunNavigationApplicationValidation(*ctx->engine, options);
+	}
+	catch(const std::exception& exception)
+	{
+		return {{"succeeded", false}, {"pending", false},
+			{"failure", std::string("Navigation editor Play Mode validation failed: ") + exception.what()}};
+	}
 }
 
 TerraEngine::Editor::Navigation::NavigationAuthoringTransactions*

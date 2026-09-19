@@ -34,6 +34,10 @@ namespace TerraEngine::Navigation
 		std::uint64_t physicalReadyRevision = 0U;
 		NavigationSourceKind sourceKind = NavigationSourceKind::Mesh;
 		std::uint32_t subshapeIndex = 0U;
+		// Geometry values are local to this normalized canonical frame. Keeping the
+		// int64 cell here prevents distant source placement from being flattened into
+		// an imprecise provider float before a target shard is selected.
+		Scene::WorldPosition canonicalFrameOrigin{};
 	};
 
 	// This outcome records why a physically observed candidate did not enter the

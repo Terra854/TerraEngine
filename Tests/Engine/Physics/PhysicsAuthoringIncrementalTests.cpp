@@ -226,6 +226,10 @@ namespace TerraEngine::Tests {
 			character.objectId = Id(2U);
 			character.objectGeneration = 1U;
 			character.componentGeneration = 1U;
+			// A detached character snapshot requires complete transform/hierarchy
+			// evidence even when this test only changes the constraint closure.
+			character.objectTransformRevision = 1U;
+			character.hierarchyGeneration = 1U;
 			firstData.characters = {character};
 			auto first = PhysicsAuthoringSnapshot::Create(std::move(firstData));
 			context.Expect(first.has_value(), "The closure fixture must create its first immutable snapshot.");

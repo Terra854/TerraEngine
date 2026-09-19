@@ -6,8 +6,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <stop_token>
 #include <vector>
 
@@ -27,6 +29,11 @@ namespace TerraEngine::Navigation::Ground
 		bool clearanceValid = false;
 		std::uint32_t capabilityMask = 0xFFFFFFFFU;
 		float traversalCost = 1.0F;
+		// Heights are sampled at this interval's endpoints from an actual exterior
+		// polygon edge. They let the graph reject stacked floors in one vertical band.
+		float heightAtIntervalStart = 0.0F;
+		float heightAtIntervalEnd = 0.0F;
+		float maximumStepHeightMetres = 0.0F;
 	};
 
 	struct GroundPortalRecord
@@ -44,6 +51,10 @@ namespace TerraEngine::Navigation::Ground
 		float traversalCost = 1.0F;
 		bool supported = false;
 		bool clearanceValid = false;
+		// Directional portal heights are sampled at the shared overlap midpoint.
+		// Search keeps them provider-local and gives each shard its own endpoint Y.
+		float fromHeightMetres = 0.0F;
+		float toHeightMetres = 0.0F;
 	};
 
 	struct GroundPortalSearchResult
@@ -55,6 +66,15 @@ namespace TerraEngine::Navigation::Ground
 
 		[[nodiscard]] bool Succeeded() const noexcept { return outcome == NavigationOutcome::Complete; }
 	};
+
+	// Classifies an empty portal search against complete coverage evidence. This
+	// deliberately ignores portal traversability: a connected component means a
+	// profile-specific obstruction (such as low clearance), whereas a gap remains
+	// a genuine unavailable-coverage neighbour. The copied key list and node
+	// budget keep this worker-safe classification bounded and scene-independent.
+	[[nodiscard]] GroundPortalSearchResult ClassifyPortalMissingNeighbor(const NavigationCoverageKey& start,
+		const NavigationCoverageKey& goal, std::span<const NavigationCoverageKey> completeCoverage,
+		std::size_t maximumNodes);
 
 	class GroundPortalGraphSnapshot
 	{
@@ -87,6 +107,12 @@ namespace TerraEngine::Navigation::Ground
 		// boundary axis/layer; no center-sample shortcut is permitted.
 		[[nodiscard]] bool PublishBoundaryIntervals(const std::vector<GroundBoundaryInterval>& intervals,
 			std::uint64_t expectedRevision);
+		// Prepares the immutable portal candidate before locking, then executes the
+		// caller's protected world-root commit while the expected portal revision is
+		// still current. A false callback leaves both authorities unchanged.
+		[[nodiscard]] bool PublishBoundaryIntervalsTransactionally(
+			const std::vector<GroundBoundaryInterval>& intervals, std::uint64_t expectedRevision,
+			const std::function<bool()>& commitWorldRoot);
 		[[nodiscard]] GroundPortalGraphSnapshot AcquireSnapshot() const;
 
 	private:

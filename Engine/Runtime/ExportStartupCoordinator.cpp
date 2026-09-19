@@ -263,7 +263,26 @@ namespace TerraEngine::Runtime {
 					return result;
 				}
 				if(optionalCache) {
-					if(mount.Exists(path)) result.optionalCachePaths.push_back(path);
+					PackagedNavigationRuntime::OptionalCacheObservation observation{};
+					observation.path = path;
+					const MountedContentReadResult cacheRead = mount.ReadAllChecked(path, Navigation::kMaximumSavedNavigationBytes);
+					observation.present = cacheRead.Succeeded();
+					if(observation.present) {
+						result.optionalCachePaths.push_back(path);
+						PackagedNavigationRuntime::OptionalCacheCandidate candidate{};
+						candidate.path = path;
+						candidate.bytes.reserve(cacheRead.bytes.size());
+						for(const std::uint8_t byte : cacheRead.bytes)
+							candidate.bytes.push_back(static_cast<std::byte>(byte));
+						result.optionalCacheCandidates.push_back(std::move(candidate));
+						// Startup has no authoritative source/settings descriptor here. Never
+						// trust fingerprints copied from the optional cache itself; leave route
+						// generation to the normal fresh-generation path and expose the reason.
+						observation.reason = "present_deferred_until_authoritative_descriptor";
+					} else {
+						observation.reason = "absent_or_mount_read_failed";
+					}
+					result.optionalCacheObservations.push_back(std::move(observation));
 					continue;
 				}
 				if(std::filesystem::path(path).extension() != ".tenavgeom" || !mount.Exists(path)) {

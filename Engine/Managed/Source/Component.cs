@@ -117,6 +117,7 @@ namespace TerraEngine
 				nameof(ConstraintSet) => "ConstraintSetComponent",
 				nameof(CharacterController) => "CharacterControllerComponent",
 				nameof(Animation.Animator) => "AnimatorComponent",
+				nameof(NavigationAgent) => "NavigationAgentComponent",
 				_ => managedType.Name
 			};
 		}

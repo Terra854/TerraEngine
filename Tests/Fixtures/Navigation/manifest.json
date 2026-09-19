@@ -4,10 +4,10 @@
 	"caseIdFormat": "{fixtureId}.{profileId}.{caseId}",
 	"referenceCasesPerProfile": 25,
 	"hardBreakDocuments": [
-		{"id": "scene-agent-component", "kind": "scene", "path": "HardBreak/Scene-NavigationAgentComponent.json", "unknownComponent": "NavigationAgentComponent"},
+		{"id": "scene-agent-component", "kind": "scene", "path": "HardBreak/Scene-NavigationAgentComponent.json", "supportedComponent": "NavigationAgentComponent", "runtimeState": "excluded"},
 		{"id": "scene-source-component", "kind": "scene", "path": "HardBreak/Scene-NavigationSourceComponent.json", "unknownComponent": "NavigationSourceComponent"},
 		{"id": "scene-connection-component", "kind": "scene", "path": "HardBreak/Scene-NavigationConnectionComponent.json", "unknownComponent": "NavigationConnectionComponent"},
-		{"id": "prefab-agent-component", "kind": "prefab", "path": "HardBreak/Prefab-NavigationAgentComponent.json", "unknownComponent": "NavigationAgentComponent"},
+		{"id": "prefab-agent-component", "kind": "prefab", "path": "HardBreak/Prefab-NavigationAgentComponent.json", "supportedComponent": "NavigationAgentComponent", "runtimeState": "excluded"},
 		{"id": "prefab-source-component", "kind": "prefab", "path": "HardBreak/Prefab-NavigationSourceComponent.json", "unknownComponent": "NavigationSourceComponent"},
 		{"id": "prefab-connection-component", "kind": "prefab", "path": "HardBreak/Prefab-NavigationConnectionComponent.json", "unknownComponent": "NavigationConnectionComponent"}
 	],

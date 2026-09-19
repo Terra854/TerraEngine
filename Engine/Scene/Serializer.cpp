@@ -10,6 +10,7 @@
 #include "Components/AudioSourceComponent.h"
 #include "Components/CameraComponent.h"
 #include "Components/MeshRenderComponent.h"
+#include "Components/NavigationAgentComponent.h"
 #include "Components/TerrainComponent.h"
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
@@ -29,6 +30,67 @@
 namespace {
 	using namespace TerraEngine::Physics;
 	using namespace TerraEngine::Animation;
+
+	// Navigation agents persist copied traversal and steering thresholds only.
+	// Runtime destinations and routes are rebuilt as fresh system-owned state.
+	nlohmann::json SerializeNavigationAgent(const NavigationAgentComponent& agent)
+	{
+		return {{"active", agent.active}, {"radiusMetres", agent.radiusMetres},
+			{"heightMetres", agent.heightMetres}, {"stepHeightMetres", agent.stepHeightMetres},
+			{"maxSlopeDegrees", agent.maxSlopeDegrees}, {"clearanceMarginMetres", agent.clearanceMarginMetres},
+			{"horizontalResolutionMetres", agent.horizontalResolutionMetres}, {"verticalResolutionMetres", agent.verticalResolutionMetres},
+			{"excludedAreasMask", agent.excludedAreasMask}, {"areaPenalties", agent.areaPenalties},
+			{"arrivalToleranceMetres", agent.arrivalToleranceMetres},
+			{"targetDisplacementThresholdMetres", agent.targetDisplacementThresholdMetres},
+			{"minimumReplanIntervalSeconds", agent.minimumReplanIntervalSeconds}};
+	}
+
+	bool ReadNavigationAgentFinite(const nlohmann::json& json, std::string_view key, double& destination)
+	{
+		const auto found = json.find(std::string(key));
+		if(found == json.end()) return true;
+		if(!found->is_number()) return false;
+		const double value = found->get<double>();
+		if(!std::isfinite(value)) return false;
+		destination = value;
+		return true;
+	}
+
+	bool DeserializeNavigationAgent(const nlohmann::json& json, NavigationAgentComponent& destination)
+	{
+		if(!json.is_object()) return false;
+		NavigationAgentComponent staged{};
+		if(const auto active = json.find("active"); active != json.end()) {
+			if(!active->is_boolean()) return false;
+			staged.active = active->get<bool>();
+		}
+		if(!ReadNavigationAgentFinite(json, "radiusMetres", staged.radiusMetres)
+			|| !ReadNavigationAgentFinite(json, "heightMetres", staged.heightMetres)
+			|| !ReadNavigationAgentFinite(json, "stepHeightMetres", staged.stepHeightMetres)
+			|| !ReadNavigationAgentFinite(json, "maxSlopeDegrees", staged.maxSlopeDegrees)
+			|| !ReadNavigationAgentFinite(json, "clearanceMarginMetres", staged.clearanceMarginMetres)
+			|| !ReadNavigationAgentFinite(json, "horizontalResolutionMetres", staged.horizontalResolutionMetres)
+			|| !ReadNavigationAgentFinite(json, "verticalResolutionMetres", staged.verticalResolutionMetres)
+			|| !ReadNavigationAgentFinite(json, "arrivalToleranceMetres", staged.arrivalToleranceMetres)
+			|| !ReadNavigationAgentFinite(json, "targetDisplacementThresholdMetres", staged.targetDisplacementThresholdMetres)
+			|| !ReadNavigationAgentFinite(json, "minimumReplanIntervalSeconds", staged.minimumReplanIntervalSeconds)) return false;
+		if(const auto mask = json.find("excludedAreasMask"); mask != json.end()) {
+			if(!mask->is_number_unsigned() || mask->get<std::uint64_t>() > std::numeric_limits<std::uint32_t>::max()) return false;
+			staged.excludedAreasMask = static_cast<std::uint32_t>(mask->get<std::uint64_t>());
+		}
+		if(const auto penalties = json.find("areaPenalties"); penalties != json.end()) {
+			if(!penalties->is_array() || penalties->size() != staged.areaPenalties.size()) return false;
+			for(std::size_t index = 0U; index < staged.areaPenalties.size(); ++index) {
+				if(!(*penalties)[index].is_number()) return false;
+				const double value = (*penalties)[index].get<double>();
+				if(!std::isfinite(value)) return false;
+				staged.areaPenalties[index] = value;
+			}
+		}
+		if(!staged.ValidateAuthoredValues()) return false;
+		destination = staged;
+		return true;
+	}
 
 	nlohmann::json SerializeAnimator(const AnimatorComponent& animator)
 	{
@@ -891,6 +953,13 @@ nlohmann::json SerializeObjectRecursive(Object object) {
 				}
 				continue;
 			}
+			if(compName == NavigationAgentComponent::kComponentName) {
+				if(const NavigationAgentComponent* agent = enttRegistry.try_get<NavigationAgentComponent>(entity)) {
+					auto guard = agent->acquireReadLock();
+					objJson["components"][compName] = SerializeNavigationAgent(*agent);
+				}
+				continue;
+			}
 			// Collection components need a typed serializer because reflection does
 			// not flatten variants or vectors. Keep this special case at the protected
 			// scene boundary; worker snapshots consume only the decoded typed values.
@@ -1215,6 +1284,7 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 	// the generic component path can restore it while ignoring unknown runtime
 	// keys from malformed or obsolete payloads.
 	AnimatorComponent::registerType();
+	NavigationAgentComponent::registerType();
 	AudioSourceComponent::registerType();
 	AudioListenerComponent::registerType();
 	// Scene files can be loaded before an editor window or renderer constructs
@@ -1310,6 +1380,13 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 				if(compName == AnimatorComponent::kComponentName) {
 					AnimatorComponent* animator = enttRegistry.try_get<AnimatorComponent>(entity);
 					if(animator == nullptr || !DeserializeAnimator(compData, *animator)) {
+						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
+					}
+					continue;
+				}
+				if(compName == NavigationAgentComponent::kComponentName) {
+					NavigationAgentComponent* agent = enttRegistry.try_get<NavigationAgentComponent>(entity);
+					if(agent == nullptr || !DeserializeNavigationAgent(compData, *agent)) {
 						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
 					}
 					continue;

@@ -3,12 +3,17 @@
 #include "../TestHarness.h"
 
 #include "Core/Scheduling/SystemScheduler.h"
+#include "Physics/Terrain/TerrainCollisionSystem.h"
 #include "Resource/VirtualGeometryStreamingSystem.h"
 #include "Terrain/TerrainDerivedSystem.h"
 #include "Terrain/TerrainStreamingSystem.h"
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <string_view>
 
 namespace TerraEngine::Tests
@@ -31,6 +36,40 @@ namespace TerraEngine::Tests
 			});
 			return found == workloads.end() ? nullptr : &*found;
 		}
+
+		// Startup registration order is also lifecycle initialization order. Read the
+		// real engine source so this contract catches a headless bootstrap being
+		// registered before the startup scene or physics world exists.
+		std::string ReadSource(std::string_view relativePath)
+		{
+			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ std::filesystem::path(std::string(relativePath)), std::ios::binary);
+			std::ostringstream output;
+			output << input.rdbuf();
+			return output.str();
+		}
+
+		// The real headless host keeps terrain residency and derivation alive while
+		// removing only presentation systems. This anchor represents the remaining
+		// physics consumer named by TerrainCollisionSystem's normal declaration.
+		class PhysicsSystemAnchor final : public SystemsBase
+		{
+		public:
+			void Initialize() override {}
+			void Update(float) override {}
+			void Shutdown() override {}
+			std::string SystemName() override { return "PhysicsSystem"; }
+
+			TerraEngine::Scheduling::SystemDeclaration SchedulerDeclaration() override
+			{
+				TerraEngine::Scheduling::SystemDeclaration declaration{};
+				declaration.name = SystemName();
+				declaration.phase = "Physics";
+				declaration.mainThread = true;
+				declaration.usesDefaultMetadata = false;
+				return declaration;
+			}
+		};
 	}
 
 	void RegisterTerrainSchedulerContractTests(TestRegistry& registry)
@@ -160,6 +199,83 @@ namespace TerraEngine::Tests
 			virtualGeometry.Shutdown();
 			derived.Shutdown();
 			streaming.Shutdown();
+		});
+
+		registry.Add("Terrain.Scheduler.HeadlessRetainsCpuTerrainChainWithoutRenderOwners", [](TestContext& context) {
+			auto& streaming = TerraEngine::Terrain::TerrainStreamingSystem::Instance();
+			auto& derived = TerraEngine::Terrain::TerrainDerivedSystem::Instance();
+			auto& collision = TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance();
+			TerraEngine::Scheduling::SystemDeclaration streamingDeclaration = streaming.SchedulerDeclaration();
+			TerraEngine::Scheduling::SystemDeclaration derivedDeclaration = derived.SchedulerDeclaration();
+			// Match MainEngine's headless registration exactly: preserve phases and
+			// resources, but remove dependencies on unregistered presentation owners.
+			std::erase(streamingDeclaration.before, "VirtualGeometryStreamingSystem");
+			std::erase(streamingDeclaration.before, "RenderSystem");
+			std::erase(derivedDeclaration.before, "VirtualGeometryStreamingSystem");
+			std::erase(derivedDeclaration.before, "RenderSystem");
+
+			PhysicsSystemAnchor physics;
+			TerraEngine::Scheduling::SystemScheduler scheduler;
+			scheduler.RegisterSystem(streaming, streamingDeclaration);
+			scheduler.RegisterSystem(derived, derivedDeclaration);
+			scheduler.RegisterSystem(collision, collision.SchedulerDeclaration());
+			scheduler.RegisterSystem(physics, physics.SchedulerDeclaration());
+			const TerraEngine::Scheduling::ScheduleSummary& summary = scheduler.BuildSchedule();
+
+			context.Expect(summary.valid,
+				"A headless host must schedule terrain residency, CPU derivation, and terrain collision without requiring VirtualGeometryStreamingSystem or RenderSystem.");
+			context.Expect(Contains(streamingDeclaration.before, "TerrainDerivedSystem")
+				&& Contains(derivedDeclaration.after, "TerrainStreamingSystem")
+				&& !Contains(streamingDeclaration.before, "VirtualGeometryStreamingSystem")
+				&& !Contains(streamingDeclaration.before, "RenderSystem")
+				&& !Contains(derivedDeclaration.before, "VirtualGeometryStreamingSystem")
+				&& !Contains(derivedDeclaration.before, "RenderSystem"),
+				"Headless terrain registration must retain the CPU dependency chain while stripping only absent presentation edges.");
+			context.Expect(Contains(streamingDeclaration.writes,
+				TerraEngine::Scheduling::kResourceTerrainPublishedResidency)
+				&& Contains(derivedDeclaration.writes,
+					TerraEngine::Scheduling::kResourceTerrainPublishedDerived),
+				"Headless terrain declarations must preserve residency and derived-publication resource ownership for later collision and navigation capture.");
+		});
+
+		registry.Add("Terrain.Scheduler.CollisionWorkloadsRemainInTheExecutablePhysicsPhase", [](TestContext& context) {
+			auto& collision = TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance();
+			collision.Shutdown();
+			collision.Initialize();
+			const auto workloads = collision.DeclareFrameWorkloads(0.0F);
+			const auto* prepare = FindWorkload(workloads,
+				"TerrainCollisionSystem/Physics/TerrainCollisionPrepare");
+			const auto* publish = FindWorkload(workloads,
+				"TerrainCollisionSystem/Physics/TerrainCollisionPublish");
+			context.Expect(prepare != nullptr && publish != nullptr
+				&& prepare->phase == "Physics" && publish->phase == "Physics"
+				&& prepare->active && prepare->ready && publish->active && publish->ready
+				&& prepare->phaseKind == TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare
+				&& publish->phaseKind == TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit
+				&& publish->explicitDependencies == std::vector<std::string>{prepare->stableDescriptorId},
+				"Terrain collision preparation and protected provider publication must execute in the real Physics phase, not helper-only phase names that the frame scheduler never visits.");
+			collision.Shutdown();
+		});
+
+		registry.Add("Terrain.Scheduler.ExportBootstrapInitializesAfterSceneAndPhysics", [](TestContext& context) {
+			const std::string source = ReadSource("Engine/Core/MainEngine.cpp");
+			const std::size_t sceneManagerRegistration = source.find(
+				"RegisterEngineSystem(systems, systemScheduler, sceneManager");
+			const std::size_t physicsRegistration = source.find(
+				"RegisterEngineSystem(systems, systemScheduler, physicsSystem");
+			const std::size_t streamingRegistration = source.find(
+				"RegisterEngineSystem(systems, systemScheduler, terrainStreamingSystem");
+			const std::size_t derivedRegistration = source.find(
+				"RegisterEngineSystem(systems, systemScheduler, terrainDerivedSystem");
+
+			context.Expect(sceneManagerRegistration != std::string::npos
+				&& physicsRegistration != std::string::npos
+				&& streamingRegistration != std::string::npos
+				&& derivedRegistration != std::string::npos
+				&& sceneManagerRegistration < physicsRegistration
+				&& physicsRegistration < streamingRegistration
+				&& streamingRegistration < derivedRegistration,
+				"Export terrain bootstrap must initialize after SceneManager activates TerrainComponents and after PhysicsSystem creates the primary collision world.");
 		});
 	}
 }

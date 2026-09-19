@@ -186,6 +186,18 @@ namespace TerraEngine::EditorTests
 			const std::string runtimeSystemSource(
 				(std::istreambuf_iterator<char>(runtimeSystemFile)),
 				std::istreambuf_iterator<char>());
+			const auto collisionHeaderPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine/Physics/Terrain/TerrainCollisionSystem.h";
+			std::ifstream collisionHeaderFile(collisionHeaderPath);
+			const std::string collisionHeaderSource(
+				(std::istreambuf_iterator<char>(collisionHeaderFile)),
+				std::istreambuf_iterator<char>());
+			const auto collisionSourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine/Physics/Terrain/TerrainCollisionSystem.cpp";
+			std::ifstream collisionSourceFile(collisionSourcePath);
+			const std::string collisionSource(
+				(std::istreambuf_iterator<char>(collisionSourceFile)),
+				std::istreambuf_iterator<char>());
 			const auto terrainMaterialPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine/Terrain/TerrainMaterial.cpp";
 			std::ifstream terrainMaterialFile(terrainMaterialPath);
@@ -200,12 +212,19 @@ namespace TerraEngine::EditorTests
 				std::istreambuf_iterator<char>());
 			context.Expect(runtimeSystemSource.find("BuildMountedTerrainRuntime") != std::string::npos
 				&& runtimeSystemSource.find("TerrainRenderProxyRegistry::Instance().Publish") != std::string::npos
-				&& runtimeSystemSource.find("CommitTerrainCollisionReplacement") != std::string::npos
+				&& runtimeSystemSource.find("PrepareMountedTerrainCollisionCandidate") != std::string::npos
+				&& runtimeSystemSource.find("SetMountedRuntimeCandidate") != std::string::npos
+				&& runtimeSystemSource.find("CommitTerrainCollisionReplacement") == std::string::npos
+				&& collisionHeaderSource.find("PublishMountedRuntimeBeforePhysics") != std::string::npos
+				&& collisionSource.find("MakeProtectedCommitPhase(\"TerrainCollisionPublish\"") != std::string::npos
+				&& collisionSource.find("PublishMountedRuntimeBeforePhysics()") != std::string::npos
+				&& collisionSource.find("PhysicsSystem::Instance()") != std::string::npos
+				&& collisionSource.find("CommitTerrainCollisionReplacement") != std::string::npos
 				&& runtimeSystemSource.find("CreateTerrainMaterial") != std::string::npos
 				&& terrainWindowSource.find("CreateTerrainMaterial") != std::string::npos
 				&& terrainMaterialSource.find("ShadingModel::MetallicRoughness") != std::string::npos
 				&& exportPipelineSource.find("importer == \"TerrainImporter\") type = AssetType::Terrain") != std::string::npos,
-				"Editor and standalone terrain proxies must publish lit render materials and collision products without serialized helper components.");
+				"Editor and standalone terrain proxies must publish lit render materials while staging collision values for TerrainCollisionSystem's declared protected physics boundary, without serialized helper components.");
 
 			// The editor executable publishes terrain proxies while RenderSystem consumes
 			// them from the engine DLL. Keeping Instance() out of the header guarantees

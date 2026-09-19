@@ -25,6 +25,7 @@
 #include "Engine/Profiling/ProfilerScope.h"
 #include "Engine/Runtime/ExportStartupCoordinator.h"
 #include "Engine/Utilities/PlatformUtils.h"
+#include "NavigationApplicationValidation.h"
 
 // ImGui
 #include <imgui.h>
@@ -144,6 +145,79 @@ void EditorSystem::SetPhysicsInvariantOutputPath(const std::filesystem::path& ou
 
 void EditorSystem::SetTerrainInvariantOutputPath(const std::filesystem::path& outputPath) {
 	terrainInvariantOutputPath = outputPath;
+}
+
+void EditorSystem::SetNavigationAgentValidationPaths(const std::filesystem::path& optionsPath,
+	const std::filesystem::path& reportPath) {
+	navigationAgentValidationOptionsPath = optionsPath;
+	navigationAgentValidationReportPath = reportPath;
+}
+
+namespace {
+	// Validation reports are written once at process shutdown, after the editor
+	// system has observed Engine's ordinary Shutdown lifecycle.
+	bool WriteNavigationAgentValidationReport(const std::filesystem::path& path,
+		const nlohmann::json& report) {
+		std::error_code error;
+		if(!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path(), error);
+		if(error) return false;
+		std::ofstream output(path, std::ios::binary | std::ios::trunc);
+		if(!output) return false;
+		output << report.dump(2);
+		output.flush();
+		return output.good();
+	}
+
+	nlohmann::json NavigationAgentValidationFailure(std::string message) {
+		// Preserve the runner's stable scalar report keys even when startup fails
+		// before the core validator could observe a workload frame.
+		return {{"succeeded", false}, {"pending", false}, {"orderlyShutdown", false},
+			{"actualWorkerCount", 0U}, {"executedCaseCount", 0U}, {"failure", std::move(message)}};
+	}
+}
+
+void EditorSystem::ProcessNavigationAgentValidation(float deltaTime) {
+	if(!navigationAgentValidationOptionsPath || !navigationAgentValidationReportPath
+		|| navigationAgentValidationTerminalReport.has_value()) return;
+
+	navigationAgentValidationWaitSeconds += std::max(0.0f, deltaTime);
+	const bool workspaceReady = context.projectManager && context.projectManager->HasActiveProject()
+		&& context.projectManager->GetReadinessState().simulationEssentialReady && mainEditor;
+	if(!workspaceReady && navigationAgentValidationWaitSeconds < 120.0f) return;
+
+	if(!navigationAgentValidationOptionsLoaded) {
+		try {
+			std::ifstream input(*navigationAgentValidationOptionsPath, std::ios::binary);
+			if(!input) throw std::runtime_error("Could not open navigation validation options.");
+			input >> navigationAgentValidationOptions;
+			if(!navigationAgentValidationOptions.is_object())
+				throw std::runtime_error("Navigation validation options must be a JSON object.");
+			navigationAgentValidationOptionsLoaded = true;
+		}
+		catch(const std::exception& exception) {
+			navigationAgentValidationTerminalReport = NavigationAgentValidationFailure(exception.what());
+		}
+	}
+
+	if(!navigationAgentValidationTerminalReport && !workspaceReady) {
+		navigationAgentValidationTerminalReport = NavigationAgentValidationFailure(
+			"Timed out waiting for the editor project and terrain publication.");
+	}
+	if(!navigationAgentValidationTerminalReport) {
+		nlohmann::json report = mainEditor->RunNavigationAgentPlayValidationFrame(navigationAgentValidationOptions);
+		// Parse/admission errors return before core session construction. Retain the
+		// report schema required by the installed runner in that fail-closed case.
+		if(!report.contains("actualWorkerCount")) report["actualWorkerCount"] = 0U;
+		if(!report.contains("executedCaseCount")) report["executedCaseCount"] = 0U;
+		if(!report.value("pending", false)) navigationAgentValidationTerminalReport = report;
+	}
+	if(!navigationAgentValidationTerminalReport) return;
+
+	// Stop through the ordinary toolbar lifecycle before asking Engine to leave
+	// its loop. The report itself is held until EditorSystem::Shutdown completes.
+	navigationAgentValidationRunAttempted = true;
+	if(mainEditor) mainEditor->StopPlayMode();
+	context.engine->SignalShutdown();
 }
 
 void EditorSystem::ProcessTerrainInvariantValidation(float deltaTime) {
@@ -790,7 +864,6 @@ void EditorSystem::Update(float deltaTime) {
 	if (physicsInvariantRunAttempted) {
 		return;
 	}
-
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (pendingLoadLayout) {
 		LoadWorkspaceLayout();
@@ -900,6 +973,13 @@ void EditorSystem::Update(float deltaTime) {
 			}
 		});
 	}
+
+	// Navigation acceptance must observe the same completed editor frame as a
+	// user would: AssetDatabase reconciliation, MainEditor update, and Game View
+	// request publication all happen above. Running the validator here preserves
+	// that normal lifecycle and lets the next frame publish a genuine render
+	// result before a terminal report requests shutdown.
+	ProcessNavigationAgentValidation(deltaTime);
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (managedUpdate) {
@@ -1041,6 +1121,44 @@ void EditorSystem::Shutdown() {
 	context.projectManager.reset();
 	
 	initialized = false;
+	// This marker is deliberately set only from Engine's registered shutdown
+	// callback. EditorMain uses it to avoid claiming an orderly shutdown merely
+	// because a validation session requested one.
+	if(navigationAgentValidationTerminalReport) navigationAgentValidationShutdownObserved = true;
+}
+
+int EditorSystem::FinalizeNavigationAgentValidationAfterEngineShutdown() {
+	if(!navigationAgentValidationReportPath)
+		return requestedProcessExitCode;
+	if(!navigationAgentValidationTerminalReport) {
+		// Engine::Run can exit after a controlled startup/runtime failure. A CLI
+		// request must still leave explicit failed evidence instead of no report.
+		navigationAgentValidationTerminalReport = NavigationAgentValidationFailure(
+			"The editor exited before navigation validation reached a terminal result.");
+	}
+
+	nlohmann::json report = *navigationAgentValidationTerminalReport;
+	report["orderlyShutdown"] = navigationAgentValidationShutdownObserved;
+	// Preserve the dedicated host capacity and the core-validated (possibly
+	// smaller) cohort size in the final installed-editor evidence document.
+	report["configuredMaxAdmittedRequests"] = 4096U;
+	report["configuredAgentPopulation"] = report.value("population", 0U);
+	const bool succeeded = report.value("succeeded", false)
+		&& report.value("orderlyShutdown", false)
+		&& !report.value("pending", false)
+		&& report.contains("actualWorkerCount")
+		&& report.contains("executedCaseCount");
+	try {
+		if(!WriteNavigationAgentValidationReport(*navigationAgentValidationReportPath, report))
+			throw std::runtime_error("Could not persist the navigation agent validation report.");
+		std::cout << "[Editor] Navigation agent validation report: " << report.dump() << '\n';
+		requestedProcessExitCode = succeeded ? 0 : 1;
+	}
+	catch(const std::exception& exception) {
+		requestedProcessExitCode = 1;
+		TERRAENGINE_LOG(LogLevel::Error, "[EditorSystem] Navigation agent validation report failed: " << exception.what());
+	}
+	return requestedProcessExitCode;
 }
 
 // EditorSystem::SystemName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

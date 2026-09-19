@@ -3,6 +3,8 @@
 #include "Runtime/ContentMount/TerrainRuntimeProxyLoader.h"
 
 #include "File Formats/TerraEngineMeshFile.h"
+
+#include "Physics/Terrain/TerrainHeightFieldActiveRect.h"
 #include "Runtime/ContentMount/ContentMount.h"
 #include "Runtime/ContentMount/TerrainContentResolver.h"
 #include "Terrain/TerrainAreaCodec.h"
@@ -163,15 +165,13 @@ namespace TerraEngine::Runtime
 			recipe.holeBits = area.holes;
 			if(recipe.holeBits.empty())
 				recipe.holeBits.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount, 0U);
-			if (const auto active = TerraEngine::Terrain::TerrainActiveRectForArea(authoredBounds, area.descriptor.coordinate))
-				for (std::uint32_t z = 0u; z < 256u; ++z)
-					for (std::uint32_t x = 0u; x < 256u; ++x)
-						if (x < active->minX || z < active->minZ
-							|| x + 1u >= active->maxXExclusive || z + 1u >= active->maxZExclusive)
-						{
-							const std::uint32_t bit = z * 256u + x;
-							recipe.holeBits[bit / 8u] |= static_cast<std::uint8_t>(1u << (bit % 8u));
-						}
+			const auto active = TerraEngine::Terrain::TerrainActiveRectForArea(
+				authoredBounds, area.descriptor.coordinate);
+			// A malformed mounted extent must not turn fixed-grid padding into walkable
+			// collision. Clear the mask so recipe validation rejects this candidate at the
+			// same protected boundary rather than publishing broadened support.
+			if(!active || !TerraEngine::Physics::Terrain::ApplyTerrainActiveRectToRecipe(recipe, *active))
+				recipe.holeBits.clear();
 			return recipe;
 		}
 

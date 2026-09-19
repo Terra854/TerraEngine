@@ -52,6 +52,8 @@
 #include "Engine/Components/CameraComponent.h"
 #include "Engine/Components/MeshRenderComponent.h"
 #include "Engine/Components/Transform.h"
+#include "Engine/Navigation/Agents/NavigationAgentSystem.h"
+#include "Engine/Navigation/NavigationSystem.h"
 #include "Engine/Components/Physics/CharacterControllerComponent.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Scene/SceneMutationQueue.h"
@@ -3229,7 +3231,14 @@ namespace TerraEngine::Editor::Automation
 		AutomationRequestContext request;
 		request.requestId = requestId;
 		request.clientId = "local-mcp";
-		request.correlationId = arguments.value("correlationId", requestId);
+		// Most editor tools use textual correlations for logs, while the typed
+		// navigation-agent ABI deliberately uses a nonzero uint64 correlation.
+		// Preserve that native value in the request context as text without
+		// changing the validated JSON payload seen by the typed handler.
+		if(const auto correlation = arguments.find("correlationId"); correlation != arguments.end()
+			&& correlation->is_number_unsigned())
+			request.correlationId = std::to_string(correlation->get<std::uint64_t>());
+		else request.correlationId = arguments.value("correlationId", requestId);
 		request.idempotencyKey = arguments.value("idempotencyKey", std::string{});
 		request.arguments = arguments;
 		request.state = BuildAutomationStateSnapshot();
@@ -5395,6 +5404,28 @@ namespace TerraEngine::Editor::Automation
 			return nlohmann::json{{"worldId", location.world.worldId.value}, {"worldGeneration", location.world.worldGeneration},
 				{"position", Serializer::SerializeWorldPosition(location.position)}};
 		};
+		const auto parseAgent = [](const nlohmann::json& value, NavigationAgentIdentity& identity) {
+			if(!value.is_object() || !value.contains("worldId") || !value.contains("worldGeneration")
+				|| !value.contains("objectId") || !value.contains("lifetimeGeneration")
+				|| !value.contains("attachmentGeneration") || !value.contains("runtimeSlot")
+				|| !value.contains("runtimeSlotGeneration") || !value["objectId"].is_string()) return false;
+			const auto objectId = TerraEngine::ParseUUID(value["objectId"].get<std::string>());
+			if(!objectId || !value["worldId"].is_number_unsigned() || !value["worldGeneration"].is_number_unsigned()
+				|| !value["lifetimeGeneration"].is_number_unsigned() || !value["attachmentGeneration"].is_number_unsigned()
+				|| !value["runtimeSlot"].is_number_unsigned() || !value["runtimeSlotGeneration"].is_number_unsigned()) return false;
+			const std::uint64_t slot = value["runtimeSlot"].get<std::uint64_t>();
+			if(slot >= kInvalidNavigationSlot) return false;
+			identity = {{value["worldId"].get<std::uint64_t>(), value["worldGeneration"].get<NavigationGeneration>()},
+				{*objectId, value["lifetimeGeneration"].get<NavigationGeneration>()}, value["attachmentGeneration"].get<NavigationGeneration>(),
+				static_cast<NavigationSlotIndex>(slot), value["runtimeSlotGeneration"].get<NavigationGeneration>()};
+			return identity.IsValid();
+		};
+		const auto serializeAgent = [](const NavigationAgentIdentity& identity) {
+			return nlohmann::json{{"worldId", identity.world.worldId.value}, {"worldGeneration", identity.world.worldGeneration},
+				{"objectId", TerraEngine::ToHexString(identity.object.objectId)}, {"lifetimeGeneration", identity.object.lifetimeGeneration},
+				{"attachmentGeneration", identity.attachmentGeneration}, {"runtimeSlot", identity.runtimeSlot},
+				{"runtimeSlotGeneration", identity.runtimeSlotGeneration}};
+		};
 
 		if (!request.state.projectAvailable || request.state.projectGeneration == 0U)
 			return reject(ErrorCategory::Unavailable, "Navigation automation requires an already-open project with a stable generation.");
@@ -5412,6 +5443,128 @@ namespace TerraEngine::Editor::Automation
 				return reject(ErrorCategory::Unavailable, "No immutable navigation world is published for this project.");
 			return std::nullopt;
 		};
+		const auto readCommandValues = [&reject](const nlohmann::json& value,
+			NavigationGeneration& configuration, NavigationGeneration& intent,
+			std::uint64_t& producer, std::uint64_t& correlation) -> std::optional<AutomationDispatchResult> {
+			// Generation values have meaningful high words (runtime slots deliberately
+			// use them), so never let a JSON default deduce a 32-bit conversion.
+			configuration = std::uint64_t{0};
+			intent = std::uint64_t{0};
+			if(value.contains("expectedConfigurationRevision")) {
+				if(!value["expectedConfigurationRevision"].is_number_unsigned())
+					return reject(ErrorCategory::Validation, "expectedConfigurationRevision must be an unsigned 64-bit value.");
+				configuration = value["expectedConfigurationRevision"].get<NavigationGeneration>();
+			}
+			if(value.contains("expectedIntentSequence")) {
+				if(!value["expectedIntentSequence"].is_number_unsigned())
+					return reject(ErrorCategory::Validation, "expectedIntentSequence must be an unsigned 64-bit value.");
+				intent = value["expectedIntentSequence"].get<NavigationGeneration>();
+			}
+			if(!value.contains("producerOrderingToken") || !value["producerOrderingToken"].is_number_unsigned()
+				|| !value.contains("correlationId") || !value["correlationId"].is_number_unsigned())
+				return reject(ErrorCategory::Validation, "Agent commands require unsigned producerOrderingToken and correlationId.");
+			producer = value["producerOrderingToken"].get<std::uint64_t>();
+			correlation = value["correlationId"].get<std::uint64_t>();
+			if(producer == 0U || correlation == 0U) return reject(ErrorCategory::Validation, "Agent command ordering and correlation values must be non-zero.");
+			return std::nullopt;
+		};
+
+		if(operation == AutomationOperation("navigation.agent.bind")) {
+			if(!hasOnlyFields(request.arguments, {"schemaVersion", "objectId"}) || !request.arguments.contains("objectId")
+				|| !request.arguments["objectId"].is_string()) return reject(ErrorCategory::Validation, "navigation.agent.bind requires only a published object identifier.");
+			if(const auto unavailable = requireWorld()) return *unavailable;
+			const auto objectId = TerraEngine::ParseUUID(request.arguments["objectId"].get<std::string>());
+			if(!objectId) return reject(ErrorCategory::Validation, "objectId must be a canonical navigation object identifier.");
+			// Binding deliberately reads only the atomically published bridge. It must
+			// never make an automation read mutate or scan live component storage.
+			const auto resolved = NavigationAgentSystem::Instance().ResolvePublishedAgent(*objectId);
+			if(!resolved || resolved->world != root->world)
+				return reject(ErrorCategory::StaleTarget, "The published object has no active NavigationAgentComponent in this world generation.");
+			const NavigationAgentIdentity identity = *resolved;
+			return succeed("Bound the active generation-qualified navigation agent.", {{"schemaVersion", 1U}, {"agent", serializeAgent(identity)}});
+		}
+
+		if(operation == AutomationOperation("navigation.agent.destination.location")
+			|| operation == AutomationOperation("navigation.agent.destination.object")
+			|| operation == AutomationOperation("navigation.agent.stop")) {
+			const bool isLocation = operation == AutomationOperation("navigation.agent.destination.location");
+			const bool isObject = operation == AutomationOperation("navigation.agent.destination.object");
+			if(!hasOnlyFields(request.arguments, isLocation ? std::initializer_list<std::string_view>{"schemaVersion", "agent", "location", "expectedConfigurationRevision", "expectedIntentSequence", "producerOrderingToken", "correlationId"}
+				: isObject ? std::initializer_list<std::string_view>{"schemaVersion", "agent", "target", "expectedConfigurationRevision", "expectedIntentSequence", "producerOrderingToken", "correlationId"}
+				: std::initializer_list<std::string_view>{"schemaVersion", "agent", "expectedConfigurationRevision", "expectedIntentSequence", "producerOrderingToken", "correlationId"}))
+				return reject(ErrorCategory::Validation, "Navigation agent command contains an unsupported field.");
+			if(const auto unavailable = requireWorld()) return *unavailable;
+			NavigationAgentIdentity identity{};
+			if(!request.arguments.contains("agent") || !parseAgent(request.arguments["agent"], identity) || identity.world != root->world)
+				return reject(ErrorCategory::StaleTarget, "The agent identity is malformed or belongs to another world generation.");
+			NavigationGeneration configuration = 0U, intent = 0U;
+			std::uint64_t producer = 0U, correlation = 0U;
+			if(const auto error = readCommandValues(request.arguments, configuration, intent, producer, correlation)) return *error;
+			NavigationAgentReceipt receipt{};
+			if(isLocation) {
+				std::string error;
+				if(!request.arguments.contains("location") || !request.arguments["location"].is_object()
+					|| !request.arguments["location"].contains("worldId") || !request.arguments["location"]["worldId"].is_number_unsigned()
+					|| !request.arguments["location"].contains("worldGeneration") || !request.arguments["location"]["worldGeneration"].is_number_unsigned())
+					return reject(ErrorCategory::Validation, "Location destination requires unsigned world identity fields.");
+				const auto position = Serializer::DeserializeWorldPosition(request.arguments["location"].value("position", nlohmann::json{}), &error);
+				if(!position || request.arguments["location"]["worldId"].get<std::uint64_t>() != root->world.worldId.value
+					|| request.arguments["location"]["worldGeneration"].get<NavigationGeneration>() != root->world.worldGeneration)
+					return reject(ErrorCategory::Validation, "Location must be canonical and belong to the current navigation world.");
+				receipt = NavigationAgentSystem::Instance().QueueLocationDestination(identity, {root->world, *position}, configuration, intent, producer, correlation);
+			} else if(isObject) {
+				if(!request.arguments.contains("target") || !request.arguments["target"].is_object() || !request.arguments["target"].contains("objectId")
+					|| !request.arguments["target"]["objectId"].is_string() || !request.arguments["target"].contains("lifetimeGeneration")
+					|| !request.arguments["target"]["lifetimeGeneration"].is_number_unsigned()) return reject(ErrorCategory::Validation, "Object destination requires objectId and lifetimeGeneration.");
+				const auto targetId = TerraEngine::ParseUUID(request.arguments["target"]["objectId"].get<std::string>());
+				if(!targetId || request.arguments["target"]["lifetimeGeneration"].get<NavigationGeneration>() == 0U)
+					return reject(ErrorCategory::Validation, "Object destination identity is invalid.");
+				receipt = NavigationAgentSystem::Instance().QueueObjectDestination(identity, {*targetId, request.arguments["target"]["lifetimeGeneration"].get<NavigationGeneration>()}, configuration, intent, producer, correlation);
+			} else receipt = NavigationAgentSystem::Instance().QueueStop(identity, configuration, intent, producer, correlation);
+			const bool queued = receipt.state == NavigationAgentReceiptState::Queued;
+			return succeed(queued ? "Queued a copied navigation-agent command; protected capture decides final admission."
+				: "Navigation-agent command was rejected without changing the existing intent.", {{"schemaVersion", 1U}, {"commitReceipt", {{"agent", serializeAgent(receipt.identity)}, {"state", std::string(ToString(receipt.state))}, {"outcome", std::string(ToString(receipt.outcome))}, {"reason", std::string(ToString(receipt.reason))}, {"correlationId", receipt.correlationId}, {"admittedSequence", receipt.admittedSequence}}}});
+		}
+
+		if(operation == AutomationOperation("navigation.agent.receipt") || operation == AutomationOperation("navigation.agent.status") || operation == AutomationOperation("navigation.agent.guidance")) {
+			if(!hasOnlyFields(request.arguments, operation == AutomationOperation("navigation.agent.receipt")
+				? std::initializer_list<std::string_view>{"schemaVersion", "agent", "correlationId"} : std::initializer_list<std::string_view>{"schemaVersion", "agent"}))
+				return reject(ErrorCategory::Validation, "Navigation agent read contains an unsupported field.");
+			NavigationAgentIdentity identity{};
+			if(!request.arguments.contains("agent") || !parseAgent(request.arguments["agent"], identity)) return reject(ErrorCategory::Validation, "A complete generation-qualified agent identity is required.");
+			NavigationAgentSystem& agents = NavigationAgentSystem::Instance();
+			if(operation == AutomationOperation("navigation.agent.receipt")) {
+				if(!request.arguments.contains("correlationId") || !request.arguments["correlationId"].is_number_unsigned()) return reject(ErrorCategory::Validation, "Receipt reads require correlationId.");
+				const std::uint64_t correlation = request.arguments["correlationId"].get<std::uint64_t>();
+				if(correlation == 0U) return reject(ErrorCategory::Validation, "Receipt correlationId must be non-zero.");
+				const auto receipt = agents.ReadReceipt(identity, correlation);
+				// Receipt retention is bounded. Absence is an observable expiration, not
+				// an ambiguous stale-target error that would hide the caller's command ID.
+				const NavigationAgentReceipt visible = receipt.value_or(NavigationAgentReceipt{
+					identity, NavigationAgentReceiptState::Expired, NavigationOutcome::Expired,
+					NavigationReason::Expired, correlation, 0U});
+				const NavigationOutcome outcome = visible.state == NavigationAgentReceiptState::Expired
+					? NavigationOutcome::Expired : visible.outcome;
+				const NavigationReason reason = visible.state == NavigationAgentReceiptState::Expired
+					? NavigationReason::Expired : visible.reason;
+				return succeed("Read the bounded navigation-agent command receipt.", {{"schemaVersion", 1U}, {"status", {{"state", std::string(ToString(visible.state))}, {"outcome", std::string(ToString(outcome))}, {"reason", std::string(ToString(reason))}, {"correlationId", visible.correlationId}, {"admittedSequence", visible.admittedSequence}}}});
+			}
+			if(operation == AutomationOperation("navigation.agent.status")) {
+				const auto status = agents.ReadStatus(identity);
+				return succeed("Read copied navigation-agent runtime status.", {{"schemaVersion", 1U}, {"status", {{"state", std::string(ToString(status.state))}, {"outcome", std::string(ToString(status.outcome))}, {"reason", std::string(ToString(status.reason))}, {"configurationRevision", status.configurationRevision}, {"intentSequence", status.intentSequence}, {"publicationRevision", status.publicationRevision}}}});
+			}
+			const auto guidance = agents.ReadGuidance(identity);
+			const nlohmann::json destination = guidance.destination.kind == NavigationDestinationKind::Object
+				? nlohmann::json{{"kind", "object"}, {"objectId", TerraEngine::ToHexString(guidance.destination.object.objectId)}, {"lifetimeGeneration", guidance.destination.object.lifetimeGeneration}}
+				: nlohmann::json{{"kind", "location"}, {"location", serializeLocation(guidance.destination.location)}};
+			return succeed("Read copied advisory navigation-agent guidance.", {{"schemaVersion", 1U}, {"guidance", {
+				{"identity", serializeAgent(guidance.identity)}, {"usable", guidance.IsUsable()}, {"state", std::string(ToString(guidance.state))},
+				{"outcome", std::string(ToString(guidance.outcome))}, {"reason", std::string(ToString(guidance.reason))},
+				{"configurationRevision", guidance.configurationRevision}, {"intentSequence", guidance.intentSequence},
+				{"publicationGeneration", guidance.publicationGeneration}, {"routeGeneration", guidance.routeGeneration},
+				{"observation", {{"sceneGeneration", guidance.observation.sceneGeneration}, {"sourceTransformRevision", guidance.observation.sourceTransformRevision}, {"destinationTransformRevision", guidance.observation.destinationTransformRevision}, {"terrainPublicationGeneration", guidance.observation.terrainPublicationGeneration}, {"worldPublicationGeneration", guidance.observation.worldPublicationGeneration}, {"sourceIndexRevision", guidance.observation.sourceIndexRevision}}},
+				{"destination", destination}, {"nextWaypoint", serializeLocation(guidance.nextWaypoint)}, {"remainingDistanceMetres", guidance.remainingDistanceMetres}, {"direction", {guidance.suggestedDirection.x, guidance.suggestedDirection.y, guidance.suggestedDirection.z}}}}});
+		}
 
 		if (operation == AutomationOperation("navigation.settings.get"))
 		{
@@ -5455,7 +5608,10 @@ namespace TerraEngine::Editor::Automation
 
 		if (operation == AutomationOperation("navigation.route.request"))
 		{
-			if (!hasOnlyFields(request.arguments, {"schemaVersion", "owner", "start", "destination", "profileId", "allowPartial", "maxItems"}))
+			// Route requests carry a complete identity-free profile value. Keep the
+			// allow-list aligned with the required field below so valid public
+			// requests reach NavigationSystem instead of being rejected as unknown.
+			if (!hasOnlyFields(request.arguments, {"schemaVersion", "owner", "start", "destination", "profile", "profileId", "allowPartial", "maxItems"}))
 				return reject(ErrorCategory::Validation, "navigation.route.request contains an unsupported field.");
 			if (const auto unavailable = requireWorld()) return *unavailable;
 			if (!request.arguments.contains("owner") || !request.arguments.contains("start")

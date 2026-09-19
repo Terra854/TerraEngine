@@ -135,6 +135,15 @@ namespace TerraEngine::Navigation
 		const NavigationGeometrySnapshotDescriptor& descriptor, const NavigationGeometryDocument& document)
 	{
 		NavigationGeometrySnapshotCreateResult result{};
+		// Source vertices are intentionally local floats. Validate the accompanying
+		// canonical frame before retaining them so worker code never treats an
+		// unnormalised int64 cell/offset pair as a provider coordinate.
+		const Scene::WorldCoordinateResult normalizedFrame =
+			Scene::NormalizeWorldPosition(descriptor.canonicalFrameOrigin);
+		if(!normalizedFrame.Succeeded() || normalizedFrame.position != descriptor.canonicalFrameOrigin) {
+			result.reason = "SnapshotCanonicalFrameInvalid";
+			return result;
+		}
 		NavigationGeometryBounds checkedBounds{};
 		if(!ValidateNavigationGeometryDocument(document, checkedBounds, result.reason)) return result;
 		auto snapshot = std::shared_ptr<NavigationGeometrySnapshot>(new NavigationGeometrySnapshot());

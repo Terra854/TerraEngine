@@ -1,0 +1,88 @@
+{
+	"schemaVersion": 1,
+	"fixtureId": "navigation-agent-workload-v2",
+	"generator": {
+		"algorithm": "splitmix64-v1",
+		"seed": 59001,
+		"integerEncoding": "uint64-little-endian",
+		"coordinateOrder": ["x", "y", "z"],
+		"endpointPairCount": 1000,
+		"endpointPairFormula": {
+			"domain": "perimeter-grid",
+			"gridResolution": 64,
+			"index": "i in [0, endpointPairCount)",
+			"startSlot": "(splitmix64(seed + 2*i) mod perimeterSlotCount)",
+			"destinationSlot": "(startSlot + 1 + (splitmix64(seed + 2*i + 1) mod (perimeterSlotCount - 1))) mod perimeterSlotCount",
+			"slotEnumeration": "clockwise perimeter of the 64x64 grid, starting at (0,0), without repeating corners",
+			"position": "(-62 + (124.0 / 63.0)*slot.x, 0, -62 + (124.0 / 63.0)*slot.z)",
+			"reachableConstraint": "reject and regenerate only if either endpoint is inside an obstacle; flat perimeter slots are otherwise reachable"
+		}
+	},
+	"world": {
+		"terrain": {
+			"shape": "flat",
+			"boundsMetres": {"min": [-64.0, 0.0, -64.0], "max": [64.0, 0.0, 64.0]},
+			"sourceSamplingMetres": 1.0,
+			"heightFormula": "height(x,z) = 0.0",
+			"walkableMarginMetres": 2.0
+		},
+		"staticBoxes": {
+			"count": 64,
+			"placementFormula": "row = floor(index / 8), column = index mod 8; center = (-28 + 8*column, 0, -28 + 8*row)",
+			"halfExtentsMetres": [1.5, 1.0, 1.5],
+			"rotationDegrees": 0.0,
+			"indexRange": [0, 63]
+		},
+		"movingBlocker": {
+			"count": 1,
+			"initialCenterMetres": [0.0, 0.0, 0.0],
+			"halfExtentsMetres": [1.0, 1.0, 1.0],
+			"updateFrequencyHz": 1,
+			"positionFormula": "center(t) = (24*sin(2*pi*t/32), 0, 24*cos(2*pi*t/32))",
+			"revisionFormula": "revision = floor(tSeconds)",
+			"updateCountPerSecond": 1
+		}
+	},
+	"cohorts": {
+		"direct": {"endpointPairs": 1000, "retainedRoutes": 1000},
+		"agent": {"endpointPairs": 1000, "retainedAgents": 1000, "retainedRoutes": 1000},
+		"warmupSeconds": 30,
+		"measurementSeconds": 600,
+		"destinationChangesPerSecond": 100,
+		"destinationChangeFormula": "agent = (changeIndex mod 1000); pair = (changeIndex div 1000 + agent) mod endpointPairCount",
+		"releaseRule": "retain one completed request/route pair per active intent; release replaced, stopped, arrived, failed, or invalidated pairs at the next protected publication boundary"
+	},
+	"navigationProfile": {
+		"id": "default-ground-agent",
+		"radiusMetres": 0.5,
+		"heightMetres": 2.0,
+		"maximumSlopeDegrees": 45.0,
+		"maximumStepMetres": 0.4,
+		"clearanceMetres": 0.1
+	},
+	"persistenceContract": {
+		"serializedComponent": "NavigationAgentComponent",
+		"authoredFieldsOnly": true,
+		"runtimeFieldsExcluded": ["destination", "route", "guidance", "intentSequence", "receipts"],
+		"reloadedState": "Idle",
+		"legacyComponentsRejected": ["NavigationSourceComponent", "NavigationConnectionComponent"]
+	},
+	"workers": {
+		"correctnessCounts": [1, 4, 8],
+		"qualificationCount": 8,
+		"scheduler": "TerraEngine task scheduler",
+		"workerPreparation": "only immutable captured inputs; no live scene or component storage access"
+	},
+	"machineMetadata": {
+		"requiredAtExecution": ["os", "architecture", "cpu", "ramBytes", "toolchain", "buildType", "powerMode", "commit", "settingsSha256", "fixtureSha256"],
+		"recordingRule": "values are measured or resolved by the acceptance runner; no developer-machine defaults",
+		"buildType": "RelWithDebInfo",
+		"architecture": "x64"
+	},
+	"metrics": {
+		"latencyPercentiles": [0.50, 0.95, 0.99],
+		"requiredCounters": ["admitted", "completed", "rejected", "cancelled", "retries", "memoryHighWaterBytes", "outstandingPeak"],
+		"qualificationP95LimitMilliseconds": 100,
+		"reportRejectionsSeparately": true
+	}
+}

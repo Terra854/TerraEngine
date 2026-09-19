@@ -17,6 +17,7 @@ add_executable(TerraEngine-EditorTests
 	# Navigation editor contract tests link the same deterministic support code
 	# used by the production editor; only the thin ImGui window remains UI-facing.
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Navigation/NavigationInspectorSupport.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Navigation/NavigationSceneOverlay.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Navigation/NavigationAuthoringTransactions.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/NavigationAutomationProvider.cpp
 	${TERRAENGINE_EDITOR_ANIMATION_TEST_SOURCES}
@@ -159,6 +160,11 @@ add_executable(TerraEngine-EditorTests
 	Navigation/NavigationHistoryTests.cpp
 	Navigation/NavigationDiagnosticsTests.cpp
 	Navigation/NavigationAutomationTests.cpp
+	Navigation/NavigationAgentAutomationTests.cpp
+	Navigation/NavigationOutcomeParityTests.cpp
+	Navigation/NavigationAgentAuthoringTests.cpp
+	Navigation/NavigationAgentPreviewTests.cpp
+	Navigation/NavigationAgentPersistenceParityTests.cpp
 	AssetPipeline/GltfPackageImporterTests.cpp
 	AssetPipeline/GltfMaterialTextureTests.cpp
 	AssetPipeline/GltfMaterialAssignmentTests.cpp
@@ -585,12 +591,17 @@ set_tests_properties(Editor.Navigation.Authoring PROPERTIES
 add_test(NAME Editor.Navigation.DiagnosticsAutomation COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
 set_tests_properties(Editor.Navigation.DiagnosticsAutomation PROPERTIES
 	LABELS "Editor;Navigation;Diagnostics;Automation"
-	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.Navigation.Diagnostics,Editor.Navigation.Automation,Editor.NavigationProjectLifecycle"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.Navigation.Diagnostics,Editor.Navigation.Automation,Editor.NavigationProjectLifecycle,Editor.Navigation.OutcomeParity"
 )
 add_test(NAME Editor.Navigation.Export COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
 set_tests_properties(Editor.Navigation.Export PROPERTIES
 	LABELS "Editor;Navigation;Export;Headless"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.NavigationExport,Editor.NavigationExportParity"
+)
+add_test(NAME Editor.Navigation.Agents COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Navigation.Agents PROPERTIES
+	LABELS "Editor;Navigation;Agent;Automation"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.Navigation.Agent"
 )
 
 # Editor animation tests share one durable filter so later authoring and MCP

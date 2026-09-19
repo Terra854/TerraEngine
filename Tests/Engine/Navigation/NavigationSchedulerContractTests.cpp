@@ -119,6 +119,10 @@ namespace TerraEngine::Tests
 			context.Expect(prepare->workerEligible && !prepare->mainThreadRequired
 				&& prepare->phaseKind == WorkerSystemPhaseKind::WorkerPrepare,
 				"Geometry/BVH/build/query preparation must be shared-pool worker-safe work.");
+			context.Expect(prepare->partitionPolicy == FrameWorkloadPartitionPolicy::DeterministicRanges
+				&& prepare->partitionWorkItemCount >= 1U && prepare->partitionWorkItemCount <= 4U
+				&& prepare->maximumPartitionCount <= 8U,
+				"Route preparation must retain adaptive deterministic ranges of no more than four searches and never exceed eight concurrent lanes.");
 			context.Expect(publish->mainThreadRequired && !publish->workerEligible
 				&& publish->phaseKind == WorkerSystemPhaseKind::ProtectedCommit
 				&& publish->hardBoundary,
@@ -128,6 +132,26 @@ namespace TerraEngine::Tests
 			context.Expect(!prepare->safeSubwork.empty() && !publish->protectedCommit.empty()
 				&& !publish->protectedReason.empty() && !publish->profilingLabel.empty(),
 				"Workload metadata must explain its worker work, protected commit, reason, and profiling scope.");
+		});
+
+		registry.Add("Navigation.Scheduler.RoutePartitionsRespectConfiguredSearchLimit", [](TestContext& context) {
+			auto& system = TerraEngine::Navigation::NavigationSystem::Instance();
+			system.Shutdown();
+			const auto original = system.SettingsSnapshot();
+			auto bounded = original;
+			bounded.maxConcurrentSearches = 1U;
+			const bool configured = system.ConfigureSettings(bounded);
+			system.Initialize();
+			system.SetContractTestWorkAvailable(true);
+			const auto workloads = system.DeclareFrameWorkloads(1.0F / 60.0F);
+			system.Shutdown();
+			(void)system.ConfigureSettings(original);
+			// Restore singleton settings before assertions so failure cannot affect
+			// later tests. The declaration constrains actual scheduler partitioning.
+			const auto* prepare = FindWorkload(workloads, "NavigationSystem/Navigation/Prepare");
+			context.Expect(configured && prepare && prepare->maximumPartitionCount == 1U
+				&& prepare->partitionWorkItemCount >= 1U && prepare->partitionWorkItemCount <= 4U,
+				"A single-search budget must prohibit concurrent route ranges while retaining up to four sequential searches in its one range.");
 		});
 
 		registry.Add("Navigation.Scheduler.OmitsIdleWorkWithoutRemovingItsDeclarations", [](TestContext& context) {

@@ -123,11 +123,33 @@ namespace TerraEngine::Scheduling {
 	inline constexpr const char kResourceNavigationGeometryPublications[] = "NavigationGeometryPublications";
 	inline constexpr const char kResourceNavigationRequestQueue[] = "NavigationRequestQueue";
 	inline constexpr const char kResourceNavigationPreparedCandidates[] = "NavigationPreparedCandidates";
+	// Background Recast/Detour work owns immutable packet copies until a protected
+	// completion poll either publishes or discards the result for its world epoch.
+	inline constexpr const char kResourceNavigationAsyncBuildTasks[] = "NavigationAsyncBuildTasks";
 	inline constexpr const char kResourceNavigationEligibleSourceIndex[] = "NavigationEligibleSourceIndex";
 	inline constexpr const char kResourceNavigationWorldRoot[] = "NavigationWorldRoot";
 	inline constexpr const char kResourceNavigationRouteValidity[] = "NavigationRouteValidity";
 	inline constexpr const char kResourceNavigationResults[] = "NavigationResults";
 	inline constexpr const char kResourceNavigationDiagnostics[] = "NavigationDiagnostics";
+	// Optional agents retain only copied runtime intent and guidance. Keeping their
+	// capture, worker output, and publication resources separate lets diagnostics
+	// prove that neither workers nor gameplay receive mutable ECS/provider state.
+	inline constexpr const char kResourceNavigationAgentCommands[] = "NavigationAgentCommands";
+	inline constexpr const char kResourceNavigationAgentCapture[] = "NavigationAgentCapture";
+	inline constexpr const char kResourceNavigationAgentPrepared[] = "NavigationAgentPrepared";
+	// Each fixed agent worker shard owns a separate prepared sidecar. This makes
+	// the scheduler's conflict graph reflect the disjoint vector ranges instead
+	// of serializing otherwise independent preparation chunks.
+	inline constexpr const char kResourceNavigationAgentPrepared0[] = "NavigationAgentPrepared/0";
+	inline constexpr const char kResourceNavigationAgentPrepared1[] = "NavigationAgentPrepared/1";
+	inline constexpr const char kResourceNavigationAgentPrepared2[] = "NavigationAgentPrepared/2";
+	inline constexpr const char kResourceNavigationAgentPrepared3[] = "NavigationAgentPrepared/3";
+	inline constexpr const char kResourceNavigationAgentPrepared4[] = "NavigationAgentPrepared/4";
+	inline constexpr const char kResourceNavigationAgentPrepared5[] = "NavigationAgentPrepared/5";
+	inline constexpr const char kResourceNavigationAgentPrepared6[] = "NavigationAgentPrepared/6";
+	inline constexpr const char kResourceNavigationAgentPrepared7[] = "NavigationAgentPrepared/7";
+	inline constexpr const char kResourceNavigationAgentState[] = "NavigationAgentState";
+	inline constexpr const char kResourceNavigationAgentGuidance[] = "NavigationAgentGuidance";
 	inline constexpr const char kResourcePhysicsFrameRegistry[] = "PhysicsFrameRegistry";
 	inline constexpr const char kResourcePhysicsFrameMigrations[] = "PhysicsFrameMigrations";
 	// Virtual characters publish immutable state separately from body pages, then

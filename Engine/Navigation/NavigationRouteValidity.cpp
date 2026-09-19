@@ -2,6 +2,9 @@
 #include "Navigation/NavigationRouteValidity.h"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
+#include <optional>
 
 namespace TerraEngine::Navigation
 {
@@ -19,6 +22,86 @@ namespace TerraEngine::Navigation
 			return {false, NavigationOutcome::Stale, NavigationReason::DirtyCoverage};
 		}
 		return {true, NavigationOutcome::Complete, NavigationReason::None};
+	}
+
+	bool RouteSegmentsIntersectLocalizedBounds(std::span<const NavigationLocation> points,
+		const NavigationProfile& profile, const Scene::WorldPosition& origin,
+		const NavigationGeometryBounds& affected) noexcept
+	{
+		// A missing segment, invalid profile margin, or malformed provider bound
+		// cannot prove a path clear of changed geometry. The dynamic caller treats
+		// this positive result as a conservative stale decision.
+		if(points.empty() || !std::isfinite(profile.radiusMetres)
+			|| !std::isfinite(profile.clearanceMarginMetres) || !std::isfinite(profile.heightMetres)
+			|| profile.radiusMetres < 0.0 || profile.clearanceMarginMetres < 0.0
+			|| profile.heightMetres < 0.0) return true;
+		// Check the provider's original bounds before applying clearance. An inverted
+		// box could otherwise become ordered after expansion and incorrectly certify
+		// a route as independent of malformed changed geometry.
+		if(!std::isfinite(affected.minimum.x) || !std::isfinite(affected.minimum.y)
+			|| !std::isfinite(affected.minimum.z) || !std::isfinite(affected.maximum.x)
+			|| !std::isfinite(affected.maximum.y) || !std::isfinite(affected.maximum.z)
+			|| affected.minimum.x > affected.maximum.x || affected.minimum.y > affected.maximum.y
+			|| affected.minimum.z > affected.maximum.z) return true;
+
+		const double horizontalMargin = profile.radiusMetres + profile.clearanceMarginMetres;
+		const double verticalMargin = profile.heightMetres + profile.clearanceMarginMetres;
+		const glm::dvec3 minimum{
+			static_cast<double>(affected.minimum.x) - horizontalMargin,
+			static_cast<double>(affected.minimum.y) - verticalMargin,
+			static_cast<double>(affected.minimum.z) - horizontalMargin};
+		const glm::dvec3 maximum{
+			static_cast<double>(affected.maximum.x) + horizontalMargin,
+			static_cast<double>(affected.maximum.y) + verticalMargin,
+			static_cast<double>(affected.maximum.z) + horizontalMargin};
+		if(!std::isfinite(minimum.x) || !std::isfinite(minimum.y) || !std::isfinite(minimum.z)
+			|| !std::isfinite(maximum.x) || !std::isfinite(maximum.y) || !std::isfinite(maximum.z)
+			|| minimum.x > maximum.x || minimum.y > maximum.y || minimum.z > maximum.z) return true;
+
+		const auto localize = [&origin](const NavigationLocation& point)
+			-> std::optional<glm::dvec3> {
+			const Scene::WorldLocalizationResult result = Scene::LocalizeWorldPosition(
+				point.position, origin, Scene::kTransformSpaceMaximumRelativeRadiusMetres);
+			if(!result.Succeeded() || !std::isfinite(result.offsetMetres.x)
+				|| !std::isfinite(result.offsetMetres.y) || !std::isfinite(result.offsetMetres.z)
+				|| std::abs(result.offsetMetres.x) > static_cast<double>(std::numeric_limits<float>::max())
+				|| std::abs(result.offsetMetres.y) > static_cast<double>(std::numeric_limits<float>::max())
+				|| std::abs(result.offsetMetres.z) > static_cast<double>(std::numeric_limits<float>::max())) return std::nullopt;
+			return result.offsetMetres;
+		};
+
+		const auto segmentIntersects = [&minimum, &maximum](const glm::dvec3& start,
+			const glm::dvec3& end) noexcept {
+			double entrance = 0.0;
+			double exit = 1.0;
+			for(std::size_t axis = 0U; axis < 3U; ++axis) {
+				const double startCoordinate = start[axis];
+				const double delta = end[axis] - startCoordinate;
+				if(!std::isfinite(startCoordinate) || !std::isfinite(delta)) return true;
+				if(std::abs(delta) <= std::numeric_limits<double>::epsilon()) {
+					if(startCoordinate < minimum[axis] || startCoordinate > maximum[axis]) return false;
+					continue;
+				}
+				double axisEntrance = (minimum[axis] - startCoordinate) / delta;
+				double axisExit = (maximum[axis] - startCoordinate) / delta;
+				if(axisEntrance > axisExit) std::swap(axisEntrance, axisExit);
+				entrance = std::max(entrance, axisEntrance);
+				exit = std::min(exit, axisExit);
+				if(entrance > exit) return false;
+			}
+			return true;
+		};
+
+		std::optional<glm::dvec3> previous = localize(points.front());
+		if(!previous) return true;
+		if(points.size() == 1U) return segmentIntersects(*previous, *previous);
+		for(std::size_t index = 1U; index < points.size(); ++index) {
+			const std::optional<glm::dvec3> current = localize(points[index]);
+			if(!current) return true;
+			if(segmentIntersects(*previous, *current)) return true;
+			previous = current;
+		}
+		return false;
 	}
 
 	bool NavigationBounds::Intersects(const NavigationBounds& other) const noexcept

@@ -70,6 +70,23 @@ namespace TerraEngine::EditorTests
 				"Live terrain validation must require one explicit evidence path in either supported command-line form.");
 		});
 
+		registry.Add("Editor.CommandLine.NavigationAgentValidationRequiresBothPaths", [](TestContext& context) {
+			const auto valid = Parse({"TerraEngine-Editor.exe", "--project", "C:/Fixture/project",
+				"--validate-editor-navigation-agents", "C:/Fixture/options.json", "C:/Evidence/navigation.json"});
+			const auto missingReport = Parse({"TerraEngine-Editor.exe",
+				"--validate-editor-navigation-agents", "C:/Fixture/options.json"});
+			const auto missingOptionsAndReport = Parse({"TerraEngine-Editor.exe",
+				"--validate-editor-navigation-agents"});
+			context.Expect(valid.navigationAgentValidation.has_value()
+				&& valid.navigationAgentValidation->optionsPath == std::filesystem::path("C:/Fixture/options.json")
+				&& valid.navigationAgentValidation->reportPath == std::filesystem::path("C:/Evidence/navigation.json"),
+				"Navigation validation must preserve the distinct immutable options and report paths.");
+			context.Expect(missingReport.navigationAgentValidationArgumentInvalid
+				&& missingOptionsAndReport.navigationAgentValidationArgumentInvalid
+				&& !missingReport.navigationAgentValidation && !missingOptionsAndReport.navigationAgentValidation,
+				"Missing navigation options or report operands must fail closed instead of starting an interactive editor.");
+		});
+
 		registry.Add("Editor.CommandLine.RendererBootstrapPrecedesEngineRun", [](TestContext& context) {
 			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Editor/TerraEngine-Editor/Core/EditorMain.cpp");

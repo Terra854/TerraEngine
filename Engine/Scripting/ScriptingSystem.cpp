@@ -8,6 +8,8 @@
 #include "Core/Scheduling/JobGraph.h"
 #include "DotNet/DotNetHost.h"
 #include "Profiling/ProfilerScope.h"
+#include "Navigation/Agents/NavigationAgentSystem.h"
+#include "Navigation/Integration/NavigationRuntimeSceneCapture.h"
 #include "Navigation/NavigationSystem.h"
 #include "Scene/SceneManager.h"
 #include "ThreadPool/ThreadPool.h"
@@ -1296,9 +1298,23 @@ void ScriptingSystem::FlushScriptMutationsIntoResult(ScriptingFrameResult& resul
 	}
 
 	TerraEngine::Scene::SceneMutationBatchResult mutationResult = SceneManager::Instance().ApplySceneMutations("scripting-mutation-flush");
-	(void)TerraEngine::Navigation::NavigationSystem::Instance().ObserveSceneMutationReceipts(
-		mutationResult.navigationSourceMutationReceipts);
+	// Script mutations are already committed at this hard boundary. Reuse the
+	// engine's typed source bridge so a managed collider change cannot leave an
+	// old ready root behind when normalization, staging, or dirty admission fails.
+	// The helper copies all live values here; it does not grant any worker ECS access.
+	const auto navigationObservation = TerraEngine::Navigation::ObserveCommittedNavigationSourceMutations(
+		TerraEngine::Navigation::NavigationSystem::Instance(), ObjectManager::instance(), queue, mutationResult);
+	if(navigationObservation.fenced) {
+		TERRAENGINE_LOG(LogLevel::Warning,
+			"Scripting committed navigation source mutation was fenced after incomplete bridge observation.");
+	}
 	TerraEngine::Navigation::NavigationSystem::Instance().ObserveProtectedBoundary(
+		TerraEngine::Navigation::NavigationProtectedBoundary::Scripting,
+		ObjectManager::instance().GetSceneGeneration());
+	// Script-originated mutations can detach or replace an authored agent. Pair
+	// navigation's protected observation with the agent runtime so stale guidance
+	// cannot remain usable after the committed scene state becomes visible.
+	TerraEngine::Navigation::NavigationAgentSystem::Instance().ObserveProtectedBoundary(
 		TerraEngine::Navigation::NavigationProtectedBoundary::Scripting,
 		ObjectManager::instance().GetSceneGeneration());
 	for (const TerraEngine::Scene::SceneMutationResult& entry : mutationResult.results)
@@ -1681,7 +1697,7 @@ TerraEngine::Scheduling::SystemDeclaration ScriptingSystem::SchedulerDeclaration
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
 	declaration.safeSubwork = "Native script batch preparation, immutable dispatch inputs, generation validation, deferred mutation capture, runtime-time request capture, and JSON transaction payload submission.";
-	declaration.protectedCommit = "Frame-start runtime-time publication, copied animation-event delivery, arbitrary managed callback invocation, managed lifecycle/reload hooks, immediate native/reflection API calls, and protected transaction commits.";
+	declaration.protectedCommit = "Frame-start runtime-time publication, copied animation-event delivery, arbitrary managed callback invocation, managed lifecycle/reload hooks, immediate native/reflection API calls, protected transaction commits, and copied static-collider navigation bridge observation.";
 	declaration.protectedReason = declaration.protectedCommit;
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
@@ -1762,6 +1778,8 @@ void ScriptingSystem::ClearGameplayAssembly() {
 		// Managed request owners belong to the unloading script-domain generation.
 		// Revoke them before callbacks disappear so late workers cannot publish.
 		TerraEngine::Navigation::NavigationSystem::Instance().RevokeAllOwners(
+			TerraEngine::Navigation::NavigationReason::SceneReplaced);
+		TerraEngine::Navigation::NavigationAgentSystem::Instance().RevokeAllAgents(
 			TerraEngine::Navigation::NavigationReason::SceneReplaced);
 	}
 	if (managedUnloadGameplayAssembly != nullptr) {

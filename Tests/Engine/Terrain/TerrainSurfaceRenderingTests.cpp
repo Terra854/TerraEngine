@@ -169,6 +169,21 @@ namespace TerraEngine::Tests
 				"Terrain scene material inputs must persist under schema v2 and clamp to valid metallic-roughness ranges.");
 		});
 
+		registry.Add("Terrain.Surface.DirectMaterialRetainsAuthoredPbrFactors", [](TestContext& context) {
+			const TerraEngine::Terrain::TerrainMaterialSettings settings{
+				glm::vec3(0.24F, 0.56F, 0.18F), 0.35F, 0.67F};
+			const std::unique_ptr<Material> generated = TerraEngine::Terrain::CreateTerrainMaterial(
+				ResourceManager::Instance(), settings, nullptr, nullptr);
+			context.Expect(generated
+				&& Near(generated->header.baseColorFactor[0], settings.baseColor.r)
+				&& Near(generated->header.baseColorFactor[1], settings.baseColor.g)
+				&& Near(generated->header.baseColorFactor[2], settings.baseColor.b)
+				&& Near(generated->header.baseColorFactor[3], 1.0F)
+				&& Near(generated->header.metallicFactor, settings.metallic)
+				&& Near(generated->header.roughnessFactor, settings.roughness),
+				"A terrain with no layer source must copy its sanitized authored base color, metallic, and roughness into the generated material header.");
+		});
+
 		registry.Add("Terrain.Surface.GeneratedProxyCopiesFirstLayerTextureAndMapping", [](TestContext& context) {
 			Material source{};
 			TextureBinding binding{};
@@ -189,6 +204,11 @@ namespace TerraEngine::Tests
 				ResourceManager::Instance(), {}, &source, &mapping);
 			context.Expect(generated && generated->textures.size() == 1u
 				&& generated->textures[0].textureUuid == binding.textureUuid
+				&& Near(generated->header.baseColorFactor[0], 1.0F)
+				&& Near(generated->header.baseColorFactor[1], 1.0F)
+				&& Near(generated->header.baseColorFactor[2], 1.0F)
+				&& Near(generated->header.metallicFactor, 1.0F)
+				&& Near(generated->header.roughnessFactor, 1.0F)
 				&& generated->textures[0].uvScale[0] == 0.5F
 				&& generated->textures[0].uvScale[1] == 0.6F
 				&& generated->textures[0].uvOffset[0] == 0.0625F
