@@ -104,6 +104,22 @@ add_executable(TerraEngine-EngineTests
 	Navigation/NavigationTypesTests.cpp
 	Navigation/NavigationGeometrySnapshotTests.cpp
 	Navigation/NavigationComponentTests.cpp
+	Navigation/NavigationAgentFoundationTests.cpp
+	Navigation/NavigationAgentStateTests.cpp
+	Navigation/NavigationAgentLifecycleTests.cpp
+	Navigation/NavigationAgentSchedulerTests.cpp
+	Navigation/NavigationAgentStressTests.cpp
+	Navigation/NavigationAgentPreparationTests.cpp
+	Navigation/NavigationAgentBoundaryTests.cpp
+	Navigation/NavigationAgentAdmissionTests.cpp
+	Scripting/NavigationAgentAbiTests.cpp
+	Scripting/NavigationAgentGameplayTests.cpp
+	Scripting/NavigationAgentControllerTests.cpp
+	Scripting/NavigationOutcomeParityTests.cpp
+	Scripting/NavigationDirectQueryAbiTests.cpp
+	Navigation/NavigationDirectQueryTests.cpp
+	Navigation/NavigationDynamicContractTests.cpp
+	Navigation/NavigationPublicationContractTests.cpp
 	Navigation/NavigationSchedulerContractTests.cpp
 	Navigation/NavigationQueryTests.cpp
 	Navigation/NavigationConnectionTests.cpp
@@ -121,8 +137,12 @@ add_executable(TerraEngine-EngineTests
 	Navigation/NavigationRouteValidityTests.cpp
 	Navigation/NavigationConcurrencyTests.cpp
 	Navigation/NavigationObjectIntegrationTests.cpp
+	# Prepared-route rebasing exercises protected dynamic publication boundaries.
+	Navigation/NavigationPreparedTransitionTests.cpp
+	Navigation/NavigationAsyncBuildCoordinatorTests.cpp
 	Scripting/NavigationObjectManagedTests.cpp
 	Navigation/SavedNavigationTests.cpp
+	Navigation/NavigationSavedCoverageImportTests.cpp
 	Physics/PhysicsHandleTests.cpp
 	Physics/PhysicsSettingsTests.cpp
 	Physics/PhysicsBackendBoundaryTests.cpp
@@ -576,18 +596,25 @@ set_tests_properties(Engine.Navigation.Ground PROPERTIES
 add_test(NAME Engine.Navigation.Dynamic COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.Navigation.Dynamic PROPERTIES
 	LABELS "Engine;Navigation;Dynamic;Streaming;Concurrency;Lifecycle"
-	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Navigation.Dynamic,Navigation.Streaming,Navigation.LargeWorld,Navigation.RouteValidity,Engine.NavigationLifecycle,Navigation.SavedNavigation"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Navigation.Dynamic,Navigation.Streaming,Navigation.LargeWorld,Navigation.RouteValidity,Engine.NavigationLifecycle,Navigation.SavedNavigation,Navigation.SavedCoverage"
 )
 add_test(NAME Engine.Navigation.ManagedAbi COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.Navigation.ManagedAbi PROPERTIES
 	LABELS "Engine;Navigation;Managed;ABI"
-	ENVIRONMENT "TERRAENGINE_TEST_FILTER=NavigationManaged,Navigation.ManagedAbi,Navigation.ObjectManaged"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=NavigationManaged,Navigation.ManagedAbi,Navigation.ObjectManaged,Navigation.OutcomeParity"
 )
 
 add_test(NAME Engine.Navigation.ObjectIntegration COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.Navigation.ObjectIntegration PROPERTIES
 	LABELS "Engine;Navigation;Object;Integration"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Navigation.ObjectIntegration"
+)
+
+# Agent and preserved direct-query contracts remain individually visible in CTest.
+add_test(NAME Engine.Navigation.Agents COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Navigation.Agents PROPERTIES
+	LABELS "Engine;Navigation;Agent;Concurrency;Lifecycle"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Navigation.Agent,Navigation.DirectQuery,Navigation.DynamicContract,Navigation.Publication"
 )
 
 add_test(NAME Engine.VirtualGeometryFoundation COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)

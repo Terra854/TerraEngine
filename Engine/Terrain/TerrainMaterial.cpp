@@ -197,18 +197,22 @@ namespace TerraEngine::Terrain
 		material->header.alphaMode = static_cast<std::uint32_t>(AlphaMode::Opaque);
 		material->header.flags = DoubleSided;
 		material->header.shaderCollectionId = resources.GetDefaultShaderCollectionID();
-		// Terrain layers own every authored factor. The proxy is routing state only,
-		// and neutral values guarantee factors are never applied once in preparation
-		// and again by the ordinary material path.
-		material->header.baseColorFactor[0] = 1.0F;
-		material->header.baseColorFactor[1] = 1.0F;
-		material->header.baseColorFactor[2] = 1.0F;
+		// A mounted export can render a direct terrain mesh before it has a terrain
+		// layer publication. In that no-source fallback, carry the scene component's
+		// already-sanitized PBR values in the ordinary TMAT header. When a real
+		// layer source exists, keep the header neutral: terrain layer preparation
+		// applies those factors itself, and multiplying them here would tint layers
+		// twice.
+		const bool usesTerrainLayerSource = surfaceSource != nullptr;
+		material->header.baseColorFactor[0] = usesTerrainLayerSource ? 1.0F : settings.baseColor.r;
+		material->header.baseColorFactor[1] = usesTerrainLayerSource ? 1.0F : settings.baseColor.g;
+		material->header.baseColorFactor[2] = usesTerrainLayerSource ? 1.0F : settings.baseColor.b;
 		material->header.baseColorFactor[3] = 1.0F;
 		material->header.emissiveFactor[0] = 0.0F;
 		material->header.emissiveFactor[1] = 0.0F;
 		material->header.emissiveFactor[2] = 0.0F;
-		material->header.metallicFactor = 1.0F;
-		material->header.roughnessFactor = 1.0F;
+		material->header.metallicFactor = usesTerrainLayerSource ? 1.0F : settings.metallic;
+		material->header.roughnessFactor = usesTerrainLayerSource ? 1.0F : settings.roughness;
 		material->header.normalScale = 1.0F;
 		material->header.occlusionStrength = 1.0F;
 		material->shaderCollectionId = material->header.shaderCollectionId;

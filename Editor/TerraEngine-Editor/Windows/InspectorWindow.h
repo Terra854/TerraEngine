@@ -60,6 +60,7 @@ private:
 	void DrawColliderSetInspector(const std::vector<entt::entity>& objects);
 	void DrawConstraintSetInspector(const std::vector<entt::entity>& objects);
 	void DrawCharacterControllerInspector(const std::vector<entt::entity>& objects);
+	void DrawNavigationAgentInspector(const std::vector<entt::entity>& objects);
 	void DrawPhysicsRuntimeState(entt::entity obj);
 	void DrawAnimatorInspector(entt::entity obj, const std::vector<entt::entity>& selectedObjects);
 	TerraEngine::UUID ResolveAnimatorStartClipAssetId(
@@ -95,6 +96,10 @@ private:
 	std::vector<uint8_t> m_MaterialDataBuffer;
 	std::string m_LastScriptMessage;
 	bool m_LastScriptMessageIsError = false;
+	// A staged agent candidate can be rejected before it reaches the protected
+	// transaction boundary. Keep that explanation visible across GUI frames so
+	// a narrow inspector does not turn an invalid edit into a silent no-op.
+	std::string m_NavigationAgentValidationMessage;
 	// The editor owns intent, not a provider/world pointer.  The editor lifecycle
 	// coordinator drains these at its declared protected authoring boundary.
 	TerraEngine::Editor::PhysicsRebuildIntentQueue m_PhysicsRebuildIntents;

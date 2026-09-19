@@ -126,6 +126,11 @@ namespace TerraEngine::Scene {
 		NavigationSourceMutationBounds newBounds{};
 		std::uint64_t expectedSourceRevision = 0U;
 		std::uint64_t committedSourceRevision = 0U;
+		// The queue assigns this only after the owning transaction commits. Source
+		// content revisions are hashes and must never be used as ordering tokens;
+		// this monotonic receipt sequence is the protected ordering evidence for a
+		// dynamic navigation publication.
+		std::uint64_t committedChangeSequence = 0U;
 		std::uint64_t physicalReadyRevision = 0U;
 		bool oldEnabled = false;
 		bool newEnabled = false;
@@ -186,6 +191,11 @@ namespace TerraEngine::Scene {
 		void EnqueueTransaction(Transaction transaction);
 		void EnqueuePublicationGroup(TransactionPublicationGroup group);
 		[[nodiscard]] bool EnqueueNavigationSourceMutationIntent(NavigationSourceMutationIntent intent);
+		// Protected scene bridges that derive a source receipt from a committed typed
+		// transform use this allocator after the transaction result is known. It is
+		// intentionally process-lifetime monotonic, including across Clear(), so a
+		// replaced object lifetime cannot reuse an old dynamic-publication order.
+		[[nodiscard]] std::uint64_t AllocateCommittedNavigationSourceChangeSequence();
 		TransactionResult PreflightTransaction(const Transaction& transaction, ObjectManager& objects) const;
 		bool CancelTransaction(const std::string& transactionId);
 		bool CancelPublicationGroup(const std::string& groupId);
@@ -214,6 +224,10 @@ namespace TerraEngine::Scene {
 		std::vector<Transaction> transactions;
 		std::vector<TransactionPublicationGroup> publicationGroups;
 		std::vector<NavigationSourceMutationIntent> navigationSourceMutationIntents;
+		// Keep this process-lifetime counter across Clear(). A scene may replace an
+		// object lifetime while navigation still drains old receipts, so resetting
+		// it could make an old source update alias a newer committed change.
+		std::uint64_t nextNavigationSourceChangeSequence = 1U;
 		std::vector<EditorTransactionCompletion> completedEditorTransactions;
 		std::vector<NavigationSourceMutationReceipt> completedNavigationSourceMutationReceipts;
 		TransactionDiagnostics transactionDiagnostics;

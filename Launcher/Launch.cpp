@@ -3,10 +3,16 @@
 // This file serves as the executable entry point for the TerraEngine launcher, responsible for initializing the core engine and bootstrapping export-mode resources. It handles executable path resolution, configures the initial resource mounts, and manages the handoff to the MainEngine runtime loop.
 
 #include <array>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <filesystem>
 #include <exception>
+#include <fstream>
 #include <iostream>
+#include <limits>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -33,6 +39,10 @@
 #include "Runtime/ContentMount/ContentMount.h"
 #include "Runtime/ExportStartupCoordinator.h"
 #include "Scripting/ScriptingSystem.h"
+#include "Navigation/NavigationSettings.h"
+#include "Navigation/NavigationSystem.h"
+#include "NavigationApplicationValidation.h"
+#include "ThreadPool/ThreadPool.h"
 
 namespace {
 namespace fs = std::filesystem;
@@ -75,6 +85,170 @@ bool HasArgument(int argc, char* argv[], const char* expectedArgument) {
 	}
 
 	return false;
+}
+
+struct NavigationValidationCommand final {
+	fs::path optionsPath;
+	fs::path reportPath;
+};
+
+std::optional<NavigationValidationCommand> FindNavigationValidationCommand(int argc, char* argv[]) {
+	for(int index = 1; index < argc; ++index) {
+		if(argv[index] == nullptr || std::strcmp(argv[index], "--validate-export-navigation-agents") != 0) continue;
+		if(index + 2 >= argc || argv[index + 1] == nullptr || argv[index + 2] == nullptr) return std::nullopt;
+		return NavigationValidationCommand{fs::path(argv[index + 1]), fs::path(argv[index + 2])};
+	}
+	return std::nullopt;
+}
+
+nlohmann::json ReadNavigationValidationOptions(const fs::path& path) {
+	std::ifstream input(path, std::ios::binary);
+	if(!input) throw std::runtime_error("Could not open navigation validation options: " + path.string());
+	nlohmann::json options;
+	input >> options;
+	if(!options.is_object()) throw std::runtime_error("Navigation validation options must be a JSON object.");
+	return options;
+}
+
+bool WriteNavigationValidationReport(const fs::path& path, const nlohmann::json& report) {
+	std::error_code error;
+	if(!path.parent_path().empty()) fs::create_directories(path.parent_path(), error);
+	if(error) return false;
+	std::ofstream output(path, std::ios::binary | std::ios::trunc);
+	if(!output) return false;
+	output << report.dump(2);
+	output.flush();
+	return output.good();
+}
+
+std::optional<std::uint32_t> ReadNavigationValidationWorkerCount(const nlohmann::json& options) {
+	constexpr const char* key = "requiredWorkerCount";
+	const auto found = options.find(key);
+	if(found == options.end()) return std::nullopt;
+	if(!found->is_number_unsigned() || found->get<std::uint64_t>() == 0U
+		|| found->get<std::uint64_t>() > std::numeric_limits<std::uint32_t>::max()) {
+		throw std::runtime_error(std::string("Navigation validation ") + key + " must be a positive unsigned 32-bit integer.");
+	}
+	return static_cast<std::uint32_t>(found->get<std::uint64_t>());
+}
+
+// Keep this narrow enum in the validation host instead of accepting an arbitrary
+// settings object. Gameplay exports never receive a route-budget tuning switch.
+enum class ManagedOutcomeProbe : std::uint8_t {
+	None,
+	Partial,
+	Budget
+};
+
+ManagedOutcomeProbe ReadManagedOutcomeProbe(const nlohmann::json& options) {
+	const auto found = options.find("managedOutcomeProbe");
+	if(found == options.end()) return ManagedOutcomeProbe::None;
+	if(!found->is_string()) {
+		throw std::runtime_error("Navigation validation managedOutcomeProbe must be 'partial' or 'budget'.");
+	}
+	const std::string& value = found->get_ref<const std::string&>();
+	if(value == "partial") return ManagedOutcomeProbe::Partial;
+	if(value == "budget") return ManagedOutcomeProbe::Budget;
+	throw std::runtime_error("Navigation validation managedOutcomeProbe must be 'partial' or 'budget'.");
+}
+
+void ConfigureNavigationValidationBeforeEngineInitialization(const nlohmann::json& options) {
+	if(const std::optional<std::uint32_t> workers = ReadNavigationValidationWorkerCount(options)) {
+		const std::string value = std::to_string(*workers);
+#ifdef _WIN32
+		if(_putenv_s("TERRAENGINE_THREADPOOL_WORKERS", value.c_str()) != 0)
+			throw std::runtime_error("Could not configure TERRAENGINE_THREADPOOL_WORKERS for navigation validation.");
+#else
+		if(setenv("TERRAENGINE_THREADPOOL_WORKERS", value.c_str(), 1) != 0)
+			throw std::runtime_error("Could not configure TERRAENGINE_THREADPOOL_WORKERS for navigation validation.");
+#endif
+	}
+
+	// The workload fixture qualifies a 1,000-agent cohort. Keep the documented
+	// default unchanged, but raise this dedicated pre-init validation host to the
+	// explicit 4,096 request ceiling before NavigationSystem captures settings.
+	TerraEngine::Navigation::NavigationSettings settings = TerraEngine::Navigation::NavigationSettings::Defaults();
+	settings.maxAdmittedRequests = 4096U;
+	if(ReadManagedOutcomeProbe(options) == ManagedOutcomeProbe::Budget) {
+		// The one-point cap is a disposable live-fixture preset. It is never
+		// serialized into a project or exposed through the managed/gameplay API.
+		settings.maxRoutePoints = 1U;
+	}
+	if(!TerraEngine::Navigation::NavigationSystem::Instance().ConfigureSettings(settings))
+		throw std::runtime_error("Navigation validation could not configure its pre-initialization request capacity.");
+}
+
+int RunExportNavigationAgentValidation(const NavigationValidationCommand& command, bool headlessCpuFallback) {
+	nlohmann::json report = {{"succeeded", false}, {"orderlyShutdown", false}};
+	Engine validationEngine;
+	bool initialized = false;
+	try {
+		nlohmann::json options = ReadNavigationValidationOptions(command.optionsPath);
+		if(ReadManagedOutcomeProbe(options) != ManagedOutcomeProbe::None) {
+			// The C# fixture is deliberately verified in an interactive editor Play
+			// session. Export validation owns a native workload loop and cannot make
+			// an honest MCP/UI observation of its managed log markers.
+			throw std::runtime_error("managedOutcomeProbe is editor-only; launch the installed editor validation Play workflow instead.");
+		}
+		ConfigureNavigationValidationBeforeEngineInitialization(options);
+		options["executionMode"] = "export";
+		options["headlessCpuFallback"] = headlessCpuFallback;
+		// A non-headless export must prove a real rendered presentation; the core
+		// helper reads renderer statistics rather than trusting this host flag.
+		options["requireRenderedPresentation"] = !headlessCpuFallback;
+		if(headlessCpuFallback) validationEngine.ConfigureHeadlessCpuFallback();
+		validationEngine.Initialize();
+		initialized = true;
+		// Export mode owns its engine updates, so keep advancing bounded batches
+		// until the shared validator reaches a terminal state. Editor Play Mode
+		// deliberately does only one observation from each normal editor frame.
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(20);
+		do {
+			report = TerraEngine::Navigation::Validation::RunNavigationApplicationValidation(validationEngine, options);
+			if(report.value("pending", false) && std::chrono::steady_clock::now() >= deadline) {
+				report["succeeded"] = false;
+				report["pending"] = false;
+				report["failure"] = "The export host exceeded its bounded navigation validation deadline.";
+			}
+		} while(report.value("pending", false));
+		validationEngine.Shutdown();
+		initialized = false;
+		report["orderlyShutdown"] = true;
+	}
+	catch(const std::exception& exception) {
+		if(initialized) {
+			try { validationEngine.Shutdown(); report["orderlyShutdown"] = true; }
+			catch(...) { report["orderlyShutdown"] = false; }
+		}
+		else {
+			// Scheduler validation can fail before Engine::Initialize enters its
+			// system-unwind block, but after starting the worker pool. Join those
+			// workers before returning a failed report instead of terminating while
+			// DLL statics still own running threads. This is not a successful run.
+			ThreadPool::instance().shutdown();
+		}
+		report["succeeded"] = false;
+		report["diagnostic"] = std::string("Export navigation validation failed: ") + exception.what();
+	}
+	// Option validation can fail before the shared helper constructs its normal
+	// report. Keep the installed runner's required evidence keys explicit there.
+	if(!report.contains("actualWorkerCount")) report["actualWorkerCount"] = 0U;
+	if(!report.contains("executedCaseCount")) report["executedCaseCount"] = 0U;
+	// Make the host-only pre-init capacity explicit in acceptance evidence. The
+	// core report supplies the validated population, including smaller cohorts.
+	report["configuredMaxAdmittedRequests"] = 4096U;
+	report["configuredAgentPopulation"] = report.value("population", 0U);
+	if(!WriteNavigationValidationReport(command.reportPath, report)) {
+		std::cerr << "[Launcher] Could not write navigation validation report: " << command.reportPath << std::endl;
+		return 1;
+	}
+	const bool succeeded = report.value("succeeded", false) && report.value("orderlyShutdown", false)
+		&& !report.value("pending", false);
+	// Runtime validation records its actionable reason in failure; startup
+	// exceptions use diagnostic. Preserve either instead of hiding runtime errors.
+	if(!succeeded) std::cerr << "[Launcher] Export navigation validation failed: "
+		<< report.value("diagnostic", report.value("failure", std::string("unknown failure"))) << std::endl;
+	return succeeded ? 0 : 1;
 }
 
 // ConfigureExportBootstrap is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -201,6 +375,19 @@ int main(int argc, char *argv[])
 			}
 			std::cout << "[Launcher] Export physics invariant validation succeeded." << std::endl;
 			return 0;
+		}
+
+		if (HasArgument(argc, argv, "--validate-export-navigation-agents")) {
+			const std::optional<NavigationValidationCommand> command = FindNavigationValidationCommand(argc, argv);
+			if(!command) {
+				std::cerr << "[Launcher] --validate-export-navigation-agents requires <options-json> <report-json>." << std::endl;
+				return 1;
+			}
+			// Configure the worker environment and navigation request capacity before
+			// Initialize. This runs the installed package through its normal engine
+			// lifecycle, never through a direct NavigationSystem test shortcut.
+			return RunExportNavigationAgentValidation(*command,
+				HasArgument(argc, argv, "--headless-cpu-fallback"));
 		}
 
 		if (HasArgument(argc, argv, "--validate-export-animation-parity")) {

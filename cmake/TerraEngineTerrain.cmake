@@ -87,6 +87,8 @@ endforeach()
 set(_TERRAENGINE_TERRAIN_PHYSICS_FILES
 	Engine/Physics/Terrain/TerrainCollisionSystem.cpp
 	Engine/Physics/Terrain/TerrainCollisionSystem.h
+	Engine/Physics/Terrain/TerrainHeightFieldActiveRect.cpp
+	Engine/Physics/Terrain/TerrainHeightFieldActiveRect.h
 )
 foreach(_terrain_file IN LISTS _TERRAENGINE_TERRAIN_PHYSICS_FILES)
 	if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_terrain_file}")

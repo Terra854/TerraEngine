@@ -244,6 +244,15 @@ namespace TerraEngine::Scene {
 		return false;
 	}
 
+	std::uint64_t SceneMutationQueue::AllocateCommittedNavigationSourceChangeSequence()
+	{
+		std::scoped_lock lock(requestsMutex);
+		// Zero is the invalid sentinel. Failing closed at wrap preserves ordering
+		// rather than allowing a live navigation world to observe an aliased update.
+		if(nextNavigationSourceChangeSequence == 0U) return 0U;
+		return nextNavigationSourceChangeSequence++;
+	}
+
 	TransactionResult SceneMutationQueue::PreflightTransaction(const Transaction& transaction, ObjectManager& objects) const
 	{
 		return TerraEngine::Scene::PreflightTransaction(objects, transaction);
@@ -831,9 +840,24 @@ namespace TerraEngine::Scene {
 				receipt.intent = std::move(intent);
 				receipt.transactionStatus = decision->second;
 				receipt.accepted = decision->second == TransactionStatus::Committed;
+				if(receipt.accepted) {
+					// Content revisions identify a copied mesh/terrain value and may be
+					// hashes, so they are not a safe ordering relation. Stamp one queue
+					// sequence only after the scene transaction is irrevocably visible.
+					// Refuse the astronomically unlikely wrap instead of reusing an old
+					// sequence across a retained navigation lifetime.
+					if(nextNavigationSourceChangeSequence == 0U) {
+						receipt.accepted = false;
+						receipt.transactionStatus = TransactionStatus::Rejected;
+						receipt.message = "Navigation source change sequence is exhausted.";
+					} else {
+						receipt.intent.committedChangeSequence = nextNavigationSourceChangeSequence++;
+					}
+				}
 				receipt.message = receipt.accepted
 					? "Navigation source change committed with its scene transaction."
-					: "Navigation source change rejected with its scene transaction.";
+					: (receipt.message.empty() ? "Navigation source change rejected with its scene transaction."
+						: receipt.message);
 				batch.navigationSourceMutationReceipts.push_back(receipt);
 				completedNavigationSourceMutationReceipts.push_back(std::move(receipt));
 			}

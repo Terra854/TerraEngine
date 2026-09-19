@@ -2,6 +2,7 @@
 
 #include "../TestHarness.h"
 
+#include "Editor/TerraEngine-Editor/Automation/EditorAutomationService.h"
 #include "EditorAutomationJobService.h"
 
 #include <filesystem>
@@ -36,7 +37,10 @@ namespace TerraEngine::EditorTests
 			if(source.empty()) return;
 			for(const std::string_view command : {"navigation.settings.get", "navigation.diagnostics.get",
 				"navigation.route.request", "navigation.route.read", "navigation.route.cancel",
-				"navigation.cache.prepare", "navigation.cache.status"})
+				"navigation.cache.prepare", "navigation.cache.status", "navigation.agent.bind",
+				"navigation.agent.destination.location", "navigation.agent.destination.object",
+				"navigation.agent.stop", "navigation.agent.receipt", "navigation.agent.status",
+				"navigation.agent.guidance"})
 				context.Expect(source.find(command) != std::string::npos, "Every navigation capability must have a stable provider command.");
 			context.Expect(source.find("schemaVersion") != std::string::npos && source.find("maxItems") != std::string::npos,
 				"Navigation responses must identify their schema version and bounded array policy.");
@@ -99,6 +103,28 @@ namespace TerraEngine::EditorTests
 				"Runtime route automation must expose request and cancellation as separate typed operations.");
 		});
 
+		registry.Add("Editor.Navigation.AgentAutomationCapabilitiesDeclareReadAndDeferredWriteAuthority", [](TestContext& context) {
+			EditorAutomationService service;
+			const auto bind = service.GetRegistry().Find("navigation.agent.bind", 1U);
+			const auto destination = service.GetRegistry().Find("navigation.agent.destination.location", 1U);
+			const auto stop = service.GetRegistry().Find("navigation.agent.stop", 1U);
+			const auto guidance = service.GetRegistry().Find("navigation.agent.guidance", 1U);
+			context.Expect(bind.has_value() && destination.has_value() && stop.has_value() && guidance.has_value(),
+				"Agent tooling must be discoverable through the editor's registered provider, not merely named in source.");
+			if(bind && destination && stop && guidance)
+			{
+				context.Expect(bind->descriptor.permission == AutomationPermission::Read
+					&& bind->descriptor.mutationMode == MutationMode::ReadOnly
+					&& guidance->descriptor.permission == AutomationPermission::Read
+					&& destination->descriptor.permission == AutomationPermission::ProjectWrite
+					&& stop->descriptor.permission == AutomationPermission::ProjectWrite,
+					"Published binding and guidance are read-only, while typed intent commands declare deferred project-write authority.");
+				context.Expect(destination->descriptor.execution.workerPreparation && destination->descriptor.execution.protectedCommit
+					&& stop->descriptor.execution.workerPreparation && stop->descriptor.execution.protectedCommit,
+					"Agent commands must advertise worker-safe validation and a protected runtime admission boundary.");
+			}
+		});
+
 		registry.Add("Editor.Navigation.AutomationUsesTypedNavigationResolver", [](TestContext& context) {
 			const std::string source = ReadSource("Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp");
 			context.Expect(!source.empty(), "Navigation automation must have a concrete editor service handler.");
@@ -111,6 +137,13 @@ namespace TerraEngine::EditorTests
 				"Navigation provider registration must not use the generic resolver.");
 			context.Expect(source.find("NavigationSystem::Instance") != std::string::npos,
 				"Route operations must use the provider-neutral NavigationSystem boundary.");
+			context.Expect(source.find("NavigationAgentSystem::Instance") != std::string::npos
+				&& source.find("QueueStop") != std::string::npos
+				&& source.find("ReadGuidance") != std::string::npos,
+				"Agent automation must call the typed runtime facade for deferred commands and copied reads.");
+			context.Expect(source.find("ResolvePublishedAgent") != std::string::npos
+				&& source.find("FindIdentity(ObjectManager") == std::string::npos,
+				"Read-only agent binding must resolve only the published identity snapshot, never scan or create an attachment through live ECS.");
 			context.Expect(source.find("DeserializeNavigationProfile") != std::string::npos,
 				"Route automation must validate and copy the complete identity-free profile value.");
 		});

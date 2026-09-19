@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <tuple>
@@ -12,11 +14,19 @@ namespace TerraEngine::Navigation {
 	namespace {
 		constexpr std::array<std::byte, 8U> kMagic{
 			std::byte{'T'}, std::byte{'E'}, std::byte{'N'}, std::byte{'A'},
+			std::byte{'V'}, std::byte{'0'}, std::byte{'0'}, std::byte{'2'}};
+		constexpr std::array<std::byte, 8U> kVersionOneMagic{
+			std::byte{'T'}, std::byte{'E'}, std::byte{'N'}, std::byte{'A'},
 			std::byte{'V'}, std::byte{'0'}, std::byte{'0'}, std::byte{'1'}};
 		constexpr std::size_t kHeaderBytes = 64U;
 		constexpr std::size_t kIndexEntryBytes = 64U;
 		constexpr std::size_t kChecksumOffset = 56U;
 		constexpr std::size_t kMaximumBackendAbiBytes = 256U;
+		constexpr std::size_t kChunkMetadataBytes = 40U;
+		constexpr std::uint32_t kEmptyTileFlag = 1U << 0U;
+		constexpr std::uint32_t kSupportCompleteFlag = 1U << 1U;
+		constexpr std::uint32_t kClearanceCompleteFlag = 1U << 2U;
+		constexpr std::uint32_t kKnownTileFlags = kEmptyTileFlag | kSupportCompleteFlag | kClearanceCompleteFlag;
 
 		[[nodiscard]] bool CheckedAdd(std::size_t first, std::size_t second, std::size_t& result) noexcept {
 			if(second > std::numeric_limits<std::size_t>::max() - first) return false;
@@ -40,6 +50,10 @@ namespace TerraEngine::Navigation {
 				bytes[offset + index] = static_cast<std::byte>((value >> (index * 8U)) & 0xffU);
 		}
 
+		void WriteF32(std::vector<std::byte>& bytes, std::size_t offset, float value) {
+			WriteU32(bytes, offset, std::bit_cast<std::uint32_t>(value));
+		}
+
 		[[nodiscard]] bool ReadU32(std::span<const std::byte> bytes, std::size_t offset, std::uint32_t& value) noexcept {
 			if(offset > bytes.size() || bytes.size() - offset < 4U) return false;
 			value = 0U;
@@ -56,6 +70,13 @@ namespace TerraEngine::Navigation {
 			return true;
 		}
 
+		[[nodiscard]] bool ReadF32(std::span<const std::byte> bytes, std::size_t offset, float& value) noexcept {
+			std::uint32_t encoded = 0U;
+			if(!ReadU32(bytes, offset, encoded)) return false;
+			value = std::bit_cast<float>(encoded);
+			return true;
+		}
+
 		[[nodiscard]] std::uint64_t HashBytes(std::span<const std::byte> bytes) noexcept {
 			std::uint64_t hash = 14695981039346656037ULL;
 			for(const std::byte value : bytes) {
@@ -68,6 +89,95 @@ namespace TerraEngine::Navigation {
 		[[nodiscard]] bool LessChunk(const SavedNavigationChunk& left, const SavedNavigationChunk& right) noexcept {
 			return std::tie(left.key.profileBuildKey, left.key.verticalBand, left.key.shardZ, left.key.shardX)
 				< std::tie(right.key.profileBuildKey, right.key.verticalBand, right.key.shardZ, right.key.shardX);
+		}
+
+		[[nodiscard]] bool IsValidChunk(const SavedNavigationChunk& chunk) noexcept {
+			// A cache cannot stand in for fresh coverage until it proves both support
+			// and clearance. An empty tile is authoritative only after that work.
+			return chunk.generation != 0U
+				&& !chunk.sourceFingerprints.empty()
+				&& chunk.sourceFingerprints.size() <= kMaximumSavedNavigationSourceFingerprints
+				&& std::is_sorted(chunk.sourceFingerprints.begin(), chunk.sourceFingerprints.end())
+				&& std::isfinite(chunk.bounds.minimum.x) && std::isfinite(chunk.bounds.minimum.y)
+				&& std::isfinite(chunk.bounds.minimum.z) && std::isfinite(chunk.bounds.maximum.x)
+				&& std::isfinite(chunk.bounds.maximum.y) && std::isfinite(chunk.bounds.maximum.z)
+				&& chunk.bounds.minimum.x <= chunk.bounds.maximum.x
+				&& chunk.bounds.minimum.y <= chunk.bounds.maximum.y
+				&& chunk.bounds.minimum.z <= chunk.bounds.maximum.z
+				&& chunk.supportComplete && chunk.clearanceComplete
+				&& (chunk.empty ? chunk.bytes.empty() : !chunk.bytes.empty())
+				&& chunk.checksum == HashBytes(chunk.bytes);
+		}
+
+		[[nodiscard]] bool EncodeChunkPayload(const SavedNavigationChunk& chunk, std::vector<std::byte>& payload) {
+			if(!IsValidChunk(chunk)) return false;
+			std::size_t fingerprintBytes = 0U;
+			std::size_t payloadBytes = 0U;
+			if(!CheckedMultiply(chunk.sourceFingerprints.size(), sizeof(std::uint64_t), fingerprintBytes)
+				|| !CheckedAdd(kChunkMetadataBytes, fingerprintBytes, payloadBytes)
+				|| !CheckedAdd(payloadBytes, chunk.bytes.size(), payloadBytes)
+				|| payloadBytes > kMaximumSavedNavigationBytes) return false;
+			payload.assign(payloadBytes, std::byte{0});
+			std::uint32_t flags = kSupportCompleteFlag | kClearanceCompleteFlag;
+			if(chunk.empty) flags |= kEmptyTileFlag;
+			WriteU32(payload, 0U, flags);
+			WriteU32(payload, 4U, static_cast<std::uint32_t>(chunk.sourceFingerprints.size()));
+			WriteU64(payload, 8U, chunk.checksum);
+			WriteF32(payload, 16U, chunk.bounds.minimum.x);
+			WriteF32(payload, 20U, chunk.bounds.minimum.y);
+			WriteF32(payload, 24U, chunk.bounds.minimum.z);
+			WriteF32(payload, 28U, chunk.bounds.maximum.x);
+			WriteF32(payload, 32U, chunk.bounds.maximum.y);
+			WriteF32(payload, 36U, chunk.bounds.maximum.z);
+			std::size_t cursor = kChunkMetadataBytes;
+			for(const std::uint64_t fingerprint : chunk.sourceFingerprints) {
+				WriteU64(payload, cursor, fingerprint);
+				cursor += sizeof(fingerprint);
+			}
+			std::copy(chunk.bytes.begin(), chunk.bytes.end(), payload.begin() + static_cast<std::ptrdiff_t>(cursor));
+			return true;
+		}
+
+		[[nodiscard]] bool DecodeChunkPayload(
+			std::span<const std::byte> payload, SavedNavigationChunk& chunk, std::string& reason) {
+			std::uint32_t flags = 0U;
+			std::uint32_t fingerprintCount = 0U;
+			std::uint64_t checksum = 0U;
+			if(payload.size() < kChunkMetadataBytes || !ReadU32(payload, 0U, flags)
+				|| !ReadU32(payload, 4U, fingerprintCount) || !ReadU64(payload, 8U, checksum)
+				|| !ReadF32(payload, 16U, chunk.bounds.minimum.x) || !ReadF32(payload, 20U, chunk.bounds.minimum.y)
+				|| !ReadF32(payload, 24U, chunk.bounds.minimum.z) || !ReadF32(payload, 28U, chunk.bounds.maximum.x)
+				|| !ReadF32(payload, 32U, chunk.bounds.maximum.y) || !ReadF32(payload, 36U, chunk.bounds.maximum.z)
+				|| (flags & ~kKnownTileFlags) != 0U
+				|| fingerprintCount > kMaximumSavedNavigationSourceFingerprints) {
+				reason = "SavedNavigationChunkMetadataMalformed";
+				return false;
+			}
+			std::size_t fingerprintBytes = 0U;
+			std::size_t byteOffset = 0U;
+			if(!CheckedMultiply(fingerprintCount, sizeof(std::uint64_t), fingerprintBytes)
+				|| !CheckedAdd(kChunkMetadataBytes, fingerprintBytes, byteOffset)
+				|| byteOffset > payload.size()) {
+				reason = "SavedNavigationChunkMetadataOutOfBounds";
+				return false;
+			}
+			chunk.sourceFingerprints.resize(fingerprintCount);
+			for(std::size_t index = 0U; index < chunk.sourceFingerprints.size(); ++index) {
+				if(!ReadU64(payload, kChunkMetadataBytes + index * sizeof(std::uint64_t), chunk.sourceFingerprints[index])) {
+					reason = "SavedNavigationChunkFingerprintOutOfBounds";
+					return false;
+				}
+			}
+			chunk.bytes.assign(payload.begin() + static_cast<std::ptrdiff_t>(byteOffset), payload.end());
+			chunk.checksum = checksum;
+			chunk.empty = (flags & kEmptyTileFlag) != 0U;
+			chunk.supportComplete = (flags & kSupportCompleteFlag) != 0U;
+			chunk.clearanceComplete = (flags & kClearanceCompleteFlag) != 0U;
+			if(!IsValidChunk(chunk)) {
+				reason = "SavedNavigationChunkMetadataIncompatible";
+				return false;
+			}
+			return true;
 		}
 	}
 
@@ -84,8 +194,10 @@ namespace TerraEngine::Navigation {
 
 		std::vector<SavedNavigationChunk> ordered(chunks.begin(), chunks.end());
 		std::sort(ordered.begin(), ordered.end(), LessChunk);
+		std::vector<std::vector<std::byte>> payloads;
+		payloads.reserve(ordered.size());
 		for(std::size_t index = 0U; index < ordered.size(); ++index) {
-			if(ordered[index].generation == 0U || ordered[index].bytes.empty()) {
+			if(!EncodeChunkPayload(ordered[index], payloads.emplace_back())) {
 				result.reason = "SavedNavigationInvalidChunk";
 				return result;
 			}
@@ -106,9 +218,8 @@ namespace TerraEngine::Navigation {
 			return result;
 		}
 		totalBytes = payloadOffset;
-		for(const SavedNavigationChunk& chunk : ordered) {
-			if(!CheckedAdd(totalBytes, chunk.bytes.size(), totalBytes)
-				|| totalBytes > kMaximumSavedNavigationBytes) {
+		for(const std::vector<std::byte>& payload : payloads) {
+			if(!CheckedAdd(totalBytes, payload.size(), totalBytes) || totalBytes > kMaximumSavedNavigationBytes) {
 				result.reason = "SavedNavigationCapacityExceeded";
 				return result;
 			}
@@ -129,6 +240,7 @@ namespace TerraEngine::Navigation {
 		std::size_t payloadCursor = payloadOffset;
 		for(std::size_t index = 0U; index < ordered.size(); ++index) {
 			const SavedNavigationChunk& chunk = ordered[index];
+			const std::vector<std::byte>& payload = payloads[index];
 			const std::size_t entry = indexOffset + index * kIndexEntryBytes;
 			WriteU64(result.bytes, entry, static_cast<std::uint64_t>(chunk.key.shardX));
 			WriteU64(result.bytes, entry + 8U, static_cast<std::uint64_t>(chunk.key.shardZ));
@@ -136,10 +248,10 @@ namespace TerraEngine::Navigation {
 			WriteU64(result.bytes, entry + 24U, chunk.key.profileBuildKey);
 			WriteU64(result.bytes, entry + 32U, chunk.generation);
 			WriteU64(result.bytes, entry + 40U, payloadCursor);
-			WriteU64(result.bytes, entry + 48U, chunk.bytes.size());
-			WriteU64(result.bytes, entry + 56U, HashBytes(chunk.bytes));
-			std::copy(chunk.bytes.begin(), chunk.bytes.end(), result.bytes.begin() + static_cast<std::ptrdiff_t>(payloadCursor));
-			payloadCursor += chunk.bytes.size();
+			WriteU64(result.bytes, entry + 48U, payload.size());
+			WriteU64(result.bytes, entry + 56U, HashBytes(payload));
+			std::copy(payload.begin(), payload.end(), result.bytes.begin() + static_cast<std::ptrdiff_t>(payloadCursor));
+			payloadCursor += payload.size();
 		}
 		result.checksum = HashBytes(result.bytes);
 		WriteU64(result.bytes, kChecksumOffset, result.checksum);
@@ -151,8 +263,17 @@ namespace TerraEngine::Navigation {
 		std::span<const std::byte> bytes,
 		const SavedNavigationDescriptor& expected) {
 		SavedNavigationReadResult result{};
-		if(bytes.size() < kHeaderBytes || bytes.size() > kMaximumSavedNavigationBytes
-			|| !std::equal(kMagic.begin(), kMagic.end(), bytes.begin())) {
+		if(bytes.size() < kHeaderBytes || bytes.size() > kMaximumSavedNavigationBytes) {
+			result.reason = "SavedNavigationInvalidHeader";
+			return result;
+		}
+		if(std::equal(kVersionOneMagic.begin(), kVersionOneMagic.end(), bytes.begin())) {
+			// V1 lacked empty/complete/source metadata. Treat it as a normal optional
+			// cache miss so the caller can schedule its ordinary fresh build.
+			result.reason = "SavedNavigationUnsupportedVersion";
+			return result;
+		}
+		if(!std::equal(kMagic.begin(), kMagic.end(), bytes.begin())) {
 			result.reason = "SavedNavigationInvalidHeader";
 			return result;
 		}
@@ -166,6 +287,10 @@ namespace TerraEngine::Navigation {
 			|| !ReadU64(bytes, kChecksumOffset, checksum) || headerBytes != kHeaderBytes
 			|| abiLength > kMaximumBackendAbiBytes || chunkCount > kMaximumSavedNavigationChunks) {
 			result.reason = "SavedNavigationMalformedHeader";
+			return result;
+		}
+		if(version != kSavedNavigationFormatVersion) {
+			result.reason = "SavedNavigationUnsupportedVersion";
 			return result;
 		}
 		std::vector<std::byte> checksumInput(bytes.begin(), bytes.end());
@@ -201,7 +326,8 @@ namespace TerraEngine::Navigation {
 				|| !ReadU32(bytes, entry + 16U, verticalBand) || !ReadU64(bytes, entry + 24U, profile)
 				|| !ReadU64(bytes, entry + 32U, generation) || !ReadU64(bytes, entry + 40U, chunkOffset)
 				|| !ReadU64(bytes, entry + 48U, chunkLength) || !ReadU64(bytes, entry + 56U, chunkChecksum)
-				|| generation == 0U || chunkOffset != nextPayloadOffset || chunkLength == 0U
+				|| generation == 0U || chunkOffset != nextPayloadOffset || chunkLength < kChunkMetadataBytes
+				|| chunkOffset > bytes.size()
 				|| chunkLength > bytes.size() - static_cast<std::size_t>(chunkOffset)) {
 				result.reason = "SavedNavigationChunkOutOfBounds";
 				result.chunks.clear();
@@ -217,7 +343,10 @@ namespace TerraEngine::Navigation {
 			chunk.key = {static_cast<std::int64_t>(shardX), static_cast<std::int64_t>(shardZ),
 				static_cast<std::int32_t>(verticalBand), profile};
 			chunk.generation = generation;
-			chunk.bytes.assign(payload.begin(), payload.end());
+			if(!DecodeChunkPayload(payload, chunk, result.reason)) {
+				result.chunks.clear();
+				return result;
+			}
 			if(!result.chunks.empty() && !LessChunk(result.chunks.back(), chunk)) {
 				result.reason = "SavedNavigationNonCanonicalIndex";
 				result.chunks.clear();

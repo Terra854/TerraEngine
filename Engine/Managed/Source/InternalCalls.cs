@@ -1756,6 +1756,19 @@ namespace TerraEngine
 		internal static extern unsafe NavigationStatus Native_Navigation_CopyInvalidations(ref NativeNavigationInvalidationCursor cursor, NativeNavigationInvalidationRecord* records, uint capacity, ref NativeNavigationBufferInfo info);
 
 		[DllImport("TerraEngine")]
+		internal static extern uint Native_NavigationAgent_GetAbiVersion();
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_NavigationAgent_ResolveIdentity(ref NativeNavigationAgentResolveRequest request, ref NativeNavigationAgentIdentitySnapshot snapshot);
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_NavigationAgent_SubmitCommand(ref NativeNavigationAgentCommand command, ref NativeNavigationAgentCommandReceipt receipt);
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_NavigationAgent_ReadReceipt(ref NativeNavigationAgentReceiptQuery query, ref NativeNavigationAgentCommandReceipt receipt);
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_NavigationAgent_ReadStatus(ref NativeNavigationAgentStatusQuery query, ref NativeNavigationAgentStatusSnapshot snapshot);
+		[DllImport("TerraEngine")]
+		internal static extern NavigationStatus Native_NavigationAgent_ReadGuidance(ref NativeNavigationAgentGuidanceQuery query, ref NativeNavigationAgentGuidanceSnapshot snapshot);
+
+		[DllImport("TerraEngine")]
 		// Native_Application_Quit bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_Application_Quit();
 

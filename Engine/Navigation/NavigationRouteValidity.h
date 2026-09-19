@@ -4,8 +4,10 @@
 #include "Navigation/Geometry/NavigationGeometryFormat.h"
 #include "Navigation/Geometry/NavigationGeometrySnapshot.h"
 #include "Navigation/NavigationTypes.h"
+#include "Navigation/NavigationSettings.h"
 
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace TerraEngine::Navigation
@@ -23,6 +25,15 @@ namespace TerraEngine::Navigation
 	[[nodiscard]] TERRAENGINE_API NavigationRouteObservationValidation
 		ValidateNavigationRouteObservation(const NavigationObservationEvidence& captured,
 			const NavigationObservationEvidence& current) noexcept;
+
+	// Dynamic publication certificates use this narrow geometric test for both
+	// retained and prepared routes. It localizes each copied waypoint in the
+	// source frame and tests its travelled segments against one profile-expanded
+	// affected bound. Unknown coordinates or malformed inputs return true so a
+	// caller can fail closed rather than retain potentially unsafe guidance.
+	[[nodiscard]] TERRAENGINE_API bool RouteSegmentsIntersectLocalizedBounds(
+		std::span<const NavigationLocation> points, const NavigationProfile& profile,
+		const Scene::WorldPosition& origin, const NavigationGeometryBounds& affected) noexcept;
 
 	struct NavigationBounds
 	{

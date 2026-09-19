@@ -11,6 +11,7 @@
 #include "../Subsystems/UndoRedoSystem.h"
 #include "SceneViewWindow.h"
 #include "TerrainWindow.h"
+#include "../Navigation/NavigationInspectorSupport.h"
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Core/Object/Component.h"
@@ -27,6 +28,8 @@
 #include "Engine/Components/UIComponent.h"
 #include "Engine/Components/ScriptComponent.h"
 #include "Engine/Components/AnimatorComponent.h"
+#include "Engine/Components/NavigationAgentComponent.h"
+#include "Engine/Navigation/Agents/NavigationAgentSystem.h"
 #include "Engine/Components/Physics/RigidBodyComponent.h"
 #include "Engine/Components/Physics/ColliderSetComponent.h"
 #include "Engine/Components/Physics/ConstraintSetComponent.h"
@@ -64,6 +67,7 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -320,6 +324,83 @@ std::vector<TerraEngine::UUID> SubmitPhysicsPropertyBatch(
 	}
 	TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
 	return changedObjects;
+}
+
+// The generic Inspector setter edits one reflected property immediately. Agent
+// settings instead stage a complete component per selected object so profile
+// combinations cannot publish partially when one candidate is invalid.
+struct NavigationAgentEditCandidate
+{
+	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	NavigationAgentComponent value{};
+};
+
+std::vector<NavigationAgentEditCandidate> CopyNavigationAgentCandidates(
+	const std::vector<entt::entity>& entities)
+{
+	std::vector<NavigationAgentEditCandidate> candidates;
+	candidates.reserve(entities.size());
+	ObjectManager& objects = ObjectManager::instance();
+	for(const entt::entity entity : entities)
+	{
+		const std::optional<Object> object = objects.getObject(entity);
+		NavigationAgentComponent* agent = object ? objects.GetComponent<NavigationAgentComponent>(*object) : nullptr;
+		if(!object || agent == nullptr) return {};
+		auto lock = agent->acquireReadLock();
+		candidates.push_back({objects.getUUID(*object), *agent});
+	}
+	return candidates;
+}
+
+bool SubmitNavigationAgentBatch(
+	const std::vector<NavigationAgentEditCandidate>& candidates,
+	std::string undoLabel,
+	std::string* validationMessage = nullptr)
+{
+	if(candidates.empty())
+	{
+		if(validationMessage != nullptr)
+			*validationMessage = "Navigation Agent editing requires at least one current component attachment.";
+		return false;
+	}
+	for(const NavigationAgentEditCandidate& candidate : candidates)
+	{
+		const TerraEngine::Editor::Navigation::NavigationAuthoringValidation validation =
+			TerraEngine::Editor::Navigation::ValidateNavigationAgentDraft(candidate.value);
+		if(!validation.accepted)
+		{
+			if(validationMessage != nullptr) *validationMessage = validation.explanation;
+			return false;
+		}
+	}
+
+	static std::uint64_t sequence = 0U;
+	ObjectManager& objects = ObjectManager::instance();
+	TerraEngine::Scene::TransactionalMutationBuilder builder(
+		"inspector-navigation-agent-" + std::to_string(++sequence),
+		TerraEngine::Scene::TransactionOrigin::Editor, "InspectorNavigationAgentMultiEdit");
+	builder.ObserveScene(objects).SetUndoGroup(std::move(undoLabel));
+	for(const NavigationAgentEditCandidate& candidate : candidates)
+	{
+		const NavigationAgentComponent& value = candidate.value;
+		builder.ObserveObject(objects, candidate.objectId)
+			.UpdateComponentProperty(candidate.objectId, std::string(NavigationAgentComponent::kComponentName), "active", TerraEngine::Reflection::Variant{value.active})
+			.UpdateComponentProperty(candidate.objectId, std::string(NavigationAgentComponent::kComponentName), "radiusMetres", TerraEngine::Reflection::Variant{value.radiusMetres})
+			.UpdateComponentProperty(candidate.objectId, std::string(NavigationAgentComponent::kComponentName), "heightMetres", TerraEngine::Reflection::Variant{value.heightMetres})
+			.UpdateComponentProperty(candidate.objectId, std::string(NavigationAgentComponent::kComponentName), "stepHeightMetres", TerraEngine::Reflection::Variant{value.stepHeightMetres})
+			.UpdateComponentProperty(candidate.objectId, std::string(NavigationAgentComponent::kComponentName), "maxSlopeDegrees", TerraEngine::Reflection::Variant{value.maxSlopeDegrees})
+			.UpdateComponentProperty(candidate.objectId, std::string(NavigationAgentComponent::kComponentName), "clearanceMarginMetres", TerraEngine::Reflection::Variant{value.clearanceMarginMetres})
+			.UpdateComponentProperty(candidate.objectId, std::string(NavigationAgentComponent::kComponentName), "horizontalResolutionMetres", TerraEngine::Reflection::Variant{value.horizontalResolutionMetres})
+			.UpdateComponentProperty(candidate.objectId, std::string(NavigationAgentComponent::kComponentName), "verticalResolutionMetres", TerraEngine::Reflection::Variant{value.verticalResolutionMetres})
+			.UpdateComponentProperty(candidate.objectId, std::string(NavigationAgentComponent::kComponentName), "excludedAreasMask", TerraEngine::Reflection::Variant{value.excludedAreasMask})
+			.UpdateComponentProperty(candidate.objectId, std::string(NavigationAgentComponent::kComponentName), "areaPenalties", TerraEngine::Reflection::Variant{value.areaPenalties})
+			.UpdateComponentProperty(candidate.objectId, std::string(NavigationAgentComponent::kComponentName), "arrivalToleranceMetres", TerraEngine::Reflection::Variant{value.arrivalToleranceMetres})
+			.UpdateComponentProperty(candidate.objectId, std::string(NavigationAgentComponent::kComponentName), "targetDisplacementThresholdMetres", TerraEngine::Reflection::Variant{value.targetDisplacementThresholdMetres})
+			.UpdateComponentProperty(candidate.objectId, std::string(NavigationAgentComponent::kComponentName), "minimumReplanIntervalSeconds", TerraEngine::Reflection::Variant{value.minimumReplanIntervalSeconds});
+	}
+	TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
+	if(validationMessage != nullptr) validationMessage->clear();
+	return true;
 }
 
 template<typename ValueType>
@@ -4257,6 +4338,158 @@ void InspectorWindow::DrawAnimationPreviewControls(
 	ImGui::PopID();
 }
 
+void InspectorWindow::DrawNavigationAgentInspector(const std::vector<entt::entity>& entities)
+{
+	std::vector<NavigationAgentEditCandidate> candidates = CopyNavigationAgentCandidates(entities);
+	if(candidates.empty())
+	{
+		ImGui::TextDisabled("Select objects that all have Navigation Agent before editing shared settings.");
+		return;
+	}
+
+	auto submit = [this, &candidates](std::string label, const auto& apply) {
+		std::vector<NavigationAgentEditCandidate> staged = candidates;
+		for(NavigationAgentEditCandidate& candidate : staged) apply(candidate.value);
+		if(SubmitNavigationAgentBatch(staged, std::move(label), &m_NavigationAgentValidationMessage)) candidates = std::move(staged);
+	};
+	auto drawDouble = [&candidates, &submit](const char* label, auto member, double speed,
+		double minimum, double maximum, const char* historyLabel) {
+		double value = candidates.front().value.*member;
+		const bool mixed = std::any_of(candidates.begin() + 1U, candidates.end(), [member, value](const auto& candidate) {
+			return candidate.value.*member != value;
+		});
+		if(mixed) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
+		const bool changed = ImGui::DragScalar(label, ImGuiDataType_Double, &value, speed, &minimum, &maximum, "%.3f");
+		if(mixed) ImGui::PopItemFlag();
+		if(changed) submit(historyLabel, [member, value](NavigationAgentComponent& agent) { agent.*member = value; });
+	};
+
+	ImGui::TextWrapped("Traversal settings are authored transactionally for every selected agent. Runtime destinations and guidance are read-only and never become preset data.");
+	ImGui::SeparatorText("Runtime Navigation (Read-Only)");
+	// Resolve through the immutable publication, then copy one guidance snapshot.
+	// This avoids touching live ECS/runtime records while the inspector draws and
+	// keeps the runtime display advisory even when several agents are selected.
+	const auto identity = TerraEngine::Navigation::NavigationAgentSystem::Instance()
+		.ResolvePublishedAgent(candidates.front().objectId);
+	if(!identity)
+	{
+		ImGui::TextDisabled("Runtime state is awaiting the next protected navigation publication.");
+	}
+	else
+	{
+		const TerraEngine::Navigation::NavigationAgentGuidanceSnapshot guidance =
+			TerraEngine::Navigation::NavigationAgentSystem::Instance().ReadGuidance(*identity);
+		auto printValue = [](const char* label, std::string_view value) {
+			ImGui::Text("%s: %.*s", label, static_cast<int>(value.size()), value.data());
+		};
+		printValue("State", TerraEngine::Navigation::ToString(guidance.state));
+		printValue("Outcome", TerraEngine::Navigation::ToString(guidance.outcome));
+		printValue("Reason", TerraEngine::Navigation::ToString(guidance.reason));
+		ImGui::Text("Guidance: %s  |  Publication: %llu", guidance.usable ? "Available" : "Unavailable",
+			static_cast<unsigned long long>(guidance.publicationGeneration));
+		if(candidates.size() > 1U)
+			ImGui::TextDisabled("The runtime snapshot above belongs to the first selected agent; authored edits still apply atomically to all selected agents.");
+	}
+	if(m_Owner != nullptr)
+	{
+		if(const auto* authoring = m_Owner->GetNavigationAuthoringTransactions(); authoring != nullptr && !authoring->CurrentState().profiles.empty())
+		{
+			if(ImGui::BeginCombo("Project Navigation Profile", "Copy project profile..."))
+			{
+				const auto& profiles = authoring->CurrentState().profiles;
+				for(std::size_t index = 0U; index < profiles.size(); ++index)
+				{
+					const std::string label = "Project Profile " + std::to_string(index + 1U);
+					if(ImGui::Selectable(label.c_str()))
+					{
+						const TerraEngine::Navigation::NavigationProfile profile = profiles[index];
+						std::vector<NavigationAgentEditCandidate> staged = candidates;
+						bool accepted = true;
+						for(NavigationAgentEditCandidate& candidate : staged)
+						{
+							const auto validation = TerraEngine::Editor::Navigation::ApplyNavigationAgentProjectProfile(candidate.value, profile);
+							if(!validation.accepted) m_NavigationAgentValidationMessage = validation.explanation;
+							accepted = validation.accepted && accepted;
+						}
+						if(accepted && SubmitNavigationAgentBatch(staged, "Copy Navigation Agent Project Profile", &m_NavigationAgentValidationMessage)) candidates = std::move(staged);
+					}
+				}
+				ImGui::EndCombo();
+			}
+		}
+		else ImGui::TextDisabled("No project navigation profiles are available to copy.");
+	}
+	if(!m_NavigationAgentValidationMessage.empty())
+		ImGui::TextColored(ImVec4(1.0F, 0.45F, 0.45F, 1.0F), "%s", m_NavigationAgentValidationMessage.c_str());
+
+	if(!ImGui::BeginTable("NavigationAgentProperties", 2, ImGuiTableFlags_SizingStretchProp)) return;
+	// The default inspector can be narrow. Keep the label column legible without
+	// consuming the editable value column on a ~230-pixel panel.
+	const float availableWidth = ImGui::GetContentRegionAvail().x;
+	const float labelWidth = std::clamp(availableWidth * 0.55F, 100.0F, 210.0F);
+	ImGui::TableSetupColumn("Setting", ImGuiTableColumnFlags_WidthFixed, labelWidth);
+	ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+	auto row = [&drawDouble](const char* label, auto member, double speed, double minimum, double maximum, const char* historyLabel) {
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted(label);
+		ImGui::TableSetColumnIndex(1);
+		ImGui::SetNextItemWidth(-1.0F);
+		drawDouble((std::string("##") + label).c_str(), member, speed, minimum, maximum, historyLabel);
+	};
+	row("Radius (m)", &NavigationAgentComponent::radiusMetres, 0.01, 0.001, 1000.0, "Edit Navigation Agent Radius");
+	row("Height (m)", &NavigationAgentComponent::heightMetres, 0.01, 0.001, 1000.0, "Edit Navigation Agent Height");
+	row("Step Height (m)", &NavigationAgentComponent::stepHeightMetres, 0.01, 0.0, 100.0, "Edit Navigation Agent Step Height");
+	row("Maximum Slope (deg)", &NavigationAgentComponent::maxSlopeDegrees, 0.1, 0.0, 89.9, "Edit Navigation Agent Maximum Slope");
+	row("Clearance Margin (m)", &NavigationAgentComponent::clearanceMarginMetres, 0.001, 0.0, 100.0, "Edit Navigation Agent Clearance Margin");
+	row("Horizontal Resolution (m)", &NavigationAgentComponent::horizontalResolutionMetres, 0.001, 0.001, 100.0, "Edit Navigation Agent Horizontal Resolution");
+	row("Vertical Resolution (m)", &NavigationAgentComponent::verticalResolutionMetres, 0.001, 0.001, 100.0, "Edit Navigation Agent Vertical Resolution");
+	row("Arrival Tolerance (m)", &NavigationAgentComponent::arrivalToleranceMetres, 0.01, 0.001, 100.0, "Edit Navigation Agent Arrival Tolerance");
+	row("Target Replan Distance (m)", &NavigationAgentComponent::targetDisplacementThresholdMetres, 0.01, 0.001, 1000.0, "Edit Navigation Agent Target Replan Distance");
+	row("Minimum Replan Interval (s)", &NavigationAgentComponent::minimumReplanIntervalSeconds, 0.01, 0.10, 60.0, "Edit Navigation Agent Replan Interval");
+
+	std::uint32_t mask = candidates.front().value.excludedAreasMask;
+	const bool mixedMask = std::any_of(candidates.begin() + 1U, candidates.end(), [mask](const auto& candidate) { return candidate.value.excludedAreasMask != mask; });
+	ImGui::TableNextRow();
+	ImGui::TableSetColumnIndex(0);
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextUnformatted("Excluded Area Mask");
+	ImGui::TableSetColumnIndex(1);
+	ImGui::SetNextItemWidth(-1.0F);
+	if(mixedMask) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
+	const bool maskChanged = ImGui::InputScalar("##NavigationAgentExcludedAreas", ImGuiDataType_U32, &mask);
+	if(mixedMask) ImGui::PopItemFlag();
+	if(maskChanged) submit("Edit Navigation Agent Excluded Areas", [mask](NavigationAgentComponent& agent) { agent.excludedAreasMask = mask; });
+
+	ImGui::EndTable();
+
+	// Area costs are useful but less frequent than core traversal dimensions.
+	// Keep them collapsed by default so the common settings remain reachable in
+	// the compact Inspector without a long initial scroll.
+	if(!ImGui::CollapsingHeader("Area Penalties")) return;
+	if(!ImGui::BeginTable("NavigationAgentAreaPenalties", 2, ImGuiTableFlags_SizingStretchProp)) return;
+	ImGui::TableSetupColumn("Area", ImGuiTableColumnFlags_WidthFixed, labelWidth);
+	ImGui::TableSetupColumn("Penalty", ImGuiTableColumnFlags_WidthStretch);
+	for(std::size_t index = 0U; index < TerraEngine::Navigation::kNavigationAreaCount; ++index)
+	{
+		const std::string label = "Area Penalty " + std::to_string(index);
+		double value = candidates.front().value.areaPenalties[index];
+		const bool mixed = std::any_of(candidates.begin() + 1U, candidates.end(), [index, value](const auto& candidate) { return candidate.value.areaPenalties[index] != value; });
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted(label.c_str());
+		ImGui::TableSetColumnIndex(1);
+		ImGui::SetNextItemWidth(-1.0F);
+		if(mixed) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
+		const bool changed = ImGui::DragScalar(("##NavigationAgentPenalty" + std::to_string(index)).c_str(), ImGuiDataType_Double, &value, 0.01F, nullptr, nullptr, "%.3f");
+		if(mixed) ImGui::PopItemFlag();
+		if(changed) submit("Edit Navigation Agent Area Penalty", [index, value](NavigationAgentComponent& agent) { agent.areaPenalties[index] = value; });
+	}
+	ImGui::EndTable();
+}
+
 void InspectorWindow::DrawAnimatorInspector(
 	entt::entity entity,
 	const std::vector<entt::entity>& selectedObjects)
@@ -4823,7 +5056,7 @@ void InspectorWindow::OnGui() {
 				}
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (access.entityHasComponent(ObjectManager::instance().getRegistry(), obj)) {
-					if (IsPhysicsAuthoringComponent(compName)
+					if ((IsPhysicsAuthoringComponent(compName) || compName == NavigationAgentComponent::kComponentName)
 						&& !std::all_of(selectedEntities.begin(), selectedEntities.end(), [&](entt::entity selectedObject) {
 							return access.entityHasComponent(ObjectManager::instance().getRegistry(), selectedObject);
 						}))
@@ -4974,7 +5207,22 @@ void InspectorWindow::OnGui() {
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (compName != "Transform") {
 					ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
-					if (ImGui::Checkbox("##compActive", &compActive)) {
+					if (compName == NavigationAgentComponent::kComponentName) {
+						std::vector<NavigationAgentEditCandidate> candidates = CopyNavigationAgentCandidates(selectedEntities);
+						const bool mixedActive = !candidates.empty()
+							&& std::any_of(candidates.begin() + 1U, candidates.end(), [active = candidates.front().value.active](const auto& candidate) {
+								return candidate.value.active != active;
+							});
+						if(!candidates.empty()) compActive = candidates.front().value.active;
+						if(mixedActive) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
+						const bool changed = ImGui::Checkbox("##compActive", &compActive);
+						if(mixedActive) ImGui::PopItemFlag();
+						if(changed) {
+							for(NavigationAgentEditCandidate& candidate : candidates) candidate.value.active = compActive;
+							(void)SubmitNavigationAgentBatch(candidates, "Set Navigation Agent Active");
+						}
+					}
+					else if (ImGui::Checkbox("##compActive", &compActive)) {
 						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (IsValid(activeProp)) {
 							ReflectionVariant oldA = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "active");
@@ -5030,6 +5278,10 @@ void InspectorWindow::OnGui() {
 					else if (compName == "CharacterControllerComponent")
 					{
 						DrawCharacterControllerInspector(selectedEntities);
+					}
+					else if (compName == NavigationAgentComponent::kComponentName)
+					{
+						DrawNavigationAgentInspector(selectedEntities);
 					}
 					else if (compName == "AnimatorComponent")
 					{

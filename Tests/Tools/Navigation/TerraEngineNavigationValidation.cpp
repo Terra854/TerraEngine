@@ -5,6 +5,8 @@
 #include "Navigation/Integration/NavigationSceneBootstrap.h"
 #include "Navigation/NavigationSettings.h"
 #include "Navigation/NavigationSystem.h"
+#include "Navigation/Backend/RecastGroundBuilder.h"
+#include "Navigation/Persistence/SavedNavigationCache.h"
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
 #include "Resource/ResourceManager.h"
@@ -39,6 +41,58 @@
 
 namespace
 {
+	bool WriteProviderCacheFixture(std::string_view mode, const std::filesystem::path& output)
+	{
+		if((mode != "current" && mode != "stale") || !output.is_absolute()) return false;
+		// Usage: TerraEngineNavigationAcceptance --write-cache-fixture current|stale
+		// <absolute-output.tenav>. This emits a standalone provider round-trip
+		// diagnostic, not a cache claimed to belong to the 129x129 workload.
+		using namespace TerraEngine::Navigation;
+		NavigationGeometryDocument document{};
+		document.kind = NavigationGeometryPayloadKind::TriangleMesh;
+		document.vertices = {{1.0F, 0.0F, 1.0F}, {8.0F, 0.0F, 8.0F}, {8.0F, 0.0F, 1.0F}, {1.0F, 0.0F, 8.0F}};
+		document.triangles = {{0U, 1U, 2U}, {0U, 3U, 1U}};
+		NavigationGeometrySnapshotDescriptor sourceDescriptor{};
+		sourceDescriptor.sourceRevision = 1U;
+		sourceDescriptor.canonicalPlacementRevision = 1U;
+		sourceDescriptor.physicalReadyRevision = 1U;
+		sourceDescriptor.sourceKind = NavigationSourceKind::Terrain;
+		const auto snapshot = NavigationGeometrySnapshot::Create(sourceDescriptor, document);
+		if(!snapshot.accepted || !snapshot.snapshot) return false;
+		RecastGroundBuildInput buildInput{};
+		buildInput.profile = NavigationProfile::Defaults();
+		buildInput.sources = {snapshot.snapshot};
+		buildInput.maximumTiles = 4U;
+		const RecastGroundBuildResult built = BuildRecastGroundTiles(buildInput);
+		if(!built.Succeeded() || built.tiles.empty() || built.tiles.front().pristineBytes.empty()) return false;
+		const GroundCoverageEvidence evidence = CaptureGroundCoverageEvidence(buildInput);
+		const SavedGroundTileExportResult chunks = BuildSavedNavigationChunks(built.tiles);
+		if(!evidence.accepted || !chunks.accepted || chunks.chunks.empty()) return false;
+		SavedNavigationDescriptor descriptor{};
+		descriptor.formatVersion = kSavedNavigationFormatVersion;
+		descriptor.backendAbi = std::string(kSavedNavigationBackendAbi);
+		descriptor.sourceFingerprint = evidence.sourceFingerprint;
+		if(descriptor.sourceFingerprint == 0U) return false;
+		descriptor.settingsFingerprint = evidence.settingsFingerprint;
+		const auto write = WriteSavedNavigationCacheAtomically(output, descriptor,
+			chunks.chunks);
+		if(!write.accepted) return false;
+		const std::uint64_t expectedSettings = mode == "stale" ? descriptor.settingsFingerprint + 1U : descriptor.settingsFingerprint;
+		SavedNavigationDescriptor expected = descriptor;
+		expected.settingsFingerprint = expectedSettings;
+		const SavedNavigationReadResult readBack = ReadSavedNavigationCache(output, expected);
+		if((mode == "current" && !readBack.accepted) || (mode == "stale" && readBack.accepted)) return false;
+		nlohmann::json state = {{"schemaVersion", 1}, {"fixture", "provider-generated-recast-tile"},
+			{"mode", std::string(mode)}, {"storedSettingsFingerprint", descriptor.settingsFingerprint},
+			{"expectedSettingsFingerprint", expectedSettings}, {"tileBytes", chunks.chunks.front().bytes.size()},
+			{"readBackAccepted", readBack.accepted}, {"readBackReason", readBack.reason},
+			{"runtimeTileConsumptionProven", false}};
+		std::ofstream metadata(output.string() + ".json", std::ios::binary | std::ios::trunc);
+		if(!metadata) return false;
+		metadata << state.dump(2) << '\n';
+		return metadata.good();
+	}
+
 	struct Options
 	{
 		std::string lane = "rendered";
@@ -421,6 +475,19 @@ namespace
 
 int main(int argc, char** argv)
 {
+	if(argc == 4 && std::string_view(argv[1]) == "--write-cache-fixture") {
+		const std::filesystem::path output(argv[3]);
+		if(!output.is_absolute()) {
+			std::cerr << "Cache fixture output must be an absolute path.\n";
+			return 2;
+		}
+		if(!WriteProviderCacheFixture(argv[2], output)) {
+			std::cerr << "Could not write provider-generated navigation cache fixture.\n";
+			return 2;
+		}
+		std::cout << "Wrote provider-generated " << argv[2] << " cache fixture: " << output << '\n';
+		return 0;
+	}
 	Options options;
 	if(!ParseOptions(argc, argv, options)) {
 		std::cerr << "Usage: TerraEngineNavigationAcceptance --lane <editor|export-rendered|export-headless> --manifest <file> --output <file> --matrices <comma-separated> [--duration-seconds N] [--cycles N]\n";

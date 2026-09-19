@@ -2,6 +2,8 @@
 
 #include "Physics/Terrain/TerrainCollisionSystem.h"
 
+#include "Physics/PhysicsSystem.h"
+
 #include <algorithm>
 #include <utility>
 
@@ -13,6 +15,21 @@ namespace TerraEngine::Physics::Terrain
 		candidate.recipe = std::move(recipe); candidate.sourceRootHash = sourceRootHash;
 		candidate.sourcePublicationGeneration = sourcePublicationGeneration; candidate.cancellation = cancellation;
 		candidate.complete = ValidateTerrainHeightFieldRecipe(candidate.recipe).accepted && sourceRootHash.IsValid() && sourcePublicationGeneration != 0u;
+		return candidate;
+	}
+
+	MountedTerrainCollisionCandidate PrepareMountedTerrainCollisionCandidate(
+		TerrainHeightFieldRecipe recipe, TerraEngine::Terrain::ContentHash sourceRootHash,
+		TerraEngine::Terrain::Generation sourcePublicationGeneration)
+	{
+		MountedTerrainCollisionCandidate candidate{};
+		candidate.recipe = std::move(recipe);
+		candidate.sourceRootHash = sourceRootHash;
+		candidate.sourcePublicationGeneration = sourcePublicationGeneration;
+		candidate.complete = ValidateTerrainHeightFieldRecipe(candidate.recipe).accepted
+			&& candidate.recipe.terrainAssetId != TerraEngine::EMPTY_UUID
+			&& candidate.sourceRootHash.IsValid()
+			&& candidate.sourcePublicationGeneration != 0u;
 		return candidate;
 	}
 
@@ -88,10 +105,61 @@ namespace TerraEngine::Physics::Terrain
 		return true;
 	}
 
+	bool PublishMountedTerrainCollisionCandidate(
+		TerrainCollisionSnapshot& inOutSnapshot, const MountedTerrainCollisionCandidate& candidate,
+		const std::function<TerrainCollisionReplacementReceipt(TerrainCollisionReplacementPacket)>& commit)
+	{
+		if(!candidate.complete || !candidate.sourceRootHash.IsValid()
+			|| candidate.sourcePublicationGeneration == 0u
+			|| !ValidateTerrainHeightFieldRecipe(candidate.recipe).accepted) {
+			inOutSnapshot.status = TerrainCollisionStatus::Failed;
+			inOutSnapshot.message = "Mounted terrain collision candidate failed immutable recipe validation; last-known-good remains active.";
+			return false;
+		}
+		if(!commit) {
+			inOutSnapshot.status = TerrainCollisionStatus::Failed;
+			inOutSnapshot.message = "Mounted terrain collision candidate has no protected physics committer.";
+			return false;
+		}
+
+		TerrainCollisionReplacementPacket packet{};
+		packet.id = "mounted-terrain-collision-"
+			+ std::to_string(candidate.sourcePublicationGeneration);
+		packet.sourceRootHash = candidate.sourceRootHash;
+		packet.sourcePublicationGeneration = candidate.sourcePublicationGeneration;
+		packet.recipe = candidate.recipe;
+		const TerrainCollisionReplacementReceipt receipt = commit(std::move(packet));
+		if(!receipt.committed) {
+			// The provider rejected the candidate, so retain every current/last-known
+			// recipe field. Only diagnostics change to describe the failed attempt.
+			inOutSnapshot.status = TerrainCollisionStatus::Failed;
+			inOutSnapshot.message = receipt.message.empty()
+				? "The active physics backend rejected the mounted terrain collision replacement; last-known-good remains active."
+				: receipt.message;
+			return false;
+		}
+
+		TerrainCollisionSnapshot committedSnapshot = inOutSnapshot;
+		if(committedSnapshot.currentRecipe.IsComplete()) {
+			committedSnapshot.lastKnownGoodRecipe = committedSnapshot.currentRecipe;
+			committedSnapshot.lastKnownGoodSourceRootHash = committedSnapshot.sourceRootHash;
+			committedSnapshot.lastKnownGoodSourcePublicationGeneration = committedSnapshot.sourcePublicationGeneration;
+		}
+		committedSnapshot.currentRecipe = candidate.recipe;
+		committedSnapshot.sourceRootHash = candidate.sourceRootHash;
+		committedSnapshot.sourcePublicationGeneration = candidate.sourcePublicationGeneration;
+		committedSnapshot.ageMilliseconds = 0.0;
+		committedSnapshot.buildLatencyMilliseconds = 0.0;
+		committedSnapshot.status = TerrainCollisionStatus::Current;
+		committedSnapshot.message = "Mounted terrain collision replacement is current at the protected before-physics boundary.";
+		inOutSnapshot = std::move(committedSnapshot);
+		return true;
+	}
+
 	TerrainCollisionSystem& TerrainCollisionSystem::Instance() { static TerrainCollisionSystem instance; return instance; }
 	void TerrainCollisionSystem::Initialize() { initialized.store(true, std::memory_order_release); }
 	void TerrainCollisionSystem::Update(float) { /* Work is declared below; Update never mutates collision state. */ }
-	void TerrainCollisionSystem::Shutdown() { initialized.store(false, std::memory_order_release); std::scoped_lock lock(mutex); prepared.reset(); desired.reset(); preparedRegions.reset(); desiredRegions.reset(); snapshot = {}; publicationStore = nullptr; commitReplacement = {}; commitRegionBatch = {}; }
+	void TerrainCollisionSystem::Shutdown() { initialized.store(false, std::memory_order_release); std::scoped_lock lock(mutex); prepared.reset(); desired.reset(); mountedPrepared.clear(); mountedDesired.clear(); preparedRegions.reset(); desiredRegions.reset(); snapshot = {}; publicationStore = nullptr; commitReplacement = {}; commitRegionBatch = {}; mountedCommitter = {}; }
 	std::string TerrainCollisionSystem::SystemName() { return "TerrainCollisionSystem"; }
 	TerraEngine::Scheduling::SystemDeclaration TerrainCollisionSystem::SchedulerDeclaration()
 	{
@@ -112,9 +180,18 @@ namespace TerraEngine::Physics::Terrain
 		using namespace TerraEngine::Scheduling;
 		const bool active = initialized.load(std::memory_order_acquire);
 		auto prepare = MakeWorkerPreparePhase("TerrainCollisionPrepare", SystemName(), {kResourceTerrainAssetRoots, kResourceTerrainPublishedDerived}, {kResourceTerrainPreparedCollision}, "TerrainCollision.Prepare");
-		prepare.stableDescriptorId = "TerrainCollisionSystem/Physics/TerrainCollisionPrepare"; prepare.active = prepare.ready = active;
+		prepare.stableDescriptorId = "TerrainCollisionSystem/Physics/TerrainCollisionPrepare";
+		// Helper factories describe worker/protected kind, but the scheduler executes
+		// only named engine phases. Collision publication belongs before PhysicsSystem
+		// in the real Physics phase, never in a synthetic helper phase.
+		prepare.phase = "Physics";
+		prepare.activationPredicateKey = "terrain-collision-lifecycle";
+		prepare.active = prepare.ready = active;
 		auto publish = MakeProtectedCommitPhase("TerrainCollisionPublish", SystemName(), {kResourceTerrainPreparedCollision}, {kResourceTerrainPublishedCollision, kResourceTerrainDiagnostics}, "Validates a complete terrain collision candidate before PhysicsSystem simulation.", "TerrainCollision.Publish");
-		publish.stableDescriptorId = "TerrainCollisionSystem/Physics/TerrainCollisionPublish"; publish.explicitDependencies = {prepare.stableDescriptorId}; publish.sameFrameVisibilityRequired = true; publish.active = publish.ready = active;
+		publish.stableDescriptorId = "TerrainCollisionSystem/Physics/TerrainCollisionPublish";
+		publish.phase = "Physics";
+		publish.activationPredicateKey = prepare.activationPredicateKey;
+		publish.explicitDependencies = {prepare.stableDescriptorId}; publish.sameFrameVisibilityRequired = true; publish.active = publish.ready = active;
 		publish.work = [this](TerraEngine::Scheduling::JobGraphContext&) {
 			const TerraEngine::Terrain::TerrainAssetStore* store = nullptr;
 			{
@@ -122,6 +199,7 @@ namespace TerraEngine::Physics::Terrain
 				store = publicationStore;
 			}
 			if(store != nullptr) (void)PublishBeforePhysics(*store);
+			else (void)PublishMountedRuntimeBeforePhysics();
 		};
 		return {std::move(prepare), std::move(publish)};
 	}
@@ -158,6 +236,86 @@ namespace TerraEngine::Physics::Terrain
 		prepared = std::move(candidate);
 		snapshot.status = TerrainCollisionStatus::Pending;
 	}
+	bool TerrainCollisionSystem::SetMountedRuntimeCandidate(MountedTerrainCollisionCandidate candidate)
+	{
+		if(!candidate.complete || !candidate.sourceRootHash.IsValid()
+			|| candidate.sourcePublicationGeneration == 0u
+			|| !ValidateTerrainHeightFieldRecipe(candidate.recipe).accepted) {
+			return false;
+		}
+		std::scoped_lock lock(mutex);
+		// Runtime package values are already copied from the mounted archive. Keep
+		// every area keyed by immutable asset/area identity for a later physics-world
+		// recreation, never a mount or ECS reference that could outlive this engine
+		// session. Startup can legitimately stage multiple mounted terrain assets.
+		const TerraEngine::UUID assetId = candidate.recipe.terrainAssetId;
+		const TerraEngine::Terrain::TerrainAreaCoordinate area{
+			candidate.recipe.areaX, candidate.recipe.areaZ};
+		mountedDesired[assetId].insert_or_assign(area, candidate);
+		mountedPrepared[assetId].insert_or_assign(area, std::move(candidate));
+		++snapshot.mountedCandidatesStaged;
+		snapshot.mountedPendingCandidateCount = static_cast<std::uint32_t>(std::accumulate(
+			mountedPrepared.begin(), mountedPrepared.end(), std::size_t{0u},
+			[](const std::size_t count, const auto& asset) { return count + asset.second.size(); }));
+		snapshot.status = TerrainCollisionStatus::Pending;
+		snapshot.message = "Mounted terrain collision is queued for protected physics publication.";
+		return true;
+	}
+
+	void TerrainCollisionSystem::ConfigureMountedRuntimeCommitter(
+		std::function<TerrainCollisionReplacementReceipt(TerrainCollisionReplacementPacket)> commit)
+	{
+		std::scoped_lock lock(mutex);
+		mountedCommitter = std::move(commit);
+	}
+
+	bool TerrainCollisionSystem::PublishMountedRuntimeBeforePhysics()
+	{
+		MountedTerrainCollisionCandidates candidates;
+		TerrainCollisionSnapshot candidateSnapshot{};
+		std::function<TerrainCollisionReplacementReceipt(TerrainCollisionReplacementPacket)> commit;
+		{
+			std::scoped_lock lock(mutex);
+			if(mountedPrepared.empty()) return false;
+			candidates = std::move(mountedPrepared);
+			mountedPrepared.clear();
+			candidateSnapshot = snapshot;
+			commit = mountedCommitter;
+		}
+		if(!commit) {
+			commit = [](TerrainCollisionReplacementPacket packet) {
+				return TerraEngine::Physics::PhysicsSystem::Instance()
+					.CommitTerrainCollisionReplacement(std::move(packet));
+			};
+		}
+		const std::size_t candidateCount = std::accumulate(candidates.begin(), candidates.end(), std::size_t{0u},
+			[](const std::size_t count, const auto& asset) { return count + asset.second.size(); });
+		candidateSnapshot.mountedPendingCandidateCount = 0u;
+		candidateSnapshot.mountedPublicationAttempts += candidateCount;
+		bool published = true;
+		for(const auto& [assetId, areas] : candidates)
+		{
+			(void)assetId;
+			for(const auto& [area, candidate] : areas)
+			{
+				(void)area;
+				// Each provider replacement is individually atomic. Continue after a
+				// rejection so unrelated mounted assets cannot be dropped because one
+				// package recipe is invalid; the snapshot records the most recent
+				// result while the backend retains every previously committed area.
+				const bool candidatePublished = PublishMountedTerrainCollisionCandidate(
+					candidateSnapshot, candidate, commit);
+				if(candidatePublished) ++candidateSnapshot.mountedPublicationCommits;
+				else ++candidateSnapshot.mountedPublicationRejections;
+				published = candidatePublished && published;
+			}
+		}
+		{
+			std::scoped_lock lock(mutex);
+			snapshot = std::move(candidateSnapshot);
+		}
+		return published;
+	}
 	void TerrainCollisionSystem::SetPreparedRegionBatch(TerrainCollisionRegionBatch batch)
 	{
 		std::scoped_lock lock(mutex);
@@ -169,7 +327,13 @@ namespace TerraEngine::Physics::Terrain
 	void TerrainCollisionSystem::RequestRepublish()
 	{
 		std::scoped_lock lock(mutex);
-		if(desiredRegions) preparedRegions = *desiredRegions;
+		if(!mountedDesired.empty()) {
+			mountedPrepared = mountedDesired;
+			snapshot.mountedPendingCandidateCount = static_cast<std::uint32_t>(std::accumulate(
+				mountedPrepared.begin(), mountedPrepared.end(), std::size_t{0u},
+				[](const std::size_t count, const auto& asset) { return count + asset.second.size(); }));
+		}
+		else if(desiredRegions) preparedRegions = *desiredRegions;
 		else if(desired) prepared = *desired;
 		else return;
 		snapshot.status = TerrainCollisionStatus::Pending;
@@ -179,6 +343,8 @@ namespace TerraEngine::Physics::Terrain
 	{
 		std::scoped_lock lock(mutex);
 		prepared.reset();
+		mountedPrepared.clear();
+		snapshot.mountedPendingCandidateCount = 0u;
 		preparedRegions.reset();
 		snapshot.status = TerrainCollisionStatus::Cancelled;
 		snapshot.message = std::move(message);
@@ -223,9 +389,11 @@ namespace TerraEngine::Physics::Terrain
 			snapshot = std::move(candidateSnapshot);
 			return published;
 		}
-		// A candidate is a one-shot immutable worker result. Clearing it prevents a
-		// stale or already-committed replacement from being published every frame.
-		bool published = PublishTerrainCollisionCandidate(candidateSnapshot, candidate, store);
+		// A candidate is a one-shot immutable worker result. Validate it into a
+		// detached copy first: a provider rejection must not expose an uncommitted
+		// recipe through the collision snapshot.
+		TerrainCollisionSnapshot validatedSnapshot = candidateSnapshot;
+		bool published = PublishTerrainCollisionCandidate(validatedSnapshot, candidate, store);
 		if(published && commit)
 		{
 			TerrainCollisionReplacementPacket packet;
@@ -243,6 +411,7 @@ namespace TerraEngine::Physics::Terrain
 					: receipt.message;
 			}
 		}
+		if(published) candidateSnapshot = std::move(validatedSnapshot);
 		{
 			std::scoped_lock lock(mutex);
 			snapshot = std::move(candidateSnapshot);

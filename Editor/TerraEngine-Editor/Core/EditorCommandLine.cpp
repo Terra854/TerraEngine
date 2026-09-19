@@ -39,6 +39,21 @@ EditorCommandLineOptions ParseEditorCommandLine(int argc, char** argv)
 				options.terrainInvariantOutputPath = std::filesystem::path(argv[++index]);
 			continue;
 		}
+		if (argument == "--validate-editor-navigation-agents")
+		{
+			if (index + 2 < argc && argv[index + 1] != nullptr && argv[index + 2] != nullptr)
+			{
+				// The options document is intentionally separate from the output report:
+				// installed acceptance fixtures remain immutable inputs across runs.
+				options.navigationAgentValidation = EditorCommandLineOptions::NavigationAgentValidationRequest{
+					std::filesystem::path(argv[++index]), std::filesystem::path(argv[++index])};
+			}
+			else
+			{
+				options.navigationAgentValidationArgumentInvalid = true;
+			}
+			continue;
+		}
 
 		constexpr std::string_view projectEqualsPrefix = "--project=";
 		if (argument.rfind(projectEqualsPrefix, 0) == 0)

@@ -4,6 +4,7 @@
 
 #include "Components/Transform.h"
 #include "Components/AnimatorComponent.h"
+#include "Components/NavigationAgentComponent.h"
 #include "Core/Object/Component.h"
 #include "Core/Object/Object.h"
 #include "Core/Object/ObjectManager.h"
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <sstream>
 #include <unordered_set>
 
@@ -251,6 +253,48 @@ namespace TerraEngine::Scene {
 			return true;
 		}
 
+		// Preflight writes into a detached candidate, then validates the complete
+		// authored profile after the batch. This preserves transactional atomicity
+		// for related values such as capsule height and permitted step height.
+		bool ApplyNavigationAgentProperty(NavigationAgentComponent& candidate,
+			std::string_view propertyName, const Reflection::Variant& value)
+		{
+			auto assignDouble = [&value](double& destination) {
+				if(!Reflection::IsType<double>(value)) return false;
+				const double converted = Reflection::GetValue<double>(value);
+				if(!std::isfinite(converted)) return false;
+				destination = converted;
+				return true;
+			};
+			if(propertyName == "radiusMetres") return assignDouble(candidate.radiusMetres);
+			if(propertyName == "heightMetres") return assignDouble(candidate.heightMetres);
+			if(propertyName == "stepHeightMetres") return assignDouble(candidate.stepHeightMetres);
+			if(propertyName == "maxSlopeDegrees") return assignDouble(candidate.maxSlopeDegrees);
+			if(propertyName == "clearanceMarginMetres") return assignDouble(candidate.clearanceMarginMetres);
+			if(propertyName == "horizontalResolutionMetres") return assignDouble(candidate.horizontalResolutionMetres);
+			if(propertyName == "verticalResolutionMetres") return assignDouble(candidate.verticalResolutionMetres);
+			if(propertyName == "arrivalToleranceMetres") return assignDouble(candidate.arrivalToleranceMetres);
+			if(propertyName == "targetDisplacementThresholdMetres") return assignDouble(candidate.targetDisplacementThresholdMetres);
+			if(propertyName == "minimumReplanIntervalSeconds") return assignDouble(candidate.minimumReplanIntervalSeconds);
+			if(propertyName == "excludedAreasMask") {
+				if(!Reflection::IsType<std::uint32_t>(value)) return false;
+				candidate.excludedAreasMask = Reflection::GetValue<std::uint32_t>(value);
+				return true;
+			}
+			if(propertyName == "areaPenalties") {
+				using Penalties = decltype(candidate.areaPenalties);
+				if(!Reflection::IsType<Penalties>(value)) return false;
+				candidate.areaPenalties = Reflection::GetValue<Penalties>(value);
+				return true;
+			}
+			if(propertyName == "active") {
+				if(!Reflection::IsType<bool>(value)) return false;
+				candidate.active = Reflection::GetValue<bool>(value);
+				return true;
+			}
+			return false;
+		}
+
 		TransactionResult ValidateTransaction(ObjectManager& objects, const Transaction& transaction)
 		{
 			TransactionResult result;
@@ -379,6 +423,7 @@ namespace TerraEngine::Scene {
 			std::unordered_set<std::string> deletedTargets;
 			std::unordered_set<std::string> spatiallyTouchedTargets;
 			std::unordered_map<std::string, bool> preparedComponentPresence;
+			std::unordered_map<std::string, NavigationAgentComponent> preparedNavigationAgents;
 			for (std::size_t index = 0; index < transaction.writeSet.operations.size(); ++index)
 			{
 				const TransactionWriteOperation& operation = transaction.writeSet.operations[index];
@@ -620,6 +665,9 @@ namespace TerraEngine::Scene {
 							AddConflict(result, TransactionConflictReason::PolicyRejection, operation.target.objectId, index, "Component is already present.", 0, 0, operation.componentName, {}, operation.kind);
 						}
 						preparedComponentPresence[componentKey] = true;
+						if(operation.componentName == NavigationAgentComponent::kComponentName) {
+							preparedNavigationAgents.insert_or_assign(componentKey, NavigationAgentComponent{});
+						}
 					}
 					else if (operation.kind == TransactionWriteKind::RemoveComponent)
 					{
@@ -629,6 +677,7 @@ namespace TerraEngine::Scene {
 							AddConflict(result, TransactionConflictReason::MissingTarget, operation.target.objectId, index, "Component is not present.", 0, 0, operation.componentName, {}, operation.kind);
 						}
 						preparedComponentPresence[componentKey] = false;
+						preparedNavigationAgents.erase(componentKey);
 					}
 					else
 					{
@@ -641,7 +690,36 @@ namespace TerraEngine::Scene {
 							result.status = TransactionStatus::Rejected;
 							AddConflict(result, TransactionConflictReason::InvalidPayload, operation.target.objectId, index, "Reflected component property or value type is invalid.", 0, 0, operation.componentName, operation.propertyName, operation.kind);
 						}
+						else if(operation.componentName == NavigationAgentComponent::kComponentName)
+						{
+							auto staged = preparedNavigationAgents.find(componentKey);
+							if(staged == preparedNavigationAgents.end()) {
+								NavigationAgentComponent current{};
+								if(!operation.target.UsesLocalObject()) {
+									if(const std::optional<Object> target = objects.getObject(operation.target.objectId)) {
+										if(const NavigationAgentComponent* live = objects.getRegistry().try_get<NavigationAgentComponent>(target->EntityId())) current = *live;
+									}
+								}
+								staged = preparedNavigationAgents.emplace(componentKey, current).first;
+							}
+							if(!ApplyNavigationAgentProperty(staged->second, operation.propertyName, converted)) {
+								result.status = TransactionStatus::Rejected;
+								AddConflict(result, TransactionConflictReason::InvalidPayload, operation.target.objectId, index,
+									"Navigation Agent property cannot form a finite authored candidate.", 0, 0,
+									operation.componentName, operation.propertyName, operation.kind);
+							}
+						}
 					}
+				}
+			}
+			for(const auto& [componentKey, candidate] : preparedNavigationAgents)
+			{
+				(void)componentKey;
+				if(!candidate.ValidateAuthoredValues()) {
+					result.status = TransactionStatus::Rejected;
+					AddConflict(result, TransactionConflictReason::InvalidPayload, TerraEngine::EMPTY_UUID, 0U,
+						"Navigation Agent settings violate their complete authored validation contract.", 0, 0,
+						std::string(NavigationAgentComponent::kComponentName));
 				}
 			}
 

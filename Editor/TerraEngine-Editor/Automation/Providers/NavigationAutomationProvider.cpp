@@ -27,6 +27,11 @@ namespace TerraEngine::Editor::Automation
 		Json InputSchema(std::string_view name)
 		{
 			Json schema = EmptySchema();
+			const Json agent = {{"type", "object"}, {"required", {"worldId", "worldGeneration", "objectId", "lifetimeGeneration", "attachmentGeneration", "runtimeSlot", "runtimeSlotGeneration"}},
+				{"properties", {{"worldId", {{"type", "integer"}, {"minimum", 1U}}}, {"worldGeneration", {{"type", "integer"}, {"minimum", 1U}}},
+					{"objectId", {{"type", "string"}, {"minLength", 32U}, {"maxLength", 32U}}}, {"lifetimeGeneration", {{"type", "integer"}, {"minimum", 1U}}},
+					{"attachmentGeneration", {{"type", "integer"}, {"minimum", 1U}}}, {"runtimeSlot", {{"type", "integer"}, {"minimum", 0U}}},
+					{"runtimeSlotGeneration", {{"type", "integer"}, {"minimum", 1U}}}}}, {"additionalProperties", false}};
 			const Json owner = {{"type", "object"}, {"required", {"worldId", "worldGeneration", "ownerId", "ownerGeneration"}},
 				{"properties", {{"worldId", {{"type", "integer"}, {"minimum", 1U}}},
 					{"worldGeneration", {{"type", "integer"}, {"minimum", 1U}}},
@@ -44,6 +49,22 @@ namespace TerraEngine::Editor::Automation
 				schema["properties"] = {{"request", request},
 					{"maxItems", {{"type", "integer"}, {"minimum", 1U}, {"maximum", 4096U}}}};
 				schema["required"] = {"request"};
+			} else if(name == "navigation.agent.bind") {
+				schema["properties"] = {{"objectId", {{"type", "string"}, {"minLength", 32U}, {"maxLength", 32U}}}};
+				schema["required"] = {"objectId"};
+			} else if(name == "navigation.agent.destination.location") {
+				schema["properties"] = {{"agent", agent}, {"location", {{"type", "object"}}}, {"expectedConfigurationRevision", {{"type", "integer"}}},
+					{"expectedIntentSequence", {{"type", "integer"}}}, {"producerOrderingToken", {{"type", "integer"}, {"minimum", 1U}}}, {"correlationId", {{"type", "integer"}, {"minimum", 1U}}}};
+				schema["required"] = {"agent", "location", "producerOrderingToken", "correlationId"};
+			} else if(name == "navigation.agent.destination.object") {
+				schema["properties"] = {{"agent", agent}, {"target", {{"type", "object"}}}, {"expectedConfigurationRevision", {{"type", "integer"}}},
+					{"expectedIntentSequence", {{"type", "integer"}}}, {"producerOrderingToken", {{"type", "integer"}, {"minimum", 1U}}}, {"correlationId", {{"type", "integer"}, {"minimum", 1U}}}};
+				schema["required"] = {"agent", "target", "producerOrderingToken", "correlationId"};
+			} else if(name == "navigation.agent.stop" || name == "navigation.agent.receipt" || name == "navigation.agent.status" || name == "navigation.agent.guidance") {
+				schema["properties"] = {{"agent", agent}, {"expectedConfigurationRevision", {{"type", "integer"}}}, {"expectedIntentSequence", {{"type", "integer"}}},
+					{"producerOrderingToken", {{"type", "integer"}, {"minimum", 1U}}}, {"correlationId", {{"type", "integer"}, {"minimum", 1U}}}};
+				schema["required"] = name == "navigation.agent.stop" ? Json{"agent", "producerOrderingToken", "correlationId"}
+					: name == "navigation.agent.receipt" ? Json{"agent", "correlationId"} : Json{"agent"};
 			} else if(name == "navigation.cache.status")
 				schema["properties"] = {{"jobId", {{"type", "string"}, {"minLength", 1}}}};
 			return schema;
@@ -71,23 +92,29 @@ namespace TerraEngine::Editor::Automation
 		std::vector<AutomationCapabilityRegistration> result;
 		for(const std::string_view name : {"navigation.settings.get", "navigation.diagnostics.get",
 			"navigation.route.request", "navigation.route.read", "navigation.route.cancel", "navigation.cache.prepare",
-			"navigation.cache.status"})
+			"navigation.cache.status", "navigation.agent.bind", "navigation.agent.destination.location",
+			"navigation.agent.destination.object", "navigation.agent.stop", "navigation.agent.receipt",
+			"navigation.agent.status", "navigation.agent.guidance"})
 		{
+			// Binding only reads the immutable agent publication.  It intentionally
+			// has no authority to discover or create an attachment in live ECS.
 			const bool read = name == "navigation.settings.get" || name == "navigation.diagnostics.get"
 				|| name == "navigation.route.read"
-				|| name == "navigation.cache.status";
+				|| name == "navigation.cache.status" || name == "navigation.agent.bind"
+				|| name == "navigation.agent.receipt"
+				|| name == "navigation.agent.status" || name == "navigation.agent.guidance";
 			AutomationCapabilityDescriptor descriptor;
 			descriptor.name = std::string(name);
 			descriptor.category = "navigation";
 			descriptor.description = "Provider-neutral ground navigation capability.";
 			descriptor.inputSchema = InputSchema(name);
-			descriptor.resultSchema = ResultSchema({"snapshot", "route", "status"});
+			descriptor.resultSchema = ResultSchema({"snapshot", "route", "status", "agent", "guidance"});
 			ApplyAccess(descriptor, read);
 			descriptor.availability.requiresProject = true;
 			descriptor.execution.workerPreparation = !read;
 			descriptor.execution.protectedCommit = !read;
 			descriptor.execution.visibilityBoundary = read ? "immutable_navigation_snapshot" : "navigation_commit_receipt";
-			descriptor.execution.preparationReads = {"NavigationEligibleSourceIndex", "NavigationCoverageRoot"};
+			descriptor.execution.preparationReads = {"NavigationEligibleSourceIndex", "NavigationCoverageRoot", "NavigationAgentState"};
 			descriptor.execution.commitWrites = read ? std::vector<std::string>{}
 				: std::vector<std::string>{"NavigationCommandQueue", "NavigationResults"};
 			result.push_back({std::move(descriptor), resolveHandler(name), {}});

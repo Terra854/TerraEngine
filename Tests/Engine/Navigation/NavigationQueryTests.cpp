@@ -6,13 +6,19 @@
 #include "../TestHarness.h"
 
 #include "Navigation/Ground/GroundRouteQuery.h"
+#include "Navigation/Geometry/NavigationGeometrySnapshot.h"
 #include "Navigation/NavigationSettings.h"
 #include "Navigation/NavigationRouteValidity.h"
 #include "Navigation/NavigationSystem.h"
 #include "Navigation/NavigationTypes.h"
+#include "Core/Scheduling/JobGraph.h"
+#include "Core/Scheduling/SystemScheduler.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <string_view>
+#include <utility>
 
 namespace TerraEngine::Tests
 {
@@ -45,6 +51,75 @@ namespace TerraEngine::Tests
 			request.allowPartial = allowPartial;
 			request.maxExpansions = 128U;
 			return request;
+		}
+
+		// The provider-facing budget tests need actual Recast/Detour coverage rather
+		// than a synthetic GroundRouteQuery snapshot. This small floor keeps setup
+		// deterministic while exercising NavigationSystem's configured limits.
+		std::shared_ptr<const NavigationGeometrySnapshot> FlatTerrain()
+		{
+			NavigationGeometryDocument document{};
+			document.kind = NavigationGeometryPayloadKind::TriangleMesh;
+			document.vertices = {{1.0F, 0.0F, 1.0F}, {8.0F, 0.0F, 8.0F},
+				{8.0F, 0.0F, 1.0F}, {1.0F, 0.0F, 8.0F}};
+			document.triangles = {{0U, 1U, 2U}, {0U, 3U, 1U}};
+			NavigationGeometrySnapshotDescriptor descriptor{};
+			descriptor.sourceKind = NavigationSourceKind::Terrain;
+			descriptor.sourceRevision = 1U;
+			descriptor.canonicalPlacementRevision = 1U;
+			descriptor.physicalReadyRevision = 1U;
+			return NavigationGeometrySnapshot::Create(descriptor, std::move(document)).snapshot;
+		}
+
+		NavigationRequestHandle SubmitPreparedRoute(NavigationSystem& system)
+		{
+			const std::shared_ptr<const NavigationWorldRoot> world = system.PublishedWorld();
+			if(!world) return {};
+			GroundRouteQuery::Request request = Request();
+			request.owner.world = world->world;
+			request.start.world = world->world;
+			request.destination.world = world->world;
+			return system.SubmitOneShotRoute(std::move(request));
+		}
+
+		struct ProviderBudgetCaseResult
+		{
+			NavigationOutcome outcome = NavigationOutcome::Failed;
+			NavigationReason reason = NavigationReason::ProviderFailure;
+		};
+
+		ProviderBudgetCaseResult RunConfiguredProviderBudgetCase(NavigationSettings settings)
+		{
+			NavigationSystem& system = NavigationSystem::Instance();
+			const NavigationSettings original = system.SettingsSnapshot();
+			system.Shutdown();
+			// Always restore the singleton's pre-test configuration even when a later
+			// assertion fails. Other navigation tests use independent capacities.
+			struct SettingsRestore final {
+				NavigationSystem& system;
+				NavigationSettings original;
+				~SettingsRestore()
+				{
+					system.Shutdown();
+					(void)system.ConfigureSettings(original);
+				}
+			} restore{system, original};
+			if(!system.ConfigureSettings(std::move(settings))) {
+				return {NavigationOutcome::InvalidRequest, NavigationReason::InvalidDestination};
+			}
+			system.Initialize();
+			const std::shared_ptr<const NavigationGeometrySnapshot> terrain = FlatTerrain();
+			if(!terrain || !system.QueueInitialGroundBuild(NavigationProfile::Defaults(), {terrain})) {
+				return {NavigationOutcome::UnavailableCoverage, NavigationReason::MissingTerrain};
+			}
+			system.Update(0.0F);
+			const NavigationRequestHandle handle = SubmitPreparedRoute(system);
+			if(!handle.IsValid()) return {NavigationOutcome::RejectedCapacity, NavigationReason::OutputLimit};
+			for(std::uint32_t frame = 0U; frame < 4U; ++frame) system.Update(0.0F);
+			const NavigationStoreReadResult<NavigationRequestRecord> read = system.ReadRequest(handle);
+			return read.record
+				? ProviderBudgetCaseResult{read.record->outcome, read.record->reason}
+				: ProviderBudgetCaseResult{};
 		}
 	}
 
@@ -151,6 +226,115 @@ namespace TerraEngine::Tests
 			context.Expect(!missingTerrain.usable && missingTerrain.outcome == NavigationOutcome::UnavailableCoverage
 				&& missingTerrain.reason == NavigationReason::MissingTerrain,
 				"An unavailable terrain publication must stay distinct from a geometrically unreachable destination.");
+		});
+
+		registry.Add("Navigation.Query.ConfiguredDetourNodeAndRoutePointBudgetsRemainIndependent", [](TestContext& context) {
+			NavigationSettings pointLimited = NavigationSettings::Defaults();
+			pointLimited.maxDetourNodesPerQuery = 64U;
+			pointLimited.maxRoutePoints = 1U;
+			const ProviderBudgetCaseResult pointResult = RunConfiguredProviderBudgetCase(pointLimited);
+
+			NavigationSettings nodeLimited = NavigationSettings::Defaults();
+			nodeLimited.maxDetourNodesPerQuery = 1U;
+			nodeLimited.maxRoutePoints = 8U;
+			const ProviderBudgetCaseResult nodeResult = RunConfiguredProviderBudgetCase(nodeLimited);
+
+			context.Expect(pointResult.outcome == NavigationOutcome::BudgetExhausted
+				&& pointResult.reason == NavigationReason::OutputLimit,
+				"A configured one-point public route budget must reject the mandatory stitched start/end pair instead of publishing truncated guidance.");
+			context.Expect(nodeResult.outcome == NavigationOutcome::BudgetExhausted
+				&& nodeResult.reason == NavigationReason::NodeLimit,
+				"A configured Detour node budget must bound provider search independently from the larger route-output budget.");
+		});
+
+		registry.Add("Navigation.Query.RouteTimingAggregatesCoverSynchronousLifecycle", [](TestContext& context) {
+			NavigationSystem& system = NavigationSystem::Instance();
+			system.Shutdown();
+			system.Initialize();
+			const std::shared_ptr<const NavigationGeometrySnapshot> terrain = FlatTerrain();
+			const bool queued = terrain != nullptr
+				&& system.QueueInitialGroundBuild(NavigationProfile::Defaults(), {terrain});
+			context.Expect(queued,
+				"The timing fixture requires one valid copied terrain source.");
+			if(!queued) {
+				system.Shutdown();
+				return;
+			}
+			system.Update(0.0F);
+			const NavigationRequestHandle handle = SubmitPreparedRoute(system);
+			context.Expect(handle.IsValid(), "The timing fixture request must be admitted.");
+			for(std::uint32_t frame = 0U; frame < 4U; ++frame) system.Update(0.0F);
+			const auto diagnostics = system.PublishedDiagnostics();
+			context.Expect(diagnostics != nullptr
+				&& diagnostics->routeAdmissionToCaptureCount >= 1U
+				&& diagnostics->routeWorkerSearchCount >= 1U,
+				"Synchronous Update must publish route admission/capture and executed worker-search samples.");
+			context.Expect(diagnostics != nullptr
+				&& diagnostics->routeAdmissionToCaptureCount == diagnostics->routeWorkerSearchCount,
+				"A completed synchronous packet must contribute one capture sample per executed search.");
+			context.Expect(diagnostics != nullptr
+				&& diagnostics->routeAdmissionToCaptureNanoseconds >= diagnostics->routeAdmissionToCaptureMaxNanoseconds
+				&& diagnostics->routeWorkerSearchNanoseconds >= diagnostics->routeWorkerSearchMaxNanoseconds,
+				"Route timing totals must dominate their corresponding maxima.");
+			system.Shutdown();
+		});
+
+		registry.Add("Navigation.Query.RouteTimingScheduledRecoveryDoesNotDoubleCountCapture", [](TestContext& context) {
+			NavigationSystem& system = NavigationSystem::Instance();
+			system.Shutdown();
+			system.Initialize();
+			const NavigationRequestHandle handle = SubmitPreparedRoute(system);
+			context.Expect(handle.IsValid(), "The scheduled timing fixture request must be admitted.");
+			if(!handle.IsValid()) {
+				system.Shutdown();
+				return;
+			}
+			system.SetContractTestWorkAvailable(true);
+			const auto firstWorkloads = system.DeclareFrameWorkloads(0.0F);
+			const auto findWorkload = [](const auto& workloads, std::string_view id) {
+				return std::find_if(workloads.begin(), workloads.end(), [id](const auto& workload) {
+					return workload.stableDescriptorId == id;
+				});
+			};
+			const auto firstCapture = findWorkload(firstWorkloads, "NavigationSystem/Navigation/Capture");
+			context.Expect(firstCapture != firstWorkloads.end() && firstCapture->work,
+				"The scheduled timing fixture must expose protected route capture.");
+			if(firstCapture == firstWorkloads.end() || !firstCapture->work) {
+				system.Shutdown();
+				return;
+			}
+			TerraEngine::Scheduling::JobGraphContext firstContext{};
+			firstCapture->work(firstContext);
+			// A second capture before preparation models a cancelled worker frame. The
+			// protected implementation restores the packet and must retain its original
+			// admission stamp rather than charging capture twice.
+			const auto secondWorkloads = system.DeclareFrameWorkloads(0.0F);
+			const auto secondCapture = findWorkload(secondWorkloads, "NavigationSystem/Navigation/Capture");
+			const auto secondPrepare = findWorkload(secondWorkloads, "NavigationSystem/Navigation/Prepare");
+			const auto secondPublish = findWorkload(secondWorkloads, "NavigationSystem/Navigation/Publish");
+			context.Expect(secondCapture != secondWorkloads.end() && secondPrepare != secondWorkloads.end()
+				&& secondPublish != secondWorkloads.end() && secondCapture->work && secondPrepare->rangeWork
+				&& secondPublish->work,
+				"The recovered scheduled packet must redeclare capture, preparation, and publication.");
+			if(secondCapture == secondWorkloads.end() || secondPrepare == secondWorkloads.end()
+				|| secondPublish == secondWorkloads.end() || !secondCapture->work || !secondPrepare->rangeWork
+				|| !secondPublish->work) {
+				system.Shutdown();
+				return;
+			}
+			TerraEngine::Scheduling::JobGraphContext secondContext{};
+			secondCapture->work(secondContext);
+			secondPrepare->rangeWork({.partitionIndex = 0U, .partitionCount = 1U,
+				.itemBegin = 0U, .itemEnd = 1U}, secondContext);
+			secondPublish->work(secondContext);
+			const auto diagnostics = system.PublishedDiagnostics();
+			context.Expect(diagnostics != nullptr
+				&& diagnostics->routeAdmissionToCaptureCount == 1U
+				&& diagnostics->routeWorkerSearchCount == 1U,
+				"A recovered scheduled packet must contribute one capture and one executed-search sample.");
+			context.Expect(diagnostics != nullptr && diagnostics->routeWorkerToPublicationCount == 0U,
+				"An unavailable route without a stored route handle must not count as successful publication.");
+			system.Shutdown();
 		});
 	}
 }

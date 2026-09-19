@@ -12,6 +12,8 @@
 #include "TEPAK/PackWriter.h"
 #include "Terrain/TerrainAreaCodec.h"
 #include "Terrain/TerrainAssetStore.h"
+#include "Terrain/TerrainMaterial.h"
+#include "Resource/ResourceManager.h"
 
 #include <array>
 #include <chrono>
@@ -93,6 +95,25 @@ namespace TerraEngine::Tests
 				&& std::filesystem::exists(root / "Engine/Shaders/Terrain/TerrainVisibility.frag.hlsl");
 			context.Expect(fallback.status == TerrainContentStatus::NotMounted && shaders && TerrainContentResolver::ReadRoot(unmounted, "Editor/Runtime.teterrain").status == TerrainContentStatus::ForbiddenRuntimePath,
 				"Export terrain loading must fail closed without a TEPAK mount, discover dedicated runtime shaders, and reject editor-only logical paths.");
+		});
+
+		registry.Add("Terrain.ExportRuntime.MountedFallbackMaterialPreservesAuthoredPbrInputs", [](TestContext& context) {
+			// TerrainDerivedSystem creates mounted direct proxies without a terrain
+			// layer source. That exact fallback must retain component-authored PBR
+			// values in its ordinary TMAT header for the export renderer to upload.
+			TerraEngine::Terrain::TerrainMaterialSettings settings{};
+			settings.baseColor = {0.18F, 0.55F, 0.16F};
+			settings.metallic = 0.0F;
+			settings.roughness = 0.92F;
+			const auto material = TerraEngine::Terrain::CreateTerrainMaterial(
+				ResourceManager::Instance(), settings);
+			context.Expect(material != nullptr
+				&& material->header.baseColorFactor[0] == settings.baseColor.r
+				&& material->header.baseColorFactor[1] == settings.baseColor.g
+				&& material->header.baseColorFactor[2] == settings.baseColor.b
+				&& material->header.metallicFactor == settings.metallic
+				&& material->header.roughnessFactor == settings.roughness,
+				"Mounted direct terrain materials must preserve authored PBR values when no layer source is available.");
 		});
 
 		registry.Add("Terrain.ExportRuntime.BuildsDirectMeshFromSavedMountedGeneration", [](TestContext& context) {
@@ -223,6 +244,11 @@ namespace TerraEngine::Tests
 			const bool removedAreaAbsent = std::none_of(loaded.areas.begin(), loaded.areas.end(), [](const auto& area) {
 				return area.area.x < -1 || area.area.z < -1 || area.area.x > 1 || area.area.z > 1;
 			});
+			const auto recipeHole = [](const TerraEngine::Physics::TerrainHeightFieldRecipe& recipe,
+				std::uint32_t x, std::uint32_t z) {
+				const std::uint32_t bit = z * 256U + x;
+				return (recipe.holeBits[bit / 8U] & (1U << (bit % 8U))) != 0U;
+			};
 			context.Expect(loaded.Succeeded() && loaded.areas.size() == 9u
 				&& loaded.sourceRootHash == encodedRoot.contentHash
 				&& loaded.sourcePublicationGeneration == 11u
@@ -232,7 +258,10 @@ namespace TerraEngine::Tests
 				&& negative->collisionRecipe.heightMillimetres.front() == 3210
 				&& partial != loaded.areas.end() && partial->implicitDefault
 				&& partial->activeRect == TerraEngine::Terrain::TerrainAreaActiveRect{0u, 0u, 2u, 2u}
-				&& partial->collisionRecipe.heightMillimetres.front() == -750,
+				&& partial->collisionRecipe.heightMillimetres.front() == -750
+				&& !recipeHole(partial->collisionRecipe, 0U, 0U)
+				&& recipeHole(partial->collisionRecipe, 1U, 0U)
+				&& recipeHole(partial->collisionRecipe, 0U, 1U),
 				"Export/runtime must derive signed explicit, sparse implicit, and partial active coverage exclusively from one complete current root. "
 					+ loaded.renderProxy.diagnostic);
 		});

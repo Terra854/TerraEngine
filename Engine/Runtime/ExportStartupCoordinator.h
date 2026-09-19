@@ -13,6 +13,8 @@
 #include "Physics/PhysicsSettings.h"
 #include "Runtime/BootSummary.h"
 #include "Runtime/ContentMount/ContentMount.h"
+#include "Navigation/Persistence/SavedNavigationFormat.h"
+#include "Navigation/NavigationSettings.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -64,11 +66,26 @@ struct PackagedPhysicsRuntime
 
 	struct PackagedNavigationRuntime
 	{
+		struct OptionalCacheObservation
+		{
+			std::string path;
+			bool present = false;
+			bool accepted = false;
+			std::string reason;
+		};
+		struct OptionalCacheCandidate
+		{
+			std::string path;
+			std::vector<std::byte> bytes;
+			TerraEngine::Navigation::NavigationProfile profile = TerraEngine::Navigation::NavigationProfile::Defaults();
+		};
 		bool declared = false;
 		bool loaded = false;
 		bool sourceFree = true;
 		std::vector<std::string> geometryPaths;
 		std::vector<std::string> optionalCachePaths;
+		std::vector<OptionalCacheObservation> optionalCacheObservations;
+		std::vector<OptionalCacheCandidate> optionalCacheCandidates;
 		std::string diagnostic;
 	};
 

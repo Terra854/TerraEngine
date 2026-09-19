@@ -8,6 +8,7 @@
 #include "EditorContext.h"
 #include <filesystem>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <optional>
 
 class ProjectHubSubsystem;
@@ -22,7 +23,12 @@ public:
 	// path leaves this unset and therefore never writes validation evidence.
 	void SetPhysicsInvariantOutputPath(const std::filesystem::path& outputPath);
 	void SetTerrainInvariantOutputPath(const std::filesystem::path& outputPath);
+	void SetNavigationAgentValidationPaths(const std::filesystem::path& optionsPath,
+		const std::filesystem::path& reportPath);
 	int RequestedProcessExitCode() const noexcept;
+	// Persist the terminal evidence only after Engine has invoked this system's
+	// Shutdown. This makes `orderlyShutdown` evidence a real lifecycle fact.
+	int FinalizeNavigationAgentValidationAfterEngineShutdown();
 	void Setup(Engine* engine);
 	void Initialize() override;
 	void Update(float deltaTime) override;
@@ -43,6 +49,10 @@ private:
 	std::optional<std::filesystem::path> startupProjectPath;
 	std::optional<std::filesystem::path> physicsInvariantOutputPath;
 	std::optional<std::filesystem::path> terrainInvariantOutputPath;
+	std::optional<std::filesystem::path> navigationAgentValidationOptionsPath;
+	std::optional<std::filesystem::path> navigationAgentValidationReportPath;
+	nlohmann::json navigationAgentValidationOptions;
+	std::optional<nlohmann::json> navigationAgentValidationTerminalReport;
 
 	// Managed Editor Hooks
 	typedef void (*ManagedInitFn)(void*);
@@ -67,16 +77,21 @@ private:
 	bool startupProjectOpenAttempted = false;
 	bool physicsInvariantRunAttempted = false;
 	bool terrainInvariantRunAttempted = false;
+	bool navigationAgentValidationRunAttempted = false;
+	bool navigationAgentValidationOptionsLoaded = false;
+	bool navigationAgentValidationShutdownObserved = false;
 	float terrainInvariantWaitSeconds = 0.0f;
 	// The installed acceptance command waits for the normal asynchronous
 	// Assembly-CSharp coordinator instead of canceling it during early shutdown.
 	float physicsInvariantManagedWaitSeconds = 0.0f;
+	float navigationAgentValidationWaitSeconds = 0.0f;
 	int requestedProcessExitCode = 0;
 	std::uint64_t imguiPresentationGeneration = 0;
 	void HandleProjectLoaded();
 	void ProcessStartupProjectOpen();
 	void ProcessPhysicsInvariantValidation(float deltaTime);
 	void ProcessTerrainInvariantValidation(float deltaTime);
+	void ProcessNavigationAgentValidation(float deltaTime);
 public:
 	void DrawWindowMenu();
 	void HideAllWindows();

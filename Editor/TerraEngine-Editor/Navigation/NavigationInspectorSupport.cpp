@@ -12,6 +12,32 @@ namespace TerraEngine::Editor::Navigation {
 				+ std::string(TerraEngine::Navigation::ToString(validation.code))};
 	}
 
+	NavigationAuthoringValidation ValidateNavigationAgentDraft(
+		const NavigationAgentComponent& candidate) {
+		if(candidate.ValidateAuthoredValues()) return {true, {}};
+		return {false, "Navigation Agent settings require a finite valid traversal profile, positive arrival and target tolerances, and a bounded replan interval."};
+	}
+
+	NavigationAuthoringValidation ApplyNavigationAgentProjectProfile(
+		NavigationAgentComponent& candidate,
+		const TerraEngine::Navigation::NavigationProfile& projectProfile) {
+		const NavigationAuthoringValidation profileValidation = ValidateNavigationProfileDraft(projectProfile);
+		if(!profileValidation.accepted) return profileValidation;
+		NavigationAgentComponent staged = candidate;
+		staged.radiusMetres = projectProfile.radiusMetres;
+		staged.heightMetres = projectProfile.heightMetres;
+		staged.stepHeightMetres = projectProfile.stepHeightMetres;
+		staged.maxSlopeDegrees = projectProfile.maxSlopeDegrees;
+		staged.clearanceMarginMetres = projectProfile.clearanceMarginMetres;
+		staged.horizontalResolutionMetres = projectProfile.horizontalResolutionMetres;
+		staged.verticalResolutionMetres = projectProfile.verticalResolutionMetres;
+		staged.excludedAreasMask = projectProfile.excludedAreasMask;
+		staged.areaPenalties = projectProfile.areaPenalties;
+		const NavigationAuthoringValidation candidateValidation = ValidateNavigationAgentDraft(staged);
+		if(candidateValidation.accepted) candidate = staged;
+		return candidateValidation;
+	}
+
 	NavigationTerrainControlDescription DescribeNavigationTerrainControls(
 		const NavigationTerrainAuthoringState& state) noexcept {
 		return {false, !state.terrainExistsInScene, false};

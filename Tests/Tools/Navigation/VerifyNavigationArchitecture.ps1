@@ -9,6 +9,7 @@ $ErrorActionPreference = 'Stop'
 # unrelated to navigation and therefore cannot establish scope creep.
 $sourceInclude = @(
 	'Engine/Navigation',
+	'Engine/Components/NavigationAgentComponent.h',
 	'Engine/Managed/Source/Navigation',
 	'Editor/TerraEngine-Editor/Navigation',
 	'Editor/TerraEngine-Editor/Windows/NavigationWindow.cpp',
@@ -19,16 +20,13 @@ $sourceInclude = @(
 )
 $sourceExclude = @('VerifyNavigationArchitecture.ps1','External/recastnavigation')
 $retiredFiles = @(
-	'Engine/Components/Navigation/NavigationAgentComponent.h',
 	'Engine/Components/Navigation/NavigationSourceComponent.h',
 	'Engine/Components/Navigation/NavigationConnectionComponent.h',
-	'Engine/Managed/Source/Navigation/NavigationAgentComponent.cs',
 	'Engine/Navigation/Ground/GroundTraversalConnectionStore.h',
 	'Engine/Navigation/Ground/GroundTraversalConnectionStore.cpp'
 )
 $retiredRules = @(
-	'NavigationAgentComponent','NavigationSourceComponent','NavigationConnectionComponent',
-	'NavigationAgentHandle','NativeNavigationAgent','QueueSetDestination','SynchronizeSceneObjectAgents',
+	'NavigationSourceComponent','NavigationConnectionComponent',
 	'\.tenavsource',
 	'Navigation(?:Agent|Source|Connection)(?:Component)?(?:Compatibility|Migration|Alias)'
 )
@@ -133,6 +131,17 @@ if($hasSourceSurface) {
 }
 
 if($hasInstalledSurface -and -not $hasSourceSurface) {
+	# A source-free agent qualification must not silently fall back to the old
+	# standalone runner or omit its deterministic scene generator/manifest.
+	foreach($required in @(
+		'Tests/Tools/Navigation/RunInstalledNavigationAgentAcceptance.ps1',
+		'Tests/Tools/Navigation/NewNavigationAgentWorkloadProject.ps1',
+		'Tests/Tools/Navigation/navigation-build-metadata.json',
+		'Tests/Fixtures/Navigation/AgentWorkload/manifest.json')) {
+		if(-not (Test-Path -LiteralPath (Join-Path $Root $required) -PathType Leaf)) {
+			$violations.Add("Installed agent qualification input missing: $required")
+		}
+	}
 	# Installed headers, support scripts, manifests, and docs are visible product
 	# surfaces. Exclude this verifier and negative fixtures because they describe
 	# forbidden identifiers deliberately rather than publishing an old API.
@@ -184,7 +193,7 @@ if($hasInstalledSurface -and -not $hasSourceSurface) {
 		})
 	if($nativeArtifacts.Count -eq 0) { $violations.Add("Installed navigation audit found no native TerraEngine artifact beneath: $Root") }
 	if($managedArtifacts.Count -eq 0) { $violations.Add("Installed navigation audit found no managed TerraEngine assembly beneath: $Root") }
-	$binaryLiterals = @('NavigationAgentComponent','NavigationSourceComponent','NavigationConnectionComponent','NavigationAgentHandle','NativeNavigationAgent','QueueSetDestination','SynchronizeSceneObjectAgents','.tenavsource')
+	$binaryLiterals = @('NavigationSourceComponent','NavigationConnectionComponent','.tenavsource')
 	foreach($artifact in @($nativeArtifacts) + @($managedArtifacts)) {
 		foreach($literal in $binaryLiterals) {
 			if(Test-InstalledBinaryLiteral -Path $artifact.FullName -Literal $literal) {

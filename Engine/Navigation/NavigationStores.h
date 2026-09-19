@@ -82,6 +82,22 @@ namespace TerraEngine::Navigation {
 	// visible to other engine systems.
 	template<typename Handle, typename Record>
 	class NavigationGenerationStore {
+	private:
+		enum class SlotState : std::uint8_t {
+			Alive,
+			Expired,
+			Destroyed,
+			Revoked,
+			Retired
+		};
+
+		struct Slot {
+			NavigationOwnerHandle owner{};
+			NavigationGeneration generation = 0U;
+			SlotState state = SlotState::Destroyed;
+			Record record{};
+		};
+
 	public:
 		explicit NavigationGenerationStore(std::size_t capacity)
 			: capacity_(capacity) {
@@ -258,22 +274,17 @@ namespace TerraEngine::Navigation {
 			return aliveCount;
 		}
 
+		// Diagnostics use this bounded container allocation estimate to distinguish
+		// live request/route storage from process-wide memory owned elsewhere.
+		// Record payloads remain value-owned by this store; external route consumers
+		// cannot extend this count by retaining a handle.
+		[[nodiscard]] std::size_t MemoryBytes() const {
+			std::lock_guard<std::mutex> lock(mutex_);
+			return slots_.capacity() * sizeof(Slot)
+				+ freeSlots_.capacity() * sizeof(NavigationSlotIndex);
+		}
+
 	private:
-		enum class SlotState : std::uint8_t {
-			Alive,
-			Expired,
-			Destroyed,
-			Revoked,
-			Retired
-		};
-
-		struct Slot {
-			NavigationOwnerHandle owner{};
-			NavigationGeneration generation = 0U;
-			SlotState state = SlotState::Destroyed;
-			Record record{};
-		};
-
 		[[nodiscard]] static Handle MakeHandle(
 			NavigationOwnerHandle owner,
 			NavigationSlotIndex index,

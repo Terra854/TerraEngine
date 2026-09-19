@@ -15,6 +15,7 @@
 #include "Components/CameraComponent.h"
 #include "Components/LightComponent.h"
 #include "Components/MeshRenderComponent.h"
+#include "Components/NavigationAgentComponent.h"
 #include "Components/SkyComponent.h"
 #include "Components/PrefabLinkComponent.h"
 #include "Components/UIComponent.h"
@@ -86,6 +87,9 @@ void ComponentRegistry::RegisterAllComponents() {
 	CameraComponent::registerType();
 	LightComponent::registerType();
 	MeshRenderComponent::registerType();
+	// Agent settings are ordinary optional authoring data. Runtime route state is
+	// owned by NavigationAgentSystem and therefore is never registered here.
+	NavigationAgentComponent::registerType();
 	SkyComponent::registerType();
 	PrefabLinkComponent::registerType();
 	UIComponent::registerType();

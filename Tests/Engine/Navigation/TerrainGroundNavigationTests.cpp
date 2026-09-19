@@ -12,12 +12,16 @@
 #include "Navigation/Geometry/NavigationGeometrySnapshot.h"
 #include "Navigation/NavigationSettings.h"
 #include "Navigation/NavigationTypes.h"
+#include "Physics/Terrain/TerrainHeightFieldActiveRect.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace TerraEngine::Tests {
 	namespace {
@@ -262,6 +266,56 @@ namespace TerraEngine::Tests {
 			context.Expect(captured.accepted && captured.terrainAvailable && captured.eligibleSourceIndex
 				&& captured.eligibleSourceIndex->Records().size() == 2U,
 				"A current active terrain must automatically enable a complete copied terrain-plus-mesh source index.");
+		});
+
+		registry.Add("Navigation.GroundTerrain.NonzeroCanonicalTerrainCellRetainsLocalGeometryForShardBuild", [](TestContext& context) {
+			Navigation::NavigationBootstrapSourceInput source = MakeAutomaticTerrainSource();
+			if(source.terrain) {
+				// A nonzero cell stays as descriptor metadata while the height samples
+				// remain small local floats for later shard-local provider conversion.
+				source.terrain->canonicalOrigin.cell.x = 17LL;
+			}
+			const Navigation::TerrainNavigationCaptureResult captured = source.terrain
+				? Navigation::CaptureTerrainNavigationSource(*source.terrain)
+				: Navigation::TerrainNavigationCaptureResult{};
+			context.Expect(captured.accepted && captured.snapshot != nullptr
+				&& captured.snapshot->Triangles().front().firstVertex.x == 0.0F,
+				"A distant terrain must retain local float geometry and its canonical cell for shard localization.");
+		});
+
+		registry.Add("Navigation.GroundTerrain.FixedCollisionGridDoesNotLeakPaddedAuthoredCells", [](TestContext& context) {
+			Navigation::NavigationBootstrapSourceInput source = MakeAutomaticTerrainSource();
+			TerraEngine::Physics::TerrainHeightFieldRecipe recipe{};
+			recipe.terrainAssetId = TerraEngine::GenerateUUID();
+			recipe.authoredGeneration = 1U;
+			recipe.authoredHash = 1U;
+			recipe.heightMillimetres.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kSampleCount, 0);
+			recipe.holeBits.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount, 0U);
+			const bool masked = TerraEngine::Physics::Terrain::ApplyTerrainActiveRectToRecipe(
+				recipe, TerraEngine::Terrain::TerrainAreaActiveRect{0U, 0U, 129U, 129U});
+			if(source.terrain) {
+				source.terrain->sampleColumns = TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent;
+				source.terrain->sampleRows = TerraEngine::Physics::TerrainHeightFieldRecipe::kGridExtent;
+				source.terrain->sampleSpacingMetres = 1.0F;
+				source.terrain->heights.assign(recipe.heightMillimetres.begin(), recipe.heightMillimetres.end());
+				source.terrain->holeMask.resize(256U * 256U, 0U);
+				for(std::size_t cell = 0U; cell < source.terrain->holeMask.size(); ++cell)
+					source.terrain->holeMask[cell] = static_cast<std::uint8_t>(
+						(recipe.holeBits[cell / 8U] >> (cell % 8U)) & 1U);
+			}
+			const Navigation::TerrainNavigationCaptureResult captured = source.terrain
+				? Navigation::CaptureTerrainNavigationSource(*source.terrain)
+				: Navigation::TerrainNavigationCaptureResult{};
+			const bool allTrianglesInsideAuthoredCells = captured.snapshot != nullptr
+				&& captured.snapshot->Triangles().size() == 128U * 128U * 2U
+				&& std::all_of(captured.snapshot->Triangles().begin(), captured.snapshot->Triangles().end(),
+					[](const Navigation::NavigationGeometryTriangleRecord& triangle) {
+						return triangle.firstVertex.x <= 128.0F && triangle.secondVertex.x <= 128.0F
+							&& triangle.thirdVertex.x <= 128.0F && triangle.firstVertex.z <= 128.0F
+							&& triangle.secondVertex.z <= 128.0F && triangle.thirdVertex.z <= 128.0F;
+					});
+			context.Expect(masked && captured.accepted && allTrianglesInsideAuthoredCells,
+				"Navigation capture must consume the collision recipe's fixed-grid hole mask so padded 129-sample terrain cells cannot become support.");
 		});
 	}
 }

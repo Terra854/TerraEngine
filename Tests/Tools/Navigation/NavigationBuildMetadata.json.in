@@ -1,0 +1,7 @@
+{
+	"compilerId": "@CMAKE_CXX_COMPILER_ID@",
+	"compilerVersion": "@CMAKE_CXX_COMPILER_VERSION@",
+	"buildType": "@CMAKE_BUILD_TYPE@",
+	"sourceRevision": "@TERRAENGINE_NAVIGATION_SOURCE_REVISION@",
+	"sourceStateNote": "Revision identifies HEAD; the executable SHA-256 identifies the actual potentially uncommitted build."
+}

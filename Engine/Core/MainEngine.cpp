@@ -34,8 +34,11 @@
 #include "Scene/RuntimeLayout.h"
 #include "Scene/WorldSpatialSystem.h"
 #include "Scene/WorldStreamingSystem.h"
+#include "Navigation/Agents/NavigationAgentCommandSystem.h"
+#include "Navigation/Agents/NavigationAgentSystem.h"
 #include "Navigation/NavigationSystem.h"
 #include "Navigation/Integration/NavigationRuntimeSceneCapture.h"
+#include "Navigation/Integration/NavigationSourceTransformObservation.h"
 #include "Scripting/ScriptingSystem.h"
 #include "Physics/PhysicsSystem.h"
 #include "Physics/Terrain/TerrainCollisionSystem.h"
@@ -52,6 +55,7 @@
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 	TerraEngine::Scheduling::SystemDeclaration MakeEngineSystemDeclaration(std::string name, std::string phase, std::vector<std::string> reads, std::vector<std::string> writes, bool requiresFlushedSceneMutations = false)
@@ -109,6 +113,28 @@ namespace {
 			: std::string(TerraEngine::kEditorFatalErrorProductName);
 		report = TerraEngine::PlatformUtils::WriteCrashDumpForReport(report, crashProductName);
 		WindowSystem::Instance().ShowFatalErrorDialog(report);
+	}
+
+	[[nodiscard]] TerraEngine::Navigation::NavigationCommittedSourceMutationObservation
+	ObserveCommittedNavigationSceneMutations(const TerraEngine::Scene::SceneMutationBatchResult& mutationResult) {
+		// The shared integration helper owns normalization, staging, dirty admission,
+		// and fail-closed fallback. MainEngine only reports its protected result.
+		const auto observation = TerraEngine::Navigation::ObserveCommittedNavigationSourceMutations(
+			TerraEngine::Navigation::NavigationSystem::Instance(), ObjectManager::instance(),
+			TerraEngine::Scene::SceneMutationQueue::Instance(), mutationResult);
+		if(observation.committedSourceCount != 0U || observation.unhandledSourceCount != 0U) {
+			TERRAENGINE_LOG(LogLevel::Info,
+				"Navigation static-source bridge: queuedMutations=" << mutationResult.inputMutationCount
+				<< ", rawTransactions=" << mutationResult.transactionResults.size()
+				<< ", rawReceipts=" << mutationResult.navigationSourceMutationReceipts.size()
+				<< ", committedSources=" << observation.committedSourceCount
+				<< ", unhandled=" << observation.unhandledSourceCount
+				<< ", staged=" << (observation.staged ? "true" : "false")
+				<< ", forwardedReceipts=" << observation.forwardedReceiptCount
+				<< ", navigationAcceptedReceipts=" << observation.observedReceiptCount
+				<< ", fenced=" << (observation.fenced ? "true" : "false"));
+		}
+		return observation;
 	}
 
 }
@@ -192,13 +218,14 @@ void Engine::Initialize()
 	// A reused Engine instance must recapture the new scene/profile lifetime even
 	// when its first component revisions happen to match the previous run.
 	navigationBootstrapAttempted = false;
+	navigationBootstrapAttemptCount = 0U;
 	lastNavigationBootstrapComponentRevision = 0U;
 	lastNavigationBootstrapProfileRevision = 0U;
 	lastNavigationBootstrapTerrainPublicationGeneration = 0U;
 	lastNavigationBootstrapTerrainCollisionStatus = 0U;
 	lastNavigationBootstrapTerrainRecipeGeneration = 0U;
 	lastNavigationBootstrapPhysicsWorldGeneration = 0U;
-	lastNavigationBootstrapSpatialGeneration = 0U;
+	lastNavigationObservedObjectSpatialRevision = 0U;
 	lastNavigationBootstrapResidencyGeneration = 0U;
 	lastNavigationBootstrapGeometryPublicationGeneration = 0U;
 	pool.initialize();
@@ -262,12 +289,27 @@ void Engine::Initialize()
 	TerraEngine::Scene::WorldSpatialSystem& worldSpatialSystem = TerraEngine::Scene::WorldSpatialSystem::Instance();
 	RegisterEngineSystem(systems, systemScheduler, worldSpatialSystem, worldSpatialSystem.SchedulerDeclaration());
 
+	// Fresh agent destinations must enter Navigation's bounded request capture in
+	// this frame. Its protected command system precedes Navigation, while the
+	// later guidance system remains after Navigation publication.
+	TerraEngine::Navigation::NavigationAgentCommandSystem& navigationAgentCommandSystem =
+		TerraEngine::Navigation::NavigationAgentCommandSystem::Instance();
+	RegisterEngineSystem(systems, systemScheduler, navigationAgentCommandSystem,
+		navigationAgentCommandSystem.SchedulerDeclaration());
+
 	// Navigation consumes the immutable spatial publication and exposes its own
 	// immutable route/coverage publications before gameplay scripting runs. The
 	// same registration is used by rendered and headless hosts.
 	TerraEngine::Navigation::NavigationSystem& navigationSystem =
 		TerraEngine::Navigation::NavigationSystem::Instance();
 	RegisterEngineSystem(systems, systemScheduler, navigationSystem, navigationSystem.SchedulerDeclaration());
+	// Optional agents consume immutable navigation publications and emit advisory
+	// guidance only. Registering them here keeps their capture/worker/publish work
+	// after route publication and before gameplay scripting in both host modes.
+	TerraEngine::Navigation::NavigationAgentSystem& navigationAgentSystem =
+		TerraEngine::Navigation::NavigationAgentSystem::Instance();
+	RegisterEngineSystem(systems, systemScheduler, navigationAgentSystem,
+		navigationAgentSystem.SchedulerDeclaration());
 
 	// ScriptingSystem manages the .NET runtime and gameplay scripts.
 	ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
@@ -299,6 +341,33 @@ void Engine::Initialize()
 	}
 	RegisterEngineSystem(systems, systemScheduler, physicsSystem, std::move(physicsDeclaration));
 
+	// Terrain residency and CPU-derived collision data are simulation inputs, not
+	// renderer features, so both host modes need this chain. Register it only
+	// after SceneManager and PhysicsSystem: exported terrain bootstrap copies
+	// TerrainComponent data from the activated startup scene and immediately
+	// stages its collision replacement through the initialized physics provider.
+	// Scheduler phases still place the runtime work at the normal Render boundary.
+	TerraEngine::Terrain::TerrainStreamingSystem& terrainStreamingSystem =
+		TerraEngine::Terrain::TerrainStreamingSystem::Instance();
+	auto terrainStreamingDeclaration = terrainStreamingSystem.SchedulerDeclaration();
+	if(headlessPhysicsValidation) {
+		// Keep phase and resource ownership unchanged. Only presentation systems are
+		// absent from this reduced graph, so only their ordering edges are removed.
+		std::erase(terrainStreamingDeclaration.before, "VirtualGeometryStreamingSystem");
+		std::erase(terrainStreamingDeclaration.before, "RenderSystem");
+	}
+	RegisterEngineSystem(systems, systemScheduler, terrainStreamingSystem,
+		std::move(terrainStreamingDeclaration));
+	TerraEngine::Terrain::TerrainDerivedSystem& terrainDerivedSystem =
+		TerraEngine::Terrain::TerrainDerivedSystem::Instance();
+	auto terrainDerivedDeclaration = terrainDerivedSystem.SchedulerDeclaration();
+	if(headlessPhysicsValidation) {
+		std::erase(terrainDerivedDeclaration.before, "VirtualGeometryStreamingSystem");
+		std::erase(terrainDerivedDeclaration.before, "RenderSystem");
+	}
+	RegisterEngineSystem(systems, systemScheduler, terrainDerivedSystem,
+		std::move(terrainDerivedDeclaration));
+
 	// Audio follows gameplay/physics authoring, prepares spatial voices from an
 	// immutable snapshot, and commits provider state before presentation.
 	TerraEngine::Audio::AudioSystem& audioSystem = TerraEngine::Audio::AudioSystem::Instance();
@@ -306,7 +375,16 @@ void Engine::Initialize()
 	// gate from StartPlayMode so authored playOnStart sources remain silent while
 	// the user edits the scene.
 	audioSystem.SetRuntimePlaybackEnabled(!editorMode);
-	RegisterEngineSystem(systems, systemScheduler, audioSystem, audioSystem.SchedulerDeclaration());
+	auto audioDeclaration = audioSystem.SchedulerDeclaration();
+	if(headlessPhysicsValidation) {
+		// Headless/export validation intentionally omits presentation systems. Keep
+		// Audio's normal ordering when UI and Render are registered, but remove only
+		// those optional external edges from the copied declaration in the reduced
+		// graph. The scheduler must continue rejecting genuinely unknown targets.
+		std::erase(audioDeclaration.before, "UISystem");
+		std::erase(audioDeclaration.before, "RenderSystem");
+	}
+	RegisterEngineSystem(systems, systemScheduler, audioSystem, std::move(audioDeclaration));
 
 	// Presentation is a separate post-physics owner so current-step ragdoll
 	// snapshots can shape the visual plan without rewriting controller authority.
@@ -330,15 +408,6 @@ void Engine::Initialize()
 		// installed parity run independent of a graphics driver and window server.
 		UISystem& uiSystem = UISystem::Instance();
 		RegisterEngineSystem(systems, systemScheduler, uiSystem, uiSystem.SchedulerDeclaration());
-
-		// Terrain has independent worker preparation and protected publication
-		// boundaries. Register it before virtual-geometry and render consumers.
-		TerraEngine::Terrain::TerrainStreamingSystem& terrainStreamingSystem =
-			TerraEngine::Terrain::TerrainStreamingSystem::Instance();
-		RegisterEngineSystem(systems, systemScheduler, terrainStreamingSystem, terrainStreamingSystem.SchedulerDeclaration());
-		TerraEngine::Terrain::TerrainDerivedSystem& terrainDerivedSystem =
-			TerraEngine::Terrain::TerrainDerivedSystem::Instance();
-		RegisterEngineSystem(systems, systemScheduler, terrainDerivedSystem, terrainDerivedSystem.SchedulerDeclaration());
 
 		// Streaming publication is a separate protected boundary. Register it before
 		// RenderSystem so accepted page state is complete before the renderer captures
@@ -435,6 +504,18 @@ void Engine::Initialize()
 		for (auto* system : systems) {
 			system->Initialize();
 			initializedSystemCount++;
+		}
+		// Optional navigation cache bytes are copied from the mounted archive and
+		// handed to NavigationSystem only after all systems exist. The system then
+		// compares them against its authoritative captured geometry; archive
+		// metadata never grants cache trust by itself.
+		if(packagedNavigation && packagedNavigation->loaded) {
+			for(auto& candidate : packagedNavigation->optionalCacheCandidates) {
+				TerraEngine::Navigation::NavigationSystem::SavedNavigationCacheCandidate input{};
+				input.bytes = std::move(candidate.bytes);
+				input.logicalPath = candidate.path;
+				(void)TerraEngine::Navigation::NavigationSystem::Instance().QueueSavedGroundCacheImport(std::move(input));
+			}
 		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -550,8 +631,10 @@ bool Engine::Update(float deltaTime)
 				// points so systems that iterate hierarchy/component data never
 				// observe the ObjectManager changing midway through their update.
 				result = SceneManager::Instance().ApplySceneMutations("system-scheduler-flush");
-				(void)TerraEngine::Navigation::NavigationSystem::Instance().ObserveSceneMutationReceipts(
-					result.navigationSourceMutationReceipts);
+				(void)ObserveCommittedNavigationSceneMutations(result);
+				TerraEngine::Navigation::NavigationAgentSystem::Instance().ObserveProtectedBoundary(
+					TerraEngine::Navigation::NavigationProtectedBoundary::Scene,
+					ObjectManager::instance().GetSceneGeneration());
 				state.message = result.applied ? "Scene mutation queue flushed." : "Scene mutation queue rejected one or more requests.";
 			}
 			if(flushPoint.name == "Frame End") {
@@ -568,6 +651,8 @@ bool Engine::Update(float deltaTime)
 				if(spatialPublished) {
 					const auto spatial = TerraEngine::Scene::WorldSpatialSystem::Instance().CurrentSnapshot();
 					TerraEngine::Navigation::NavigationSystem::Instance().ObserveProtectedBoundary(
+						TerraEngine::Navigation::NavigationProtectedBoundary::Spatial, spatial.spatialGeneration);
+					TerraEngine::Navigation::NavigationAgentSystem::Instance().ObserveProtectedBoundary(
 						TerraEngine::Navigation::NavigationProtectedBoundary::Spatial, spatial.spatialGeneration);
 				}
 			}
@@ -586,6 +671,9 @@ bool Engine::Update(float deltaTime)
 				TerraEngine::Navigation::NavigationSystem::Instance().ObserveProtectedBoundary(
 					TerraEngine::Navigation::NavigationProtectedBoundary::PhysicsSubstep,
 					TerraEngine::Physics::PhysicsSystem::Instance().CurrentFixedTick());
+				TerraEngine::Navigation::NavigationAgentSystem::Instance().ObserveProtectedBoundary(
+					TerraEngine::Navigation::NavigationProtectedBoundary::PhysicsSubstep,
+					TerraEngine::Physics::PhysicsSystem::Instance().CurrentFixedTick());
 				// Managed subscribers observe the immutable packet only after physics
 				// transform transactions are visible and provider callbacks have ended.
 				ScriptingSystem::Instance().DeliverPhysicsEventsAfterFlush();
@@ -597,6 +685,13 @@ bool Engine::Update(float deltaTime)
 				const std::uint64_t componentRevision = ObjectManager::instance().GetComponentMutationRevision();
 				TerraEngine::Navigation::NavigationSystem& navigation =
 					TerraEngine::Navigation::NavigationSystem::Instance();
+				const bool bridgeRequestedFreshCapture = navigation.ConsumeFreshAutomaticCaptureRequest();
+				if(bridgeRequestedFreshCapture) {
+					// A committed source mutation was visible but not representable by the
+					// typed bridge. Consume its one-shot request here; ordinary unavailable
+					// terrain never reaches this branch and therefore cannot cause a storm.
+					navigationBootstrapAttempted = false;
+				}
 				const std::uint64_t profileRevision = navigation.ProfileConfigurationRevision();
 				const auto terrainCollision =
 					TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().Snapshot();
@@ -613,19 +708,74 @@ bool Engine::Update(float deltaTime)
 					TerraEngine::Scene::WorldStreamingSystem::Instance().CurrentResidency().generation;
 				const std::uint64_t geometryPublicationGeneration =
 					ResourceManager::Instance().NavigationGeometryPublicationGeneration();
-				if(!navigationBootstrapAttempted
-					|| componentRevision != lastNavigationBootstrapComponentRevision
-					|| profileRevision != lastNavigationBootstrapProfileRevision
-					|| terrainPublicationGeneration != lastNavigationBootstrapTerrainPublicationGeneration
-					|| terrainCollisionStatus != lastNavigationBootstrapTerrainCollisionStatus
-					|| terrainRecipeGeneration != lastNavigationBootstrapTerrainRecipeGeneration
-					|| physicsWorldGeneration != lastNavigationBootstrapPhysicsWorldGeneration
-					|| spatialGeneration != lastNavigationBootstrapSpatialGeneration
-					|| residencyGeneration != lastNavigationBootstrapResidencyGeneration
-					|| geometryPublicationGeneration != lastNavigationBootstrapGeometryPublicationGeneration) {
+				// A transactional canonical-pose write advances ObjectManager even if
+				// no spatial publication candidate was submitted. Inspect only retained
+				// geometry sources when that cheap revision changes, not every agent.
+				const std::uint64_t objectSpatialRevision = ObjectManager::instance().GetSpatialRevision();
+				const auto observedNavigationWorld = navigation.PublishedWorld();
+				// The accepted automatic stage can be newer than the published root while
+				// asynchronous Recast work is still running. Copy its source rows once at
+				// this protected boundary, so an unchanged live scene does not repeatedly
+				// supersede the exact packet that is already admitted to workers.
+				const std::vector<TerraEngine::Navigation::NavigationSourceIndexRecord>
+					automaticSourceObservation = navigation.AutomaticSourceObservationSnapshot();
+				// Retain the first mismatch values only when a spatial write actually
+				// occurred. The installed validation trace can then distinguish a stale
+				// bridge source row from a generic bootstrap condition without paying an
+				// additional source scan in stable frames.
+				const auto sourceTransformMismatch = objectSpatialRevision != lastNavigationObservedObjectSpatialRevision
+					&& observedNavigationWorld
+					? TerraEngine::Navigation::FindNavigationSourceTransformMismatch(
+						ObjectManager::instance(), automaticSourceObservation)
+					: std::optional<TerraEngine::Navigation::NavigationSourceTransformMismatch>{};
+				const bool sourceTransformsChanged = sourceTransformMismatch.has_value();
+				if(sourceTransformMismatch) {
+					TERRAENGINE_LOG(LogLevel::Info,
+						"Navigation source transform mismatch: source="
+						<< TerraEngine::ToHexString(sourceTransformMismatch->sourceId)
+						<< ", object=" << TerraEngine::ToHexString(sourceTransformMismatch->objectId)
+						<< ", kind=" << static_cast<unsigned int>(sourceTransformMismatch->sourceKind)
+						<< ", retainedLifetime=" << sourceTransformMismatch->retainedLifetimeGeneration
+						<< ", liveLifetime=" << sourceTransformMismatch->liveLifetimeGeneration
+						<< ", retainedTransformRevision=" << sourceTransformMismatch->retainedTransformRevision
+						<< ", liveTransformRevision=" << sourceTransformMismatch->liveTransformRevision);
+				}
+				const bool sourceStructureChanged = observedNavigationWorld
+					&& TerraEngine::Navigation::NavigationAutomaticSourceStructureChanged(
+						ObjectManager::instance(), automaticSourceObservation);
+				// Snapshot the admission predicates before updating their last-observed
+				// tuple. The compact bootstrap diagnostic below must report the decision
+				// that actually admitted this capture, not the values after bookkeeping.
+				const bool initialBootstrapRequired = !navigationBootstrapAttempted;
+				const bool profileChanged = profileRevision != lastNavigationBootstrapProfileRevision;
+				const bool terrainPublicationChanged = terrainPublicationGeneration
+					!= lastNavigationBootstrapTerrainPublicationGeneration;
+				const bool terrainStatusChanged = terrainCollisionStatus
+					!= lastNavigationBootstrapTerrainCollisionStatus;
+				const bool terrainRecipeChanged = terrainRecipeGeneration
+					!= lastNavigationBootstrapTerrainRecipeGeneration;
+				const bool physicsWorldChanged = physicsWorldGeneration
+					!= lastNavigationBootstrapPhysicsWorldGeneration;
+				const bool residencyChanged = residencyGeneration != lastNavigationBootstrapResidencyGeneration;
+				const bool geometryPublicationChanged = geometryPublicationGeneration
+					!= lastNavigationBootstrapGeometryPublicationGeneration;
+				lastNavigationObservedObjectSpatialRevision = objectSpatialRevision;
+				if(initialBootstrapRequired
+					|| sourceTransformsChanged
+					// The global component revision also advances for agents, UI, and
+					// unrelated authored values. Scan only navigation source membership and
+					// source-local authored evidence before admitting expensive full builds.
+					|| sourceStructureChanged
+					|| profileChanged
+					|| terrainPublicationChanged
+					|| terrainStatusChanged
+					|| terrainRecipeChanged
+					|| physicsWorldChanged
+					|| residencyChanged
+					|| geometryPublicationChanged) {
 					// Record the immutable input tuple before capture. Rejections are
-					// deterministic for this tuple, so retry only after a scene, profile,
-					// spatial, terrain, resource-backed component, or streaming publication
+					// deterministic for this tuple, so retry only after source evidence,
+					// profile, terrain, resource-backed component, or streaming publication
 					// change instead of stalling every editor frame.
 					navigationBootstrapAttempted = true;
 					lastNavigationBootstrapComponentRevision = componentRevision;
@@ -634,7 +784,6 @@ bool Engine::Update(float deltaTime)
 					lastNavigationBootstrapTerrainCollisionStatus = terrainCollisionStatus;
 					lastNavigationBootstrapTerrainRecipeGeneration = terrainRecipeGeneration;
 					lastNavigationBootstrapPhysicsWorldGeneration = physicsWorldGeneration;
-					lastNavigationBootstrapSpatialGeneration = spatialGeneration;
 					lastNavigationBootstrapResidencyGeneration = residencyGeneration;
 					lastNavigationBootstrapGeometryPublicationGeneration = geometryPublicationGeneration;
 					const TerraEngine::Navigation::NavigationProfileResolver profiles =
@@ -646,11 +795,61 @@ bool Engine::Update(float deltaTime)
 						terrainCollision, settings);
 					const auto submission = TerraEngine::Navigation::SubmitNavigationRuntimeSceneCapture(
 						navigation, capture);
-					if(!submission.accepted && !capture.reason.empty()) {
-						TERRAENGINE_LOG(LogLevel::Debug, "Navigation bootstrap pending: " << capture.reason);
+					const std::size_t activeObjectCount =
+						ObjectManager::instance().GetRuntimeActiveMembershipSnapshot().size();
+					const std::size_t capturedSourceCount = capture.bootstrap.eligibleSourceIndex
+						? capture.bootstrap.eligibleSourceIndex->Records().size() : 0U;
+					const std::size_t excludedSourceCount = capture.bootstrap.eligibleSourceIndex
+						? capture.bootstrap.eligibleSourceIndex->Exclusions().size() : 0U;
+					// One compact record per changed protected input tuple lets export smoke
+					// distinguish a missing Frame End callback from terrain/pose/asset
+					// capture rejection. Do not move this into worker preparation: every
+					// value here is read from its declared protected publication boundary.
+					TERRAENGINE_LOG(LogLevel::Info,
+						"Navigation bootstrap attempt " << ++navigationBootstrapAttemptCount
+						<< ": capture=" << (capture.accepted ? "accepted" : "rejected")
+						<< ", submission=" << (submission.accepted ? "accepted" : "rejected")
+						<< ", captureReason=" << (capture.reason.empty() ? "<none>" : capture.reason)
+						<< ", submissionReason=" << (submission.reason.empty() ? "<none>" : submission.reason)
+						<< ", builds=" << capture.bootstrap.builds.size()
+						<< ", terrainAvailable=" << (capture.bootstrap.terrainAvailable ? "true" : "false")
+						<< ", terrainComponents=" << capture.terrainComponentsObserved
+						<< ", canonicalTerrain=" << capture.terrainComponentsWithCanonicalPose
+						<< ", identifiedTerrain=" << capture.terrainComponentsWithAsset
+						<< ", currentTerrain=" << capture.terrainCandidatesWithCurrentPhysics
+						<< ", terrainReject=" << (capture.terrainCandidateRejectionReason.empty()
+							? "<none>" : capture.terrainCandidateRejectionReason)
+						<< ", sources=" << capturedSourceCount
+						<< ", excluded=" << excludedSourceCount
+						<< ", activeObjects=" << activeObjectCount
+						<< ", collisionStatus=" << static_cast<unsigned int>(terrainCollisionStatus)
+						<< ", collisionGeneration=" << terrainPublicationGeneration
+						<< ", recipeGeneration=" << terrainRecipeGeneration
+						<< ", recipeComplete=" << (terrainCollision.currentRecipe.IsComplete() ? "true" : "false")
+						// Keep every Frame End admission predicate visible. Installed smoke
+						// must identify the exact source of a full capture rather than
+						// treating a changed tuple as a generic bootstrap retry.
+						<< ", triggers={initial=" << (initialBootstrapRequired ? "true" : "false")
+						<< ",sourceTransforms=" << (sourceTransformsChanged ? "true" : "false")
+						<< ",sourceStructure=" << (sourceStructureChanged ? "true" : "false")
+						<< ",profile=" << (profileChanged ? "true" : "false")
+						<< ",terrainPublication=" << (terrainPublicationChanged ? "true" : "false")
+						<< ",terrainStatus=" << (terrainStatusChanged ? "true" : "false")
+						<< ",terrainRecipe=" << (terrainRecipeChanged ? "true" : "false")
+						<< ",physicsWorld=" << (physicsWorldChanged ? "true" : "false")
+						<< ",residency=" << (residencyChanged ? "true" : "false")
+						<< ",geometryPublication=" << (geometryPublicationChanged ? "true" : "false")
+						<< "}");
+					if(!submission.accepted) {
+						// Admission can reject a valid capture too. Report the submission
+						// reason so startup diagnostics do not silently hide that case.
+						TERRAENGINE_LOG(LogLevel::Debug, "Navigation bootstrap pending: " << submission.reason);
 					}
 				}
 				TerraEngine::Navigation::NavigationSystem::Instance().ObserveProtectedBoundary(
+					TerraEngine::Navigation::NavigationProtectedBoundary::FrameEnd,
+					spatialGeneration);
+				TerraEngine::Navigation::NavigationAgentSystem::Instance().ObserveProtectedBoundary(
 					TerraEngine::Navigation::NavigationProtectedBoundary::FrameEnd,
 					spatialGeneration);
 			}
@@ -853,8 +1052,10 @@ TerraEngine::Runtime::PhysicsInvariantReport Engine::RunPhysicsInvariantFixture(
 			const bool spatialOnlyBoundary = flushPoint.name == "Before Physics";
 			if (!deferredAfterPhysics && !spatialOnlyBoundary && !queue.Empty()) {
 				result = SceneManager::Instance().ApplySceneMutations("physics-parity-scheduler-flush");
-				(void)TerraEngine::Navigation::NavigationSystem::Instance().ObserveSceneMutationReceipts(
-					result.navigationSourceMutationReceipts);
+				(void)ObserveCommittedNavigationSceneMutations(result);
+				TerraEngine::Navigation::NavigationAgentSystem::Instance().ObserveProtectedBoundary(
+					TerraEngine::Navigation::NavigationProtectedBoundary::Scene,
+					ObjectManager::instance().GetSceneGeneration());
 				state.message = result.applied ? "Scene mutation queue flushed." : "Scene mutation queue rejected one or more requests.";
 			}
 			if(flushPoint.name == "Frame End") {
@@ -872,6 +1073,8 @@ TerraEngine::Runtime::PhysicsInvariantReport Engine::RunPhysicsInvariantFixture(
 					const auto spatial = TerraEngine::Scene::WorldSpatialSystem::Instance().CurrentSnapshot();
 					TerraEngine::Navigation::NavigationSystem::Instance().ObserveProtectedBoundary(
 						TerraEngine::Navigation::NavigationProtectedBoundary::Spatial, spatial.spatialGeneration);
+					TerraEngine::Navigation::NavigationAgentSystem::Instance().ObserveProtectedBoundary(
+						TerraEngine::Navigation::NavigationProtectedBoundary::Spatial, spatial.spatialGeneration);
 				}
 			}
 			const bool physicsPublicationBoundary = (flushPoint.name == "After Physics" && sameFramePhysicsConsumer)
@@ -882,10 +1085,16 @@ TerraEngine::Runtime::PhysicsInvariantReport Engine::RunPhysicsInvariantFixture(
 				TerraEngine::Navigation::NavigationSystem::Instance().ObserveProtectedBoundary(
 					TerraEngine::Navigation::NavigationProtectedBoundary::PhysicsSubstep,
 					TerraEngine::Physics::PhysicsSystem::Instance().CurrentFixedTick());
+				TerraEngine::Navigation::NavigationAgentSystem::Instance().ObserveProtectedBoundary(
+					TerraEngine::Navigation::NavigationProtectedBoundary::PhysicsSubstep,
+					TerraEngine::Physics::PhysicsSystem::Instance().CurrentFixedTick());
 				ScriptingSystem::Instance().DeliverPhysicsEventsAfterFlush();
 			}
 			if(flushPoint.name == "Frame End") {
 				TerraEngine::Navigation::NavigationSystem::Instance().ObserveProtectedBoundary(
+					TerraEngine::Navigation::NavigationProtectedBoundary::FrameEnd,
+					TerraEngine::Scene::WorldSpatialSystem::Instance().CurrentSnapshot().spatialGeneration);
+				TerraEngine::Navigation::NavigationAgentSystem::Instance().ObserveProtectedBoundary(
 					TerraEngine::Navigation::NavigationProtectedBoundary::FrameEnd,
 					TerraEngine::Scene::WorldSpatialSystem::Instance().CurrentSnapshot().spatialGeneration);
 			}
@@ -1013,10 +1222,12 @@ TerraEngine::Runtime::PhysicsInvariantReport Engine::RunPhysicsInvariantFixture(
 // Engine::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Engine::Shutdown()
 {
-	// Revoke gameplay navigation owners before systems begin their reverse-order
-	// teardown. Any worker result that finishes during shutdown then targets an
-	// obsolete world generation and cannot become visible to a later engine run.
+	// Revoke gameplay navigation owners and optional agent runtime records before
+	// reverse-order teardown. A late worker result then targets an obsolete world
+	// generation and cannot become visible to a later engine run.
 	TerraEngine::Navigation::NavigationSystem::Instance().RevokeAllOwners(
+		TerraEngine::Navigation::NavigationReason::SceneReplaced);
+	TerraEngine::Navigation::NavigationAgentSystem::Instance().RevokeAllAgents(
 		TerraEngine::Navigation::NavigationReason::SceneReplaced);
 	if (editorMode) {
 		editorSystem->Shutdown();

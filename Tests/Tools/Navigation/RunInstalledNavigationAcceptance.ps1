@@ -14,11 +14,23 @@ param(
 	[ValidateRange(1, 100)][int]$IdlePairs = 5,
 	[ValidateRange(5, 5)][int]$UsabilityInvalidCases = 5,
 	[switch]$Qualification,
+	[switch]$AgentComponents,
 	[switch]$DryRun
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# Optional-agent qualification uses genuine application hosts. Preserve the
+# earlier standalone direct-query runner only as an explicitly separate lane.
+if ($AgentComponents) {
+	$agentDuration = if ($DurationSecondsOverride -gt 0) { $DurationSecondsOverride } else { $DurationMinutes * 60 }
+	& (Join-Path $PSScriptRoot 'RunInstalledNavigationAgentAcceptance.ps1') `
+		-InstallRoot $InstallRoot -OutputDirectory $OutputDirectory -Lanes $Lanes `
+		-MeasurementSeconds $agentDuration -Qualification:$Qualification -DryRun:$DryRun
+	if (!$?) { throw 'Installed navigation-agent acceptance failed.' }
+	return
+}
 
 $install = [IO.Path]::GetFullPath($InstallRoot)
 $output = [IO.Path]::GetFullPath($OutputDirectory)

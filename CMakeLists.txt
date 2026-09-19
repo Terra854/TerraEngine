@@ -196,6 +196,7 @@ list(REMOVE_DUPLICATES TERRAENGINE_NAVIGATION_ENGINE_SOURCES)
 # contract instead of exceeding LINK's 65,535 import-library member limit.
 set(TERRAENGINE_NAVIGATION_RUNTIME_SOURCES
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/NavigationSystem.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/Agents/NavigationAgentSystem.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Navigation/Integration/NavigationSceneBootstrap.cpp"
 )
 list(REMOVE_ITEM TERRAENGINE_NAVIGATION_ENGINE_SOURCES ${TERRAENGINE_NAVIGATION_RUNTIME_SOURCES})
@@ -683,6 +684,9 @@ endif()
 add_library(TerraEngine-Engine SHARED
 	${ENGINE_SOURCES}
 	${ENGINE_HEADERS}
+	# Application acceptance executes the real engine scheduler. Keep this
+	# validation-only utility outside production source directories.
+	Tests/Tools/Navigation/NavigationApplicationValidation.cpp
 )
 
 # Header-only dependencies stay bundled so texture decoding and OBJ parsing never
@@ -702,6 +706,7 @@ target_include_directories(TerraEngine-Engine
 		# Copied TEPAK reader sources use internal relative includes that
 		# expect the source root as an include path.
 		${CMAKE_CURRENT_SOURCE_DIR}/Engine/Runtime/ContentMount
+		${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Navigation
 )
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
@@ -1178,6 +1183,7 @@ add_dependencies(TerraEngine.Editor.Managed TerraEngine.Export.Generator)
 add_executable(TerraEngine-Launcher
     ${LAUNCHER_SOURCES}
 )
+target_include_directories(TerraEngine-Launcher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Navigation)
 set_target_properties(TerraEngine-Launcher PROPERTIES
 	BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
 	INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}"
@@ -1739,6 +1745,7 @@ set_target_properties(TerraEngine-Editor PROPERTIES
 # Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_include_directories(TerraEngine-Editor
 	PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Navigation
 		${CMAKE_CURRENT_SOURCE_DIR}
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Core
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems

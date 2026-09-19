@@ -25,6 +25,9 @@ inline constexpr std::uint32_t kNativeAudioDiagnosticBytes = 192U;
 // independently of audio, physics, and the generic runtime dispatcher.
 inline constexpr std::uint32_t kNativeNavigationAbiVersion = 2U;
 inline constexpr std::uint32_t kNativeNavigationDiagnosticBytes = 192U;
+// Optional NavigationAgent commands have an additive ABI. Keep direct route
+// packets on v2 so existing scripts never reinterpret their frozen layouts.
+inline constexpr std::uint32_t kNativeNavigationAgentAbiVersion = 1U;
 
 #pragma pack(push, 8)
 struct NativePhysicsAbiHeader { std::uint32_t abiVersion; std::uint32_t structSize; };
@@ -714,6 +717,111 @@ struct NativeNavigationInvalidationRecord {
 	std::uint64_t sourceRevision;
 	std::uint64_t observationGeneration;
 };
+
+// NavigationAgent v1 exchanges copied attachment identities and advisory
+// guidance only. Entity integers are resolved through a protected immutable
+// binding snapshot before commands enter the bounded native queue.
+struct NativeNavigationAgentObjectIdentity {
+	std::uint64_t objectIdLow;
+	std::uint64_t objectIdHigh;
+	std::uint64_t lifetimeGeneration;
+};
+struct NativeNavigationAgentIdentity {
+	NativeNavigationWorldHandle world;
+	NativeNavigationAgentObjectIdentity object;
+	std::uint64_t attachmentGeneration;
+	std::uint32_t runtimeSlot;
+	std::uint32_t reserved;
+	std::uint64_t runtimeSlotGeneration;
+};
+enum class NativeNavigationAgentCommandKind : std::uint32_t {
+	SetLocationDestination = 0U,
+	SetObjectDestination = 1U,
+	Stop = 2U
+};
+struct NativeNavigationAgentResolveRequest {
+	NativeNavigationAbiHeader header;
+	std::uint32_t ownerObjectEntity;
+	std::uint32_t reserved;
+};
+struct NativeNavigationAgentIdentitySnapshot {
+	NativeNavigationAbiHeader header;
+	NativeNavigationStatus status;
+	std::uint32_t reserved;
+	NativeNavigationAgentIdentity identity;
+};
+struct NativeNavigationAgentCommand {
+	NativeNavigationAbiHeader header;
+	NativeNavigationAgentIdentity identity;
+	NativeNavigationAgentCommandKind kind;
+	std::uint32_t targetObjectEntity;
+	NativeNavigationLocation location;
+	std::uint64_t expectedConfigurationRevision;
+	std::uint64_t expectedIntentSequence;
+	std::uint64_t producerOrderingToken;
+	std::uint64_t correlationId;
+};
+struct NativeNavigationAgentCommandReceipt {
+	NativeNavigationAbiHeader header;
+	NativeNavigationStatus status;
+	std::uint32_t receiptState;
+	NativeNavigationAgentIdentity identity;
+	std::uint32_t outcome;
+	std::uint32_t reason;
+	std::uint64_t correlationId;
+	std::uint64_t admittedSequence;
+};
+struct NativeNavigationAgentReceiptQuery {
+	NativeNavigationAbiHeader header;
+	NativeNavigationAgentIdentity identity;
+	std::uint64_t correlationId;
+};
+struct NativeNavigationAgentStatusQuery {
+	NativeNavigationAbiHeader header;
+	NativeNavigationAgentIdentity identity;
+};
+struct NativeNavigationAgentStatusSnapshot {
+	NativeNavigationAbiHeader header;
+	NativeNavigationStatus status;
+	std::uint32_t state;
+	std::uint32_t outcome;
+	std::uint32_t reason;
+	std::uint64_t configurationRevision;
+	std::uint64_t intentSequence;
+	std::uint64_t publicationRevision;
+};
+struct NativeNavigationAgentGuidanceQuery {
+	NativeNavigationAbiHeader header;
+	NativeNavigationAgentIdentity identity;
+};
+struct NativeNavigationAgentGuidanceSnapshot {
+	NativeNavigationAbiHeader header;
+	NativeNavigationStatus status;
+	std::uint32_t state;
+	std::uint32_t outcome;
+	std::uint32_t reason;
+	std::uint64_t configurationRevision;
+	std::uint64_t intentSequence;
+	std::uint64_t publicationGeneration;
+	std::uint64_t routeGeneration;
+	std::uint64_t sceneGeneration;
+	std::uint64_t sourceTransformRevision;
+	std::uint64_t destinationTransformRevision;
+	std::uint64_t terrainPublicationGeneration;
+	std::uint64_t worldPublicationGeneration;
+	std::uint64_t sourceIndexRevision;
+	NativeNavigationLocation nextWaypoint;
+	double directionX;
+	double directionY;
+	double directionZ;
+	double remainingDistanceMetres;
+	std::uint32_t usable;
+	std::uint32_t reserved;
+	std::uint32_t destinationKind;
+	std::uint32_t destinationReserved;
+	NativeNavigationLocation destinationLocation;
+	NativeNavigationAgentObjectIdentity destinationObject;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(NativeNavigationAbiHeader) == 8U);
@@ -728,12 +836,32 @@ static_assert(sizeof(NativeNavigationObjectToObjectRequest) == 360U);
 static_assert(sizeof(NativeNavigationSubmitReceipt) == 264U);
 static_assert(sizeof(NativeNavigationRoutePoint) == 72U);
 static_assert(sizeof(NativeNavigationBufferInfo) == 32U);
+static_assert(sizeof(NativeNavigationAgentObjectIdentity) == 24U);
+static_assert(sizeof(NativeNavigationAgentIdentity) == 64U);
+static_assert(sizeof(NativeNavigationAgentResolveRequest) == 16U);
+static_assert(sizeof(NativeNavigationAgentIdentitySnapshot) == 80U);
+static_assert(sizeof(NativeNavigationAgentCommand) == 176U);
+static_assert(sizeof(NativeNavigationAgentCommandReceipt) == 104U);
+static_assert(sizeof(NativeNavigationAgentReceiptQuery) == 80U);
+static_assert(sizeof(NativeNavigationAgentStatusQuery) == 72U);
+static_assert(sizeof(NativeNavigationAgentStatusSnapshot) == 48U);
+static_assert(sizeof(NativeNavigationAgentGuidanceQuery) == 72U);
+static_assert(sizeof(NativeNavigationAgentGuidanceSnapshot) == 304U);
 static_assert(offsetof(NativeNavigationObjectToLocationRequest, header) == 0U);
 static_assert(offsetof(NativeNavigationObjectToObjectRequest, header) == 0U);
 static_assert(offsetof(NativeNavigationSubmitReceipt, header) == 0U);
 static_assert(offsetof(NativeNavigationRequestSnapshot, header) == 0U);
 static_assert(offsetof(NativeNavigationRouteValidationRequest, header) == 0U);
 static_assert(offsetof(NativeNavigationInvalidationRecord, header) == 0U);
+static_assert(offsetof(NativeNavigationAgentResolveRequest, header) == 0U);
+static_assert(offsetof(NativeNavigationAgentIdentitySnapshot, header) == 0U);
+static_assert(offsetof(NativeNavigationAgentCommand, header) == 0U);
+static_assert(offsetof(NativeNavigationAgentCommandReceipt, header) == 0U);
+static_assert(offsetof(NativeNavigationAgentReceiptQuery, header) == 0U);
+static_assert(offsetof(NativeNavigationAgentStatusQuery, header) == 0U);
+static_assert(offsetof(NativeNavigationAgentStatusSnapshot, header) == 0U);
+static_assert(offsetof(NativeNavigationAgentGuidanceQuery, header) == 0U);
+static_assert(offsetof(NativeNavigationAgentGuidanceSnapshot, header) == 0U);
 
 class Engine;
 
@@ -836,6 +964,20 @@ extern "C" {
 	TERRAENGINE_API NativeNavigationStatus Native_Navigation_CopyInvalidations(
 		const NativeNavigationInvalidationCursor* cursor, NativeNavigationInvalidationRecord* records,
 		std::uint32_t capacity, NativeNavigationBufferInfo* info);
+
+	// Optional NavigationAgent ABI v1. Calls only consume copied records and the
+	// protected immutable entity-binding snapshot; they never borrow ECS memory.
+	TERRAENGINE_API std::uint32_t Native_NavigationAgent_GetAbiVersion();
+	TERRAENGINE_API NativeNavigationStatus Native_NavigationAgent_ResolveIdentity(
+		const NativeNavigationAgentResolveRequest* request, NativeNavigationAgentIdentitySnapshot* snapshot);
+	TERRAENGINE_API NativeNavigationStatus Native_NavigationAgent_SubmitCommand(
+		const NativeNavigationAgentCommand* command, NativeNavigationAgentCommandReceipt* receipt);
+	TERRAENGINE_API NativeNavigationStatus Native_NavigationAgent_ReadReceipt(
+		const NativeNavigationAgentReceiptQuery* query, NativeNavigationAgentCommandReceipt* receipt);
+	TERRAENGINE_API NativeNavigationStatus Native_NavigationAgent_ReadStatus(
+		const NativeNavigationAgentStatusQuery* query, NativeNavigationAgentStatusSnapshot* snapshot);
+	TERRAENGINE_API NativeNavigationStatus Native_NavigationAgent_ReadGuidance(
+		const NativeNavigationAgentGuidanceQuery* query, NativeNavigationAgentGuidanceSnapshot* snapshot);
 
 	// Graphics ABI v1 queues runtime-only settings for RenderSystem's protected
 	// boundary. These calls never persist project authoring files from gameplay.

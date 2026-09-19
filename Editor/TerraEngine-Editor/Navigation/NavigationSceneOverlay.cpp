@@ -16,6 +16,19 @@ namespace TerraEngine::Editor::Navigation {
 			remaining -= count;
 			result.truncated = result.truncated || count != source.size();
 		};
+		// A selected route has priority over broad coverage diagnostics. It is the
+		// small, demand-driven copy a user explicitly asked to inspect.
+		if(input.selectedAgent) {
+			result.selectedAgent = input.selectedAgent;
+			result.selectedAgent->routePoints.clear();
+			result.selectedAgent->routeTruncated = false;
+			if(input.selectedAgent->routeCurrent && input.selectedAgent->guidance.IsUsable()) {
+				copyBounded(input.selectedAgent->routePoints, result.selectedAgent->routePoints);
+				result.selectedAgent->routeTruncated = result.selectedAgent->routePoints.size()
+					!= input.selectedAgent->routePoints.size();
+			}
+		}
+		result.agentDiagnostics = input.agentDiagnostics;
 		copyBounded(input.coverage, result.coverage);
 		copyBounded(input.connectionEndpoints, result.connectionEndpoints);
 		copyBounded(input.routePoints, result.routePoints);

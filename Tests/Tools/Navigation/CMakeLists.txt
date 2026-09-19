@@ -1,4 +1,26 @@
 # Real-engine navigation evidence runner used only by installed acceptance.
+# Capture compiler provenance at configure time; the installed runner cannot
+# infer a compiler version from whatever happens to be on the user's PATH.
+# Developer shells may omit Git from PATH. Resolve its executable once rather
+# than silently losing source provenance in an otherwise reproducible build.
+find_package(Git QUIET)
+if(GIT_FOUND)
+	execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+		WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+		OUTPUT_VARIABLE TERRAENGINE_NAVIGATION_SOURCE_REVISION
+		OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+endif()
+if(NOT TERRAENGINE_NAVIGATION_SOURCE_REVISION)
+	set(TERRAENGINE_NAVIGATION_SOURCE_REVISION "unavailable")
+endif()
+configure_file(NavigationBuildMetadata.json.in navigation-build-metadata.json @ONLY)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/navigation-build-metadata.json"
+	DESTINATION Tests/Tools/Navigation)
+# The workload uses a genuine flat terrain root produced by the editor, not a
+# navigation-only mesh pretending to be physically published terrain.
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/Tests/Fixtures/Navigation/AgentWorkload/TerrainSeed/"
+	DESTINATION Tests/Fixtures/Navigation/AgentWorkload/TerrainSeed)
+
 add_executable(TerraEngineNavigationValidation TerraEngineNavigationValidation.cpp)
 target_compile_features(TerraEngineNavigationValidation PRIVATE cxx_std_20)
 target_link_libraries(TerraEngineNavigationValidation PRIVATE TerraEngine-Engine)
@@ -19,6 +41,9 @@ install(TARGETS TerraEngineNavigationValidation
 # acceptance can run from a clean directory without source-tree fallbacks.
 install(FILES
 	RunInstalledNavigationAcceptance.ps1
+	RunInstalledNavigationAgentAcceptance.ps1
+	NewNavigationAgentWorkloadProject.ps1
+	VerifyNavigationWorkloadScene.ps1
 	CompareNavigationEvidence.ps1
 	VerifyNavigationArchitecture.ps1
 	navigation-evidence.schema.json

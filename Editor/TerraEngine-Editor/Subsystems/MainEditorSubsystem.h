@@ -190,6 +190,10 @@ public:
 	// invariant counts for comparison with the exported runtime report.
 	TerraEngine::Runtime::PhysicsInvariantReport RunPhysicsExportInvariantFixture();
 	[[nodiscard]] nlohmann::json RunTerrainLiveValidationFixture();
+	// Advances one externally scheduled editor Play Mode validation observation.
+	// It never calls Engine::Update: EditorSystem invokes it after a normal frame
+	// has completed, preserving the scheduler's non-reentrant ownership.
+	[[nodiscard]] nlohmann::json RunNavigationAgentPlayValidationFrame(nlohmann::json options);
 	// Inspector assignment becomes visible only after SceneMutationQueue flushes.
 	// Keep restoration armed across that boundary so the terrain window can open
 	// the newly referenced asset and publish its derived renderer resources.

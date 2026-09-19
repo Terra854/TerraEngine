@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<!-- Build with the bundled SDK and offline NuGet configuration. Pass the
+	     freshly built TerraEngineAssemblyPath explicitly; no package dependency. -->
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net10.0</TargetFramework>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<Nullable>enable</Nullable>
+		<EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+	</PropertyGroup>
+	<ItemGroup>
+		<Reference Include="TerraEngine.CSharp">
+			<HintPath>$(TerraEngineAssemblyPath)</HintPath>
+		</Reference>
+		<Compile Include="ManagedAgentContractProbe.cs" />
+		<Compile Include="../../Fixtures/Navigation/NavigationAgentLiveTest.cs" />
+		<!-- Compile optional outcome probes too; execution still requires the real
+		     editor/engine callback path and is not claimed by this CLR-only probe. -->
+		<Compile Include="../../Fixtures/Navigation/NavigationManagedOutcomeLiveTest.cs" />
+	</ItemGroup>
+</Project>

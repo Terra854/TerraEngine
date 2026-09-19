@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 #include <functional>
+#include <concepts>
 #include <string_view>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -264,8 +265,14 @@ void RegisterComponentAccess(const std::string& name)
 		ComponentType* component = registry.valid(entity) ? registry.try_get<ComponentType>(entity) : nullptr;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!component) return compJson;
-
+		// Custom authored snapshots obey the same component lock as reflection.
 		auto guard = component->acquireReadLock();
+		if constexpr (requires(const ComponentType& value) {
+			{ ComponentType::SerializeAuthored(value) } -> std::same_as<nlohmann::json>;
+		}) {
+			return ComponentType::SerializeAuthored(*component);
+		}
+
 		TerraEngine::Reflection::Type type = TerraEngine::Reflection::ResolveType<ComponentType>();
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const TerraEngine::Reflection::Property& prop : TerraEngine::Reflection::GetProperties(type))
@@ -303,8 +310,15 @@ void RegisterComponentAccess(const std::string& name)
 		ComponentType* component = registry.valid(entity) ? registry.try_get<ComponentType>(entity) : nullptr;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!component) return;
-
+		// Hold exclusive ownership through staged custom validation and assignment.
 		auto guard = component->acquireWriteLock();
+		if constexpr (requires(ComponentType& value, const nlohmann::json& json) {
+			{ ComponentType::DeserializeAuthored(value, json) } -> std::convertible_to<bool>;
+		}) {
+			(void)ComponentType::DeserializeAuthored(*component, compData);
+			return;
+		}
+
 		TerraEngine::Reflection::Type type = TerraEngine::Reflection::ResolveType<ComponentType>();
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto& [propName, propVal] : compData.items())

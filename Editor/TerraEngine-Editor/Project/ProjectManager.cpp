@@ -17,6 +17,7 @@
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Scene/DerivedSceneCache.h"
 #include "Engine/Scene/SceneManager.h"
+#include "Engine/Navigation/Agents/NavigationAgentSystem.h"
 #include "Engine/Navigation/NavigationSystem.h"
 #include "Resource/ResourceStreaming.h"
 
@@ -862,6 +863,8 @@ void ProjectManager::CloseProject() {
 		projectClosing.store(true, std::memory_order_release);
 		projectLoadGeneration.fetch_add(1U, std::memory_order_acq_rel);
 		TerraEngine::Navigation::NavigationSystem::Instance().RevokeAllOwners(
+			TerraEngine::Navigation::NavigationReason::SceneReplaced);
+		TerraEngine::Navigation::NavigationAgentSystem::Instance().RevokeAllAgents(
 			TerraEngine::Navigation::NavigationReason::SceneReplaced);
 		SaveProjectSettings();
 		isProjectLoaded = false;

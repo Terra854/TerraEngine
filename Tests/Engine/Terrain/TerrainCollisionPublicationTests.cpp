@@ -8,6 +8,7 @@
 #include "Core/Scheduling/JobGraph.h"
 #include "ThreadPool/ThreadPool.h"
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 
@@ -126,6 +127,88 @@ namespace TerraEngine::Tests
 				&& republishedSnapshot.sourcePublicationGeneration == 9u,
 				"The protected collision workload must commit automatically on first publication and again when a fresh physics world requests the desired terrain.");
 			system.ClearPublication(&store);
+			system.Shutdown();
+		});
+
+		registry.Add("Terrain.CollisionPublication.MountedCandidatesPublishEveryAreaAndRetainPriorOnProviderRejection", [](TestContext& context) {
+			// Export startup supplies copied package recipes. This helper deliberately
+			// gives each recipe a distinct asset/area identity so the protected batch
+			// path proves it cannot overwrite an earlier mounted terrain request.
+			auto makeRecipe = [](const TerraEngine::UUID assetId, const std::int64_t areaX,
+				const std::int64_t areaZ, const std::uint64_t authoredHash) {
+				TerraEngine::Physics::TerrainHeightFieldRecipe recipe{};
+				recipe.terrainAssetId = assetId;
+				recipe.areaX = areaX;
+				recipe.areaZ = areaZ;
+				recipe.authoredGeneration = 17u;
+				recipe.authoredHash = authoredHash;
+				recipe.heightMillimetres.assign(
+					TerraEngine::Physics::TerrainHeightFieldRecipe::kSampleCount, 4);
+				recipe.holeBits.assign(
+					TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount, 0u);
+				return recipe;
+			};
+
+			const TerraEngine::UUID firstAsset = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID secondAsset = TerraEngine::GenerateUUID();
+			const auto first = TerraEngine::Physics::Terrain::PrepareMountedTerrainCollisionCandidate(
+				makeRecipe(firstAsset, 0, 0, 701u), {71u, 72u}, 17u);
+			const auto second = TerraEngine::Physics::Terrain::PrepareMountedTerrainCollisionCandidate(
+				makeRecipe(secondAsset, 1, 0, 702u), {73u, 74u}, 17u);
+
+			TerraEngine::Physics::Terrain::TerrainCollisionSnapshot snapshot{};
+			const bool firstCommitted = TerraEngine::Physics::Terrain::PublishMountedTerrainCollisionCandidate(
+				snapshot, first, [](TerraEngine::Physics::TerrainCollisionReplacementPacket) {
+					TerraEngine::Physics::TerrainCollisionReplacementReceipt receipt{};
+					receipt.committed = true;
+					return receipt;
+				});
+			const auto retainedRecipe = snapshot.currentRecipe;
+			const bool rejected = TerraEngine::Physics::Terrain::PublishMountedTerrainCollisionCandidate(
+				snapshot, second, [](TerraEngine::Physics::TerrainCollisionReplacementPacket) {
+					TerraEngine::Physics::TerrainCollisionReplacementReceipt receipt{};
+					receipt.retainedLastKnownGood = true;
+					receipt.message = "Test provider rejected the second replacement.";
+					return receipt;
+				});
+			context.Expect(firstCommitted && !rejected
+				&& snapshot.status == TerraEngine::Physics::Terrain::TerrainCollisionStatus::Failed
+				&& snapshot.currentRecipe.terrainAssetId == retainedRecipe.terrainAssetId
+				&& snapshot.currentRecipe.authoredHash == retainedRecipe.authoredHash,
+				"A mounted provider rejection must update diagnostics without replacing the prior collision recipe.");
+
+			auto& system = TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance();
+			system.Shutdown();
+			system.Initialize();
+			std::vector<TerraEngine::UUID> committedAssets;
+			system.ConfigureMountedRuntimeCommitter(
+				[&committedAssets](TerraEngine::Physics::TerrainCollisionReplacementPacket packet) {
+					committedAssets.push_back(packet.recipe.terrainAssetId);
+					TerraEngine::Physics::TerrainCollisionReplacementReceipt receipt{};
+					receipt.committed = packet.recipe.IsComplete();
+					return receipt;
+				});
+			const bool stagedFirst = system.SetMountedRuntimeCandidate(first);
+			const bool stagedSecond = system.SetMountedRuntimeCandidate(second);
+			auto workloads = system.DeclareFrameWorkloads(0.0f);
+			TerraEngine::Scheduling::JobGraphContext graphContext;
+			if(workloads.size() == 2u && workloads.back().work) workloads.back().work(graphContext);
+			const auto publishedSnapshot = system.Snapshot();
+			system.RequestRepublish();
+			workloads = system.DeclareFrameWorkloads(0.0f);
+			if(workloads.size() == 2u && workloads.back().work) workloads.back().work(graphContext);
+			const bool bothAreasCommitted = committedAssets.size() == 4u
+				&& std::count(committedAssets.begin(), committedAssets.end(), firstAsset) == 2
+				&& std::count(committedAssets.begin(), committedAssets.end(), secondAsset) == 2;
+			context.Expect(stagedFirst && stagedSecond && bothAreasCommitted
+				&& publishedSnapshot.status == TerraEngine::Physics::Terrain::TerrainCollisionStatus::Current
+				&& publishedSnapshot.currentRecipe.IsComplete()
+				&& publishedSnapshot.mountedCandidatesStaged == 2u
+				&& publishedSnapshot.mountedPendingCandidateCount == 0u
+				&& publishedSnapshot.mountedPublicationAttempts == 2u
+				&& publishedSnapshot.mountedPublicationCommits == 2u
+				&& publishedSnapshot.mountedPublicationRejections == 0u,
+				"The protected mounted-terrain boundary must publish every copied asset/area and republish the complete batch for a new physics world.");
 			system.Shutdown();
 		});
 
