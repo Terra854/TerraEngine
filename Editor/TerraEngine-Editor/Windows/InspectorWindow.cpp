@@ -5144,9 +5144,10 @@ void InspectorWindow::OnGui() {
 					// Transform is required by every object and therefore cannot be removed.
 					if (compName != "Transform") {
 						if (ImGui::MenuItem("Remove Component")) {
-							UndoRedoSystem::Instance().PushCommand(std::make_unique<RemoveComponentCommand>(obj, compName));
-							access.entityRemoveComponent(ObjectManager::instance().getRegistry(), obj);
-							NotifySceneAfterComponentMutation(compName);
+							// Use the same protected mutation and revision publication as redo.
+							auto command = std::make_unique<RemoveComponentCommand>(obj, compName);
+							command->Redo();
+							UndoRedoSystem::Instance().PushCommand(std::move(command));
 						}
 					}
 					if (ImGui::MenuItem("Reset Component To Prefab Defaults")) {
@@ -5539,9 +5540,10 @@ void InspectorWindow::OnGui() {
 					ImGui::PushID(compName.c_str());
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (ImGui::Selectable(displayName.c_str())) {
-						UndoRedoSystem::Instance().PushCommand(std::make_unique<AddComponentCommand>(obj, compName));
-						accessReg[compName].entityAddComponent(ObjectManager::instance().getRegistry(), obj);
-						NotifySceneAfterComponentMutation(compName);
+						// Initial edits and history replay must invalidate identical caches.
+						auto command = std::make_unique<AddComponentCommand>(obj, compName);
+						command->Redo();
+						UndoRedoSystem::Instance().PushCommand(std::move(command));
 						ImGui::CloseCurrentPopup();
 					}
 					ImGui::PopID();

@@ -306,6 +306,10 @@ void AddComponentCommand::Undo() {
 		auto& reg = ComponentAccessRegistry();
 		if (reg.count(m_ComponentName)) {
 			reg[m_ComponentName].entityRemoveComponent(ObjectManager::instance().getRegistry(), obj->EntityId());
+			// Type-erased registry callbacks do not publish object revisions. Tell
+			// retained renderer/physics snapshots that membership changed here,
+			// while editor history owns the protected boundary.
+			ObjectManager::instance().notifyObjectStructureChanged(*obj);
 			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}
@@ -318,6 +322,8 @@ void AddComponentCommand::Redo() {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (reg.count(m_ComponentName)) {
 			reg[m_ComponentName].entityAddComponent(ObjectManager::instance().getRegistry(), obj->EntityId());
+			// Initial Inspector adds and redo share this publication path.
+			ObjectManager::instance().notifyObjectStructureChanged(*obj);
 			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}
@@ -346,6 +352,9 @@ void RemoveComponentCommand::Undo() {
 		if (reg.count(m_ComponentName)) {
 			reg[m_ComponentName].entityAddComponent(ObjectManager::instance().getRegistry(), obj->EntityId());
 			reg[m_ComponentName].entityDeserialize(ObjectManager::instance().getRegistry(), obj->EntityId(), m_ComponentJson);
+			// Publish only after restoring the complete authored payload so the
+			// next renderer capture sees the restored mesh and material together.
+			ObjectManager::instance().notifyObjectStructureChanged(*obj);
 			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}
@@ -358,6 +367,8 @@ void RemoveComponentCommand::Redo() {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (reg.count(m_ComponentName)) {
 			reg[m_ComponentName].entityRemoveComponent(ObjectManager::instance().getRegistry(), obj->EntityId());
+			// Removal must retire retained draw membership without reloading a scene.
+			ObjectManager::instance().notifyObjectStructureChanged(*obj);
 			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}

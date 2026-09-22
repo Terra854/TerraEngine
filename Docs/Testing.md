@@ -1,5 +1,42 @@
 # TerraEngine Testing
 
+## Live mesh component edits
+
+After the normal RelWithDebInfo build and install below, run:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER = 'Editor.TransactionalMutation,Editor.Inspector'
+& ./out/build/RelWithDebInfo/TerraEngine-EditorTests.exe
+$env:TERRAENGINE_TEST_FILTER = 'Engine.SceneChangePacket'
+& ./out/build/RelWithDebInfo/TerraEngine-EngineTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+`MeshInspectorLifecyclePublishesRenderChanges` exercises the same commands as
+the Inspector and checks the renderer-consumed scene journal after add, mesh and
+material assignment, removal, undo and redo. The Inspector wiring regression
+prevents raw registry edits from bypassing those notifications. In a disposable
+editor scene, add Mesh Render to an object, assign valid mesh/material assets,
+and verify it appears without reopening. Remove the component and undo/redo:
+visibility must follow the component, and undo removal must restore both asset
+references. Saving the scene is not required to refresh rendering.
+
+`LiveCacheRejectsEditsAfterPublication` covers edits made after the frame packet
+was published but before protected render capture. Consecutive packet numbers
+alone do not prove that a packet includes the live component revision. The
+renderer must rebuild its membership cache when unpublished changes remain,
+while preserving the incremental path for a complete, consecutive publication.
+
+Verified on 2026-09-23 in the installed editor with
+`ProjectCreationRetest-20260916`: Inspector removal hid the red obstacle, undo
+restored it, and redo hid it again. A fresh Inspector-added component rendered
+after separate MCP mesh/material assignments. Ten MCP removal/undo cycles each
+changed Scene-view visible command counts from 4 to 3 and back to 4. All scene
+edits were undone without saving. Evidence: `out/mesh-packet-live-cycles.log`,
+`out/mesh-packet-native-tests.log` (345 tests), and
+`out/mesh-packet-editor-tests.log` (complete editor suite). Build and install
+logs are `out/mesh-packet-build.log` and `out/mesh-packet-install.log`.
+
 ## Scene View click selection
 
 Build and install the editor and `TerraEngine-EditorTests` with the preset below.

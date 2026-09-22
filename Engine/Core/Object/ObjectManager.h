@@ -395,6 +395,12 @@ public:
 	// later protected publication cannot invalidate their exact scene delta.
 	std::shared_ptr<const TerraEngine::Scene::SceneChangePacket>
 		LoadPublishedSceneChangePacketShared() const noexcept;
+	// Protected-side cache consumers may patch live state only when this is the
+	// next publication and no later edit remains outside that immutable packet.
+	// Worker jobs must use captured values instead of consulting this live journal.
+	bool CanApplySceneChangePacketToLiveState(
+		const TerraEngine::Scene::SceneChangePacket& packet,
+		std::uint64_t previousPublicationRevision) const;
 	std::uint64_t GetSceneGeneration() const { return sceneGeneration; }
 	std::uint64_t GetObjectTransformRevision(const Object& object) const;
 	std::uint64_t GetObjectSpatialRevision(const Object& object) const;

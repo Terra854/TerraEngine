@@ -5,6 +5,7 @@
 
 #include "Core/Object/ComponentRegistry.h"
 #include "Core/Object/ObjectManager.h"
+#include "Components/MeshRenderComponent.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "UndoRedoSystem.h"
 
@@ -40,6 +41,56 @@ namespace TerraEngine::EditorTests {
 
 	void RegisterTransactionalMutationUndoTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.TransactionalMutation.MeshInspectorLifecyclePublishesRenderChanges", [](TestContext& context) {
+			ComponentRegistry::RegisterAllComponents();
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Object object = objects.createObject("Live mesh authoring");
+			(void)objects.PublishSceneChangePacket();
+			auto& access = ComponentAccessRegistry().at("MeshRenderComponent");
+			std::uint64_t revision = objects.GetComponentMutationRevision();
+			const auto expectPublication = [&] {
+				// This is the immutable journal consumed by renderer membership
+				// capture, not merely the scene's unsaved-file indicator.
+				context.Expect(objects.GetComponentMutationRevision() > revision,
+					"An Inspector/history edit must invalidate retained render capture.");
+				revision = objects.GetComponentMutationRevision();
+				const auto packet = objects.PublishSceneChangePacket();
+				context.Expect(packet.Validate(objects.GetSceneGeneration()).valid
+					&& packet.ComponentChanged().size() == 1U
+					&& packet.ComponentChanged().front().objectId == objects.getUUID(object),
+					"The next protected publication must identify the edited owner.");
+			};
+			AddComponentCommand add(object.EntityId(), "MeshRenderComponent");
+			add.Redo();
+			expectPublication();
+			const auto meshId = TerraEngine::GenerateUUID();
+			const auto materialId = TerraEngine::GenerateUUID();
+			context.Expect(access.entitySetter(objects.getRegistry(), object.EntityId(), "meshId", meshId),
+				"Inspector mesh assignment must succeed.");
+			expectPublication();
+			context.Expect(access.entitySetter(objects.getRegistry(), object.EntityId(), "materialId", materialId),
+				"Inspector material assignment must succeed.");
+			expectPublication();
+			RemoveComponentCommand remove(object.EntityId(), "MeshRenderComponent");
+			remove.Redo();
+			expectPublication();
+			context.Expect(objects.GetComponent<MeshRenderComponent>(object) == nullptr,
+				"Removal must retire the live mesh binding.");
+			remove.Undo();
+			expectPublication();
+			const auto* restored = objects.GetComponent<MeshRenderComponent>(object);
+			context.Expect(restored && restored->meshId == meshId && restored->materialId == materialId,
+				"Undo removal must restore both resource bindings before publication.");
+			remove.Redo();
+			expectPublication();
+			add.Redo();
+			expectPublication();
+			add.Undo();
+			expectPublication();
+			objects.clear();
+		});
+
 		registry.Add("Editor.TransactionalMutation.CarriesUndoGroupMetadata", [](TestContext& context) {
 			TerraEngine::Scene::Transaction transaction = TerraEngine::Scene::TransactionalMutationBuilder("editor-undo", TerraEngine::Scene::TransactionOrigin::Editor, "inspector")
 				.SetUndoGroup("Inspector Edit")

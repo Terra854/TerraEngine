@@ -21,6 +21,46 @@ namespace TerraEngine::Tests {
 
 	void RegisterSceneChangePacketTests(TestRegistry& registry)
 	{
+		registry.Add("Engine.SceneChangePacket.LiveCacheRejectsEditsAfterPublication", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Object object = objects.createObject("Live mesh cache probe");
+			const auto initial = objects.PublishSceneChangePacket();
+			const auto beforeAdd = objects.PublishSceneChangePacket();
+			context.Expect(objects.CanApplySceneChangePacketToLiveState(beforeAdd, initial.PublicationRevision()),
+				"A consecutive publication with no later edits can patch a live cache.");
+
+			// This is the editor failure ordering: publish an empty frame packet,
+			// then add/remove a component before the renderer captures live revisions.
+			objects.AddComponent<PacketProbeComponent>(object);
+			context.Expect(!objects.CanApplySceneChangePacketToLiveState(beforeAdd, initial.PublicationRevision()),
+				"An empty packet must not hide a component added after publication.");
+			const auto added = objects.PublishSceneChangePacket();
+			context.Expect(objects.CanApplySceneChangePacketToLiveState(added, beforeAdd.PublicationRevision()),
+				"Publishing the pending addition restores safe incremental capture.");
+			objects.RemoveComponent<PacketProbeComponent>(object);
+			context.Expect(!objects.CanApplySceneChangePacketToLiveState(added, beforeAdd.PublicationRevision()),
+				"Even a nonempty packet must not hide a later component removal.");
+			const auto removed = objects.PublishSceneChangePacket();
+			context.Expect(objects.CanApplySceneChangePacketToLiveState(removed, added.PublicationRevision()),
+				"The removal is safe to apply once it reaches publication.");
+			context.Expect(!objects.CanApplySceneChangePacketToLiveState(added, beforeAdd.PublicationRevision()),
+				"An older retained packet cannot describe current live state.");
+			context.Expect(!objects.CanApplySceneChangePacketToLiveState(removed, initial.PublicationRevision()),
+				"A missed publication requires a full rebuild.");
+			objects.AddComponent<PacketProbeComponent>(object);
+			const auto restored = objects.PublishSceneChangePacket();
+			objects.notifyObjectComponentValueChanged(object, "PacketProbeComponent");
+			context.Expect(!objects.CanApplySceneChangePacketToLiveState(restored, removed.PublicationRevision()),
+				"Late mesh/material value notifications also require fresh live capture.");
+			const auto valueChanged = objects.PublishSceneChangePacket();
+			context.Expect(objects.CanApplySceneChangePacketToLiveState(valueChanged, restored.PublicationRevision()),
+				"Published value edits preserve the normal incremental path.");
+			objects.clear();
+			context.Expect(!objects.CanApplySceneChangePacketToLiveState(removed, added.PublicationRevision()),
+				"A previous scene's packet cannot update the replacement scene.");
+		});
+
 		registry.Add("Scene.ChangePacket.InvalidationKindsCoverPublicationDependencies", [](TestContext& context) {
 			using TerraEngine::Scene::SceneChangeKind;
 			context.Expect(static_cast<unsigned>(SceneChangeKind::Bounds) == 6U, "Change packets expose stable bounds/hierarchy/transform/component invalidation kinds.");

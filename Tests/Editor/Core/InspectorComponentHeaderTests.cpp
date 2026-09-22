@@ -31,6 +31,17 @@ namespace TerraEngine::EditorTests
 
 	void RegisterInspectorComponentHeaderTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.Inspector.ComponentEditsUseNotifyingHistoryCommands", [](TestContext& context) {
+			// The runtime lifecycle test exercises these commands. This wiring check
+			// prevents the ImGui buttons from bypassing them with raw EnTT edits.
+			const std::string source = ReadInspectorSource();
+			context.Expect(!source.empty(), "Inspector source must be available.");
+			context.Expect(source.find("access.entityRemoveComponent(ObjectManager::instance().getRegistry(), obj)") == std::string::npos,
+				"Inspector removal must use the notifying command, not raw storage.");
+			context.Expect(source.find("accessReg[compName].entityAddComponent(ObjectManager::instance().getRegistry(), obj)") == std::string::npos,
+				"Inspector addition must use the notifying command, not raw storage.");
+		});
+
 		registry.Add("Editor.Inspector.ComponentHeaderUsesOneContextMenu", [](TestContext& context) {
 			const std::string source = ReadInspectorSource();
 			context.Expect(!source.empty(), "InspectorWindow.cpp should be readable for header menu checks.");

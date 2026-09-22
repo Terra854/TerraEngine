@@ -5116,10 +5116,12 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 					const bool sameSceneAndHierarchy =
 						renderableMembershipSceneGeneration == membershipSceneGeneration
 						&& renderableMembershipHierarchyRevision == membershipHierarchyRevision;
+					// A consecutive packet can still predate a same-frame Inspector
+					// edit. Patch only if its journal covers the live state being
+					// captured; otherwise rebuild once at this protected boundary.
 					const bool packetIsNext = protectedSceneChanges != nullptr
-						&& protectedSceneChanges->Validate(membershipSceneGeneration).valid
-						&& protectedSceneChanges->PublicationRevision()
-							== renderableMembershipPacketRevision + 1U;
+						&& objManager.CanApplySceneChangePacketToLiveState(
+							*protectedSceneChanges, renderableMembershipPacketRevision);
 					// A proxy publication can replace the mesh or material for every
 					// instance of one terrain asset without producing an ECS change packet.
 					// Rebuild the protected membership snapshot in that case instead of

@@ -340,6 +340,20 @@ TerraEngine::Scene::SceneChangePacket ObjectManager::PublishSceneChangePacket()
 	return packet;
 }
 
+bool ObjectManager::CanApplySceneChangePacketToLiveState(
+	const TerraEngine::Scene::SceneChangePacket& packet,
+	std::uint64_t previousPublicationRevision) const
+{
+	// Publication order alone is insufficient: Inspector or another protected
+	// producer can edit after frame-start publication, before render capture.
+	// In that case consumers must rebuild from live state, not bless an older
+	// delta with the new component revision and retain stale bindings forever.
+	return pendingSceneChanges.empty()
+		&& packet.PublicationRevision() == sceneChangePublicationRevision
+		&& packet.PublicationRevision() == previousPublicationRevision + 1U
+		&& packet.Validate(sceneGeneration).valid;
+}
+
 TerraEngine::Scene::SceneChangePacket ObjectManager::LoadPublishedSceneChangePacket() const
 {
 	const std::shared_ptr<const TerraEngine::Scene::SceneChangePacket> packet =
