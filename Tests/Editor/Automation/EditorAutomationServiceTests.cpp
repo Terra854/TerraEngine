@@ -234,6 +234,14 @@ namespace TerraEngine::EditorTests
 			context.Expect(childResult != result["data"]["objects"].end(), "Scene listing should include a nested child.");
 			if (childResult != result["data"]["objects"].end())
 			{
+				// Canonical transform writes require a revision observed through the
+				// public read API, even when component enumeration is disabled.
+				context.Expect(childResult->contains("transformRevision")
+					&& (*childResult)["transformRevision"].is_number_unsigned(),
+					"Scene listing must expose a typed revision for optimistic transform transactions.");
+				context.ExpectEqual(childResult->value("transformRevision", std::uint64_t{}),
+					ObjectManager::instance().GetObjectTransformRevision(child),
+					"The published revision must match the current object, not an inferred constant.");
 				context.ExpectEqual(
 					childResult->value("parent", std::uint32_t{}),
 					static_cast<std::uint32_t>(parent.EntityId()),

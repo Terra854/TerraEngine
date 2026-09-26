@@ -4,6 +4,8 @@
 // It uses the engine's reflection system to dynamically generate UI controls for various component types and data fields.
 
 #pragma once
+
+#include <unordered_map>
 #include "../Framework/EditorWindow.h"
 #include "AssetDatabase.h"
 #include "Engine/Core/Object/Reflection.h"
@@ -61,6 +63,7 @@ private:
 	void DrawConstraintSetInspector(const std::vector<entt::entity>& objects);
 	void DrawCharacterControllerInspector(const std::vector<entt::entity>& objects);
 	void DrawNavigationAgentInspector(const std::vector<entt::entity>& objects);
+	void DrawCharacterLocomotionInspector(const std::vector<entt::entity>& objects);
 	void DrawPhysicsRuntimeState(entt::entity obj);
 	void DrawAnimatorInspector(entt::entity obj, const std::vector<entt::entity>& selectedObjects);
 	TerraEngine::UUID ResolveAnimatorStartClipAssetId(
@@ -100,6 +103,9 @@ private:
 	// transaction boundary. Keep that explanation visible across GUI frames so
 	// a narrow inspector does not turn an invalid edit into a silent no-op.
 	std::string m_NavigationAgentValidationMessage;
+	std::string m_LocomotionValidationMessage;
+	TerraEngine::UUID m_LocomotionDraftObjectId = TerraEngine::EMPTY_UUID;
+	std::unordered_map<std::string, std::string> m_LocomotionTextDrafts;
 	// The editor owns intent, not a provider/world pointer.  The editor lifecycle
 	// coordinator drains these at its declared protected authoring boundary.
 	TerraEngine::Editor::PhysicsRebuildIntentQueue m_PhysicsRebuildIntents;

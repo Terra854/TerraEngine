@@ -61,6 +61,7 @@ namespace TerraEngine::Animation {
 
 		bool SameRequest(const AnimationCommand& left, const AnimationCommand& right) noexcept {
 			return left.target == right.target
+				&& left.expectedController == right.expectedController
 				&& left.kind == right.kind
 				&& left.parameterType == right.parameterType
 				&& left.parameterId == right.parameterId

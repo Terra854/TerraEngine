@@ -202,6 +202,9 @@ namespace TerraEngine::EditorTests {
 	void RegisterNavigationAgentAutomationTests(TestRegistry& registry);
 	void RegisterNavigationOutcomeParityTests(TestRegistry& registry);
 	void RegisterNavigationAgentAuthoringTests(TestRegistry& registry);
+	void RegisterLocomotionAuthoringTests(TestRegistry& registry);
+	void RegisterLocomotionAutomationTests(TestRegistry& registry);
+	void RegisterLocomotionExportTests(TestRegistry& registry);
 	void RegisterNavigationAgentPreviewTests(TestRegistry& registry);
 	void RegisterNavigationAgentPersistenceParityTests(TestRegistry& registry);
 	void RegisterPhysicsMaterialAssetTests(TestRegistry& registry);
@@ -474,6 +477,9 @@ int main() {
 	TerraEngine::EditorTests::RegisterNavigationAgentAutomationTests(registry);
 	TerraEngine::EditorTests::RegisterNavigationOutcomeParityTests(registry);
 	TerraEngine::EditorTests::RegisterNavigationAgentAuthoringTests(registry);
+	TerraEngine::EditorTests::RegisterLocomotionAuthoringTests(registry);
+	TerraEngine::EditorTests::RegisterLocomotionAutomationTests(registry);
+	TerraEngine::EditorTests::RegisterLocomotionExportTests(registry);
 	TerraEngine::EditorTests::RegisterNavigationAgentPreviewTests(registry);
 	TerraEngine::EditorTests::RegisterNavigationAgentPersistenceParityTests(registry);
 	TerraEngine::EditorTests::RegisterPhysicsMaterialAssetTests(registry);

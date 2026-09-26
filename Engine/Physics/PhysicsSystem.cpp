@@ -6,6 +6,7 @@
 #include "Animation/Runtime/RootMotion.h"
 
 #include "Backend/JoltPhysicsBackend.h"
+#include "Components/Physics/CharacterControllerComponent.h"
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
 #include "Physics/Assets/PhysicsAssetChangeJournal.h"
@@ -25,8 +26,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <exception>
+#include <new>
 #include <filesystem>
 #include <future>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <stdexcept>
@@ -38,6 +42,15 @@ namespace TerraEngine::Physics {
 	namespace {
 		using Clock = std::chrono::steady_clock;
 
+		// Successful tagged Physics teardown, not a live Animation component,
+		// supplies retirement authority. This private marker only satisfies the
+		// shared provider transition shape; no callback reaches a retired animator.
+		struct TerminalRagdollTeardownEvidence final : CharacterMotionValidity {
+			CharacterMotionValidityReason Validate() const noexcept override {
+				return CharacterMotionValidityReason::Valid;
+			}
+		};
+
 		double MillisecondsSince(Clock::time_point start) {
 			return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 		}
@@ -48,19 +61,32 @@ namespace TerraEngine::Physics {
 		}
 
 		bool SamePose(const PhysicsPose& left, const PhysicsPose& right) {
-			constexpr float epsilon = 1.0e-6F;
-			// Unit quaternions q and -q encode the same orientation. Jolt may choose
-			// either representation when extracting a body, so compare the absolute
-			// dot product instead of component signs before suppressing a duplicate
-			// authored transform publication.
-			const float rotationDot = left.rotation.x * right.rotation.x
-				+ left.rotation.y * right.rotation.y
-				+ left.rotation.z * right.rotation.z
-				+ left.rotation.w * right.rotation.w;
+			constexpr double epsilon = 1.0e-6;
+			// Repeated physical yaw may produce a near-unit quaternion. Its raw
+			// self-dot can be below one even when two sampled poses are identical,
+			// causing a redundant Transform mutation and source-revision change.
+			// Normalize the comparison rather than the published pose; absolute
+			// dot also treats q and -q as the same orientation.
+			const auto normSquared = [](const PhysicsQuaternion& value) {
+				return static_cast<double>(value.x) * value.x
+					+ static_cast<double>(value.y) * value.y
+					+ static_cast<double>(value.z) * value.z
+					+ static_cast<double>(value.w) * value.w;
+			};
+			const double leftNormSquared = normSquared(left.rotation);
+			const double rightNormSquared = normSquared(right.rotation);
+			if(!std::isfinite(leftNormSquared) || !std::isfinite(rightNormSquared)
+				|| leftNormSquared <= 0.0 || rightNormSquared <= 0.0) return false;
+			const double rawDot = static_cast<double>(left.rotation.x) * right.rotation.x
+				+ static_cast<double>(left.rotation.y) * right.rotation.y
+				+ static_cast<double>(left.rotation.z) * right.rotation.z
+				+ static_cast<double>(left.rotation.w) * right.rotation.w;
+			const double rotationDot = std::clamp(std::fabs(rawDot)
+				/ std::sqrt(leftNormSquared * rightNormSquared), 0.0, 1.0);
 			return std::fabs(left.position.x - right.position.x) <= epsilon
 				&& std::fabs(left.position.y - right.position.y) <= epsilon
 				&& std::fabs(left.position.z - right.position.z) <= epsilon
-				&& std::fabs(rotationDot) >= 1.0F - epsilon;
+				&& rotationDot >= 1.0 - epsilon;
 		}
 
 		glm::vec3 ToGlmPosition(const PhysicsVector3& value) {
@@ -141,6 +167,7 @@ namespace TerraEngine::Physics {
 			std::int64_t areaZ = 0;
 			PhysicsShapeHandle shape;
 			PhysicsBodyHandle body;
+			TerrainCollisionPublication publication;
 		};
 
 		struct PreparedBody {
@@ -261,8 +288,12 @@ namespace TerraEngine::Physics {
 			// data, so paused unchanged worlds lower to omitted descriptors.
 			activation.snapshot = worldActive && preparationWork;
 			activation.prepare = preparationWork;
-			activation.commandCommit = preparationWork;
 			activation.simulate = worldActive && predictedStep;
+			// A guarded controller keeps the protected commit boundary active
+			// before a predicted step, even without a newly queued command.
+			activation.commandCommit = preparationWork
+				|| (activation.simulate && (!retainedGuardedTargets.empty()
+					|| !retainedRootIntervals.empty()));
 			activation.extract = activation.simulate;
 			activation.publish = activation.extract;
 			activation.publicationBarrier = activation.publish;
@@ -304,6 +335,7 @@ namespace TerraEngine::Physics {
 			PublishPhysicsDiagnosticsSnapshot({});
 			Backend::PhysicsBackendWorldConfiguration configuration;
 			configuration.world = world.Handle();
+			configuration.frame = {kPrimaryPhysicsFrameId, configuration.world.worldGeneration};
 			configuration.settings = requestedSettings;
 			const Backend::PhysicsBackendResult result = backend->CreateWorld(configuration);
 			if(result.Succeeded()) {
@@ -355,6 +387,10 @@ namespace TerraEngine::Physics {
 			bodyObjects.clear();
 			runtimeConstraints.clear();
 			runtimeCharacters.clear();
+			retainedGuardedTargets.clear();
+			retainedRootIntervals.clear();
+			rootRetirementCursor = 0U;
+			recoveryTickets.clear();
 			runtimeRagdolls.clear();
 			preparedBodies.clear();
 			preparedBodyTransformUpdates.clear();
@@ -424,7 +460,7 @@ namespace TerraEngine::Physics {
 			const bool packetContinuous = authoring && packetValid
 				&& scenePacket->SceneGeneration() == lastAuthoringSceneGeneration
 				&& scenePacket->PublicationRevision() == lastAuthoringScenePublicationRevision + 1U;
-			const auto packetAffectsAuthoring = [this, &scenePacket]() {
+			const auto packetAffectsAuthoring = [this, &objects, &scenePacket]() {
 				if(scenePacket == nullptr || !authoring) return true;
 				std::unordered_set<TerraEngine::UUID> changed;
 				auto append = [this, &changed](const auto& records, bool transforms) {
@@ -450,8 +486,19 @@ namespace TerraEngine::Physics {
 					if(changed.contains(constraint.ownerObjectId) || changed.contains(constraint.firstObjectId)
 						|| changed.contains(constraint.secondObjectId)) return true;
 				}
-				return std::any_of(authoring->Data().characters.begin(), authoring->Data().characters.end(),
-					[&changed](const PhysicsCharacterDescriptor& character) { return changed.contains(character.objectId); });
+				if(std::any_of(authoring->Data().characters.begin(), authoring->Data().characters.end(),
+					[&changed](const PhysicsCharacterDescriptor& character) { return changed.contains(character.objectId); })) return true;
+				// The previous snapshot has no descriptor after a controller was
+				// removed. Check changed live objects too, or a re-added controller
+				// would be mistaken for unrelated scene work and never captured.
+				const auto hasNewCharacter = [&objects](const auto& records) {
+					return std::any_of(records.begin(), records.end(), [&objects](const auto& record) {
+						const auto* character = objects.GetComponent<CharacterControllerComponent>(record.object);
+						return character != nullptr && character->active;
+					});
+				};
+				return hasNewCharacter(scenePacket->Added())
+					|| hasNewCharacter(scenePacket->ComponentChanged());
 			};
 			const bool sceneAffectsPhysics = packetAffectsAuthoring();
 			if(authoring && packetContinuous && !sceneAffectsPhysics && assetChanges.Empty()) {
@@ -1441,7 +1488,16 @@ namespace TerraEngine::Physics {
 			const Animation::AnimationFixedTick committedStep =
 				static_cast<Animation::AnimationFixedTick>(std::max<PhysicsTick>(1U, physicsTick));
 			Backend::PhysicsBackendStagingToken staging;
-			std::unordered_map<std::uint64_t, RuntimeRagdoll> candidate = runtimeRagdolls;
+			std::unordered_map<std::uint64_t, RuntimeRagdoll> candidate;
+			try {
+				candidate = runtimeRagdolls;
+			} catch(const std::bad_alloc&) {
+				// Drain already transferred ownership out of Bridge. Even this first
+				// candidate-map allocation must restore the exact retirement work.
+				ragdollPhysicsBridge.RestoreUndeliveredDrain(std::move(requests));
+				++diagnosticCounters.rejectedCount;
+				return;
+			}
 			std::vector<RuntimeRagdoll> stagedAllocations;
 			std::vector<RuntimeRagdoll> retireAfterCommit;
 			std::vector<std::uint64_t> touchedPoseIds;
@@ -1452,6 +1508,13 @@ namespace TerraEngine::Physics {
 			std::vector<RagdollMotorUpdate> motorUpdates;
 			std::size_t appliedMotorUpdateCount = 0U;
 			std::string diagnostic;
+			std::vector<std::pair<std::uint64_t, std::uint64_t>> reservedRecoveryKeys;
+			std::vector<CharacterExternalRecoveryTransition> retirementGrants;
+			PreparedCharacterMotionLeaseBatch preparedRetirementGrants;
+			const bool ownsRetirementRetry = std::any_of(requests.begin(), requests.end(),
+				[](const Animation::RagdollPhysicsRequest& request) {
+					return request.retirementIntent != nullptr;
+				});
 
 			const auto rollbackStaging = [&]() {
 				if(staging.IsValid()) {
@@ -1483,8 +1546,17 @@ namespace TerraEngine::Physics {
 			};
 
 			const auto rejectBatch = [&](std::string reason) {
+				for(const auto& key : reservedRecoveryKeys) recoveryTickets.erase(key);
 				rollbackMotorUpdates();
 				rollbackStaging();
+				if(ownsRetirementRetry) {
+					// The animator record was retired after enqueue. Physics owns this
+					// bounded exact request until teardown and grant both succeed;
+					// a terminal rejection would discard its only cleanup authority.
+					ragdollPhysicsBridge.RestoreUndeliveredDrain(std::move(requests));
+					++diagnosticCounters.rejectedCount;
+					return;
+				}
 				const Animation::AnimationStatus rejected = ragdollPhysicsBridge.RejectBatchAtProtectedBoundary(
 					requests, committedStep, std::move(reason));
 				if(rejected != Animation::AnimationStatus::Rejected) {
@@ -1492,9 +1564,155 @@ namespace TerraEngine::Physics {
 				}
 				diagnosticCounters.rejectedCount += requests.size();
 			};
+			try {
+				reservedRecoveryKeys.reserve(requests.size());
+				retirementGrants.reserve(requests.size());
+			} catch(const std::bad_alloc&) {
+				rejectBatch("Recovery ticket preflight exceeded protected allocation capacity.");
+				return;
+			}
 
 			for(const Animation::RagdollPhysicsRequest& request : requests) {
-				if(request.generation.worldGeneration != world.Handle().worldGeneration) {
+				if(request.recoveryIntent) {
+					const auto& intent = *request.recoveryIntent;
+					const auto& source = request.recoverySourcePose;
+					const auto key = std::pair{request.ragdollId, request.correlationId};
+					const auto lease = world.ReadCharacterMotionLease(
+						intent.expectedExternalLease.controller);
+					const auto controller = runtimeCharacters.find(
+						intent.expectedExternalLease.controller.objectId);
+					if(request.kind != Animation::RagdollPhysicsRequestKind::Deactivate
+						|| request.ragdollId == 0U || request.correlationId == 0U
+						|| recoveryTickets.size() >= 4096U || recoveryTickets.contains(key)
+						|| !source || !source->completeCurrentStep
+						|| !source->generation.IsValid()
+						|| ragdollPhysicsBridge.AcquireCurrentStepPose(
+							request.ragdollId, source->generation) != source
+						|| !lease || *lease != intent.expectedExternalLease
+						|| controller == runtimeCharacters.end()
+						|| controller->second.handle != intent.expectedExternalLease.controller.character
+						|| intent.externalOwnerId == 0U
+						|| intent.externalOwnerId != lease->externalOwnerId) {
+						diagnostic = "The tagged recovery handoff has stale owner, snapshot, or bounded ticket evidence.";
+						break;
+					}
+					const auto nextEpoch = [](std::uint64_t value) { return value + 1U; };
+					if(lease->authorityEpoch == std::numeric_limits<std::uint64_t>::max()
+						|| lease->motionEpoch == std::numeric_limits<std::uint64_t>::max()
+						|| lease->publicationEpoch == std::numeric_limits<std::uint64_t>::max()) {
+						diagnostic = "The external recovery cannot advance exhausted character motion epochs.";
+						break;
+					}
+					CharacterMotionLease released = *lease;
+					released.owner = {};
+					released.externalOwnerId = 0U;
+					released.state = CharacterMotionLeaseState::Unleased;
+					released.mode = CharacterMotionMode::Velocity;
+					released.authorityEpoch = nextEpoch(lease->authorityEpoch);
+					released.motionEpoch = nextEpoch(lease->motionEpoch);
+					released.publicationEpoch = nextEpoch(lease->publicationEpoch);
+				const CharacterExternalRecoveryTransition transition{intent, released};
+				if(ValidateCharacterExternalRecoveryTransition(transition, *lease)
+					!= CharacterMotionLeaseError::None) {
+						diagnostic = "The tagged recovery pose or lease transition is invalid.";
+						break;
+				}
+				try {
+						RecoveryTicket ticket;
+						ticket.token = {world.Handle(), request.ragdollId, request.correlationId,
+							request.generation, committedStep};
+						ticket.intent = request.recoveryIntent;
+						ticket.sourcePose = source;
+						recoveryTickets.emplace(key, std::move(ticket));
+						reservedRecoveryKeys.push_back(key);
+					} catch(const std::bad_alloc&) {
+						diagnostic = "Recovery ticket capacity could not be reserved before ragdoll deactivation.";
+						break;
+					}
+				} else if(request.recoverySourcePose) {
+					diagnostic = "A recovery source pose requires a tagged recovery intent.";
+					break;
+				}
+				if(request.retirementIntent) {
+					const auto& intent = *request.retirementIntent;
+					if(request.kind != Animation::RagdollPhysicsRequestKind::Teardown
+						|| request.recoveryIntent || request.ragdollId == 0U
+						|| request.correlationId == 0U || intent.externalOwnerId == 0U
+						|| request.ragdollId != intent.externalOwnerId + 1U
+						|| intent.frame != PhysicsFrameHandle{kPrimaryPhysicsFrameId,
+							world.Handle().worldGeneration}
+						|| std::count_if(requests.begin(), requests.end(), [&request](const auto& other) {
+							return other.ragdollId == request.ragdollId;
+						}) != 1U
+						|| ragdollPhysicsBridge.HasPendingRagdoll(request.ragdollId)) {
+						diagnostic = "A tagged retirement requires one exact, unqueued ragdoll Teardown.";
+						break;
+					}
+					const auto lease = world.ReadCharacterMotionLease(
+						intent.expectedExternalLease.controller);
+					if(!lease || *lease != intent.expectedExternalLease
+						|| lease->state != CharacterMotionLeaseState::ExternalExclusive
+						|| lease->externalOwnerId != intent.externalOwnerId) {
+						bool ownerStillLive = false;
+						for(const auto& [objectId, runtime] : runtimeCharacters) {
+							const PhysicsCharacterCommandTarget target{world.Handle(), runtime.handle,
+								objectId, runtime.objectGeneration, runtime.componentGeneration};
+							const auto currentLease = world.ReadCharacterMotionLease(target);
+							ownerStillLive = ownerStillLive || (currentLease
+								&& currentLease->state == CharacterMotionLeaseState::ExternalExclusive
+								&& currentLease->externalOwnerId == intent.externalOwnerId);
+						}
+						if(ownerStillLive || world.Status(intent.expectedExternalLease.controller.character)
+							== PhysicsHandleStatus::Alive) {
+							diagnostic = "The tagged retirement has a stale or different live external controller.";
+							break;
+						}
+						// A genuinely destroyed character already ended its exclusion.
+						// Teardown still retires the ragdoll, but grants no new owner.
+					} else {
+						const auto runtime = runtimeCharacters.find(lease->controller.objectId);
+						const auto pose = backend->ReadCurrentCharacterPose(lease->controller);
+						if(runtime == runtimeCharacters.end()
+							|| runtime->second.handle != lease->controller.character || !pose
+							|| lease->authorityEpoch == std::numeric_limits<std::uint64_t>::max()
+							|| lease->motionEpoch == std::numeric_limits<std::uint64_t>::max()
+							|| lease->publicationEpoch == std::numeric_limits<std::uint64_t>::max()) {
+							diagnostic = "The tagged retirement controller cannot safely advance its current-pose lease.";
+							break;
+						}
+						CharacterExternalRecoveryTransition grant;
+						grant.intent.expectedExternalLease = *lease;
+						grant.intent.externalOwnerId = intent.externalOwnerId;
+						grant.intent.frame = intent.frame;
+						grant.intent.alignedControllerPose = *pose;
+						grant.intent.bindingGeneration = std::max<std::uint64_t>(1U,
+							intent.bindingGeneration);
+						try {
+							grant.intent.bindingGuard = std::make_shared<TerminalRagdollTeardownEvidence>();
+						} catch(const std::bad_alloc&) {
+							diagnostic = "The tagged retirement could not reserve terminal grant evidence.";
+							break;
+						}
+						grant.releasedLease = *lease;
+						grant.releasedLease.owner = {};
+						grant.releasedLease.externalOwnerId = 0U;
+						grant.releasedLease.state = CharacterMotionLeaseState::Unleased;
+						grant.releasedLease.mode = CharacterMotionMode::Velocity;
+						++grant.releasedLease.authorityEpoch;
+						++grant.releasedLease.motionEpoch;
+						++grant.releasedLease.publicationEpoch;
+						if(ValidateCharacterExternalRecoveryTransition(grant, *lease)
+							!= CharacterMotionLeaseError::None
+							|| !backend->PreflightCharacterExternalRecovery(grant).Succeeded()) {
+							diagnostic = "The tagged retirement current-pose grant failed protected preflight.";
+							break;
+						}
+						retirementGrants.push_back(std::move(grant));
+					}
+				}
+				if(request.generation.worldGeneration != world.Handle().worldGeneration
+					&& !(request.retirementIntent && !request.generation.IsValid()
+						&& !runtimeRagdolls.contains(request.ragdollId))) {
 					diagnostic = "A ragdoll request targets a stale physics-world generation.";
 					break;
 				}
@@ -1505,15 +1723,44 @@ namespace TerraEngine::Physics {
 						break;
 					}
 				} else {
-					if(current == candidate.end()) {
+					if(current == candidate.end()
+						&& !(request.kind == Animation::RagdollPhysicsRequestKind::Teardown
+							&& request.retirementIntent)) {
 						diagnostic = "A ragdoll lifecycle request targets an absent runtime identity.";
 						break;
 					}
-					if(request.expectedCurrentGeneration.IsValid()
-						&& current->second.generation != request.expectedCurrentGeneration) {
-						diagnostic = "A ragdoll lifecycle request targets a stale current generation.";
+					if(current != candidate.end() && request.retirementIntent
+						&& (!request.expectedCurrentGeneration.IsValid()
+							|| request.generation != request.expectedCurrentGeneration)) {
+						diagnostic = "A provider ragdoll Teardown requires one exact copied source generation.";
 						break;
 					}
+					if(current != candidate.end() && request.expectedCurrentGeneration.IsValid()) {
+						const auto& expected = request.expectedCurrentGeneration;
+						const auto& live = current->second.generation;
+						// Animator retirement pins a stable ragdoll source and external
+						// owner, not an exact simulation tick. Physics can advance its
+						// pose after Animation copied the teardown intent; ordinary
+						// lifecycle requests still require the full generation stamp.
+						const bool stableRetirementSource = request.retirementIntent
+							&& expected.worldGeneration == live.worldGeneration
+							&& expected.profileGeneration == live.profileGeneration
+							&& expected.skeletonGeneration == live.skeletonGeneration
+							&& expected.publicationGeneration == live.publicationGeneration
+							&& live.fixedStep >= expected.fixedStep;
+						if(current->second.generation != expected && !stableRetirementSource) {
+							diagnostic = "A ragdoll lifecycle request targets a stale current generation.";
+							break;
+						}
+					}
+				}
+				if(current == candidate.end()
+					&& request.kind == Animation::RagdollPhysicsRequestKind::Teardown
+					&& request.retirementIntent) {
+					// A pre-provider Activate failed before any ragdoll existed. The
+					// tagged Teardown still provides one explicit current-pose grant.
+					touchedPoseIds.push_back(request.ragdollId);
+					continue;
 				}
 
 				if(request.kind == Animation::RagdollPhysicsRequestKind::UpdateMotors) {
@@ -1595,6 +1842,13 @@ namespace TerraEngine::Physics {
 				rejectBatch(std::move(diagnostic));
 				return;
 			}
+			if(!retirementGrants.empty()) {
+				preparedRetirementGrants = world.PrepareExternalCharacterRecoveries(retirementGrants);
+				if(!preparedRetirementGrants.result.accepted) {
+					rejectBatch("The full tagged Teardown lease root could not be reserved atomically.");
+					return;
+				}
+			}
 			std::sort(touchedPoseIds.begin(), touchedPoseIds.end());
 			touchedPoseIds.erase(std::unique(touchedPoseIds.begin(), touchedPoseIds.end()), touchedPoseIds.end());
 			std::shared_ptr<const Animation::RagdollPhysicsResultSnapshot> preparedResults;
@@ -1602,6 +1856,7 @@ namespace TerraEngine::Physics {
 				Animation::AnimationStatus::Ok, "The ragdoll lifecycle batch committed atomically.",
 				preparedResults) != Animation::AnimationStatus::Ok) {
 				rollbackStaging();
+				for(const auto& key : reservedRecoveryKeys) recoveryTickets.erase(key);
 				ragdollPhysicsBridge.RestoreUndeliveredDrain(std::move(requests));
 				++diagnosticCounters.rejectedCount;
 				return;
@@ -1633,8 +1888,37 @@ namespace TerraEngine::Physics {
 
 			for(RuntimeRagdoll& retired : retireAfterCommit) DestroyCommittedRagdollLocked(retired);
 			runtimeRagdolls = std::move(candidate);
+			// Every tagged Teardown has now committed and no same-ID request can
+			// enqueue under the held Physics coordinator. Provider preflight and the
+			// immutable root were prepared before any ragdoll was destroyed.
+			for(const CharacterExternalRecoveryTransition& grant : retirementGrants)
+				if(!backend->CommitCharacterExternalRecovery(grant))
+					std::terminate(); // A failed no-allocation commit would strand a retired animator.
+			if(preparedRetirementGrants.result.accepted
+				&& !world.CommitPreparedCharacterMotionLeases(
+					std::move(preparedRetirementGrants)))
+				std::terminate(); // PhysicsSystem excludes every lease mutation until this swap.
+			for(const CharacterExternalRecoveryTransition& grant : retirementGrants) {
+				retainedGuardedTargets.erase(grant.intent.expectedExternalLease.controller.objectId);
+				std::erase_if(retainedRootIntervals, [&grant](const auto& entry) {
+					return entry.second.interval.lease.controller
+						== grant.intent.expectedExternalLease.controller;
+				});
+				std::erase_if(recoveryTickets, [&grant](const auto& entry) {
+					return entry.second.intent
+						&& entry.second.intent->expectedExternalLease.controller
+							== grant.intent.expectedExternalLease.controller;
+				});
+			}
 			ragdollPhysicsBridge.PublishPreparedResultsAtProtectedBoundary(
 				std::move(preparedResults), touchedPoseIds);
+			for(const auto& key : reservedRecoveryKeys)
+				recoveryTickets.at(key).committed = true;
+			for(const auto& request : requests)
+				if(request.kind == Animation::RagdollPhysicsRequestKind::Teardown)
+					std::erase_if(recoveryTickets, [&request](const auto& entry) {
+						return entry.first.first == request.ragdollId;
+					});
 			diagnosticCounters.commandCount += requests.size();
 		}
 
@@ -2053,6 +2337,7 @@ namespace TerraEngine::Physics {
 				request.allowStairWalking = prepared.allowStairWalking;
 				request.useGravity = prepared.useGravity;
 				request.enabled = prepared.enabled;
+				request.rotationPolicy = prepared.rotationPolicy;
 				Backend::PhysicsBackendResult result = backend->CreateCharacter(request, staging);
 				if(!result.Succeeded()) {
 					world.Release(handle);
@@ -2087,19 +2372,168 @@ namespace TerraEngine::Physics {
 				registeredConstraintHandles.push_back(constraint.runtime.handle);
 			}
 
+			// Build every fallible retirement container and replacement runtime map
+			// before committing staged provider objects. An external carry never
+			// publishes a new lease while later map growth could strand its ticket.
+			std::unordered_set<TerraEngine::UUID> retiringConstraints;
+			std::vector<TerraEngine::UUID> orderedConstraintRetirements;
+			std::unordered_set<TerraEngine::UUID> retiringCharacters;
+			std::unordered_set<TerraEngine::UUID> retiringBodies;
+			decltype(runtimeBodies) nextRuntimeBodies;
+			decltype(runtimeConstraints) nextRuntimeConstraints;
+			decltype(runtimeCharacters) nextRuntimeCharacters;
+			decltype(bodyObjects) nextBodyObjects;
+			std::vector<PhysicsCharacterHandle> retiringCharacterHandles;
+			std::vector<CharacterExternalCarry> externalCarries;
+			using RecoveryTicketKey = std::pair<std::uint64_t, std::uint64_t>;
+			std::vector<std::pair<RecoveryTicketKey,
+				std::shared_ptr<const CharacterExternalRecoveryIntent>>> remappedRecoveryTickets;
+			PreparedCharacterMotionLeaseBatch preparedCharacterRetirement;
+			if(!transactionRejected) {
+				try {
+					retiringConstraints.insert(preparedConstraintRemovals.begin(),
+						preparedConstraintRemovals.end());
+					for(const PhysicsConstraintDescriptor& prepared : preparedConstraints)
+						retiringConstraints.insert(prepared.recordId);
+					orderedConstraintRetirements.assign(retiringConstraints.begin(),
+						retiringConstraints.end());
+					std::stable_sort(orderedConstraintRetirements.begin(),
+						orderedConstraintRetirements.end(),
+						[this](const TerraEngine::UUID& left, const TerraEngine::UUID& right) {
+							const auto leftRecord = runtimeConstraints.find(left);
+							const auto rightRecord = runtimeConstraints.find(right);
+							const bool leftGear = leftRecord != runtimeConstraints.end()
+								&& leftRecord->second.request.kind == PhysicsConstraintKind::Gear;
+							const bool rightGear = rightRecord != runtimeConstraints.end()
+								&& rightRecord->second.request.kind == PhysicsConstraintKind::Gear;
+							return leftGear && !rightGear;
+						});
+					retiringCharacters.insert(preparedCharacterRemovals.begin(),
+						preparedCharacterRemovals.end());
+					for(const StagedCharacter& staged : stagedCharacters)
+						retiringCharacters.insert(staged.objectId);
+					retiringBodies.insert(preparedRemovals.begin(), preparedRemovals.end());
+					for(const PreparedBody& prepared : preparedBodies)
+						retiringBodies.insert(prepared.body.objectId);
+					nextRuntimeBodies = runtimeBodies;
+					nextRuntimeConstraints = runtimeConstraints;
+					nextRuntimeCharacters = runtimeCharacters;
+					nextBodyObjects = bodyObjects;
+					for(const TerraEngine::UUID& recordId : retiringConstraints)
+						nextRuntimeConstraints.erase(recordId);
+					for(const TerraEngine::UUID& objectId : retiringBodies) {
+						const auto old = runtimeBodies.find(objectId);
+						if(old != runtimeBodies.end())
+							nextBodyObjects.erase(old->second.body.slotIndex);
+						nextRuntimeBodies.erase(objectId);
+					}
+					for(const TerraEngine::UUID& objectId : retiringCharacters)
+						nextRuntimeCharacters.erase(objectId);
+					for(const StagedBody& staged : stagedBodies) {
+						nextBodyObjects[staged.runtime.body.slotIndex] = staged.objectId;
+						nextRuntimeBodies[staged.objectId] = staged.runtime;
+					}
+					for(const StagedConstraint& staged : stagedConstraints)
+						nextRuntimeConstraints[staged.recordId] = staged.runtime;
+					for(const StagedCharacter& staged : stagedCharacters)
+						nextRuntimeCharacters[staged.objectId] = staged.runtime;
+					retiringCharacterHandles.reserve(retiringCharacters.size());
+					for(const TerraEngine::UUID& objectId : retiringCharacters) {
+						const auto old = runtimeCharacters.find(objectId);
+						if(old != runtimeCharacters.end())
+							retiringCharacterHandles.push_back(old->second.handle);
+					}
+					externalCarries.reserve(stagedCharacters.size());
+					remappedRecoveryTickets.reserve(recoveryTickets.size());
+					for(const StagedCharacter& staged : stagedCharacters) {
+						const auto old = runtimeCharacters.find(staged.objectId);
+						if(old == runtimeCharacters.end()
+							|| old->second.objectGeneration != staged.runtime.objectGeneration)
+							continue;
+						const PhysicsCharacterCommandTarget oldTarget{world.Handle(), old->second.handle,
+							old->second.objectId, old->second.objectGeneration,
+							old->second.componentGeneration};
+						const auto previous = world.ReadCharacterMotionLease(oldTarget);
+						if(!previous || previous->state != CharacterMotionLeaseState::ExternalExclusive)
+							continue;
+						if(ragdollPhysicsBridge.HasPendingExternalRetirementOwner(
+							previous->externalOwnerId)) {
+							// A failed tagged Teardown is Physics-owned in Bridge's retry
+							// slot. Preserve its exact controller until it can grant at
+							// the current pose; no generic retarget permission is needed.
+							rejectTransaction("A pending ragdoll retirement retains its old external controller.");
+							break;
+						}
+						if(previous->authorityEpoch == std::numeric_limits<std::uint64_t>::max()
+							|| previous->motionEpoch == std::numeric_limits<std::uint64_t>::max()
+							|| previous->publicationEpoch == std::numeric_limits<std::uint64_t>::max()) {
+							rejectTransaction("The external character carry exhausted its motion epochs.");
+							break;
+						}
+						CharacterMotionLease carried = *previous;
+						carried.controller = {world.Handle(), staged.runtime.handle,
+							staged.runtime.objectId, staged.runtime.objectGeneration,
+							staged.runtime.componentGeneration};
+						carried.owner = {};
+						++carried.authorityEpoch;
+						++carried.motionEpoch;
+						++carried.publicationEpoch;
+						externalCarries.push_back({*previous, carried});
+						for(const auto& [key, ticket] : recoveryTickets) {
+							if(!ticket.intent
+								|| ticket.intent->expectedExternalLease.controller != oldTarget)
+								continue;
+							auto remapped = std::make_shared<CharacterExternalRecoveryIntent>(*ticket.intent);
+							remapped->expectedExternalLease = carried;
+							remappedRecoveryTickets.emplace_back(key, std::move(remapped));
+						}
+					}
+					if(!transactionRejected && externalCarries.size() > 4096U)
+						rejectTransaction("The external carry batch exceeds its bounded 4096-controller capacity.");
+					if(!transactionRejected && !retiringCharacterHandles.empty()) {
+						preparedCharacterRetirement = world.PrepareExternalCharacterCarry(
+							externalCarries, retiringCharacterHandles);
+						if(!preparedCharacterRetirement.result.accepted)
+							rejectTransaction("The full character lease retirement root could not be prepared.");
+					}
+					if(!transactionRejected && !externalCarries.empty()
+						&& !backend->PreflightCharacterExternalCarry(externalCarries).Succeeded())
+						rejectTransaction("The provider rejected the staged external character carry.");
+				} catch(const std::bad_alloc&) {
+					rejectTransaction("Physics maintenance could not preallocate its complete protected state.");
+				}
+			}
+
 			if(!transactionRejected && staging.IsValid()) {
 				const Backend::PhysicsBackendResult committed = backend->CommitStaging(staging);
 				if(!committed.Succeeded()) rejectTransaction(committed.message);
 			}
+			if(!transactionRejected && !externalCarries.empty()
+				&& !backend->CommitCharacterExternalCarry(externalCarries))
+				rejectTransaction("The provider rejected a preflighted external carry commit.");
+			if(!transactionRejected && preparedCharacterRetirement.result.accepted
+				&& !world.CommitPreparedCharacterMotionLeases(
+					std::move(preparedCharacterRetirement)))
+				rejectTransaction("The preallocated character retirement root became stale.");
 			if(transactionRejected) {
 				rollbackTransaction();
+				// Revisit the same immutable authoring generation after a transient
+				// protected failure, especially a deferred tagged Teardown.
+				lastPreparedAuthoringSnapshotGeneration = 0U;
 				AppendCommandResult(0U, PhysicsResultStatus::ProviderFailure, world.Timing().tick,
 					transactionDiagnostic.empty() ? "The physics mutation batch was rejected atomically."
 						: transactionDiagnostic);
 			} else {
+				// Ticket pointers were allocated before staging and are remapped only
+				// after the complete provider/World external carry succeeds.
+				for(auto& [key, remapped] : remappedRecoveryTickets)
+					recoveryTickets.at(key).intent = std::move(remapped);
 				for(const PreparedBodyTransformUpdate& update : preparedBodyTransformUpdates) {
-					auto runtime = runtimeBodies.find(update.body.objectId);
-					if(runtime == runtimeBodies.end()
+					const auto original = runtimeBodies.find(update.body.objectId);
+					auto runtime = nextRuntimeBodies.find(update.body.objectId);
+					if(original == runtimeBodies.end()
+						|| runtime == nextRuntimeBodies.end()
+						|| runtime->second.body != original->second.body
 						|| runtime->second.objectGeneration != update.body.objectGeneration
 						|| runtime->second.componentGeneration != update.body.componentGeneration) {
 						++diagnosticCounters.staleCount;
@@ -2133,23 +2567,6 @@ namespace TerraEngine::Physics {
 					runtime->second.parentObjectGeneration = update.body.parentObjectGeneration;
 					runtime->second.parentTransformRevision = update.body.parentTransformRevision;
 				}
-				std::unordered_set<TerraEngine::UUID> retiringConstraints(
-					preparedConstraintRemovals.begin(), preparedConstraintRemovals.end());
-				for(const PhysicsConstraintDescriptor& prepared : preparedConstraints) {
-					retiringConstraints.insert(prepared.recordId);
-				}
-				std::vector<TerraEngine::UUID> orderedConstraintRetirements(
-					retiringConstraints.begin(), retiringConstraints.end());
-				std::stable_sort(orderedConstraintRetirements.begin(), orderedConstraintRetirements.end(),
-					[this](const TerraEngine::UUID& left, const TerraEngine::UUID& right) {
-						const auto leftRecord = runtimeConstraints.find(left);
-						const auto rightRecord = runtimeConstraints.find(right);
-						const bool leftGear = leftRecord != runtimeConstraints.end()
-							&& leftRecord->second.request.kind == PhysicsConstraintKind::Gear;
-						const bool rightGear = rightRecord != runtimeConstraints.end()
-							&& rightRecord->second.request.kind == PhysicsConstraintKind::Gear;
-						return leftGear && !rightGear;
-					});
 				// Gears retire before referenced hinges, and all constraints retire
 				// before endpoint bodies. These operations cannot reject after the live
 				// handles and dependencies were preflighted above.
@@ -2159,48 +2576,48 @@ namespace TerraEngine::Physics {
 					backend->DestroyConstraint(old->second.handle);
 					world.RemoveConstraint(old->second.handle);
 					world.Release(old->second.handle);
-					runtimeConstraints.erase(old);
 				}
 
-				std::unordered_set<TerraEngine::UUID> retiringCharacters(
-					preparedCharacterRemovals.begin(), preparedCharacterRemovals.end());
-				for(const PhysicsCharacterDescriptor& prepared : preparedCharacters) {
-					retiringCharacters.insert(prepared.objectId);
-				}
 				for(const TerraEngine::UUID& objectId : retiringCharacters) {
+					retainedGuardedTargets.erase(objectId);
+					std::erase_if(retainedRootIntervals, [&objectId](const auto& entry) {
+						return entry.second.interval.lease.controller.objectId == objectId;
+					});
+					const bool preservedExternal = std::any_of(stagedCharacters.begin(),
+						stagedCharacters.end(), [this, &objectId](const StagedCharacter& staged) {
+							if(staged.objectId != objectId) return false;
+							const PhysicsCharacterCommandTarget target{world.Handle(), staged.runtime.handle,
+								staged.runtime.objectId, staged.runtime.objectGeneration,
+								staged.runtime.componentGeneration};
+							const auto lease = world.ReadCharacterMotionLease(target);
+							return lease && lease->state == CharacterMotionLeaseState::ExternalExclusive;
+						});
+					if(!preservedExternal)
+						std::erase_if(recoveryTickets, [&objectId](const auto& entry) {
+							return entry.second.intent
+								&& entry.second.intent->expectedExternalLease.controller.objectId == objectId;
+						});
 					const auto old = runtimeCharacters.find(objectId);
 					if(old == runtimeCharacters.end()) continue;
 					backend->DestroyCharacter(old->second.handle);
 					world.Release(old->second.handle);
-					runtimeCharacters.erase(old);
 				}
 
-				std::unordered_set<TerraEngine::UUID> retiringBodies(
-					preparedRemovals.begin(), preparedRemovals.end());
-				for(const PreparedBody& prepared : preparedBodies) {
-					retiringBodies.insert(prepared.body.objectId);
-				}
 				for(const TerraEngine::UUID& objectId : retiringBodies) {
 					const auto old = runtimeBodies.find(objectId);
 					if(old == runtimeBodies.end()) continue;
 					backend->DestroyBody(old->second.body);
 					backend->DestroyShape(old->second.shape);
-					bodyObjects.erase(old->second.body.slotIndex);
 					world.Release(old->second.body);
 					world.Release(old->second.shape);
-					runtimeBodies.erase(old);
 				}
-
-				for(StagedBody& body : stagedBodies) {
-					bodyObjects[body.runtime.body.slotIndex] = body.objectId;
-					runtimeBodies[body.objectId] = std::move(body.runtime);
-				}
-				for(StagedConstraint& constraint : stagedConstraints) {
-					runtimeConstraints[constraint.recordId] = std::move(constraint.runtime);
-				}
-				for(StagedCharacter& character : stagedCharacters) {
-					runtimeCharacters[character.objectId] = std::move(character.runtime);
-				}
+				// All candidate map nodes were allocated before provider publication.
+				// Swapping the four complete roots is non-fallible and makes the
+				// transaction's new runtime identities visible together.
+				runtimeBodies.swap(nextRuntimeBodies);
+				runtimeConstraints.swap(nextRuntimeConstraints);
+				runtimeCharacters.swap(nextRuntimeCharacters);
+				bodyObjects.swap(nextBodyObjects);
 			}
 
 			const PhysicsTick inclusiveTick = !plannedSteps.requests.empty()
@@ -2210,6 +2627,29 @@ namespace TerraEngine::Physics {
 			diagnosticCounters.commandCount += batch.commands.size();
 			for(const PhysicsCommand& command : batch.commands) {
 				Backend::PhysicsBackendResult result;
+				if(IsCharacterMotionCommand(command)) {
+					const PhysicsCharacterCommandTarget controller{
+						world.Handle(), command.character, command.targetObjectId,
+						command.objectGeneration, command.componentGeneration};
+					const auto runtime = runtimeCharacters.find(command.targetObjectId);
+					const auto lease = world.ReadCharacterMotionLease(controller);
+					if(runtime == runtimeCharacters.end() || runtime->second.handle != command.character
+						|| runtime->second.objectGeneration != command.objectGeneration
+						|| runtime->second.componentGeneration != command.componentGeneration || !lease) {
+						result = {PhysicsResultStatus::StaleTarget, Backend::PhysicsBackendErrorCode::StaleHandle,
+							"The deferred character command targets a stale controller lifetime."};
+					} else if(command.characterMotionSource != CharacterMotionCommandSource::Legacy
+						|| command.characterMotionEpoch != lease->motionEpoch
+						|| (command.type != PhysicsCommandType::UpdateCharacter
+							&& lease->state != CharacterMotionLeaseState::Unleased)) {
+						result = {PhysicsResultStatus::Conflict, Backend::PhysicsBackendErrorCode::OwnershipConflict,
+							"The deferred character command conflicts with its current motion lease or epoch."};
+					} else {
+						result = backend->ApplyCommand(command);
+					}
+					AppendCommandResult(command.commandId, result.status, inclusiveTick, result.message);
+					continue;
+				}
 				if(command.type == PhysicsCommandType::ResetConstraint) {
 					const auto runtime = runtimeConstraints.find(command.recordId);
 					const auto* reset = std::get_if<PhysicsConstraintResetPayload>(&command.payload);
@@ -2250,6 +2690,11 @@ namespace TerraEngine::Physics {
 		void SimulateLocked() {
 			const Clock::time_point start = Clock::now();
 			completedSteps.clear();
+			if(!plannedSteps.requests.empty()
+				&& !backend->PrepareRootMotionStepResults(world.Handle(), plannedSteps.requests.size()))
+				AppendCommandResult(0U, PhysicsResultStatus::LimitExceeded,
+					plannedSteps.requests.front().tick,
+					"Root interval tick evidence is backpressured; physical root consumption is paused until acknowledgement.");
 			for(const PhysicsFixedStepRequest& request : plannedSteps.requests) {
 				// Commands only update persistent character intent. Advancing it here
 				// ties virtual-controller motion to fixed simulation time rather than
@@ -2269,6 +2714,21 @@ namespace TerraEngine::Physics {
 					break;
 				}
 				completedSteps.push_back(request);
+			}
+			// Physics owns this protected guard cache, but Animation owns result
+			// acknowledgement. Observe terminal IDs without acknowledging them so
+			// many consumed intervals cannot grow the cache or block new admission
+			// when an external reader is temporarily idle.
+			if(!retainedRootIntervals.empty()) {
+				for(;;) {
+					const auto page = backend->ReadRootMotionResults(rootRetirementCursor, 256U);
+					if(!page || page->records.empty()) break;
+					for(const RootMotionResultRecord& record : page->records)
+						if(const auto* terminal = std::get_if<RootMotionTerminalResult>(&record.result))
+							retainedRootIntervals.erase(terminal->intervalId.sequence);
+					rootRetirementCursor = page->nextCursor;
+					if(!page->hasMore) break;
+				}
 			}
 			diagnosticTimings.simulateMs = MillisecondsSince(start);
 		}
@@ -2884,7 +3344,10 @@ namespace TerraEngine::Physics {
 				characterStates.push_back({provider.handle, provider.objectId, provider.objectGeneration,
 					provider.componentGeneration, world.Handle(), extraction.tick, provider.pose,
 					provider.linearVelocity, groundState, provider.groundPosition, provider.groundNormal,
-					provider.supportVelocity, support, provider.contactCount, provider.supported});
+					provider.supportVelocity, support, provider.contactCount, provider.supported,
+					provider.completedStepDuration, provider.requestedPlanarVelocity,
+					provider.realizedDisplacement, provider.requestedYawRadians,
+					provider.realizedYawRadians, provider.motionDiscontinuity});
 			}
 			if(!characterStates.empty()) world.PublishCharacterStates(extraction.tick, characterStates);
 			latestCharacters = world.AcquireCharacterStatePacket(extraction.tick, extraction.tick);
@@ -3226,9 +3689,9 @@ namespace TerraEngine::Physics {
 				true, "active physics frame", "", authoringDiagnostics.changedObjects});
 			scheduler->push_back({"PhysicsPrepare", "Physics", "PhysicsAuthoringSnapshot,PhysicsQueryQueue", "PhysicsPreparedWork,PhysicsPreparedQueries", "none", true,
 				true, "snapshot or fixed-step input available", "PhysicsSnapshot", preparationDiagnostics.estimatedWorkItems});
-			scheduler->push_back({"PhysicsCommandCommit", "Physics", "PhysicsPreparedWork,RagdollPhysicsQueue", "PhysicsWorld,RagdollPhysicsSnapshots,RagdollPhysicsResults", "hard boundary: typed ragdoll drain", false,
+			scheduler->push_back({"PhysicsCommandCommit", "Physics", "PhysicsPreparedWork,RagdollPhysicsQueue,PhysicsCharacterMotionLeases,CharacterMotionTargets,SceneChangePublication,NavigationAgentState,NavigationAgentGuidance,NavigationRouteValidity", "PhysicsWorld,RagdollPhysicsSnapshots,RagdollPhysicsResults", "hard boundary: typed ragdoll, character authority, and producer-evidence validation", false,
 				true, "prepared provider mutation, command, or ragdoll request work available", "PhysicsPrepare", diagnosticCounters.commandCount + ragdollPhysicsBridge.PendingCount()});
-			scheduler->push_back({"PhysicsSimulate", "Physics", "PhysicsWorld", "PhysicsWorld", "provider ownership", true,
+			scheduler->push_back({"PhysicsSimulate", "Physics", "PhysicsWorld,PhysicsCharacterMotionLeases,CharacterMotionTargets", "PhysicsWorld", "provider ownership", true,
 				!completedSteps.empty(), completedSteps.empty() ? "no fixed step planned" : "fixed step planned", "PhysicsCommandCommit", completedSteps.size()});
 			scheduler->push_back({"PhysicsExtract", "Physics", "PhysicsWorld,PhysicsPreparedQueries", "PhysicsPublishedSnapshots,PhysicsCharacterStatePackets,PhysicsBackendQueryResults,PhysicsRawEvents", "immutable provider snapshot then protected event drain", true,
 				!completedSteps.empty(), completedSteps.empty() ? "no completed provider step" : "provider step completed", "PhysicsSimulate", extractionDiagnostics.extractedBodies});
@@ -3487,7 +3950,27 @@ namespace TerraEngine::Physics {
 		std::unordered_map<TerraEngine::UUID, RuntimeBody> runtimeBodies;
 		std::unordered_map<TerraEngine::UUID, RuntimeConstraint> runtimeConstraints;
 		std::unordered_map<TerraEngine::UUID, RuntimeCharacter> runtimeCharacters;
+		// Guarded targets retain only copied identity/evidence. Validation runs
+		// outside this system's mutex at the next protected Physics boundary.
+		std::unordered_map<TerraEngine::UUID, CharacterMotionTarget> retainedGuardedTargets;
+		struct RetainedRootInterval {
+			RootMotionIntervalReservation reservation;
+			RootMotionInterval interval;
+			bool committed = false;
+		};
+		std::unordered_map<std::uint64_t, RetainedRootInterval> retainedRootIntervals;
+		std::uint64_t rootRetirementCursor = 0U;
 		std::unordered_map<std::uint64_t, RuntimeRagdoll> runtimeRagdolls;
+		struct RecoveryTicket {
+			RagdollExternalRecoveryToken token;
+			std::shared_ptr<const CharacterExternalRecoveryIntent> intent;
+			std::shared_ptr<const Animation::PhysicsPoseSnapshot> sourcePose;
+			bool committed = false;
+		};
+		// At most one durable, immutable handoff per tagged successful Deactivate
+		// correlation. Failed attempts keep ExternalExclusive and the ticket for
+		// retry; world teardown invalidates every remaining ticket.
+		std::map<std::pair<std::uint64_t, std::uint64_t>, RecoveryTicket> recoveryTickets;
 		// Slot lookup keeps extraction O(n) for large scenes while the full typed
 		// handle comparison above still rejects stale slot generations.
 		std::unordered_map<PhysicsSlotIndex, TerraEngine::UUID> bodyObjects;
@@ -3521,6 +4004,8 @@ namespace TerraEngine::Physics {
 		PhysicsTick lastAggregateDiagnosticsTick = 0U;
 		std::uint64_t explicitStepPublicationCount = 0U;
 		std::vector<RuntimeTerrainCollision> terrainCollisions;
+		CharacterMotionTraceBuffer characterMotionTrace;
+		std::uint64_t characterMotionTraceBatch = 0U;
 		mutable std::mutex mutex;
 	};
 
@@ -3555,15 +4040,30 @@ namespace TerraEngine::Physics {
 	}
 
 	void PhysicsSystem::Update(float deltaTime) {
-		std::lock_guard<std::mutex> lock(impl->mutex);
-		impl->SnapshotLocked();
-		impl->PrepareLocked(deltaTime);
-		impl->CommitLocked();
-		impl->SimulateLocked();
-		impl->AdvanceSecondaryFramesLocked(deltaTime);
-		impl->ExtractLocked();
-		impl->PublishLocked();
-		impl->PublicationBarrierLocked();
+		{
+			std::lock_guard<std::mutex> lock(impl->mutex);
+			impl->SnapshotLocked();
+			impl->PrepareLocked(deltaTime);
+		}
+		// These two checks run after worker-safe preparation and immediately
+		// before the protected provider boundaries, without holding a Physics
+		// lock while producer evidence reads Navigation or scene state.
+		RevalidateCharacterMotionTargets();
+		RevalidateRootMotionIntervals();
+		{
+			std::lock_guard<std::mutex> lock(impl->mutex);
+			impl->CommitLocked();
+		}
+		RevalidateCharacterMotionTargets();
+		RevalidateRootMotionIntervals();
+		{
+			std::lock_guard<std::mutex> lock(impl->mutex);
+			impl->SimulateLocked();
+			impl->AdvanceSecondaryFramesLocked(deltaTime);
+			impl->ExtractLocked();
+			impl->PublishLocked();
+			impl->PublicationBarrierLocked();
+		}
 	}
 
 	void PhysicsSystem::Shutdown() {
@@ -3591,15 +4091,15 @@ namespace TerraEngine::Physics {
 		declaration.phase = "Physics";
 		declaration.after = {"ScriptingSystem"};
 		declaration.before = {"UISystem"};
-		declaration.reads = {"SceneGraph", "ObjectManager", "PhysicsSettingsUpdateQueue", "PhysicsAuthoringSnapshot", "PhysicsQueryQueue", "PhysicsEventSubscriptions", "RagdollPhysicsQueue", TerraEngine::Scheduling::kResourceTerrainPublishedCollision, TerraEngine::Scheduling::kResourcePhysicsFrameRegistry, TerraEngine::Scheduling::kResourcePhysicsFrameMigrations};
-		declaration.writes = {"PhysicsSettings", "PhysicsPreparedWork", "PhysicsWorld", "PhysicsQueryResults", "PhysicsEventPackets", "PhysicsPublishedSnapshots", TerraEngine::Scheduling::kResourcePhysicsCharacterStatePackets, "RagdollPhysicsSnapshots", "RagdollPhysicsResults", "PhysicsTransformTransactions", "SceneMutationQueue", TerraEngine::Scheduling::kResourcePhysicsFrameRegistry, TerraEngine::Scheduling::kResourcePhysicsFrameMigrations};
+		declaration.reads = {"SceneGraph", "ObjectManager", "PhysicsSettingsUpdateQueue", "PhysicsAuthoringSnapshot", "PhysicsQueryQueue", "PhysicsEventSubscriptions", "RagdollPhysicsQueue", TerraEngine::Scheduling::kResourceSceneChangePublication, TerraEngine::Scheduling::kResourceNavigationAgentState, TerraEngine::Scheduling::kResourceNavigationAgentGuidance, TerraEngine::Scheduling::kResourceNavigationRouteValidity, TerraEngine::Scheduling::kResourceAnimationAuthorityFrame, TerraEngine::Scheduling::kResourceLocomotionAnimatorBindings, TerraEngine::Scheduling::kResourceLocomotionAuthority, TerraEngine::Scheduling::kResourceCharacterMotionTargets, TerraEngine::Scheduling::kResourcePhysicsCharacterMotionLeases, TerraEngine::Scheduling::kResourceRootMotionIntervals, TerraEngine::Scheduling::kResourceRootMotionResults, TerraEngine::Scheduling::kResourceTerrainPublishedCollision, TerraEngine::Scheduling::kResourcePhysicsFrameRegistry, TerraEngine::Scheduling::kResourcePhysicsFrameMigrations};
+		declaration.writes = {"PhysicsSettings", "PhysicsPreparedWork", "PhysicsWorld", "PhysicsQueryResults", "PhysicsEventPackets", "PhysicsPublishedSnapshots", TerraEngine::Scheduling::kResourcePhysicsCharacterStatePackets, TerraEngine::Scheduling::kResourcePhysicsCharacterMotionLeases, TerraEngine::Scheduling::kResourceRootMotionIntervals, TerraEngine::Scheduling::kResourceRootMotionResults, "RagdollPhysicsSnapshots", "RagdollPhysicsResults", "PhysicsTransformTransactions", "SceneMutationQueue", TerraEngine::Scheduling::kResourcePhysicsFrameRegistry, TerraEngine::Scheduling::kResourcePhysicsFrameMigrations};
 		declaration.mainThread = true;
 		declaration.requiresFlushedSceneMutations = true;
 		declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
 		declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 		declaration.hardBoundary = true;
 		declaration.safeSubwork = "Immutable authoring preparation, provider stepping through the shared job adapter, and extraction into typed packets.";
-		declaration.protectedCommit = "World generation changes, provider staging commit, typed ragdoll request drain, immutable character/ragdoll snapshot/result swap, command ordering, and transform transaction publication.";
+		declaration.protectedCommit = "World generation changes, provider staging commit, typed ragdoll drain, atomic character leases, guarded Navigation/Animation/scene evidence rechecks outside Physics locks, root interval admission and results, final motion-epoch checks, immutable snapshots, command ordering, and transform publication.";
 		declaration.protectedReason = declaration.protectedCommit;
 		declaration.profilingLabel = "Physics";
 		declaration.usesDefaultMetadata = false;
@@ -3646,10 +4146,18 @@ namespace TerraEngine::Physics {
 				{"PhysicsAuthoringSnapshot", "PhysicsPublishedSnapshots", "PhysicsQueryQueue"},
 				{"PhysicsPreparedWork", "PhysicsPreparedQueries"}, true, WorkerSystemPhaseKind::WorkerPrepare);
 			configure(descriptors[2], "PhysicsCommandCommit",
-				{"PhysicsPreparedWork", "PhysicsWorld", "RagdollPhysicsQueue"},
-				{"PhysicsWorld", "RagdollPhysicsSnapshots", "RagdollPhysicsResults"}, false, WorkerSystemPhaseKind::ProtectedCommit);
+				{"PhysicsPreparedWork", "PhysicsWorld", "RagdollPhysicsQueue", kResourcePhysicsCharacterMotionLeases, kResourceCharacterMotionTargets,
+					kResourceRootMotionIntervals, kResourceSceneChangePublication,
+					kResourceNavigationAgentState, kResourceNavigationAgentGuidance,
+					kResourceNavigationRouteValidity, kResourceAnimationAuthorityFrame,
+					kResourceLocomotionAnimatorBindings},
+				{"PhysicsWorld", kResourceRootMotionIntervals, kResourceRootMotionResults,
+					"RagdollPhysicsSnapshots", "RagdollPhysicsResults"}, false, WorkerSystemPhaseKind::ProtectedCommit);
+			descriptors[2].protectedReason = "Guarded Navigation, Animation, and scene evidence is rechecked outside Physics locks before root consumption and fixed stepping.";
 			configure(descriptors[3], "PhysicsSimulate",
-				{"PhysicsWorld", kResourceTerrainPublishedCollision}, {"PhysicsWorld"}, true, WorkerSystemPhaseKind::WorkerPrepare);
+				{"PhysicsWorld", kResourcePhysicsCharacterMotionLeases, kResourceCharacterMotionTargets,
+					kResourceRootMotionIntervals, kResourceTerrainPublishedCollision},
+				{"PhysicsWorld", kResourceRootMotionIntervals, kResourceRootMotionResults}, true, WorkerSystemPhaseKind::WorkerPrepare);
 			configure(descriptors[4], "PhysicsExtract",
 				{"PhysicsWorld", "PhysicsPreparedQueries"},
 				{"PhysicsPublishedSnapshots", kResourcePhysicsCharacterStatePackets, "PhysicsBackendQueryResults", "PhysicsRawEvents"}, true, WorkerSystemPhaseKind::WorkerPrepare);
@@ -3699,7 +4207,16 @@ namespace TerraEngine::Physics {
 			&& TerraEngine::Scheduling::SameFramePhysicsPublicationConsumerActive();
 		workloads[0].work = [this](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->SnapshotLocked(); };
 		workloads[1].work = [this, deltaTime](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->PrepareLocked(deltaTime); };
-		workloads[2].work = [this](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->CommitLocked(); };
+		workloads[2].work = [this](JobGraphContext&) {
+			RevalidateCharacterMotionTargets();
+			RevalidateRootMotionIntervals();
+			{
+				std::lock_guard<std::mutex> workloadLock(impl->mutex);
+				impl->CommitLocked();
+			}
+			RevalidateCharacterMotionTargets();
+			RevalidateRootMotionIntervals();
+		};
 		workloads[3].work = [this, deltaTime](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->SimulateLocked(); impl->AdvanceSecondaryFramesLocked(deltaTime); };
 		workloads[4].work = [this](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->ExtractLocked(); };
 		workloads[5].work = [this](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->PublishLocked(); };
@@ -3896,16 +4413,31 @@ namespace TerraEngine::Physics {
 			(void)impl->world.Release(packet.replacementShape); (void)impl->world.Release(packet.replacementBody.handle);
 			return receipt;
 		}
+		const TerrainCollisionPublication publication{packet.recipe.terrainAssetId,
+			packet.recipe.areaX, packet.recipe.areaZ, packet.expectedWorld,
+			packet.replacementBody.handle, packet.replacementShape,
+			packet.sourceRootHash, packet.sourcePublicationGeneration,
+			packet.recipe.authoredGeneration, packet.recipe.authoredHash,
+			packet.recipe.sampleSpacingMetres};
 		if(prior != impl->terrainCollisions.end()) {
 			// The helper already retired the provider body. Releasing only its typed
 			// body handle makes stale packets fail while retaining the old shape for
 			// deferred provider-safe retirement and last-known-good diagnostics.
 			(void)impl->world.Release(prior->body);
 			prior->shape = packet.replacementShape; prior->body = packet.replacementBody.handle;
+			prior->publication = publication;
 		} else {
-			impl->terrainCollisions.push_back({packet.recipe.terrainAssetId, packet.recipe.areaX, packet.recipe.areaZ, packet.replacementShape, packet.replacementBody.handle});
+			impl->terrainCollisions.push_back({packet.recipe.terrainAssetId, packet.recipe.areaX, packet.recipe.areaZ, packet.replacementShape, packet.replacementBody.handle, publication});
 		}
 		return receipt;
+	}
+
+	std::vector<TerrainCollisionPublication> PhysicsSystem::CopyTerrainCollisionPublications() const {
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		std::vector<TerrainCollisionPublication> result;
+		result.reserve(impl->terrainCollisions.size());
+		for(const auto& collision : impl->terrainCollisions) result.push_back(collision.publication);
+		return result;
 	}
 
 	bool PhysicsSystem::RemoveTerrainCollisions(TerraEngine::UUID terrainAssetId) {
@@ -3943,13 +4475,615 @@ namespace TerraEngine::Physics {
 
 	PhysicsCommandReceipt PhysicsSystem::SubmitCommand(PhysicsCommand command) {
 		std::lock_guard<std::mutex> lock(impl->mutex);
+		// PhysicsWorld overwrites the public command's source and captures its
+		// current motion epoch at this queue boundary. Producer fields cannot grant
+		// permission to control a leased character.
 		return impl->world.EnqueueCommand(std::move(command));
+	}
+
+	CharacterMotionLeaseResult PhysicsSystem::PreflightCharacterMotionLeases(
+		std::span<const CharacterMotionLeaseChange> changes) const {
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		if(!impl->backend) return {false, CharacterMotionLeaseError::StaleCharacter, 0U};
+		for(const CharacterMotionLeaseChange& change : changes) {
+			const auto found = impl->runtimeCharacters.find(change.next.controller.objectId);
+			if(found == impl->runtimeCharacters.end()
+				|| found->second.handle != change.next.controller.character
+				|| found->second.objectGeneration != change.next.controller.objectGeneration
+				|| found->second.componentGeneration != change.next.controller.componentGeneration)
+				return {false, CharacterMotionLeaseError::StaleCharacter, 0U};
+		}
+		const PreparedCharacterMotionLeaseBatch prepared = impl->world.PrepareCharacterMotionLeases(changes);
+		if(!prepared.result.accepted) return prepared.result;
+		const Backend::PhysicsBackendResult provider = impl->backend->PreflightCharacterMotionLeases(changes);
+		if(!provider.Succeeded()) return {false,
+			provider.error == Backend::PhysicsBackendErrorCode::OwnershipConflict
+				? CharacterMotionLeaseError::OwnershipConflict : CharacterMotionLeaseError::StaleCharacter, 0U};
+		return prepared.result;
+	}
+
+	CharacterMotionLeaseResult PhysicsSystem::PublishCharacterMotionLeases(
+		std::span<const CharacterMotionLeaseChange> changes) {
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		if(!impl->backend) return {false, CharacterMotionLeaseError::StaleCharacter, 0U};
+		for(const CharacterMotionLeaseChange& change : changes) {
+			const auto found = impl->runtimeCharacters.find(change.next.controller.objectId);
+			if(found == impl->runtimeCharacters.end()
+				|| found->second.handle != change.next.controller.character
+				|| found->second.objectGeneration != change.next.controller.objectGeneration
+				|| found->second.componentGeneration != change.next.controller.componentGeneration)
+				return {false, CharacterMotionLeaseError::StaleCharacter, 0U};
+		}
+		PreparedCharacterMotionLeaseBatch prepared = impl->world.PrepareCharacterMotionLeases(changes);
+		if(!prepared.result.accepted) return prepared.result;
+		const Backend::PhysicsBackendResult provider = impl->backend->PublishCharacterMotionLeases(changes);
+		if(!provider.Succeeded()) return {false,
+			provider.error == Backend::PhysicsBackendErrorCode::OwnershipConflict
+				? CharacterMotionLeaseError::OwnershipConflict : CharacterMotionLeaseError::StaleCharacter, 0U};
+		const CharacterMotionLeaseResult result = prepared.result;
+		// This swap is allocation-free. The system lock is held from preflight to
+		// commit, so no other lease transition can invalidate the prepared root.
+		if(!impl->world.CommitPreparedCharacterMotionLeases(std::move(prepared)))
+			return {false, CharacterMotionLeaseError::StaleEpoch, 0U};
+		for(const CharacterMotionLeaseChange& change : changes) {
+			impl->retainedGuardedTargets.erase(change.next.controller.objectId);
+			std::erase_if(impl->retainedRootIntervals, [&change](const auto& entry) {
+				return entry.second.interval.lease.controller.objectId == change.next.controller.objectId;
+			});
+		}
+		if(impl->characterMotionTrace.Enabled()) {
+			const auto batch = ++impl->characterMotionTraceBatch;
+			for(std::size_t index = 0U; index < changes.size(); ++index)
+				impl->characterMotionTrace.Record({0U, impl->world.Timing().tick, batch,
+					static_cast<std::uint32_t>(index), static_cast<std::uint32_t>(changes.size()), false, changes[index]});
+		}
+		return result;
+	}
+
+	std::optional<CharacterMotionLease> PhysicsSystem::ReadCharacterMotionLease(
+		const PhysicsCharacterCommandTarget& controller) const {
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		const auto found = impl->runtimeCharacters.find(controller.objectId);
+		if(found == impl->runtimeCharacters.end() || found->second.handle != controller.character
+			|| found->second.objectGeneration != controller.objectGeneration
+			|| found->second.componentGeneration != controller.componentGeneration) return std::nullopt;
+		return impl->world.ReadCharacterMotionLease(controller);
+	}
+
+	bool PhysicsSystem::HasExternalCharacterMotionOwner(std::uint64_t externalOwnerId) const {
+		return ReadExternalCharacterMotionOwner(externalOwnerId).has_value();
+	}
+
+	std::optional<CharacterMotionLease> PhysicsSystem::ReadExternalCharacterMotionOwner(
+		std::uint64_t externalOwnerId) const {
+		if(externalOwnerId == 0U) return std::nullopt;
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		// One copied lease lookup per live controller keeps this query bounded by
+		// the already-bounded character registry and avoids Animation callbacks.
+		for(const auto& [objectId, runtime] : impl->runtimeCharacters) {
+			const PhysicsCharacterCommandTarget target{impl->world.Handle(), runtime.handle,
+				objectId, runtime.objectGeneration, runtime.componentGeneration};
+			const auto lease = impl->world.ReadCharacterMotionLease(target);
+			if(lease && lease->state == CharacterMotionLeaseState::ExternalExclusive
+				&& lease->externalOwnerId == externalOwnerId)
+				return lease;
+		}
+		return std::nullopt;
+	}
+
+	Backend::PhysicsBackendResult PhysicsSystem::PublishCharacterMotionTarget(const CharacterMotionTarget& target) {
+		// Producer evidence may consult Navigation or scene snapshots. Validate it
+		// before taking the Physics mutex so there is no cross-system lock cycle.
+		if(target.validityGuard && !target.clearImmediately) {
+			const CharacterMotionValidityReason validity = target.validityGuard->Validate();
+			if(validity != CharacterMotionValidityReason::Valid) {
+				const char* reason = "The character motion evidence is unavailable.";
+				switch(validity) {
+				case CharacterMotionValidityReason::StaleLifetime: reason = "The character motion lifetime is stale."; break;
+				case CharacterMotionValidityReason::StaleConfiguration: reason = "The character motion configuration is stale."; break;
+				case CharacterMotionValidityReason::StaleEvidence: reason = "The character motion route or observation evidence is stale."; break;
+				case CharacterMotionValidityReason::Unavailable: break;
+				case CharacterMotionValidityReason::Valid: break;
+				}
+				return {PhysicsResultStatus::StaleTarget,
+					Backend::PhysicsBackendErrorCode::StaleHandle, reason};
+			}
+		}
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		if(!impl->backend) return {PhysicsResultStatus::StaleTarget,
+			Backend::PhysicsBackendErrorCode::StaleHandle, "The physics world is absent."};
+		const auto found = impl->runtimeCharacters.find(target.controller.objectId);
+		const auto lease = impl->world.ReadCharacterMotionLease(target.controller);
+		if(found == impl->runtimeCharacters.end() || found->second.handle != target.controller.character
+			|| found->second.objectGeneration != target.controller.objectGeneration
+			|| found->second.componentGeneration != target.controller.componentGeneration || !lease)
+			return {PhysicsResultStatus::StaleTarget,
+				Backend::PhysicsBackendErrorCode::StaleHandle, "The character target lifetime is stale."};
+		if(lease->state != CharacterMotionLeaseState::LocomotionOwned || lease->owner != target.owner
+			|| lease->authorityEpoch != target.authorityEpoch || lease->motionEpoch != target.motionEpoch
+			|| lease->mode != target.mode)
+			return {PhysicsResultStatus::Conflict,
+				Backend::PhysicsBackendErrorCode::OwnershipConflict, "The target does not own the controller."};
+		const Backend::PhysicsBackendResult result = impl->backend->PublishCharacterMotionTarget(target);
+		if(result.Succeeded()) {
+			if(impl->characterMotionTrace.Enabled())
+				impl->characterMotionTrace.Record({0U, impl->world.Timing().tick,
+					++impl->characterMotionTraceBatch, 0U, 1U, false, target});
+			if(target.validityGuard && !target.clearImmediately)
+				impl->retainedGuardedTargets[target.controller.objectId] = target;
+			else
+				impl->retainedGuardedTargets.erase(target.controller.objectId);
+			if(target.clearImmediately && target.mode == CharacterMotionMode::RootMotion)
+				std::erase_if(impl->retainedRootIntervals, [&target](const auto& entry) {
+					return entry.second.interval.lease.controller == target.controller;
+				});
+		}
+		return result;
+	}
+
+	RootMotionIntervalAdmission PhysicsSystem::ReserveRootMotionInterval(const RootMotionInterval& interval) {
+		// A producer guard may read Animation or scene state. Never invoke it while
+		// holding the Physics mutex; the provider receives only copied numeric data.
+		if(interval.validityGuard
+			&& interval.validityGuard->Validate() != CharacterMotionValidityReason::Valid)
+			return {false, RootMotionIntervalError::StaleEvidence, {}};
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		if(!impl->backend) return {};
+		const auto found = impl->runtimeCharacters.find(interval.lease.controller.objectId);
+		const auto lease = impl->world.ReadCharacterMotionLease(interval.lease.controller);
+		if(found == impl->runtimeCharacters.end()
+			|| found->second.handle != interval.lease.controller.character || !lease)
+			return {false, RootMotionIntervalError::StaleTarget, {}};
+		if(*lease != interval.lease)
+			return {false, RootMotionIntervalError::OwnershipConflict, {}};
+		// The backend caps live intervals at 4096. Bound the system's copied
+		// validity evidence independently; completed entries retire after each
+		// fixed-step terminal observation without consuming Animation's cursor.
+		if(impl->retainedRootIntervals.size() >= 4096U)
+			return {false, RootMotionIntervalError::CapacityExceeded, {}};
+		RootMotionIntervalAdmission reserved = impl->backend->ReserveRootMotionInterval(interval);
+		if(!reserved.accepted) return reserved;
+		try {
+			impl->retainedRootIntervals.emplace(reserved.reservation.intervalId.sequence,
+				Impl::RetainedRootInterval{reserved.reservation, interval, false});
+		} catch(const std::bad_alloc&) {
+			(void)impl->backend->CancelRootMotionIntervalReservation(reserved.reservation);
+			return {false, RootMotionIntervalError::CapacityExceeded, {}};
+		}
+		return reserved;
+	}
+
+	RootMotionIntervalAdmission PhysicsSystem::CommitRootMotionInterval(
+		RootMotionIntervalReservation reservation) {
+		std::shared_ptr<const CharacterMotionValidity> guard;
+		{
+			std::lock_guard<std::mutex> lock(impl->mutex);
+			const auto found = impl->retainedRootIntervals.find(reservation.intervalId.sequence);
+			if(found == impl->retainedRootIntervals.end() || found->second.reservation != reservation)
+				return {false, RootMotionIntervalError::StaleTarget, reservation};
+			guard = found->second.interval.validityGuard;
+		}
+		const bool evidenceValid = !guard
+			|| guard->Validate() == CharacterMotionValidityReason::Valid;
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		const auto found = impl->retainedRootIntervals.find(reservation.intervalId.sequence);
+		if(found == impl->retainedRootIntervals.end() || found->second.reservation != reservation)
+			return {false, RootMotionIntervalError::StaleTarget, reservation};
+		if(!evidenceValid) {
+			(void)impl->backend->CancelRootMotionIntervalReservation(reservation);
+			impl->retainedRootIntervals.erase(found);
+			return {false, RootMotionIntervalError::StaleEvidence, reservation};
+		}
+		const auto lease = impl->world.ReadCharacterMotionLease(found->second.interval.lease.controller);
+		if(!lease || *lease != found->second.interval.lease) {
+			(void)impl->backend->CancelRootMotionIntervalReservation(reservation);
+			impl->retainedRootIntervals.erase(found);
+			return {false, RootMotionIntervalError::OwnershipConflict, reservation};
+		}
+		RootMotionIntervalAdmission committed = impl->backend->CommitRootMotionInterval(reservation);
+		if(committed.accepted) {
+			// An idempotent repeat is not a second physical interval publication.
+			if(!found->second.committed && impl->characterMotionTrace.Enabled())
+				impl->characterMotionTrace.Record({0U, impl->world.Timing().tick,
+					++impl->characterMotionTraceBatch, 0U, 1U, false, found->second.interval});
+			if(found->second.interval.durationSeconds == 0.0F)
+				impl->retainedRootIntervals.erase(found);
+			else
+				found->second.committed = true;
+		}
+		else if(committed.error != RootMotionIntervalError::OutOfOrder) {
+			(void)impl->backend->CancelRootMotionIntervalReservation(reservation);
+			impl->retainedRootIntervals.erase(found);
+		}
+		return committed;
+	}
+
+	bool PhysicsSystem::ConfigureCharacterMotionTrace(bool enabled, std::size_t capacity) {
+		std::lock_guard lock(impl->mutex);
+		return impl->characterMotionTrace.Configure(enabled, capacity);
+	}
+
+	CharacterMotionTraceSnapshot PhysicsSystem::CopyCharacterMotionTrace(std::uint64_t afterSequence) const {
+		std::lock_guard lock(impl->mutex);
+		return impl->characterMotionTrace.CopySince(afterSequence);
+	}
+
+	CharacterMotionStorageDiagnostics PhysicsSystem::ReadCharacterMotionStorage() const {
+		std::lock_guard lock(impl->mutex);
+		CharacterMotionStorageDiagnostics result;
+		result.characters = impl->runtimeCharacters.size();
+		result.guardedTargets = impl->retainedGuardedTargets.size();
+		result.retainedIntervals = impl->retainedRootIntervals.size();
+		for(const auto& [id, runtime] : impl->runtimeCharacters) {
+			const auto lease = impl->world.ReadCharacterMotionLease({impl->world.Handle(), runtime.handle,
+				id, runtime.objectGeneration, runtime.componentGeneration});
+			if(!lease) continue;
+			result.ownedLeases += lease->state == CharacterMotionLeaseState::LocomotionOwned;
+			result.externalLeases += lease->state == CharacterMotionLeaseState::ExternalExclusive;
+		}
+		for(const auto& [id, retained] : impl->retainedRootIntervals) {
+			(void)id;
+			result.committedIntervals += retained.committed;
+		}
+		result.livePayloadBytes = result.characters * sizeof(CharacterMotionLease)
+			+ result.guardedTargets * sizeof(CharacterMotionTarget)
+			+ result.retainedIntervals * sizeof(Impl::RetainedRootInterval);
+		result.traceReservedBytes = impl->characterMotionTrace.ReservedBytes();
+		return result;
+	}
+
+	bool PhysicsSystem::CancelRootMotionIntervalReservation(
+		RootMotionIntervalReservation reservation) {
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		const auto found = impl->retainedRootIntervals.find(reservation.intervalId.sequence);
+		if(found == impl->retainedRootIntervals.end() || found->second.reservation != reservation
+			|| found->second.committed) return false;
+		const bool cancelled = impl->backend->CancelRootMotionIntervalReservation(reservation);
+		if(cancelled) impl->retainedRootIntervals.erase(found);
+		return cancelled;
+	}
+
+	void PhysicsSystem::CancelRootMotionIntervals(
+		const PhysicsCharacterCommandTarget& controller, RootMotionIntervalError reason) {
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		if(!impl->backend) return;
+		impl->backend->CancelRootMotionIntervals(controller, reason);
+		std::erase_if(impl->retainedRootIntervals, [&controller](const auto& entry) {
+			return entry.second.interval.lease.controller == controller;
+		});
+	}
+
+	CharacterExternalRecoveryResult PhysicsSystem::CompleteExternalCharacterRecovery(
+		const RagdollExternalRecoveryToken& token) {
+		std::shared_ptr<const CharacterExternalRecoveryIntent> intent;
+		{
+			std::lock_guard<std::mutex> lock(impl->mutex);
+			const auto found = impl->recoveryTickets.find({token.ragdollId, token.correlationId});
+			if(found == impl->recoveryTickets.end() || !found->second.committed
+				|| found->second.token != token || !found->second.intent)
+				return {false, CharacterExternalRecoveryError::StaleToken, {}};
+			intent = found->second.intent;
+		}
+		// The copied Animation binding guard may inspect scene/Animation state.
+		// Evaluate it before locking Physics, then compare the exact ticket again.
+		if(!intent->bindingGuard || intent->bindingGuard->Validate()
+			!= CharacterMotionValidityReason::Valid)
+			return {false, CharacterExternalRecoveryError::StalePose, {}};
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		const auto key = std::pair{token.ragdollId, token.correlationId};
+		const auto found = impl->recoveryTickets.find(key);
+		if(found == impl->recoveryTickets.end() || !found->second.committed
+			|| found->second.token != token || found->second.intent != intent
+			|| !found->second.sourcePose || !found->second.sourcePose->completeCurrentStep)
+			return {false, CharacterExternalRecoveryError::StaleToken, {}};
+		if(token.world != impl->world.Handle())
+			return {false, CharacterExternalRecoveryError::StaleWorld, {}};
+		const auto current = impl->world.ReadCharacterMotionLease(intent->expectedExternalLease.controller);
+		if(!current || *current != intent->expectedExternalLease
+			|| current->state != CharacterMotionLeaseState::ExternalExclusive
+			|| current->externalOwnerId != intent->externalOwnerId)
+			return {false, CharacterExternalRecoveryError::StaleOwner, {}};
+		const auto controller = impl->runtimeCharacters.find(current->controller.objectId);
+		if(controller == impl->runtimeCharacters.end()
+			|| controller->second.handle != current->controller.character)
+			return {false, CharacterExternalRecoveryError::StaleOwner, {}};
+		if(current->authorityEpoch == std::numeric_limits<std::uint64_t>::max()
+			|| current->motionEpoch == std::numeric_limits<std::uint64_t>::max()
+			|| current->publicationEpoch == std::numeric_limits<std::uint64_t>::max())
+			return {false, CharacterExternalRecoveryError::EpochExhausted, {}};
+		CharacterMotionLease released = *current;
+		released.owner = {};
+		released.externalOwnerId = 0U;
+		released.state = CharacterMotionLeaseState::Unleased;
+		released.mode = CharacterMotionMode::Velocity;
+		++released.authorityEpoch;
+		++released.motionEpoch;
+		++released.publicationEpoch;
+		const CharacterExternalRecoveryTransition transition{*intent, released};
+		if(ValidateCharacterExternalRecoveryTransition(transition, *current)
+			!= CharacterMotionLeaseError::None)
+			return {false, CharacterExternalRecoveryError::InvalidArgument, {}};
+		const auto prepared = impl->world.PrepareExternalCharacterRecovery(transition);
+		if(!prepared.result.accepted)
+			return {false, prepared.result.error == CharacterMotionLeaseError::CapacityExceeded
+				? CharacterExternalRecoveryError::CapacityExceeded
+				: CharacterExternalRecoveryError::StaleOwner, {}};
+		const auto provider = impl->backend->PreflightCharacterExternalRecovery(transition);
+		if(!provider.Succeeded())
+			return {false, CharacterExternalRecoveryError::ProviderRejected, {}};
+		// Both providers are frozen by this protected coordinator. Jolt's
+		// validated SetPosition/SetRotation/clear and the preallocated root swap
+		// have no ordinary failure path after this point.
+		if(!impl->backend->CommitCharacterExternalRecovery(transition))
+			return {false, CharacterExternalRecoveryError::ProviderRejected, {}};
+		if(!impl->world.CommitPreparedCharacterMotionLeases(prepared))
+			return {false, CharacterExternalRecoveryError::ProviderRejected, {}};
+		impl->retainedGuardedTargets.erase(current->controller.objectId);
+		std::erase_if(impl->retainedRootIntervals, [&current](const auto& entry) {
+			return entry.second.interval.lease.controller == current->controller;
+		});
+		impl->recoveryTickets.erase(found);
+		return {true, CharacterExternalRecoveryError::None, released};
+	}
+
+	CharacterExternalRecoveryError PhysicsSystem::RefreshExternalCharacterRecovery(
+		const RagdollExternalRecoveryToken& token,
+		std::shared_ptr<const CharacterExternalRecoveryIntent> freshIntent) {
+		if(!freshIntent || !freshIntent->bindingGuard)
+			return CharacterExternalRecoveryError::InvalidArgument;
+		if(freshIntent->bindingGuard->Validate() != CharacterMotionValidityReason::Valid)
+			return CharacterExternalRecoveryError::StalePose;
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		const auto found = impl->recoveryTickets.find({token.ragdollId, token.correlationId});
+		if(found == impl->recoveryTickets.end() || !found->second.committed
+			|| found->second.token != token || !found->second.intent)
+			return CharacterExternalRecoveryError::StaleToken;
+		const auto& previous = *found->second.intent;
+		if(token.world != impl->world.Handle()
+			|| freshIntent->expectedExternalLease != previous.expectedExternalLease
+			|| freshIntent->externalOwnerId != previous.externalOwnerId
+			|| freshIntent->frame != previous.frame
+			|| freshIntent->bindingGeneration == 0U
+			|| !freshIntent->alignedControllerPose.IsFinite())
+			return CharacterExternalRecoveryError::StaleOwner;
+		const auto current = impl->world.ReadCharacterMotionLease(previous.expectedExternalLease.controller);
+		if(!current || *current != previous.expectedExternalLease)
+			return CharacterExternalRecoveryError::StaleOwner;
+		if(current->authorityEpoch == std::numeric_limits<std::uint64_t>::max()
+			|| current->motionEpoch == std::numeric_limits<std::uint64_t>::max()
+			|| current->publicationEpoch == std::numeric_limits<std::uint64_t>::max())
+			return CharacterExternalRecoveryError::EpochExhausted;
+		CharacterMotionLease released = *current;
+		released.owner = {};
+		released.externalOwnerId = 0U;
+		released.state = CharacterMotionLeaseState::Unleased;
+		released.mode = CharacterMotionMode::Velocity;
+		++released.authorityEpoch;
+		++released.motionEpoch;
+		++released.publicationEpoch;
+		if(ValidateCharacterExternalRecoveryTransition({*freshIntent, released}, *current)
+			!= CharacterMotionLeaseError::None)
+			return CharacterExternalRecoveryError::InvalidArgument;
+		// This explicit retry changes only inert copied mapping evidence. It
+		// never moves a controller or releases the external owner by itself.
+		found->second.intent = std::move(freshIntent);
+		return CharacterExternalRecoveryError::None;
+	}
+
+	CharacterExternalRecoveryResult PhysicsSystem::AbortFailedExternalRagdollAdmission(
+		const CharacterFailedRagdollAdmissionProof& proof) {
+		// A pre-provider Activate rejection has no valid RagdollGenerationStamp.
+		// The nonzero correlation/publication pair remains a typed, terminal
+		// Animation proof; managed/legacy motion producers cannot grant a lease.
+		if(proof.ragdollId == 0U || proof.failedActivationCorrelationId == 0U
+			|| proof.failurePublicationGeneration == 0U || proof.externalOwnerId == 0U
+			|| proof.bindingGeneration == 0U || !proof.bindingGuard)
+			return {false, CharacterExternalRecoveryError::InvalidArgument, {}};
+		if(proof.bindingGuard->Validate() != CharacterMotionValidityReason::Valid)
+			return {false, CharacterExternalRecoveryError::StalePose, {}};
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		if(!impl->backend || proof.expectedExternalLease.controller.world != impl->world.Handle()
+			|| proof.frame != PhysicsFrameHandle{kPrimaryPhysicsFrameId,
+				impl->world.Handle().worldGeneration})
+			return {false, CharacterExternalRecoveryError::StaleWorld, {}};
+		// Both Physics request ingress overloads hold the same coordinator mutex
+		// while appending to Bridge. A concurrent Activate cannot appear between
+		// this queue check and the final provider/root publication.
+		if(impl->ragdollPhysicsBridge.HasPendingRagdoll(proof.ragdollId)
+			|| impl->recoveryTickets.contains({proof.ragdollId,
+				proof.failedActivationCorrelationId}))
+			return {false, CharacterExternalRecoveryError::StaleToken, {}};
+		const auto ragdoll = impl->runtimeRagdolls.find(proof.ragdollId);
+		if(ragdoll != impl->runtimeRagdolls.end() && ragdoll->second.active)
+			return {false, CharacterExternalRecoveryError::StaleOwner, {}};
+		const auto current = impl->world.ReadCharacterMotionLease(
+			proof.expectedExternalLease.controller);
+		if(!current || *current != proof.expectedExternalLease
+			|| current->state != CharacterMotionLeaseState::ExternalExclusive
+			|| current->externalOwnerId != proof.externalOwnerId)
+			return {false, CharacterExternalRecoveryError::StaleOwner, {}};
+		const auto controller = impl->runtimeCharacters.find(current->controller.objectId);
+		if(controller == impl->runtimeCharacters.end()
+			|| controller->second.handle != current->controller.character)
+			return {false, CharacterExternalRecoveryError::StaleOwner, {}};
+		if(current->authorityEpoch == std::numeric_limits<std::uint64_t>::max()
+			|| current->motionEpoch == std::numeric_limits<std::uint64_t>::max()
+			|| current->publicationEpoch == std::numeric_limits<std::uint64_t>::max())
+			return {false, CharacterExternalRecoveryError::EpochExhausted, {}};
+		const auto pose = impl->backend->ReadCurrentCharacterPose(current->controller);
+		if(!pose)
+			return {false, CharacterExternalRecoveryError::ProviderRejected, {}};
+		CharacterExternalRecoveryIntent intent;
+		intent.expectedExternalLease = *current;
+		intent.externalOwnerId = proof.externalOwnerId;
+		intent.frame = proof.frame;
+		intent.alignedControllerPose = *pose;
+		intent.bindingGeneration = proof.bindingGeneration;
+		intent.bindingGuard = proof.bindingGuard;
+		CharacterMotionLease released = *current;
+		released.owner = {};
+		released.externalOwnerId = 0U;
+		released.state = CharacterMotionLeaseState::Unleased;
+		released.mode = CharacterMotionMode::Velocity;
+		++released.authorityEpoch;
+		++released.motionEpoch;
+		++released.publicationEpoch;
+		const CharacterExternalRecoveryTransition transition{std::move(intent), released};
+		if(ValidateCharacterExternalRecoveryTransition(transition, *current)
+			!= CharacterMotionLeaseError::None)
+			return {false, CharacterExternalRecoveryError::InvalidArgument, {}};
+		const auto prepared = impl->world.PrepareExternalCharacterRecovery(transition);
+		if(!prepared.result.accepted)
+			return {false, prepared.result.error == CharacterMotionLeaseError::CapacityExceeded
+				? CharacterExternalRecoveryError::CapacityExceeded
+				: CharacterExternalRecoveryError::StaleOwner, {}};
+		if(!impl->backend->PreflightCharacterExternalRecovery(transition).Succeeded())
+			return {false, CharacterExternalRecoveryError::ProviderRejected, {}};
+		// The pose came from the protected provider itself. The only setter path
+		// reuses that exact pose to clear residual velocity and mark a one-shot
+		// discontinuity; it does not teleport to a producer-authored location.
+		if(!impl->backend->CommitCharacterExternalRecovery(transition))
+			return {false, CharacterExternalRecoveryError::ProviderRejected, {}};
+		if(!impl->world.CommitPreparedCharacterMotionLeases(prepared))
+			return {false, CharacterExternalRecoveryError::ProviderRejected, {}};
+		impl->retainedGuardedTargets.erase(current->controller.objectId);
+		std::erase_if(impl->retainedRootIntervals, [&current](const auto& entry) {
+			return entry.second.interval.lease.controller == current->controller;
+		});
+		return {true, CharacterExternalRecoveryError::None, released};
+	}
+
+	std::shared_ptr<const RootMotionResultPacket> PhysicsSystem::ReadRootMotionResults(
+		std::uint64_t afterCursor, std::size_t maxRecords) const {
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		if(!impl->backend) return nullptr;
+		auto packet = impl->backend->ReadRootMotionResults(afterCursor, maxRecords);
+		if(packet) {
+			// Backend terminal records are immutable once copied. Retire the
+			// protected guard cache when a consumer can see the terminal; the
+			// provider already owns its bounded cursor/ack lifetime separately.
+			for(const RootMotionResultRecord& record : packet->records)
+				if(const auto* terminal = std::get_if<RootMotionTerminalResult>(&record.result))
+					impl->retainedRootIntervals.erase(terminal->intervalId.sequence);
+		}
+		return packet;
+	}
+
+	bool PhysicsSystem::AcknowledgeRootMotionResults(std::uint64_t throughCursor) {
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		return impl->backend && impl->backend->AcknowledgeRootMotionResults(throughCursor);
+	}
+
+	void PhysicsSystem::RevalidateCharacterMotionTargets() {
+		std::vector<CharacterMotionTarget> candidates;
+		{
+			std::lock_guard<std::mutex> lock(impl->mutex);
+			candidates.reserve(impl->retainedGuardedTargets.size());
+			for(const auto& [objectId, target] : impl->retainedGuardedTargets) {
+				(void)objectId;
+				candidates.push_back(target);
+			}
+		}
+		std::vector<CharacterMotionTarget> invalid;
+		invalid.reserve(candidates.size());
+		for(const CharacterMotionTarget& target : candidates)
+			if(target.validityGuard
+				&& target.validityGuard->Validate() != CharacterMotionValidityReason::Valid)
+				invalid.push_back(target);
+		if(invalid.empty()) return;
+
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		for(const CharacterMotionTarget& observed : invalid) {
+			const auto found = impl->retainedGuardedTargets.find(observed.controller.objectId);
+			if(found == impl->retainedGuardedTargets.end() || found->second != observed) continue;
+			const auto lease = impl->world.ReadCharacterMotionLease(observed.controller);
+			if(!lease || lease->state != CharacterMotionLeaseState::LocomotionOwned
+				|| lease->owner != observed.owner || lease->authorityEpoch != observed.authorityEpoch
+				|| lease->motionEpoch != observed.motionEpoch) {
+				// A newer authority transition already cleared provider intent.
+				impl->retainedGuardedTargets.erase(found);
+				continue;
+			}
+			CharacterMotionTarget stop = observed;
+			stop.planarVelocity = {};
+			stop.approachDistanceMetres = 0.0F;
+			stop.validityGuard.reset();
+			stop.clearImmediately = true;
+			const Backend::PhysicsBackendResult cleared = impl->backend->PublishCharacterMotionTarget(stop);
+			if(!cleared.Succeeded()) {
+				// Never step a controller with invalid route evidence if the
+				// reserved provider clear unexpectedly fails. Marking the world
+				// failed alone does not cancel an already prepared fixed-step plan.
+				impl->world.MarkFailed();
+				impl->plannedSteps = {};
+				continue;
+			}
+			impl->retainedGuardedTargets.erase(found);
+		}
+	}
+
+	void PhysicsSystem::RevalidateRootMotionIntervals() {
+		std::vector<Impl::RetainedRootInterval> candidates;
+		{
+			std::lock_guard<std::mutex> lock(impl->mutex);
+			candidates.reserve(impl->retainedRootIntervals.size());
+			for(const auto& [sequence, retained] : impl->retainedRootIntervals) {
+				(void)sequence;
+				if(retained.committed && retained.interval.validityGuard)
+					candidates.push_back(retained);
+			}
+		}
+		std::vector<RootMotionIntervalReservation> invalid;
+		invalid.reserve(candidates.size());
+		for(const Impl::RetainedRootInterval& retained : candidates)
+			if(retained.interval.validityGuard->Validate() != CharacterMotionValidityReason::Valid)
+				invalid.push_back(retained.reservation);
+		if(invalid.empty()) return;
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		for(const RootMotionIntervalReservation& reservation : invalid) {
+			const auto found = impl->retainedRootIntervals.find(reservation.intervalId.sequence);
+			if(found == impl->retainedRootIntervals.end() || found->second.reservation != reservation
+				|| !found->second.committed) continue;
+			(void)impl->backend->CancelRootMotionInterval(reservation.intervalId,
+				RootMotionIntervalError::StaleEvidence);
+			impl->retainedRootIntervals.erase(found);
+		}
 	}
 
 	Animation::AnimationStatus PhysicsSystem::SubmitRagdollPhysicsRequest(
 		Animation::RagdollPhysicsRequest request) {
+		if(request.retirementIntent
+			&& (request.kind != Animation::RagdollPhysicsRequestKind::Teardown
+				|| request.recoveryIntent || request.ragdollId == 0U
+				|| request.correlationId == 0U
+				|| request.retirementIntent->externalOwnerId == 0U
+				|| request.ragdollId != request.retirementIntent->externalOwnerId + 1U))
+			return Animation::AnimationStatus::InvalidArgument;
+		if(request.recoveryIntent) {
+			// The binding guard may inspect Animation/scene state. Never invoke it
+			// while holding PhysicsSystem's mutex or a provider lock.
+			if(request.kind != Animation::RagdollPhysicsRequestKind::Deactivate
+				|| !request.recoverySourcePose || !request.recoveryIntent->bindingGuard)
+				return Animation::AnimationStatus::InvalidArgument;
+			if(request.recoveryIntent->bindingGuard->Validate()
+				!= CharacterMotionValidityReason::Valid)
+				return Animation::AnimationStatus::StaleHandle;
+		} else if(request.recoverySourcePose) {
+			return Animation::AnimationStatus::InvalidArgument;
+		}
 		std::lock_guard<std::mutex> lock(impl->mutex);
 		if(!impl->world.Handle().IsValid()) return Animation::AnimationStatus::NotReady;
+		if(request.retirementIntent) {
+			const auto& intent = *request.retirementIntent;
+			const auto lease = impl->world.ReadCharacterMotionLease(
+				intent.expectedExternalLease.controller);
+			if(!lease || *lease != intent.expectedExternalLease
+				|| lease->state != CharacterMotionLeaseState::ExternalExclusive
+				|| lease->externalOwnerId != intent.externalOwnerId
+				|| intent.frame != PhysicsFrameHandle{kPrimaryPhysicsFrameId,
+					impl->world.Handle().worldGeneration})
+				return Animation::AnimationStatus::StaleHandle;
+		}
 		return impl->ragdollPhysicsBridge.Enqueue(std::move(request));
 	}
 
@@ -3957,6 +5091,42 @@ namespace TerraEngine::Physics {
 		std::span<const Animation::RagdollPhysicsRequest> requests) {
 		// The bridge owns copied request values. No provider object or live world
 		// storage crosses this thread-safe producer boundary.
+		for(const auto& request : requests) {
+			if(request.retirementIntent
+				&& (request.kind != Animation::RagdollPhysicsRequestKind::Teardown
+					|| request.recoveryIntent || request.ragdollId == 0U
+					|| request.correlationId == 0U
+					|| request.retirementIntent->externalOwnerId == 0U
+					|| request.ragdollId != request.retirementIntent->externalOwnerId + 1U))
+				return Animation::AnimationStatus::InvalidArgument;
+			if(request.recoveryIntent) {
+				if(request.kind != Animation::RagdollPhysicsRequestKind::Deactivate
+					|| !request.recoverySourcePose || !request.recoveryIntent->bindingGuard)
+					return Animation::AnimationStatus::InvalidArgument;
+				if(request.recoveryIntent->bindingGuard->Validate()
+					!= CharacterMotionValidityReason::Valid)
+					return Animation::AnimationStatus::StaleHandle;
+			} else if(request.recoverySourcePose) {
+				return Animation::AnimationStatus::InvalidArgument;
+			}
+		}
+		// Match the single-request ingress: the protected recovery abort holds
+		// this mutex while testing Bridge queues and releasing the external lease.
+		// A concurrent batch cannot append a ragdoll after that queue test.
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		if(!impl->world.Handle().IsValid()) return Animation::AnimationStatus::NotReady;
+		for(const auto& request : requests) {
+			if(!request.retirementIntent) continue;
+			const auto& intent = *request.retirementIntent;
+			const auto lease = impl->world.ReadCharacterMotionLease(
+				intent.expectedExternalLease.controller);
+			if(!lease || *lease != intent.expectedExternalLease
+				|| lease->state != CharacterMotionLeaseState::ExternalExclusive
+				|| lease->externalOwnerId != intent.externalOwnerId
+				|| intent.frame != PhysicsFrameHandle{kPrimaryPhysicsFrameId,
+					impl->world.Handle().worldGeneration})
+				return Animation::AnimationStatus::StaleHandle;
+		}
 		return impl->ragdollPhysicsBridge.EnqueueBatch(requests);
 	}
 

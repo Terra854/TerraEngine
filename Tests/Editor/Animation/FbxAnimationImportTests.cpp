@@ -9,6 +9,10 @@
 
 #include "AssetPipeline/FbxTestHelpers.h"
 #include "Editor/AssetCompilers/ModelPackageImporter.h"
+#include <assimp/Importer.hpp>
+#include <assimp/config.h>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
 
 #include <array>
 #include <cmath>
@@ -144,9 +148,48 @@ namespace TerraEngine::EditorTests
 
 	void RegisterFbxAnimationImportTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.Animation.FbxImport.PreservesAbsoluteAnimationRotations", [](TestContext& context) {
+			// Compare independent Assimp absolute-local keys with the public import
+			// result. A skin bind different from the exported resting pose must not
+			// turn the resting animation back into the mesh's unanimated T-pose.
+			const auto result = ImportAnimatedFbxFixture("animation_with_skeleton.fbx");
+			Assimp::Importer source;
+			source.SetPropertyBool(AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS, false);
+			const auto* scene = source.ReadFile(AssimpFbxFixturePath("animation_with_skeleton.fbx").string(),
+				aiProcess_Triangulate | aiProcess_SortByPType | aiProcess_JoinIdenticalVertices |
+				aiProcess_FindInvalidData | aiProcess_GenSmoothNormals | aiProcess_CalcTangentSpace |
+				aiProcess_ImproveCacheLocality | aiProcess_GlobalScale | aiProcess_PopulateArmatureData);
+			context.Expect(scene != nullptr, "Independent source import must succeed.");
+			if (!scene) return;
+			std::size_t checked = 0;
+			for (unsigned int a = 0; a < scene->mNumAnimations; ++a) {
+				const auto* animation = scene->mAnimations[a];
+				for (const auto& clip : result.animation.clips) {
+					if (clip.displayName != animation->mName.C_Str()) continue;
+					for (unsigned int c = 0; c < animation->mNumChannels; ++c) {
+						const auto* channel = animation->mChannels[c];
+						if (!channel->mNumRotationKeys) continue;
+						for (const auto& node : result.animation.nodes) {
+							if (node.displayName != channel->mNodeName.C_Str()) continue;
+							for (const auto& cooked : clip.nodeChannels) {
+								if (cooked.targetSemanticKey != node.semanticKey || cooked.rotations.empty()) continue;
+								auto expected = channel->mRotationKeys[0].mValue;
+								expected.Normalize();
+								const auto actual = cooked.rotations.front().value;
+								const float dot = std::abs(expected.x * actual.x + expected.y * actual.y
+									+ expected.z * actual.z + expected.w * actual.w);
+								context.Expect(dot > 0.99999F, "Absolute source rotation must survive import: " + node.displayName);
+								++checked;
+							}
+						}
+					}
+				}
+			}
+			context.Expect(checked > 0, "The regression must compare actual animated joints.");
+		});
 		registry.Add("Editor.Animation.FbxImport.UsesCurrentImporterRecipeVersion", [](TestContext& context) {
 			context.ExpectEqual(
-				std::string("6"),
+				std::string("7"),
 				std::string(TerraEngine::AssetPipeline::GetModelPackageImporterVersion("fixture.fbx")),
 				"FBX packages must use the authored skin-bind hierarchy importer recipe version.");
 			context.ExpectEqual(
@@ -178,7 +221,7 @@ namespace TerraEngine::EditorTests
 				"The FBX authored skin-bind contract");
 			context.Expect(result.animation.skeletons.size() == 1u,
 				"The representative animated FBX should publish one inspectable skeleton.");
-			context.Expect(result.package.animationManifest.importerVersion == "6",
+			context.Expect(result.package.animationManifest.importerVersion == "7",
 				"The generated FBX animation manifest must use the same bind-and-clip recipe version as AssetDatabase invalidation.");
 			if (result.animation.skeletons.size() != 1u)
 			{

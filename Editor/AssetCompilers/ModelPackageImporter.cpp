@@ -880,7 +880,8 @@ namespace TerraEngine::AssetPipeline
 		// versions. Only importer recipe changes belong here.
 		if (IsFbxPackageSourceExtension(filePath))
 		{
-			return "6";
+			// Rebuild clips authored by the old bind-relative animation recipe.
+			return "7";
 		}
 		if (IsGltfPackageSourceExtension(filePath))
 		{

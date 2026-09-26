@@ -1,5 +1,6 @@
 // RagdollPhysicsBridge.cpp - Bounded deterministic command staging.
 #include "Animation/Ragdoll/RagdollPhysicsBridge.h"
+#include "Physics/PhysicsCommands.h"
 #include <algorithm>
 #include <cmath>
 #include <new>
@@ -7,7 +8,11 @@
 namespace TerraEngine::Animation {
 	namespace {
 		AnimationStatus ValidateRequest(const RagdollPhysicsRequest& request) noexcept {
-			if(request.ragdollId == 0U || !request.generation.IsValid()) {
+			const bool noProviderRetirement = request.kind == RagdollPhysicsRequestKind::Teardown
+				&& request.retirementIntent != nullptr;
+			if(request.ragdollId == 0U
+				|| (!request.generation.IsValid() && !noProviderRetirement)
+				|| (request.retirementIntent && request.kind != RagdollPhysicsRequestKind::Teardown)) {
 				return AnimationStatus::InvalidArgument;
 			}
 			const bool needsActivationPose = request.kind == RagdollPhysicsRequestKind::Create
@@ -46,6 +51,11 @@ namespace TerraEngine::Animation {
 	AnimationStatus RagdollPhysicsBridge::Enqueue(RagdollPhysicsRequest request) noexcept {
 		if(const AnimationStatus status = ValidateRequest(request);
 			status != AnimationStatus::Ok) return status;
+		if(request.retirementIntent) {
+			// The same all-or-none normalization used by batch retirement must also
+			// protect a single trusted Teardown producer.
+			return EnqueueBatch(std::span(&request, 1U));
+		}
 		try {
 			std::lock_guard lock(mutex_);
 			if(pending_.size() >= kRagdollSnapshotMaximumBodies) return AnimationStatus::HardLimitExceeded;
@@ -64,6 +74,53 @@ namespace TerraEngine::Animation {
 		}
 		try {
 			std::lock_guard lock(mutex_);
+			const bool taggedRetirement = std::any_of(requests.begin(), requests.end(),
+				[](const RagdollPhysicsRequest& request) {
+					return request.retirementIntent != nullptr;
+				});
+			if(taggedRetirement) {
+				// Stage all three roots first. A rejected retirement cannot erase an
+				// accepted Create/Activate or its future terminal receipt.
+				std::vector<RagdollPhysicsRequest> candidatePending = pending_;
+				std::vector<RagdollPhysicsRequest> candidateUndelivered = undelivered_;
+				std::vector<RagdollPhysicsResult> candidateCancelled =
+					pendingRetirementCancellations_;
+				for(const RagdollPhysicsRequest& retirement : requests) {
+					if(!retirement.retirementIntent) continue;
+					if(std::count_if(requests.begin(), requests.end(),
+						[&retirement](const RagdollPhysicsRequest& request) {
+							return request.ragdollId == retirement.ragdollId;
+						}) != 1U) return AnimationStatus::InvalidArgument;
+					const auto cancelOlder = [&](std::vector<RagdollPhysicsRequest>& queue) {
+						for(auto entry = queue.begin(); entry != queue.end();) {
+							if(entry->ragdollId != retirement.ragdollId) {
+								++entry;
+								continue;
+							}
+							if(entry->retirementIntent) return false;
+							if(candidateCancelled.size() >= kRagdollSnapshotMaximumBodies)
+								return false;
+							candidateCancelled.push_back({entry->ragdollId, entry->kind,
+								entry->generation, entry->correlationId,
+								AnimationStatus::Cancelled, 0,
+								"Superseded by exact animator retirement."});
+							entry = queue.erase(entry);
+						}
+						return true;
+					};
+					if(!cancelOlder(candidatePending)
+						|| !cancelOlder(candidateUndelivered))
+						return AnimationStatus::HardLimitExceeded;
+				}
+				if(requests.size() > kRagdollSnapshotMaximumBodies - candidatePending.size())
+					return AnimationStatus::HardLimitExceeded;
+				candidatePending.reserve(candidatePending.size() + requests.size());
+				candidatePending.insert(candidatePending.end(), requests.begin(), requests.end());
+				pending_.swap(candidatePending);
+				undelivered_.swap(candidateUndelivered);
+				pendingRetirementCancellations_.swap(candidateCancelled);
+				return AnimationStatus::Queued;
+			}
 			if(requests.size() > kRagdollSnapshotMaximumBodies - pending_.size()) {
 				return AnimationStatus::HardLimitExceeded;
 			}
@@ -109,20 +166,13 @@ namespace TerraEngine::Animation {
 		std::span<const RagdollPhysicsRequest> requests,
 		AnimationFixedTick committedStep,
 		std::string diagnostic) noexcept {
-		try {
-			auto results = std::make_shared<std::vector<RagdollPhysicsResult>>();
-			results->reserve(requests.size());
-			for(const RagdollPhysicsRequest& request : requests) {
-				results->push_back({request.ragdollId, request.kind, request.generation,
-					request.correlationId, AnimationStatus::Rejected, committedStep, diagnostic});
-			}
-			auto snapshot = std::make_shared<RagdollPhysicsResultSnapshot>();
-			snapshot->committedStep = committedStep;
-			snapshot->results = std::move(results);
-			std::lock_guard lock(mutex_);
-			latestResults_ = std::move(snapshot);
-			return AnimationStatus::Rejected;
-		} catch(const std::bad_alloc&) { return AnimationStatus::HardLimitExceeded; }
+		std::shared_ptr<const RagdollPhysicsResultSnapshot> prepared;
+		const AnimationStatus status = PrepareResultSnapshot(
+			requests, committedStep, AnimationStatus::Rejected,
+			std::move(diagnostic), prepared);
+		if(status != AnimationStatus::Ok) return status;
+		PublishPreparedResultsAtProtectedBoundary(std::move(prepared));
+		return AnimationStatus::Rejected;
 	}
 
 	AnimationStatus RagdollPhysicsBridge::PrepareResultSnapshot(
@@ -134,7 +184,17 @@ namespace TerraEngine::Animation {
 		if(requests.empty() || committedStep <= 0) return AnimationStatus::InvalidArgument;
 		try {
 			auto results = std::make_shared<std::vector<RagdollPhysicsResult>>();
-			results->reserve(requests.size());
+			std::size_t cancellationCount = 0U;
+			{
+				std::lock_guard lock(mutex_);
+				cancellationCount = pendingRetirementCancellations_.size();
+				results->reserve(cancellationCount + requests.size());
+				for(const RagdollPhysicsResult& cancelled : pendingRetirementCancellations_) {
+					RagdollPhysicsResult terminal = cancelled;
+					terminal.committedStep = committedStep;
+					results->push_back(std::move(terminal));
+				}
+			}
 			for(const RagdollPhysicsRequest& request : requests) {
 				results->push_back({request.ragdollId, request.kind, request.generation,
 					request.correlationId, status, committedStep, diagnostic});
@@ -142,6 +202,7 @@ namespace TerraEngine::Animation {
 			auto snapshot = std::make_shared<RagdollPhysicsResultSnapshot>();
 			snapshot->committedStep = committedStep;
 			snapshot->results = std::move(results);
+			snapshot->includedRetirementCancellationCount = cancellationCount;
 			output = std::move(snapshot);
 			return AnimationStatus::Ok;
 		} catch(const std::bad_alloc&) {
@@ -154,6 +215,14 @@ namespace TerraEngine::Animation {
 		std::span<const std::uint64_t> retiredPoseIds) noexcept {
 		std::lock_guard lock(mutex_);
 		for(const std::uint64_t ragdollId : retiredPoseIds) currentStepPoses_.erase(ragdollId);
+		if(results && results->includedRetirementCancellationCount != 0U) {
+			const std::size_t consumed = std::min(
+				results->includedRetirementCancellationCount,
+				pendingRetirementCancellations_.size());
+			pendingRetirementCancellations_.erase(
+				pendingRetirementCancellations_.begin(),
+				pendingRetirementCancellations_.begin() + consumed);
+		}
 		latestResults_ = std::move(results);
 	}
 
@@ -216,10 +285,35 @@ namespace TerraEngine::Animation {
 		return pending_.size() + undelivered_.size();
 	}
 
+	bool RagdollPhysicsBridge::HasPendingRagdoll(std::uint64_t ragdollId) const noexcept
+	{
+		if(ragdollId == 0U) return false;
+		std::lock_guard lock(mutex_);
+		const auto matches = [ragdollId](const RagdollPhysicsRequest& request) {
+			return request.ragdollId == ragdollId;
+		};
+		return std::any_of(pending_.begin(), pending_.end(), matches)
+			|| std::any_of(undelivered_.begin(), undelivered_.end(), matches);
+	}
+
+	bool RagdollPhysicsBridge::HasPendingExternalRetirementOwner(
+		std::uint64_t externalOwnerId) const noexcept
+	{
+		if(externalOwnerId == 0U) return false;
+		std::lock_guard lock(mutex_);
+		const auto matches = [externalOwnerId](const RagdollPhysicsRequest& request) {
+			return request.retirementIntent
+				&& request.retirementIntent->externalOwnerId == externalOwnerId;
+		};
+		return std::any_of(pending_.begin(), pending_.end(), matches)
+			|| std::any_of(undelivered_.begin(), undelivered_.end(), matches);
+	}
+
 	void RagdollPhysicsBridge::Clear() noexcept {
 		std::lock_guard lock(mutex_);
 		pending_.clear();
 		undelivered_.clear();
+		pendingRetirementCancellations_.clear();
 		currentStepPoses_.clear();
 		latestResults_.reset();
 	}

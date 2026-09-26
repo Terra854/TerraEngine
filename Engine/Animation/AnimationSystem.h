@@ -411,6 +411,16 @@ namespace TerraEngine::Animation {
 			AnimatorInstanceHandle handle,
 			std::span<NativeAnimationRagdollSnapshot> destination,
 			std::uint32_t& requiredCount) const;
+		// The protected locomotion publisher hands Animation one immutable binding
+		// root. Readers only pin the shared pointer and never take a Locomotion lock.
+		void PublishRootControllerBindings(
+			std::shared_ptr<const AnimationRootControllerBindingSnapshot> bindings) noexcept;
+		[[nodiscard]] std::shared_ptr<const AnimationRootControllerBindingSnapshot>
+			ReadRootControllerBindings() const noexcept;
+		// SubmitRagdollRequest must expose accepted pending Activate before Animation
+		// evaluation; protected movement publication consumes this copied exclusion.
+		[[nodiscard]] std::shared_ptr<const AnimationRagdollExclusionSnapshot>
+			ReadRagdollExclusions() const noexcept;
 		[[nodiscard]] AnimationStatus CopyDeterminismSnapshots(
 			AnimatorInstanceHandle handle,
 			std::span<NativeAnimationDeterminismSnapshot> destination,

@@ -9,6 +9,7 @@
 #include "DotNet/DotNetHost.h"
 #include "Profiling/ProfilerScope.h"
 #include "Navigation/Agents/NavigationAgentSystem.h"
+#include "Locomotion/LocomotionSystem.h"
 #include "Navigation/Integration/NavigationRuntimeSceneCapture.h"
 #include "Navigation/NavigationSystem.h"
 #include "Scene/SceneManager.h"
@@ -1317,6 +1318,7 @@ void ScriptingSystem::FlushScriptMutationsIntoResult(ScriptingFrameResult& resul
 	TerraEngine::Navigation::NavigationAgentSystem::Instance().ObserveProtectedBoundary(
 		TerraEngine::Navigation::NavigationProtectedBoundary::Scripting,
 		ObjectManager::instance().GetSceneGeneration());
+	TerraEngine::Locomotion::LocomotionSystem::Instance().ObserveProtectedBoundary();
 	for (const TerraEngine::Scene::SceneMutationResult& entry : mutationResult.results)
 	{
 		if (entry.accepted)
@@ -1473,6 +1475,12 @@ void ScriptingSystem::SetRunning(bool running)
 		return;
 	}
 
+	if(!running) {
+		// Revoke copied movement intent before callers restore authored scene data.
+		// Physics is still alive here, so its lease and buffered targets can clear
+		// at this protected lifecycle boundary rather than leaking into fresh Play.
+		TerraEngine::Locomotion::LocomotionSystem::Instance().RevokeAll();
+	}
 	m_Running = running;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_Running)
@@ -1685,8 +1693,31 @@ TerraEngine::Scheduling::SystemDeclaration ScriptingSystem::SchedulerDeclaration
 	// batch. Name that exact scheduler resource so startup validation can prove
 	// the handoff exists instead of relying on an unregistered aggregate label.
 	declaration.reads = { "SceneGraph", "Resources", "RuntimeTime",
-		TerraEngine::Scheduling::kResourceAnimationManagedCallbackBatches };
-	declaration.writes = { "Scripting", "ObjectManager", "SceneMutationQueue", "RuntimeTimeQueue" };
+		TerraEngine::Scheduling::kResourceAnimationManagedCallbackBatches,
+		TerraEngine::Scheduling::kResourceLocomotionComponents,
+		TerraEngine::Scheduling::kResourcePhysicsCharacterStatePackets,
+		TerraEngine::Scheduling::kResourcePhysicsCharacterMotionLeases,
+		// Protected lifecycle reconciliation refreshes optional agent bindings;
+		// managed callbacks themselves still submit deferred movement commands.
+		TerraEngine::Scheduling::kResourceNavigationAgentState,
+		TerraEngine::Scheduling::kResourceNavigationAgentGuidance,
+		TerraEngine::Scheduling::kResourceNavigationRouteValidity,
+		TerraEngine::Scheduling::kResourceAnimationAuthorityFrame,
+		TerraEngine::Scheduling::kResourceAnimationRuntimeState,
+		TerraEngine::Scheduling::kResourceAnimationRagdollMappings };
+	declaration.writes = { "Scripting", "ObjectManager", "SceneMutationQueue", "RuntimeTimeQueue",
+		TerraEngine::Scheduling::kResourceLocomotionCommands,
+		TerraEngine::Scheduling::kResourceLocomotionAuthority,
+		TerraEngine::Scheduling::kResourceLocomotionObservations,
+		TerraEngine::Scheduling::kResourceLocomotionReceipts,
+		TerraEngine::Scheduling::kResourcePhysicsCharacterMotionLeases,
+		TerraEngine::Scheduling::kResourceCharacterMotionTargets,
+		TerraEngine::Scheduling::kResourceLocomotionAnimatorBindings,
+		TerraEngine::Scheduling::kResourceAnimationConsumerMasks,
+		// Lifecycle revocation clears provider contributions and emits terminal
+		// root acknowledgements even before the normal Locomotion phase runs.
+		"PhysicsWorld", TerraEngine::Scheduling::kResourceRootMotionIntervals,
+		TerraEngine::Scheduling::kResourceRootMotionResults };
 	// Managed callbacks can be batched by native code, but the managed boundary
 	// itself remains protected because scripts may call reflection APIs and
 	// request structural scene mutations. Native pre/post work reports worker
@@ -1775,6 +1806,7 @@ bool ScriptingSystem::LoadGameplayAssembly(const std::filesystem::path& assembly
 void ScriptingSystem::ClearGameplayAssembly() {
 	const bool invalidatesManagedWrappers = m_GameplayAssemblyLoaded;
 	if(invalidatesManagedWrappers) {
+		TerraEngine::Locomotion::LocomotionSystem::Instance().RevokeAll();
 		// Managed request owners belong to the unloading script-domain generation.
 		// Revoke them before callbacks disappear so late workers cannot publish.
 		TerraEngine::Navigation::NavigationSystem::Instance().RevokeAllOwners(

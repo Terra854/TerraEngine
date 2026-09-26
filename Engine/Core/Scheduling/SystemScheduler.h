@@ -150,11 +150,35 @@ namespace TerraEngine::Scheduling {
 	inline constexpr const char kResourceNavigationAgentPrepared7[] = "NavigationAgentPrepared/7";
 	inline constexpr const char kResourceNavigationAgentState[] = "NavigationAgentState";
 	inline constexpr const char kResourceNavigationAgentGuidance[] = "NavigationAgentGuidance";
+	// Locomotion keeps protected authoring/command capture separate from its
+	// immutable worker inputs, disjoint prepared shards, and published outputs.
+	inline constexpr const char kResourceLocomotionComponents[] = "LocomotionComponents";
+	inline constexpr const char kResourceLocomotionCommands[] = "LocomotionCommands";
+	inline constexpr const char kResourceLocomotionCaptureInputs[] = "LocomotionCaptureInputs";
+	inline constexpr const char kResourceLocomotionPrepared[] = "LocomotionPrepared";
+	inline constexpr const char kResourceLocomotionPrepared0[] = "LocomotionPrepared/0";
+	inline constexpr const char kResourceLocomotionPrepared1[] = "LocomotionPrepared/1";
+	inline constexpr const char kResourceLocomotionPrepared2[] = "LocomotionPrepared/2";
+	inline constexpr const char kResourceLocomotionPrepared3[] = "LocomotionPrepared/3";
+	inline constexpr const char kResourceLocomotionPrepared4[] = "LocomotionPrepared/4";
+	inline constexpr const char kResourceLocomotionPrepared5[] = "LocomotionPrepared/5";
+	inline constexpr const char kResourceLocomotionPrepared6[] = "LocomotionPrepared/6";
+	inline constexpr const char kResourceLocomotionPrepared7[] = "LocomotionPrepared/7";
+	inline constexpr const char kResourceLocomotionAuthority[] = "LocomotionAuthority";
+	inline constexpr const char kResourceLocomotionObservations[] = "LocomotionObservations";
+	inline constexpr const char kResourceLocomotionReceipts[] = "LocomotionReceipts";
+	inline constexpr const char kResourceCharacterMotionTargets[] = "CharacterMotionTargets";
+	inline constexpr const char kResourceLocomotionAnimatorBindings[] = "LocomotionAnimatorBindings";
+	inline constexpr const char kResourceRootMotionIntervals[] = "RootMotionIntervals";
+	inline constexpr const char kResourceRootMotionResults[] = "RootMotionResults";
 	inline constexpr const char kResourcePhysicsFrameRegistry[] = "PhysicsFrameRegistry";
 	inline constexpr const char kResourcePhysicsFrameMigrations[] = "PhysicsFrameMigrations";
 	// Virtual characters publish immutable state separately from body pages, then
 	// PhysicsPublish revalidates their typed Transform authority at the boundary.
 	inline constexpr const char kResourcePhysicsCharacterStatePackets[] = "PhysicsCharacterStatePackets";
+	// Physics retains controller exclusion independently of a locomotion attachment
+	// while an external authority such as ragdoll still owns the character.
+	inline constexpr const char kResourcePhysicsCharacterMotionLeases[] = "PhysicsCharacterMotionLeases";
 	// Protected capture owns only immutable values borrowed by the following
 	// renderer workers. Keeping this resource separate from the persistent and
 	// dynamic roots makes scheduler diagnostics reflect the real ownership split.

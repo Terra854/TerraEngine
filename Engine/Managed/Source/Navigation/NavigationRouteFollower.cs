@@ -31,7 +31,10 @@ namespace TerraEngine
 		private const double WorldCellEdgeMetres = 65_536.0;
 		private const float MinimumReplanIntervalSeconds = 0.10F;
 		private const float MinimumBlockedDurationSeconds = 0.10F;
-		private const float ControllerGeometryToleranceMetres = 0.001F;
+		private const float ControllerLinearToleranceMetres = 0.001F;
+		private const float ControllerSlopeToleranceDegrees = 0.001F;
+		private const float ControllerUnitVectorTolerance = 0.001F;
+		private const float ControllerScaleTolerance = 0.001F;
 
 		private readonly Object _source;
 		private readonly Transform _transform;
@@ -199,11 +202,12 @@ namespace TerraEngine
 				return Fail(NavigationStatus.InvalidArgument, NavigationOutcome.InvalidRequest, NavigationReason.ProviderFailure);
 			if (_state == NavigationRouteFollowerState.Idle || _state == NavigationRouteFollowerState.Arrived || _state == NavigationRouteFollowerState.Failed)
 				return _state;
-			// Controller enablement can change while a route is pending. Check the two
-			// cheap reflected flags each step, but require geometry/profile changes to
-			// stop and begin a new follower so its copied route contract stays valid.
+			// Recheck shape, effective scale and owner collision on each step. A live
+			// authoring edit must not keep following a route built for old geometry.
 			if (!_controller.Enabled || !_controller.PhysicsEnabled)
 				return Fail(NavigationStatus.Unavailable, NavigationOutcome.Failed, NavigationReason.ProviderFailure);
+			if (!IsProfileCompatibleWithController(_controller, _profile) || !HasDisabledOwnerColliderSet())
+				return Fail(NavigationStatus.InvalidArgument, NavigationOutcome.InvalidRequest, NavigationReason.InsufficientClearance);
 
 			if (_replanRemainingSeconds > 0.0F)
 			{
@@ -337,26 +341,47 @@ namespace TerraEngine
 			float controllerSlope = controller.MaximumSlopeAngleDegrees;
 			Vector3 controllerUp = controller.UpDirection;
 			Vector3 controllerCenter = controller.LocalCenter;
+			WorldPose ownerPose = controller.Object.Transform.Pose;
+			Vector3 effectiveScale = ownerPose.Scale;
+			Quaternion rotation = ownerPose.Rotation;
+			double rotationLengthSquared = (double)rotation.X * rotation.X + (double)rotation.Y * rotation.Y
+				+ (double)rotation.Z * rotation.Z + (double)rotation.W * rotation.W;
+			bool uprightWorldRotation = rotationLengthSquared > 1.0e-12
+				&& !double.IsNaN(rotationLengthSquared) && !double.IsInfinity(rotationLengthSquared)
+				&& Math.Abs(2.0 * ((double)rotation.X * rotation.Y - (double)rotation.W * rotation.Z)
+					/ rotationLengthSquared) <= ControllerUnitVectorTolerance
+				&& Math.Abs(2.0 * ((double)rotation.Y * rotation.Z + (double)rotation.W * rotation.X)
+					/ rotationLengthSquared) <= ControllerUnitVectorTolerance
+				&& 2.0 * ((double)rotation.X * rotation.X + (double)rotation.Z * rotation.Z)
+					/ rotationLengthSquared <= ControllerUnitVectorTolerance;
 			return controller.Enabled && controller.PhysicsEnabled
+				&& controller.Shape == PhysicsCharacterShape.Capsule
+				&& uprightWorldRotation
 				&& IsFinitePositive(controllerRadius) && IsFinitePositive(controllerHeight)
 				&& IsFiniteNonNegative(controllerPadding) && IsFiniteNonNegative(controllerStepHeight)
 				&& IsFinitePositive(controllerSlope)
+				// Physics currently constructs the virtual character from unscaled
+				// authored radius/height. Reject other effective world scales rather
+				// than claiming its route profile reserves unsupported geometry.
+				&& Math.Abs(effectiveScale.X - 1.0F) <= ControllerScaleTolerance
+				&& Math.Abs(effectiveScale.Y - 1.0F) <= ControllerScaleTolerance
+				&& Math.Abs(effectiveScale.Z - 1.0F) <= ControllerScaleTolerance
 				// Ground navigation assumes an upright capsule centred halfway up its body.
 				// Rejecting another convention is safer than steering a different shape
 				// through a corridor that was built for the object transform's ground point.
-				&& Math.Abs(controllerUp.X) <= ControllerGeometryToleranceMetres
-				&& Math.Abs(controllerUp.Y - 1.0F) <= ControllerGeometryToleranceMetres
-				&& Math.Abs(controllerUp.Z) <= ControllerGeometryToleranceMetres
-				&& Math.Abs(controllerCenter.X) <= ControllerGeometryToleranceMetres
-				&& Math.Abs(controllerCenter.Y - controllerHeight * 0.5F) <= ControllerGeometryToleranceMetres
-				&& Math.Abs(controllerCenter.Z) <= ControllerGeometryToleranceMetres
+				&& Math.Abs(controllerUp.X) <= ControllerUnitVectorTolerance
+				&& Math.Abs(controllerUp.Y - 1.0F) <= ControllerUnitVectorTolerance
+				&& Math.Abs(controllerUp.Z) <= ControllerUnitVectorTolerance
+				&& Math.Abs(controllerCenter.X) <= ControllerLinearToleranceMetres
+				&& Math.Abs(controllerCenter.Y - controllerHeight * 0.5F) <= ControllerLinearToleranceMetres
+				&& Math.Abs(controllerCenter.Z) <= ControllerLinearToleranceMetres
 				// Reflected float values are not bit-identical to the copied double profile,
 				// so this small one-millimetre tolerance avoids false unsafe-profile rejects.
-				&& profile.RadiusMetres + ControllerGeometryToleranceMetres >= controllerRadius
-				&& profile.ClearanceMarginMetres + ControllerGeometryToleranceMetres >= controllerPadding
-				&& profile.HeightMetres + ControllerGeometryToleranceMetres >= controllerHeight
-				&& profile.StepHeightMetres <= controllerStepHeight + ControllerGeometryToleranceMetres
-				&& profile.MaxSlopeDegrees <= controllerSlope + ControllerGeometryToleranceMetres;
+				&& profile.RadiusMetres + ControllerLinearToleranceMetres >= controllerRadius
+				&& profile.ClearanceMarginMetres + ControllerLinearToleranceMetres >= controllerPadding
+				&& profile.HeightMetres + ControllerLinearToleranceMetres >= controllerHeight
+				&& profile.StepHeightMetres <= controllerStepHeight + ControllerLinearToleranceMetres
+				&& profile.MaxSlopeDegrees <= controllerSlope + ControllerSlopeToleranceDegrees;
 		}
 
 		private NavigationRouteFollowerState ObserveRequest()

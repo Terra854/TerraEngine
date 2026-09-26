@@ -11,6 +11,11 @@ successful `NavigationAgent059Test` authored project. The seed is a genuine
 The workload generator verifies the descriptor, metadata, CURRENT pointer, and
 root manifest before copying the seed into a generated project.
 
+The private bundle is byte-canonical: `CURRENT` and `.root` files must retain
+LF line endings. Repository attributes disable automatic Windows CRLF
+conversion for this bundle. Do not resave it with platform-native line endings;
+the generator rejects converted bytes rather than producing missing terrain.
+
 The validation executable's optional cache-fixture mode builds a separate small
 7x7 provider tile through `BuildRecastGroundTiles` and writes its pristine
 Detour bytes into a checked `.tenav` container. That fixture is a standalone

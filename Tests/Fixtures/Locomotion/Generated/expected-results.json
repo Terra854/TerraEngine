@@ -1,0 +1,303 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "locomotion-060-v1",
+  "status": "expected-only-not-executed",
+  "caseExpectations": [
+    {
+      "id": "route.flat-straight-20m",
+      "expected": "reach within 0.25 m arrival tolerance and settle to <=0.05 m/s for 1 s"
+    },
+    {
+      "id": "collision.wall",
+      "expected": "collision constrains motion; observed animation speed follows realized movement"
+    },
+    {
+      "id": "collision.narrow-corridor",
+      "expected": "admissible width clears controller plus margin; inadmissible width refuses or blocks without tunneling"
+    },
+    {
+      "id": "traversal.shallow-slope",
+      "expected": "slope at least 10% below frozen controller limit is traversable"
+    },
+    {
+      "id": "traversal.excessive-slope",
+      "expected": "slope at least 10% above frozen controller limit is rejected by traversal"
+    },
+    {
+      "id": "traversal.shallow-step",
+      "expected": "step at least 10% below controller limit is traversable"
+    },
+    {
+      "id": "traversal.excessive-step",
+      "expected": "step at least 10% above controller limit is rejected by traversal"
+    },
+    {
+      "id": "support.missing",
+      "expected": "no stale locomotion contribution when support is lost"
+    },
+    {
+      "id": "support.terrain-hole",
+      "expected": "terrain hole behaves as missing support"
+    },
+    {
+      "id": "dynamic.moving-blocker",
+      "expected": "current guidance/blocking is honored without stale movement"
+    },
+    {
+      "id": "dynamic.moving-destination",
+      "expected": "consume revised NavigationAgent ReadGuidance only; preserve the agent as sole destination/route/replan owner; no second locomotion query or route"
+    },
+    {
+      "id": "intent.manual-world",
+      "expected": "finite world direction is planarized and speed-limited"
+    },
+    {
+      "id": "intent.manual-local",
+      "expected": "controller-local input follows captured orientation"
+    },
+    {
+      "id": "intent.diagonal-normalized",
+      "expected": "diagonal direction does not exceed requested speed"
+    },
+    {
+      "id": "intent.zero-and-tiny",
+      "expected": "near-zero direction remains stationary without facing jitter"
+    },
+    {
+      "id": "intent.continuous-expiry",
+      "expected": "missing player refresh expires to braking-to-zero"
+    },
+    {
+      "id": "intent.persistent-script",
+      "expected": "UntilStopped script intent persists until explicit stop or release"
+    },
+    {
+      "id": "authority.stop-resume",
+      "expected": "Stop clears contribution at observation boundary; newer valid intent resumes"
+    },
+    {
+      "id": "authority.release",
+      "expected": "Release returns to idle and does not restore legacy velocity"
+    },
+    {
+      "id": "authority.competing-producer",
+      "expected": "second producer is rejected and accepted owner remains intact"
+    },
+    {
+      "id": "authority.explicit-transfer",
+      "expected": "transfer switches owner atomically and clears prior contribution"
+    },
+    {
+      "id": "boundary.target-edit-after-capture",
+      "expected": "same-frame target revision invalidates stale preparation before physics"
+    },
+    {
+      "id": "boundary.terrain-edit-after-capture",
+      "expected": "same-frame terrain revision prevents stale guidance consumption"
+    },
+    {
+      "id": "boundary.controller-edit-after-capture",
+      "expected": "same-frame controller revision triggers compatibility revalidation"
+    },
+    {
+      "id": "navigation.invalid-route",
+      "expected": "invalid route yields zero stale guidance contribution and explicit reason"
+    },
+    {
+      "id": "navigation.missing-coverage",
+      "expected": "missing coverage does not consume stale guidance"
+    },
+    {
+      "id": "navigation.queued-stop",
+      "expected": "Scripting-issued NavigationAgent QueueStop remains queued after Navigation35; old published guidance may still be consumed at Locomotion42 this frame; verify Queued versus terminal receipt"
+    },
+    {
+      "id": "navigation.applied-stop",
+      "expected": "NavigationAgent Stop applies at next Navigation35 and its nonusable guidance is consumed by the following Locomotion42; verify applied receipt/publication epochs"
+    },
+    {
+      "id": "scripting.locomotion-stop",
+      "expected": "Scripting40-issued Locomotion Stop is admitted at Locomotion42 in the same frame and clears its contribution at that publication boundary"
+    },
+    {
+      "id": "animation.velocity-wall-observation",
+      "expected": "reported speed matches completed physical observation, not requested speed"
+    },
+    {
+      "id": "root.free-translation-yaw",
+      "expected": "accepted translation and root yaw apply once; no procedural facing yaw is added"
+    },
+    {
+      "id": "root.wall-constrained",
+      "expected": "collision-adjusted displacement is discarded rather than deferred as catch-up"
+    },
+    {
+      "id": "root.no-animation-tick",
+      "expected": "no repeated or stale root sample contributes"
+    },
+    {
+      "id": "root.zero-physics-steps",
+      "expected": "valid intervals remain pending within bounds until a physics step"
+    },
+    {
+      "id": "root.multiple-physics-steps",
+      "expected": "each interval fragment is consumed once across steps"
+    },
+    {
+      "id": "root.shorter-than-tick",
+      "expected": "short fragment contributes only its displacement; uncovered tick time contributes zero"
+    },
+    {
+      "id": "root.playback-speed-0_5",
+      "expected": "physical interval duration and displacement are applied once at 0.5 playback"
+    },
+    {
+      "id": "root.playback-speed-1",
+      "expected": "physical interval duration and displacement are applied once at normal playback"
+    },
+    {
+      "id": "root.playback-speed-2",
+      "expected": "physical interval duration and displacement are applied once at 2x playback"
+    },
+    {
+      "id": "root.loop-and-reverse",
+      "expected": "loop/reverse intervals keep unique monotonic evaluation identities"
+    },
+    {
+      "id": "root.repeated-late-missing-samples",
+      "expected": "repeated/out-of-order/reloaded samples reject without extrapolating stale motion"
+    },
+    {
+      "id": "root.queue-overflow-atomicity",
+      "expected": "overflow rejects new interval atomically and retains earlier accepted intervals"
+    },
+    {
+      "id": "root.binding-reload",
+      "expected": "binding generation change invalidates old intervals and mappings"
+    },
+    {
+      "id": "lifecycle.pending-ragdoll",
+      "expected": "pending ragdoll suppresses locomotion authority"
+    },
+    {
+      "id": "lifecycle.active-ragdoll",
+      "expected": "external exclusive authority persists through active ragdoll"
+    },
+    {
+      "id": "lifecycle.legacy-rejection-during-suspension",
+      "expected": "legacy movement rejects throughout ExternalExclusive suspension"
+    },
+    {
+      "id": "lifecycle.explicit-recovery",
+      "expected": "recovery requires external release/grant and a fresh acquire"
+    },
+    {
+      "id": "lifecycle.root-velocity-handoff",
+      "expected": "mode handoff clears old root/velocity contribution atomically"
+    },
+    {
+      "id": "lifecycle.legacy-follower-conflict",
+      "expected": "conflicting legacy follower cannot contribute movement"
+    },
+    {
+      "id": "lifecycle.pre-acquire-command-replay",
+      "expected": "pre-acquire legacy movement cannot replay after release"
+    },
+    {
+      "id": "lifecycle.legacy-automatic-transform-root",
+      "expected": "automatic transform root respects leased animator-to-controller mapping"
+    },
+    {
+      "id": "lifecycle.disable-remove-readd",
+      "expected": "re-added attachment starts idle without revived intent"
+    },
+    {
+      "id": "lifecycle.scene-unload-id-reuse",
+      "expected": "late work cannot affect reused object identity"
+    },
+    {
+      "id": "lifecycle.owner-controller-destruction",
+      "expected": "destroyed owner/controller revokes all contributions and mappings"
+    },
+    {
+      "id": "frame.primary-region-crossing",
+      "expected": "supported primary-frame crossing preserves continuous movement"
+    },
+    {
+      "id": "frame.render-origin-shift",
+      "expected": "render-origin shift does not create a physical displacement jump"
+    },
+    {
+      "id": "frame.unsupported-frame",
+      "expected": "unsupported frame rejects work explicitly"
+    },
+    {
+      "id": "frame.teleport-derivative-reset",
+      "expected": "teleport resets motion derivatives and stale navigation evidence"
+    },
+    {
+      "id": "authoring.inspector-full-multi-edit",
+      "expected": "all selected valid authored candidates commit together"
+    },
+    {
+      "id": "authoring.invalid-candidate-rollback",
+      "expected": "invalid batch leaves all selected live configuration unchanged"
+    },
+    {
+      "id": "authoring.undo-redo",
+      "expected": "undo and redo restore complete accepted configurations"
+    },
+    {
+      "id": "authoring.save-reopen",
+      "expected": "authored values persist while runtime ownership and input reload idle"
+    },
+    {
+      "id": "authoring.prefab-descendant-animator-remap",
+      "expected": "duplicated prefab binding maps to its own descendant animator"
+    },
+    {
+      "id": "authoring.play-restoration",
+      "expected": "Play exit restores authored scene without revived runtime intent"
+    },
+    {
+      "id": "parity.exported-content",
+      "expected": "editor and exported runtime match shared movement, authority, arrival and root outcomes"
+    }
+  ],
+  "rootTimeline": {
+    "oneSourceTickTranslationMetres": 0.125,
+    "oneSourceTickYawRadians": 0.04375,
+    "twoSourceTicksAt2xTranslationMetres": 0.25,
+    "twoSourceTicksAt2xYawRadians": 0.0875,
+    "loopBoundaryCase": {
+      "seekAbsoluteTick": 7,
+      "speed": 2.0,
+      "sourceEndAbsoluteTick": 9,
+      "accumulatedCyclesMinimum": 1
+    },
+    "reverseCase": {
+      "reverse": true,
+      "expectedSourceTickOrder": "end < begin",
+      "expectedTranslationSignX": "negative"
+    },
+    "testOnlyControllerCaps": {
+      "maximumSpeedMetresPerSecond": 16.0,
+      "turnRateRadiansPerSecond": 6.283185
+    },
+    "testOnlyPhysicsController": {
+      "radiusMetres": 0.35,
+      "totalHeightMetres": 1.8,
+      "gravityEnabled": false
+    }
+  },
+  "stress": {
+    "population": 1000,
+    "velocity": 700,
+    "rootMotion": 300,
+    "minimumAcceptedChanges": 60000,
+    "measurementSeconds": 600
+  },
+  "paired": {
+    "maximumCandidateP95FrameTimeRatio": 1.1
+  }
+}

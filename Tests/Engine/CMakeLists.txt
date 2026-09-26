@@ -6,6 +6,29 @@ file(GLOB_RECURSE TERRAENGINE_ENGINE_ANIMATION_TEST_SOURCES CONFIGURE_DEPENDS
 
 add_executable(TerraEngine-EngineTests
 	EngineTests.cpp
+	# Locomotion contracts are registered explicitly so empty filters cannot pass.
+	Locomotion/LocomotionSchedulerTests.cpp
+	Locomotion/LocomotionConfigurationTests.cpp
+	Locomotion/LocomotionCommandStoreTests.cpp
+	Locomotion/LocomotionLeaseTests.cpp
+	Locomotion/LocomotionLifecycleTests.cpp
+	Locomotion/LocomotionCoreTests.cpp
+	Locomotion/LocomotionAuthorityTests.cpp
+	Locomotion/LocomotionPhysicsTests.cpp
+	Locomotion/LocomotionNavigationProfileTests.cpp
+	Locomotion/LocomotionNavigationBoundaryTests.cpp
+	Locomotion/LocomotionNavigationIngressTests.cpp
+	Locomotion/LocomotionNavigationInteropTests.cpp
+	Locomotion/LocomotionAnimationBindingTests.cpp
+	Locomotion/LocomotionRootIntervalTests.cpp
+	Locomotion/LocomotionRagdollAuthorityTests.cpp
+	Locomotion/LocomotionRagdollRecoveryTests.cpp
+	Locomotion/LocomotionObservedAnimationTests.cpp
+	Locomotion/LocomotionRootBindingTests.cpp
+	Locomotion/LocomotionRootLifecycleTests.cpp
+	Locomotion/LocomotionStressTests.cpp
+	Locomotion/LocomotionTraceTests.cpp
+	Locomotion/LocomotionReplayTests.cpp
 	Audio/AudioProviderContractTests.cpp
 	Audio/AudioFileFormatTests.cpp
 	Audio/AudioResourceTests.cpp
@@ -113,6 +136,7 @@ add_executable(TerraEngine-EngineTests
 	Navigation/NavigationAgentBoundaryTests.cpp
 	Navigation/NavigationAgentAdmissionTests.cpp
 	Scripting/NavigationAgentAbiTests.cpp
+	Scripting/LocomotionAbiTests.cpp
 	Scripting/NavigationAgentGameplayTests.cpp
 	Scripting/NavigationAgentControllerTests.cpp
 	Scripting/NavigationOutcomeParityTests.cpp
@@ -857,6 +881,60 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/Tests/Engine/Terrain/TerrainExportRuntimeTests.cp
 		LABELS "Engine;Terrain;Export;Runtime;ContentMount"
 		ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.ExportRuntime")
 endif()
+
+add_test(NAME Engine.Locomotion.Scheduler COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Locomotion.Scheduler PROPERTIES
+	LABELS "Engine;Locomotion;Scheduler;Contract"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Engine.Locomotion.Scheduler"
+)
+
+add_test(NAME Engine.Locomotion.Core COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Locomotion.Core PROPERTIES
+	LABELS "Engine;Locomotion;Core;Contract"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Engine.Locomotion.Configuration,Engine.Locomotion.Core"
+)
+
+add_test(NAME Engine.Locomotion.Physics COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Locomotion.Physics PROPERTIES
+	LABELS "Engine;Locomotion;Physics;Contract"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Locomotion.Physics"
+	RUN_SERIAL TRUE
+)
+
+add_test(NAME Engine.Locomotion.Authority COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Locomotion.Authority PROPERTIES
+	LABELS "Engine;Locomotion;Authority;Contract"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Engine.Locomotion.Commands,Locomotion.Lease,Engine.Locomotion.Lifecycle,Engine.Locomotion.Authority"
+)
+
+# Keep every navigation contract in one explicitly registered qualification lane.
+add_test(NAME Engine.Locomotion.Navigation COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Locomotion.Navigation PROPERTIES
+	LABELS "Engine;Locomotion;Navigation;Contract"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Engine.Locomotion.Navigation,Locomotion.NavigationIngress"
+	RUN_SERIAL TRUE
+)
+
+add_test(NAME Engine.Locomotion.Interop COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Locomotion.Interop PROPERTIES
+	LABELS "Engine;Locomotion;Interop;Contract"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Engine.Locomotion.Interop"
+)
+
+add_test(NAME Engine.Locomotion.Animation COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Locomotion.Animation PROPERTIES
+	LABELS "Engine;Locomotion;Animation;Contract"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Engine.Locomotion.Animation,Locomotion.RootInterval,Engine.Locomotion.RootBinding,Engine.Locomotion.RagdollRecovery"
+	RUN_SERIAL TRUE
+)
+
+add_test(NAME Engine.Locomotion.Stress COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Locomotion.Stress PROPERTIES
+	LABELS "Engine;Locomotion;Stress;Contract"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Engine.Locomotion.Stress"
+	RUN_SERIAL TRUE
+	TIMEOUT 180
+)
 
 add_test(NAME Engine.AnimationParityValidator COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.AnimationParityValidator PROPERTIES

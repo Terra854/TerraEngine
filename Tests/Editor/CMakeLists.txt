@@ -17,6 +17,8 @@ add_executable(TerraEngine-EditorTests
 	# Navigation editor contract tests link the same deterministic support code
 	# used by the production editor; only the thin ImGui window remains UI-facing.
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Navigation/NavigationInspectorSupport.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Locomotion/LocomotionInspectorSupport.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/LocomotionAutomationProvider.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Navigation/NavigationSceneOverlay.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Navigation/NavigationAuthoringTransactions.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/NavigationAutomationProvider.cpp
@@ -163,6 +165,9 @@ add_executable(TerraEngine-EditorTests
 	Navigation/NavigationAgentAutomationTests.cpp
 	Navigation/NavigationOutcomeParityTests.cpp
 	Navigation/NavigationAgentAuthoringTests.cpp
+	Locomotion/LocomotionAuthoringTests.cpp
+	Locomotion/LocomotionAutomationTests.cpp
+	Locomotion/LocomotionExportTests.cpp
 	Navigation/NavigationAgentPreviewTests.cpp
 	Navigation/NavigationAgentPersistenceParityTests.cpp
 	AssetPipeline/GltfPackageImporterTests.cpp
@@ -685,6 +690,18 @@ add_test(NAME Editor.Terrain.SaveRecovery COMMAND $<TARGET_FILE:TerraEngine-Edit
 set_tests_properties(Editor.Terrain.SaveRecovery PROPERTIES
 	LABELS "Editor;Terrain;Save;Recovery;Lifecycle"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.TerrainSaveRecovery,Editor.TerrainLifecycle"
+)
+
+add_test(NAME Editor.Locomotion.Authoring COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Locomotion.Authoring PROPERTIES
+	LABELS "Editor;Locomotion;Authoring;Contract"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.Locomotion.Authoring"
+)
+
+add_test(NAME Editor.Locomotion.Automation COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Locomotion.Automation PROPERTIES
+	LABELS "Editor;Locomotion;Automation;Contract"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.Locomotion.Automation"
 )
 
 add_test(NAME Editor.Terrain.LargeWorld COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)

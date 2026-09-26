@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include "Physics/PhysicsCommands.h"
 #include "Physics/PhysicsSettings.h"
 #include "Physics/PhysicsEvents.h"
 #include "Physics/PhysicsQueries.h"
@@ -32,8 +33,10 @@ namespace TerraEngine::Physics {
 			InvalidState,
 			StaleWorld,
 			StaleHandle,
+			OwnershipConflict,
 			CapacityExceeded,
 			Unsupported,
+			UnsupportedFrame,
 			Cancelled,
 			ProviderFailure,
 			FatalProviderFailure
@@ -243,6 +246,7 @@ namespace TerraEngine::Physics {
 			bool allowStairWalking = true;
 			bool useGravity = true;
 			bool enabled = true;
+			PhysicsCharacterRotationPolicy rotationPolicy = PhysicsCharacterRotationPolicy::AlignToUp;
 		};
 
 		struct PhysicsCharacterUpdateRequest {
@@ -252,6 +256,8 @@ namespace TerraEngine::Physics {
 			PhysicsGeneration componentGeneration = 0U;
 			PhysicsPose pose;
 			PhysicsVector3 desiredVelocity;
+			std::uint64_t characterMotionEpoch = 0U;
+			CharacterMotionCommandSource characterMotionSource = CharacterMotionCommandSource::Legacy;
 			float fixedDeltaTime = 1.0F / 60.0F;
 			float jumpSpeed = 0.0F;
 			float resizeHeight = 0.0F;
@@ -489,6 +495,14 @@ namespace TerraEngine::Physics {
 			PhysicsBodyHandle supportBody;
 			std::uint32_t contactCount = 0U;
 			bool supported = false;
+			// One completed physical step, not a render/update interval. Zero
+			// duration or a discontinuity forbids pose-difference speed feedback.
+			float completedStepDuration = 0.0F;
+			PhysicsVector3 requestedPlanarVelocity;
+			PhysicsVector3 realizedDisplacement;
+			float requestedYawRadians = 0.0F;
+			float realizedYawRadians = 0.0F;
+			bool motionDiscontinuity = true;
 		};
 
 		struct PhysicsBackendExtraction {
@@ -612,6 +626,52 @@ namespace TerraEngine::Physics {
 				PhysicsBackendStagingToken& staging) = 0;
 			virtual PhysicsBackendResult UpdateCharacter(const PhysicsCharacterUpdateRequest& request) = 0;
 			virtual PhysicsBackendResult DestroyCharacter(PhysicsCharacterHandle handle) = 0;
+			// Preflight checks the full transition set before either the provider or
+			// the immutable physics authority root changes. Publication repeats this
+			// validation under the provider lock and then clears old motion together.
+			virtual PhysicsBackendResult PreflightCharacterMotionLeases(
+				std::span<const CharacterMotionLeaseChange> changes) const = 0;
+			virtual PhysicsBackendResult PublishCharacterMotionLeases(
+				std::span<const CharacterMotionLeaseChange> changes) = 0;
+			// Replacement controllers may still be staged during the protected
+			// preflight. Commit occurs only after staging succeeds, and changes the
+			// entire external carry batch without allocating or clearing old leases.
+			virtual PhysicsBackendResult PreflightCharacterExternalCarry(
+				std::span<const CharacterExternalCarry> carries) const = 0;
+			virtual bool CommitCharacterExternalCarry(
+				std::span<const CharacterExternalCarry> carries) = 0;
+			virtual PhysicsBackendResult PublishCharacterMotionTarget(const CharacterMotionTarget& target) = 0;
+			// The trusted recovery coordinator validates the external owner and
+			// reserves the immutable world root before this direct provider handoff.
+			virtual PhysicsBackendResult PreflightCharacterExternalRecovery(
+				const CharacterExternalRecoveryTransition& transition) const = 0;
+			virtual bool CommitCharacterExternalRecovery(
+				const CharacterExternalRecoveryTransition& transition) = 0;
+			// A failed ragdoll Activate may never have entered the provider. The
+			// protected abort path reads the controller's actual current pose instead
+			// of accepting a replacement pose from the recovery producer.
+			virtual std::optional<PhysicsPose> ReadCurrentCharacterPose(
+				const PhysicsCharacterCommandTarget& controller) const = 0;
+			// Root reservation owns bounded provider/receipt capacity without movement.
+			// The protected producer then reserves its independent application ledger
+			// before committing or cancelling this exact token.
+			virtual RootMotionIntervalAdmission ReserveRootMotionInterval(
+				const RootMotionInterval& interval) = 0;
+			virtual RootMotionIntervalAdmission CommitRootMotionInterval(
+				RootMotionIntervalReservation reservation) = 0;
+			virtual bool CancelRootMotionIntervalReservation(
+				RootMotionIntervalReservation reservation) = 0;
+			virtual bool CancelRootMotionInterval(
+				RootMotionIntervalId intervalId, RootMotionIntervalError reason) = 0;
+			virtual void CancelRootMotionIntervals(
+				const PhysicsCharacterCommandTarget& controller, RootMotionIntervalError reason) = 0;
+			virtual std::shared_ptr<const RootMotionResultPacket> ReadRootMotionResults(
+				std::uint64_t afterCursor, std::size_t maxRecords) const = 0;
+			virtual bool AcknowledgeRootMotionResults(std::uint64_t throughCursor) = 0;
+			// Preflight the whole planned frame against the bounded tick-result ring.
+			// A false result pauses root consumption without discarding intervals.
+			virtual bool PrepareRootMotionStepResults(
+				PhysicsWorldHandle world, std::size_t plannedStepCount) = 0;
 			// Character intent is accumulated by ApplyCommand, then advanced exactly
 			// once for each engine-owned fixed step. Providers without virtual
 			// characters retain a no-op implementation instead of inventing a render

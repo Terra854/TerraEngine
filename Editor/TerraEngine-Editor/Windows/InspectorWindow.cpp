@@ -12,6 +12,7 @@
 #include "SceneViewWindow.h"
 #include "TerrainWindow.h"
 #include "../Navigation/NavigationInspectorSupport.h"
+#include "../Locomotion/LocomotionInspectorSupport.h"
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Core/Object/Component.h"
@@ -29,6 +30,8 @@
 #include "Engine/Components/ScriptComponent.h"
 #include "Engine/Components/AnimatorComponent.h"
 #include "Engine/Components/NavigationAgentComponent.h"
+#include "Engine/Components/CharacterLocomotionComponent.h"
+#include "Engine/Locomotion/LocomotionSystem.h"
 #include "Engine/Navigation/Agents/NavigationAgentSystem.h"
 #include "Engine/Components/Physics/RigidBodyComponent.h"
 #include "Engine/Components/Physics/ColliderSetComponent.h"
@@ -55,6 +58,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/trigonometric.hpp>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cinttypes>
 #include <cmath>
@@ -334,6 +338,76 @@ struct NavigationAgentEditCandidate
 	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 	NavigationAgentComponent value{};
 };
+
+struct LocomotionEditCandidate
+{
+	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	CharacterLocomotionComponent value{};
+};
+
+std::vector<LocomotionEditCandidate> CopyLocomotionCandidates(const std::vector<entt::entity>& entities)
+{
+	std::vector<LocomotionEditCandidate> candidates;
+	candidates.reserve(entities.size());
+	ObjectManager& objects = ObjectManager::instance();
+	for (const entt::entity entity : entities)
+	{
+		const std::optional<Object> object = objects.getObject(entity);
+		CharacterLocomotionComponent* component = object ? objects.GetComponent<CharacterLocomotionComponent>(*object) : nullptr;
+		if (!object || component == nullptr) return {};
+		auto lock = component->acquireReadLock();
+		candidates.push_back({objects.getUUID(*object), *component});
+	}
+	return candidates;
+}
+
+bool SubmitLocomotionBatch(const std::vector<LocomotionEditCandidate>& candidates,
+	std::string undoLabel, std::string* validationMessage = nullptr)
+{
+	if (candidates.empty()) {
+		if (validationMessage != nullptr) *validationMessage = "Select objects with a current Character Locomotion attachment.";
+		return false;
+	}
+	for (const LocomotionEditCandidate& candidate : candidates) {
+		const auto validation = TerraEngine::Editor::Locomotion::ValidateCharacterLocomotionDraft(candidate.value);
+		if (!validation.accepted) {
+			if (validationMessage != nullptr) *validationMessage = validation.field + ": " + validation.explanation;
+			return false;
+		}
+	}
+	static std::uint64_t sequence = 0U;
+	ObjectManager& objects = ObjectManager::instance();
+	TerraEngine::Scene::TransactionalMutationBuilder builder(
+		"inspector-character-locomotion-" + std::to_string(++sequence),
+		TerraEngine::Scene::TransactionOrigin::Editor, "InspectorCharacterLocomotionMultiEdit");
+	builder.ObserveScene(objects).SetUndoGroup(std::move(undoLabel));
+	for (const LocomotionEditCandidate& candidate : candidates) {
+		const auto& value = candidate.value;
+		const std::string componentName(CharacterLocomotionComponent::kComponentName);
+		// One full candidate per object lets the transaction validate cross-field
+		// rules only after all of its property changes have been staged.
+		builder.ObserveObject(objects, candidate.objectId)
+			.UpdateComponentProperty(candidate.objectId, componentName, "active", TerraEngine::Reflection::Variant{value.active})
+			.UpdateComponentProperty(candidate.objectId, componentName, "controllerBinding", TerraEngine::Reflection::Variant{value.controllerBinding})
+			.UpdateComponentProperty(candidate.objectId, componentName, "navigationBinding", TerraEngine::Reflection::Variant{value.navigationBinding})
+			.UpdateComponentProperty(candidate.objectId, componentName, "animatorBinding", TerraEngine::Reflection::Variant{value.animatorBinding})
+			.UpdateComponentProperty(candidate.objectId, componentName, "animatorObjectId", TerraEngine::Reflection::Variant{value.animatorObjectId})
+			.UpdateComponentProperty(candidate.objectId, componentName, "maximumSpeed", TerraEngine::Reflection::Variant{value.maximumSpeed})
+			.UpdateComponentProperty(candidate.objectId, componentName, "acceleration", TerraEngine::Reflection::Variant{value.acceleration})
+			.UpdateComponentProperty(candidate.objectId, componentName, "braking", TerraEngine::Reflection::Variant{value.braking})
+			.UpdateComponentProperty(candidate.objectId, componentName, "turnRate", TerraEngine::Reflection::Variant{value.turnRate})
+			.UpdateComponentProperty(candidate.objectId, componentName, "facing", TerraEngine::Reflection::Variant{value.facing})
+			.UpdateComponentProperty(candidate.objectId, componentName, "initialMotionMode", TerraEngine::Reflection::Variant{value.initialMotionMode})
+			.UpdateComponentProperty(candidate.objectId, componentName, "speedParameter", TerraEngine::Reflection::Variant{value.speedParameter})
+			.UpdateComponentProperty(candidate.objectId, componentName, "localDirectionXParameter", TerraEngine::Reflection::Variant{value.localDirectionXParameter})
+			.UpdateComponentProperty(candidate.objectId, componentName, "localDirectionZParameter", TerraEngine::Reflection::Variant{value.localDirectionZParameter})
+			.UpdateComponentProperty(candidate.objectId, componentName, "groundedParameter", TerraEngine::Reflection::Variant{value.groundedParameter})
+			.UpdateComponentProperty(candidate.objectId, componentName, "movingParameter", TerraEngine::Reflection::Variant{value.movingParameter});
+	}
+	TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
+	if (validationMessage != nullptr) validationMessage->clear();
+	return true;
+}
 
 std::vector<NavigationAgentEditCandidate> CopyNavigationAgentCandidates(
 	const std::vector<entt::entity>& entities)
@@ -690,6 +764,38 @@ std::string BuildDisplayPropertyName(const std::string& componentName, const std
 	}
 
 	return TerraEngine::Editor::BuildStandardInspectorPropertyLabel(componentName, propertyName);
+}
+
+// Explain the last control on hover, including disabled controls. Wrapping keeps
+// guidance readable in narrow inspectors without widening the property panel.
+void DrawMovementHelp(const char* text)
+{
+	if (!ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) return;
+	ImGui::BeginTooltip();
+	ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0F);
+	ImGui::TextUnformatted(text);
+	ImGui::PopTextWrapPos();
+	ImGui::EndTooltip();
+}
+
+// Use the same left-label/right-value split as the navigation property tables.
+// Clip long labels instead of wrapping onto a second line; hover help preserves
+// the explanation, and the remaining width always belongs to the value editor.
+void DrawMovementLabel(const char* label, const char* help)
+{
+	const ImVec2 localStart = ImGui::GetCursorPos();
+	const ImVec2 screenStart = ImGui::GetCursorScreenPos();
+	const float labelWidth = ImGui::GetContentRegionAvail().x * 0.55F;
+	ImGui::AlignTextToFramePadding();
+	ImGui::PushClipRect(screenStart,
+		ImVec2(screenStart.x + labelWidth - ImGui::GetStyle().ItemInnerSpacing.x,
+			screenStart.y + ImGui::GetFrameHeight()), true);
+	ImGui::TextUnformatted(label);
+	ImGui::PopClipRect();
+	DrawMovementHelp(help);
+	ImGui::SameLine();
+	ImGui::SetCursorPosX(localStart.x + labelWidth);
+	ImGui::SetNextItemWidth(-1.0F);
 }
 
 void DrawAnimatorPropertyGuidance(std::string_view propertyName, bool labelHovered)
@@ -4206,7 +4312,8 @@ void InspectorWindow::DrawCharacterControllerInspector(const std::vector<entt::e
 		std::vector<float> values;
 		for (const auto& candidate : candidates) values.push_back(candidate.value.*member);
 		float value = values.front();
-		if (DrawMixedDragFloat(widgetLabel, value, HasMixedValues(values), .01F, minimum, maximum, "%.3f"))
+		DrawMovementLabel(widgetLabel, historyLabel);
+		if (DrawMixedDragFloat((std::string("##") + propertyName).c_str(), value, HasMixedValues(values), .01F, minimum, maximum, "%.3f"))
 			submit(propertyName, value, [member](auto& character, float updated) { character.*member = updated; }, historyLabel);
 	};
 	drawFloat("Radius (m)", "radius", &CharacterControllerComponent::radius, .01F, 1000.0F, "Edit Character Radius");
@@ -4216,12 +4323,14 @@ void InspectorWindow::DrawCharacterControllerInspector(const std::vector<entt::e
 	std::vector<bool> stairValues;
 	for (const auto& candidate : candidates) stairValues.push_back(candidate.value.allowStairWalking);
 	bool stairWalking = stairValues.front();
-	if (DrawMixedCheckbox("Allow Stair Walking", stairWalking, HasMixedValues(stairValues)))
+	DrawMovementLabel("Allow Stair Walking", "Allow the physical character to climb steps within its Step Height limit.");
+	if (DrawMixedCheckbox("##AllowStairWalking", stairWalking, HasMixedValues(stairValues)))
 		submit("allowStairWalking", stairWalking, [](auto& character, bool value) { character.allowStairWalking = value; }, "Edit Character Stair Walking");
 	std::vector<bool> gravityValues;
 	for (const auto& candidate : candidates) gravityValues.push_back(candidate.value.useGravity);
 	bool useGravity = gravityValues.front();
-	if (DrawMixedCheckbox("Use World Gravity", useGravity, HasMixedValues(gravityValues)))
+	DrawMovementLabel("Use World Gravity", "Apply the physics world's gravity to this character.");
+	if (DrawMixedCheckbox("##UseWorldGravity", useGravity, HasMixedValues(gravityValues)))
 		submit("useGravity", useGravity, [](auto& character, bool value) { character.useGravity = value; }, "Edit Character Gravity");
 }
 
@@ -4364,37 +4473,45 @@ void InspectorWindow::DrawNavigationAgentInspector(const std::vector<entt::entit
 		if(changed) submit(historyLabel, [member, value](NavigationAgentComponent& agent) { agent.*member = value; });
 	};
 
-	ImGui::TextWrapped("Traversal settings are authored transactionally for every selected agent. Runtime destinations and guidance are read-only and never become preset data.");
-	ImGui::SeparatorText("Runtime Navigation (Read-Only)");
-	// Resolve through the immutable publication, then copy one guidance snapshot.
-	// This avoids touching live ECS/runtime records while the inspector draws and
-	// keeps the runtime display advisory even when several agents are selected.
-	const auto identity = TerraEngine::Navigation::NavigationAgentSystem::Instance()
-		.ResolvePublishedAgent(candidates.front().objectId);
-	if(!identity)
-	{
-		ImGui::TextDisabled("Runtime state is awaiting the next protected navigation publication.");
+	ImGui::TextWrapped("Plans routes around obstacles. Character Locomotion follows the route using a Character Controller on the same object.");
+	// Runtime details are opt-in and only read immutable published snapshots.
+	if (ImGui::CollapsingHeader("Runtime Diagnostics (Read-Only)##Navigation")) {
+		ImGui::TextWrapped("First selected agent only. State, outcome and reason explain whether a route can be followed; they are not saved settings.");
+		// Resolve through the immutable publication, then copy one guidance snapshot.
+		// This avoids touching live ECS/runtime records while the inspector draws and
+		// keeps the runtime display advisory even when several agents are selected.
+		const auto identity = TerraEngine::Navigation::NavigationAgentSystem::Instance()
+			.ResolvePublishedAgent(candidates.front().objectId);
+		if(!identity)
+		{
+			ImGui::TextDisabled("Runtime state is awaiting the next protected navigation publication.");
+		}
+		else
+		{
+			const TerraEngine::Navigation::NavigationAgentGuidanceSnapshot guidance =
+				TerraEngine::Navigation::NavigationAgentSystem::Instance().ReadGuidance(*identity);
+			auto printValue = [](const char* label, std::string_view value) {
+				ImGui::Text("%s: %.*s", label, static_cast<int>(value.size()), value.data());
+			};
+			printValue("State", TerraEngine::Navigation::ToString(guidance.state));
+			printValue("Outcome", TerraEngine::Navigation::ToString(guidance.outcome));
+			printValue("Reason", TerraEngine::Navigation::ToString(guidance.reason));
+			ImGui::Text("Guidance: %s  |  Publication: %llu", guidance.usable ? "Available" : "Unavailable",
+				static_cast<unsigned long long>(guidance.publicationGeneration));
+			if(candidates.size() > 1U)
+				ImGui::TextDisabled("The runtime snapshot above belongs to the first selected agent; authored edits still apply atomically to all selected agents.");
+		}
 	}
-	else
-	{
-		const TerraEngine::Navigation::NavigationAgentGuidanceSnapshot guidance =
-			TerraEngine::Navigation::NavigationAgentSystem::Instance().ReadGuidance(*identity);
-		auto printValue = [](const char* label, std::string_view value) {
-			ImGui::Text("%s: %.*s", label, static_cast<int>(value.size()), value.data());
-		};
-		printValue("State", TerraEngine::Navigation::ToString(guidance.state));
-		printValue("Outcome", TerraEngine::Navigation::ToString(guidance.outcome));
-		printValue("Reason", TerraEngine::Navigation::ToString(guidance.reason));
-		ImGui::Text("Guidance: %s  |  Publication: %llu", guidance.usable ? "Available" : "Unavailable",
-			static_cast<unsigned long long>(guidance.publicationGeneration));
-		if(candidates.size() > 1U)
-			ImGui::TextDisabled("The runtime snapshot above belongs to the first selected agent; authored edits still apply atomically to all selected agents.");
-	}
+	ImGui::SeparatorText("Essentials");
+	ImGui::TextWrapped("Start by copying a project profile. Match its dimensions and traversal limits to the Character Controller; these values do not resize the physical capsule.");
 	if(m_Owner != nullptr)
 	{
 		if(const auto* authoring = m_Owner->GetNavigationAuthoringTransactions(); authoring != nullptr && !authoring->CurrentState().profiles.empty())
 		{
-			if(ImGui::BeginCombo("Project Navigation Profile", "Copy project profile..."))
+			DrawMovementLabel("Project Profile", "Copy traversal settings from a project profile. This does not create a live link.");
+			const bool profileOpen = ImGui::BeginCombo("##ProjectNavigationProfile", "Copy project profile...");
+			DrawMovementHelp("Copies traversal dimensions, sampling settings and area costs from a project profile. This is a one-time copy, not a live link; later profile edits do not update this agent.");
+			if(profileOpen)
 			{
 				const auto& profiles = authoring->CurrentState().profiles;
 				for(std::size_t index = 0U; index < profiles.size(); ++index)
@@ -4426,28 +4543,37 @@ void InspectorWindow::DrawNavigationAgentInspector(const std::vector<entt::entit
 	// The default inspector can be narrow. Keep the label column legible without
 	// consuming the editable value column on a ~230-pixel panel.
 	const float availableWidth = ImGui::GetContentRegionAvail().x;
-	const float labelWidth = std::clamp(availableWidth * 0.55F, 100.0F, 210.0F);
+	const float labelWidth = availableWidth * 0.55F;
 	ImGui::TableSetupColumn("Setting", ImGuiTableColumnFlags_WidthFixed, labelWidth);
 	ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
-	auto row = [&drawDouble](const char* label, auto member, double speed, double minimum, double maximum, const char* historyLabel) {
+	auto row = [&drawDouble](const char* label, auto member, double speed, double minimum, double maximum, const char* historyLabel, const char* help) {
 		ImGui::TableNextRow();
 		ImGui::TableSetColumnIndex(0);
 		ImGui::AlignTextToFramePadding();
 		ImGui::TextUnformatted(label);
+		DrawMovementHelp(help);
 		ImGui::TableSetColumnIndex(1);
 		ImGui::SetNextItemWidth(-1.0F);
 		drawDouble((std::string("##") + label).c_str(), member, speed, minimum, maximum, historyLabel);
+		DrawMovementHelp(help);
 	};
-	row("Radius (m)", &NavigationAgentComponent::radiusMetres, 0.01, 0.001, 1000.0, "Edit Navigation Agent Radius");
-	row("Height (m)", &NavigationAgentComponent::heightMetres, 0.01, 0.001, 1000.0, "Edit Navigation Agent Height");
-	row("Step Height (m)", &NavigationAgentComponent::stepHeightMetres, 0.01, 0.0, 100.0, "Edit Navigation Agent Step Height");
-	row("Maximum Slope (deg)", &NavigationAgentComponent::maxSlopeDegrees, 0.1, 0.0, 89.9, "Edit Navigation Agent Maximum Slope");
-	row("Clearance Margin (m)", &NavigationAgentComponent::clearanceMarginMetres, 0.001, 0.0, 100.0, "Edit Navigation Agent Clearance Margin");
-	row("Horizontal Resolution (m)", &NavigationAgentComponent::horizontalResolutionMetres, 0.001, 0.001, 100.0, "Edit Navigation Agent Horizontal Resolution");
-	row("Vertical Resolution (m)", &NavigationAgentComponent::verticalResolutionMetres, 0.001, 0.001, 100.0, "Edit Navigation Agent Vertical Resolution");
-	row("Arrival Tolerance (m)", &NavigationAgentComponent::arrivalToleranceMetres, 0.01, 0.001, 100.0, "Edit Navigation Agent Arrival Tolerance");
-	row("Target Replan Distance (m)", &NavigationAgentComponent::targetDisplacementThresholdMetres, 0.01, 0.001, 1000.0, "Edit Navigation Agent Target Replan Distance");
-	row("Minimum Replan Interval (s)", &NavigationAgentComponent::minimumReplanIntervalSeconds, 0.01, 0.10, 60.0, "Edit Navigation Agent Replan Interval");
+	row("Radius (m)", &NavigationAgentComponent::radiusMetres, 0.01, 0.001, 1000.0, "Edit Navigation Agent Radius", "Horizontal space needed by the agent, in metres. Match the physical controller radius so routes do not use gaps the character cannot fit through.");
+	row("Height (m)", &NavigationAgentComponent::heightMetres, 0.01, 0.001, 1000.0, "Edit Navigation Agent Height", "Required overhead space, in metres. Match the controller's total height, not the visual mesh height.");
+	row("Step Height (m)", &NavigationAgentComponent::stepHeightMetres, 0.01, 0.0, 100.0, "Edit Navigation Agent Step Height", "Largest step the route may traverse, in metres. Keep within the physical controller's stair-climbing capability.");
+	row("Maximum Slope (deg)", &NavigationAgentComponent::maxSlopeDegrees, 0.1, 0.0, 89.9, "Edit Navigation Agent Maximum Slope", "Steepest walkable slope, in degrees. Keep within the controller slope limit to avoid routes the character cannot climb.");
+	row("Arrival Tolerance (m)", &NavigationAgentComponent::arrivalToleranceMetres, 0.01, 0.001, 100.0, "Edit Navigation Agent Arrival Tolerance", "Distance from the destination that counts as arrived, in metres. Increase if the agent struggles to settle exactly on its target.");
+	ImGui::EndTable();
+
+	// Preserve all authored fields, but hide infrequent path-quality tuning until requested.
+	if (!ImGui::CollapsingHeader("Advanced##Navigation")) return;
+	if (!ImGui::BeginTable("NavigationAgentAdvanced", 2, ImGuiTableFlags_SizingStretchProp)) return;
+	ImGui::TableSetupColumn("Setting", ImGuiTableColumnFlags_WidthFixed, labelWidth);
+	ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+	row("Clearance Margin (m)", &NavigationAgentComponent::clearanceMarginMetres, 0.001, 0.0, 100.0, "Edit Navigation Agent Clearance Margin", "Extra safety space around the agent, in metres. Increase for more obstacle clearance; large margins may close narrow passages.");
+	row("Horizontal Resolution (m)", &NavigationAgentComponent::horizontalResolutionMetres, 0.001, 0.001, 100.0, "Edit Navigation Agent Horizontal Resolution", "Horizontal navigation sampling spacing, in metres. Smaller values represent finer detail but increase navigation work. Prefer the project profile value.");
+	row("Vertical Resolution (m)", &NavigationAgentComponent::verticalResolutionMetres, 0.001, 0.001, 100.0, "Edit Navigation Agent Vertical Resolution", "Vertical navigation sampling spacing, in metres. Smaller values resolve finer height differences at greater cost. Prefer the project profile value.");
+	row("Target Replan Distance (m)", &NavigationAgentComponent::targetDisplacementThresholdMetres, 0.01, 0.001, 1000.0, "Edit Navigation Agent Target Replan Distance", "How far a moving target must shift before requesting a new route, in metres. Increase to reduce replanning for small target movements.");
+	row("Minimum Replan Interval (s)", &NavigationAgentComponent::minimumReplanIntervalSeconds, 0.01, 0.10, 60.0, "Edit Navigation Agent Replan Interval", "Minimum time between replans, in seconds. Higher values reduce work but react more slowly to moving targets.");
 
 	std::uint32_t mask = candidates.front().value.excludedAreasMask;
 	const bool mixedMask = std::any_of(candidates.begin() + 1U, candidates.end(), [mask](const auto& candidate) { return candidate.value.excludedAreasMask != mask; });
@@ -4455,10 +4581,12 @@ void InspectorWindow::DrawNavigationAgentInspector(const std::vector<entt::entit
 	ImGui::TableSetColumnIndex(0);
 	ImGui::AlignTextToFramePadding();
 	ImGui::TextUnformatted("Excluded Area Mask");
+	DrawMovementHelp("Bit mask of forbidden navigation areas: bit N excludes area N. Zero allows every area. Use penalties below to discourage an area without forbidding it.");
 	ImGui::TableSetColumnIndex(1);
 	ImGui::SetNextItemWidth(-1.0F);
 	if(mixedMask) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
 	const bool maskChanged = ImGui::InputScalar("##NavigationAgentExcludedAreas", ImGuiDataType_U32, &mask);
+	DrawMovementHelp("Bit mask, not an area number. For example 1 excludes area 0, 2 excludes area 1, and 3 excludes both. Zero excludes none.");
 	if(mixedMask) ImGui::PopItemFlag();
 	if(maskChanged) submit("Edit Navigation Agent Excluded Areas", [mask](NavigationAgentComponent& agent) { agent.excludedAreasMask = mask; });
 
@@ -4484,10 +4612,165 @@ void InspectorWindow::DrawNavigationAgentInspector(const std::vector<entt::entit
 		ImGui::SetNextItemWidth(-1.0F);
 		if(mixed) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
 		const bool changed = ImGui::DragScalar(("##NavigationAgentPenalty" + std::to_string(index)).c_str(), ImGuiDataType_Double, &value, 0.01F, nullptr, nullptr, "%.3f");
+		DrawMovementHelp("Relative travel cost for this area (unitless). Higher values make routes prefer other areas; use the excluded-area mask to forbid traversal entirely.");
 		if(mixed) ImGui::PopItemFlag();
 		if(changed) submit("Edit Navigation Agent Area Penalty", [index, value](NavigationAgentComponent& agent) { agent.areaPenalties[index] = value; });
 	}
 	ImGui::EndTable();
+}
+
+void InspectorWindow::DrawCharacterLocomotionInspector(const std::vector<entt::entity>& entities)
+{
+	std::vector<LocomotionEditCandidate> candidates = CopyLocomotionCandidates(entities);
+	if (candidates.empty()) {
+		ImGui::TextDisabled("Select objects that all have Character Locomotion to edit shared settings.");
+		return;
+	}
+	if (m_LocomotionDraftObjectId != candidates.front().objectId) {
+		m_LocomotionDraftObjectId = candidates.front().objectId;
+		m_LocomotionTextDrafts.clear();
+	}
+	auto submit = [this, &candidates](std::string label, const auto& edit) {
+		std::vector<LocomotionEditCandidate> staged = candidates;
+		for (LocomotionEditCandidate& candidate : staged) edit(candidate.value);
+		if (SubmitLocomotionBatch(staged, std::move(label), &m_LocomotionValidationMessage))
+			candidates = std::move(staged);
+	};
+	ImGui::TextWrapped("Moves the Character Controller on this object. An optional Navigation Agent plans routes; an optional Animator receives measured movement.");
+	ImGui::TextWrapped("Set capsule size and collision limits in Character Controller. Hover a setting for help. Edits apply to all selected characters.");
+	if (!m_LocomotionValidationMessage.empty())
+		ImGui::TextColored(ImVec4(1.0F, 0.45F, 0.45F, 1.0F), "%s", m_LocomotionValidationMessage.c_str());
+
+	const CharacterLocomotionComponent initial = candidates.front().value;
+	// Common movement controls stay visible. Conditional controls use the whole
+	// selection so mixed authoring cannot silently hide another character's setup.
+	ImGui::SeparatorText("Essentials");
+	auto drawDouble = [&candidates, &submit](const char* label, auto member, double minimum, double maximum, const char* help) {
+		double value = candidates.front().value.*member;
+		const bool mixed = std::any_of(candidates.begin() + 1U, candidates.end(), [member, value](const auto& item) { return item.value.*member != value; });
+		if (mixed) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
+		DrawMovementLabel(label, help);
+		const bool changed = ImGui::DragScalar((std::string("##") + label).c_str(), ImGuiDataType_Double, &value, 0.05F, &minimum, &maximum, "%.3f");
+		if (mixed) ImGui::PopItemFlag();
+		DrawMovementHelp(help);
+		if (changed) submit(std::string("Edit Locomotion ") + label, [member, value](auto& candidate) { candidate.*member = value; });
+	};
+	drawDouble("Maximum Speed (m/s)", &CharacterLocomotionComponent::maximumSpeed, 0.0, 100.0, "Movement speed limit in metres per second. Start here when tuning how fast this character moves.");
+	drawDouble("Acceleration (m/s²)", &CharacterLocomotionComponent::acceleration, 0.001, 1000.0, "How quickly velocity-driven movement gains speed, in metres per second squared. Higher values feel more responsive.");
+	drawDouble("Braking (m/s²)", &CharacterLocomotionComponent::braking, 0.001, 1000.0, "How quickly velocity-driven movement slows down, in metres per second squared. Higher values produce shorter stops.");
+	const char* facingNames[] = {"Keep Current Direction", "Face Movement"};
+	int facing = static_cast<int>(initial.facing);
+	DrawMovementLabel("Facing", "Choose whether locomotion turns the character toward movement.");
+	if (ImGui::Combo("##Facing", &facing, facingNames, 2))
+		submit("Edit Locomotion Facing", [facing](auto& value) { value.facing = static_cast<std::uint32_t>(facing); });
+	DrawMovementHelp("Face Movement turns toward the movement direction. Keep Current Direction leaves facing unchanged by locomotion.");
+	const bool canTurn = std::any_of(candidates.begin(), candidates.end(), [](const auto& item) { return item.value.facing == CharacterLocomotionComponent::kFacingMovement; });
+	ImGui::BeginDisabled(!canTurn);
+	drawDouble("Turn Rate (rad/s)", &CharacterLocomotionComponent::turnRate, 0.0, 100.0, "Maximum turning speed in radians per second; about 6.28 is one full turn per second. Used only with Face Movement.");
+	ImGui::EndDisabled();
+	if (!canTurn) ImGui::TextWrapped("Turn rate is unused while keeping the current direction.");
+
+	if (ImGui::CollapsingHeader("Advanced##Locomotion")) {
+		ImGui::SeparatorText("Component Connections");
+		const char* navigationNames[] = {"None", "Self"};
+		int navigation = static_cast<int>(initial.navigationBinding);
+		DrawMovementLabel("Navigation Agent", "Self connects the Navigation Agent on this object; None leaves route following disconnected.");
+		if (ImGui::Combo("##NavigationAgent", &navigation, navigationNames, 2))
+			submit("Edit Locomotion Navigation Binding", [navigation](auto& value) { value.navigationBinding = static_cast<std::uint32_t>(navigation); });
+		DrawMovementHelp("Self uses the Navigation Agent on this object for route following. None is suitable for direct player or script movement without routes.");
+		const char* animatorNames[] = {"None", "Self", "Descendant UUID"};
+		int animator = static_cast<int>(initial.animatorBinding);
+		DrawMovementLabel("Animator", "Connect this object's Animator or a descendant visual's Animator. None disables animation integration.");
+		if (ImGui::Combo("##Animator", &animator, animatorNames, 3)) {
+			if (animator == static_cast<int>(CharacterLocomotionComponent::kDescendantBinding)
+				&& initial.animatorObjectId == TerraEngine::EMPTY_UUID)
+				m_LocomotionTextDrafts["chooseDescendant"] = "1";
+			else submit("Edit Locomotion Animator Binding", [animator](auto& value) {
+				value.animatorBinding = static_cast<std::uint32_t>(animator);
+				if (animator != static_cast<int>(CharacterLocomotionComponent::kDescendantBinding))
+					value.animatorObjectId = TerraEngine::EMPTY_UUID;
+			});
+			if (animator != static_cast<int>(CharacterLocomotionComponent::kDescendantBinding))
+				m_LocomotionTextDrafts.erase("chooseDescendant");
+		}
+		DrawMovementHelp("None disables animation integration. Self uses this object's Animator; Descendant UUID uses an Animator on a child visual. Selecting a child requires its object UUID below.");
+		const bool showDescendant = m_LocomotionTextDrafts.contains("chooseDescendant")
+			|| std::any_of(candidates.begin(), candidates.end(), [](const auto& item) { return item.value.animatorBinding == CharacterLocomotionComponent::kDescendantBinding; });
+		if (showDescendant) {
+			ImGui::TextWrapped("Paste the child visual object's UUID and press Enter to connect its Animator.");
+			auto& uuidDraft = m_LocomotionTextDrafts.try_emplace("animatorObjectId", TerraEngine::ToHexString(initial.animatorObjectId)).first->second;
+			std::array<char, 65U> uuidBuffer{};
+			std::snprintf(uuidBuffer.data(), uuidBuffer.size(), "%s", uuidDraft.c_str());
+			DrawMovementLabel("Descendant Animator UUID", "Paste a child object's UUID, not an asset ID, and press Enter.");
+			if (ImGui::InputText("##DescendantAnimatorUUID", uuidBuffer.data(), uuidBuffer.size(), ImGuiInputTextFlags_EnterReturnsTrue)) {
+				uuidDraft = uuidBuffer.data();
+				const auto parsed = TerraEngine::ParseUUID(uuidDraft);
+				if (!parsed || *parsed == TerraEngine::EMPTY_UUID)
+					m_LocomotionValidationMessage = "animatorObjectId: Enter a nonempty valid descendant UUID.";
+				else submit("Edit Locomotion Descendant Animator", [id = *parsed](auto& value) {
+					value.animatorBinding = CharacterLocomotionComponent::kDescendantBinding;
+					value.animatorObjectId = id;
+				});
+			} else if (ImGui::IsItemEdited()) uuidDraft = uuidBuffer.data();
+			DrawMovementHelp("Object UUID of a same-scene descendant with an Animator, not an animation asset ID. Enter commits the UUID and Descendant binding together; invalid text leaves the saved binding unchanged.");
+		}
+		const char* modeNames[] = {"Velocity", "Root Motion"};
+		int initialMode = static_cast<int>(initial.initialMotionMode);
+		DrawMovementLabel("Initial Motion Mode", "Velocity is the usual starting mode. Root Motion requires animation-authored displacement.");
+		if (ImGui::Combo("##InitialMotionMode", &initialMode, modeNames, 2))
+			submit("Edit Locomotion Initial Mode", [initialMode](auto& value) { value.initialMotionMode = static_cast<std::uint32_t>(initialMode); });
+		DrawMovementHelp("Starting movement source. Velocity uses movement requests; Root Motion consumes animation-authored displacement and requires a compatible Animator/root-motion setup. Runtime commands can change modes.");
+
+		auto drawParameter = [this, &candidates, &submit](const char* label, const char* key, auto member, const char* help) {
+			auto& draft = m_LocomotionTextDrafts.try_emplace(key, candidates.front().value.*member).first->second;
+			std::array<char, 129U> buffer{};
+			std::snprintf(buffer.data(), buffer.size(), "%s", draft.c_str());
+			DrawMovementLabel(label, help);
+			if (ImGui::InputText((std::string("##") + key).c_str(), buffer.data(), buffer.size(), ImGuiInputTextFlags_EnterReturnsTrue)) {
+				draft = buffer.data();
+				submit(std::string("Edit Locomotion ") + label, [member, text = draft](auto& value) { value.*member = text; });
+			} else if (ImGui::IsItemEdited()) draft = buffer.data();
+			DrawMovementHelp(help);
+		};
+		ImGui::SeparatorText("Animation Parameters");
+		const bool hasAnimator = std::any_of(candidates.begin(), candidates.end(), [](const auto& item) { return item.value.animatorBinding != CharacterLocomotionComponent::kNoneBinding; });
+		ImGui::TextWrapped(hasAnimator ? "Optional controller parameter names. Leave blank to skip an output; press Enter to apply." : "Connect an Animator above to enable parameter outputs. Existing names are preserved.");
+		ImGui::BeginDisabled(!hasAnimator);
+		drawParameter("Speed", "speedParameter", &CharacterLocomotionComponent::speedParameter, "Float parameter receiving measured planar speed in m/s, not requested speed. Use it to blend idle, walk and run.");
+		drawParameter("Local Direction X", "localDirectionXParameter", &CharacterLocomotionComponent::localDirectionXParameter, "Float parameter receiving the normalized sideways movement direction in character-local space (unitless).");
+		drawParameter("Local Direction Z", "localDirectionZParameter", &CharacterLocomotionComponent::localDirectionZParameter, "Float parameter receiving the normalized forward/backward movement direction in character-local space (unitless).");
+		drawParameter("Grounded", "groundedParameter", &CharacterLocomotionComponent::groundedParameter, "Bool parameter indicating physical ground contact. Use it to distinguish grounded and airborne animation.");
+		drawParameter("Moving", "movingParameter", &CharacterLocomotionComponent::movingParameter, "Bool parameter indicating measured movement. Use it for idle/moving transitions; a blocked movement request is not actual movement.");
+		ImGui::EndDisabled();
+	}
+
+	// Diagnostic expansion reads published observations; it never edits runtime ownership.
+	if (!ImGui::CollapsingHeader("Runtime Diagnostics (Read-Only)##Locomotion")) return;
+	ImGui::TextWrapped("Authority identifies who controls movement. Desired is requested speed; realized is actual motion after physics. Binding, navigation and animation reasons explain blocked integration.");
+	const auto observations = TerraEngine::Locomotion::LocomotionSystem::Instance().CopyObservations();
+	const TerraEngine::Locomotion::LocomotionObservation* current = nullptr;
+	if (observations) {
+		const auto found = std::find_if(observations->entries.begin(), observations->entries.end(), [&](const auto& item) {
+			return item.handle.objectId == candidates.front().objectId;
+		});
+		if (found != observations->entries.end()) current = &*found;
+	}
+	if (current == nullptr) ImGui::TextDisabled("Awaiting a protected locomotion observation.");
+	else {
+		const auto display = TerraEngine::Editor::Locomotion::DescribeLocomotionRuntime(*current);
+		ImGui::Text("Authority: %s  |  Mode: %s", display.authority.c_str(), display.mode.c_str());
+		ImGui::Text("Desired: %.3f m/s  |  Realized: %.3f m/s", display.desiredSpeed, display.realizedSpeed);
+		ImGui::Text("Physical Tick: %llu", static_cast<unsigned long long>(display.physicalTick));
+		ImGui::Text("Binding: %s", display.binding.c_str());
+		ImGui::Text("Navigation: %s", display.navigation.c_str());
+		ImGui::Text("Animation: %s", display.animation.c_str());
+		if (current->navigationCompatibilityField != TerraEngine::Locomotion::NavigationCompatibilityField::None)
+			ImGui::Text("Navigation mismatch field %u: controller %.3f, profile %.3f",
+				static_cast<unsigned>(current->navigationCompatibilityField),
+				current->navigationControllerValue, current->navigationProfileValue);
+		if (candidates.size() > 1U)
+			ImGui::TextDisabled("Runtime values belong to the first selected character; authored edits apply to all.");
+	}
 }
 
 void InspectorWindow::DrawAnimatorInspector(
@@ -5056,7 +5339,8 @@ void InspectorWindow::OnGui() {
 				}
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (access.entityHasComponent(ObjectManager::instance().getRegistry(), obj)) {
-					if ((IsPhysicsAuthoringComponent(compName) || compName == NavigationAgentComponent::kComponentName)
+					if ((IsPhysicsAuthoringComponent(compName) || compName == NavigationAgentComponent::kComponentName
+						|| compName == CharacterLocomotionComponent::kComponentName)
 						&& !std::all_of(selectedEntities.begin(), selectedEntities.end(), [&](entt::entity selectedObject) {
 							return access.entityHasComponent(ObjectManager::instance().getRegistry(), selectedObject);
 						}))
@@ -5223,6 +5507,21 @@ void InspectorWindow::OnGui() {
 							(void)SubmitNavigationAgentBatch(candidates, "Set Navigation Agent Active");
 						}
 					}
+					else if (compName == CharacterLocomotionComponent::kComponentName) {
+						std::vector<LocomotionEditCandidate> candidates = CopyLocomotionCandidates(selectedEntities);
+						const bool mixedActive = !candidates.empty()
+							&& std::any_of(candidates.begin() + 1U, candidates.end(), [active = candidates.front().value.active](const auto& candidate) {
+								return candidate.value.active != active;
+							});
+						if (!candidates.empty()) compActive = candidates.front().value.active;
+						if (mixedActive) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
+						const bool changed = ImGui::Checkbox("##compActive", &compActive);
+						if (mixedActive) ImGui::PopItemFlag();
+						if (changed) {
+							for (LocomotionEditCandidate& candidate : candidates) candidate.value.active = compActive;
+							(void)SubmitLocomotionBatch(candidates, "Set Character Locomotion Active", &m_LocomotionValidationMessage);
+						}
+					}
 					else if (ImGui::Checkbox("##compActive", &compActive)) {
 						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (IsValid(activeProp)) {
@@ -5283,6 +5582,10 @@ void InspectorWindow::OnGui() {
 					else if (compName == NavigationAgentComponent::kComponentName)
 					{
 						DrawNavigationAgentInspector(selectedEntities);
+					}
+					else if (compName == CharacterLocomotionComponent::kComponentName)
+					{
+						DrawCharacterLocomotionInspector(selectedEntities);
 					}
 					else if (compName == "AnimatorComponent")
 					{

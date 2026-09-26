@@ -54,6 +54,14 @@ EditorCommandLineOptions ParseEditorCommandLine(int argc, char** argv)
 			}
 			continue;
 		}
+		if (argument == "--validate-editor-locomotion")
+		{
+			if (index + 2 < argc && argv[index + 1] != nullptr && argv[index + 2] != nullptr)
+				options.locomotionValidation = EditorCommandLineOptions::LocomotionValidationRequest{
+					std::filesystem::path(argv[++index]), std::filesystem::path(argv[++index])};
+			else options.locomotionValidationArgumentInvalid = true;
+			continue;
+		}
 
 		constexpr std::string_view projectEqualsPrefix = "--project=";
 		if (argument.rfind(projectEqualsPrefix, 0) == 0)

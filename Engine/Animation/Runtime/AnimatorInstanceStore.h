@@ -43,6 +43,11 @@ namespace TerraEngine::Animation {
 		// the free list, so a slot can never be inserted twice.
 		void InvalidateAll();
 		bool IsAlive(AnimatorInstanceHandle handle) const;
+		// A controller reload keeps the live animator handle but changes the
+		// generation copied into future worker frame inputs. Only the same durable
+		// controller asset may be updated; changing assets requires a new handle.
+		bool UpdateControllerGeneration(AnimatorInstanceHandle handle,
+			AnimationAssetHandle controller) noexcept;
 		// Scheduler activation needs only the membership count. Keeping this value
 		// atomic avoids taking the store mutex on every dormant frame; descriptor
 		// capture still takes the mutex before reading any live slot data.

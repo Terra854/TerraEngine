@@ -114,6 +114,15 @@ namespace TerraEngine::Editor
 			if(propertyName == "terrainAssetId") return "Terrain Asset";
 			if(propertyName == "castsShadows") return "Cast Shadows";
 		}
+		if(componentName == "CharacterLocomotionComponent")
+		{
+			if(propertyName == "maximumSpeed") return "Maximum Speed (m/s)";
+			if(propertyName == "acceleration") return "Acceleration (m/s²)";
+			if(propertyName == "braking") return "Braking (m/s²)";
+			if(propertyName == "turnRate") return "Turn Rate (rad/s)";
+			if(propertyName == "animatorObjectId") return "Descendant Animator UUID";
+			if(propertyName == "initialMotionMode") return "Initial Motion Mode";
+		}
 		if(componentName == "Transform")
 		{
 			if(propertyName == "worldPose") return "Canonical World Pose";

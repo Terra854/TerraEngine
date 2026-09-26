@@ -15,6 +15,11 @@ struct EditorCommandLineOptions
 		std::filesystem::path optionsPath;
 		std::filesystem::path reportPath;
 	};
+	struct LocomotionValidationRequest
+	{
+		std::filesystem::path optionsPath;
+		std::filesystem::path reportPath;
+	};
 
 	std::optional<std::filesystem::path> startupProjectPath;
 	// Present only for the installed CapabilityValidation acceptance command. Normal editor
@@ -30,6 +35,10 @@ struct EditorCommandLineOptions
 	// Keep malformed acceptance invocations fail-closed instead of silently
 	// starting an interactive editor that produces no report.
 	bool navigationAgentValidationArgumentInvalid = false;
+	// The locomotion validation host runs only from an explicit two-path
+	// invocation; ordinary editor launches never consume acceptance options.
+	std::optional<LocomotionValidationRequest> locomotionValidation;
+	bool locomotionValidationArgumentInvalid = false;
 };
 
 EditorCommandLineOptions ParseEditorCommandLine(int argc, char** argv);

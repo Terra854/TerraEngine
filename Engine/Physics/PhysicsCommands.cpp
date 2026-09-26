@@ -13,6 +13,116 @@
 #include <utility>
 
 namespace TerraEngine::Physics {
+	bool CharacterMotionOwner::IsValid() const noexcept {
+		return sceneLifetime != 0U && objectId != TerraEngine::EMPTY_UUID
+			&& objectGeneration != 0U && attachmentGeneration != 0U
+			&& slotGeneration != 0U;
+	}
+
+	bool IsCharacterMotionCommand(const PhysicsCommand& command) noexcept {
+		return command.type == PhysicsCommandType::MoveCharacter
+			|| command.type == PhysicsCommandType::JumpCharacter
+			|| command.type == PhysicsCommandType::ResizeCharacter
+			|| command.type == PhysicsCommandType::UpdateCharacter
+			|| (command.type == PhysicsCommandType::Teleport && command.character.IsValid());
+	}
+
+	CharacterMotionLeaseError ValidateCharacterMotionLeaseChange(
+		const CharacterMotionLeaseChange& change, const CharacterMotionLease& current) noexcept {
+		if(change.expected != current) return CharacterMotionLeaseError::StaleEpoch;
+		const CharacterMotionLease& next = change.next;
+		if(next.controller != current.controller || !next.controller.character.IsValid()
+			|| next.controller.world != PhysicsWorldHandle{next.controller.character.worldId,
+				next.controller.character.worldGeneration}
+			|| next.controller.objectId == TerraEngine::EMPTY_UUID
+			|| next.controller.objectGeneration == 0U || next.controller.componentGeneration == 0U
+			|| next.motionEpoch <= current.motionEpoch
+			|| next.publicationEpoch <= current.publicationEpoch) {
+			return CharacterMotionLeaseError::InvalidArgument;
+		}
+		// Locomotion authority epochs belong to one attachment lifetime. A new
+		// attachment may start at one even though this physical controller keeps
+		// a higher tombstone motion epoch from its previous owner.
+		if(next.state == CharacterMotionLeaseState::LocomotionOwned
+			&& (next.authorityEpoch == 0U
+				|| (current.state == CharacterMotionLeaseState::LocomotionOwned
+					&& next.owner == current.owner && next.authorityEpoch <= current.authorityEpoch)))
+			return CharacterMotionLeaseError::StaleEpoch;
+		// This ordinary publication surface cannot release another subsystem's
+		// exclusion. The external owner will need a separate protected handoff
+		// operation bound to its live ragdoll/external identity.
+		if(current.state == CharacterMotionLeaseState::ExternalExclusive)
+			return CharacterMotionLeaseError::OwnershipConflict;
+		if(next.state == CharacterMotionLeaseState::LocomotionOwned) {
+			if(!next.owner.IsValid() || next.owner.objectId != next.controller.objectId
+				|| next.owner.objectGeneration != next.controller.objectGeneration
+				|| next.externalOwnerId != 0U) return CharacterMotionLeaseError::InvalidArgument;
+		} else if(next.state == CharacterMotionLeaseState::ExternalExclusive) {
+			if(next.externalOwnerId == 0U) return CharacterMotionLeaseError::InvalidArgument;
+		} else if(next.state == CharacterMotionLeaseState::Unleased) {
+			if(next.owner.IsValid() || next.externalOwnerId != 0U) return CharacterMotionLeaseError::InvalidArgument;
+		} else {
+			return CharacterMotionLeaseError::InvalidArgument;
+		}
+		return CharacterMotionLeaseError::None;
+	}
+
+	CharacterMotionLeaseError ValidateCharacterExternalRecoveryTransition(
+		const CharacterExternalRecoveryTransition& transition,
+		const CharacterMotionLease& current) noexcept {
+		const CharacterExternalRecoveryIntent& intent = transition.intent;
+		const CharacterMotionLease& next = transition.releasedLease;
+		if(intent.expectedExternalLease != current)
+			return CharacterMotionLeaseError::StaleEpoch;
+		if(current.state != CharacterMotionLeaseState::ExternalExclusive
+			|| current.externalOwnerId == 0U
+			|| intent.externalOwnerId != current.externalOwnerId)
+			return CharacterMotionLeaseError::OwnershipConflict;
+		if(!current.controller.character.IsValid() || current.controller.objectId == TerraEngine::EMPTY_UUID
+			|| current.controller.objectGeneration == 0U || current.controller.componentGeneration == 0U
+			|| intent.bindingGeneration == 0U
+			|| !intent.bindingGuard
+			|| intent.frame != PhysicsFrameHandle{kPrimaryPhysicsFrameId,
+				current.controller.world.worldGeneration}
+			|| !intent.alignedControllerPose.IsFinite())
+			return CharacterMotionLeaseError::InvalidArgument;
+		const PhysicsQuaternion& rotation = intent.alignedControllerPose.rotation;
+		const double lengthSquared = static_cast<double>(rotation.x) * rotation.x
+			+ static_cast<double>(rotation.y) * rotation.y
+			+ static_cast<double>(rotation.z) * rotation.z
+			+ static_cast<double>(rotation.w) * rotation.w;
+		if(!std::isfinite(lengthSquared) || std::fabs(lengthSquared - 1.0) > 0.001)
+			return CharacterMotionLeaseError::InvalidArgument;
+		if(next.controller != current.controller || next.state != CharacterMotionLeaseState::Unleased
+			|| next.owner.IsValid() || next.externalOwnerId != 0U
+			|| next.mode != CharacterMotionMode::Velocity
+			|| next.authorityEpoch <= current.authorityEpoch
+			|| next.motionEpoch <= current.motionEpoch
+			|| next.publicationEpoch <= current.publicationEpoch)
+			return CharacterMotionLeaseError::InvalidArgument;
+		return CharacterMotionLeaseError::None;
+	}
+
+	CharacterMotionLeaseError ValidateCharacterExternalCarry(
+		const CharacterExternalCarry& carry) noexcept {
+		const CharacterMotionLease& old = carry.expectedExternalLease;
+		const CharacterMotionLease& next = carry.nextExternalLease;
+		if(old.state != CharacterMotionLeaseState::ExternalExclusive
+			|| old.externalOwnerId == 0U || next.state != CharacterMotionLeaseState::ExternalExclusive
+			|| next.externalOwnerId != old.externalOwnerId || next.owner.IsValid()
+			|| next.controller.world != old.controller.world
+			|| next.controller.objectId != old.controller.objectId
+			|| next.controller.objectGeneration != old.controller.objectGeneration
+			|| next.controller.componentGeneration == old.controller.componentGeneration
+			|| next.controller.character == old.controller.character
+			|| !next.controller.character.IsValid()
+			|| next.authorityEpoch <= old.authorityEpoch
+			|| next.motionEpoch <= old.motionEpoch
+			|| next.publicationEpoch <= old.publicationEpoch)
+			return CharacterMotionLeaseError::InvalidArgument;
+		return CharacterMotionLeaseError::None;
+	}
+
 	namespace {
 		bool RequiresObjectTarget(PhysicsCommandType type) {
 			switch(type) {

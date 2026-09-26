@@ -681,6 +681,19 @@ namespace TerraEngine::Animation {
 			float pendingRagdollPreviousBlendWeight = 0.0F;
 			NativeAnimationRagdollOperation pendingRagdollOperation =
 				NativeAnimationRagdollOperation::Deactivate;
+			// Physics retains the completed recovery ticket after the ragdoll body
+			// is deactivated. An unsuccessful character handoff can be retried at
+			// later protected boundaries without reviving stale root motion.
+			std::optional<Physics::RagdollExternalRecoveryToken> pendingExternalRecoveryToken;
+			bool pendingRagdollExternalRecovery = false;
+			bool pendingExternalRecoveryNeedsRefresh = false;
+			// A rejected Activate does not implicitly return an already-granted
+			// physical ExternalExclusive lease to locomotion. A later explicit
+			// abort/recovery request must name this terminal failure.
+			std::uint64_t failedRagdollActivateCorrelationId = 0U;
+			RagdollGenerationStamp failedRagdollActivateGeneration{};
+			std::uint64_t failedRagdollActivatePublicationGeneration = 0U;
+			AnimationFixedTick failedRagdollActivateFrameTick = 0;
 		};
 		// Runtime configuration remains protected while it is authored, but frame
 		// finalization owns a retained immutable root.  Replacing this root is one
@@ -796,6 +809,9 @@ namespace TerraEngine::Animation {
 			// around the separate compact SoA column for deterministic publication.
 			std::size_t capturedInputIndex = 0U;
 			AnimationFrameInput input;
+			// Captured from Locomotion's immutable sorted binding table. Worker
+			// evaluation never calls back into the live authority coordinator.
+			bool rootMotionEnabled = false;
 			// Compact captures keep this authority slot only for deterministic commit
 			// order. Their broad evaluator state below is never populated; the tagged
 			// payload owns the only data a visual-only GPU packet may observe.
@@ -835,6 +851,9 @@ namespace TerraEngine::Animation {
 			bool eventStateCaptured = false;
 			AnimationStatus dependencyStatus = AnimationStatus::MissingAsset;
 			AnimatorPlaybackAdvanceResult advance;
+			// Physical interval time is selected before clip playback speed changes
+			// source ticks. It is never reconstructed from advancedTicks.
+			double physicalEvaluationDurationSeconds = 0.0;
 			std::shared_ptr<PoseBuffer> pose;
 			// CPU visual-only culling reuses this immutable prior pose while still
 			// publishing current playback state and generations for the animator.
@@ -943,6 +962,8 @@ namespace TerraEngine::Animation {
 				// Binding fingerprints follow that same retained immutable storage and
 				// are invalidated only when capture replaces part of the binding below.
 				advance = {};
+				rootMotionEnabled = false;
+				physicalEvaluationDurationSeconds = 0.0;
 				pose.reset();
 				retainedVisualPose.reset();
 				publication.reset();
@@ -1464,7 +1485,11 @@ namespace TerraEngine::Animation {
 		// complete clip independently for every runtime record during initial bind.
 		std::map<AnimationAssetHandle, std::uint64_t> clipContentFingerprints;
 		std::vector<AnimationFrameInput> capturedFrameInputs;
-		std::vector<AnimationCommand> capturedCommands;
+			std::vector<AnimationCommand> capturedCommands;
+			// A single resource-publication epoch protects all controller-qualified
+			// commands at the scalar authority exchange. Capture reads it before the
+			// per-command validation so even a reload during Capture changes the seal.
+			std::uint64_t qualifiedControllerResourceRevision = 0U;
                 // Each worker writes only entries targeting its disjoint
                 // animator range. The protected publisher later turns these
                 // staged values into observable receipts together with the pose
@@ -1661,6 +1686,14 @@ namespace TerraEngine::Animation {
 		// runtime type retains its own fine-grained data lock for normal queue/store
 		// operations, and worker evaluation never takes this lifecycle mutex.
 		mutable std::mutex runtimeOwnershipMutex;
+		// Locomotion publishes complete copied mappings without entering this mutex;
+		// Animation workers pin one immutable root for the entire evaluation phase.
+		std::atomic<std::shared_ptr<const AnimationRootControllerBindingSnapshot>>
+			rootControllerBindings;
+		// Accepted ragdoll Activate is visible at submission, before any worker
+		// evaluates root motion or the next locomotion movement publication.
+		std::atomic<std::shared_ptr<const AnimationRagdollExclusionSnapshot>>
+			ragdollExclusions;
 		// The singleton starts usable for the existing engine bootstrap path. The
 		// flag then prevents calls after Shutdown from recreating queue ownership;
 		// only an explicit Initialize begins another runtime session.
@@ -1832,6 +1865,7 @@ namespace TerraEngine::Animation {
                   sealedAuthorityCandidateReady = false;
                   capturedFrameInputs.clear();
                   capturedCommands.clear();
+                  qualifiedControllerResourceRevision = 0U;
                   capturedCommandStatuses.clear();
                   capturedProceduralCommands.clear();
                   capturedProceduralCommandStatuses.clear();
@@ -2969,6 +3003,17 @@ namespace TerraEngine::Animation {
 			frameSceneGeneration = ObjectManager::instance().GetSceneGeneration();
 			frameConsumerReadView =
 				AnimationConsumerRegistry::Instance().CaptureReadView();
+			const auto rootBindings = rootControllerBindings.load(std::memory_order_acquire);
+			const auto rootEnabledFor = [&rootBindings](AnimatorInstanceHandle handle) noexcept {
+				if(!rootBindings) return false;
+				const auto found = std::lower_bound(rootBindings->active.begin(),
+					rootBindings->active.end(), handle,
+					[](const AnimationRootControllerBinding& row, AnimatorInstanceHandle key) {
+						return row.animator < key;
+					});
+				return found != rootBindings->active.end() && found->animator == handle
+					&& found->rootMotionEnabled;
+			};
 			frameHasConsumerDeclarations =
 				frameConsumerReadView.HasDeclarations();
 			const std::uint64_t frameSpatialRevision =
@@ -2983,7 +3028,25 @@ namespace TerraEngine::Animation {
 					instances->CaptureFrameInputs(captureTick, capturedFrameInputs);
 					commands->DrainThrough(captureTick, capturedCommands, *instances);
 					capturedCommandStatuses.assign(capturedCommands.size(),
-												   AnimationStatus::NotReady);
+											   AnimationStatus::NotReady);
+					const std::uint64_t controllerRevisionBefore = ResourceManager::Instance()
+						.GetAnimationBindingResourceRevision();
+					qualifiedControllerResourceRevision = 0U;
+					// Qualified commands are tied to the exact resource publication
+					// captured by their producer. Reject a hot-reloaded or tombstoned
+					// controller before any worker can mutate copied parameters.
+					for(std::size_t commandIndex = 0U; commandIndex < capturedCommands.size(); ++commandIndex) {
+						const AnimationAssetHandle expected = capturedCommands[commandIndex].expectedController;
+						if(!expected.IsValid()) continue;
+						const auto current = ResourceManager::Instance().TryGetAnimationAssetRuntimeGeneration(
+							expected.assetId.value, AssetType::AnimationController);
+						if(!current || *current != expected.generation
+							|| !ResourceManager::Instance().IsAnimationAssetPublished(
+								expected.assetId.value, AssetType::AnimationController))
+							capturedCommandStatuses[commandIndex] = AnimationStatus::StaleHandle;
+						else
+							qualifiedControllerResourceRevision = controllerRevisionBefore;
+					}
 					proceduralCommands->DrainThrough(captureTick, capturedProceduralCommands,
 													 *instances);
 					if(proceduralCommands->CaptureActiveGoals(capturedProceduralGoalRanges,
@@ -3499,8 +3562,9 @@ namespace TerraEngine::Animation {
                                         item.eventStateCaptured;
                                     const bool priorControllerStateCaptured =
                                         item.controllerStateCaptured;
-                                    item.ResetForCaptureReuse();
-                                    item.input = input;
+									item.ResetForCaptureReuse();
+									item.input = input;
+									item.rootMotionEnabled = rootEnabledFor(input.handle);
                                     if (!sourceObjectTransformReusable) {
                                       item.sourceObjectGeneration = 0U;
                                       item.sourceObjectWorldTransform = {};
@@ -4199,7 +4263,8 @@ namespace TerraEngine::Animation {
 			item.cacheRequirements.events = item.cacheRequirements.timeAdvances
 				&& item.binding.eventPolicy != AnimatorEventPolicy::Suppress;
 			item.cacheRequirements.rootMotion = item.cacheRequirements.timeAdvances
-				&& item.binding.rootMotionPolicy != AnimatorRootMotionPolicy::Ignore;
+				&& (item.rootMotionEnabled
+					|| item.binding.rootMotionPolicy != AnimatorRootMotionPolicy::Ignore);
 			item.cacheRequirements.physics = item.executionDecision.consumerClosure.physics;
 			item.cacheRequirements.recording = item.executionDecision.consumerClosure.recording;
 			item.cacheRequirements.replication = item.executionDecision.consumerClosure.networking;
@@ -4261,6 +4326,7 @@ namespace TerraEngine::Animation {
 				&& !item.resolvedConsumers.deterministic
 				&& !item.executionDecision.consumerClosure.HasAuthoritativeSubset()
 				&& item.binding.eventPolicy == AnimatorEventPolicy::Suppress
+				&& !item.rootMotionEnabled
 				&& item.binding.rootMotionPolicy == AnimatorRootMotionPolicy::Ignore
 				&& item.activeProceduralGoals.empty()
 				&& item.pendingMotionQueries.empty()
@@ -5283,6 +5349,18 @@ namespace TerraEngine::Animation {
 				for(std::size_t commandIndex = 0U; commandIndex < capturedCommands.size(); ++commandIndex) {
 					const AnimationCommand& command = capturedCommands[commandIndex];
 					if(command.target != item.input.handle) continue;
+					if(capturedCommandStatuses[commandIndex] != AnimationStatus::NotReady) {
+						if(commandStatus == AnimationStatus::Ok)
+							commandStatus = capturedCommandStatuses[commandIndex];
+						continue;
+					}
+					if(command.expectedController.IsValid()
+						&& command.expectedController != item.input.descriptor.controller) {
+						capturedCommandStatuses[commandIndex] = AnimationStatus::StaleHandle;
+						if(commandStatus == AnimationStatus::Ok)
+							commandStatus = AnimationStatus::StaleHandle;
+						continue;
+					}
 					if(command.kind == AnimationCommandKind::Play
 						|| command.kind == AnimationCommandKind::CrossFade
 						|| command.kind == AnimationCommandKind::SetLayerWeight) {
@@ -5409,6 +5487,22 @@ namespace TerraEngine::Animation {
 					// state once before ordinary advancement resumes.
 					effectiveTime = {};
 				}
+				if(item.binding.updatePolicy != AnimatorUpdatePolicy::Manual
+					&& !item.restoredFromHistory) {
+					switch(item.binding.playback.timePolicy) {
+					case AnimatorTimePolicy::Scaled:
+						item.physicalEvaluationDurationSeconds = effectiveTime.scaledDeltaSeconds;
+						break;
+					case AnimatorTimePolicy::Unscaled:
+						item.physicalEvaluationDurationSeconds = effectiveTime.unscaledDeltaSeconds;
+						break;
+					case AnimatorTimePolicy::Fixed:
+						item.physicalEvaluationDurationSeconds = effectiveTime.fixedDeltaTicks > 0
+							? static_cast<double>(effectiveTime.fixedDeltaTicks)
+								/ static_cast<double>(kAnimationFixedTicksPerSecond) : 0.0;
+						break;
+					}
+				}
 				const AnimationStatus advanceStatus = item.playback.Advance(effectiveTime, item.advance);
 				AnimationStatus transitionAdvanceStatus = AnimationStatus::Ok;
 				if(item.candidateGraphState.activeTransitionStableId != 0U
@@ -5486,7 +5580,8 @@ namespace TerraEngine::Animation {
 				// consumers still request CPU authority even when the current clip has no
 				// track, while interrupted/cross-fading root motion remains authoritative.
 				modeRequest.consumers.rootMotion = RequiresCpuRootMotionAuthority(
-					item.binding.rootMotionPolicy,
+					item.rootMotionEnabled ? AnimatorRootMotionPolicy::ApplyToCharacter
+						: item.binding.rootMotionPolicy,
 					item.binding.clip != nullptr && item.binding.clip->rootMotion.enabled,
 					item.transition.capturedSourceRootMotion.has_value(),
 					item.transition.ready && item.transition.destination.clip != nullptr
@@ -7636,12 +7731,28 @@ namespace TerraEngine::Animation {
 			}
 
 			if(item.dependencyStatus == AnimationStatus::Ok) {
+				const auto rootSourceFingerprint = [&item](
+					AnimationGeneration clipGeneration,
+					std::uint64_t clipContentFingerprint) noexcept {
+					// This is a source/graph identity, not the authority publication
+					// generation that advances every frame. Hot reload changes it even
+					// when the animator handle remains unchanged.
+					std::uint64_t hash = 14695981039346656037ULL;
+					for(const std::uint64_t value : {
+						static_cast<std::uint64_t>(item.binding.programGeneration),
+						static_cast<std::uint64_t>(clipGeneration), clipContentFingerprint}) {
+						hash ^= value;
+						hash *= 1099511628211ULL;
+					}
+					return hash == 0U ? 1U : hash;
+				};
 				auto extractClipRootMotion = [&item, &evaluator](
 					const AnimationClipAsset* clip,
 					const AnimationClipView& view,
 					const AnimatorPlayback& playback,
 					const AnimatorPlaybackAdvanceResult& advance,
 					std::uint64_t stateId,
+					std::uint64_t sourceGeneration,
 					std::optional<AnimationRootMotionDelta>& output) {
 					output.reset();
 					if(clip == nullptr || !clip->rootMotion.enabled
@@ -7693,7 +7804,12 @@ namespace TerraEngine::Animation {
 						clip->rootMotion.accumulatedCycleYawRadians;
 					extraction.sourceStateId = stateId;
 					extraction.generation = item.candidatePoseGeneration;
-					extraction.policy = item.binding.rootMotionPolicy;
+					extraction.policy = item.rootMotionEnabled
+						? AnimatorRootMotionPolicy::ApplyToCharacter
+						: item.binding.rootMotionPolicy;
+					extraction.sourceGeneration = sourceGeneration;
+					extraction.evaluationDurationSeconds =
+						item.physicalEvaluationDurationSeconds;
 					AnimationRootMotionDelta candidate;
 					status = ExtractRootMotion(extraction, candidate);
 					if(status == AnimationStatus::Ok) {
@@ -7711,6 +7827,8 @@ namespace TerraEngine::Animation {
 					item.candidateGraphState.activeTransitionStableId != 0U
 						? item.candidateGraphState.transitionSourceStateId
 						: item.binding.stateId,
+					rootSourceFingerprint(item.binding.clipGeneration,
+						item.binding.clipDeterministicContentFingerprint),
 					sourceRootMotion);
 				if(rootStatus == AnimationStatus::Ok
 					&& item.transition.capturedSourceRootMotion) {
@@ -7725,8 +7843,14 @@ namespace TerraEngine::Animation {
 						item.transition.sourceStateId;
 					sourceRootMotion->generation =
 						item.candidatePoseGeneration;
-					sourceRootMotion->policy =
-						item.binding.rootMotionPolicy;
+					sourceRootMotion->policy = item.rootMotionEnabled
+						? AnimatorRootMotionPolicy::ApplyToCharacter
+						: item.binding.rootMotionPolicy;
+					sourceRootMotion->sourceGeneration = rootSourceFingerprint(
+						item.binding.clipGeneration,
+						item.binding.clipDeterministicContentFingerprint);
+					sourceRootMotion->evaluationDurationSeconds =
+						item.physicalEvaluationDurationSeconds;
 				}
 				std::optional<AnimationRootMotionDelta> destinationRootMotion;
 				if(rootStatus == AnimationStatus::Ok
@@ -7738,6 +7862,8 @@ namespace TerraEngine::Animation {
 						item.transition.destinationPlayback,
 						item.transition.destinationAdvance,
 						item.transition.destinationStateId,
+						rootSourceFingerprint(item.transition.destination.clipGeneration,
+							item.transition.destination.deterministicContentFingerprint),
 						destinationRootMotion);
 				}
 				if(rootStatus == AnimationStatus::Ok
@@ -7754,7 +7880,9 @@ namespace TerraEngine::Animation {
 						const AnimationRootMotionDelta empty{
 							.animator = item.input.handle,
 							.generation = item.candidatePoseGeneration,
-							.policy = item.binding.rootMotionPolicy};
+							.policy = item.rootMotionEnabled
+								? AnimatorRootMotionPolicy::ApplyToCharacter
+								: item.binding.rootMotionPolicy};
 						const AnimationRootMotionDelta& source =
 							sourceRootMotion ? *sourceRootMotion : empty;
 						const AnimationRootMotionDelta& destination =
@@ -7795,6 +7923,11 @@ namespace TerraEngine::Animation {
 							destinationWeight >= 0.5F
 								? destination.accumulatedCycles
 								: source.accumulatedCycles;
+						blended.sourceGeneration = source.sourceGeneration
+							^ (destination.sourceGeneration + 0x9e3779b97f4a7c15ULL
+								+ (source.sourceGeneration << 6U)
+								+ (source.sourceGeneration >> 2U));
+						if(blended.sourceGeneration == 0U) blended.sourceGeneration = 1U;
 					}
 					rootStatus = ApplyRetargetRootMotionPolicy(
 						item, blended);
@@ -9903,7 +10036,9 @@ namespace TerraEngine::Animation {
 							item.sourceObjectWorldTransform;
 						publication.request.sourceObjectWorldTransformCaptured =
 							item.sourceObjectWorldTransformCaptured;
-						switch(item.binding.rootMotionPolicy) {
+						switch(item.rootMotionEnabled
+						? AnimatorRootMotionPolicy::ApplyToCharacter
+						: item.binding.rootMotionPolicy) {
 						case AnimatorRootMotionPolicy::Ignore:
 							publication.request.mode = AnimationRootMotionApplicationMode::Ignore;
 							break;
@@ -10060,10 +10195,71 @@ namespace TerraEngine::Animation {
 						.SubmitRagdollPhysicsRequest(std::move(*publication.motorRequest));
 				}
 				if(publication.deactivateRequest) {
+					if(record->ragdollLifecycle == RagdollLifecycleState::Recovering) {
+						const auto bindings = rootControllerBindings.load(std::memory_order_acquire);
+						const auto binding = bindings ? std::lower_bound(bindings->active.begin(),
+							bindings->active.end(), record->handle,
+							[](const AnimationRootControllerBinding& row, AnimatorInstanceHandle handle) {
+								return row.animator < handle;
+							}) : std::vector<AnimationRootControllerBinding>::const_iterator{};
+						if(bindings && binding != bindings->active.end()
+							&& binding->animator == record->handle) {
+							// A bound controller needs a durable Physics recovery ticket;
+							// otherwise keep the ragdoll Recovering and retry next frame.
+							if(binding->bindingValidityGuard
+								&& binding->bindingValidityGuard->Validate()
+									!= Physics::CharacterMotionValidityReason::Valid) continue;
+							const auto lease = Physics::PhysicsSystem::Instance()
+								.ReadCharacterMotionLease(binding->controller);
+							const auto sourcePose = Physics::PhysicsSystem::Instance()
+								.LatestRagdollPhysicsPoseAtOrAfter(record->ragdollId, record->ragdollGeneration);
+							const auto characterPacket = Physics::PhysicsSystem::Instance()
+								.LatestCharacterStatePacket();
+							if(!lease || lease->state != Physics::CharacterMotionLeaseState::ExternalExclusive
+								|| lease->externalOwnerId != RagdollExternalOwnerId(record->handle)
+								|| !sourcePose || !sourcePose->completeCurrentStep
+								|| !characterPacket || !characterPacket->states) continue;
+							const auto character = std::find_if(characterPacket->states->begin(),
+								characterPacket->states->end(), [binding](const Physics::PhysicsCharacterState& state) {
+									return state.world == binding->controller.world
+										&& state.handle == binding->controller.character
+										&& state.objectId == binding->controller.objectId
+										&& state.objectGeneration == binding->controller.objectGeneration
+										&& state.componentGeneration == binding->controller.componentGeneration;
+								});
+							if(character == characterPacket->states->end()) continue;
+							const AnimationQuaternion rotation{character->pose.rotation.x,
+								character->pose.rotation.y, character->pose.rotation.z,
+								character->pose.rotation.w};
+							const AnimationFloat3 offset = RotateVector(
+								rotation, binding->capturedRelativeTranslation);
+							Physics::CharacterExternalRecoveryIntent intent;
+							intent.expectedExternalLease = *lease;
+							intent.externalOwnerId = lease->externalOwnerId;
+							intent.frame = binding->frame;
+							intent.alignedControllerPose.position = {
+								record->ragdollRecoveryAlignedRootPosition.x - offset.x,
+								record->ragdollRecoveryAlignedRootPosition.y - offset.y,
+								record->ragdollRecoveryAlignedRootPosition.z - offset.z};
+							intent.alignedControllerPose.rotation = character->pose.rotation;
+							intent.bindingGeneration = binding->bindingGeneration;
+							intent.bindingGuard = binding->bindingValidityGuard;
+							if(!intent.alignedControllerPose.IsFinite()) continue;
+							try {
+								publication.deactivateRequest->recoveryIntent =
+									std::make_shared<const Physics::CharacterExternalRecoveryIntent>(intent);
+								publication.deactivateRequest->recoverySourcePose = sourcePose;
+							} catch(const std::bad_alloc&) {
+								continue;
+							}
+						}
+					}
 					const RagdollGenerationStamp generation =
 						publication.deactivateRequest->generation;
 					const std::uint64_t correlationId =
 						publication.deactivateRequest->correlationId;
+					const bool externalRecovery =
+						publication.deactivateRequest->recoveryIntent != nullptr;
 					const AnimationStatus queued = Physics::PhysicsSystem::Instance()
 						.SubmitRagdollPhysicsRequest(
 							std::move(*publication.deactivateRequest));
@@ -10081,6 +10277,7 @@ namespace TerraEngine::Animation {
 						record->pendingRagdollCorrelationId = correlationId;
 						record->pendingRagdollOperation =
 							NativeAnimationRagdollOperation::Deactivate;
+						record->pendingRagdollExternalRecovery = externalRecovery;
 					}
 				}
 			}
@@ -10125,6 +10322,14 @@ namespace TerraEngine::Animation {
 			// automatic policy. Both pass through the same reservation ledger, so a
 			// later request for the same mutating generation is rejected, never applied
 			// twice. Worker submissions remain copied until this protected loop.
+			const auto rootBindings = rootControllerBindings.load(std::memory_order_acquire);
+			const auto exclusions = ragdollExclusions.load(std::memory_order_acquire);
+			if(rootBindings && exclusions && !exclusions->entries.empty()) {
+				// A ragdoll Activate accepted after Locomotion publication still makes
+				// the controller physically exclusive before any root interval routes.
+				(void)ApplyRagdollControllerExclusions(*rootBindings, *exclusions,
+					Physics::PhysicsSystem::Instance());
+			}
 			for(const AnimationRootMotionApplicationRequest& request : sidecars.explicitRootMotion) {
 				(void)RouteRootMotionApplication(
 					request,
@@ -10867,10 +11072,313 @@ namespace TerraEngine::Animation {
 			return snapshot;
 		}
 
+		bool HasRagdollExternalLeaseLocked(const RuntimeRecord& record) const noexcept
+		{
+			const auto bindings = rootControllerBindings.load(std::memory_order_acquire);
+			if(!bindings) return false;
+			const auto found = std::lower_bound(bindings->active.begin(), bindings->active.end(),
+				record.handle, [](const AnimationRootControllerBinding& row,
+					AnimatorInstanceHandle handle) { return row.animator < handle; });
+			if(found == bindings->active.end() || found->animator != record.handle) return false;
+			const auto lease = Physics::PhysicsSystem::Instance()
+				.ReadCharacterMotionLease(found->controller);
+			return lease && lease->state == Physics::CharacterMotionLeaseState::ExternalExclusive
+				&& lease->externalOwnerId == RagdollExternalOwnerId(record.handle);
+		}
+
+		AnimationStatus AbortFailedRagdollAdmissionLocked(RuntimeRecord& record) noexcept
+		{
+			// A terminal failed Activate is not itself a release instruction. This
+			// method is reached only for a later explicit Deactivate/RequestRecovery.
+			if(record.failedRagdollActivateCorrelationId == 0U
+				|| record.failedRagdollActivatePublicationGeneration == 0U)
+				return AnimationStatus::NotReady;
+			const auto bindings = rootControllerBindings.load(std::memory_order_acquire);
+			if(!bindings) return AnimationStatus::NotReady;
+			const auto found = std::lower_bound(bindings->active.begin(), bindings->active.end(),
+				record.handle, [](const AnimationRootControllerBinding& row,
+					AnimatorInstanceHandle handle) { return row.animator < handle; });
+			if(found == bindings->active.end() || found->animator != record.handle
+				|| !found->bindingValidityGuard
+				|| found->bindingValidityGuard->Validate()
+					!= Physics::CharacterMotionValidityReason::Valid)
+				return AnimationStatus::StaleHandle;
+			const auto lease = Physics::PhysicsSystem::Instance()
+				.ReadCharacterMotionLease(found->controller);
+			if(!lease || lease->state != Physics::CharacterMotionLeaseState::ExternalExclusive
+				|| lease->externalOwnerId != RagdollExternalOwnerId(record.handle))
+				return AnimationStatus::StaleHandle;
+			Physics::CharacterFailedRagdollAdmissionProof proof;
+			proof.expectedExternalLease = *lease;
+			proof.externalOwnerId = lease->externalOwnerId;
+			proof.ragdollId = record.ragdollId;
+			proof.failedActivationCorrelationId = record.failedRagdollActivateCorrelationId;
+			proof.failedActivationGeneration = record.failedRagdollActivateGeneration;
+			proof.failurePublicationGeneration = record.failedRagdollActivatePublicationGeneration;
+			proof.failureFrameTick = record.failedRagdollActivateFrameTick;
+			proof.frame = found->frame;
+			proof.bindingGeneration = found->bindingGeneration;
+			proof.bindingGuard = found->bindingValidityGuard;
+			const auto released = Physics::PhysicsSystem::Instance()
+				.AbortFailedExternalRagdollAdmission(proof);
+			if(!released.accepted) return AnimationStatus::NotReady;
+			record.failedRagdollActivateCorrelationId = 0U;
+			record.failedRagdollActivateGeneration = {};
+			record.failedRagdollActivatePublicationGeneration = 0U;
+			record.failedRagdollActivateFrameTick = 0;
+			return AnimationStatus::Ok;
+		}
+
+		AnimationStatus RefreshExternalRagdollRecoveryLocked(RuntimeRecord& record) noexcept
+		{
+			// A stale recovery ticket preserves the old external owner. Only an
+			// explicit new RequestRecovery may replace its inert target pose.
+			if(!record.pendingExternalRecoveryToken
+				|| !record.pendingExternalRecoveryNeedsRefresh) return AnimationStatus::NotReady;
+			const auto bindings = rootControllerBindings.load(std::memory_order_acquire);
+			if(!bindings) return AnimationStatus::NotReady;
+			const auto found = std::lower_bound(bindings->active.begin(), bindings->active.end(),
+				record.handle, [](const AnimationRootControllerBinding& row,
+					AnimatorInstanceHandle handle) { return row.animator < handle; });
+			if(found == bindings->active.end() || found->animator != record.handle
+				|| !found->bindingValidityGuard
+				|| found->bindingValidityGuard->Validate()
+					!= Physics::CharacterMotionValidityReason::Valid)
+				return AnimationStatus::StaleHandle;
+			const auto lease = Physics::PhysicsSystem::Instance()
+				.ReadCharacterMotionLease(found->controller);
+			const auto characterPacket = Physics::PhysicsSystem::Instance()
+				.LatestCharacterStatePacket();
+			if(!lease || lease->state != Physics::CharacterMotionLeaseState::ExternalExclusive
+				|| lease->externalOwnerId != RagdollExternalOwnerId(record.handle)
+				|| !characterPacket || !characterPacket->states) return AnimationStatus::StaleHandle;
+			const auto character = std::find_if(characterPacket->states->begin(),
+				characterPacket->states->end(), [found](const Physics::PhysicsCharacterState& state) {
+					return state.world == found->controller.world
+						&& state.handle == found->controller.character
+						&& state.objectId == found->controller.objectId
+						&& state.objectGeneration == found->controller.objectGeneration
+						&& state.componentGeneration == found->controller.componentGeneration;
+				});
+			if(character == characterPacket->states->end()) return AnimationStatus::NotReady;
+			const AnimationQuaternion rotation{character->pose.rotation.x,
+				character->pose.rotation.y, character->pose.rotation.z,
+				character->pose.rotation.w};
+			const AnimationFloat3 offset = RotateVector(
+				rotation, found->capturedRelativeTranslation);
+			Physics::CharacterExternalRecoveryIntent fresh;
+			fresh.expectedExternalLease = *lease;
+			fresh.externalOwnerId = lease->externalOwnerId;
+			fresh.frame = found->frame;
+			fresh.alignedControllerPose.position = {
+				record.ragdollRecoveryAlignedRootPosition.x - offset.x,
+				record.ragdollRecoveryAlignedRootPosition.y - offset.y,
+				record.ragdollRecoveryAlignedRootPosition.z - offset.z};
+			fresh.alignedControllerPose.rotation = character->pose.rotation;
+			fresh.bindingGeneration = found->bindingGeneration;
+			fresh.bindingGuard = found->bindingValidityGuard;
+			if(!fresh.alignedControllerPose.IsFinite()) return AnimationStatus::InvalidArgument;
+			try {
+				const auto immutable = std::make_shared<const Physics::CharacterExternalRecoveryIntent>(fresh);
+				if(Physics::PhysicsSystem::Instance().RefreshExternalCharacterRecovery(
+					*record.pendingExternalRecoveryToken, immutable)
+					!= Physics::CharacterExternalRecoveryError::None)
+					return AnimationStatus::NotReady;
+			} catch(const std::bad_alloc&) {
+				return AnimationStatus::HardLimitExceeded;
+			}
+			record.pendingExternalRecoveryNeedsRefresh = false;
+			const auto completed = Physics::PhysicsSystem::Instance()
+				.CompleteExternalCharacterRecovery(*record.pendingExternalRecoveryToken);
+			if(!completed.accepted) {
+				record.pendingExternalRecoveryNeedsRefresh =
+					completed.error != Physics::CharacterExternalRecoveryError::ProviderRejected
+					&& completed.error != Physics::CharacterExternalRecoveryError::CapacityExceeded;
+				return AnimationStatus::Queued;
+			}
+			record.pendingExternalRecoveryToken.reset();
+			record.ragdollLifecycle = RagdollLifecycleState::Inactive;
+			record.ragdollBlendWeight = 0.0F;
+			record.ragdollRecoveryCandidateId = 0U;
+			record.ragdollRecoveryBlockReason = RagdollRecoveryBlockReason::None;
+			record.ragdollRecoveryDurationSeconds = 0.0F;
+			return AnimationStatus::Ok;
+		}
+
+		void PublishRagdollExclusionForRecordLocked(
+			const RuntimeRecord& record, std::uint64_t completedCorrelation) noexcept
+		{
+			try {
+				const auto current = ragdollExclusions.load(std::memory_order_acquire);
+				if(!current && record.ragdollLifecycle == RagdollLifecycleState::Inactive
+					&& record.failedRagdollActivateCorrelationId == 0U) return;
+				if(current && current->publicationGeneration == std::numeric_limits<std::uint64_t>::max())
+					return;
+				auto next = std::make_shared<AnimationRagdollExclusionSnapshot>();
+				if(current) next->entries = current->entries;
+				const auto found = std::find_if(next->entries.begin(), next->entries.end(),
+					[handle = record.handle](const AnimationRagdollExclusion& entry) {
+						return entry.animator == handle;
+					});
+				// A newer queued Activate must not be erased by an older completion.
+				if(found != next->entries.end()
+					&& found->state == AnimationRagdollExclusionState::PendingActivate
+					&& found->correlationId != completedCorrelation) return;
+				if(record.ragdollLifecycle == RagdollLifecycleState::Inactive
+					&& record.failedRagdollActivateCorrelationId == 0U) {
+					if(found == next->entries.end()) return;
+					next->entries.erase(found);
+				} else {
+					const AnimationRagdollExclusionState state =
+						record.ragdollLifecycle == RagdollLifecycleState::Creating
+							? AnimationRagdollExclusionState::PendingActivate
+							: AnimationRagdollExclusionState::Active;
+					if(found != next->entries.end()) {
+						found->state = state;
+						found->correlationId = record.pendingRagdollCorrelationId != 0U
+							? record.pendingRagdollCorrelationId
+							: record.failedRagdollActivateCorrelationId != 0U
+								? record.failedRagdollActivateCorrelationId : completedCorrelation;
+						found->externalOwnerId = RagdollExternalOwnerId(record.handle);
+					} else {
+						if(next->entries.size() >= 4096U) return;
+						next->entries.push_back({record.handle, state,
+							record.failedRagdollActivateCorrelationId != 0U
+								? record.failedRagdollActivateCorrelationId : completedCorrelation,
+							RagdollExternalOwnerId(record.handle)});
+					}
+				}
+				next->publicationGeneration = current ? current->publicationGeneration + 1U : 1U;
+				ragdollExclusions.store(std::move(next), std::memory_order_release);
+			} catch(const std::bad_alloc&) {
+				// Preserve the previous exclusion on memory pressure. Movement fails
+				// closed until a later protected reconciliation succeeds.
+			}
+		}
+
+		void RejectDrainedFrameCommandsLocked() noexcept
+		{
+			// A controller reload after Capture invalidates the entire sealed frame.
+			// Every queue was already drained, so finish each copied request with a
+			// terminal stale receipt while retaining the prior authority/runtime root.
+			for(const AnimationCommand& command : capturedCommands)
+				commands->PublishCompletion(command, AnimationStatus::StaleHandle, frameTick, 0U);
+			for(const NativeAnimationProceduralGoalCommand& command : capturedProceduralCommands)
+				proceduralCommands->PublishCompletion(command, AnimationStatus::StaleHandle, frameTick, 0U);
+			if(advancedCommands == nullptr) return;
+			for(const NativeAnimationRetargetRequest& request : capturedRetargetRequests) {
+				NativeAnimationRetargetSnapshot result{};
+				result.header = MakeNativeHeader(NativeAnimationRecordKind::RetargetSnapshot, sizeof(result));
+				result.status = NativeAnimationStatus::StaleHandle;
+				result.animator = request.animator;
+				result.profileAssetId = request.profileAssetId;
+				result.profileGeneration = request.profileGeneration;
+				result.observationTick = frameTick;
+				(void)advancedCommands->Publish(result);
+			}
+			for(const NativeAnimationMotionMatchRequest& request : capturedMotionMatchRequests) {
+				NativeAnimationMotionMatchSnapshot result{};
+				result.header = MakeNativeHeader(NativeAnimationRecordKind::MotionMatchSnapshot, sizeof(result));
+				result.status = NativeAnimationStatus::StaleHandle;
+				result.animator = request.animator;
+				result.databaseAssetId = request.databaseAssetId;
+				result.databaseGeneration = request.databaseGeneration;
+				result.queryId = request.queryId;
+				result.observationTick = frameTick;
+				(void)advancedCommands->Publish(result);
+			}
+			for(const NativeAnimationMotionMatchQueryRequestV2& request : capturedMotionMatchQueriesV2) {
+				NativeAnimationMotionMatchResultV2 result{};
+				result.header = MakeNativeHeader(NativeAnimationRecordKind::MotionMatchResultV2, sizeof(result));
+				result.status = NativeAnimationStatus::StaleHandle;
+				result.gpuStatus = NativeAnimationStatus::StaleHandle;
+				result.animator = request.animator;
+				result.databaseAssetId = request.databaseAssetId;
+				result.databaseGeneration = request.databaseGeneration;
+				result.schemaFingerprint = request.schemaFingerprint;
+				result.queryId = request.queryId;
+				result.observationTick = frameTick;
+				result.populatedFields = static_cast<std::uint32_t>(
+					NativeAnimationMotionMatchResultField::Identity);
+				(void)advancedCommands->Publish(result);
+			}
+			for(const NativeAnimationRagdollRequest& request : capturedRagdollRequests) {
+				NativeAnimationRagdollSnapshot result{};
+				result.header = MakeNativeHeader(NativeAnimationRecordKind::RagdollSnapshot, sizeof(result));
+				result.status = NativeAnimationStatus::StaleHandle;
+				result.animator = request.animator;
+				result.profileAssetId = request.profileAssetId;
+				result.profileGeneration = request.profileGeneration;
+				result.physicsWorldGeneration = request.physicsWorldGeneration;
+				result.observationTick = frameTick;
+				(void)advancedCommands->Publish(result);
+				DropStalePendingRagdollExclusionLocked(
+					{request.animator.slotIndex, request.animator.generation}, request.correlationId);
+			}
+			for(const NativeAnimationDeterminismRequest& request : capturedDeterminismRequests) {
+				NativeAnimationDeterminismSnapshot result{};
+				result.header = MakeNativeHeader(NativeAnimationRecordKind::DeterminismSnapshot, sizeof(result));
+				result.status = NativeAnimationStatus::StaleHandle;
+				result.animator = request.animator;
+				result.tick = frameTick;
+				(void)advancedCommands->Publish(result);
+			}
+		}
+
+		void DropStalePendingRagdollExclusionLocked(
+			AnimatorInstanceHandle animator, std::uint64_t correlationId) noexcept
+		{
+			try {
+				const auto current = ragdollExclusions.load(std::memory_order_acquire);
+				if(!current || current->publicationGeneration == std::numeric_limits<std::uint64_t>::max())
+					return;
+				const auto found = std::find_if(current->entries.begin(), current->entries.end(),
+					[animator, correlationId](const AnimationRagdollExclusion& entry) {
+						return entry.animator == animator
+							&& entry.correlationId == correlationId
+							&& entry.state == AnimationRagdollExclusionState::PendingActivate;
+					});
+				if(found == current->entries.end()) return;
+				auto next = std::make_shared<AnimationRagdollExclusionSnapshot>(*current);
+				next->entries.erase(next->entries.begin()
+					+ static_cast<std::ptrdiff_t>(std::distance(current->entries.begin(), found)));
+				next->publicationGeneration = current->publicationGeneration + 1U;
+				ragdollExclusions.store(std::move(next), std::memory_order_release);
+			} catch(const std::bad_alloc&) {
+				// Keeping a stale exclusion is safer than accidentally restoring motion.
+			}
+		}
+
 		void SynchronizeRagdollResultsLocked(
 			std::uint64_t publicationGeneration) noexcept
 		{
 			if(advancedCommands == nullptr) return;
+			// Provider Deactivate may have succeeded while the final character
+			// teleport/unlease was temporarily unavailable. The Physics ticket
+			// retains its immutable pose and lease proof across render frames.
+			const auto retryRoot = runtimeRecords.load(std::memory_order_acquire);
+			if(retryRoot) retryRoot->ForEach([this, publicationGeneration](
+				const std::shared_ptr<RuntimeRecord>& owned) {
+				if(!owned || !owned->pendingExternalRecoveryToken
+					|| owned->pendingExternalRecoveryNeedsRefresh) return;
+				const auto completed = Physics::PhysicsSystem::Instance()
+					.CompleteExternalCharacterRecovery(*owned->pendingExternalRecoveryToken);
+				if(completed.accepted) {
+					owned->pendingExternalRecoveryToken.reset();
+					owned->ragdollLifecycle = RagdollLifecycleState::Inactive;
+					owned->ragdollBlendWeight = 0.0F;
+					owned->ragdollRecoveryCandidateId = 0U;
+					owned->ragdollRecoveryBlockReason = RagdollRecoveryBlockReason::None;
+					owned->ragdollRecoveryDurationSeconds = 0.0F;
+					PublishRagdollExclusionForRecordLocked(*owned, 0U);
+					(void)advancedCommands->Publish(MakeRagdollSnapshot(
+						*owned, NativeAnimationStatus::Ok, frameTick,
+						publicationGeneration));
+				} else if(completed.error != Physics::CharacterExternalRecoveryError::ProviderRejected
+					&& completed.error != Physics::CharacterExternalRecoveryError::CapacityExceeded) {
+					owned->pendingExternalRecoveryNeedsRefresh = true;
+				}
+			});
 			const std::shared_ptr<const RagdollPhysicsResultSnapshot> results =
 				Physics::PhysicsSystem::Instance().LatestRagdollPhysicsResults();
 			if(!results || !results->results) return;
@@ -10882,23 +11390,59 @@ namespace TerraEngine::Animation {
 						|| owned->pendingRagdollCorrelationId == 0U
 						|| owned->pendingRagdollCorrelationId != result.correlationId) return;
 					RuntimeRecord& record = *owned;
+					AnimationStatus snapshotStatus = result.status;
 					if(result.status == AnimationStatus::Ok) {
 						record.ragdollGeneration = result.generation;
 						switch(record.pendingRagdollOperation) {
 						case NativeAnimationRagdollOperation::Activate:
 							record.ragdollCreated = true;
+							record.failedRagdollActivateCorrelationId = 0U;
+							record.failedRagdollActivateGeneration = {};
+							record.failedRagdollActivatePublicationGeneration = 0U;
+							record.failedRagdollActivateFrameTick = 0;
 							record.ragdollLifecycle = RagdollLifecycleState::Active;
 							record.ragdollLifecycleStartTick = result.committedStep;
 							record.ragdollRecoveryBlockReason =
 								RagdollRecoveryBlockReason::None;
 							break;
 						case NativeAnimationRagdollOperation::Deactivate:
-							record.ragdollLifecycle = RagdollLifecycleState::Inactive;
-							record.ragdollBlendWeight = 0.0F;
-							record.ragdollRecoveryCandidateId = 0U;
-							record.ragdollRecoveryBlockReason =
-								RagdollRecoveryBlockReason::None;
-							record.ragdollRecoveryDurationSeconds = 0.0F;
+							if(record.pendingRagdollExternalRecovery
+								&& record.pendingRagdollPreviousLifecycle
+									== RagdollLifecycleState::Recovering) {
+								Physics::RagdollExternalRecoveryToken token;
+								token.world = Physics::PhysicsSystem::Instance().WorldHandle();
+								token.ragdollId = result.ragdollId;
+								token.correlationId = result.correlationId;
+								token.deactivateGeneration = result.generation;
+								token.committedStep = result.committedStep;
+								const auto completed = Physics::PhysicsSystem::Instance()
+									.CompleteExternalCharacterRecovery(token);
+								if(completed.accepted) {
+									record.ragdollLifecycle = RagdollLifecycleState::Inactive;
+									record.ragdollBlendWeight = 0.0F;
+									record.ragdollRecoveryCandidateId = 0U;
+									record.ragdollRecoveryBlockReason = RagdollRecoveryBlockReason::None;
+									record.ragdollRecoveryDurationSeconds = 0.0F;
+									record.pendingExternalRecoveryToken.reset();
+									record.pendingExternalRecoveryNeedsRefresh = false;
+								} else {
+									record.pendingExternalRecoveryToken = token;
+									record.ragdollLifecycle = RagdollLifecycleState::TearingDown;
+									// The provider stopped the ragdoll, but the character is
+									// still physically ExternalExclusive. Do not advertise a
+									// completed recovery until the retained ticket grants it.
+									snapshotStatus = AnimationStatus::NotReady;
+									record.pendingExternalRecoveryNeedsRefresh =
+										completed.error != Physics::CharacterExternalRecoveryError::ProviderRejected
+										&& completed.error != Physics::CharacterExternalRecoveryError::CapacityExceeded;
+								}
+							} else {
+								record.ragdollLifecycle = RagdollLifecycleState::Inactive;
+								record.ragdollBlendWeight = 0.0F;
+								record.ragdollRecoveryCandidateId = 0U;
+								record.ragdollRecoveryBlockReason = RagdollRecoveryBlockReason::None;
+								record.ragdollRecoveryDurationSeconds = 0.0F;
+							}
 							break;
 						case NativeAnimationRagdollOperation::RequestRecovery:
 							record.ragdollLifecycle = RagdollLifecycleState::Recovering;
@@ -10916,12 +11460,21 @@ namespace TerraEngine::Animation {
 							record.pendingRagdollPreviousProfileId;
 						record.ragdollBlendWeight =
 							record.pendingRagdollPreviousBlendWeight;
+						if(record.pendingRagdollOperation
+							== NativeAnimationRagdollOperation::Activate) {
+							record.failedRagdollActivateCorrelationId = result.correlationId;
+							record.failedRagdollActivateGeneration = result.generation;
+							record.failedRagdollActivatePublicationGeneration = publicationGeneration;
+							record.failedRagdollActivateFrameTick = result.committedStep;
+						}
 					}
 					(void)advancedCommands->Publish(MakeRagdollSnapshot(
-						record, ToNativeStatus(result.status), result.committedStep,
+						record, ToNativeStatus(snapshotStatus), result.committedStep,
 						publicationGeneration));
 					record.pendingRagdollCorrelationId = 0U;
 					record.pendingRagdollPreviousGeneration = {};
+					record.pendingRagdollExternalRecovery = false;
+					PublishRagdollExclusionForRecordLocked(record, result.correlationId);
 				});
 			}
 		}
@@ -11185,6 +11738,9 @@ namespace TerraEngine::Animation {
 					stale.observationTick = frameTick;
 					stale.publicationGeneration = publicationGeneration;
 					(void)advancedCommands->Publish(std::move(stale));
+					DropStalePendingRagdollExclusionLocked(
+						{request.animator.slotIndex, request.animator.generation},
+						request.correlationId);
 					continue;
 				}
 
@@ -11192,14 +11748,32 @@ namespace TerraEngine::Animation {
 				bool recoveryBlocked = false;
 				if(record->pendingRagdollCorrelationId != 0U) {
 					status = AnimationStatus::NotReady;
+				} else if(request.operation == NativeAnimationRagdollOperation::RequestRecovery
+					&& record->pendingExternalRecoveryToken) {
+					status = record->pendingExternalRecoveryNeedsRefresh
+						? RefreshExternalRagdollRecoveryLocked(*record)
+						: AnimationStatus::Queued;
+				} else if(record->failedRagdollActivateCorrelationId != 0U
+					&& (request.operation == NativeAnimationRagdollOperation::RequestRecovery
+						|| request.operation == NativeAnimationRagdollOperation::Deactivate)) {
+					status = AbortFailedRagdollAdmissionLocked(*record);
 				} else if(request.operation == NativeAnimationRagdollOperation::RequestRecovery) {
 					status = BeginRagdollRecoveryLocked(
 						*record, request, recoveryBlocked);
 				} else if(request.operation == NativeAnimationRagdollOperation::Activate) {
 					PhysicsPoseSnapshot activationPose;
 					RagdollGenerationStamp generation;
-					status = BuildRagdollActivationPoseLocked(
-						*record, request, publicationGeneration, activationPose, generation);
+					// SubmitRagdollRequest published PendingActivate already. Recheck
+					// the copied controller table here so Physics cannot activate a body
+					// while its character still accepts velocity or root movement.
+					const auto rootBindings = rootControllerBindings.load(std::memory_order_acquire);
+					const auto exclusions = ragdollExclusions.load(std::memory_order_acquire);
+					status = rootBindings && exclusions
+						? ApplyRagdollControllerExclusions(*rootBindings, *exclusions,
+							Physics::PhysicsSystem::Instance()) : AnimationStatus::Ok;
+					if(status == AnimationStatus::Ok)
+						status = BuildRagdollActivationPoseLocked(
+							*record, request, publicationGeneration, activationPose, generation);
 					if(status == AnimationStatus::Ok) {
 						RagdollPhysicsRequest activate;
 						activate.kind = RagdollPhysicsRequestKind::Activate;
@@ -11280,6 +11854,15 @@ namespace TerraEngine::Animation {
 				(void)advancedCommands->Publish(MakeRagdollSnapshot(
 					*record, ToNativeStatus(status), frameTick,
 					publicationGeneration, recoveryBlocked));
+				if(request.operation == NativeAnimationRagdollOperation::Activate
+					&& status != AnimationStatus::Queued && status != AnimationStatus::Ok) {
+					record->failedRagdollActivateCorrelationId = request.correlationId;
+					record->failedRagdollActivateGeneration = {};
+					record->failedRagdollActivatePublicationGeneration = publicationGeneration;
+					record->failedRagdollActivateFrameTick = frameTick;
+				}
+				if(status != AnimationStatus::Queued)
+					PublishRagdollExclusionForRecordLocked(*record, request.correlationId);
 			}
 
 			for(const NativeAnimationDeterminismRequest& request : capturedDeterminismRequests) {
@@ -11820,6 +12403,7 @@ namespace TerraEngine::Animation {
 			impl_->ActivateRuntimeOwnershipLocked();
 			impl_->capturedFrameInputs.clear();
 			impl_->capturedCommands.clear();
+			impl_->qualifiedControllerResourceRevision = 0U;
 			impl_->capturedCommandStatuses.clear();
 			impl_->capturedProceduralCommands.clear();
 			impl_->capturedProceduralCommandStatuses.clear();
@@ -11884,6 +12468,7 @@ namespace TerraEngine::Animation {
 			impl_->memoryController.Shutdown();
 			impl_->capturedFrameInputs.clear();
 			impl_->capturedCommands.clear();
+			impl_->qualifiedControllerResourceRevision = 0U;
 			impl_->capturedCommandStatuses.clear();
 			impl_->capturedProceduralCommands.clear();
 			impl_->capturedProceduralCommandStatuses.clear();
@@ -11899,6 +12484,8 @@ namespace TerraEngine::Animation {
 			impl_->candidateFrameWork.clear();
 			impl_->rollbackHistory.ClearAll();
 			impl_->hadScheduledAnimatorMembership = false;
+			impl_->rootControllerBindings.store({}, std::memory_order_release);
+			impl_->ragdollExclusions.store({}, std::memory_order_release);
 			if(impl_->runtimeActive.exchange(false, std::memory_order_acq_rel)) {
 				// Make dormant membership visible before invalidating the protected
 				// store, then retire all handles while producers remain behind the guard.
@@ -11953,7 +12540,14 @@ namespace TerraEngine::Animation {
 			kResourceAnimationResidencyCapabilities,
 			kResourceAnimationClipSegments,
 			kResourceAnimationRollbackState,
-			kResourceAnimatedObjectVisibilitySnapshot
+			kResourceAnimatedObjectVisibilitySnapshot,
+			kResourceLocomotionAnimatorBindings,
+			kResourceRootMotionResults,
+			kResourceAnimationRagdollMappings,
+			kResourcePhysicsCharacterMotionLeases,
+			"PhysicsWorld",
+			"RagdollPhysicsSnapshots",
+			"RagdollPhysicsResults"
 		};
 		declaration.writes = {
 			kResourceAnimationFrameInputs,
@@ -11972,6 +12566,12 @@ namespace TerraEngine::Animation {
 			kResourceAnimationRuntimeState,
 			kResourceAnimationPhysicsHandoffQueue,
 			kResourceAnimationManagedCallbackBatches,
+			kResourceRootMotionIntervals,
+			kResourceRootMotionResults,
+			kResourcePhysicsCharacterMotionLeases,
+			kResourceAnimationRagdollMappings,
+			"PhysicsWorld",
+			"RagdollPhysicsQueue",
 			"SceneMutationQueue",
 			"SceneGraph",
 			"ObjectManager"
@@ -12090,6 +12690,7 @@ namespace TerraEngine::Animation {
 				impl_->ResetFrameIntegrationStateLocked();
 				impl_->capturedFrameInputs.clear();
 				impl_->capturedCommands.clear();
+				impl_->qualifiedControllerResourceRevision = 0U;
 				impl_->capturedCommandStatuses.clear();
 				impl_->pendingRootMotionApplications.clear();
 				impl_->frameWork.clear();
@@ -12136,7 +12737,8 @@ namespace TerraEngine::Animation {
 			WorkerSystemPhaseKind::Snapshot,
 			{kResourceAnimatorComponents, kResourceAnimationCommandQueues, "RuntimeTime", "RuntimeLayout",
 				"Resources", "SceneGraph", "ObjectManager",
-				kResourceAnimatedObjectVisibilitySnapshot},
+				kResourceAnimatedObjectVisibilitySnapshot,
+				kResourceLocomotionAnimatorBindings, kResourceAnimationRagdollMappings},
 			{kResourceAnimationFrameInputs},
 			"Live animator membership, component configuration, commands, transforms, and resource views are copied before worker access.");
 		ConfigureWorkerWorkload(
@@ -12186,7 +12788,7 @@ namespace TerraEngine::Animation {
 			"PublishAnimationAuthority",
 			WorkerSystemPhaseKind::ProtectedCommit,
 			{kResourceAnimationAuthorityPages, kResourceAnimationFrameSidecars,
-				kResourceAnimationAuthorityFrame},
+				kResourceAnimationAuthorityFrame, "Resources"},
 			{kResourceAnimationAuthorityFrame},
 			"Performs the constant-time session/predecessor check and exchanges one sealed authority root.");
 		ConfigureWorkerWorkload(
@@ -12203,9 +12805,15 @@ namespace TerraEngine::Animation {
 			"FinalizePublishedAnimationAuthority",
 			WorkerSystemPhaseKind::ProtectedCommit,
 			{kResourceAnimationAuthorityFrame, kResourceAnimationFrameSidecars,
-				"SceneGraph", "ObjectManager"},
+				"SceneGraph", "ObjectManager", kResourceLocomotionAnimatorBindings,
+				kResourceRootMotionResults, kResourceAnimationRagdollMappings,
+				kResourcePhysicsCharacterMotionLeases, "PhysicsWorld",
+				"RagdollPhysicsSnapshots", "RagdollPhysicsResults"},
 			{kResourceAnimationRuntimeState, kResourceAnimationPhysicsHandoffQueue,
-				kResourceAnimationManagedCallbackBatches, "SceneMutationQueue", "SceneGraph", "ObjectManager"},
+				kResourceAnimationManagedCallbackBatches, kResourceRootMotionIntervals,
+				kResourceRootMotionResults, kResourcePhysicsCharacterMotionLeases,
+				kResourceAnimationRagdollMappings, "PhysicsWorld", "RagdollPhysicsQueue",
+				"SceneMutationQueue", "SceneGraph", "ObjectManager"},
 			"Applies the already accepted immutable commit token and its sparse specialist batches.");
 
 		descriptors[1].explicitDependencies = {descriptors[0].stableDescriptorId};
@@ -12350,6 +12958,19 @@ namespace TerraEngine::Animation {
 					!= impl_->frameLifecycleGenerations.Generation(AnimationLifecycleBoundary::Scene)) {
 				return;
 			}
+			// Capture qualified individual commands against the controller generation
+			// and sealed the binding-resource revision before those checks. A concurrent
+			// resource publication changes this one scalar even if it races Capture;
+			// the protected authority exchange remains constant-time for large crowds.
+			if(impl_->qualifiedControllerResourceRevision != 0U
+				&& ResourceManager::Instance().GetAnimationBindingResourceRevision()
+					!= impl_->qualifiedControllerResourceRevision) {
+				impl_->RejectDrainedFrameCommandsLocked();
+				impl_->sealedAuthorityCandidate = {};
+				impl_->sealedAuthorityCandidateReady = false;
+				impl_->publishedAuthorityCommit = {};
+				return;
+			}
 			const AnimationPublicationReceipt authorityReceipt = impl_->authorityPublisher.Publish(
 				impl_->sealedAuthorityCandidate,
 				runtimeSessionEpoch,
@@ -12385,6 +13006,10 @@ namespace TerraEngine::Animation {
 		};
 		descriptors[8].work = [this, animatorCount, runtimeSessionEpoch, frameDeclarationEpoch](JobGraphContext& context) {
 			if(context.IsCancellationRequested()) return;
+			// Drain previous completed physical ticks before opening the next
+			// authority publication. Physics never calls back under its mutex.
+			AnimationRootMotionResultPublisher::Instance().ObserveRootMotionIntervalResults(
+				Physics::PhysicsSystem::Instance());
 			std::scoped_lock lock(impl_->runtimeOwnershipMutex);
 			Impl::PublishedAuthorityCommitToken token = impl_->publishedAuthorityCommit;
 			if(!token.ready || token.animatorCount != animatorCount || token.frameEpoch != frameDeclarationEpoch
@@ -12477,6 +13102,8 @@ namespace TerraEngine::Animation {
 		// Stage every allocation before mutating the instance store. A failed reserve
 		// or copy therefore leaves both handle liveness and the published root intact.
 		std::vector<AnimatorInstanceHandle> retired;
+		std::shared_ptr<Impl::RuntimeRecordRoot> nextRoot;
+		try {
 		retired.reserve(handles.size());
 		for(const AnimatorInstanceHandle handle : handles) {
 			if(handle.IsValid() && impl_->instances->IsAlive(handle)) {
@@ -12489,16 +13116,69 @@ namespace TerraEngine::Animation {
 
 		const std::shared_ptr<Impl::RuntimeRecordRoot> currentRoot =
 			impl_->runtimeRecords.load(std::memory_order_acquire);
-		std::shared_ptr<Impl::RuntimeRecordRoot> nextRoot = currentRoot
+		nextRoot = currentRoot
 			? std::make_shared<Impl::RuntimeRecordRoot>(*currentRoot)
 			: std::shared_ptr<Impl::RuntimeRecordRoot>{};
+		// Stage the retired root and every physical Teardown request before making
+		// any handle stale. A full bridge queue or failed allocation leaves the old
+		// runtime, stream ownership, and external character lease untouched so the
+		// component coordinator can retry at the next protected boundary.
+		std::vector<RagdollPhysicsRequest> externalTeardowns;
+		externalTeardowns.reserve(retired.size());
+		const auto bindings = impl_->rootControllerBindings.load(std::memory_order_acquire);
+		for(const AnimatorInstanceHandle handle : retired) {
+			if(nextRoot && handle.slotIndex < nextRoot->size()) {
+				nextRoot->Set(handle.slotIndex, {});
+			}
+			const std::uint64_t externalOwnerId = RagdollExternalOwnerId(handle);
+			const auto external = Physics::PhysicsSystem::Instance()
+				.ReadExternalCharacterMotionOwner(externalOwnerId);
+			if(!external) continue;
+			const Impl::RuntimeRecord* record = impl_->FindRuntimeRecordLocked(handle);
+			if(!record || record->ragdollId == 0U) return 0U;
+			Physics::CharacterExternalRetirementIntent intent;
+			intent.expectedExternalLease = *external;
+			intent.externalOwnerId = externalOwnerId;
+			// Feature060 binds the primary frame. A still-valid copied row can
+			// supply its exact frame/generation; a removed AnimatorComponent may
+			// already stale that guard, so physical owner identity is authoritative.
+			intent.frame = {Physics::kPrimaryPhysicsFrameId,
+				external->controller.world.worldGeneration};
+			if(bindings) {
+				const auto found = std::lower_bound(bindings->active.begin(), bindings->active.end(),
+					handle, [](const AnimationRootControllerBinding& row,
+						AnimatorInstanceHandle key) { return row.animator < key; });
+				if(found != bindings->active.end() && found->animator == handle
+					&& found->controller == external->controller
+					&& found->bindingValidityGuard
+					&& found->bindingValidityGuard->Validate()
+						== Physics::CharacterMotionValidityReason::Valid) {
+					intent.frame = found->frame;
+					intent.bindingGeneration = found->bindingGeneration;
+				}
+			}
+			RagdollPhysicsRequest teardown;
+			teardown.kind = RagdollPhysicsRequestKind::Teardown;
+			teardown.ragdollId = record->ragdollId;
+			teardown.generation = record->ragdollGeneration;
+			teardown.expectedCurrentGeneration = record->ragdollGeneration;
+			teardown.correlationId = record->ragdollId ^ 0xA11AFFFF00000000ULL;
+			if(teardown.correlationId == 0U) teardown.correlationId = 1U;
+			teardown.producerOrder = std::numeric_limits<std::uint64_t>::max();
+			teardown.retirementIntent =
+				std::make_shared<const Physics::CharacterExternalRetirementIntent>(intent);
+			externalTeardowns.push_back(std::move(teardown));
+		}
+		if(!externalTeardowns.empty()
+			&& Physics::PhysicsSystem::Instance().SubmitRagdollPhysicsRequestBatch(
+				externalTeardowns) != AnimationStatus::Queued) return 0U;
+		} catch(const std::bad_alloc&) {
+			return 0U;
+		}
 		for(const AnimatorInstanceHandle handle : retired) {
 			// Runtime ownership is held for the complete batch, so a handle proven live
 			// above cannot be replaced between validation and this generation advance.
 			(void)impl_->instances->Invalidate(handle);
-			if(nextRoot && handle.slotIndex < nextRoot->size()) {
-				nextRoot->Set(handle.slotIndex, {});
-			}
 		}
 
 		(void)impl_->InvalidateLifecycleLocked(AnimationLifecycleBoundary::Component);
@@ -12676,6 +13356,16 @@ namespace TerraEngine::Animation {
 			|| record == nullptr || !impl_->instances->IsAlive(handle)) {
 			return AnimationStatus::StaleHandle;
 		}
+		// Rebinding would retire the old ragdoll proof, recovery pose, and profile.
+		// An external character owner may survive a controller-target replacement,
+		// so this low-frequency protected check scans Physics by owner identity rather
+		// than trusting the current animator-to-controller binding table alone.
+		if(record->bindingInitialized
+			&& (record->pendingExternalRecoveryToken.has_value()
+				|| Physics::PhysicsSystem::Instance().HasExternalCharacterMotionOwner(
+					RagdollExternalOwnerId(handle)))) {
+			return AnimationStatus::NotReady;
+		}
 		if(binding.clipGeneration == 0U || binding.skeletonGeneration == 0U
 			|| binding.programGeneration == 0U || binding.stateId == 0U) {
 			return AnimationStatus::InvalidArgument;
@@ -12738,6 +13428,14 @@ namespace TerraEngine::Animation {
 					}
 					initialLayerWeights.push_back(layer.defaultWeight);
 				}
+			}
+			if(sharedPreparation != nullptr) {
+				// The shared template is copied into each actor only after the
+				// controller generation changes. Reserve both destinations now so
+				// that late allocation cannot fail after the instance descriptor
+				// has advanced to the new controller publication.
+				record->parameters.reserve(initialParameters.size());
+				record->layerWeights.reserve(initialLayerWeights.size());
 			}
 		} catch(const std::bad_alloc&) {
 			return AnimationStatus::InternalError;
@@ -12949,6 +13647,16 @@ namespace TerraEngine::Animation {
 			binding.fallbackCompatibilityFingerprint =
 				binding.skeleton->compatibilityFingerprint;
 		}
+		AnimationAssetHandle reboundController{};
+		if(record->descriptor.controller.IsValid() && binding.evaluationProgram) {
+			reboundController = record->descriptor.controller;
+			reboundController.generation = binding.programGeneration;
+			// This is the last generation check before the successful bind commits.
+			// CaptureFrameInputs copies this store descriptor, not the runtime record.
+			if(!impl_->instances->UpdateControllerGeneration(handle, reboundController)) {
+				return AnimationStatus::StaleHandle;
+			}
+		}
 		if(publishGlobalInvalidation) {
 			// A direct-clip crowd batch reaches this point under one protected lock.
 			// The first record invalidates shared authority/presentation ownership;
@@ -12962,9 +13670,8 @@ namespace TerraEngine::Animation {
 		}
 		record->binding = std::move(binding);
 		record->bindingInitialized = true;
-		if(record->descriptor.controller.IsValid()
-			&& record->binding.evaluationProgram) {
-			record->descriptor.controller.generation = record->binding.programGeneration;
+		if(reboundController.IsValid()) {
+			record->descriptor.controller = reboundController;
 		}
 		record->clipView = std::move(clipView);
 		record->eventStream = std::move(eventStream);
@@ -14078,8 +14785,47 @@ namespace TerraEngine::Animation {
 		std::scoped_lock lock(impl_->runtimeOwnershipMutex);
 		if(impl_->runtimeActive.load(std::memory_order_acquire)
 			&& impl_->advancedCommands && impl_->instances) {
+			std::shared_ptr<const AnimationRagdollExclusionSnapshot> stagedExclusion;
+			if(request.operation == NativeAnimationRagdollOperation::Activate) {
+				try {
+					auto next = std::make_shared<AnimationRagdollExclusionSnapshot>();
+					const auto current = impl_->ragdollExclusions.load(std::memory_order_acquire);
+					if(current) next->entries = current->entries;
+					if(current && current->publicationGeneration == std::numeric_limits<std::uint64_t>::max())
+						throw std::bad_alloc{};
+					next->publicationGeneration = current ? current->publicationGeneration + 1U : 1U;
+					const AnimatorInstanceHandle handle{request.animator.slotIndex, request.animator.generation};
+					const auto found = std::find_if(next->entries.begin(), next->entries.end(),
+						[handle](const AnimationRagdollExclusion& entry) { return entry.animator == handle; });
+					if(found == next->entries.end()) {
+						if(next->entries.size() >= 4096U) throw std::bad_alloc{};
+						next->entries.push_back({handle, AnimationRagdollExclusionState::PendingActivate,
+							request.correlationId, RagdollExternalOwnerId(handle)});
+					} else {
+						found->state = AnimationRagdollExclusionState::PendingActivate;
+						found->correlationId = request.correlationId;
+						found->externalOwnerId = RagdollExternalOwnerId(handle);
+					}
+					stagedExclusion = std::move(next);
+				} catch(const std::bad_alloc&) {
+					// Do not accept an Activate that cannot become visible to the
+					// preceding movement authority boundary in the same frame.
+					NativeAnimationRagdollReceipt rejected{};
+					rejected.header = MakeNativeHeader(
+						NativeAnimationRecordKind::RagdollReceipt, sizeof(rejected));
+					rejected.status = NativeAnimationStatus::HardLimitExceeded;
+					rejected.animator = request.animator;
+					rejected.operation = request.operation;
+					rejected.profileGeneration = request.profileGeneration;
+					rejected.correlationId = request.correlationId;
+					rejected.observableTick = request.targetTick;
+					return rejected;
+				}
+			}
 			NativeAnimationRagdollReceipt receipt =
 				impl_->advancedCommands->Submit(request, *impl_->instances);
+			if(receipt.status == NativeAnimationStatus::Queued && stagedExclusion)
+				impl_->ragdollExclusions.store(std::move(stagedExclusion), std::memory_order_release);
 			receipt.publicationGeneration =
 				impl_->authorityPublicationGeneration.load(std::memory_order_acquire);
 			return receipt;
@@ -14187,6 +14933,24 @@ namespace TerraEngine::Animation {
 		if(!impl_->instances->IsAlive(handle)) return AnimationStatus::StaleHandle;
 		return impl_->advancedCommands->Copy(
 			{handle.slotIndex, handle.generation}, destination, requiredCount);
+	}
+
+	void AnimationSystem::PublishRootControllerBindings(
+		std::shared_ptr<const AnimationRootControllerBindingSnapshot> bindings) noexcept
+	{
+		impl_->rootControllerBindings.store(std::move(bindings), std::memory_order_release);
+	}
+
+	std::shared_ptr<const AnimationRootControllerBindingSnapshot>
+	AnimationSystem::ReadRootControllerBindings() const noexcept
+	{
+		return impl_->rootControllerBindings.load(std::memory_order_acquire);
+	}
+
+	std::shared_ptr<const AnimationRagdollExclusionSnapshot>
+	AnimationSystem::ReadRagdollExclusions() const noexcept
+	{
+		return impl_->ragdollExclusions.load(std::memory_order_acquire);
 	}
 
 	AnimatorInstanceHandle AnimationSystem::ResolveAnimatorForObject(

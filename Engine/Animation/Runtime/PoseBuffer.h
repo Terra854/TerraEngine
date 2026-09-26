@@ -80,6 +80,11 @@ namespace TerraEngine::Animation {
 		std::uint32_t layerIndex = 0U;
 		AnimationGeneration generation = 0U;
 		AnimatorRootMotionPolicy policy = AnimatorRootMotionPolicy::ExtractOnly;
+		// The source fingerprint changes on clip/program replacement independently of
+		// this pose generation. Physical duration is evaluated wall/simulation time,
+		// never the speed-scaled distance between source clip ticks.
+		std::uint64_t sourceGeneration = 0U;
+		double evaluationDurationSeconds = 0.0;
 
 		auto operator<=>(const AnimationRootMotionDelta&) const = default;
 	};

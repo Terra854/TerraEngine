@@ -122,6 +122,10 @@ int main(int argc, char** argv) {
 		std::cerr << "[Editor navigation validation] --validate-editor-navigation-agents requires <options-json> <report-json>.\n";
 		return 2;
 	}
+	if(commandLine.locomotionValidationArgumentInvalid) {
+		std::cerr << "[Editor locomotion validation] --validate-editor-locomotion requires <options-json> <report-json>.\n";
+		return 2;
+	}
 	const std::filesystem::path launchDirectory = std::filesystem::current_path();
 	MakeCommandLinePathAbsolute(commandLine.startupProjectPath, launchDirectory);
 	MakeCommandLinePathAbsolute(commandLine.physicsInvariantOutputPath, launchDirectory);
@@ -130,6 +134,10 @@ int main(int argc, char** argv) {
 	{
 		MakeCommandLinePathAbsolute(commandLine.navigationAgentValidation->optionsPath, launchDirectory);
 		MakeCommandLinePathAbsolute(commandLine.navigationAgentValidation->reportPath, launchDirectory);
+	}
+	if(commandLine.locomotionValidation) {
+		MakeCommandLinePathAbsolute(commandLine.locomotionValidation->optionsPath, launchDirectory);
+		MakeCommandLinePathAbsolute(commandLine.locomotionValidation->reportPath, launchDirectory);
 	}
 	ManagedOutcomeProbe managedOutcomeProbe = ManagedOutcomeProbe::None;
 	try
@@ -192,6 +200,9 @@ int main(int argc, char** argv) {
 			commandLine.navigationAgentValidation->optionsPath,
 			commandLine.navigationAgentValidation->reportPath);
 	}
+	if(commandLine.locomotionValidation)
+		editorSystem.SetLocomotionValidationPaths(commandLine.locomotionValidation->optionsPath,
+			commandLine.locomotionValidation->reportPath);
 	// Pass the engine pointer to the editor system so it can access engine state/systems
 	editorSystem.Setup(&engine);
 	
@@ -203,5 +214,7 @@ int main(int argc, char** argv) {
 	// The navigation command writes `orderlyShutdown` only after Engine has run
 	// EditorSystem::Shutdown; ordinary editor and other validation modes retain
 	// their existing exit-code behavior.
-	return editorSystem.FinalizeNavigationAgentValidationAfterEngineShutdown();
+	const int navigationExit = editorSystem.FinalizeNavigationAgentValidationAfterEngineShutdown();
+	const int locomotionExit = editorSystem.FinalizeLocomotionValidationAfterEngineShutdown();
+	return navigationExit != 0 ? navigationExit : locomotionExit;
 }

@@ -1,6 +1,7 @@
 // PrefabComposition.cpp - deterministic prefab source and instance resolution.
 
 #include "PrefabComposition.h"
+#include "Components/CharacterLocomotionComponent.h"
 
 #include <algorithm>
 #include <functional>
@@ -139,6 +140,36 @@ namespace TerraEngine::Scene {
 				}
 			}
 		}
+
+		bool IsSourceDescendant(const SceneGraph& graph, TerraEngine::UUID ancestor, TerraEngine::UUID candidate)
+		{
+			// A bounded parent walk rejects malformed cycles and never treats an
+			// unrelated mapped UUID as this component's descendant animator.
+			for (std::size_t depth = 0U; depth < graph.objects.size(); ++depth)
+			{
+				const auto found = graph.objects.find(candidate);
+				if (found == graph.objects.end() || found->second.parentId == TerraEngine::EMPTY_UUID) return false;
+				candidate = found->second.parentId;
+				if (candidate == ancestor) return true;
+			}
+			return false;
+		}
+
+		bool RemapLocomotionPayload(nlohmann::json& payload, const PrefabSource& source,
+			const PrefabInstance& instance, TerraEngine::UUID sourceObjectId)
+		{
+			CharacterLocomotionComponent authored{};
+			if (!CharacterLocomotionComponent::DeserializeAuthored(authored, payload)) return false;
+			if (authored.animatorBinding != CharacterLocomotionComponent::kDescendantBinding) return true;
+			if (!IsSourceDescendant(source.sourceGraph, sourceObjectId, authored.animatorObjectId)) return true;
+			const auto mapped = instance.sourceToInstanceObjectIds.find(authored.animatorObjectId);
+			if (mapped == instance.sourceToInstanceObjectIds.end() || mapped->second == TerraEngine::EMPTY_UUID) return true;
+			// Only a descendant copied into this instance changes identity. External
+			// authored UUIDs remain unresolved so runtime binding can diagnose them.
+			authored.animatorObjectId = mapped->second;
+			payload = CharacterLocomotionComponent::SerializeAuthored(authored);
+			return true;
+		}
 	}
 
 	bool ValidatePrefabSource(PrefabSource& source)
@@ -204,6 +235,15 @@ namespace TerraEngine::Scene {
 			for (auto& [componentName, payload] : components)
 			{
 				if (componentName == "ConstraintSetComponent") RemapConstraintPayload(payload, instance);
+				if (componentName == CharacterLocomotionComponent::kComponentName
+					&& !RemapLocomotionPayload(payload, resolvedDefaults, instance, sourceObjectId))
+				{
+					result.success = false;
+					result.resolvedComponentDefaults.clear();
+					result.diagnostics.push_back(MakePrefabDiagnostic(SceneDiagnosticSeverity::Error, sourceObjectId,
+						"Prefab contains invalid character locomotion authoring.", "Correct the authored locomotion fields before instantiating."));
+					return result;
+				}
 			}
 			result.resolvedComponentDefaults[resolvedObjectId] = std::move(components);
 		}

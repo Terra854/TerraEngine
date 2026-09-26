@@ -1,5 +1,63 @@
 # TerraEngine Testing
 
+## Movement inspector usability
+
+Build `TerraEngine-Editor` and `TerraEngine-EditorTests` using the RelWithDebInfo
+workflow below, then run `ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo
+-R 'Editor.Locomotion|Editor.Navigation' --output-on-failure` and install with
+`cmake --install out/build/RelWithDebInfo --config RelWithDebInfo` (close the editor first).
+
+In the installed editor, select the navigation-demo knight. Both movement
+inspectors should show Essentials, with Advanced and read-only Runtime Diagnostics
+collapsed initially. Navigation dimensions describe route clearance, not a capsule
+resize; edit the physical capsule in Character Controller. Hover labels and inputs
+for units and usage guidance. Check labels and inputs in a narrow Inspector.
+Character Controller, Navigation Agent, and Character Locomotion properties use
+single-line rows with the label on the left and the value/control on the right.
+Long labels clip rather than wrap; widen the Inspector or hover for guidance.
+Expand Advanced to check profile sampling/replanning and animation connections.
+Keep Current Direction disables turn rate; Animator None disables parameter names
+without clearing them. Select Descendant UUID, enter a child UUID and press Enter;
+invalid input must not replace the saved binding. Confirm a valid edit and undo/redo,
+including multiple selected characters. Opening sections alone must not dirty the scene.
+
+The source-wiring test `Editor.Locomotion.Authoring.InspectorProgressiveDisclosure`
+guards default-collapsed sections and conditional controls; existing authoring tests
+cover atomic multi-edits and undo/redo. It does not replace the live layout check.
+
+Verified on 2026-09-23: editor/test targets compiled, install succeeded, all six
+Navigation/Locomotion CTest groups and 12 `Editor.Inspector`-filtered native tests
+passed. In the installed navigation demo, both sections began collapsed, navigation
+advanced fields and locomotion connections expanded correctly, and wrapped help
+displayed at the default narrow width. Selecting Keep Current Direction disabled
+turn rate; undo restored Face Movement and its enabled turn-rate control. No scene
+save was performed. Animator-None/UUID entry and multi-selection interactions were
+not exercised live in this pass. Logs: `out/inspector-usability-{build,install,tests}.log`
+and `out/inspector-usability-inspector-tests.log`.
+
+## FBX absolute animation poses
+
+Build `TerraEngine-Editor` and `TerraEngine-EditorTests`, then run:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R 'Editor.Animation' --output-on-failure
+cmake --install out/build/RelWithDebInfo --config RelWithDebInfo
+```
+
+`Editor.Animation.FbxImport.PreservesAbsoluteAnimationRotations` compares
+imported rotations against an independent Assimp read of the vendored animated
+FBX fixture. Its exported node pose differs from the skin bind pose. Absolute
+animation keys must remain absolute; multiplying them by a bind/node-pose
+correction incorrectly turns resting poses toward the mesh's T-pose. The
+existing authored-bind regression independently preserves inverse bind data.
+Importer recipe 7 invalidates clips cooked with that incorrect correction.
+
+For live verification, restart the installed editor and reimport the original
+Quaternius knight FBX in the navigation demo. Check lowered arms in Idle and
+arm swings in Walking/Run, along with the measured-speed controller state log.
+Do not equate successful state changes with correct skin poses. The separate
+parent-relative visual-scale issue is not covered by this animation fix.
+
 ## Live mesh component edits
 
 After the normal RelWithDebInfo build and install below, run:

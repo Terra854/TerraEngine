@@ -5,6 +5,7 @@
 #include "Animation/AnimationSystem.h"
 #include "Animation/Assets/AnimationClipAsset.h"
 #include "Animation/Runtime/AnimationClipView.h"
+#include "Animation/Runtime/RootMotion.h"
 #include "Animation/Assets/AnimationControllerAsset.h"
 #include "Animation/Codec/AnimationCodec.h"
 #include "Animation/Graph/AnimationProgramPublisher.h"
@@ -19,6 +20,7 @@
 #include "Core/Object/ObjectManager.h"
 #include "File Formats/TerraEngineMeshFile.h"
 #include "Profiling/ProfilerScope.h"
+#include "Physics/PhysicsSystem.h"
 #include "Renderer/RenderSystem.h"
 #include "Resource/ResourceManager.h"
 #include "ThreadPool/ThreadPool.h"
@@ -943,6 +945,8 @@ namespace TerraEngine::Animation {
 					state.assetId = component.controllerAssetId;
 					state.sourceGeneration = sourceGeneration;
 					state.latestController.reset();
+					state.publishedProgram.reset();
+					state.publishedController.reset();
 					state.publisher.reset();
 					state.pending = false;
 					state.status = AnimationStatus::MissingAsset;
@@ -951,6 +955,11 @@ namespace TerraEngine::Animation {
 				signature.controllerRuntimeGeneration = copiedGeneration;
 				state.assetId = component.controllerAssetId;
 				state.sourceGeneration = copiedGeneration;
+				// A compile for a new source publication must not reuse the previous
+				// generation's program or controller while its worker is pending. The
+				// authored animator stays on a safe pose until matching bytes publish.
+				state.publishedProgram.reset();
+				state.publishedController.reset();
 				state.latestController = std::move(controller);
 				state.publisher = std::make_unique<AnimationProgramPublisher>(
 					CreateThreadPoolAnimationProgramCompileExecutor(ThreadPool::instance()), 2U);
@@ -3579,6 +3588,38 @@ namespace TerraEngine::Animation {
 			const std::vector<Object>& reconciliationObjects =
 				targetedStreamingReconciliation
 					? targetedAuthoredObjects : authoredObjects;
+			if(!targetedStreamingReconciliation) {
+				// Component removal/replacement can retire an animator while its
+				// ragdoll owns a character. Pre-reserve that whole external batch
+				// before erasing entries or releasing streams; a full Physics queue
+				// leaves all old handles intact for the next protected retry.
+				std::vector<AnimatorInstanceHandle> externalRetirements;
+				for(const auto& [ownerId, entry] : impl_->entries) {
+					const auto object = objects.getObject(ownerId);
+					const AnimatorComponent* component = object
+						? objects.GetComponent<AnimatorComponent>(*object) : nullptr;
+					const bool identityChanged = !object || !component
+						|| entry.objectLifetimeGeneration
+							!= objects.getObjectLifetimeGeneration(*object)
+						|| entry.componentGeneration != CompressObjectGeneration(
+							objects.getObjectComponentGeneration(*object))
+						|| entry.signature.controllerAssetId != component->controllerAssetId;
+					if(!identityChanged || !animation.IsAnimatorInstanceAlive(entry.handle)
+						|| !Physics::PhysicsSystem::Instance().HasExternalCharacterMotionOwner(
+							RagdollExternalOwnerId(entry.handle))) continue;
+					externalRetirements.push_back(entry.handle);
+				}
+				if(!externalRetirements.empty()) {
+					const std::size_t retired = animation.InvalidateAnimatorInstances(
+						externalRetirements);
+					if(retired != externalRetirements.size()) {
+						impl_->requiresPolling = true;
+						++summary.failedCount;
+						return summary;
+					}
+					summary.invalidatedCount += retired;
+				}
+			}
 			std::map<AuthoredBindingSignature, AuthoredBindingSignature>
 				authoredSignatureTemplates;
 			// Freeze all unique authored generation tuples before mutating any runtime
@@ -4778,6 +4819,17 @@ namespace TerraEngine::Animation {
 		try {
 			std::vector<AnimatorInstanceHandle> handles;
 			handles.reserve(impl_->entries.size());
+			for(const auto& [ownerObjectId, entry] : impl_->entries) {
+				(void)ownerObjectId;
+				if(animation.IsAnimatorInstanceAlive(entry.handle)) handles.push_back(entry.handle);
+			}
+			if(!handles.empty()
+				&& animation.InvalidateAnimatorInstances(handles) != handles.size()) {
+				// Do not drop the coordinator's only retry inventory when Physics
+				// cannot reserve a tagged external-owner retirement yet.
+				impl_->requiresPolling = true;
+				return;
+			}
 			for(auto& [ownerObjectId, entry] : impl_->entries) {
 				if(impl_->resources != nullptr) {
 					(void)impl_->resources->ReleaseStreamingNeedsForObject(
@@ -4786,16 +4838,12 @@ namespace TerraEngine::Animation {
 				}
 				ReleaseClipStreamRetains(
 					impl_->clipStreaming, entry.retainedClipStreams);
-				handles.push_back(entry.handle);
 			}
-			(void)animation.InvalidateAnimatorInstances(handles);
 		} catch(const std::bad_alloc&) {
-			// Shutdown cannot retain live handles merely because the batch scratch
-			// vector could not be allocated. Preserve the scalar fail-safe path.
-			for(auto& [ownerObjectId, entry] : impl_->entries) {
-				(void)ownerObjectId;
-				(void)animation.InvalidateAnimatorInstance(entry.handle);
-			}
+			// A failed batch allocation cannot authorize partial external release.
+			// Keep entries and their streams so the next protected pass can retry.
+			impl_->requiresPolling = true;
+			return;
 		}
 		for(auto& [key, job] : impl_->clipStreaming.pendingReads) {
 			(void)key;

@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "locomotion-060-assets-v1",
+  "sourceManifestSha256": "54578d79df6e53cad7b41733aa0551d9041aa6f90602b92594457cf845990ae2",
+  "generatorSourceSha256": "8cf4675dcc94ac1588ee7a8b3f51db72f0a72cb67e9e98fdf2b93b54f873b620",
+  "expectedResultsPath": "expected-results.json",
+  "expectedResultsSha256": "fa0f7da34e97cd061d18f21136e3345de562d4bc4405cb49e4945577e04d3144",
+  "assets": [
+    {
+      "role": "skeleton",
+      "path": "Assets/Animation/skeleton.teskel",
+      "assetId": "54455252412d4c4f434f3036303ca55a",
+      "sha256": "4e42f84bc27977c0fe4fcd8bc353f6754adb6822b37e096a3e266f19ce8f21f7"
+    },
+    {
+      "role": "idleClip",
+      "path": "Assets/Animation/idle.teanim",
+      "assetId": "54455252412d4c4f434f30363050a55a",
+      "sha256": "1acf81f45393f18b58ef0d9e8d34ea2e67a5c4833319a5306636829caf6750a1"
+    },
+    {
+      "role": "moveClip",
+      "path": "Assets/Animation/move.teanim",
+      "assetId": "54455252412d4c4f434f30363064a55a",
+      "sha256": "e1c323dee0b05f115c8c9b36fa690a157bd778597bd2081461d7b91ab0887351"
+    },
+    {
+      "role": "rootClip",
+      "path": "Assets/Animation/root.teanim",
+      "assetId": "54455252412d4c4f434f30363078a55a",
+      "sha256": "1afc149d62ddfb62ab4eeed0d17b9017d95e4b32903a6e21912ac82dc75d98b1"
+    },
+    {
+      "role": "controller",
+      "path": "Assets/Animation/locomotion.teanimctrl",
+      "assetId": "54455252412d4c4f434f3036308ca55a",
+      "sha256": "43cb85b3e4a2b951356818675736aa71fc419a6b762a8bf480c84f1c9e2bb8e1"
+    },
+    {
+      "role": "ragdollProfile",
+      "path": "Assets/Animation/locomotion.teragdoll",
+      "assetId": "54455252412d4c4f434f303630a0a55a",
+      "sha256": "671e47c843b6a934701fd650c161d1c107137fd3602625c7278cbc2519d4067a"
+    }
+  ]
+}

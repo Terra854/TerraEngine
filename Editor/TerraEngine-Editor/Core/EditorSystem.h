@@ -25,10 +25,13 @@ public:
 	void SetTerrainInvariantOutputPath(const std::filesystem::path& outputPath);
 	void SetNavigationAgentValidationPaths(const std::filesystem::path& optionsPath,
 		const std::filesystem::path& reportPath);
+	void SetLocomotionValidationPaths(const std::filesystem::path& optionsPath,
+		const std::filesystem::path& reportPath);
 	int RequestedProcessExitCode() const noexcept;
 	// Persist the terminal evidence only after Engine has invoked this system's
 	// Shutdown. This makes `orderlyShutdown` evidence a real lifecycle fact.
 	int FinalizeNavigationAgentValidationAfterEngineShutdown();
+	int FinalizeLocomotionValidationAfterEngineShutdown();
 	void Setup(Engine* engine);
 	void Initialize() override;
 	void Update(float deltaTime) override;
@@ -53,6 +56,10 @@ private:
 	std::optional<std::filesystem::path> navigationAgentValidationReportPath;
 	nlohmann::json navigationAgentValidationOptions;
 	std::optional<nlohmann::json> navigationAgentValidationTerminalReport;
+	std::optional<std::filesystem::path> locomotionValidationOptionsPath;
+	std::optional<std::filesystem::path> locomotionValidationReportPath;
+	nlohmann::json locomotionValidationOptions;
+	std::optional<nlohmann::json> locomotionValidationTerminalReport;
 
 	// Managed Editor Hooks
 	typedef void (*ManagedInitFn)(void*);
@@ -80,11 +87,14 @@ private:
 	bool navigationAgentValidationRunAttempted = false;
 	bool navigationAgentValidationOptionsLoaded = false;
 	bool navigationAgentValidationShutdownObserved = false;
+	bool locomotionValidationOptionsLoaded = false;
+	bool locomotionValidationShutdownObserved = false;
 	float terrainInvariantWaitSeconds = 0.0f;
 	// The installed acceptance command waits for the normal asynchronous
 	// Assembly-CSharp coordinator instead of canceling it during early shutdown.
 	float physicsInvariantManagedWaitSeconds = 0.0f;
 	float navigationAgentValidationWaitSeconds = 0.0f;
+	float locomotionValidationWaitSeconds = 0.0f;
 	int requestedProcessExitCode = 0;
 	std::uint64_t imguiPresentationGeneration = 0;
 	void HandleProjectLoaded();
@@ -92,6 +102,7 @@ private:
 	void ProcessPhysicsInvariantValidation(float deltaTime);
 	void ProcessTerrainInvariantValidation(float deltaTime);
 	void ProcessNavigationAgentValidation(float deltaTime);
+	void ProcessLocomotionValidation(float deltaTime);
 public:
 	void DrawWindowMenu();
 	void HideAllWindows();

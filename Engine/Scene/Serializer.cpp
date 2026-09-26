@@ -11,6 +11,7 @@
 #include "Components/CameraComponent.h"
 #include "Components/MeshRenderComponent.h"
 #include "Components/NavigationAgentComponent.h"
+#include "Components/CharacterLocomotionComponent.h"
 #include "Components/TerrainComponent.h"
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
@@ -960,6 +961,14 @@ nlohmann::json SerializeObjectRecursive(Object object) {
 				}
 				continue;
 			}
+			if(compName == CharacterLocomotionComponent::kComponentName) {
+				if(const CharacterLocomotionComponent* locomotion = enttRegistry.try_get<CharacterLocomotionComponent>(entity)) {
+					auto guard = locomotion->acquireReadLock();
+					// Runtime leases, commands, and observations never enter the authored scene.
+					objJson["components"][compName] = CharacterLocomotionComponent::SerializeAuthored(*locomotion);
+				}
+				continue;
+			}
 			// Collection components need a typed serializer because reflection does
 			// not flatten variants or vectors. Keep this special case at the protected
 			// scene boundary; worker snapshots consume only the decoded typed values.
@@ -1285,6 +1294,7 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 	// keys from malformed or obsolete payloads.
 	AnimatorComponent::registerType();
 	NavigationAgentComponent::registerType();
+	CharacterLocomotionComponent::registerType();
 	AudioSourceComponent::registerType();
 	AudioListenerComponent::registerType();
 	// Scene files can be loaded before an editor window or renderer constructs
@@ -1387,6 +1397,13 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 				if(compName == NavigationAgentComponent::kComponentName) {
 					NavigationAgentComponent* agent = enttRegistry.try_get<NavigationAgentComponent>(entity);
 					if(agent == nullptr || !DeserializeNavigationAgent(compData, *agent)) {
+						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
+					}
+					continue;
+				}
+				if(compName == CharacterLocomotionComponent::kComponentName) {
+					CharacterLocomotionComponent* locomotion = enttRegistry.try_get<CharacterLocomotionComponent>(entity);
+					if(locomotion == nullptr || !CharacterLocomotionComponent::DeserializeAuthored(*locomotion, compData)) {
 						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
 					}
 					continue;
@@ -1497,6 +1514,8 @@ TerraEngine::Scene::PreparedSceneDecode Serializer::PrepareSceneDecode(
 	const std::function<bool()>& cancellationRequested)
 {
 	TerraEngine::Scene::PreparedSceneDecode result;
+	// Engine startup registers built-in component schemas before dispatching
+	// detached decode jobs. Do not mutate reflection metadata from worker decode.
 	if (!ValidateUnboundedSceneDocument(sceneJson, &result.reason))
 	{
 		const std::string observedFormat = sceneJson.is_object() && sceneJson.contains("format")
@@ -1570,7 +1589,6 @@ TerraEngine::Scene::PreparedSceneDecode Serializer::PrepareSceneDecode(
 			}
 			for (const auto& [componentName, componentData] : components->items())
 			{
-				(void)componentData;
 				if (!registeredComponentNames.contains(componentName))
 				{
 					// This is the ordinary current-schema error for every unknown
@@ -1578,6 +1596,16 @@ TerraEngine::Scene::PreparedSceneDecode Serializer::PrepareSceneDecode(
 					result.reason = "unregistered component at object " + stablePath
 						+ "/components/" + componentName;
 					return false;
+				}
+				if (componentName == CharacterLocomotionComponent::kComponentName)
+				{
+					// Validate a complete detached candidate before any graph record can be published.
+					CharacterLocomotionComponent candidate{};
+					if (!CharacterLocomotionComponent::DeserializeAuthored(candidate, componentData))
+					{
+						result.reason = "invalid character locomotion authoring at object " + stablePath;
+						return false;
+					}
 				}
 			}
 			result.componentCount += components->size();

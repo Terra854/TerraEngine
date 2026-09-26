@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <new>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace TerraEngine::Physics {
@@ -171,6 +174,8 @@ namespace TerraEngine::Physics {
 			settings.retainedResultTicks});
 		constraintRuntime.clear();
 		characterStateHistory.clear();
+		characterMotionLeases = std::make_shared<const std::unordered_map<PhysicsSlotIndex, CharacterMotionLease>>();
+		characterMotionLeaseSerial = 0U;
 		bodyStateStore.Reset(ActiveHandleLocked());
 		state = PhysicsWorldState::Active;
 		return true;
@@ -653,6 +658,42 @@ namespace TerraEngine::Physics {
 				|| (update.removed && status != PhysicsHandleStatus::Alive
 					&& status != PhysicsHandleStatus::Destroyed)) return std::nullopt;
 		}
+		// A ragdoll can create and replace a provider body between two published
+		// Physics ticks. Its destroyed handle is a valid provider tombstone, but
+		// the state store never saw that handle and therefore has nothing to
+		// remove. Discard only these never-published removals before the atomic
+		// store apply; real published removals retain strict generation checks.
+		const auto complete = bodyStateStore.AcquireComplete();
+		if(complete && std::any_of(batch.updates.begin(), batch.updates.end(),
+			[&complete](const IncrementalBodyStateUpdate& update) {
+				return update.removed && complete->Find(update.removedHandle) == nullptr;
+			})) {
+			try {
+				// This rare tombstone path counts all full handles once. Duplicate
+				// removals and create/remove contradictions stay in the filtered
+				// batch, preserving the store's atomic rejection semantics.
+				std::unordered_map<std::uint64_t, std::uint32_t> handleCounts;
+				handleCounts.reserve(batch.updates.size());
+				const auto keyOf = [](PhysicsBodyHandle handle) {
+					return (static_cast<std::uint64_t>(handle.slotIndex) << 32U)
+						| handle.slotGeneration;
+				};
+				for(const IncrementalBodyStateUpdate& update : batch.updates) {
+					const PhysicsBodyHandle handle = update.removed
+						? update.removedHandle : update.state.handle;
+					++handleCounts[keyOf(handle)];
+				}
+				IncrementalBodyStateUpdateBatch filtered = batch;
+				std::erase_if(filtered.updates, [&complete, &handleCounts, &keyOf](
+					const IncrementalBodyStateUpdate& update) {
+					return update.removed && complete->Find(update.removedHandle) == nullptr
+						&& handleCounts.at(keyOf(update.removedHandle)) == 1U;
+				});
+				return bodyStateStore.Apply(filtered);
+			} catch(const std::bad_alloc&) {
+				return std::nullopt;
+			}
+		}
 		return bodyStateStore.Apply(batch);
 	}
 
@@ -817,9 +858,246 @@ namespace TerraEngine::Physics {
 	}
 
 	PhysicsCommandReceipt PhysicsWorld::EnqueueCommand(PhysicsCommand command) {
-		// Queue synchronization is internal, so producers do not need the world
-		// lifecycle mutex while a protected teardown stops admission atomically.
+		// Capture the motion epoch before an ordinary command enters the delayed
+		// queue. Acquisition and release both advance it, so even a later unleased
+		// controller cannot replay a pre-acquisition command.
+		std::lock_guard<std::mutex> lock(mutex);
+		if(IsCharacterMotionCommand(command)) {
+			command.characterMotionSource = CharacterMotionCommandSource::Legacy;
+			const auto found = characterMotionLeases->find(command.character.slotIndex);
+			command.characterMotionEpoch = found != characterMotionLeases->end()
+				&& found->second.controller.character == command.character
+				? found->second.motionEpoch : 0U;
+		}
 		return commandQueue.Enqueue(std::move(command));
+	}
+
+	PreparedCharacterMotionLeaseBatch PhysicsWorld::PrepareCharacterMotionLeases(
+		std::span<const CharacterMotionLeaseChange> changes) const {
+		std::lock_guard<std::mutex> lock(mutex);
+		PreparedCharacterMotionLeaseBatch prepared;
+		prepared.expectedWorld = ActiveHandleLocked();
+		prepared.expectedSerial = characterMotionLeaseSerial;
+		if(changes.size() > 256U) {
+			prepared.result.error = CharacterMotionLeaseError::CapacityExceeded;
+			return prepared;
+		}
+		auto candidate = std::make_shared<std::unordered_map<PhysicsSlotIndex, CharacterMotionLease>>(*characterMotionLeases);
+		std::unordered_set<PhysicsSlotIndex> changedSlots;
+		changedSlots.reserve(changes.size());
+		for(const CharacterMotionLeaseChange& change : changes) {
+			const PhysicsCharacterCommandTarget& controller = change.next.controller;
+			if(!controller.character.IsValid() || controller.world != ActiveHandleLocked()
+				|| characterRegistry.Status(controller.character, ActiveHandleLocked()) != PhysicsHandleStatus::Alive) {
+				prepared.result.error = CharacterMotionLeaseError::StaleCharacter;
+				return prepared;
+			}
+			if(!changedSlots.insert(controller.character.slotIndex).second) {
+				prepared.result.error = CharacterMotionLeaseError::InvalidArgument;
+				return prepared;
+			}
+			const auto found = characterMotionLeases->find(controller.character.slotIndex);
+			CharacterMotionLease current;
+			if(found == characterMotionLeases->end()) {
+				current.controller = controller;
+			} else {
+				current = found->second;
+				if(current.controller != controller) {
+					prepared.result.error = CharacterMotionLeaseError::StaleCharacter;
+					return prepared;
+				}
+			}
+			const CharacterMotionLeaseError error = ValidateCharacterMotionLeaseChange(change, current);
+			if(error != CharacterMotionLeaseError::None) {
+				prepared.result.error = error;
+				return prepared;
+			}
+			(*candidate)[controller.character.slotIndex] = change.next;
+			prepared.result.publicationEpoch = std::max(prepared.result.publicationEpoch,
+				change.next.publicationEpoch);
+		}
+		prepared.root = std::move(candidate);
+		prepared.result.accepted = true;
+		return prepared;
+	}
+
+	PreparedCharacterMotionLeaseBatch PhysicsWorld::PrepareExternalCharacterRecovery(
+		const CharacterExternalRecoveryTransition& transition) const {
+		std::lock_guard<std::mutex> lock(mutex);
+		PreparedCharacterMotionLeaseBatch prepared;
+		prepared.expectedWorld = ActiveHandleLocked();
+		prepared.expectedSerial = characterMotionLeaseSerial;
+		const PhysicsCharacterCommandTarget& controller = transition.intent.expectedExternalLease.controller;
+		if(!controller.character.IsValid() || controller.world != prepared.expectedWorld
+			|| characterRegistry.Status(controller.character, prepared.expectedWorld) != PhysicsHandleStatus::Alive) {
+			prepared.result.error = CharacterMotionLeaseError::StaleCharacter;
+			return prepared;
+		}
+		const auto found = characterMotionLeases->find(controller.character.slotIndex);
+		if(found == characterMotionLeases->end() || found->second.controller != controller) {
+			prepared.result.error = CharacterMotionLeaseError::StaleCharacter;
+			return prepared;
+		}
+		prepared.result.error = ValidateCharacterExternalRecoveryTransition(transition, found->second);
+		if(prepared.result.error != CharacterMotionLeaseError::None) return prepared;
+		try {
+			// All root allocation precedes provider mutation. The later swap is
+			// non-fallible while PhysicsSystem holds the protected coordinator lock.
+			auto candidate = std::make_shared<std::unordered_map<PhysicsSlotIndex,
+				CharacterMotionLease>>(*characterMotionLeases);
+			(*candidate)[controller.character.slotIndex] = transition.releasedLease;
+			prepared.root = std::move(candidate);
+			prepared.result.publicationEpoch = transition.releasedLease.publicationEpoch;
+			prepared.result.accepted = true;
+		} catch(const std::bad_alloc&) {
+			prepared.result.error = CharacterMotionLeaseError::CapacityExceeded;
+		}
+		return prepared;
+	}
+
+	PreparedCharacterMotionLeaseBatch PhysicsWorld::PrepareExternalCharacterRecoveries(
+		std::span<const CharacterExternalRecoveryTransition> transitions) const {
+		std::lock_guard<std::mutex> lock(mutex);
+		PreparedCharacterMotionLeaseBatch prepared;
+		prepared.expectedWorld = ActiveHandleLocked();
+		prepared.expectedSerial = characterMotionLeaseSerial;
+		if(transitions.empty() || transitions.size() > 4096U) {
+			prepared.result.error = CharacterMotionLeaseError::CapacityExceeded;
+			return prepared;
+		}
+		try {
+			std::unordered_set<PhysicsSlotIndex> seen;
+			seen.reserve(transitions.size());
+			auto candidate = std::make_shared<std::unordered_map<PhysicsSlotIndex,
+				CharacterMotionLease>>(*characterMotionLeases);
+			for(const CharacterExternalRecoveryTransition& transition : transitions) {
+				const auto& controller = transition.intent.expectedExternalLease.controller;
+				if(controller.world != prepared.expectedWorld
+					|| characterRegistry.Status(controller.character, prepared.expectedWorld)
+						!= PhysicsHandleStatus::Alive
+					|| !seen.insert(controller.character.slotIndex).second) {
+					prepared.result.error = CharacterMotionLeaseError::StaleCharacter;
+					return prepared;
+				}
+				const auto found = characterMotionLeases->find(controller.character.slotIndex);
+				if(found == characterMotionLeases->end()
+					|| found->second.controller != controller) {
+					prepared.result.error = CharacterMotionLeaseError::StaleCharacter;
+					return prepared;
+				}
+				prepared.result.error = ValidateCharacterExternalRecoveryTransition(
+					transition, found->second);
+				if(prepared.result.error != CharacterMotionLeaseError::None)
+					return prepared;
+				(*candidate)[controller.character.slotIndex] = transition.releasedLease;
+				prepared.result.publicationEpoch = std::max(
+					prepared.result.publicationEpoch,
+					transition.releasedLease.publicationEpoch);
+			}
+			prepared.root = std::move(candidate);
+			prepared.result.accepted = true;
+		} catch(const std::bad_alloc&) {
+			prepared.result.error = CharacterMotionLeaseError::CapacityExceeded;
+		}
+		return prepared;
+	}
+
+	PreparedCharacterMotionLeaseBatch PhysicsWorld::PrepareExternalCharacterCarry(
+		std::span<const CharacterExternalCarry> carries,
+		std::span<const PhysicsCharacterHandle> retiringCharacters) const {
+		std::lock_guard<std::mutex> lock(mutex);
+		PreparedCharacterMotionLeaseBatch prepared;
+		prepared.expectedWorld = ActiveHandleLocked();
+		prepared.expectedSerial = characterMotionLeaseSerial;
+		if((carries.empty() && retiringCharacters.empty()) || carries.size() > 4096U) {
+			prepared.result.error = CharacterMotionLeaseError::CapacityExceeded;
+			return prepared;
+		}
+		try {
+			std::unordered_set<PhysicsSlotIndex> seenOld;
+			std::unordered_set<PhysicsSlotIndex> seenNew;
+			seenOld.reserve(retiringCharacters.size());
+			seenNew.reserve(carries.size());
+			for(const PhysicsCharacterHandle retired : retiringCharacters) {
+				if(characterRegistry.Status(retired, prepared.expectedWorld)
+						!= PhysicsHandleStatus::Alive
+					|| !seenOld.insert(retired.slotIndex).second) {
+					prepared.result.error = CharacterMotionLeaseError::StaleCharacter;
+					return prepared;
+				}
+			}
+			for(const CharacterExternalCarry& carry : carries) {
+				const auto& old = carry.expectedExternalLease;
+				const auto& next = carry.nextExternalLease;
+				if(ValidateCharacterExternalCarry(carry) != CharacterMotionLeaseError::None
+					|| old.controller.world != prepared.expectedWorld
+					|| characterRegistry.Status(old.controller.character, prepared.expectedWorld)
+						!= PhysicsHandleStatus::Alive
+					|| characterRegistry.Status(next.controller.character, prepared.expectedWorld)
+						!= PhysicsHandleStatus::Alive
+					|| !seenOld.contains(old.controller.character.slotIndex)
+					|| !seenNew.insert(next.controller.character.slotIndex).second) {
+					prepared.result.error = CharacterMotionLeaseError::StaleCharacter;
+					return prepared;
+				}
+				const auto found = characterMotionLeases->find(old.controller.character.slotIndex);
+				if(found == characterMotionLeases->end() || found->second != old
+					|| characterMotionLeases->contains(next.controller.character.slotIndex)) {
+					prepared.result.error = CharacterMotionLeaseError::StaleEpoch;
+					return prepared;
+				}
+			}
+			// Build the entire immutable handoff while both old and new handles are
+			// alive. Commit later swaps one root; old Release sees no lease row and
+			// therefore performs no allocation after provider publication.
+			auto candidate = std::make_shared<std::unordered_map<PhysicsSlotIndex,
+				CharacterMotionLease>>(*characterMotionLeases);
+			for(const PhysicsCharacterHandle retired : retiringCharacters)
+				candidate->erase(retired.slotIndex);
+			for(const CharacterExternalCarry& carry : carries) {
+				(*candidate)[carry.nextExternalLease.controller.character.slotIndex]
+					= carry.nextExternalLease;
+				prepared.result.publicationEpoch = std::max(prepared.result.publicationEpoch,
+					carry.nextExternalLease.publicationEpoch);
+			}
+			prepared.root = std::move(candidate);
+			prepared.result.accepted = true;
+		} catch(const std::bad_alloc&) {
+			prepared.result.error = CharacterMotionLeaseError::CapacityExceeded;
+		}
+		return prepared;
+	}
+
+	bool PhysicsWorld::CommitPreparedCharacterMotionLeases(PreparedCharacterMotionLeaseBatch prepared) {
+		std::lock_guard<std::mutex> lock(mutex);
+		if(!prepared.result.accepted || !prepared.root || prepared.expectedWorld != ActiveHandleLocked()
+			|| prepared.expectedSerial != characterMotionLeaseSerial) return false;
+		characterMotionLeases.swap(prepared.root);
+		++characterMotionLeaseSerial;
+		return true;
+	}
+
+	CharacterMotionLeaseResult PhysicsWorld::PublishCharacterMotionLeases(
+		std::span<const CharacterMotionLeaseChange> changes) {
+		PreparedCharacterMotionLeaseBatch prepared = PrepareCharacterMotionLeases(changes);
+		const CharacterMotionLeaseResult result = prepared.result;
+		if(result.accepted && !CommitPreparedCharacterMotionLeases(std::move(prepared)))
+			return {false, CharacterMotionLeaseError::StaleEpoch, 0U};
+		return result;
+	}
+
+	std::optional<CharacterMotionLease> PhysicsWorld::ReadCharacterMotionLease(
+		const PhysicsCharacterCommandTarget& controller) const {
+		std::lock_guard<std::mutex> lock(mutex);
+		if(controller.world != ActiveHandleLocked()
+			|| characterRegistry.Status(controller.character, ActiveHandleLocked()) != PhysicsHandleStatus::Alive) return std::nullopt;
+		const auto found = characterMotionLeases->find(controller.character.slotIndex);
+		if(found == characterMotionLeases->end()) {
+			CharacterMotionLease unleased;
+			unleased.controller = controller;
+			return unleased;
+		}
+		return found->second.controller == controller ? std::optional<CharacterMotionLease>{found->second} : std::nullopt;
 	}
 
 	bool PhysicsWorld::CancelCommand(PhysicsCommandId commandId) {
@@ -972,6 +1250,8 @@ namespace TerraEngine::Physics {
 		characterRegistry.Clear();
 		constraintRuntime.clear();
 		characterStateHistory.clear();
+		characterMotionLeases = std::make_shared<const std::unordered_map<PhysicsSlotIndex, CharacterMotionLease>>();
+		characterMotionLeaseSerial = 0U;
 		bodyStateStore.Reset();
 		// Cache owners retire at world teardown. Any worker or immutable published
 		// snapshot still holding a lease keeps its bytes alive until it finishes.
@@ -1036,8 +1316,28 @@ namespace TerraEngine::Physics {
 		if(!CanAccessRegistriesLocked() || characterRegistry.Status(handle, ActiveHandleLocked()) != PhysicsHandleStatus::Alive) {
 			return false;
 		}
+		std::shared_ptr<const std::unordered_map<PhysicsSlotIndex, CharacterMotionLease>> withoutLease;
+		const auto foundLease = characterMotionLeases->find(handle.slotIndex);
+		if(foundLease != characterMotionLeases->end() && foundLease->second.controller.character == handle) {
+			try {
+				// Allocate before the handle changes state. A failed copy must not
+				// leave a dead registry slot with a still-published lease row.
+				auto next = std::make_shared<std::unordered_map<PhysicsSlotIndex,
+					CharacterMotionLease>>(*characterMotionLeases);
+				next->erase(handle.slotIndex);
+				withoutLease = std::move(next);
+			} catch(const std::bad_alloc&) {
+				return false;
+			}
+		}
 		const bool released = characterRegistry.Release(handle);
 		if(released) {
+			// Controller destruction is the only implicit end of an external
+			// exclusion. A locomotion attachment release cannot erase this row.
+			if(withoutLease) {
+				characterMotionLeases = std::move(withoutLease);
+				++characterMotionLeaseSerial;
+			}
 			// Packets are immutable, so remove only packets that mention the released
 			// handle; unrelated character observations retain their normal lifetime.
 			characterStateHistory.erase(std::remove_if(characterStateHistory.begin(), characterStateHistory.end(),

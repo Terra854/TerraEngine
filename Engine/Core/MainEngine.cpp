@@ -36,6 +36,8 @@
 #include "Scene/WorldStreamingSystem.h"
 #include "Navigation/Agents/NavigationAgentCommandSystem.h"
 #include "Navigation/Agents/NavigationAgentSystem.h"
+#include "Locomotion/LocomotionSystem.h"
+#include "LocomotionReplaySystem.h"
 #include "Navigation/NavigationSystem.h"
 #include "Navigation/Integration/NavigationRuntimeSceneCapture.h"
 #include "Navigation/Integration/NavigationSourceTransformObservation.h"
@@ -209,6 +211,13 @@ void Engine::ConfigureHeadlessCpuFallback()
 	headlessPhysicsValidation = true;
 }
 
+void Engine::ConfigureCharacterMotionReplayValidation()
+{
+	// Scheduler membership is frozen at initialization; replay is never a live
+	// gameplay mode switch and cannot take authority away from a running system.
+	if(systems.empty()) characterMotionReplayValidation = true;
+}
+
 // Engine::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Engine::Initialize()
 {
@@ -314,6 +323,18 @@ void Engine::Initialize()
 	// ScriptingSystem manages the .NET runtime and gameplay scripts.
 	ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
 	RegisterEngineSystem(systems, systemScheduler, scriptingSystem, scriptingSystem.SchedulerDeclaration());
+
+	// Intent is admitted after scripting's existing flush and before animation.
+	// A dormant system binds nothing until Physics has a live Play/runtime world.
+	if(characterMotionReplayValidation) {
+		auto& replay = TerraEngine::Locomotion::Validation::LocomotionReplaySystem::Instance();
+		auto& roots = TerraEngine::Locomotion::Validation::LocomotionReplayRootSystem::Instance();
+		RegisterEngineSystem(systems, systemScheduler, replay, replay.SchedulerDeclaration());
+		RegisterEngineSystem(systems, systemScheduler, roots, roots.SchedulerDeclaration());
+	} else {
+		auto& locomotionSystem = TerraEngine::Locomotion::LocomotionSystem::Instance();
+		RegisterEngineSystem(systems, systemScheduler, locomotionSystem, locomotionSystem.SchedulerDeclaration());
+	}
 
 	// Scripts publish typed animation commands before this phase. AnimationSystem
 	// captures those inputs once, prepares/evaluates worker ranges, then commits
@@ -661,6 +682,9 @@ bool Engine::Update(float deltaTime)
 				// requests from managed callbacks publish only at this protected edge.
 				FlushManagedRuntimeRequests();
 			}
+			// Revoke stale component/controller lifetimes before any later phase can
+			// consume their copied targets; this adds no scene mutation flush.
+			TerraEngine::Locomotion::LocomotionSystem::Instance().ObserveProtectedBoundary();
 			const bool physicsPublicationBoundary = (flushPoint.name == "After Physics" && sameFramePhysicsConsumer)
 				|| (flushPoint.name == "Frame End" && !sameFramePhysicsConsumer);
 			if (physicsPublicationBoundary) {
@@ -1222,6 +1246,8 @@ TerraEngine::Runtime::PhysicsInvariantReport Engine::RunPhysicsInvariantFixture(
 // Engine::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Engine::Shutdown()
 {
+	// Retire physical movement leases before reverse-order Physics teardown.
+	TerraEngine::Locomotion::LocomotionSystem::Instance().RevokeAll();
 	// Revoke gameplay navigation owners and optional agent runtime records before
 	// reverse-order teardown. A late worker result then targets an obsolete world
 	// generation and cannot become visible to a later engine run.

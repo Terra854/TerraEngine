@@ -5,12 +5,26 @@
 #include "Scripting/AnimationScriptAbi.h"
 #include "Scripting/ScriptGlue.h"
 
+#include "Animation/AnimationSystem.h"
+#include "Animation/Runtime/AnimationAuthorityPublication.h"
+#include "Animation/Runtime/AnimationConsumerRegistry.h"
+#include "Core/Object/ComponentRegistry.h"
+#include "Core/Object/ObjectManager.h"
+#include "Core/Scheduling/FrameWorkload.h"
+#include "Scene/SceneMutationQueue.h"
+#include "ThreadPool/ThreadPool.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <utility>
+#include <vector>
 
 namespace TerraEngine::Tests {
 	namespace {
+		using namespace TerraEngine::Animation;
+
 		template<typename Record>
 		Record MakeRecord(NativeAnimationRecordKind kind)
 		{
@@ -53,6 +67,83 @@ namespace TerraEngine::Tests {
 			}
 			return request;
 		}
+
+		// ABI tests exercise the exported bridge against a known initialized runtime.
+		// This fixture also removes component-owned animators and prior consumer
+		// declarations so neighboring suites cannot change stale-handle outcomes.
+		class AnimationAbiRuntimeFixture final {
+		public:
+			AnimationAbiRuntimeFixture()
+				: system_(AnimationSystem::Instance())
+				, previousHeadless_(system_.IsHeadlessExecutionRequired())
+				, previousWorkerCount_(ThreadPool::instance().getThreadCount())
+			{
+				system_.Shutdown();
+				AnimationConsumerRegistry::Instance().Clear();
+				ThreadPool::instance().shutdown();
+				ThreadPool::instance().initialize();
+				ComponentRegistry::RegisterAllComponents();
+				ObjectManager::instance().clear();
+				Scene::SceneMutationQueue::Instance().Clear();
+				system_.SetHeadlessExecutionRequired(true);
+				system_.Initialize();
+			}
+
+			~AnimationAbiRuntimeFixture()
+			{
+				system_.Shutdown();
+				AnimationConsumerRegistry::Instance().Clear();
+				Scene::SceneMutationQueue::Instance().Clear();
+				ObjectManager::instance().clear();
+				system_.SetHeadlessExecutionRequired(previousHeadless_);
+				ThreadPool::instance().shutdown();
+				if(previousWorkerCount_ != 0U)
+					ThreadPool::instance().initialize(previousWorkerCount_);
+			}
+
+			[[nodiscard]] bool PublishEmptyAuthorityFrame()
+			{
+				AnimatorInstanceDescriptor descriptor;
+				for(std::size_t index = 0U; index < descriptor.ownerObjectId.size(); ++index)
+					descriptor.ownerObjectId[index] = static_cast<std::uint8_t>(0xA0U + index);
+				descriptor.componentGeneration = 1U;
+				const AnimatorInstanceHandle handle = system_.CreateAnimatorInstance(descriptor);
+				if(!handle.IsValid()) return false;
+
+				auto skeleton = std::make_shared<SkeletonAsset>();
+				skeleton->assetId.value[0U] = 0xA6U;
+				skeleton->compatibilityFingerprint = 0x414249454D505459ULL;
+				skeleton->rootJointIndex = 0U;
+				SkeletonJoint root;
+				root.stableId = 0xA601U;
+				root.parentIndex = -1;
+				root.normalizedSourcePath = "/abi-empty-event-root";
+				skeleton->joints.push_back(std::move(root));
+				AnimatorPlaybackBinding binding;
+				binding.skeleton = std::move(skeleton);
+				binding.playback.timePolicy = AnimatorTimePolicy::Fixed;
+				// An intentionally missing clip exercises the ordinary safe-pose
+				// publication path without authored events or external asset files.
+				if(system_.BindAnimatorPlayback(handle, std::move(binding)) != AnimationStatus::MissingAsset)
+					return false;
+
+				std::vector<Scheduling::FrameWorkloadDeclaration> workloads =
+					system_.DeclareFrameWorkloads(1.0F / 60.0F);
+				const Scheduling::FrameExecutionPlan plan =
+					Scheduling::ExecuteFrameWorkloadsCompatibility(
+						std::move(workloads), "animation-abi-empty-runtime");
+				if(!plan.valid || !plan.completed) return false;
+				const auto authority = system_.LoadPublishedAuthorityFrame();
+				return authority && authority->IsValid() && authority->pages
+					&& !authority->pages->empty() && authority->Find(handle) && authority->sidecars
+					&& authority->sidecars->events.empty();
+			}
+
+		private:
+			AnimationSystem& system_;
+			bool previousHeadless_ = false;
+			std::size_t previousWorkerCount_ = 0U;
+		};
 	}
 
 	void RegisterAnimationAbiTests(TestRegistry& registry)
@@ -96,6 +187,7 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Animation.AbiV1.ValidatesEnumsIdentityAndGenerationSafeHandles", [](TestContext& context) {
+			AnimationAbiRuntimeFixture runtime;
 			NativeAnimationCommandRequest request = MakeRecord<NativeAnimationCommandRequest>(
 				NativeAnimationRecordKind::CommandRequest);
 			request.animator = {0U, 1U};
@@ -121,12 +213,20 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Animation.AbiV1.CountQueryAndUndersizedWritesAreAtomic", [](TestContext& context) {
+			AnimationAbiRuntimeFixture runtime;
 			NativeAnimationBufferInfo info = MakeRecord<NativeAnimationBufferInfo>(
 				NativeAnimationRecordKind::BufferInfo);
+			const NativeAnimationStatus unpublishedStatus = Native_Animation_CopyEventBatch(nullptr, 0U, &info);
+			context.Expect(unpublishedStatus == NativeAnimationStatus::NotReady
+				&& info.requiredCount == 0U && info.writtenCount == 0U,
+				"Before its first authority publication, a zero-capacity query must report NotReady without claiming events.");
+			context.Expect(runtime.PublishEmptyAuthorityFrame(),
+				"The count query must then observe a real live animator publication with an empty event sidecar.");
+			info = MakeRecord<NativeAnimationBufferInfo>(NativeAnimationRecordKind::BufferInfo);
 			const NativeAnimationStatus emptyStatus = Native_Animation_CopyEventBatch(nullptr, 0U, &info);
 			context.Expect(emptyStatus == NativeAnimationStatus::Ok
 				&& info.requiredCount == 0U && info.writtenCount == 0U,
-				"A null zero-capacity query must report the exact complete event count.");
+				"After an empty authority publication, a null zero-capacity query must report the exact event count.");
 
 			NativeAnimationAnimatorHandle stale{100000U, 1U};
 			info = MakeRecord<NativeAnimationBufferInfo>(NativeAnimationRecordKind::BufferInfo);
@@ -221,6 +321,7 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Animation.MotionMatchAbiV2.ValidatesThenReportsCentralAdmission", [](TestContext& context) {
+			AnimationAbiRuntimeFixture runtime;
 			NativeAnimationMotionMatchQueryRequestV2 request = MakeMotionMatchQueryV2();
 			NativeAnimationMotionMatchQueryReceiptV2 receipt =
 				MakeRecord<NativeAnimationMotionMatchQueryReceiptV2>(

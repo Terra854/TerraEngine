@@ -66,6 +66,9 @@ file(GLOB_RECURSE TERRAENGINE_ANIMATION_ENGINE_HEADERS CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/*Animator*.hpp"
 )
 list(REMOVE_DUPLICATES TERRAENGINE_ANIMATION_ENGINE_SOURCES)
+# Locomotion's animation adapter is already linked once through its private
+# runtime library; the broad integration glob must not compile it a second time.
+list(FILTER TERRAENGINE_ANIMATION_ENGINE_SOURCES EXCLUDE REGEX "/Locomotion/")
 list(REMOVE_DUPLICATES TERRAENGINE_ANIMATION_ENGINE_HEADERS)
 
 file(GLOB_RECURSE TERRAENGINE_ANIMATION_SHADER_SOURCES CONFIGURE_DEPENDS
@@ -680,6 +683,29 @@ if(MSVC)
 	target_compile_options(TerraEngineNavigationRuntime PRIVATE /FS /bigobj)
 endif()
 
+# Locomotion's protected ECS coordinator is private static code with deliberate
+# exported entry points, matching Navigation's Windows symbol-count boundary.
+add_library(TerraEngineLocomotionRuntime STATIC
+	Engine/Locomotion/LocomotionTypes.cpp
+	Engine/Locomotion/LocomotionCommands.cpp
+	Engine/Locomotion/LocomotionPreparation.cpp
+	Engine/Locomotion/LocomotionNavigationCompatibility.cpp
+	Engine/Locomotion/LocomotionNavigationBindings.cpp
+	Engine/Locomotion/LocomotionAnimationBindings.cpp
+	Engine/Locomotion/LocomotionSystem.cpp
+)
+target_include_directories(TerraEngineLocomotionRuntime PRIVATE
+	${CMAKE_CURRENT_SOURCE_DIR}/Engine
+	${CMAKE_CURRENT_SOURCE_DIR}/Engine/Core/Object
+	${CMAKE_CURRENT_SOURCE_DIR}/External/entt/src
+	${CMAKE_CURRENT_SOURCE_DIR}/External/glm
+	${CMAKE_CURRENT_SOURCE_DIR}/External/json/single_include
+)
+target_compile_definitions(TerraEngineLocomotionRuntime PRIVATE TERRAENGINE_SHARED TERRAENGINE_ENGINE_BUILD)
+if(MSVC)
+	target_compile_options(TerraEngineLocomotionRuntime PRIVATE /FS /bigobj)
+endif()
+
 # Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
 add_library(TerraEngine-Engine SHARED
 	${ENGINE_SOURCES}
@@ -687,6 +713,8 @@ add_library(TerraEngine-Engine SHARED
 	# Application acceptance executes the real engine scheduler. Keep this
 	# validation-only utility outside production source directories.
 	Tests/Tools/Navigation/NavigationApplicationValidation.cpp
+	Tests/Tools/Locomotion/LocomotionValidationHarness.cpp
+	Tests/Tools/Locomotion/LocomotionReplaySystem.cpp
 )
 
 # Header-only dependencies stay bundled so texture decoding and OBJ parsing never
@@ -707,6 +735,7 @@ target_include_directories(TerraEngine-Engine
 		# expect the source root as an include path.
 		${CMAKE_CURRENT_SOURCE_DIR}/Engine/Runtime/ContentMount
 		${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Navigation
+		${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Locomotion
 )
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
@@ -876,6 +905,7 @@ target_link_libraries(TerraEngine-Engine
 		TerraEnginePhysicsJoltRuntime
 		TerraEngineAudioRuntime
 		$<LINK_LIBRARY:WHOLE_ARCHIVE,TerraEngineNavigationRuntime>
+		$<LINK_LIBRARY:WHOLE_ARCHIVE,TerraEngineLocomotionRuntime>
 		# Recast/Detour remain private implementation dependencies. The later
 		# Navigation backend is the only engine domain permitted to include their
 		# headers; no provider include directory reaches installed consumers.
@@ -1183,7 +1213,7 @@ add_dependencies(TerraEngine.Editor.Managed TerraEngine.Export.Generator)
 add_executable(TerraEngine-Launcher
     ${LAUNCHER_SOURCES}
 )
-target_include_directories(TerraEngine-Launcher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Navigation)
+target_include_directories(TerraEngine-Launcher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Navigation ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Locomotion)
 set_target_properties(TerraEngine-Launcher PROPERTIES
 	BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
 	INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}"
@@ -1350,6 +1380,18 @@ endif()
 if(BUILD_TESTING)
 	# These runners produce test evidence and exercise installed-runtime
 	# contracts. Production-only configurations do not need to build them.
+	add_executable(TerraEngine-LocomotionFixtureMaterializer
+		Tests/Tools/Locomotion/LocomotionFixtureMaterializer.cpp
+		Editor/AssetCompilers/AnimationClipCompiler.cpp
+	)
+	target_include_directories(TerraEngine-LocomotionFixtureMaterializer PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
+	)
+	target_link_libraries(TerraEngine-LocomotionFixtureMaterializer PRIVATE TerraEngine-Engine)
+	if(MSVC)
+		target_compile_options(TerraEngine-LocomotionFixtureMaterializer PRIVATE /FS /bigobj)
+	endif()
 	add_executable(TerraEngineAudioStressRunner
 		Tests/Tools/Audio/AudioStressRunner.cpp
 	)
@@ -1703,6 +1745,8 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp
 	Editor/TerraEngine-Editor/Windows/NavigationWindow.cpp
 	Editor/TerraEngine-Editor/Navigation/NavigationInspectorSupport.cpp
+	Editor/TerraEngine-Editor/Locomotion/LocomotionInspectorSupport.cpp
+	Editor/TerraEngine-Editor/Automation/Providers/LocomotionAutomationProvider.cpp
 	Editor/TerraEngine-Editor/Navigation/NavigationSceneOverlay.cpp
 	Editor/TerraEngine-Editor/Navigation/NavigationAuthoringTransactions.cpp
 	Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp
@@ -1746,6 +1790,7 @@ set_target_properties(TerraEngine-Editor PROPERTIES
 target_include_directories(TerraEngine-Editor
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Navigation
+		${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Locomotion
 		${CMAKE_CURRENT_SOURCE_DIR}
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Core
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems
@@ -2739,6 +2784,21 @@ file(COPY \"\${shader_stage_root}/\"
 	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/AnimationExportRuntime/"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Fixtures/AnimationExportRuntime"
 	)
+	# Runtime acceptance carries its own inputs and scripts. Checkout-only build
+	# and baseline helpers are excluded because an installed bundle is not a repo.
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/Locomotion/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Fixtures/Locomotion"
+	)
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Locomotion/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Locomotion"
+		FILES_MATCHING PATTERN "*.ps1" PATTERN "*.json" PATTERN "*.md" PATTERN "*.cpp" PATTERN "*.h" PATTERN "*.cs" PATTERN "*.csproj"
+		PATTERN "InvokeLocomotionBuild.ps1" EXCLUDE
+		PATTERN "CaptureLocomotionBaseline.ps1" EXCLUDE
+	)
+	if(TARGET TerraEngine-LocomotionFixtureMaterializer)
+		install(TARGETS TerraEngine-LocomotionFixtureMaterializer
+			RUNTIME DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Locomotion")
+	endif()
 	install(FILES
 		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/VirtualGeometry/README.md"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/VirtualGeometry/hardening-fixtures.json"

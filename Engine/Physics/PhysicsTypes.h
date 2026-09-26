@@ -10,11 +10,13 @@
 #include "Scene/WorldCoordinate.h"
 #include "Utilities/UUID.h"
 
+#include <algorithm>
 #include <compare>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -269,6 +271,14 @@ namespace TerraEngine::Physics {
 		Compound
 	};
 
+	// Durable authoring and provider character creation use the same typed
+	// rotation policy without making the provider depend on ECS components.
+	enum class PhysicsCharacterRotationPolicy : std::uint8_t {
+		Free,
+		AlignToUp,
+		Locked
+	};
+
 	enum class PhysicsConstraintKind : std::uint8_t {
 		Fixed,
 		Point,
@@ -447,8 +457,20 @@ namespace TerraEngine::Physics {
 				if(slots.size() >= static_cast<std::size_t>(kInvalidPhysicsSlot)) {
 					return {};
 				}
+				// A later Release must never allocate after marking a live slot
+				// dead. Grow its free-list capacity before publishing a new slot.
+				try {
+					if(freeSlots.capacity() < slots.size() + 1U)
+						freeSlots.reserve(std::max(slots.capacity(), slots.size() + 1U));
+				} catch(const std::bad_alloc&) {
+					return {};
+				}
 				index = static_cast<PhysicsSlotIndex>(slots.size());
-				slots.push_back(Slot{world, 1U, true});
+				try {
+					slots.push_back(Slot{world, 1U, true});
+				} catch(const std::bad_alloc&) {
+					return {};
+				}
 			}
 
 			const Slot& slot = slots[index];

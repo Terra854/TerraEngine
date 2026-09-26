@@ -459,4 +459,4 @@ obj/
 
 # The exact SDK is hash-pinned by cmake/TerraEngineDotNetSdk.lock.json and is
 # regenerated under External so no build consults a machine-wide installation.
-/External/dotnet/sdk/
+External/dotnet/sdk/

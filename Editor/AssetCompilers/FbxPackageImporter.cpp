@@ -2813,44 +2813,25 @@ namespace TerraEngine::AssetPipeline
 					FbxNodeAnimationChannel channel;
 					channel.targetStableId = skeleton.asset.joints[*nodeIndex].stableId;
 					channel.targetSemanticKey = skeleton.asset.joints[*nodeIndex].normalizedSourcePath;
-					// Assimp animation keys are absolute locals relative to the
-					// exported scene/node pose. The skeleton bind locals above are
-					// reconstructed from the authoritative skin offsets. Apply the
-					// fixed B * inverse(S) correction so every animated key carries
-					// the same motion from the authored skin bind instead of snapping
-					// selected bones back into the exporter frame-zero hierarchy.
-					aiMatrix4x4 inverseSourceLocal = ToAssimpMatrix(
-						nodes[*nodeIndex].localTransform);
-					inverseSourceLocal.Inverse();
-					const aiMatrix4x4 localBindCorrection =
-						ToAssimpMatrix(
-							skeleton.asset.joints[*nodeIndex].localBindTransform)
-						* inverseSourceLocal;
-					aiVector3D correctionScale;
-					aiVector3D correctionTranslation;
-					aiQuaternion correctionRotation;
-					localBindCorrection.Decompose(
-						correctionScale,
-						correctionRotation,
-						correctionTranslation);
+					// Assimp keys are absolute local transforms, not deltas from the
+					// exported node pose. Preserve them in the source hierarchy frame.
+					// The skin's inverse bind matrices already account for its bind
+					// pose; multiplying keys by B * inverse(S) would apply a second
+					// correction and map an authored resting pose S back to T-pose B.
 					for (unsigned int keyIndex = 0u; keyIndex < sourceChannel->mNumPositionKeys; ++keyIndex)
 					{
 						const aiVectorKey& sourceKey = sourceChannel->mPositionKeys[keyIndex];
-						const aiVector3D rebased =
-							TransformPoint(localBindCorrection, sourceKey.mValue);
 						AppendOrReplaceCollapsedKey(channel.translations, FbxVectorKey{
 							ToFixedAnimationTick(sourceKey.mTime, ticksPerSecond, sourceOrigin),
-							{ rebased.x, rebased.y, rebased.z }
+							{ sourceKey.mValue.x, sourceKey.mValue.y, sourceKey.mValue.z }
 						}, collapsedTimestamp);
 					}
 					for (unsigned int keyIndex = 0u; keyIndex < sourceChannel->mNumRotationKeys; ++keyIndex)
 					{
 						const aiQuatKey& sourceKey = sourceChannel->mRotationKeys[keyIndex];
-						const aiQuaternion rebased =
-							correctionRotation * sourceKey.mValue;
 						AppendOrReplaceCollapsedKey(channel.rotations, FbxQuaternionKey{
 							ToFixedAnimationTick(sourceKey.mTime, ticksPerSecond, sourceOrigin),
-							NormalizeAnimationQuaternion(rebased)
+							NormalizeAnimationQuaternion(sourceKey.mValue)
 						}, collapsedTimestamp);
 					}
 					for (unsigned int keyIndex = 0u; keyIndex < sourceChannel->mNumScalingKeys; ++keyIndex)
@@ -2859,9 +2840,9 @@ namespace TerraEngine::AssetPipeline
 						AppendOrReplaceCollapsedKey(channel.scales, FbxVectorKey{
 							ToFixedAnimationTick(sourceKey.mTime, ticksPerSecond, sourceOrigin),
 							{
-								correctionScale.x * sourceKey.mValue.x,
-								correctionScale.y * sourceKey.mValue.y,
-								correctionScale.z * sourceKey.mValue.z
+								sourceKey.mValue.x,
+								sourceKey.mValue.y,
+								sourceKey.mValue.z
 							}
 						}, collapsedTimestamp);
 					}

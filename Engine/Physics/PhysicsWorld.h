@@ -244,6 +244,14 @@ namespace TerraEngine::Physics {
 		PhysicsBodyHandle supportBody;
 		std::uint32_t contactCount = 0U;
 		bool supported = false;
+		// Fixed-step intent and measured displacement share this state's tick.
+		// A discontinuity (such as teleport) suppresses derivative feedback.
+		float completedStepDuration = 0.0F;
+		PhysicsVector3 requestedPlanarVelocity;
+		PhysicsVector3 realizedDisplacement;
+		float requestedYawRadians = 0.0F;
+		float realizedYawRadians = 0.0F;
+		bool motionDiscontinuity = true;
 	};
 
 	struct PhysicsCharacterStatePacket {
@@ -253,6 +261,16 @@ namespace TerraEngine::Physics {
 		std::shared_ptr<const std::vector<PhysicsCharacterState>> states;
 
 		[[nodiscard]] bool IsValidFor(PhysicsWorldHandle activeWorld, PhysicsTick currentTick) const noexcept;
+	};
+
+	// Preparation owns every allocation needed by an authority change. The
+	// protected coordinator may validate the provider, publish there, and then
+	// swap this immutable root without allocating or changing individual rows.
+	struct PreparedCharacterMotionLeaseBatch {
+		CharacterMotionLeaseResult result;
+		std::shared_ptr<const std::unordered_map<PhysicsSlotIndex, CharacterMotionLease>> root;
+		PhysicsWorldHandle expectedWorld;
+		std::uint64_t expectedSerial = 0U;
 	};
 
 	// PhysicsWorld represents the one initial gameplay world. It can be safely
@@ -294,6 +312,20 @@ namespace TerraEngine::Physics {
 		bool CancelCommand(PhysicsCommandId commandId);
 		PhysicsCommandBatch MergeCommands(PhysicsTick inclusiveTick);
 		PhysicsCommandQueueDiagnostics CommandQueueDiagnostics() const;
+		PreparedCharacterMotionLeaseBatch PrepareCharacterMotionLeases(
+			std::span<const CharacterMotionLeaseChange> changes) const;
+		PreparedCharacterMotionLeaseBatch PrepareExternalCharacterRecovery(
+			const CharacterExternalRecoveryTransition& transition) const;
+		PreparedCharacterMotionLeaseBatch PrepareExternalCharacterRecoveries(
+			std::span<const CharacterExternalRecoveryTransition> transitions) const;
+		PreparedCharacterMotionLeaseBatch PrepareExternalCharacterCarry(
+			std::span<const CharacterExternalCarry> carries,
+			std::span<const PhysicsCharacterHandle> retiringCharacters) const;
+		bool CommitPreparedCharacterMotionLeases(PreparedCharacterMotionLeaseBatch prepared);
+		CharacterMotionLeaseResult PublishCharacterMotionLeases(
+			std::span<const CharacterMotionLeaseChange> changes);
+		std::optional<CharacterMotionLease> ReadCharacterMotionLease(
+			const PhysicsCharacterCommandTarget& controller) const;
 
 		// Query submissions are generation-validated and bounded at this world
 		// boundary. Preparation yields immutable packets for worker/backend execution;
@@ -421,6 +453,9 @@ namespace TerraEngine::Physics {
 		PhysicsHandleAllocator<PhysicsCharacterHandle> characterRegistry;
 		std::unordered_map<std::uint64_t, PhysicsConstraintRuntimeState> constraintRuntime;
 		std::vector<std::shared_ptr<const PhysicsCharacterStatePacket>> characterStateHistory;
+		std::shared_ptr<const std::unordered_map<PhysicsSlotIndex, CharacterMotionLease>> characterMotionLeases =
+			std::make_shared<const std::unordered_map<PhysicsSlotIndex, CharacterMotionLease>>();
+		std::uint64_t characterMotionLeaseSerial = 0U;
 		IncrementalBodyStateStore bodyStateStore;
 		std::unordered_map<std::uint64_t, std::shared_ptr<const PhysicsCookedShapeData>> cookedShapes;
 		std::unordered_map<TerraEngine::UUID, std::shared_ptr<const PhysicsCookedShapeAssetState>> cookedShapeAssets;

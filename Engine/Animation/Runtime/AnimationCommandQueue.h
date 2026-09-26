@@ -50,6 +50,9 @@ namespace TerraEngine::Animation {
 
 	struct AnimationCommand {
 		AnimatorInstanceHandle target;
+		// A protected producer may pin the exact authored controller generation.
+		// Invalid preserves the pre-existing unqualified command behavior.
+		AnimationAssetHandle expectedController;
 		AnimationCommandKind kind = AnimationCommandKind::SetParameter;
 		AnimationParameterType parameterType = AnimationParameterType::Float;
 		std::uint32_t parameterId = 0U;

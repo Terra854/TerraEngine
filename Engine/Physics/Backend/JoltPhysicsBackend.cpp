@@ -57,10 +57,13 @@
 #include <cstring>
 #include <cfloat>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <numbers>
 #include <numeric>
+#include <optional>
 #include <shared_mutex>
 #include <sstream>
 #include <string>
@@ -112,6 +115,31 @@ namespace TerraEngine::Physics::Backend {
 
 		PhysicsVector3 FromJoltVector(JPH::Vec3Arg value) {
 			return {value.GetX(), value.GetY(), value.GetZ()};
+		}
+
+		JPH::Vec3 MovePlanarTowards(JPH::Vec3Arg current, JPH::Vec3Arg target, float maximumDelta) {
+			const JPH::Vec3 difference = target - current;
+			const float distance = difference.Length();
+			if(distance <= maximumDelta || distance <= 1.0e-6F) return target;
+			return current + difference * (maximumDelta / distance);
+		}
+
+		JPH::Vec3 ShapeLocomotionVelocity(JPH::Vec3Arg current, JPH::Vec3Arg target,
+			float acceleration, float braking, float duration) {
+			// Opposite intent first spends its braking budget getting to zero. Only
+			// unused physical time may accelerate in the new direction.
+			if(current.Dot(target) < 0.0F && current.LengthSq() > 1.0e-8F) {
+				const float speed = current.Length();
+				const float brakeDelta = braking * duration;
+				if(brakeDelta < speed) return current * (1.0F - brakeDelta / speed);
+				const float remaining = braking > 0.0F ? duration - speed / braking : 0.0F;
+				return MovePlanarTowards(JPH::Vec3::sZero(), target,
+					acceleration * std::max(0.0F, remaining));
+			}
+			const bool slowing = target.LengthSq() < current.LengthSq()
+				&& current.Dot(target) >= 0.0F;
+			return MovePlanarTowards(current, target,
+				(slowing ? braking : acceleration) * duration);
 		}
 
 		PhysicsVector3 FromJoltPosition(JPH::RVec3Arg value) {
@@ -1113,10 +1141,30 @@ namespace TerraEngine::Physics::Backend {
 		};
 
 		struct CharacterRecord {
+			struct RootIntervalRecord {
+				RootMotionIntervalReservation reservation;
+				RootMotionInterval interval;
+				PhysicsVector3 remainingTranslation;
+				float remainingYawRadians = 0.0F;
+				float remainingDurationSeconds = 0.0F;
+				std::uint64_t firstTickResultSequence = 0U;
+				std::uint64_t lastTickResultSequence = 0U;
+				bool committed = false;
+				bool adjustedByLimit = false;
+				bool adjustedByCollision = false;
+				bool sharedTickAttribution = false;
+			};
 			// Commands update this copied intent at their protected admission boundary.
 			// AdvanceCharacters consumes the one-shot flags exactly once per fixed tick.
 			struct PendingIntent {
 				PhysicsVector3 desiredVelocity;
+				PhysicsVector3 desiredFacing;
+				float acceleration = 0.0F;
+				float braking = 0.0F;
+				float turnRate = 0.0F;
+				bool hasFacing = false;
+				std::uint64_t motionEpoch = 0U;
+				CharacterMotionCommandSource source = CharacterMotionCommandSource::Legacy;
 				PhysicsPose pose;
 				float jumpSpeed = 0.0F;
 				float resizeHeight = 0.0F;
@@ -1138,6 +1186,30 @@ namespace TerraEngine::Physics::Backend {
 			bool enabled = true;
 			bool committed = false;
 			std::uint64_t stagingToken = 0U;
+			CharacterMotionLease lease;
+			std::uint64_t lastLocomotionUpdateEpoch = 0U;
+			// This is the locomotion contribution only, never gravity, platform
+			// velocity, or a collision solver's realized physical velocity.
+			PhysicsVector3 shapedPlanarVelocity;
+			float remainingApproachDistanceMetres = -1.0F;
+			float completedStepDuration = 0.0F;
+			PhysicsVector3 requestedPlanarVelocity;
+			PhysicsVector3 realizedDisplacement;
+			float requestedYawRadians = 0.0F;
+			float realizedYawRadians = 0.0F;
+			// Root Y is authored one-shot motion. Keep the independently integrated
+			// gravity/jump component so a blocked root sample cannot rebound on
+			// the next unsupported step through Jolt's combined velocity.
+			float physicalVerticalVelocity = 0.0F;
+			bool motionDiscontinuity = true;
+			// Fixed slots include reservations not yet made visible to stepping. A
+			// cancelled ledger attempt releases only its own slot and terminal reserve.
+			std::array<std::optional<RootIntervalRecord>, 8U> rootIntervals;
+			RootMotionAnimatorIdentity lastCommittedRootAnimator;
+			std::uint64_t lastCommittedRootEvaluationSequence = 0U;
+			// A protected emergency clear seals this lease lifetime; an old
+			// producer cannot submit a fresh root sample after its owner vanished.
+			bool rootMotionSealed = false;
 		};
 
 		struct StagingRecord {
@@ -1169,6 +1241,79 @@ namespace TerraEngine::Physics::Backend {
 			}
 			if(!healthy.load(std::memory_order_acquire)) {
 				return ProviderFailure("The Jolt backend is contained after a fatal provider failure.", true);
+			}
+			return Success();
+		}
+
+		static constexpr std::size_t kMaximumRootIntervals = 4096U;
+		static constexpr std::size_t kMaximumRootResultRecords = 65536U;
+
+		bool EnsureRootResultStorage() {
+			if(!rootResults.empty()) return true;
+			try {
+				// Every admitted interval permanently reserves one terminal record.
+				// Allocate the bounded ring before any root admission is visible.
+				rootResults.resize(kMaximumRootResultRecords);
+				return true;
+			} catch(const std::bad_alloc&) {
+				return false;
+			}
+		}
+
+		std::uint64_t AppendRootResult(RootMotionResultRecord result) {
+			if(rootResults.empty() || rootResultCount >= rootResults.size()) return 0U;
+			if(nextRootResultSequence == 0U) return 0U;
+			result.sequence = nextRootResultSequence++;
+			rootResults[(rootResultHead + rootResultCount) % rootResults.size()] = std::move(result);
+			++rootResultCount;
+			return nextRootResultSequence - 1U;
+		}
+
+		void CancelRootIntervalsForRecord(CharacterRecord& character, RootMotionIntervalError reason) {
+			for(auto& slot : character.rootIntervals) {
+				if(!slot) continue;
+				if(slot->committed) {
+					RootMotionTerminalResult terminal;
+					terminal.intervalId = slot->reservation.intervalId;
+					terminal.animator = slot->interval.animator;
+					terminal.ledger = slot->interval.ledger;
+					terminal.disposition = RootMotionTerminalDisposition::Cancelled;
+					terminal.reason = reason;
+					terminal.firstTickResultSequence = slot->firstTickResultSequence;
+					terminal.lastTickResultSequence = slot->lastTickResultSequence;
+					terminal.sharedTickAttribution = slot->sharedTickAttribution;
+					(void)AppendRootResult({0U, terminal});
+				}
+				slot.reset();
+				if(liveRootIntervalCount > 0U) --liveRootIntervalCount;
+			}
+		}
+
+		PhysicsBackendResult PreflightCharacterMotionLeasesLocked(
+			std::span<const CharacterMotionLeaseChange> changes) const {
+			const PhysicsBackendResult ready = CheckReady();
+			if(!ready.Succeeded()) return ready;
+			if(physicsSystem == nullptr) return Rejected(PhysicsBackendErrorCode::InvalidState,
+				"The character lease world is not active.");
+			if(changes.size() > 256U) return Rejected(PhysicsBackendErrorCode::CapacityExceeded,
+				"A character lease batch exceeds its fixed maximum of 256 transitions.");
+			std::unordered_set<std::uint64_t> seen;
+			seen.reserve(changes.size());
+			for(const CharacterMotionLeaseChange& change : changes) {
+				const PhysicsCharacterCommandTarget& controller = change.next.controller;
+				if(!seen.insert(HandleKey(controller.character)).second)
+					return Rejected(PhysicsBackendErrorCode::InvalidArgument, "A controller appears twice in one lease batch.");
+				const auto found = characters.find(HandleKey(controller.character));
+				if(found == characters.end() || !found->second.committed || found->second.stagingToken != 0U
+					|| found->second.lease.controller != controller) {
+					return Rejected(PhysicsBackendErrorCode::StaleHandle, "The lease controller lifetime is stale.");
+				}
+				const CharacterMotionLeaseError error = ValidateCharacterMotionLeaseChange(change, found->second.lease);
+				if(error != CharacterMotionLeaseError::None) {
+					return Rejected(error == CharacterMotionLeaseError::OwnershipConflict
+						? PhysicsBackendErrorCode::OwnershipConflict : PhysicsBackendErrorCode::InvalidArgument,
+						"A character lease transition conflicts with the current controller authority.");
+				}
 			}
 			return Success();
 		}
@@ -1589,6 +1734,16 @@ namespace TerraEngine::Physics::Backend {
 		std::vector<PhysicsBodyHandle> pendingRemovedBodies;
 		std::unordered_map<std::uint64_t, ConstraintRecord> constraints;
 		std::unordered_map<std::uint64_t, CharacterRecord> characters;
+		// This fixed ring never discards an unacknowledged tick or terminal result.
+		// Active intervals reserve one terminal slot against its free space.
+		std::vector<RootMotionResultRecord> rootResults;
+		std::size_t rootResultHead = 0U;
+		std::size_t rootResultCount = 0U;
+		std::size_t liveRootIntervalCount = 0U;
+		std::uint64_t nextRootIntervalSequence = 1U;
+		std::uint64_t nextRootReservationGeneration = 1U;
+		std::uint64_t nextRootResultSequence = 1U;
+		bool rootStepCapacityAvailable = true;
 		// Provider maps retain O(1) handle lookup, while these compact membership
 		// orders make fixed-step extraction deterministic without sorting every tick.
 		std::vector<std::uint64_t> constraintOrder;
@@ -1737,6 +1892,13 @@ namespace TerraEngine::Physics::Backend {
 		impl->characters.clear();
 		impl->constraintOrder.clear();
 		impl->characterOrder.clear();
+		impl->rootResults.clear();
+		impl->rootResultHead = 0U;
+		impl->rootResultCount = 0U;
+		impl->liveRootIntervalCount = 0U;
+		impl->nextRootIntervalSequence = 1U;
+		impl->nextRootReservationGeneration = 1U;
+		impl->nextRootResultSequence = 1U;
 		impl->bodyIdToKey.clear();
 		impl->bodyObjectToKey.clear();
 		impl->shapes.clear();
@@ -1817,6 +1979,12 @@ namespace TerraEngine::Physics::Backend {
 			impl->worldConfiguration = configuration;
 			impl->bodyOrderGeneration = 1U;
 			impl->lastEventDrainTick = 0U;
+			impl->rootResultHead = 0U;
+			impl->rootResultCount = 0U;
+			impl->liveRootIntervalCount = 0U;
+			impl->nextRootIntervalSequence = 1U;
+			impl->nextRootReservationGeneration = 1U;
+			impl->nextRootResultSequence = 1U;
 			return impl->CheckProviderHealth()
 				? Success("The Jolt world was created.")
 				: ProviderFailure("Jolt reported a fatal failure while creating the world.", true);
@@ -1861,6 +2029,10 @@ namespace TerraEngine::Physics::Backend {
 		impl->characters.clear();
 		impl->constraintOrder.clear();
 		impl->characterOrder.clear();
+		impl->rootResults.clear();
+		impl->rootResultHead = 0U;
+		impl->rootResultCount = 0U;
+		impl->liveRootIntervalCount = 0U;
 		impl->bodyIdToKey.clear();
 		impl->bodyObjectToKey.clear();
 		impl->shapes.clear();
@@ -2654,6 +2826,9 @@ namespace TerraEngine::Physics::Backend {
 			|| !std::isfinite(request.penetrationRecoverySpeed) || request.penetrationRecoverySpeed < 0.0F
 			|| !std::isfinite(request.groundAdhesion) || request.groundAdhesion < 0.0F
 			|| !std::isfinite(request.gravityScale) || !std::isfinite(request.jumpSpeed) || request.jumpSpeed < 0.0F
+			|| (request.rotationPolicy != PhysicsCharacterRotationPolicy::Free
+				&& request.rotationPolicy != PhysicsCharacterRotationPolicy::AlignToUp
+				&& request.rotationPolicy != PhysicsCharacterRotationPolicy::Locked)
 			|| request.collisionLayer >= kJoltObjectLayerCount) return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The virtual-character request is invalid or stale.");
 		const std::uint64_t key = HandleKey(request.handle);
 		if(impl->characters.contains(key)) return Rejected(PhysicsBackendErrorCode::InvalidState, "The character handle is already populated.");
@@ -2687,6 +2862,9 @@ namespace TerraEngine::Physics::Backend {
 			character->SetListener(&impl->characterContactListener);
 			impl->characters.emplace(key, Impl::CharacterRecord{request.handle, request.objectId, request.objectGeneration, request.componentGeneration,
 				request.shapeKind, request.radius, request.height, request, std::move(character), {}, request.enabled, false, staging.value});
+			impl->characters.at(key).lease.controller = {
+				impl->worldConfiguration.world, request.handle, request.objectId,
+				request.objectGeneration, request.componentGeneration};
 			impl->staging.at(staging.value).characterKeys.push_back(key);
 			return Success("The Jolt virtual character was staged without update visibility.");
 		} catch(const std::exception& exception) {
@@ -2717,14 +2895,36 @@ namespace TerraEngine::Physics::Backend {
 		if(request.resizeRequested && request.resizeHeight < 2.0F * record.radius) {
 			return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The requested character resize is invalid.");
 		}
-		record.enabled = request.enabled;
-		if(!record.enabled) {
+		if(!request.enabled) {
+			record.enabled = false;
+			impl->CancelRootIntervalsForRecord(record, RootMotionIntervalError::Cancelled);
+			if(record.lease.mode == CharacterMotionMode::RootMotion)
+				record.rootMotionSealed = true;
 			// Disable is a cancellation boundary: a controller that is later enabled
 			// must not replay a delayed jump, resize, teleport, or stale velocity.
 			record.intent = {};
+			record.shapedPlanarVelocity = {};
+			record.remainingApproachDistanceMetres = -1.0F;
+			record.completedStepDuration = 0.0F;
+			record.requestedPlanarVelocity = {};
+			record.realizedDisplacement = {};
+			record.requestedYawRadians = 0.0F;
+			record.realizedYawRadians = 0.0F;
+			record.physicalVerticalVelocity = 0.0F;
+			record.character->SetLinearVelocity(JPH::Vec3::sZero());
+			record.motionDiscontinuity = true;
 			return Success("The disabled virtual character discarded pending motion intent.");
 		}
+		if(record.lease.state != CharacterMotionLeaseState::Unleased
+			|| request.characterMotionSource != CharacterMotionCommandSource::Legacy
+			|| request.characterMotionEpoch != record.lease.motionEpoch) {
+			return Rejected(PhysicsBackendErrorCode::OwnershipConflict,
+				"A direct character update conflicts with the current motion lease or epoch.");
+		}
+		record.enabled = true;
 		record.intent.desiredVelocity = request.desiredVelocity;
+		record.intent.motionEpoch = request.characterMotionEpoch;
+		record.intent.source = CharacterMotionCommandSource::Legacy;
 		if(request.jumpRequested) {
 			record.intent.jumpRequested = true;
 			record.intent.jumpSpeed = request.jumpSpeed;
@@ -2741,6 +2941,571 @@ namespace TerraEngine::Physics::Backend {
 		return Success("The virtual-character intent was stored for the next fixed step.");
 	}
 
+	PhysicsBackendResult JoltPhysicsBackend::PreflightCharacterMotionLeases(
+		std::span<const CharacterMotionLeaseChange> changes) const {
+		std::lock_guard lock(impl->mutex);
+		return impl->PreflightCharacterMotionLeasesLocked(changes);
+	}
+
+	PhysicsBackendResult JoltPhysicsBackend::PublishCharacterMotionLeases(
+		std::span<const CharacterMotionLeaseChange> changes) {
+		std::lock_guard lock(impl->mutex);
+		const PhysicsBackendResult preflight = impl->PreflightCharacterMotionLeasesLocked(changes);
+		if(!preflight.Succeeded()) return preflight;
+		// Every row was checked before the first write. The provider already owns
+		// these fixed records, so the commit allocates nothing and cannot partially
+		// fail due to ordinary queue or receipt capacity.
+		for(const CharacterMotionLeaseChange& change : changes) {
+			auto& record = impl->characters.at(HandleKey(change.next.controller.character));
+			impl->CancelRootIntervalsForRecord(record, RootMotionIntervalError::Cancelled);
+			record.lease = change.next;
+			record.intent = {};
+			record.intent.motionEpoch = change.next.motionEpoch;
+			record.lastLocomotionUpdateEpoch = 0U;
+			record.shapedPlanarVelocity = {};
+			record.remainingApproachDistanceMetres = -1.0F;
+			record.completedStepDuration = 0.0F;
+			record.requestedPlanarVelocity = {};
+			record.realizedDisplacement = {};
+			record.requestedYawRadians = 0.0F;
+			record.realizedYawRadians = 0.0F;
+			record.motionDiscontinuity = true;
+			record.lastCommittedRootAnimator = {};
+			record.lastCommittedRootEvaluationSequence = 0U;
+			record.rootMotionSealed = false;
+		}
+		return Success("The complete character motion lease batch was published.");
+	}
+
+	PhysicsBackendResult JoltPhysicsBackend::PreflightCharacterExternalCarry(
+		std::span<const CharacterExternalCarry> carries) const {
+		std::shared_lock lock(impl->mutex);
+		if(!impl->CheckReady().Succeeded() || impl->physicsSystem == nullptr)
+			return Rejected(PhysicsBackendErrorCode::InvalidState,
+				"The external carry world is not active.");
+		if(carries.empty() || carries.size() > 4096U)
+			return Rejected(PhysicsBackendErrorCode::CapacityExceeded,
+				"An external carry batch exceeds its bounded capacity.");
+		std::unordered_set<std::uint64_t> oldKeys;
+		std::unordered_set<std::uint64_t> newKeys;
+		oldKeys.reserve(carries.size());
+		newKeys.reserve(carries.size());
+		for(const CharacterExternalCarry& carry : carries) {
+			const auto& old = carry.expectedExternalLease;
+			const auto& next = carry.nextExternalLease;
+			if(ValidateCharacterExternalCarry(carry) != CharacterMotionLeaseError::None
+				|| !HandleMatchesWorld(old.controller.world, impl->worldConfiguration.world)
+				|| !oldKeys.insert(HandleKey(old.controller.character)).second
+				|| !newKeys.insert(HandleKey(next.controller.character)).second)
+				return Rejected(PhysicsBackendErrorCode::InvalidArgument,
+					"The external carry has an invalid or repeated controller identity.");
+			const auto oldRecord = impl->characters.find(HandleKey(old.controller.character));
+			const auto newRecord = impl->characters.find(HandleKey(next.controller.character));
+			if(oldRecord == impl->characters.end() || !oldRecord->second.committed
+				|| oldRecord->second.stagingToken != 0U || oldRecord->second.lease != old
+				|| newRecord == impl->characters.end()
+				|| newRecord->second.lease.controller != next.controller
+				|| newRecord->second.lease.state != CharacterMotionLeaseState::Unleased)
+				return Rejected(PhysicsBackendErrorCode::StaleHandle,
+					"The external carry source or staged replacement is stale.");
+		}
+		return Success("The complete external carry is preflighted.");
+	}
+
+	bool JoltPhysicsBackend::CommitCharacterExternalCarry(
+		std::span<const CharacterExternalCarry> carries) {
+		std::lock_guard lock(impl->mutex);
+		if(!impl->CheckReady().Succeeded() || impl->physicsSystem == nullptr
+			|| carries.empty() || carries.size() > 4096U)
+			return false;
+		for(std::size_t index = 0U; index < carries.size(); ++index) {
+			const auto& carry = carries[index];
+			if(ValidateCharacterExternalCarry(carry) != CharacterMotionLeaseError::None
+				|| !HandleMatchesWorld(carry.expectedExternalLease.controller.world,
+					impl->worldConfiguration.world)) return false;
+			const auto old = impl->characters.find(HandleKey(
+				carry.expectedExternalLease.controller.character));
+			const auto next = impl->characters.find(HandleKey(
+				carry.nextExternalLease.controller.character));
+			if(old == impl->characters.end() || !old->second.committed
+				|| old->second.lease != carry.expectedExternalLease
+				|| next == impl->characters.end() || !next->second.committed
+				|| next->second.lease.controller != carry.nextExternalLease.controller
+				|| next->second.lease.state != CharacterMotionLeaseState::Unleased)
+				return false;
+			for(std::size_t prior = 0U; prior < index; ++prior)
+				if(carries[prior].expectedExternalLease.controller.character
+						== carry.expectedExternalLease.controller.character
+					|| carries[prior].nextExternalLease.controller.character
+						== carry.nextExternalLease.controller.character)
+					return false;
+		}
+		// Both controller sets are now checked under the provider lock. Only
+		// already-allocated records change, so the entire batch is non-fallible.
+		for(const CharacterExternalCarry& carry : carries) {
+			auto& record = impl->characters.at(HandleKey(carry.nextExternalLease.controller.character));
+			record.lease = carry.nextExternalLease;
+			record.intent = {};
+			record.intent.motionEpoch = carry.nextExternalLease.motionEpoch;
+			record.shapedPlanarVelocity = {};
+			record.physicalVerticalVelocity = 0.0F;
+			record.motionDiscontinuity = true;
+		}
+		return true;
+	}
+
+	PhysicsBackendResult JoltPhysicsBackend::PublishCharacterMotionTarget(const CharacterMotionTarget& target) {
+		std::lock_guard lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
+		if(!target.frame.IsValid() || target.frame != impl->worldConfiguration.frame)
+			return Rejected(PhysicsBackendErrorCode::UnsupportedFrame,
+				"The typed character target does not use the active character physics frame.");
+		if(!target.controller.character.IsValid() || !target.owner.IsValid()
+			|| target.locomotionUpdateEpoch == 0U
+			|| !target.planarVelocity.IsFinite() || !target.desiredFacing.IsFinite()
+			|| !std::isfinite(target.approachDistanceMetres)
+			|| (target.approachDistanceMetres < 0.0F && target.approachDistanceMetres != -1.0F)
+			|| !std::isfinite(target.acceleration) || target.acceleration < 0.0F
+			|| !std::isfinite(target.braking) || target.braking < 0.0F
+			|| !std::isfinite(target.turnRate) || target.turnRate < 0.0F) {
+			return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The typed character target is invalid.");
+		}
+		const auto found = impl->characters.find(HandleKey(target.controller.character));
+		if(found == impl->characters.end() || !found->second.committed
+			|| found->second.lease.controller != target.controller)
+			return Rejected(PhysicsBackendErrorCode::StaleHandle, "The typed character target controller is stale.");
+		auto& record = found->second;
+		if(!record.enabled)
+			return Rejected(PhysicsBackendErrorCode::InvalidState, "The leased character controller is disabled.");
+		if(record.lease.state != CharacterMotionLeaseState::LocomotionOwned
+			|| record.lease.owner != target.owner
+			|| record.lease.authorityEpoch != target.authorityEpoch
+			|| record.lease.motionEpoch != target.motionEpoch
+			|| record.lease.mode != target.mode) {
+			return Rejected(PhysicsBackendErrorCode::OwnershipConflict,
+				"The typed character target does not match the current motion lease.");
+		}
+		if(target.mode != CharacterMotionMode::Velocity && !target.clearImmediately)
+			return Rejected(PhysicsBackendErrorCode::Unsupported,
+				"Root-motion intervals require their later dedicated physics ingress.");
+		if(target.locomotionUpdateEpoch < record.lastLocomotionUpdateEpoch)
+			return Rejected(PhysicsBackendErrorCode::OwnershipConflict,
+				"An older prepared target cannot replace a newer controller update.");
+		if(target.hasFacing && !target.clearImmediately) {
+			constexpr float axisTolerance = 0.001F;
+			const PhysicsVector3& center = record.settings.localCenter;
+			const PhysicsVector3& up = record.settings.upDirection;
+			const JPH::Vec3 rotatedUp = record.character->GetRotation() * JPH::Vec3::sAxisY();
+			if((record.shapeKind != PhysicsShapeKind::Capsule && record.shapeKind != PhysicsShapeKind::Cylinder)
+				|| record.settings.rotationPolicy == PhysicsCharacterRotationPolicy::Locked
+				|| std::fabs(center.x) > axisTolerance || std::fabs(center.z) > axisTolerance
+				|| std::fabs(up.x) > axisTolerance || std::fabs(up.y - 1.0F) > axisTolerance
+				|| std::fabs(up.z) > axisTolerance
+				|| std::fabs(rotatedUp.GetX()) > axisTolerance
+				|| std::fabs(rotatedUp.GetY() - 1.0F) > axisTolerance
+				|| std::fabs(rotatedUp.GetZ()) > axisTolerance) {
+				return Rejected(PhysicsBackendErrorCode::Unsupported,
+					"Requested facing needs an unlocked, upright, centered capsule or cylinder.");
+			}
+			if(std::fabs(target.desiredFacing.y) > axisTolerance
+				|| target.desiredFacing.x * target.desiredFacing.x
+					+ target.desiredFacing.z * target.desiredFacing.z <= 1.0e-8F)
+				return Rejected(PhysicsBackendErrorCode::InvalidArgument,
+					"Requested facing must contain a nonzero planar direction.");
+		}
+		record.lastLocomotionUpdateEpoch = target.locomotionUpdateEpoch;
+		if(target.clearImmediately) {
+			if(target.mode == CharacterMotionMode::RootMotion) {
+				impl->CancelRootIntervalsForRecord(record, RootMotionIntervalError::Cancelled);
+				record.rootMotionSealed = true;
+			}
+			record.intent = {};
+			record.intent.motionEpoch = target.motionEpoch;
+			record.intent.source = CharacterMotionCommandSource::Locomotion;
+			record.shapedPlanarVelocity = {};
+			record.remainingApproachDistanceMetres = 0.0F;
+			return Success("The leased character target was cleared immediately.");
+		}
+		record.remainingApproachDistanceMetres = target.approachDistanceMetres;
+		record.intent.desiredVelocity = target.planarVelocity;
+		record.intent.desiredFacing = target.desiredFacing;
+		record.intent.acceleration = target.acceleration;
+		record.intent.braking = target.braking;
+		record.intent.turnRate = target.turnRate;
+		record.intent.hasFacing = target.hasFacing;
+		record.intent.motionEpoch = target.motionEpoch;
+		record.intent.source = CharacterMotionCommandSource::Locomotion;
+		return Success("The leased character target was stored for fixed-step consumption.");
+	}
+
+	PhysicsBackendResult JoltPhysicsBackend::PreflightCharacterExternalRecovery(
+		const CharacterExternalRecoveryTransition& transition) const {
+		std::shared_lock lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
+		const CharacterExternalRecoveryIntent& intent = transition.intent;
+		const PhysicsCharacterCommandTarget& controller = intent.expectedExternalLease.controller;
+		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(controller.world, impl->worldConfiguration.world)
+			|| intent.frame != impl->worldConfiguration.frame)
+			return Rejected(PhysicsBackendErrorCode::StaleWorld,
+				"The external recovery targets a stale world or physics frame.");
+		const auto found = impl->characters.find(HandleKey(controller.character));
+		if(found == impl->characters.end() || !found->second.committed
+			|| found->second.stagingToken != 0U || found->second.lease.controller != controller
+			|| found->second.character == nullptr)
+			return Rejected(PhysicsBackendErrorCode::StaleHandle,
+				"The external recovery controller lifetime is stale.");
+		if(ValidateCharacterExternalRecoveryTransition(transition, found->second.lease)
+			!= CharacterMotionLeaseError::None)
+			return Rejected(PhysicsBackendErrorCode::OwnershipConflict,
+				"The external recovery owner, pose, or lease transition is invalid.");
+		const JPH::Vec3 up = ToNormalizedJoltAxis(found->second.settings.upDirection);
+		const JPH::Vec3 recoveredUp = ToJoltRotation(intent.alignedControllerPose.rotation)
+			* JPH::Vec3::sAxisY();
+		if(recoveredUp.Dot(up) < 0.99F)
+			return Rejected(PhysicsBackendErrorCode::InvalidArgument,
+				"The recovered virtual controller pose is not upright.");
+		return Success("The external recovery can atomically relocate and release the controller.");
+	}
+
+	bool JoltPhysicsBackend::CommitCharacterExternalRecovery(
+		const CharacterExternalRecoveryTransition& transition) {
+		std::lock_guard lock(impl->mutex);
+		if(impl->physicsSystem == nullptr
+			|| !HandleMatchesWorld(transition.intent.expectedExternalLease.controller.world,
+				impl->worldConfiguration.world)
+			|| transition.intent.frame != impl->worldConfiguration.frame)
+			return false;
+		const auto found = impl->characters.find(HandleKey(
+			transition.intent.expectedExternalLease.controller.character));
+		if(found == impl->characters.end() || !found->second.committed
+			|| found->second.character == nullptr
+			|| ValidateCharacterExternalRecoveryTransition(transition, found->second.lease)
+				!= CharacterMotionLeaseError::None)
+			return false;
+		auto& record = found->second;
+		// All finite/upright/frame checks and the immutable World root allocation
+		// completed before this protected point. These Jolt setters do not stage a
+		// command or allocate, and no second owner can interleave in PhysicsSystem.
+		impl->CancelRootIntervalsForRecord(record, RootMotionIntervalError::Cancelled);
+		record.character->SetPosition(ToJoltPosition(transition.intent.alignedControllerPose.position));
+		record.character->SetRotation(ToJoltRotation(transition.intent.alignedControllerPose.rotation));
+		record.character->SetLinearVelocity(JPH::Vec3::sZero());
+		record.lease = transition.releasedLease;
+		record.enabled = true;
+		record.intent = {};
+		record.intent.motionEpoch = transition.releasedLease.motionEpoch;
+		record.intent.source = CharacterMotionCommandSource::Legacy;
+		record.intent.teleportRequested = true;
+		record.intent.pose = transition.intent.alignedControllerPose;
+		record.shapedPlanarVelocity = {};
+		record.physicalVerticalVelocity = 0.0F;
+		record.remainingApproachDistanceMetres = -1.0F;
+		record.completedStepDuration = 0.0F;
+		record.requestedPlanarVelocity = {};
+		record.realizedDisplacement = {};
+		record.requestedYawRadians = 0.0F;
+		record.realizedYawRadians = 0.0F;
+		record.motionDiscontinuity = true;
+		record.rootMotionSealed = false;
+		record.lastCommittedRootAnimator = {};
+		record.lastCommittedRootEvaluationSequence = 0U;
+		return true;
+	}
+
+	std::optional<PhysicsPose> JoltPhysicsBackend::ReadCurrentCharacterPose(
+		const PhysicsCharacterCommandTarget& controller) const {
+		std::shared_lock lock(impl->mutex);
+		if(!impl->CheckReady().Succeeded() || impl->physicsSystem == nullptr
+			|| !HandleMatchesWorld(controller.world, impl->worldConfiguration.world))
+			return std::nullopt;
+		const auto found = impl->characters.find(HandleKey(controller.character));
+		if(found == impl->characters.end() || !found->second.committed
+			|| found->second.stagingToken != 0U || found->second.lease.controller != controller
+			|| found->second.character == nullptr)
+			return std::nullopt;
+		// This read occurs under the same protected PhysicsSystem coordinator as
+		// the abort preflight and commit; no script can supply a teleport pose.
+		return PhysicsPose{FromJoltPosition(found->second.character->GetPosition()),
+			FromJoltRotation(found->second.character->GetRotation())};
+	}
+
+	RootMotionIntervalAdmission JoltPhysicsBackend::ReserveRootMotionInterval(
+		const RootMotionInterval& interval) {
+		std::lock_guard lock(impl->mutex);
+		const auto reject = [](RootMotionIntervalError error) {
+			RootMotionIntervalAdmission result;
+			result.error = error;
+			return result;
+		};
+		if(!impl->CheckReady().Succeeded() || impl->physicsSystem == nullptr)
+			return reject(RootMotionIntervalError::NotReady);
+		if(!interval.lease.controller.character.IsValid()
+			|| !HandleMatchesWorld(interval.lease.controller.world, impl->worldConfiguration.world)
+			|| !interval.frame.IsValid() || interval.frame != impl->worldConfiguration.frame)
+			return reject(RootMotionIntervalError::UnsupportedFrame);
+		if(!interval.localTranslation.IsFinite() || !interval.frameTranslation.IsFinite()
+			|| !std::isfinite(interval.localYawRadians) || !std::isfinite(interval.frameYawRadians)
+			|| !std::isfinite(interval.durationSeconds) || interval.durationSeconds < 0.0F
+			|| !std::isfinite(interval.maximumSpeed) || interval.maximumSpeed < 0.0F
+			|| !std::isfinite(interval.maximumTurnRate) || interval.maximumTurnRate < 0.0F
+			|| (interval.durationSeconds == 0.0F
+				&& (interval.localTranslation.x != 0.0F || interval.localTranslation.y != 0.0F
+					|| interval.localTranslation.z != 0.0F || interval.localYawRadians != 0.0F
+					|| interval.frameTranslation.x != 0.0F || interval.frameTranslation.y != 0.0F
+					|| interval.frameTranslation.z != 0.0F || interval.frameYawRadians != 0.0F))
+			)
+			return reject(RootMotionIntervalError::InvalidArgument);
+		const RootMotionAnimatorIdentity& animator = interval.animator;
+		const RootMotionLedgerIdentity& ledger = interval.ledger;
+		if(animator.slotIndex == 0xffffffffU || animator.animatorGeneration == 0U
+			|| animator.poseGeneration == 0U || animator.sourceGeneration == 0U
+			|| animator.evaluationSequence == 0U || animator.bindingGeneration == 0U
+			|| animator.publicationGeneration == 0U || animator.sourceBeginTick < 0
+			|| animator.sourceEndTick < 0 || ledger.producerId == 0U
+			|| ledger.producerSequence == 0U || ledger.idempotencyKey == 0U
+			|| ledger.correlationId == 0U)
+			return reject(RootMotionIntervalError::InvalidArgument);
+		const auto found = impl->characters.find(HandleKey(interval.lease.controller.character));
+		if(found == impl->characters.end() || !found->second.committed
+			|| found->second.lease.controller != interval.lease.controller)
+			return reject(RootMotionIntervalError::StaleTarget);
+		auto& character = found->second;
+		if(character.lease != interval.lease || character.lease.state != CharacterMotionLeaseState::LocomotionOwned
+			|| character.lease.mode != CharacterMotionMode::RootMotion)
+			return reject(RootMotionIntervalError::OwnershipConflict);
+		if(character.rootMotionSealed) return reject(RootMotionIntervalError::StaleEvidence);
+		if(!character.enabled) return reject(RootMotionIntervalError::StaleTarget);
+		if(interval.frameYawRadians != 0.0F) {
+			const PhysicsVector3& center = character.settings.localCenter;
+			const PhysicsVector3& up = character.settings.upDirection;
+			const JPH::Vec3 rotatedUp = character.character->GetRotation() * JPH::Vec3::sAxisY();
+			constexpr float tolerance = 0.001F;
+			if((character.shapeKind != PhysicsShapeKind::Capsule
+					&& character.shapeKind != PhysicsShapeKind::Cylinder)
+				|| character.settings.rotationPolicy == PhysicsCharacterRotationPolicy::Locked
+				|| std::fabs(center.x) > tolerance || std::fabs(center.z) > tolerance
+				|| std::fabs(up.x) > tolerance || std::fabs(up.y - 1.0F) > tolerance
+				|| std::fabs(up.z) > tolerance || std::fabs(rotatedUp.GetX()) > tolerance
+				|| std::fabs(rotatedUp.GetY() - 1.0F) > tolerance
+				|| std::fabs(rotatedUp.GetZ()) > tolerance)
+				return reject(RootMotionIntervalError::UnsupportedController);
+		}
+		std::size_t occupied = 0U;
+		double remainingDuration = interval.durationSeconds;
+		std::uint64_t latestPendingSequence = character.lastCommittedRootEvaluationSequence;
+		for(const auto& slot : character.rootIntervals) {
+			if(!slot) continue;
+			++occupied;
+			remainingDuration += slot->remainingDurationSeconds;
+			if(slot->interval.animator.slotIndex != animator.slotIndex
+				|| slot->interval.animator.animatorGeneration != animator.animatorGeneration
+				|| slot->interval.animator.sourceGeneration != animator.sourceGeneration
+				|| slot->interval.animator.bindingGeneration != animator.bindingGeneration)
+				return reject(RootMotionIntervalError::StaleEvidence);
+			if(slot->interval.animator.evaluationSequence == animator.evaluationSequence
+				|| slot->interval.ledger == ledger)
+				return reject(RootMotionIntervalError::Duplicate);
+			latestPendingSequence = std::max(latestPendingSequence,
+				slot->interval.animator.evaluationSequence);
+		}
+		if(character.lastCommittedRootEvaluationSequence != 0U
+			&& (character.lastCommittedRootAnimator.slotIndex != animator.slotIndex
+				|| character.lastCommittedRootAnimator.animatorGeneration != animator.animatorGeneration
+				|| character.lastCommittedRootAnimator.sourceGeneration != animator.sourceGeneration
+				|| character.lastCommittedRootAnimator.bindingGeneration != animator.bindingGeneration)) {
+			if(occupied != 0U) return reject(RootMotionIntervalError::StaleEvidence);
+			latestPendingSequence = 0U;
+		}
+		if(animator.evaluationSequence <= latestPendingSequence)
+			return reject(RootMotionIntervalError::OutOfOrder);
+		if(occupied >= character.rootIntervals.size()
+			|| impl->liveRootIntervalCount >= Impl::kMaximumRootIntervals
+			|| remainingDuration > 0.25 + 1.0e-6
+			|| impl->nextRootIntervalSequence == 0U
+			|| impl->nextRootReservationGeneration == 0U
+			|| !impl->EnsureRootResultStorage()
+			|| impl->rootResultCount + impl->liveRootIntervalCount + 1U
+				> Impl::kMaximumRootResultRecords)
+			return reject(RootMotionIntervalError::CapacityExceeded);
+		auto vacant = std::find_if(character.rootIntervals.begin(), character.rootIntervals.end(),
+			[](const auto& slot) { return !slot.has_value(); });
+		RootMotionIntervalAdmission admitted;
+		admitted.accepted = true;
+		admitted.error = RootMotionIntervalError::None;
+		admitted.reservation.intervalId = {impl->worldConfiguration.world,
+			impl->nextRootIntervalSequence++};
+		admitted.reservation.tokenGeneration = impl->nextRootReservationGeneration++;
+		Impl::CharacterRecord::RootIntervalRecord record;
+		record.reservation = admitted.reservation;
+		record.interval = interval;
+		record.remainingTranslation = interval.frameTranslation;
+		record.remainingYawRadians = interval.frameYawRadians;
+		record.remainingDurationSeconds = interval.durationSeconds;
+		*vacant = std::move(record);
+		++impl->liveRootIntervalCount;
+		return admitted;
+	}
+
+	RootMotionIntervalAdmission JoltPhysicsBackend::CommitRootMotionInterval(
+		RootMotionIntervalReservation reservation) {
+		std::lock_guard lock(impl->mutex);
+		RootMotionIntervalAdmission result;
+		result.reservation = reservation;
+		if(!reservation.IsValid() || reservation.intervalId.world != impl->worldConfiguration.world)
+			{ result.error = RootMotionIntervalError::StaleTarget; return result; }
+		for(auto& [key, character] : impl->characters) {
+			(void)key;
+			for(auto& slot : character.rootIntervals) {
+				if(!slot || slot->reservation != reservation) continue;
+				if(slot->committed) { result.error = RootMotionIntervalError::Duplicate; return result; }
+				for(const auto& earlier : character.rootIntervals) {
+					if(earlier && !earlier->committed
+						&& earlier->reservation.intervalId.sequence < reservation.intervalId.sequence) {
+						// A later ledger winner cannot overtake a still-reserved earlier
+						// evaluation, even if a worker delivers its commit first.
+						result.error = RootMotionIntervalError::OutOfOrder;
+						return result;
+					}
+				}
+				if(character.lease != slot->interval.lease || !character.enabled) {
+					result.error = RootMotionIntervalError::OwnershipConflict;
+					return result;
+				}
+				slot->committed = true;
+				character.lastCommittedRootAnimator = slot->interval.animator;
+				character.lastCommittedRootEvaluationSequence =
+					slot->interval.animator.evaluationSequence;
+				if(slot->remainingDurationSeconds == 0.0F) {
+					// A zero-duration, zero-motion interval is complete at commit and
+					// never waits for a physics tick that may not occur while paused.
+					RootMotionTerminalResult terminal;
+					terminal.intervalId = reservation.intervalId;
+					terminal.animator = slot->interval.animator;
+					terminal.ledger = slot->interval.ledger;
+					terminal.disposition = RootMotionTerminalDisposition::Consumed;
+					terminal.reason = RootMotionIntervalError::None;
+					(void)impl->AppendRootResult({0U, terminal});
+					slot.reset();
+					--impl->liveRootIntervalCount;
+				}
+				result.accepted = true;
+				result.error = RootMotionIntervalError::None;
+				return result;
+			}
+		}
+		result.error = RootMotionIntervalError::StaleTarget;
+		return result;
+	}
+
+	bool JoltPhysicsBackend::CancelRootMotionIntervalReservation(
+		RootMotionIntervalReservation reservation) {
+		std::lock_guard lock(impl->mutex);
+		if(!reservation.IsValid() || reservation.intervalId.world != impl->worldConfiguration.world)
+			return false;
+		for(auto& [key, character] : impl->characters) {
+			(void)key;
+			for(auto& slot : character.rootIntervals) {
+				if(!slot || slot->reservation != reservation || slot->committed) continue;
+				slot.reset();
+				--impl->liveRootIntervalCount;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool JoltPhysicsBackend::CancelRootMotionInterval(
+		RootMotionIntervalId intervalId, RootMotionIntervalError reason) {
+		std::lock_guard lock(impl->mutex);
+		if(!intervalId.IsValid() || intervalId.world != impl->worldConfiguration.world) return false;
+		for(auto& [key, character] : impl->characters) {
+			(void)key;
+			for(auto& slot : character.rootIntervals) {
+				if(!slot || slot->reservation.intervalId != intervalId) continue;
+				if(slot->committed) {
+					RootMotionTerminalResult terminal;
+					terminal.intervalId = intervalId;
+					terminal.animator = slot->interval.animator;
+					terminal.ledger = slot->interval.ledger;
+					terminal.disposition = RootMotionTerminalDisposition::Cancelled;
+					terminal.reason = reason;
+					terminal.firstTickResultSequence = slot->firstTickResultSequence;
+					terminal.lastTickResultSequence = slot->lastTickResultSequence;
+					terminal.sharedTickAttribution = slot->sharedTickAttribution;
+					(void)impl->AppendRootResult({0U, terminal});
+				}
+				slot.reset();
+				--impl->liveRootIntervalCount;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void JoltPhysicsBackend::CancelRootMotionIntervals(
+		const PhysicsCharacterCommandTarget& controller, RootMotionIntervalError reason) {
+		std::lock_guard lock(impl->mutex);
+		const auto found = impl->characters.find(HandleKey(controller.character));
+		if(found == impl->characters.end() || found->second.lease.controller != controller) return;
+		impl->CancelRootIntervalsForRecord(found->second, reason);
+	}
+
+	std::shared_ptr<const RootMotionResultPacket> JoltPhysicsBackend::ReadRootMotionResults(
+		std::uint64_t afterCursor, std::size_t maxRecords) const {
+		std::shared_lock lock(impl->mutex);
+		auto packet = std::make_shared<RootMotionResultPacket>();
+		packet->world = impl->worldConfiguration.world;
+		packet->requestedAfterCursor = afterCursor;
+		if(maxRecords > 256U) maxRecords = 256U;
+		const std::uint64_t oldest = impl->rootResultCount == 0U
+			? impl->nextRootResultSequence
+			: impl->rootResults[impl->rootResultHead].sequence;
+		packet->expiredCursor = afterCursor != 0U && afterCursor < oldest - 1U;
+		packet->nextCursor = afterCursor;
+		if(impl->rootResults.empty() || maxRecords == 0U) return packet;
+		packet->records.reserve(std::min(maxRecords, impl->rootResultCount));
+		for(std::size_t index = 0U; index < impl->rootResultCount; ++index) {
+			const RootMotionResultRecord& record = impl->rootResults[
+				(impl->rootResultHead + index) % impl->rootResults.size()];
+			if(record.sequence <= afterCursor) continue;
+			if(packet->records.size() >= maxRecords) { packet->hasMore = true; break; }
+			packet->records.push_back(record);
+			packet->nextCursor = record.sequence;
+		}
+		return packet;
+	}
+
+	bool JoltPhysicsBackend::AcknowledgeRootMotionResults(std::uint64_t throughCursor) {
+		std::lock_guard lock(impl->mutex);
+		if(throughCursor >= impl->nextRootResultSequence) return false;
+		while(impl->rootResultCount != 0U
+			&& impl->rootResults[impl->rootResultHead].sequence <= throughCursor) {
+			impl->rootResultHead = (impl->rootResultHead + 1U) % impl->rootResults.size();
+			--impl->rootResultCount;
+		}
+		return true;
+	}
+
+	bool JoltPhysicsBackend::PrepareRootMotionStepResults(
+		PhysicsWorldHandle world, std::size_t plannedStepCount) {
+		std::lock_guard lock(impl->mutex);
+		if(!HandleMatchesWorld(world, impl->worldConfiguration.world)) return false;
+		std::size_t activeControllers = 0U;
+		for(const auto& [key, character] : impl->characters) {
+			(void)key;
+			if(std::any_of(character.rootIntervals.begin(), character.rootIntervals.end(),
+				[](const auto& slot) { return slot && slot->committed; }))
+				++activeControllers;
+		}
+		const std::size_t available = Impl::kMaximumRootResultRecords
+			- impl->rootResultCount - impl->liveRootIntervalCount;
+		impl->rootStepCapacityAvailable = plannedStepCount == 0U || activeControllers == 0U
+			|| (activeControllers <= available / plannedStepCount);
+		return impl->rootStepCapacityAvailable;
+	}
+
 	PhysicsBackendResult JoltPhysicsBackend::AdvanceCharacters(
 		PhysicsWorldHandle world, PhysicsTick tick, float fixedDeltaTime) {
 		std::lock_guard lock(impl->mutex);
@@ -2754,8 +3519,31 @@ namespace TerraEngine::Physics::Backend {
 			auto found = impl->characters.find(key);
 			if(found == impl->characters.end()) continue;
 			auto& record = found->second;
-			if(!record.committed || record.character == nullptr || !record.enabled) continue;
+			if(!record.committed || record.character == nullptr) continue;
+			if(!record.enabled) {
+				record.completedStepDuration = 0.0F;
+				record.requestedPlanarVelocity = {};
+				record.realizedDisplacement = {};
+				record.requestedYawRadians = 0.0F;
+				record.realizedYawRadians = 0.0F;
+				record.motionDiscontinuity = true;
+				continue;
+			}
 			auto& intent = record.intent;
+			const bool currentLegacy = record.lease.state == CharacterMotionLeaseState::Unleased
+				&& intent.source == CharacterMotionCommandSource::Legacy;
+			const bool currentLocomotion = record.lease.state == CharacterMotionLeaseState::LocomotionOwned
+				&& intent.source == CharacterMotionCommandSource::Locomotion;
+			if(intent.motionEpoch != record.lease.motionEpoch || (!currentLegacy && !currentLocomotion)) {
+				// This is the last gate before physical consumption. A delayed command,
+				// old owner, or external suspension contributes zero even if it passed
+				// an earlier queue or provider boundary.
+				intent = {};
+				intent.motionEpoch = record.lease.motionEpoch;
+				intent.source = record.lease.state == CharacterMotionLeaseState::LocomotionOwned
+					? CharacterMotionCommandSource::Locomotion : CharacterMotionCommandSource::Legacy;
+				record.shapedPlanarVelocity = {};
+			}
 			if(!intent.desiredVelocity.IsFinite()) {
 				return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The stored desired character velocity is invalid.");
 			}
@@ -2766,6 +3554,76 @@ namespace TerraEngine::Physics::Backend {
 			intent.jumpRequested = false;
 			intent.resizeRequested = false;
 			intent.teleportRequested = false;
+			RootMotionTickResult rootTick;
+			rootTick.controller = record.lease.controller;
+			rootTick.tick = tick;
+			rootTick.completedStepDuration = fixedDeltaTime;
+			std::array<Impl::CharacterRecord::RootIntervalRecord*, 8U> orderedRoots{};
+			std::array<Impl::CharacterRecord::RootIntervalRecord*, 8U> contributingRoots{};
+			std::size_t orderedRootCount = 0U;
+			std::size_t contributingRootCount = 0U;
+			JPH::Vec3 rootTranslation = JPH::Vec3::sZero();
+			float rootYawRadians = 0.0F;
+			float rootMaximumSpeed = std::numeric_limits<float>::max();
+			float rootMaximumTurnRate = std::numeric_limits<float>::max();
+			if(record.lease.mode == CharacterMotionMode::RootMotion
+				&& record.lease.state == CharacterMotionLeaseState::LocomotionOwned
+				&& impl->rootStepCapacityAvailable && !pending.teleportRequested
+				&& impl->rootResultCount + impl->liveRootIntervalCount
+					< Impl::kMaximumRootResultRecords) {
+				for(auto& slot : record.rootIntervals)
+					if(slot) orderedRoots[orderedRootCount++] = &*slot;
+				std::sort(orderedRoots.begin(), orderedRoots.begin() + orderedRootCount,
+					[](const auto* left, const auto* right) {
+						return left->reservation.intervalId.sequence < right->reservation.intervalId.sequence;
+					});
+				float remainingTickSeconds = fixedDeltaTime;
+				for(std::size_t index = 0U; index < orderedRootCount
+					&& remainingTickSeconds > 0.0F; ++index) {
+					auto& interval = *orderedRoots[index];
+					// A reserved but uncommitted earlier evaluation is an ordering
+					// barrier. Later samples cannot overtake its ledger decision.
+					if(!interval.committed) break;
+					if(interval.remainingDurationSeconds <= 0.0F) continue;
+					const float overlap = std::min(remainingTickSeconds,
+						interval.remainingDurationSeconds);
+					const float fraction = overlap / interval.remainingDurationSeconds;
+					const JPH::Vec3 fragment = ToJoltVector(interval.remainingTranslation) * fraction;
+					const float yawFragment = interval.remainingYawRadians * fraction;
+					rootTranslation += fragment;
+					rootYawRadians += yawFragment;
+					interval.remainingTranslation = FromJoltVector(
+						ToJoltVector(interval.remainingTranslation) - fragment);
+					interval.remainingYawRadians -= yawFragment;
+					interval.remainingDurationSeconds = std::max(0.0F,
+						interval.remainingDurationSeconds - overlap);
+					remainingTickSeconds -= overlap;
+					rootMaximumSpeed = std::min(rootMaximumSpeed, interval.interval.maximumSpeed);
+					rootMaximumTurnRate = std::min(rootMaximumTurnRate,
+						interval.interval.maximumTurnRate);
+					rootTick.contributingIntervals[contributingRootCount] =
+						interval.reservation.intervalId;
+					contributingRoots[contributingRootCount++] = &interval;
+				}
+			}
+			if(contributingRootCount != 0U) {
+				// Limits bound the aggregate, not each short fragment. Uncovered
+				// time stays at zero while the full fixed tick remains the divisor.
+				const float maxDistance = rootMaximumSpeed * fixedDeltaTime;
+				if(rootTranslation.Length() > maxDistance) {
+					rootTranslation *= maxDistance / rootTranslation.Length();
+					rootTick.adjustedByLimit = true;
+				}
+				const float maxYaw = rootMaximumTurnRate * fixedDeltaTime;
+				if(std::fabs(rootYawRadians) > maxYaw) {
+					rootYawRadians = std::copysign(maxYaw, rootYawRadians);
+					rootTick.adjustedByLimit = true;
+				}
+				rootTick.contributingCount = static_cast<std::uint8_t>(contributingRootCount);
+				rootTick.requestedTranslation = FromJoltVector(rootTranslation);
+				rootTick.requestedYawRadians = rootYawRadians;
+			}
+			const JPH::RVec3 positionBeforeStep = record.character->GetPosition();
 			// Jolt documents character-vs-character callbacks as non-thread-safe. This
 			// provider boundary is therefore serialized under the backend mutex; Jolt's
 			// rigid-body solver still uses the engine-owned ThreadPool job adapter.
@@ -2785,6 +3643,8 @@ namespace TerraEngine::Physics::Backend {
 			JPH::BodyFilter bodyFilter;
 			JPH::ShapeFilter shapeFilter;
 			if(pending.teleportRequested) {
+				impl->CancelRootIntervalsForRecord(record, RootMotionIntervalError::Cancelled);
+				record.physicalVerticalVelocity = 0.0F;
 				record.character->SetPosition(ToJoltPosition(pending.pose.position)); record.character->SetRotation(ToJoltRotation(pending.pose.rotation));
 				record.character->RefreshContacts(broadPhase, objectLayer, bodyFilter, shapeFilter, *impl->temporaryAllocator);
 			}
@@ -2800,13 +3660,54 @@ namespace TerraEngine::Physics::Backend {
 				record.height = pending.resizeHeight;
 			}
 			const JPH::Vec3 up = ToNormalizedJoltAxis(record.settings.upDirection);
-			JPH::Vec3 velocity = ToJoltVector(intent.desiredVelocity);
+			JPH::Vec3 velocity = ToJoltVector(pending.desiredVelocity);
+			record.requestedYawRadians = 0.0F;
+			record.realizedYawRadians = 0.0F;
+			if(record.lease.state == CharacterMotionLeaseState::LocomotionOwned
+				&& record.lease.mode == CharacterMotionMode::RootMotion) {
+				// Root intervals are one-shot displacement, never persistent intent.
+				// The entire tick duration is the divisor even for short fragments.
+				velocity = rootTranslation / fixedDeltaTime;
+			} else if(record.lease.state == CharacterMotionLeaseState::LocomotionOwned
+				&& record.lease.mode == CharacterMotionMode::Velocity
+				&& pending.source == CharacterMotionCommandSource::Locomotion) {
+				// Shape only the locomotion-owned planar contribution. Gravity,
+				// platform motion, jump and solver contacts remain physical inputs.
+				velocity -= up * velocity.Dot(up);
+				const JPH::Vec3 shaped = ShapeLocomotionVelocity(
+					ToJoltVector(record.shapedPlanarVelocity), velocity,
+					pending.acceleration, pending.braking, fixedDeltaTime);
+				record.shapedPlanarVelocity = FromJoltVector(shaped);
+				velocity = shaped;
+				if(record.remainingApproachDistanceMetres >= 0.0F) {
+					// The route owner supplies remaining distance, but Physics clips
+					// each actual step even when several steps have no new target.
+					const float requestedDistance = velocity.Length() * fixedDeltaTime;
+					if(requestedDistance > record.remainingApproachDistanceMetres
+						&& requestedDistance > 0.0F)
+						velocity *= record.remainingApproachDistanceMetres / requestedDistance;
+					record.shapedPlanarVelocity = FromJoltVector(velocity);
+				}
+			} else {
+				record.shapedPlanarVelocity = {};
+			}
+			// Root translation is a full three-dimensional animation delta. The
+			// copied observation retains that full-tick request for locomotion math.
+			record.requestedPlanarVelocity = record.lease.mode == CharacterMotionMode::RootMotion
+				? FromJoltVector(rootTranslation / fixedDeltaTime)
+				: FromJoltVector(velocity - up * velocity.Dot(up));
 			if(record.settings.useGravity) {
 				// Desired controller velocity is planar. While unsupported, carry the
 				// prior vertical velocity so gravity and a one-shot jump evolve once per
 				// fixed step instead of being erased by render-rate Move commands.
-				velocity -= up * velocity.Dot(up);
-				if(!record.character->IsSupported()) velocity += up * record.character->GetLinearVelocity().Dot(up);
+				if(record.lease.mode != CharacterMotionMode::RootMotion)
+					velocity -= up * velocity.Dot(up);
+				if(!record.character->IsSupported()) {
+					const float priorPhysicalVertical = record.lease.mode == CharacterMotionMode::RootMotion
+						? record.physicalVerticalVelocity
+						: record.character->GetLinearVelocity().Dot(up);
+					velocity += up * priorPhysicalVertical;
+				}
 				velocity += ToJoltVector(impl->worldConfiguration.settings.gravity) * record.settings.gravityScale * fixedDeltaTime;
 			}
 			const auto& activeContacts = record.character->GetActiveContacts();
@@ -2825,12 +3726,108 @@ namespace TerraEngine::Physics::Backend {
 				velocity -= up * velocity.Dot(up);
 				velocity += up * (pending.jumpSpeed > 0.0F ? pending.jumpSpeed : record.settings.jumpSpeed);
 			}
+			if(rootYawRadians != 0.0F && !pending.teleportRequested) {
+				// The yaw interval rotates the symmetric virtual controller exactly
+				// once; it does not become persistent angular velocity.
+				record.character->SetRotation((JPH::Quat::sRotation(up, rootYawRadians)
+					* record.character->GetRotation()).Normalized());
+				record.requestedYawRadians = rootYawRadians;
+				record.realizedYawRadians = rootYawRadians;
+			} else if(pending.hasFacing && pending.turnRate > 0.0F
+				&& record.lease.state == CharacterMotionLeaseState::LocomotionOwned
+				&& record.lease.mode == CharacterMotionMode::Velocity
+				&& !pending.teleportRequested) {
+				// Only a validated upright symmetric controller reaches this path.
+				// Yaw before ExtendedUpdate changes facing without teleporting the
+				// scene Transform or changing the collision volume.
+				const JPH::Quat currentRotation = record.character->GetRotation();
+				JPH::Vec3 forward = currentRotation * JPH::Vec3::sAxisZ();
+				forward -= up * forward.Dot(up);
+				const JPH::Vec3 desired = ToJoltVector(pending.desiredFacing).Normalized();
+				if(forward.LengthSq() > 1.0e-8F) {
+					forward = forward.Normalized();
+					const float remainingYaw = std::atan2(up.Dot(forward.Cross(desired)),
+						forward.Dot(desired));
+					const float stepYaw = std::clamp(remainingYaw,
+						-pending.turnRate * fixedDeltaTime, pending.turnRate * fixedDeltaTime);
+					record.requestedYawRadians = stepYaw;
+					record.realizedYawRadians = stepYaw;
+					if(stepYaw != 0.0F) {
+						// Repeated small turns accumulate floating-point norm error.
+						// Keep the provider orientation unit length before extraction.
+						record.character->SetRotation((JPH::Quat::sRotation(up, stepYaw)
+							* currentRotation).Normalized());
+					}
+				}
+			}
 			record.character->SetLinearVelocity(velocity);
 			JPH::CharacterVirtual::ExtendedUpdateSettings settings;
 			settings.mStickToFloorStepDown = -up * record.settings.groundAdhesion;
 			settings.mWalkStairsStepUp = record.settings.allowStairWalking ? up * record.settings.stepHeight : JPH::Vec3::sZero();
 			record.character->ExtendedUpdate(fixedDeltaTime, ToJoltVector(impl->worldConfiguration.settings.gravity) * record.settings.gravityScale,
 				settings, broadPhase, objectLayer, bodyFilter, shapeFilter, *impl->temporaryAllocator);
+			if(pending.teleportRequested || record.character->IsSupported()) {
+				record.physicalVerticalVelocity = 0.0F;
+			} else if(record.lease.mode == CharacterMotionMode::RootMotion) {
+				// A ceiling may cancel the requested root Y inside Jolt. Never
+				// subtract requested root from Jolt's already-clamped result;
+				// retain only the independently authored physical component.
+				record.physicalVerticalVelocity = velocity.Dot(up)
+					- rootTranslation.Dot(up) / fixedDeltaTime;
+			} else {
+				record.physicalVerticalVelocity = record.character->GetLinearVelocity().Dot(up);
+			}
+			record.completedStepDuration = fixedDeltaTime;
+			record.motionDiscontinuity = pending.teleportRequested;
+			record.realizedDisplacement = pending.teleportRequested ? PhysicsVector3{}
+				: FromJoltPosition(record.character->GetPosition() - positionBeforeStep);
+			if(contributingRootCount != 0U) {
+				// Jolt resolves the aggregate against contacts once. Each source
+				// interval references this same complete-tick observation, never a
+				// fabricated independent fragment collision result.
+				rootTick.realizedTranslation = record.realizedDisplacement;
+				rootTick.realizedYawRadians = record.realizedYawRadians;
+				const JPH::Vec3 residual = ToJoltVector(record.realizedDisplacement)
+					- velocity * fixedDeltaTime;
+				rootTick.adjustedByCollision = residual.LengthSq() > 1.0e-6F;
+				const std::uint64_t tickSequence = impl->AppendRootResult({0U, rootTick});
+				for(std::size_t index = 0U; index < contributingRootCount; ++index) {
+					auto& interval = *contributingRoots[index];
+					if(interval.firstTickResultSequence == 0U)
+						interval.firstTickResultSequence = tickSequence;
+					interval.lastTickResultSequence = tickSequence;
+					interval.adjustedByLimit |= rootTick.adjustedByLimit;
+					interval.adjustedByCollision |= rootTick.adjustedByCollision;
+					interval.sharedTickAttribution |= contributingRootCount > 1U;
+					if(interval.remainingDurationSeconds > 0.0F) continue;
+					RootMotionTerminalResult terminal;
+					terminal.intervalId = interval.reservation.intervalId;
+					terminal.animator = interval.interval.animator;
+					terminal.ledger = interval.interval.ledger;
+					terminal.disposition = interval.adjustedByLimit || interval.adjustedByCollision
+						? RootMotionTerminalDisposition::Adjusted
+						: RootMotionTerminalDisposition::Consumed;
+					terminal.reason = RootMotionIntervalError::None;
+					terminal.finalTick = tick;
+					terminal.firstTickResultSequence = interval.firstTickResultSequence;
+					terminal.lastTickResultSequence = interval.lastTickResultSequence;
+					terminal.sharedTickAttribution = interval.sharedTickAttribution;
+					(void)impl->AppendRootResult({0U, terminal});
+					for(auto& slot : record.rootIntervals) {
+						if(slot && &*slot == &interval) {
+							slot.reset();
+							--impl->liveRootIntervalCount;
+							break;
+						}
+					}
+				}
+			}
+			if(record.remainingApproachDistanceMetres >= 0.0F && !pending.teleportRequested) {
+				JPH::Vec3 realizedPlanar = ToJoltVector(record.realizedDisplacement);
+				realizedPlanar -= up * realizedPlanar.Dot(up);
+				record.remainingApproachDistanceMetres = std::max(0.0F,
+					record.remainingApproachDistanceMetres - realizedPlanar.Length());
+			}
 			// Desired velocity persists until another Move/stop command arrives. The
 			// snapshot above already consumed the one-shot operations for this tick.
 		}
@@ -2842,6 +3839,9 @@ namespace TerraEngine::Physics::Backend {
 		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(handle, impl->worldConfiguration.world)) return Rejected(PhysicsBackendErrorCode::StaleHandle, "The character handle is stale.");
 		auto found = impl->characters.find(HandleKey(handle));
 		if(found == impl->characters.end() || found->second.handle != handle) return Rejected(PhysicsBackendErrorCode::StaleHandle, "The character handle was not found.");
+		// Retirement resolves any committed animation ledger interval before the
+		// provider-owned character storage disappears from this world.
+		impl->CancelRootIntervalsForRecord(found->second, RootMotionIntervalError::Cancelled);
 		impl->characterCollisions.Remove(found->second.character.get());
 		impl->characters.erase(found);
 		impl->RebuildCharacterOrder();
@@ -2881,6 +3881,12 @@ namespace TerraEngine::Physics::Backend {
 				|| found->second.componentGeneration != command.componentGeneration) {
 				return Rejected(PhysicsBackendErrorCode::StaleHandle, "The character command identity is stale.");
 			}
+			if(found->second.lease.state != CharacterMotionLeaseState::Unleased
+				|| command.characterMotionSource != CharacterMotionCommandSource::Legacy
+				|| command.characterMotionEpoch != found->second.lease.motionEpoch) {
+				return Rejected(PhysicsBackendErrorCode::OwnershipConflict,
+					"The character command conflicts with the current motion lease or epoch.");
+			}
 			auto& intent = found->second.intent;
 			switch(command.type) {
 			case PhysicsCommandType::MoveCharacter:
@@ -2905,7 +3911,24 @@ namespace TerraEngine::Physics::Backend {
 			default:
 				break;
 			}
+			intent.motionEpoch = command.characterMotionEpoch;
+			intent.source = CharacterMotionCommandSource::Legacy;
 			return Success("The virtual-character command intent was coalesced for the next fixed step.");
+		}
+		if(command.type == PhysicsCommandType::UpdateCharacter) {
+			// Authoring reconciliation has already happened in PhysicsSystem's
+			// protected snapshot stage. This queued marker must never write runtime
+			// leased velocity or one-shot state through the body-command fallback.
+			const auto found = impl->characters.find(HandleKey(command.character));
+			if(found == impl->characters.end() || found->second.handle != command.character
+				|| found->second.objectId != command.targetObjectId
+				|| found->second.objectGeneration != command.objectGeneration
+				|| found->second.componentGeneration != command.componentGeneration)
+				return Rejected(PhysicsBackendErrorCode::StaleHandle, "The character configuration marker is stale.");
+			if(command.characterMotionEpoch != found->second.lease.motionEpoch)
+				return Rejected(PhysicsBackendErrorCode::OwnershipConflict,
+					"The character configuration marker predates an authority change.");
+			return Success("The character configuration was reconciled without modifying runtime motion.");
 		}
 		Impl::BodyRecord* record = impl->FindBodyByObject(command.targetObjectId);
 		// Validate both object and component generations before touching provider state so a
@@ -3805,6 +4828,12 @@ namespace TerraEngine::Physics::Backend {
 				}
 				if(const Impl::BodyRecord* support = impl->FindBodyByJoltId(character.GetGroundBodyID())) state.supportBody = support->handle;
 				state.contactCount = static_cast<std::uint32_t>(std::count_if(character.GetActiveContacts().begin(), character.GetActiveContacts().end(), [](const JPH::CharacterContact& contact) { return contact.mHadCollision; }));
+				state.completedStepDuration = record.completedStepDuration;
+			state.requestedPlanarVelocity = record.requestedPlanarVelocity;
+			state.realizedDisplacement = record.realizedDisplacement;
+			state.requestedYawRadians = record.requestedYawRadians;
+			state.realizedYawRadians = record.realizedYawRadians;
+				state.motionDiscontinuity = record.motionDiscontinuity;
 				extraction.characters.push_back(state);
 			}
 		}

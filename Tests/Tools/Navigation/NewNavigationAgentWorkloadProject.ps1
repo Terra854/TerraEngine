@@ -155,9 +155,19 @@ if($terrainDescriptor.format -ne 'TerraEngineTerrain' -or $terrainDescriptor.roo
 	throw 'TerrainSeed descriptor is not the required 129x129, one-metre TERRAROOT1 asset.'
 }
 $terrainAssetId = [string]$terrainDescriptor.assetId
-$rootPointer = (Get-Content -LiteralPath $seedCurrent -Raw).Split("`n")[0].Trim()
+$currentBytes = [IO.File]::ReadAllText($seedCurrent)
+# These are hash-pinned runtime inputs, not platform-native text documents.
+# Refuse a checkout-converted bundle before producing an unusable project.
+if($currentBytes.Contains("`r")) {
+	throw 'TerrainSeed CURRENT has noncanonical CRLF bytes; restore the LF fixture protected by .gitattributes.'
+}
+$rootPointer = $currentBytes.Split("`n")[0]
 if($rootPointer -notmatch '^[0-9a-f]{32}$' -or -not (Test-Path -LiteralPath (Join-Path $seedRootDir ($rootPointer + '.root')))) {
 	throw 'TerrainSeed CURRENT does not resolve to its canonical root manifest.'
+}
+$rootManifestPath = Join-Path $seedRootDir ($rootPointer + '.root')
+if([IO.File]::ReadAllText($rootManifestPath).Contains("`r")) {
+	throw 'TerrainSeed root manifest has noncanonical CRLF bytes; restore the hash-pinned LF fixture.'
 }
 Copy-Item -LiteralPath $seedTerrain -Destination (Join-Path $out 'Assets/Terrain/NavigationTerrain.teterrain') -Force
 Copy-Item -LiteralPath $seedMeta -Destination (Join-Path $out 'Assets/Terrain/NavigationTerrain.teterrain.meta') -Force

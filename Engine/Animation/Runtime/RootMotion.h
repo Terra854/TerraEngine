@@ -3,7 +3,9 @@
 #pragma once
 
 #include "Animation/Runtime/PoseBuffer.h"
+#include "Physics/PhysicsCommands.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -17,6 +19,7 @@ class ObjectManager;
 
 namespace TerraEngine::Physics {
 	class PhysicsSystem;
+	class CharacterMotionValidity;
 	struct PhysicsCommandResultSnapshot;
 	struct IncrementalBodyStateSnapshot;
 	struct PhysicsCharacterStatePacket;
@@ -48,7 +51,83 @@ namespace TerraEngine::Animation {
 		std::uint32_t layerIndex = 0U;
 		AnimationGeneration generation = 0U;
 		AnimatorRootMotionPolicy policy = AnimatorRootMotionPolicy::ExtractOnly;
+		std::uint64_t sourceGeneration = 0U;
+		double evaluationDurationSeconds = 0.0;
 	};
+
+	// Locomotion publishes a complete copied animator-to-controller table before
+	// Animation capture. The controller may belong to an ancestor of the animator;
+	// no Animation worker needs ObjectManager or a Locomotion lock to resolve it.
+	struct AnimationRootControllerBinding {
+		AnimatorInstanceHandle animator;
+		UUID animatorObjectId = EMPTY_UUID;
+		std::uint64_t animatorObjectGeneration = 0U;
+		std::uint64_t animatorComponentGeneration = 0U;
+		Physics::PhysicsCharacterCommandTarget controller;
+		Physics::CharacterMotionOwner owner;
+		std::uint64_t authorityEpoch = 0U;
+		std::uint64_t motionEpoch = 0U;
+		std::uint64_t bindingGeneration = 0U;
+		// Every leased animator stays mapped. Only RootMotion mode contributes a
+		// root consumer; Velocity mode must still suppress mutating root fallback.
+		Physics::CharacterMotionMode mode = Physics::CharacterMotionMode::Velocity;
+		// Idle mappings remain available for ragdoll exclusion but authorize no
+		// movement. Stopped/Suspended owned mappings suppress legacy fallback while
+		// rootMotionEnabled alone authorizes extraction and interval routing.
+		bool locomotionOwned = false;
+		bool rootMotionEnabled = false;
+		Physics::PhysicsFrameHandle frame;
+		// Validation-only relative/rest basis. SourceObjectWorldTransform in the
+		// captured root request performs the local-to-frame conversion exactly once.
+		AnimationQuaternion capturedRelativeBasisRotation{};
+		AnimationFloat3 capturedRelativeBasisScale{1.0F, 1.0F, 1.0F};
+		// The authored source-to-controller offset is captured at binding time.
+		// Recovery subtracts this rotated offset from the selected animator root
+		// so a descendant animator never teleports its controller to the child origin.
+		AnimationFloat3 capturedRelativeTranslation{};
+		float maximumRootSpeed = 0.0F;
+		float maximumYawRate = 0.0F;
+		bool facingLocked = false;
+		// Exclusion must not seize a stale ancestor controller after hierarchy or
+		// animator rebind changes between the two protected publishers.
+		std::shared_ptr<const Physics::CharacterMotionValidity> bindingValidityGuard;
+		std::shared_ptr<const Physics::CharacterMotionValidity> validityGuard;
+	};
+
+	struct AnimationRootControllerBindingSnapshot {
+		std::uint64_t publicationGeneration = 0U;
+		std::vector<AnimationRootControllerBinding> active;
+	};
+
+	// Pending Activate must be visible before the next movement publisher runs;
+	// active exclusion remains until an explicit external-owner release/grant.
+	enum class AnimationRagdollExclusionState : std::uint8_t { PendingActivate, Active };
+	struct AnimationRagdollExclusion {
+		AnimatorInstanceHandle animator;
+		AnimationRagdollExclusionState state = AnimationRagdollExclusionState::PendingActivate;
+		std::uint64_t correlationId = 0U;
+		std::uint64_t externalOwnerId = 0U;
+	};
+	struct AnimationRagdollExclusionSnapshot {
+		std::uint64_t publicationGeneration = 0U;
+		std::vector<AnimationRagdollExclusion> entries;
+	};
+
+	// This is the existing generation-qualified Animation ragdoll ID. Both the
+	// locomotion coordinator and Animation use it for one physical external owner.
+	[[nodiscard]] constexpr std::uint64_t RagdollExternalOwnerId(
+		AnimatorInstanceHandle animator) noexcept {
+		return animator.IsValid()
+			? (static_cast<std::uint64_t>(animator.generation) << 32U)
+				| static_cast<std::uint64_t>(animator.slotIndex) : 0U;
+	}
+
+	// A protected caller makes pending/active exclusions physical before it can
+	// publish movement or activate a ragdoll. This helper never enters Locomotion.
+	TERRAENGINE_API AnimationStatus ApplyRagdollControllerExclusions(
+		const AnimationRootControllerBindingSnapshot& bindings,
+		const AnimationRagdollExclusionSnapshot& exclusions,
+		Physics::PhysicsSystem& physics);
 
 	// This function is intentionally pure. It creates a copied delta but never
 	// applies it to ObjectManager, a character controller, or the physics world.
@@ -144,7 +223,26 @@ namespace TerraEngine::Animation {
 		bool idempotencyConflict = false;
 		std::string sceneTransactionId;
 		std::uint64_t physicsCommandId = 0U;
+		Physics::RootMotionIntervalId rootIntervalId;
 		std::uint64_t correlationId = 0U;
+	};
+
+	// One retained record is the measured whole-step aggregate. Multiple
+	// intervals can name the same record; no per-fragment collision is invented.
+	struct AnimationRootMotionTickEvidence {
+		std::uint64_t resultSequence = 0U;
+		Physics::PhysicsWorldHandle world;
+		Physics::PhysicsTick tick = 0U;
+		float completedStepDuration = 0.0F;
+		Physics::PhysicsVector3 requestedTranslation;
+		Physics::PhysicsVector3 realizedTranslation;
+		float requestedYawRadians = 0.0F;
+		float realizedYawRadians = 0.0F;
+		std::array<std::uint64_t, 8U> contributingIntervalSequences{};
+		std::uint8_t contributingCount = 0U;
+		bool adjustedByLimit = false;
+		bool adjustedByCollision = false;
+		auto operator<=>(const AnimationRootMotionTickEvidence&) const = default;
 	};
 
 	struct AnimationRootMotionApplicationResult {
@@ -179,6 +277,19 @@ namespace TerraEngine::Animation {
 		std::uint64_t producerSequence = 0U;
 		std::uint64_t idempotencyKey = 0U;
 		std::uint64_t physicsCommandId = 0U;
+		Physics::RootMotionIntervalId rootIntervalId;
+		// These are measured whole-tick aggregates. When sharedTickAttribution is
+		// true they are evidence only, not this interval's unique displacement.
+		Physics::PhysicsVector3 aggregateRequestedTranslation;
+		Physics::PhysicsVector3 aggregateRealizedTranslation;
+		float aggregateRequestedYawRadians = 0.0F;
+		float aggregateRealizedYawRadians = 0.0F;
+		std::uint64_t observedPhysicalTickCount = 0U;
+		bool sharedTickAttribution = false;
+		bool tickEvidenceExpired = false;
+		Physics::PhysicsTick finalPhysicalTick = 0U;
+		std::uint64_t firstTickResultSequence = 0U;
+		std::uint64_t lastTickResultSequence = 0U;
 		bool duplicate = false;
 		bool idempotencyConflict = false;
 
@@ -223,6 +334,25 @@ namespace TerraEngine::Animation {
 			AnimationQuaternion startRotation,
 			AnimationQuaternion requestedEndRotation,
 			bool character);
+		// Reserve ledger evidence before committing an independently reserved
+		// Physics interval. A failed physical commit is cancelled by exact ID.
+		bool RegisterRootMotionInterval(Physics::RootMotionIntervalId intervalId,
+			AnimationRootMotionApplicationResult result);
+		void CancelRootMotionIntervalApplication(Physics::RootMotionIntervalId intervalId,
+			AnimationStatus status) noexcept;
+		// A copied Physics page can be staged independently at a protected boundary.
+		// It updates bounded evidence and exact aggregates, but never acknowledges
+		// the source queue; the caller does so only after this returns true.
+		[[nodiscard]] bool ObserveRootMotionResultPacket(
+			const Physics::RootMotionResultPacket& page);
+		void ObserveRootMotionIntervalResults(Physics::PhysicsSystem& physics);
+		// A fixed scene-wide ring preserves the latest whole-tick aggregates once,
+		// even when several intervals share a collided tick. Omitted reports that
+		// the requested cursor predates its bounded 256-record retention window.
+		std::size_t CopyRootMotionTickEvidence(Physics::PhysicsWorldHandle world,
+			std::uint64_t afterSequence,
+			std::span<AnimationRootMotionTickEvidence> output, bool& omitted) const noexcept;
+		[[nodiscard]] std::size_t RetainedRootMotionTickEvidenceCount() const noexcept;
 		void ObserveSceneTransactionResult(const TerraEngine::Scene::TransactionResult& result);
 		void ObservePhysicsResults(
 			const TerraEngine::Physics::PhysicsCommandResultSnapshot& results,
@@ -241,6 +371,10 @@ namespace TerraEngine::Animation {
 	private:
 		struct PendingScene;
 		struct PendingPhysics;
+		struct PendingRootInterval;
+		struct RootIntervalIdHash {
+			std::size_t operator()(const Physics::RootMotionIntervalId& id) const noexcept;
+		};
 		struct ApplicationRecord;
 		struct AppliedMutationRecord;
 		// Root-motion receipts use this exact producer identity for retry and
@@ -287,6 +421,14 @@ namespace TerraEngine::Animation {
 		mutable std::mutex mutex_;
 		std::vector<PendingScene> pendingScene_;
 		std::vector<PendingPhysics> pendingPhysics_;
+		std::vector<PendingRootInterval> pendingRootIntervals_;
+		std::unordered_map<Physics::RootMotionIntervalId, std::size_t,
+			RootIntervalIdHash> pendingRootIntervalIndex_;
+		std::uint64_t rootResultCursor_ = 0U;
+		Physics::PhysicsWorldHandle observedRootWorld_;
+		std::array<AnimationRootMotionTickEvidence, 256U> rootTickEvidenceRing_{};
+		std::size_t rootTickEvidenceSize_ = 0U;
+		std::size_t rootTickEvidenceCursor_ = 0U;
 		std::vector<ApplicationRecord> applications_;
 		std::unordered_map<ApplicationIdentity, std::size_t, ApplicationIdentityHash>
 			applicationIndex_;

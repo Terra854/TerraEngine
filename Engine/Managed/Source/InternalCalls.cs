@@ -16,6 +16,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using TerraEngine.Animation;
+using TerraEngine.Locomotion;
 
 namespace TerraEngine
 {
@@ -1768,6 +1769,21 @@ namespace TerraEngine
 		[DllImport("TerraEngine")]
 		internal static extern NavigationStatus Native_NavigationAgent_ReadGuidance(ref NativeNavigationAgentGuidanceQuery query, ref NativeNavigationAgentGuidanceSnapshot snapshot);
 
+		// Locomotion submits a bounded copied batch; callers never pass a live
+		// component address, provider handle or managed callback into physics work.
+		[DllImport("TerraEngine")]
+		internal static extern uint Native_Locomotion_GetAbiVersion();
+		[DllImport("TerraEngine")]
+		internal static extern LocomotionStatus Native_Locomotion_Resolve(ref NativeLocomotionResolveRequest request, ref NativeLocomotionResolveResult result);
+		[DllImport("TerraEngine")]
+		internal static extern unsafe LocomotionStatus Native_Locomotion_Submit(ref NativeLocomotionCommandBatch batch,
+			NativeLocomotionCommand* commands, NativeLocomotionReceipt* receipts, uint receiptCapacity, ref NativeLocomotionBufferInfo info);
+		[DllImport("TerraEngine")]
+		internal static extern LocomotionStatus Native_Locomotion_ReadReceipt(ref NativeLocomotionReceiptQuery query, ref NativeLocomotionReceipt receipt);
+		[DllImport("TerraEngine")]
+		internal static extern unsafe LocomotionStatus Native_Locomotion_CopyObservations(ref NativeLocomotionObservationQuery query,
+			NativeLocomotionObservation* observations, uint capacity, ref NativeLocomotionBufferInfo info);
+
 		[DllImport("TerraEngine")]
 		// Native_Application_Quit bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_Application_Quit();
@@ -1942,6 +1958,9 @@ namespace TerraEngine
 
 		[DllImport("TerraEngine")]
 		internal static extern ulong Native_Object_GetBindingGeneration(uint objectId);
+
+		[DllImport("TerraEngine")]
+		internal static extern RuntimeStatus Native_Object_ReadUuid(uint objectId, ref PhysicsUuid uuid);
 
 		[DllImport("TerraEngine")]
 		internal static extern void Native_Scripting_PushDispatchContext(uint objectId, IntPtr bindingIdPtr, ulong frameOrder, int workerDispatch, int exportMode, ulong objectGeneration, ulong componentGeneration, ulong bindingGeneration);

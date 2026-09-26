@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 class ThreadPool;
 
@@ -83,6 +84,34 @@ namespace TerraEngine::Physics::Backend {
 		PhysicsBackendResult AdvanceCharacters(
 			PhysicsWorldHandle world, PhysicsTick tick, float fixedDeltaTime) override;
 		PhysicsBackendResult DestroyCharacter(PhysicsCharacterHandle handle) override;
+		PhysicsBackendResult PreflightCharacterMotionLeases(
+			std::span<const CharacterMotionLeaseChange> changes) const override;
+		PhysicsBackendResult PublishCharacterMotionLeases(
+			std::span<const CharacterMotionLeaseChange> changes) override;
+		PhysicsBackendResult PreflightCharacterExternalCarry(
+			std::span<const CharacterExternalCarry> carries) const override;
+		bool CommitCharacterExternalCarry(
+			std::span<const CharacterExternalCarry> carries) override;
+		PhysicsBackendResult PublishCharacterMotionTarget(const CharacterMotionTarget& target) override;
+		PhysicsBackendResult PreflightCharacterExternalRecovery(
+			const CharacterExternalRecoveryTransition& transition) const override;
+		bool CommitCharacterExternalRecovery(
+			const CharacterExternalRecoveryTransition& transition) override;
+		std::optional<PhysicsPose> ReadCurrentCharacterPose(
+			const PhysicsCharacterCommandTarget& controller) const override;
+		RootMotionIntervalAdmission ReserveRootMotionInterval(const RootMotionInterval& interval) override;
+		RootMotionIntervalAdmission CommitRootMotionInterval(
+			RootMotionIntervalReservation reservation) override;
+		bool CancelRootMotionIntervalReservation(RootMotionIntervalReservation reservation) override;
+		bool CancelRootMotionInterval(
+			RootMotionIntervalId intervalId, RootMotionIntervalError reason) override;
+		void CancelRootMotionIntervals(
+			const PhysicsCharacterCommandTarget& controller, RootMotionIntervalError reason) override;
+		std::shared_ptr<const RootMotionResultPacket> ReadRootMotionResults(
+			std::uint64_t afterCursor, std::size_t maxRecords) const override;
+		bool AcknowledgeRootMotionResults(std::uint64_t throughCursor) override;
+		bool PrepareRootMotionStepResults(
+			PhysicsWorldHandle world, std::size_t plannedStepCount) override;
 
 		PhysicsBackendResult ApplyCommand(const PhysicsCommand& command) override;
 		PhysicsBackendResult Step(const PhysicsBackendStepRequest& request) override;

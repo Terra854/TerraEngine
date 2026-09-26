@@ -153,6 +153,12 @@ void EditorSystem::SetNavigationAgentValidationPaths(const std::filesystem::path
 	navigationAgentValidationReportPath = reportPath;
 }
 
+void EditorSystem::SetLocomotionValidationPaths(const std::filesystem::path& optionsPath,
+	const std::filesystem::path& reportPath) {
+	locomotionValidationOptionsPath = optionsPath;
+	locomotionValidationReportPath = reportPath;
+}
+
 namespace {
 	// Validation reports are written once at process shutdown, after the editor
 	// system has observed Engine's ordinary Shutdown lifecycle.
@@ -216,6 +222,39 @@ void EditorSystem::ProcessNavigationAgentValidation(float deltaTime) {
 	// Stop through the ordinary toolbar lifecycle before asking Engine to leave
 	// its loop. The report itself is held until EditorSystem::Shutdown completes.
 	navigationAgentValidationRunAttempted = true;
+	if(mainEditor) mainEditor->StopPlayMode();
+	context.engine->SignalShutdown();
+}
+
+void EditorSystem::ProcessLocomotionValidation(float deltaTime) {
+	if(!locomotionValidationOptionsPath || !locomotionValidationReportPath
+		|| locomotionValidationTerminalReport) return;
+	locomotionValidationWaitSeconds += std::max(0.0f, deltaTime);
+	const bool ready = context.projectManager && context.projectManager->HasActiveProject()
+		&& context.projectManager->GetReadinessState().simulationEssentialReady && mainEditor;
+	if(!ready && locomotionValidationWaitSeconds < 120.0f) return;
+	if(!locomotionValidationOptionsLoaded) {
+		try {
+			std::ifstream input(*locomotionValidationOptionsPath, std::ios::binary);
+			if(!input) throw std::runtime_error("Could not open locomotion validation options.");
+			input >> locomotionValidationOptions;
+			if(!locomotionValidationOptions.is_object())
+				throw std::runtime_error("Locomotion validation options must be a JSON object.");
+			locomotionValidationOptionsLoaded = true;
+		} catch(const std::exception& exception) {
+			locomotionValidationTerminalReport = NavigationAgentValidationFailure(exception.what());
+		}
+	}
+	if(!locomotionValidationTerminalReport && !ready)
+		locomotionValidationTerminalReport = NavigationAgentValidationFailure(
+			"Timed out waiting for the locomotion validation project.");
+	if(!locomotionValidationTerminalReport) {
+		nlohmann::json report = mainEditor->RunLocomotionPlayValidationFrame(locomotionValidationOptions);
+		if(!report.value("pending", false)) locomotionValidationTerminalReport = std::move(report);
+	}
+	if(!locomotionValidationTerminalReport) return;
+	// Stop through the same Play lifecycle as the toolbar. Final evidence is
+	// persisted only after the engine invokes this system's Shutdown callback.
 	if(mainEditor) mainEditor->StopPlayMode();
 	context.engine->SignalShutdown();
 }
@@ -980,6 +1019,7 @@ void EditorSystem::Update(float deltaTime) {
 	// that normal lifecycle and lets the next frame publish a genuine render
 	// result before a terminal report requests shutdown.
 	ProcessNavigationAgentValidation(deltaTime);
+	ProcessLocomotionValidation(deltaTime);
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (managedUpdate) {
@@ -1125,6 +1165,7 @@ void EditorSystem::Shutdown() {
 	// callback. EditorMain uses it to avoid claiming an orderly shutdown merely
 	// because a validation session requested one.
 	if(navigationAgentValidationTerminalReport) navigationAgentValidationShutdownObserved = true;
+	if(locomotionValidationTerminalReport) locomotionValidationShutdownObserved = true;
 }
 
 int EditorSystem::FinalizeNavigationAgentValidationAfterEngineShutdown() {
@@ -1161,6 +1202,27 @@ int EditorSystem::FinalizeNavigationAgentValidationAfterEngineShutdown() {
 	return requestedProcessExitCode;
 }
 
+int EditorSystem::FinalizeLocomotionValidationAfterEngineShutdown() {
+	if(!locomotionValidationReportPath) return requestedProcessExitCode;
+	if(!locomotionValidationTerminalReport)
+		locomotionValidationTerminalReport = NavigationAgentValidationFailure(
+			"The editor exited before locomotion validation reached a terminal result.");
+	nlohmann::json report = *locomotionValidationTerminalReport;
+	report["orderlyShutdown"] = locomotionValidationShutdownObserved;
+	const bool succeeded = report.value("succeeded", false)
+		&& report.value("orderlyShutdown", false) && !report.value("pending", false)
+		&& report.value("executedCaseCount", 0U) != 0U;
+	try {
+		if(!WriteNavigationAgentValidationReport(*locomotionValidationReportPath, report))
+			throw std::runtime_error("Could not persist the locomotion validation report.");
+		requestedProcessExitCode = succeeded ? 0 : 1;
+	} catch(const std::exception& exception) {
+		requestedProcessExitCode = 1;
+		TERRAENGINE_LOG(LogLevel::Error, "[EditorSystem] Locomotion validation report failed: " << exception.what());
+	}
+	return requestedProcessExitCode;
+}
+
 // EditorSystem::SystemName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string EditorSystem::SystemName() {
 	return "EditorSystem";
@@ -1173,13 +1235,21 @@ TerraEngine::Scheduling::SystemDeclaration EditorSystem::SchedulerDeclaration() 
 	declaration.reads = {
 		"RendererOutput", "PresentationState", "WindowSnapshot", "InputSnapshot",
 		"ProjectState", "EditorState", "ImGuiDrawData", "EditorAutomationQueue",
-		"EditorAutomationSession", "AnimationRuntimeState"
+		"EditorAutomationSession", "AnimationRuntimeState",
+		"LocomotionAuthority", "LocomotionObservations", "LocomotionReceipts",
+		"PhysicsCharacterMotionLeases", "LocomotionAnimatorBindings",
+		"Resources", "SceneGraph", "ObjectManager", "AnimationRagdollMappings"
 	};
 	declaration.writes = {
 		"EditorUiPresentation", "ViewportTextureRegistry", "EditorSubmissionCompletion",
 		"EditorDiagnostics", "EditorAutomationState", "EditorAutomationSession",
 		"SceneMutationQueue", "EditorProfilerTiming", "EditorProfilerWorkerCompletions",
-		"EditorProfilerHealthPublication"
+		"EditorProfilerHealthPublication",
+		// Editor commands only queue intent; Play/project lifecycle also retires
+		// leases and root consumers before Physics or authored state is destroyed.
+		"LocomotionCommands", "LocomotionAuthority", "LocomotionObservations", "LocomotionReceipts",
+		"PhysicsWorld", "PhysicsCharacterMotionLeases", "LocomotionAnimatorBindings",
+		"AnimationConsumerMasks", "RootMotionIntervals", "RootMotionResults"
 	};
 	declaration.mainThread = true;
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;

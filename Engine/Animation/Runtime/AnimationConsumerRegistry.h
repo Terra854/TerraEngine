@@ -97,6 +97,23 @@ namespace TerraEngine::Animation {
 		struct PublishedDeclarations;
 
 	public:
+		// A root-only overlay is prepared before Locomotion publishes ownership.
+		// Holding the reservation lock makes a successful commit allocation-free and
+		// prevents a concurrent ordinary declaration batch changing total capacity.
+		class PreparedRootMotionConsumers {
+		public:
+			PreparedRootMotionConsumers() = default;
+			PreparedRootMotionConsumers(PreparedRootMotionConsumers&&) noexcept = default;
+			PreparedRootMotionConsumers& operator=(PreparedRootMotionConsumers&&) noexcept = default;
+			[[nodiscard]] AnimationStatus Status() const noexcept { return status_; }
+
+		private:
+			friend class AnimationConsumerRegistry;
+			AnimationStatus status_ = AnimationStatus::NotReady;
+			std::unique_lock<std::mutex> reservation_;
+			std::shared_ptr<const PublishedDeclarations> candidate_;
+		};
+
 		// One captured view pins an immutable declaration publication for every
 		// worker partition in a frame. Resolve performs no atomic shared_ptr traffic,
 		// so a handful of gameplay consumers cannot serialize a large visual crowd.
@@ -111,6 +128,7 @@ namespace TerraEngine::Animation {
 		private:
 			friend class AnimationConsumerRegistry;
 			std::shared_ptr<const PublishedDeclarations> snapshot_;
+			std::shared_ptr<const PublishedDeclarations> rootMotionSnapshot_;
 		};
 
 		static AnimationConsumerRegistry& Instance();
@@ -119,6 +137,13 @@ namespace TerraEngine::Animation {
 			std::span<const AnimationConsumerDeclaration> declarations,
 			AnimationGeneration generation,
 			AnimationFixedTick declarationTick);
+		[[nodiscard]] PreparedRootMotionConsumers PrepareRootMotionConsumers(
+			std::span<const AnimatorInstanceHandle> activeAnimators,
+			AnimationGeneration generation,
+			AnimationFixedTick declarationTick) const;
+		void CommitRootMotionConsumers(PreparedRootMotionConsumers&& prepared) noexcept;
+		// Lifecycle retirement must not need a fresh generation or allocation.
+		void ClearRootMotionConsumers() noexcept;
 		AnimationResolvedConsumerRequirements Resolve(
 			AnimatorInstanceHandle animator,
 			std::span<const std::int32_t> jointParents,
@@ -127,9 +152,11 @@ namespace TerraEngine::Animation {
 		void Clear() noexcept;
 		[[nodiscard]] AnimationGeneration PublishedGeneration() const noexcept;
 		[[nodiscard]] std::size_t DeclarationCount() const noexcept;
+		[[nodiscard]] std::size_t RootMotionDeclarationCount() const noexcept;
 
 	private:
 		mutable std::mutex publishMutex_;
 		std::shared_ptr<const PublishedDeclarations> published_;
+		std::shared_ptr<const PublishedDeclarations> rootMotionPublished_;
 	};
 }

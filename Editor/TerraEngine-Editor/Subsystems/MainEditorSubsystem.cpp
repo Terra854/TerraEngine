@@ -26,6 +26,8 @@
 #include "Engine/Components/TerrainComponent.h"
 #include "Engine/Animation/AnimationSystem.h"
 #include "Engine/Audio/AudioSystem.h"
+#include "Engine/Locomotion/LocomotionSystem.h"
+#include "LocomotionValidationHarness.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Renderer/Terrain/TerrainRenderProxyRegistry.h"
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
@@ -2499,6 +2501,7 @@ void MainEditorSubsystem::Shutdown() {
 		terrainTools->CancelDetachedPreview("Terrain preview cancelled during editor shutdown.");
 	// Provider-owned bodies must be gone before editor teardown can release the
 	// authored ObjectManager state referenced by the current physics snapshot.
+	TerraEngine::Locomotion::LocomotionSystem::Instance().RevokeAll();
 	TerraEngine::Physics::PhysicsSystem::Instance().StopWorld();
 	ClearPlayModeSceneState();
 	m_PrefabReturnGameViewCameras.clear();
@@ -2693,6 +2696,7 @@ void MainEditorSubsystem::StopPlayMode()
 	// Retire the running-world authority before physics and scene restoration can
 	// reuse object slots.  The next edit-domain frame publishes a fresh tick-zero
 	// pose instead of exposing a retained Play Mode root.
+	TerraEngine::Locomotion::LocomotionSystem::Instance().RevokeAll();
 	(void)TerraEngine::Animation::AnimationSystem::Instance()
 		.NotifyLifecycleInvalidation(TerraEngine::Animation::AnimationLifecycleBoundary::PlayMode);
 	// Stop and drain provider work before restoring or destroying authored
@@ -2779,6 +2783,44 @@ nlohmann::json MainEditorSubsystem::RunNavigationAgentPlayValidationFrame(nlohma
 	{
 		return {{"succeeded", false}, {"pending", false},
 			{"failure", std::string("Navigation editor Play Mode validation failed: ") + exception.what()}};
+	}
+}
+
+nlohmann::json MainEditorSubsystem::RunLocomotionPlayValidationFrame(nlohmann::json options)
+{
+	if(ctx == nullptr || ctx->engine == nullptr || ctx->projectManager == nullptr
+		|| !ctx->projectManager->HasActiveProject())
+		return {{"succeeded", false}, {"pending", false},
+			{"failure", "Locomotion validation requires an open editor project."}};
+	if(!ctx->projectManager->GetReadinessState().simulationEssentialReady)
+		return {{"succeeded", false}, {"pending", true}};
+	try {
+		if(!m_LocomotionValidationSceneOpened) {
+			const std::string scene = options.value("scenePath", std::string{});
+			if(scene != "Scenes/Smoke.tescene" && scene != "Scenes/Semantic.tescene"
+				&& scene != "Scenes/Startup.tescene")
+				return {{"succeeded", false}, {"pending", false},
+					{"failure", "Locomotion validation requires one exact generated fixture scene."}};
+			// OpenScene uses ProjectManager's prepared scene transaction and leaves
+			// its authored source unchanged. The next normal frame sees its contents.
+			OpenScene(std::filesystem::path(scene));
+			if(m_CurrentScenePath.generic_string() != scene)
+				return {{"succeeded", false}, {"pending", false},
+					{"failure", "The installed editor could not open the requested locomotion fixture scene."}};
+			m_LocomotionValidationSceneOpened = true;
+			return {{"succeeded", false}, {"pending", true}};
+		}
+		if(!ScriptingSystem::Instance().IsRunning()) {
+			if(!StartPlayMode()) return {{"succeeded", false}, {"pending", false},
+				{"failure", "The normal editor Play Mode lifecycle could not start locomotion validation."}};
+			// The current PostFrame preceded Play Mode's first scheduled frame.
+			return {{"succeeded", false}, {"pending", true}};
+		}
+		options["executionMode"] = "editor-play";
+		return TerraEngine::Locomotion::Validation::RunLocomotionApplicationValidation(*ctx->engine, options);
+	} catch(const std::exception& exception) {
+		return {{"succeeded", false}, {"pending", false},
+			{"failure", std::string("Editor locomotion validation failed: ") + exception.what()}};
 	}
 }
 
@@ -4068,6 +4110,7 @@ void MainEditorSubsystem::CloseCurrentProject() {
 	// A project switch can preserve the process-wide AnimationSystem singleton.
 	// Advance the scene identity first so old authority and presentation roots are
 	// not available while the outgoing scene is being released.
+	TerraEngine::Locomotion::LocomotionSystem::Instance().RevokeAll();
 	(void)TerraEngine::Animation::AnimationSystem::Instance()
 		.NotifyLifecycleInvalidation(TerraEngine::Animation::AnimationLifecycleBoundary::Scene);
 	TerraEngine::Physics::PhysicsSystem::Instance().StopWorld();

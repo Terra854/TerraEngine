@@ -42,6 +42,7 @@
 #include "Navigation/NavigationSettings.h"
 #include "Navigation/NavigationSystem.h"
 #include "NavigationApplicationValidation.h"
+#include "LocomotionValidationHarness.h"
 #include "ThreadPool/ThreadPool.h"
 
 namespace {
@@ -92,9 +93,10 @@ struct NavigationValidationCommand final {
 	fs::path reportPath;
 };
 
-std::optional<NavigationValidationCommand> FindNavigationValidationCommand(int argc, char* argv[]) {
+std::optional<NavigationValidationCommand> FindNavigationValidationCommand(
+	int argc, char* argv[], const char* flag = "--validate-export-navigation-agents") {
 	for(int index = 1; index < argc; ++index) {
-		if(argv[index] == nullptr || std::strcmp(argv[index], "--validate-export-navigation-agents") != 0) continue;
+		if(argv[index] == nullptr || std::strcmp(argv[index], flag) != 0) continue;
 		if(index + 2 >= argc || argv[index + 1] == nullptr || argv[index + 2] == nullptr) return std::nullopt;
 		return NavigationValidationCommand{fs::path(argv[index + 1]), fs::path(argv[index + 2])};
 	}
@@ -251,6 +253,63 @@ int RunExportNavigationAgentValidation(const NavigationValidationCommand& comman
 	return succeeded ? 0 : 1;
 }
 
+int RunExportLocomotionValidation(const NavigationValidationCommand& command, bool headlessCpuFallback) {
+	// This host owns a normal exported Engine lifecycle. The shared validator
+	// advances real scheduler frames and only returns a terminal copied report.
+	nlohmann::json report = {{"succeeded", false}, {"pending", false}, {"orderlyShutdown", false}};
+	Engine validationEngine;
+	bool initialized = false;
+	try {
+		nlohmann::json options = ReadNavigationValidationOptions(command.optionsPath);
+		const auto workers = ReadNavigationValidationWorkerCount(options);
+		if(!workers) throw std::runtime_error("Locomotion validation requires requiredWorkerCount.");
+		const std::string workerText = std::to_string(*workers);
+#ifdef _WIN32
+		if(_putenv_s("TERRAENGINE_THREADPOOL_WORKERS", workerText.c_str()) != 0)
+			throw std::runtime_error("Could not configure locomotion validation workers.");
+#else
+		if(setenv("TERRAENGINE_THREADPOOL_WORKERS", workerText.c_str(), 1) != 0)
+			throw std::runtime_error("Could not configure locomotion validation workers.");
+#endif
+		options["executionMode"] = "export";
+		options["headlessCpuFallback"] = headlessCpuFallback;
+		if(headlessCpuFallback) validationEngine.ConfigureHeadlessCpuFallback();
+		validationEngine.Initialize();
+		initialized = true;
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(20);
+		do {
+			report = TerraEngine::Locomotion::Validation::RunLocomotionApplicationValidation(validationEngine, options);
+			if(report.value("pending", false) && std::chrono::steady_clock::now() >= deadline) {
+				report["pending"] = false;
+				report["succeeded"] = false;
+				report["failure"] = "The exported locomotion run exceeded its bounded deadline.";
+			}
+		} while(report.value("pending", false));
+		validationEngine.Shutdown();
+		initialized = false;
+		report["orderlyShutdown"] = true;
+	} catch(const std::exception& exception) {
+		if(initialized) {
+			try { validationEngine.Shutdown(); report["orderlyShutdown"] = true; }
+			catch(...) { report["orderlyShutdown"] = false; }
+		} else {
+			// A failed pre-initialize path may still have started worker threads.
+			ThreadPool::instance().shutdown();
+		}
+		report["pending"] = false;
+		report["succeeded"] = false;
+		report["failure"] = std::string("Export locomotion validation failed: ") + exception.what();
+	}
+	if(!report.contains("actualWorkerCount")) report["actualWorkerCount"] = 0U;
+	if(!report.contains("executedCaseCount")) report["executedCaseCount"] = 0U;
+	if(!WriteNavigationValidationReport(command.reportPath, report)) {
+		std::cerr << "[Launcher] Could not write locomotion validation report: " << command.reportPath << std::endl;
+		return 1;
+	}
+	return report.value("succeeded", false) && report.value("orderlyShutdown", false)
+		&& !report.value("pending", false) ? 0 : 1;
+}
+
 // ConfigureExportBootstrap is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ConfigureExportBootstrap(const char* argv0) {
 	const fs::path executablePath = ResolveExecutablePath(argv0);
@@ -387,6 +446,17 @@ int main(int argc, char *argv[])
 			// Initialize. This runs the installed package through its normal engine
 			// lifecycle, never through a direct NavigationSystem test shortcut.
 			return RunExportNavigationAgentValidation(*command,
+				HasArgument(argc, argv, "--headless-cpu-fallback"));
+		}
+
+		if (HasArgument(argc, argv, "--validate-export-locomotion")) {
+			const auto command = FindNavigationValidationCommand(argc, argv,
+				"--validate-export-locomotion");
+			if(!command) {
+				std::cerr << "[Launcher] --validate-export-locomotion requires <options-json> <report-json>." << std::endl;
+				return 1;
+			}
+			return RunExportLocomotionValidation(*command,
 				HasArgument(argc, argv, "--headless-cpu-fallback"));
 		}
 

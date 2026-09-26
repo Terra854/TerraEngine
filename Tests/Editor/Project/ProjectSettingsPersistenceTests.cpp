@@ -3,6 +3,7 @@
 #include "Editor/TerraEngine-Editor/Project/ProjectPhysicsSettingsIO.h"
 #include "Editor/TerraEngine-Editor/Project/ProjectManager.h"
 #include "Editor/TerraEngine-Editor/Windows/SceneViewCameraState.h"
+#include "Core/Object/ComponentRegistry.h"
 
 #include <filesystem>
 #include <cmath>
@@ -248,6 +249,10 @@ namespace TerraEngine::EditorTests
 		});
 
 		registry.Add("Editor.ProjectSettings.NewProjectsCreateLoadableDefaultScene", [](TestContext& context) {
+			// The application registers its complete built-in component schema during startup.
+			// This isolated project-manager test must establish the same precondition before
+			// detached scene decoding validates component names.
+			ComponentRegistry::RegisterAllComponents();
 			const std::filesystem::path root =
 				std::filesystem::temp_directory_path() / "TerraEngineProjectSettings" / "LoadableDefaultScene";
 			std::error_code ignored;
@@ -260,7 +265,8 @@ namespace TerraEngine::EditorTests
 					error.empty() ? "New project creation should succeed." : error);
 
 				::ProjectSceneLoadDecision decision;
-				context.Expect(manager.PrepareSceneForLoading("Scenes/Scene.tescene", decision, &error),
+				const bool scenePrepared = manager.PrepareSceneForLoading("Scenes/Scene.tescene", decision, &error);
+				context.Expect(scenePrepared,
 					error.empty() ? "A new project's default scene should pass the production scene preparation path." : error);
 				context.Expect(decision.prepared, "The default scene should produce a prepared scene packet.");
 				context.ExpectEqual(std::size_t{2U}, decision.preparedScene.objectCount,

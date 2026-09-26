@@ -5,6 +5,7 @@
 #include "Components/Transform.h"
 #include "Components/AnimatorComponent.h"
 #include "Components/NavigationAgentComponent.h"
+#include "Components/CharacterLocomotionComponent.h"
 #include "Core/Object/Component.h"
 #include "Core/Object/Object.h"
 #include "Core/Object/ObjectManager.h"
@@ -295,6 +296,56 @@ namespace TerraEngine::Scene {
 			return false;
 		}
 
+		// Stage every locomotion authoring write into a detached full candidate.
+		// Several writes may temporarily violate a cross-field rule; validation
+		// occurs only after the final operation in the transaction has been staged.
+		bool ApplyLocomotionProperty(CharacterLocomotionComponent& candidate,
+			std::string_view propertyName, const Reflection::Variant& value)
+		{
+			auto assignDouble = [&value](double& destination) {
+				if(!Reflection::IsType<double>(value)) return false;
+				const double converted = Reflection::GetValue<double>(value);
+				if(!std::isfinite(converted)) return false;
+				destination = converted;
+				return true;
+			};
+			auto assignInteger = [&value](std::uint32_t& destination) {
+				if(!Reflection::IsType<std::uint32_t>(value)) return false;
+				destination = Reflection::GetValue<std::uint32_t>(value);
+				return true;
+			};
+			auto assignString = [&value](std::string& destination) {
+				if(!Reflection::IsType<std::string>(value)) return false;
+				destination = Reflection::GetValue<std::string>(value);
+				return true;
+			};
+			if(propertyName == "active") {
+				if(!Reflection::IsType<bool>(value)) return false;
+				candidate.active = Reflection::GetValue<bool>(value);
+				return true;
+			}
+			if(propertyName == "controllerBinding") return assignInteger(candidate.controllerBinding);
+			if(propertyName == "navigationBinding") return assignInteger(candidate.navigationBinding);
+			if(propertyName == "animatorBinding") return assignInteger(candidate.animatorBinding);
+			if(propertyName == "animatorObjectId") {
+				if(!Reflection::IsType<TerraEngine::UUID>(value)) return false;
+				candidate.animatorObjectId = Reflection::GetValue<TerraEngine::UUID>(value);
+				return true;
+			}
+			if(propertyName == "maximumSpeed") return assignDouble(candidate.maximumSpeed);
+			if(propertyName == "acceleration") return assignDouble(candidate.acceleration);
+			if(propertyName == "braking") return assignDouble(candidate.braking);
+			if(propertyName == "turnRate") return assignDouble(candidate.turnRate);
+			if(propertyName == "facing") return assignInteger(candidate.facing);
+			if(propertyName == "initialMotionMode") return assignInteger(candidate.initialMotionMode);
+			if(propertyName == "speedParameter") return assignString(candidate.speedParameter);
+			if(propertyName == "localDirectionXParameter") return assignString(candidate.localDirectionXParameter);
+			if(propertyName == "localDirectionZParameter") return assignString(candidate.localDirectionZParameter);
+			if(propertyName == "groundedParameter") return assignString(candidate.groundedParameter);
+			if(propertyName == "movingParameter") return assignString(candidate.movingParameter);
+			return false;
+		}
+
 		TransactionResult ValidateTransaction(ObjectManager& objects, const Transaction& transaction)
 		{
 			TransactionResult result;
@@ -424,6 +475,7 @@ namespace TerraEngine::Scene {
 			std::unordered_set<std::string> spatiallyTouchedTargets;
 			std::unordered_map<std::string, bool> preparedComponentPresence;
 			std::unordered_map<std::string, NavigationAgentComponent> preparedNavigationAgents;
+			std::unordered_map<std::string, CharacterLocomotionComponent> preparedLocomotionComponents;
 			for (std::size_t index = 0; index < transaction.writeSet.operations.size(); ++index)
 			{
 				const TransactionWriteOperation& operation = transaction.writeSet.operations[index];
@@ -668,6 +720,9 @@ namespace TerraEngine::Scene {
 						if(operation.componentName == NavigationAgentComponent::kComponentName) {
 							preparedNavigationAgents.insert_or_assign(componentKey, NavigationAgentComponent{});
 						}
+						if(operation.componentName == CharacterLocomotionComponent::kComponentName) {
+							preparedLocomotionComponents.insert_or_assign(componentKey, CharacterLocomotionComponent{});
+						}
 					}
 					else if (operation.kind == TransactionWriteKind::RemoveComponent)
 					{
@@ -678,6 +733,7 @@ namespace TerraEngine::Scene {
 						}
 						preparedComponentPresence[componentKey] = false;
 						preparedNavigationAgents.erase(componentKey);
+						preparedLocomotionComponents.erase(componentKey);
 					}
 					else
 					{
@@ -709,6 +765,25 @@ namespace TerraEngine::Scene {
 									operation.componentName, operation.propertyName, operation.kind);
 							}
 						}
+						else if(operation.componentName == CharacterLocomotionComponent::kComponentName)
+						{
+							auto staged = preparedLocomotionComponents.find(componentKey);
+							if(staged == preparedLocomotionComponents.end()) {
+								CharacterLocomotionComponent current{};
+								if(!operation.target.UsesLocalObject()) {
+									if(const std::optional<Object> target = objects.getObject(operation.target.objectId)) {
+										if(const auto* live = objects.getRegistry().try_get<CharacterLocomotionComponent>(target->EntityId())) current = *live;
+									}
+								}
+								staged = preparedLocomotionComponents.emplace(componentKey, current).first;
+							}
+							if(!ApplyLocomotionProperty(staged->second, operation.propertyName, converted)) {
+								result.status = TransactionStatus::Rejected;
+								AddConflict(result, TransactionConflictReason::InvalidPayload, operation.target.objectId, index,
+									"Locomotion property cannot form an authored candidate.", 0, 0,
+									operation.componentName, operation.propertyName, operation.kind);
+							}
+						}
 					}
 				}
 			}
@@ -720,6 +795,16 @@ namespace TerraEngine::Scene {
 					AddConflict(result, TransactionConflictReason::InvalidPayload, TerraEngine::EMPTY_UUID, 0U,
 						"Navigation Agent settings violate their complete authored validation contract.", 0, 0,
 						std::string(NavigationAgentComponent::kComponentName));
+				}
+			}
+			for(const auto& [componentKey, candidate] : preparedLocomotionComponents)
+			{
+				(void)componentKey;
+				if(!candidate.ValidateAuthoredValues()) {
+					result.status = TransactionStatus::Rejected;
+					AddConflict(result, TransactionConflictReason::InvalidPayload, TerraEngine::EMPTY_UUID, 0U,
+						"Character Locomotion settings violate complete authored validation.", 0, 0,
+						std::string(CharacterLocomotionComponent::kComponentName));
 				}
 			}
 

@@ -64,6 +64,10 @@ class TERRAENGINE_API Engine {
 		// CPU animation fallback is selected because RenderSystem is intentionally
 		// absent from the resulting scheduler.
 		void ConfigureHeadlessCpuFallback();
+		// Opt-in installed performance control: replace only locomotion derivation
+		// with recorded typed ingress, retaining the normal scheduler and Physics.
+		// Call before Initialize; ordinary games never enable this validation mode.
+		void ConfigureCharacterMotionReplayValidation();
 		// Executes the already-loaded startup scene through the same PhysicsSystem
 		// and scheduler/flush boundary used by ordinary frames. Callers own normal
 		// engine shutdown after this bounded validation operation returns.
@@ -111,6 +115,7 @@ class TERRAENGINE_API Engine {
 		SystemsBase* editorSystem = nullptr;
 		bool editorMode = false;
 		bool headlessPhysicsValidation = false;
+		bool characterMotionReplayValidation = false;
 		// Track attempts separately because zero is a valid initial revision. A
 		// deterministic rejection is cached until one of the protected inputs below
 		// changes, preventing an unchanged editor scene from being rescanned and

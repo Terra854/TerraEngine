@@ -10,8 +10,10 @@
 #include "PhysicsTypes.h"
 #include "Utilities/UUID.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <variant>
 #include <vector>
@@ -94,6 +96,261 @@ namespace TerraEngine::Physics {
 		TerraEngine::UUID objectId{};
 		PhysicsGeneration objectGeneration = 0U;
 		PhysicsGeneration componentGeneration = 0U;
+		bool operator==(const PhysicsCharacterCommandTarget&) const = default;
+	};
+
+	// The locomotion attachment is identified without importing locomotion or
+	// provider headers into Physics. All generations are copied at admission.
+	struct CharacterMotionOwner {
+		std::uint64_t sceneLifetime = 0U;
+		TerraEngine::UUID objectId{};
+		std::uint64_t objectGeneration = 0U;
+		std::uint64_t attachmentGeneration = 0U;
+		std::uint32_t slotIndex = 0U;
+		std::uint32_t slotGeneration = 0U;
+
+		[[nodiscard]] bool IsValid() const noexcept;
+		bool operator==(const CharacterMotionOwner&) const = default;
+	};
+
+	enum class CharacterMotionLeaseState : std::uint8_t { Unleased, LocomotionOwned, ExternalExclusive };
+	enum class CharacterMotionMode : std::uint8_t { Velocity, RootMotion };
+	enum class CharacterMotionCommandSource : std::uint8_t { Legacy, Locomotion };
+
+	// An unleased record remains present until controller destruction so an old
+	// command cannot become valid again when ownership is later released.
+	struct CharacterMotionLease {
+		PhysicsCharacterCommandTarget controller;
+		CharacterMotionOwner owner;
+		std::uint64_t authorityEpoch = 0U;
+		std::uint64_t motionEpoch = 0U;
+		std::uint64_t publicationEpoch = 0U;
+		std::uint64_t externalOwnerId = 0U;
+		CharacterMotionLeaseState state = CharacterMotionLeaseState::Unleased;
+		CharacterMotionMode mode = CharacterMotionMode::Velocity;
+		bool operator==(const CharacterMotionLease&) const = default;
+	};
+
+	struct CharacterMotionLeaseChange {
+		CharacterMotionLease expected;
+		CharacterMotionLease next;
+	};
+
+	enum class CharacterMotionLeaseError : std::uint8_t {
+		None, InvalidArgument, StaleCharacter, StaleEpoch, OwnershipConflict, CapacityExceeded
+	};
+
+	struct CharacterMotionLeaseResult {
+		bool accepted = false;
+		CharacterMotionLeaseError error = CharacterMotionLeaseError::None;
+		std::uint64_t publicationEpoch = 0U;
+	};
+
+	[[nodiscard]] CharacterMotionLeaseError ValidateCharacterMotionLeaseChange(
+		const CharacterMotionLeaseChange& change, const CharacterMotionLease& current) noexcept;
+
+	// A producer may attach immutable evidence whose current validity can be
+	// checked at protected Physics boundaries without importing its subsystem.
+	enum class CharacterMotionValidityReason : std::uint8_t {
+		Valid, StaleLifetime, StaleConfiguration, StaleEvidence, Unavailable
+	};
+
+	class TERRAENGINE_API CharacterMotionValidity {
+	public:
+		virtual ~CharacterMotionValidity() = default;
+		[[nodiscard]] virtual CharacterMotionValidityReason Validate() const noexcept = 0;
+	};
+
+	// Only PhysicsSystem's trusted protected ingress may publish this target.
+	// Legacy callers keep using PhysicsCommand and are stamped as Legacy there.
+	struct CharacterMotionTarget {
+		PhysicsCharacterCommandTarget controller;
+		CharacterMotionOwner owner;
+		std::uint64_t authorityEpoch = 0U;
+		std::uint64_t motionEpoch = 0U;
+		std::uint64_t locomotionUpdateEpoch = 0U;
+		CharacterMotionMode mode = CharacterMotionMode::Velocity;
+		PhysicsFrameHandle frame;
+		PhysicsVector3 planarVelocity;
+		float acceleration = 0.0F;
+		float braking = 0.0F;
+		PhysicsVector3 desiredFacing;
+		float turnRate = 0.0F;
+		bool hasFacing = false;
+		bool clearImmediately = false;
+		std::shared_ptr<const CharacterMotionValidity> validityGuard;
+		// -1 means no arrival budget. Navigation supplies route distance minus
+		// tolerance; Physics spends it only on realized planar fixed-step travel.
+		float approachDistanceMetres = -1.0F;
+		bool operator==(const CharacterMotionTarget&) const = default;
+	};
+
+	// Animation's successful ragdoll recovery supplies one copied, frame-qualified
+	// controller pose. This intent is inert until a protected Physics boundary
+	// proves the exact external owner and completed ragdoll result.
+	struct CharacterExternalRecoveryIntent {
+		CharacterMotionLease expectedExternalLease;
+		std::uint64_t externalOwnerId = 0U;
+		PhysicsFrameHandle frame;
+		PhysicsPose alignedControllerPose;
+		std::uint64_t bindingGeneration = 0U;
+		std::shared_ptr<const CharacterMotionValidity> bindingGuard;
+		bool operator==(const CharacterExternalRecoveryIntent&) const = default;
+	};
+
+	// A retired animator has no valid binding guard after component invalidation.
+	// Its protected producer pins the exact live external lease before retiring
+	// the record; only an exact successful ragdoll Teardown may consume this
+	// intent and clear the character at its current provider pose.
+	struct CharacterExternalRetirementIntent {
+		CharacterMotionLease expectedExternalLease;
+		std::uint64_t externalOwnerId = 0U;
+		PhysicsFrameHandle frame;
+		std::uint64_t bindingGeneration = 0U;
+	};
+
+	// The provider and lease table receive the same prevalidated transition.
+	// A separate recovery path never weakens ordinary ExternalExclusive rules.
+	struct CharacterExternalRecoveryTransition {
+		CharacterExternalRecoveryIntent intent;
+		CharacterMotionLease releasedLease;
+	};
+	[[nodiscard]] CharacterMotionLeaseError ValidateCharacterExternalRecoveryTransition(
+		const CharacterExternalRecoveryTransition& transition,
+		const CharacterMotionLease& current) noexcept;
+
+	// A surviving controller may receive a new physical handle when the scene's
+	// shared component generation changes. Both full identities are checked in
+	// one prepared root; the old ExternalExclusive row is retired, never released
+	// through the ordinary locomotion lease API.
+	struct CharacterExternalCarry {
+		CharacterMotionLease expectedExternalLease;
+		CharacterMotionLease nextExternalLease;
+	};
+	[[nodiscard]] CharacterMotionLeaseError ValidateCharacterExternalCarry(
+		const CharacterExternalCarry& carry) noexcept;
+
+	// Animation supplies copied numeric identities and a frame-space delta.
+	// Physics does not import an Animation handle or call its application ledger.
+	struct RootMotionAnimatorIdentity {
+		std::uint32_t slotIndex = 0xffffffffU;
+		std::uint32_t animatorGeneration = 0U;
+		std::uint32_t poseGeneration = 0U;
+		std::uint64_t sourceGeneration = 0U;
+		std::uint64_t sourceStateId = 0U;
+		std::uint32_t layerIndex = 0U;
+		std::uint64_t evaluationSequence = 0U;
+		std::uint64_t bindingGeneration = 0U;
+		std::uint64_t publicationGeneration = 0U;
+		std::int64_t sourceBeginTick = 0;
+		std::int64_t sourceEndTick = 0;
+		std::int64_t accumulatedCycles = 0;
+		bool operator==(const RootMotionAnimatorIdentity&) const = default;
+	};
+
+	struct RootMotionLedgerIdentity {
+		std::uint32_t producerId = 0U;
+		std::uint64_t producerSequence = 0U;
+		std::uint64_t idempotencyKey = 0U;
+		std::uint64_t correlationId = 0U;
+		bool operator==(const RootMotionLedgerIdentity&) const = default;
+	};
+
+	// Translation and yaw are already converted from the captured animator basis
+	// into this physical frame exactly once by the protected producer. Local values
+	// remain copied receipt evidence and must not be applied a second time.
+	struct RootMotionInterval {
+		CharacterMotionLease lease;
+		PhysicsFrameHandle frame;
+		RootMotionAnimatorIdentity animator;
+		RootMotionLedgerIdentity ledger;
+		PhysicsVector3 localTranslation;
+		float localYawRadians = 0.0F;
+		PhysicsVector3 frameTranslation;
+		float frameYawRadians = 0.0F;
+		float durationSeconds = 0.0F;
+		float maximumSpeed = 0.0F;
+		float maximumTurnRate = 0.0F;
+		// Source or binding changes may revoke a retained interval. Physics invokes
+		// this guard only at protected boundaries, never inside a provider worker.
+		std::shared_ptr<const CharacterMotionValidity> validityGuard;
+	};
+
+	// An interval ID belongs to one world generation and never aliases an ordinary
+	// PhysicsCommandId. A separate token generation names the reserved capacity.
+	struct RootMotionIntervalId {
+		PhysicsWorldHandle world;
+		std::uint64_t sequence = 0U;
+		[[nodiscard]] bool IsValid() const noexcept { return world.IsValid() && sequence != 0U; }
+		bool operator==(const RootMotionIntervalId&) const = default;
+	};
+
+	struct RootMotionIntervalReservation {
+		RootMotionIntervalId intervalId;
+		std::uint64_t tokenGeneration = 0U;
+		[[nodiscard]] bool IsValid() const noexcept { return intervalId.IsValid() && tokenGeneration != 0U; }
+		bool operator==(const RootMotionIntervalReservation&) const = default;
+	};
+
+	enum class RootMotionIntervalError : std::uint8_t {
+		None, InvalidArgument, StaleTarget, OwnershipConflict, UnsupportedController,
+		UnsupportedFrame, Duplicate, OutOfOrder, StaleEvidence, CapacityExceeded,
+		NotReady, Cancelled
+	};
+
+	struct RootMotionIntervalAdmission {
+		bool accepted = false;
+		RootMotionIntervalError error = RootMotionIntervalError::NotReady;
+		RootMotionIntervalReservation reservation;
+	};
+
+	// Every tick record reports one whole fixed-step aggregate. Contributing IDs
+	// share its measured result; Physics never invents per-fragment collision data.
+	struct RootMotionTickResult {
+		PhysicsCharacterCommandTarget controller;
+		PhysicsTick tick = 0U;
+		float completedStepDuration = 0.0F;
+		PhysicsVector3 requestedTranslation;
+		PhysicsVector3 realizedTranslation;
+		float requestedYawRadians = 0.0F;
+		float realizedYawRadians = 0.0F;
+		std::array<RootMotionIntervalId, 8U> contributingIntervals{};
+		std::uint8_t contributingCount = 0U;
+		bool adjustedByLimit = false;
+		bool adjustedByCollision = false;
+	};
+
+	enum class RootMotionTerminalDisposition : std::uint8_t {
+		Consumed, Adjusted, Cancelled, Rejected
+	};
+
+	struct RootMotionTerminalResult {
+		RootMotionIntervalId intervalId;
+		RootMotionAnimatorIdentity animator;
+		RootMotionLedgerIdentity ledger;
+		RootMotionTerminalDisposition disposition = RootMotionTerminalDisposition::Rejected;
+		RootMotionIntervalError reason = RootMotionIntervalError::NotReady;
+		PhysicsTick finalTick = 0U;
+		std::uint64_t firstTickResultSequence = 0U;
+		std::uint64_t lastTickResultSequence = 0U;
+		bool sharedTickAttribution = false;
+	};
+
+	struct RootMotionResultRecord {
+		std::uint64_t sequence = 0U;
+		std::variant<RootMotionTickResult, RootMotionTerminalResult> result;
+	};
+
+	// A copied immutable page is read by Animation at its protected boundary.
+	// The cursor is acknowledged only after its existing ledger has resolved the
+	// corresponding terminal applications; no callback runs under a Physics lock.
+	struct RootMotionResultPacket {
+		PhysicsWorldHandle world;
+		std::uint64_t requestedAfterCursor = 0U;
+		std::uint64_t nextCursor = 0U;
+		bool expiredCursor = false;
+		bool hasMore = false;
+		std::vector<RootMotionResultRecord> records;
 	};
 
 	// Producer-owned metadata describes when a command becomes eligible and how
@@ -161,6 +418,10 @@ namespace TerraEngine::Physics {
 		// are never serialized into constraint or character authoring components.
 		PhysicsConstraintHandle constraint;
 		PhysicsCharacterHandle character;
+		// PhysicsWorld stamps these at queue admission. A caller cannot opt into
+		// Locomotion by setting either field on the public legacy command path.
+		std::uint64_t characterMotionEpoch = 0U;
+		CharacterMotionCommandSource characterMotionSource = CharacterMotionCommandSource::Legacy;
 		PhysicsTick effectiveTick = 0;
 		PhysicsSequence producerId = 0;
 		PhysicsSequence producerSequence = 0;
@@ -257,6 +518,8 @@ namespace TerraEngine::Physics {
 			const PhysicsCharacterCommandTarget& target,
 			PhysicsCommandMetadata metadata = {});
 	};
+
+	[[nodiscard]] bool IsCharacterMotionCommand(const PhysicsCommand& command) noexcept;
 
 	struct PhysicsCommandQueueLimits {
 		std::size_t maximumCommands = 4096U;

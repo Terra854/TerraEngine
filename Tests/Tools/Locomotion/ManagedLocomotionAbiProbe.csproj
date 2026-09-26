@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<!-- Offline CLR layout probe; pass the freshly built engine assembly path. -->
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+	</PropertyGroup>
+	<ItemGroup>
+		<Reference Include="TerraEngine.CSharp">
+			<HintPath>$(TerraEngineAssemblyPath)</HintPath>
+		</Reference>
+		<Compile Include="ManagedLocomotionAbiProbe.cs" />
+		<Compile Include="ManagedLocomotionAuthoringSample.cs" />
+	</ItemGroup>
+</Project>

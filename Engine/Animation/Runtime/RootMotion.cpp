@@ -2,6 +2,8 @@
 
 #include "Animation/Runtime/RootMotion.h"
 
+#include "Animation/AnimationSystem.h"
+
 #include "Components/Transform.h"
 #include "Core/Object/Object.h"
 #include "Core/Object/ObjectManager.h"
@@ -89,7 +91,9 @@ namespace TerraEngine::Animation {
 			return delta.animator.IsValid() && delta.generation != 0U
 				&& delta.sourceBeginTick != delta.sourceEndTick
 				&& IsFinite(delta.localTranslation) && IsFinite(delta.worldTranslation)
-				&& std::isfinite(delta.localYawRadians) && std::isfinite(delta.worldYawRadians);
+				&& std::isfinite(delta.localYawRadians) && std::isfinite(delta.worldYawRadians)
+				&& std::isfinite(delta.evaluationDurationSeconds)
+				&& delta.evaluationDurationSeconds >= 0.0;
 		}
 
 		glm::quat ToGlm(AnimationQuaternion value) noexcept
@@ -177,6 +181,20 @@ namespace TerraEngine::Animation {
 				&& NearlyEqual(expected.scale, actual.scale);
 		}
 
+		bool CompatibleRootBasis(const AnimationRootControllerBinding& binding) noexcept
+		{
+			const AnimationFloat3 scale = binding.capturedRelativeBasisScale;
+			if(!IsFinite(scale) || scale.x <= 0.0F || scale.y <= 0.0F || scale.z <= 0.0F
+				|| std::abs(scale.x - scale.y) > 1.0e-3F
+				|| std::abs(scale.x - scale.z) > 1.0e-3F) return false;
+			const glm::quat q = ToGlm(binding.capturedRelativeBasisRotation);
+			if(!std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z)
+				|| !std::isfinite(q.w) || glm::dot(q, q) < 1.0e-8F) return false;
+			const glm::vec3 up = glm::normalize(q) * glm::vec3{0.0F, 1.0F, 0.0F};
+			return std::abs(up.x) <= 1.0e-3F && std::abs(up.y - 1.0F) <= 1.0e-3F
+				&& std::abs(up.z) <= 1.0e-3F;
+		}
+
 		bool ConvertWorldTargetToLocal(
 			ObjectManager& objects,
 			Object object,
@@ -229,7 +247,9 @@ namespace TerraEngine::Animation {
 			|| !IsFinite(request.begin.translation) || !IsFinite(request.end.translation)
 			|| !IsFinite(request.accumulatedCycleTranslation)
 			|| !std::isfinite(request.begin.yawRadians) || !std::isfinite(request.end.yawRadians)
-			|| !std::isfinite(request.accumulatedCycleYawRadians)) {
+			|| !std::isfinite(request.accumulatedCycleYawRadians)
+			|| !std::isfinite(request.evaluationDurationSeconds)
+			|| request.evaluationDurationSeconds < 0.0) {
 			return AnimationStatus::InvalidArgument;
 		}
 		std::int64_t cycles = 0;
@@ -261,6 +281,8 @@ namespace TerraEngine::Animation {
 		staged.layerIndex = request.layerIndex;
 		staged.generation = request.generation;
 		staged.policy = request.policy;
+		staged.sourceGeneration = request.sourceGeneration;
+		staged.evaluationDurationSeconds = request.evaluationDurationSeconds;
 		output = staged;
 		return AnimationStatus::Ok;
 	}
@@ -278,7 +300,8 @@ namespace TerraEngine::Animation {
 		const AnimationRootMotionDelta& current = *accumulated_;
 		if(current.animator != delta.animator || current.generation != delta.generation
 			|| current.policy != delta.policy || current.sourceStateId != delta.sourceStateId
-			|| current.layerIndex != delta.layerIndex) {
+			|| current.layerIndex != delta.layerIndex
+			|| current.sourceGeneration != delta.sourceGeneration) {
 			return AnimationStatus::StaleHandle;
 		}
 		if(current.sourceBeginTick == delta.sourceBeginTick
@@ -307,6 +330,10 @@ namespace TerraEngine::Animation {
 		staged.worldTranslation = combinedWorld.translation;
 		staged.worldYawRadians = combinedWorld.yaw;
 		staged.accumulatedCycles = cycles;
+		// A merged sample spans both physical evaluations; clip tick progression
+		// can differ from wall time when an animator changes playback speed.
+		staged.evaluationDurationSeconds += delta.evaluationDurationSeconds;
+		if(!std::isfinite(staged.evaluationDurationSeconds)) return AnimationStatus::RangeOverflow;
 		accumulated_ = staged;
 		return AnimationStatus::Ok;
 	}
@@ -334,6 +361,23 @@ namespace TerraEngine::Animation {
 		AnimationQuaternion requestedEndRotation{};
 		bool character = false;
 	};
+
+	struct AnimationRootMotionResultPublisher::PendingRootInterval {
+		Physics::RootMotionIntervalId intervalId;
+		AnimationRootMotionApplicationResult result;
+		std::uint64_t lastObservedTickSequence = 0U;
+	};
+
+	std::size_t AnimationRootMotionResultPublisher::RootIntervalIdHash::operator()(
+		const Physics::RootMotionIntervalId& id) const noexcept
+	{
+		std::uint64_t value = id.world.worldId.value;
+		value ^= static_cast<std::uint64_t>(id.world.worldGeneration)
+			+ 0x9e3779b97f4a7c15ULL + (value << 6U) + (value >> 2U);
+		value ^= id.sequence + 0x9e3779b97f4a7c15ULL
+			+ (value << 6U) + (value >> 2U);
+		return static_cast<std::size_t>(value);
+	}
 
 	struct AnimationRootMotionResultPublisher::ApplicationRecord {
 		AnimationRootMotionApplicationRequest request;
@@ -810,6 +854,7 @@ namespace TerraEngine::Animation {
 		found->receipt.duplicate = found->receipt.duplicate || receipt.duplicate;
 		found->receipt.idempotencyConflict = receipt.idempotencyConflict;
 		found->receipt.physicsCommandId = receipt.physicsCommandId;
+		found->receipt.rootIntervalId = receipt.rootIntervalId;
 		found->receipt.correlationId = receipt.correlationId;
 		if(receipt.status == AnimationStatus::Ok
 			&& IsMutatingMode(found->request.mode)) {
@@ -842,6 +887,22 @@ namespace TerraEngine::Animation {
 		if(physics != pendingPhysics_.end()) {
 			commandId = physics->commandId;
 			pendingPhysics_.erase(physics);
+		}
+		const auto interval = std::find_if(pendingRootIntervals_.begin(), pendingRootIntervals_.end(),
+			[&request](const PendingRootInterval& value) {
+				return value.result.animator == request.delta.animator
+					&& value.result.producerId == request.producerId
+					&& value.result.idempotencyKey == request.idempotencyKey;
+			});
+		if(interval != pendingRootIntervals_.end()) {
+			const std::size_t position = static_cast<std::size_t>(interval - pendingRootIntervals_.begin());
+			const auto intervalId = interval->intervalId;
+			if(position + 1U != pendingRootIntervals_.size()) {
+				pendingRootIntervals_[position] = std::move(pendingRootIntervals_.back());
+				pendingRootIntervalIndex_[pendingRootIntervals_[position].intervalId] = position;
+			}
+			pendingRootIntervals_.pop_back();
+			pendingRootIntervalIndex_.erase(intervalId);
 		}
 		return commandId;
 	}
@@ -1086,6 +1147,12 @@ namespace TerraEngine::Animation {
 		std::erase_if(pendingPhysics_, [animator](const PendingPhysics& value) {
 			return value.result.animator == animator;
 		});
+		std::erase_if(pendingRootIntervals_, [animator](const PendingRootInterval& value) {
+			return value.result.animator == animator;
+		});
+		pendingRootIntervalIndex_.clear();
+		for(std::size_t index = 0U; index < pendingRootIntervals_.size(); ++index)
+			pendingRootIntervalIndex_.emplace(pendingRootIntervals_[index].intervalId, index);
 		std::erase_if(applications_, [animator](const ApplicationRecord& value) {
 			return value.request.delta.animator == animator;
 		});
@@ -1114,6 +1181,12 @@ namespace TerraEngine::Animation {
 		std::erase_if(pendingPhysics_, [&contains](const PendingPhysics& value) {
 			return contains(value.result.animator);
 		});
+		std::erase_if(pendingRootIntervals_, [&contains](const PendingRootInterval& value) {
+			return contains(value.result.animator);
+		});
+		pendingRootIntervalIndex_.clear();
+		for(std::size_t index = 0U; index < pendingRootIntervals_.size(); ++index)
+			pendingRootIntervalIndex_.emplace(pendingRootIntervals_[index].intervalId, index);
 		std::erase_if(applications_, [&contains](const ApplicationRecord& value) {
 			return contains(value.request.delta.animator);
 		});
@@ -1134,7 +1207,24 @@ namespace TerraEngine::Animation {
 		std::scoped_lock lock(mutex_);
 		try {
 			for(const AnimationRootMotionApplicationResult& result : results_) {
-				if(result.animator == animator) staged.push_back(result);
+				if(result.animator != animator) continue;
+				AnimationRootMotionApplicationResult copied = result;
+				if(copied.rootIntervalId.IsValid() && copied.firstTickResultSequence != 0U) {
+					// Evidence is a rolling scene ring: a terminal result can outlive
+					// its detailed ticks, so expiration is evaluated on every read.
+					if(copied.rootIntervalId.world != observedRootWorld_
+						|| rootTickEvidenceSize_ == 0U) {
+						copied.tickEvidenceExpired = true;
+					} else {
+						const std::size_t oldest = (rootTickEvidenceCursor_
+							+ rootTickEvidenceRing_.size() - rootTickEvidenceSize_)
+							% rootTickEvidenceRing_.size();
+						copied.tickEvidenceExpired = copied.tickEvidenceExpired
+							|| copied.firstTickResultSequence
+								< rootTickEvidenceRing_[oldest].resultSequence;
+					}
+				}
+				staged.push_back(std::move(copied));
 			}
 			std::sort(staged.begin(), staged.end(), [](const auto& left, const auto& right) {
 				if(left.sourceEndTick != right.sourceEndTick) return left.sourceEndTick < right.sourceEndTick;
@@ -1151,6 +1241,12 @@ namespace TerraEngine::Animation {
 		std::scoped_lock lock(mutex_);
 		pendingScene_.clear();
 		pendingPhysics_.clear();
+		pendingRootIntervals_.clear();
+		pendingRootIntervalIndex_.clear();
+		rootResultCursor_ = 0U;
+		observedRootWorld_ = {};
+		rootTickEvidenceSize_ = 0U;
+		rootTickEvidenceCursor_ = 0U;
 		applications_.clear();
 		applicationIndex_.clear();
 		applicationEvictionCursor_ = 0U;
@@ -1158,6 +1254,316 @@ namespace TerraEngine::Animation {
 		results_.clear();
 		resultIndex_.clear();
 		resultEvictionCursor_ = 0U;
+	}
+
+	AnimationStatus ApplyRagdollControllerExclusions(
+		const AnimationRootControllerBindingSnapshot& bindings,
+		const AnimationRagdollExclusionSnapshot& exclusions,
+		Physics::PhysicsSystem& physics)
+	{
+		using namespace TerraEngine::Physics;
+		try {
+			std::vector<CharacterMotionLeaseChange> changes;
+			changes.reserve(std::min<std::size_t>(exclusions.entries.size(), 256U));
+			for(const AnimationRagdollExclusion& exclusion : exclusions.entries) {
+				if(!exclusion.animator.IsValid()
+					|| exclusion.externalOwnerId != RagdollExternalOwnerId(exclusion.animator))
+					return AnimationStatus::InvalidArgument;
+				const auto binding = std::find_if(bindings.active.begin(), bindings.active.end(),
+					[&exclusion](const AnimationRootControllerBinding& candidate) {
+						return candidate.animator == exclusion.animator;
+					});
+				// An unbound animator may ragdoll without a locomotion controller.
+				if(binding == bindings.active.end()) continue;
+				if(binding->bindingValidityGuard
+					&& binding->bindingValidityGuard->Validate()
+						!= CharacterMotionValidityReason::Valid)
+					return AnimationStatus::StaleHandle;
+				const auto existing = physics.ReadCharacterMotionLease(binding->controller);
+				if(!existing) return AnimationStatus::NotReady;
+				if(existing->state == CharacterMotionLeaseState::ExternalExclusive) {
+					if(existing->externalOwnerId != exclusion.externalOwnerId)
+						return AnimationStatus::Rejected;
+					continue;
+				}
+				const auto duplicate = std::find_if(changes.begin(), changes.end(),
+					[&existing](const CharacterMotionLeaseChange& change) {
+						return change.expected.controller == existing->controller;
+					});
+				if(duplicate != changes.end()) {
+					if(duplicate->next.externalOwnerId != exclusion.externalOwnerId)
+						return AnimationStatus::Rejected;
+					continue;
+				}
+				if(changes.size() >= 256U) return AnimationStatus::HardLimitExceeded;
+				if(existing->motionEpoch == std::numeric_limits<std::uint64_t>::max()
+					|| existing->publicationEpoch == std::numeric_limits<std::uint64_t>::max())
+					return AnimationStatus::RangeOverflow;
+				CharacterMotionLease next = *existing;
+				next.owner = {};
+				next.state = CharacterMotionLeaseState::ExternalExclusive;
+				next.externalOwnerId = exclusion.externalOwnerId;
+				++next.motionEpoch;
+				++next.publicationEpoch;
+				changes.push_back({*existing, next});
+			}
+			if(changes.empty()) return AnimationStatus::Ok;
+			if(!physics.PreflightCharacterMotionLeases(changes).accepted)
+				return AnimationStatus::Rejected;
+			return physics.PublishCharacterMotionLeases(changes).accepted
+				? AnimationStatus::Ok : AnimationStatus::Rejected;
+		} catch(const std::bad_alloc&) {
+			return AnimationStatus::HardLimitExceeded;
+		}
+
+	}
+
+	bool AnimationRootMotionResultPublisher::RegisterRootMotionInterval(
+		Physics::RootMotionIntervalId intervalId,
+		AnimationRootMotionApplicationResult result)
+	{
+		if(!intervalId.IsValid()) return false;
+		std::scoped_lock lock(mutex_);
+		if(pendingRootIntervals_.size() >= kRetainedRootMotionApplications
+			|| pendingRootIntervalIndex_.contains(intervalId)) return false;
+		try {
+			result.rootIntervalId = intervalId;
+			pendingRootIntervals_.push_back({intervalId, std::move(result)});
+			try {
+				pendingRootIntervalIndex_.emplace(intervalId, pendingRootIntervals_.size() - 1U);
+			} catch(...) {
+				pendingRootIntervals_.pop_back();
+				throw;
+			}
+			return true;
+		} catch(const std::bad_alloc&) {
+			return false;
+		}
+	}
+
+	void AnimationRootMotionResultPublisher::CancelRootMotionIntervalApplication(
+		Physics::RootMotionIntervalId intervalId, AnimationStatus status) noexcept
+	{
+		std::scoped_lock lock(mutex_);
+		const auto indexed = pendingRootIntervalIndex_.find(intervalId);
+		if(indexed == pendingRootIntervalIndex_.end()) return;
+		const std::size_t position = indexed->second;
+		AnimationRootMotionApplicationResult terminal = std::move(pendingRootIntervals_[position].result);
+		terminal.status = status;
+		terminal.disposition = AnimationRootMotionDisposition::Rejected;
+		if(ApplicationRecord* application = FindApplicationLocked(terminal))
+			application->receipt.status = status;
+		try {
+			RetainResultLocked(std::move(terminal));
+		} catch(...) {
+			// The scalar application receipt is terminal even if diagnostic
+			// history cannot retain an optional copy during memory pressure.
+		}
+		if(position + 1U != pendingRootIntervals_.size()) {
+			pendingRootIntervals_[position] = std::move(pendingRootIntervals_.back());
+			pendingRootIntervalIndex_[pendingRootIntervals_[position].intervalId] = position;
+		}
+		pendingRootIntervals_.pop_back();
+		pendingRootIntervalIndex_.erase(indexed);
+	}
+
+
+	bool AnimationRootMotionResultPublisher::ObserveRootMotionResultPacket(
+		const Physics::RootMotionResultPacket& page)
+	{
+		std::scoped_lock lock(mutex_);
+		if(!page.world.IsValid() || page.expiredCursor) return false;
+		if(!observedRootWorld_.IsValid()) observedRootWorld_ = page.world;
+		if(observedRootWorld_ != page.world) return false;
+		try {
+			for(const Physics::RootMotionResultRecord& record : page.records) {
+				if(const auto* tick = std::get_if<Physics::RootMotionTickResult>(&record.result)) {
+					AnimationRootMotionTickEvidence evidence;
+					evidence.resultSequence = record.sequence;
+					evidence.world = page.world;
+					evidence.tick = tick->tick;
+					evidence.completedStepDuration = tick->completedStepDuration;
+					evidence.requestedTranslation = tick->requestedTranslation;
+					evidence.realizedTranslation = tick->realizedTranslation;
+					evidence.requestedYawRadians = tick->requestedYawRadians;
+					evidence.realizedYawRadians = tick->realizedYawRadians;
+					evidence.contributingCount = std::min<std::uint8_t>(
+						tick->contributingCount,
+						static_cast<std::uint8_t>(tick->contributingIntervals.size()));
+					evidence.adjustedByLimit = tick->adjustedByLimit;
+					evidence.adjustedByCollision = tick->adjustedByCollision;
+					for(std::uint8_t index = 0U; index < evidence.contributingCount; ++index)
+						evidence.contributingIntervalSequences[index] =
+							tick->contributingIntervals[index].sequence;
+					const bool alreadyRetained = rootTickEvidenceSize_ != 0U
+						&& rootTickEvidenceRing_[(rootTickEvidenceCursor_
+							+ rootTickEvidenceRing_.size() - 1U)
+							% rootTickEvidenceRing_.size()].resultSequence >= record.sequence;
+					if(!alreadyRetained) {
+						rootTickEvidenceRing_[rootTickEvidenceCursor_] = evidence;
+						rootTickEvidenceCursor_ = (rootTickEvidenceCursor_ + 1U)
+							% rootTickEvidenceRing_.size();
+						rootTickEvidenceSize_ = std::min(rootTickEvidenceSize_ + 1U,
+							rootTickEvidenceRing_.size());
+					}
+					for(std::uint8_t index = 0U; index < evidence.contributingCount; ++index) {
+						const auto found = pendingRootIntervalIndex_.find(tick->contributingIntervals[index]);
+						if(found == pendingRootIntervalIndex_.end()) continue;
+						auto& pending = pendingRootIntervals_[found->second];
+						if(record.sequence <= pending.lastObservedTickSequence) continue;
+						auto& result = pending.result;
+						result.aggregateRequestedTranslation.x += evidence.requestedTranslation.x;
+						result.aggregateRequestedTranslation.y += evidence.requestedTranslation.y;
+						result.aggregateRequestedTranslation.z += evidence.requestedTranslation.z;
+						result.aggregateRealizedTranslation.x += evidence.realizedTranslation.x;
+						result.aggregateRealizedTranslation.y += evidence.realizedTranslation.y;
+						result.aggregateRealizedTranslation.z += evidence.realizedTranslation.z;
+						result.aggregateRequestedYawRadians += evidence.requestedYawRadians;
+						result.aggregateRealizedYawRadians += evidence.realizedYawRadians;
+						if(result.observedPhysicalTickCount != std::numeric_limits<std::uint64_t>::max())
+							++result.observedPhysicalTickCount;
+						result.sharedTickAttribution = result.sharedTickAttribution
+							|| evidence.contributingCount > 1U;
+						pending.lastObservedTickSequence = record.sequence;
+					}
+				} else if(const auto* terminal =
+					std::get_if<Physics::RootMotionTerminalResult>(&record.result)) {
+					const auto found = pendingRootIntervalIndex_.find(terminal->intervalId);
+					if(found == pendingRootIntervalIndex_.end()) continue;
+					const std::size_t position = found->second;
+					AnimationRootMotionApplicationResult finalized =
+						pendingRootIntervals_[position].result;
+					finalized.finalPhysicalTick = terminal->finalTick;
+					finalized.firstTickResultSequence = terminal->firstTickResultSequence;
+					finalized.lastTickResultSequence = terminal->lastTickResultSequence;
+					finalized.sharedTickAttribution = finalized.sharedTickAttribution
+						|| terminal->sharedTickAttribution;
+					if(finalized.firstTickResultSequence != 0U && rootTickEvidenceSize_ != 0U) {
+					const std::size_t oldest = (rootTickEvidenceCursor_
+						+ rootTickEvidenceRing_.size() - rootTickEvidenceSize_)
+						% rootTickEvidenceRing_.size();
+					finalized.tickEvidenceExpired = finalized.firstTickResultSequence
+						< rootTickEvidenceRing_[oldest].resultSequence;
+					}
+					switch(terminal->disposition) {
+					case Physics::RootMotionTerminalDisposition::Consumed:
+						finalized.status = AnimationStatus::Ok;
+						finalized.disposition = AnimationRootMotionDisposition::Applied;
+						break;
+					case Physics::RootMotionTerminalDisposition::Adjusted:
+						finalized.status = AnimationStatus::Ok;
+						finalized.disposition = AnimationRootMotionDisposition::Adjusted;
+						break;
+					case Physics::RootMotionTerminalDisposition::Cancelled:
+						finalized.status = AnimationStatus::Cancelled;
+						finalized.disposition = AnimationRootMotionDisposition::Rejected;
+						break;
+					case Physics::RootMotionTerminalDisposition::Rejected:
+						finalized.status = AnimationStatus::Rejected;
+						finalized.disposition = AnimationRootMotionDisposition::Rejected;
+						break;
+					}
+				if(!finalized.sharedTickAttribution) {
+					// Only a sole contributor can claim an independently
+					// measured collision-resolved displacement.
+					finalized.appliedTranslation = {
+						finalized.aggregateRealizedTranslation.x,
+						finalized.aggregateRealizedTranslation.y,
+						finalized.aggregateRealizedTranslation.z};
+					finalized.appliedYawRadians = finalized.aggregateRealizedYawRadians;
+				}
+				RetainResultLocked(finalized);
+				if(ApplicationRecord* application = FindApplicationLocked(finalized))
+					application->receipt.status = finalized.status;
+				if(position + 1U != pendingRootIntervals_.size()) {
+					pendingRootIntervals_[position] = std::move(pendingRootIntervals_.back());
+					pendingRootIntervalIndex_[pendingRootIntervals_[position].intervalId] = position;
+				}
+				pendingRootIntervals_.pop_back();
+				pendingRootIntervalIndex_.erase(found);
+				}
+			}
+		} catch(const std::bad_alloc&) {
+			return false;
+		}
+		return true;
+	}
+
+	void AnimationRootMotionResultPublisher::ObserveRootMotionIntervalResults(
+		Physics::PhysicsSystem& physics)
+	{
+		const Physics::PhysicsWorldHandle currentWorld = physics.WorldHandle();
+		// Physics may destroy its result ring on StopWorld. Terminalize old
+		// generation applications here rather than leaving Queued receipts forever.
+		for(;;) {
+			Physics::RootMotionIntervalId stale;
+			{
+				std::scoped_lock lock(mutex_);
+				if(observedRootWorld_ != currentWorld) {
+					observedRootWorld_ = currentWorld;
+					rootResultCursor_ = 0U;
+					rootTickEvidenceSize_ = 0U;
+					rootTickEvidenceCursor_ = 0U;
+				}
+				const auto found = std::find_if(pendingRootIntervals_.begin(),
+					pendingRootIntervals_.end(), [&currentWorld](const PendingRootInterval& pending) {
+						return pending.intervalId.world != currentWorld;
+					});
+				if(found == pendingRootIntervals_.end()) break;
+				stale = found->intervalId;
+			}
+			CancelRootMotionIntervalApplication(stale, AnimationStatus::Cancelled);
+		}
+		if(!currentWorld.IsValid()) return;
+		// Pages are copied from Physics before touching the Animation ledger, so
+		// neither subsystem calls into the other while holding its own lock.
+		for(std::size_t pageIndex = 0U; pageIndex < 256U; ++pageIndex) {
+			std::uint64_t cursor = 0U;
+			{
+				std::scoped_lock lock(mutex_);
+				cursor = rootResultCursor_;
+			}
+			const auto page = physics.ReadRootMotionResults(cursor, 256U);
+			if(!page || page->expiredCursor || page->records.empty()) return;
+			if(!ObserveRootMotionResultPacket(*page)) return;
+			if(!physics.AcknowledgeRootMotionResults(page->nextCursor)) return;
+			{
+				std::scoped_lock lock(mutex_);
+				rootResultCursor_ = page->nextCursor;
+			}
+			if(!page->hasMore) return;
+		}
+	}
+
+	std::size_t AnimationRootMotionResultPublisher::CopyRootMotionTickEvidence(
+		Physics::PhysicsWorldHandle world, std::uint64_t afterSequence,
+		std::span<AnimationRootMotionTickEvidence> output, bool& omitted) const noexcept
+	{
+		omitted = false;
+		std::scoped_lock lock(mutex_);
+		if(world != observedRootWorld_) {
+			omitted = true;
+			return 0U;
+		}
+		if(rootTickEvidenceSize_ == 0U) return 0U;
+		const std::size_t oldest = (rootTickEvidenceCursor_
+			+ rootTickEvidenceRing_.size() - rootTickEvidenceSize_)
+			% rootTickEvidenceRing_.size();
+		const std::uint64_t oldestSequence = rootTickEvidenceRing_[oldest].resultSequence;
+		omitted = afterSequence < oldestSequence - 1U;
+		std::size_t copied = 0U;
+		for(std::size_t offset = 0U; offset < rootTickEvidenceSize_ && copied < output.size(); ++offset) {
+			const auto& value = rootTickEvidenceRing_[(oldest + offset)
+				% rootTickEvidenceRing_.size()];
+			if(value.resultSequence > afterSequence) output[copied++] = value;
+		}
+		return copied;
+	}
+
+	std::size_t AnimationRootMotionResultPublisher::RetainedRootMotionTickEvidenceCount() const noexcept
+	{
+		std::scoped_lock lock(mutex_);
+		return rootTickEvidenceSize_;
 	}
 
 	static AnimationRootMotionApplicationReceipt RouteRootMotionApplicationImpl(
@@ -1226,6 +1632,113 @@ namespace TerraEngine::Animation {
 			result.disposition = AnimationRootMotionDisposition::Extracted;
 			receipt.status = result.status;
 			publishTerminal(result);
+			return receipt;
+		}
+
+		const auto bindings = AnimationSystem::Instance().ReadRootControllerBindings();
+		const auto exclusions = AnimationSystem::Instance().ReadRagdollExclusions();
+		const bool ragdollExcluded = exclusions && std::any_of(
+			exclusions->entries.begin(), exclusions->entries.end(),
+			[&resolved](const AnimationRagdollExclusion& entry) {
+				return entry.animator == resolved.delta.animator;
+			});
+		if(ragdollExcluded) return reject(AnimationStatus::Rejected);
+		const AnimationRootControllerBinding* bound = nullptr;
+		if(bindings) {
+			const auto found = std::find_if(bindings->active.begin(), bindings->active.end(),
+				[&resolved](const AnimationRootControllerBinding& value) {
+					return value.animator == resolved.delta.animator;
+				});
+			if(found != bindings->active.end()) bound = &*found;
+		}
+		if(bound && bound->locomotionOwned && !bound->rootMotionEnabled)
+			return reject(AnimationStatus::Rejected);
+		if(bound && bound->rootMotionEnabled) {
+			if(!bound->locomotionOwned || bound->mode != CharacterMotionMode::RootMotion
+				|| bound->animatorObjectId != resolved.ownerObjectId
+				|| TerraEngine::CompressObjectGeneration(bound->animatorObjectGeneration)
+					!= resolved.objectGeneration
+				|| TerraEngine::CompressObjectGeneration(bound->animatorComponentGeneration)
+					!= resolved.componentGeneration
+				|| !CompatibleRootBasis(*bound)
+				|| !resolved.sourceObjectWorldTransformCaptured
+				|| resolved.delta.sourceGeneration == 0U
+				|| !std::isfinite(resolved.delta.evaluationDurationSeconds)
+				|| resolved.delta.evaluationDurationSeconds <= 0.0
+				|| resolved.delta.evaluationDurationSeconds
+					> static_cast<double>(std::numeric_limits<float>::max()))
+				return reject(AnimationStatus::StaleHandle);
+			const auto object = objects.getObject(resolved.ownerObjectId);
+			AnimationTransform currentWorld;
+			if(!object || !CaptureWorldTransform(objects, *object, currentWorld)
+				|| !SameSourceTransform(resolved.sourceObjectWorldTransform, currentWorld))
+				return reject(AnimationStatus::StaleHandle);
+			const auto lease = physics.ReadCharacterMotionLease(bound->controller);
+			if(!lease || lease->state != CharacterMotionLeaseState::LocomotionOwned
+				|| lease->mode != CharacterMotionMode::RootMotion
+				|| lease->owner != bound->owner
+				|| lease->authorityEpoch != bound->authorityEpoch
+				|| lease->motionEpoch != bound->motionEpoch)
+				return reject(AnimationStatus::Rejected);
+			RootMotionInterval interval;
+			interval.lease = *lease;
+			interval.frame = bound->frame;
+			interval.animator.slotIndex = resolved.delta.animator.slotIndex;
+			interval.animator.animatorGeneration = resolved.delta.animator.generation;
+			interval.animator.poseGeneration = resolved.delta.generation;
+			interval.animator.sourceGeneration = resolved.delta.sourceGeneration;
+			interval.animator.sourceStateId = resolved.delta.sourceStateId;
+			interval.animator.layerIndex = resolved.delta.layerIndex;
+			interval.animator.evaluationSequence = resolved.publicationGeneration;
+			interval.animator.bindingGeneration = bound->bindingGeneration;
+			interval.animator.publicationGeneration = resolved.publicationGeneration;
+			interval.animator.sourceBeginTick = resolved.delta.sourceBeginTick;
+			interval.animator.sourceEndTick = resolved.delta.sourceEndTick;
+			interval.animator.accumulatedCycles = resolved.delta.accumulatedCycles;
+			interval.ledger = {resolved.producerId, resolved.producerSequence,
+				resolved.idempotencyKey, resolved.correlationId};
+			interval.localTranslation = {resolved.delta.localTranslation.x,
+				resolved.delta.localTranslation.y, resolved.delta.localTranslation.z};
+			interval.localYawRadians = resolved.delta.localYawRadians;
+			// ResolveWorldMotion used the captured animator world basis exactly
+			// once. The validation-only relative/rest basis is never applied again.
+			interval.frameTranslation = {resolved.delta.worldTranslation.x,
+				resolved.delta.worldTranslation.y, resolved.delta.worldTranslation.z};
+			interval.frameYawRadians = resolved.delta.worldYawRadians;
+			interval.durationSeconds = static_cast<float>(resolved.delta.evaluationDurationSeconds);
+			interval.maximumSpeed = bound->maximumRootSpeed;
+			interval.maximumTurnRate = bound->maximumYawRate;
+			interval.validityGuard = bound->validityGuard;
+			const RootMotionIntervalAdmission reserved = physics.ReserveRootMotionInterval(interval);
+			if(!reserved.accepted) return reject(reserved.error == RootMotionIntervalError::CapacityExceeded
+				? AnimationStatus::HardLimitExceeded : AnimationStatus::Rejected);
+			struct ReservationGuard {
+				PhysicsSystem& physics;
+				RootMotionIntervalReservation reservation;
+				bool active = true;
+				~ReservationGuard() noexcept {
+					if(active) try {
+						(void)physics.CancelRootMotionIntervalReservation(reservation);
+					} catch(...) {}
+				}
+			} reservationGuard{physics, reserved.reservation};
+			receipt.rootIntervalId = reserved.reservation.intervalId;
+			result.rootIntervalId = receipt.rootIntervalId;
+			if(!AnimationRootMotionResultPublisher::Instance().RegisterRootMotionInterval(
+				receipt.rootIntervalId, result)) {
+				return reject(AnimationStatus::HardLimitExceeded);
+			}
+			const RootMotionIntervalAdmission committed =
+				physics.CommitRootMotionInterval(reserved.reservation);
+			if(!committed.accepted) {
+				AnimationRootMotionResultPublisher::Instance()
+					.CancelRootMotionIntervalApplication(receipt.rootIntervalId,
+						AnimationStatus::Rejected);
+				return reject(AnimationStatus::Rejected);
+			}
+			reservationGuard.active = false;
+			receipt.status = AnimationStatus::Queued;
+			AnimationRootMotionResultPublisher::Instance().UpdateApplicationReceipt(resolved, receipt);
 			return receipt;
 		}
 

@@ -27,6 +27,7 @@
 #include "Providers/PhysicsAutomationProvider.h"
 #include "Providers/AudioAutomationProvider.h"
 #include "Providers/NavigationAutomationProvider.h"
+#include "Providers/LocomotionAutomationProvider.h"
 #include "Providers/ScriptBuildAutomationProvider.h"
 
 #include "../Assets/AssetImportResult.h"
@@ -2399,6 +2400,9 @@ namespace TerraEngine::Editor::Automation
 			return ResolveNavigationAutomationHandler(name);
 		};
 		(void)capabilityRegistry.RegisterProvider(std::make_shared<NavigationAutomationProvider>(resolveNavigationHandler));
+		// Locomotion owns its copied domain adapter. All four handlers are resolved
+		// through the typed registry rather than the legacy capability switch.
+		(void)capabilityRegistry.RegisterProvider(std::make_shared<LocomotionAutomationProvider>());
 		RegisterDefaultCapabilities();
 	}
 
@@ -8083,6 +8087,11 @@ namespace TerraEngine::Editor::Automation
 		data["layer"] = objectHandle ? objectManager.getObjectLayer(*objectHandle) : "Default";
 		data["active"] = objectHandle ? objectManager.isObjectActive(*objectHandle) : false;
 		data["static"] = objectHandle ? objectManager.isObjectStatic(*objectHandle) : false;
+		// Canonical transform transactions require a current observed revision.
+		// Expose it with identity reads so clients never guess a revision or weaken
+		// optimistic concurrency checks just to place a newly authored character.
+		data["transformRevision"] = objectHandle
+			? objectManager.GetObjectTransformRevision(*objectHandle) : std::uint64_t{0};
 		std::optional<Object> parent = objectHandle ? objectManager.getParent(*objectHandle) : std::nullopt;
 		// Keep the original entity-valued parent field for existing automation
 		// clients, and publish a stable UUID alongside it so callers can bind a

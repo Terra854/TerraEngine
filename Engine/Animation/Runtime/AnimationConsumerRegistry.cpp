@@ -9,6 +9,7 @@
 namespace TerraEngine::Animation {
 	namespace {
 		constexpr std::size_t kMaximumConsumerDeclarations = 4096U;
+		constexpr std::uint64_t kLocomotionRootConsumerId = 0x4c4f434f524f4f54ULL;
 		constexpr std::uint64_t kFingerprintOffset = 14695981039346656037ULL;
 		constexpr std::uint64_t kFingerprintPrime = 1099511628211ULL;
 
@@ -108,7 +109,11 @@ namespace TerraEngine::Animation {
 			std::scoped_lock lock(publishMutex_);
 			const std::shared_ptr<const PublishedDeclarations> current =
 				std::atomic_load_explicit(&published_, std::memory_order_acquire);
+			const std::shared_ptr<const PublishedDeclarations> roots =
+				std::atomic_load_explicit(&rootMotionPublished_, std::memory_order_acquire);
 			if(current && generation <= current->generation) return AnimationStatus::Rejected;
+			if(roots && staged->values.size() + roots->values.size() > kMaximumConsumerDeclarations)
+				return AnimationStatus::HardLimitExceeded;
 			std::atomic_store_explicit(
 				&published_, std::shared_ptr<const PublishedDeclarations>(std::move(staged)),
 				std::memory_order_release);
@@ -126,18 +131,102 @@ namespace TerraEngine::Animation {
 		return CaptureReadView().Resolve(animator, jointParents, fixedTick);
 	}
 
+	AnimationConsumerRegistry::PreparedRootMotionConsumers
+	AnimationConsumerRegistry::PrepareRootMotionConsumers(
+		std::span<const AnimatorInstanceHandle> activeAnimators,
+		AnimationGeneration generation,
+		AnimationFixedTick declarationTick) const
+	{
+		PreparedRootMotionConsumers prepared;
+		if(generation == 0U || declarationTick < 0) {
+			prepared.status_ = AnimationStatus::InvalidArgument;
+			return prepared;
+		}
+		if(activeAnimators.size() > kMaximumConsumerDeclarations) {
+			prepared.status_ = AnimationStatus::HardLimitExceeded;
+			return prepared;
+		}
+		try {
+			auto staged = std::make_shared<PublishedDeclarations>();
+			staged->generation = generation;
+			staged->declarationTick = declarationTick;
+			staged->values.reserve(activeAnimators.size());
+			for(const AnimatorInstanceHandle animator : activeAnimators) {
+				if(!animator.IsValid()) {
+					prepared.status_ = AnimationStatus::InvalidArgument;
+					return prepared;
+				}
+				AnimationConsumerDeclaration declaration;
+				declaration.consumerId = kLocomotionRootConsumerId;
+				declaration.kind = AnimationConsumerKind::Physics;
+				declaration.animator = animator;
+				declaration.declarationGeneration = generation;
+				declaration.declarationTick = declarationTick;
+				declaration.rootMotion = true;
+				staged->values.push_back(std::move(declaration));
+			}
+			std::sort(staged->values.begin(), staged->values.end(), [](const auto& left, const auto& right) {
+				return left.animator < right.animator;
+			});
+			if(std::adjacent_find(staged->values.begin(), staged->values.end(), [](const auto& left, const auto& right) {
+				return left.animator == right.animator;
+			}) != staged->values.end()) {
+				prepared.status_ = AnimationStatus::Rejected;
+				return prepared;
+			}
+			// Keep this lock through the owner's physical lease preflight and root
+			// swap. Commit only exchanges an already allocated immutable candidate.
+			prepared.reservation_ = std::unique_lock(publishMutex_);
+			const auto ordinary = std::atomic_load_explicit(&published_, std::memory_order_acquire);
+			const auto current = std::atomic_load_explicit(&rootMotionPublished_, std::memory_order_acquire);
+			if((ordinary && ordinary->values.size() + staged->values.size() > kMaximumConsumerDeclarations)
+				|| (current && generation <= current->generation)) {
+				prepared.status_ = ordinary && ordinary->values.size() + staged->values.size() > kMaximumConsumerDeclarations
+					? AnimationStatus::HardLimitExceeded : AnimationStatus::Rejected;
+				prepared.reservation_.unlock();
+				return prepared;
+			}
+			prepared.candidate_ = std::move(staged);
+			prepared.status_ = AnimationStatus::Ok;
+			return prepared;
+		} catch(const std::bad_alloc&) {
+			prepared.status_ = AnimationStatus::InternalError;
+			return prepared;
+		}
+	}
+
+	void AnimationConsumerRegistry::CommitRootMotionConsumers(
+		PreparedRootMotionConsumers&& prepared) noexcept
+	{
+		if(prepared.status_ != AnimationStatus::Ok || !prepared.reservation_.owns_lock()
+			|| !prepared.candidate_) return;
+		std::atomic_store_explicit(&rootMotionPublished_, std::move(prepared.candidate_),
+			std::memory_order_release);
+		prepared.reservation_.unlock();
+	}
+
+	void AnimationConsumerRegistry::ClearRootMotionConsumers() noexcept
+	{
+		std::scoped_lock lock(publishMutex_);
+		std::atomic_store_explicit(&rootMotionPublished_,
+			std::shared_ptr<const PublishedDeclarations>{}, std::memory_order_release);
+	}
+
 	AnimationConsumerRegistry::ReadView
 	AnimationConsumerRegistry::CaptureReadView() const noexcept
 	{
 		ReadView view;
 		view.snapshot_ = std::atomic_load_explicit(
 			&published_, std::memory_order_acquire);
+		view.rootMotionSnapshot_ = std::atomic_load_explicit(
+			&rootMotionPublished_, std::memory_order_acquire);
 		return view;
 	}
 
 	bool AnimationConsumerRegistry::ReadView::HasDeclarations() const noexcept
 	{
-		return snapshot_ != nullptr && !snapshot_->values.empty();
+		return (snapshot_ != nullptr && !snapshot_->values.empty())
+			|| (rootMotionSnapshot_ != nullptr && !rootMotionSnapshot_->values.empty());
 	}
 
 	AnimationResolvedConsumerRequirements
@@ -151,13 +240,16 @@ namespace TerraEngine::Animation {
 			resolved.status = AnimationStatus::InvalidArgument;
 			return resolved;
 		}
-		if(!snapshot_) return resolved;
-		if(snapshot_->declarationTick > fixedTick) {
+		if(!snapshot_ && !rootMotionSnapshot_) return resolved;
+		if((snapshot_ && snapshot_->declarationTick > fixedTick)
+			|| (rootMotionSnapshot_ && rootMotionSnapshot_->declarationTick > fixedTick)) {
 			resolved.status = AnimationStatus::InvalidArgument;
 			return resolved;
 		}
-		resolved.declarationGeneration = snapshot_->generation;
-		resolved.declarationTick = snapshot_->declarationTick;
+		resolved.declarationGeneration = std::max(snapshot_ ? snapshot_->generation : 0U,
+			rootMotionSnapshot_ ? rootMotionSnapshot_->generation : 0U);
+		resolved.declarationTick = std::max(snapshot_ ? snapshot_->declarationTick : 0,
+			rootMotionSnapshot_ ? rootMotionSnapshot_->declarationTick : 0);
 		resolved.maximumSnapshotAgeTicks = std::numeric_limits<AnimationFixedTick>::max();
 		try {
 			std::vector<std::uint32_t> requestedJoints;
@@ -166,18 +258,19 @@ namespace TerraEngine::Animation {
 			// Publications are sorted by generation-safe animator handle. Skip directly
 			// to this animator's contiguous declaration range instead of walking every
 			// unrelated gameplay/tooling consumer for every visual crowd member.
-			const auto first = std::lower_bound(
-				snapshot_->values.begin(), snapshot_->values.end(), animator,
-				[](const AnimationConsumerDeclaration& declaration,
-					AnimatorInstanceHandle target) {
-					return declaration.animator.slotIndex != target.slotIndex
-						? declaration.animator.slotIndex < target.slotIndex
-						: declaration.animator.generation < target.generation;
-				});
-			for(auto iterator = first;
-				iterator != snapshot_->values.end()
-					&& iterator->animator == animator;
-				++iterator) {
+			auto accumulate = [&](const std::shared_ptr<const PublishedDeclarations>& publication) {
+				if(!publication) return;
+				const auto first = std::lower_bound(
+					publication->values.begin(), publication->values.end(), animator,
+					[](const AnimationConsumerDeclaration& declaration,
+						AnimatorInstanceHandle target) {
+						return declaration.animator.slotIndex != target.slotIndex
+							? declaration.animator.slotIndex < target.slotIndex
+							: declaration.animator.generation < target.generation;
+					});
+				for(auto iterator = first;
+					iterator != publication->values.end() && iterator->animator == animator;
+					++iterator) {
 				const AnimationConsumerDeclaration& declaration = *iterator;
 				const std::size_t before = requestedJoints.size();
 				requestedJoints.insert(requestedJoints.end(), declaration.joints.begin(), declaration.joints.end());
@@ -208,7 +301,10 @@ namespace TerraEngine::Animation {
 					declaration.maximumSnapshotAgeTicks,
 					static_cast<std::uint32_t>(requestedJoints.size() - before),
 					0U});
-			}
+				}
+			};
+			accumulate(snapshot_);
+			accumulate(rootMotionSnapshot_);
 			if(resolved.attribution.empty()) {
 				resolved.maximumSnapshotAgeTicks = 0;
 				return resolved;
@@ -252,6 +348,8 @@ namespace TerraEngine::Animation {
 		std::scoped_lock lock(publishMutex_);
 		std::atomic_store_explicit(
 			&published_, std::shared_ptr<const PublishedDeclarations>{}, std::memory_order_release);
+		std::atomic_store_explicit(
+			&rootMotionPublished_, std::shared_ptr<const PublishedDeclarations>{}, std::memory_order_release);
 	}
 
 	AnimationGeneration AnimationConsumerRegistry::PublishedGeneration() const noexcept
@@ -265,6 +363,12 @@ namespace TerraEngine::Animation {
 	{
 		const std::shared_ptr<const PublishedDeclarations> snapshot =
 			std::atomic_load_explicit(&published_, std::memory_order_acquire);
+		return snapshot ? snapshot->values.size() : 0U;
+	}
+
+	std::size_t AnimationConsumerRegistry::RootMotionDeclarationCount() const noexcept
+	{
+		const auto snapshot = std::atomic_load_explicit(&rootMotionPublished_, std::memory_order_acquire);
 		return snapshot ? snapshot->values.size() : 0U;
 	}
 }

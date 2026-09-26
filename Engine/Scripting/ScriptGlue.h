@@ -28,6 +28,8 @@ inline constexpr std::uint32_t kNativeNavigationDiagnosticBytes = 192U;
 // Optional NavigationAgent commands have an additive ABI. Keep direct route
 // packets on v2 so existing scripts never reinterpret their frozen layouts.
 inline constexpr std::uint32_t kNativeNavigationAgentAbiVersion = 1U;
+// Locomotion uses a separately versioned, strictly sized record envelope.
+inline constexpr std::uint32_t kNativeLocomotionAbiVersion = 1U;
 
 #pragma pack(push, 8)
 struct NativePhysicsAbiHeader { std::uint32_t abiVersion; std::uint32_t structSize; };
@@ -822,7 +824,192 @@ struct NativeNavigationAgentGuidanceSnapshot {
 	NativeNavigationLocation destinationLocation;
 	NativeNavigationAgentObjectIdentity destinationObject;
 };
+
+// Locomotion v1 passes only copied values. Each record, including nested
+// handles, carries its exact kind and size so malformed batches can be rejected
+// before any member is queued or any physical authority is changed.
+enum class NativeLocomotionRecordKind : std::uint16_t {
+	Handle = 1U, ResolveRequest, ResolveResult, CommandBatch, Command,
+	ReceiptQuery, Receipt, ObservationQuery, Observation, BufferInfo
+};
+struct NativeLocomotionAbiHeader {
+	std::uint32_t abiVersion;
+	std::uint32_t structSize;
+	NativeLocomotionRecordKind recordKind;
+	std::uint16_t reserved0;
+	std::uint32_t reserved1;
+};
+enum class NativeLocomotionStatus : std::uint32_t {
+	Success = 0U, Queued, InvalidArgument, VersionMismatch, NotPlaying,
+	NotReady, MissingBinding, StaleHandle, StaleConfiguration,
+	OwnershipConflict, UnsupportedController, UnsupportedFrame,
+	AnimationUnavailable, CapacityExceeded, ExpiredReceipt,
+	SequenceConflict, BufferTooSmall, ProviderFailure
+};
+enum class NativeLocomotionCommandKind : std::uint32_t {
+	Acquire = 0U, SetIntent, FollowNavigation, Stop, SetMode, Transfer, Release
+};
+enum class NativeLocomotionReceiptState : std::uint32_t {
+	Queued = 0U, Applied, Adjusted, Rejected, Expired
+};
+enum class NativeLocomotionReason : std::uint32_t {
+	None = 0U, InvalidArgument, StaleHandle, StaleConfiguration,
+	OwnershipConflict, UnsupportedController, UnsupportedFrame,
+	MissingBinding, AnimationUnavailable, CapacityExceeded, NotPlaying,
+	ExpiredReceipt, SequenceConflict, Stopped, Revoked, ExternalExclusive
+};
+enum class NativeLocomotionMotionMode : std::uint32_t { Velocity = 0U, RootMotion = 1U };
+enum class NativeLocomotionAuthorityState : std::uint32_t {
+	Idle = 0U, Controlled, Stopped, Suspended
+};
+enum class NativeLocomotionIntentKind : std::uint32_t { Player = 0U, Script, Navigation };
+enum class NativeLocomotionDirectionSpace : std::uint32_t { World = 0U, ControllerLocal };
+enum class NativeLocomotionIntentLifetime : std::uint32_t { OneUpdate = 0U, UntilStopped };
+
+struct NativeLocomotionHandle {
+	NativeLocomotionAbiHeader header;
+	std::uint64_t sceneLifetime;
+	NativePhysicsUuid objectId;
+	std::uint64_t objectGeneration;
+	std::uint64_t attachmentGeneration;
+	std::uint32_t slotIndex;
+	std::uint32_t slotGeneration;
+};
+struct NativeLocomotionResolveRequest {
+	NativeLocomotionAbiHeader header;
+	NativePhysicsUuid objectId;
+};
+struct NativeLocomotionResolveResult {
+	NativeLocomotionAbiHeader header;
+	NativeLocomotionStatus status;
+	NativeLocomotionReason bindingReason;
+	NativeLocomotionHandle handle;
+	std::uint64_t configurationRevision;
+	std::uint64_t authorityEpoch;
+};
+struct NativeLocomotionCommandBatch {
+	NativeLocomotionAbiHeader header;
+	std::uint32_t commandCount;
+	std::uint32_t reserved;
+};
+struct NativeLocomotionCommand {
+	NativeLocomotionAbiHeader header;
+	NativeLocomotionHandle handle;
+	NativeLocomotionCommandKind kind;
+	NativeLocomotionIntentKind intentKind;
+	NativeLocomotionDirectionSpace directionSpace;
+	NativeLocomotionIntentLifetime lifetime;
+	NativeLocomotionMotionMode mode;
+	std::uint32_t reserved;
+	std::uint64_t expectedAuthorityEpoch;
+	std::uint64_t expectedConfigurationRevision;
+	std::uint64_t ownerToken;
+	std::uint64_t producerId;
+	std::uint64_t sequence;
+	std::uint64_t correlationId;
+	double directionX;
+	double directionY;
+	double directionZ;
+	double requestedSpeed;
+	std::uint64_t transferProducerId;
+};
+struct NativeLocomotionReceiptQuery {
+	NativeLocomotionAbiHeader header;
+	NativeLocomotionHandle handle;
+	std::uint64_t producerId;
+	std::uint64_t sequence;
+	std::uint64_t correlationId;
+};
+struct NativeLocomotionReceipt {
+	NativeLocomotionAbiHeader header;
+	NativeLocomotionHandle handle;
+	std::uint64_t producerId;
+	std::uint64_t sequence;
+	std::uint64_t correlationId;
+	NativeLocomotionReceiptState state;
+	NativeLocomotionReason reason;
+	std::uint64_t acceptedUpdateEpoch;
+	std::uint64_t authorityEpoch;
+	std::uint64_t ownerToken;
+};
+struct NativeLocomotionObservationQuery {
+	NativeLocomotionAbiHeader header;
+	NativeLocomotionHandle handle;
+};
+struct NativeLocomotionObservation {
+	NativeLocomotionAbiHeader header;
+	NativeLocomotionHandle handle;
+	NativeLocomotionAuthorityState authorityState;
+	NativeLocomotionMotionMode motionMode;
+	NativeLocomotionIntentKind intentKind;
+	NativeLocomotionReason suspendedReason;
+	NativeLocomotionReason bindingReason;
+	NativeLocomotionReason navigationReason;
+	std::uint32_t navigationState;
+	std::uint32_t navigationOutcome;
+	std::uint32_t navigationAgentReason;
+	std::uint32_t navigationCompatibilityField;
+	NativeLocomotionReason animationReason;
+	std::uint32_t animationParameterField;
+	std::uint32_t animationParameterError;
+	std::uint8_t grounded;
+	std::uint8_t motionHistoryAvailable;
+	std::uint16_t reserved0;
+	std::uint64_t ownerToken;
+	std::uint64_t ownerProducerId;
+	std::uint64_t authorityEpoch;
+	std::uint64_t configurationRevision;
+	std::uint64_t acceptedSequence;
+	std::uint64_t physicalTick;
+	std::uint64_t publicationEpoch;
+	std::uint64_t frameId;
+	std::uint32_t frameGeneration;
+	std::uint32_t reserved1;
+	double desiredVelocityX;
+	double desiredVelocityY;
+	double desiredVelocityZ;
+	double observedPlanarSpeed;
+	double observedLocalDirectionX;
+	double observedLocalDirectionY;
+	double observedLocalDirectionZ;
+	double navigationControllerValue;
+	double navigationProfileValue;
+	double observationDurationSeconds;
+	double remainingRouteDistanceMetres;
+	double requestedTranslationX;
+	double requestedTranslationY;
+	double requestedTranslationZ;
+	double realizedTranslationX;
+	double realizedTranslationY;
+	double realizedTranslationZ;
+	double requestedYawRadians;
+	double realizedYawRadians;
+};
+struct NativeLocomotionBufferInfo {
+	NativeLocomotionAbiHeader header;
+	NativeLocomotionStatus status;
+	std::uint32_t requiredCount;
+	std::uint32_t writtenCount;
+	std::uint32_t capacity;
+	std::uint64_t publicationEpoch;
+};
 #pragma pack(pop)
+
+static_assert(sizeof(NativeLocomotionAbiHeader) == 16U);
+static_assert(sizeof(NativeLocomotionHandle) == 64U);
+static_assert(sizeof(NativeLocomotionResolveRequest) == 32U);
+static_assert(sizeof(NativeLocomotionResolveResult) == 104U);
+static_assert(sizeof(NativeLocomotionCommandBatch) == 24U);
+static_assert(sizeof(NativeLocomotionCommand) == 192U);
+static_assert(sizeof(NativeLocomotionReceiptQuery) == 104U);
+static_assert(sizeof(NativeLocomotionReceipt) == 136U);
+static_assert(sizeof(NativeLocomotionObservationQuery) == 80U);
+static_assert(sizeof(NativeLocomotionObservation) == 360U);
+static_assert(sizeof(NativeLocomotionBufferInfo) == 40U);
+static_assert(offsetof(NativeLocomotionHandle, objectId) == 24U);
+static_assert(offsetof(NativeLocomotionCommand, directionX) == 152U);
+static_assert(offsetof(NativeLocomotionObservation, desiredVelocityX) == 208U);
+static_assert(offsetof(NativeLocomotionBufferInfo, publicationEpoch) == 32U);
 
 static_assert(sizeof(NativeNavigationAbiHeader) == 8U);
 static_assert(sizeof(NativeNavigationWorldHandle) == 16U);
@@ -918,6 +1105,9 @@ extern "C" {
 	TERRAENGINE_API std::uint64_t Native_Object_GetMetadataGeneration(uint32_t objectId);
 	TERRAENGINE_API std::uint64_t Native_Object_GetComponentGeneration(uint32_t objectId);
 	TERRAENGINE_API std::uint64_t Native_Object_GetBindingGeneration(uint32_t objectId);
+	// Copy the current UUID for a managed object's first locomotion bind. An
+	// invalid entity or null output is rejected without writing the caller buffer.
+	TERRAENGINE_API NativeRuntimeStatus Native_Object_ReadUuid(uint32_t objectId, NativePhysicsUuid* uuid);
 	TERRAENGINE_API void Native_GetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* outValue, int type);
 	TERRAENGINE_API void Native_SetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* inValue, int type);
 	// Transform has a dedicated exact ABI. Submissions only enqueue typed spatial
@@ -978,6 +1168,20 @@ extern "C" {
 		const NativeNavigationAgentStatusQuery* query, NativeNavigationAgentStatusSnapshot* snapshot);
 	TERRAENGINE_API NativeNavigationStatus Native_NavigationAgent_ReadGuidance(
 		const NativeNavigationAgentGuidanceQuery* query, NativeNavigationAgentGuidanceSnapshot* snapshot);
+
+	// Locomotion v1 only accepts complete copied records. Submit is all-or-none;
+	// CopyObservations probes and copies from one immutable publication root.
+	TERRAENGINE_API std::uint32_t Native_Locomotion_GetAbiVersion();
+	TERRAENGINE_API NativeLocomotionStatus Native_Locomotion_Resolve(
+		const NativeLocomotionResolveRequest* request, NativeLocomotionResolveResult* result);
+	TERRAENGINE_API NativeLocomotionStatus Native_Locomotion_Submit(
+		const NativeLocomotionCommandBatch* batch, const NativeLocomotionCommand* commands,
+		NativeLocomotionReceipt* receipts, std::uint32_t receiptCapacity, NativeLocomotionBufferInfo* info);
+	TERRAENGINE_API NativeLocomotionStatus Native_Locomotion_ReadReceipt(
+		const NativeLocomotionReceiptQuery* query, NativeLocomotionReceipt* receipt);
+	TERRAENGINE_API NativeLocomotionStatus Native_Locomotion_CopyObservations(
+		const NativeLocomotionObservationQuery* query, NativeLocomotionObservation* observations,
+		std::uint32_t capacity, NativeLocomotionBufferInfo* info);
 
 	// Graphics ABI v1 queues runtime-only settings for RenderSystem's protected
 	// boundary. These calls never persist project authoring files from gameplay.

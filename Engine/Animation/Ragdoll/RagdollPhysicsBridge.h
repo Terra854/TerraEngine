@@ -8,6 +8,10 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+namespace TerraEngine::Physics {
+	struct CharacterExternalRecoveryIntent;
+	struct CharacterExternalRetirementIntent;
+}
 namespace TerraEngine::Animation {
 	struct RagdollProfileAsset;
 
@@ -41,6 +45,15 @@ namespace TerraEngine::Animation {
 		// and never exposes a mutable provider object to animation workers.
 		std::shared_ptr<const RagdollProfileAsset> profile;
 		PhysicsPoseSnapshot activationPose{};
+		// Only the automatic Deactivate after an explicit, fully blended recovery
+		// carries this immutable handoff proof. Physics retains it with a bounded
+		// completion ticket until an exact external-owner release succeeds.
+		std::shared_ptr<const Physics::CharacterExternalRecoveryIntent> recoveryIntent;
+		std::shared_ptr<const PhysicsPoseSnapshot> recoverySourcePose;
+		// A retiring animator cannot receive a later Animation result. Physics owns
+		// this exact external lease proof until Teardown succeeds and performs the
+		// current-pose character grant itself; failed teardown leaves it exclusive.
+		std::shared_ptr<const Physics::CharacterExternalRetirementIntent> retirementIntent;
 		std::vector<RagdollMotorDrive> motorDrives;
 		std::uint64_t correlationId = 0U;
 		std::uint64_t producerOrder = 0U;
@@ -61,6 +74,9 @@ namespace TerraEngine::Animation {
 	struct RagdollPhysicsResultSnapshot {
 		AnimationFixedTick committedStep = 0;
 		std::shared_ptr<const std::vector<RagdollPhysicsResult>> results;
+		// Prepared cancellation evidence is consumed only when Physics publishes
+		// this immutable result root, never when its provider work merely starts.
+		std::size_t includedRetirementCancellationCount = 0U;
 	};
 	// The bridge has no Jolt dependency. PhysicsSystem must drain this queue once
 	// at its protected boundary and atomically publish acknowledgements/snapshots.
@@ -114,11 +130,19 @@ namespace TerraEngine::Animation {
 			const RagdollGenerationStamp& expectedIdentity) const noexcept;
 		std::shared_ptr<const RagdollPhysicsResultSnapshot> LatestResults() const noexcept;
 		std::size_t PendingCount() const noexcept;
+		// Abort-grant preflight must not release an external character while a
+		// matching ragdoll request still waits in either queue generation.
+		[[nodiscard]] bool HasPendingRagdoll(std::uint64_t ragdollId) const noexcept;
+		// Character reconciliation must not replace a controller named by a
+		// queued tagged retirement after that Teardown was deferred for retry.
+		[[nodiscard]] bool HasPendingExternalRetirementOwner(
+			std::uint64_t externalOwnerId) const noexcept;
 		void Clear() noexcept;
 	private:
 		mutable std::mutex mutex_;
 		std::vector<RagdollPhysicsRequest> pending_;
 		std::vector<RagdollPhysicsRequest> undelivered_;
+		std::vector<RagdollPhysicsResult> pendingRetirementCancellations_;
 		std::unordered_map<std::uint64_t, std::shared_ptr<const PhysicsPoseSnapshot>> currentStepPoses_;
 		std::shared_ptr<const RagdollPhysicsResultSnapshot> latestResults_;
 	};

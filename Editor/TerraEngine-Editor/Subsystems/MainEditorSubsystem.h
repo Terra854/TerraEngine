@@ -194,6 +194,7 @@ public:
 	// It never calls Engine::Update: EditorSystem invokes it after a normal frame
 	// has completed, preserving the scheduler's non-reentrant ownership.
 	[[nodiscard]] nlohmann::json RunNavigationAgentPlayValidationFrame(nlohmann::json options);
+	[[nodiscard]] nlohmann::json RunLocomotionPlayValidationFrame(nlohmann::json options);
 	// Inspector assignment becomes visible only after SceneMutationQueue flushes.
 	// Keep restoration armed across that boundary so the terrain window can open
 	// the newly referenced asset and publish its derived renderer resources.
@@ -387,6 +388,9 @@ private:
 	std::optional<SelectedPackageChildAsset> selectedPackageChildAsset;
 	PrefabAuthoringService prefabAuthoringService;
 	std::filesystem::path m_CurrentScenePath;
+	// Installed locomotion validation opens its exact generated scene once before
+	// normal Play; editor LastScene preferences cannot choose its fixture.
+	bool m_LocomotionValidationSceneOpened = false;
 	// Receipts intentionally omit their forward payload, so editor transactions
 	// are cached before the next protected flush and paired by stable ID later.
 

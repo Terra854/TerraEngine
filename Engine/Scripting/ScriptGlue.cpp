@@ -21,6 +21,7 @@
 #include "UI/UISystem.h"
 #include "Input/InputSystem.h"
 #include "Physics/PhysicsSystem.h"
+#include "Locomotion/LocomotionSystem.h"
 #include "Navigation/Agents/NavigationAgentSystem.h"
 #include "Navigation/NavigationSystem.h"
 #include "Scene/SceneManager.h"
@@ -34,6 +35,7 @@
 #include <cmath>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <shared_mutex>
 #include <span>
@@ -1063,6 +1065,146 @@ namespace {
 			&& record->header.structSize == sizeof(Record);
 	}
 
+	// The v1 locomotion envelope fixes both layout and semantic record kind.
+	// These copied checks never access scene data or dispatch an incomplete batch.
+	template<typename Record>
+	bool HasLocomotionAbiRecord(const Record* record, NativeLocomotionRecordKind kind) noexcept {
+		return record != nullptr && record->header.abiVersion == kNativeLocomotionAbiVersion
+			&& record->header.structSize == sizeof(Record) && record->header.recordKind == kind
+			&& record->header.reserved0 == 0U && record->header.reserved1 == 0U;
+	}
+
+	bool ToLocomotionHandle(const NativeLocomotionHandle& source,
+		TerraEngine::Locomotion::LocomotionHandle& destination) noexcept {
+		if(!HasLocomotionAbiRecord(&source, NativeLocomotionRecordKind::Handle)) return false;
+		destination = {source.sceneLifetime, ToUuid(source.objectId), source.objectGeneration,
+			source.attachmentGeneration, source.slotIndex, source.slotGeneration};
+		return destination.IsValid();
+	}
+
+	NativeLocomotionHandle FromLocomotionHandle(TerraEngine::Locomotion::LocomotionHandle source) noexcept {
+		return {{kNativeLocomotionAbiVersion, sizeof(NativeLocomotionHandle),
+			NativeLocomotionRecordKind::Handle, 0U, 0U}, source.sceneLifetime,
+			FromUuid(source.objectId), source.objectGeneration, source.attachmentGeneration,
+			source.slotIndex, source.slotGeneration};
+	}
+
+	bool IsLocomotionCommandShapeValid(const NativeLocomotionCommand& command) noexcept {
+		return command.reserved == 0U
+			&& static_cast<std::uint32_t>(command.kind) <= static_cast<std::uint32_t>(NativeLocomotionCommandKind::Release)
+			&& static_cast<std::uint32_t>(command.intentKind) <= static_cast<std::uint32_t>(NativeLocomotionIntentKind::Navigation)
+			&& static_cast<std::uint32_t>(command.directionSpace) <= static_cast<std::uint32_t>(NativeLocomotionDirectionSpace::ControllerLocal)
+			&& static_cast<std::uint32_t>(command.lifetime) <= static_cast<std::uint32_t>(NativeLocomotionIntentLifetime::UntilStopped)
+			&& static_cast<std::uint32_t>(command.mode) <= static_cast<std::uint32_t>(NativeLocomotionMotionMode::RootMotion)
+			&& std::isfinite(command.directionX) && std::isfinite(command.directionY)
+			&& std::isfinite(command.directionZ) && std::isfinite(command.requestedSpeed);
+	}
+
+	TerraEngine::Locomotion::LocomotionCommand ToLocomotionCommand(
+		const NativeLocomotionCommand& source, TerraEngine::Locomotion::LocomotionHandle handle) noexcept {
+		using namespace TerraEngine::Locomotion;
+		LocomotionCommand result{};
+		result.kind = static_cast<CommandKind>(source.kind);
+		result.handle = handle;
+		result.expectedAuthorityEpoch = source.expectedAuthorityEpoch;
+		result.expectedConfigurationRevision = source.expectedConfigurationRevision;
+		result.ownerToken = source.ownerToken;
+		result.producerId = source.producerId;
+		result.sequence = source.sequence;
+		result.correlationId = source.correlationId;
+		result.intentKind = static_cast<IntentKind>(source.intentKind);
+		result.directionSpace = static_cast<DirectionSpace>(source.directionSpace);
+		result.direction = {source.directionX, source.directionY, source.directionZ};
+		result.requestedSpeed = source.requestedSpeed;
+		result.lifetime = static_cast<IntentLifetime>(source.lifetime);
+		result.mode = static_cast<MotionMode>(source.mode);
+		result.transferProducerId = source.transferProducerId;
+		return result;
+	}
+
+	NativeLocomotionStatus ToNativeLocomotionStatus(TerraEngine::Locomotion::LocomotionReason reason) noexcept {
+		using TerraEngine::Locomotion::LocomotionReason;
+		switch(reason) {
+		case LocomotionReason::None: return NativeLocomotionStatus::Success;
+		case LocomotionReason::InvalidArgument: return NativeLocomotionStatus::InvalidArgument;
+		case LocomotionReason::StaleHandle: return NativeLocomotionStatus::StaleHandle;
+		case LocomotionReason::StaleConfiguration: return NativeLocomotionStatus::StaleConfiguration;
+		case LocomotionReason::OwnershipConflict:
+		case LocomotionReason::ExternalExclusive:
+		case LocomotionReason::Stopped:
+		case LocomotionReason::Revoked: return NativeLocomotionStatus::OwnershipConflict;
+		case LocomotionReason::UnsupportedController: return NativeLocomotionStatus::UnsupportedController;
+		case LocomotionReason::UnsupportedFrame: return NativeLocomotionStatus::UnsupportedFrame;
+		case LocomotionReason::MissingBinding: return NativeLocomotionStatus::MissingBinding;
+		case LocomotionReason::AnimationUnavailable: return NativeLocomotionStatus::AnimationUnavailable;
+		case LocomotionReason::CapacityExceeded: return NativeLocomotionStatus::CapacityExceeded;
+		case LocomotionReason::NotPlaying: return NativeLocomotionStatus::NotPlaying;
+		case LocomotionReason::ExpiredReceipt: return NativeLocomotionStatus::ExpiredReceipt;
+		case LocomotionReason::SequenceConflict: return NativeLocomotionStatus::SequenceConflict;
+		}
+		return NativeLocomotionStatus::ProviderFailure;
+	}
+
+	NativeLocomotionReceipt FromLocomotionReceipt(const TerraEngine::Locomotion::CommandReceipt& source) noexcept {
+		return {{kNativeLocomotionAbiVersion, sizeof(NativeLocomotionReceipt),
+			NativeLocomotionRecordKind::Receipt, 0U, 0U}, FromLocomotionHandle(source.handle),
+			source.producerId, source.sequence, source.correlationId,
+			static_cast<NativeLocomotionReceiptState>(source.state),
+			static_cast<NativeLocomotionReason>(source.reason), source.acceptedUpdateEpoch,
+			source.authorityEpoch, source.ownerToken};
+	}
+
+	NativeLocomotionObservation FromLocomotionObservation(
+		const TerraEngine::Locomotion::LocomotionObservation& source) noexcept {
+		NativeLocomotionObservation result{};
+		result.header = {kNativeLocomotionAbiVersion, sizeof(result), NativeLocomotionRecordKind::Observation, 0U, 0U};
+		result.handle = FromLocomotionHandle(source.handle);
+		result.authorityState = static_cast<NativeLocomotionAuthorityState>(source.authority.state);
+		result.motionMode = static_cast<NativeLocomotionMotionMode>(source.authority.mode);
+		result.intentKind = static_cast<NativeLocomotionIntentKind>(source.authority.kind);
+		result.suspendedReason = static_cast<NativeLocomotionReason>(source.authority.suspendedReason);
+		result.bindingReason = static_cast<NativeLocomotionReason>(source.bindingReason);
+		result.navigationReason = static_cast<NativeLocomotionReason>(source.navigationReason);
+		result.navigationState = static_cast<std::uint32_t>(source.navigationState);
+		result.navigationOutcome = static_cast<std::uint32_t>(source.navigationOutcome);
+		result.navigationAgentReason = static_cast<std::uint32_t>(source.navigationAgentReason);
+		result.navigationCompatibilityField = static_cast<std::uint32_t>(source.navigationCompatibilityField);
+		result.animationReason = static_cast<NativeLocomotionReason>(source.animationReason);
+		result.animationParameterField = static_cast<std::uint32_t>(source.animationParameterField);
+		result.animationParameterError = static_cast<std::uint32_t>(source.animationParameterError);
+		result.grounded = source.grounded ? 1U : 0U;
+		result.motionHistoryAvailable = source.motionHistoryAvailable ? 1U : 0U;
+		result.ownerToken = source.authority.ownerToken;
+		result.ownerProducerId = source.authority.ownerProducerId;
+		result.authorityEpoch = source.authority.authorityEpoch;
+		result.configurationRevision = source.authority.configurationRevision;
+		result.acceptedSequence = source.authority.acceptedSequence;
+		result.physicalTick = source.physicalTick;
+		result.publicationEpoch = source.publicationEpoch;
+		result.frameId = source.frame.frameId.value;
+		result.frameGeneration = source.frame.frameGeneration;
+		result.desiredVelocityX = source.desiredVelocity.x;
+		result.desiredVelocityY = source.desiredVelocity.y;
+		result.desiredVelocityZ = source.desiredVelocity.z;
+		result.observedPlanarSpeed = source.observedPlanarSpeed;
+		result.observedLocalDirectionX = source.observedLocalDirection.x;
+		result.observedLocalDirectionY = source.observedLocalDirection.y;
+		result.observedLocalDirectionZ = source.observedLocalDirection.z;
+		result.navigationControllerValue = source.navigationControllerValue;
+		result.navigationProfileValue = source.navigationProfileValue;
+		result.observationDurationSeconds = source.observationDurationSeconds;
+		result.remainingRouteDistanceMetres = source.remainingRouteDistanceMetres;
+		result.requestedTranslationX = source.requestedTranslation.x;
+		result.requestedTranslationY = source.requestedTranslation.y;
+		result.requestedTranslationZ = source.requestedTranslation.z;
+		result.realizedTranslationX = source.realizedTranslation.x;
+		result.realizedTranslationY = source.realizedTranslation.y;
+		result.realizedTranslationZ = source.realizedTranslation.z;
+		result.requestedYawRadians = source.requestedYawRadians;
+		result.realizedYawRadians = source.realizedYawRadians;
+		return result;
+	}
+
 	void WriteNavigationDiagnostic(char (&destination)[kNativeNavigationDiagnosticBytes], std::string_view message) noexcept {
 		std::memset(destination, 0, sizeof(destination));
 		const std::size_t count = std::min(message.size(), sizeof(destination) - 1U);
@@ -1659,6 +1801,199 @@ extern "C" {
 		snapshot->directionZ = guidance.suggestedDirection.z;
 		snapshot->remainingDistanceMetres = guidance.remainingDistanceMetres;
 		return snapshot->status;
+	}
+
+	std::uint32_t Native_Locomotion_GetAbiVersion() {
+		return kNativeLocomotionAbiVersion;
+	}
+
+	NativeLocomotionStatus Native_Locomotion_Resolve(
+		const NativeLocomotionResolveRequest* request, NativeLocomotionResolveResult* result) {
+		if(!HasLocomotionAbiRecord(result, NativeLocomotionRecordKind::ResolveResult))
+			return NativeLocomotionStatus::VersionMismatch;
+		*result = {};
+		result->header = {kNativeLocomotionAbiVersion, sizeof(*result),
+			NativeLocomotionRecordKind::ResolveResult, 0U, 0U};
+		if(!HasLocomotionAbiRecord(request, NativeLocomotionRecordKind::ResolveRequest)) {
+			result->status = NativeLocomotionStatus::VersionMismatch;
+			return result->status;
+		}
+		const TerraEngine::UUID objectId = ToUuid(request->objectId);
+		if(objectId == TerraEngine::EMPTY_UUID) {
+			result->status = NativeLocomotionStatus::InvalidArgument;
+			return result->status;
+		}
+		if(!TerraEngine::Physics::PhysicsSystem::Instance().WorldHandle().IsValid()) {
+			result->status = NativeLocomotionStatus::NotPlaying;
+			return result->status;
+		}
+		const auto resolved = TerraEngine::Locomotion::LocomotionSystem::Instance().ResolvePublishedSnapshot(objectId);
+		if(!resolved) {
+			result->status = NativeLocomotionStatus::MissingBinding;
+			return result->status;
+		}
+		result->handle = FromLocomotionHandle(resolved->handle);
+		result->bindingReason = static_cast<NativeLocomotionReason>(resolved->bindingReason);
+		result->configurationRevision = resolved->configurationRevision;
+		result->authorityEpoch = resolved->authorityEpoch;
+		result->status = ToNativeLocomotionStatus(resolved->bindingReason);
+		return result->status;
+	}
+
+	NativeLocomotionStatus Native_Locomotion_Submit(
+		const NativeLocomotionCommandBatch* batch, const NativeLocomotionCommand* commands,
+		NativeLocomotionReceipt* receipts, std::uint32_t receiptCapacity, NativeLocomotionBufferInfo* info) {
+		if(!HasLocomotionAbiRecord(info, NativeLocomotionRecordKind::BufferInfo))
+			return NativeLocomotionStatus::VersionMismatch;
+		*info = {};
+		info->header = {kNativeLocomotionAbiVersion, sizeof(*info),
+			NativeLocomotionRecordKind::BufferInfo, 0U, 0U};
+		info->capacity = receiptCapacity;
+		if(!HasLocomotionAbiRecord(batch, NativeLocomotionRecordKind::CommandBatch)) {
+			info->status = NativeLocomotionStatus::VersionMismatch;
+			return info->status;
+		}
+		if(batch->reserved != 0U || batch->commandCount == 0U
+			|| batch->commandCount > TerraEngine::Locomotion::kMaximumCommandBatch || commands == nullptr) {
+			info->status = NativeLocomotionStatus::InvalidArgument;
+			return info->status;
+		}
+		info->requiredCount = batch->commandCount;
+		if(receipts == nullptr || receiptCapacity < batch->commandCount) {
+			info->status = NativeLocomotionStatus::BufferTooSmall;
+			return info->status;
+		}
+		if(receiptCapacity > TerraEngine::Locomotion::kMaximumCommandBatch) {
+			info->status = NativeLocomotionStatus::InvalidArgument;
+			return info->status;
+		}
+		std::vector<TerraEngine::Locomotion::LocomotionCommand> copied;
+		try {
+			copied.reserve(batch->commandCount);
+			for(std::uint32_t index = 0U; index < batch->commandCount; ++index) {
+				const auto& source = commands[index];
+				if(!HasLocomotionAbiRecord(&source, NativeLocomotionRecordKind::Command)
+					|| !HasLocomotionAbiRecord(&source.handle, NativeLocomotionRecordKind::Handle)
+					|| !HasLocomotionAbiRecord(&receipts[index], NativeLocomotionRecordKind::Receipt)) {
+					info->status = NativeLocomotionStatus::VersionMismatch;
+					return info->status;
+				}
+				TerraEngine::Locomotion::LocomotionHandle handle{};
+				if(!ToLocomotionHandle(source.handle, handle) || !IsLocomotionCommandShapeValid(source)) {
+					info->status = NativeLocomotionStatus::InvalidArgument;
+					return info->status;
+				}
+				copied.push_back(ToLocomotionCommand(source, handle));
+			}
+		} catch(const std::bad_alloc&) {
+			// This allocation occurs before semantic admission; no command or
+			// receipt has entered the protected locomotion store yet.
+			info->status = NativeLocomotionStatus::CapacityExceeded;
+			return info->status;
+		}
+		// The command store owns bounded all-or-none admission and high-water
+		// sequencing. No member is submitted until the complete ABI is copied.
+		const auto admitted = TerraEngine::Locomotion::LocomotionSystem::Instance().SubmitBatch(copied);
+		if(!admitted.queued) {
+			info->status = ToNativeLocomotionStatus(admitted.reason);
+			return info->status;
+		}
+		if(admitted.receipts.size() != copied.size()) {
+			info->status = NativeLocomotionStatus::ProviderFailure;
+			return info->status;
+		}
+		bool anyQueued = false;
+		for(std::size_t index = 0U; index < admitted.receipts.size(); ++index) {
+			receipts[index] = FromLocomotionReceipt(admitted.receipts[index]);
+			anyQueued = anyQueued || admitted.receipts[index].state == TerraEngine::Locomotion::ReceiptState::Queued;
+		}
+		info->writtenCount = batch->commandCount;
+		info->status = anyQueued ? NativeLocomotionStatus::Queued : NativeLocomotionStatus::Success;
+		return info->status;
+	}
+
+	NativeLocomotionStatus Native_Locomotion_ReadReceipt(
+		const NativeLocomotionReceiptQuery* query, NativeLocomotionReceipt* receipt) {
+		if(!HasLocomotionAbiRecord(receipt, NativeLocomotionRecordKind::Receipt))
+			return NativeLocomotionStatus::VersionMismatch;
+		*receipt = {};
+		receipt->header = {kNativeLocomotionAbiVersion, sizeof(*receipt),
+			NativeLocomotionRecordKind::Receipt, 0U, 0U};
+		if(!HasLocomotionAbiRecord(query, NativeLocomotionRecordKind::ReceiptQuery)
+			|| !HasLocomotionAbiRecord(query ? &query->handle : nullptr, NativeLocomotionRecordKind::Handle))
+			return NativeLocomotionStatus::VersionMismatch;
+		TerraEngine::Locomotion::LocomotionHandle handle{};
+		if(!ToLocomotionHandle(query->handle, handle) || query->producerId == 0U
+			|| query->sequence == 0U || query->correlationId == 0U)
+			return NativeLocomotionStatus::InvalidArgument;
+		const auto found = TerraEngine::Locomotion::LocomotionSystem::Instance()
+			.ReadCurrentReceipt(handle, query->producerId, query->sequence, query->correlationId);
+		if(!found) return NativeLocomotionStatus::StaleHandle;
+		*receipt = FromLocomotionReceipt(*found);
+		switch(found->state) {
+		case TerraEngine::Locomotion::ReceiptState::Queued: return NativeLocomotionStatus::Queued;
+		case TerraEngine::Locomotion::ReceiptState::Applied:
+		case TerraEngine::Locomotion::ReceiptState::Adjusted: return NativeLocomotionStatus::Success;
+		case TerraEngine::Locomotion::ReceiptState::Expired: return NativeLocomotionStatus::ExpiredReceipt;
+		case TerraEngine::Locomotion::ReceiptState::Rejected: return ToNativeLocomotionStatus(found->reason);
+		}
+		return NativeLocomotionStatus::ProviderFailure;
+	}
+
+	NativeLocomotionStatus Native_Locomotion_CopyObservations(
+		const NativeLocomotionObservationQuery* query, NativeLocomotionObservation* observations,
+		std::uint32_t capacity, NativeLocomotionBufferInfo* info) {
+		if(!HasLocomotionAbiRecord(info, NativeLocomotionRecordKind::BufferInfo))
+			return NativeLocomotionStatus::VersionMismatch;
+		*info = {};
+		info->header = {kNativeLocomotionAbiVersion, sizeof(*info),
+			NativeLocomotionRecordKind::BufferInfo, 0U, 0U};
+		info->capacity = capacity;
+		if(!HasLocomotionAbiRecord(query, NativeLocomotionRecordKind::ObservationQuery)
+			|| !HasLocomotionAbiRecord(query ? &query->handle : nullptr, NativeLocomotionRecordKind::Handle)) {
+			info->status = NativeLocomotionStatus::VersionMismatch;
+			return info->status;
+		}
+		TerraEngine::Locomotion::LocomotionHandle handle{};
+		if(!ToLocomotionHandle(query->handle, handle) || capacity > TerraEngine::Locomotion::kMaximumObservationCopy) {
+			info->status = NativeLocomotionStatus::InvalidArgument;
+			return info->status;
+		}
+		const auto snapshot = TerraEngine::Locomotion::LocomotionSystem::Instance()
+			.CopyObservationsForHandle(handle);
+		if(!snapshot.handleCurrent) {
+			info->status = NativeLocomotionStatus::StaleHandle;
+			return info->status;
+		}
+		const auto& root = snapshot.root;
+		if(!root) {
+			info->status = NativeLocomotionStatus::NotReady;
+			return info->status;
+		}
+		info->publicationEpoch = root->publicationEpoch;
+		const auto found = std::find_if(root->entries.begin(), root->entries.end(),
+			[handle](const auto& item) { return item.handle == handle; });
+		if(found == root->entries.end()) {
+			info->status = NativeLocomotionStatus::NotReady;
+			return info->status;
+		}
+		info->requiredCount = 1U;
+		if(observations == nullptr && capacity == 0U) {
+			info->status = NativeLocomotionStatus::Success;
+			return info->status;
+		}
+		if(observations == nullptr || capacity < 1U) {
+			info->status = NativeLocomotionStatus::BufferTooSmall;
+			return info->status;
+		}
+		if(!HasLocomotionAbiRecord(&observations[0], NativeLocomotionRecordKind::Observation)) {
+			info->status = NativeLocomotionStatus::VersionMismatch;
+			return info->status;
+		}
+		observations[0] = FromLocomotionObservation(*found);
+		info->writtenCount = 1U;
+		info->status = NativeLocomotionStatus::Success;
+		return info->status;
 	}
 
 	std::uint16_t Native_Animation_GetAbiVersion()
@@ -4699,6 +5034,18 @@ extern "C" {
 			return objects.getObjectBindingGeneration(*object);
 		}
 		return 0;
+	}
+
+	NativeRuntimeStatus Native_Object_ReadUuid(uint32_t objectId, NativePhysicsUuid* uuid) {
+		if(uuid == nullptr) return NativeRuntimeStatus::InvalidArgument;
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		const auto object = objects.getObject(static_cast<entt::entity>(objectId));
+		if(!object) return NativeRuntimeStatus::NotFound;
+		// Convert only after lookup succeeds. A stale entity cannot partially
+		// overwrite the managed caller's first-bind UUID buffer.
+		*uuid = FromUuid(objects.getUUID(*object));
+		return NativeRuntimeStatus::Success;
 	}
 
 	// Native_ScriptComponent_AddBinding is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

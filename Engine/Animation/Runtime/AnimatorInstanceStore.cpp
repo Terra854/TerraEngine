@@ -59,6 +59,25 @@ namespace TerraEngine::Animation {
 			&& slots_[handle.slotIndex].alive && slots_[handle.slotIndex].generation == handle.generation;
 	}
 
+	bool AnimatorInstanceStore::UpdateControllerGeneration(AnimatorInstanceHandle handle,
+		AnimationAssetHandle controller) noexcept {
+		std::scoped_lock lock(mutex_);
+		if(!handle.IsValid() || handle.slotIndex >= slots_.size() || !controller.IsValid()) return false;
+		Slot& slot = slots_[handle.slotIndex];
+		if(!slot.alive || slot.generation != handle.generation
+			|| !slot.descriptor.controller.IsValid()
+			|| slot.descriptor.controller.assetId != controller.assetId
+			|| controller.generation < slot.descriptor.controller.generation) return false;
+		if(slot.descriptor.controller.generation != controller.generation) {
+			// The store is the source copied by CaptureFrameInputs. Advance its
+			// observation revision so protected coordinators also notice a direct
+			// generation-only rebind without changing the animator's slot identity.
+			slot.descriptor.controller.generation = controller.generation;
+			membershipRevision_.fetch_add(1U, std::memory_order_acq_rel);
+		}
+		return true;
+	}
+
 	std::size_t AnimatorInstanceStore::ActiveCount() const noexcept {
 		// Release updates occur only while slot ownership is protected. The
 		// scheduler needs the count as activation metadata and never dereferences a
