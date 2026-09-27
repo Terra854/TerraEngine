@@ -22,6 +22,23 @@ namespace TerraEngine::Scene {
 	namespace {
 		using Clock = std::chrono::steady_clock;
 
+		// History/rollback supplies an exact pair; ordinary typed publications
+		// derive the local pose against the current protected hierarchy instead.
+		WorldCoordinateError PublishTransformPose(ObjectManager& objects, const Object& target,
+			const WorldPose& pose, const std::optional<ParentRelativePose>& restoredRelative)
+		{
+			return restoredRelative ? objects.RestoreTransformPose(target, pose, *restoredRelative)
+				: objects.SetCanonicalWorldPose(target, pose);
+		}
+
+		void ObserveTransformAncestry(TransactionalMutationBuilder& builder, ObjectManager& objects, TerraEngine::UUID objectId)
+		{
+			// World-to-local conversion reads the full parent chain. Observing only
+			// the direct parent would miss a grandparent move between prepare/flush.
+			for (auto object = objects.getObject(objectId); object; object = objects.getParent(*object))
+				builder.ObserveObject(objects, objects.getUUID(*object));
+		}
+
 		std::uint64_t ElapsedNs(Clock::time_point start)
 		{
 			return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
@@ -1039,7 +1056,7 @@ namespace TerraEngine::Scene {
 		// Capture the source revision before a worker releases its immutable input.
 		// The protected boundary will reject the complete batch if this pose is stale.
 		ObserveScene(objects);
-		ObserveObject(objects, objectId);
+		ObserveTransformAncestry(*this, objects, objectId);
 		TransactionWriteOperation operation;
 		operation.kind = TransactionWriteKind::SetWorldTransform;
 		operation.target = ExistingObject(objectId);
@@ -1051,7 +1068,7 @@ namespace TerraEngine::Scene {
 	TransactionalMutationBuilder& TransactionalMutationBuilder::TranslateWorld(ObjectManager& objects, TerraEngine::UUID objectId, WorldDelta delta)
 	{
 		ObserveScene(objects);
-		ObserveObject(objects, objectId);
+		ObserveTransformAncestry(*this, objects, objectId);
 		TransactionWriteOperation operation;
 		operation.kind = TransactionWriteKind::TranslateWorld;
 		operation.target = ExistingObject(objectId);
@@ -1090,7 +1107,7 @@ namespace TerraEngine::Scene {
 		transaction.readSet.objects.reserve(transaction.readSet.objects.size() + updates.size());
 		for (const TransactionTransformUpdate& update : updates)
 		{
-			ObserveObject(objects, update.objectId);
+			ObserveTransformAncestry(*this, objects, update.objectId);
 		}
 		TransactionWriteOperation operation;
 		operation.kind = TransactionWriteKind::UpdateTransformBatch;
@@ -1299,23 +1316,45 @@ namespace TerraEngine::Scene {
 
 				inverse.operation.kind = TransactionWriteKind::UpdateTransformBatch;
 				inverse.operation.transformUpdates.reserve(operation.transformUpdates.size());
+				std::vector<std::pair<std::size_t, std::size_t>> publicationOrder;
+				publicationOrder.reserve(targets.size());
+				std::vector<WorldPose> publishedPoses;
+				publishedPoses.reserve(targets.size());
 				for (std::size_t updateIndex = 0U; updateIndex < operation.transformUpdates.size(); ++updateIndex)
 				{
 					const TransactionTransformUpdate& update = operation.transformUpdates[updateIndex];
-					inverse.operation.transformUpdates.push_back({update.objectId, *objects.GetCanonicalWorldPose(targets[updateIndex].first)});
-				}
-				for (std::size_t updateIndex = 0U; updateIndex < operation.transformUpdates.size(); ++updateIndex)
-				{
-					const TransactionTransformUpdate& update = operation.transformUpdates[updateIndex];
+					const Transform& before = *targets[updateIndex].second;
+					inverse.operation.transformUpdates.push_back({update.objectId, before.worldPose, false, before.parentRelativePose});
 					WorldPose publishedPose = update.pose;
 					if (update.preserveScale)
 					{
-						// Provider poses contain no scale. Read it only after the entire
-						// batch has passed protected target/revision validation, so worker
-						// publication cannot replace an authored scale with the default 1.
-						publishedPose.scale = targets[updateIndex].second->worldPose.scale;
+						// Capture inherited size before any parent in this batch changes.
+						const auto resolved = objects.GetResolvedWorldPose(targets[updateIndex].first);
+						if (!resolved)
+						{
+							AddConflict(result, TransactionConflictReason::InvalidCoordinate, update.objectId, index,
+								"Cannot resolve the authored scale of a transform publication target.", 0, 0, {}, {}, operation.kind);
+							break;
+						}
+						publishedPose.scale = resolved->scale;
 					}
-					if (objects.SetCanonicalWorldPose(targets[updateIndex].first, publishedPose) != WorldCoordinateError::None)
+					publishedPoses.push_back(publishedPose);
+					std::size_t depth = 0;
+					for (auto parent = objects.getParent(targets[updateIndex].first); parent; parent = objects.getParent(*parent)) ++depth;
+					publicationOrder.emplace_back(depth, updateIndex);
+				}
+				if (!result.conflicts.empty()) break;
+				// Worker packet order is not hierarchy order. Publish ancestors first
+				// so each child is converted against the parent's final batch pose.
+				// This dependency-bound work stays inside the existing protected flush.
+				// Root-only physics batches are already ordered: retain their linear
+				// publication path instead of paying for an unnecessary sort each tick.
+				if (!std::is_sorted(publicationOrder.begin(), publicationOrder.end()))
+					std::sort(publicationOrder.begin(), publicationOrder.end());
+				for (const auto& [depth, updateIndex] : publicationOrder)
+				{
+					const TransactionTransformUpdate& update = operation.transformUpdates[updateIndex];
+					if (PublishTransformPose(objects, targets[updateIndex].first, publishedPoses[updateIndex], update.restoreParentRelativePose) != WorldCoordinateError::None)
 					{
 						AddConflict(result, TransactionConflictReason::InvalidCoordinate, update.objectId, index,
 							"Canonical transform batch entry was rejected during protected publication.", 0, 0,
@@ -1352,7 +1391,8 @@ namespace TerraEngine::Scene {
 			{
 				inverse.operation.kind = TransactionWriteKind::SetWorldTransform;
 				inverse.operation.worldPose = *objects.GetCanonicalWorldPose(*target);
-				if (objects.SetCanonicalWorldPose(*target, operation.worldPose) != WorldCoordinateError::None)
+				inverse.operation.restoreParentRelativePose = objects.GetComponent<Transform>(*target)->parentRelativePose;
+				if (PublishTransformPose(objects, *target, operation.worldPose, operation.restoreParentRelativePose) != WorldCoordinateError::None)
 				{
 					AddConflict(result, TransactionConflictReason::InvalidCoordinate, targetId, index,
 						"Canonical world pose was rejected during protected publication.", 0, 0,
@@ -1364,7 +1404,14 @@ namespace TerraEngine::Scene {
 			}
 			case TransactionWriteKind::TranslateWorld:
 			{
-				const WorldPose previousPose = *objects.GetCanonicalWorldPose(*target);
+				const auto resolvedPose = objects.GetResolvedWorldPose(*target);
+				if (!resolvedPose)
+				{
+					AddConflict(result, TransactionConflictReason::InvalidCoordinate, targetId, index,
+						"Cannot translate an unresolved hierarchy pose.", 0, 0, {}, {}, operation.kind);
+					break;
+				}
+				const WorldPose previousPose = *resolvedPose;
 				const auto translatedPosition = ApplyWorldDelta(previousPose.position, operation.worldDelta);
 				if (!translatedPosition.Succeeded())
 				{
@@ -1376,7 +1423,8 @@ namespace TerraEngine::Scene {
 				WorldPose translatedPose = previousPose;
 				translatedPose.position = translatedPosition.position;
 				inverse.operation.kind = TransactionWriteKind::SetWorldTransform;
-				inverse.operation.worldPose = previousPose;
+				inverse.operation.worldPose = *objects.GetCanonicalWorldPose(*target);
+				inverse.operation.restoreParentRelativePose = objects.GetComponent<Transform>(*target)->parentRelativePose;
 				if (objects.SetCanonicalWorldPose(*target, translatedPose) != WorldCoordinateError::None)
 				{
 					AddConflict(result, TransactionConflictReason::InvalidCoordinate, targetId, index,
@@ -1412,6 +1460,7 @@ namespace TerraEngine::Scene {
 			{
 				inverse.operation.kind = TransactionWriteKind::ReparentObject;
 				const std::optional<WorldPose> previousPose = objects.GetCanonicalWorldPose(*target);
+				const ParentRelativePose previousRelative = objects.GetComponent<Transform>(*target)->parentRelativePose;
 				if (const std::optional<Object> previousParent = objects.getParent(*target))
 				{
 					inverse.operation.parent = ExistingObject(objects.getUUID(*previousParent));
@@ -1440,6 +1489,7 @@ namespace TerraEngine::Scene {
 					poseInverse.operation.kind = TransactionWriteKind::SetWorldTransform;
 					poseInverse.operation.target = operation.target;
 					poseInverse.operation.worldPose = *previousPose;
+					poseInverse.operation.restoreParentRelativePose = previousRelative;
 					result.inverseDeltas.push_back(std::move(poseInverse));
 				}
 				break;
@@ -1756,7 +1806,7 @@ namespace TerraEngine::Scene {
 				for (const TransactionTransformUpdate& update : operation.transformUpdates)
 				{
 					const std::optional<Object> target = objects.getObject(update.objectId);
-					if (!target || objects.SetCanonicalWorldPose(*target, update.pose) != WorldCoordinateError::None)
+					if (!target || PublishTransformPose(objects, *target, update.pose, update.restoreParentRelativePose) != WorldCoordinateError::None)
 					{
 						restoredEveryDelta = false;
 						continue;
@@ -1775,7 +1825,7 @@ namespace TerraEngine::Scene {
 			switch (operation.kind)
 			{
 			case TransactionWriteKind::SetWorldTransform:
-				if (objects.SetCanonicalWorldPose(*target, operation.worldPose) != WorldCoordinateError::None)
+				if (PublishTransformPose(objects, *target, operation.worldPose, operation.restoreParentRelativePose) != WorldCoordinateError::None)
 				{
 					restoredEveryDelta = false;
 				}

@@ -94,25 +94,29 @@ private:
 		// Read observations are captured when the user asks for undo/redo. A stale
 		// object generation therefore rejects the complete replay at publication.
 		ObjectManager& objects = ObjectManager::instance();
-		replay.readSet.sceneRevision = objects.GetHierarchyRevision();
+		TerraEngine::Scene::TransactionalMutationBuilder observations(replay.id, replay.origin, replay.originName);
+		observations.ObserveScene(objects);
 		std::unordered_set<TerraEngine::UUID> observed;
+		const auto observeHierarchy = [&](TerraEngine::UUID objectId) {
+			// Use the shared observation contract, including parent identity and
+			// transform revisions. A partial aggregate initializer treated every
+			// child as a root and caused otherwise valid undo commands to conflict.
+			for (auto object = objects.getObject(objectId); object; object = objects.getParent(*object))
+			{
+				const auto id = objects.getUUID(*object);
+				if (!observed.insert(id).second) break;
+				observations.ObserveObject(objects, id);
+			}
+		};
 		for (const TerraEngine::Scene::TransactionWriteOperation& operation : operations)
 		{
-			if (operation.target.objectId == TerraEngine::EMPTY_UUID || !observed.insert(operation.target.objectId).second)
-			{
-				continue;
-			}
-			if (const std::optional<Object> object = objects.getObject(operation.target.objectId))
-			{
-				replay.readSet.objects.push_back({
-					operation.target.objectId,
-					objects.getObjectLifetimeGeneration(*object),
-					objects.getObjectMetadataGeneration(*object),
-					objects.getObjectComponentGeneration(*object),
-					objects.GetHierarchyRevision()
-				});
-			}
+			observeHierarchy(operation.target.objectId);
+			observeHierarchy(operation.parent.objectId);
+			// A typed batch has no scalar target; each member needs the same
+			// protected replay conflict checks as an individual Inspector edit.
+			for (const auto& update : operation.transformUpdates) observeHierarchy(update.objectId);
 		}
+		replay.readSet = observations.Build().readSet;
 		m_PendingReplayTransactionId = replay.id;
 		TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(std::move(replay));
 	}

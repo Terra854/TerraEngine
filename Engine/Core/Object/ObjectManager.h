@@ -407,11 +407,20 @@ public:
 	// Return the exact authoritative pose captured by Transform. Worker code
 	// consumes a published snapshot instead of calling this live-registry API.
 	[[nodiscard]] std::optional<TerraEngine::Scene::WorldPose> GetCanonicalWorldPose(const Object& object) const;
+	// Resolve the current hierarchy without writing live components. Descendant
+	// world caches can lag ancestor edits until the scheduled propagation pass.
+	[[nodiscard]] std::optional<TerraEngine::Scene::WorldPose> GetResolvedWorldPose(const Object& object) const;
 	// Validate and publish an exact pose from a protected mutation path. The
 	// returned error is stable enough for transactions to reject whole batches.
 	[[nodiscard]] TerraEngine::Scene::WorldCoordinateError SetCanonicalWorldPose(
 		const Object& object,
 		TerraEngine::Scene::WorldPose pose);
+	// Protected transaction/history replay restores both captured representations
+	// exactly; recomputing local data during rollback would introduce drift or fail
+	// while an earlier parent edit is still waiting to be rolled back.
+	[[nodiscard]] TerraEngine::Scene::WorldCoordinateError RestoreTransformPose(
+		const Object& object, const TerraEngine::Scene::WorldPose& pose,
+		const TerraEngine::Scene::ParentRelativePose& relativePose);
 
 private:
 	ObjectManager();

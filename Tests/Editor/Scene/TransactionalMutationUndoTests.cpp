@@ -2,6 +2,7 @@
 #include "Scene/SceneManager.h"
 #include "Scene/SceneMutationQueue.h"
 #include "Scene/TransactionalMutation.h"
+#include "Scene/SceneGraphRuntime.h"
 
 #include "Core/Object/ComponentRegistry.h"
 #include "Core/Object/ObjectManager.h"
@@ -41,6 +42,43 @@ namespace TerraEngine::EditorTests {
 
 	void RegisterTransactionalMutationUndoTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.TransactionalMutation.ChildWorldScaleUndoRedoUsesProtectedBoundary", [](TestContext& context) {
+			using namespace TerraEngine::Scene;
+			ComponentRegistry::RegisterAllComponents();
+			ScriptingSystem::Instance().SetRunning(false);
+			ObjectManager& objects = ObjectManager::instance();
+			auto& queue = SceneMutationQueue::Instance();
+			auto& history = UndoRedoSystem::Instance();
+			objects.clear();
+			queue.Clear();
+			history.Clear();
+			const Object root = objects.createObject("Capsule root");
+			const Object child = objects.createObject("Visual");
+			context.Expect(objects.setParent(child, root, ReparentMode::KeepLocal), "Visual fixture must attach.");
+			const auto childId = objects.getUUID(child);
+			auto pose = *objects.GetCanonicalWorldPose(child);
+			pose.scale = glm::vec3(0.321496f);
+			TransactionalMutationBuilder builder("visual-scale-history", TransactionOrigin::Editor);
+			builder.SetUndoGroup("Align character visual").SetWorldTransform(objects, childId, pose);
+			const auto transaction = builder.Build();
+			const auto result = CommitTransaction(objects, transaction);
+			context.Expect(result.status == TransactionStatus::Committed && history.RecordCommittedTransaction(transaction, result), "Committed visual edit must enter editor history.");
+			history.Undo();
+			context.Expect(objects.GetComponent<Transform>(child)->parentRelativePose.scale == pose.scale, "Requesting undo must not expose local changes ahead of the protected flush.");
+			queue.Apply(objects, "visual-scale-undo");
+			auto receipts = queue.DrainCompletedEditorTransactionResults();
+			context.Expect(receipts.size() == 1 && receipts.front().status == TransactionStatus::Committed && history.CompleteDeferredReplay(receipts.front()), "Undo must commit at its protected boundary.");
+			context.Expect(BuildSceneGraphFromObjectManager(objects).objects.at(childId).worldPose.scale == glm::vec3(1), "Undo must restore rendered size, not just the Inspector cache.");
+			history.Redo();
+			queue.Apply(objects, "visual-scale-redo");
+			receipts = queue.DrainCompletedEditorTransactionResults();
+			context.Expect(receipts.size() == 1 && receipts.front().status == TransactionStatus::Committed && history.CompleteDeferredReplay(receipts.front()), "Redo must commit at its protected boundary.");
+			context.Expect(BuildSceneGraphFromObjectManager(objects).objects.at(childId).worldPose.scale == pose.scale, "Redo must restore the intended character size.");
+			history.Clear();
+			queue.Clear();
+			objects.clear();
+		});
+
 		registry.Add("Editor.TransactionalMutation.MeshInspectorLifecyclePublishesRenderChanges", [](TestContext& context) {
 			ComponentRegistry::RegisterAllComponents();
 			ObjectManager& objects = ObjectManager::instance();

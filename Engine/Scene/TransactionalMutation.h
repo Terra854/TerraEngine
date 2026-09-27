@@ -8,6 +8,7 @@
 #pragma once
 
 #include "Core/Export.h"
+#include "Components/Transform.h"
 #include "Core/Object/Reflection.h"
 #include "Scene/WorldCoordinate.h"
 #include "Utilities/UUID.h"
@@ -100,7 +101,7 @@ namespace TerraEngine::Scene {
 		PublishAnimationMutations
 	};
 
-	// A transform batch carries local-space values for existing objects. The
+	// A transform batch carries canonical world poses for existing objects. The
 	// transaction layer observes every target before it accepts the batch, then
 	// applies all entries or rolls the complete batch back at the flush boundary.
 	struct TransactionTransformUpdate {
@@ -111,6 +112,9 @@ namespace TerraEngine::Scene {
 		// Physics owns position and rotation, not authored mesh size. When requested,
 		// retain the target's scale at the protected, revision-validated boundary.
 		bool preserveScale = false;
+		// Native inverse/history data only: retain the exact local pose as well as
+		// the world cache. Normal publications derive local data from the hierarchy.
+		std::optional<ParentRelativePose> restoreParentRelativePose;
 	};
 
 	struct AnimationMutationPublication {
@@ -174,6 +178,8 @@ namespace TerraEngine::Scene {
 		// SetWorldTransform replaces the complete canonical pose in one protected
 		// write. It cannot be confused with a parent-relative local transform.
 		WorldPose worldPose{};
+		// Filled by native inverse capture, never by the external JSON decoder.
+		std::optional<ParentRelativePose> restoreParentRelativePose;
 		// TranslateWorld is intentionally a displacement rather than an absolute
 		// location, preventing a caller from treating a delta as a position.
 		WorldDelta worldDelta{};

@@ -1222,6 +1222,45 @@ std::optional<TerraEngine::Scene::WorldPose> ObjectManager::GetCanonicalWorldPos
 	return transform != nullptr ? std::optional<TerraEngine::Scene::WorldPose>(transform->worldPose) : std::nullopt;
 }
 
+std::optional<TerraEngine::Scene::WorldPose> ObjectManager::GetResolvedWorldPose(const Object& object) const
+{
+	using namespace TerraEngine::Scene;
+	const entt::entity entityId = object.EntityId();
+	if (!registry.valid(entityId)) return std::nullopt;
+	const Transform* transform = registry.try_get<Transform>(entityId);
+	if (!transform) return std::nullopt;
+	if (getParentEntityInternal(entityId) == entt::null) return transform->worldPose;
+
+	// Only walk this object's ancestry, not the entire scene. Root publications
+	// remain allocation-free. This protected read is sequential because each
+	// ancestor's TRS is the input to its child's bounded-space composition.
+	std::vector<const Transform*> ancestry;
+	for (entt::entity current = entityId; current != entt::null; current = getParentEntityInternal(current))
+	{
+		if (!registry.valid(current)) return std::nullopt;
+		const Transform* entry = registry.try_get<Transform>(current);
+		if (!entry || ancestry.size() > parentMap.size()) return std::nullopt;
+		ancestry.push_back(entry);
+	}
+	WorldPose resolved = ancestry.back()->worldPose;
+	for (std::size_t index = ancestry.size() - 1; index > 0; --index)
+	{
+		const Transform& child = *ancestry[index - 1];
+		const ParentRelativePose& relative = child.parentRelativePose;
+		if (!IsParentRelativePoseInRange(relative)) return std::nullopt;
+		// Match the renderer's bounded TRS convention (no affine shear).
+		const glm::vec3 offset = resolved.rotation * (resolved.scale * glm::vec3(relative.translationMetres));
+		const auto position = ApplyWorldDelta(resolved.position, {{}, glm::dvec3(offset)});
+		if (!position.Succeeded()) return std::nullopt;
+		resolved.position = position.position;
+		resolved.rotation *= relative.rotation;
+		resolved.scale *= relative.scale;
+		resolved.coordinateFrameRevision = child.worldPose.coordinateFrameRevision;
+		if (!IsWorldPoseFinite(resolved)) return std::nullopt;
+	}
+	return resolved;
+}
+
 TerraEngine::Scene::WorldCoordinateError ObjectManager::SetCanonicalWorldPose(
 	const Object& object,
 	TerraEngine::Scene::WorldPose pose)
@@ -1249,9 +1288,56 @@ TerraEngine::Scene::WorldCoordinateError ObjectManager::SetCanonicalWorldPose(
 	const bool changedCell = transform->worldPose.position.cell != normalized.position.cell;
 	pose.position = normalized.position;
 	pose.coordinateFrameRevision = transform->worldPose.coordinateFrameRevision + (changedCell ? 1u : 0u);
+	// A child is rendered from its parent-relative pose. Prepare its inverse TRS
+	// before publishing either representation so a failed conversion is atomic.
+	TerraEngine::Scene::ParentRelativePose relative = transform->parentRelativePose;
+	if (const std::optional<Object> parent = getParent(object))
+	{
+		const auto parentPose = GetResolvedWorldPose(*parent);
+		constexpr float minimumScale = 1e-6f;
+		if (!parentPose || std::abs(parentPose->scale.x) < minimumScale
+			|| std::abs(parentPose->scale.y) < minimumScale || std::abs(parentPose->scale.z) < minimumScale
+			|| glm::dot(parentPose->rotation, parentPose->rotation) < minimumScale)
+		{
+			return TerraEngine::Scene::WorldCoordinateError::UnsafeLocalRange;
+		}
+		const auto local = TerraEngine::Scene::LocalizeWorldPosition(pose.position, parentPose->position,
+			TerraEngine::Scene::kTransformSpaceMaximumRelativeRadiusMetres);
+		if (!local.Succeeded()) return local.error;
+		const glm::quat inverseRotation = glm::inverse(parentPose->rotation);
+		relative.translationMetres = glm::dvec3(inverseRotation * glm::vec3(local.offsetMetres)) / glm::dvec3(parentPose->scale);
+		relative.rotation = inverseRotation * pose.rotation;
+		relative.scale = pose.scale / parentPose->scale;
+		relative.transformSpaceId = parentPose->coordinateFrameRevision;
+		if (!TerraEngine::Scene::IsParentRelativePoseInRange(relative))
+		{
+			return TerraEngine::Scene::WorldCoordinateError::UnsafeLocalRange;
+		}
+	}
 	transform->worldPose = pose;
+	transform->parentRelativePose = relative;
 	MarkObjectTransformDirty(object);
 	return TerraEngine::Scene::WorldCoordinateError::None;
+}
+
+TerraEngine::Scene::WorldCoordinateError ObjectManager::RestoreTransformPose(
+	const Object& object, const TerraEngine::Scene::WorldPose& pose,
+	const TerraEngine::Scene::ParentRelativePose& relativePose)
+{
+	using namespace TerraEngine::Scene;
+	if (ReportWorkerObjectMutation("ObjectManager.RestoreTransformPose", "Worker code attempted to restore a live transform directly."))
+		return WorldCoordinateError::UnsafeLocalRange;
+	Transform* transform = registry.valid(object.EntityId()) ? registry.try_get<Transform>(object.EntityId()) : nullptr;
+	const auto normalized = NormalizeWorldPosition(pose.position);
+	if (!transform || !normalized.Succeeded() || normalized.position != pose.position
+		|| !IsWorldPoseFinite(pose) || !IsParentRelativePoseInRange(relativePose))
+		return WorldCoordinateError::UnsafeLocalRange;
+	// Captured local data is intentional even when the stored world cache was
+	// stale. Do not invert a possibly singular/intermediate parent during replay.
+	transform->worldPose = pose;
+	transform->parentRelativePose = relativePose;
+	MarkObjectTransformDirty(object);
+	return WorldCoordinateError::None;
 }
 
 std::uint64_t ObjectManager::getObjectMetadataGeneration(const Object& obj) const

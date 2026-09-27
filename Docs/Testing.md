@@ -1,5 +1,56 @@
 # TerraEngine Testing
 
+## Parented world edits and character scale
+
+Build the editor and both native test targets with the RelWithDebInfo workflow
+below. For a focused regression pass:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER = 'WorldHierarchy,Engine.WorldSpatialTransaction'
+& ./out/build/RelWithDebInfo/TerraEngine-EngineTests.exe
+$env:TERRAENGINE_TEST_FILTER = 'Editor.TransactionalMutation'
+& ./out/build/RelWithDebInfo/TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+cmake --install out/build/RelWithDebInfo --config RelWithDebInfo
+```
+
+These tests check world-to-local conversion under rotated/nonuniform parents,
+moved ancestors, cross-cell positions, singular-parent rejection, child-first
+publication batches, stale-ancestor conflicts, exact pose rollback, protected
+undo/redo visibility, repeated propagation, and save/load. World edits update
+both the stored world pose and the parent-relative pose consumed by hierarchy
+propagation. Exact inverse records retain both poses; existing dirty revisions
+remain monotonic through rollback. No new scheduler phase or flush is added.
+
+In the installed navigation demo, retain unit scale on the character-controller
+root. The original knight mesh is approximately 5.598825 m tall; use visual-child
+scale `1.8 / 5.598825` (approximately `0.321496`) for a 1.8 m character. Apply this
+through `world.set_transform`, not by changing importer units or skinning math.
+Check the child local scale, rendered size against the physical capsule, and
+foot alignment in Idle/Walk/Run. Exercise undo/redo and save/reload; merely reading
+the Inspector's stored world scale does not prove the rendered size is correct.
+
+Verified on 2026-09-27: the three new hierarchy regressions failed before the fix
+and passed afterward. All 17 focused engine checks (including 512 children across
+four worker-propagated frames) and seven editor transaction checks passed.
+The aggregate CTest entries `Engine.SpatialUnitTests` and `Editor.ExportUnitTests`
+passed: 2,480 engine tests and 1,016 editor tests, with three editor checks skipped
+because external validation projects were absent. The normal aggregate engine
+exclusion for the separately registered 30,000-frame profiler gate was retained.
+Build and install succeeded; logs are `out/alignment-{final-build,history-build,
+install,ctest}.log` and `out/alignment-focused-{engine,editor}.log`.
+
+The installed navigation-demo scene was corrected and saved. Live Vulkan
+off-screen readbacks (not fallback images) verified the size change, Idle, Walk
+at 1.49998 m/s, Run at 3.999996 m/s, and stopped speed zero, with grounding retained.
+World/local visual scale both saved as 0.321496; the root stayed unit-scaled and
+the capsule stayed 1.8 m tall. MCP undo/redo succeeded, and exiting Play restored
+the authored state. Windows was locked, so native Inspector/overlay inspection
+was unavailable; off-screen captures exclude editor overlays. A small Run-pose
+foot dip remains animation/foot-placement polish, not a reason to raise the
+entire visual and misalign Idle. An explicit scene-file reopen was not performed:
+MCP requested approval; automated serialization round-trip coverage passed.
+
 ## Movement inspector usability
 
 Build `TerraEngine-Editor` and `TerraEngine-EditorTests` using the RelWithDebInfo
