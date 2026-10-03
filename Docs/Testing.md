@@ -1,5 +1,55 @@
 # TerraEngine Testing
 
+## Engine correctness and failure safety
+
+The seven focused correctness entries are implemented: `Engine.SceneMutationFailureSafety`,
+`Engine.ResourceAsyncLifecycle`, `Engine.SceneSaveFailureSafety`,
+`Engine.AudioWorldCellCapture`, `Engine.FrameFailureLifecycle`, `Engine.OwnedProcess`
+and `Editor.ExportLifecycle`. Their independent process-tree watchdogs reject
+missing/zero selections and enforce registered minimum counts. Current floors
+are respectively 39, 28, 10, 5, 7, 6 and 6. Actual acceptance results and the
+unchanged naming-policy baseline are recorded in
+[implementation-evidence.md](../specs/061-fix-engine-correctness/implementation-evidence.md).
+
+Run in an x64 Visual Studio developer shell with supported SDK headers/libraries
+and pinned repository dependencies. Complete the build before using native
+harnesses so executable and engine DLL layouts match.
+
+```powershell
+cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
+cmake --build --preset RelWithDebInfo --target install --parallel 2
+if ($LASTEXITCODE -ne 0) { throw 'Compile/install failed.' }
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine\.(SceneMutationFailureSafety|ResourceAsyncLifecycle|SceneSaveFailureSafety|AudioWorldCellCapture|FrameFailureLifecycle|OwnedProcess)|Editor\.ExportLifecycle)$' --output-on-failure
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+```
+
+Native build-harness checks are distinct from installed runtime acceptance.
+The actual maintained install tree is `out/build/RelWithDebInfo/Build`, beneath
+ENGINE_INSTALL_DESTINATION. Installation includes native DLL closures, managed
+runtime/test dependencies, shaders, export tooling, child fixture and runner.
+Its final `correctness-artifacts.json` compares installed binaries against built
+targets and records SHA-256/lengths for the maintained runtime/support inputs.
+The installed runner rejects missing/hash-mismatched artifacts, an invocation
+from its source copy, and reused work directories.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File out/build/RelWithDebInfo/Build/Tests/Tools/Correctness/RunInstalledCorrectnessAcceptance.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/validation/correctness-acceptance-fresh -AllowLiveAcceptance
+```
+
+Live checks require Windows, a usable desktop/renderer and the installed bundled
+NativeAOT tools. Export requests retain the existing high-impact approval policy:
+approve each of the four export requests under Edit → Preferences → MCP Bridge
+→ Approvals. Fresh correctness/export fixtures copy both installed default layout
+files, matching normal project creation. Managed callback fault evidence requires
+the exact fixture receipt and logged exception; native dispatch counts alone do
+not report exceptions caught inside the managed callback bridge.
+The runner uses isolated write-enabled preferences but never manufactures approval
+tokens. Optional timing/port arguments and the maintained managed-reload/export
+regressions are documented in the
+[correctness quickstart](../specs/061-fix-engine-correctness/quickstart.md).
+The runner preserves correlated native/live logs and package/managed/process
+observations; watchdog termination is a failed check, not an orderly shutdown.
+
 ## Parented world edits and character scale
 
 Build the editor and both native test targets with the RelWithDebInfo workflow
@@ -1603,7 +1653,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Physics/RunI
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/physics-export-baseline
 ```
 
-The live harness accepts `-RunManagedReloadAutomationLoopback` for managed/automation checks and
+The live harness accepts `-RunManagedReloadAutomationLoopback -RunColliderCookIncrementalMatrix`
+for managed/automation checks with same-run rollback and visibility evidence, and
 `-RunAuthoringWalkthrough` for authoring checks. The export baseline must retain
 the six evidence files and must not copy `.tecollider` source recipes into the
 published package. Troubleshoot stale binaries by reinstalling; troubleshoot a

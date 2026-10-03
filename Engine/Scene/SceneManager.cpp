@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <cwctype>
 #include <fstream>
 #include <sstream>
 #include <utility>
@@ -371,6 +372,7 @@ bool SceneManager::SetActiveScene(const TerraEngine::UUID& id)
 	}
 
 	activeSceneId = id;
+	++activeSceneAuthoredRevision;
 	activeSceneRenderSettings = LoadSceneRenderSettingsFromDocument(*doc);
 	// New scenes start clean to avoid showing unsaved changes indicators
 	// immediately after a successful load or swap.
@@ -427,6 +429,7 @@ void SceneManager::SetActiveSceneRenderSettings(const SceneRenderSettings& setti
 {
 	activeSceneRenderSettings = SanitizeSceneRenderSettings(settings);
 	activeSceneDirty = true;
+	++activeSceneAuthoredRevision;
 }
 
 // SceneManager::GetActiveSkyComponent resolves the first active SkyComponent in
@@ -494,6 +497,7 @@ void SceneManager::MarkActiveSceneSkyStateDirty()
 void SceneManager::ForceMarkActiveSceneDirty()
 {
 	activeSceneDirty = true;
+	++activeSceneAuthoredRevision;
 	MarkActiveSceneSkyStateDirty();
 }
 
@@ -545,111 +549,205 @@ TerraEngine::Scene::BulkScenePublicationResult SceneManager::PublishPreparedRegi
 // SceneManager::SaveScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 {
-	const SceneDocument* activeScene = GetActiveScene();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!activeScene)
-	{
-		TERRAENGINE_LOG(LogLevel::Error, "No active scene to save.");
-		return false;
-	}
+	return SaveScene(std::move(path), {});
+}
 
-	// Default to overwriting the original source if no alternative path is
-	// provided by the caller (e.g. a "Save As" operation).
-	std::filesystem::path targetPath;
-	if (path.has_value())
+bool SceneManager::SaveScene(std::optional<std::filesystem::path> path,
+	const TerraEngine::Utilities::AtomicFileWriteOptions& options)
+{
+	using namespace TerraEngine::Utilities;
+	lastSaveResult = {};
+	try
 	{
-		targetPath = *path;
-	}
-	else
-	{
-		targetPath = activeScene->sourcePath;
-	}
-	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!targetPath.is_absolute()) {
-		targetPath = ResolveScenePath(targetPath);
-	}
-
-	nlohmann::json sceneJson;
-	// A save is captured against one published generation.  ObjectManager has no
-	// reader transaction, so detect any concurrent generation change and refuse
-	// to write a mixed-generation file rather than persisting torn world state.
-	const TerraEngine::Scene::PublishedSpatialSnapshot saveSnapshot = TerraEngine::Scene::WorldSpatialSystem::Instance().CurrentSnapshot();
-	const std::uint64_t saveSceneGeneration = ObjectManager::instance().GetSceneGeneration();
-	sceneJson["format"] = TerraEngine::Scene::kTerraSceneUnboundedFormat;
-	sceneJson["sourceSceneGeneration"] = saveSceneGeneration;
-	sceneJson["spatialPublicationGeneration"] = saveSnapshot.spatialGeneration;
-	const TerraEngine::Scene::PublishedWorldRegionResidency saveResidency = TerraEngine::Scene::WorldStreamingSystem::Instance().CurrentResidency();
-	sceneJson["residencyGeneration"] = saveResidency.generation;
-	sceneJson["regions"] = nlohmann::json::array();
-	for (const auto& [key, region] : saveResidency.residentRegions)
-	{
-		if (!region) continue;
-		TerraEngine::Scene::WorldRegionArtifactManifest manifest;
-		manifest.key = key;
-		manifest.contentHash = region->contentHash;
-		manifest.sourceGeneration = saveResidency.generation;
-		sceneJson["regions"].push_back(TerraEngine::Scene::SerializeWorldRegionArtifactManifest(manifest));
-	}
-	sceneJson["name"] = activeScene->name;
-	sceneJson["sceneSettings"] = Serializer::SerializeSceneRenderSettings(activeSceneRenderSettings);
-	sceneJson["objects"] = nlohmann::json::array();
-
-	ObjectManager& objManager = ObjectManager::instance();
-	auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objManager);
-	for (const TerraEngine::Scene::SceneDiagnostic& diagnostic : graph.diagnostics)
-	{
-		TERRAENGINE_LOG(LogLevel::Warning, "Scene graph save diagnostic: " << TerraEngine::Scene::FormatSceneDiagnostic(diagnostic));
-	}
-
-	// Leverage the centralized Serializer to convert the live object graph 
-	// into a JSON structure suitable for disk storage.
-	for (const TerraEngine::UUID& rootId : graph.rootObjects) {
-		if (auto root = objManager.getObject(rootId))
+		// Save is a protected synchronous authoring operation: live ECS capture
+		// stays on its owner thread. Only owned bytes enter filesystem work.
+		struct SaveTicket
 		{
-			sceneJson["objects"].push_back(Serializer::SerializeObject(*root));
-		}
-	}
-	if (ObjectManager::instance().GetSceneGeneration() != saveSceneGeneration
-		|| TerraEngine::Scene::WorldSpatialSystem::Instance().CurrentSnapshot().spatialGeneration != saveSnapshot.spatialGeneration)
-	{
-		TERRAENGINE_LOG(LogLevel::Warning, "Scene changed while SaveScene captured generation " << saveSceneGeneration << "; no file was written.");
-		return false;
-	}
-
-	std::ofstream file(targetPath);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!file.is_open()) {
-		TERRAENGINE_LOG(LogLevel::Error, "Failed to open file for writing: " << targetPath);
-		return false;
-	}
-
-	file << sceneJson.dump(4);
-	file.close();
-
-	TERRAENGINE_LOG(LogLevel::Info, "Saved scene to " << targetPath);
-	
-	// Update the cache if we overwrote the currently active scene file so subsequent
-	// reloads (or SetActiveScene calls) see the fresh data.
-	if (!path.has_value() || *path == activeScene->sourcePath)
-	{
-		std::unique_lock lock(sceneCache.mutex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto it = sceneCache.resources.find(activeSceneId); it != sceneCache.resources.end())
+			TerraEngine::UUID sceneId;
+			std::shared_ptr<const std::uint8_t> documentIdentity;
+			std::filesystem::path sourcePath;
+			std::string name;
+			SceneRenderSettings settings;
+			std::uint64_t authored, scene, component, spatial, hierarchy, membership;
+			struct ObjectRevision { TerraEngine::UUID id; std::uint64_t lifetime, metadata; };
+			std::vector<ObjectRevision> objectRevisions;
+		};
+		ObjectManager& objects = ObjectManager::instance();
+		SaveTicket ticket;
 		{
-			if (it->second)
+			std::shared_lock lock(sceneCache.mutex);
+			const auto it = sceneCache.resources.find(activeSceneId);
+			if(it == sceneCache.resources.end() || !it->second)
 			{
-				it->second->parsedJson = sceneJson;
-				it->second->jsonContents = sceneJson.dump(4);
+				lastSaveResult.reason = "No active scene to save.";
+				return false;
+			}
+			const auto& document = *it->second;
+			ticket = {activeSceneId, document.saveIdentity, document.sourcePath, document.name,
+				activeSceneRenderSettings, activeSceneAuthoredRevision, objects.GetSceneGeneration(),
+				objects.GetComponentMutationRevision(), objects.GetSpatialRevision(),
+				objects.GetHierarchyRevision(), objects.GetRuntimeActiveMembershipRevision()};
+		}
+		const auto target = ResolveScenePath(path.value_or(ticket.sourcePath));
+		// Acquiring the target before capture orders same-target saves and retains
+		// that order through replacement and persisted cache publication.
+		AtomicFileWriteTransaction transaction(target);
+		auto checkpoint = [&](AtomicFileWriteStage stage)
+		{
+			lastSaveResult.stage = stage;
+			if(options.checkpoint) lastSaveResult.reason = options.checkpoint(stage, transaction.Target());
+			return lastSaveResult.reason.empty();
+		};
+		auto revisionsMatch = [&]()
+		{
+			return activeSceneId == ticket.sceneId && activeSceneAuthoredRevision == ticket.authored
+				&& objects.GetSceneGeneration() == ticket.scene
+				&& objects.GetComponentMutationRevision() == ticket.component
+				&& objects.GetSpatialRevision() == ticket.spatial
+				&& objects.GetHierarchyRevision() == ticket.hierarchy
+				&& objects.GetRuntimeActiveMembershipRevision() == ticket.membership
+				&& std::all_of(ticket.objectRevisions.begin(), ticket.objectRevisions.end(), [&](const auto& revision)
+				{
+					const auto object = objects.getObject(revision.id);
+					return object && objects.getObjectLifetimeGeneration(*object) == revision.lifetime
+						&& objects.getObjectMetadataGeneration(*object) == revision.metadata;
+				});
+		};
+		if(!checkpoint(AtomicFileWriteStage::Capture)) return false;
+		const auto spatial = TerraEngine::Scene::WorldSpatialSystem::Instance().CurrentSnapshot();
+		const auto residency = TerraEngine::Scene::WorldStreamingSystem::Instance().CurrentResidency();
+		nlohmann::json sceneJson;
+		sceneJson["format"] = TerraEngine::Scene::kTerraSceneUnboundedFormat;
+		sceneJson["sourceSceneGeneration"] = ticket.scene;
+		sceneJson["spatialPublicationGeneration"] = spatial.spatialGeneration;
+		sceneJson["residencyGeneration"] = residency.generation;
+		sceneJson["regions"] = nlohmann::json::array();
+		for(const auto& [key, region] : residency.residentRegions)
+		{
+			if(!region) continue;
+			TerraEngine::Scene::WorldRegionArtifactManifest manifest;
+			manifest.key = key; manifest.contentHash = region->contentHash; manifest.sourceGeneration = residency.generation;
+			sceneJson["regions"].push_back(TerraEngine::Scene::SerializeWorldRegionArtifactManifest(manifest));
+		}
+		sceneJson["name"] = ticket.name;
+		sceneJson["sceneSettings"] = Serializer::SerializeSceneRenderSettings(ticket.settings);
+		sceneJson["objects"] = nlohmann::json::array();
+		const auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objects);
+		// Metadata setters have per-object generations rather than one global
+		// token. Capture them too so rename/tag/layer edits cannot be missed.
+		ticket.objectRevisions.reserve(graph.objects.size());
+		for(const auto& [id, record] : graph.objects)
+		{
+			const auto object = objects.getObject(id);
+			if(!object) { lastSaveResult.reason = "Object disappeared during authored capture."; return false; }
+			ticket.objectRevisions.push_back({id, objects.getObjectLifetimeGeneration(*object), objects.getObjectMetadataGeneration(*object)});
+		}
+		for(const auto& diagnostic : graph.diagnostics)
+		{
+			if(diagnostic.severity == TerraEngine::Scene::SceneDiagnosticSeverity::Error
+				|| diagnostic.severity == TerraEngine::Scene::SceneDiagnosticSeverity::Fatal)
+			{
+				lastSaveResult.reason = TerraEngine::Scene::FormatSceneDiagnostic(diagnostic);
+				return false;
 			}
 		}
+		for(const auto& rootId : graph.rootObjects)
+		{
+			if(auto root = objects.getObject(rootId)) sceneJson["objects"].push_back(Serializer::SerializeObject(*root));
+			else { lastSaveResult.reason = "Scene root disappeared during authored capture."; return false; }
+		}
+		if(!checkpoint(AtomicFileWriteStage::Serialize)) return false;
+		if(!Serializer::ValidateUnboundedSceneDocument(sceneJson, &lastSaveResult.reason)) return false;
+		// JSON's text serializer silently writes nonfinite floating values as
+		// null. Reject them explicitly so an invalid authored field cannot become
+		// a superficially successful save with changed component meaning. Use an
+		// iterative walk so deep custom component JSON does not consume the stack.
+		std::vector<const nlohmann::json*> pendingValues{&sceneJson};
+		while(!pendingValues.empty())
+		{
+			const auto* value = pendingValues.back(); pendingValues.pop_back();
+			if(value->is_number_float() && !std::isfinite(value->get<double>()))
+			{ lastSaveResult.reason = "Authored scene contains a nonfinite numeric value."; return false; }
+			if(value->is_structured())
+			{
+				for(const auto& child : *value) pendingValues.push_back(&child);
+			}
+		}
+		// dump is intentionally before any staging open. It validates text and
+		// can throw for invalid UTF-8 or allocations without touching old bytes.
+		std::string completeBytes = sceneJson.dump(4);
+		if(!revisionsMatch()
+			|| TerraEngine::Scene::WorldSpatialSystem::Instance().CurrentSnapshot().spatialGeneration != spatial.spatialGeneration
+			|| TerraEngine::Scene::WorldStreamingSystem::Instance().CurrentResidency().generation != residency.generation)
+		{
+			lastSaveResult.reason = "Scene or published spatial/residency revision changed during authored capture.";
+			return false;
+		}
+		{
+			std::shared_lock lock(sceneCache.mutex);
+			const auto it = sceneCache.resources.find(ticket.sceneId);
+			if(it == sceneCache.resources.end() || !it->second || it->second->saveIdentity != ticket.documentIdentity)
+			{ lastSaveResult.reason = "Scene document owner changed during authored capture."; return false; }
+		}
+		// Cache JSON and text already own all required allocations. After disk
+		// commit publication uses swaps and cannot turn success into false.
+		auto sourceKey = std::filesystem::absolute(ticket.sourcePath).lexically_normal().wstring();
+		auto targetKey = transaction.Target().wstring();
+#if defined(_WIN32)
+		// Windows source paths are case-insensitive even when a Save As caller
+		// uses a different spelling of the original path.
+		std::transform(sourceKey.begin(), sourceKey.end(), sourceKey.begin(), [](wchar_t c) { return std::towlower(c); });
+		std::transform(targetKey.begin(), targetKey.end(), targetKey.begin(), [](wchar_t c) { return std::towlower(c); });
+#endif
+		const bool updatesSourceCache = sourceKey == targetKey;
+		bool publicationUnchanged = true;
+		AtomicFileWriteOptions checkedOptions;
+		checkedOptions.checkpoint = [&](AtomicFileWriteStage stage, const std::filesystem::path& destination)
+		{
+			std::string rejection = options.checkpoint ? options.checkpoint(stage, destination) : std::string{};
+			if(stage == AtomicFileWriteStage::Replace && rejection.empty())
+			{
+				// Snapshot copies can allocate, so do this last publication observation
+				// before replacement. Postcommit adoption then needs only scalar tokens.
+				publicationUnchanged = TerraEngine::Scene::WorldSpatialSystem::Instance().CurrentSnapshot().spatialGeneration == spatial.spatialGeneration
+					&& TerraEngine::Scene::WorldStreamingSystem::Instance().CurrentResidency().generation == residency.generation;
+			}
+			return rejection;
+		};
+		lastSaveResult = transaction.Commit(completeBytes, checkedOptions);
+		if(!lastSaveResult.committed) return false;
+		{
+			std::unique_lock lock(sceneCache.mutex);
+			const auto it = sceneCache.resources.find(ticket.sceneId);
+			const bool sameOwner = it != sceneCache.resources.end() && it->second
+				&& it->second->saveIdentity == ticket.documentIdentity;
+			if(sameOwner && updatesSourceCache)
+			{
+				it->second->parsedJson.swap(sceneJson);
+				it->second->jsonContents.swap(completeBytes);
+				it->second->preparedScene.reset();
+			}
+			if(sameOwner && publicationUnchanged && revisionsMatch())
+			{
+				activeSceneDirty = false;
+				activeSceneSettingsDirty = false;
+			}
+		}
+		return true;
 	}
-
-	// Resetting the dirty flag after a successful disk write ensures the editor
-	// UI accurately reflects that the current state is safely persisted.
-	ClearActiveSceneDirty();
-	
-	return true;
+	catch(const std::exception& error)
+	{
+		// A rare postcommit synchronization error cannot undo an already saved
+		// file. Keep dirty state and report truthful committed status to callers.
+		if(lastSaveResult.committed) return true;
+		lastSaveResult.reason = error.what();
+	}
+	catch(...)
+	{
+		if(lastSaveResult.committed) return true;
+		lastSaveResult.reason = "Unknown authored scene save failure.";
+	}
+	return false;
 }
 
 std::vector<std::filesystem::path> SceneManager::ListSceneFiles(const std::filesystem::path& projectRoot) const
@@ -760,6 +858,7 @@ void SceneManager::UnloadAll()
 	}
 
 	activeSceneId = TerraEngine::EMPTY_UUID;
+	++activeSceneAuthoredRevision;
 	activeSceneDirty = false;
 	activeSceneSettingsDirty = false;
 	activeSceneRenderSettings = MakeDefaultSceneRenderSettings();
@@ -824,6 +923,7 @@ void SceneManager::NullifyAssetReferences(const TerraEngine::UUID& assetId)
 			if (changed)
 			{
 				activeSceneDirty = true;
+				++activeSceneAuthoredRevision;
 			}
 		}
 	);

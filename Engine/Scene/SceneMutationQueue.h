@@ -94,6 +94,11 @@ namespace TerraEngine::Scene {
 		std::string sourceBindingId;
 		std::uint64_t sourceFrameOrder = 0;
 		std::vector<SceneDiagnostic> diagnostics;
+		// Original request identity remains stable even when native lowering emits
+		// several operations. Informational unsupported requests have an empty span.
+		std::size_t nativeOperationBegin = 0U;
+		std::size_t nativeOperationCount = 0U;
+		std::size_t appliedWriteCount = 0U;
 	};
 
 	// Navigation observes committed source changes through copied values. Producers
@@ -210,6 +215,9 @@ namespace TerraEngine::Scene {
 		std::vector<TransactionResult> DrainCompletedEditorTransactionResults();
 		std::vector<EditorTransactionCompletion> DrainCompletedEditorTransactions();
 		std::vector<NavigationSourceMutationReceipt> DrainCompletedNavigationSourceMutationReceipts();
+		// Fatal group publication cannot return its normal batch. This channel
+		// retains those terminal group receipts until one consumer takes them.
+		std::vector<TransactionPublicationGroupResult> TakeCompletedPublicationGroupResults();
 		TransactionDiagnostics GetTransactionDiagnostics() const;
 		void Clear();
 		SceneMutationBatchResult Validate(const SceneGraph& graph) const;
@@ -219,6 +227,16 @@ namespace TerraEngine::Scene {
 		std::vector<TransactionPublicationGroupResult> DrainPublicationGroups(ObjectManager& objects);
 
 	private:
+		// Prepared drains operate on the boundary-owned cohort while diagnostics
+		// and terminal producer/history receipts remain with this queue owner.
+		std::vector<SceneMutationRequest> SnapshotRequests(bool coalesce) const;
+		std::vector<TransactionResult> DrainPreparedTransactions(ObjectManager& objects, std::vector<Transaction>& pending,
+			std::vector<NavigationSourceMutationIntent>& intents);
+		std::vector<TransactionPublicationGroupResult> DrainPreparedPublicationGroups(ObjectManager& objects,
+			std::vector<TransactionPublicationGroup>& pending, std::vector<NavigationSourceMutationIntent>& intents);
+		void RestorePendingIntents(std::vector<NavigationSourceMutationIntent>& intents);
+		void CancelPreparedExecution(std::vector<Transaction>& pending, std::vector<TransactionPublicationGroup>& groups,
+			std::vector<NavigationSourceMutationIntent>& intents);
 		std::vector<SceneMutationRequest> requests;
 		std::vector<SceneMutationWorkerBuffer> workerBuffers;
 		std::vector<Transaction> transactions;
@@ -230,6 +248,7 @@ namespace TerraEngine::Scene {
 		std::uint64_t nextNavigationSourceChangeSequence = 1U;
 		std::vector<EditorTransactionCompletion> completedEditorTransactions;
 		std::vector<NavigationSourceMutationReceipt> completedNavigationSourceMutationReceipts;
+		std::vector<TransactionPublicationGroupResult> completedPublicationGroupResults;
 		TransactionDiagnostics transactionDiagnostics;
 		mutable std::mutex requestsMutex;
 	};

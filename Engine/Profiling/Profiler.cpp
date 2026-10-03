@@ -1268,6 +1268,48 @@ void Profiler::BeginFrame(bool playModeActive)
 	UpdateFastRecordingFlagsLocked();
 }
 
+void Profiler::AbandonFrameAfterFailure() noexcept
+{
+	// Disarm first, outside fallible lock acquisition. Unwinding scopes and task
+	// instrumentation must observe an invalid token even if cleanup itself fails.
+	frameRecordingActive.store(false, std::memory_order_release);
+	markerRecordingActive.store(false, std::memory_order_release);
+	taskRecordingActive.store(false, std::memory_order_release);
+	hotPath->activeFrameToken.store(0u, std::memory_order_release);
+	hotPath->activeFrameStartNanoseconds.store(0, std::memory_order_release);
+	hotPath->excludedEditorNanoseconds.store(0, std::memory_order_release);
+	try
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		currentFrame.reset();
+		currentDeferredSamples.reset();
+		queuedTaskCount = startedTaskCount = finishedTaskCount = 0u;
+		droppedSampleCount = truncatedSampleLabelCount = lateSampleCount = 0u;
+		// Graph work is settled: consume producer rings in place without the
+		// allocating snapshot used by ordinary session replacement. Producer-owned
+		// open stacks reset on their next token bind; no worker stack is mutated.
+		std::lock_guard<std::mutex> registryLock(hotPath->registryMutex);
+		for (const auto& buffer : hotPath->registeredBuffers)
+		{
+			buffer->readSequence.store(buffer->writeSequence.load(std::memory_order_acquire), std::memory_order_release);
+			buffer->queuedTasks.store(0u, std::memory_order_relaxed);
+			buffer->startedTasks.store(0u, std::memory_order_relaxed);
+			buffer->finishedTasks.store(0u, std::memory_order_relaxed);
+			buffer->droppedSamples.store(0u, std::memory_order_relaxed);
+			buffer->truncatedLabels.store(0u, std::memory_order_relaxed);
+			buffer->lateSamples.store(0u, std::memory_order_relaxed);
+		}
+		hotPath->rejectedThreadBuffers.store(0u, std::memory_order_relaxed);
+		hotPath->rejectedThreadBufferFrameToken.store(0u, std::memory_order_release);
+		snapshotRevision.fetch_add(1u, std::memory_order_release);
+	}
+	catch (...)
+	{
+		// Failure cleanup cannot replace the coordinator's original exception.
+		// Atomic disarm above is guaranteed; retain existing session evidence.
+	}
+}
+
 // Profiler::EndFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::EndFrame()
 {

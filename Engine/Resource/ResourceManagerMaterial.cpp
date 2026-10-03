@@ -254,106 +254,25 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadMaterialAsync(const s
 // ResourceManager::RegisterMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID ResourceManager::RegisterMaterial(const std::string& cacheKey, std::unique_ptr<Material> material)
 {
-	// Generated materials do not live on disk, so store them under a synthetic key and keep a stable UUID for callers.
-	const std::string normalizedKey = "generated/" + cacheKey;
-	std::unique_lock lock(materialCache.mutex);
-
-	TerraEngine::UUID id = TerraEngine::GenerateUUID();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto existing = materialCache.pathToId.find(normalizedKey); existing != materialCache.pathToId.end())
-	{
-		id = existing->second;
-	}
-	materialCache.pathToId[normalizedKey] = id;
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (material)
-	{
-		materialCache.resources[id] = std::move(material);
-	}
-	else
-	{
-		materialCache.resources.erase(id);
-	}
-	// Generated materials bypass FinalizeLoad, so publish the same renderer
-	// invalidation token here after their complete cache state becomes visible.
-	m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);
-
-	// Clear any stale in-flight futures that may have been waiting on this key.
-	materialCache.inFlight.erase(normalizedKey);
-	return id;
+	// Synthetic publications participate in invalidation and accounting too.
+	return RegisterGenerated(cacheKey, materialCache, std::move(material));
 }
 
-// ResourceManager::ReloadMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::ReloadMaterial(const TerraEngine::UUID& id)
 {
-	std::string key;
-	{
-		std::shared_lock lock(materialCache.mutex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (const auto pathIt = materialCache.idToPath.find(id); pathIt != materialCache.idToPath.end())
-		{
-			key = pathIt->second;
-		}
-	}
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (key.empty())
-	{
-		TERRAENGINE_LOG(LogLevel::Warning, "Cannot reload material: UUID " << ToHexString(id) << " not found in cache path map.");
-		return;
-	}
-
-	// Generated materials cannot be reloaded from disk.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (key.starts_with("generated/"))
-	{
-		return;
-	}
-
-	const std::filesystem::path resolvedPath(key);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!IsCompiledMaterialPath(resolvedPath))
-	{
-		TERRAENGINE_LOG(LogLevel::Debug, "Skipping material reload from non-TMAT path: " << resolvedPath);
-		return;
-	}
-
-	TERRAENGINE_LOG(LogLevel::Debug, "Reloading material from " << resolvedPath);
-	auto material = LoadMaterialFile(*this, resolvedPath);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (material)
-	{
-		std::unique_lock lock(materialCache.mutex);
-		materialCache.resources[id] = std::move(material);
-		// A material becomes renderer-visible only after its complete payload has
-		// replaced the cached value; malformed reloads intentionally publish nothing.
-		m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);
-	}
+	ReloadCached<Material>(id, materialCache, [this](const std::filesystem::path& path) {
+		return IsCompiledMaterialPath(path) ? LoadMaterialFile(*this, path) : std::unique_ptr<Material>{};
+	}, true).get();
 }
 
-bool ResourceManager::ReloadMaterialFromAuthoredPath(
-	const TerraEngine::UUID& id,
+bool ResourceManager::ReloadMaterialFromAuthoredPath(const TerraEngine::UUID& id,
 	const std::filesystem::path& authoredPath)
 {
-	// TMAT source assets already use the runtime binary contract. Loading the
-	// atomically published authored file avoids waiting for the file watcher to
-	// copy the same bytes into Build before an Inspector preview can update.
-	if(id == TerraEngine::EMPTY_UUID || !IsCompiledMaterialPath(authoredPath))
-	{
-		return false;
-	}
-	auto material = LoadMaterialFile(*this, authoredPath);
-	if(!material)
-	{
-		return false;
-	}
-	{
-		std::unique_lock lock(materialCache.mutex);
-		materialCache.resources[id] = std::move(material);
-		// Readers observe the generation only after the complete replacement owns
-		// all spans into its new storage buffer.
-		m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);
-	}
-	return true;
+	if (id == TerraEngine::EMPTY_UUID || !IsCompiledMaterialPath(authoredPath)) return false;
+	// The preview reads detached authored bytes but competes for the registered
+	// runtime key. A watcher or another preview admitted later supersedes it.
+	const auto capturedPath = ResolveAssetPath(authoredPath);
+	return ReloadCached<Material>(id, materialCache, [this, capturedPath](const std::filesystem::path&) {
+		return LoadMaterialFile(*this, capturedPath);
+	}, true).get() == id;
 }

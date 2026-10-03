@@ -8,6 +8,7 @@
 #pragma once
 
 #include <memory>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <shared_mutex>
@@ -27,6 +28,27 @@
 #include "Reflection.h"
 #include "Object.h"
 #include "Utilities/UUID.h"
+
+// Eligibility names concrete audited types, never a user-controlled registry
+// string. Third-party components must explicitly attest to side-effect safety.
+class Transform;
+class ScriptComponent;
+class UIComponent;
+struct AnimatorComponent;
+struct NavigationAgentComponent;
+struct CharacterLocomotionComponent;
+struct RigidBodyComponent;
+struct ColliderSetComponent;
+struct ConstraintSetComponent;
+struct CharacterControllerComponent;
+struct AudioSourceComponent;
+struct AudioListenerComponent;
+struct CameraComponent;
+struct MeshRenderComponent;
+struct LightComponent;
+struct SkyComponent;
+struct PrefabLinkComponent;
+struct TerrainComponent;
 
 // Helper utilities that keep the CRTP component base lightweight while still
 // allowing each component to expose metadata through the shared reflection
@@ -128,6 +150,36 @@ inline std::string component_name_for()
 
 // Type-erased property hooks that allow runtime access to any component
 // registered through the Component CRTP without exposing the concrete type.
+// Prepared values own concrete component copies, not JSON or live pointers.
+// Preparation may throw; restoration assigns into retained storage without
+// calling reflected setters, registering types, or allocating new state.
+struct PreparedComponentValue {
+	virtual ~PreparedComponentValue() = default;
+	virtual void Apply(entt::registry& registry, entt::entity entity) = 0;
+	virtual bool Restore(entt::registry& registry, entt::entity entity) noexcept = 0;
+	virtual std::shared_ptr<PreparedComponentValue> Copy() const = 0;
+};
+
+template<typename T>
+struct TypedPreparedComponentValue final : PreparedComponentValue {
+	T value;
+	explicit TypedPreparedComponentValue(const T& source) : value(source) {}
+	std::shared_ptr<PreparedComponentValue> Copy() const override {
+		return std::make_shared<TypedPreparedComponentValue<T>>(value);
+	}
+	void Apply(entt::registry& registry, entt::entity entity) override {
+		if (!registry.any_of<T>(entity)) registry.emplace<T>(entity);
+		registry.get<T>(entity) = std::move(value);
+	}
+	bool Restore(entt::registry& registry, entt::entity entity) noexcept override {
+		static_assert(std::is_nothrow_move_assignable_v<T>);
+		T* destination = registry.valid(entity) ? registry.try_get<T>(entity) : nullptr;
+		if (!destination) return false;
+		*destination = std::move(value);
+		return true;
+	}
+};
+
 struct ComponentAccessFunctions
 {
 	// Store the reflected type from the engine module so editor code can query
@@ -147,6 +199,18 @@ struct ComponentAccessFunctions
 	std::function<void(entt::registry&, entt::entity)> entityRemoveComponent;
 	std::function<nlohmann::json(entt::registry&, entt::entity)> entitySerialize;
 	std::function<void(entt::registry&, entt::entity, const nlohmann::json&)> entityDeserialize;
+	// Only audited authored components, or explicit custom opt-ins, receive
+	// these hooks. Copy/move traits alone do not prove setter side-effect safety.
+	std::function<std::shared_ptr<PreparedComponentValue>(entt::registry&, entt::entity)> capturePrepared;
+	std::function<std::shared_ptr<PreparedComponentValue>(const nlohmann::json&, std::string&)> decodePrepared;
+	std::function<std::shared_ptr<PreparedComponentValue>(entt::registry&, entt::entity,
+		std::string_view, const TerraEngine::Reflection::Variant&, std::string&)> prepareProperty;
+	// Ordered preparation feeds the preceding detached value to each setter,
+	// so several edits preserve each other without writing any live component.
+	std::function<std::shared_ptr<PreparedComponentValue>(const PreparedComponentValue&,
+		std::string_view, const TerraEngine::Reflection::Variant&, std::string&)> prepareDetachedProperty;
+	std::function<std::shared_ptr<PreparedComponentValue>(const PreparedComponentValue&,
+		std::string_view, std::string&)> prepareDetachedScriptBinding;
 	// Declarations are copied during component type registration. The editor can
 	// publish them later without naming this component in a central dispatcher.
 	std::vector<ComponentAutomationDeclaration> automationDeclarations;
@@ -188,6 +252,147 @@ void RegisterComponentAccess(const std::string& name)
 
 	ComponentAccessFunctions functions;
 	functions.reflectionType = TerraEngine::Reflection::ResolveType<ComponentType>();
+	constexpr bool auditedBuiltin = std::is_same_v<ComponentType, Transform> || std::is_same_v<ComponentType, AnimatorComponent>
+		|| std::is_same_v<ComponentType, NavigationAgentComponent> || std::is_same_v<ComponentType, CharacterLocomotionComponent>
+		|| std::is_same_v<ComponentType, RigidBodyComponent> || std::is_same_v<ComponentType, ColliderSetComponent>
+		|| std::is_same_v<ComponentType, ConstraintSetComponent> || std::is_same_v<ComponentType, CharacterControllerComponent>
+		|| std::is_same_v<ComponentType, AudioSourceComponent> || std::is_same_v<ComponentType, AudioListenerComponent>
+		|| std::is_same_v<ComponentType, CameraComponent> || std::is_same_v<ComponentType, MeshRenderComponent>
+		|| std::is_same_v<ComponentType, LightComponent> || std::is_same_v<ComponentType, SkyComponent>
+		|| std::is_same_v<ComponentType, ScriptComponent> || std::is_same_v<ComponentType, PrefabLinkComponent>
+		|| std::is_same_v<ComponentType, TerrainComponent> || std::is_same_v<ComponentType, UIComponent>;
+	static_assert(!auditedBuiltin || (std::is_copy_constructible_v<ComponentType>
+		&& std::is_nothrow_move_constructible_v<ComponentType> && std::is_nothrow_move_assignable_v<ComponentType>
+		&& std::is_nothrow_destructible_v<ComponentType>),
+		"Audited built-in authoring must retain a copy and restore/remove without throwing.");
+	bool optedIn = auditedBuiltin;
+	if constexpr (requires { ComponentType::kTransactionalAuthoringSafe; }) {
+		optedIn = optedIn || ComponentType::kTransactionalAuthoringSafe;
+	}
+	// Retained values can be moved back and newly added values can be removed
+	// during abort without invoking a fallible component destructor.
+	if constexpr (std::is_copy_constructible_v<ComponentType> && std::is_nothrow_move_constructible_v<ComponentType>
+		&& std::is_nothrow_move_assignable_v<ComponentType>
+		&& std::is_nothrow_destructible_v<ComponentType>) {
+		if (optedIn) {
+			functions.capturePrepared = [](entt::registry& registry, entt::entity entity) {
+				const auto& source = registry.get<ComponentType>(entity);
+				auto lock = source.acquireReadLock();
+				return std::make_shared<TypedPreparedComponentValue<ComponentType>>(source);
+			};
+			functions.decodePrepared = [](const nlohmann::json& json, std::string& reason)
+				-> std::shared_ptr<PreparedComponentValue> {
+				if (!json.is_object()) { reason = "Authored component must be an object."; return {}; }
+				ComponentType candidate;
+				if constexpr (requires { ComponentType::DeserializeAuthored(candidate, json); }) {
+					if (!ComponentType::DeserializeAuthored(candidate, json)) {
+						reason = "Invalid custom authored component payload."; return {};
+					}
+				} else {
+					const auto type = TerraEngine::Reflection::ResolveType<ComponentType>();
+					for (const auto& [key, source] : json.items()) {
+						const auto prop = TerraEngine::Reflection::FindProperty(type, key);
+						if (!TerraEngine::Reflection::IsValid(prop)) {
+							reason = "Unknown authored component property: " + key; return {};
+						}
+						const auto expected = TerraEngine::Reflection::GetPropertyType(prop);
+						TerraEngine::Reflection::Variant value;
+						if (TerraEngine::Reflection::IsType<float>(expected) && source.is_number()) value = source.get<float>();
+						else if (TerraEngine::Reflection::IsType<int>(expected) && source.is_number_integer()
+							&& source.get<double>() >= std::numeric_limits<int>::min() && source.get<double>() <= std::numeric_limits<int>::max()) value = source.get<int>();
+						else if (TerraEngine::Reflection::IsType<std::uint32_t>(expected) && source.is_number_integer()
+							&& source.get<double>() >= 0.0 && source.get<double>() <= std::numeric_limits<std::uint32_t>::max()) value = source.get<std::uint32_t>();
+						else if (TerraEngine::Reflection::IsType<bool>(expected) && source.is_boolean()) value = source.get<bool>();
+						else if (TerraEngine::Reflection::IsType<std::string>(expected) && source.is_string()) value = source.get<std::string>();
+						else if (TerraEngine::Reflection::IsType<TerraEngine::UUID>(expected) && source.is_string()) {
+							const auto id = TerraEngine::ParseUUID(source.get<std::string>()); if (id) value = *id;
+						} else if (TerraEngine::Reflection::IsType<glm::vec3>(expected) && source.is_array() && source.size() == 3
+							&& source[0].is_number() && source[1].is_number() && source[2].is_number()) {
+							value = glm::vec3(source[0].get<float>(), source[1].get<float>(), source[2].get<float>());
+						} else if (TerraEngine::Reflection::IsType<glm::quat>(expected) && source.is_array() && source.size() == 4
+							&& source[0].is_number() && source[1].is_number() && source[2].is_number() && source[3].is_number()) {
+							value = glm::quat(source[0].get<float>(), source[1].get<float>(), source[2].get<float>(), source[3].get<float>());
+						}
+						if (TerraEngine::Reflection::IsType<float>(value) && !std::isfinite(TerraEngine::Reflection::GetValue<float>(value))) {
+							reason = "Nonfinite authored numeric property: " + key; return {};
+						}
+						if constexpr (std::is_same_v<ComponentType, ScriptComponent>) {
+							if (key == "BindingsJson") {
+								if (!source.is_string() || !nlohmann::json::parse(source.get<std::string>()).is_array()) {
+									reason = "Script bindings require a serialized array."; return {};
+								}
+							}
+						}
+						if (!TerraEngine::Reflection::IsValid(value) || !TerraEngine::Reflection::SetPropertyValue(prop, candidate, value)) {
+							reason = "Invalid authored property value: " + key; return {};
+						}
+						if constexpr (std::is_same_v<ComponentType, ScriptComponent>) {
+							if (key == "BindingsJson" && candidate.GetBindings().size() != nlohmann::json::parse(source.get<std::string>()).size()) {
+								reason = "Malformed authored script binding record."; return {};
+							}
+						}
+					}
+				}
+				return std::make_shared<TypedPreparedComponentValue<ComponentType>>(candidate);
+			};
+			functions.prepareDetachedProperty = [](const PreparedComponentValue& previous,
+				std::string_view property, const TerraEngine::Reflection::Variant& incoming, std::string& reason)
+				-> std::shared_ptr<PreparedComponentValue> {
+				const auto prop = TerraEngine::Reflection::FindProperty(
+					TerraEngine::Reflection::ResolveType<ComponentType>(), property);
+				// Use the same checked reflection conversion as transaction preflight,
+				// preserving existing typed numeric-property compatibility.
+				auto converted = TerraEngine::Reflection::IsValid(prop)
+					? incoming.allow_cast(TerraEngine::Reflection::GetPropertyType(prop)) : TerraEngine::Reflection::Variant{};
+				if (!TerraEngine::Reflection::IsValid(prop) || !TerraEngine::Reflection::IsValid(converted)) {
+					reason = "Unknown property or mismatched reflected value type.";
+					return {};
+				}
+				if ((TerraEngine::Reflection::IsType<float>(converted) && !std::isfinite(TerraEngine::Reflection::GetValue<float>(converted)))
+					|| (TerraEngine::Reflection::IsType<double>(converted) && !std::isfinite(TerraEngine::Reflection::GetValue<double>(converted)))) {
+					reason = "Authored property contains a nonfinite numeric value."; return {};
+				}
+				if constexpr (std::is_same_v<ComponentType, ScriptComponent>) {
+					if (property == "BindingsJson") {
+						if (!TerraEngine::Reflection::IsType<std::string>(converted)
+							|| !nlohmann::json::parse(TerraEngine::Reflection::GetValue<std::string>(converted)).is_array()) {
+							reason = "Script bindings require a serialized authored array."; return {};
+						}
+					}
+				}
+				const auto* source = dynamic_cast<const TypedPreparedComponentValue<ComponentType>*>(&previous);
+				if (!source) { reason = "Detached component type does not match its authoring hook."; return {}; }
+				auto prepared = std::make_shared<TypedPreparedComponentValue<ComponentType>>(source->value);
+				if (!TerraEngine::Reflection::SetPropertyValue(prop, prepared->value, converted)) {
+					reason = "Detached authored setter rejected its value.";
+					return {};
+				}
+				if constexpr (std::is_same_v<ComponentType, ScriptComponent>) {
+					if (property == "BindingsJson" && prepared->value.GetBindings().size()
+						!= nlohmann::json::parse(TerraEngine::Reflection::GetValue<std::string>(converted)).size()) {
+						reason = "Malformed authored script binding record."; return {};
+					}
+				}
+				return prepared;
+			};
+			functions.prepareProperty = [capture = functions.capturePrepared, prepare = functions.prepareDetachedProperty](
+				entt::registry& registry, entt::entity entity, std::string_view property,
+				const TerraEngine::Reflection::Variant& incoming, std::string& reason) {
+				auto previous = capture(registry, entity);
+				return prepare(*previous, property, incoming, reason);
+			};
+			if constexpr (std::is_same_v<ComponentType, ScriptComponent>) {
+				functions.prepareDetachedScriptBinding = [](const PreparedComponentValue& previous,
+					std::string_view className, std::string& reason) -> std::shared_ptr<PreparedComponentValue> {
+					const auto* source = dynamic_cast<const TypedPreparedComponentValue<ComponentType>*>(&previous);
+					if (!source || className.empty()) { reason = "Script binding requires a safe Script candidate and nonempty class name."; return {}; }
+					auto prepared = std::make_shared<TypedPreparedComponentValue<ComponentType>>(source->value);
+					if (!prepared->value.HasBinding(className)) prepared->value.AddBinding(TerraEngine::EMPTY_UUID, className);
+					return prepared;
+				};
+			}
+		}
+	}
 	if constexpr (component_has_automation_declarations<ComponentType>::value)
 	{
 		functions.automationDeclarations = ComponentType::automation();
@@ -514,7 +719,9 @@ public:
 		registerType();
 	}
 
-	Component(Component&&) noexcept = default;
+	// A mutex belongs to its physical component instance. Move only authored
+	// base state; never transfer locks or invoke registration during rollback.
+	Component(Component&& other) noexcept : active(other.active) {}
 	~Component() = default;
 
 	Component& operator=(const Component& other)
@@ -535,7 +742,10 @@ public:
 		return *this;
 	}
 
-	Component& operator=(Component&&) noexcept = default;
+	Component& operator=(Component&& other) noexcept {
+		active = other.active;
+		return *this;
+	}
 
 	// registerType is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	static void registerType()

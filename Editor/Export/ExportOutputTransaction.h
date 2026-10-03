@@ -10,6 +10,9 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <memory>
+
+class ExportCancellationState;
 
 /// Identifies the current visibility state of one output transaction.
 enum class ExportOutputTransactionState {
@@ -71,6 +74,9 @@ public:
 	/// Overwrites matching destination files from validated staging while keeping
 	/// the destination directory identity and every unmentioned path intact.
 	[[nodiscard]] bool Commit(std::string& error);
+	// Cancellation accepted before this protected publication wins. A completed
+	// commit permanently rejects later cancellation without relabeling success.
+	[[nodiscard]] bool Commit(std::string& error, const std::shared_ptr<ExportCancellationState>& cancellation);
 
 	/// Removes this run's private files and restores any backed-up prior output.
 	/// Calling Rollback after a successful Commit only performs leftover cleanup.

@@ -14,9 +14,12 @@
 #include <nlohmann/json.hpp>
 #include <cstdint>
 #include <optional>
+#include <memory>
 #include <functional>
 #include <string>
 #include <vector>
+
+struct ComponentAccessFunctions;
 
 namespace TerraEngine::Scene {
 	// Authored files must identify this exact contract.  We deliberately do not
@@ -46,6 +49,24 @@ namespace TerraEngine::Scene {
 // Static utility class that handles converting live Engine objects into JSON
 // documents and reconstructing them. This is used for scene saving and the
 // Undo/Redo system to capture state snapshots.
+struct PreparedComponentValue;
+
+// Strict transaction restoration owns decoded concrete component values and
+// validated metadata. Parent indices make graph application ordered and avoid
+// retaining recursive JSON in the protected application path.
+struct PreparedObjectRestore {
+	struct Node {
+		TerraEngine::UUID id = TerraEngine::EMPTY_UUID;
+		std::string name, tag, layer;
+		bool active = true, isStatic = false;
+		std::optional<std::size_t> parent;
+		std::vector<std::pair<std::string, std::shared_ptr<PreparedComponentValue>>> components;
+	};
+	bool accepted = false;
+	std::string reason;
+	std::vector<Node> nodes;
+};
+
 class Serializer {
 public:
 	// Recursively converts an object and all its components/children into a
@@ -76,6 +97,18 @@ public:
 	// are restored if present in the source data.
 	static entt::entity DeserializeObjectEntity(const nlohmann::json& json, std::optional<entt::entity> parent = std::nullopt);
 	static Object DeserializeObject(const nlohmann::json& json, std::optional<Object> parent = std::nullopt);
+	// The caller supplies its transaction node budget. Iterative traversal keeps
+	// hostile/deep restoration input from consuming unbounded stack or storage.
+	static PreparedObjectRestore PrepareObjectRestore(const nlohmann::json& json, std::size_t maximumNodes);
+	static entt::entity ApplyPreparedObjectRestore(PreparedObjectRestore& prepared);
+	static std::shared_ptr<PreparedComponentValue> PrepareComponentRestore(
+		const std::string& name, const nlohmann::json& data, std::string& reason);
+	static nlohmann::json SerializeComponentAuthored(const std::string& name, entt::registry& registry, entt::entity entity);
+	// Protected callers holding the registration lock supply their captured access
+	// so history capture cannot recursively acquire a nonrecursive registry mutex.
+	static nlohmann::json SerializeComponentAuthored(const std::string& name, entt::registry& registry,
+		entt::entity entity, const ComponentAccessFunctions& access);
+
 
 	// Extract a deterministic, value-only scene table from authored JSON.  The
 	// optional cancellation callback is safe to invoke on a worker thread; this

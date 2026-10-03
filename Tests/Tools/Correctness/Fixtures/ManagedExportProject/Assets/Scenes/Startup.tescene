@@ -1,0 +1,179 @@
+{
+	"format": "TerraSceneUnboundedV1",
+	"name": "Installed Correctness Startup",
+	"objects": [
+		{
+			"uuid": "61000000000000000000000000000001",
+			"name": "Correctness Camera",
+			"components": {
+				"Transform": {
+					"WorldPose": {
+						"position": {
+							"cell": {
+								"y": "0",
+								"x": "0",
+								"z": "0"
+							},
+							"offsetMetres": [
+								0.0,
+								1.0,
+								4.0
+							]
+						},
+						"rotation": [
+							1.0,
+							0.0,
+							0.0,
+							0.0
+						],
+						"scale": [
+							1.0,
+							1.0,
+							1.0
+						]
+					},
+					"ParentRelativePose": {
+						"translationMetres": [
+							0.0,
+							1.0,
+							4.0
+						],
+						"rotation": [
+							1.0,
+							0.0,
+							0.0,
+							0.0
+						],
+						"scale": [
+							1.0,
+							1.0,
+							1.0
+						],
+						"transformSpaceId": 0
+					}
+				},
+				"CameraComponent": {
+					"aspectRatio": 1.7777778,
+					"verticalFovDegrees": 60.0,
+					"farPlane": 100.0,
+					"up": [
+						0.0,
+						1.0,
+						0.0
+					],
+					"nearPlane": 0.1
+				}
+			}
+		},
+		{
+			"uuid": "61000000000000000000000000000002",
+			"name": "Correctness Healthy Callback",
+			"components": {
+				"Transform": {
+					"WorldPose": {
+						"position": {
+							"cell": {
+								"y": "0",
+								"x": "0",
+								"z": "0"
+							},
+							"offsetMetres": [
+								0.0,
+								0.0,
+								0.0
+							]
+						},
+						"rotation": [
+							1.0,
+							0.0,
+							0.0,
+							0.0
+						],
+						"scale": [
+							1.0,
+							1.0,
+							1.0
+						]
+					},
+					"ParentRelativePose": {
+						"translationMetres": [
+							0.0,
+							0.0,
+							0.0
+						],
+						"rotation": [
+							1.0,
+							0.0,
+							0.0,
+							0.0
+						],
+						"scale": [
+							1.0,
+							1.0,
+							1.0
+						],
+						"transformSpaceId": 0
+					}
+				},
+				"Script": {
+					"BindingsJson": "[{\"bindingId\":\"62000000000000000000000000000001\",\"assetGuid\":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],\"className\":\"CorrectnessHealthyScript\",\"enabled\":true,\"orderIndex\":0,\"serializedValues\":[],\"authoredStateVersion\":1}]"
+				}
+			}
+		},
+		{
+			"uuid": "61000000000000000000000000000003",
+			"name": "Correctness Controlled Fault",
+			"components": {
+				"Transform": {
+					"WorldPose": {
+						"position": {
+							"cell": {
+								"y": "0",
+								"x": "0",
+								"z": "0"
+							},
+							"offsetMetres": [
+								1.0,
+								0.0,
+								0.0
+							]
+						},
+						"rotation": [
+							1.0,
+							0.0,
+							0.0,
+							0.0
+						],
+						"scale": [
+							1.0,
+							1.0,
+							1.0
+						]
+					},
+					"ParentRelativePose": {
+						"translationMetres": [
+							1.0,
+							0.0,
+							0.0
+						],
+						"rotation": [
+							1.0,
+							0.0,
+							0.0,
+							0.0
+						],
+						"scale": [
+							1.0,
+							1.0,
+							1.0
+						],
+						"transformSpaceId": 0
+					}
+				},
+				"Script": {
+					"BindingsJson": "[{\"bindingId\":\"62000000000000000000000000000002\",\"assetGuid\":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],\"className\":\"CorrectnessControlledFaultScript\",\"enabled\":true,\"orderIndex\":0,\"serializedValues\":[],\"authoredStateVersion\":1}]"
+				}
+			}
+		}
+	]
+}

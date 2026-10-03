@@ -81,6 +81,7 @@
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Utilities/UUID.h"
 #include "ThreadPool/ThreadPool.h"
+#include "Editor/Export/EditorExportOperationController.h"
 
 #include <algorithm>
 #include <array>
@@ -3218,7 +3219,12 @@ namespace TerraEngine::Editor::Automation
 			return BuildError(requestId, ErrorCategory::UnsupportedCapability, "Capability version is not registered.");
 		}
 		std::string schemaError;
-		if (capability->descriptor.execution.workerPreparation && ThreadPool::instance().getThreadCount() > 0u)
+		// Schema validation is bounded owner preparation while an export occupies
+		// the shared pool. Waiting for a queued schema task here can starve cancel,
+		// duplicate admission and job observation when the pool has one worker.
+		const bool exportOwnsWorker = editorContext && editorContext->exportController
+			&& editorContext->exportController->HasPendingOperation();
+		if (capability->descriptor.execution.workerPreparation && !exportOwnsWorker && ThreadPool::instance().getThreadCount() > 0u)
 		{
 			// JSON and descriptor copies are immutable, so worker preparation cannot
 			// race the editor state revalidation performed by the handler later.
@@ -6021,6 +6027,12 @@ namespace TerraEngine::Editor::Automation
 		if (operation == AutomationOperation("jobs.cancel"))
 		{
 			const std::string jobId = arguments.value("jobId", std::string{});
+			if (const auto active = activeExportOperations.find(jobId); active != activeExportOperations.end()) {
+				const auto disposition = active->second.controller->RequestCancellation(active->second.operationId);
+				if (disposition == ExportCancellationDisposition::Accepted) (void)jobService.RequestCancellation(jobId);
+				return BuildSuccess(requestId, "Observed export cancellation disposition.", {{"job", SerializeAutomationJob(*jobService.Get(jobId))},
+					{"cancellationDisposition", disposition == ExportCancellationDisposition::Accepted ? "accepted" : disposition == ExportCancellationDisposition::TooLate ? "too_late" : "already_terminal"}});
+			}
 			if (!jobService.RequestCancellation(jobId)) return BuildError(requestId, ErrorCategory::Conflict, "Job cannot be canceled.", jobId);
 			if(const auto cook = activePhysicsCookJobs.find(jobId); cook != activePhysicsCookJobs.end())
 			{
@@ -7424,10 +7436,11 @@ namespace TerraEngine::Editor::Automation
 			const auto path = resolveScenePath(arguments, "path");
 			if (!path) return BuildError(requestId, ErrorCategory::Validation, "Scene path must name a .tescene file under Assets.");
 			if (std::filesystem::exists(*path)) return BuildError(requestId, ErrorCategory::Conflict, "Scene destination already exists.");
-			if (!SceneManager::Instance().SaveScene(*path)) return BuildError(requestId, ErrorCategory::Internal, "Scene save-as failed.");
+			if (!SceneManager::Instance().SaveScene(*path)) return BuildError(requestId, ErrorCategory::Internal,
+				"Scene save-as failed: " + SceneManager::Instance().GetLastSaveResult().reason);
 			// Automation saves participate in the same revision-aware dirty state as
 			// Ctrl+S, so subsequent undo/redo reports the persisted version correctly.
-			UndoRedoSystem::Instance().SetSavePoint();
+			if (!SceneManager::Instance().IsActiveSceneDirty()) UndoRedoSystem::Instance().SetSavePoint();
 			return BuildSuccess(requestId, "Saved scene as a new file.", {{"path", std::filesystem::relative(*path, editorContext->projectManager->GetProjectRoot()).generic_string()}});
 		}
 		if (operation == AutomationOperation("scene.duplicate") || operation == AutomationOperation("scene.rename"))
@@ -7975,6 +7988,41 @@ namespace TerraEngine::Editor::Automation
 		return {{"activity", items}, {"count", items.size()}};
 	}
 
+	void EditorAutomationService::PumpExportJobsAtProtectedFrame()
+	{
+		// The controller polls futures outside service/mailbox locks; all durable
+		// job, activity and frontend effects are serialized by this owner adapter.
+		for (auto iterator = activeExportOperations.begin(); iterator != activeExportOperations.end(); ) {
+			auto& active = iterator->second;
+			active.controller->Poll();
+			const auto observation = active.controller->Observe(active.operationId);
+			if (!observation) { ++iterator; continue; }
+			if (observation->revision != active.revision) {
+				active.revision = observation->revision;
+				(void)jobService.SetState(iterator->first, AutomationJobState::Running, std::string(ToString(observation->progress.stage)));
+				(void)jobService.PublishProgress(iterator->first, observation->progress.overallProgress, std::string(ToString(observation->progress.stage)));
+			}
+			const auto result = active.controller->ConsumeFinal(active.operationId, 2);
+			if (!result) { ++iterator; continue; }
+			for (const auto& diagnostic : result->diagnostics) {
+				(void)jobService.AddDiagnostic(iterator->first, {ExportAutomationSeverity(diagnostic.severity), diagnostic.category, diagnostic.message,
+					{{"stage", diagnostic.stage}, {"code", diagnostic.code}, {"file", diagnostic.filePath}, {"line", diagnostic.line}, {"suggestion", diagnostic.suggestion}}});
+			}
+			if (result->success && !result->outputDirectory.empty()) (void)jobService.AddArtifact(iterator->first,
+				{"export-output-" + result->runId, "export_output", result->outputDirectory.generic_string(), "application/vnd.terraengine.export", {{"profileId", result->profileId}, {"runId", result->runId}}});
+			if (!result->evidenceDirectory.empty()) (void)jobService.AddArtifact(iterator->first,
+				{"export-evidence-" + result->runId, "export_evidence", result->evidenceDirectory.generic_string(), "application/json", {{"runId", result->runId}}});
+			const nlohmann::json terminal{{"success", result->success}, {"canceled", result->canceled}, {"runId", result->runId},
+				{"stage", ToString(result->stage)}, {"failureCategory", ToString(result->failureCategory)}, {"exitCode", result->exitCode}, {"message", result->message},
+				{"outputDirectory", result->outputDirectory.generic_string()}, {"evidenceDirectory", result->evidenceDirectory.generic_string()}};
+			if (result->canceled) (void)jobService.CompleteCanceled(iterator->first, terminal);
+			else if (result->success) (void)jobService.CompleteSucceeded(iterator->first, terminal);
+			else (void)jobService.CompleteFailed(iterator->first, terminal);
+			for (auto& job : exportJobs) if (job.jobId == iterator->first) { job.state = result->canceled ? "canceled" : result->success ? "succeeded" : "failed"; job.progress = observation->progress.overallProgress; }
+			iterator = activeExportOperations.erase(iterator);
+		}
+	}
+
 	std::vector<ExportJob> EditorAutomationService::GetExportJobs() const
 	{
 		return exportJobs;
@@ -8233,11 +8281,14 @@ namespace TerraEngine::Editor::Automation
 			: SceneManager::Instance().SaveScene();
 		if (!saved)
 		{
-			return BuildError(requestId, ErrorCategory::Internal, "Scene save failed.");
+			return BuildError(requestId, ErrorCategory::Internal,
+				"Scene save failed: " + SceneManager::Instance().GetLastSaveResult().reason);
 		}
 		// Store the exact history state that reached disk rather than relying on
 		// SceneManager's temporary dirty-flag clear.
-		UndoRedoSystem::Instance().SetSavePoint();
+		// A complete file can contain an earlier captured revision if a newer
+		// edit arrived during I/O. Keep that newer history dirty until saved too.
+		if (!SceneManager::Instance().IsActiveSceneDirty()) UndoRedoSystem::Instance().SetSavePoint();
 		if (activityCallback)
 		{
 			activityCallback(ActivityEventType::Mutation, requestId, "scene.save", "Saved active scene.");
@@ -9414,68 +9465,19 @@ namespace TerraEngine::Editor::Automation
 			}
 			(void)jobService.SetState(job.jobId, AutomationJobState::Preparing, "preparing");
 
-			const std::string durableJobId = job.jobId;
-			auto exportTask = ThreadPool::instance().createTask([this, exportRequest = std::move(exportRequest), durableJobId]() mutable {
-				if (jobService.IsCancellationRequested(durableJobId))
-				{
-					(void)jobService.CompleteCanceled(durableJobId, {{"cancellationBoundary", "before_pipeline"}});
-					return;
-				}
-				(void)jobService.SetState(durableJobId, AutomationJobState::Running, "validation");
-				ExportPipeline pipeline;
-				const ExportResult result = pipeline.Execute(exportRequest, [this, durableJobId](const ExportProgress& progress) {
-					// The job service serializes worker publication internally. Progress
-					// remains monotonic and reconnect-safe while the editor UI stays live.
-					(void)jobService.PublishProgress(durableJobId, progress.overallProgress, std::string(ToString(progress.stage)));
-				});
-
-				for (const ExportDiagnostic& diagnostic : result.diagnostics)
-				{
-					(void)jobService.AddDiagnostic(durableJobId, {
-						ExportAutomationSeverity(diagnostic.severity),
-						diagnostic.category,
-						diagnostic.message,
-						{{"stage", diagnostic.stage}, {"code", diagnostic.code}, {"file", diagnostic.filePath}, {"line", diagnostic.line}, {"suggestion", diagnostic.suggestion}}
-					});
-				}
-				if (!result.outputDirectory.empty())
-				{
-					(void)jobService.AddArtifact(durableJobId, {
-						"export-output-" + result.runId,
-						"export_output",
-						result.outputDirectory.generic_string(),
-						"application/vnd.terraengine.export",
-						{{"profileId", result.profileId}, {"runId", result.runId}}
-					});
-				}
-				if (!result.evidenceDirectory.empty())
-				{
-					(void)jobService.AddArtifact(durableJobId, {
-						"export-evidence-" + result.runId,
-						"export_evidence",
-						result.evidenceDirectory.generic_string(),
-						"application/json",
-						{{"runId", result.runId}}
-					});
-				}
-				const nlohmann::json terminalResult{
-					{"success", result.success},
-					{"runId", result.runId},
-					{"stage", ToString(result.stage)},
-					{"failureCategory", ToString(result.failureCategory)},
-					{"exitCode", result.exitCode},
-					{"message", result.message},
-					{"outputDirectory", result.outputDirectory.generic_string()},
-					{"evidenceDirectory", result.evidenceDirectory.generic_string()}
-				};
-				if (jobService.IsCancellationRequested(durableJobId))
-					(void)jobService.CompleteCanceled(durableJobId, terminalResult);
-				else if (result.success)
-					(void)jobService.CompleteSucceeded(durableJobId, terminalResult);
-				else
-					(void)jobService.CompleteFailed(durableJobId, terminalResult);
-			});
-			ThreadPool::instance().enqueue(exportTask);
+			// Both frontends share the project-owned admission controller. The worker
+			// retains immutable input/shared operation state, never this service.
+			if (!editorContext->exportController) editorContext->exportController = std::make_shared<EditorExportOperationController>();
+			EditorExportOperationRequest operationRequest;
+			operationRequest.request = std::move(exportRequest);
+			operationRequest.projectGeneration = editorContext->exportController->Generation();
+			const auto admission = editorContext->exportController->Admit(std::move(operationRequest));
+			if (!admission.accepted) {
+				(void)jobService.CompleteFailed(job.jobId, {{"category", "conflict"}, {"message", admission.error}});
+				for (auto& retained : exportJobs) if (retained.jobId == job.jobId) retained.state = "failed";
+				return BuildError(requestId, ErrorCategory::Conflict, admission.error);
+			}
+			activeExportOperations[job.jobId] = {editorContext->exportController, admission.operationId, 0};
 		}
 		nlohmann::json accepted = BuildSuccess(requestId, "Accepted export job.", {{"jobId", job.jobId}, {"profile", job.profile}, {"progress", job.progress}, {"state", job.state}, {"pollTool", "jobs.get"}, {"cancelTool", "jobs.cancel"}});
 		accepted["status"] = "accepted";
@@ -9493,6 +9495,15 @@ namespace TerraEngine::Editor::Automation
 		{
 			if (job.jobId == jobId)
 			{
+				const auto active = activeExportOperations.find(jobId);
+				if (active != activeExportOperations.end()) {
+					const auto disposition = active->second.controller->RequestCancellation(active->second.operationId);
+					if (disposition == ExportCancellationDisposition::Accepted) { (void)jobService.RequestCancellation(jobId); job.cancelRequested = true; }
+					return BuildSuccess(requestId, disposition == ExportCancellationDisposition::Accepted ? "Export cancellation requested." : "Export cancellation is too late.",
+						{{"jobId", jobId}, {"state", job.state}, {"cancellationDisposition", disposition == ExportCancellationDisposition::Accepted ? "accepted" : "too_late"}});
+				}
+				// Durable terminal jobs cannot be relabeled after commit/settlement.
+				if (job.state == "succeeded" || job.state == "failed" || job.state == "canceled") return BuildSuccess(requestId, "Export already settled.", {{"jobId", jobId}, {"state", job.state}, {"cancellationDisposition", "already_terminal"}});
 				(void)jobService.RequestCancellation(jobId);
 				job.cancelRequested = true;
 				job.state = "canceled";

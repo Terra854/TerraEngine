@@ -45,6 +45,84 @@ bool WaitForCondition(const std::function<bool()>& predicate)
 
 void RegisterProfilerLifecycleTests(TestRegistry& registry)
 {
+	registry.Add("Engine.ProfilerLifecycle.AbandonedFrameDisarmsOpenSamplesAndPreservesHistory", [](TestContext& context) {
+		using namespace TerraEngine::Profiling;
+		Profiler& profiler = Profiler::Instance();
+		ProfilerCaptureSettings settings;
+		settings.detailLevel = ProfilerCaptureDetailLevel::Detailed;
+		settings.recordMarkers = true;
+		settings.taskExecutionEnabled = true;
+		profiler.Clear();
+		profiler.StartRecording({}, settings);
+		profiler.BeginFrame();
+		profiler.EndFrame();
+		const auto priorFrames = profiler.GetFramesSnapshot();
+		profiler.BeginFrame();
+		const bool sample = profiler.BeginSample("abandoned open sample", ProfilerModuleId::CpuEngine);
+		const bool task = profiler.RecordTaskStarted("abandoned task");
+		context.Expect(sample && task && profiler.IsFrameRecordingActive(), "The failure fixture must begin with actual active samples and task instrumentation.");
+		profiler.AbandonFrameAfterFailure();
+		context.Expect(!profiler.IsFrameRecordingActive() && !profiler.BeginSample("late sample", ProfilerModuleId::CpuEngine)
+			&& !profiler.RecordTaskStarted("late task"), "Failure abandonment must disarm both sample and task admissions.");
+		// Scope unwind occurs after the protected failure boundary. Its old token
+		// must not publish successful evidence or attach to a future clean frame.
+		profiler.RecordTaskFinished(task);
+		if (sample) profiler.EndSample();
+		profiler.EndFrame();
+		profiler.AbandonFrameAfterFailure();
+		context.ExpectEqual(priorFrames.size(), profiler.GetFramesSnapshot().size(), "Abandonment must preserve completed history and discard the incomplete record.");
+		profiler.BeginFrame();
+		const bool clean = profiler.BeginSample("clean successor", ProfilerModuleId::CpuEngine);
+		if (clean) profiler.EndSample();
+		profiler.EndFrame();
+		const auto frames = profiler.GetFramesSnapshot();
+		context.Expect(frames.size() == priorFrames.size() + 1u && frames.back().complete && frames.back().samples.size() == 1u
+			&& frames.back().samples.front().name == "clean successor" && frames.back().samples.front().parentSampleId == 0u,
+			"A subsequent clean frame must not inherit abandoned samples or their ancestry.");
+		(void)profiler.FinishRecording();
+		profiler.StartRecording({}, settings);
+		profiler.BeginFrame(); profiler.EndFrame();
+		const auto replacement = profiler.GetFramesSnapshot();
+		context.Expect(replacement.size() == 1u && replacement.front().complete && replacement.front().samples.empty(), "A clean replacement session must not inherit discarded producer records.");
+		profiler.Clear();
+	});
+
+	registry.Add("Engine.ProfilerLifecycle.AbandonedJournalFramePreservesBufferedEvidence", [](TestContext& context) {
+		using namespace TerraEngine::Profiling;
+		ProfilerThreadPoolSession pool;
+		ProfilerTestSupport::TemporaryWorkspace workspace("ProfilerLifecycleAbandonedJournal");
+		Profiler& profiler = Profiler::Instance();
+		ProfilerCaptureSettings settings;
+		settings.detailLevel = ProfilerCaptureDetailLevel::Detailed;
+		settings.maximumChunkFrames = 8u;
+		settings.maximumChunkBytes = 1024u * 1024u;
+		settings.maximumPendingBytes = 1024u * 1024u;
+		settings.maximumSealedFrameBytes = 1024u * 1024u;
+		profiler.Clear();
+		std::string error;
+		const auto path = workspace.Path("abandoned.teprof");
+		context.Expect(profiler.StartJournalRecording({}, settings, path, error), "The journal abandonment fixture must open: " + error);
+		profiler.BeginFrame(); profiler.EndFrame();
+		profiler.BeginFrame();
+		{
+			ProfilerScope sample("discarded journal sample", ProfilerModuleId::CpuEngine);
+		}
+		profiler.AbandonFrameAfterFailure();
+		profiler.BeginFrame(); profiler.EndFrame();
+		const auto ticket = profiler.FinishRecording();
+		context.Expect(WaitForCondition([&] { return profiler.GetJournalFinalizationStatus(ticket).state == ProfilerJournalFinalizationState::Completed; }), "Buffered valid journal frames must still finalize after abandonment.");
+		ProfilerJournalV1OpenResult index;
+		context.Expect(ReadProfilerJournalV1Index(path, index, error) == ProfilerJournalV1ResultCode::Ok && index.index.size() == 2u,
+			"The journal must retain its two valid frames and omit the discarded frame: " + error);
+		for (const auto& entry : index.index)
+		{
+			ProfilerFrameRecord frame;
+			context.Expect(ReadProfilerJournalV1SelectedFrame(path, entry.frameIndex, frame, error) == ProfilerJournalV1ResultCode::Ok
+				&& frame.complete && frame.samples.empty(), "A durable valid frame must not inherit discarded deferred samples: " + error);
+		}
+		profiler.Clear();
+	});
+
 	registry.Add("Engine.ProfilerLifecycle.JournalFinalizationIsExplicitAndSingleShot", [](TestContext& context) {
 		using namespace TerraEngine::Profiling;
 		ProfilerTestSupport::TemporaryWorkspace workspace("ProfilerLifecycleJournal");

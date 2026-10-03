@@ -58,10 +58,9 @@ namespace TerraEngine::Audio {
 			AudioAuthoringSourceRecord record;
 			record.identity = {objects.getUUID(object), objects.getObjectComponentGeneration(object), 1U};
 			record.clipAssetId = source.clipAssetId;
-			// Audio records remain bounded local inputs. The exact canonical cell is
-			// retained by the spatial publication consumed by future listener frames.
-			record.position = {static_cast<float>(pose->position.offsetMetres.x),
-				static_cast<float>(pose->position.offsetMetres.y), static_cast<float>(pose->position.offsetMetres.z)};
+			// Keep cells and double offsets together until worker listener selection.
+			// Separately converting cell offsets changes the physical separation.
+			record.worldPosition = pose->position;
 			record.volume = source.volume; record.pitch = source.pitch;
 			record.mixGroupId = source.mixGroupId;
 			record.maximumDistance = source.maxDistance; record.spatialBlend = source.spatialBlend; record.priority = source.priority;
@@ -90,10 +89,12 @@ namespace TerraEngine::Audio {
 			if(!pose) return;
 			const glm::vec3 forward = pose->rotation * glm::vec3(0.0F, 0.0F, -1.0F);
 			liveListeners.push_back({objects.getUUID(object), objects.getObjectComponentGeneration(object),
-				{static_cast<float>(pose->position.offsetMetres.x), static_cast<float>(pose->position.offsetMetres.y),
-					static_cast<float>(pose->position.offsetMetres.z)}, {forward.x, forward.y, forward.z}, listener.outputMode, listener.active, listener.eligible});
+				{}, {forward.x, forward.y, forward.z}, listener.outputMode, listener.active, listener.eligible, pose->position});
 		});
-		if(!manualAuthoringSnapshot) { data.sources = std::move(liveSources); data.listeners = std::move(liveListeners); }
+		if(!manualAuthoringSnapshot) {
+			data.coordinateMode = AudioCoordinateMode::CanonicalWorld;
+			data.sources = std::move(liveSources); data.listeners = std::move(liveListeners);
+		}
 		data.frame = frame; data.deltaSeconds = deltaTime; data.masterVolume = mix.Snapshot().master.volume; data.masterMuted = mix.Snapshot().master.muted;
 		// A disabled runtime is also paused for provider/timeline purposes. This is
 		// a second safety boundary for explicit controls racing a Play Mode exit.
@@ -105,20 +106,20 @@ namespace TerraEngine::Audio {
 	TerraEngine::Scheduling::SystemDeclaration AudioSystem::SchedulerDeclaration() {
 		TerraEngine::Scheduling::SystemDeclaration declaration;
 		declaration.name = SystemName(); declaration.phase = "Audio"; declaration.before = {"UISystem", "RenderSystem"};
-		declaration.reads = {"ObjectManager", "RuntimeLayout", "AudioAuthoring"};
+		declaration.reads = {"ObjectManager", "RuntimeLayout", "AudioAuthoring", "Canonical world poses", "Audio listeners", "Audio clip generations"};
 		declaration.writes = {"AudioPreparedFrame", "AudioProvider", "AudioDiagnostics"};
 		declaration.mainThread = true; declaration.requiresFlushedSceneMutations = true;
 		declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
 		declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::Protected;
 		declaration.hardBoundary = true;
-		declaration.safeSubwork = "Partitionable attenuation, listener selection, cursor advancement, and voice ranking over immutable records.";
+		declaration.safeSubwork = "Listener selection, checked canonical localization, attenuation, cursor advancement, and voice ranking over immutable records.";
 		declaration.protectedCommit = "Capture source/listener values, drain typed controls, submit one provider packet, and publish immutable snapshots.";
 		declaration.protectedReason = "Scene capture and audio device calls cannot execute in worker-safe preparation.";
 		declaration.profilingLabel = "Audio"; declaration.omitWhenNoFrameWorkloads = true; declaration.usesDefaultMetadata = false;
 		return declaration;
 	}
 	std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> AudioSystem::DeclareFrameWorkloads(float deltaTime) {
-		auto snapshot = TerraEngine::Scheduling::MakeSnapshotPhase("AudioSnapshot", SystemName(), {"Audio components", "Transforms", "Audio control queue"}, "AudioSnapshot");
+		auto snapshot = TerraEngine::Scheduling::MakeSnapshotPhase("AudioSnapshot", SystemName(), {"Audio components", "Transforms", "Canonical world poses", "Audio listeners", "Audio clip generations", "Audio control queue"}, "AudioSnapshot");
 		snapshot.phase = "Audio";
 		snapshot.stableDescriptorId = "AudioSystem/Audio/AudioSnapshot";
 		snapshot.writes = {"Audio frame snapshot", "Audio receipts"};
@@ -407,8 +408,8 @@ namespace TerraEngine::Audio {
 		diagnostics->failures = failures;
 		diagnostics->controlReceipts = controlReceipts;
 		diagnostics->scheduler = {
-			{"AudioSnapshot", "protected snapshot", "components/transforms/controls", "frame snapshot/receipts", "controls visible to prepare", false, authoring.Data().sources.size()},
-			{"AudioPrepare", "worker prepare", "frame snapshot/prior playback", "prepared plan", "no live mutation", true, authoring.Data().sources.size()},
+			{"AudioSnapshot", "protected snapshot", "components/canonical world poses/listeners/clip generations/controls", "frame snapshot/receipts", "controls visible to prepare", false, authoring.Data().sources.size()},
+			{"AudioPrepare", "worker prepare", "immutable canonical-or-shared-local frame/prior playback", "listener-relative prepared plan", "no live mutation", true, authoring.Data().sources.size()},
 			{"AudioCommit", "protected commit", "prepared plan/observations", "provider/snapshots", "visible after commit", false, prepared.voices.size()}
 		};
 		for(const auto& voice : prepared.voices) {

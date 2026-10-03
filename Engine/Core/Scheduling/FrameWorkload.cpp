@@ -421,6 +421,26 @@ namespace TerraEngine::Scheduling {
 			const std::vector<ScheduledPartition>& scheduledPartitions,
 			bool collectExecutionRecords)
 		{
+			// Map graph partitions back to the owning descriptor. Keep original
+			// failure text/prerequisite evidence instead of a generic frame label.
+			auto mapFailure = [&](const JobGraphDiagnostic& diagnostic) {
+				std::string owner = diagnostic.nodeLabel;
+				for (const auto& partition : scheduledPartitions) {
+					if (partition.jobName == diagnostic.nodeLabel) {
+						owner = plan.results[partition.resultIndex].declaration.workloadName;
+						break;
+					}
+				}
+				return ArchitectureDiagnostic{ArchitectureDiagnosticSeverity::Error,
+					ArchitectureDiagnosticCode::ExecutionFailed, std::move(owner),
+					diagnostic.nodeLabel, diagnostic.message, diagnostic.recommendedAction};
+			};
+			if (summary.firstFailure) plan.firstFailure = mapFailure(*summary.firstFailure);
+			for (const auto& diagnostic : summary.diagnostics) {
+				if (diagnostic.severity == JobGraphDiagnosticSeverity::Error) {
+					plan.diagnostics.push_back(mapFailure(diagnostic));
+				}
+			}
 			std::unordered_map<std::string, JobGraphNodeState> statesByName;
 			std::unordered_map<std::string, const JobGraphResultEntry*> entriesByName;
 			for (const JobGraphResultEntry& entry : summary.jobs)
@@ -1457,7 +1477,7 @@ namespace TerraEngine::Scheduling {
 		}
 		ApplyJobGraphSummary(plan, summary, scheduledPartitions,
 			options.collectExecutionRecords);
-		if (!summary.valid || !plan.completed)
+		if ((!summary.valid || !plan.completed) && !plan.firstFailure)
 		{
 			AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::ExecutionFailed, plan.frameId, "", "Frame workload graph did not complete successfully.", "Inspect JobGraph diagnostics.");
 		}

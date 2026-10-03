@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -283,6 +284,9 @@ namespace TerraEngine::Scheduling {
 		std::vector<FrameWorkloadResult> results;
 		std::vector<FrameWorkloadDependencyEdge> dependencyEdges;
 		std::vector<ArchitectureDiagnostic> diagnostics;
+		// The first failed job is retained before display sorting, with its
+		// original exception and mapped workload owner for terminal diagnostics.
+		std::optional<ArchitectureDiagnostic> firstFailure;
 		// Execution records are bounded value snapshots; they never retain the
 		// std::function callbacks held by workload declarations.
 		std::vector<TerraEngine::Profiling::WorkloadExecutionRecord> executionRecords;

@@ -71,7 +71,9 @@ namespace TerraEngine::Tests {
 
 			context.Expect(!result.applied, "A rejected request should block the whole batch.");
 			context.ExpectEqual(beforeCount, objects.getRootObjects().size(), "Earlier accepted creates should not become visible after a later rejection.");
-			context.ExpectEqual(static_cast<std::size_t>(1), result.rejectedMutationCount, "The invalid target should be counted as rejected.");
+			// Apply reports the terminal disposition of the entire atomic cohort;
+			// Validate may still count only the operation that caused rejection.
+			context.ExpectEqual(static_cast<std::size_t>(2), result.rejectedMutationCount, "Both unapplied requests should receive terminal rejection.");
 			objects.clear();
 		});
 

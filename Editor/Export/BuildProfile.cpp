@@ -37,17 +37,19 @@ namespace {
 
 	std::string QuoteShellArgument(std::string_view value) {
 #ifdef _WIN32
-		// Export currently runs through cmd.exe. Percent expansion still occurs
-		// inside double quotes, while a caret inside those quotes is preserved.
-		// Close the quoted segment around each percent, emit the caret outside,
-		// and reopen it. cmd consumes that caret and the child process receives
-		// one literal percent while all spaces remain in one logical argument.
+		// OwnedProcess uses CreateProcess directly. Preserve literal percent signs
+		// and apply the Windows argv rules for quotes and adjacent backslashes.
 		std::string quoted = "\"";
+		std::size_t backslashes = 0;
 		for(const char character : value) {
-			if(character == '%') quoted += "\"^%\"";
-			else quoted += character;
+			if(character == '\\') { ++backslashes; continue; }
+			quoted.append(backslashes * (character == '\"' ? 2 : 1), '\\');
+			backslashes = 0;
+			if(character == '\"') quoted += '\\';
+			quoted += character;
 		}
-		quoted += '"';
+		quoted.append(backslashes * 2, '\\');
+		quoted += '\"';
 		return quoted;
 #else
 		// POSIX single quotes suppress $, backtick, backslash, and whitespace
@@ -78,16 +80,6 @@ namespace {
 		return QuoteShellArgument(value);
 	}
 
-	std::string GeneratedTreeExcludesShellValue()
-	{
-		// A command-line `%3B` survives as an escaped literal when the value is
-		// later consumed by an item Exclude. Preserve it through shell/MSBuild
-		// command parsing, then deliberately unescape during project evaluation
-		// so DefaultItemExcludes becomes five real patterns rather than one path.
-		constexpr std::string_view kDelayedMsBuildExcludes =
-			"$([MSBuild]::Unescape('obj/**%3Bbin/**%3BBuild/**%3BLibrary/**%3BTemp/**'))";
-		return QuoteShellArgument(kDelayedMsBuildExcludes);
-	}
 }
 
 // --- ID generation ---
@@ -174,17 +166,7 @@ namespace {
 			<< " -p:OutputPath="
 			<< QuoteShellDirectoryProperty(context.binaryOutputDirectory)
 			<< " -p:RestorePackagesPath="
-			<< QuoteShellDirectoryProperty(context.packageCache)
-			// Moving BaseIntermediateOutputPath also moves the SDK's implicit
-			// obj exclusion. Reassert every TerraEngine-generated project tree
-			// so stale editor outputs cannot be compiled as authored source.
-			// MSBuild parses raw semicolons as command-switch separators before
-			// evaluating the quoted property, so encode each list separator with
-			// its documented property escape. A delayed MSBuild Unescape turns
-			// those protected separators into a true Exclude list only when the
-			// project evaluates DefaultItemExcludes.
-			<< " -p:DefaultItemExcludes="
-			<< GeneratedTreeExcludesShellValue();
+			<< QuoteShellDirectoryProperty(context.packageCache);
 	}
 
 	void AppendOfflineNuGetProperties(

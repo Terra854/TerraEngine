@@ -1,0 +1,10 @@
+<Project>
+	<!-- The editor regenerates Assembly-CSharp.csproj from its installed template.
+	     MSBuild imports this separate authored file after the regenerated project,
+	     so the disposable acceptance gate survives project load and script.compile.
+	     Only the acceptance child opts in; live managed builds never PublishAot. -->
+	<Target Name="CorrectnessOwnedExportGate" BeforeTargets="PrepareForBuild"
+		Condition="'$(PublishAot)' == 'true' and '$(TERRAENGINE_CORRECTNESS_HOLD_EXPORT)' == '1'">
+		<Exec Command="&quot;$(TERRAENGINE_CORRECTNESS_PROCESS_FIXTURE)&quot; --gate &quot;$(TERRAENGINE_CORRECTNESS_OBSERVATION_ROOT)/export.release&quot; --spawn-depth 2 --pid-file &quot;$(TERRAENGINE_CORRECTNESS_OBSERVATION_ROOT)/export-pid&quot; --timeout-ms 300000" />
+	</Target>
+</Project>

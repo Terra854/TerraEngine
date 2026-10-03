@@ -3,6 +3,8 @@
 // Implements the primary editor workspace logic, including the main menu bar, toolbars, and global hotkey handling. It manages the lifecycle of all native editor windows and provides the necessary hooks for scene state capture and restoration during play mode.
 
 #include "MainEditorSubsystem.h"
+#include "Editor/Export/EditorExportOperationController.h"
+#include "Editor/TerraEngine-Editor/Automation/EditorMcpBridge.h"
 #include "EditorRuntimeLayout.h"
 #include "PhysicsEditorAuthoringState.h"
 #include "Editor/AssetCompilers/ModelPackageImporter.h"
@@ -1468,6 +1470,7 @@ namespace
 // MainEditorSubsystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::Initialize(EditorContext& context) {
 	ctx = &context;
+	context.exportController = std::make_shared<EditorExportOperationController>();
 
 	// Set engine root to the executable's directory so default shaders can be found
 	// even if the project asset root is changed later.
@@ -1554,6 +1557,8 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 // MainEditorSubsystem::OnProjectOpened is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::OnProjectOpened() {
 	if (!ctx || !ctx->projectManager->HasActiveProject()) return;
+	// A new project admits only requests captured for its new generation.
+	if (ctx->exportController) ctx->exportController->BeginProject();
 	auto& animationSystem = TerraEngine::Animation::AnimationSystem::Instance();
 	// Opening a project begins a new scene identity even when the previous project
 	// closed without an engine shutdown.  Retire its immutable animation roots
@@ -2497,6 +2502,10 @@ void MainEditorSubsystem::ClosePrefabMode()
 
 // MainEditorSubsystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::Shutdown() {
+	// Export work owns process trees and immutable requests. Settle it while
+	// the project, scripts, resource providers and worker pool still exist.
+	if (ctx && ctx->exportController) ctx->exportController->StopAndDrain();
+	if (ctx && ctx->editorMcpBridge) ctx->editorMcpBridge->PumpExportJobsAtProtectedFrame();
 	if(auto terrainTools = GetWindow<TerrainWindow>())
 		terrainTools->CancelDetachedPreview("Terrain preview cancelled during editor shutdown.");
 	// Provider-owned bodies must be gone before editor teardown can release the
@@ -2881,11 +2890,10 @@ TerraEngine::Runtime::PhysicsInvariantReport MainEditorSubsystem::RunPhysicsExpo
 		}
 		ResourceManager::Instance().RegisterAssetPath(cooked->Envelope().assetId, cookedPath, AssetType::CookedCollider);
 
-		auto& physics = PhysicsSystem::Instance();
-		// Queue settings before Play Mode captures authored state. StartPlayMode
-		// performs the normal lifecycle start, which applies this validated update
-		// at its protected world-creation boundary.
-		if (!physics.QueueSettingsUpdate(settings) || !StartPlayMode()) {
+		// StartPlayMode reads and queues the durable project settings exactly once,
+		// then applies them at its protected world-creation boundary. Prequeuing
+		// here would occupy the single pending slot and reject normal Play entry.
+		if (!StartPlayMode()) {
 			serializedReport.diagnostic = "The serialized fixture could not start editor Play Mode with its project settings.";
 			return serializedReport;
 		}
@@ -3016,6 +3024,10 @@ void MainEditorSubsystem::OnBackendReady() {
 
 // MainEditorSubsystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::Update(float deltaTime) {
+	// Future adoption and launch eligibility belong to this protected editor
+	// boundary, never to a worker callback or a hidden panel's lifetime.
+	if (ctx && ctx->exportController) ctx->exportController->Poll();
+	if (auto buildProfiles = GetWindow<BuildProfilesWindow>()) buildProfiles->PollExportAtProtectedFrame();
 	// Reconcile derived state against durable component membership before any
 	// restore attempt. Removing the last TerrainComponent must retire the cached
 	// render binding and every provider heightfield body for that asset.
@@ -3928,7 +3940,8 @@ void MainEditorSubsystem::RequestExit() {
 		m_ShowImportCloseConfirmation = true;
 		return;
 	}
-	if (SceneManager::Instance().IsActiveSceneDirty() || (m_IsPrefabEditingMode && m_PrefabEditingDirty)) {
+	const bool terrainDirty = [&]() { if(auto terrainTools = GetWindow<TerrainWindow>()) return terrainTools->IsTerrainDirty(); return false; }();
+	if (SceneManager::Instance().IsActiveSceneDirty() || terrainDirty || (m_IsPrefabEditingMode && m_PrefabEditingDirty)) {
 		m_PendingAction = PendingAction::Exit;
 		m_ShowSaveConfirmation = true;
 	} else {
@@ -3973,28 +3986,36 @@ void MainEditorSubsystem::DrawSaveConfirmationModal() {
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("Yes", ImVec2(120, 0))) {
+			// A failed save must keep this modal and the live document available.
+			// Closing unconditionally here would discard the edits we failed to save.
+			bool authoringSaved = true;
 			if (m_IsPrefabEditingMode) {
-				const bool restoreSceneNeedsSave = SceneManager::Instance().IsActiveSceneDirty();
-				SaveOpenPrefab();
-				ClosePrefabMode();
-				if (restoreSceneNeedsSave) {
-					if (SceneManager::Instance().SaveScene(m_CurrentScenePath)) {
-						std::string terrainSaveError;
-						if(auto terrainTools = GetWindow<TerrainWindow>(); !terrainTools || terrainTools->SaveTerrain(terrainSaveError))
-							UndoRedoSystem::Instance().SetSavePoint();
-						else TERRAENGINE_LOG(LogLevel::Error, "Terrain save failed while closing project: " << terrainSaveError);
-					}
-				}
+				authoringSaved = SaveOpenPrefab();
+				if (authoringSaved) ClosePrefabMode();
+				// Closing prefab mode restores the document whose current dirty
+				// state must be checked; the prefab's dirty state describes another owner.
+				if (authoringSaved && SceneManager::Instance().IsActiveSceneDirty())
+					authoringSaved = SceneManager::Instance().SaveScene(m_CurrentScenePath);
 			} else {
-				if (SceneManager::Instance().SaveScene()) {
-					std::string terrainSaveError;
-					if(auto terrainTools = GetWindow<TerrainWindow>(); !terrainTools || terrainTools->SaveTerrain(terrainSaveError))
-						UndoRedoSystem::Instance().SetSavePoint();
-					else TERRAENGINE_LOG(LogLevel::Error, "Terrain save failed while closing project: " << terrainSaveError);
-				}
+				authoringSaved = SceneManager::Instance().SaveScene();
 			}
-			ExecutePendingAction();
-			ImGui::CloseCurrentPopup();
+			if (authoringSaved) {
+				authoringSaved = !SceneManager::Instance().IsActiveSceneDirty();
+				// Terrain has its own dirty owner and must save even when the
+				// restored scene needed no write. Failure keeps the action paused.
+				std::string terrainSaveError;
+				if(auto terrainTools = GetWindow<TerrainWindow>(); terrainTools && !terrainTools->SaveTerrain(terrainSaveError)) {
+					authoringSaved = false;
+					TERRAENGINE_LOG(LogLevel::Error, "Terrain save failed while closing project: " << terrainSaveError);
+				}
+				if(authoringSaved) UndoRedoSystem::Instance().SetSavePoint();
+			}
+			if(authoringSaved) {
+				ExecutePendingAction();
+				ImGui::CloseCurrentPopup();
+			} else {
+				TERRAENGINE_LOG(LogLevel::Error, "Save did not complete for the current authored state; the pending close/open action remains paused.");
+			}
 		}
 		ImGui::SetItemDefaultFocus();
 		ImGui::SameLine();
@@ -4085,6 +4106,10 @@ void MainEditorSubsystem::DrawScriptCompilationModal() {
 
 // MainEditorSubsystem::CloseCurrentProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::CloseCurrentProject() {
+	if (ctx && ctx->exportController) ctx->exportController->StopAndDrain();
+	if (ctx && ctx->editorMcpBridge) ctx->editorMcpBridge->PumpExportJobsAtProtectedFrame();
+	ScriptCompilationSubsystem::Instance().StopAdmissionsAndDrain();
+	ResourceManager::Instance().StopAdmissionsAndDrain();
 	// History commands are project-scoped and may retain references to stores and
 	// queues owned by editor windows. Destroy every command while those owners are
 	// still alive so command destructors can safely release retained resources.
@@ -4141,6 +4166,9 @@ void MainEditorSubsystem::CloseCurrentProject() {
 
 	// Clear Resources
 	ResourceManager::Instance().ClearCaches();
+	// The outgoing project no longer owns physical work. Reopen a fresh hub
+	// request session for editor defaults without reviving its old tokens.
+	ResourceManager::Instance().BeginRequestSession();
 	ResourceManager::Instance().LoadDefaultResources();
 	
 	// Clear Renderer Resources

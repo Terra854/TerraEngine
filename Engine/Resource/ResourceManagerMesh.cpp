@@ -1632,13 +1632,9 @@ TerraEngine::UUID ResourceManager::LoadDeformableMesh(
 	return meshCache.resources.contains(id) ? id : TerraEngine::EMPTY_UUID;
 }
 
-void ResourceManager::CacheLoadedMeshBounds(const TerraEngine::UUID& id, const Mesh* mesh)
+std::optional<TerraEngine::Scene::SpatialAABB> ResourceManager::ComputeLoadedMeshBounds(const Mesh* mesh)
 {
-	if (id == TerraEngine::EMPTY_UUID || mesh == nullptr)
-	{
-		return;
-	}
-
+	if (!mesh) return {};
 	TerraEngine::Scene::SpatialAABB bounds = TerraEngine::Scene::MakeFallbackBounds(glm::vec3(0.0f), 1.0f);
 	if (mesh->hasLocalBounds)
 	{
@@ -1679,8 +1675,17 @@ void ResourceManager::CacheLoadedMeshBounds(const TerraEngine::UUID& id, const M
 		}
 	}
 
+	return bounds;
+}
+
+void ResourceManager::CacheLoadedMeshBounds(const TerraEngine::UUID& id, const Mesh* mesh)
+{
+	// Ordinary bounds updates share the pure calculation with staged publication.
+	if (id == TerraEngine::EMPTY_UUID) return;
+	const auto bounds = ComputeLoadedMeshBounds(mesh);
+	if (!bounds) return;
 	std::unique_lock lock(m_MeshLocalBoundsMutex);
-	m_MeshLocalBoundsCache[id] = bounds;
+	m_MeshLocalBoundsCache[id] = *bounds;
 }
 
 void ResourceManager::CacheLoadedMeshBounds(const TerraEngine::UUID&, const void*)
@@ -1723,75 +1728,15 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadMeshAsync(const std::
 // no half-built payload is ever visible to renderer collection.
 TerraEngine::UUID ResourceManager::RegisterMesh(const std::string& cacheKey, std::unique_ptr<Mesh> mesh)
 {
-	const std::string normalizedKey = "generated/" + cacheKey;
-	TerraEngine::UUID id = TerraEngine::GenerateUUID();
-	{
-		std::unique_lock lock(meshCache.mutex);
-		if(const auto existing = meshCache.pathToId.find(normalizedKey);
-			existing != meshCache.pathToId.end())
-		{
-			id = existing->second;
-		}
-		meshCache.pathToId[normalizedKey] = id;
-		meshCache.idToPath[id] = normalizedKey;
-		if(mesh)
-		{
-			meshCache.resources[id] = std::move(mesh);
-		}
-		else
-		{
-			meshCache.resources.erase(id);
-		}
-		meshCache.inFlight.erase(normalizedKey);
-		m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);
-	}
-	if(Mesh* published = GetMesh(id); published != nullptr)
-	{
-		CacheLoadedMeshBounds(id, published);
-	}
-	return id;
+	// Bounds and accounting now publish inside the same accepted transaction.
+	return RegisterGenerated(cacheKey, meshCache, std::move(mesh));
 }
 
-// ResourceManager::ReloadMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::ReloadMesh(const TerraEngine::UUID& id)
 {
-	std::string key;
-	{
-		std::shared_lock lock(meshCache.mutex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (const auto pathIt = meshCache.idToPath.find(id); pathIt != meshCache.idToPath.end())
-		{
-			key = pathIt->second;
-		}
-	}
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (key.empty())
-	{
-		TERRAENGINE_LOG(LogLevel::Debug, "Cannot reload mesh yet: UUID " << ToHexString(id) << " has no compiled TEMF path registered.");
-		return;
-	}
-
-	const std::filesystem::path resolvedPath(key);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!IsCompiledMeshPath(resolvedPath))
-	{
-		TERRAENGINE_LOG(LogLevel::Debug, "Skipping mesh reload from non-TEMF path: " << resolvedPath);
-		return;
-	}
-
-	TERRAENGINE_LOG(LogLevel::Debug, "Reloading mesh from " << resolvedPath);
-	auto mesh = LoadMeshFile(*this, resolvedPath);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (mesh)
-	{
-		CacheLoadedMeshBounds(id, mesh.get());
-		std::unique_lock lock(meshCache.mutex);
-		meshCache.resources[id] = std::move(mesh);
-		// Publish only the completed cache replacement. Readers that captured the
-		// previous generation retain their immutable plan until the next boundary.
-		m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);
-	}
+	ReloadCached<Mesh>(id, meshCache, [this](const std::filesystem::path& path) {
+		return IsCompiledMeshPath(path) ? LoadMeshFile(*this, path) : std::unique_ptr<Mesh>{};
+	}, true).get();
 }
 
 // ResourceManager::GetMeshLocalBounds is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

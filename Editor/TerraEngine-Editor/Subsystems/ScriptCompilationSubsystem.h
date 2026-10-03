@@ -94,6 +94,9 @@ public:
 	void Update(float deltaTime) override;
 	void DrawUI() override;
 	void Shutdown() override;
+	// Producer settlement runs before provider/resource teardown. It cancels and
+	// joins compilation without releasing context or the loaded gameplay assembly.
+	void StopAdmissionsAndDrain();
 	std::string GetName() const override;
 
 	void OnProjectOpened();
@@ -153,6 +156,7 @@ private:
 	// serialized and never race against each other.
 	std::future<ScriptBuildResult> m_ActiveBuild;
 	bool m_BuildInFlight = false;
+	bool m_AdmissionsStopped = false;
 	ScriptBuildReason m_LastQueuedReason = ScriptBuildReason::ProjectOpen;
 	// Small debounce window that collapses save bursts into one build without
 	// delaying project-open or already-idle file-change rebuilds for long.

@@ -230,6 +230,40 @@ function Assert-CompiledAsset {
 	}
 }
 
+function Test-CanonicalDirectResidentMesh {
+	param(
+		[Parameter(Mandatory = $true)][string]$Path,
+		[Parameter(Mandatory = $true)][object]$Metadata
+	)
+
+	# The native importer validates the complete production directory and codecs,
+	# then validates dense direct LOD ranges before publishing this exact reason.
+	# Other Skipped states (including unsuccessful simplification) are not evidence
+	# that a current selectable direct-resident mesh was generated.
+	$reason = 'Compiled mesh uses selectable direct-resident LOD ranges; no virtual pages were built.'
+	if ($Metadata.status -cne 'Skipped' -or $Metadata.cooked -ne $false -or
+		$Metadata.detailLevels -le 0 -or $Metadata.meshlets -le 0 -or
+		$Metadata.sourceTriangles -le 0 -or @($Metadata.warnings) -cnotcontains $reason) {
+		return $false
+	}
+
+	# These packed offsets are the published TemfProductionHeader layout in
+	# Engine/File Formats/TerraEngineMeshFile.h. Require TEMF 1.0 / TEMFPRD1,
+	# exactly DirectMeshlets, and a nonempty block allocation without virtual pages.
+	# This is a representation witness; the native importer above owns full validation.
+	$bytes = [System.IO.File]::ReadAllBytes($Path)
+	return $bytes.Length -ge 192 -and
+		[System.BitConverter]::ToUInt32($bytes, 0) -eq [uint32]0x464d4554 -and
+		[System.BitConverter]::ToUInt16($bytes, 4) -eq 1 -and
+		[System.BitConverter]::ToUInt16($bytes, 6) -eq 0 -and
+		[System.BitConverter]::ToUInt32($bytes, 8) -eq 192 -and
+		[System.BitConverter]::ToUInt32($bytes, 12) -eq 1 -and
+		[System.BitConverter]::ToUInt32($bytes, 64) -eq 0 -and
+		[System.BitConverter]::ToUInt32($bytes, 68) -eq 0 -and
+		[System.BitConverter]::ToUInt32($bytes, 72) -gt 0 -and
+		[System.BitConverter]::ToUInt64($bytes, 168) -eq [Convert]::ToUInt64('31445250464d4554', 16)
+}
+
 function Assert-PhysicsInvariantReport {
 	param(
 		[Parameter(Mandatory = $true)][object]$Report,
@@ -329,6 +363,20 @@ Copy-Item -LiteralPath (Join-Path $physicsFixtureSource "ProjectSettings/Physics
 Copy-Item -LiteralPath (Join-Path $physicsFixtureSource "Scenes/Startup.tescene") -Destination (Join-Path $projectRoot "Assets/Scenes/Startup.tescene") -Force
 
 $installedEditor = Join-Path $resolvedInstallRoot "Editor"
+# This fixture is assembled directly rather than through CreateProject. Seed
+# both default workspace files so its first editor launch has the same docking
+# and window visibility as a normal new project, including a hidden UI Builder.
+# Only the owned disposable project's UserSettings directory is written here.
+$defaultLayoutRoot = Join-Path $installedEditor "Project/Templates/UserSettings"
+$projectUserSettings = Join-Path $projectRoot "UserSettings"
+New-Item -ItemType Directory -Force -Path $projectUserSettings | Out-Null
+foreach ($layoutFileName in @("EditorLayout.ini", "EditorLayout.terra")) {
+	$layoutSource = Join-Path $defaultLayoutRoot $layoutFileName
+	if (-not (Test-Path -LiteralPath $layoutSource -PathType Leaf)) {
+		throw "Installed default editor layout was not found: '$layoutSource'."
+	}
+	Copy-Item -LiteralPath $layoutSource -Destination (Join-Path $projectUserSettings $layoutFileName)
+}
 $editorExecutable = Resolve-InstalledExecutable -Directory $installedEditor -BaseName "TerraEngine-Editor"
 $modelCompiler = Resolve-InstalledExecutable -Directory $installedEditor -BaseName "TerraEngineModelPackageCompiler"
 $physicsColliderCompiler = Resolve-InstalledExecutable -Directory $installedEditor -BaseName "TerraEnginePhysicsColliderCompiler"
@@ -385,8 +433,9 @@ if ($missingGeneratedChild) {
 
 foreach ($child in @($importResult.generatedMeshes)) {
 	Assert-CompiledAsset -Path (Join-Path $compiledAssetRoot $child.compiledPath) -Format "TEMF"
-	if ($child.virtualGeometry.status -ne "Cooked") {
-		throw "Generated baseline mesh must contain a current cooked virtual-geometry payload."
+	if ($child.virtualGeometry.status -ne "Cooked" -and
+		-not (Test-CanonicalDirectResidentMesh -Path (Join-Path $compiledAssetRoot $child.compiledPath) -Metadata $child.virtualGeometry)) {
+		throw "Generated baseline mesh must contain current cooked virtual geometry or validated canonical direct-resident LODs."
 	}
 }
 foreach ($child in @($importResult.generatedMaterials)) {
@@ -416,9 +465,32 @@ Assert-CompiledAsset -Path $physicsCookedCollider -Format "TEPC"
 # managed editor host, real Play Mode lifecycle, and shared PhysicsSystem.
 $editorInvariantPath = Join-Path $evidenceRoot "physics-editor-invariants.json"
 $editorPhysicsLog = Join-Path $logRoot "physics-editor-invariants.log"
-Invoke-LoggedNative -Stage "physics-editor-invariants" -FilePath $editorExecutable `
-	-Arguments @("--project", $projectRoot, "--validate-editor-physics-invariants", $editorInvariantPath) `
-	-LogPath $editorPhysicsLog
+# Keep this real editor child independent from the user's global preferences.
+# Script auto-build is required for managed readiness; diagnostics and MCP are
+# disabled so inherited personal settings cannot alter this validation workload.
+$editorPreferencesPath = Join-Path $evidenceRoot "physics-editor-preferences.json"
+[ordered]@{
+	recentProjects = @()
+	autoBuildScripts = $true
+	editorMcpEnabled = $false
+	vulkanValidationLayers = $false
+	renderDebugDiagnostics = $false
+	rendererDiagnosticsPreferencesInitialized = $true
+} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $editorPreferencesPath -Encoding utf8
+$previousPreferencesPath = [Environment]::GetEnvironmentVariable('TERRAENGINE_EDITOR_PREFS_SESSION_PATH', 'Process')
+$previousSuppressRecents = [Environment]::GetEnvironmentVariable('TERRAENGINE_SUPPRESS_PROJECT_RECENTS', 'Process')
+try {
+	[Environment]::SetEnvironmentVariable('TERRAENGINE_EDITOR_PREFS_SESSION_PATH', $editorPreferencesPath, 'Process')
+	[Environment]::SetEnvironmentVariable('TERRAENGINE_SUPPRESS_PROJECT_RECENTS', '1', 'Process')
+	Invoke-LoggedNative -Stage "physics-editor-invariants" -FilePath $editorExecutable `
+		-Arguments @("--project", $projectRoot, "--validate-editor-physics-invariants", $editorInvariantPath) `
+		-LogPath $editorPhysicsLog
+} finally {
+	# Restore the exact previous process values, including absent variables, even
+	# when the child fails. Later exporter/launcher stages use their normal environment.
+	[Environment]::SetEnvironmentVariable('TERRAENGINE_EDITOR_PREFS_SESSION_PATH', $previousPreferencesPath, 'Process')
+	[Environment]::SetEnvironmentVariable('TERRAENGINE_SUPPRESS_PROJECT_RECENTS', $previousSuppressRecents, 'Process')
+}
 if (-not (Test-Path -LiteralPath $editorInvariantPath -PathType Leaf)) {
 	throw "Installed editor did not persist its physics invariant report: '$editorInvariantPath'."
 }

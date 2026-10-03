@@ -1,0 +1,13 @@
+{
+	"preset": 2,
+	"validationEnabled": false,
+	"debugEnabled": false,
+	"settings": {
+		"shadowResolution": 512,
+		"maxUploadedLights": 16,
+		"maxDynamicLights": 8,
+		"maxShadowLights": 2,
+		"textureBudgetMb": 64,
+		"resolutionScale": 1.0
+	}
+}

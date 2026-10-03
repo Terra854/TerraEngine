@@ -3,6 +3,15 @@
 #include <iostream>
 
 namespace TerraEngine::Tests {
+	void RegisterAudioWorldCellCaptureTests(TestRegistry& registry);
+	void RegisterSceneSaveFailureSafetyTests(TestRegistry& registry);
+	void RegisterFrameFailureLifecycleTests(TestRegistry& registry);
+	void RegisterOwnedProcessTests(TestRegistry& registry);
+	void RegisterResourceAsyncDependencyTests(TestRegistry& registry);
+	void RegisterTransactionalMutationFailureSafetyTests(TestRegistry& registry);
+	void RegisterGenericMutationFailureSafetyTests(TestRegistry& registry);
+	void RegisterSceneMutationQueueFailureSafetyTests(TestRegistry& registry);
+	void RegisterResourcePublicationLifecycleTests(TestRegistry& registry);
 	// Animation story tests register through one stable entry point so their
 	// CTest filter can grow without adding global initialization side effects.
 	void RegisterAnimationTestScaffolding(TestRegistry& registry);
@@ -417,6 +426,15 @@ namespace TerraEngine::Tests {
 
 int main() {
 	TerraEngine::Tests::TestRegistry registry;
+	TerraEngine::Tests::RegisterAudioWorldCellCaptureTests(registry);
+	TerraEngine::Tests::RegisterSceneSaveFailureSafetyTests(registry);
+	TerraEngine::Tests::RegisterFrameFailureLifecycleTests(registry);
+	TerraEngine::Tests::RegisterOwnedProcessTests(registry);
+	TerraEngine::Tests::RegisterResourceAsyncDependencyTests(registry);
+	TerraEngine::Tests::RegisterTransactionalMutationFailureSafetyTests(registry);
+	TerraEngine::Tests::RegisterGenericMutationFailureSafetyTests(registry);
+	TerraEngine::Tests::RegisterSceneMutationQueueFailureSafetyTests(registry);
+	TerraEngine::Tests::RegisterResourcePublicationLifecycleTests(registry);
 
 	registry.Add("Engine.Smoke.HarnessRuns", [](TerraEngine::Tests::TestContext& context) {
 		context.Expect(true, "The engine test harness should execute registered tests.");

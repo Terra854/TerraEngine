@@ -10,6 +10,7 @@
 #include "AssetDatabase.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "../Automation/EditorMcpBridge.h"
+#include "Editor/Export/EditorExportOperationController.h"
 #include "../Profiling/EditorProfilerService.h"
 #include "../Windows/SceneViewWindow.h"
 #include "Engine/Scripting/ScriptingSystem.h"
@@ -39,6 +40,7 @@
 #include <utility>
 #include <fstream>
 #include <functional>
+#include <exception>
 #include <iterator>
 #include <iostream>
 #include <stdexcept>
@@ -677,11 +679,13 @@ void EditorSystem::Initialize() {
 	GLFWwindow* window = static_cast<GLFWwindow*>(windowSystem.GetNativeHandle());
 
 	// Register Drop Callback safely using static map
+	editorCallbackWindow = window;
 	g_EditorSystems[window] = this;
 	
 	// 3. Init ImGui
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
+	ownsImGuiContext = true;
 	ImGuiIO& io = ImGui::GetIO(); (void)io;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
@@ -759,6 +763,7 @@ void EditorSystem::Initialize() {
 		}
 	});
 	
+	ownsWindowCallbacks = true;
 	ImGui_ImplVulkan_InitInfo init_info = {};
 	init_info.Instance = (VkInstance)handles.instance;
 	init_info.PhysicalDevice = (VkPhysicalDevice)handles.physicalDevice;
@@ -782,10 +787,15 @@ void EditorSystem::Initialize() {
 		(PFN_vkGetInstanceProcAddr)handles.vkGetInstanceProcAddr,
 		(VkInstance)handles.instance
 	};
-	ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_3, [](const char* function_name, void* user_data) {
+	const bool functionsLoaded = ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_3, [](const char* function_name, void* user_data) {
 		auto* p = (std::pair<PFN_vkGetInstanceProcAddr, VkInstance>*)user_data;
 		return p->first(p->second, function_name);
 	}, &loaderParams);
+	// A missing dispatch function is a startup failure, not a usable partial
+	// backend. Throw while the engine still owns callback/context cleanup.
+	if (!functionsLoaded) {
+		throw std::runtime_error("Dear ImGui Vulkan function loading failed.");
+	}
 	
 	const auto backendInit = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
 		TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
@@ -890,6 +900,7 @@ void EditorSystem::Update(float deltaTime) {
 	// enablement, ImGui visibility, or the installed physics-validation path.
 	if (context.editorMcpBridge) {
 		context.editorMcpBridge->PumpAnimationRecordingsAtProtectedFrame();
+		context.editorMcpBridge->PumpExportJobsAtProtectedFrame();
 		context.editorMcpBridge->PumpRendererValidationMutationsAtProtectedFrame();
 		context.editorMcpBridge->PumpTerrainAutomationJobsAtProtectedFrame();
 	}
@@ -1129,41 +1140,98 @@ void EditorSystem::Update(float deltaTime) {
 }
 
 // EditorSystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void EditorSystem::PrepareShutdown() {
+	// Retain project and managed owners until every export/compiler task has
+	// observed cancellation and reaped its owned process tree. One failed drain
+	// must not skip the remaining independent producer owners.
+	std::exception_ptr firstFailure;
+	auto settle = [&](auto&& action) {
+		try { action(); } catch (...) { if(!firstFailure) firstFailure = std::current_exception(); }
+	};
+	if (context.exportController) settle([&] { context.exportController->StopAndDrain(); });
+	if (context.editorMcpBridge) settle([&] { context.editorMcpBridge->PumpExportJobsAtProtectedFrame(); });
+	settle([] { ScriptCompilationSubsystem::Instance().StopAdmissionsAndDrain(); });
+	if(firstFailure) std::rethrow_exception(firstFailure);
+}
+
 void EditorSystem::Shutdown() {
-	SaveWorkspaceLayout();
+	// Keep the first error for Engine's lifecycle report, but release every
+	// independent acquired owner before rethrowing. Workspace persistence may
+	// fail on a read-only/deleted project and must never bypass native cleanup.
+	std::exception_ptr firstFailure;
+	auto settle = [&](auto&& action) {
+		try { action(); } catch (...) { if(!firstFailure) firstFailure = std::current_exception(); }
+	};
+	settle([&] { PrepareShutdown(); });
+	if (ownsImGuiContext && context.projectManager) settle([&] { SaveWorkspaceLayout(); });
 	if (managedShutdown) {
-		managedShutdown();
+		// Retire the callback before invoking foreign code so reentry or another
+		// shutdown attempt cannot call this acquired managed owner twice.
+		const auto shutdown = std::exchange(managedShutdown, nullptr);
+		settle([&] { shutdown(); });
 	}
+	managedInitialize = nullptr;
+	managedUpdate = nullptr;
+	managedDrawWindowMenu = nullptr;
+	managedGetWindows = nullptr;
+	managedSetWindowVisibility = nullptr;
+	managedHideAllWindows = nullptr;
 
 	auto& renderSystem = RenderSystem::Instance();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto* rhi = renderSystem.GetContext()) {
-		rhi->WaitIdle();
-	}
+	if (auto* rhi = renderSystem.GetContext()) settle([&] { rhi->WaitIdle(); });
 	if (mainEditor) {
-		const auto recovery = renderSystem.GetLatestRendererRecoverySnapshot();
-		mainEditor->ShutdownViewportTextures(
-			recovery.state != TerraEngine::Renderer::RendererRecoveryStateKind::Active);
-		mainEditor->Shutdown();
+		settle([&] {
+			const auto recovery = renderSystem.GetLatestRendererRecoverySnapshot();
+			mainEditor->ShutdownViewportTextures(
+				recovery.state != TerraEngine::Renderer::RendererRecoveryStateKind::Active);
+		});
+		settle([&] { mainEditor->Shutdown(); });
+	}
+	// MainEditor normally releases the profiler. Also settle it independently
+	// if a preceding subsystem shutdown exited before reaching that owner.
+	if(context.editorProfiler) {
+		settle([&] { context.editorProfiler->Shutdown(); });
+		context.editorProfiler.reset();
 	}
 
-	ImGui_ImplVulkan_Shutdown();
-	ImGui_ImplGlfw_Shutdown();
-	ImGui::DestroyContext();
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (projectHub) projectHub->Shutdown();
-	if (context.editorMcpBridge) context.editorMcpBridge->Shutdown();
-	
-	AssetDatabase::Instance().Shutdown();
+	// Restore native callbacks before releasing ImGui; WindowSystem remains
+	// alive until Engine finishes reverse-order system teardown. Each callback
+	// is independent, so an unexpected error cannot skip the others.
+	if (editorCallbackWindow) {
+		auto* window = static_cast<GLFWwindow*>(editorCallbackWindow);
+		const bool restoreCallbacks = std::exchange(ownsWindowCallbacks, false);
+		editorCallbackWindow = nullptr;
+		if (restoreCallbacks) {
+			settle([&] { glfwSetFramebufferSizeCallback(window, g_PrevResizeCallback); });
+			settle([&] { glfwSetMouseButtonCallback(window, g_PrevMouseButtonCallback); });
+			settle([&] { glfwSetScrollCallback(window, g_PrevScrollCallback); });
+			settle([&] { glfwSetKeyCallback(window, g_PrevKeyCallback); });
+			settle([&] { glfwSetCharCallback(window, g_PrevCharCallback); });
+			settle([&] { glfwSetWindowCloseCallback(window, g_PrevCloseCallback); });
+			settle([&] { glfwSetDropCallback(window, g_PrevDropCallback); });
+		}
+		g_EditorSystems.erase(window);
+	}
+	if (ownsImGuiContext) {
+		// A backend can allocate its user data before reporting init failure.
+		// Its data pointer proves which partial acquisition needs cleanup.
+		auto& io = ImGui::GetIO();
+		if (io.BackendRendererUserData) settle([] { ImGui_ImplVulkan_Shutdown(); });
+		if (io.BackendPlatformUserData) settle([] { ImGui_ImplGlfw_Shutdown(); });
+		ownsImGuiContext = false;
+		settle([] { ImGui::DestroyContext(); });
+	}
+	if (projectHub) settle([&] { projectHub->Shutdown(); });
+	if (context.editorMcpBridge) settle([&] { context.editorMcpBridge->Shutdown(); });
+	settle([] { AssetDatabase::Instance().Shutdown(); });
 	context.editorMcpBridge.reset();
 	context.assetDatabase.reset();
 	context.projectManager.reset();
-	
+
 	initialized = false;
-	// This marker is deliberately set only from Engine's registered shutdown
-	// callback. EditorMain uses it to avoid claiming an orderly shutdown merely
-	// because a validation session requested one.
+	// A failed release is reported after all stages have been attempted and
+	// cannot produce an orderly-shutdown acceptance claim.
+	if(firstFailure) std::rethrow_exception(firstFailure);
 	if(navigationAgentValidationTerminalReport) navigationAgentValidationShutdownObserved = true;
 	if(locomotionValidationTerminalReport) locomotionValidationShutdownObserved = true;
 }
@@ -1235,7 +1303,7 @@ TerraEngine::Scheduling::SystemDeclaration EditorSystem::SchedulerDeclaration() 
 	declaration.reads = {
 		"RendererOutput", "PresentationState", "WindowSnapshot", "InputSnapshot",
 		"ProjectState", "EditorState", "ImGuiDrawData", "EditorAutomationQueue",
-		"EditorAutomationSession", "AnimationRuntimeState",
+		"EditorAutomationSession", "EditorExportWorkerResults", "AnimationRuntimeState",
 		"LocomotionAuthority", "LocomotionObservations", "LocomotionReceipts",
 		"PhysicsCharacterMotionLeases", "LocomotionAnimatorBindings",
 		"Resources", "SceneGraph", "ObjectManager", "AnimationRagdollMappings"
@@ -1244,7 +1312,7 @@ TerraEngine::Scheduling::SystemDeclaration EditorSystem::SchedulerDeclaration() 
 		"EditorUiPresentation", "ViewportTextureRegistry", "EditorSubmissionCompletion",
 		"EditorDiagnostics", "EditorAutomationState", "EditorAutomationSession",
 		"SceneMutationQueue", "EditorProfilerTiming", "EditorProfilerWorkerCompletions",
-		"EditorProfilerHealthPublication",
+		"EditorProfilerHealthPublication", "EditorExportOperationState",
 		// Editor commands only queue intent; Play/project lifecycle also retires
 		// leases and root consumers before Physics or authored state is destroyed.
 		"LocomotionCommands", "LocomotionAuthority", "LocomotionObservations", "LocomotionReceipts",
@@ -1255,8 +1323,8 @@ TerraEngine::Scheduling::SystemDeclaration EditorSystem::SchedulerDeclaration() 
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::Protected;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Automation schema validation, immutable request preparation, reference-impact scans, log filtering, editor subsystem snapshots, and profiler journal/index/detail workers may run on workers; workers only enqueue epoch-tagged profiler completions and never mutate Profiler or ImGui.";
-	declaration.protectedCommit = "Immutable animation recording capture, protected drain of EditorProfilerWorkerCompletions, bounded EditorProfilerHealthPublication, prepared automation request commit at post_editor_automation_flush, SceneMutationQueue publication, project and Play Mode transitions, ImGui frame mutation, checked Vulkan backend recording, descriptor mutation, acquire, submit, present, and retirement publication.";
+	declaration.safeSubwork = "Automation schema validation and immutable request preparation may run on workers; immutable export requests and owned subprocesses, reference-impact scans, log filtering, editor subsystem snapshots, and profiler workers prepare owned results without touching live scene, scripting assemblies or ImGui.";
+	declaration.protectedCommit = "Export admission, coherent result adoption and captured launch, immutable animation recording capture, profiler completion drain and health publication, prepared automation request commit at post_editor_automation_flush, SceneMutationQueue publication, project and Play Mode transitions, ImGui frame mutation, checked Vulkan recording and presentation.";
 	declaration.protectedReason = declaration.protectedCommit;
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;

@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -144,6 +145,9 @@ namespace TerraEngine::Scheduling {
 		std::vector<JobGraphResultEntry> barriers;
 		std::vector<JobGraphDependencyEdge> dependencies;
 		std::vector<JobGraphDiagnostic> diagnostics;
+		// Retain coordinator observation order separately from the sorted display.
+		// A later independent failure must not replace the first fatal evidence.
+		std::optional<JobGraphDiagnostic> firstFailure;
 		std::size_t workerJobCount = 0;
 		std::size_t protectedJobCount = 0;
 		std::size_t inlineJobCount = 0;

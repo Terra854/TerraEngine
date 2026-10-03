@@ -7,7 +7,24 @@ namespace TerraEngine::Audio {
 	namespace {
 		constexpr float kPi = 3.14159265358979323846F;
 		float Length(const AudioVector3& value) { return std::sqrt(value.x * value.x + value.y * value.y + value.z * value.z); }
-		AudioVector3 Subtract(const AudioVector3& left, const AudioVector3& right) { return {left.x - right.x, left.y - right.y, left.z - right.z}; }
+		// Bound exact cell differences by the authored source range before converting
+		// any displacement to provider floats. Local-only callers use the same shared
+		// listener frame, with double subtraction preventing float overflow.
+		std::optional<glm::dvec3> ListenerRelativeOffset(const AudioAuthoringSnapshotData& data,
+			const AudioAuthoringSourceRecord& source, const AudioAuthoringListenerRecord& listener) {
+			if(source.maximumDistance <= 0.0F) return std::nullopt;
+			if(data.coordinateMode == AudioCoordinateMode::CanonicalWorld) {
+				const auto result = TerraEngine::Scene::LocalizeWorldPosition(*source.worldPosition,
+					*listener.worldPosition, static_cast<double>(source.maximumDistance));
+				return result.Succeeded() ? std::optional<glm::dvec3>(result.offsetMetres) : std::nullopt;
+			}
+			const glm::dvec3 offset{static_cast<double>(source.position.x) - listener.position.x,
+				static_cast<double>(source.position.y) - listener.position.y,
+				static_cast<double>(source.position.z) - listener.position.z};
+			if(std::abs(offset.x) > source.maximumDistance || std::abs(offset.y) > source.maximumDistance
+				|| std::abs(offset.z) > source.maximumDistance) return std::nullopt;
+			return offset;
+		}
 		AudioPlaybackSeed* FindSeed(std::vector<AudioPlaybackSeed>& seeds, const AudioSourceIdentity& authoredIdentity) {
 			// Authoring identifies the durable component, while each Play command owns
 			// a new playback generation. Matching the full identity would make every
@@ -96,6 +113,10 @@ namespace TerraEngine::Audio {
 	AudioPreparedFrame PrepareAudioFrame(const AudioAuthoringSnapshot& snapshot, std::vector<AudioPlaybackSeed>& playback) {
 		const auto& data = snapshot.Data(); AudioPreparedFrame prepared; prepared.frame = data.frame; prepared.configuredVoiceLimit = data.voiceLimit;
 		for(const auto& listener : data.listeners) if(listener.enabled && listener.eligible) { prepared.listener = listener; break; }
+		// Preserve the immutable authored listener for checked localization below;
+		// the prepared listener represents the common provider origin at zero.
+		const auto selectedListener = prepared.listener;
+		if(prepared.listener) prepared.listener->position = {};
 		prepared.listenerCandidateCount = static_cast<std::uint32_t>(std::count_if(data.listeners.begin(), data.listeners.end(), [](const auto& item) { return item.enabled && item.eligible; }));
 		for(const auto& source : data.sources) {
 			AudioPlaybackSeed* seed = FindSeed(playback, source.identity); if(seed == nullptr) continue;
@@ -132,12 +153,22 @@ namespace TerraEngine::Audio {
 			else if(source.spatial) {
 				if(!prepared.listener) { voice.audibility = AudioAudibility::NoListener; voice.gain = 0.0F; }
 				else {
-					const auto offset = Subtract(source.position, prepared.listener->position);
-					const float attenuation = ComputeAudioAttenuation(Length(offset), source.maximumDistance);
+					const auto relative = ListenerRelativeOffset(data, source, *selectedListener);
+					// hypot stays finite for large valid float ranges; a float squared
+					// length can overflow even when the displacement itself is finite.
+					const double distance = relative ? std::hypot(relative->x, relative->y, relative->z) : 0.0;
+					const bool inRange = relative && distance < static_cast<double>(source.maximumDistance);
+					const float attenuation = inRange ? ComputeAudioAttenuation(static_cast<float>(distance), source.maximumDistance) : 0.0F;
+					AudioVector3 offset{};
+					AudioVector3 direction{};
+					if(inRange) {
+						offset = {static_cast<float>(relative->x), static_cast<float>(relative->y), static_cast<float>(relative->z)};
+						if(distance > 0.0001) direction = {static_cast<float>(relative->x / distance), static_cast<float>(relative->y / distance), static_cast<float>(relative->z / distance)};
+					}
 					const float spatialBlend = NormalizeAudioUnit(source.spatialBlend);
-					const float pan = ComputeAudioPan(prepared.listener->forward, offset);
-					const float frontness = ComputeAudioFrontness(prepared.listener->forward, offset);
-					voice.spatial.position = source.position;
+					const float pan = ComputeAudioPan(prepared.listener->forward, direction);
+					const float frontness = ComputeAudioFrontness(prepared.listener->forward, direction);
+					voice.spatial.position = offset;
 					voice.spatial.forward = prepared.listener->forward;
 					voice.spatial.outputMode = prepared.listener->outputMode;
 					voice.spatial.pan = pan;

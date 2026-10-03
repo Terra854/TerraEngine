@@ -426,6 +426,8 @@ namespace TerraEngine::Scheduling {
 			std::stable_sort(summary.taskGroups.begin(), summary.taskGroups.end(), byHandle);
 			std::stable_sort(summary.barriers.begin(), summary.barriers.end(), byHandle);
 
+			const auto firstError = std::find_if(diagnostics.begin(), diagnostics.end(), IsError);
+			if (firstError != diagnostics.end()) summary.firstFailure = *firstError;
 			SortDiagnostics(diagnostics);
 			summary.diagnostics = std::move(diagnostics);
 			summary.valid = std::none_of(summary.diagnostics.begin(), summary.diagnostics.end(), IsError);
@@ -1033,6 +1035,8 @@ namespace TerraEngine::Scheduling {
 				Impl::Node& node = impl->nodes[index];
 				if (node.kind == JobGraphNodeKind::Job && node.requiresSuccessfulDependencies && dependencyFailed(index))
 				{
+					// Blocking is terminal for this invocation. Continue settling
+					// independent dispatched work; never run a failed job's dependents.
 					completeNode(index, JobGraphNodeState::Blocked);
 					++terminalCount;
 					impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Warning, JobGraphDiagnosticCategory::Execution, node.name, "Required dependency did not complete successfully.", "Keep this job blocked until the dependency failure is resolved.");

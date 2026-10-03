@@ -61,6 +61,10 @@ struct PreparedAnimationAssetReloadBatch::State
 		TerraEngine::Animation::AnimationGeneration nextGeneration = 0U;
 		std::uint64_t publisherRetirementGeneration = 0U;
 		std::uint64_t cpuBytes = 0U;
+		TerraEngine::Resource::ResidentAsset accounting;
+		TerraEngine::Resource::StreamableAssetRecord streaming;
+		TerraEngine::Resource::ResidentAsset* accountingSlot = nullptr;
+		TerraEngine::Resource::StreamableAssetRecord* streamingSlot = nullptr;
 		void* payload = nullptr;
 		void (*destroyPayload)(void*) noexcept = nullptr;
 		// These non-owning destinations are populated only while every animation
@@ -84,6 +88,7 @@ struct PreparedAnimationAssetReloadBatch::State
 			nextGeneration(other.nextGeneration),
 			publisherRetirementGeneration(other.publisherRetirementGeneration),
 			cpuBytes(other.cpuBytes),
+			accounting(std::move(other.accounting)), streaming(std::move(other.streaming)),
 			payload(std::exchange(other.payload, nullptr)),
 			destroyPayload(std::exchange(other.destroyPayload, nullptr)),
 			destinationSlot(std::exchange(other.destinationSlot, nullptr)),
@@ -101,6 +106,8 @@ struct PreparedAnimationAssetReloadBatch::State
 			nextGeneration = other.nextGeneration;
 			publisherRetirementGeneration = other.publisherRetirementGeneration;
 			cpuBytes = other.cpuBytes;
+			accounting = std::move(other.accounting);
+			streaming = std::move(other.streaming);
 			payload = std::exchange(other.payload, nullptr);
 			destroyPayload = std::exchange(other.destroyPayload, nullptr);
 			destinationSlot = std::exchange(other.destinationSlot, nullptr);
@@ -134,6 +141,16 @@ struct PreparedAnimationAssetReloadBatch::State
 		if(animationClipLock.owns_lock()) animationClipLock.unlock();
 		if(skeletonLock.owns_lock()) skeletonLock.unlock();
 		if(retirementLock.owns_lock()) retirementLock.unlock();
+		if(streamingLock.owns_lock()) streamingLock.unlock();
+		if(accountingLock.owns_lock()) accountingLock.unlock();
+		if(publicationGate.owns_lock()) publicationGate.unlock();
+		ResourceManager::DeliverRequests(std::move(deliveries));
+	}
+
+	~State() noexcept {
+		UnlockPublicationLocks();
+		// Abandoned or rejected prepared work still has one terminal disposition.
+		if (owner) for (const auto& request : requests) owner->AbortRequestSetup(request);
 	}
 
 	[[nodiscard]] bool OwnsPublicationLocks() const noexcept
@@ -146,7 +163,11 @@ struct PreparedAnimationAssetReloadBatch::State
 
 	ResourceManager* owner = nullptr;
 	std::vector<Entry> entries;
+	std::vector<ResourceManager::RequestPtr> requests;
+	ResourceManager::RequestDeliveries deliveries;
 	bool diagnosticsFinalized = false;
+	std::unique_lock<std::mutex> publicationGate;
+	std::unique_lock<std::shared_mutex> accountingLock, streamingLock;
 	std::unique_lock<std::shared_mutex> skeletonLock;
 	std::unique_lock<std::shared_mutex> animationClipLock;
 	std::unique_lock<std::shared_mutex> animationControllerLock;
@@ -1046,6 +1067,371 @@ std::uint64_t ResourceManager::ComputeLoadedResourceBytes(const Texture& resourc
 // the cache members are destroyed, keeping unique_ptr deleters well-defined.
 ResourceManager::~ResourceManager() = default;
 
+ResourceManager::PreparedResourceAccounting::~PreparedResourceAccounting() noexcept
+{
+	if (!owner || committed) return;
+	if (insertedResident) owner->m_ResidentAssets.erase(id);
+	if (insertedType) owner->m_ResidentAssetTypes.erase(id);
+	if (insertedStream) owner->m_StreamableAssets.erase(id);
+}
+
+std::unique_ptr<ResourceManager::PreparedResourceAccounting> ResourceManager::PrepareResourceAccounting(
+	const TerraEngine::UUID& id, AssetType type, const std::string& key, std::uint64_t cpuBytes, bool tracksResidency, bool success)
+{
+	auto prepared = std::make_unique<PreparedResourceAccounting>();
+	prepared->owner = this;
+	prepared->id = id;
+	prepared->type = type;
+	prepared->residencyLock = std::unique_lock<std::shared_mutex>(m_ResidencyMutex);
+	prepared->streamingLock = std::unique_lock<std::shared_mutex>(m_StreamingMutex);
+	if (const auto current = m_StreamableAssets.find(id); current != m_StreamableAssets.end()) prepared->stream = current->second;
+	const auto policy = prepared->stream.assetId == id
+		? TerraEngine::Resource::SanitizeStreamingAssetPolicy(prepared->stream.assetPolicy)
+		: TerraEngine::Resource::MakeDefaultStreamingAssetPolicy(ToStreamableAssetType(type));
+	BuildStreamRecord(prepared->stream, id, type, key, success, tracksResidency ? cpuBytes : 0U, 0U,
+		success ? std::string_view{} : std::string_view("loader returned no payload"));
+	if (tracksResidency) {
+		if (const auto current = m_ResidentAssets.find(id); current != m_ResidentAssets.end()) prepared->resident = current->second;
+		BuildResidentRecord(prepared->resident, id, type, key, cpuBytes, 0U, true,
+			TerraEngine::Resource::ResidencyState::Active, policy);
+		const auto resident = m_ResidentAssets.try_emplace(id);
+		prepared->insertedResident = resident.second;
+		prepared->residentSlot = &resident.first->second;
+		const auto typed = m_ResidentAssetTypes.try_emplace(id, type);
+		prepared->insertedType = typed.second;
+		prepared->typeSlot = &typed.first->second;
+	}
+	const auto stream = m_StreamableAssets.try_emplace(id);
+	prepared->insertedStream = stream.second;
+	prepared->streamSlot = &stream.first->second;
+	return prepared;
+}
+
+void ResourceManager::CommitResourceAccounting(PreparedResourceAccounting& prepared) noexcept
+{
+	static_assert(std::is_nothrow_move_assignable_v<TerraEngine::Resource::ResidentAsset>);
+	static_assert(std::is_nothrow_move_assignable_v<TerraEngine::Resource::StreamableAssetRecord>);
+	if (prepared.residentSlot) {
+		*prepared.residentSlot = std::move(prepared.resident);
+		*prepared.typeSlot = prepared.type;
+	}
+	*prepared.streamSlot = std::move(prepared.stream);
+	prepared.committed = true;
+}
+
+ResourceManager::RequestDeliveries::~RequestDeliveries() noexcept
+{
+	// Pending receipts survive setup exceptions and are delivered after the
+	// surrounding gate/cache guards have unwound.
+	if (first) ResourceManager::DeliverRequests(std::move(*this));
+}
+
+void ResourceManager::DeliverRequests(RequestDeliveries deliveries) noexcept
+{
+	while (deliveries.first) {
+		auto request = std::move(deliveries.first);
+		deliveries.first = std::move(request->deliveryNext);
+		if (!deliveries.first) deliveries.last.reset();
+		std::vector<std::function<void(RequestOutcome)>> subscribers;
+		{
+			std::lock_guard lock(request->subscriberMutex);
+			request->delivered = true;
+			subscribers.swap(request->subscribers);
+		}
+		// A broken/duplicate promise or a throwing consumer cannot suppress any
+		// other consumer's terminal notification. Logging is also best effort.
+		try { request->promise.set_value(request->terminalResult); } catch (...) {}
+		try { request->completionPromise.set_value(); } catch (...) {}
+		for (auto& subscriber : subscribers) {
+			try { subscriber(request->outcome); }
+			catch (...) { try { TERRAENGINE_LOG(LogLevel::Error, "Resource completion subscriber threw."); } catch (...) {} }
+		}
+	}
+}
+
+ResourceManager::RequestPtr ResourceManager::AdmitRequestLocked(
+	ResourceKind kind, const std::string& key, const TerraEngine::UUID& id,
+	bool reload, bool direct, const RequestPtr& consumer, RequestDeliveries& deliveries)
+{
+	if (!m_RequestAdmissionOpen) return {};
+	const std::string mapKey = std::to_string(static_cast<std::uint32_t>(kind)) + ":" + key;
+	if (const auto found = m_Requests.find(mapKey); found != m_Requests.end()) {
+		const auto& existing = found->second;
+		if (!reload && existing->epoch == m_RequestEpoch && !existing->terminal) {
+			existing->directDemand |= direct;
+			if (consumer) existing->consumers.push_back(consumer);
+			return existing;
+		}
+		if (!existing->terminal) {
+			FinishRequestLocked(existing, RequestOutcome::Obsolete, TerraEngine::EMPTY_UUID,
+				"A newer request owns this resource key.", deliveries);
+		}
+	}
+	auto& version = m_RequestVersions[mapKey];
+	if (version == std::numeric_limits<std::uint64_t>::max()) return {};
+	auto request = std::make_shared<CacheRequest>();
+	request->kind = kind;
+	request->key = key;
+	request->mapKey = mapKey;
+	request->id = id;
+	request->epoch = m_RequestEpoch;
+	request->version = ++version;
+	request->identitySerial = m_IdentityInvalidationSerial;
+	request->directDemand = direct;
+	if (consumer) request->consumers.push_back(consumer);
+	m_Requests[mapKey] = request;
+	return request;
+}
+
+bool ResourceManager::HasAuthorityLocked(const RequestPtr& request) const
+{
+	if (!request || !m_RequestAdmissionOpen || request->epoch != m_RequestEpoch || request->terminal) return false;
+	const auto current = m_Requests.find(request->mapKey);
+	if (current == m_Requests.end() || current->second != request) return false;
+	for (const auto& weak : request->dependencies) {
+		const auto dependency = weak.lock();
+		if (!dependency || dependency->epoch != m_RequestEpoch) return false;
+		const auto stage = m_Requests.find(dependency->mapKey);
+		if (stage == m_Requests.end() || stage->second != dependency
+			|| (dependency->terminal && dependency->outcome != RequestOutcome::Published)) return false;
+	}
+	if (request->directDemand) return true;
+	// A stage can publish for any still-current collection consumer. A canceled
+	// collection cannot keep its private dependency alive through a stale lease.
+	for (const auto& weak : request->consumers) {
+		if (const auto consumer = weak.lock(); consumer && consumer->epoch == m_RequestEpoch) {
+			const auto parent = m_Requests.find(consumer->mapKey);
+			if (parent != m_Requests.end() && parent->second == consumer
+				&& (!consumer->terminal || consumer->outcome == RequestOutcome::Published)) return true;
+		}
+	}
+	return false;
+}
+
+void ResourceManager::FinishRequestLocked(const RequestPtr& request, RequestOutcome outcome,
+	const TerraEngine::UUID& result, std::string_view reason, RequestDeliveries& deliveries)
+{
+	if (!request || request->terminal) return;
+	// The intrusive receipt takes ownership without allocating before terminal
+	// state changes. Diagnostics must never make completion depend on allocation.
+	deliveries.Push(request);
+	request->terminalResult = result;
+	request->terminal = true;
+	request->outcome = outcome;
+	try { request->reason.assign(reason); } catch (...) { request->reason.clear(); }
+	++m_TerminalCounts[static_cast<std::size_t>(outcome)];
+	if (request->detach) request->detach();
+}
+
+void ResourceManager::FinishRequest(const RequestPtr& request, RequestOutcome outcome, std::string_view reason)
+{
+	RequestDeliveries deliveries;
+	{
+		std::lock_guard gate(m_PublicationGate);
+		FinishRequestLocked(request, outcome, TerraEngine::EMPTY_UUID, std::move(reason), deliveries);
+	}
+	DeliverRequests(std::move(deliveries));
+}
+
+void ResourceManager::AbortRequestSetup(const RequestPtr& request) noexcept
+{
+	try { FinishRequest(request, RequestOutcome::Failed, "Resource request setup failed."); }
+	catch (...) {} // Intrusive terminal delivery still runs while guards unwind.
+}
+
+void ResourceManager::SubscribeRequest(const RequestPtr& request, std::function<void(RequestOutcome)> callback)
+{
+	if (!request) { callback(RequestOutcome::Failed); return; }
+	std::optional<RequestOutcome> terminal;
+	{
+		std::lock_guard lock(request->subscriberMutex);
+		if (request->delivered) terminal = request->outcome;
+		else request->subscribers.push_back(callback);
+	}
+	// Registration and terminal observation share one mutex, preventing a lost
+	// wakeup when decoding completes between admission and subscription.
+	if (terminal) callback(*terminal);
+}
+
+void ResourceManager::InvalidateKeyLocked(ResourceKind kind, const std::string& key, RequestDeliveries& deliveries)
+{
+	const std::string mapKey = std::to_string(static_cast<std::uint32_t>(kind)) + ":" + key;
+	auto& version = m_RequestVersions[mapKey];
+	if (version != std::numeric_limits<std::uint64_t>::max()) ++version;
+	if (const auto current = m_Requests.find(mapKey); current != m_Requests.end()) {
+		FinishRequestLocked(current->second, RequestOutcome::Obsolete, TerraEngine::EMPTY_UUID,
+			"Resource ownership was invalidated.", deliveries);
+		m_Requests.erase(current);
+	}
+}
+
+bool ResourceManager::IdentityStillCurrentLocked(const RequestPtr& request, const TerraEngine::UUID& id) const
+{
+	const auto identity = std::to_string(static_cast<std::uint32_t>(request->kind)) + ":" + TerraEngine::ToHexString(id);
+	const auto found = m_IdentityInvalidations.find(identity);
+	return found == m_IdentityInvalidations.end() || found->second <= request->identitySerial;
+}
+
+void ResourceManager::InvalidateIdentityLocked(ResourceKind kind, const TerraEngine::UUID& id, RequestDeliveries& deliveries)
+{
+	if (id == TerraEngine::EMPTY_UUID) return;
+	if (m_IdentityInvalidationSerial == std::numeric_limits<std::uint64_t>::max()) m_RequestAdmissionOpen = false;
+	else ++m_IdentityInvalidationSerial;
+	const auto identity = std::to_string(static_cast<std::uint32_t>(kind)) + ":" + TerraEngine::ToHexString(id);
+	m_IdentityInvalidations[identity] = m_IdentityInvalidationSerial;
+	for (const auto& [key, request] : m_Requests) {
+		(void)key;
+		if (request->kind == kind && request->id == id) FinishRequestLocked(request,
+			RequestOutcome::Obsolete, TerraEngine::EMPTY_UUID, "Resource identity was withdrawn.", deliveries);
+	}
+}
+
+void ResourceManager::InvalidateEpochLocked(RequestDeliveries& deliveries)
+{
+	if (m_RequestEpoch == std::numeric_limits<std::uint64_t>::max()) m_RequestAdmissionOpen = false;
+	else ++m_RequestEpoch;
+	for (const auto& [key, request] : m_Requests) {
+		(void)key;
+		FinishRequestLocked(request, RequestOutcome::Obsolete, TerraEngine::EMPTY_UUID,
+			"Resource session ownership changed.", deliveries);
+	}
+	m_Requests.clear();
+}
+
+void ResourceManager::SetRequestTestHooks(RequestTestHooks hooks)
+{
+	std::lock_guard lock(m_RequestHooksMutex);
+	m_RequestHooks = std::move(hooks);
+}
+
+void ResourceManager::InvokeRequestHook(const std::string& key, unsigned boundary)
+{
+	std::function<void(const std::string&)> callback;
+	{
+		std::lock_guard lock(m_RequestHooksMutex);
+		callback = boundary == 0U ? m_RequestHooks.beforeDecode
+			: (boundary == 1U ? m_RequestHooks.beforePublication
+				: (boundary == 2U ? m_RequestHooks.beforeEnqueue : m_RequestHooks.afterAdmission));
+	}
+	if (callback) callback(key);
+}
+
+void ResourceManager::ScheduleRequestWork(const RequestPtr& request, std::function<void()> work, bool inlineDispatch)
+{
+	// Tooling can call async APIs before pool initialization. Never retain a
+	// queued task with no executor; inline synchronous loads remain available.
+	if (!inlineDispatch && threadPool.getThreadCount() == 0U) {
+		FinishRequest(request, RequestOutcome::Failed, "Resource executor is not initialized.");
+		return;
+	}
+	// Retain the actual task future before unlocked enqueue. Closing admission
+	// cannot miss a producer between record admission and physical dispatch.
+	RequestDeliveries rejected;
+	{
+		std::lock_guard gate(m_PublicationGate);
+		if (!HasAuthorityLocked(request)) {
+			FinishRequestLocked(request, RequestOutcome::Obsolete, TerraEngine::EMPTY_UUID,
+				"Resource dispatch lost current ownership or demand.", rejected);
+		}
+	}
+	if (!rejected.empty()) { DeliverRequests(std::move(rejected)); return; }
+	std::shared_ptr<Task<void>> task;
+	try {
+		std::lock_guard gate(m_PublicationGate);
+		if (!HasAuthorityLocked(request)) throw std::runtime_error("Resource dispatch ownership changed.");
+		// Lifecycle-owned tasks bypass the reusable void-task pool: an
+		// unenqueued pooled task retains its promise and would never settle.
+		task = std::make_shared<Task<void>>([this, request, work = std::move(work)] {
+			try { work(); }
+			catch (const std::exception& error) { FinishRequest(request, RequestOutcome::Failed, error.what()); }
+			catch (...) { FinishRequest(request, RequestOutcome::Failed, "Resource worker threw an unknown exception."); }
+		});
+		m_PhysicalTasks.erase(std::remove_if(m_PhysicalTasks.begin(), m_PhysicalTasks.end(), [](const auto& future) {
+			return future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+		}), m_PhysicalTasks.end());
+		m_PhysicalTasks.push_back(task->getFuture().share());
+		++m_EnqueueReservations;
+	} catch (...) {
+		FinishRequest(request, RequestOutcome::Failed, "Resource task allocation failed.");
+		return;
+	}
+	struct Reservation {
+		ResourceManager& manager;
+		~Reservation() noexcept {
+			{ std::lock_guard gate(manager.m_PublicationGate); --manager.m_EnqueueReservations; }
+			manager.m_PhysicalChanged.notify_all();
+		}
+	} reservation{*this};
+	try {
+		InvokeRequestHook(request->key, 2U);
+		if (inlineDispatch) task->run();
+		else threadPool.enqueue(task);
+	} catch (const std::exception& error) {
+		FinishRequest(request, RequestOutcome::Failed, error.what());
+	} catch (...) {
+		FinishRequest(request, RequestOutcome::Failed, "Resource enqueue failed.");
+	}
+	// An unenqueued task's promise becomes broken when its final owner drops.
+	// Drain observes this terminal receipt rather than waiting on nonexistent IO.
+	task.reset();
+}
+
+void ResourceManager::StopAdmissionsAndDrain()
+{
+	RequestDeliveries deliveries;
+	{
+		std::lock_guard gate(m_PublicationGate);
+		m_RequestAdmissionOpen = false;
+		InvalidateEpochLocked(deliveries);
+	}
+	DeliverRequests(std::move(deliveries));
+	std::vector<std::shared_future<void>> physical;
+	{
+		std::unique_lock gate(m_PublicationGate);
+		m_PhysicalChanged.wait(gate, [this] { return m_EnqueueReservations == 0U; });
+		physical = m_PhysicalTasks;
+	}
+	// Only protected owner teardown waits. Clear/root invalidation stays
+	// nonblocking and ordinary pool workers never wait on dependent requests.
+	for (auto& future : physical) {
+		try { future.get(); }
+		catch (...) { try { TERRAENGINE_LOG(LogLevel::Debug, "Resource physical task ended exceptionally before dispatch."); } catch (...) {} }
+	}
+	{
+		std::lock_guard gate(m_PublicationGate);
+		m_PhysicalTasks.clear();
+	}
+}
+
+void ResourceManager::BeginRequestSession()
+{
+	StopAdmissionsAndDrain();
+	std::lock_guard gate(m_PublicationGate);
+	if (m_RequestEpoch != std::numeric_limits<std::uint64_t>::max()) m_RequestAdmissionOpen = true;
+}
+
+ResourceManager::RequestDiagnostics ResourceManager::GetRequestDiagnostics() const
+{
+	std::lock_guard gate(m_PublicationGate);
+	RequestDiagnostics result;
+	result.epoch = m_RequestEpoch;
+	result.admitting = m_RequestAdmissionOpen;
+	result.published = m_TerminalCounts[0U];
+	result.failed = m_TerminalCounts[1U];
+	result.canceled = m_TerminalCounts[2U];
+	result.obsolete = m_TerminalCounts[3U];
+	for (const auto& future : m_PhysicalTasks) {
+		if (future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) ++result.physicalTasks;
+	}
+	for (const auto& [key, request] : m_Requests) {
+		(void)key;
+		result.pending += request->terminal ? 0U : 1U;
+		result.requests.push_back({request->key, request->id, request->epoch, request->version,
+			request->terminal, request->outcome, request->reason});
+	}
+	return result;
+}
+
 ResourceManager::ResourceManager()
 	// threadPool is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	: threadPool(ThreadPool::instance())
@@ -1093,6 +1479,9 @@ ResourceManager::ResourceManager()
 // ResourceManager::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::Initialize()
 {
+	// A new session reopens admission only after prior physical loader work has
+	// settled. Root replacement itself never blocks the steady-state pool.
+	BeginRequestSession();
 	// Each engine session starts with a fresh startup-scene override so stale
 	// export manifest data cannot leak into the next launch.
 	m_ConfiguredStartupScene.reset();
@@ -1252,6 +1641,7 @@ void ResourceManager::Initialize()
 // ResourceManager::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::Shutdown()
 {
+	StopAdmissionsAndDrain();
 	m_ConfiguredStartupScene.reset();
 	m_ConfiguredRenderSettings.reset();
 	m_RenderProfileSummary = "profile=Default";
@@ -1271,8 +1661,15 @@ void ResourceManager::Shutdown()
 // ResourceManager::SetEngineRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::SetEngineRoot(const std::filesystem::path& engineRootPath)
 {
-	engineRoot = engineRootPath.lexically_normal();
-	TERRAENGINE_LOG(LogLevel::Debug, "Engine root set to " << engineRoot);
+	const auto capturedRoot = std::filesystem::absolute(engineRootPath).lexically_normal();
+	RequestDeliveries deliveries;
+	{
+		std::lock_guard gate(m_PublicationGate);
+		if (engineRoot != capturedRoot) InvalidateEpochLocked(deliveries);
+		engineRoot = capturedRoot;
+	}
+	DeliverRequests(std::move(deliveries));
+	TERRAENGINE_LOG(LogLevel::Debug, "Engine root set to " << capturedRoot);
 }
 
 // ResourceManager::SetAssetRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1280,18 +1677,26 @@ void ResourceManager::SetAssetRoot(const std::filesystem::path& assetRootPath)
 {
 	// Normalize immediately so the cache keys stay predictable even if
 	// callers provide paths with redundant separators or relative jumps.
-	assetRoot = assetRootPath.lexically_normal();
+	const auto capturedRoot = std::filesystem::absolute(assetRootPath).lexically_normal();
+	RequestDeliveries deliveries;
+	{
+		std::lock_guard gate(m_PublicationGate);
+		if (assetRoot != capturedRoot) InvalidateEpochLocked(deliveries);
+		assetRoot = capturedRoot;
+	}
+	DeliverRequests(std::move(deliveries));
 	if (!IsExportRuntime())
 	{
 		RefreshEditorProjectManifest();
 	}
 	// Verbose debug logging makes it obvious which asset tree subsequent loads will pull from.
-	TERRAENGINE_LOG(LogLevel::Debug, "Asset root set to " << assetRoot);
+	TERRAENGINE_LOG(LogLevel::Debug, "Asset root set to " << capturedRoot);
 }
 
 // ResourceManager::GetAssetRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path ResourceManager::GetAssetRoot() const
 {
+	std::lock_guard gate(m_PublicationGate);
 	return assetRoot;
 }
 
@@ -1745,209 +2150,56 @@ AnimationResourceValidationResult ResourceManager::ValidateAnimationAssetFile(
 	return result;
 }
 
-TerraEngine::UUID ResourceManager::LoadSkeleton(
-	const std::filesystem::path& path,
+TerraEngine::UUID ResourceManager::LoadSkeleton(const std::filesystem::path& path,
 	TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint)
 {
-	if (!HasNativeExtensionForAssetType(path, AssetType::Skeleton))
-	{
-		TERRAENGINE_LOG(LogLevel::Warning,
-			"Skipping non-cooked skeleton source; runtime requires .teskel: " << path);
-		return TerraEngine::EMPTY_UUID;
-	}
-
-	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
-	const std::string key = NormalizeKey(resolvedPath);
-	if (const std::optional<TerraEngine::UUID> cached = ResolveCached(key, skeletonCache))
-	{
-		std::shared_lock lock(skeletonCache.mutex);
-		const auto resource = skeletonCache.resources.find(*cached);
-		if (resource != skeletonCache.resources.end()
-			&& (expectedCompatibilityFingerprint == 0U
-				|| resource->second->compatibilityFingerprint == expectedCompatibilityFingerprint))
-		{
-			return *cached;
-		}
-		TERRAENGINE_LOG(LogLevel::Error,
-			"Cached skeleton fingerprint does not match the requested binding for " << resolvedPath);
-		return TerraEngine::EMPTY_UUID;
-	}
-
-	AnimationResourceValidationResult validation;
-	std::unique_ptr<TerraEngine::Animation::SkeletonAsset> asset = ReadSkeletonResource(
-		*this, resolvedPath, expectedCompatibilityFingerprint, validation);
-	if (!asset)
-	{
-		TERRAENGINE_LOG(LogLevel::Error,
-			validation.diagnosticCode << ": " << validation.message << " path=" << validation.resolvedPath);
-		return TerraEngine::EMPTY_UUID;
-	}
-
-	const TerraEngine::UUID id = asset->assetId.value;
-	const std::uint64_t cpuBytes = ComputeLoadedResourceBytes(*asset);
-	{
-		std::unique_lock lock(skeletonCache.mutex);
-		if (const auto registered = skeletonCache.pathToId.find(key);
-			registered != skeletonCache.pathToId.end() && registered->second != id)
-		{
-			TERRAENGINE_LOG(LogLevel::Error,
-				"Registered skeleton UUID does not match the cooked envelope for " << resolvedPath);
-			return TerraEngine::EMPTY_UUID;
-		}
-		// A concurrent request may have published this exact resource while this
-		// caller parsed from disk. Reuse it instead of manufacturing a false
-		// hot-reload generation for unchanged data.
-		if(const auto existing = skeletonCache.resources.find(id); existing != skeletonCache.resources.end()) {
-			return id;
-		}
-		const std::optional<TerraEngine::Animation::AnimationGeneration> generation =
-			AdvanceAnimationGenerationLocked(skeletonCache, id);
-		if(!generation.has_value()) {
-			TERRAENGINE_LOG(LogLevel::Error, "Skeleton runtime generation exhausted for " << resolvedPath);
-			return TerraEngine::EMPTY_UUID;
-		}
-		asset->runtimeGeneration = *generation;
-		skeletonCache.pathToId[key] = id;
-		skeletonCache.idToPath[id] = key;
-		skeletonCache.resources[id] = std::move(asset);
-		skeletonCache.inFlight.erase(key);
-	}
-	RegisterResidencyResource(id, AssetType::Skeleton, key, cpuBytes, 0U, true,
-		TerraEngine::Resource::ResidencyState::Active);
-	UpdateStreamableLoadResult(id, AssetType::Skeleton, key, true, cpuBytes, 0U);
-	return id;
+	if (!HasNativeExtensionForAssetType(path, AssetType::Skeleton)) return TerraEngine::EMPTY_UUID;
+	// Cooked identity and compatibility are checked before the shared publication
+	// path. Cached payloads are rechecked for this caller's binding requirements.
+	const LoaderFunction<TerraEngine::Animation::SkeletonAsset> loader = [this, expectedCompatibilityFingerprint](const std::filesystem::path& resolvedPath) {
+		AnimationResourceValidationResult validation;
+		return ReadSkeletonResource(*this, resolvedPath, expectedCompatibilityFingerprint, validation);
+	};
+	const auto id = LoadOrSchedule(path, skeletonCache, loader, true, false, true, {}, true).get();
+	std::shared_lock lock(skeletonCache.mutex);
+	const auto found = skeletonCache.resources.find(id);
+	return found != skeletonCache.resources.end() && (expectedCompatibilityFingerprint == 0U
+		|| found->second->compatibilityFingerprint == expectedCompatibilityFingerprint) ? id : TerraEngine::EMPTY_UUID;
 }
 
-TerraEngine::UUID ResourceManager::LoadAnimationClip(
-	const std::filesystem::path& path,
+TerraEngine::UUID ResourceManager::LoadAnimationClip(const std::filesystem::path& path,
 	TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint)
 {
-	if (!HasNativeExtensionForAssetType(path, AssetType::AnimationClip))
-	{
-		TERRAENGINE_LOG(LogLevel::Warning,
-			"Skipping non-cooked animation source; runtime requires .teanim: " << path);
-		return TerraEngine::EMPTY_UUID;
-	}
-
-	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
-	const std::string key = NormalizeKey(resolvedPath);
-	if (const std::optional<TerraEngine::UUID> cached = ResolveCached(key, animationClipCache))
-	{
-		std::shared_lock lock(animationClipCache.mutex);
-		const auto resource = animationClipCache.resources.find(*cached);
-		if (resource != animationClipCache.resources.end()
-			&& (expectedCompatibilityFingerprint == 0U
-				|| resource->second->compatibilityFingerprint == expectedCompatibilityFingerprint))
-		{
-			return *cached;
-		}
-		TERRAENGINE_LOG(LogLevel::Error,
-			"Cached animation clip fingerprint does not match the requested skeleton for " << resolvedPath);
-		return TerraEngine::EMPTY_UUID;
-	}
-
-	AnimationResourceValidationResult validation;
-	std::unique_ptr<TerraEngine::Animation::AnimationClipAsset> asset = ReadAnimationClipResource(
-		*this, resolvedPath, expectedCompatibilityFingerprint, validation);
-	if (!asset)
-	{
-		TERRAENGINE_LOG(LogLevel::Error,
-			validation.diagnosticCode << ": " << validation.message << " path=" << validation.resolvedPath);
-		return TerraEngine::EMPTY_UUID;
-	}
-
-	const TerraEngine::UUID id = asset->assetId.value;
-	const std::uint64_t cpuBytes = ComputeLoadedResourceBytes(*asset);
-	{
-		std::unique_lock lock(animationClipCache.mutex);
-		if (const auto registered = animationClipCache.pathToId.find(key);
-			registered != animationClipCache.pathToId.end() && registered->second != id)
-		{
-			TERRAENGINE_LOG(LogLevel::Error,
-				"Registered animation-clip UUID does not match the cooked envelope for " << resolvedPath);
-			return TerraEngine::EMPTY_UUID;
-		}
-		// See the equivalent skeleton branch: concurrent readers share one
-		// publication rather than turning ordinary cache contention into a reload.
-		if(const auto existing = animationClipCache.resources.find(id); existing != animationClipCache.resources.end()) {
-			return id;
-		}
-		const std::optional<TerraEngine::Animation::AnimationGeneration> generation =
-			AdvanceAnimationGenerationLocked(animationClipCache, id);
-		if(!generation.has_value()) {
-			TERRAENGINE_LOG(LogLevel::Error, "Animation clip runtime generation exhausted for " << resolvedPath);
-			return TerraEngine::EMPTY_UUID;
-		}
-		asset->runtimeGeneration = *generation;
-		animationClipCache.pathToId[key] = id;
-		animationClipCache.idToPath[id] = key;
-		animationClipCache.resources[id] = std::move(asset);
-		animationClipCache.inFlight.erase(key);
-	}
-	RegisterResidencyResource(id, AssetType::AnimationClip, key, cpuBytes, 0U, true,
-		TerraEngine::Resource::ResidencyState::Active);
-	UpdateStreamableLoadResult(id, AssetType::AnimationClip, key, true, cpuBytes, 0U);
-	return id;
+	if (!HasNativeExtensionForAssetType(path, AssetType::AnimationClip)) return TerraEngine::EMPTY_UUID;
+	// Cooked identity and compatibility are checked before the shared publication
+	// path. Cached payloads are rechecked for this caller's binding requirements.
+	const LoaderFunction<TerraEngine::Animation::AnimationClipAsset> loader = [this, expectedCompatibilityFingerprint](const std::filesystem::path& resolvedPath) {
+		AnimationResourceValidationResult validation;
+		return ReadAnimationClipResource(*this, resolvedPath, expectedCompatibilityFingerprint, validation);
+	};
+	const auto id = LoadOrSchedule(path, animationClipCache, loader, true, false, true, {}, true).get();
+	std::shared_lock lock(animationClipCache.mutex);
+	const auto found = animationClipCache.resources.find(id);
+	return found != animationClipCache.resources.end() && (expectedCompatibilityFingerprint == 0U
+		|| found->second->compatibilityFingerprint == expectedCompatibilityFingerprint) ? id : TerraEngine::EMPTY_UUID;
 }
 
 TerraEngine::UUID ResourceManager::LoadOpaqueAnimationAsset(const std::filesystem::path& path, AssetType type)
 {
-	if (!HasNativeExtensionForAssetType(path, type))
-	{
-		return TerraEngine::EMPTY_UUID;
-	}
-
-	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
-	const std::string key = NormalizeKey(resolvedPath);
-	const auto loadIntoCache = [&](auto& cache) {
-		if (const std::optional<TerraEngine::UUID> cached = ResolveCached(key, cache))
-		{
-			return *cached;
-		}
+	if (!HasNativeExtensionForAssetType(path, type)) return TerraEngine::EMPTY_UUID;
+	const LoaderFunction<OpaqueAnimationResource> loader = [this, type](const std::filesystem::path& resolvedPath) {
 		auto resource = std::make_unique<OpaqueAnimationResource>();
 		resource->bytes = ReadFileBytes(resolvedPath);
-		if (resource->bytes.empty()
-			|| !ValidateOpaqueAnimationPayload(resource->bytes, type, &resource->assetId)
-			|| resource->assetId == TerraEngine::EMPTY_UUID)
-		{
-			return TerraEngine::EMPTY_UUID;
-		}
-		const TerraEngine::UUID id = resource->assetId;
-		const std::uint64_t cpuBytes = ComputeLoadedResourceBytes(*resource);
-		{
-			std::unique_lock lock(cache.mutex);
-			if (const auto registered = cache.pathToId.find(key);
-				registered != cache.pathToId.end() && registered->second != id)
-			{
-				return TerraEngine::EMPTY_UUID;
-			}
-			if (cache.resources.contains(id))
-			{
-				return id;
-			}
-			if (!AdvanceAnimationGenerationLocked(cache, id).has_value())
-			{
-				return TerraEngine::EMPTY_UUID;
-			}
-			cache.pathToId[key] = id;
-			cache.idToPath[id] = key;
-			cache.resources[id] = std::move(resource);
-			cache.inFlight.erase(key);
-			cache.inFlightTokens.erase(key);
-		}
-		RegisterResidencyResource(id, type, key, cpuBytes, 0u, true,
-			TerraEngine::Resource::ResidencyState::Active);
-		UpdateStreamableLoadResult(id, type, key, true, cpuBytes, 0u);
-		return id;
+		return resource->bytes.empty() || !ValidateOpaqueAnimationPayload(resource->bytes, type, &resource->assetId)
+			? std::unique_ptr<OpaqueAnimationResource>{} : std::move(resource);
 	};
-
-	switch (type)
-	{
-	case AssetType::AnimationController: return loadIntoCache(animationControllerCache);
-	case AssetType::AnimationMask: return loadIntoCache(animationMaskCache);
-	case AssetType::RetargetProfile: return loadIntoCache(retargetProfileCache);
-	case AssetType::MotionDatabase: return loadIntoCache(motionDatabaseCache);
-	case AssetType::RagdollProfile: return loadIntoCache(ragdollProfileCache);
+	// Specialist assets use the identical inline task transaction as skeletons.
+	switch (type) {
+	case AssetType::AnimationController: return LoadOrSchedule(path, animationControllerCache, loader, true, false, true, {}, true).get();
+	case AssetType::AnimationMask: return LoadOrSchedule(path, animationMaskCache, loader, true, false, true, {}, true).get();
+	case AssetType::RetargetProfile: return LoadOrSchedule(path, retargetProfileCache, loader, true, false, true, {}, true).get();
+	case AssetType::MotionDatabase: return LoadOrSchedule(path, motionDatabaseCache, loader, true, false, true, {}, true).get();
+	case AssetType::RagdollProfile: return LoadOrSchedule(path, ragdollProfileCache, loader, true, false, true, {}, true).get();
 	default: return TerraEngine::EMPTY_UUID;
 	}
 }
@@ -2010,82 +2262,22 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadAnimationAssetAsync(
 
 bool ResourceManager::ReloadSkeleton(const TerraEngine::UUID& id)
 {
-	std::string sourceKey;
-	TerraEngine::Animation::AnimationGeneration observedGeneration = 0U;
-	{
-		std::shared_lock lock(skeletonCache.mutex);
-		const auto path = skeletonCache.idToPath.find(id);
-		const auto generation = skeletonCache.runtimeGenerations.find(id);
-		if(path == skeletonCache.idToPath.end()
-			|| skeletonCache.resources.find(id) == skeletonCache.resources.end()
-			|| generation == skeletonCache.runtimeGenerations.end()
-			|| generation->second == std::numeric_limits<TerraEngine::Animation::AnimationGeneration>::max()) return false;
-		sourceKey = path->second;
-		observedGeneration = generation->second;
-	}
-	AnimationResourceValidationResult validation;
-	std::unique_ptr<TerraEngine::Animation::SkeletonAsset> candidate = ReadSkeletonResource(
-		*this, sourceKey, 0U, validation);
-	if(!candidate || candidate->assetId.value != id) return false;
-	const std::uint64_t cpuBytes = ComputeLoadedResourceBytes(*candidate);
-	{
-		std::unique_lock lock(skeletonCache.mutex);
-		const auto path = skeletonCache.idToPath.find(id);
-		const auto generation = skeletonCache.runtimeGenerations.find(id);
-		if(path == skeletonCache.idToPath.end() || path->second != sourceKey
-			|| skeletonCache.resources.find(id) == skeletonCache.resources.end()
-			|| generation == skeletonCache.runtimeGenerations.end()
-			|| generation->second != observedGeneration) return false;
-		const std::optional<TerraEngine::Animation::AnimationGeneration> next =
-			AdvanceAnimationGenerationLocked(skeletonCache, id);
-		if(!next.has_value()) return false;
-		candidate->runtimeGeneration = *next;
-		skeletonCache.resources[id] = std::move(candidate);
-	}
-	RegisterResidencyResource(id, AssetType::Skeleton, sourceKey, cpuBytes, 0U, true,
-		TerraEngine::Resource::ResidencyState::Active);
-	UpdateStreamableLoadResult(id, AssetType::Skeleton, sourceKey, true, cpuBytes, 0U);
-	return true;
+	const LoaderFunction<TerraEngine::Animation::SkeletonAsset> loader = [this](const std::filesystem::path& path) {
+		AnimationResourceValidationResult validation;
+		return ReadSkeletonResource(*this, path, 0U, validation);
+	};
+	// The reload request's newer version withdraws any older detached producer.
+	return ReloadCached(id, skeletonCache, loader, true).get() == id;
 }
 
 bool ResourceManager::ReloadAnimationClip(const TerraEngine::UUID& id)
 {
-	std::string sourceKey;
-	TerraEngine::Animation::AnimationGeneration observedGeneration = 0U;
-	{
-		std::shared_lock lock(animationClipCache.mutex);
-		const auto path = animationClipCache.idToPath.find(id);
-		const auto generation = animationClipCache.runtimeGenerations.find(id);
-		if(path == animationClipCache.idToPath.end()
-			|| animationClipCache.resources.find(id) == animationClipCache.resources.end()
-			|| generation == animationClipCache.runtimeGenerations.end()
-			|| generation->second == std::numeric_limits<TerraEngine::Animation::AnimationGeneration>::max()) return false;
-		sourceKey = path->second;
-		observedGeneration = generation->second;
-	}
-	AnimationResourceValidationResult validation;
-	std::unique_ptr<TerraEngine::Animation::AnimationClipAsset> candidate = ReadAnimationClipResource(
-		*this, sourceKey, 0U, validation);
-	if(!candidate || candidate->assetId.value != id) return false;
-	const std::uint64_t cpuBytes = ComputeLoadedResourceBytes(*candidate);
-	{
-		std::unique_lock lock(animationClipCache.mutex);
-		const auto path = animationClipCache.idToPath.find(id);
-		const auto generation = animationClipCache.runtimeGenerations.find(id);
-		if(path == animationClipCache.idToPath.end() || path->second != sourceKey
-			|| animationClipCache.resources.find(id) == animationClipCache.resources.end()
-			|| generation == animationClipCache.runtimeGenerations.end()
-			|| generation->second != observedGeneration) return false;
-		const std::optional<TerraEngine::Animation::AnimationGeneration> next =
-			AdvanceAnimationGenerationLocked(animationClipCache, id);
-		if(!next.has_value()) return false;
-		candidate->runtimeGeneration = *next;
-		animationClipCache.resources[id] = std::move(candidate);
-	}
-	RegisterResidencyResource(id, AssetType::AnimationClip, sourceKey, cpuBytes, 0U, true,
-		TerraEngine::Resource::ResidencyState::Active);
-	UpdateStreamableLoadResult(id, AssetType::AnimationClip, sourceKey, true, cpuBytes, 0U);
-	return true;
+	const LoaderFunction<TerraEngine::Animation::AnimationClipAsset> loader = [this](const std::filesystem::path& path) {
+		AnimationResourceValidationResult validation;
+		return ReadAnimationClipResource(*this, path, 0U, validation);
+	};
+	// The reload request's newer version withdraws any older detached producer.
+	return ReloadCached(id, animationClipCache, loader, true).get() == id;
 }
 
 bool ResourceManager::ReloadAnimationAsset(const TerraEngine::UUID& id, AssetType type)
@@ -2105,58 +2297,13 @@ bool ResourceManager::ReloadAnimationAsset(const TerraEngine::UUID& id, AssetTyp
 	}
 
 	const auto reloadOpaque = [&](auto& cache) {
-		std::string sourceKey;
-		TerraEngine::Animation::AnimationGeneration observedGeneration = 0u;
-		{
-			std::shared_lock lock(cache.mutex);
-			const auto path = cache.idToPath.find(id);
-			const auto generation = cache.runtimeGenerations.find(id);
-			if (path == cache.idToPath.end() || cache.resources.find(id) == cache.resources.end()
-				|| generation == cache.runtimeGenerations.end()
-				|| generation->second == std::numeric_limits<TerraEngine::Animation::AnimationGeneration>::max())
-			{
-				return false;
-			}
-			sourceKey = path->second;
-			observedGeneration = generation->second;
-		}
-
-		std::vector<std::uint8_t> bytes = ReadFileBytes(sourceKey);
-		if (bytes.empty() || !ValidateOpaqueAnimationPayload(bytes, type))
-		{
-			return false;
-		}
-		TerraEngine::Animation::AnimationAssetReader reader;
-		if (reader.Parse(bytes) != TerraEngine::Animation::AnimationStatus::Ok
-			|| reader.Envelope().assetId.value != id)
-		{
-			return false;
-		}
-
-		auto candidate = std::make_unique<OpaqueAnimationResource>();
-		candidate->assetId = id;
-		candidate->bytes = std::move(bytes);
-		const std::uint64_t cpuBytes = ComputeLoadedResourceBytes(*candidate);
-		{
-			std::unique_lock lock(cache.mutex);
-			const auto path = cache.idToPath.find(id);
-			const auto generation = cache.runtimeGenerations.find(id);
-			if (path == cache.idToPath.end() || path->second != sourceKey
-				|| cache.resources.find(id) == cache.resources.end()
-				|| generation == cache.runtimeGenerations.end() || generation->second != observedGeneration)
-			{
-				return false;
-			}
-			if (!AdvanceAnimationGenerationLocked(cache, id).has_value())
-			{
-				return false;
-			}
-			cache.resources[id] = std::move(candidate);
-		}
-		RegisterResidencyResource(id, type, sourceKey, cpuBytes, 0u, true,
-			TerraEngine::Resource::ResidencyState::Active);
-		UpdateStreamableLoadResult(id, type, sourceKey, true, cpuBytes, 0u);
-		return true;
+		const LoaderFunction<OpaqueAnimationResource> loader = [this, type](const std::filesystem::path& path) {
+			auto candidate = std::make_unique<OpaqueAnimationResource>();
+			candidate->bytes = ReadFileBytes(path);
+			return candidate->bytes.empty() || !ValidateOpaqueAnimationPayload(candidate->bytes, type, &candidate->assetId)
+				? std::unique_ptr<OpaqueAnimationResource>{} : std::move(candidate);
+		};
+		return ReloadCached(id, cache, loader, true).get() == id;
 	};
 
 	switch (type)
@@ -2184,6 +2331,7 @@ PreparedAnimationAssetReloadBatch ResourceManager::PrepareAnimationAssetReloadBa
 		auto state = std::make_unique<PreparedAnimationAssetReloadBatch::State>();
 		state->owner = this;
 		state->entries.reserve(requests.size());
+		state->requests.reserve(requests.size());
 		std::unordered_set<std::string> identities;
 		identities.reserve(requests.size());
 
@@ -2203,6 +2351,8 @@ PreparedAnimationAssetReloadBatch ResourceManager::PrepareAnimationAssetReloadBa
 			entry.assetType = request.assetType;
 			entry.publisherRetirementGeneration = request.publisherRetirementGeneration;
 			const auto capturePublication = [&](const auto& cache) {
+				std::lock_guard gate(m_PublicationGate);
+				if (!m_RequestAdmissionOpen) return false;
 				std::shared_lock lock(cache.mutex);
 				const auto path = cache.idToPath.find(request.assetId);
 				const auto resource = cache.resources.find(request.assetId);
@@ -2217,6 +2367,10 @@ PreparedAnimationAssetReloadBatch ResourceManager::PrepareAnimationAssetReloadBa
 				entry.sourceKey = path->second;
 				entry.observedGeneration = generation->second;
 				entry.nextGeneration = generation->second + 1U;
+				lock.unlock();
+				state->requests.push_back(AdmitRequestLocked(CacheKind(cache), entry.sourceKey,
+					entry.assetId, true, true, {}, state->deliveries));
+				if (!state->requests.back()) return false;
 				return true;
 			};
 
@@ -2235,6 +2389,11 @@ PreparedAnimationAssetReloadBatch ResourceManager::PrepareAnimationAssetReloadBa
 				prepared.m_diagnostic = "A requested animation asset is not a live, reloadable cache publication.";
 				return prepared;
 			}
+			DeliverRequests(std::move(state->deliveries));
+			bool decoded = false;
+			ScheduleRequestWork(state->requests.back(), [&] {
+			InvokeRequestHook(entry.sourceKey, 0U);
+			const auto decodeEntry = [&]() -> bool {
 
 			if(request.assetType == AssetType::Skeleton) {
 				AnimationResourceValidationResult validation;
@@ -2247,7 +2406,7 @@ PreparedAnimationAssetReloadBatch ResourceManager::PrepareAnimationAssetReloadBa
 					|| (request.expectedContentFingerprint != 0U
 						&& validation.contentFingerprint != request.expectedContentFingerprint)) {
 					prepared.m_diagnostic = "A staged skeleton replacement failed checked parsing or durable identity validation.";
-					return prepared;
+					return false;
 				}
 				candidate->runtimeGeneration = entry.nextGeneration;
 				entry.cpuBytes = ComputeLoadedResourceBytes(*candidate);
@@ -2266,7 +2425,7 @@ PreparedAnimationAssetReloadBatch ResourceManager::PrepareAnimationAssetReloadBa
 					|| (request.expectedContentFingerprint != 0U
 						&& validation.contentFingerprint != request.expectedContentFingerprint)) {
 					prepared.m_diagnostic = "A staged animation clip replacement failed checked parsing or durable identity validation.";
-					return prepared;
+					return false;
 				}
 				candidate->runtimeGeneration = entry.nextGeneration;
 				entry.cpuBytes = ComputeLoadedResourceBytes(*candidate);
@@ -2283,26 +2442,26 @@ PreparedAnimationAssetReloadBatch ResourceManager::PrepareAnimationAssetReloadBa
 						candidate->bytes, request.assetType, &parsedAssetId)
 					|| parsedAssetId != request.assetId) {
 					prepared.m_diagnostic = "A staged specialist animation replacement failed checked parsing or durable identity validation.";
-					return prepared;
+					return false;
 				}
 				TerraEngine::Animation::AnimationAssetReader reader;
 				if(reader.Parse(candidate->bytes) != TerraEngine::Animation::AnimationStatus::Ok
 					|| (request.expectedCompatibilityFingerprint != 0U
 						&& reader.Envelope().compatibilityFingerprint != request.expectedCompatibilityFingerprint)) {
 					prepared.m_diagnostic = "A staged specialist animation replacement changed compatibility after publisher validation.";
-					return prepared;
+					return false;
 				}
 				std::uint64_t contentFingerprint = 0U;
 				std::memcpy(&contentFingerprint, reader.Envelope().contentHash.data(), sizeof(contentFingerprint));
 				if(request.expectedContentHashPresent
 					&& reader.Envelope().contentHash != request.expectedContentHash) {
 					prepared.m_diagnostic = "A staged specialist animation replacement changed its complete content hash after publisher validation.";
-					return prepared;
+					return false;
 				}
 				if(request.expectedContentFingerprint != 0U
 					&& contentFingerprint != request.expectedContentFingerprint) {
 					prepared.m_diagnostic = "A staged specialist animation replacement changed content after publisher validation.";
-					return prepared;
+					return false;
 				}
 				candidate->assetId = parsedAssetId;
 				entry.cpuBytes = ComputeLoadedResourceBytes(*candidate);
@@ -2311,6 +2470,29 @@ PreparedAnimationAssetReloadBatch ResourceManager::PrepareAnimationAssetReloadBa
 					delete static_cast<OpaqueAnimationResource*>(payload);
 				};
 			}
+			// Allocate/copy diagnostic ownership before the no-throw commit boundary.
+			// Commit updates only payload fields, preserving newer streaming demand.
+			{
+				std::shared_lock accounting(m_ResidencyMutex);
+				std::shared_lock streaming(m_StreamingMutex);
+				const auto resident = m_ResidentAssets.find(entry.assetId);
+				const auto stream = m_StreamableAssets.find(entry.assetId);
+				if (resident == m_ResidentAssets.end() || stream == m_StreamableAssets.end()) return false;
+				entry.accounting = resident->second;
+				entry.streaming = stream->second;
+			}
+			for (auto& payload : entry.accounting.cpuPayloads) payload.byteSize = entry.cpuBytes;
+			entry.accounting.exactCpuBytes = TerraEngine::Resource::MakeExactResidencyBytes(entry.cpuBytes);
+			entry.accounting.exactGpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
+			entry.accounting.lastTouchedReason = "load";
+			entry.streaming.exactCpuBytes = entry.accounting.exactCpuBytes;
+			entry.streaming.exactGpuBytes = entry.accounting.exactGpuBytes;
+			return true;
+			};
+			decoded = decodeEntry();
+			if (!decoded) FinishRequest(state->requests.back(), RequestOutcome::Failed, "Prepared animation decode or accounting staging failed.");
+			}, true);
+			if (!decoded) return prepared;
 			state->entries.push_back(std::move(entry));
 		}
 
@@ -2338,6 +2520,18 @@ bool ResourceManager::CommitPreparedAnimationAssetReloadBatch(
 
 	try {
 		PreparedAnimationAssetReloadBatch::State& state = *prepared.m_state;
+		for (const auto& entry : state.entries) InvokeRequestHook(entry.sourceKey, 1U);
+		// Authority is always acquired before any typed cache or accounting lock.
+		state.publicationGate = std::unique_lock<std::mutex>(m_PublicationGate);
+		for (const auto& request : state.requests) {
+			if (!HasAuthorityLocked(request) || !IdentityStillCurrentLocked(request, request->id)) {
+				for (const auto& rejected : state.requests) FinishRequestLocked(rejected,
+					RequestOutcome::Obsolete, TerraEngine::EMPTY_UUID, {}, state.deliveries);
+				for (const auto& rejected : state.requests) FinishRequestLocked(rejected, RequestOutcome::Obsolete, TerraEngine::EMPTY_UUID, {}, state.deliveries);
+				state.UnlockPublicationLocks();
+				return false;
+			}
+		}
 		// These locks outlive the callback and are released only by the publisher's
 		// postcommit hook. That makes cache and publisher publication one visible
 		// boundary rather than two adjacent, independently observable operations.
@@ -2352,8 +2546,11 @@ bool ResourceManager::CommitPreparedAnimationAssetReloadBatch(
 		std::lock(state.skeletonLock, state.animationClipLock, state.animationControllerLock,
 			state.animationMaskLock, state.retargetProfileLock, state.motionDatabaseLock,
 			state.ragdollLock, state.retirementLock);
+		state.accountingLock = std::unique_lock<std::shared_mutex>(m_ResidencyMutex);
+		state.streamingLock = std::unique_lock<std::shared_mutex>(m_StreamingMutex);
 		constexpr std::size_t kMaximumRetiredAnimationPayloads = 16384U;
 		if(state.entries.size() > kMaximumRetiredAnimationPayloads - m_RetiredAnimationPayloads.size()) {
+			for (const auto& rejected : state.requests) FinishRequestLocked(rejected, RequestOutcome::Obsolete, TerraEngine::EMPTY_UUID, {}, state.deliveries);
 			state.UnlockPublicationLocks();
 			return false;
 		}
@@ -2393,9 +2590,20 @@ bool ResourceManager::CommitPreparedAnimationAssetReloadBatch(
 					reset.destinationSlot = nullptr;
 					reset.generationSlot = nullptr;
 				}
+				for (const auto& rejected : state.requests) FinishRequestLocked(rejected, RequestOutcome::Obsolete, TerraEngine::EMPTY_UUID, {}, state.deliveries);
 				state.UnlockPublicationLocks();
 				return false;
 			}
+			const auto resident = m_ResidentAssets.find(entry.assetId);
+			const auto stream = m_StreamableAssets.find(entry.assetId);
+			if (resident == m_ResidentAssets.end() || stream == m_StreamableAssets.end()
+				|| resident->second.sourceKey != entry.sourceKey || stream->second.sourceKey != entry.sourceKey) {
+				for (const auto& rejected : state.requests) FinishRequestLocked(rejected, RequestOutcome::Obsolete, TerraEngine::EMPTY_UUID, {}, state.deliveries);
+				state.UnlockPublicationLocks();
+				return false;
+			}
+			entry.accountingSlot = &resident->second;
+			entry.streamingSlot = &stream->second;
 		}
 
 		// No operation below this point allocates, performs IO, or searches a map.
@@ -2449,15 +2657,37 @@ bool ResourceManager::CommitPreparedAnimationAssetReloadBatch(
 			default: break;
 			}
 			*entry.generationSlot = entry.nextGeneration;
+			// Only prebuilt ownership fields move after the first pointer swap;
+			// recent needs, policy, pins, and touch histories stay on the live record.
+			auto& resident = *entry.accountingSlot;
+			resident.estimatedCpuBytes = entry.cpuBytes;
+			resident.estimatedGpuBytes = 0U;
+			resident.exactCpuBytes = std::move(entry.accounting.exactCpuBytes);
+			resident.exactGpuBytes = std::move(entry.accounting.exactGpuBytes);
+			resident.cpuPayloads.swap(entry.accounting.cpuPayloads);
+			resident.gpuAllocations.clear();
+			resident.lastTouchedReason.swap(entry.accounting.lastTouchedReason);
+			resident.state = TerraEngine::Resource::ResidencyState::Active;
+			auto& stream = *entry.streamingSlot;
+			stream.estimatedCpuBytes = entry.cpuBytes;
+			stream.estimatedGpuBytes = 0U;
+			stream.exactCpuBytes = std::move(entry.streaming.exactCpuBytes);
+			stream.exactGpuBytes = std::move(entry.streaming.exactGpuBytes);
+			stream.payloadState = TerraEngine::Resource::StreamablePayloadState::RamResident;
+			stream.failureReason.clear();
+			++stream.residencyGeneration;
 			entry.destinationSlot = nullptr;
 			entry.generationSlot = nullptr;
 		}
+		for (const auto& request : state.requests) FinishRequestLocked(request,
+			RequestOutcome::Published, request->id, {}, state.deliveries);
 		prepared.m_committed = true;
 		return true;
 	} catch(...) {
 		// Lock acquisition and pre-publication map validation are the only
 		// operations above that may throw, and both occur before the first swap.
 		prepared.m_state->UnlockPublicationLocks();
+		for (const auto& request : prepared.m_state->requests) AbortRequestSetup(request);
 		return false;
 	}
 }
@@ -2471,32 +2701,9 @@ void ResourceManager::FinalizeCommittedAnimationAssetReloadBatch(
 	}
 	const bool standaloneCommit = prepared.m_state->OwnsPublicationLocks();
 	prepared.m_state->diagnosticsFinalized = true;
-	for(const auto& entry : prepared.m_state->entries) {
-		try {
-			RegisterResidencyResource(
-				entry.assetId,
-				entry.assetType,
-				entry.sourceKey,
-				entry.cpuBytes,
-				0U,
-				true,
-				TerraEngine::Resource::ResidencyState::Active);
-			UpdateStreamableLoadResult(
-				entry.assetId,
-				entry.assetType,
-				entry.sourceKey,
-				true,
-				entry.cpuBytes,
-				0U);
-		} catch(...) {
-			// The immutable payload and publisher are already complete. Diagnostic
-			// refresh failure must never turn a successful atomic commit into a
-			// misleading rollback after consumers can observe the new generation.
-			TERRAENGINE_LOG(LogLevel::Warning,
-				"Animation reload committed but residency diagnostics could not refresh for "
-				<< TerraEngine::ToHexString(entry.assetId));
-		}
-	}
+	// Cache payloads and prebuilt accounting committed under one gate already.
+	// This post-publication path performs no diagnostic allocation or reinsertion.
+
 	if(standaloneCommit) {
 		// Direct ResourceManager callers have no publisher retirement owner. Their
 		// finalization is the documented protected boundary, so release locks and
@@ -2596,6 +2803,9 @@ void ResourceManager::ClearAnimationRuntimeGenerations()
 // ResourceManager::ClearCaches is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::ClearCaches()
 {
+	RequestDeliveries deliveries;
+	std::unique_lock gate(m_PublicationGate);
+	InvalidateEpochLocked(deliveries);
 	// Session teardown invalidates every cache publication, so no publisher can
 	// still lawfully retain these payloads. Release the bounded old-generation
 	// archive before clearing the live owners.
@@ -2715,7 +2925,7 @@ void ResourceManager::ClearCaches()
 		audioClipPaths.idToPath.clear();
 		std::unique_lock assetLock(audioClipMutex);
 		audioClipAssets.clear();
-		audioClipGenerations.clear();
+		// Generation ledgers survive cache ownership changes; old leases remain distinct.
 	}
 	{
 		std::unique_lock lock(terrainPaths.mutex);
@@ -2737,89 +2947,146 @@ void ResourceManager::ClearCaches()
 	// Mesh and animation cache ownership changed as one protected teardown
 	// publication, so wake binding synchronization exactly once.
 	m_AnimationBindingResourceRevision.fetch_add(1U, std::memory_order_release);
+	gate.unlock();
+	DeliverRequests(std::move(deliveries));
 }
 
 TerraEngine::UUID ResourceManager::LoadAudioClip(const std::filesystem::path& path)
 {
-	if(!HasNativeExtensionForAssetType(path, AssetType::AudioClip)) {
-		TERRAENGINE_LOG(LogLevel::Warning, "Skipping non-cooked audio source; runtime requires .teaudio: " << path);
-		return TerraEngine::EMPTY_UUID;
-	}
-	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
-	const std::string key = NormalizeKey(resolvedPath);
-	{
-		std::shared_lock pathLock(audioClipPaths.mutex);
-		const auto registered = audioClipPaths.pathToId.find(key);
-		if(registered != audioClipPaths.pathToId.end()) {
-			std::shared_lock assetLock(audioClipMutex);
-			if(audioClipAssets.contains(registered->second)) return registered->second;
-		}
-	}
-	const std::vector<std::uint8_t> bytes = ReadFileBytes(path);
-	if(bytes.empty() || bytes.size()
-		> TerraEngine::Audio::kAudioFileMaximumPayloadBytes + TerraEngine::Audio::kAudioFileHeaderSize)
-		return TerraEngine::EMPTY_UUID;
-	const TerraEngine::Audio::AudioFileReadResult parsed = TerraEngine::Audio::ReadAudioFile(bytes);
-	if(!parsed.Succeeded()) {
-		TERRAENGINE_LOG(LogLevel::Error, "Audio TEAF envelope rejected: " << resolvedPath);
-		return TerraEngine::EMPTY_UUID;
-	}
-	std::vector<std::uint8_t> payload(parsed.payload.begin(), parsed.payload.end());
-	const TerraEngine::UUID id = parsed.metadata.assetId;
-	std::uint64_t generation = 1U;
-	{
-		std::unique_lock pathLock(audioClipPaths.mutex);
-		if(const auto registered = audioClipPaths.pathToId.find(key);
-			registered != audioClipPaths.pathToId.end() && registered->second != id) return TerraEngine::EMPTY_UUID;
-		audioClipPaths.pathToId[key] = id;
-		audioClipPaths.idToPath[id] = key;
-		std::unique_lock assetLock(audioClipMutex);
-		if(const auto existing = audioClipAssets.find(id); existing != audioClipAssets.end()) return id;
-		generation = audioClipGenerations[id] + 1U;
-		if(generation == 0U) return TerraEngine::EMPTY_UUID;
-		auto asset = TerraEngine::Audio::AudioClipAsset::Create(parsed.metadata, std::move(payload), generation);
-		if(!asset) return TerraEngine::EMPTY_UUID;
-		audioClipGenerations[id] = generation;
-		audioClipAssets[id] = std::move(asset);
-	}
-	RegisterResidencyResource(id, AssetType::AudioClip, key,
-		static_cast<std::uint64_t>(sizeof(TerraEngine::Audio::AudioClipAsset) + parsed.payload.size()), 0U, true,
-		TerraEngine::Resource::ResidencyState::Active);
-	UpdateStreamableLoadResult(id, AssetType::AudioClip, key, true,
-		static_cast<std::uint64_t>(sizeof(TerraEngine::Audio::AudioClipAsset) + parsed.payload.size()), 0U);
-	return id;
+	return HasNativeExtensionForAssetType(path, AssetType::AudioClip)
+		? RequestAudioClip(path).get() : TerraEngine::EMPTY_UUID;
 }
 
 bool ResourceManager::ReloadAudioClip(const TerraEngine::UUID& id)
 {
-	std::filesystem::path path;
-	{
-		std::shared_lock lock(audioClipPaths.mutex);
-		const auto found = audioClipPaths.idToPath.find(id);
-		if(found == audioClipPaths.idToPath.end()) return false;
-		path = found->second;
+	std::string key;
+	{ std::lock_guard gate(m_PublicationGate);
+		std::shared_lock paths(audioClipPaths.mutex);
+		if (const auto found = audioClipPaths.idToPath.find(id); found != audioClipPaths.idToPath.end()) key = found->second;
 	}
-	// Remove no live value before parsing: a bad reimport keeps the last known
-	// good immutable generation visible to every source and retained packet.
-	const std::vector<std::uint8_t> bytes = ReadFileBytes(path);
-	if(bytes.empty() || bytes.size()
-		> TerraEngine::Audio::kAudioFileMaximumPayloadBytes + TerraEngine::Audio::kAudioFileHeaderSize) return false;
-	const auto parsed = TerraEngine::Audio::ReadAudioFile(bytes);
-	if(!parsed.Succeeded() || parsed.metadata.assetId != id) return false;
-	std::vector<std::uint8_t> payload(parsed.payload.begin(), parsed.payload.end());
-	std::unique_lock lock(audioClipMutex);
-	const std::uint64_t generation = audioClipGenerations[id] + 1U;
-	auto replacement = TerraEngine::Audio::AudioClipAsset::Create(parsed.metadata, std::move(payload), generation);
-	if(!replacement) return false;
-	audioClipGenerations[id] = generation;
-	audioClipAssets[id] = std::move(replacement);
-	return true;
+	return !key.empty() && RequestAudioClip(key, id, true).get() == id;
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::RequestAudioClip(const std::filesystem::path& path,
+	const TerraEngine::UUID& expectedIdentity, bool reload)
+{
+	RequestPtr request;
+	RequestDeliveries deliveries;
+	bool admitted = false;
+	std::filesystem::path capturedPath;
+	try {
+		{
+			std::lock_guard gate(m_PublicationGate);
+			capturedPath = (path.is_absolute() ? path : assetRoot / path).lexically_normal();
+			const auto key = NormalizeKey(capturedPath);
+			TerraEngine::UUID id = TerraEngine::EMPTY_UUID;
+			{ std::shared_lock paths(audioClipPaths.mutex);
+				if (const auto found = audioClipPaths.pathToId.find(key); found != audioClipPaths.pathToId.end()) id = found->second;
+				if (expectedIdentity != TerraEngine::EMPTY_UUID && (id != expectedIdentity
+					|| !audioClipPaths.idToPath.contains(id) || audioClipPaths.idToPath.at(id) != key)) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+				std::shared_lock assets(audioClipMutex);
+				if (!reload && audioClipAssets.contains(id)) return MakeReadyFuture(id);
+			}
+			const auto kind = static_cast<ResourceKind>(static_cast<std::uint32_t>(AssetType::AudioClip));
+			const auto mapKey = std::to_string(static_cast<std::uint32_t>(kind)) + ":" + key;
+			const auto existing = m_Requests.find(mapKey);
+			const auto previous = existing == m_Requests.end() ? RequestPtr{} : existing->second;
+			request = AdmitRequestLocked(kind, key, id, reload, true, {}, deliveries);
+			if (!request) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+			admitted = request != previous;
+		}
+		DeliverRequests(std::move(deliveries));
+		if (admitted) ScheduleRequestWork(request, [this, request, capturedPath] {
+			InvokeRequestHook(request->key, 0U);
+			const auto bytes = ReadFileBytes(capturedPath);
+			const auto parsed = TerraEngine::Audio::ReadAudioFile(bytes);
+			if (!parsed.Succeeded() || (request->id != TerraEngine::EMPTY_UUID && parsed.metadata.assetId != request->id)) {
+				FinishRequest(request, RequestOutcome::Failed, "Audio clip parsing or identity validation failed."); return;
+			}
+			std::vector<std::uint8_t> payload(parsed.payload.begin(), parsed.payload.end());
+			InvokeRequestHook(request->key, 1U);
+			RequestDeliveries published;
+			std::unique_lock gate(m_PublicationGate);
+			if (!HasAuthorityLocked(request) || !IdentityStillCurrentLocked(request, parsed.metadata.assetId)) {
+				FinishRequestLocked(request, RequestOutcome::Obsolete, TerraEngine::EMPTY_UUID, {}, published);
+				gate.unlock(); DeliverRequests(std::move(published)); return;
+			}
+			std::unique_lock paths(audioClipPaths.mutex);
+			const auto id = parsed.metadata.assetId;
+			if ((audioClipPaths.pathToId.contains(request->key) && audioClipPaths.pathToId.at(request->key) != id)
+				|| (audioClipPaths.idToPath.contains(id) && audioClipPaths.idToPath.at(id) != request->key)) {
+				paths.unlock(); FinishRequestLocked(request, RequestOutcome::Obsolete, TerraEngine::EMPTY_UUID, {}, published);
+				gate.unlock(); DeliverRequests(std::move(published)); return;
+			}
+			std::unique_lock assets(audioClipMutex);
+			const auto priorGeneration = audioClipGenerations.find(id);
+			const auto generation = priorGeneration == audioClipGenerations.end() ? 0U : priorGeneration->second;
+			if (generation == std::numeric_limits<std::uint64_t>::max()) {
+				assets.unlock(); paths.unlock(); FinishRequestLocked(request, RequestOutcome::Failed, TerraEngine::EMPTY_UUID, {}, published);
+				gate.unlock(); DeliverRequests(std::move(published)); return;
+			}
+			auto replacement = TerraEngine::Audio::AudioClipAsset::Create(parsed.metadata, std::move(payload), generation + 1U);
+			if (!replacement) {
+				assets.unlock(); paths.unlock(); FinishRequestLocked(request, RequestOutcome::Failed, TerraEngine::EMPTY_UUID, {}, published);
+				gate.unlock(); DeliverRequests(std::move(published)); return;
+			}
+			// Prepare every allocating destination before exchanging the immutable
+			// clip. Failed preparation removes only newly reserved empty slots.
+			auto accounting = PrepareResourceAccounting(id, AssetType::AudioClip, request->key, bytes.size(), true);
+			struct AudioDestinations {
+				ResourceManager& owner; const std::string& key; TerraEngine::UUID id;
+				bool path{}, identity{}, asset{}, generation{}, committed{};
+				~AudioDestinations() noexcept {
+					if (committed) return;
+					if (path) owner.audioClipPaths.pathToId.erase(key);
+					if (identity) owner.audioClipPaths.idToPath.erase(id);
+					if (asset) owner.audioClipAssets.erase(id);
+					if (generation) owner.audioClipGenerations.erase(id);
+				}
+			} destinations{*this, request->key, id};
+			const auto pathSlot = audioClipPaths.pathToId.try_emplace(request->key, id); destinations.path = pathSlot.second;
+			const auto identitySlot = audioClipPaths.idToPath.try_emplace(id, request->key); destinations.identity = identitySlot.second;
+			const auto assetSlot = audioClipAssets.try_emplace(id); destinations.asset = assetSlot.second;
+			const auto generationSlot = audioClipGenerations.try_emplace(id, generation); destinations.generation = generationSlot.second;
+			// Shared leases retain old generations; all remaining commit operations
+			// are swaps, scalar writes, or prebuilt accounting moves and cannot allocate.
+			assetSlot.first->second.swap(replacement);
+			++generationSlot.first->second;
+			CommitResourceAccounting(*accounting);
+			destinations.committed = true;
+			accounting.reset(); // Release accounting locks before terminal delivery.
+			request->id = id;
+			assets.unlock(); paths.unlock();
+			FinishRequestLocked(request, RequestOutcome::Published, id, {}, published);
+			gate.unlock(); DeliverRequests(std::move(published));
+		}, true);
+		return request->future;
+	} catch (...) {
+		if (admitted) AbortRequestSetup(request);
+		return request ? request->future : MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	}
 }
 
 // ResourceManager::DeleteResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type)
 {
+	RequestDeliveries deliveries;
+	std::unique_lock gate(m_PublicationGate);
+	InvalidateIdentityLocked(static_cast<ResourceKind>(static_cast<std::uint32_t>(type)), id, deliveries);
+	InvalidateIdentityLocked(ResourceKind::Navigation, id, deliveries);
+	// Derived companion snapshots cannot survive deletion of their source owner.
+	{ std::unique_lock lock(navigationGeometryMutex);
+		if (navigationGeometrySnapshots.erase(id)) navigationGeometryPublicationGeneration.fetch_add(1U, std::memory_order_acq_rel); }
+	auto invalidateIdentity = [&](auto& cache) {
+		std::vector<std::string> keys;
+		{
+			std::shared_lock lock(cache.mutex);
+			for (const auto& [key, identity] : cache.pathToId) if (identity == id) keys.push_back(key);
+		}
+		for (const auto& key : keys) InvalidateKeyLocked(CacheKind(cache), key, deliveries);
+	};
 	auto removeFromCache = [&](auto& cache) {
+		invalidateIdentity(cache);
 		std::unique_lock lock(cache.mutex);
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto it = cache.pathToId.begin(); it != cache.pathToId.end(); ) {
@@ -2837,6 +3104,7 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 	// Animation cache removals advance the retained ledger under the same lock
 	// as the payload removal. This makes delete a real tombstone publication.
 	auto removeAnimationFromCache = [&](auto& cache) {
+		invalidateIdentity(cache);
 		std::unique_lock lock(cache.mutex);
 		for (auto it = cache.pathToId.begin(); it != cache.pathToId.end(); ) {
 			it = it->second == id ? cache.pathToId.erase(it) : std::next(it);
@@ -2880,7 +3148,7 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 		audioClipPaths.idToPath.erase(id);
 		std::unique_lock assetLock(audioClipMutex);
 		audioClipAssets.erase(id);
-		audioClipGenerations.erase(id);
+		// Retain the generation tombstone for any surviving immutable audio lease.
 		break;
 	}
 	case AssetType::Terrain: {
@@ -2904,13 +3172,14 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 		m_MeshLocalBoundsCache.erase(id);
 	}
 
+	bool deleteBackend = false;
 	// Physics assets have no renderer-owned object or descriptor to retire.
 	if(type != AssetType::PhysicsMaterial && type != AssetType::CookedCollider && type != AssetType::AudioClip
 		&& type != AssetType::Skeleton && type != AssetType::AnimationClip
 		&& type != AssetType::AnimationController && type != AssetType::AnimationMask
 		&& type != AssetType::RetargetProfile && type != AssetType::MotionDatabase
 		&& type != AssetType::RagdollProfile)
-		RenderSystem::Instance().DeleteResource(id);
+		deleteBackend = true;
 	{
 		std::unique_lock lock(m_ResidencyMutex);
 		m_ResidentAssets.erase(id);
@@ -2920,6 +3189,11 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 		std::unique_lock lock(m_StreamingMutex);
 		m_StreamableAssets.erase(id);
 	}
+	gate.unlock();
+	DeliverRequests(std::move(deliveries));
+	// The protected renderer owner may wait for device retirement only after
+	// releasing resource locks; worker publication does not acquire device state.
+	if (deleteBackend) RenderSystem::Instance().DeleteResource(id);
 }
 
 void ResourceManager::SetResidencyPolicy(const TerraEngine::Resource::ResidencyPolicy& policy)
@@ -2983,6 +3257,15 @@ void ResourceManager::RegisterResidencyResource(
 	const TerraEngine::Resource::StreamingAssetPolicy assetPolicy = ResolveStreamingAssetPolicy(id, type);
 	std::unique_lock lock(m_ResidencyMutex);
 	TerraEngine::Resource::ResidentAsset& asset = m_ResidentAssets[id];
+	BuildResidentRecord(asset, id, type, sourceKey, cpuBytes, gpuBytes, reloadable, state, assetPolicy);
+	m_ResidentAssetTypes[id] = type;
+}
+
+void ResourceManager::BuildResidentRecord(TerraEngine::Resource::ResidentAsset& asset, const TerraEngine::UUID& id,
+	AssetType type, const std::string& sourceKey, std::uint64_t cpuBytes, std::uint64_t gpuBytes,
+	bool reloadable, TerraEngine::Resource::ResidencyState state, const TerraEngine::Resource::StreamingAssetPolicy& assetPolicy)
+{
+	// All potentially allocating field preparation can target a detached copy.
 	asset.assetId = id;
 	asset.assetType = TerraEngine::Resource::ToResidencyAssetType(type);
 	asset.sourceKey = sourceKey;
@@ -3099,7 +3382,6 @@ void ResourceManager::RegisterResidencyResource(
 	{
 		asset.state = TerraEngine::Resource::ResidencyState::Pinned;
 	}
-	m_ResidentAssetTypes[id] = type;
 }
 
 void ResourceManager::TouchResource(
@@ -3440,6 +3722,17 @@ bool ResourceManager::ReleaseResidentResource(
 	std::uint64_t frameId,
 	std::uint64_t /*candidateBytes*/)
 {
+	RequestDeliveries deliveries;
+	std::unique_lock gate(m_PublicationGate);
+	InvalidateIdentityLocked(static_cast<ResourceKind>(static_cast<std::uint32_t>(type)), id, deliveries);
+	VisitAssetCache(type, [&](auto& cache) {
+		std::vector<std::string> keys;
+		{
+			std::shared_lock lock(cache.mutex);
+			for (const auto& [key, identity] : cache.pathToId) if (identity == id) keys.push_back(key);
+		}
+		for (const auto& key : keys) InvalidateKeyLocked(CacheKind(cache), key, deliveries);
+	});
 	const bool releaseCpu = domain == TerraEngine::Resource::ResidencyReleaseDomain::Cpu
 		|| domain == TerraEngine::Resource::ResidencyReleaseDomain::CpuAndGpu;
 	const bool releaseGpu = domain == TerraEngine::Resource::ResidencyReleaseDomain::Gpu
@@ -3447,6 +3740,7 @@ bool ResourceManager::ReleaseResidentResource(
 	bool detachedCpuPayload = false;
 	if (releaseCpu)
 	{
+		if (type == AssetType::AudioClip) { std::unique_lock assets(audioClipMutex); detachedCpuPayload = audioClipAssets.erase(id) != 0U; }
 		VisitAssetCache(type, [&](auto& cache) {
 			std::unique_lock lock(cache.mutex);
 			if (!cache.resources.contains(id))
@@ -3477,6 +3771,8 @@ bool ResourceManager::ReleaseResidentResource(
 
 	if ((!releaseCpu || !detachedCpuPayload) && !hasResidentPayload)
 	{
+		gate.unlock();
+		DeliverRequests(std::move(deliveries));
 		return false;
 	}
 
@@ -3517,6 +3813,8 @@ bool ResourceManager::ReleaseResidentResource(
 	{
 		UpdateStreamableLoadResult(id, type, {}, true, remainingCpuBytes, remainingGpuBytes);
 	}
+	gate.unlock();
+	DeliverRequests(std::move(deliveries));
 	return true;
 }
 
@@ -3829,7 +4127,9 @@ TerraEngine::Resource::StreamableAssetRecord ResourceManager::RegisterStreamable
 	const std::filesystem::path& path,
 	bool referencedByScene)
 {
-	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
+	// Registration may already hold the publication gate with an absolute root
+	// snapshot. Absolute keys need no second root lookup (or recursive gate lock).
+	const std::filesystem::path resolvedPath = path.is_absolute() ? path.lexically_normal() : ResolveAssetPath(path);
 	const std::string key = NormalizeKey(resolvedPath);
 	const double nowSeconds = ResidencyClockSeconds();
 	std::unique_lock lock(m_StreamingMutex);
@@ -4183,52 +4483,45 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestStreamableLoad(
 
 bool ResourceManager::CancelStreamableLoad(const TerraEngine::UUID& id, AssetType type)
 {
-	if (id == TerraEngine::EMPTY_UUID)
+	if (id == TerraEngine::EMPTY_UUID) return false;
+	RequestDeliveries deliveries;
+	bool canceled = false;
 	{
-		return false;
-	}
-	bool cancelled = false;
-	std::string sourceKey;
-	VisitAssetCache(type, [&](auto& cache) {
-		std::unique_lock lock(cache.mutex);
-		const auto path = cache.idToPath.find(id);
-		if (path == cache.idToPath.end())
-		{
-			return;
-		}
-		sourceKey = path->second;
-		if (!cache.inFlight.contains(sourceKey))
-		{
-			return;
-		}
-		// Removing the token is the cancellation publication. The shared future
-		// remains valid for existing waiters, but its worker can no longer publish
-		// into this cache and a later request may install a fresh token/future.
-		cache.inFlightTokens.erase(sourceKey);
-		cache.inFlight.erase(sourceKey);
-		cancelled = true;
-	});
-	if (!cancelled)
-	{
-		return false;
-	}
-	{
-		std::unique_lock lock(m_StreamingMutex);
-		if (auto record = m_StreamableAssets.find(id); record != m_StreamableAssets.end())
-		{
-			record->second.payloadState = TerraEngine::Resource::StreamablePayloadState::Deferred;
-			record->second.failureReason = "Asynchronous load cancelled before publication.";
-		}
-	}
-	{
-		std::unique_lock lock(m_ResidencyMutex);
-		if (auto record = m_ResidentAssets.find(id); record != m_ResidentAssets.end())
-		{
-			record->second.inFlight = false;
-			record->second.lastTouchedReason = "streaming load cancelled";
+		std::lock_guard gate(m_PublicationGate);
+		VisitAssetCache(type, [&](auto& cache) {
+			std::string key;
+			{
+				std::shared_lock lock(cache.mutex);
+				const auto found = cache.idToPath.find(id);
+				if (found == cache.idToPath.end()) return;
+				key = found->second;
+			}
+			const auto mapKey = std::to_string(static_cast<std::uint32_t>(CacheKind(cache))) + ":" + key;
+			const auto request = m_Requests.find(mapKey);
+			if (request == m_Requests.end() || request->second->terminal) return;
+			FinishRequestLocked(request->second, RequestOutcome::Canceled, TerraEngine::EMPTY_UUID,
+				"Asynchronous load canceled before publication.", deliveries);
+			canceled = true;
+		});
+		if (canceled) {
+			{
+				std::unique_lock lock(m_StreamingMutex);
+				if (auto record = m_StreamableAssets.find(id); record != m_StreamableAssets.end()) {
+					record->second.payloadState = TerraEngine::Resource::StreamablePayloadState::Deferred;
+					record->second.failureReason = "Asynchronous load canceled before publication.";
+				}
+			}
+			{
+				std::unique_lock lock(m_ResidencyMutex);
+				if (auto record = m_ResidentAssets.find(id); record != m_ResidentAssets.end()) {
+					record->second.inFlight = false;
+					record->second.lastTouchedReason = "streaming load canceled";
+				}
+			}
 		}
 	}
-	return true;
+	DeliverRequests(std::move(deliveries));
+	return canceled;
 }
 
 void ResourceManager::UpdateStreamableLoadResult(
@@ -4246,6 +4539,13 @@ void ResourceManager::UpdateStreamableLoadResult(
 	}
 	std::unique_lock lock(m_StreamingMutex);
 	TerraEngine::Resource::StreamableAssetRecord& record = m_StreamableAssets[id];
+	BuildStreamRecord(record, id, type, sourceKey, success, cpuBytes, gpuBytes, failureReason);
+}
+
+void ResourceManager::BuildStreamRecord(TerraEngine::Resource::StreamableAssetRecord& record, const TerraEngine::UUID& id,
+	AssetType type, const std::string& sourceKey, bool success, std::uint64_t cpuBytes, std::uint64_t gpuBytes, std::string_view failureReason)
+{
+	// The same builder serves public updates and detached publication staging.
 	record.assetId = id;
 	record.assetType = ToStreamableAssetType(type);
 	if (!record.assetPolicyExplicit)
@@ -4412,19 +4712,38 @@ bool ResourceManager::HasResource(const TerraEngine::UUID& id) const
 // ResourceManager::RegisterAssetPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::filesystem::path& path, AssetType type)
 {
-	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
+	RequestDeliveries deliveries;
+	std::unique_lock gate(m_PublicationGate);
+	InvalidateIdentityLocked(static_cast<ResourceKind>(static_cast<std::uint32_t>(type)), id, deliveries);
+	const std::filesystem::path resolvedPath = (path.is_absolute() ? path : assetRoot / path).lexically_normal();
 	const std::string key = NormalizeKey(resolvedPath);
 	const bool canBePreferredLoadPath = HasNativeExtensionForAssetType(resolvedPath, type);
 	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider || type == AssetType::AudioClip || type == AssetType::Terrain) {
 		AssetPathRegistry& registry = type == AssetType::PhysicsMaterial
 			? physicsMaterialPaths : (type == AssetType::CookedCollider ? cookedColliderPaths : (type == AssetType::AudioClip ? audioClipPaths : terrainPaths));
+		if (type == AssetType::AudioClip) {
+			std::string previous;
+			{ std::shared_lock lock(registry.mutex);
+				if (const auto found = registry.idToPath.find(id); found != registry.idToPath.end()) previous = found->second; }
+			const auto kind = static_cast<ResourceKind>(static_cast<std::uint32_t>(type));
+			if (!previous.empty() && previous != key && canBePreferredLoadPath) InvalidateKeyLocked(kind, previous, deliveries);
+			InvalidateKeyLocked(kind, key, deliveries);
+		}
 		std::unique_lock lock(registry.mutex);
 		registry.pathToId[key] = id;
 		if(canBePreferredLoadPath) registry.idToPath[id] = key;
+		lock.unlock(); gate.unlock(); DeliverRequests(std::move(deliveries));
 		return;
 	}
 
 	VisitAssetCache(type, [&](auto& cache) {
+		std::string previousKey;
+		{
+			std::shared_lock lock(cache.mutex);
+			if (const auto previous = cache.idToPath.find(id); previous != cache.idToPath.end()) previousKey = previous->second;
+		}
+		if (!previousKey.empty() && previousKey != key && canBePreferredLoadPath) InvalidateKeyLocked(CacheKind(cache), previousKey, deliveries);
+		InvalidateKeyLocked(CacheKind(cache), key, deliveries);
 		std::unique_lock lock(cache.mutex);
 		cache.pathToId[key] = id;
 		// Source assets such as .obj are useful aliases for resolving authored
@@ -4437,7 +4756,11 @@ void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::
 			cache.idToPath[id] = key;
 		}
 	});
-	RegisterStreamableAsset(id, type, path, true);
+	// Registration accounting belongs to the same authority boundary. A clear
+	// cannot interleave between path ownership and its streaming evidence.
+	RegisterStreamableAsset(id, type, resolvedPath, true);
+	gate.unlock();
+	DeliverRequests(std::move(deliveries));
 }
 
 std::filesystem::path ResourceManager::GetRegisteredAssetPath(const TerraEngine::UUID& id, AssetType type) const
@@ -4546,13 +4869,22 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 	};
 
 	const std::vector<std::filesystem::path> candidatePaths = buildCandidatePaths();
+	// Root capture precedes every cache lock. Publication takes gate -> cache;
+	// resolving a path from inside the lookup would reverse that order and could
+	// deadlock against a loader committing its completed payload.
+	const auto capturedAssetRoot = GetAssetRoot();
+	std::vector<std::string> candidateKeys;
+	candidateKeys.reserve(candidatePaths.size());
+	for (const auto& candidate : candidatePaths) {
+		candidateKeys.push_back(NormalizeKey(candidate.is_absolute()
+			? candidate : capturedAssetRoot / candidate));
+	}
 
 	const auto tryFindRegisteredMatch = [&](auto& cache) -> TerraEngine::UUID {
 		std::shared_lock lock(cache.mutex);
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const std::filesystem::path& candidatePath : candidatePaths)
+		for (const std::string& exactKey : candidateKeys)
 		{
-			const std::string exactKey = NormalizeKey(ResolveAssetPath(candidatePath));
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (auto exactMatch = cache.pathToId.find(exactKey); exactMatch != cache.pathToId.end())
 			{
@@ -5069,6 +5401,7 @@ Texture* ResourceManager::GetTexture(const TerraEngine::UUID& id)
 // ResourceManager::ResolveAssetPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path ResourceManager::ResolveAssetPath(const std::filesystem::path& path) const
 {
+	std::lock_guard gate(m_PublicationGate);
 	if (path.is_absolute())
 	{
 		return path.lexically_normal();
@@ -5080,6 +5413,7 @@ std::filesystem::path ResourceManager::ResolveAssetPath(const std::filesystem::p
 // ResourceManager::ResolveEngineAssetPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path ResourceManager::ResolveEngineAssetPath(const std::filesystem::path& path) const
 {
+	std::lock_guard gate(m_PublicationGate);
 	if (path.is_absolute())
 	{
 		return path.lexically_normal();
@@ -5103,7 +5437,7 @@ std::string ResourceManager::NormalizeKey(const std::filesystem::path& path) con
 std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::path& path) const
 {
 	const std::filesystem::path absolutePath = ResolveAssetPath(path);
-	const std::filesystem::path logicalPath = absolutePath.lexically_relative(assetRoot);
+	const std::filesystem::path logicalPath = absolutePath.lexically_relative(GetAssetRoot());
 	const std::string logicalPathString = ContentMount::NormalizeLogicalPath(logicalPath.generic_string());
 
 	// A packaged animation asset has exactly one authority: the active TEPAK.
@@ -5286,7 +5620,7 @@ AnimationRangeReadResult ResourceManager::ReadAnimationAssetRange(
 	}
 
 	const std::string logicalPath = ContentMount::NormalizeLogicalPath(
-		result.resolvedPath.lexically_relative(assetRoot).generic_string());
+		result.resolvedPath.lexically_relative(GetAssetRoot()).generic_string());
 	if (ContentMount::Instance().IsMounted())
 	{
 		const TerraEngine::AnimationContentReadResult mounted =

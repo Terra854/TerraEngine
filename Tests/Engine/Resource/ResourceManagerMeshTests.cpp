@@ -193,17 +193,19 @@ namespace TerraEngine::Tests
 				&& header.find("std::atomic_uint64_t m_RendererResourcePublicationGeneration{1U}")
 					!= std::string::npos,
 				"ResourceManager must expose a monotonic renderer-only publication generation.");
-			context.Expect(meshReload.find("meshCache.resources[id] = std::move(mesh);")
-					< meshReload.find(publication)
-				&& materialReload.find("materialCache.resources[id] = std::move(material);")
-					< materialReload.find(publication)
-				&& textureReload.find("textureCache.resources[id] = std::move(texture);")
-					< textureReload.find(publication),
-				"Mesh, material, and texture reloads must advance renderer publication only after replacing a complete cache payload.");
-			context.Expect(meshReload.find("if (mesh)") < meshReload.find(publication)
-				&& materialReload.find("if (material)") < materialReload.find(publication)
-				&& textureReload.find("if (texture)") < textureReload.find(publication),
-				"Reload failures must not advance the renderer publication generation.");
+			// Reload entry points now delegate to one checked publication transaction.
+			// Verify delegation plus the payload-before-generation order at that shared
+			// boundary; production lifecycle fixtures exercise the actual outcomes.
+			context.Expect(meshReload.find("ReloadCached<Mesh>") != std::string::npos
+				&& materialReload.find("ReloadCached<Material>") != std::string::npos
+				&& textureReload.find("ReloadCached<Texture>") != std::string::npos,
+				"Mesh, material, and texture reloads must share checked publication authority.");
+			const auto finalizeStart = header.find("ResourceManager::FinalizeLoad(");
+			const auto finalize = header.substr(finalizeStart, header.find("ResourceManager::LoadOrGetCached", finalizeStart) - finalizeStart);
+			context.Expect(finalize.find("ownerSlot.first->second.swap(stagedOwner);") < finalize.find(publication)
+				&& finalize.find("if (loadedSuccessfully)") < finalize.find(publication)
+				&& finalize.find("HasAuthorityLocked(request)") < finalize.find("ownerSlot.first->second.swap(stagedOwner);"),
+				"Only an accepted complete payload can advance the shared renderer generation.");
 		});
 
 		registry.Add("Resource.Manager.InitialRendererLoadInvalidatesWarmRenderCaches", [](TestContext& context) {

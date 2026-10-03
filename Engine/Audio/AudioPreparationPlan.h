@@ -18,6 +18,8 @@ namespace TerraEngine::Audio {
 		TerraEngine::UUID startedClipAssetId = TerraEngine::EMPTY_UUID;
 		AudioGeneration startedClipGeneration = 0U;
 	};
+	// Immutable snapshots are validated at capture. Preparation selects one listener,
+	// bounds world differences by each source range and emits finite relative packets.
 	TERRAENGINE_API AudioPreparedFrame PrepareAudioFrame(const AudioAuthoringSnapshot& snapshot, std::vector<AudioPlaybackSeed>& mutablePlayback);
 	TERRAENGINE_API float ComputeAudioAttenuation(float distance, float maximumDistance) noexcept;
 	TERRAENGINE_API float ComputeAudioPan(const AudioVector3& listenerForward, const AudioVector3& sourceOffset) noexcept;

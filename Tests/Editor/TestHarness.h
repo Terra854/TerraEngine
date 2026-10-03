@@ -121,7 +121,8 @@ namespace TerraEngine::EditorTests {
 			// while selectedCount describes work that actually ran.
 			output << selectedCount << " selected tests (" << tests_.size()
 				<< " registered), " << failedCount << " failures, " << skippedCount << " skipped\n";
-			return failedCount == 0 ? 0 : 1;
+			// Empty filters indicate missing registration, not successful testing.
+			return failedCount == 0 && selectedCount != 0U ? 0 : 1;
 		}
 
 	private:

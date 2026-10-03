@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cmath>
+#include <limits>
 #include <exception>
 #include <mutex>
 #include <sstream>
@@ -25,6 +27,75 @@
 namespace TerraEngine::Scene {
 	namespace {
 		constexpr std::size_t kMaximumPendingNavigationSourceMutationIntents = 16384U;
+
+		TransactionResult CanceledExecutionResult(const Transaction& transaction) {
+			TransactionResult result;
+			result.transactionId = transaction.id;
+			result.status = TransactionStatus::Canceled;
+			result.rejectedWriteCount = LogicalWriteCount(transaction);
+			result.message = "Transaction canceled because required-frame execution failed.";
+			return result;
+		}
+
+		// A spatial envelope participates in its cohort's atomic decision, but its
+		// producer owns only its original operation span. Rebase inverse/conflict
+		// indices so replay never includes another producer's authored writes.
+		TransactionResult ProjectSpatialReceipt(const TransactionResult& aggregate, const Transaction& cohort,
+			const SceneMutationResult& span, const Transaction& producer) {
+			TransactionResult result;
+			result.transactionId = producer.id; result.status = aggregate.status;
+			result.validationCostNs = aggregate.validationCostNs; result.commitCostNs = aggregate.commitCostNs;
+			result.message = aggregate.message; result.spatialPublicationGeneration = aggregate.spatialPublicationGeneration;
+			const auto end = span.nativeOperationBegin + span.nativeOperationCount;
+			const auto owns = [&](std::size_t index) { return index >= span.nativeOperationBegin && index < end; };
+			if (result.status == TransactionStatus::Committed) result.appliedWriteCount = LogicalWriteCount(producer);
+			else result.rejectedWriteCount = LogicalWriteCount(producer);
+			for (const auto& source : aggregate.conflicts) if (owns(source.operationIndex)) {
+				auto conflict = source; conflict.operationIndex -= span.nativeOperationBegin; result.conflicts.push_back(std::move(conflict));
+			}
+			for (const auto& source : aggregate.inverseDeltas) if (owns(source.sourceOperationIndex)) {
+				auto inverse = source; inverse.sourceOperationIndex -= span.nativeOperationBegin; result.inverseDeltas.push_back(std::move(inverse));
+			}
+			std::size_t animationOffset = 0U;
+			for (std::size_t index = 0U; index < cohort.writeSet.operations.size(); ++index) {
+				const auto& operation = cohort.writeSet.operations[index];
+				if (owns(index) && operation.kind == TransactionWriteKind::CreateObject) {
+					const auto created = aggregate.createdObjects.find(operation.createdLocalObjectId);
+					if (created != aggregate.createdObjects.end()) result.createdObjects.insert(*created);
+				}
+				if (operation.kind != TransactionWriteKind::PublishAnimationMutations) continue;
+				if (owns(index) && result.status == TransactionStatus::Committed) {
+					const auto animationEnd = animationOffset + operation.animationPublications.size();
+					if (animationEnd <= aggregate.acceptedAnimationPublications.size())
+						result.acceptedAnimationPublications.insert(result.acceptedAnimationPublications.end(),
+							aggregate.acceptedAnimationPublications.begin() + animationOffset,
+							aggregate.acceptedAnimationPublications.begin() + animationEnd);
+				}
+				animationOffset += operation.animationPublications.size();
+			}
+			return result;
+		}
+
+		// Producer receipts are terminal even when a committed observer stops the
+		// frame. This also removes matching intents so a later flush cannot replay.
+		void SettleProducerReceipts(const TransactionResult& result,
+			std::vector<NavigationSourceMutationIntent>& intents,
+			std::vector<NavigationSourceMutationReceipt>& completed, std::uint64_t& sequence) {
+			TerraEngine::Animation::AnimationRootMotionResultPublisher::Instance().ObserveSceneTransactionResult(result);
+			for (auto intent = intents.begin(); intent != intents.end();) {
+				if (intent->transactionId != result.transactionId) { ++intent; continue; }
+				NavigationSourceMutationReceipt receipt;
+				receipt.intent = std::move(*intent);
+				receipt.transactionStatus = result.status;
+				receipt.accepted = result.status == TransactionStatus::Committed;
+				if (receipt.accepted && sequence != 0U) receipt.intent.committedChangeSequence = sequence++;
+				else if (receipt.accepted) { receipt.accepted = false; receipt.transactionStatus = TransactionStatus::Rejected; }
+				receipt.message = receipt.accepted ? "Navigation source change committed with its scene transaction."
+					: "Navigation source change canceled with required-frame execution.";
+				completed.push_back(std::move(receipt));
+				intent = intents.erase(intent);
+			}
+		}
 		[[nodiscard]] bool NormalizeNavigationMutationBounds(NavigationSourceMutationBounds& bounds)
 		{
 			if(!bounds.valid) return true;
@@ -88,51 +159,70 @@ namespace TerraEngine::Scene {
 				|| operation == SceneMutationOperation::ChangeSimulationFrame;
 		}
 
-		TerraEngine::Reflection::Variant MakeVariantFromMutationPayload(const nlohmann::json& value, int valueKind)
-		{
-			const auto readFloat = [&value](std::size_t index, float fallback) {
-				return value.is_array() && index < value.size()
-					? value.at(index).get<float>()
-					: fallback;
-			};
+		bool FiniteMutationValue(const Reflection::Variant& value) {
+			if (Reflection::IsType<float>(value)) return std::isfinite(Reflection::GetValue<float>(value));
+			if (Reflection::IsType<double>(value)) return std::isfinite(Reflection::GetValue<double>(value));
+			if (Reflection::IsType<glm::vec2>(value)) { const auto v = Reflection::GetValue<glm::vec2>(value); return std::isfinite(v.x) && std::isfinite(v.y); }
+			if (Reflection::IsType<glm::vec3>(value)) { const auto v = Reflection::GetValue<glm::vec3>(value); return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
+			if (Reflection::IsType<glm::vec4>(value)) { const auto v = Reflection::GetValue<glm::vec4>(value); return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) && std::isfinite(v.w); }
+			if (Reflection::IsType<glm::quat>(value)) { const auto v = Reflection::GetValue<glm::quat>(value); return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) && std::isfinite(v.w); }
+			return Reflection::IsValid(value);
+		}
 
-			switch (valueKind)
-			{
-			case 0: return value.get<bool>();
-			case 1: return value.get<int>();
-			case 2: return value.get<float>();
-			case 3: return value.get<std::uint32_t>();
-			case 4:
-				return glm::vec2(readFloat(0, 0.0f), readFloat(1, 0.0f));
-			case 5:
-				return glm::vec3(readFloat(0, 0.0f), readFloat(1, 0.0f), readFloat(2, 0.0f));
-			case 6:
-				return glm::vec4(readFloat(0, 0.0f), readFloat(1, 0.0f), readFloat(2, 0.0f), readFloat(3, 0.0f));
-			case 7:
-				return glm::quat(readFloat(0, 1.0f), readFloat(1, 0.0f), readFloat(2, 0.0f), readFloat(3, 0.0f));
-			default:
-				return {};
+		bool MutationKindMatches(const Reflection::Variant& value, int kind) {
+			// Typed string/UUID ingress has no numeric wire-kind field. Its native
+			// reflection value already carries an exact type, so -1 remains valid.
+			switch (kind) {
+			case -1: return Reflection::IsValid(value);
+			case 0: return Reflection::IsType<bool>(value);
+			case 1: return Reflection::IsType<int>(value);
+			case 2: return Reflection::IsType<float>(value);
+			case 3: return Reflection::IsType<std::uint32_t>(value);
+			case 4: return Reflection::IsType<glm::vec2>(value);
+			case 5: return Reflection::IsType<glm::vec3>(value);
+			case 6: return Reflection::IsType<glm::vec4>(value);
+			case 7: return Reflection::IsType<glm::quat>(value);
+			default: return false;
 			}
 		}
 
-		bool ApplyComponentPropertyPayload(ObjectManager& objects, entt::entity target, const ComponentAccessFunctions& component, const SceneMutationRequest& request)
-		{
-			entt::registry& registry = objects.getRegistry();
-			if (request.typedComponentPayload.valid)
-			{
-				return component.entitySetter(registry, target, request.typedComponentPayload.propertyName, request.typedComponentPayload.value);
-			}
+		Reflection::Variant ReadMutationWireValue(const nlohmann::json& value, int kind) {
+			// Validate complete wire shape before conversion. Short vectors, missing
+			// fields and numeric strings never receive invented default values.
+			if (kind == 0 && value.is_boolean()) return value.get<bool>();
+			if (kind == 1 && value.is_number_integer() && value.get<double>() >= std::numeric_limits<int>::min()
+				&& value.get<double>() <= std::numeric_limits<int>::max()) return value.get<int>();
+			if (kind == 2 && value.is_number()) { const auto number = value.get<float>(); if (std::isfinite(number)) return number; }
+			if (kind == 3 && value.is_number_integer() && value.get<double>() >= 0.0
+				&& value.get<double>() <= std::numeric_limits<std::uint32_t>::max()) return value.get<std::uint32_t>();
+			const std::size_t length = kind == 4 ? 2U : kind == 5 ? 3U : kind == 6 || kind == 7 ? 4U : 0U;
+			if (length == 0U || !value.is_array() || value.size() != length) return {};
+			for (const auto& number : value) if (!number.is_number() || !std::isfinite(number.get<float>())) return {};
+			if (kind == 4) return glm::vec2(value[0].get<float>(), value[1].get<float>());
+			if (kind == 5) return glm::vec3(value[0].get<float>(), value[1].get<float>(), value[2].get<float>());
+			if (kind == 6) return glm::vec4(value[0].get<float>(), value[1].get<float>(), value[2].get<float>(), value[3].get<float>());
+			return glm::quat(value[0].get<float>(), value[1].get<float>(), value[2].get<float>(), value[3].get<float>());
+		}
 
-			const nlohmann::json payload = nlohmann::json::parse(request.payloadJson);
-			const std::string propertyName = payload.value("propertyName", std::string{});
-			const int valueKind = payload.value("valueKind", -1);
-			if (propertyName.empty() || !payload.contains("value"))
-			{
-				return false;
+		bool PrepareMutationProperty(const SceneMutationRequest& request, TransactionWriteOperation& operation, std::string& reason) {
+			operation.kind = TransactionWriteKind::UpdateComponentProperty;
+			if (request.typedComponentPayload.valid) {
+				operation.propertyName = request.typedComponentPayload.propertyName;
+				operation.propertyValue = request.typedComponentPayload.value;
+				if (!MutationKindMatches(operation.propertyValue, request.typedComponentPayload.valueKind)) { reason = "Typed property value does not match its declared value kind."; return false; }
+			} else {
+				const auto payload = nlohmann::json::parse(request.payloadJson);
+				if (!payload.is_object() || !payload.contains("propertyName") || !payload["propertyName"].is_string()
+					|| !payload.contains("valueKind") || !payload["valueKind"].is_number_integer() || !payload.contains("value")) {
+					reason = "Component property requires propertyName, integer valueKind and value."; return false;
+				}
+				operation.propertyName = payload["propertyName"].get<std::string>();
+				operation.propertyValue = ReadMutationWireValue(payload["value"], payload["valueKind"].get<int>());
 			}
-
-			TerraEngine::Reflection::Variant value = MakeVariantFromMutationPayload(payload["value"], valueKind);
-			return component.entitySetter(registry, target, propertyName, value);
+			if (operation.propertyName.empty() || !Reflection::IsValid(operation.propertyValue) || !FiniteMutationValue(operation.propertyValue)) {
+				reason = "Component property name, value kind or numeric value is invalid."; return false;
+			}
+			return true;
 		}
 
 		std::string FormatCommitSummary(const SceneMutationBatchResult& batch)
@@ -311,6 +401,11 @@ namespace TerraEngine::Scene {
 
 	std::vector<SceneMutationRequest> SceneMutationQueue::PendingRequests() const
 	{
+		return SnapshotRequests(true);
+	}
+
+	std::vector<SceneMutationRequest> SceneMutationQueue::SnapshotRequests(bool coalesce) const
+	{
 		// Return a snapshot instead of exposing the internal vector so scheduler
 		// diagnostics and tests can inspect pending requests without mutating the
 		// queue that frame systems are still relying on.
@@ -339,6 +434,7 @@ namespace TerraEngine::Scene {
 			return left.requestId < right.requestId;
 		});
 
+		if (!coalesce) return snapshot;
 		std::vector<SceneMutationRequest> coalesced;
 		coalesced.reserve(snapshot.size());
 		std::unordered_map<std::string, std::size_t> coalescedIndex;
@@ -409,6 +505,66 @@ namespace TerraEngine::Scene {
 		return transactionDiagnostics;
 	}
 
+	std::vector<TransactionPublicationGroupResult> SceneMutationQueue::TakeCompletedPublicationGroupResults() {
+		std::scoped_lock lock(requestsMutex);
+		std::vector<TransactionPublicationGroupResult> results;
+		results.swap(completedPublicationGroupResults);
+		return results;
+	}
+
+
+	void SceneMutationQueue::RestorePendingIntents(std::vector<NavigationSourceMutationIntent>& intents) {
+		std::scoped_lock lock(requestsMutex);
+		// Unknown transaction decisions retain their copied intents for a future
+		// boundary; late ingress stays in the live collection throughout execution.
+		// Reserve before the first move, so allocation failure leaves every captured
+		// intent intact for the caller's terminal cleanup path.
+		navigationSourceMutationIntents.reserve(navigationSourceMutationIntents.size() + intents.size());
+		for (auto& intent : intents) navigationSourceMutationIntents.push_back(std::move(intent));
+		intents.clear();
+	}
+
+	void SceneMutationQueue::CancelPreparedExecution(std::vector<Transaction>& transactions,
+		std::vector<TransactionPublicationGroup>& publicationGroups, std::vector<NavigationSourceMutationIntent>& navigationSourceMutationIntents) {
+		std::scoped_lock lock(requestsMutex);
+		completedEditorTransactions.reserve(completedEditorTransactions.size() + transactions.size());
+		completedPublicationGroupResults.reserve(completedPublicationGroupResults.size() + publicationGroups.size());
+		completedNavigationSourceMutationReceipts.reserve(completedNavigationSourceMutationReceipts.size() + navigationSourceMutationIntents.size());
+		for (auto& transaction : transactions) {
+			auto result = CanceledExecutionResult(transaction);
+			AccumulateTransactionDiagnostics(transactionDiagnostics, transaction, result);
+			SettleProducerReceipts(result, navigationSourceMutationIntents, completedNavigationSourceMutationReceipts, nextNavigationSourceChangeSequence);
+			if (transaction.origin == TransactionOrigin::Editor && (!transaction.undoGroupName.empty() || transaction.originName == "UndoRedoReplay"))
+				completedEditorTransactions.push_back({std::move(transaction), std::move(result)});
+		}
+		transactions.clear();
+		for (const auto& group : publicationGroups) {
+			TransactionPublicationGroupResult result;
+			result.groupId = group.groupId; result.status = TransactionStatus::Canceled;
+			result.aggregateResult.transactionId = group.groupId; result.aggregateResult.status = result.status;
+			result.message = "Publication group canceled because required-frame execution failed.";
+			for (std::size_t index = 0; index < group.chunks.size(); ++index) {
+				const auto canceled = CanceledExecutionResult(group.chunks[index]);
+				AccumulateTransactionDiagnostics(transactionDiagnostics, group.chunks[index], canceled);
+				SettleProducerReceipts(canceled, navigationSourceMutationIntents, completedNavigationSourceMutationReceipts, nextNavigationSourceChangeSequence);
+				result.chunkReceipts.push_back({group.chunks[index].id, index, TransactionStatus::Canceled, canceled.rejectedWriteCount});
+				result.rejectedWriteCount += canceled.rejectedWriteCount;
+			}
+			result.aggregateResult.rejectedWriteCount = result.rejectedWriteCount;
+			completedPublicationGroupResults.push_back(std::move(result));
+		}
+		publicationGroups.clear();
+		// Intents without a terminal transaction cannot remain alive after the
+		// required frame has failed. Their scene transaction was never published.
+		for (auto& intent : navigationSourceMutationIntents) {
+			NavigationSourceMutationReceipt receipt;
+			receipt.intent = std::move(intent); receipt.transactionStatus = TransactionStatus::Canceled;
+			receipt.message = "Navigation source change canceled because required-frame execution failed.";
+			completedNavigationSourceMutationReceipts.push_back(std::move(receipt));
+		}
+		navigationSourceMutationIntents.clear();
+	}
+
 	void SceneMutationQueue::Clear()
 	{
 		std::scoped_lock lock(requestsMutex);
@@ -419,6 +575,7 @@ namespace TerraEngine::Scene {
 		navigationSourceMutationIntents.clear();
 		completedEditorTransactions.clear();
 		completedNavigationSourceMutationReceipts.clear();
+		completedPublicationGroupResults.clear();
 	}
 
 	SceneMutationBatchResult SceneMutationQueue::Validate(const SceneGraph& graph) const
@@ -536,384 +693,476 @@ namespace TerraEngine::Scene {
 
 	SceneMutationBatchResult SceneMutationQueue::Apply(ObjectManager& objects, std::string commitName)
 	{
-		const std::vector<SceneMutationRequest> requestSnapshot = PendingRequests();
+		// Detach every producer channel at one protected boundary. Preparation and
+		// callbacks may enqueue new work; it stays invisible until the next flush.
+		SceneMutationQueue requestCohort;
+		std::vector<Transaction> capturedTransactions;
+		std::vector<TransactionPublicationGroup> capturedGroups;
+		std::vector<NavigationSourceMutationIntent> capturedIntents;
 		SceneMutationBatchResult batch;
-		if (!requestSnapshot.empty())
-		{
-			// Request mutations need a graph-wide preflight. Typed transactions carry
-			// their own read sets, so avoiding this traversal keeps a physics-only
-			// After Physics flush proportional to the bodies that actually moved.
-			SceneGraph graph = BuildSceneGraphFromObjectManager(objects);
-			batch = Validate(graph);
-		}
-		batch.commitName = commitName.empty() ? "SceneMutationQueue.Apply" : std::move(commitName);
-		for (const SceneMutationRequest& request : requestSnapshot)
-		{
-			if (request.operation == SceneMutationOperation::UpdateComponent)
+		try {
 			{
-				if (request.typedComponentPayload.valid)
-				{
-					++batch.typedMutationCount;
+				std::scoped_lock lock(requestsMutex);
+				requestCohort.requests.swap(requests);
+				requestCohort.workerBuffers.swap(workerBuffers);
+				capturedTransactions.swap(transactions); capturedGroups.swap(publicationGroups);
+				capturedIntents.swap(navigationSourceMutationIntents);
+				completedNavigationSourceMutationReceipts.reserve(completedNavigationSourceMutationReceipts.size() + capturedIntents.size());
+			}
+			const auto rawSnapshot = requestCohort.SnapshotRequests(false);
+			std::vector<SceneMutationRequest> requestSnapshot;
+			std::vector<SceneMutationRequest> superseded;
+			std::unordered_map<std::string, std::size_t> selectedKeys;
+			for (const auto& request : rawSnapshot) {
+				if (!request.coalescingKey.empty()) {
+					const auto found = selectedKeys.find(request.coalescingKey);
+					if (found != selectedKeys.end()) { superseded.push_back(std::move(requestSnapshot[found->second])); requestSnapshot[found->second] = request; continue; }
+					selectedKeys.emplace(request.coalescingKey, requestSnapshot.size());
 				}
-				else if (!request.payloadJson.empty() || request.usedJsonFallback)
-				{
-					++batch.jsonMutationFallbackCount;
+				requestSnapshot.push_back(request);
+			}
+			batch.commitName = commitName.empty() ? "SceneMutationQueue.Apply" : std::move(commitName);
+			batch.inputMutationCount = rawSnapshot.size();
+			const auto rawRequests = rawSnapshot.size();
+			batch.coalescedMutationCount = rawRequests > requestSnapshot.size() ? rawRequests - requestSnapshot.size() : 0U;
+			Transaction generic;
+			generic.id = "generic-cohort:" + batch.commitName + (requestSnapshot.empty() ? std::string{} : ":" + requestSnapshot.front().requestId);
+			generic.origin = TransactionOrigin::ManagedCallback;
+			generic.originName = batch.commitName;
+			generic.readSet.sceneGeneration = objects.GetSceneGeneration();
+			generic.readSet.sceneRevision = objects.GetHierarchyRevision();
+			batch.results.reserve(rawSnapshot.size());
+			std::vector<bool> informational(requestSnapshot.size(), false);
+			std::vector<std::int32_t> creationLocals(requestSnapshot.size(), 0);
+			std::unordered_map<TerraEngine::UUID, std::int32_t> reservedCreates;
+			auto requestRef = [&](TerraEngine::UUID id) {
+				const auto local = reservedCreates.find(id);
+				return local == reservedCreates.end() ? ExistingObject(id) : LocalObject(local->second);
+			};
+			bool lowered = true;
+			for (std::size_t index = 0; index < requestSnapshot.size(); ++index) {
+				const auto& request = requestSnapshot[index];
+				SceneMutationResult receipt;
+				receipt.requestId = request.requestId; receipt.sourceObjectId = request.sourceObjectId;
+				receipt.sourceObjectUuid = request.sourceObjectUuid; receipt.sourceBindingId = request.sourceBindingId;
+				receipt.sourceFrameOrder = request.sourceFrameOrder;
+				receipt.nativeOperationBegin = generic.writeSet.operations.size();
+				TransactionWriteOperation op;
+				op.target = requestRef(request.targetObjectId); op.parent = requestRef(request.parentObjectId);
+				op.componentName = request.componentName; op.stringValue = request.metadataValue; op.boolValue = request.metadataBooleanValue;
+				std::string reason;
+				try {
+					if (request.expectedGraphRevision != 0U && request.expectedGraphRevision != generic.readSet.sceneRevision)
+						reason = "Mutation was captured against a stale scene graph revision.";
+					else if (IsSpatialMutation(request.operation)) {
+						if (!request.typedSpatialTransaction) reason = "Spatial ingress requires a lowered native transaction.";
+						else {
+							const auto preflight = TerraEngine::Scene::PreflightTransaction(objects, *request.typedSpatialTransaction);
+							if (preflight.status != TransactionStatus::PreflightAccepted) reason = preflight.message.empty()
+								? "Typed spatial envelope was rejected before generic cohort publication." : preflight.message;
+							else {
+								generic.readSet.objects.insert(generic.readSet.objects.end(), request.typedSpatialTransaction->readSet.objects.begin(), request.typedSpatialTransaction->readSet.objects.end());
+								generic.writeSet.operations.insert(generic.writeSet.operations.end(), request.typedSpatialTransaction->writeSet.operations.begin(), request.typedSpatialTransaction->writeSet.operations.end());
+							}
+						}
+					} else {
+						switch (request.operation) {
+						case SceneMutationOperation::CreateObject:
+							op.kind = TransactionWriteKind::CreateObject;
+							op.createdLocalObjectId = static_cast<std::int32_t>(index + 1U);
+							op.createdStableObjectId = request.targetObjectId; op.displayName = request.displayName;
+							creationLocals[index] = op.createdLocalObjectId;
+							if (request.targetObjectId != TerraEngine::EMPTY_UUID) reservedCreates[request.targetObjectId] = op.createdLocalObjectId;
+							break;
+						case SceneMutationOperation::DeleteObject: op.kind = TransactionWriteKind::DeleteObject; break;
+						case SceneMutationOperation::ReparentObject: op.kind = TransactionWriteKind::ReparentObject; break;
+						case SceneMutationOperation::SetObjectName: op.kind = TransactionWriteKind::SetName; break;
+						case SceneMutationOperation::SetObjectTag: op.kind = TransactionWriteKind::SetTag; break;
+						case SceneMutationOperation::SetObjectLayer: op.kind = TransactionWriteKind::SetLayer; break;
+						case SceneMutationOperation::SetObjectActive: op.kind = TransactionWriteKind::SetActive; break;
+						case SceneMutationOperation::SetObjectStatic: op.kind = TransactionWriteKind::SetStatic; break;
+						case SceneMutationOperation::AddComponent: op.kind = TransactionWriteKind::AddComponent; break;
+						case SceneMutationOperation::RemoveComponent: op.kind = TransactionWriteKind::RemoveComponent; break;
+						case SceneMutationOperation::UpdateComponent:
+							if (request.componentName == Transform::kComponentName) reason = "Generic Transform property edits are not spatial authority.";
+							else (void)PrepareMutationProperty(request, op, reason);
+							if (request.typedComponentPayload.valid) ++batch.typedMutationCount;
+							else ++batch.jsonMutationFallbackCount;
+							break;
+						case SceneMutationOperation::AddScriptBinding:
+							op.kind = TransactionWriteKind::AddScriptBinding;
+							if (op.stringValue.empty()) reason = "Script binding requires a nonempty managed class name.";
+							break;
+						default:
+							// These existing envelopes have no authored side effect. Keep
+							// the informational receipt without claiming an applied write.
+							informational[index] = true;
+							receipt.accepted = true;
+							receipt.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Info, request,
+								"Mutation operation has no direct ObjectManager side effect.", "Its owning prefab system handles the operation at its approved boundary."));
+							break;
+						}
+						if (reason.empty() && !informational[index]) generic.writeSet.operations.push_back(std::move(op));
+					}
+				} catch (const std::exception& error) { reason = error.what(); }
+				catch (...) { reason = "Generic authored preparation threw an unknown exception."; }
+				receipt.nativeOperationCount = generic.writeSet.operations.size() - receipt.nativeOperationBegin;
+				if (!reason.empty()) {
+					lowered = false;
+					receipt.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, reason,
+						"Rebuild the request from supported reflected authored data."));
+				}
+				batch.results.push_back(std::move(receipt));
+			}
+			// Every admitted identity receives one terminal outcome, including values
+			// replaced by coalescing. Superseded work owns no applied write.
+			for (const auto& request : superseded) {
+				SceneMutationResult receipt; receipt.requestId = request.requestId;
+				receipt.sourceObjectId = request.sourceObjectId; receipt.sourceObjectUuid = request.sourceObjectUuid;
+				receipt.sourceBindingId = request.sourceBindingId; receipt.sourceFrameOrder = request.sourceFrameOrder;
+				receipt.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Info, request,
+					"Request was superseded by a later coalesced value.", "No authored write was applied for this identity."));
+				batch.diagnostics.insert(batch.diagnostics.end(), receipt.diagnostics.begin(), receipt.diagnostics.end());
+				batch.results.push_back(std::move(receipt));
+				if (request.typedSpatialTransaction) {
+					auto canceled = CanceledExecutionResult(*request.typedSpatialTransaction);
+					std::scoped_lock lock(requestsMutex);
+					AccumulateTransactionDiagnostics(transactionDiagnostics, *request.typedSpatialTransaction, canceled);
+					const auto firstReceipt = completedNavigationSourceMutationReceipts.size();
+					SettleProducerReceipts(canceled, capturedIntents, completedNavigationSourceMutationReceipts, nextNavigationSourceChangeSequence);
+					batch.navigationSourceMutationReceipts.insert(batch.navigationSourceMutationReceipts.end(),
+						completedNavigationSourceMutationReceipts.begin() + firstReceipt, completedNavigationSourceMutationReceipts.end());
+					batch.transactionResults.push_back(std::move(canceled));
 				}
 			}
-		}
-		const bool hasRejectedRequest = std::any_of(batch.results.begin(), batch.results.end(), [](const SceneMutationResult& result) {
-			return !result.accepted;
-		});
-		if (hasRejectedRequest)
-		{
-			batch.formattedCommitSummary = FormatCommitSummary(batch);
-			return batch;
-		}
-
-		for (std::size_t index = 0; index < requestSnapshot.size(); ++index)
-		{
-			const SceneMutationRequest& request = requestSnapshot[index];
-			SceneMutationResult& result = batch.results[index];
-			if (IsSpatialMutation(request.operation))
-			{
-				// Generic ingress has completed validation. The only publication route
-				// from here is the typed STM, which owns observations and rollback.
-				const TransactionResult typedResult = CommitTransaction(objects, *request.typedSpatialTransaction);
-				{
+			TransactionResult genericResult;
+			genericResult.transactionId = generic.id;
+			if (!requestSnapshot.empty() && !generic.writeSet.operations.empty() && lowered) {
+				try { genericResult = CommitTransaction(objects, generic); }
+				catch (const TransactionPublicationFailure& failure) {
 					std::scoped_lock lock(requestsMutex);
-					AccumulateTransactionDiagnostics(transactionDiagnostics, *request.typedSpatialTransaction, typedResult);
+					AccumulateTransactionDiagnostics(transactionDiagnostics, generic, failure.committedResult);
+					for (std::size_t index = 0; index < requestSnapshot.size(); ++index) {
+						const auto& request = requestSnapshot[index]; if (!request.typedSpatialTransaction) continue;
+						auto receipt = ProjectSpatialReceipt(failure.committedResult, generic, batch.results[index], *request.typedSpatialTransaction);
+						AccumulateTransactionDiagnostics(transactionDiagnostics, *request.typedSpatialTransaction, receipt);
+						SettleProducerReceipts(receipt, capturedIntents, completedNavigationSourceMutationReceipts, nextNavigationSourceChangeSequence);
+					}
+					throw;
 				}
-				batch.transactionResults.push_back(typedResult);
-				if (typedResult.status == TransactionStatus::Committed)
+			} else {
+				genericResult.status = TransactionStatus::Rejected;
+				genericResult.rejectedWriteCount = LogicalWriteCount(generic);
+				genericResult.message = "Generic request cohort was rejected during detached lowering.";
+			}
+			const bool committed = genericResult.status == TransactionStatus::Committed;
+			for (std::size_t index = 0; index < requestSnapshot.size(); ++index) {
+				const auto& request = requestSnapshot[index]; auto& receipt = batch.results[index];
+				if (!informational[index]) {
+					receipt.accepted = committed;
+					if (committed) {
+						receipt.appliedWriteCount = 0U;
+						for (std::size_t opIndex = receipt.nativeOperationBegin; opIndex < receipt.nativeOperationBegin + receipt.nativeOperationCount; ++opIndex)
+							receipt.appliedWriteCount += LogicalWriteCount(generic.writeSet.operations[opIndex]);
+						++batch.acceptedMutationCount;
+						if (creationLocals[index] != 0) receipt.createdObjectId = genericResult.createdObjects.at(creationLocals[index]);
+					} else {
+						++batch.rejectedMutationCount;
+						for (const auto& conflict : genericResult.conflicts) {
+							if (conflict.operationIndex >= receipt.nativeOperationBegin && conflict.operationIndex < receipt.nativeOperationBegin + receipt.nativeOperationCount)
+								receipt.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, conflict.humanMessage,
+									"Refresh authored data before resubmitting the rejected cohort."));
+						}
+						if (receipt.diagnostics.empty()) receipt.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request,
+							"The atomic generic cohort was rejected; this request was not applied.", "Resolve the failing request before resubmitting the cohort."));
+					}
+				}
+				batch.diagnostics.insert(batch.diagnostics.end(), receipt.diagnostics.begin(), receipt.diagnostics.end());
+				if (request.typedSpatialTransaction) {
+					auto spatialReceipt = ProjectSpatialReceipt(genericResult, generic, receipt, *request.typedSpatialTransaction);
+					TerraEngine::Animation::AnimationRootMotionResultPublisher::Instance().ObserveSceneTransactionResult(spatialReceipt);
+					batch.transactionResults.push_back(std::move(spatialReceipt));
+				}
+			}
+			batch.applied = committed;
+			if (!requestSnapshot.empty() && !generic.writeSet.operations.empty()) {
+				std::scoped_lock lock(requestsMutex);
+				AccumulateTransactionDiagnostics(transactionDiagnostics, generic, genericResult);
+				batch.transactionResults.push_back(genericResult);
+			}
+			batch.acceptedAnimationPublications.insert(batch.acceptedAnimationPublications.end(), genericResult.acceptedAnimationPublications.begin(), genericResult.acceptedAnimationPublications.end());
+			const std::vector<TransactionResult> transactionResults = DrainPreparedTransactions(objects, capturedTransactions, capturedIntents);
+			batch.transactionResults.insert(batch.transactionResults.end(), transactionResults.begin(), transactionResults.end());
+			for (const TransactionResult& transactionResult : transactionResults)
+			{
+				// Unknown transaction IDs are ignored by the animation publisher. Known
+				// root-motion IDs become observable only at this protected scene flush.
+				TerraEngine::Animation::AnimationRootMotionResultPublisher::Instance()
+					.ObserveSceneTransactionResult(transactionResult);
+				if (transactionResult.status == TransactionStatus::Committed)
 				{
-					batch.acceptedMutationCount += typedResult.appliedWriteCount;
-					batch.acceptedAnimationPublications.insert(batch.acceptedAnimationPublications.end(),
-						typedResult.acceptedAnimationPublications.begin(), typedResult.acceptedAnimationPublications.end());
+					batch.applied = true;
+					batch.acceptedMutationCount += transactionResult.appliedWriteCount;
+					batch.acceptedAnimationPublications.insert(batch.acceptedAnimationPublications.end(), transactionResult.acceptedAnimationPublications.begin(), transactionResult.acceptedAnimationPublications.end());
 				}
 				else
 				{
-					batch.rejectedMutationCount += typedResult.rejectedWriteCount;
+					batch.rejectedMutationCount += transactionResult.rejectedWriteCount;
 				}
-				continue;
+			}
+			const std::vector<TransactionPublicationGroupResult> publicationGroupResults = DrainPreparedPublicationGroups(objects, capturedGroups, capturedIntents);
+			batch.publicationGroupResults = publicationGroupResults;
+			for (const TransactionPublicationGroupResult& groupResult : publicationGroupResults)
+			{
+				if (groupResult.status == TransactionStatus::Committed)
+				{
+					batch.applied = true;
+					batch.acceptedMutationCount += groupResult.appliedWriteCount;
+					batch.acceptedAnimationPublications.insert(batch.acceptedAnimationPublications.end(), groupResult.aggregateResult.acceptedAnimationPublications.begin(), groupResult.aggregateResult.acceptedAnimationPublications.end());
+				}
+				else
+				{
+					batch.rejectedMutationCount += groupResult.rejectedWriteCount;
+				}
 			}
 
-			switch (request.operation)
+			// Resolve copied navigation intents from the same immutable receipts used by
+			// every other transactional producer. An intent with no receipt remains
+			// queued; it cannot become visible ahead of its associated scene commit.
+			std::unordered_map<std::string, TransactionStatus> navigationTransactionStatuses;
+			for(const TransactionResult& result : batch.transactionResults)
 			{
-			case SceneMutationOperation::CreateObject:
-			{
-				Object created = objects.createObject(request.displayName.empty() ? "Object" : request.displayName);
-				if (request.targetObjectId != TerraEngine::EMPTY_UUID)
-				{
-					objects.UpdateObjectUUID(created, request.targetObjectId);
-				}
-				result.createdObjectId = objects.getUUID(created);
-				if (request.parentObjectId != TerraEngine::EMPTY_UUID)
-				{
-					if (auto parent = objects.getObject(request.parentObjectId))
-					{
-						objects.setParent(created, parent);
-					}
-				}
-				break;
+				navigationTransactionStatuses[result.transactionId] = result.status;
 			}
-			case SceneMutationOperation::DeleteObject:
-				if (auto target = objects.getObject(request.targetObjectId))
+			for(const TransactionPublicationGroupResult& groupResult : batch.publicationGroupResults)
+			{
+				for(const TransactionPublicationChunkReceipt& chunk : groupResult.chunkReceipts)
 				{
-					objects.removeObject(*target);
+					navigationTransactionStatuses[chunk.transactionId] = groupResult.status;
 				}
-				break;
-			case SceneMutationOperation::ReparentObject:
-				if (auto target = objects.getObject(request.targetObjectId))
+			}
+			{
+				std::scoped_lock lock(requestsMutex);
+				std::vector<NavigationSourceMutationIntent> unresolved;
+				unresolved.reserve(capturedIntents.size());
+				for(NavigationSourceMutationIntent& intent : capturedIntents)
 				{
-					std::optional<Object> parent;
-					if (request.parentObjectId != TerraEngine::EMPTY_UUID)
+					const auto decision = navigationTransactionStatuses.find(intent.transactionId);
+					if(decision == navigationTransactionStatuses.end())
 					{
-						parent = objects.getObject(request.parentObjectId);
+						unresolved.push_back(std::move(intent));
+						continue;
 					}
-					objects.setParent(*target, parent);
-				}
-				break;
-			case SceneMutationOperation::SetObjectName:
-				if (auto target = objects.getObject(request.targetObjectId))
-				{
-					objects.setObjectName(*target, request.metadataValue);
-				}
-				break;
-			case SceneMutationOperation::SetObjectTag:
-				if (auto target = objects.getObject(request.targetObjectId))
-				{
-					objects.setObjectTag(*target, request.metadataValue);
-				}
-				break;
-			case SceneMutationOperation::SetObjectLayer:
-				if (auto target = objects.getObject(request.targetObjectId))
-				{
-					objects.setObjectLayer(*target, request.metadataValue);
-				}
-				break;
-			case SceneMutationOperation::SetObjectActive:
-				if (auto target = objects.getObject(request.targetObjectId))
-				{
-					objects.setObjectActive(*target, request.metadataBooleanValue);
-				}
-				break;
-			case SceneMutationOperation::SetObjectStatic:
-				if (auto target = objects.getObject(request.targetObjectId))
-				{
-					objects.setObjectStatic(*target, request.metadataBooleanValue);
-				}
-				break;
-			case SceneMutationOperation::AddComponent:
-				if (auto target = objects.getObject(request.targetObjectId))
-				{
-					std::lock_guard registryLock(ComponentAccessRegistryMutex());
-					auto& registry = ComponentAccessRegistry();
-					if (auto component = registry.find(request.componentName); component != registry.end())
-					{
-						entt::registry& enttRegistry = objects.getRegistry();
-						const entt::entity targetEntity = target->EntityId();
-						if (!component->second.entityHasComponent(enttRegistry, targetEntity))
-						{
-							component->second.entityAddComponent(enttRegistry, targetEntity);
-							objects.notifyObjectStructureChanged(*target);
+					NavigationSourceMutationReceipt receipt;
+					receipt.intent = std::move(intent);
+					receipt.transactionStatus = decision->second;
+					receipt.accepted = decision->second == TransactionStatus::Committed;
+					if(receipt.accepted) {
+						// Content revisions identify a copied mesh/terrain value and may be
+						// hashes, so they are not a safe ordering relation. Stamp one queue
+						// sequence only after the scene transaction is irrevocably visible.
+						// Refuse the astronomically unlikely wrap instead of reusing an old
+						// sequence across a retained navigation lifetime.
+						if(nextNavigationSourceChangeSequence == 0U) {
+							receipt.accepted = false;
+							receipt.transactionStatus = TransactionStatus::Rejected;
+							receipt.message = "Navigation source change sequence is exhausted.";
+						} else {
+							receipt.intent.committedChangeSequence = nextNavigationSourceChangeSequence++;
 						}
 					}
-					else
-					{
-						result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Warning, request, "Component mutation references an unknown component type.", "Register the component in ComponentAccessRegistry before scripts can add it."));
-					}
+					receipt.message = receipt.accepted
+						? "Navigation source change committed with its scene transaction."
+						: (receipt.message.empty() ? "Navigation source change rejected with its scene transaction."
+							: receipt.message);
+					batch.navigationSourceMutationReceipts.push_back(receipt);
+					completedNavigationSourceMutationReceipts.push_back(std::move(receipt));
 				}
-				break;
-			case SceneMutationOperation::RemoveComponent:
-				if (auto target = objects.getObject(request.targetObjectId))
-				{
-					std::lock_guard registryLock(ComponentAccessRegistryMutex());
-					auto& registry = ComponentAccessRegistry();
-					if (auto component = registry.find(request.componentName); component != registry.end())
-					{
-						entt::registry& enttRegistry = objects.getRegistry();
-						const entt::entity targetEntity = target->EntityId();
-						if (component->second.entityHasComponent(enttRegistry, targetEntity))
-						{
-							component->second.entityRemoveComponent(enttRegistry, targetEntity);
-							objects.notifyObjectStructureChanged(*target);
-						}
-					}
-					else
-					{
-						result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Warning, request, "Component removal references an unknown component type.", "Register the component in ComponentAccessRegistry before scripts can remove it."));
-					}
-				}
-				break;
-			case SceneMutationOperation::UpdateComponent:
-				if (auto target = objects.getObject(request.targetObjectId))
-				{
-					std::lock_guard registryLock(ComponentAccessRegistryMutex());
-					auto& registry = ComponentAccessRegistry();
-					auto component = registry.find(request.componentName);
-					if (component == registry.end())
-					{
-						result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Warning, request, "Component update references an unknown component type.", "Register the component in ComponentAccessRegistry before scripts can update it."));
-						break;
-					}
+				capturedIntents.swap(unresolved);
+			}
 
-					try
-					{
-						const bool hasPayload = request.typedComponentPayload.valid || !request.payloadJson.empty();
-						if (!hasPayload)
-						{
-							result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, "Component update payload is missing property data.", "Include propertyName, valueKind, and value in the deferred payload."));
-							break;
-						}
-
-						if (!ApplyComponentPropertyPayload(objects, target->EntityId(), component->second, request))
-						{
-							result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Warning, request, "Component update could not write the reflected property.", "Verify the property name and value type match the component reflection metadata."));
-						}
-						if (request.componentName != Transform::kComponentName)
-						{
-							// Reflected Transform setters publish their spatial
-							// revision centrally; other component edits still
-							// invalidate the object's structural snapshot here.
-							objects.notifyObjectStructureChanged(*target);
-						}
-					}
-					catch (const std::exception& exception)
-					{
-						result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, std::string("Component update payload could not be parsed: ") + exception.what(), "Rebuild the script mutation payload from supported property types."));
-					}
-				}
-				break;
-			case SceneMutationOperation::AddScriptBinding:
-				if (auto target = objects.getObject(request.targetObjectId))
-				{
-					ScriptComponent* scripts = objects.GetComponent<ScriptComponent>(*target);
-					if (scripts == nullptr)
-					{
-						scripts = objects.AddComponent<ScriptComponent>(*target);
-					}
-					if (scripts == nullptr)
-					{
-						result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, "Script component could not be created.", "Retry after refreshing the target object."));
-						break;
-					}
-					auto guard = scripts->acquireWriteLock();
-					if (!scripts->HasBinding(request.metadataValue))
-					{
-						scripts->AddBinding(TerraEngine::EMPTY_UUID, request.metadataValue);
-						objects.notifyObjectStructureChanged(*target);
-					}
-				}
-				break;
-			default:
-				result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Info, request, "Mutation operation recorded but has no direct ObjectManager side effect yet.", "Prefab and component payloads are handled by their owning systems at the approved flush point."));
-				break;
-			}
+			RestorePendingIntents(capturedIntents);
+			batch.formattedCommitSummary = FormatCommitSummary(batch);
+			return batch;
+		} catch (...) {
+			// Cleanup is best effort after a required execution failure. Receipt or
+			// diagnostic allocation cannot replace the first production exception,
+			// or prevent the remaining captured owners from being consumed.
+			const auto failure = std::current_exception();
+			try {
+				std::scoped_lock lock(requestsMutex);
+				for (const auto& result : batch.transactionResults) SettleProducerReceipts(result, capturedIntents,
+					completedNavigationSourceMutationReceipts, nextNavigationSourceChangeSequence);
+			} catch (...) {}
+			try { CancelPreparedExecution(capturedTransactions, capturedGroups, capturedIntents); } catch (...) {}
+			capturedTransactions.clear(); capturedGroups.clear(); capturedIntents.clear();
+			std::rethrow_exception(failure);
 		}
-
-		// A protected boundary with no accepted request/transaction/group is a
-		// no-op, not a successful publication. Later receipts may set this true.
-		batch.applied = !requestSnapshot.empty();
-		const std::vector<TransactionResult> transactionResults = DrainTransactions(objects);
-		batch.transactionResults.insert(batch.transactionResults.end(), transactionResults.begin(), transactionResults.end());
-		for (const TransactionResult& transactionResult : transactionResults)
-		{
-			// Unknown transaction IDs are ignored by the animation publisher. Known
-			// root-motion IDs become observable only at this protected scene flush.
-			TerraEngine::Animation::AnimationRootMotionResultPublisher::Instance()
-				.ObserveSceneTransactionResult(transactionResult);
-			if (transactionResult.status == TransactionStatus::Committed)
-			{
-				batch.applied = true;
-				batch.acceptedMutationCount += transactionResult.appliedWriteCount;
-				batch.acceptedAnimationPublications.insert(batch.acceptedAnimationPublications.end(), transactionResult.acceptedAnimationPublications.begin(), transactionResult.acceptedAnimationPublications.end());
-			}
-			else
-			{
-				batch.rejectedMutationCount += transactionResult.rejectedWriteCount;
-			}
-		}
-		const std::vector<TransactionPublicationGroupResult> publicationGroupResults = DrainPublicationGroups(objects);
-		batch.publicationGroupResults = publicationGroupResults;
-		for (const TransactionPublicationGroupResult& groupResult : publicationGroupResults)
-		{
-			if (groupResult.status == TransactionStatus::Committed)
-			{
-				batch.applied = true;
-				batch.acceptedMutationCount += groupResult.appliedWriteCount;
-				batch.acceptedAnimationPublications.insert(batch.acceptedAnimationPublications.end(), groupResult.aggregateResult.acceptedAnimationPublications.begin(), groupResult.aggregateResult.acceptedAnimationPublications.end());
-			}
-			else
-			{
-				batch.rejectedMutationCount += groupResult.rejectedWriteCount;
-			}
-		}
-
-		// Resolve copied navigation intents from the same immutable receipts used by
-		// every other transactional producer. An intent with no receipt remains
-		// queued; it cannot become visible ahead of its associated scene commit.
-		std::unordered_map<std::string, TransactionStatus> navigationTransactionStatuses;
-		for(const TransactionResult& result : batch.transactionResults)
-		{
-			navigationTransactionStatuses[result.transactionId] = result.status;
-		}
-		for(const TransactionPublicationGroupResult& groupResult : batch.publicationGroupResults)
-		{
-			for(const TransactionPublicationChunkReceipt& chunk : groupResult.chunkReceipts)
-			{
-				navigationTransactionStatuses[chunk.transactionId] = groupResult.status;
-			}
-		}
-		{
-			std::scoped_lock lock(requestsMutex);
-			std::vector<NavigationSourceMutationIntent> unresolved;
-			unresolved.reserve(navigationSourceMutationIntents.size());
-			for(NavigationSourceMutationIntent& intent : navigationSourceMutationIntents)
-			{
-				const auto decision = navigationTransactionStatuses.find(intent.transactionId);
-				if(decision == navigationTransactionStatuses.end())
-				{
-					unresolved.push_back(std::move(intent));
-					continue;
-				}
-				NavigationSourceMutationReceipt receipt;
-				receipt.intent = std::move(intent);
-				receipt.transactionStatus = decision->second;
-				receipt.accepted = decision->second == TransactionStatus::Committed;
-				if(receipt.accepted) {
-					// Content revisions identify a copied mesh/terrain value and may be
-					// hashes, so they are not a safe ordering relation. Stamp one queue
-					// sequence only after the scene transaction is irrevocably visible.
-					// Refuse the astronomically unlikely wrap instead of reusing an old
-					// sequence across a retained navigation lifetime.
-					if(nextNavigationSourceChangeSequence == 0U) {
-						receipt.accepted = false;
-						receipt.transactionStatus = TransactionStatus::Rejected;
-						receipt.message = "Navigation source change sequence is exhausted.";
-					} else {
-						receipt.intent.committedChangeSequence = nextNavigationSourceChangeSequence++;
-					}
-				}
-				receipt.message = receipt.accepted
-					? "Navigation source change committed with its scene transaction."
-					: (receipt.message.empty() ? "Navigation source change rejected with its scene transaction."
-						: receipt.message);
-				batch.navigationSourceMutationReceipts.push_back(receipt);
-				completedNavigationSourceMutationReceipts.push_back(std::move(receipt));
-			}
-			navigationSourceMutationIntents.swap(unresolved);
-		}
-		{
-			std::scoped_lock lock(requestsMutex);
-			requests.clear();
-			workerBuffers.clear();
-		}
-		batch.formattedCommitSummary = FormatCommitSummary(batch);
-		return batch;
 	}
 
 	std::vector<TransactionResult> SceneMutationQueue::DrainTransactions(ObjectManager& objects)
 	{
 		std::vector<Transaction> pending;
+		std::vector<NavigationSourceMutationIntent> intents;
+		{ std::scoped_lock lock(requestsMutex); pending.swap(transactions); intents.swap(navigationSourceMutationIntents); }
+		try { auto result = DrainPreparedTransactions(objects, pending, intents); RestorePendingIntents(intents); return result; }
+		catch (...) {
+			const auto failure = std::current_exception();
+			std::vector<TransactionPublicationGroup> groups;
+			try { CancelPreparedExecution(pending, groups, intents); } catch (...) {}
+			pending.clear(); intents.clear();
+			std::rethrow_exception(failure);
+		}
+	}
+
+	std::vector<TransactionResult> SceneMutationQueue::DrainPreparedTransactions(ObjectManager& objects, std::vector<Transaction>& pending,
+		std::vector<NavigationSourceMutationIntent>& navigationSourceMutationIntents)
+	{
 		{
 			std::scoped_lock lock(requestsMutex);
-			pending.swap(transactions);
+			completedEditorTransactions.reserve(completedEditorTransactions.size() + pending.size());
+			completedPublicationGroupResults.reserve(completedPublicationGroupResults.size() + pending.size());
+			completedNavigationSourceMutationReceipts.reserve(completedNavigationSourceMutationReceipts.size() + navigationSourceMutationIntents.size());
 		}
+
 		std::vector<TransactionResult> results;
 		results.reserve(pending.size());
-		for (const Transaction& transaction : pending)
-		{
-			TransactionResult result = CommitTransaction(objects, transaction);
-			{
-				std::scoped_lock lock(requestsMutex);
-				AccumulateTransactionDiagnostics(transactionDiagnostics, transaction, result);
-				if (transaction.origin == TransactionOrigin::Editor
-					&& (!transaction.undoGroupName.empty() || transaction.originName == "UndoRedoReplay"))
-				{
-					// Keep one complete receipt until MainEditorSubsystem records a new
-					// command or reconciles a deferred undo/redo replay. The bounded
-					// diagnostics copy cannot carry the inverse payload needed by history.
-					completedEditorTransactions.push_back({transaction, result});
-				}
+		std::vector<TransactionResult> canceled;
+		std::vector<EditorTransactionCompletion> completions;
+		canceled.reserve(pending.size()); completions.reserve(pending.size());
+		for (const auto& transaction : pending) {
+			canceled.push_back(CanceledExecutionResult(transaction));
+			if (transaction.origin == TransactionOrigin::Editor
+				&& (!transaction.undoGroupName.empty() || transaction.originName == "UndoRedoReplay")) completions.push_back({transaction, {}});
+			else completions.push_back({{}, {}});
+		}
+		auto retain = [&](std::size_t index, TransactionResult result, bool producerSettlement) {
+			std::scoped_lock lock(requestsMutex);
+			AccumulateTransactionDiagnostics(transactionDiagnostics, pending[index], result);
+			if (producerSettlement) SettleProducerReceipts(result, navigationSourceMutationIntents,
+				completedNavigationSourceMutationReceipts, nextNavigationSourceChangeSequence);
+			if (pending[index].origin == TransactionOrigin::Editor
+				&& (!pending[index].undoGroupName.empty() || pending[index].originName == "UndoRedoReplay")) {
+				completions[index].result = std::move(result);
+				completedEditorTransactions.push_back(std::move(completions[index]));
 			}
+		};
+		for (std::size_t index = 0; index < pending.size(); ++index) {
+			TransactionResult result;
+			try { result = CommitTransaction(objects, pending[index]); }
+			catch (TransactionPublicationFailure& failure) {
+				// The current batch committed. Consume its receipt exactly once and
+				// terminally cancel the detached remainder before propagating failure.
+				{
+					std::scoped_lock lock(requestsMutex);
+					for (const auto& earlier : results) SettleProducerReceipts(earlier, navigationSourceMutationIntents,
+						completedNavigationSourceMutationReceipts, nextNavigationSourceChangeSequence);
+				}
+				retain(index, failure.committedResult, true);
+				for (std::size_t later = index + 1; later < pending.size(); ++later) retain(later, std::move(canceled[later]), true);
+				pending.clear();
+				throw;
+			}
+			catch (const TransactionRestorationFailure&) {
+				// The invariant breach has no ordinary rejection result. The current
+				// transaction is consumed; unstarted work still receives cancellation.
+				{
+					std::scoped_lock lock(requestsMutex);
+					for (const auto& earlier : results) SettleProducerReceipts(earlier, navigationSourceMutationIntents,
+						completedNavigationSourceMutationReceipts, nextNavigationSourceChangeSequence);
+				}
+				for (std::size_t later = index + 1; later < pending.size(); ++later) retain(later, std::move(canceled[later]), true);
+				pending.clear();
+				throw;
+			}
+			retain(index, result, false);
 			results.push_back(std::move(result));
 		}
+		pending.clear();
 		return results;
 	}
 
 	std::vector<TransactionPublicationGroupResult> SceneMutationQueue::DrainPublicationGroups(ObjectManager& objects)
 	{
 		std::vector<TransactionPublicationGroup> pending;
+		std::vector<NavigationSourceMutationIntent> intents;
+		{ std::scoped_lock lock(requestsMutex); pending.swap(publicationGroups); intents.swap(navigationSourceMutationIntents); }
+		try { auto result = DrainPreparedPublicationGroups(objects, pending, intents); RestorePendingIntents(intents); return result; }
+		catch (...) {
+			const auto failure = std::current_exception();
+			std::vector<Transaction> transactions;
+			try { CancelPreparedExecution(transactions, pending, intents); } catch (...) {}
+			pending.clear(); intents.clear();
+			std::rethrow_exception(failure);
+		}
+	}
+
+	std::vector<TransactionPublicationGroupResult> SceneMutationQueue::DrainPreparedPublicationGroups(ObjectManager& objects, std::vector<TransactionPublicationGroup>& pending,
+		std::vector<NavigationSourceMutationIntent>& navigationSourceMutationIntents)
+	{
 		{
 			std::scoped_lock lock(requestsMutex);
-			pending.swap(publicationGroups);
+			completedEditorTransactions.reserve(completedEditorTransactions.size() + pending.size());
+			completedPublicationGroupResults.reserve(completedPublicationGroupResults.size() + pending.size());
+			completedNavigationSourceMutationReceipts.reserve(completedNavigationSourceMutationReceipts.size() + navigationSourceMutationIntents.size());
 		}
+
 		std::vector<TransactionPublicationGroupResult> results;
-		results.reserve(pending.size());
-		for (const TransactionPublicationGroup& group : pending)
-		{
-			results.push_back(CommitTransactionPublicationGroup(objects, group));
+		std::vector<TransactionPublicationGroupResult> canceled;
+		results.reserve(pending.size()); canceled.reserve(pending.size());
+		for (const auto& group : pending) {
+			TransactionPublicationGroupResult result;
+			result.groupId = group.groupId; result.status = TransactionStatus::Canceled;
+			result.aggregateResult.transactionId = group.groupId;
+			result.aggregateResult.status = TransactionStatus::Canceled;
+			result.message = "Publication group canceled because required-frame execution failed.";
+			result.chunkReceipts.reserve(group.chunks.size());
+			for (std::size_t index = 0; index < group.chunks.size(); ++index) {
+				const auto& chunk = group.chunks[index];
+				result.chunkReceipts.push_back({chunk.id, index, TransactionStatus::Canceled, LogicalWriteCount(chunk)});
+				result.rejectedWriteCount += LogicalWriteCount(chunk);
+			}
+			result.aggregateResult.rejectedWriteCount = result.rejectedWriteCount;
+			canceled.push_back(std::move(result));
 		}
+		auto settle = [&](const TransactionPublicationGroupResult& result) {
+			SettleProducerReceipts(result.aggregateResult, navigationSourceMutationIntents,
+				completedNavigationSourceMutationReceipts, nextNavigationSourceChangeSequence);
+			for (const auto& chunk : result.chunkReceipts) {
+				TransactionResult receipt;
+				receipt.transactionId = chunk.transactionId; receipt.status = result.status;
+				if (result.status == TransactionStatus::Committed) receipt.appliedWriteCount = chunk.writeCount;
+				else receipt.rejectedWriteCount = chunk.writeCount;
+				SettleProducerReceipts(receipt, navigationSourceMutationIntents,
+					completedNavigationSourceMutationReceipts, nextNavigationSourceChangeSequence);
+			}
+		};
+		for (std::size_t index = 0; index < pending.size(); ++index) {
+			try { results.push_back(CommitTransactionPublicationGroup(objects, pending[index])); }
+			catch (TransactionGroupPublicationFailure& failure) {
+				std::scoped_lock lock(requestsMutex);
+				// Earlier results never reached the caller because this drain failed.
+				// Transfer the cohort once; ordinary successful drains return directly.
+				for (auto& earlier : results) { settle(earlier); completedPublicationGroupResults.push_back(std::move(earlier)); }
+				settle(failure.committedGroupResult);
+				completedPublicationGroupResults.push_back(std::move(failure.committedGroupResult));
+				for (std::size_t later = index + 1; later < pending.size(); ++later) {
+					settle(canceled[later]); completedPublicationGroupResults.push_back(std::move(canceled[later]));
+				}
+				pending.clear();
+				throw;
+			}
+			catch (const TransactionRestorationFailure&) {
+				std::scoped_lock lock(requestsMutex);
+				for (auto& earlier : results) { settle(earlier); completedPublicationGroupResults.push_back(std::move(earlier)); }
+				for (std::size_t later = index + 1; later < pending.size(); ++later) {
+					settle(canceled[later]); completedPublicationGroupResults.push_back(std::move(canceled[later]));
+				}
+				pending.clear();
+				throw;
+			}
+		}
+		pending.clear();
 		return results;
 	}
 }

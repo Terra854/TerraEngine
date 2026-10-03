@@ -36,6 +36,7 @@ public:
 	void Initialize() override;
 	void Update(float deltaTime) override;
 	void Shutdown() override;
+	void PrepareShutdown() override;
 	std::string SystemName() override;
 	TerraEngine::Scheduling::SystemDeclaration SchedulerDeclaration() override;
 	std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> DeclareFrameWorkloads(float deltaTime) override;
@@ -79,6 +80,11 @@ private:
 	ManagedHideAllWindowsFn managedHideAllWindows = nullptr;
 
 	bool initialized = false;
+	// Track native acquisition separately from workspace readiness so partial
+	// startup can release only the ImGui context and callbacks it actually owns.
+	bool ownsImGuiContext = false;
+	bool ownsWindowCallbacks = false;
+	void* editorCallbackWindow = nullptr;
 	bool pendingLoadLayout = false;
 	bool pendingSaveLayout = false;
 	bool startupProjectOpenAttempted = false;

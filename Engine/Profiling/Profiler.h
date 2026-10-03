@@ -115,6 +115,10 @@ public:
 	// keeps the session active but prevents editor-preview frames from entering it.
 	void BeginFrame(bool playModeActive = true);
 	void EndFrame();
+	// The protected coordinator calls this only after graph work has settled.
+	// Discard the failing frame without formatting status or publishing success;
+	// already buffered session/journal evidence remains owned by the profiler.
+	void AbandonFrameAfterFailure() noexcept;
 	// EditorSystem runs inside the protected scheduler frame, but its ImGui and
 	// presentation work is editor overhead rather than exported engine CPU work.
 	// This paired boundary removes the interval from enclosing CPU samples and

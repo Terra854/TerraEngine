@@ -12,6 +12,7 @@
 class Engine;
 class ProjectManager;
 class AssetDatabase;
+class EditorExportOperationController;
 // class EditorProfilerService groups related state and operations so callers have one documented contract.
 class EditorProfilerService;
 namespace TerraEngine::Editor::Automation
@@ -43,6 +44,9 @@ struct EditorContext {
 	Engine* engine = nullptr;
 	std::shared_ptr<ProjectManager> projectManager;
 	std::shared_ptr<AssetDatabase> assetDatabase;
+	// Project-owned exports survive a hidden window and drain before scripts,
+	// scene/resources or the shared pool can be released.
+	std::shared_ptr<EditorExportOperationController> exportController;
 	std::shared_ptr<EditorProfilerService> editorProfiler;
 	// The MCP bridge is editor-owned and opt-in; keeping it in shared context
 	// lets windows display status while subsystems route updates through one

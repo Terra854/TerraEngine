@@ -33,7 +33,15 @@ namespace TerraEngine::Tests
 
 			~AudioExportWorkspace()
 			{
+				// Assertions may unwind before the explicit reset below. Always drain
+				// this archive owner before restoring the next loose-file session.
+				auto& resources = ResourceManager::Instance();
+				resources.Shutdown();
+				resources.ConfigureExportArchive({});
 				ContentMount::Instance().Unmount();
+				resources.SetAssetRoot(m_PreviousAssetRoot);
+				resources.SetEngineRoot(m_PreviousEngineRoot);
+				resources.BeginRequestSession();
 				std::error_code ignored;
 				std::filesystem::remove_all(m_Root, ignored);
 			}
@@ -80,6 +88,8 @@ namespace TerraEngine::Tests
 		private:
 			std::filesystem::path m_Root;
 			std::filesystem::path m_ContentRoot = m_Root / "Content";
+			std::filesystem::path m_PreviousAssetRoot = ResourceManager::Instance().GetAssetRoot();
+			std::filesystem::path m_PreviousEngineRoot = ResourceManager::Instance().GetEngineRoot();
 		};
 
 		std::vector<std::uint8_t> MakeValidAudioFile(TerraEngine::UUID assetId)
@@ -107,6 +117,8 @@ namespace TerraEngine::Tests
 			resources.Shutdown();
 			resources.ConfigureExportArchive({});
 			ContentMount::Instance().Unmount();
+			// Admission remains closed until Initialize starts another archive owner
+			// or the workspace restores roots and explicitly opens its next session.
 		}
 	}
 

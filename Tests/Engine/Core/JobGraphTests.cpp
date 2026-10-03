@@ -4,6 +4,7 @@
 #include "Core/Scheduling/SystemScheduler.h"
 #include "Core/SystemBase.h"
 #include "ThreadPool/ThreadPool.h"
+#include "Runtime/CorrectnessTestSupport.h"
 
 #include <algorithm>
 #include <atomic>
@@ -20,12 +21,12 @@ namespace TerraEngine::Tests {
 	namespace {
 		class ThreadPoolSession {
 		public:
-			ThreadPoolSession()
+			explicit ThreadPoolSession(std::size_t workers = 0U)
 			{
 				// The job graph uses the engine ThreadPool singleton. Restart it
 				// per test so worker availability and queued work are deterministic.
 				ThreadPool::instance().shutdown();
-				ThreadPool::instance().initialize();
+				ThreadPool::instance().initialize(workers);
 			}
 
 			~ThreadPoolSession()
@@ -360,6 +361,71 @@ namespace TerraEngine::Tests {
 			context.Expect(!summary.valid, "Failed job should make summary invalid.");
 			context.Expect(HasJobState(summary, "Failing", TerraEngine::Scheduling::JobGraphNodeState::Failed), "Throwing job should report failed state.");
 			context.Expect(HasJobState(summary, "Dependent", TerraEngine::Scheduling::JobGraphNodeState::Blocked), "Required dependent should be blocked.");
+		});
+
+		registry.Add("Engine.JobGraph.RequiredFailureSettlesIndependentWorkAndSkipsDescendants", [](TestContext& context) {
+			for (const auto policy : {TerraEngine::Scheduling::JobGraphExecutionPolicy::WorkerEligible,
+				TerraEngine::Scheduling::JobGraphExecutionPolicy::Protected}) {
+				ThreadPoolSession session(2U);
+				Correctness::ControlledGate independentGate;
+				auto waiter = independentGate.MakeWaiter();
+				std::atomic<unsigned> independentCompleted = 0U;
+				std::atomic<unsigned> dependentCalls = 0U;
+				std::promise<void> failureEntered;
+				auto failureObserved = failureEntered.get_future();
+				TerraEngine::Scheduling::JobGraph graph("required-failure-settlement", "Required failure settlement");
+				auto independent = MakeJob("Independent", TerraEngine::Scheduling::JobGraphExecutionPolicy::WorkerEligible);
+				independent.work = [waiter, &independentCompleted](TerraEngine::Scheduling::JobGraphContext&) {
+					(void)waiter(); ++independentCompleted;
+				};
+				graph.AddJob(std::move(independent));
+				auto failing = MakeJob("Failing", policy);
+				failing.work = [&failureEntered, &independentGate](TerraEngine::Scheduling::JobGraphContext&) {
+					(void)independentGate.WaitForArrivals(1U);
+					failureEntered.set_value();
+					throw std::runtime_error("Unexpected required prerequisite failure");
+				};
+				const auto failed = graph.AddJob(std::move(failing));
+				auto dependent = MakeJob("Dependent", TerraEngine::Scheduling::JobGraphExecutionPolicy::Protected);
+				dependent.dependencies = {failed};
+				dependent.work = [&dependentCalls](TerraEngine::Scheduling::JobGraphContext&) { ++dependentCalls; };
+				const auto blocked = graph.AddJob(std::move(dependent));
+				auto descendant = MakeJob("Descendant", TerraEngine::Scheduling::JobGraphExecutionPolicy::WorkerEligible);
+				descendant.dependencies = {blocked};
+				descendant.work = [&dependentCalls](TerraEngine::Scheduling::JobGraphContext&) { ++dependentCalls; };
+				graph.AddJob(std::move(descendant));
+				// The test coordinator waits separately; all production work still
+				// runs on the existing graph/pool. Release before any assertion can
+				// unwind a future whose destructor joins the coordinator.
+				auto executing = std::async(std::launch::async, [&graph] { return graph.Execute(); });
+				const bool observed = failureObserved.wait_for(Correctness::kDefaultTimeout) == std::future_status::ready;
+				const bool retainedIndependent = executing.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready;
+				independentGate.Release();
+				const auto summary = executing.get();
+				context.Expect(observed && retainedIndependent, "A required fault must retain already-running independent work until settlement.");
+				context.Expect(!summary.valid, "Required failure must remain visible in graph diagnostics.");
+				context.Expect(summary.firstFailure && summary.firstFailure->nodeLabel == "Failing"
+					&& summary.firstFailure->message.find("Unexpected required prerequisite failure") != std::string::npos,
+					"First failure evidence must retain the original job and exception before display sorting.");
+				context.ExpectEqual(1U, independentCompleted.load(), "Independent worker work must settle once.");
+				context.ExpectEqual(0U, dependentCalls.load(), "Required dependents and descendants must never execute.");
+				context.Expect(HasJobState(summary, "Dependent", TerraEngine::Scheduling::JobGraphNodeState::Blocked)
+					&& HasJobState(summary, "Descendant", TerraEngine::Scheduling::JobGraphNodeState::Blocked),
+					"Skipped required work must have explicit terminal blocked states.");
+			}
+		});
+
+		registry.Add("Engine.JobGraph.InvalidRequiredPlanRunsNoWork", [](TestContext& context) {
+			ThreadPoolSession session(2U);
+			std::atomic<unsigned> calls = 0U;
+			TerraEngine::Scheduling::JobGraph graph("invalid-required-plan", "Invalid required plan");
+			auto job = MakeJob("Invalid", TerraEngine::Scheduling::JobGraphExecutionPolicy::WorkerEligible);
+			job.dependencies = {TerraEngine::Scheduling::DependencyHandle{999999U}};
+			job.work = [&calls](TerraEngine::Scheduling::JobGraphContext&) { ++calls; };
+			graph.AddJob(std::move(job));
+			const auto summary = graph.Execute();
+			context.Expect(!summary.valid, "An unresolved prerequisite must reject the required plan.");
+			context.ExpectEqual(0U, calls.load(), "Invalid required plans must execute no workload.");
 		});
 
 		registry.Add("Engine.JobGraph.SummaryOrderingIsDeterministicAcrossWorkerCompletionOrder", [](TestContext& context) {

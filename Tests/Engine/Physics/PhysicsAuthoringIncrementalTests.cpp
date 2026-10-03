@@ -200,6 +200,55 @@ namespace TerraEngine::Tests {
 				"Unrelated scene metadata must not disturb a retained body's stable descriptor identity.");
 		});
 
+		registry.Add("Physics.AuthoringIncremental.PairedEndpointsPublishOneConstraintAcrossLifecycle", [](TestContext& context) {
+			// A real constraint depends on two bodies. Adding, moving, or removing
+			// both in one authored generation must retain one runtime closure record.
+			PhysicsAuthoringData data;
+			data.world = {{1U}, 1U};
+			data.settings = PhysicsSettings::Defaults();
+			data.snapshotGeneration = 1U;
+			data.bodies = {Body(1U), Body(2U)};
+			data.colliders = {Collider(1U, 11U, 0xF1U), Collider(2U, 12U, 0xF2U)};
+			PhysicsConstraintDescriptor constraint;
+			constraint.ownerObjectId = Id(1U);
+			constraint.ownerObjectGeneration = 1U;
+			constraint.componentGeneration = 1U;
+			constraint.recordId = Id(91U);
+			constraint.recordGeneration = 1U;
+			constraint.firstObjectId = Id(1U);
+			constraint.secondEndpointKind = PhysicsConstraintEndpointKind::ConnectedObject;
+			constraint.secondObjectId = Id(2U);
+			data.constraints = {constraint};
+			const auto first = PhysicsAuthoringSnapshot::Create(std::move(data));
+			context.Expect(first.has_value(), "Paired endpoints must form a valid immutable snapshot.");
+			const auto verify = [&](const PhysicsAuthoringSnapshot* previous, const PhysicsAuthoringSnapshot& current, bool removed) {
+				const auto generation = PhysicsAuthoringSnapshot::BuildGeneration(previous, current);
+				context.Expect(generation.has_value(), "Both changed endpoints must publish an atomically validated generation.");
+				context.Expect(generation->Data().constraintRecordIds == std::vector<UUID>{constraint.recordId}
+					&& generation->Data().changes.size() == 2U,
+					"The constraint union must contain one record while both endpoint changes remain visible.");
+				for(const auto& change : generation->Data().changes) {
+					context.Expect(HasAnyReason(change.reasons, removed ? PhysicsAuthoringChangeReason::Removed
+						: previous ? PhysicsAuthoringChangeReason::Transform : PhysicsAuthoringChangeReason::Added),
+						"Closure normalization must preserve endpoint lifecycle and transform reasons.");
+				}
+			};
+			verify(nullptr, *first, false);
+			PhysicsAuthoringData movedData = first->Data();
+			movedData.snapshotGeneration = 2U;
+			for(auto& body : movedData.bodies) ++body.sourceTransformRevision;
+			const auto moved = PhysicsAuthoringSnapshot::Create(std::move(movedData), &*first);
+			context.Expect(moved.has_value(), "Moving both endpoints must preserve snapshot validity.");
+			verify(&*first, *moved, false);
+			PhysicsAuthoringData emptyData;
+			emptyData.world = first->Data().world;
+			emptyData.settings = first->Data().settings;
+			emptyData.snapshotGeneration = 3U;
+			const auto empty = PhysicsAuthoringSnapshot::Create(std::move(emptyData), &*moved);
+			context.Expect(empty.has_value(), "Removing the paired mechanism must produce a valid empty snapshot.");
+			verify(&*moved, *empty, true);
+		});
+
 		registry.Add("Physics.AuthoringIncremental.TypedClosureIncludesOnlyAffectedConstraintAndCharacterOwners", [](TestContext& context) {
 			PhysicsAuthoringData firstData;
 			firstData.world = {{1U}, 1U};

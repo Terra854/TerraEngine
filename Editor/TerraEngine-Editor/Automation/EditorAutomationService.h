@@ -33,6 +33,7 @@
 #include <glm/vec3.hpp>
 
 struct EditorContext;
+class EditorExportOperationController;
 namespace TerraEngine::Editor::Terrain { class TerrainAutomationAdapter; }
 
 namespace TerraEngine::Profiling
@@ -84,6 +85,9 @@ namespace TerraEngine::Editor::Automation
 		// Completes terrain derived jobs only after their protected engine boundary
 		// has published or rejected the generation-checked candidate.
 		void PumpTerrainAutomationJobsAtProtectedFrame();
+		// Copies revisioned export observations and completes durable jobs only
+		// on the protected editor owner. Worker tasks never call this service.
+		void PumpExportJobsAtProtectedFrame();
 		// Condenses optional frame-publication evidence into a stable automation
 		// payload. The result retains unavailable lanes, incomplete frames, and
 		// reconciliation facts instead of treating absent instrumentation as
@@ -218,6 +222,12 @@ namespace TerraEngine::Editor::Automation
 		std::function<void(std::optional<entt::entity>)> setSelectedEntity;
 		std::vector<AssistantCapability> capabilities;
 		std::vector<ExportJob> exportJobs;
+		struct ActiveExportOperation {
+			std::shared_ptr<EditorExportOperationController> controller;
+			std::uint64_t operationId = 0;
+			std::uint64_t revision = 0;
+		};
+		std::unordered_map<std::string, ActiveExportOperation> activeExportOperations;
 		TerraEngine::Editor::Terrain::TerrainAutomationAdapter* terrainAutomationAdapter = nullptr;
 		bool terrainAutomationProviderRegistered = false;
 		struct PendingTerrainCollisionJob

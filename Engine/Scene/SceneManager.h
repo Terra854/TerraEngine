@@ -30,6 +30,7 @@
 #include "Scene/TransactionalMutation.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Utilities/UUID.h"
+#include "Utilities/AtomicFileWrite.h"
 
 class ResourceManager;
 struct SkyComponent;
@@ -50,6 +51,9 @@ struct SceneDocument
 	// protected editor boundary.
 	std::optional<TerraEngine::Scene::PreparedSceneDecode> preparedScene;
 	bool isPrefab = false;
+	// A retained identity distinguishes a reloaded document even when its path
+	// and UUID are reused. Save tickets never keep a raw document pointer.
+	std::shared_ptr<const std::uint8_t> saveIdentity = std::make_shared<const std::uint8_t>(0);
 };
 
 // Centralized scene manager that handles loading authored .tescene and .teprefab
@@ -120,6 +124,9 @@ public:
 	// is omitted, the document's original source location is overwritten. This 
 	// triggers a dirty flag reset upon successful write.
 	bool SaveScene(std::optional<std::filesystem::path> path = std::nullopt);
+	// Native filesystem checkpoints exercise actual staging failures per call.
+	bool SaveScene(std::optional<std::filesystem::path> path, const TerraEngine::Utilities::AtomicFileWriteOptions& options);
+	const TerraEngine::Utilities::AtomicFileWriteResult& GetLastSaveResult() const { return lastSaveResult; }
 	// Editor automation uses these filesystem-only helpers during preflight and
 	// protected lifecycle commits. Callers must pass canonical project-contained
 	// paths; the manager preserves source files unless the requested operation is
@@ -246,6 +253,10 @@ private:
 
 	bool activeSceneDirty = false;
 	bool activeSceneSettingsDirty = false;
+	// Protected authoring entry points advance this token, including edits to
+	// scene settings which are outside ObjectManager's component revisions.
+	std::uint64_t activeSceneAuthoredRevision = 0;
+	TerraEngine::Utilities::AtomicFileWriteResult lastSaveResult;
 	SceneRenderSettings activeSceneRenderSettings = MakeDefaultSceneRenderSettings();
 
 	TerraEngine::UUID previewMeshId = TerraEngine::EMPTY_UUID;

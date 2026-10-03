@@ -55,6 +55,10 @@ struct BulkObjectStorageReservation {
 	std::size_t componentCount = 0U;
 };
 
+// Native-only deterministic factory seams. No managed/automation adapter
+// exposes these hooks; tests clear the callback before their fixture teardown.
+enum class ObjectCreationStage { Allocated, DefaultsConstructed };
+
 // class ObjectManager groups related state and operations so callers have one documented contract.
 class ObjectManager {
 public:
@@ -67,6 +71,15 @@ public:
 	// stay on a protected scheduler path; worker code should enqueue a deferred
 	// SceneMutationQueue create request instead.
 	Object createObject(const std::string& name);
+	void SetCreationFailureHookForTesting(std::function<void(ObjectCreationStage)> hook) { creationFailureHook = std::move(hook); }
+	// A protected batch owns its before-images and newly allocated entities.
+	// Abort is no-fail; a false result is a fatal invariant breach, not rejection.
+	void BeginProtectedMutation(std::size_t maximumNewObjects);
+	void CaptureProtectedComponent(entt::entity entity, const ComponentAccessFunctions& access);
+	void PrepareProtectedMutationCommit();
+	void FinishProtectedMutation();
+	bool AbortProtectedMutation() noexcept;
+	bool IsProtectedMutationActive() const noexcept { return protectedMutation != nullptr; }
 	bool isObjectValid(const Object& object) const;
 	// Assign or clear a parent for the given object. Passing std::nullopt
 	// detaches the object to the root. The call validates cycles before
@@ -429,6 +442,12 @@ private:
 	friend class Object;
 
 	std::function<void()> onModified;
+	struct ProtectedMutationJournal;
+	std::unique_ptr<ProtectedMutationJournal> protectedMutation;
+	std::function<void(ObjectCreationStage)> creationFailureHook;
+	void CaptureProtectedEntity(entt::entity entity);
+	void CaptureProtectedLookup(bool names, const std::string& key);
+	void DiscardProtectedEntity(entt::entity entity) noexcept;
 	std::function<void(entt::entity)> onSpatialObjectDirty;
 	std::uint64_t spatialRevision = 0;
 	std::uint64_t transformRevision = 0;

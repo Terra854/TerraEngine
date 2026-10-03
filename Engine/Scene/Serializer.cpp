@@ -1287,6 +1287,172 @@ std::optional<TerraEngine::Navigation::NavigationSettings> Serializer::Deseriali
 
 // Serializer::DeserializeObjectEntity restores authored state through manager
 // APIs so stale identity and component access stay centralized.
+std::shared_ptr<PreparedComponentValue> Serializer::PrepareComponentRestore(
+	const std::string& name, const nlohmann::json& data, std::string& reason) {
+	ComponentAccessFunctions access;
+	{
+		std::lock_guard lock(ComponentAccessRegistryMutex());
+		const auto found = ComponentAccessRegistry().find(name);
+		if (found == ComponentAccessRegistry().end() || !found->second.capturePrepared) {
+			reason = "Unknown or unsupported transactional component: " + name; return {};
+		}
+		access = found->second;
+	}
+	auto special = []<typename T>(const nlohmann::json& source, bool (*decode)(const nlohmann::json&, T&))
+		-> std::shared_ptr<PreparedComponentValue> {
+		T candidate;
+		if (!decode(source, candidate)) return {};
+		return std::make_shared<TypedPreparedComponentValue<T>>(candidate);
+	};
+	if (name == Transform::kComponentName) return special(data, DeserializeCanonicalTransform);
+	if (name == AnimatorComponent::kComponentName) return special(data, DeserializeAnimator);
+	if (name == NavigationAgentComponent::kComponentName) return special(data, DeserializeNavigationAgent);
+	if (name == RigidBodyComponent::kComponentName) return special(data, DeserializeRigidBody);
+	if (name == ColliderSetComponent::kComponentName) return special(data, DeserializeColliderSet);
+	if (name == ConstraintSetComponent::kComponentName) return special(data, DeserializeConstraintSet);
+	if (name == CharacterControllerComponent::kComponentName) return special(data, DeserializeCharacterController);
+	return access.decodePrepared ? access.decodePrepared(data, reason) : nullptr;
+}
+
+nlohmann::json Serializer::SerializeComponentAuthored(const std::string& name, entt::registry& registry, entt::entity entity) {
+	ComponentAccessFunctions access;
+	{ std::lock_guard lock(ComponentAccessRegistryMutex()); access = ComponentAccessRegistry().at(name); }
+	return SerializeComponentAuthored(name, registry, entity, access);
+}
+
+nlohmann::json Serializer::SerializeComponentAuthored(const std::string& name, entt::registry& registry,
+	entt::entity entity, const ComponentAccessFunctions& access) {
+	// Special durable formats and generic reflected capture share the same
+	// caller-owned access lifetime; serialization does not mutate registration.
+
+	if (name == Transform::kComponentName) return SerializeCanonicalTransform(registry.get<Transform>(entity));
+	if (name == AnimatorComponent::kComponentName) return SerializeAnimator(registry.get<AnimatorComponent>(entity));
+	if (name == NavigationAgentComponent::kComponentName) return SerializeNavigationAgent(registry.get<NavigationAgentComponent>(entity));
+	if (name == RigidBodyComponent::kComponentName) return SerializeRigidBody(registry.get<RigidBodyComponent>(entity));
+	if (name == ColliderSetComponent::kComponentName) return SerializeColliderSet(registry.get<ColliderSetComponent>(entity));
+	if (name == ConstraintSetComponent::kComponentName) return SerializeConstraintSet(registry.get<ConstraintSetComponent>(entity));
+	if (name == CharacterControllerComponent::kComponentName) return SerializeCharacterController(registry.get<CharacterControllerComponent>(entity));
+	return access.entitySerialize(registry, entity);
+}
+
+PreparedObjectRestore Serializer::PrepareObjectRestore(const nlohmann::json& json, std::size_t maximumNodes) {
+	PreparedObjectRestore result;
+	std::unordered_set<TerraEngine::UUID> identities;
+	auto special = []<typename T>(const nlohmann::json& data, bool (*decode)(const nlohmann::json&, T&))
+		-> std::shared_ptr<PreparedComponentValue> {
+		T candidate;
+		if (!decode(data, candidate)) return {};
+		return std::make_shared<TypedPreparedComponentValue<T>>(candidate);
+	};
+	struct PendingNode { const nlohmann::json* source; std::optional<std::size_t> parent; };
+	std::vector<PendingNode> pending;
+	auto append = [&](const nlohmann::json& source, std::optional<std::size_t> parent) {
+		if (!source.is_object() || !source.contains("uuid") || !source["uuid"].is_string()) {
+			result.reason = "Restore node requires an object and stable UUID."; return false;
+		}
+		const auto id = TerraEngine::ParseUUID(source["uuid"].get<std::string>());
+		if (!id || *id == TerraEngine::EMPTY_UUID || !identities.insert(*id).second) {
+			result.reason = "Restore graph has invalid or duplicate UUIDs."; return false;
+		}
+		PreparedObjectRestore::Node node;
+		node.id = *id; node.parent = parent;
+		auto text = [&](const char* key, std::string& destination, const char* fallback) {
+			const auto field = source.find(key);
+			if (field != source.end() && !field->is_string()) return false;
+			destination = field == source.end() ? fallback : field->get<std::string>(); return true;
+		};
+		auto boolean = [&](const char* key, bool& destination) {
+			const auto field = source.find(key);
+			if (field != source.end() && !field->is_boolean()) return false;
+			if (field != source.end()) destination = field->get<bool>(); return true;
+		};
+		if (!text("name", node.name, "Unnamed") || !text("tag", node.tag, "Untagged") || !text("layer", node.layer, "Default")
+			|| !boolean("active", node.active) || !boolean("isStatic", node.isStatic)) {
+			result.reason = "Restore node has malformed metadata."; return false;
+		}
+		if (const auto components = source.find("components"); components != source.end()) {
+			if (!components->is_object()) { result.reason = "Restore component table is not an object."; return false; }
+			for (const auto& [name, data] : components->items()) {
+				ComponentAccessFunctions access;
+				{
+					std::lock_guard lock(ComponentAccessRegistryMutex());
+					const auto found = ComponentAccessRegistry().find(name);
+					if (found == ComponentAccessRegistry().end() || !found->second.capturePrepared) {
+						result.reason = "Unknown or unsupported transactional component: " + name; return false;
+					}
+					access = found->second;
+				}
+				// Special authored formats retain their existing schema/default and
+				// tolerated runtime-key compatibility. All decode is detached.
+				std::shared_ptr<PreparedComponentValue> value;
+				if (name == Transform::kComponentName) value = special(data, DeserializeCanonicalTransform);
+				else if (name == AnimatorComponent::kComponentName) value = special(data, DeserializeAnimator);
+				else if (name == NavigationAgentComponent::kComponentName) value = special(data, DeserializeNavigationAgent);
+				else if (name == RigidBodyComponent::kComponentName) value = special(data, DeserializeRigidBody);
+				else if (name == ColliderSetComponent::kComponentName) value = special(data, DeserializeColliderSet);
+				else if (name == ConstraintSetComponent::kComponentName) value = special(data, DeserializeConstraintSet);
+				else if (name == CharacterControllerComponent::kComponentName) value = special(data, DeserializeCharacterController);
+				else if (access.decodePrepared) value = access.decodePrepared(data, result.reason);
+				if (!value) { result.reason = "Invalid authored component " + name + ": " + result.reason; return false; }
+				node.components.emplace_back(name, std::move(value));
+			}
+		}
+		const std::size_t index = result.nodes.size();
+		result.nodes.push_back(std::move(node));
+		if (const auto children = source.find("children"); children != source.end()) {
+			if (!children->is_array()) { result.reason = "Restore children must be an array."; return false; }
+			// Count both decoded and pending nodes before enqueuing children. This
+			// prevents a wide node from allocating more than the caller's budget.
+			if (children->size() > maximumNodes - result.nodes.size() - pending.size()) {
+				result.reason = "Restore graph exceeds the preparation node budget."; return false;
+			}
+			for (auto child = children->rbegin(); child != children->rend(); ++child) pending.push_back({&*child, index});
+		}
+		return true;
+	};
+	try {
+		if (maximumNodes == 0U) result.reason = "Restore graph has no preparation node budget.";
+		else {
+			pending.push_back({&json, {}});
+			result.accepted = true;
+			while (!pending.empty()) {
+				const PendingNode next = pending.back(); pending.pop_back();
+				if (!append(*next.source, next.parent)) { result.accepted = false; break; }
+			}
+		}
+	}
+	catch (const std::exception& error) { result.accepted = false; result.reason = error.what(); }
+	catch (...) { result.accepted = false; result.reason = "Detached restore decoding threw an unknown exception."; }
+	if (!result.accepted) result.nodes.clear();
+	return result;
+}
+
+entt::entity Serializer::ApplyPreparedObjectRestore(PreparedObjectRestore& prepared) {
+	if (!prepared.accepted || prepared.nodes.empty()) throw std::invalid_argument("Restore graph was not prepared.");
+	ObjectManager& objects = ObjectManager::instance();
+	if (!objects.IsProtectedMutationActive()) throw std::logic_error("Prepared restore requires a protected transaction.");
+	std::vector<Object> created;
+	created.reserve(prepared.nodes.size());
+	for (auto& node : prepared.nodes) {
+		Object object = objects.createObject(node.name);
+		objects.UpdateObjectUUID(object, node.id);
+		objects.setObjectTag(object, node.tag); objects.setObjectLayer(object, node.layer);
+		objects.setObjectActive(object, node.active); objects.setObjectStatic(object, node.isStatic);
+		for (auto& [name, value] : node.components) {
+			ComponentAccessFunctions access;
+			{ std::lock_guard lock(ComponentAccessRegistryMutex()); access = ComponentAccessRegistry().at(name); }
+			objects.CaptureProtectedComponent(object.EntityId(), access);
+			value->Apply(objects.getRegistry(), object.EntityId());
+			objects.notifyObjectStructureChanged(object);
+		}
+		if (node.parent && !objects.setParent(object, created.at(*node.parent), ReparentMode::KeepLocal)) {
+			throw std::invalid_argument("Prepared restore hierarchy is outside supported coordinate range.");
+		}
+		created.push_back(object);
+	}
+	return created.front().EntityId();
+}
+
 entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std::optional<entt::entity> parent) {
 	// Disk data may name AnimatorComponent before any live instance has invoked
 	// its CRTP constructor. Register its authored reflection contract first so

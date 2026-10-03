@@ -13,6 +13,9 @@
 #include "Engine/Scripting/ScriptingSystem.h"
 
 #include <algorithm>
+#include <atomic>
+#include <exception>
+#include <stdexcept>
 #include <utility>
 #include <unordered_set>
 
@@ -129,6 +132,52 @@ private:
 	std::uint64_t m_ReplaySequence = 0U;
 };
 
+// Legacy synchronous commands already execute at the protected editor boundary.
+// Reuse the typed journal without changing their visible undo/redo timing.
+class HistoryReplayRejected final : public std::runtime_error {
+public:
+	using std::runtime_error::runtime_error;
+};
+
+void CommitImmediateHistory(std::vector<TerraEngine::Scene::TransactionWriteOperation> operations)
+{
+	static std::atomic<std::uint64_t> nextReplay{1U};
+	TerraEngine::Scene::Transaction transaction;
+	transaction.id = "immediate-history-" + std::to_string(nextReplay.fetch_add(1U));
+	transaction.origin = TerraEngine::Scene::TransactionOrigin::Editor;
+	transaction.originName = "ImmediateHistoryReplay";
+	transaction.writeSet.operations = std::move(operations);
+	const auto result = TerraEngine::Scene::CommitTransaction(ObjectManager::instance(), transaction);
+	if (result.status != TerraEngine::Scene::TransactionStatus::Committed) throw HistoryReplayRejected(result.message);
+}
+
+void RestoreImmediateObject(const TerraEngine::UUID& id, const nlohmann::json& snapshot)
+{
+	TerraEngine::Scene::TransactionWriteOperation operation;
+	operation.kind = TerraEngine::Scene::TransactionWriteKind::RestoreObjectSnapshot;
+	operation.target = TerraEngine::Scene::ExistingObject(id); operation.serializedObject = snapshot;
+	CommitImmediateHistory({std::move(operation)});
+}
+
+void RestoreImmediateComponent(const Object& object, const std::string& name, const nlohmann::json& snapshot)
+{
+	ComponentAccessFunctions access;
+	{ std::lock_guard lock(ComponentAccessRegistryMutex()); access = ComponentAccessRegistry().at(name); }
+	std::vector<TerraEngine::Scene::TransactionWriteOperation> operations;
+	operations.reserve(2U);
+	TerraEngine::Scene::TransactionWriteOperation operation;
+	operation.target = TerraEngine::Scene::ExistingObject(ObjectManager::instance().getUUID(object));
+	operation.componentName = name;
+	if (access.entityHasComponent(ObjectManager::instance().getRegistry(), object.EntityId())) {
+		operation.kind = TerraEngine::Scene::TransactionWriteKind::RemoveComponent;
+		operations.push_back(operation);
+	}
+	operation.kind = TerraEngine::Scene::TransactionWriteKind::AddComponent;
+	operation.serializedComponent = snapshot;
+	operations.push_back(std::move(operation));
+	CommitImmediateHistory(std::move(operations));
+}
+
 // ResolveObject keeps undo/redo replay on the explicit ObjectManager service
 // path so history commands never depend on raw entity ids surviving reloads.
 std::optional<Object> ResolveObject(const TerraEngine::UUID& uuid)
@@ -182,7 +231,7 @@ void CreateObjectCommand::Undo() {
 
 // CreateObjectCommand::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void CreateObjectCommand::Redo() {
-	Serializer::DeserializeObjectEntity(m_Json);
+	RestoreImmediateObject(m_Uuid, m_Json);
 }
 
 // CreateObjectCommand::GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -198,7 +247,7 @@ DeleteObjectCommand::DeleteObjectCommand(entt::entity entity) {
 
 // DeleteObjectCommand::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void DeleteObjectCommand::Undo() {
-	Serializer::DeserializeObjectEntity(m_Json);
+	RestoreImmediateObject(m_Uuid, m_Json);
 }
 
 // DeleteObjectCommand::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -343,24 +392,18 @@ RemoveComponentCommand::RemoveComponentCommand(entt::entity entity, const std::s
 	if (ObjectManager::instance().getObject(entity).has_value()) {
 		auto& reg = ComponentAccessRegistry();
 		if (reg.count(m_ComponentName)) {
-			m_ComponentJson = reg[m_ComponentName].entitySerialize(ObjectManager::instance().getRegistry(), entity);
+			// Automation may already hold the registration lock while capturing undo.
+			// Reuse its stable entry instead of asking the serializer to lock again.
+			m_ComponentJson = Serializer::SerializeComponentAuthored(m_ComponentName, ObjectManager::instance().getRegistry(), entity, reg.at(m_ComponentName));
 		}
 	}
 }
 
 // RemoveComponentCommand::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RemoveComponentCommand::Undo() {
-	if (auto obj = ResolveObject(m_Uuid)) {
-		auto& reg = ComponentAccessRegistry();
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (reg.count(m_ComponentName)) {
-			reg[m_ComponentName].entityAddComponent(ObjectManager::instance().getRegistry(), obj->EntityId());
-			reg[m_ComponentName].entityDeserialize(ObjectManager::instance().getRegistry(), obj->EntityId(), m_ComponentJson);
-			// Publish only after restoring the complete authored payload so the
-			// next renderer capture sees the restored mesh and material together.
-			ObjectManager::instance().notifyObjectStructureChanged(*obj);
-			NotifySceneAfterComponentMutation(m_ComponentName);
-		}
+	if (auto object = ResolveObject(m_Uuid)) {
+		RestoreImmediateComponent(*object, m_ComponentName, m_ComponentJson);
+		NotifySceneAfterComponentMutation(m_ComponentName);
 	}
 }
 
@@ -388,38 +431,21 @@ SetComponentPayloadCommand::SetComponentPayloadCommand(entt::entity entity, cons
 
 void SetComponentPayloadCommand::Undo()
 {
-	if (auto obj = ResolveObject(m_Uuid))
-	{
-		auto& reg = ComponentAccessRegistry();
-		if (reg.count(m_ComponentName))
-		{
-			reg[m_ComponentName].entityDeserialize(ObjectManager::instance().getRegistry(), obj->EntityId(), m_OldPayload);
-			// Reflected Transform history must invalidate propagated world
-			// matrices just like the original edit; scene-dirty state alone
-			// cannot make the renderer or spatial index observe the restored TRS.
-			if (m_ComponentName == Transform::kComponentName)
-			{
-				ObjectManager::instance().MarkObjectTransformDirty(*obj);
-			}
-			NotifySceneAfterComponentMutation(m_ComponentName);
-		}
+	if (auto object = ResolveObject(m_Uuid)) {
+		// Full authored restoration is one atomic remove/add batch. The existing
+		// component remains retained until the prepared replacement succeeds.
+		RestoreImmediateComponent(*object, m_ComponentName, m_OldPayload);
+		NotifySceneAfterComponentMutation(m_ComponentName);
 	}
 }
 
 void SetComponentPayloadCommand::Redo()
 {
-	if (auto obj = ResolveObject(m_Uuid))
-	{
-		auto& reg = ComponentAccessRegistry();
-		if (reg.count(m_ComponentName))
-		{
-			reg[m_ComponentName].entityDeserialize(ObjectManager::instance().getRegistry(), obj->EntityId(), m_NewPayload);
-			if (m_ComponentName == Transform::kComponentName)
-			{
-				ObjectManager::instance().MarkObjectTransformDirty(*obj);
-			}
-			NotifySceneAfterComponentMutation(m_ComponentName);
-		}
+	if (auto object = ResolveObject(m_Uuid)) {
+		// Full authored restoration is one atomic remove/add batch. The existing
+		// component remains retained until the prepared replacement succeeds.
+		RestoreImmediateComponent(*object, m_ComponentName, m_NewPayload);
+		NotifySceneAfterComponentMutation(m_ComponentName);
 	}
 }
 
@@ -577,13 +603,23 @@ bool UndoRedoSystem::RecordCommittedTransaction(const TerraEngine::Scene::Transa
 		return true;
 	}
 
-	// Replays only retain operations whose inverse is an explicit typed write.
-	// Component snapshot restoration still needs a richer protocol, while a
-	// canonical transform inverse is already a complete WorldPose value.
+	// Only authored scene operations enter editor history. Snapshot inverses
+	// lower to the same strictly prepared protected transaction as new edits.
 	if (!std::all_of(transaction.writeSet.operations.begin(), transaction.writeSet.operations.end(), [](const TransactionWriteOperation& operation) {
 		return operation.kind == TransactionWriteKind::UpdateComponentProperty
 			|| operation.kind == TransactionWriteKind::SetWorldTransform
-			|| operation.kind == TransactionWriteKind::TranslateWorld;
+			|| operation.kind == TransactionWriteKind::TranslateWorld
+			|| operation.kind == TransactionWriteKind::RestoreObjectSnapshot
+			|| operation.kind == TransactionWriteKind::CreateObject
+			|| operation.kind == TransactionWriteKind::DeleteObject
+			|| operation.kind == TransactionWriteKind::ReparentObject
+			|| operation.kind == TransactionWriteKind::SetName
+			|| operation.kind == TransactionWriteKind::SetTag
+			|| operation.kind == TransactionWriteKind::SetLayer
+			|| operation.kind == TransactionWriteKind::SetActive
+			|| operation.kind == TransactionWriteKind::SetStatic
+			|| operation.kind == TransactionWriteKind::AddComponent
+			|| operation.kind == TransactionWriteKind::RemoveComponent;
 	}))
 	{
 		return false;
@@ -593,11 +629,13 @@ bool UndoRedoSystem::RecordCommittedTransaction(const TerraEngine::Scene::Transa
 	inverse.reserve(result.inverseDeltas.size());
 	for (auto delta = result.inverseDeltas.rbegin(); delta != result.inverseDeltas.rend(); ++delta)
 	{
-		if (delta->restoresSerializedObject || delta->restoresSerializedComponent)
-		{
-			return false;
+		TransactionWriteOperation operation = delta->operation;
+		if (delta->restoresSerializedObject) {
+			operation.kind = TransactionWriteKind::RestoreObjectSnapshot;
+			operation.serializedObject = delta->serializedObject;
 		}
-		inverse.push_back(delta->operation);
+		if (delta->restoresSerializedComponent) operation.serializedComponent = delta->serializedComponent;
+		inverse.push_back(std::move(operation));
 	}
 	PushCommand(std::make_unique<CommittedTransactionCommand>(transaction.undoGroupName,
 		transaction.id, transaction.writeSet.operations, std::move(inverse)));
@@ -682,7 +720,20 @@ void UndoRedoSystem::Undo() {
 	undoStack.pop_back();
 
 	TERRAENGINE_LOG(LogLevel::Debug, "Undoing command: " << entry.command->GetName());
-	entry.command->Undo();
+	std::exception_ptr committedFailure;
+	try { entry.command->Undo(); }
+	catch (const HistoryReplayRejected& error) {
+		// A rejected prepared replay leaves authored values and history position
+		// unchanged. Return the entry to its original stack without a state step.
+		undoStack.push_back(std::move(entry));
+		TERRAENGINE_LOG(LogLevel::Warning, "History replay rejected: " << error.what());
+		return;
+	} catch (const TerraEngine::Scene::TransactionPublicationFailure&) {
+		committedFailure = std::current_exception();
+	} catch (...) {
+		undoStack.push_back(std::move(entry));
+		throw;
+	}
 	const std::string replayTransactionId = entry.command->GetPendingReplayTransactionId();
 
 	m_CurrentStateId = entry.beforeStateId;
@@ -693,6 +744,7 @@ void UndoRedoSystem::Undo() {
 	}
 	++historySequence;
 	UpdateDirtyState();
+	if (committedFailure) std::rethrow_exception(committedFailure);
 }
 
 // UndoRedoSystem::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -707,7 +759,20 @@ void UndoRedoSystem::Redo() {
 	redoStack.pop_back();
 
 	TERRAENGINE_LOG(LogLevel::Debug, "Redoing command: " << entry.command->GetName());
-	entry.command->Redo();
+	std::exception_ptr committedFailure;
+	try { entry.command->Redo(); }
+	catch (const HistoryReplayRejected& error) {
+		// A rejected prepared replay leaves authored values and history position
+		// unchanged. Return the entry to its original stack without a state step.
+		redoStack.push_back(std::move(entry));
+		TERRAENGINE_LOG(LogLevel::Warning, "History replay rejected: " << error.what());
+		return;
+	} catch (const TerraEngine::Scene::TransactionPublicationFailure&) {
+		committedFailure = std::current_exception();
+	} catch (...) {
+		redoStack.push_back(std::move(entry));
+		throw;
+	}
 	const std::string replayTransactionId = entry.command->GetPendingReplayTransactionId();
 
 	m_CurrentStateId = entry.afterStateId;
@@ -718,6 +783,7 @@ void UndoRedoSystem::Redo() {
 	}
 	++historySequence;
 	UpdateDirtyState();
+	if (committedFailure) std::rethrow_exception(committedFailure);
 }
 
 // UndoRedoSystem::CanUndo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

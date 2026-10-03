@@ -8,6 +8,8 @@
 #pragma once
 #include <cstdint>
 #include <iostream>
+#include <optional>
+#include <string_view>
 #include <vector>
 
 #ifdef _WIN32
@@ -34,17 +36,28 @@
 // Primary engine facade exposed to the launcher and other executables. The
 // TERRAENGINE_API macro ensures the class is exported from the shared library
 // on Windows builds so the import library is generated correctly.
+// A failure report belongs to one engine lifetime and is copied only on the
+// protected coordinator thread. Expected scene/asset rejection never creates it.
+struct EngineFrameFailureReport {
+	std::uint64_t frame = 0U;
+	std::string workload;
+	std::string phase;
+	std::string reason;
+};
+
 class TERRAENGINE_API Engine {
 	public:
 		// The engine owns singleton system references, so copying would duplicate
-		// ownership semantics incorrectly. Moves stay enabled in case the engine
-		// needs to be passed between scopes.
+		// ownership semantics incorrectly. Its window callbacks and application
+		// host retain this address, so moving would also invalidate live owners.
 		Engine() = default;
 		Engine(const Engine&) = delete;
 		Engine& operator=(const Engine&) = delete;
-		Engine(Engine&&) = default;
-		Engine& operator=(Engine&&) = default;
-		~Engine() = default;
+		Engine(Engine&&) = delete;
+		Engine& operator=(Engine&&) = delete;
+		// Scope exit follows the same idempotent ownership ledger as explicit
+		// shutdown, including callers that leave after a controlled frame failure.
+		~Engine() noexcept;
 
 		void Run();
 		void SignalShutdown();
@@ -98,9 +111,24 @@ class TERRAENGINE_API Engine {
 		const TerraEngine::Scheduling::ArchitectureMigrationSummary& GetArchitectureMigrationSummary() const { return latestArchitectureSummary; }
 		const TerraEngine::Scheduling::WorkerCoverageReport& GetWorkerCoverageReport() const { return latestWorkerCoverageReport; }
 		const TerraEngine::Scene::LayoutDiagnosticsSummary& GetRuntimeLayoutDiagnostics() const { return latestRuntimeLayoutDiagnostics; }
+		// Owner-thread diagnostics retain the first required frame failure even
+		// after subsequent Update calls have been suppressed.
+		const std::optional<EngineFrameFailureReport>& GetFrameFailure() const noexcept { return frameFailure; }
 
 	private:
 		bool running = true;
+		std::uint64_t frameSequence = 0U;
+		std::optional<EngineFrameFailureReport> frameFailure;
+	void RecordFrameFailure(std::string_view workload, std::string_view phase, std::string_view reason) noexcept;
+		void InitializeImpl();
+		// Arm each ledger entry before Initialize: an owner can acquire resources
+		// and then throw. Shutdown releases entered owners once, including partial
+		// initialization, while ignoring owners this lifetime never entered.
+		bool lifecycleStarted = false;
+		bool poolOwned = false;
+		bool resourceManagerInitialized = false;
+		bool editorSystemInitialized = false;
+		std::size_t initializedSystemCount = 0U;
 		// Non-owning references to systems stored as singletons elsewhere in the
 		// engine so the main loop can iterate them without heap allocations.
 		std::vector<SystemsBase*> systems;

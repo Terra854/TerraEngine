@@ -1214,6 +1214,12 @@ namespace TerraEngine::Physics {
 		}
 		generation.characterObjectIds.insert(generation.characterObjectIds.end(),
 			changedCharacterObjects.begin(), changedCharacterObjects.end());
+		// Each endpoint can name the same constraint. Preparation needs the union
+		// of affected records, so normalize it before the generation validator checks
+		// uniqueness. This also covers paired endpoint retirement from the old snapshot.
+		std::sort(generation.constraintRecordIds.begin(), generation.constraintRecordIds.end());
+		generation.constraintRecordIds.erase(std::unique(generation.constraintRecordIds.begin(),
+			generation.constraintRecordIds.end()), generation.constraintRecordIds.end());
 		return PhysicsAuthoringGeneration::Create(std::move(generation));
 	}
 }

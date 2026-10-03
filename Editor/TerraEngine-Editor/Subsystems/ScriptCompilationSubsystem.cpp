@@ -12,6 +12,7 @@
 #include "Engine/Components/ScriptComponent.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Engine/Utilities/PlatformUtils.h"
+#include "Engine/Utilities/OwnedProcess.h"
 #include "Editor/Export/ExportRuntimeLayout.h"
 #include "NativeAotProjectWorkspace.h"
 
@@ -39,17 +40,7 @@ namespace
 {
 	constexpr float kScriptBuildDebounceSeconds = 0.25f;
 
-#if defined(_WIN32)
-	std::string DescribeWindowsProcessError(std::string_view operation, DWORD error)
-	{
-		// Capture the numeric Win32 code as well as the localized system message.
-		// The number remains stable in automation evidence even when the editor
-		// runs under a different display language.
-		return std::string(operation) + " failed with Windows error "
-			+ std::to_string(error) + ": "
-			+ std::system_category().message(static_cast<int>(error)) + ".";
-	}
-#endif
+
 
 	// BuildProfileToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string BuildProfileToString(ScriptBuildProfile profile)
@@ -81,345 +72,8 @@ namespace
 		return "Unknown";
 	}
 
-	// RunProcessCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	bool RunProcessCapture(const std::filesystem::path& workingDirectory, const std::string& commandLine, const std::atomic_bool& cancellationRequested, std::string& output, int& exitCode, bool& canceled)
-	{
-		canceled = false;
-#if defined(_WIN32)
-		SECURITY_ATTRIBUTES securityAttributes{};
-		securityAttributes.nLength = sizeof(securityAttributes);
-		securityAttributes.bInheritHandle = TRUE;
+	// Process execution lives in OwnedProcess so script and export cancellation share tree ownership.
 
-		HANDLE readHandle = nullptr;
-		HANDLE writeHandle = nullptr;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!CreatePipe(&readHandle, &writeHandle, &securityAttributes, 0))
-		{
-			return false;
-		}
-
-		SetHandleInformation(readHandle, HANDLE_FLAG_INHERIT, 0);
-
-		// A kill-on-close Job Object owns the complete dotnet/MSBuild/compiler
-		// process tree. Canceling only the directly launched dotnet process can
-		// otherwise leave Roslyn or MSBuild descendants writing into a project
-		// after the editor has closed it.
-		HANDLE jobHandle = CreateJobObjectW(nullptr, nullptr);
-		if (jobHandle == nullptr)
-		{
-			const DWORD jobError = GetLastError();
-			CloseHandle(writeHandle);
-			CloseHandle(readHandle);
-			output = DescribeWindowsProcessError("CreateJobObjectW", jobError);
-			return false;
-		}
-		JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobLimits{};
-		jobLimits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-		if (!SetInformationJobObject(
-				jobHandle,
-				JobObjectExtendedLimitInformation,
-				&jobLimits,
-				sizeof(jobLimits)))
-		{
-			const DWORD jobError = GetLastError();
-			CloseHandle(jobHandle);
-			CloseHandle(writeHandle);
-			CloseHandle(readHandle);
-			output = DescribeWindowsProcessError("SetInformationJobObject", jobError);
-			return false;
-		}
-
-		STARTUPINFOW startupInfo{};
-		startupInfo.cb = sizeof(startupInfo);
-		startupInfo.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
-		startupInfo.wShowWindow = SW_HIDE;
-		startupInfo.hStdOutput = writeHandle;
-		startupInfo.hStdError = writeHandle;
-		startupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-
-		PROCESS_INFORMATION processInfo{};
-		std::wstring mutableCommandLine(commandLine.begin(), commandLine.end());
-		const BOOL started = CreateProcessW(
-			nullptr,
-			mutableCommandLine.data(),
-			nullptr,
-			nullptr,
-			TRUE,
-			// Suspend until job assignment succeeds so no compiler child can
-			// escape the cancellation boundary between launch and assignment.
-			CREATE_NO_WINDOW | CREATE_SUSPENDED,
-			nullptr,
-			workingDirectory.wstring().c_str(),
-			&startupInfo,
-			&processInfo);
-		const DWORD launchError = started ? ERROR_SUCCESS : GetLastError();
-
-		CloseHandle(writeHandle);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!started)
-		{
-			output = DescribeWindowsProcessError("CreateProcessW", launchError);
-			CloseHandle(jobHandle);
-			CloseHandle(readHandle);
-			return false;
-		}
-		if (!AssignProcessToJobObject(jobHandle, processInfo.hProcess))
-		{
-			const DWORD assignmentError = GetLastError();
-			TerminateProcess(processInfo.hProcess, assignmentError);
-			WaitForSingleObject(processInfo.hProcess, INFINITE);
-			CloseHandle(processInfo.hThread);
-			CloseHandle(processInfo.hProcess);
-			CloseHandle(jobHandle);
-			CloseHandle(readHandle);
-			output = DescribeWindowsProcessError("AssignProcessToJobObject", assignmentError);
-			return false;
-		}
-		if (ResumeThread(processInfo.hThread) == static_cast<DWORD>(-1))
-		{
-			const DWORD resumeError = GetLastError();
-			// Closing this configured job terminates the still-suspended process
-			// and any descendants before their project handles are released.
-			CloseHandle(jobHandle);
-			WaitForSingleObject(processInfo.hProcess, INFINITE);
-			CloseHandle(processInfo.hThread);
-			CloseHandle(processInfo.hProcess);
-			CloseHandle(readHandle);
-			output = DescribeWindowsProcessError("ResumeThread", resumeError);
-			return false;
-		}
-
-		std::array<char, 4096> buffer{};
-		bool processExited = false;
-		bool terminationRequested = false;
-		while (!processExited)
-		{
-			DWORD available = 0u;
-			if (PeekNamedPipe(readHandle, nullptr, 0u, nullptr, &available, nullptr) && available > 0u)
-			{
-				DWORD bytesRead = 0u;
-				const DWORD requested = std::min<DWORD>(available, static_cast<DWORD>(buffer.size()));
-				if (ReadFile(readHandle, buffer.data(), requested, &bytesRead, nullptr) && bytesRead > 0u)
-				{
-					output.append(buffer.data(), bytesRead);
-				}
-			}
-
-			if (!terminationRequested && cancellationRequested.load(std::memory_order_relaxed))
-			{
-				// Terminate the whole job, not just dotnet, so cancellation is a
-				// protected boundary for all compiler descendants.
-				if (!TerminateJobObject(jobHandle, ERROR_CANCELLED))
-				{
-					// A direct termination remains a conservative fallback if
-					// the operating system rejects job-wide termination.
-					TerminateProcess(processInfo.hProcess, ERROR_CANCELLED);
-				}
-				canceled = true;
-				terminationRequested = true;
-			}
-			processExited = WaitForSingleObject(processInfo.hProcess, 50u) == WAIT_OBJECT_0;
-		}
-
-		// Drain output already written before process termination/completion.
-		while (true)
-		{
-			DWORD available = 0u;
-			if (!PeekNamedPipe(readHandle, nullptr, 0u, nullptr, &available, nullptr) || available == 0u)
-			{
-				break;
-			}
-			DWORD bytesRead = 0u;
-			if (!ReadFile(readHandle, buffer.data(), std::min<DWORD>(available, static_cast<DWORD>(buffer.size())), &bytesRead, nullptr) || bytesRead == 0u)
-			{
-				break;
-			}
-			output.append(buffer.data(), bytesRead);
-		}
-
-		DWORD processExitCode = 0;
-		GetExitCodeProcess(processInfo.hProcess, &processExitCode);
-		exitCode = static_cast<int>(processExitCode);
-
-		CloseHandle(processInfo.hThread);
-		CloseHandle(processInfo.hProcess);
-		// Normal completion can still leave a tool holding inherited handles.
-		// Closing the kill-on-close job guarantees those descendants cannot
-		// outlive the captured build operation.
-		CloseHandle(jobHandle);
-		CloseHandle(readHandle);
-		return true;
-#else
-		constexpr auto kBuildTimeout = std::chrono::minutes(5);
-		constexpr auto kPostExitPipeDrainTimeout = std::chrono::seconds(2);
-
-		int pipeHandles[2] = {-1, -1};
-		// Capture stdout and stderr together so Linux compiler diagnostics are
-		// shown in the editor exactly like they would be in a terminal.
-		if (pipe2(pipeHandles, O_CLOEXEC) != 0)
-		{
-			output = std::string("Failed to create process output pipe: ") + std::strerror(errno);
-			return false;
-		}
-
-		const pid_t childProcess = fork();
-		if (childProcess < 0)
-		{
-			output = std::string("Failed to fork dotnet build process: ") + std::strerror(errno);
-			close(pipeHandles[0]);
-			close(pipeHandles[1]);
-			return false;
-		}
-
-		if (childProcess == 0)
-		{
-			// Put the shell and any dotnet children in their own process group so
-			// timeout cleanup cannot accidentally signal the editor process.
-			setpgid(0, 0);
-			close(pipeHandles[0]);
-			dup2(pipeHandles[1], STDOUT_FILENO);
-			dup2(pipeHandles[1], STDERR_FILENO);
-			close(pipeHandles[1]);
-
-			if (!workingDirectory.empty())
-			{
-				std::error_code pathError;
-				const std::filesystem::path absoluteWorkingDirectory = std::filesystem::absolute(workingDirectory, pathError);
-				const std::string workingDirectoryText = pathError ? workingDirectory.string() : absoluteWorkingDirectory.string();
-				if (chdir(workingDirectoryText.c_str()) != 0)
-				{
-					_exit(127);
-				}
-			}
-
-			execl("/bin/sh", "sh", "-c", commandLine.c_str(), static_cast<char*>(nullptr));
-			_exit(127);
-		}
-
-		setpgid(childProcess, childProcess);
-		close(pipeHandles[1]);
-		const int currentFlags = fcntl(pipeHandles[0], F_GETFL, 0);
-		if (currentFlags >= 0)
-		{
-			fcntl(pipeHandles[0], F_SETFL, currentFlags | O_NONBLOCK);
-		}
-
-		std::array<char, 4096> buffer{};
-		const auto startedAt = std::chrono::steady_clock::now();
-		std::optional<std::chrono::steady_clock::time_point> childExitedAt;
-		int status = 0;
-		bool childExited = false;
-		bool pipeClosed = false;
-		bool timedOut = false;
-
-		while (!pipeClosed)
-		{
-			pollfd readPoll{};
-			readPoll.fd = pipeHandles[0];
-			readPoll.events = POLLIN | POLLHUP | POLLERR;
-			const int pollResult = poll(&readPoll, 1, 100);
-			if (pollResult > 0 && (readPoll.revents & (POLLIN | POLLHUP | POLLERR)) != 0)
-			{
-				while (true)
-				{
-					const ssize_t bytesRead = read(pipeHandles[0], buffer.data(), buffer.size());
-					if (bytesRead > 0)
-					{
-						output.append(buffer.data(), static_cast<std::size_t>(bytesRead));
-						continue;
-					}
-					if (bytesRead == 0)
-					{
-						pipeClosed = true;
-					}
-					break;
-				}
-			}
-
-			if (!childExited)
-			{
-				const pid_t waitResult = waitpid(childProcess, &status, WNOHANG);
-				if (waitResult == childProcess)
-				{
-					childExited = true;
-					childExitedAt = std::chrono::steady_clock::now();
-				}
-				else if (waitResult < 0 && errno != EINTR)
-				{
-					close(pipeHandles[0]);
-					output += std::string("Failed to wait for dotnet build process: ") + std::strerror(errno);
-					return false;
-				}
-			}
-
-			const auto now = std::chrono::steady_clock::now();
-			if (!childExited && cancellationRequested.load(std::memory_order_relaxed))
-			{
-				canceled = true;
-				kill(-childProcess, SIGTERM);
-				std::this_thread::sleep_for(std::chrono::milliseconds(100));
-				kill(-childProcess, SIGKILL);
-				waitpid(childProcess, &status, 0);
-				childExited = true;
-				break;
-			}
-			if (!childExited && now - startedAt > kBuildTimeout)
-			{
-				timedOut = true;
-				kill(-childProcess, SIGTERM);
-				std::this_thread::sleep_for(std::chrono::milliseconds(200));
-				kill(-childProcess, SIGKILL);
-				waitpid(childProcess, &status, 0);
-				childExited = true;
-				break;
-			}
-
-			// Some tools can leave grandchildren with inherited stdout/stderr
-			// handles. Once the shell has exited, drain briefly for final output
-			// and then let the editor continue instead of waiting forever for EOF.
-			if (childExitedAt.has_value() && now - *childExitedAt > kPostExitPipeDrainTimeout)
-			{
-				break;
-			}
-		}
-		close(pipeHandles[0]);
-
-		if (!childExited)
-		{
-			while (waitpid(childProcess, &status, 0) < 0)
-			{
-				if (errno == EINTR)
-				{
-					continue;
-				}
-				output += std::string("Failed to wait for dotnet build process: ") + std::strerror(errno);
-				return false;
-			}
-		}
-
-		if (timedOut)
-		{
-			exitCode = 124;
-			output += "\ndotnet build exceeded the editor script compilation timeout and was terminated.";
-			return true;
-		}
-
-		if (WIFEXITED(status))
-		{
-			exitCode = WEXITSTATUS(status);
-		}
-		else if (WIFSIGNALED(status))
-		{
-			exitCode = 128 + WTERMSIG(status);
-		}
-		else
-		{
-			exitCode = status;
-		}
-
-		return true;
-#endif
-	}
 }
 
 ScriptCompilationSubsystem& ScriptCompilationSubsystem::Instance()
@@ -431,6 +85,7 @@ ScriptCompilationSubsystem& ScriptCompilationSubsystem::Instance()
 // ScriptCompilationSubsystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::Initialize(EditorContext& context)
 {
+	m_AdmissionsStopped = false;
 	m_Context = &context;
 	UpdateSharedState();
 }
@@ -438,6 +93,7 @@ void ScriptCompilationSubsystem::Initialize(EditorContext& context)
 // ScriptCompilationSubsystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::Update(float deltaTime)
 {
+	if (m_AdmissionsStopped) return;
 	if (m_Context == nullptr || m_Context->projectManager == nullptr || !m_Context->projectManager->HasActiveProject())
 	{
 		return;
@@ -476,8 +132,7 @@ void ScriptCompilationSubsystem::Shutdown()
 	// Shutdown must not let a compiler process retain project files after the
 	// editor context is released. The worker observes this token and terminates
 	// its complete Windows Job Object before the future is joined.
-	m_CancelRequested.store(true, std::memory_order_relaxed);
-	CancelAndDrainActiveBuild();
+	StopAdmissionsAndDrain();
 
 	m_Context = nullptr;
 	m_Status = ScriptCompilationStatus{};
@@ -498,6 +153,8 @@ std::string ScriptCompilationSubsystem::GetName() const
 // ScriptCompilationSubsystem::OnProjectOpened is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::OnProjectOpened()
 {
+	StopAdmissionsAndDrain();
+	m_AdmissionsStopped = false;
 	if (m_Context == nullptr || m_Context->projectManager == nullptr || !m_Context->projectManager->HasActiveProject())
 	{
 		return;
@@ -545,9 +202,7 @@ void ScriptCompilationSubsystem::OnProjectClosed()
 	// Project close clears the workspace service below. Cancel and join first so
 	// the worker cannot race that mutation while reading project paths or while
 	// a dotnet descendant is still writing derived outputs.
-	m_Status.queuedBuild = false;
-	m_CancelRequested.store(true, std::memory_order_relaxed);
-	CancelAndDrainActiveBuild();
+	StopAdmissionsAndDrain();
 
 	m_Status = ScriptCompilationStatus{};
 	m_ShouldRestorePausedGameplayState = false;
@@ -562,6 +217,7 @@ void ScriptCompilationSubsystem::OnProjectClosed()
 // ScriptCompilationSubsystem::RequestBuild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::RequestBuild(ScriptBuildReason reason)
 {
+	if (m_AdmissionsStopped) return;
 	if (m_Context == nullptr || m_Context->projectManager == nullptr || !m_Context->projectManager->HasActiveProject())
 	{
 		return;
@@ -1011,6 +667,16 @@ void ScriptCompilationSubsystem::BeginBuild()
 	UpdateSharedState();
 }
 
+void ScriptCompilationSubsystem::StopAdmissionsAndDrain()
+{
+	// Keep the assembly/context/workspace alive until the compiler and its
+	// descendants have settled. Repeated calls are harmless and never reload.
+	m_AdmissionsStopped = true;
+	m_Status.queuedBuild = false;
+	m_CancelRequested.store(true, std::memory_order_relaxed);
+	CancelAndDrainActiveBuild();
+}
+
 void ScriptCompilationSubsystem::CancelAndDrainActiveBuild()
 {
 	if (!m_BuildInFlight || !m_ActiveBuild.valid())
@@ -1234,7 +900,11 @@ ScriptCompilationSubsystem::ScriptBuildResult ScriptCompilationSubsystem::RunBui
 		processWorkspace.BuildProjectRoot() / canonicalProjectPath.filename());
 
 	int exitCode = 0;
-	if (!RunProcessCapture(invocation.processWorkingDirectory, invocation.commandLine, m_CancelRequested, result.buildOutput, exitCode, result.canceled))
+	const auto processResult = TerraEngine::Utilities::OwnedProcess::Run({invocation.processWorkingDirectory, invocation.commandLine}, m_CancelRequested);
+	result.buildOutput = processResult.output;
+	exitCode = processResult.exitCode;
+	result.canceled = processResult.canceled;
+	if (!processResult.started)
 	{
 		result.failureMessage = TerraEngine::Editor::Scripting::DescribeScriptBuildLaunchFailure(
 			invocation,

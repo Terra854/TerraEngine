@@ -21,6 +21,7 @@
 #include "Resource/ResourceResidency.h"
 #include "Resource/ResourceStreaming.h"
 #include "Terrain/TerrainAssetStore.h"
+#include "Engine/Utilities/OwnedProcess.h"
 
 #include <algorithm>
 #include <array>
@@ -49,6 +50,55 @@
 static std::string PathToUtf8(const std::filesystem::path& path) {
 	const std::u8string encoded = path.generic_u8string();
 	return std::string(reinterpret_cast<const char*>(encoded.data()), encoded.size());
+}
+
+// The import lives beside private compiler output and is removed by workspace RAII.
+// Moving obj outside the project makes the SDK's usual obj exclusion point there;
+// remove only generated source below the authored root before compiler inputs settle.
+static std::string EscapeNativeAotTargetsPath(const std::filesystem::path& path) {
+	std::string escaped;
+	for(const char character : PathToUtf8(path)) {
+		switch(character) {
+		case '&': escaped += "&amp;"; break;
+		case '<': escaped += "&lt;"; break;
+		case '>': escaped += "&gt;"; break;
+		case '\"': escaped += "&quot;"; break;
+		case '\'': escaped += "&apos;"; break;
+		// MSBuild escapes keep literal path punctuation from becoming expressions
+		// or item-list separators after XML decoding.
+		case '%': escaped += "%25"; break;
+		case '$': escaped += "%24"; break;
+		case '@': escaped += "%40"; break;
+		case ';': escaped += "%3B"; break;
+		case '*': escaped += "%2A"; break;
+		case '?': escaped += "%3F"; break;
+		default: escaped += character; break;
+		}
+	}
+	return escaped;
+}
+
+static std::string NativeAotTargetsArgument(const std::filesystem::path& path) {
+	// MSBuild parses property lists and decodes percent escapes independently
+	// of process quoting. Encode literal punctuation before either host quotes it.
+	std::string propertyPath;
+	for(const char character : PathToUtf8(path)) {
+		if(character == '%') propertyPath += "%25";
+		else if(character == ';') propertyPath += "%3B";
+		else propertyPath += character;
+	}
+#ifdef _WIN32
+	// OwnedProcess invokes CreateProcess directly, so percent signs are literal.
+	return " -p:CustomAfterMicrosoftCommonTargets=\"" + propertyPath + "\"";
+#else
+	// The POSIX process adapter invokes a shell; keep the entire path literal.
+	std::string quoted = " -p:CustomAfterMicrosoftCommonTargets='";
+	for(const char character : propertyPath) {
+		if(character == '\'') quoted += "'\\''";
+		else quoted += character;
+	}
+	return quoted + "'";
+#endif
 }
 
 // Export provenance hashes are deterministic identifiers for package auditing,
@@ -470,82 +520,23 @@ static nlohmann::json BuildVirtualGeometryExportManifest(const BuildProfile& pro
 	return virtualGeometry;
 }
 
-static int ExecuteUtf8ShellCommand(const std::string& commandLine) {
-#ifdef _WIN32
-	const int wideLength = MultiByteToWideChar(
-		CP_UTF8, MB_ERR_INVALID_CHARS, commandLine.data(), static_cast<int>(commandLine.size()), nullptr, 0);
-	if(wideLength <= 0) return -1;
-	std::wstring wideCommand(static_cast<std::size_t>(wideLength), L'\0');
-	if(MultiByteToWideChar(
-		CP_UTF8, MB_ERR_INVALID_CHARS, commandLine.data(), static_cast<int>(commandLine.size()),
-		wideCommand.data(), wideLength) != wideLength) return -1;
-	return _wsystem(wideCommand.c_str());
-#else
-	return std::system(commandLine.c_str());
-#endif
-}
-
-static std::string QuotePosixShellValue(const std::string& value) {
-	// Single quotes preserve spaces and shell metacharacters in the project and
-	// installed-toolchain paths. POSIX shells represent a literal quote by
-	// closing, escaping, and reopening the quoted value.
-	std::string quoted = "'";
-	for(const char character : value) {
-		if(character == '\'') {
-			quoted += "'";
-			quoted += '\\';
-			quoted += "'";
-		}
-		else quoted += character;
-	}
-	quoted += "'";
-	return quoted;
-}
-
-#ifdef _WIN32
-static std::string EscapeWindowsCommandExpansion(std::string_view value) {
-	// cmd.exe expands %NAME% even inside quotes. Prefix each percent with a
-	// caret so valid project/install paths containing percent signs remain
-	// literal when setting environment variables or changing directories.
-	std::string escaped;
-	escaped.reserve(value.size());
-	for(const char character : value) {
-		if(character == '%') escaped += '^';
-		escaped += character;
-	}
-	return escaped;
-}
-#endif
-
 static int ExecuteNativeAotToolchainCommand(
 	const std::string& commandLine,
-	const NativeAotPublishContext& context)
+	const NativeAotPublishContext& context,
+	const std::shared_ptr<ExportCancellationState>& cancellation)
 {
-	const std::string toolchainDirectory = PathToUtf8(context.workingDirectory);
-	const std::string packageCache = PathToUtf8(context.packageCache);
-	const std::string dotnetCliHome = PathToUtf8(context.dotnetCliHome);
-#ifdef _WIN32
-	// cmd.exe is already the _wsystem host. pushd scopes global.json discovery
-	// to the installed toolchain and the set commands scope cache variables to
-	// this child shell, leaving the editor and the user's profile untouched.
-	const std::string wrapped = "pushd \"" + EscapeWindowsCommandExpansion(toolchainDirectory) + "\" && "
-		"set \"NUGET_PACKAGES=" + EscapeWindowsCommandExpansion(packageCache) + "\" && "
-		"set \"DOTNET_CLI_HOME=" + EscapeWindowsCommandExpansion(dotnetCliHome) + "\" && "
-		"set \"DOTNET_CLI_TELEMETRY_OPTOUT=1\" && "
-		"set \"DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1\" && "
-		"set \"DOTNET_NOLOGO=1\" && "
-		"set \"NUGET_XMLDOC_MODE=skip\" && "
-		"set \"NUGET_CERT_REVOCATION_MODE=offline\" && "
-		+ commandLine;
-#else
-	const std::string wrapped = "cd " + QuotePosixShellValue(toolchainDirectory) + " && "
-		"NUGET_PACKAGES=" + QuotePosixShellValue(packageCache) + " "
-		"DOTNET_CLI_HOME=" + QuotePosixShellValue(dotnetCliHome) + " "
-		"DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 "
-		"DOTNET_NOLOGO=1 NUGET_XMLDOC_MODE=skip "
-		"NUGET_CERT_REVOCATION_MODE=offline " + commandLine;
-#endif
-	return ExecuteUtf8ShellCommand(wrapped);
+	// The process owner supplies cwd/environment directly. No shell modifies
+	// the editor's environment, and cancellation reaches compiler descendants.
+	TerraEngine::Utilities::OwnedProcessRequest request;
+	request.commandLine = commandLine;
+	request.workingDirectory = context.workingDirectory;
+	request.environment = {{"NUGET_PACKAGES", PathToUtf8(context.packageCache)}, {"DOTNET_CLI_HOME", PathToUtf8(context.dotnetCliHome)},
+		{"DOTNET_CLI_TELEMETRY_OPTOUT", "1"}, {"DOTNET_SKIP_FIRST_TIME_EXPERIENCE", "1"}, {"DOTNET_NOLOGO", "1"}, {"NUGET_XMLDOC_MODE", "skip"}, {"NUGET_CERT_REVOCATION_MODE", "offline"}};
+	const std::atomic_bool neverCanceled = false;
+	const auto result = TerraEngine::Utilities::OwnedProcess::Run(request, cancellation ? cancellation->requested : neverCanceled);
+	// Preserve CLI stdout as JSONL; compiler diagnostics remain on stderr.
+	std::cerr << result.output;
+	return result.started ? result.exitCode : -1;
 }
 
 static nlohmann::json BuildRendererRecoveryManifest(const BuildProfile& profile)
@@ -800,8 +791,10 @@ static ProjectManifestMetadata LoadProjectManifestMetadata(const std::filesystem
 
 ExportResult ExportPipeline::Execute(
 	const ExportRequest& request,
-	ExportProgressCallback progressCallback)
+	ExportProgressCallback progressCallback,
+	std::shared_ptr<ExportCancellationState> cancellation)
 {
+	m_Cancellation = std::move(cancellation);
 	const auto startTime = std::chrono::steady_clock::now();
 	ExportResult result;
 	result.runId = request.runId;
@@ -815,6 +808,7 @@ ExportResult ExportPipeline::Execute(
 
 	std::vector<std::string> progressRecords;
 	ExportProgressCallback capturedProgress = [&](const ExportProgress& progress) {
+		CheckCancellation();
 		progressRecords.push_back(SerializeExportProgressRecord(request.runId, progress));
 		if(progressCallback) progressCallback(progress);
 	};
@@ -833,7 +827,9 @@ ExportResult ExportPipeline::Execute(
 	};
 
 	auto finish = [&](ExportFailureCategory category, ExportStage stage, std::string message) {
+		if (m_Cancellation && m_Cancellation->requested.load(std::memory_order_relaxed) && !transaction.WasPublished()) category = ExportFailureCategory::Canceled;
 		result.success = category == ExportFailureCategory::None;
+		result.canceled = category == ExportFailureCategory::Canceled;
 		result.failureCategory = category;
 		result.stage = stage;
 		result.exitCode = ExitCodeForFailure(category);
@@ -885,6 +881,7 @@ ExportResult ExportPipeline::Execute(
 	};
 
 	try {
+		CheckCancellation();
 		std::string transactionError;
 		if(!transaction.Begin(transactionError)) {
 			result.affectedPath = transaction.LockPath();
@@ -1072,7 +1069,7 @@ ExportResult ExportPipeline::Execute(
 			result.affectedPath = request.evidenceDirectory;
 			return finish(ExportFailureCategory::EvidenceWriteFailed, ExportStage::Evidence, evidenceError);
 		}
-		if(!transaction.Commit(transactionError)) {
+		if(!transaction.Commit(transactionError, m_Cancellation)) {
 			result.affectedPath = request.finalOutputDirectory;
 			return finish(ExportFailureCategory::PublicationFailed, ExportStage::Publication, transactionError);
 		}
@@ -1095,6 +1092,10 @@ ExportResult ExportPipeline::Execute(
 		return finish(ExportFailureCategory::UnexpectedFailure, result.stage,
 			"Contained export failure with no diagnostic text.");
 	}
+}
+
+void ExportPipeline::CheckCancellation() const {
+	if (m_Cancellation && m_Cancellation->requested.load(std::memory_order_relaxed)) throw std::runtime_error("Export canceled before output publication.");
 }
 
 static bool ValidateManagedRuntimeOutput(
@@ -1201,6 +1202,32 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 		return false;
 	}
 
+	const std::filesystem::path generatedSourceTargets =
+		nativeAotWorkspace.WorkspaceRoot() / "GeneratedSourceIsolation.targets";
+	std::ofstream targets(generatedSourceTargets, std::ios::binary | std::ios::trunc);
+	targets << "<Project><Target Name=\"TerraEngineExcludeGeneratedManagedSources\" "
+		"BeforeTargets=\"CoreCompile\"><ItemGroup>";
+	// Include both spellings because authored explicit items can use real paths
+	// while SDK default items resolve through the short project junction.
+	for(const auto& root : {std::filesystem::absolute(projectRoot),
+			std::filesystem::absolute(buildProjectRoot)}) {
+		for(const char* directory : {"obj", "bin", "Build", "Builds", "Library", "Temp"}) {
+			targets << "<_TerraEngineGeneratedSource Include=\""
+				<< EscapeNativeAotTargetsPath(root / directory) << "/**/*.cs\" />";
+		}
+	}
+	// Match normalized full paths rather than item identities: SDK items use
+	// relative names while explicitly authored includes may use absolute names.
+	targets << "<Compile Remove=\"@(_TerraEngineGeneratedSource)\" "
+		"MatchOnMetadata=\"FullPath\" MatchOnMetadataOptions=\"PathLike\" />"
+		"</ItemGroup></Target></Project>";
+	targets.close();
+	if(!targets) {
+		result.errorMessage = "Could not write the private managed source isolation target.";
+		return false;
+	}
+	const std::string targetsArgument = NativeAotTargetsArgument(generatedSourceTargets);
+
 	// Resolve the output directory for the NativeAOT publish output.
 	std::filesystem::path outputDir = ResolveOutputDirectory(profile, projectRoot);
 	std::filesystem::create_directories(outputDir);
@@ -1233,8 +1260,8 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 	// come only from the installed feed. Publish then consumes that exact assets
 	// file with --no-restore and cannot silently contact a user or network source.
 	const int restoreExitCode = ExecuteNativeAotToolchainCommand(
-		BuildNativeAotRestoreCommand(profile, managedProject, nativeAotContext) + " 1>&2",
-		nativeAotContext);
+		BuildNativeAotRestoreCommand(profile, managedProject, nativeAotContext) + targetsArgument,
+		nativeAotContext, m_Cancellation);
 	if(restoreExitCode != 0) {
 		result.errorMessage = "NativeAOT offline restore failed (exit code "
 			+ std::to_string(restoreExitCode) + ").";
@@ -1246,8 +1273,8 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 	// output remains human-readable on stderr without corrupting JSONL output.
 	const int publishExitCode = ExecuteNativeAotToolchainCommand(
 		BuildNativeAotPublishCommand(
-			profile, managedProject, nativeAotPublishOutputDir, nativeAotContext) + " 1>&2",
-		nativeAotContext);
+			profile, managedProject, nativeAotPublishOutputDir, nativeAotContext) + targetsArgument,
+		nativeAotContext, m_Cancellation);
 	if(publishExitCode != 0) {
 		result.errorMessage = "NativeAOT compilation failed (exit code " +
 			std::to_string(publishExitCode) + ").";
@@ -1334,6 +1361,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 		// 2. Copy raw assets (baseline).
 		if (std::filesystem::exists(rawAssets)) {
 			for (const auto& entry : std::filesystem::recursive_directory_iterator(rawAssets)) {
+				CheckCancellation();
 				if (!entry.is_regular_file()) continue;
 
 				const std::filesystem::path relative = std::filesystem::relative(entry.path(), rawAssets);
@@ -1359,6 +1387,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 		// while leaving raw files that don't need compilation (like .tescene) intact.
 		if (std::filesystem::exists(compiledAssets)) {
 			for (const auto& entry : std::filesystem::recursive_directory_iterator(compiledAssets)) {
+				CheckCancellation();
 				if (!entry.is_regular_file()) continue;
 				// A malformed or stale build directory must not reintroduce authoring
 				// recipes after the raw-asset pass deliberately excluded them. The
@@ -1649,7 +1678,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 			inferredSourcePath.replace_extension();
 			return inferredSourcePath;
 		};
-		auto stageModelPackageChildren = [&addStagedAsset](const std::filesystem::path& sourceAssetPath) -> bool {
+		auto stageModelPackageChildren = [this, &addStagedAsset](const std::filesystem::path& sourceAssetPath) -> bool {
 			TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
 			if (!TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourceAssetPath, importResult)
 				|| importResult.status == TerraEngine::AssetPipeline::ModelImportStatus::Failed) {
@@ -1658,6 +1687,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 
 			bool addedAny = false;
 			for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes) {
+				CheckCancellation();
 				// Package parents are containers; only generated child TEMFs are
 				// renderable at runtime. Skip stale failed child cooks so the
 				// manifest never references missing or unusable package output.
@@ -1674,6 +1704,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 					0U) || addedAny;
 			}
 			for (const TerraEngine::AssetPipeline::GeneratedModelMaterialAsset& material : importResult.generatedMaterials) {
+				CheckCancellation();
 				if (!material.compiledPath.empty()) {
 					addedAny = addStagedAsset(
 						TerraEngine::ToHexString(material.guid),
@@ -1684,6 +1715,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 				}
 			}
 			for (const TerraEngine::AssetPipeline::GeneratedModelTextureAsset& texture : importResult.generatedTextures) {
+				CheckCancellation();
 				if (!texture.compiledPath.empty()) {
 					addedAny = addStagedAsset(
 						TerraEngine::ToHexString(texture.guid),
@@ -1697,6 +1729,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 		};
 		if (std::filesystem::exists(rawAssets)) {
 			for (const auto& entry : std::filesystem::recursive_directory_iterator(rawAssets)) {
+				CheckCancellation();
 				if (!entry.is_regular_file()) continue;
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (entry.path().extension() != ".meta") continue;
@@ -1816,6 +1849,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 			});
 		};
 		for(const auto& entry : std::filesystem::recursive_directory_iterator(stagingDir)) {
+			CheckCancellation();
 			if(!entry.is_regular_file()) continue;
 			const std::filesystem::path extension = entry.path().extension();
 			const AssetType type = extension == ".tephysmat" ? AssetType::PhysicsMaterial
@@ -1877,6 +1911,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 			TerraEngine::Export::AnimationExportDependencyResolver::Resolve({rawAssets, stagingDir});
 		if(!animationClosure.Complete()) {
 			for(const TerraEngine::Export::AnimationExportIssue& issue : animationClosure.issues) {
+				CheckCancellation();
 				ExportDiagnostic diagnostic;
 				diagnostic.severity = ExportDiagnosticSeverity::Error;
 				diagnostic.category = "Animation";
@@ -1898,6 +1933,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 			return false;
 		}
 		for(const TerraEngine::Export::AnimationExportAsset& asset : animationClosure.assets) {
+			CheckCancellation();
 			// Generated prefabs are authored runtime documents loaded by SceneManager,
 			// not ResourceManager assets. Keep the exact prefab record in the
 			// animation manifests and TEPAK, but omit it from game.json's typed GUID
@@ -1937,6 +1973,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 			TerraEngine::Export::NavigationExportDependencyResolver::Resolve(stagingDir);
 		if(!navigationClosure.Complete()) {
 			for(const TerraEngine::Export::NavigationExportIssue& issue : navigationClosure.issues) {
+				CheckCancellation();
 				ExportDiagnostic diagnostic;
 				diagnostic.severity = ExportDiagnosticSeverity::Error;
 				diagnostic.category = "Navigation";
@@ -2079,6 +2116,7 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 			GetExportGlfwLibraryName(profile.platform)
 		};
 		for (const auto& libraryName : engineLibraries) {
+			CheckCancellation();
 			std::filesystem::path librarySrc = runtimeLayout.launcherDirectory / libraryName;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!std::filesystem::exists(librarySrc)) {
@@ -2180,6 +2218,7 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 			return std::tie(left.guid, left.path, left.type) < std::tie(right.guid, right.path, right.type);
 		});
 		for (const auto& asset : sortedAssets) {
+			CheckCancellation();
 			nlohmann::json entry;
 			entry["guid"] = asset.guid;
 			entry["path"] = asset.path;

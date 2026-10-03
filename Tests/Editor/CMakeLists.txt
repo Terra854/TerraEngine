@@ -1,11 +1,18 @@
-# Editor unit tests only compile deterministic non-UI editor support code.
-# They deliberately avoid the editor executable, GLFW, Vulkan, and launcher.
+# Editor tests compile deterministic support and bounded production frontend
+# actions. They do not start a platform window, graphics device or launcher.
 file(GLOB_RECURSE TERRAENGINE_EDITOR_ANIMATION_TEST_SOURCES CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/Animation/*.cpp"
 )
 
 add_executable(TerraEngine-EditorTests
 	EditorTests.cpp
+	Export/ExportLifecycleTests.cpp
+	Scene/SceneSaveFailureSafetyTests.cpp
+	# The actual export frontend actions share the production window/controller.
+	# Tests instantiate it without starting a platform window or graphics device.
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Framework/EditorWindow.cpp
+	${CMAKE_SOURCE_DIR}/External/ImGuiFileDialog/ImGuiFileDialog.cpp
 	Audio/AudioClipCompilerTests.cpp
 	Audio/AudioImportPlaybackTests.cpp
 	Audio/AudioAuthoringPersistenceTests.cpp
@@ -337,6 +344,7 @@ set_tests_properties(Editor.AudioIntegration PROPERTIES
 
 target_include_directories(TerraEngine-EditorTests
 	PRIVATE
+		${CMAKE_SOURCE_DIR}/External/ImGuiFileDialog
 		${CMAKE_CURRENT_SOURCE_DIR}
 		${CMAKE_SOURCE_DIR}
 		${CMAKE_SOURCE_DIR}/Engine
@@ -380,6 +388,7 @@ target_link_libraries(TerraEngine-EditorTests
 	PRIVATE
 		TerraEngine-Engine
 		TerraEngine-ExportSupport
+		cimgui
 		Threads::Threads
 		assimp::assimp
 		fastgltf::fastgltf
@@ -425,7 +434,9 @@ if(WIN32)
 endif()
 
 add_test(NAME Editor.ExportUnitTests COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
-set_tests_properties(Editor.ExportUnitTests PROPERTIES LABELS "Editor")
+set_tests_properties(Editor.ExportUnitTests PROPERTIES LABELS "Editor"
+	ENVIRONMENT "TERRAENGINE_TEST_EXCLUDE_FILTER=Editor.ExportLifecycle"
+)
 
 add_test(NAME Editor.HeadlessExport COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
 set_tests_properties(Editor.HeadlessExport PROPERTIES
@@ -469,7 +480,7 @@ set_tests_properties(Editor.VirtualGeometryFoundation PROPERTIES
 add_test(NAME Editor.VirtualGeometryProductionContracts COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
 set_tests_properties(Editor.VirtualGeometryProductionContracts PROPERTIES
 	LABELS "Editor;VirtualGeometry;Production;Contract"
-	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Production;VirtualGeometry.Editor.AssetPipeline.CanonicalProduction;VirtualGeometry.Editor.Export.Benchmark;VirtualGeometry.Editor.Automation"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Production,VirtualGeometry.Editor.AssetPipeline.CanonicalProduction,VirtualGeometry.Editor.Export.Benchmark,VirtualGeometry.Editor.Automation"
 )
 
 add_test(NAME Editor.VirtualGeometryHardening COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
@@ -538,10 +549,12 @@ set_tests_properties(Editor.RendererRecovery PROPERTIES
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=RendererRecovery,ExportPackageValidator,VirtualGeometry.Editor.Export,LinuxPlatformExport"
 )
 
+# Keep the intended case union inside one environment variable. The harness
+# accepts commas; CMake interprets semicolons as separate environment entries.
 add_test(NAME Editor.AdaptiveVirtualGeometry COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
 set_tests_properties(Editor.AdaptiveVirtualGeometry PROPERTIES
 	LABELS "Editor;VirtualGeometry;AdaptiveVirtualGeometry"
-	ENVIRONMENT "TERRAENGINE_TEST_FILTER=AdaptiveVirtualGeometry;Editor.AssetPipeline.VirtualGeometry;VirtualGeometry.Editor.Inspector;VirtualGeometry.Editor.Automation;VirtualGeometry.Editor.Export;VirtualGeometry.Editor.DebugView"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=AdaptiveVirtualGeometry,Editor.AssetPipeline.VirtualGeometry,VirtualGeometry.Editor.Inspector,VirtualGeometry.Editor.Automation,VirtualGeometry.Editor.Export,VirtualGeometry.Editor.DebugView"
 )
 
 add_test(NAME Editor.PhysicsWorkflows COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
@@ -709,3 +722,5 @@ set_tests_properties(Editor.Terrain.LargeWorld PROPERTIES
 	LABELS "Editor;Terrain;LargeWorld;Soak"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.TerrainLargeWorldSoak"
 )
+
+terraengine_add_correctness_slice(Editor.ExportLifecycle TerraEngine-EditorTests Editor.ExportLifecycle 6)

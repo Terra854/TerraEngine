@@ -174,25 +174,14 @@ namespace TerraEngine::EditorTests {
 			context.Expect(command.rfind("-p:RestorePackagesPath=\"C:/Temp/TEAOT-command-test/packages/\"")
 					> command.rfind("C:/Attacker/packages/"),
 				"The private package cache must override a profile-provided restore cache.");
-#ifdef _WIN32
-			const std::string defaultItemExcludes =
-				"-p:DefaultItemExcludes=\"$([MSBuild]::Unescape('obj/**\"^%\"3Bbin/**\"^%\"3BBuild/**\"^%\"3BLibrary/**\"^%\"3BTemp/**'))\"";
-#else
-			const std::string defaultItemExcludes =
-				"-p:DefaultItemExcludes='$([MSBuild]::Unescape("
-				"'\\''obj/**%3Bbin/**%3BBuild/**%3BLibrary/**%3BTemp/**'\\''"
-				"))'";
-#endif
-			context.Expect(command.rfind(defaultItemExcludes)
-					> command.rfind("C:/Attacker/generated/**"),
-				"The delayed MSBuild Unescape representation must override a profile value.");
-			context.Expect(command.find("-p:DefaultItemExcludes=obj/**")
-					== std::string::npos,
-				"Publish must not retain the ineffective bare escaped exclusion list.");
-			context.Expect(
-				command.find("obj/**;bin/**;Build/**;Library/**;Temp/**")
-					== std::string::npos,
-				"Publish must not emit raw semicolon separators that MSBuild parses as switches.");
+			// Preserve SDK and authored defaults: generated-source isolation belongs
+			// to the private pipeline import, not a replacement global property.
+			context.Expect(command.find("Unescape") == std::string::npos,
+				"Publish must not replace default SDK exclusions with a delayed expression.");
+			context.Expect(command.find("-p:DefaultItemExcludes=")
+					== command.rfind("-p:DefaultItemExcludes="),
+				"Only the authored profile exclusion override may appear in the command.");
+
 			context.Expect(command.find("-p:RestoreFallbackFolders=") != std::string::npos
 				&& command.find("-p:RestoreAdditionalProjectSources=") != std::string::npos
 				&& command.find("-p:NuGetAudit=false") != std::string::npos,
@@ -231,8 +220,8 @@ namespace TerraEngine::EditorTests {
 					&& restore.find("-p:RestorePackagesPath=\"C:/Temp/TEAOT-command-test/packages/\"")
 						!= std::string::npos,
 				"Restore and publish must share the exact private obj, bin, and package paths.");
-			context.Expect(restore.find(defaultItemExcludes) != std::string::npos,
-				"Restore must use the same MSBuild-escaped and shell-quoted exclusions as publish.");
+			context.Expect(restore.find("-p:DefaultItemExcludes=") == std::string::npos,
+				"Restore must preserve the SDK default exclusions.");
 			context.Expect(
 				restore.find("obj/**;bin/**;Build/**;Library/**;Temp/**")
 					== std::string::npos,
@@ -263,29 +252,29 @@ namespace TerraEngine::EditorTests {
 			const std::string publish =
 				BuildNativeAotPublishCommand(profile, project, output, toolchain);
 			const std::string projectArgument =
-				"\"C:/Projects/\"^%\"TERRAENGINE_PATH_SENTINEL\"^%\"/Assembly-CSharp.csproj\"";
+				"\"C:/Projects/%TERRAENGINE_PATH_SENTINEL%/Assembly-CSharp.csproj\"";
 			const std::string outputArgument =
-				"-o \"C:/Projects/\"^%\"TERRAENGINE_PATH_SENTINEL\"^%\"/Managed/\"";
+				"-o \"C:/Projects/%TERRAENGINE_PATH_SENTINEL%/Managed/\"";
 			const std::string feedProperty =
-				"-p:RestoreSources=\"C:/Installed \"^%\"TERRAENGINE_PATH_SENTINEL\"^%\"/NativeAotNuGet/feed/\"";
+				"-p:RestoreSources=\"C:/Installed %TERRAENGINE_PATH_SENTINEL%/NativeAotNuGet/feed/\"";
 			const std::string packageArgument =
-				"--packages \"C:/Temp/\"^%\"TERRAENGINE_PATH_SENTINEL\"^%\"/packages/\"";
+				"--packages \"C:/Temp/%TERRAENGINE_PATH_SENTINEL%/packages/\"";
 			context.Expect(restore.find(projectArgument) != std::string::npos
 					&& publish.find(projectArgument) != std::string::npos
 					&& publish.find(outputArgument) != std::string::npos
 					&& restore.find(feedProperty) != std::string::npos
 					&& publish.find(feedProperty) != std::string::npos
 					&& restore.find(packageArgument) != std::string::npos,
-				"Windows NativeAOT paths must close quotes, escape each percent outside quotes, and reopen the same argument.");
-			context.Expect(restore.find("^%TERRAENGINE_PATH_SENTINEL^%")
+				"Direct Windows NativeAOT arguments must preserve literal percent signs.");
+			context.Expect(restore.find("^%")
 					== std::string::npos
-					&& publish.find("^%TERRAENGINE_PATH_SENTINEL^%")
+					&& publish.find("^%")
 						== std::string::npos,
-				"Windows NativeAOT paths must not leave caret escapes inside one quoted segment.");
+				"Direct Windows NativeAOT arguments must not contain cmd caret escapes.");
 			context.Expect(
 				std::count(restore.begin(), restore.end(), '"') % 2 == 0
 					&& std::count(publish.begin(), publish.end(), '"') % 2 == 0,
-				"Segmented Windows NativeAOT arguments must keep their double quotes balanced.");
+				"Windows NativeAOT arguments must keep their double quotes balanced.");
 #else
 			const std::filesystem::path project =
 				"/tmp/Terra $HOME 'Game/Assembly-CSharp.csproj";

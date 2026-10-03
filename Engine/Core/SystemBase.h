@@ -27,8 +27,14 @@ public:
 	// System Update with Delta Time
 	virtual void Update(float deltaTime) = 0;
 
-	// System freeing resources
+	// Free resources acquired by either complete or partial Initialize. This
+	// must be idempotent: startup can fail after an owner acquires dependencies.
 	virtual void Shutdown() = 0;
+
+	// Two-stage teardown settles producer work while every provider and owner
+	// still exists. Ordinary synchronous systems need no separate drain step.
+	// The coordinator calls this before releasing any initialized system.
+	virtual void PrepareShutdown() {}
 
 	// Systems can report a terminal condition without teaching MainEngine about
 	// subsystem-specific states. The engine checks this only after the protected

@@ -3,6 +3,8 @@
 #include <iostream>
 
 namespace TerraEngine::EditorTests {
+	void RegisterExportLifecycleTests(TestRegistry& registry);
+	void RegisterEditorSceneSaveFailureSafetyTests(TestRegistry& registry);
 	void RegisterAudioClipCompilerTests(TestRegistry& registry);
 	void RegisterAudioImportPlaybackTests(TestRegistry& registry);
 	void RegisterAudioAuthoringPersistenceTests(TestRegistry& registry);
@@ -246,6 +248,8 @@ namespace TerraEngine::EditorTests {
 
 int main() {
 	TerraEngine::EditorTests::TestRegistry registry;
+	TerraEngine::EditorTests::RegisterExportLifecycleTests(registry);
+	TerraEngine::EditorTests::RegisterEditorSceneSaveFailureSafetyTests(registry);
 
 	registry.Add("Editor.Smoke.HarnessRuns", [](TerraEngine::EditorTests::TestContext& context) {
 		context.Expect(true, "The editor test harness should execute registered tests.");

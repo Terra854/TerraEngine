@@ -290,6 +290,11 @@ namespace TerraEngine::Editor::Automation
 		service.PumpAnimationRecordingsAtProtectedFrame();
 	}
 
+	void EditorMcpBridge::PumpExportJobsAtProtectedFrame()
+	{
+		service.PumpExportJobsAtProtectedFrame();
+	}
+
 	void EditorMcpBridge::PumpRendererValidationMutationsAtProtectedFrame()
 	{
 		// The service produces one typed transaction from a retained target set.

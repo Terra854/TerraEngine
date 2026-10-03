@@ -15,9 +15,13 @@ class ExportPipeline {
 public:
 	ExportResult Execute(
 		const ExportRequest& request,
-		ExportProgressCallback progressCallback = nullptr);
+		ExportProgressCallback progressCallback = nullptr,
+		std::shared_ptr<ExportCancellationState> cancellation = {});
 
 private:
+	// Long loops and stage boundaries fail through one cancellation outcome.
+	void CheckCancellation() const;
+	std::shared_ptr<ExportCancellationState> m_Cancellation;
 	bool RunValidation(
 		const BuildProfile& profile,
 		const std::filesystem::path& projectRoot,

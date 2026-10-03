@@ -90,14 +90,16 @@ namespace
 	// Load and validate the requested stage set before wrapping them in
 	// a ShaderCollection. This keeps pipeline creation simple because stages
 	// are guaranteed to match their expected roles.
-	std::unique_ptr<ShaderCollection> LoadShaderCollectionStages(ResourceManager& manager, const std::vector<StageRequest>& stages)
+	std::unique_ptr<ShaderCollection> LoadShaderCollectionStages(const std::vector<StageRequest>& stages,
+		const std::vector<std::pair<TerraEngine::UUID, std::shared_ptr<const Shader>>>& payloads)
 	{
 		auto collection = std::make_unique<ShaderCollection>();
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const StageRequest& request : stages)
+		for (std::size_t index = 0U; index < stages.size(); ++index)
 		{
-			const TerraEngine::UUID shaderId = manager.LoadShader(request.path);
-			Shader* shader = manager.GetShader(shaderId);
+			const auto& request = stages[index];
+			const TerraEngine::UUID shaderId = payloads[index].first;
+			const Shader* shader = payloads[index].second.get();
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (shader == nullptr)
 			{
@@ -131,53 +133,32 @@ namespace
 				return binding.stage == ShaderStage::Vertex
 					|| binding.stage == ShaderStage::Mesh;
 			});
-		if(hasFragment && !hasGeometryProvider)
-		{
-			// Surface-only collections inherit canonical engine geometry. Shader
-			// authors therefore never bind palettes, skin streams, morph inputs,
-			// or virtual-page resources.
-			const TerraEngine::UUID taskId =
-				manager.LoadShader("Shaders/Default.task.tspf");
-			const TerraEngine::UUID meshId =
-				manager.LoadShader("Shaders/Default.mesh.tspf");
-			if(taskId == TerraEngine::EMPTY_UUID
-				|| meshId == TerraEngine::EMPTY_UUID)
-			{
-				TERRAENGINE_LOG(LogLevel::Error,
-					"Engine-managed surface collection cannot load canonical task/mesh stages.");
-				return nullptr;
-			}
-			collection->stages.insert(collection->stages.begin(),
-				{ ShaderStage::Mesh, meshId });
-			collection->stages.insert(collection->stages.begin(),
-				{ ShaderStage::Task, taskId });
-			hasGeometryProvider = true;
-		}
 
 		// If both vertex and fragment stages are present, verify their interfaces match.
-		Shader* vertexShader = nullptr;
-		Shader* meshShader = nullptr;
-		Shader* fragmentShader = nullptr;
-		for (const ShaderCollection::StageBinding& binding : collection->stages)
+		const Shader* vertexShader = nullptr;
+		const Shader* meshShader = nullptr;
+		const Shader* fragmentShader = nullptr;
+		for (std::size_t index = 0U; index < collection->stages.size(); ++index)
 		{
+			const auto& binding = collection->stages[index];
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (binding.stage == ShaderStage::Vertex)
 			{
-				vertexShader = manager.GetShader(binding.shaderId);
+				vertexShader = payloads[index].second.get();
 			}
 			else if(binding.stage == ShaderStage::Mesh)
 			{
-				meshShader = manager.GetShader(binding.shaderId);
+				meshShader = payloads[index].second.get();
 			}
 			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (binding.stage == ShaderStage::Fragment)
 			{
-				fragmentShader = manager.GetShader(binding.shaderId);
+				fragmentShader = payloads[index].second.get();
 			}
 		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		Shader* geometryOutputShader =
+		const Shader* geometryOutputShader =
 			meshShader != nullptr ? meshShader : vertexShader;
 		if (geometryOutputShader && fragmentShader
 			&& !ValidateInterfaceCompatibility(
@@ -214,85 +195,139 @@ namespace
 	}
 }
 
-// ResourceManager::LoadShaderCollection is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+// Both public adapters share one admission/dependency continuation path.
 TerraEngine::UUID ResourceManager::LoadShaderCollection(const std::vector<ShaderStagePath>& stagePaths)
 {
-	std::vector<StageRequest> stages;
-	stages.reserve(stagePaths.size());
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (const ShaderStagePath& stagePath : stagePaths)
-	{
-		StageRequest request{};
-		request.stage = stagePath.stage;
-		request.path = ResolveAssetPath(stagePath.path);
-		request.key = NormalizeKey(request.path);
-		stages.push_back(request);
-	}
-
-	const std::string key = BuildShaderCollectionKey(stages);
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto cached = ResolveCached(key, shaderCollectionCache))
-	{
-		return *cached;
-	}
-
-	const TerraEngine::UUID id = EnsureResourceId(key, shaderCollectionCache);
-	// Trace the pairing so it is clear which stage files feed this collection UUID.
-	TERRAENGINE_LOG(LogLevel::Debug, "Loading shader collection with " << stages.size() << " stages (id " << ToHexString(id) << ")");
-	auto collection = LoadShaderCollectionStages(*this, stages);
-	return FinalizeLoad(key, shaderCollectionCache, id, std::move(collection));
+	return RequestShaderCollection(stagePaths).get();
 }
 
-// ResourceManager::LoadShaderCollectionAsync is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::shared_future<TerraEngine::UUID> ResourceManager::LoadShaderCollectionAsync(const std::vector<ShaderStagePath>& stagePaths)
 {
+	return RequestShaderCollection(stagePaths);
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::RequestShaderCollection(const std::vector<ShaderStagePath>& stagePaths)
+{
 	std::vector<StageRequest> stages;
-	stages.reserve(stagePaths.size());
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (const ShaderStagePath& stagePath : stagePaths)
+	RequestPtr parent;
+	RequestDeliveries deliveries;
+	bool admitted = false;
+	try {
 	{
-		StageRequest request{};
-		request.stage = stagePath.stage;
-		request.path = ResolveAssetPath(stagePath.path);
-		request.key = NormalizeKey(request.path);
-		stages.push_back(request);
-	}
-
-	const std::string key = BuildShaderCollectionKey(stages);
-
-	{
-		std::shared_lock lock(shaderCollectionCache.mutex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto existing = shaderCollectionCache.pathToId.find(key); existing != shaderCollectionCache.pathToId.end())
+		std::lock_guard gate(m_PublicationGate);
+		if (!m_RequestAdmissionOpen) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+		// Resolve explicit and implicit dependencies against one captured project
+		// context. Default geometry belongs to the installed engine, not Assets.
+		const bool hasFragment = std::any_of(stagePaths.begin(), stagePaths.end(), [](const auto& stage) { return stage.stage == ShaderStage::Fragment; });
+		const bool hasGeometry = std::any_of(stagePaths.begin(), stagePaths.end(), [](const auto& stage) { return stage.stage == ShaderStage::Vertex || stage.stage == ShaderStage::Mesh; });
+		if (hasFragment && !hasGeometry) {
+			const auto task = (engineRoot / "Shaders/Default.task.tspf").lexically_normal();
+			const auto mesh = (engineRoot / "Shaders/Default.mesh.tspf").lexically_normal();
+			stages.push_back({ShaderStage::Task, task, NormalizeKey(task)});
+			stages.push_back({ShaderStage::Mesh, mesh, NormalizeKey(mesh)});
+		}
+		for (const auto& stage : stagePaths) {
+			const auto path = (stage.path.is_absolute() ? stage.path : assetRoot / stage.path).lexically_normal();
+			stages.push_back({stage.stage, path, NormalizeKey(path)});
+		}
+		const auto key = BuildShaderCollectionKey(stages);
+		TerraEngine::UUID id = TerraEngine::EMPTY_UUID;
 		{
-			if (shaderCollectionCache.resources.find(existing->second) != shaderCollectionCache.resources.end())
-			{
-				return MakeReadyFuture(existing->second);
+			std::unique_lock lock(shaderCollectionCache.mutex);
+			if (const auto found = shaderCollectionCache.pathToId.find(key); found != shaderCollectionCache.pathToId.end()) {
+				id = found->second;
+				if (shaderCollectionCache.resources.contains(id)) return MakeReadyFuture(id);
+			} else {
+				id = TerraEngine::GenerateUUID();
+				shaderCollectionCache.pathToId[key] = id;
+				try { shaderCollectionCache.idToPath[id] = key; }
+				catch (...) { shaderCollectionCache.pathToId.erase(key); throw; }
 			}
 		}
-
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto pending = shaderCollectionCache.inFlight.find(key); pending != shaderCollectionCache.inFlight.end())
-		{
-			return pending->second;
+		const auto mapKey = std::to_string(static_cast<std::uint32_t>(CacheKind(shaderCollectionCache))) + ":" + key;
+		const auto prior = m_Requests.find(mapKey);
+		const auto previous = prior == m_Requests.end() ? RequestPtr{} : prior->second;
+		parent = AdmitRequestLocked(CacheKind(shaderCollectionCache), key, id, false, true, {}, deliveries);
+		if (!parent) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+		admitted = parent != previous;
+		if (admitted) {
+			parent->detach = [this, key, version = parent->version] {
+				std::unique_lock lock(shaderCollectionCache.mutex);
+				const auto current = shaderCollectionCache.inFlightTokens.find(key);
+				if (current == shaderCollectionCache.inFlightTokens.end() || current->second == version) {
+					shaderCollectionCache.inFlight.erase(key);
+					if (current != shaderCollectionCache.inFlightTokens.end()) shaderCollectionCache.inFlightTokens.erase(current);
+				}
+			};
+			std::unique_lock lock(shaderCollectionCache.mutex);
+			shaderCollectionCache.inFlight[key] = parent->future;
+			shaderCollectionCache.inFlightTokens[key] = parent->version;
 		}
 	}
-
-	const TerraEngine::UUID id = EnsureResourceId(key, shaderCollectionCache);
-	// Schedule the pair load so the calling thread stays responsive while disk I/O completes.
-	TERRAENGINE_LOG(LogLevel::Debug, "Scheduling async shader collection load with " << stages.size() << " stages (id " << ToHexString(id) << ")");
-	auto task = threadPool.createTask([this, key, stages, id]() -> TerraEngine::UUID {
-		auto collection = LoadShaderCollectionStages(*this, stages);
-		return FinalizeLoad(key, shaderCollectionCache, id, std::move(collection));
-	});
-
-	auto future = task->getFuture().share();
-	{
-		std::unique_lock lock(shaderCollectionCache.mutex);
-		shaderCollectionCache.inFlight[key] = future;
+	DeliverRequests(std::move(deliveries));
+	if (!admitted) return parent->future;
+	InvokeRequestHook(parent->key, 3U);
+	if (stages.empty()) {
+		FinishRequest(parent, RequestOutcome::Failed, "Shader collection has no stages.");
+		return parent->future;
 	}
-	threadPool.enqueue(task);
-
-	return future;
+	// The state owns dependency records, and those records retain immutable
+	// stage payloads. Callbacks do only bounded bookkeeping; the last successful
+	// dependency dispatches assembly once, without occupying a waiting worker.
+	struct Assembly {
+		std::mutex mutex;
+		std::size_t remaining = 0U;
+		bool scheduled = false;
+		std::vector<RequestPtr> dependencies;
+	};
+	auto assembly = std::make_shared<Assembly>();
+	assembly->remaining = stages.size();
+	try {
+		for (const auto& stage : stages) assembly->dependencies.push_back(AdmitShaderDependency(stage.path, parent));
+		{
+			std::lock_guard gate(m_PublicationGate);
+			for (const auto& dependency : assembly->dependencies) parent->dependencies.push_back(dependency);
+		}
+		for (const auto& dependency : assembly->dependencies) {
+			SubscribeRequest(dependency, [this, parent, stages, assembly](RequestOutcome outcome) {
+				try {
+				bool dispatch = false;
+				{
+					std::lock_guard lock(assembly->mutex);
+					if (assembly->scheduled) return;
+					if (outcome != RequestOutcome::Published) assembly->scheduled = true;
+					else if (--assembly->remaining == 0U) { assembly->scheduled = true; dispatch = true; }
+				}
+				if (outcome != RequestOutcome::Published) {
+					FinishRequest(parent, outcome == RequestOutcome::Failed ? RequestOutcome::Failed : RequestOutcome::Canceled,
+						"A required shader dependency did not publish.");
+				} else if (dispatch) {
+					ScheduleRequestWork(parent, [this, parent, stages, assembly] {
+						std::vector<std::pair<TerraEngine::UUID, std::shared_ptr<const Shader>>> payloads;
+						{
+							std::lock_guard gate(m_PublicationGate);
+							for (const auto& dependency : assembly->dependencies) payloads.emplace_back(dependency->id, dependency->shaderPayload);
+						}
+						InvokeRequestHook(parent->key, 0U);
+						auto collection = LoadShaderCollectionStages(stages, payloads);
+						InvokeRequestHook(parent->key, 1U);
+						FinalizeLoad(parent->key, shaderCollectionCache, parent->id, std::move(collection), parent->version, parent);
+					});
+				}
+				} catch (...) {
+					// Last-dependency closure allocation belongs to the collection,
+					// even when completion originates in another request's delivery.
+					AbortRequestSetup(parent);
+				}
+			});
+		}
+	} catch (const std::exception& error) { FinishRequest(parent, RequestOutcome::Failed, error.what()); }
+	catch (...) { FinishRequest(parent, RequestOutcome::Failed, "Shader dependency admission failed."); }
+	return parent->future;
+	} catch (...) {
+		// Assembly allocation and registration are part of admission ownership.
+		// An exception must settle this producer rather than poison its key.
+		if (admitted) AbortRequestSetup(parent);
+		return parent ? parent->future : MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	}
 }

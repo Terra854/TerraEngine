@@ -11,7 +11,7 @@
 #include "../Project/ProjectManager.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Engine/ThreadPool/ThreadPool.h"
-#include "../Subsystems/ScriptCompilationSubsystem.h"
+#include "../../Export/EditorExportOperationController.h"
 #include <ImGuiFileDialog.h>
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -27,6 +27,7 @@
 	#include <Windows.h>
 #elif defined(__linux__)
 	#include <unistd.h>
+	#include <sys/wait.h>
 #endif
 
 namespace
@@ -113,6 +114,7 @@ BuildProfilesWindow::BuildProfilesWindow(MainEditorSubsystem* owner)
 
 // BuildProfilesWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void BuildProfilesWindow::OnGui() {
+	PollExportAtProtectedFrame();
 	constexpr ImGuiTableFlags layoutFlags =
 		ImGuiTableFlags_SizingFixedFit |
 		ImGuiTableFlags_NoSavedSettings;
@@ -236,13 +238,13 @@ void BuildProfilesWindow::DrawProfileEditor() {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("...##OutputDir")) {
 		IGFD::FileDialogConfig config;
-		std::filesystem::path projectRoot = m_Owner->GetContext()->projectManager->GetProjectRoot();
+		std::filesystem::path projectRoot = Context()->projectManager->GetProjectRoot();
 		config.path = outputStr.empty() ? projectRoot.string() : outputStr;
 		ImGuiFileDialog::Instance()->OpenDialog("ChooseOutputDir", "Select Output Directory", nullptr, config);
 	}
 
 	// Startup Scene
-	const std::filesystem::path projectRoot = m_Owner->GetContext()->projectManager->GetProjectRoot();
+	const std::filesystem::path projectRoot = Context()->projectManager->GetProjectRoot();
 	const std::vector<std::string> scenePaths = CollectProjectScenePaths(projectRoot);
 	if (profile.startupScene.empty() && !scenePaths.empty()) {
 		// Exports now require a startup scene, so default to the first authored
@@ -429,28 +431,7 @@ void BuildProfilesWindow::DrawExportPanel() {
 				"Export succeeded in %.1fs", m_LastExportResult.totalElapsedSeconds);
 			ImGui::TextDisabled("Output: %s", m_LastExportResult.outputDirectory.string().c_str());
 			
-			if (m_RunAfterExport) {
-				m_RunAfterExport = false;
-				const std::filesystem::path projectRoot = m_Owner->GetContext()->projectManager->GetProjectRoot();
-				const bool hasSelectedProfile = m_SelectedProfileIndex >= 0 && m_SelectedProfileIndex < static_cast<int>(m_Profiles.size());
-				const BuildProfile* selectedProfile = hasSelectedProfile ? &m_Profiles[m_SelectedProfileIndex] : nullptr;
-				const std::string fallbackName = selectedProfile ? selectedProfile->name : "TerraEngine";
-				const ExportPlatform platform = selectedProfile ? selectedProfile->platform : GetHostExportPlatform();
-				std::string projectName = projectRoot.filename().string();
-				if (projectName.empty()) {
-					projectName = fallbackName;
-				}
-				const std::string launcherPath = (m_LastExportResult.outputDirectory / GetExportLauncherFileName(projectName, platform)).string();
-				// Hand the built launcher to the OS after export completes; this mirrors
-				// the editor's lightweight external-tool launch behavior.
-#ifdef _WIN32
-				std::string cmd = "start \"\" \"" + launcherPath + "\"";
-				std::system(cmd.c_str());
-#else
-				std::string cmd = "\"" + launcherPath + "\" &";
-				std::system(cmd.c_str());
-#endif
-			}
+
 		}
 		else {
 			ImGui::TextColored(ImVec4(0.9f, 0.2f, 0.2f, 1.0f),
@@ -533,8 +514,8 @@ void BuildProfilesWindow::LoadProfiles() {
 
 // BuildProfilesWindow::OnProjectOpened is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void BuildProfilesWindow::OnProjectOpened() {
-	if (m_Owner && m_Owner->GetContext() && m_Owner->GetContext()->projectManager->HasActiveProject()) {
-		m_ProfileDirectory = m_Owner->GetContext()->projectManager->GetProjectRoot() / "BuildProfiles";
+	if (Context() && Context()->projectManager && Context()->projectManager->HasActiveProject()) {
+		m_ProfileDirectory = Context()->projectManager->GetProjectRoot() / "BuildProfiles";
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!std::filesystem::exists(m_ProfileDirectory)) {
 			std::filesystem::create_directories(m_ProfileDirectory);
@@ -549,7 +530,7 @@ void BuildProfilesWindow::RunValidation() {
 		return;
 	}
 
-	std::filesystem::path projectRoot = m_Owner->GetContext()->projectManager->GetProjectRoot();
+	std::filesystem::path projectRoot = Context()->projectManager->GetProjectRoot();
 	ExportValidator validator;
 	ExportRuntimeLayout runtimeLayout;
 	std::string layoutError;
@@ -560,84 +541,87 @@ void BuildProfilesWindow::RunValidation() {
 }
 
 // BuildProfilesWindow::StartExport is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void BuildProfilesWindow::StartExport() {
-	if (m_SelectedProfileIndex < 0 || m_SelectedProfileIndex >= static_cast<int>(m_Profiles.size())) {
-		return;
-	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (m_ExportInProgress) {
-		return;
-	}
+void BuildProfilesWindow::StartExport() { StartCapturedExport(false); }
+void BuildProfilesWindow::StartExportAndRun() { StartCapturedExport(true); }
 
-	// Save the profile before exporting to ensure consistency.
-	SaveSelectedProfile();
-
-	m_ExportInProgress = true;
-	m_HasExportResult = false;
-	m_RunAfterExport = false;
-
-	// Run the export pipeline on a background thread so the editor stays
-	// responsive during lengthy compilation and packaging steps.
-	const auto profile = m_Profiles[m_SelectedProfileIndex];
-	const auto projectRoot = m_Owner->GetContext()->projectManager->GetProjectRoot();
-
-	auto exportTask = ThreadPool::instance().createTask([this, profile, projectRoot]() {
-		// Unload the gameplay assembly before starting managed compilation to
-		// avoid file locks on Assembly-CSharp.dll.
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (profile.enableManagedCompilation) {
-			ScriptingSystem::Instance().ClearGameplayAssembly();
-		}
-
-		ExportRequest request;
-		request.projectRoot = std::filesystem::weakly_canonical(projectRoot);
-		request.profile = profile;
-		request.profilePath = profile.filePath.empty()
-			? std::filesystem::path{}
-			: std::filesystem::weakly_canonical(profile.filePath);
-		const std::filesystem::path configuredOutput = profile.outputDirectory.empty()
-			? projectRoot / "Builds" / profile.name
-			: (profile.outputDirectory.is_absolute() ? profile.outputDirectory : projectRoot / profile.outputDirectory);
-		request.finalOutputDirectory = std::filesystem::weakly_canonical(configuredOutput);
-		request.runId = GenerateEditorExportRunId();
-		request.evidenceDirectory = BuildDefaultExportEvidenceDirectory(
-			request.projectRoot, request.runId);
-		request.invocationKind = ExportInvocationKind::Editor;
-		std::string layoutError;
-		DiscoverExportRuntimeLayout(ResolveRunningEditorExecutable(), request.runtimeLayout, layoutError);
-
-		ExportPipeline pipeline;
-		m_LastExportResult = pipeline.Execute(request,
-			[this](const ExportProgress& progress) {
-				m_CurrentProgress = progress;
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (progress.finished) {
-					m_ExportInProgress = false;
-					m_HasExportResult = true;
-				}
-			});
-
-		// Ensure validation results from the pipeline are displayed in the validation panel
-		// if we halted at validation or successfully completed validation during export.
-		m_LastValidationResult = m_LastExportResult.validationResult;
-		m_HasValidationResult = true;
-
-		m_ExportInProgress = false;
-		m_HasExportResult = true;
-
-		// Re-trigger a script build/reload to restore editor functionality.
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (profile.enableManagedCompilation) {
-			ScriptCompilationSubsystem::Instance().RequestBuild(ScriptBuildReason::ManualRefresh);
-		}
-	});
-	ThreadPool::instance().enqueue(exportTask);
+EditorContext* BuildProfilesWindow::Context() const { return m_ExplicitContext ? m_ExplicitContext : m_Owner ? m_Owner->GetContext() : nullptr; }
+BuildProfilesWindow::BuildProfilesWindow(EditorContext& context) : BuildProfilesWindow(static_cast<MainEditorSubsystem*>(nullptr)) {
+	m_ExplicitContext = &context;
+	OnProjectOpened();
 }
-
-// BuildProfilesWindow::StartExportAndRun is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void BuildProfilesWindow::StartExportAndRun() {
-	StartExport();
-	if (m_ExportInProgress) {
-		m_RunAfterExport = true;
+void BuildProfilesWindow::StartCapturedExport(bool launchAfterSuccess) {
+	auto* context = Context();
+	if (!context || !context->projectManager || !context->projectManager->HasActiveProject() || m_SelectedProfileIndex < 0 || m_SelectedProfileIndex >= static_cast<int>(m_Profiles.size())) return;
+	PollExportAtProtectedFrame();
+	if (m_ExportInProgress) return;
+	SaveSelectedProfile();
+	if (!context->exportController) context->exportController = std::make_shared<EditorExportOperationController>();
+	const auto projectRoot = context->projectManager->GetProjectRoot();
+	const auto profile = m_Profiles[m_SelectedProfileIndex];
+	EditorExportOperationRequest operation;
+	operation.projectGeneration = context->exportController->Generation();
+	operation.launchAfterSuccess = launchAfterSuccess;
+	auto& request = operation.request;
+	request.projectRoot = std::filesystem::weakly_canonical(projectRoot);
+	request.profile = profile;
+	request.profilePath = profile.filePath;
+	const auto output = profile.outputDirectory.empty() ? projectRoot / "Builds" / profile.name : profile.outputDirectory.is_absolute() ? profile.outputDirectory : projectRoot / profile.outputDirectory;
+	request.finalOutputDirectory = std::filesystem::weakly_canonical(output);
+	request.runId = GenerateEditorExportRunId();
+	request.evidenceDirectory = BuildDefaultExportEvidenceDirectory(request.projectRoot, request.runId);
+	request.invocationKind = ExportInvocationKind::Editor;
+	std::string layoutError;
+	DiscoverExportRuntimeLayout(ResolveRunningEditorExecutable(), request.runtimeLayout, layoutError);
+	const auto projectName = projectRoot.filename().empty() ? profile.name : projectRoot.filename().string();
+	operation.launcherPath = request.finalOutputDirectory / GetExportLauncherFileName(projectName, profile.platform);
+	const auto admission = context->exportController->Admit(std::move(operation));
+	if (!admission.accepted) {
+		m_LastExportResult = {}; m_LastExportResult.errorMessage = admission.error; m_HasExportResult = true; return;
+	}
+	m_ExportController = context->exportController;
+	m_OperationId = admission.operationId;
+	m_ExportInProgress = true; m_HasExportResult = false; m_RunAfterExport = launchAfterSuccess;
+}
+void BuildProfilesWindow::PollExportAtProtectedFrame() {
+	if (!m_ExportController || !m_OperationId) return;
+	m_ExportController->Poll();
+	const auto observation = m_ExportController->Observe(m_OperationId);
+	if (!observation) return;
+	if (observation->intent.projectGeneration != m_ExportController->Generation()) {
+		// Old observations remain durable for job queries, but this panel now
+		// belongs to a different project and cannot display/adopt their intent.
+		m_OperationId = 0; m_ExportInProgress = false; m_HasExportResult = false; m_RunAfterExport = false; return;
+	}
+	m_CurrentProgress = observation->progress;
+	m_ExportInProgress = !observation->result.has_value();
+	const auto result = m_ExportController->ConsumeFinal(m_OperationId, 1);
+	if (result) {
+		m_LastExportResult = *result;
+		m_LastValidationResult = result->validationResult;
+		m_HasValidationResult = true; m_HasExportResult = true;
+	}
+	if (m_RunAfterExport && m_ExportController && observation->result) {
+		m_RunAfterExport = false;
+		const auto launcher = m_ExportController->TakeLaunch(m_OperationId);
+		if (launcher) {
+			// Only the protected owner launches the immutable captured path.
+#ifdef _WIN32
+			const auto executable = launcher->wstring();
+			std::wstring command = L"\"" + executable + L"\"";
+			STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION process{};
+			if (CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, launcher->parent_path().c_str(), &startup, &process)) { CloseHandle(process.hThread); CloseHandle(process.hProcess); }
+#else
+			const auto child = fork();
+			if (child == 0) {
+				// Detach the explicitly launched game so its eventual exit is reaped
+				// by the OS rather than retained as an editor-owned zombie.
+				const auto game = fork();
+				if (game != 0) _exit(game < 0 ? 127 : 0);
+				chdir(launcher->parent_path().c_str());
+				execl(launcher->c_str(), launcher->c_str(), static_cast<char*>(nullptr)); _exit(127);
+			}
+			if (child > 0) { int status = 0; while (waitpid(child, &status, 0) < 0 && errno == EINTR) {} }
+#endif
+		}
 	}
 }

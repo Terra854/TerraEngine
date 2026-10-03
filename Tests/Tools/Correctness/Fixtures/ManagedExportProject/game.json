@@ -1,0 +1,5 @@
+{
+	"name": "Installed Correctness Callbacks",
+	"version": "1.0.0",
+	"startupScene": "Scenes/Startup.tescene"
+}

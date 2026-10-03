@@ -24,6 +24,14 @@ namespace {
 	{
 		return finish >= start ? finish - start : 0;
 	}
+
+	// Diagnostic allocation failure must never change admission or prevent an
+	// already-owned task from settling its future. Keep observations optional.
+	template<typename Observation>
+	void ObserveTaskSafely(Observation&& observation) noexcept
+	{
+		try { observation(); } catch (...) {}
+	}
 }
 
 ThreadPool& ThreadPool::instance() {
@@ -132,14 +140,15 @@ void ThreadPool::enqueue(std::shared_ptr<ITask> task, std::uint64_t usefulItemCo
 					// The profiler returns whether a task sample was actually
 					// opened. Carry that through to completion so idle profiler
 					// sessions do not pay an unmatched EndSample call.
-					const bool profilerSampleActive = TerraEngine::Profiling::Profiler::Instance().RecordTaskStarted("ThreadPool Task");
+					bool profilerSampleActive = false;
+					ObserveTaskSafely([&] { profilerSampleActive = TerraEngine::Profiling::Profiler::Instance().RecordTaskStarted("ThreadPool Task"); });
 					task->run();
 					ThreadPool::instance().completeTask(task);
-					TerraEngine::Profiling::Profiler::Instance().RecordTaskFinished(profilerSampleActive);
+					ObserveTaskSafely([&] { TerraEngine::Profiling::Profiler::Instance().RecordTaskFinished(profilerSampleActive); });
 				}, queueDepthAtEnqueue, usefulItemCount, MonotonicNanoseconds()});
 			} // Release the lock asap when done to minimize the chances of deadlocks
 
-			TerraEngine::Profiling::Profiler::Instance().RecordTaskQueued();
+			ObserveTaskSafely([] { TerraEngine::Profiling::Profiler::Instance().RecordTaskQueued(); });
 		}
 		condition.notify_one();  // Notify a worker thread that a task is available
 	}
@@ -379,9 +388,9 @@ void ThreadPool::workerThread(int threadNum)
 		const std::uint64_t runStartedNanoseconds = MonotonicNanoseconds();
 		task.execute();
 		const std::uint64_t finishedNanoseconds = MonotonicNanoseconds();
-		RecordWorkerTaskFinished(workerIndex, task.queueDepthAtEnqueue, queueDepthAtStart,
+		ObserveTaskSafely([&] { RecordWorkerTaskFinished(workerIndex, task.queueDepthAtEnqueue, queueDepthAtStart,
 			task.usefulItemCount, waitNanoseconds, idleNanoseconds,
-			ElapsedNanoseconds(runStartedNanoseconds, finishedNanoseconds));
+			ElapsedNanoseconds(runStartedNanoseconds, finishedNanoseconds)); });
 		// Drop captures held by the completed callable before waiting for the
 		// next job so pooled Task<void> objects can return to the reuse cache
 		// immediately after their futures become ready.

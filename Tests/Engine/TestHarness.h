@@ -105,7 +105,9 @@ namespace TerraEngine::Tests {
 			// feature evidence must not describe skipped registrations as executed.
 			output << selectedCount << " selected tests (" << tests_.size()
 				<< " registered), " << failedCount << " failures\n";
-			return failedCount == 0 ? 0 : 1;
+			// A filtered lane must execute a real case. An absent/misspelled
+			// registration is a failure, even when no assertion happened to run.
+			return failedCount == 0 && selectedCount != 0U ? 0 : 1;
 		}
 
 	private:

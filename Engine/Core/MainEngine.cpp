@@ -156,9 +156,15 @@ void Engine::Run()
 		}
 		
 		Shutdown();
+		if (frameFailure) {
+			ShowControlledFatalEngineDialog(frameFailure->reason,
+				"Required work stopped in " + frameFailure->phase + ": " + frameFailure->workload,
+				ResourceManager::Instance().IsExportRuntime());
+		}
 	}
 	catch (const std::exception& exception)
 	{
+		Shutdown();
 		ShowControlledFatalEngineDialog(
 			exception.what(),
 			initializedForRun ? "Engine runtime stopped after a controlled fatal error." : "Engine startup stopped before normal runtime entry.",
@@ -166,6 +172,7 @@ void Engine::Run()
 	}
 	catch (...)
 	{
+		Shutdown();
 		ShowControlledFatalEngineDialog(
 			"Unknown fatal engine error.",
 			initializedForRun ? "Engine runtime stopped after an unknown fatal error." : "Engine startup stopped before normal runtime entry.",
@@ -211,6 +218,34 @@ void Engine::ConfigureHeadlessCpuFallback()
 	headlessPhysicsValidation = true;
 }
 
+Engine::~Engine() noexcept
+{
+	try { Shutdown(); } catch (...) { SetApplicationHostEngine(nullptr); }
+}
+
+void Engine::RecordFrameFailure(std::string_view workload, std::string_view phase, std::string_view reason) noexcept
+{
+	// Close admission to the next frame before retaining diagnostics. Failure
+	// cannot become an implicit recovery merely because the caller retries Update.
+	running = false;
+	if (frameFailure) return;
+	// Borrow diagnostic inputs until admission is closed. A failed allocation
+	// while retaining text must not interrupt the remaining owner drains.
+	frameFailure.emplace();
+	frameFailure->frame = frameSequence;
+	try {
+		frameFailure->workload = workload;
+		frameFailure->phase = phase;
+		frameFailure->reason = reason;
+	} catch (...) {}
+	// Reporting must not interrupt physical owner settlement during shutdown.
+	try {
+		TERRAENGINE_LOG(LogLevel::Error, "Required frame work failed; engine loop stopped. frame="
+			<< frameFailure->frame << " workload=" << frameFailure->workload
+			<< " phase=" << frameFailure->phase << " reason=" << frameFailure->reason);
+	} catch (...) {}
+}
+
 void Engine::ConfigureCharacterMotionReplayValidation()
 {
 	// Scheduler membership is frozen at initialization; replay is never a live
@@ -221,6 +256,22 @@ void Engine::ConfigureCharacterMotionReplayValidation()
 // Engine::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Engine::Initialize()
 {
+	if (lifecycleStarted) throw std::logic_error("Engine is already initialized; shut down its current lifetime before reinitializing.");
+	lifecycleStarted = true;
+	try { InitializeImpl(); }
+	catch (...) {
+		// The same ownership ledger handles early schedule failure, partial
+		// initialization and runtime teardown. Never release an unstarted owner.
+		Shutdown();
+		throw;
+	}
+}
+
+void Engine::InitializeImpl()
+{
+	running = true;
+	frameSequence = 0U;
+	frameFailure.reset();
 	// Register the currently booting engine instance so script glue can signal
 	// the outer run loop when Application.Quit() is invoked in exports.
 	SetApplicationHostEngine(this);
@@ -237,6 +288,7 @@ void Engine::Initialize()
 	lastNavigationObservedObjectSpatialRevision = 0U;
 	lastNavigationBootstrapResidencyGeneration = 0U;
 	lastNavigationBootstrapGeometryPublicationGeneration = 0U;
+	poolOwned = true;
 	pool.initialize();
 	
 	systems.clear();
@@ -470,14 +522,11 @@ void Engine::Initialize()
 		throw std::runtime_error("System scheduler job graph validation failed. See job graph summary diagnostics in the log.");
 	}
 
-	std::size_t initializedSystemCount = 0;
-	bool editorSystemInitialized = false;
-	bool resourceManagerInitialized = false;
 	std::optional<TerraEngine::Runtime::PackagedPhysicsRuntime> packagedPhysics;
 	std::optional<TerraEngine::Runtime::PackagedNavigationRuntime> packagedNavigation;
 	try {
-		resourceManager.Initialize();
 		resourceManagerInitialized = true;
+		resourceManager.Initialize();
 		sceneManager.SetSceneRoot(resourceManager.GetAssetRoot());
 		sceneManager.SetStartupScene(resourceManager.GetConfiguredStartupScene().value_or(std::filesystem::path{}));
 		// Exported physics content is validated and copied from the mounted archive
@@ -523,8 +572,8 @@ void Engine::Initialize()
 
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto* system : systems) {
-			system->Initialize();
 			initializedSystemCount++;
+			system->Initialize();
 		}
 		// Optional navigation cache bytes are copied from the mounted archive and
 		// handed to NavigationSystem only after all systems exist. The system then
@@ -540,31 +589,13 @@ void Engine::Initialize()
 		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (editorMode) {
-			editorSystem->Initialize();
+		if (editorMode && editorSystem != nullptr) {
 			editorSystemInitialized = true;
+			editorSystem->Initialize();
 		}
 	}
 	catch (...) {
-		// If any system throws during startup, unwind only the systems that did
-		// finish initialization so exported builds do not leave windowing,
-		// rendering, or threading resources half alive after a fatal error.
-		if (editorSystemInitialized && editorSystem != nullptr) {
-			editorSystem->Shutdown();
-		}
-
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		while (initializedSystemCount > 0) {
-			systems[--initializedSystemCount]->Shutdown();
-		}
-
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (resourceManagerInitialized) {
-			resourceManager.Shutdown();
-		}
-
-		pool.shutdown();
-		SetApplicationHostEngine(nullptr);
+		// Public Initialize owns cleanup using the retained initialized ledger.
 		throw;
 	}
 	
@@ -614,17 +645,22 @@ void Engine::Initialize()
 // Engine::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool Engine::Update(float deltaTime)
 {
-	if (!running) {
+	if (!running || !lifecycleStarted) {
 		return false;
 	}
+	++frameSequence;
 	// A profiler session may be armed before Play Mode begins. Sample only frames
 	// whose runtime world was active at frame start; editor-preview updates never
 	// enter game performance captures.
 	TerraEngine::Profiling::Profiler& profiler = TerraEngine::Profiling::Profiler::Instance();
-	profiler.BeginLatestEngineFrameTiming();
 	const bool playModeFrame = ScriptingSystem::Instance().IsRunning();
-	profiler.BeginFrame(playModeFrame);
-	{
+	bool profilerFrameEntered = false;
+	try {
+		profiler.BeginLatestEngineFrameTiming();
+		// BeginFrame may allocate after opening profiler state. Pair even a
+		// partial start with EndFrame on the protected coordinator thread.
+		profilerFrameEntered = playModeFrame;
+		profiler.BeginFrame(playModeFrame);
 		TERRAENGINE_PROFILE_SCOPE("Engine::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		// Runtime time-scale requests are published once before the scheduler builds
 		// immutable frame workloads. Every system therefore receives the same
@@ -882,6 +918,19 @@ bool Engine::Update(float deltaTime)
 		});
 		if (!schedulerSummary.valid) {
 			TERRAENGINE_LOG(LogLevel::Error, schedulerSummary.formatted);
+			const auto& failedPlan = systemScheduler.LatestFrameExecutionPlan();
+			const auto failure = std::find_if(failedPlan.diagnostics.begin(), failedPlan.diagnostics.end(), [](const auto& diagnostic) {
+				return diagnostic.severity == TerraEngine::Scheduling::ArchitectureDiagnosticSeverity::Error;
+			});
+			const auto* firstFailure = failedPlan.firstFailure ? &*failedPlan.firstFailure
+				: (failure != failedPlan.diagnostics.end() ? &*failure : nullptr);
+			std::string workload = firstFailure ? firstFailure->workloadName : "SystemScheduler";
+			std::string phase = "ProtectedBoundary";
+			for (const auto& declaration : failedPlan.workloads) {
+				if (declaration.workloadName == workload) { phase = declaration.phase; break; }
+			}
+			RecordFrameFailure(std::move(workload), std::move(phase),
+				firstFailure ? firstFailure->message : schedulerSummary.formatted);
 		}
 		{
 			// Reuse the frame plan that actually executed. Revalidating the same
@@ -908,10 +957,25 @@ bool Engine::Update(float deltaTime)
 			systemScheduler.SetLatestEcsGraphSummary(TerraEngine::Scheduling::FormatPublishedEcsGraphFrameSummaries());
 		}
 	}
+	catch (const std::exception& exception) {
+		// Declaration/capture/flush failures can occur before a JobGraph callback
+		// owns the exception. They obey the same terminal required-frame policy.
+		RecordFrameFailure("FrameCoordinator", "ProtectedBoundary", exception.what());
+	}
+	catch (...) {
+		RecordFrameFailure("FrameCoordinator", "ProtectedBoundary", "Unknown required frame exception.");
+	}
 	profiler.PublishLatestEngineFrameTiming();
-	if (playModeFrame)
-	{
-		profiler.EndFrame();
+	if (profilerFrameEntered) {
+		try { profiler.EndFrame(); }
+		catch (const std::exception& exception) {
+			profiler.AbandonFrameAfterFailure();
+			RecordFrameFailure("Profiler", "FrameEnd", exception.what());
+		}
+		catch (...) {
+			profiler.AbandonFrameAfterFailure();
+			RecordFrameFailure("Profiler", "FrameEnd", "Unknown frame finalization exception.");
+		}
 	}
 
 	// Subsystems own the interpretation of their terminal states. MainEngine
@@ -1246,33 +1310,62 @@ TerraEngine::Runtime::PhysicsInvariantReport Engine::RunPhysicsInvariantFixture(
 // Engine::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Engine::Shutdown()
 {
+	if (!lifecycleStarted) return;
+	// Close this lifetime before callbacks, so reentrant/repeated Shutdown
+	// cannot release the same owner twice. Providers and the pool remain alive
+	// until producer cancellation and physical task settlement are complete.
+	lifecycleStarted = false;
+	running = false;
+	// Revoke the process hook before any teardown callback can throw or reenter.
+	SetApplicationHostEngine(nullptr);
+	auto settle = [this](const char* owner, auto&& action) {
+		try { action(); }
+		catch (const std::exception& exception) { RecordFrameFailure(owner, "Shutdown", exception.what()); }
+		catch (...) { RecordFrameFailure(owner, "Shutdown", "Unknown owner teardown failure."); }
+	};
+	if (editorSystemInitialized && editorSystem) {
+		settle("EditorDrain", [&] { editorSystem->PrepareShutdown(); });
+	}
+	for (std::size_t index = initializedSystemCount; index > 0U; --index) {
+		settle("SystemDrain", [&] { systems[index - 1U]->PrepareShutdown(); });
+	}
+	if (resourceManagerInitialized) {
+		settle("ResourceDrain", [] { ResourceManager::Instance().StopAdmissionsAndDrain(); });
+	}
 	// Retire physical movement leases before reverse-order Physics teardown.
-	TerraEngine::Locomotion::LocomotionSystem::Instance().RevokeAll();
+	if (initializedSystemCount != 0U) settle("MovementOwners", [] { TerraEngine::Locomotion::LocomotionSystem::Instance().RevokeAll(); });
 	// Revoke gameplay navigation owners and optional agent runtime records before
 	// reverse-order teardown. A late worker result then targets an obsolete world
 	// generation and cannot become visible to a later engine run.
-	TerraEngine::Navigation::NavigationSystem::Instance().RevokeAllOwners(
-		TerraEngine::Navigation::NavigationReason::SceneReplaced);
-	TerraEngine::Navigation::NavigationAgentSystem::Instance().RevokeAllAgents(
-		TerraEngine::Navigation::NavigationReason::SceneReplaced);
-	if (editorMode) {
-		editorSystem->Shutdown();
+	if (initializedSystemCount != 0U) settle("NavigationOwners", [] {
+		TerraEngine::Navigation::NavigationSystem::Instance().RevokeAllOwners(TerraEngine::Navigation::NavigationReason::SceneReplaced);
+		TerraEngine::Navigation::NavigationAgentSystem::Instance().RevokeAllAgents(TerraEngine::Navigation::NavigationReason::SceneReplaced);
+	});
+	if (editorSystemInitialized && editorSystem) {
+		editorSystemInitialized = false;
+		settle("Editor", [&] { editorSystem->Shutdown(); });
 	}
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (auto it = systems.rbegin(); it != systems.rend(); ++it) {
-		(*it)->Shutdown();
+	while (initializedSystemCount > 0U) {
+		SystemsBase* system = systems[--initializedSystemCount];
+		settle("System", [&] { system->Shutdown(); });
 	}
 
-	ResourceManager::Instance().Shutdown();
-	
-	pool.shutdown();
+	if (resourceManagerInitialized) {
+		resourceManagerInitialized = false;
+		settle("Resources", [] { ResourceManager::Instance().Shutdown(); });
+	}
+	if (poolOwned) {
+		poolOwned = false;
+		settle("ThreadPool", [&] { pool.shutdown(); });
+	}
 	
 	// Notify that the engine shutdown path completed and logging can be stopped soon.
-	TERRAENGINE_LOG(LogLevel::Info, "Shutdown complete!");
+	settle("ShutdownLog", [] { TERRAENGINE_LOG(LogLevel::Info, "Shutdown complete!"); });
 	
 	// Stop the logger thread so queued messages flush before the application exits.
-	Logger::Instance().Shutdown();
+	settle("Logger", [] { Logger::Instance().Shutdown(); });
 
 	// Clear the non-owning quit hook after every shutdown so a future engine
 	// session in the same process cannot target a stale instance pointer.

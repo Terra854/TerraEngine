@@ -1,0 +1,105 @@
+# Run last during install. A manifest ties installed tests to the engine and
+# authored fixtures from this same build, preventing mixed-ABI acceptance.
+set(correctness_root "@ENGINE_INSTALL_DESTINATION@")
+set(correctness_required
+	"Editor/TerraEngine-Editor@TERRAENGINE_EXECUTABLE_SUFFIX@"
+	"Editor/TerraEngine-Export@TERRAENGINE_EXECUTABLE_SUFFIX@"
+	"Editor/Managed/TerraEngine.CSharp.dll"
+	"Editor/Managed/TerraEngine.CSharp.runtimeconfig.json"
+	"Editor/Managed/TerraEngine.CSharp.deps.json"
+	"Editor/Managed/TerraEngine.Editor.runtimeconfig.json"
+	"Editor/Managed/TerraEngine.Editor.deps.json"
+	"Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll"
+	"Editor/DotNet/dotnet@TERRAENGINE_EXECUTABLE_SUFFIX@"
+	"Editor/NativeAotNuGet/NuGet.Config"
+	"Editor/NativeAotNuGet/global.json"
+	# Fresh validation projects use these same authored layout templates as
+	# normal project creation; seal both docking and window visibility inputs.
+	"Editor/Project/Templates/UserSettings/EditorLayout.ini"
+	"Editor/Project/Templates/UserSettings/EditorLayout.terra"
+	"Tests/Engine/TerraEngine-EngineTests@TERRAENGINE_EXECUTABLE_SUFFIX@"
+	"Tests/Engine/CorrectnessProcessFixture@TERRAENGINE_EXECUTABLE_SUFFIX@"
+	"Tests/Editor/TerraEngine-EditorTests@TERRAENGINE_EXECUTABLE_SUFFIX@"
+	"Tests/Tools/Correctness/RunInstalledCorrectnessAcceptance.ps1"
+	"Tests/Tools/Correctness/RunNativeCorrectnessSlice.ps1"
+	"Tests/Tools/Correctness/RunWithWatchdog.ps1"
+	"Tests/Tools/Correctness/Fixtures/ManagedExportProject/game.json")
+foreach(correctness_relative IN LISTS correctness_required)
+	if(NOT EXISTS "${correctness_root}/${correctness_relative}")
+		message(FATAL_ERROR "Required installed correctness artifact is missing: ${correctness_relative}")
+	endif()
+endforeach()
+
+# Check built targets against their installed copies before sealing the hashes.
+# Hashing an old install alone would merely bless a stale or mismatched binary.
+set(correctness_sources
+	"$<TARGET_FILE:TerraEngine-Engine>"
+	"$<TARGET_FILE:TerraEngine-Editor>"
+	"$<TARGET_FILE:TerraEngine-Export>"
+	"$<TARGET_FILE:TerraEngine-Launcher>"
+	"$<TARGET_FILE:TerraEngine-Engine>"
+	"$<TARGET_FILE:TerraEngine-EngineTests>"
+	"$<TARGET_FILE:TerraEngine-EditorTests>"
+	"$<TARGET_FILE:TerraEngineCorrectnessProcessFixture>")
+set(correctness_copies
+	"Editor/$<TARGET_FILE_NAME:TerraEngine-Engine>"
+	"Editor/$<TARGET_FILE_NAME:TerraEngine-Editor>"
+	"Editor/$<TARGET_FILE_NAME:TerraEngine-Export>"
+	"Editor/ExportRuntime/$<TARGET_FILE_NAME:TerraEngine-Launcher>"
+	"Editor/ExportRuntime/$<TARGET_FILE_NAME:TerraEngine-Engine>"
+	"Tests/Engine/$<TARGET_FILE_NAME:TerraEngine-EngineTests>"
+	"Tests/Editor/$<TARGET_FILE_NAME:TerraEngine-EditorTests>"
+	"Tests/Engine/$<TARGET_FILE_NAME:TerraEngineCorrectnessProcessFixture>")
+list(LENGTH correctness_sources correctness_source_count)
+math(EXPR correctness_last "${correctness_source_count} - 1")
+foreach(correctness_index RANGE 0 ${correctness_last})
+	list(GET correctness_sources ${correctness_index} correctness_source)
+	list(GET correctness_copies ${correctness_index} correctness_relative)
+	file(SHA256 "${correctness_source}" correctness_expected_hash)
+	file(SHA256 "${correctness_root}/${correctness_relative}" correctness_installed_hash)
+	if(NOT correctness_expected_hash STREQUAL correctness_installed_hash)
+		message(FATAL_ERROR "Installed correctness binary differs from its built target: ${correctness_relative}")
+	endif()
+endforeach()
+if(WIN32)
+	file(SHA256 "$<TARGET_FILE:TerraEngine-Engine>" correctness_engine_hash)
+	foreach(correctness_category Engine Editor)
+		file(SHA256 "${correctness_root}/Tests/${correctness_category}/$<TARGET_FILE_NAME:TerraEngine-Engine>" correctness_copy_hash)
+		if(NOT correctness_engine_hash STREQUAL correctness_copy_hash)
+			message(FATAL_ERROR "Installed ${correctness_category} tests have a mismatched engine DLL")
+		endif()
+	endforeach()
+endif()
+
+# Inventory only maintained install inputs, excluding user projects/evidence
+# left beside the editor by earlier runs. Hash the bundled SDK and export-runtime
+# inputs too, so script/export acceptance cannot bless an incomplete toolchain.
+file(GLOB correctness_files RELATIVE "${correctness_root}"
+	"${correctness_root}/Editor/*.exe" "${correctness_root}/Editor/*.dll"
+	"${correctness_root}/Editor/*.so" "${correctness_root}/Editor/*.dylib"
+	"${correctness_root}/Tests/Engine/*.exe" "${correctness_root}/Tests/Engine/*.dll"
+	"${correctness_root}/Tests/Editor/*.exe" "${correctness_root}/Tests/Editor/*.dll")
+file(GLOB_RECURSE correctness_support_files LIST_DIRECTORIES false RELATIVE "${correctness_root}"
+	"${correctness_root}/Editor/Managed/*" "${correctness_root}/Editor/Shaders/*"
+	"${correctness_root}/Editor/DotNet/*" "${correctness_root}/Editor/ExportRuntime/*"
+	"${correctness_root}/Editor/NativeAotNuGet/*"
+	"${correctness_root}/Tests/Editor/Managed/*"
+	"${correctness_root}/Tests/Tools/Correctness/*")
+list(APPEND correctness_files ${correctness_support_files} ${correctness_required} ${correctness_copies})
+# Historical local build directories are not maintained fixture assets, even
+# when a previous install left them in the destination tree.
+list(FILTER correctness_files EXCLUDE REGEX "^Tests/Tools/Correctness/Fixtures/.*/(obj|bin|Build|Builds|Library|Temp)/")
+list(REMOVE_DUPLICATES correctness_files)
+list(SORT correctness_files)
+set(correctness_json "{\n  \"schemaVersion\":1,\n  \"minimumCases\":{\"Engine.SceneMutationFailureSafety\":39,\"Engine.ResourceAsyncLifecycle\":28,\"Scene.SaveFailureSafety\":10,\"Audio.WorldCellCapture\":5,\"Engine.FrameFailureLifecycle\":7,\"Engine.OwnedProcess\":6,\"Editor.ExportLifecycle\":6},\n  \"files\":[")
+set(correctness_separator "")
+foreach(correctness_relative IN LISTS correctness_files)
+	file(SHA256 "${correctness_root}/${correctness_relative}" correctness_hash)
+	file(SIZE "${correctness_root}/${correctness_relative}" correctness_size)
+	string(APPEND correctness_json "${correctness_separator}\n    {\"relativePath\":\"${correctness_relative}\",\"sha256\":\"${correctness_hash}\",\"length\":${correctness_size}}")
+	set(correctness_separator ",")
+endforeach()
+string(TIMESTAMP correctness_timestamp "%Y-%m-%dT%H:%M:%SZ" UTC)
+string(APPEND correctness_json "\n  ],\n  \"builtAtUtc\":\"${correctness_timestamp}\"\n}\n")
+file(WRITE "${correctness_root}/correctness-artifacts.json" "${correctness_json}")
+message(STATUS "Sealed installed correctness artifacts: ${correctness_root}/correctness-artifacts.json")

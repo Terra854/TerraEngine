@@ -32,6 +32,11 @@ namespace TerraEngine::Tests {
 				SceneManager::Instance().UnloadAll();
 				ResourceManager::Instance().Shutdown();
 				ResourceManager::Instance().ConfigureExportArchive({});
+				// A fixture owns only its export lifetime. Restore the loose-file
+				// environment and explicitly admit the next shared-process owner.
+				ResourceManager::Instance().SetAssetRoot(previousAssetRoot_);
+				ResourceManager::Instance().SetEngineRoot(previousEngineRoot_);
+				ResourceManager::Instance().BeginRequestSession();
 			}
 
 			[[nodiscard]] std::filesystem::path ContentRoot() const {
@@ -81,6 +86,8 @@ namespace TerraEngine::Tests {
 
 		private:
 			std::filesystem::path root_;
+			std::filesystem::path previousAssetRoot_ = ResourceManager::Instance().GetAssetRoot();
+			std::filesystem::path previousEngineRoot_ = ResourceManager::Instance().GetEngineRoot();
 		};
 
 		std::string MakeGameManifest(std::string_view meshGuid, std::string_view materialGuid, std::string_view textureGuid) {

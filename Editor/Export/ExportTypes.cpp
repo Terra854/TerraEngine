@@ -43,6 +43,7 @@ std::string_view ToString(ExportFailureCategory category) {
 	case ExportFailureCategory::EvidenceWriteFailed: return "evidence_write_failed";
 	case ExportFailureCategory::PublicationFailed: return "publication_failed";
 	case ExportFailureCategory::UnexpectedFailure: return "unexpected_failure";
+	case ExportFailureCategory::Canceled: return "canceled";
 	}
 	return "unexpected_failure";
 }
@@ -62,6 +63,7 @@ int ExitCodeForFailure(ExportFailureCategory category) {
 	case ExportFailureCategory::EvidenceWriteFailed: return 8;
 	case ExportFailureCategory::PublicationFailed: return 9;
 	case ExportFailureCategory::UnexpectedFailure: return 10;
+	case ExportFailureCategory::Canceled: return 130;
 	}
 	return 10;
 }

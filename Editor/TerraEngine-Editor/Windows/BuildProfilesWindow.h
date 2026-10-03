@@ -13,17 +13,27 @@
 #include <vector>
 
 class MainEditorSubsystem;
+struct EditorContext;
+class EditorExportOperationController;
 
 // class BuildProfilesWindow groups related state and operations so callers have one documented contract.
 class BuildProfilesWindow : public EditorWindow {
 public:
 	BuildProfilesWindow(MainEditorSubsystem* owner);
+	// Explicit owner-thread context also supports non-ImGui editor hosts that
+	// invoke the same frontend actions without initializing an entire UI shell.
+	explicit BuildProfilesWindow(EditorContext& context);
 
 protected:
 	void OnGui() override;
 
 private:
 	MainEditorSubsystem* m_Owner;
+	EditorContext* m_ExplicitContext = nullptr;
+	EditorContext* Context() const;
+	void StartCapturedExport(bool launchAfterSuccess);
+	std::shared_ptr<EditorExportOperationController> m_ExportController;
+	std::uint64_t m_OperationId = 0;
 
 	// Currently loaded profiles.
 	std::vector<BuildProfile> m_Profiles;
@@ -63,4 +73,7 @@ private:
 	void RunValidation();
 	void StartExport();
 	void StartExportAndRun();
+	void PollExportAtProtectedFrame();
+	// The operation handle supports owner diagnostics and frontend correlation.
+	std::uint64_t GetExportOperationId() const { return m_OperationId; }
 	};

@@ -11,6 +11,9 @@
 #include "TepakPackager.h"
 
 #include <cstdint>
+#include <atomic>
+#include <mutex>
+#include <memory>
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -51,6 +54,7 @@ enum class ExportFailureCategory : std::uint32_t {
 	EvidenceWriteFailed,
 	PublicationFailed,
 	UnexpectedFailure,
+	Canceled,
 };
 
 /// Phase retained for the existing editor progress widgets. Every phase maps to
@@ -125,6 +129,7 @@ struct ExportResult {
 	std::uint32_t schemaVersion = kSchemaVersion;
 	std::string runId;
 	bool success = false;
+	bool canceled = false;
 	ExportInvocationKind invocationKind = ExportInvocationKind::Editor;
 	ExportStage stage = ExportStage::Arguments;
 	ExportFailureCategory failureCategory = ExportFailureCategory::None;
@@ -140,6 +145,34 @@ struct ExportResult {
 	double totalElapsedSeconds = 0.0;
 	std::string errorMessage;
 	std::vector<ExportDiagnostic> diagnostics;
+};
+
+enum class ExportCancellationDisposition { Accepted, TooLate, AlreadyTerminal };
+
+// One small arbiter orders cancellation against the filesystem publication.
+// It is independent from observation locks; never hold a mailbox during I/O.
+class ExportCancellationState final {
+public:
+	ExportCancellationDisposition RequestCancellation() {
+		std::lock_guard lock(mutex_);
+		if (committed_) return ExportCancellationDisposition::TooLate;
+		if (terminal_) return ExportCancellationDisposition::AlreadyTerminal;
+		requested.store(true, std::memory_order_relaxed);
+		return ExportCancellationDisposition::Accepted;
+	}
+	bool Commit(const std::function<bool()>& publish) {
+		std::lock_guard lock(mutex_);
+		if (requested.load(std::memory_order_relaxed)) return false;
+		committed_ = publish();
+		return committed_;
+	}
+	void MarkTerminal() { std::lock_guard lock(mutex_); terminal_ = true; }
+	bool WasCommitted() const { std::lock_guard lock(mutex_); return committed_; }
+	std::atomic_bool requested = false;
+private:
+	mutable std::mutex mutex_;
+	bool committed_ = false;
+	bool terminal_ = false;
 };
 
 std::string_view ToString(ExportInvocationKind kind);

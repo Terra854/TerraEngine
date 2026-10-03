@@ -349,24 +349,10 @@ TerraEngine::UUID ResourceManager::LoadTexture(const std::filesystem::path& path
 	});
 }
 
-TerraEngine::UUID ResourceManager::RegisterTexture(
-	const std::string& cacheKey,
-	std::unique_ptr<Texture> texture)
+TerraEngine::UUID ResourceManager::RegisterTexture(const std::string& cacheKey, std::unique_ptr<Texture> texture)
 {
-	// Stable synthetic keys let terrain replace a detached control-page preview
-	// without creating a new UUID or leaking an unbounded bindless texture slot.
-	const std::string normalizedKey = "generated/" + cacheKey;
-	std::unique_lock lock(textureCache.mutex);
-	TerraEngine::UUID id = TerraEngine::GenerateUUID();
-	if(const auto existing = textureCache.pathToId.find(normalizedKey);
-		existing != textureCache.pathToId.end())
-		id = existing->second;
-	textureCache.pathToId[normalizedKey] = id;
-	if(texture) textureCache.resources[id] = std::move(texture);
-	else textureCache.resources.erase(id);
-	textureCache.inFlight.erase(normalizedKey);
-	m_RendererResourcePublicationGeneration.fetch_add(1u, std::memory_order_release);
-	return id;
+	// Generated replacements acquire the same key authority as disk producers.
+	return RegisterGenerated(cacheKey, textureCache, std::move(texture));
 }
 
 // ResourceManager::LoadTextureAsync is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -386,51 +372,13 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadTextureAsync(const st
 // ResourceManager::ReloadTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::shared_future<void> ResourceManager::ReloadTexture(const TerraEngine::UUID& id)
 {
-	std::string key;
-	{
-		std::shared_lock lock(textureCache.mutex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (const auto pathIt = textureCache.idToPath.find(id); pathIt != textureCache.idToPath.end())
-		{
-			key = pathIt->second;
-		}
-	}
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (key.empty())
-	{
-		TERRAENGINE_LOG(LogLevel::Debug, "Cannot reload texture yet: UUID " << ToHexString(id) << " has no compiled TETF path registered.");
-		std::promise<void> p;
-		p.set_value();
-		return p.get_future().share();
-	}
-
-	const std::filesystem::path resolvedPath(key);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!IsCompiledTexturePath(resolvedPath))
-	{
-		TERRAENGINE_LOG(LogLevel::Debug, "Skipping texture reload from non-TETF path: " << resolvedPath);
-		std::promise<void> p;
-		p.set_value();
-		return p.get_future().share();
-	}
-
-	TERRAENGINE_LOG(LogLevel::Debug, "Reloading texture from " << resolvedPath);
-	
-	auto task = threadPool.createTask([this, key, resolvedPath, id]() {
-		auto texture = LoadTextureFile(*this, resolvedPath);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (texture)
-		{
-			std::unique_lock lock(textureCache.mutex);
-			textureCache.resources[id] = std::move(texture);
-			// The release increment follows the cache swap, making this asynchronous
-			// publication visible atomically to the next renderer frame boundary.
-			m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);
-		}
-	});
-
-	auto future = task->getFuture().share();
-	threadPool.enqueue(task);
-	return future;
+	RequestPtr request;
+	ReloadCached<Texture>(id, textureCache, [this](const std::filesystem::path& path) {
+		return IsCompiledTexturePath(path) ? LoadTextureFile(*this, path) : std::unique_ptr<Texture>{};
+	}, false, &request);
+	if (request) return request->completion;
+	// Unregistered identities have no producer; preserve the ready void API.
+	std::promise<void> completion;
+	completion.set_value();
+	return completion.get_future().share();
 }

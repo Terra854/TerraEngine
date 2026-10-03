@@ -1,6 +1,7 @@
 // ExportOutputTransaction.cpp - Validated staging and conservative output overlay.
 
 #include "ExportOutputTransaction.h"
+#include "ExportTypes.h"
 
 #include <atomic>
 #include <charconv>
@@ -389,6 +390,13 @@ bool ExportOutputTransaction::MarkStagedAndValidated(std::string& error) {
 		return false;
 	}
 	return true;
+}
+
+bool ExportOutputTransaction::Commit(std::string& error, const std::shared_ptr<ExportCancellationState>& cancellation) {
+	if (!cancellation) return Commit(error);
+	const bool committed = cancellation->Commit([&] { return Commit(error); });
+	if (!committed && cancellation->requested.load(std::memory_order_relaxed)) error = "Export canceled before output publication.";
+	return committed;
 }
 
 bool ExportOutputTransaction::Commit(std::string& error) {

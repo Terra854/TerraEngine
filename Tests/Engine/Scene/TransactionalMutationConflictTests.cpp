@@ -3,6 +3,7 @@
 #include "Scene/TransactionalMutationTestFixtures.h"
 
 #include "Core/Object/ObjectManager.h"
+#include "Scene/Serializer.h"
 
 #include <algorithm>
 #include <array>
@@ -12,6 +13,24 @@
 namespace TerraEngine::Tests {
 	void RegisterTransactionalMutationConflictTests(TestRegistry& registry)
 	{
+		registry.Add("Engine.TransactionalMutation.RestoreIdentityCollisionPreservesPriorAuthoredState", [](TestContext& context) {
+			TransactionalMutationFixture fixture = MakeTransactionalMutationFixture();
+			const auto before = Serializer::SerializeObject(fixture.root.EntityId());
+			(void)fixture.objects.PublishSceneChangePacket();
+			const auto hierarchy = fixture.objects.GetHierarchyRevision();
+			auto transaction = TerraEngine::Scene::TransactionalMutationBuilder("restore-collision", TerraEngine::Scene::TransactionOrigin::Test)
+				.SetName(fixture.rootId, "Must Remain Unapplied").Build();
+			TerraEngine::Scene::TransactionWriteOperation restore;
+			restore.kind = TerraEngine::Scene::TransactionWriteKind::RestoreObjectSnapshot;
+			restore.target = TerraEngine::Scene::ExistingObject(fixture.rootId);
+			restore.serializedObject = before;
+			transaction.writeSet.operations.push_back(restore);
+			const auto result = TerraEngine::Scene::CommitTransaction(fixture.objects, transaction);
+			context.Expect(result.status == TerraEngine::Scene::TransactionStatus::Rejected, "Restoring a live UUID must reject before any publication.");
+			context.Expect(Serializer::SerializeObject(fixture.root.EntityId()) == before, "Identity conflict must preserve prior authored values.");
+			context.ExpectEqual(hierarchy, fixture.objects.GetHierarchyRevision(), "Identity conflict must preserve hierarchy visibility.");
+			context.Expect(fixture.objects.PublishSceneChangePacket().Empty(), "Identity conflict must not leave pending publication work.");
+		});
 		registry.Add("Engine.TransactionalMutation.RejectsStaleObservedObjectWithoutPartialWrites", [](TestContext& context) {
 			TransactionalMutationFixture fixture = MakeTransactionalMutationFixture();
 			TerraEngine::Scene::Transaction transaction = TerraEngine::Scene::TransactionalMutationBuilder("tx-stale", TerraEngine::Scene::TransactionOrigin::Test, "test")

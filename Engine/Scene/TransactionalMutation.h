@@ -20,6 +20,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/vec3.hpp>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -98,7 +99,10 @@ namespace TerraEngine::Scene {
 		UpdateTransformBatch,
 		// Animation owns runtime storage, so this records typed publication intent
 		// for the protected boundary instead of writing component state from workers.
-		PublishAnimationMutations
+		PublishAnimationMutations,
+		// Append additive kinds to preserve existing native/wire enum values.
+		// Script runtime instances are never invoked during authored preparation.
+		AddScriptBinding
 	};
 
 	// A transform batch carries canonical world poses for existing objects. The
@@ -169,6 +173,9 @@ namespace TerraEngine::Scene {
 		TransactionObjectRef target;
 		TransactionObjectRef parent;
 		std::int32_t createdLocalObjectId = 0;
+		// Generic managed creation may reserve an identity before its boundary;
+		// native callers leave this empty and retain generated UUID behavior.
+		TerraEngine::UUID createdStableObjectId = TerraEngine::EMPTY_UUID;
 		std::string displayName;
 		std::string stringValue;
 		bool boolValue = false;
@@ -193,6 +200,9 @@ namespace TerraEngine::Scene {
 		// This payload is populated only by editor history replay. Runtime systems
 		// keep using compact typed fields and never pay serialization costs.
 		nlohmann::json serializedObject = nlohmann::json::object();
+		// Native editor-history removal inverse only. External generic producers
+		// still use typed component operations; this is decoded before live writes.
+		std::optional<nlohmann::json> serializedComponent;
 	};
 
 	struct TransactionWriteSet {
@@ -238,6 +248,11 @@ namespace TerraEngine::Scene {
 		bool canceled = false;
 	};
 
+	// Shared accounting keeps budgets, terminal cancellations and projected
+	// producer receipts consistent for multi-target typed packets.
+	TERRAENGINE_API std::size_t LogicalWriteCount(const TransactionWriteOperation& operation) noexcept;
+	TERRAENGINE_API std::size_t LogicalWriteCount(const Transaction& transaction) noexcept;
+
 	struct TransactionResult {
 		std::string transactionId;
 		TransactionStatus status = TransactionStatus::Pending;
@@ -254,6 +269,21 @@ namespace TerraEngine::Scene {
 		std::uint64_t spatialPublicationGeneration = 0;
 
 		bool MutatedScene() const { return status == TransactionStatus::Committed && appliedWriteCount > 0; }
+	};
+
+	// Journal corruption is a required execution failure. Callers must let this
+	// exception reach the frame failure boundary rather than report rejection.
+	class TransactionRestorationFailure : public std::runtime_error {
+	public:
+		using std::runtime_error::runtime_error;
+	};
+	// Observers execute after no-fail commit. Retain the truthful committed
+	// result so a queue can publish its receipt/history before stopping the frame.
+	class TransactionPublicationFailure : public std::runtime_error {
+	public:
+		TransactionResult committedResult;
+		TransactionPublicationFailure(TransactionResult result, const std::string& reason)
+			: std::runtime_error("Committed transaction " + result.transactionId + ": " + reason), committedResult(std::move(result)) {}
 	};
 
 	// Preparation chunks are a scheduling detail, not an atomicity boundary.
@@ -283,6 +313,14 @@ namespace TerraEngine::Scene {
 		std::string message;
 
 		bool Committed() const { return status == TransactionStatus::Committed; }
+	};
+	// A group has already committed when an observer fails. Retain every chunk
+	// receipt so producers can settle once even though the frame cannot return.
+	class TransactionGroupPublicationFailure : public TransactionPublicationFailure {
+	public:
+		TransactionPublicationGroupResult committedGroupResult;
+		TransactionGroupPublicationFailure(TransactionPublicationGroupResult result, const std::string& reason)
+			: TransactionPublicationFailure(result.aggregateResult, reason), committedGroupResult(std::move(result)) {}
 	};
 
 	struct TransactionDiagnostics {

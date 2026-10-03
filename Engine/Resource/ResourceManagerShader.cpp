@@ -476,3 +476,26 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadShaderAsync(const std
 		return LoadShaderFile(*this, resolvedPath);
 	});
 }
+
+ResourceManager::RequestPtr ResourceManager::AdmitShaderDependency(
+	const std::filesystem::path& path, const RequestPtr& consumer)
+{
+	if (!IsCompiledShaderPath(path)) return {};
+	// A collection owns a consumer lease rather than a direct request. Losing
+	// that parent's authority therefore cannot leave private stage work alive.
+	LoadOrSchedule<Shader>(path, shaderCache, [this](const std::filesystem::path& resolvedPath) {
+		return LoadShaderFile(*this, resolvedPath);
+	}, false, false, false, consumer);
+	std::lock_guard gate(m_PublicationGate);
+	const std::string mapKey = std::to_string(static_cast<std::uint32_t>(ResourceKind::Shader))
+		+ ":" + NormalizeKey(path);
+	const auto found = m_Requests.find(mapKey);
+	return found == m_Requests.end() ? RequestPtr{} : found->second;
+}
+
+std::shared_ptr<const Shader> ResourceManager::AcquireShaderSnapshot(const TerraEngine::UUID& id) const
+{
+	std::shared_lock lock(shaderCache.mutex);
+	const auto found = shaderCache.resources.find(id);
+	return found == shaderCache.resources.end() ? nullptr : found->second;
+}

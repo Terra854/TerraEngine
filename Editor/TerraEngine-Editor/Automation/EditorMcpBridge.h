@@ -44,6 +44,8 @@ namespace TerraEngine::Editor::Automation
 		// forwarder lets that owner advance durable recordings even when the MCP
 		// listener is disabled, disconnected, or has no queued requests.
 		void PumpAnimationRecordingsAtProtectedFrame();
+		// Export futures publish durable job results only on the protected owner.
+		void PumpExportJobsAtProtectedFrame();
 		void PumpRendererValidationMutationsAtProtectedFrame();
 		// Complete terrain automation jobs only after their typed protected
 		// publication workload has made the requested generation visible.

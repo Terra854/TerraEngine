@@ -284,6 +284,8 @@ set(ENGINE_SOURCES
 	Engine/Input/InputSystem.cpp
 	Engine/Input/GLFW/GlfwInputBackend.cpp
 	Engine/Utilities/PlatformUtils.cpp
+	Engine/Utilities/OwnedProcess.cpp
+	Engine/Utilities/AtomicFileWrite.cpp
 	Engine/Window/WindowSystem.cpp
 	Engine/Window/GLFW/GlfwWindowBackend.cpp
 	Engine/ThreadPool/ThreadPool.cpp
@@ -450,6 +452,7 @@ set(ENGINE_HEADERS
 	Engine/Scene/SpatialQuery.h
 	Engine/Input/GLFW/GlfwInputBackend.h
 	Engine/Utilities/PlatformUtils.h
+	Engine/Utilities/OwnedProcess.h
 	Engine/Utilities/UUID.h
 	Engine/Utilities/Containers/BoundedRingBuffer.h
 	Engine/Utilities/Tepak/BinaryIO.h
@@ -1624,6 +1627,7 @@ add_library(TerraEngine-ExportSupport STATIC
 	Editor/Export/ExportOutputTransaction.cpp
 	Editor/Export/ExportPackageValidator.cpp
 	Editor/Export/ExportPipeline.cpp
+	Editor/Export/EditorExportOperationController.cpp
 	Editor/Export/ExportRuntimeLayout.cpp
 	Editor/Export/ExportScriptBindingRewriter.cpp
 	Editor/Export/ExportTypes.cpp
@@ -2941,6 +2945,43 @@ endif()
 if(BUILD_TESTING)
 	# Install validation executables under the test tree so the installed layout
 	# preserves the same production-versus-test boundary as the source tree.
+	install(TARGETS TerraEngine-EngineTests TerraEngineCorrectnessProcessFixture
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Engine
+	)
+	install(TARGETS TerraEngine-EditorTests
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Editor
+	)
+	install(FILES
+		${CMAKE_SOURCE_DIR}/Tests/Engine/Runtime/CorrectnessTestSupport.h
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Include/Runtime
+	)
+	install(FILES
+		${CMAKE_SOURCE_DIR}/Tests/Tools/Correctness/RunWithWatchdog.ps1
+		${CMAKE_SOURCE_DIR}/Tests/Tools/Correctness/RunNativeCorrectnessSlice.ps1
+		${CMAKE_SOURCE_DIR}/Tests/Tools/Correctness/RunInstalledCorrectnessAcceptance.ps1
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Correctness
+	)
+	install(DIRECTORY ${CMAKE_SOURCE_DIR}/Tests/Tools/Correctness/Fixtures/
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Correctness/Fixtures
+		# Install authored fixtures only; local SDK validation outputs are not inputs.
+		PATTERN "obj" EXCLUDE PATTERN "bin" EXCLUDE PATTERN "Build" EXCLUDE
+		PATTERN "Builds" EXCLUDE PATTERN "Library" EXCLUDE PATTERN "Temp" EXCLUDE
+	)
+	# Native installed tests must use the DLL closure beside their executable;
+	# never resolve an old build-tree engine when validating the installed tree.
+	if(WIN32)
+		install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-EngineTests>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Engine
+		)
+		install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-EditorTests>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Editor
+		)
+	endif()
+	# Managed native-harness tests need the same self-contained runtimeconfig,
+	# deps, runtime and analyzer closure as the installed editor.
+	install(DIRECTORY ${MANAGED_OUTPUT_DIR}/
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Editor/Managed
+	)
 	install(TARGETS TerraEngineAudioStressRunner
 		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Audio
 		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Audio
@@ -2976,6 +3017,8 @@ if(BUILD_TESTING)
 	endif()
 endif()
 
+
+
 # Configure-time guard: select platform or option behavior before generating build files.
 if(WIN32)
 	install(PROGRAMS
@@ -3002,4 +3045,13 @@ else()
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/lib/libdxil.so
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)
+endif()
+
+# Seal only after every runtime, test, shader and authored fixture install rule.
+if(BUILD_TESTING)
+	configure_file(cmake/WriteCorrectnessArtifactManifest.cmake.in
+		${CMAKE_CURRENT_BINARY_DIR}/WriteCorrectnessArtifactManifest.configured.cmake @ONLY)
+	file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/WriteCorrectnessArtifactManifest-$<CONFIG>.cmake
+		INPUT ${CMAKE_CURRENT_BINARY_DIR}/WriteCorrectnessArtifactManifest.configured.cmake)
+	install(SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/WriteCorrectnessArtifactManifest-$<CONFIG>.cmake)
 endif()

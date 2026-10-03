@@ -1,0 +1,16 @@
+{
+	"name": "Correctness Windows",
+	"id": "correctness",
+	"platform": "windows",
+	"outputDirectory": "Builds/Correctness",
+	"startupScene": "Scenes/Startup.tescene",
+	"compressionPreset": "normal",
+	"tepakWorkerCount": 1,
+	"enableManagedCompilation": true,
+	"includeDebugSymbols": true,
+	"stripNativeAotOutput": false,
+	"enableVulkanValidationLayers": false,
+	"enableRenderDebugDiagnostics": false,
+	"additionalPublishArgs": "",
+	"includedScenes": []
+}

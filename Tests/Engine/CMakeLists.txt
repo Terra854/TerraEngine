@@ -1,11 +1,33 @@
 # Engine unit tests stay headless and deterministic so contributors can run
 # them before the editor or renderer is available.
+# This child has no engine dependency: the watchdog can terminate a deliberately
+# blocked test without loading providers, managed assemblies or GPU resources.
+add_executable(TerraEngineCorrectnessProcessFixture
+	Runtime/CorrectnessProcessFixture.cpp
+)
+target_compile_features(TerraEngineCorrectnessProcessFixture PRIVATE cxx_std_20)
+target_link_libraries(TerraEngineCorrectnessProcessFixture PRIVATE Threads::Threads)
+set_target_properties(TerraEngineCorrectnessProcessFixture PROPERTIES
+	OUTPUT_NAME "CorrectnessProcessFixture"
+	RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+)
+
 file(GLOB_RECURSE TERRAENGINE_ENGINE_ANIMATION_TEST_SOURCES CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/Animation/*.cpp"
 )
 
 add_executable(TerraEngine-EngineTests
 	EngineTests.cpp
+	# Correctness cases exercise production entry points; watchdogs bound hangs.
+	Runtime/FrameFailureLifecycleTests.cpp
+	Audio/AudioWorldCellCaptureTests.cpp
+	Runtime/OwnedProcessTests.cpp
+	Resource/ResourceAsyncDependencyTests.cpp
+	Scene/TransactionalMutationFailureSafetyTests.cpp
+	Scene/GenericMutationFailureSafetyTests.cpp
+	Scene/SceneMutationQueueFailureSafetyTests.cpp
+	Resource/ResourcePublicationLifecycleTests.cpp
+	Scene/SceneSaveFailureSafetyTests.cpp
 	# Locomotion contracts are registered explicitly so empty filters cannot pass.
 	Locomotion/LocomotionSchedulerTests.cpp
 	Locomotion/LocomotionConfigurationTests.cpp
@@ -480,7 +502,7 @@ add_test(NAME Engine.SpatialUnitTests COMMAND $<TARGET_FILE:TerraEngine-EngineTe
 # state or ThreadPool history, while full CTest still executes the exact gate.
 set_tests_properties(Engine.SpatialUnitTests PROPERTIES
 	LABELS "Engine"
-	ENVIRONMENT "TERRAENGINE_TEST_EXCLUDE_FILTER=Engine.ProfilerCapturePerformance.LiveThirtyThousandFramesStayResidentBounded"
+	ENVIRONMENT "TERRAENGINE_TEST_EXCLUDE_FILTER=Engine.ProfilerCapturePerformance.LiveThirtyThousandFramesStayResidentBounded,Engine.FrameFailureLifecycle,Engine.ResourceAsyncLifecycle,Engine.SceneMutationFailureSafety,Scene.SaveFailureSafety,Audio.WorldCellCapture,Engine.OwnedProcess"
 )
 
 # Keep the unbounded-scene scheduler contract independently selectable while
@@ -654,7 +676,7 @@ set_tests_properties(Engine.VirtualGeometryFoundation PROPERTIES
 add_test(NAME Engine.VirtualGeometryProductionContracts COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.VirtualGeometryProductionContracts PROPERTIES
 	LABELS "Engine;VirtualGeometry;Production;Contract"
-	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Capability;VirtualGeometry.GpuTiming;Renderer.VulkanVirtualGeometryTiming;VirtualGeometry.Evidence;VirtualGeometry.Scheduler;VirtualGeometry.Publication;VirtualGeometry.Visibility;VirtualGeometry.Backend;AnimatedVirtualGeometry"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Capability,VirtualGeometry.GpuTiming,Renderer.VulkanVirtualGeometryTiming,VirtualGeometry.Evidence,VirtualGeometry.Scheduler,VirtualGeometry.Publication,VirtualGeometry.Visibility,VirtualGeometry.Backend,AnimatedVirtualGeometry"
 )
 
 add_test(NAME Engine.RenderRouteParity COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
@@ -744,7 +766,7 @@ set_tests_properties(Engine.VulkanImageReadback PROPERTIES
 add_test(NAME Engine.AdaptiveVirtualGeometry COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.AdaptiveVirtualGeometry PROPERTIES
 	LABELS "Engine;VirtualGeometry;AdaptiveVirtualGeometry"
-	ENVIRONMENT "TERRAENGINE_TEST_FILTER=AdaptiveVirtualGeometry;VirtualGeometry.Render;VirtualGeometry.Resource;VirtualGeometry.Diagnostics;VirtualGeometry.HiZ;VirtualGeometry.Stress"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=AdaptiveVirtualGeometry,VirtualGeometry.Render,VirtualGeometry.Resource,VirtualGeometry.Diagnostics,VirtualGeometry.HiZ,VirtualGeometry.Stress"
 )
 
 # The broad Animation filter is intentionally stable. Story-specific test names
@@ -838,10 +860,12 @@ set_tests_properties(Engine.Terrain.Mapping PROPERTIES
 	LABELS "Engine;Terrain;Mapping;LargeWorld"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.Mapping,Terrain.Coordinates,Terrain.LargeWorld")
 
+# These cases live under Residency. Commas belong to the harness filter;
+# semicolons would split CMake's ENVIRONMENT property into separate variables.
 add_test(NAME Engine.Terrain.Sampler COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.Terrain.Sampler PROPERTIES
 	LABELS "Engine;Terrain;Sampler;Vulkan;Residency"
-	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.Sampler")
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Terrain.Residency.SamplerPolicy,Terrain.Residency.SampledAliases,Terrain.Residency.DiagnosticsExposeValidationSampler")
 
 add_test(NAME Engine.Terrain.Lod COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.Terrain.Lod PROPERTIES
@@ -953,3 +977,36 @@ set_tests_properties(Engine.AnimationDeterminism100k PROPERTIES
 	RUN_SERIAL TRUE
 	TIMEOUT 1800
 )
+
+# Independent process-tree ownership protects deadlock/teardown regressions.
+# Native harnesses also reject zero selected cases on every supported platform.
+if(WIN32)
+	# Developer command prompts can omit PowerShell from PATH. Both supported
+	# Windows installations provide these standard discovery locations.
+	find_program(TERRAENGINE_CORRECTNESS_POWERSHELL NAMES pwsh powershell
+		HINTS "$ENV{ProgramFiles}/PowerShell/7"
+			"$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0" REQUIRED)
+endif()
+function(terraengine_add_correctness_slice name target filter minimum_cases)
+	if(WIN32)
+		add_test(NAME ${name} COMMAND ${TERRAENGINE_CORRECTNESS_POWERSHELL}
+			-NoProfile -ExecutionPolicy Bypass -File ${CMAKE_SOURCE_DIR}/Tests/Tools/Correctness/RunNativeCorrectnessSlice.ps1
+			-Executable $<TARGET_FILE:${target}> -Filter ${filter} -MinimumCases ${minimum_cases} -TimeoutSeconds 120)
+	else()
+		add_test(NAME ${name} COMMAND $<TARGET_FILE:${target}>)
+	endif()
+	if(name STREQUAL "Engine.ResourceAsyncLifecycle")
+		set(worker_count 0)
+	else()
+		set(worker_count 2)
+	endif()
+	set_tests_properties(${name} PROPERTIES LABELS "Correctness;FailureSafety"
+		TIMEOUT 135 RUN_SERIAL TRUE
+		ENVIRONMENT "TERRAENGINE_TEST_FILTER=${filter};TERRAENGINE_THREADPOOL_WORKERS=${worker_count}")
+endfunction()
+terraengine_add_correctness_slice(Engine.SceneMutationFailureSafety TerraEngine-EngineTests Engine.SceneMutationFailureSafety 39)
+terraengine_add_correctness_slice(Engine.ResourceAsyncLifecycle TerraEngine-EngineTests Engine.ResourceAsyncLifecycle 28)
+terraengine_add_correctness_slice(Engine.SceneSaveFailureSafety TerraEngine-EngineTests Scene.SaveFailureSafety 10)
+terraengine_add_correctness_slice(Engine.AudioWorldCellCapture TerraEngine-EngineTests Audio.WorldCellCapture 5)
+terraengine_add_correctness_slice(Engine.FrameFailureLifecycle TerraEngine-EngineTests Engine.FrameFailureLifecycle 7)
+terraengine_add_correctness_slice(Engine.OwnedProcess TerraEngine-EngineTests Engine.OwnedProcess 6)

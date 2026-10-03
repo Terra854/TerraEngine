@@ -1057,7 +1057,13 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 			name = if ($isDynamic) { "Stress Dynamic {0:d5}" -f $index } elseif ($isKinematic) { "Stress Kinematic {0:d5}" -f ($index - $dynamicCount) } else { "Stress Static {0:d5}" -f ($index - $dynamicCount - $kinematicCount) }
 			tag = "Untagged"; layer = "Default"; active = $true; isStatic = $isStaticBody
 			components = [ordered]@{
-				"Transform" = [ordered]@{ Position = $position; Rotation = @(1.0, 0.0, 0.0, 0.0); Scale = @(1.0, 1.0, 1.0) }
+				"Transform" = [ordered]@{
+					WorldPose = [ordered]@{
+						position = [ordered]@{ cell = [ordered]@{ x = "0"; y = "0"; z = "0" }; offsetMetres = $position }
+						rotation = @(1.0, 0.0, 0.0, 0.0); scale = @(1.0, 1.0, 1.0)
+					}
+					ParentRelativePose = [ordered]@{ translationMetres = $position; rotation = @(1.0, 0.0, 0.0, 0.0); scale = @(1.0, 1.0, 1.0); transformSpaceId = 0 }
+				}
 				"RigidBodyComponent" = $body
 				"ColliderSetComponent" = [ordered]@{ active = $true; schemaVersion = 1; colliders = @($collider) }
 			}
@@ -1066,6 +1072,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		if ($index -eq $managedReloadAutomationTargetIndex) { $managedReloadAutomationTargetPosition = @($position) }
 	}
 	$scene = [ordered]@{
+		format = "TerraSceneUnboundedV1"
 		name = "Installed Physics Stress"
 		sceneSettings = [ordered]@{ indirectStrength = 1.0; ambientOcclusionStrength = 1.0; ambientOcclusionQuality = 2 }
 		objects = @($objects)
@@ -1348,6 +1355,35 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 	# script compiler then pauses gameplay for its reload boundary and races the
 	# harness's explicit pause request. Poll the immutable diagnostics surface so
 	# the following Play/Pause/Next checks measure physics after startup work.
+	# MCP availability precedes asynchronous scene publication. Read-only polling
+	# must prove this owned generated project and scene are usable before any
+	# authoring matrix, rather than letting missing targets resemble rollback.
+	$sceneReadyDeadlineMs = (Get-MonotonicMilliseconds) + ($StartupTimeoutSeconds * 1000.0)
+	$sceneReady = $false
+	# SceneManager identifies active scenes by source filename, not authored display name.
+	$expectedSceneStem = [IO.Path]::GetFileNameWithoutExtension($scenePath)
+	$expectedSceneSource = [IO.Path]::GetFullPath($scenePath)
+	$lastSceneReadiness = 'not observed'
+	$expectedVisible = @($objects[0], $objects[$dynamicCount + $kinematicCount], $objects[$managedReloadAutomationTargetIndex])
+	while ((Get-MonotonicMilliseconds) -lt $sceneReadyDeadlineMs) {
+		if ($process.HasExited) { throw "The installed editor exited before the generated scene became ready." }
+		$projectState = Invoke-Tool -Name "project.state"
+		$state = $projectState.data
+		$lastSceneReadiness = "project='$($state.projectRoot)' scene='$($state.activeScene)' generation=$($state.sceneGeneration) simulationReady=$($state.readiness.simulationEssentialReady) reason='$($state.readiness.reason)'"
+		if ($state.hasProject -and [IO.Path]::GetFullPath([string]$state.projectRoot).Equals([IO.Path]::GetFullPath($projectRoot), [StringComparison]::OrdinalIgnoreCase) -and
+			$state.activeScene -ceq $expectedSceneStem -and [UInt64]$state.sceneGeneration -ne 0 -and $state.readiness.simulationEssentialReady -and
+			-not [string]::IsNullOrWhiteSpace([string]$state.derivedScene.sourcePath) -and
+			[IO.Path]::GetFullPath([string]$state.derivedScene.sourcePath).Equals($expectedSceneSource, [StringComparison]::OrdinalIgnoreCase)) {
+			$visible = $true
+			foreach ($expected in $expectedVisible) {
+				$listed = Invoke-Tool -Name "scene.list_objects" -Arguments ([ordered]@{ search = [string]$expected.name })
+				if (@($listed.data.objects | Where-Object { [string]$_.uuid -ceq [string]$expected.uuid }).Count -ne 1) { $visible = $false; break }
+			}
+			if ($visible) { $sceneReady = $true; break }
+		}
+		Start-Sleep -Milliseconds 250
+	}
+	if (-not $sceneReady) { throw "The owned generated physics scene and expected objects were not published before the startup timeout: $lastSceneReadiness" }
 	Start-Stage -Name "scriptingReadiness"
 	$deadline = (Get-Date).AddSeconds($StartupTimeoutSeconds)
 	$scriptingReady = $false
@@ -1432,6 +1468,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		$sceneGeneration = [UInt64]$projectStateBefore.data.sceneGeneration
 		$historyBeforeReparent = Invoke-Tool -Name "history.state"
 		$reparent = Invoke-Tool -Name "transaction.execute" -Arguments ([ordered]@{
+			format = "TerraSpatialTransactionV1"
 			operations = @([ordered]@{ kind = "object.set_parent"; target = $childId; parent = $parentId })
 			expectedSceneGeneration = $sceneGeneration
 			label = "collider-cook matrix installed physics reparent"
@@ -1450,6 +1487,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		# conflicting value never became partially visible.
 		$conflictName = "collider-cook matrix MUST NOT COMMIT"
 		$conflict = Invoke-ToolExpectFailure -Name "transaction.execute" -Arguments ([ordered]@{
+			format = "TerraSpatialTransactionV1"
 			operations = @([ordered]@{ kind = "object.set_metadata"; target = $childId; name = $conflictName })
 			expectedSceneGeneration = [UInt64]::MaxValue
 			label = "collider-cook matrix installed stale conflict"
@@ -1457,6 +1495,8 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 			idempotencyKey = "collider-cook-collider-cook-conflict"
 		})
 		if ([string]$conflict.error.category -ne "stale_target") { throw "collider-cook matrix stale transaction returned '$($conflict.error.category)' instead of stale_target." }
+		# A schema rejection must not masquerade as the intended stale-generation rollback.
+		if ([string]$conflict.error.details -cne "Scene generation changed after transaction preparation.") { throw "collider-cook matrix stale transaction did not reject the intended scene-generation conflict." }
 		$conflictLeak = Invoke-Tool -Name "scene.list_objects" -Arguments ([ordered]@{ search = $conflictName })
 		$unchangedRoot = Invoke-Tool -Name "scene.list_objects" -Arguments ([ordered]@{ search = $childName })
 		if (@($conflictLeak.data.objects).Count -ne 0 -or @($unchangedRoot.data.objects | Where-Object { [string]$_.uuid -eq $childId }).Count -ne 1) {
@@ -1518,6 +1558,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		if ([string]::IsNullOrWhiteSpace($sourceId)) { throw "Authoring walkthrough object.create did not return a stable source UUID." }
 
 		$metadata = Invoke-Tool -Name "transaction.execute" -Arguments ([ordered]@{
+			format = "TerraSpatialTransactionV1"
 			operations = @(
 				[ordered]@{ kind = "object.set_metadata"; target = $sourceId; name = "Authoring Walkthrough Source" },
 				[ordered]@{ kind = "object.set_metadata"; target = $sourceId; tag = "PhysicsWalkthrough" }

@@ -3,6 +3,7 @@
 #include "Scene/SceneMutationQueue.h"
 #include "Scene/TransactionalMutation.h"
 #include "Scene/SceneGraphRuntime.h"
+#include "Scene/Serializer.h"
 
 #include "Core/Object/ComponentRegistry.h"
 #include "Core/Object/ObjectManager.h"
@@ -42,6 +43,69 @@ namespace TerraEngine::EditorTests {
 
 	void RegisterTransactionalMutationUndoTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.TransactionalMutation.LegacyRemovalCapturesAuthoredPayloadUnderRegistrationLock", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance(); objects.clear(); MeshRenderComponent::registerType();
+			Object object = objects.createObject("Locked Removal Target");
+			auto* component = objects.AddComponent<MeshRenderComponent>(object);
+			const auto meshId = TerraEngine::GenerateUUID(); component->meshId = meshId;
+			std::unique_ptr<RemoveComponentCommand> command;
+			{
+				// Match automation's protected capture: the component registry remains
+				// locked while the command snapshots the attached authored component.
+				std::lock_guard lock(ComponentAccessRegistryMutex());
+				command = std::make_unique<RemoveComponentCommand>(object.EntityId(), "MeshRenderComponent");
+			}
+			command->Redo();
+			context.Expect(objects.GetComponent<MeshRenderComponent>(object) == nullptr, "Legacy removal must retire the component.");
+			command->Undo();
+			const auto* restored = objects.GetComponent<MeshRenderComponent>(object);
+			context.Expect(restored && restored->meshId == meshId, "Prepared undo must restore the captured authored binding.");
+			objects.clear();
+		});
+
+		registry.Add("Editor.TransactionalMutation.PreparedObjectRestoreUndoRedoUsesProtectedBoundary", [](TestContext& context) {
+			using namespace TerraEngine::Scene;
+			ComponentRegistry::RegisterAllComponents();
+			ScriptingSystem::Instance().SetRunning(false);
+			auto& objects = ObjectManager::instance();
+			auto& queue = SceneMutationQueue::Instance();
+			auto& history = UndoRedoSystem::Instance();
+			objects.clear(); queue.Clear(); history.Clear();
+			const Object authored = objects.createObject("History Restore");
+			const Object child = objects.createObject("History Child");
+			objects.setParent(child, authored);
+			const auto id = objects.getUUID(authored);
+			const auto childId = objects.getUUID(child);
+			const auto snapshot = Serializer::SerializeObject(authored.EntityId());
+			objects.removeObject(authored);
+			Transaction transaction;
+			transaction.id = "snapshot-history"; transaction.origin = TransactionOrigin::Editor;
+			transaction.undoGroupName = "Restore authored graph";
+			TransactionWriteOperation restore;
+			restore.kind = TransactionWriteKind::RestoreObjectSnapshot;
+			restore.target = ExistingObject(id); restore.serializedObject = snapshot;
+			transaction.writeSet.operations.push_back(restore);
+			const auto committed = CommitTransaction(objects, transaction);
+			context.Expect(committed.status == TransactionStatus::Committed && history.RecordCommittedTransaction(transaction, committed),
+				"A prepared restore must commit and enter history as one operation.");
+			history.Undo();
+			context.Expect(objects.getObject(id).has_value(), "Undo submission must leave restoration visible until the protected boundary.");
+			queue.Apply(objects, "restore-history-undo");
+			auto receipts = queue.DrainCompletedEditorTransactionResults();
+			context.Expect(receipts.size() == 1 && receipts.front().status == TransactionStatus::Committed && history.CompleteDeferredReplay(receipts.front()),
+				"Undo must produce one committed protected receipt.");
+			context.Expect(!objects.getObject(id) && !objects.getObject(childId), "Undo must remove the complete restored branch.");
+			history.Redo();
+			context.Expect(!objects.getObject(id), "Redo submission must wait for the protected boundary.");
+			queue.Apply(objects, "restore-history-redo");
+			receipts = queue.DrainCompletedEditorTransactionResults();
+			context.Expect(receipts.size() == 1 && receipts.front().status == TransactionStatus::Committed && history.CompleteDeferredReplay(receipts.front()),
+				"Redo must produce one committed prepared restoration receipt.");
+			const auto restored = objects.getObject(id);
+			context.Expect(restored && objects.getObject(childId)
+				&& Serializer::SerializeObject(restored->EntityId()) == snapshot, "Redo must preserve exact authored values and stable hierarchy identities.");
+			history.Clear(); queue.Clear(); objects.clear();
+		});
 		registry.Add("Editor.TransactionalMutation.ChildWorldScaleUndoRedoUsesProtectedBoundary", [](TestContext& context) {
 			using namespace TerraEngine::Scene;
 			ComponentRegistry::RegisterAllComponents();

@@ -9,6 +9,7 @@
 #include "ThreadPool/ThreadPool.h"
 #include "Utilities/UUID.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -48,6 +49,7 @@ namespace {
 		std::uint32_t constraints = 0U;
 		std::uint32_t characters = 0U;
 		std::uint32_t supportedCharacters = 0U;
+		bool movementJumpResizeTeleport = false;
 		std::uint64_t stateHash = kFnvOffset;
 	};
 
@@ -268,7 +270,11 @@ namespace {
 	bool ExerciseCharacterCommands(
 		IPhysicsBackend& backend,
 		PhysicsWorldHandle world,
-		const std::array<CharacterIdentity, kCharacterCount>& characters) {
+		const std::array<CharacterIdentity, kCharacterCount>& characters, FixtureCounts& counts) {
+		bool movementObserved = false;
+		bool jumpObserved = false;
+		bool resizeSettled = false;
+		bool teleportObserved = false;
 		for(PhysicsTick tick = 1U; tick <= kFixedSteps; ++tick) {
 			for(std::uint32_t index = 0U; index < kCharacterCount; ++index) {
 				const CharacterIdentity& identity = characters[index];
@@ -289,9 +295,37 @@ namespace {
 				if(request.teleportRequested) request.pose.position = {1.5F, 3.0F, 2.0F};
 				if(!backend.UpdateCharacter(request).Succeeded()) return false;
 			}
+			// Updates store intent; this protected provider boundary consumes it once
+			// before the rigid-body solver, matching the production fixed-step path.
+			if(!backend.AdvanceCharacters(world, tick, kFixedDeltaTime).Succeeded()) return false;
+			if(tick == 20U || tick == 30U || tick == 60U || tick == 90U) {
+				PhysicsBackendExtraction observation;
+				observation.world = world;
+				if(!backend.Extract(observation).Succeeded()) return false;
+				const auto findState = [&](std::uint32_t index) -> const PhysicsBackendCharacterState* {
+					const auto found = std::find_if(observation.characters.begin(), observation.characters.end(),
+						[&](const auto& state) { return state.handle == characters[index].handle; });
+					return found == observation.characters.end() ? nullptr : &*found;
+				};
+				const std::uint32_t index = tick == 60U ? 1U : tick == 90U ? 2U : 0U;
+				const auto* state = findState(index);
+				if(state == nullptr || !IsFinite(*state)
+					|| std::abs(state->completedStepDuration - kFixedDeltaTime) > 1.0e-6F) return false;
+				if(tick == 20U) movementObserved = state->pose.position.x > -4.45F;
+				if(tick == 30U) jumpObserved = state->linearVelocity.y > 1.0F;
+				// Extraction does not expose shape dimensions. A successful advance
+				// proves SetShape accepted the resize; finite completed state proves
+				// settlement, rather than claiming an independent height measurement.
+				if(tick == 60U) resizeSettled = !state->motionDiscontinuity;
+				if(tick == 90U) teleportObserved = state->motionDiscontinuity
+					&& std::abs(state->pose.position.x - 1.5F) < 0.05F
+					&& std::abs(state->pose.position.y - 3.0F) < 0.05F
+					&& std::abs(state->pose.position.z - 2.0F) < 0.05F;
+			}
 			if(!backend.Step({world, tick, kFixedDeltaTime, 1U}).Succeeded()) return false;
 		}
-		return true;
+		counts.movementJumpResizeTeleport = movementObserved && jumpObserved && resizeSettled && teleportObserved;
+		return counts.movementJumpResizeTeleport;
 	}
 
 	bool ExerciseBreakAndResetContract() {
@@ -377,7 +411,8 @@ namespace {
 			<< ",\"constraints\":{\"families\":8,\"gear\":1,\"denseChainLinks\":" << kChainBodyCount - 1U
 			<< ",\"total\":" << counts.constraints << ",\"limitsMotorsSprings\":true}"
 			<< ",\"characters\":{\"total\":" << counts.characters << ",\"capsules\":2,\"cylinders\":2"
-			<< ",\"supported\":" << counts.supportedCharacters << ",\"movementJumpResizeTeleport\":true}"
+			<< ",\"supported\":" << counts.supportedCharacters << ",\"movementJumpResizeTeleport\":"
+			<< (counts.movementJumpResizeTeleport ? "true" : "false") << "}"
 			<< ",\"breakReset\":" << (breakResetPassed ? "true" : "false")
 			<< ",\"stateHash\":\"" << counts.stateHash << "\""
 			<< ",\"teardown\":" << (teardownPassed ? "true" : "false") << "}" << std::endl;
@@ -412,7 +447,7 @@ int main() {
 			if(passed) { stage = "publish-bodies"; passed = PublishBodies(backend, world, floor, chain); }
 			if(passed) { stage = "publish-constraints"; passed = PublishConstraints(backend, world, chain); }
 			if(passed) { stage = "publish-characters"; passed = PublishCharacters(backend, world, characters); }
-			if(passed) { stage = "fixed-character-commands"; passed = ExerciseCharacterCommands(backend, world, characters); }
+			if(passed) { stage = "fixed-character-commands"; passed = ExerciseCharacterCommands(backend, world, characters, counts); }
 			if(passed) { stage = "break-reset-contract"; breakResetPassed = ExerciseBreakAndResetContract(); }
 			if(passed) { stage = "extract-invariants"; passed = breakResetPassed && InspectExtraction(backend, world, counts) && backend.IsHealthy(); }
 
