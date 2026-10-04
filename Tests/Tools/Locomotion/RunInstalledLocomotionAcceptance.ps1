@@ -253,10 +253,10 @@ try {
 				}
 			}
 		}
-		# SC-007/008 are deliberately not inferred from semantic reports. Until
+		# Sustained throughput and paired overhead are not inferred from semantic reports. Until
 		# the app emits their exact durations, counters and matched replay traces,
 		# qualification remains incomplete and the runner exits nonzero.
-		throw 'SC-007 sustained and SC-008 paired real-application reports are not yet implemented.'
+		throw 'Sustained throughput and paired overhead real-application reports are not yet implemented.'
 	}
 	$summary.status = 'smoke_passed_not_qualification'
 } catch {

@@ -147,8 +147,11 @@ foreach($file in @($files | Sort-Object FullName -Unique))
 	}
 	++$scannedFiles
 	Add-Violations $violations $relativePath 'filename' $relativePath $configurationDocument.patterns
+	# Explicit root files are text even when they have no familiar extension,
+	# so contributor guides and repository settings cannot escape this audit.
 	if($file.Length -gt [int64]$configurationDocument.maximumTextBytes -or
-		$file.Extension -notin @($configurationDocument.textExtensions))
+		($file.Extension -notin @($configurationDocument.textExtensions) -and
+			$relativePath -notin @($configurationDocument.rootFiles)))
 	{
 		continue
 	}

@@ -7,6 +7,7 @@
 #include <map>
 #include <chrono>
 #include <algorithm>
+#include <cstring>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -25,6 +26,63 @@ FileWatcher::FileWatcher() {}
 
 FileWatcher::~FileWatcher() {
 	Stop();
+}
+
+void FileWatcher::ProcessWindowsCompletion(std::span<const std::byte> bytes, bool succeeded)
+{
+	// Stage copied events before queueing. Bounds checks keep even a truncated
+	// native completion from reading bytes belonging to an earlier request.
+	if (!succeeded || bytes.empty()) { FlagReconcileRequired(); return; }
+	const auto malformed = [this] { FlagReconcileRequired(); };
+	try {
+	std::vector<FileEvent> decoded;
+	std::size_t offset = 0U;
+	for (;;) {
+		constexpr std::size_t headerBytes = 12U;
+		if (offset > bytes.size() || bytes.size() - offset < headerBytes) { malformed(); return; }
+		std::uint32_t next{}, action{}, nameBytes{};
+		std::memcpy(&next, bytes.data() + offset, 4U);
+		std::memcpy(&action, bytes.data() + offset + 4U, 4U);
+		std::memcpy(&nameBytes, bytes.data() + offset + 8U, 4U);
+		if (nameBytes == 0U || nameBytes % 2U != 0U || nameBytes > bytes.size() - offset - headerBytes
+			|| action < 1U || action > 5U) { malformed(); return; }
+		std::u16string name(nameBytes / 2U, u'\0');
+		std::memcpy(name.data(), bytes.data() + offset + headerBytes, nameBytes);
+		// UTF-16 surrogate pairs must be complete before filesystem conversion;
+		// embedded NULs and rooted/traversing names cannot name a watched child.
+		for (std::size_t index = 0U; index < name.size(); ++index) {
+			const auto value = name[index];
+			if (value == 0U || (value >= 0xDC00U && value <= 0xDFFFU)) { malformed(); return; }
+			if (value >= 0xD800U && value <= 0xDBFFU) {
+				if (++index == name.size() || name[index] < 0xDC00U || name[index] > 0xDFFFU) { malformed(); return; }
+			}
+		}
+		std::filesystem::path child;
+		try { child = std::filesystem::path(name); } catch (...) { malformed(); return; }
+		if (child.is_absolute() || child.has_root_name()
+			|| std::find(child.begin(), child.end(), std::filesystem::path("..")) != child.end()) { malformed(); return; }
+		const auto status = action == 1U || action == 5U ? FileStatus::Created
+			: (action == 2U || action == 4U ? FileStatus::Erased : FileStatus::Modified);
+		decoded.push_back({pathData / child, status});
+		if (next == 0U) break;
+		if (next % 4U != 0U || next < headerBytes + nameBytes || next > bytes.size() - offset
+			|| bytes.size() - offset - next < headerBytes) { malformed(); return; }
+		offset += next;
+	}
+	for (auto& event : decoded) QueueEvent(std::move(event.path), event.status);
+	} catch (...) {
+		// A conversion/allocation failure loses notification information too;
+		// leave recovery visible rather than terminating the platform pump.
+		malformed();
+	}
+}
+
+void FileWatcher::ProcessLinuxLoss(bool succeeded, std::uint32_t mask)
+{
+	// The platform-neutral entry retains the native read disposition and mask
+	// so recovery classification is exercised without creating an inotify fd.
+	constexpr std::uint32_t queueOverflow = 0x00004000U;
+	if (!succeeded || (mask & queueOverflow) != 0U) FlagReconcileRequired();
 }
 
 // FileWatcher::Start is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -150,6 +208,7 @@ void FileWatcher::WatchLoopWin32() {
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (hDir == INVALID_HANDLE_VALUE) {
+		FlagReconcileRequired();
 		// Fallback or error logging
 		return;
 	}
@@ -169,32 +228,17 @@ void FileWatcher::WatchLoopWin32() {
 		&overlapped,
 		NULL
 	);
+	if (!success) FlagReconcileRequired();
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	while (running) {
 		DWORD waitResult = WaitForSingleObject(overlapped.hEvent, 50); // Check every 50ms
 		if (waitResult == WAIT_OBJECT_0) {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (GetOverlappedResult(hDir, &overlapped, &bytesReturned, FALSE)) {
-				FILE_NOTIFY_INFORMATION* pNotify;
-				int offset = 0;
-				do {
-					pNotify = (FILE_NOTIFY_INFORMATION*)((char*)buffer + offset);
-					
-					std::wstring filename(pNotify->FileName, pNotify->FileNameLength / sizeof(WCHAR));
-					std::filesystem::path fullPath = pathData / filename;
-					
-					FileStatus status = FileStatus::Modified;
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (pNotify->Action == FILE_ACTION_ADDED || pNotify->Action == FILE_ACTION_RENAMED_NEW_NAME) status = FileStatus::Created;
-					else if (pNotify->Action == FILE_ACTION_REMOVED || pNotify->Action == FILE_ACTION_RENAMED_OLD_NAME) status = FileStatus::Erased;
-					else if (pNotify->Action == FILE_ACTION_MODIFIED) status = FileStatus::Modified;
-
-					QueueEvent(std::move(fullPath), status);
-
-					offset += pNotify->NextEntryOffset;
-				} while (pNotify->NextEntryOffset != 0);
-			}
+			const bool completed = GetOverlappedResult(hDir, &overlapped, &bytesReturned, FALSE) != FALSE
+				&& bytesReturned <= sizeof(buffer);
+			ProcessWindowsCompletion(std::span<const std::byte>(reinterpret_cast<const std::byte*>(buffer),
+				completed ? std::min<std::size_t>(bytesReturned, sizeof(buffer)) : 0U), completed);
 			ResetEvent(overlapped.hEvent);
 			success = ReadDirectoryChangesW(
 				hDir, buffer, sizeof(buffer), TRUE,
@@ -202,7 +246,7 @@ void FileWatcher::WatchLoopWin32() {
 				NULL, &overlapped, NULL
 			);
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (!success) break;
+			if (!success) { FlagReconcileRequired(); break; }
 		}
 	}
 	
@@ -224,7 +268,7 @@ void FileWatcher::AddWatchesLinux(int fd, const std::filesystem::path& root, std
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (wd != -1) {
 		wdToPath[wd] = root;
-	}
+	} else FlagReconcileRequired();
 	
 	// Recursively add watches for subdirectories
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
@@ -234,7 +278,7 @@ void FileWatcher::AddWatchesLinux(int fd, const std::filesystem::path& root, std
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (wd != -1) {
 				wdToPath[wd] = p.path();
-			}
+			} else FlagReconcileRequired();
 		}
 	}
 }
@@ -242,7 +286,7 @@ void FileWatcher::AddWatchesLinux(int fd, const std::filesystem::path& root, std
 // FileWatcher::WatchLoopLinux is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void FileWatcher::WatchLoopLinux() {
 	int fd = inotify_init1(IN_NONBLOCK);
-	if (fd == -1) return;
+	if (fd == -1) { FlagReconcileRequired(); return; }
 
 	std::map<int, std::filesystem::path> wdToPath;
 	AddWatchesLinux(fd, pathData, wdToPath);
@@ -253,6 +297,7 @@ void FileWatcher::WatchLoopLinux() {
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	while (running) {
 		int length = read(fd, buf, BUF_LEN);
+		ProcessLinuxLoss(length >= 0 || errno == EAGAIN, 0U);
 		if (length < 0) {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (errno == EAGAIN) {
@@ -268,14 +313,21 @@ void FileWatcher::WatchLoopLinux() {
 		int i = 0;
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		while (i < length) {
+			if (length - i < static_cast<int>(sizeof(inotify_event))) { FlagReconcileRequired(); break; }
 			// struct inotify_event groups related state and operations so callers have one documented contract.
-			struct inotify_event* event = (struct inotify_event*)&buf[i];
+			inotify_event header{};
+			std::memcpy(&header, buf + i, sizeof(header));
+			const auto* event = &header;
+			if (event->len > static_cast<unsigned>(length - i - sizeof(header))) { FlagReconcileRequired(); break; }
+			const char* name = buf + i + sizeof(header);
+			if (event->len != 0U && std::memchr(name, '\0', event->len) == nullptr) { FlagReconcileRequired(); break; }
+			ProcessLinuxLoss(true, event->mask);
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (event->len) {
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (wdToPath.find(event->wd) != wdToPath.end()) {
 					std::filesystem::path dirPath = wdToPath[event->wd];
-					std::filesystem::path fullPath = dirPath / event->name;
+					std::filesystem::path fullPath = dirPath / name;
 
 					FileStatus status = FileStatus::Modified;
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

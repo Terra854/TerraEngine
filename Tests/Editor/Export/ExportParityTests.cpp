@@ -313,8 +313,8 @@ namespace TerraEngine::EditorTests {
 
 			const std::filesystem::path projectRoot = tempDirectory.Root() / "Parity Project";
 			TouchParityFile(projectRoot / "game.json", R"({"name":"Parity Project"})");
-			TouchParityFile(projectRoot / "Assets" / "Scenes" / "Startup.tescene", R"({"objects":[]})");
-			TouchParityFile(projectRoot / "Assets" / "Scenes" / "Secondary.tescene", R"({"objects":[]})");
+			TouchParityFile(projectRoot / "Assets" / "Scenes" / "Startup.tescene", R"({"format":"TerraSceneUnboundedV1","objects":[]})");
+			TouchParityFile(projectRoot / "Assets" / "Scenes" / "Secondary.tescene", R"({"format":"TerraSceneUnboundedV1","objects":[]})");
 			TouchParityFile(projectRoot / "Assets" / "UI" / "Parity.teui", R"({"root":{}})");
 			TouchParityFile(projectRoot / "ProjectSettings" / "RenderSettings.json",
 				R"({"settings":{"maxShadowLights":4,"shadowResolution":1536,"ambientOcclusionStrength":0.75,"ambientOcclusionQuality":2,"textureBudgetMb":384,"resolutionScale":0.9,"variableRateShading":1}})");

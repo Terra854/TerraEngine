@@ -9,8 +9,8 @@
 		"coordinateOrder": ["x", "y", "z"],
 		"caseOrdering": "cases array order is canonical; case IDs are stable identities",
 		"contentProvenance": {
-			"status": "existing-source-assets-pinned; T070-generated-fixtures-pending",
-			"policy": "Existing committed source assets record their actual file SHA-256 and serialized identity. T070 outputs remain null until produced and verified byte-for-byte; null means unavailable, not verified.",
+			"status": "existing-source-assets-pinned; generated-installed-fixtures-pending",
+			"policy": "Existing committed source assets record their actual file SHA-256 and serialized identity. Generated installed fixture outputs remain null until produced and verified byte-for-byte; null means unavailable, not verified.",
 			"animationFixtures": [
 				{
 					"id": "idle-source",
@@ -285,7 +285,7 @@
 		},
 		"stress": {
 			"id": "stress-1000-characters",
-			"purpose": "SC-007 sustained bounded-state and throughput qualification",
+			"purpose": "Sustained bounded-state and throughput qualification",
 			"seed": 60060,
 			"population": 1000,
 			"lanePlacement": "deterministic nonintersecting parallel lanes on shared published terrain",
@@ -304,7 +304,7 @@
 		},
 		"paired": {
 			"id": "paired-coordination-overhead",
-			"purpose": "SC-008 matched control-versus-locomotion coordination overhead",
+			"purpose": "Matched control-versus-locomotion coordination overhead",
 			"seed": 60060,
 			"population": 1000,
 			"warmupSecondsPerRun": 30,

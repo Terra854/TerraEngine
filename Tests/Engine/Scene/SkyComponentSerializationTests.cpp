@@ -87,7 +87,9 @@ namespace TerraEngine::Tests {
 		{
 			SkyComponent::registerType();
 			SceneManager& scenes = SceneManager::Instance();
-			scenes.UnloadAll();
+			// Each activation helper owns a fresh fixture lifetime; root changes
+			// alone must not reopen a scene manager closed by another test.
+			scenes.BeginLoadSession();
 			scenes.SetSceneRoot(scenePath.parent_path());
 			const TerraEngine::UUID sceneId = scenes.LoadScene(scenePath);
 			return sceneId != TerraEngine::EMPTY_UUID && scenes.SetActiveScene(sceneId);

@@ -425,6 +425,10 @@ void BuildProfilesWindow::DrawExportPanel() {
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_HasExportResult && !m_ExportInProgress) {
+		// A copied result remains useful after bounded controller history expires.
+		// Show expiry separately instead of relabeling a completed build as failed.
+		if (!m_OperationId && (m_CurrentProgress.statusMessage == "Export observation expired." || m_CurrentProgress.statusMessage == "Export operation is unknown."))
+			ImGui::TextDisabled("%s", m_CurrentProgress.statusMessage.c_str());
 		ImGui::Spacing();
 		if (m_LastExportResult.success) {
 			ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f),
@@ -585,8 +589,19 @@ void BuildProfilesWindow::StartCapturedExport(bool launchAfterSuccess) {
 void BuildProfilesWindow::PollExportAtProtectedFrame() {
 	if (!m_ExportController || !m_OperationId) return;
 	m_ExportController->Poll();
-	const auto observation = m_ExportController->Observe(m_OperationId);
-	if (!observation) return;
+	const auto lookup = m_ExportController->Lookup(m_OperationId);
+	if (lookup.disposition == EditorExportLookupDisposition::Expired || lookup.disposition == EditorExportLookupDisposition::Unknown) {
+		// A missing terminal receipt is final, not an instruction to poll forever.
+		// Retained panel copies remain displayed; any pending launch is revoked.
+		const std::string message = lookup.disposition == EditorExportLookupDisposition::Expired ? "Export observation expired." : "Export operation is unknown.";
+		m_CurrentProgress.statusMessage = message;
+		if (!m_HasExportResult) {
+			m_LastExportResult = {}; m_LastExportResult.errorMessage = message;
+			m_LastExportResult.message = message; m_HasExportResult = true;
+		}
+		m_OperationId = 0; m_ExportInProgress = false; m_RunAfterExport = false; return;
+	}
+	const auto& observation = lookup.observation;
 	if (observation->intent.projectGeneration != m_ExportController->Generation()) {
 		// Old observations remain durable for job queries, but this panel now
 		// belongs to a different project and cannot display/adopt their intent.
@@ -594,7 +609,7 @@ void BuildProfilesWindow::PollExportAtProtectedFrame() {
 	}
 	m_CurrentProgress = observation->progress;
 	m_ExportInProgress = !observation->result.has_value();
-	const auto result = m_ExportController->ConsumeFinal(m_OperationId, 1);
+	const auto result = m_ExportController->Consume(m_OperationId, 1).result;
 	if (result) {
 		m_LastExportResult = *result;
 		m_LastValidationResult = result->validationResult;

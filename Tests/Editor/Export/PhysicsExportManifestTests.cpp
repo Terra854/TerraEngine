@@ -3,6 +3,9 @@
 #include "ExportEvidence.h"
 #include "ExportTypes.h"
 #include "Resource/ResourceManager.h"
+#include "Physics/PhysicsSettings.h"
+#include "Physics/Assets/PhysicsMaterial.h"
+#include "Physics/Assets/CookedColliderAsset.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -72,9 +75,34 @@ namespace TerraEngine::EditorTests {
 
 		registry.Add("Editor.PhysicsExport.InventoryClassifiesRuntimePhysicsPayloads", [](TestContext& context) {
 			TempPhysicsExportDirectory temporary;
-			temporary.Write("Package/ProjectSettings/PhysicsSettings.json", "{}");
-			temporary.Write("Package/Physics/Default.tephysmat", "physics material");
-			temporary.Write("Package/Physics/Level.tepcoll", "cooked collider");
+			// Classification now runs the same typed validation as export. Build
+			// genuine serialized settings, material and cooked envelopes so the
+			// assertions isolate their inventory types rather than malformed bytes.
+			const auto settings = TerraEngine::Physics::PhysicsSettings::Defaults();
+			nlohmann::json layers = nlohmann::json::array();
+			for(const auto& layer : settings.layers) {
+				layers.push_back({{"id", layer.id}, {"name", layer.name},
+					{"collisionMask", layer.collisionMask}, {"broadPhaseGroup", layer.broadPhaseGroup}, {"enabled", layer.enabled}});
+			}
+			temporary.Write("Package/ProjectSettings/PhysicsSettings.json",
+				nlohmann::json{{"schemaVersion", settings.schemaVersion},
+					{"gravity", {settings.gravity.x, settings.gravity.y, settings.gravity.z}}, {"layers", layers}}.dump());
+			TerraEngine::UUID materialId{}; materialId[0] = 1;
+			temporary.Write("Package/Physics/Default.tephysmat",
+				TerraEngine::Physics::PhysicsMaterial::Defaults(materialId).ToJson().dump());
+			TerraEngine::Physics::CookedColliderEnvelope envelope;
+			envelope.assetId[0] = 2; envelope.sourceAssetId[0] = 3;
+			envelope.sourceContentHash = 4; envelope.recipeHash = 5;
+			envelope.vertexCount = 3; envelope.triangleCount = 1; envelope.partCount = 1;
+			envelope.bounds.minimum = {-1, -1, -1}; envelope.bounds.maximum = {1, 1, 1};
+			TerraEngine::Physics::CookedColliderDiagnostics diagnostics;
+			const auto collider = TerraEngine::Physics::CookedColliderAsset::Create(
+				envelope, {std::byte{1}, std::byte{2}}, diagnostics);
+			context.Expect(collider.has_value(), "The classification fixture must create a codec-valid cooked envelope.");
+			if(!collider) return;
+			const auto colliderBytes = collider->Serialize();
+			temporary.Write("Package/Physics/Level.tepcoll",
+				std::string(reinterpret_cast<const char*>(colliderBytes.data()), colliderBytes.size()));
 			temporary.Write("Package/Physics/Source.tecollider", "editor only recipe");
 			std::vector<ExportContentInventoryEntry> inventory;
 			std::string error;
@@ -90,7 +118,7 @@ namespace TerraEngine::EditorTests {
 			TempPhysicsExportDirectory temporary;
 			const std::filesystem::path projectRoot = temporary.root_ / "Project";
 			const std::filesystem::path packageInput = projectRoot / "PackageInput";
-			temporary.Write("Project/PackageInput/Scenes/Runtime.tescene", R"({"objects":[]})");
+			temporary.Write("Project/PackageInput/Scenes/Runtime.tescene", R"({"format":"TerraSceneUnboundedV1","objects":[]})");
 			// These sibling editor artifacts intentionally remain outside package input.
 			// The inventory must be rooted in explicit runtime staging, never a broad
 			// project walk that could turn disposable caches into gameplay state.

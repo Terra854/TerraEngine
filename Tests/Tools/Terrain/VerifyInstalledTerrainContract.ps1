@@ -21,7 +21,7 @@ $requiredFoundation = @(
 	'Tests/Tools/Terrain/VerifyTerrainArchitecture.ps1', 'Tests/Tools/Terrain/VerifyInstalledTerrainContract.ps1',
 	'Tests/Tools/Terrain/hardware-matrix.json', 'Tests/Tools/Terrain/quality-profiles.json',
 	'Tests/Tools/Terrain/workloads.json', 'Tests/Fixtures/Terrain/manifest.json',
-	'Tests/Fixtures/Terrain/SaveRecovery/manifest.json', 'Schemas/Terrain/terrain-edit-v1.schema.json'
+	'Tests/Fixtures/Terrain/SaveRecovery/manifest.json'
 )
 $requiredShaderSources = @(
 	'Engine/Shaders/Terrain/TerrainMaterial.hlsli',

@@ -14,6 +14,8 @@
 #include <vector>
 #include <map>
 #include <future>
+
+class ThreadPool;
 #include <chrono>
 #include <cstdint>
 #include <atomic>
@@ -157,6 +159,23 @@ struct AssetImportProgress {
 	bool failed = false;
 	bool cancelRequested = false;
 	double elapsedSeconds = 0.0;
+};
+
+// A copied owner-boundary view distinguishes pending recovery from a successful
+// scan whose bounded catalog application is still progressing across frames.
+struct AssetDiscoveryDiagnostics {
+	std::uint64_t requestedGeneration{}, scanningGeneration{}, completedGeneration{}, projectGeneration{}, failedScans{}, retiredScans{};
+	bool pending{}, scanning{};
+	std::size_t pendingImports{};
+	std::string lastFailure;
+};
+
+// Admission diagnostics retain scalar totals, not an ever-growing terminal
+// history. Queued/active counts describe work still owned by this project.
+struct AssetImportAdmissionDiagnostics {
+	std::size_t configuredCapacity = 4U, queued{}, active{}, peakActive{};
+	std::uint64_t canceled{}, failed{}, retired{}, submitted{};
+	bool open{};
 };
 
 // AssetOrganizationImpact is the editor-owned preflight for an asset move,
@@ -364,8 +383,21 @@ public:
 	void RequestCancelAllImports(bool removeAssetsAfterCancel = true);
 	void CancelAllImportsAndWait(bool removeAssetsAfterCancel = true);
 	size_t GetCompileJobsCount() const;
+	AssetDiscoveryDiagnostics GetDiscoveryDiagnostics() const;
+	bool SetMaxActiveImports(std::size_t limit);
+	AssetImportAdmissionDiagnostics GetImportAdmissionDiagnostics() const;
 
 #ifdef TERRAENGINE_EDITOR_TESTS
+	enum class ImportAdmissionBoundaryForTests { ExecutorCreation, Enqueue, Finalization, BeforePublication };
+	using ImportAdmissionHookForTests = std::function<void(const std::filesystem::path&, ImportAdmissionBoundaryForTests)>;
+	void SetImportAdmissionHookForTests(ImportAdmissionHookForTests hook) { importAdmissionHookForTests = std::move(hook); }
+	std::uint64_t GetAssetIndexSaveAttemptsForTests() const { return assetIndexSaveAttemptsForTests; }
+	// Hooks are copied before submission and execute outside owner locks. They
+	// control native regressions only and are unavailable to editor automation.
+	using ProjectReconcileHookForTests = std::function<void(bool afterScan)>;
+	void SetProjectReconcileHookForTests(ProjectReconcileHookForTests hook) { projectReconcileHookForTests = std::move(hook); }
+	void PauseWatcherForTests() { fileWatcher.Stop(); (void)fileWatcher.PopEvents(); }
+	void InjectWatcherCompletionForTests(std::span<const std::byte> bytes, bool succeeded) { fileWatcher.ProcessWindowsCompletionForTests(bytes, succeeded); }
 	// Editor tests install this worker hook to hold an import at a deterministic
 	// cancellation boundary. A missing hook keeps the production compiler path.
 	using AsyncImportCompileHookForTests = std::function<bool(
@@ -440,6 +472,8 @@ private:
 	bool LoadAssetIndex();
 	bool SaveAssetIndex() const;
 	void RequestAssetIndexSave();
+	void EndAssetIndexSaveBatch() noexcept;
+	void TrySaveDeferredAssetIndex() noexcept;
 	void StartBackgroundProjectReconcile();
 	void PublishBackgroundProjectReconcile();
 	void ProcessPendingProjectReconcile();
@@ -466,10 +500,18 @@ private:
 	// batched until the original index has closed and every entry is registered.
 	bool loadingAssetIndex = false;
 	bool assetIndexSaveDeferred = false;
+	// Protected owner applications may nest; only their outer boundary persists
+	// the complete index. Standalone imports still save immediately.
+	std::size_t assetIndexSaveBatchDepth = 0U;
+#ifdef TERRAENGINE_EDITOR_TESTS
+	mutable std::uint64_t assetIndexSaveAttemptsForTests = 0U;
+#endif
 	
 	// File Watcher
 	FileWatcher fileWatcher;
-	bool watcherReconcilePending = false;
+	AssetDiscoveryDiagnostics discovery;
+	bool discoveryOpen = false;
+	std::uint64_t applyingReconcileGeneration = 0U;
 	mutable std::mutex animationReimportStatusMutex;
 	std::deque<AnimationReimportStatus> animationReimportStatuses;
 	std::uint64_t nextAnimationReimportStatusSequence = 0u;
@@ -489,17 +531,30 @@ private:
 	};
 	std::map<std::filesystem::path, PendingEvent> pendingEvents;
 	std::map<std::filesystem::path, bool> deferredImports;
+	std::map<std::filesystem::path, AssetMetadata> deferredImportMetadata;
+	std::unique_ptr<ThreadPool> importExecutor;
+	AssetImportAdmissionDiagnostics importAdmission;
+	mutable std::mutex importLifecycleMutex;
+	bool importAdmissionOpen = false;
+	std::uint64_t importProjectGeneration = 0U;
 
 	struct ProjectReconcileSnapshot {
+		std::uint64_t projectGeneration{}, requestedGeneration{};
 		std::vector<std::filesystem::path> sourceFiles;
 		std::vector<std::filesystem::path> orphanedMetaFiles;
 	};
 	std::future<ProjectReconcileSnapshot> projectReconcileFuture;
 	std::deque<std::filesystem::path> pendingReconcileImports;
-	std::vector<std::filesystem::path> pendingReconcileOrphanedMetas;
+	std::deque<std::filesystem::path> pendingReconcileRemovals;
+	std::deque<std::filesystem::path> pendingReconcileOrphanedMetas;
 
 	// struct AsyncCompileJob groups related state and operations so callers have one documented contract.
 	struct AsyncImportProgressState {
+#ifdef TERRAENGINE_EDITOR_TESTS
+		// Immutable copied native checkpoint; workers never read the owner's hook.
+		ImportAdmissionHookForTests beforePublicationHook;
+#endif
+		std::uint64_t projectGeneration = 0U;
 		mutable std::mutex mutex;
 		AssetImportProgress snapshot;
 		std::chrono::steady_clock::time_point startedAt = std::chrono::steady_clock::now();
@@ -517,13 +572,21 @@ private:
 		bool needsImport;
 		std::filesystem::path absSourcePath;
 		std::shared_ptr<AsyncImportProgressState> progressState;
+		std::optional<VirtualGeometryAdaptiveSettingsMetadata> resolvedMeshSettings;
+		bool admitted = false, submissionFailed = false;
 	};
 	// Update, shutdown drain, and explicit same-path synchronization share the
 	// same result handling so failure/cancellation cannot publish differently.
 	void FinalizeAsyncImportJob(AsyncCompileJob& job);
+	void DispatchQueuedImports();
+	bool RunAsyncImportWork(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath,
+		const std::shared_ptr<AsyncImportProgressState>& progressState,
+		const std::optional<VirtualGeometryAdaptiveSettingsMetadata>& resolvedMeshSettings);
 	std::vector<AsyncCompileJob> asyncJobs;
 
 #ifdef TERRAENGINE_EDITOR_TESTS
+	ImportAdmissionHookForTests importAdmissionHookForTests;
+	ProjectReconcileHookForTests projectReconcileHookForTests;
 	mutable std::mutex asyncImportCompileHookMutex;
 	AsyncImportCompileHookForTests asyncImportCompileHookForTests;
 	mutable std::mutex animationPackageTestHookMutex;

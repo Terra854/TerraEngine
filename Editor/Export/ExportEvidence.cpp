@@ -1,6 +1,7 @@
 // ExportEvidence.cpp - deterministic export evidence serialization.
 
 #include "ExportEvidence.h"
+#include "Runtime/ArtifactValidation.h"
 
 #include <algorithm>
 #include <array>
@@ -65,16 +66,6 @@ namespace {
 		std::ostringstream stream;
 		stream << std::hex << std::setfill('0') << std::setw(16) << hash;
 		return stream.str();
-	}
-
-	bool ContainsPlaceholder(const std::vector<unsigned char>& bytes) {
-		static constexpr std::array<unsigned char, 11> marker = {
-			'p', 'l', 'a', 'c', 'e', 'h', 'o', 'l', 'd', 'e', 'r'
-		};
-		if(bytes.size() < marker.size()) return false;
-		return std::search(bytes.begin(), bytes.end(), marker.begin(), marker.end(), [](unsigned char left, unsigned char right) {
-			return static_cast<unsigned char>(std::tolower(left)) == right;
-		}) != bytes.end();
 	}
 
 	Json DiagnosticToJson(const ExportDiagnostic& diagnostic) {
@@ -229,7 +220,16 @@ bool BuildExportContentInventory(
 		inventoryEntry.sourceKind = InferSourceKind(relative);
 		inventoryEntry.byteSize = bytes.size();
 		inventoryEntry.contentHash = HashBytes(bytes);
-		inventoryEntry.placeholderDetected = ContainsPlaceholder(bytes);
+		const auto validation = TerraEngine::Runtime::ValidateArtifact({
+			std::as_bytes(std::span(bytes)), TerraEngine::Runtime::InferArtifactKind(inventoryEntry.logicalPath),
+			TerraEngine::Runtime::HostNativeImageTarget(), inventoryEntry.logicalPath});
+		// The compatibility flag names explicit producer stub evidence only.
+		// An invalid required artifact is rejected separately, never renamed a stub.
+		inventoryEntry.placeholderDetected = validation.IsExplicitStub();
+		if(inventoryEntry.required && !validation.IsValid()) {
+			outError = validation.code + ": " + inventoryEntry.logicalPath + ": " + validation.diagnostic;
+			return false;
+		}
 		outEntries.push_back(std::move(inventoryEntry));
 	}
 

@@ -9,6 +9,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -23,12 +24,24 @@ namespace TerraEngine::AssetPipeline
 		GeneratedModelMeshVirtualGeometrySettings settings;
 	};
 
+	// A process can prepare complete outputs in owner-selected private roots.
+	// The owner retains and removes these roots after guarded publication.
+	struct ModelPackagePreparationRoots
+	{
+		std::filesystem::path assetRoot;
+		std::filesystem::path buildRoot;
+	};
+
 	struct ModelPackageImportOptions
 	{
 		std::filesystem::path sourcePath;
 		std::filesystem::path assetRoot;
 		std::filesystem::path buildRoot;
 		std::filesystem::path sourceRelativePath;
+		// Authored dependency spelling uses this read root while generated files
+		// use assetRoot. Empty preserves the historical direct-import behavior.
+		std::filesystem::path sourceAssetRoot;
+		std::optional<ModelPackagePreparationRoots> preparationRoots;
 		TerraEngine::UUID packageGuid = TerraEngine::EMPTY_UUID;
 		TerraEngine::UUID shaderCollectionId = TerraEngine::EMPTY_UUID;
 		GeneratedModelMeshVirtualGeometrySettings virtualGeometrySettings;
@@ -54,4 +67,9 @@ namespace TerraEngine::AssetPipeline
 	[[nodiscard]] const char* GetModelPackageImporterVersion(const std::filesystem::path& filePath);
 	[[nodiscard]] bool IsModelPackageImporterName(std::string_view importerName);
 	[[nodiscard]] ModelPackageImportResult ImportModelPackage(const ModelPackageImportOptions& options);
+	// Publish already validated private outputs, including their candidate
+	// sidecar, with the existing rollback transaction. The caller holds its
+	// lifecycle/publication arbiter; this helper does no compile or physical wait.
+	[[nodiscard]] bool PublishPreparedModelPackage(
+		const ModelPackagePreparationRoots& roots, const ModelPackageImportOptions& options);
 }

@@ -4,6 +4,9 @@
 
 namespace TerraEngine::EditorTests {
 	void RegisterExportLifecycleTests(TestRegistry& registry);
+	void RegisterExportArtifactValidationTests(TestRegistry& registry);
+	void RegisterAssetDiscoveryRecoveryTests(TestRegistry& registry);
+	void RegisterAssetImportAdmissionTests(TestRegistry& registry);
 	void RegisterEditorSceneSaveFailureSafetyTests(TestRegistry& registry);
 	void RegisterAudioClipCompilerTests(TestRegistry& registry);
 	void RegisterAudioImportPlaybackTests(TestRegistry& registry);
@@ -249,6 +252,9 @@ namespace TerraEngine::EditorTests {
 int main() {
 	TerraEngine::EditorTests::TestRegistry registry;
 	TerraEngine::EditorTests::RegisterExportLifecycleTests(registry);
+	TerraEngine::EditorTests::RegisterExportArtifactValidationTests(registry);
+	TerraEngine::EditorTests::RegisterAssetDiscoveryRecoveryTests(registry);
+	TerraEngine::EditorTests::RegisterAssetImportAdmissionTests(registry);
 	TerraEngine::EditorTests::RegisterEditorSceneSaveFailureSafetyTests(registry);
 
 	registry.Add("Editor.Smoke.HarnessRuns", [](TerraEngine::EditorTests::TestContext& context) {

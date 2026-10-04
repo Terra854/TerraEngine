@@ -178,6 +178,12 @@ public:
 	static constexpr std::size_t kMaximumTelemetryHistoryCapacityPerWorker = 256;
 
 	static TERRAENGINE_API ThreadPool& instance();
+	// Independent capacity reuses the same queue implementation without changing
+	// frame workers. The owner must close/drain before releasing its dependencies.
+	// The optional startup checkpoint is native-only deterministic test input.
+	static TERRAENGINE_API std::unique_ptr<ThreadPool> CreateOwned(
+		std::size_t workerCount, std::function<void(std::size_t)> beforeWorker = {});
+	TERRAENGINE_API ~ThreadPool();
 
 	ThreadPool(const ThreadPool&) = delete;
 	ThreadPool& operator=(const ThreadPool&) = delete;
@@ -198,6 +204,9 @@ public:
 		
 		// constexpr is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		if constexpr (std::is_void_v<ReturnType>) {
+			// Owned pools must never export a raw-this reuse-cache deleter. Even an
+			// accidentally retained void handle can then safely outlive that pool.
+			if(ownedExecutor) return std::make_shared<Task<void>>(std::function<void()>(std::move(boundFunc)));
 			return AllocateVoidTask(std::move(boundFunc));
 		} else {
 			return std::make_shared<Task<ReturnType>>(std::function<ReturnType()>(boundFunc));
@@ -236,7 +245,8 @@ public:
 
 private:
 	ThreadPool() : stop(false) {}
-	~ThreadPool() {}
+	void InitializeWorkers(std::size_t requestedWorkerCount,
+		const std::function<void(std::size_t)>& beforeWorker);
 
 	void workerThread(int threadNum);
 	void ResetTelemetryForWorkers(std::size_t workerCount);
@@ -277,6 +287,7 @@ private:
 	std::mutex queue_mutex;
 	std::condition_variable condition;
 	bool stop;
+	bool ownedExecutor = false;
 	
 	std::vector<Task<void>*> voidTaskPool;
 	std::mutex poolMutex;

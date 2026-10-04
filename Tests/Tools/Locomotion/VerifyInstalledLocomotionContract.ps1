@@ -1,4 +1,4 @@
-# VerifyInstalledLocomotionContract.ps1 - fail-closed installed Feature 060 audit.
+# VerifyInstalledLocomotionContract.ps1 - fail-closed installed locomotion audit.
 [CmdletBinding()]
 param(
 	[string]$InstallRoot = 'out/build/RelWithDebInfo/Build',
@@ -235,7 +235,7 @@ if($null -ne $workloadsPath -and $null -ne $fixtureManifestPath) {
 }
 
 # Existing committed source fixtures are also pinned by their declared SHA-256;
-# compare the installed copies without confusing them with generated T070 outputs.
+# compare the installed copies without confusing them with generated fixture outputs.
 $sourceFixtureResults = @()
 if($null -ne $workloadsPath) {
 	try {

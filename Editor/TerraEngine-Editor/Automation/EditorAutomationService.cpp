@@ -7995,14 +7995,25 @@ namespace TerraEngine::Editor::Automation
 		for (auto iterator = activeExportOperations.begin(); iterator != activeExportOperations.end(); ) {
 			auto& active = iterator->second;
 			active.controller->Poll();
-			const auto observation = active.controller->Observe(active.operationId);
-			if (!observation) { ++iterator; continue; }
+			const auto lookup = active.controller->Lookup(active.operationId);
+			if (lookup.disposition == EditorExportLookupDisposition::Expired || lookup.disposition == EditorExportLookupDisposition::Unknown) {
+				// Retention expiry and a never-issued reference are terminal consumer
+				// outcomes. Durable job copies survive, while ongoing polling and old
+				// project launch authority are relinquished at this protected boundary.
+				const bool expired = lookup.disposition == EditorExportLookupDisposition::Expired;
+				const nlohmann::json terminal{{"success", false}, {"category", expired ? "export.expired" : "export.unknown"},
+					{"operationId", active.operationId}, {"message", expired ? "Export observation expired." : "Export operation is unknown."}};
+				(void)jobService.CompleteFailed(iterator->first, terminal);
+				for (auto& job : exportJobs) if (job.jobId == iterator->first && job.state != "succeeded" && job.state != "failed" && job.state != "canceled") job.state = "failed";
+				iterator = activeExportOperations.erase(iterator); continue;
+			}
+			const auto& observation = lookup.observation;
 			if (observation->revision != active.revision) {
 				active.revision = observation->revision;
 				(void)jobService.SetState(iterator->first, AutomationJobState::Running, std::string(ToString(observation->progress.stage)));
 				(void)jobService.PublishProgress(iterator->first, observation->progress.overallProgress, std::string(ToString(observation->progress.stage)));
 			}
-			const auto result = active.controller->ConsumeFinal(active.operationId, 2);
+			const auto result = active.controller->Consume(active.operationId, 2).result;
 			if (!result) { ++iterator; continue; }
 			for (const auto& diagnostic : result->diagnostics) {
 				(void)jobService.AddDiagnostic(iterator->first, {ExportAutomationSeverity(diagnostic.severity), diagnostic.category, diagnostic.message,

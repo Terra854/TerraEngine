@@ -17,7 +17,7 @@ coverage, correctness, rollback, visibility, or install mismatches.
 
 This document is a self-contained design brief for implementing a complete,
 production-oriented physics system in TerraEngine. It is intended to be copied
-to another development machine and supplied to the same Spec Kit workflow as
+to another development machine and used during implementation planning as
 the authoritative feature description.
 
 The receiving repository is expected to preserve TerraEngine's existing
@@ -38,7 +38,7 @@ architecture:
 - Rejected transactional operations are atomic and leave no partial live state.
 - Editor and exported games must use the same runtime physics implementation.
 
-This document describes the intended final architecture. Spec Kit may split the
+This document describes the intended final architecture. Implementation planning may split the
 work into user stories and implementation phases, but it should not silently
 weaken the safety, runtime parity, or testing requirements.
 
@@ -75,7 +75,7 @@ failure, and application shutdown.
 
 ## Physics Backend Selection
 
-The physics library is intentionally not selected in this design. Spec Kit must
+The physics library is intentionally not selected in this design. The implementation team must
 research the available libraries and record the decision in the implementation
 plan before any third-party source is added.
 
@@ -122,7 +122,7 @@ and the reason the selected backend best fits TerraEngine.
 - Wrap backend allocation, logging, assertions, job execution, and temporary
   allocators behind TerraEngine adapters.
 - Keep backend replacement possible through `IPhysicsBackend`, but do not build
-  multiple backends in the first implementation unless Spec Kit identifies a
+  multiple backends in the first implementation unless planning identifies a
   concrete product requirement.
 
 ### Determinism Position
@@ -1157,7 +1157,7 @@ Export parity uses the installed baseline command
 `Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build`
 with a disposable `out/ci/export-runtime-baseline` work root.
 
-Target gates should be finalized by Spec Kit, but the initial design expects:
+Target gates should be finalized during qualification planning, but the initial design expects:
 
 - At least 10,000 mixed static/dynamic bodies in stress tests.
 - At least 1,000 concurrently active dynamic bodies at 60 Hz on the reference
@@ -1384,49 +1384,3 @@ The feature is complete when:
 10. The final codebase compiles and the CMake install target succeeds.
 
 ---
-
-## Spec Kit Handoff Prompt
-
-Copy this document into the receiving TerraEngine workspace, then invoke the
-Spec Kit specification workflow with a prompt equivalent to:
-
-> Implement the complete TerraEngine physics system described in
-> `Docs/PhysicsSystemDesign.md`. Preserve every architectural, scheduler,
-> transactional mutation, component, scripting, editor, MCP, export, testing,
-> dependency, and lifecycle requirement in that document. Research and select
-> the physics backend during planning, then keep it behind TerraEngine-owned
-> abstractions. Project creation, opening, and closing must remain
-> native-editor-only. Split delivery into
-> independently testable user stories without weakening the final acceptance
-> criteria.
-
-Recommended workflow:
-
-1. Run `speckit-specify` using this document as the feature source.
-2. Run `speckit-clarify` for unresolved product decisions such as the initial
-   advanced-module scope and target performance hardware.
-3. Run `speckit-plan` and require explicit scheduler/resource/visibility
-   declarations, a backend comparison/selection record, and dependency details.
-4. Run `speckit-tasks`, then `speckit-analyze` before implementation.
-5. Run `speckit-implement` in phases, compiling and testing after every story.
-6. Perform installed-editor and exported-runtime live validation before marking
-   the final tasks complete.
-
-### Clarifications Worth Asking During Spec Kit
-
-- Whether ragdolls, vehicles, and soft bodies must ship in the same feature or
-  may be follow-up specifications after the shared foundation lands.
-- Which physics backend best satisfies the documented evaluation criteria and
-  what prototype evidence is needed before committing to it.
-- Reference hardware and performance budgets.
-- Whether Linux support is required in the first physics release or immediately
-  after Windows parity.
-- Whether cross-platform deterministic networking is planned soon enough to
-  impose stricter numerical constraints now.
-- Whether the existing animation system is ready for ragdoll pose integration.
-- Desired maximum collision layer count and compatibility/migration policy.
-
-Unless clarified otherwise, the safe default is to ship the complete rigid
-body, collider, material, filtering, query, event, constraint, character,
-editor, C#, MCP, export, and hardening scope first, then deliver advanced
-ragdoll/vehicle/soft-body modules on the same architecture.

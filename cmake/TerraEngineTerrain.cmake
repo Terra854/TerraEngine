@@ -152,7 +152,7 @@ foreach(_terrain_file IN LISTS _TERRAENGINE_TERRAIN_EDITOR_FILES)
 	endif()
 endforeach()
 
-# Phase 9 automation implementation files are deliberately opt-in. This keeps
+# Terrain automation implementation files are deliberately opt-in. This keeps
 # a partially landed provider from changing the editor target until its paired
 # header/source is present.
 set(_TERRAENGINE_TERRAIN_AUTOMATION_EDITOR_FILES
@@ -231,13 +231,6 @@ foreach(_terrain_test IN LISTS _TERRAENGINE_TERRAIN_EDITOR_TEST_FILES)
 			"${CMAKE_CURRENT_SOURCE_DIR}/${_terrain_test}")
 	endif()
 endforeach()
-
-set(TERRAENGINE_TERRAIN_CONTRACT_FILES)
-file(GLOB _terrain_contract_files CONFIGURE_DEPENDS
-	"${CMAKE_CURRENT_SOURCE_DIR}/specs/053-terrain-authoring-foundation/contracts/*")
-if(_terrain_contract_files)
-	list(APPEND TERRAENGINE_TERRAIN_CONTRACT_FILES ${_terrain_contract_files})
-endif()
 
 file(GLOB_RECURSE _terrain_runtime_shader_files CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Terrain/*")

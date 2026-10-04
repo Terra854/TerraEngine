@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param([string]$Root=(Resolve-Path (Join-Path $PSScriptRoot '../../..')).Path)
 $ErrorActionPreference='Stop'
-$forbidden='048-refactor-frame-publication|(?<![A-Za-z0-9])US[0-9]+(?![A-Za-z0-9])|(?<![A-Za-z0-9])T[0-9]{3}(?![A-Za-z0-9])|legacy.*renderer|DX12|DirectX12|(?<![A-Za-z0-9])(?:NVIDIA|AMD)(?![A-Za-z0-9])|vendor-specific|spec kit|user story|staggered.*update|old.*animation.*publication'
+$forbidden='048-refactor-frame-publication|(?<![A-Za-z0-9])US[0-9]+(?![A-Za-z0-9])|(?<![A-Za-z0-9])T[0-9]{3}(?![A-Za-z0-9])|legacy.*renderer|DX12|DirectX12|(?<![A-Za-z0-9])(?:NVIDIA|AMD)(?![A-Za-z0-9])|vendor-specific|spec[ ]kit|user story|staggered.*update|old.*animation.*publication'
 # Audit only source-owned product and validation folders. External dependencies,
 # generated build trees, local agent metadata, and uncommitted specifications are
 # intentionally outside the engine naming contract and make recursive scans both

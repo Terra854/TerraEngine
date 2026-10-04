@@ -4,6 +4,7 @@
 // so the split changes compilation boundaries without changing resource lifetime or synchronization.
 
 #include "VulkanContextSource.h"
+#include "ThreadPool/ScopedTaskSettlement.h"
 
 // VulkanContext::RenderFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::RenderFrame(
@@ -3727,6 +3728,11 @@ void VulkanContext::RenderFrame(
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!prepared.empty()) {
 		const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+		// Hardware cores do not imply available task workers. In particular a
+		// single executing worker must record inline rather than wait for its own
+		// queued children. Zero workers also follows the synchronous fallback.
+		const size_t recordingCapacity = std::min(hw,
+			std::max<size_t>(1u, ThreadPool::instance().getThreadCount()));
 		const size_t usefulWorkerCount = std::max<size_t>(
 			1u,
 			(prepared.size() + kVulkanDrawsPerRecordingWorker - 1u)
@@ -3734,7 +3740,7 @@ void VulkanContext::RenderFrame(
 		const size_t workerCount = prepared.size()
 			< kVulkanParallelRecordingThreshold
 			? 1u
-			: std::min(usefulWorkerCount, hw);
+			: std::min(usefulWorkerCount, recordingCapacity);
 		const size_t chunkSize = (prepared.size() + workerCount - 1) / workerCount;
 
 		impl->EnsureWorkerPools(impl->currentFrame, workerCount);
@@ -3742,8 +3748,10 @@ void VulkanContext::RenderFrame(
 		futures.reserve(workerCount);
 		std::vector<VkCommandBuffer> futureSecondaryBuffers;
 		std::vector<std::uint64_t> futureSecondarySignatures;
+		std::vector<VkCommandBuffer> recordedSecondaryBuffers;
 		futureSecondaryBuffers.reserve(workerCount);
 		futureSecondarySignatures.reserve(workerCount);
+		recordedSecondaryBuffers.reserve(workerCount);
 		// The scratch vector belongs to the render thread's thread-local storage.
 		// Worker jobs must capture that exact storage explicitly; resolving the
 		// thread-local name on a worker would select the worker's empty instance.
@@ -3891,6 +3899,12 @@ void VulkanContext::RenderFrame(
 				? secondary : VK_NULL_HANDLE;
 		};
 
+		// Construct after the recording callable and every referenced input. Any
+		// later admission/result failure joins all recording children before those
+		// stack captures expire. Prepared results are accepted only as a whole.
+		TerraEngine::Tasks::ScopedTaskSettlement<VkCommandBuffer> recordingSettlement(
+			futures, TerraEngine::Tasks::NestedTaskGroup::VulkanSecondaryRecording);
+
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (size_t taskIndex = 0; taskIndex < workerCount; ++taskIndex) {
 			const size_t start = taskIndex * chunkSize;
@@ -3913,25 +3927,26 @@ void VulkanContext::RenderFrame(
 			}
 			impl->reusableSecondaryCommandSignatures.erase(secondary);
 			if (workerCount == 1u) {
-				if (VkCommandBuffer recorded = recordSecondaryRange(secondary, renderPass, framebuffer, renderExtent, start, end); recorded != VK_NULL_HANDLE) {
+				if (VkCommandBuffer recorded = recordingSettlement.RunInline([&] {
+					return recordSecondaryRange(secondary, renderPass, framebuffer, renderExtent, start, end);
+				}); recorded != VK_NULL_HANDLE) {
 					secondaryBuffers.push_back(recorded);
 					impl->reusableSecondaryCommandSignatures[recorded] = secondarySignature;
 				}
 			}
 			else {
-				auto task = ThreadPool::instance().createTask([secondary, renderPass, framebuffer, renderExtent, start, end, &recordSecondaryRange]() -> VkCommandBuffer {
+				recordingSettlement.CreateAndEnqueue(ThreadPool::instance(), [secondary, renderPass, framebuffer, renderExtent, start, end, &recordSecondaryRange]() -> VkCommandBuffer {
 					return recordSecondaryRange(secondary, renderPass, framebuffer, renderExtent, start, end);
 				});
-				futures.push_back(task->getFuture());
 				futureSecondaryBuffers.push_back(secondary);
 				futureSecondarySignatures.push_back(secondarySignature);
-				ThreadPool::instance().enqueue(task);
 			}
 		}
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (std::size_t futureIndex = 0u; futureIndex < futures.size(); ++futureIndex) {
-			VkCommandBuffer secondary = futures[futureIndex].get();
+		// Collect every completion before publishing any newly recorded command.
+		recordingSettlement.Collect(recordedSecondaryBuffers);
+		for (std::size_t futureIndex = 0u; futureIndex < recordedSecondaryBuffers.size(); ++futureIndex) {
+			VkCommandBuffer secondary = recordedSecondaryBuffers[futureIndex];
 			if (secondary != VK_NULL_HANDLE) {
 				secondaryBuffers.push_back(secondary);
 				impl->reusableSecondaryCommandSignatures[secondary] =

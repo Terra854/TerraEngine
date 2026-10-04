@@ -15,6 +15,8 @@
 #include <condition_variable>
 #include <queue>
 #include <cstdint>
+#include <span>
+#include <cstddef>
 
 enum class FileStatus {
 	Created,
@@ -60,6 +62,12 @@ public:
 	// the main thread cannot lose a recovery request between frames.
 	bool ConsumeReconcileRequired();
 	FileWatcherDiagnostics GetDiagnostics() const;
+#ifdef TERRAENGINE_EDITOR_TESTS
+	// Native regressions feed owned completion bytes through the same decoding
+	// path as the platform pump; no buffer address or OS handle escapes.
+	void ProcessWindowsCompletionForTests(std::span<const std::byte> bytes, bool succeeded) { ProcessWindowsCompletion(bytes, succeeded); }
+	void ProcessLinuxLossForTests(bool succeeded, std::uint32_t mask) { ProcessLinuxLoss(succeeded, mask); }
+#endif
 
 private:
 	std::filesystem::path pathData;
@@ -78,6 +86,8 @@ private:
 	// turn source-watch noise into unbounded memory or delayed stale reimports.
 	void QueueEvent(std::filesystem::path path, FileStatus status);
 	void FlagReconcileRequired();
+	void ProcessWindowsCompletion(std::span<const std::byte> bytes, bool succeeded);
+	void ProcessLinuxLoss(bool succeeded, std::uint32_t mask);
 	
 	// Internal helper to check if we should use the OS specific or generic loop
 	void WatchLoop();

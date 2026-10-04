@@ -36,7 +36,8 @@ $output = [System.IO.Path]::GetFullPath($OutputDirectory)
 $missing = [System.Collections.Generic.List[string]]::new()
 $required = [ordered]@{}
 
-$required.schema = Resolve-InstalledFile @("Schemas/Terrain/terrain-edit-v1.schema.json")
+# Request validation belongs to the editor's typed automation boundary. The
+# runner supplies fixtures and checks receipts without a separate schema file.
 $required.manifest = Resolve-InstalledFile @("Tests/Fixtures/Terrain/manifest.json")
 $required.recovery = Resolve-InstalledFile @("Tests/Fixtures/Terrain/SaveRecovery/manifest.json")
 $required.workloads = Resolve-InstalledFile @("Tests/Tools/Terrain/workloads.json")
@@ -49,9 +50,7 @@ foreach ($entry in $required.GetEnumerator()) {
 	if ($null -eq $entry.Value) { Add-Missing "$install (missing installed $($entry.Key))" }
 }
 
-$schema = $null
 $manifest = $null
-if ($null -ne $required.schema) { $schema = Get-Content -Raw -LiteralPath $required.schema | ConvertFrom-Json }
 if ($null -ne $required.manifest) { $manifest = Get-Content -Raw -LiteralPath $required.manifest | ConvertFrom-Json }
 $operations = if ($Operation -eq "all") { @("create", "inspect", "edit", "rebuild", "validate", "import", "export", "save", "parity") } else { @($Operation) }
 $resultPath = Join-Path $output "terrain-validation-result.json"
@@ -77,7 +76,7 @@ if (-not $DryRun -and $missing.Count -eq 0) {
 		$receipts = [System.Collections.Generic.List[object]]::new()
 		foreach ($operationName in $operations) {
 			$receiptPath = Join-Path $output ("terrain-" + $operationName + "-receipt.json")
-			& $AutomationAdapter --operation $operationName --schema $required.schema --fixture $required.manifest --recovery-fixture $required.recovery --output $receiptPath
+			& $AutomationAdapter --operation $operationName --fixture $required.manifest --recovery-fixture $required.recovery --output $receiptPath
 			if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
 				$result.failure = "Automation adapter did not publish a receipt for operation '$operationName'."
 				break

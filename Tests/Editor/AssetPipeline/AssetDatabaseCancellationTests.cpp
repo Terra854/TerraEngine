@@ -87,17 +87,17 @@ namespace TerraEngine::EditorTests
 				std::filesystem::remove_all(root, ignored);
 			}
 
-			void StartBlockedReimport()
+			void StartBlockedReimport(bool retainAfterCancellation = false)
 			{
 				const std::shared_ptr<BlockedImportGate> sharedGate = gate;
 				AssetDatabase::Instance().SetAsyncImportCompileHookForTests(
-					[sharedGate](const AssetMetadata&, const std::atomic_bool& cancellationRequested) {
+					[sharedGate, retainAfterCancellation](const AssetMetadata&, const std::atomic_bool& cancellationRequested) {
 						std::unique_lock<std::mutex> lock(sharedGate->mutex);
 						sharedGate->workerEntered = true;
 						sharedGate->condition.notify_all();
 						// Cancellation owns a separate atomic token, so use a short timed
 						// wait to observe it without needing a production callback into the test.
-						while (!sharedGate->allowCompletion && !cancellationRequested.load()) {
+						while (!sharedGate->allowCompletion && (retainAfterCancellation || !cancellationRequested.load())) {
 							sharedGate->condition.wait_for(lock, std::chrono::milliseconds(5));
 						}
 						return !cancellationRequested.load();
@@ -168,6 +168,19 @@ namespace TerraEngine::EditorTests
 
 	void RegisterAssetDatabaseCancellationTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.AssetPipeline.AssetDatabaseCancellation.CanceledImportRetainsPhysicalOwnership", [](TestContext& context) {
+			AssetDatabaseCancellationFixture fixture;
+			fixture.StartBlockedReimport(true);
+			context.Expect(fixture.WaitForWorker(), "Cancellation ownership requires a real held production import callback.");
+			context.Expect(AssetDatabase::Instance().CancelImport(fixture.sourcePath, false), "Active cancellation must revoke pending publication.");
+			context.Expect(AssetDatabase::Instance().GetCompileJobsCount() == 1U, "Logical cancellation must retain its unsettled physical job.");
+			auto drain = std::async(std::launch::async, [] { AssetDatabase::Instance().CancelAllImportsAndWait(false); });
+			const bool retained = drain.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout;
+			fixture.ReleaseWorker(); drain.get();
+			context.Expect(retained && AssetDatabase::Instance().GetCompileJobsCount() == 0U, "Drain must wait until the held worker actually exits, then release its ownership.");
+			fixture.ExpectPublishedStateSurvives(context);
+			fixture.ExpectRegistrationSurvives(context);
+		});
 		registry.Add("Editor.AssetPipeline.AssetDatabaseCancellation.ShutdownDrainsActiveImport", [](TestContext& context) {
 			AssetDatabaseCancellationFixture fixture;
 			fixture.StartBlockedReimport();

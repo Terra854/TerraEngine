@@ -59,7 +59,9 @@ namespace TerraEngine::EditorTests {
 				document << Json{{"format", "TerraSceneUnboundedV1"}, {"name", "Locomotion"},
 					{"sceneSettings", Json::object()}, {"objects", Json::array()}}.dump(2);
 				document.close();
-				SceneManager::Instance().UnloadAll();
+				// Open this fixture's independent project lifetime explicitly;
+				// changing source roots does not reopen closed scene admission.
+				SceneManager::Instance().BeginLoadSession();
 				SceneManager::Instance().SetSceneRoot(editor.projectManager->GetProjectRoot());
 				const UUID scene = SceneManager::Instance().LoadScene(path);
 				SceneManager::Instance().SetActiveScene(scene);

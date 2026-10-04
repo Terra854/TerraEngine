@@ -24,6 +24,12 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#ifdef _WIN32
+#include <Windows.h>
+// Keep the native file lease from changing standard min/max call semantics.
+#undef min
+#undef max
+#endif
 
 namespace TerraEngine::EditorTests
 {
@@ -247,6 +253,80 @@ namespace TerraEngine::EditorTests
 
 	void RegisterAnimationSubAssetIdentityTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.Animation.SubAssetIdentity.PreparedPackagePublishesOnlyAtOwnerBoundary", [](TestContext& context) {
+			using namespace TerraEngine::AssetPipeline;
+			const auto testRoot = std::filesystem::temp_directory_path() / "TerraEnginePreparedPackageTests" / TerraEngine::ToHexString(TerraEngine::GenerateUUID());
+			struct FixtureOwner { std::filesystem::path root; ~FixtureOwner() { std::error_code ignored; std::filesystem::remove_all(root, ignored); } } owner{testRoot};
+			ModelPackageImportOptions options;
+			options.assetRoot = testRoot / "Assets"; options.buildRoot = testRoot / "Build";
+			options.sourceRelativePath = "Models/ImportedHero.gltf";
+			options.sourcePath = options.assetRoot / options.sourceRelativePath;
+			options.packageGuid = TerraEngine::GenerateUUID(); options.forceReimport = true;
+			const auto fixtureModels = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Tests/Fixtures/Animation/ImportValidation/Assets/Models";
+			std::filesystem::create_directories(options.sourcePath.parent_path());
+			std::filesystem::copy(fixtureModels, options.sourcePath.parent_path(), std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing);
+			const auto first = ImportModelPackage(options);
+			context.Expect(first.status != ModelImportStatus::Failed && !first.generatedMeshes.empty(), "The fixture must establish a real last-known-good package before preparation.");
+			context.Expect(SaveModelPackageImportResult(options.sourcePath, first), "The prior authoritative package sidecar must be available to the owner.");
+			const auto manifestPath = options.buildRoot / ".terra-animation-manifests" / (TerraEngine::ToHexString(options.packageGuid) + ".json");
+			const auto originalManifest = ReadFileBytes(manifestPath);
+			const auto originalSidecar = ReadFileBytes(GetImportResultPath(options.sourcePath));
+			const auto originalMesh = ReadFileBytes(options.buildRoot / first.generatedMeshes.front().compiledPath);
+			// Preserve the saved child recipe with its stable GUID, exactly as the
+			// isolated compiler restores it from the authoritative prior sidecar.
+			auto recipe = first.generatedMeshes.front().virtualGeometrySettings;
+			recipe.hasOverride = true; recipe.targetRatios = {1.0F, 0.5F}; recipe.settingsSource = "PreparedFixture";
+			options.virtualGeometryMeshOverrides.push_back({first.generatedMeshes.front().guid, recipe});
+			const ModelPackagePreparationRoots roots{options.assetRoot / ".ta-prepared", options.buildRoot / ".tb-prepared"};
+			options.preparationRoots = roots;
+			const auto candidate = ImportModelPackage(options);
+			context.Expect(candidate.status != ModelImportStatus::Failed && candidate.animationManifest.publishedGeneration == first.animationManifest.publishedGeneration + 1U
+				&& candidate.animationManifest.lastKnownGoodGeneration == first.animationManifest.publishedGeneration,
+				"Private preparation must read the real prior generation without publishing its candidate marker.");
+			context.Expect(SaveModelPackageImportResult(roots.assetRoot / options.sourceRelativePath, candidate), "The child must keep its complete candidate sidecar inside private Assets.");
+			context.Expect(ReadFileBytes(manifestPath) == originalManifest && ReadFileBytes(GetImportResultPath(options.sourcePath)) == originalSidecar
+				&& ReadFileBytes(options.buildRoot / first.generatedMeshes.front().compiledPath) == originalMesh,
+				"Preparing a complete package must leave every sampled authoritative artifact byte-for-byte unchanged.");
+			context.Expect(candidate.generatedMeshes.front().guid == first.generatedMeshes.front().guid
+				&& candidate.generatedMeshes.front().virtualGeometrySettings.hasOverride
+				&& candidate.generatedMeshes.front().virtualGeometrySettings.targetRatios == recipe.targetRatios,
+				"Preparation must preserve stable child identity and the saved per-child recipe.");
+#ifdef _WIN32
+			{
+				// Denying delete sharing on the final marker makes its rename fail
+				// after earlier payloads moved, exercising the real rollback path.
+				struct MarkerLease { HANDLE handle; ~MarkerLease() { if(handle != INVALID_HANDLE_VALUE) CloseHandle(handle); } } lease{
+					CreateFileW(NativeIoPath(manifestPath).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+				context.Expect(lease.handle != INVALID_HANDLE_VALUE, "The final marker must be retained to force a real publication failure.");
+				context.Expect(!PublishPreparedModelPackage(roots, options), "A later marker rename failure must reject the candidate transaction.");
+				context.Expect(ReadFileBytes(manifestPath) == originalManifest && ReadFileBytes(GetImportResultPath(options.sourcePath)) == originalSidecar
+					&& ReadFileBytes(options.buildRoot / first.generatedMeshes.front().compiledPath) == originalMesh,
+					"Failed late publication must restore earlier payload and sidecar moves without replacing the prior marker.");
+			}
+			// A rejected transaction consumes some private payloads while rolling
+			// back. The owner retries by preparing a fresh complete candidate.
+			const auto retry = ImportModelPackage(options);
+			context.Expect(retry.status != ModelImportStatus::Failed && SaveModelPackageImportResult(roots.assetRoot / options.sourceRelativePath, retry),
+				"A publication retry must prepare and save a complete fresh candidate.");
+#endif
+			context.Expect(PublishPreparedModelPackage(roots, options), "The protected owner must publish the complete prepared transaction.");
+			ModelPackageImportResult published;
+			context.Expect(LoadModelPackageImportResult(options.sourcePath, published)
+				&& published.animationManifest.publishedGeneration == candidate.animationManifest.publishedGeneration
+				&& !published.generatedMeshes.empty()
+				&& published.generatedMeshes.front().guid == candidate.generatedMeshes.front().guid
+				&& published.generatedMeshes.front().virtualGeometrySettings.targetRatios == recipe.targetRatios,
+				"Owner publication must move the matching sidecar, identities, generation and recipe together.");
+			// A later candidate which loses owner authority is discarded physically;
+			// it must never become visible merely because preparation succeeded.
+			const auto publishedManifest = ReadFileBytes(manifestPath), publishedSidecar = ReadFileBytes(GetImportResultPath(options.sourcePath));
+			const auto discarded = ImportModelPackage(options);
+			context.Expect(discarded.status != ModelImportStatus::Failed, "The discarded candidate must be valid so this proves the visibility boundary.");
+			std::filesystem::remove_all(roots.assetRoot); std::filesystem::remove_all(roots.buildRoot);
+			context.Expect(!PublishPreparedModelPackage(roots, options), "Missing private roots must reject without touching authoritative package files.");
+			context.Expect(ReadFileBytes(manifestPath) == publishedManifest && ReadFileBytes(GetImportResultPath(options.sourcePath)) == publishedSidecar,
+				"Discarding an uncommitted private generation must retain the published package and sidecar.");
+		});
 		registry.Add("Editor.Animation.SubAssetIdentity.MoveRenameReimportAndReloadPreserveSemanticIds", [](TestContext& context) {
 			const TerraEngine::UUID packageGuid = TerraEngine::GenerateUUID();
 			const auto original = TerraEngine::AssetPipeline::ImportFbxPackage(MakeIdentityOptions("Models/OriginalCharacter.fbx", packageGuid));

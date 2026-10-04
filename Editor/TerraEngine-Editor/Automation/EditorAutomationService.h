@@ -222,6 +222,9 @@ namespace TerraEngine::Editor::Automation
 		std::function<void(std::optional<entt::entity>)> setSelectedEntity;
 		std::vector<AssistantCapability> capabilities;
 		std::vector<ExportJob> exportJobs;
+		// A native test accessor can supply an invalid retained export reference;
+		// this cannot be requested through the automation or MCP protocol.
+		friend struct EditorExportRetentionTestAccess;
 		struct ActiveExportOperation {
 			std::shared_ptr<EditorExportOperationController> controller;
 			std::uint64_t operationId = 0;

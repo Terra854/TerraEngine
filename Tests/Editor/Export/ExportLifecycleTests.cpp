@@ -41,8 +41,137 @@ namespace TerraEngine::EditorTests {
 			request.launcherPath = "captured-platform-launcher";
 			return request;
 		}
+		ExportResult ControlledSuccess(const ExportRequest&, ExportProgressCallback, std::shared_ptr<ExportCancellationState> cancellation) {
+			ExportResult result; result.message = "fixed controlled outcome";
+			result.success = cancellation->Commit([] { return true; }); return result;
+		}
 	}
 	void RegisterExportLifecycleTests(TestRegistry& registry) {
+		registry.Add("Editor.ExportRetention.ThousandExportsBounded", [](TestContext& context) {
+			PoolSession pool;
+			EditorExportOperationController controller([](const ExportRequest&, ExportProgressCallback, std::shared_ptr<ExportCancellationState> cancellation) {
+				// Fixed-size native outcomes isolate retained ownership from asset size.
+				ExportResult result; result.success = cancellation->Commit([] { return true; }); return result;
+			});
+			for (std::uint64_t expected = 1; expected <= 1000; ++expected) {
+				const auto admission = controller.Admit(Request(controller));
+				context.Expect(admission.accepted && admission.operationId == expected && AwaitFinal(controller, admission.operationId), "Every controlled export should receive a contiguous identity and settle.");
+			}
+			std::size_t retained = 0;
+			for (std::uint64_t id = 1; id <= 1000; ++id) if (controller.Observe(id)) ++retained;
+			context.Expect(retained == 64, "One thousand exports must retain only the default 64 terminal observations.");
+			const auto before = controller.RetentionDiagnostics();
+			for (int visit = 0; visit < 1000; ++visit) controller.Poll();
+			const auto after = controller.RetentionDiagnostics();
+			context.Expect(after.retainedTerminal == 64 && after.active == 0 && after.expiredCount == 936 && after.lastIssuedId == 1000 && after.pollVisits == before.pollVisits,
+				"Idle polling must visit no historical exports and expose bounded ownership diagnostics.");
+		});
+		registry.Add("Editor.ExportRetention.ProjectDrainExpiresHistory", [](TestContext& context) {
+			PoolSession pool;
+			EditorExportOperationController controller([](const ExportRequest&, ExportProgressCallback, std::shared_ptr<ExportCancellationState> cancellation) {
+				ExportResult result; result.success = cancellation->Commit([] { return true; }); return result;
+			});
+			const auto admission = controller.Admit(Request(controller));
+			context.Expect(admission.accepted && AwaitFinal(controller, admission.operationId), "The project should own a completed export before retirement.");
+			const auto copied = controller.Observe(admission.operationId);
+			controller.StopAndDrain();
+			context.Expect(!controller.Observe(admission.operationId) && !controller.TakeLaunch(admission.operationId), "Drained project ownership and launch intent must expire.");
+			context.Expect(copied && copied->result && copied->result->success, "An observer's already copied receipt must survive controller expiry.");
+			context.Expect(controller.Lookup(admission.operationId).disposition == EditorExportLookupDisposition::Expired
+				&& controller.RetentionDiagnostics().retainedTerminal == 0, "Project drain must expose explicit expiry and remove history ownership.");
+			controller.BeginProject();
+			const auto next = controller.Admit(Request(controller));
+			context.Expect(next.accepted && next.operationId == admission.operationId + 1 && AwaitFinal(controller, next.operationId), "A replacement project must continue identities without aliasing old receipts.");
+		});
+		registry.Add("Editor.ExportRetention.PositiveLimitAndLowering", [](TestContext& context) {
+			PoolSession pool; EditorExportOperationController controller(ControlledSuccess);
+			bool rejected = false;
+			try { controller.SetTerminalHistoryLimit(0); } catch (const std::invalid_argument&) { rejected = true; }
+			context.Expect(rejected && controller.RetentionDiagnostics().terminalLimit == 64, "Zero capacity must reject without altering the positive default.");
+			controller.SetTerminalHistoryLimit(4);
+			for (int index = 0; index < 6; ++index) { const auto admitted = controller.Admit(Request(controller)); context.Expect(admitted.accepted && AwaitFinal(controller, admitted.operationId), "Configured history exports should settle."); }
+			controller.SetTerminalHistoryLimit(2);
+			context.Expect(controller.RetentionDiagnostics().retainedTerminal == 2 && controller.RetentionDiagnostics().terminalLimit == 2,
+				"Lowering capacity must immediately retain only the newest positive limit.");
+			for (std::uint64_t id = 1; id <= 4; ++id) context.Expect(controller.Lookup(id).disposition == EditorExportLookupDisposition::Expired, "FIFO lowering must expire oldest receipts.");
+			for (std::uint64_t id : {5u, 6u}) context.Expect(controller.Lookup(id).disposition == EditorExportLookupDisposition::Terminal, "FIFO lowering must preserve newest receipts.");
+			context.Expect(controller.Lookup(0).disposition == EditorExportLookupDisposition::Unknown && controller.Lookup(7).disposition == EditorExportLookupDisposition::Unknown, "Zero and never-issued identities must not masquerade as expired history.");
+		});
+		registry.Add("Editor.ExportRetention.AbsentObserverCannotPin", [](TestContext& context) {
+			PoolSession pool; EditorExportOperationController controller(ControlledSuccess); controller.SetTerminalHistoryLimit(2);
+			for (int index = 0; index < 5; ++index) { const auto admitted = controller.Admit(Request(controller)); context.Expect(admitted.accepted && AwaitFinal(controller, admitted.operationId), "Exports with absent observers must progress."); }
+			context.Expect(controller.Consume(1, 77).disposition == EditorExportLookupDisposition::Expired && !controller.TakeLaunch(1), "Unconsumed observers and launches must not pin expired history.");
+			context.Expect(controller.RetentionDiagnostics().retainedTerminal == 2, "Absent observers cannot grow terminal ownership.");
+		});
+		registry.Add("Editor.ExportRetention.ActiveAndAdoptionNeverEvicted", [](TestContext& context) {
+			PoolSession pool; ControlledGate gate; bool failAdoption = false;
+			auto executions = std::make_shared<std::atomic_uint>(0);
+			EditorExportOperationController::OwnerHooks hooks;
+			hooks.beforeAdoption = [&] { if (failAdoption) throw std::runtime_error("controlled adoption failure"); };
+			EditorExportOperationController controller([executions, wait = gate.MakeWaiter()](const ExportRequest& request, ExportProgressCallback progress, std::shared_ptr<ExportCancellationState> cancellation) {
+				if (executions->fetch_add(1) != 0) (void)wait();
+				return ControlledSuccess(request, progress, std::move(cancellation));
+			}, hooks);
+			const auto historical = controller.Admit(Request(controller)); context.Expect(AwaitFinal(controller, historical.operationId), "Initial receipt should settle.");
+			const auto active = controller.Admit(Request(controller)); context.Expect(active.accepted && gate.WaitForArrivals(1), "The next export must be physically active at its gate.");
+			controller.SetTerminalHistoryLimit(1);
+			context.Expect(controller.Lookup(active.operationId).disposition == EditorExportLookupDisposition::Active && controller.RetentionDiagnostics().active == 1, "Capacity changes must not evict executing work.");
+			failAdoption = true; gate.Release();
+			bool failed = false; const auto deadline = std::chrono::steady_clock::now() + kDefaultTimeout;
+			while (!failed && std::chrono::steady_clock::now() < deadline) { try { controller.Poll(); } catch (const std::runtime_error&) { failed = true; } std::this_thread::yield(); }
+			context.Expect(failed && controller.RetentionDiagnostics().adoptionPending == 1 && controller.Lookup(active.operationId).disposition == EditorExportLookupDisposition::Active,
+				"A consumed physical future must retain exact unadopted truth for owner retry.");
+			controller.SetTerminalHistoryLimit(2); controller.SetTerminalHistoryLimit(1);
+			failAdoption = false;
+			context.Expect(AwaitFinal(controller, active.operationId) && executions->load() == 2 && controller.Observe(active.operationId)->result->message == "fixed controlled outcome",
+				"Retry must adopt the original result without executing another worker.");
+			context.Expect(controller.Lookup(historical.operationId).disposition == EditorExportLookupDisposition::Expired && controller.RetentionDiagnostics().adoptionPending == 0, "Successful adoption must atomically enter FIFO history.");
+		});
+		registry.Add("Editor.ExportRetention.ConsumeAndLaunchOnce", [](TestContext& context) {
+			PoolSession pool; EditorExportOperationController controller(ControlledSuccess);
+			const auto admitted = controller.Admit(Request(controller)); context.Expect(AwaitFinal(controller, admitted.operationId), "The multi-observer export should settle.");
+			const auto first = controller.Consume(admitted.operationId, 1); const auto second = controller.Consume(admitted.operationId, 2);
+			context.Expect(first.result && second.result && first.result->message == second.result->message, "Independent observers must receive the exact same copied outcome.");
+			context.Expect(!controller.Consume(admitted.operationId, 1).result && !controller.Consume(admitted.operationId, 2).result, "Each observer can consume only once while retained.");
+			context.Expect(controller.TakeLaunch(admitted.operationId) == std::optional<std::filesystem::path>("captured-platform-launcher") && !controller.TakeLaunch(admitted.operationId), "Multiple observers must not multiply launch intent.");
+			controller.BeginProject(); context.Expect(first.result->success && second.result->success && !controller.TakeLaunch(admitted.operationId), "Copied outcomes survive retirement while launch authority does not.");
+		});
+		registry.Add("Editor.ExportRetention.ExpiryRevokesLaunch", [](TestContext& context) {
+			PoolSession pool; DisposableFixturePath files; Engine engine; EditorContext editor;
+			editor.engine = &engine; editor.projectManager = std::make_shared<ProjectManager>();
+			context.Expect(editor.projectManager->CreateProject(files.Child("Project"), "RetentionPanel", ProjectTemplate::Blank), "The real panel workspace should open.");
+			BuildProfile profile; profile.name = "Retention"; profile.id = "retention"; profile.enableManagedCompilation = false; profile.startupScene = "Scenes/Scene.tescene";
+			context.Expect(SaveBuildProfile(profile, editor.projectManager->GetProjectRoot() / "BuildProfiles/Retention.json"), "The real panel profile should save.");
+			editor.exportController = std::make_shared<EditorExportOperationController>(ControlledSuccess); editor.exportController->SetTerminalHistoryLimit(1);
+			BuildProfilesWindow window(editor); window.StartExportAndRun(); const auto oldId = window.GetExportOperationId();
+			context.Expect(oldId && AwaitFinal(*editor.exportController, oldId), "The real Build And Run action should complete before its absent panel observes it.");
+			const auto later = editor.exportController->Admit(Request(*editor.exportController)); context.Expect(later.accepted && AwaitFinal(*editor.exportController, later.operationId), "A later export should evict the pending panel receipt.");
+			window.PollExportAtProtectedFrame();
+			context.Expect(window.GetExportOperationId() == 0 && !editor.exportController->TakeLaunch(oldId), "The real panel must stop polling expiry and revoke unconsumed launch intent.");
+			window.PollExportAtProtectedFrame();
+		});
+		registry.Add("Editor.ExportRetention.ContiguousIssuanceAndConcurrentCopies", [](TestContext& context) {
+			PoolSession pool; bool denySubmission = true;
+			EditorExportOperationController::OwnerHooks hooks;
+			hooks.beforeSubmission = [&] { if (denySubmission) throw std::runtime_error("controlled submission failure"); };
+			EditorExportOperationController controller(ControlledSuccess, hooks); controller.SetTerminalHistoryLimit(2);
+			const auto failed = controller.Admit(Request(controller));
+			context.Expect(!failed.accepted && failed.operationId == 0 && controller.Lookup(1).disposition == EditorExportLookupDisposition::Unknown && controller.RetentionDiagnostics().lastIssuedId == 0,
+				"Failed submission must leave no externally issued hole or active ownership.");
+			denySubmission = false;
+			std::atomic_bool stop = false; std::atomic_bool coherent = true;
+			// Readers perform only copied lookup; adoption remains protected-owner work.
+			std::jthread reader([&] { while (!stop.load()) { for (std::uint64_t id = 1; id <= 100; ++id) {
+				const auto copied = controller.Lookup(id);
+				if (copied.observation && (copied.observation->operationId != id || (copied.observation->result && !copied.observation->progress.finished))) coherent.store(false);
+			} } });
+			struct ReaderCleanup { std::atomic_bool& stop; ~ReaderCleanup() { stop.store(true); } } readerCleanup{stop};
+			for (std::uint64_t id = 1; id <= 100; ++id) {
+				const auto admitted = controller.Admit(Request(controller)); context.Expect(admitted.accepted && admitted.operationId == id && AwaitFinal(controller, id), "All successful public IDs must remain contiguous after failed submission.");
+			}
+			stop.store(true); reader.join(); context.Expect(coherent.load(), "Concurrent copied observations must remain coherent through FIFO expiry.");
+			controller.BeginProject(); context.Expect(controller.Lookup(100).disposition == EditorExportLookupDisposition::Expired && controller.Lookup(101).disposition == EditorExportLookupDisposition::Unknown, "Retirement must distinguish issued expiry from unknown IDs without aliasing.");
+		});
 		registry.Add("Editor.ExportLifecycle.EngineBackedDuplicateAdmission", [](TestContext& context) {
 			using namespace TerraEngine::Editor::Automation;
 			using namespace TerraEngine::Tests::Correctness;
@@ -198,9 +327,8 @@ namespace TerraEngine::EditorTests {
 				(void)wait(); ExportResult result; result.success = token->Commit([] { return true; }); return result;
 			});
 			auto& controller = *ownedController;
-			// Teardown walks historical receipts as well as the active operation.
-			// Repeated polling must preserve the first worker exception while later
-			// cancellation still drains the real active physical task.
+			// Teardown settles the active operation before expiring owned history.
+			// Already copied receipts remain valid independently of controller state.
 			const auto historical = controller.Admit(Request(controller));
 			context.Expect(historical.accepted && AwaitFinal(controller, historical.operationId), "The historical worker failure must become a final receipt.");
 			controller.Poll();
@@ -213,15 +341,13 @@ namespace TerraEngine::EditorTests {
 			// the protected owner can now prove drain/cancel ordering without sleeps.
 			std::thread release([&] { while (!cancellation->requested.load()) std::this_thread::yield(); gate.Release(); });
 			controller.StopAndDrain(); release.join();
-			context.Expect(controller.Observe(historical.operationId)->result->message == prior->result->message, "Draining a later operation must not rewrite historical terminal failure.");
-			const auto settled = controller.Observe(admission.operationId);
-			context.Expect(settled && settled->result && settled->result->canceled, "Owner close should cancel before commit and retain one terminal result.");
-			const auto revision = settled->revision;
+			context.Expect(prior->result->message == "retained historical worker failure" && controller.Lookup(historical.operationId).disposition == EditorExportLookupDisposition::Expired, "Draining must expire ownership without rewriting copied historical failure.");
+			context.Expect(cancellation->requested.load() && !cancellation->WasCommitted() && controller.Lookup(admission.operationId).disposition == EditorExportLookupDisposition::Expired, "Owner close must cancel and settle before expiring active ownership.");
 			lateProgress({});
-			context.Expect(controller.Observe(admission.operationId)->revision == revision, "Late worker callbacks cannot overwrite terminal observations.");
+			context.Expect(controller.Lookup(admission.operationId).disposition == EditorExportLookupDisposition::Expired, "Late worker callbacks cannot republish expired observations.");
 			context.Expect(!controller.TakeLaunch(admission.operationId) && !controller.Admit(Request(controller)).accepted, "Stopped owners must reject launch and new admission.");
 			controller.StopAndDrain(); controller.BeginProject();
-			context.Expect(controller.Generation() != settled->intent.projectGeneration, "Replacement must advance the generation before admission reopens.");
+			context.Expect(controller.Generation() != prior->intent.projectGeneration, "Replacement must advance the generation before admission reopens.");
 			ownedController.reset();
 			lateProgress({}); // The callback owns shared mailbox data after owner destruction.
 		});
@@ -232,8 +358,9 @@ namespace TerraEngine::EditorTests {
 			});
 			const auto admission = controller.Admit(Request(controller));
 			context.Expect(admission.accepted && AwaitFinal(controller, admission.operationId), "The captured launch request should commit successfully.");
+			const auto copied = controller.Observe(admission.operationId);
 			controller.StopAndDrain();
-			context.Expect(controller.Observe(admission.operationId)->result->success && !controller.TakeLaunch(admission.operationId), "Shutdown preserves committed success while invalidating an unconsumed launch.");
+			context.Expect(copied->result->success && controller.Lookup(admission.operationId).disposition == EditorExportLookupDisposition::Expired && !controller.TakeLaunch(admission.operationId), "Shutdown preserves copied committed success while expiring history and invalidating an unconsumed launch.");
 		});
 		registry.Add("Editor.ExportLifecycle.OutputCommitCancellationBoundary", [](TestContext& context) {
 			DisposableFixturePath files;

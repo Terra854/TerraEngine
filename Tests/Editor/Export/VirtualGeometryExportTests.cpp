@@ -123,9 +123,9 @@ namespace TerraEngine::EditorTests
 
 			// Package validation requires every export fixture to name and stage a
 			// startup scene, even when this test exercises virtual-geometry data only.
-			// The empty object list is a valid minimal serialized-scene payload and
+			// The canonical format and empty object list form a valid minimal scene and
 			// deliberately keeps physics optional for these focused tests.
-			workspace.WriteText("Scenes/Startup.tescene", R"({"objects":[]})");
+			workspace.WriteText("Scenes/Startup.tescene", R"({"format":"TerraSceneUnboundedV1","objects":[]})");
 		}
 
 		std::string ReadTextFile(const std::filesystem::path& path)

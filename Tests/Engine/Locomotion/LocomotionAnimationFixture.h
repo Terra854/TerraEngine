@@ -1,4 +1,4 @@
-// LocomotionAnimationFixture.h - cohesive production-format assets for US3 tests.
+// LocomotionAnimationFixture.h - cohesive production-format assets for animation integration tests.
 //
 // Tests that exercise AnimationSystem's authored-component path need a real
 // ResourceManager-backed controller dependency graph. This fixture compiles a

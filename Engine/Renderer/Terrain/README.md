@@ -69,9 +69,8 @@ repairs, stitch masks, hole pins, desired versus resident pages, fallback depth,
 payload bytes/checksum state, halo failures, upload/publication state, sampler
 fallback, descriptor pressure, stale rejection, and rollback.
 
-See the normative [surface-runtime](../../../specs/054-terrain-rendering-overhaul/contracts/terrain-surface-runtime.md)
-and [LOD-publication](../../../specs/054-terrain-rendering-overhaul/contracts/terrain-lod-publication.md)
-contracts.
+See the surface-runtime and LOD-publication guidance in
+[Terrain](../../../Docs/Terrain.md).
 
 ## Focused verification
 

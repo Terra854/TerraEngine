@@ -17,6 +17,9 @@ param(
 	[string[]]$ArgumentList = @(),
 	[ValidateRange(1, 3600)][int]$TimeoutSeconds = 30,
 	[string]$WorkingDirectory = (Get-Location).Path,
+	# Interactive editor acceptance needs a visible window for normal approvals.
+	# Other native regression jobs retain their hidden/default launch behavior.
+	[switch]$VisibleWindow,
 	[string]$LogDirectory = '',
 	[string]$ReleaseGatePath = '',
 	[ValidateRange(0, 3600000)][int]$ReleaseAfterMilliseconds = 0
@@ -71,7 +74,7 @@ public sealed class TerraCorrectnessWatchdog : IDisposable {
 		}
 		return result.Append('\\',slashes*2).Append('"').ToString();
 	}
-	public TerraCorrectnessWatchdog(string executable,string[] arguments,string directory,string stdout,string stderr) {
+	public TerraCorrectnessWatchdog(string executable,string[] arguments,string directory,string stdout,string stderr,bool visibleWindow) {
 		IntPtr output=IntPtr.Zero,error=IntPtr.Zero,input=IntPtr.Zero,thread=IntPtr.Zero;
 		try {
 			job=CreateJobObjectW(IntPtr.Zero,null); if(job==IntPtr.Zero) throw Error("CreateJobObject");
@@ -84,10 +87,11 @@ public sealed class TerraCorrectnessWatchdog : IDisposable {
 			if(error==new IntPtr(-1)) throw Error("stderr creation");
 			input=CreateFileW("NUL",0x80000000,3,ref security,3,0x80,IntPtr.Zero);
 			if(input==new IntPtr(-1)) throw Error("stdin creation");
-			var startup=new Startup { cb=Marshal.SizeOf(typeof(Startup)),flags=0x100,input=input,output=output,error=error };
+			var startup=new Startup { cb=Marshal.SizeOf(typeof(Startup)),flags=visibleWindow ? 0x101 : 0x100,show=(short)(visibleWindow ? 5 : 0),input=input,output=output,error=error };
 			var command=new StringBuilder(Quote(executable)); foreach(var argument in arguments) command.Append(' ').Append(Quote(argument));
 			ProcessInfo info;
-			if(!CreateProcessW(executable,command,IntPtr.Zero,IntPtr.Zero,true,0x08000004,IntPtr.Zero,directory,ref startup,out info)) throw Error("CreateProcess");
+			uint creationFlags=visibleWindow ? 0x00000004u : 0x08000004u;
+			if(!CreateProcessW(executable,command,IntPtr.Zero,IntPtr.Zero,true,creationFlags,IntPtr.Zero,directory,ref startup,out info)) throw Error("CreateProcess");
 			process=info.process; thread=info.thread; Pid=info.pid;
 			if(!AssignProcessToJobObject(job,process)) throw Error("AssignProcessToJobObject");
 			if(ResumeThread(thread)==0xffffffff) throw Error("ResumeThread");
@@ -122,7 +126,7 @@ try {
 		if (Test-Path -LiteralPath $gatePath) { throw "Release gate must be fresh: $gatePath" }
 		if (-not (Test-Path -LiteralPath ([IO.Path]::GetDirectoryName($gatePath)) -PathType Container)) { throw 'Release gate parent must already exist.' }
 	}
-	$ownedProcess = [TerraCorrectnessWatchdog]::new($executablePath, $ArgumentList, $workingPath, (Join-Path $logPath 'stdout.log'), (Join-Path $logPath 'stderr.log'))
+	$ownedProcess = [TerraCorrectnessWatchdog]::new($executablePath, $ArgumentList, $workingPath, (Join-Path $logPath 'stdout.log'), (Join-Path $logPath 'stderr.log'), [bool]$VisibleWindow)
 	$clock = [Diagnostics.Stopwatch]::StartNew()
 	$released = $false
 	while (-not $ownedProcess.Poll()) {

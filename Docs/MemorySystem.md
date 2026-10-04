@@ -25,7 +25,7 @@ fresh-allocation branch was removed after the reusable path was accepted.
 ## Measured decisions
 
 The immutable numerical baseline remains
-`specs/056-benchmark-memory-system/benchmark/Baselines/baseline-v4/`. The final
+the standalone benchmark workspace's `Baselines/baseline-v4/` directory. The final
 candidate-era standard route passed all 18 workloads after targeted replication
 of three noisy single-sample checks; thresholds were not changed.
 

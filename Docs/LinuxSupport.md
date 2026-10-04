@@ -145,7 +145,7 @@ than requiring Visual Studio.
 - If shader installation fails, confirm `External/dxc/linux/bin/dxc` and its
   `libdxcompiler.so` and `libdxil.so` libraries are present.
 - If opening a C# script reports a Windows-only Visual Studio or editor-launch
-  message, complete the Linux script editor launch tasks in the active Spec Kit
+  message, complete the Linux script editor launch tasks in the Linux editor implementation
   plan and configure a Linux editor command such as `code {script}` or
   `rider {solution}`.
 # Audio validation

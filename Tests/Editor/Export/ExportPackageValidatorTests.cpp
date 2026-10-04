@@ -98,7 +98,9 @@ namespace TerraEngine::EditorTests {
 		}
 
 		void WriteManifestAndStartupScene(const TempExportPackageWorkspace& workspace) {
-			workspace.WriteText("Scenes/Main.tescene", "{\n\t\"name\": \"Startup\"\n}\n");
+			// The package fixture is a valid empty scene; later negative cases
+			// remove only their targeted prerequisite instead of failing scene syntax.
+			workspace.WriteText("Scenes/Main.tescene", R"({"format":"TerraSceneUnboundedV1","name":"Startup","objects":[]})");
 			workspace.WriteText(
 				"game.json",
 				"{\n"

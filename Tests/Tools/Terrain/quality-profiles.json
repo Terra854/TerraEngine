@@ -15,7 +15,7 @@
   ],
   "artifactHashContract": {
     "algorithm": "SHA256",
-    "requiredArtifacts": ["terrain-edit-v1.schema.json", "manifest.json", "SaveRecovery/manifest.json", "workloads.json", "runtime-shaders", "editor-shaders"],
+    "requiredArtifacts": ["manifest.json", "SaveRecovery/manifest.json", "workloads.json", "runtime-shaders", "editor-shaders"],
     "sourceOfTruth": "installed-tree",
     "sourceCheckoutSubstitution": "reject"
   }

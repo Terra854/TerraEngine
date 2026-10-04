@@ -7,6 +7,10 @@ file(GLOB_RECURSE TERRAENGINE_EDITOR_ANIMATION_TEST_SOURCES CONFIGURE_DEPENDS
 add_executable(TerraEngine-EditorTests
 	EditorTests.cpp
 	Export/ExportLifecycleTests.cpp
+	# Lifecycle recovery cases use the same production gate and watcher paths.
+	Export/ExportArtifactValidationTests.cpp
+	AssetPipeline/AssetDiscoveryRecoveryTests.cpp
+	AssetPipeline/AssetImportAdmissionTests.cpp
 	Scene/SceneSaveFailureSafetyTests.cpp
 	# The actual export frontend actions share the production window/controller.
 	# Tests instantiate it without starting a platform window or graphics device.
@@ -435,7 +439,7 @@ endif()
 
 add_test(NAME Editor.ExportUnitTests COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
 set_tests_properties(Editor.ExportUnitTests PROPERTIES LABELS "Editor"
-	ENVIRONMENT "TERRAENGINE_TEST_EXCLUDE_FILTER=Editor.ExportLifecycle"
+	ENVIRONMENT "TERRAENGINE_TEST_EXCLUDE_FILTER=Editor.ExportLifecycle,Editor.AssetDiscoveryRecovery,Editor.AssetImportAdmission,Editor.ExportArtifactValidation,Editor.ExportRetention"
 )
 
 add_test(NAME Editor.HeadlessExport COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
@@ -724,3 +728,10 @@ set_tests_properties(Editor.Terrain.LargeWorld PROPERTIES
 )
 
 terraengine_add_correctness_slice(Editor.ExportLifecycle TerraEngine-EditorTests Editor.ExportLifecycle 6)
+
+# Recovery slices retain independent process-tree watchdogs and exact case floors.
+terraengine_add_correctness_slice(Editor.AssetDiscoveryRecovery TerraEngine-EditorTests Editor.AssetDiscoveryRecovery 8)
+terraengine_add_correctness_slice(Editor.ExportArtifactValidation TerraEngine-EditorTests Editor.ExportArtifactValidation 12)
+terraengine_add_correctness_slice(Editor.ExportRetention TerraEngine-EditorTests Editor.ExportRetention 10)
+
+terraengine_add_correctness_slice(Editor.AssetImportAdmission TerraEngine-EditorTests Editor.AssetImportAdmission 13)

@@ -61,7 +61,8 @@ namespace TerraEngine::EditorTests {
 			ExpectContains(context, helper, "Assert-CompiledAsset", "Helper should validate every generated compiled child.");
 			ExpectContains(context, helper, "$bytes.Length -le 4", "Helper should reject empty or truncated generated children.");
 			ExpectContains(context, helper, "0x54455446", "Helper should validate the binary TETF magic value.");
-			ExpectContains(context, helper, "placeholder", "Helper should reject old placeholder payload markers.");
+			ExpectContains(context, helper, "Native artifact validity evidence", "Helper must require correlated production artifact validity evidence.");
+			context.Expect(helper.find("IndexOf(\"placeholder\"") == std::string::npos, "Ordinary words must not become script-side rejection rules.");
 			ExpectContains(context, helper, "$LASTEXITCODE", "Native compiler and export failures should propagate to the caller.");
 		});
 

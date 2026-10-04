@@ -7,9 +7,8 @@ The seven focused correctness entries are implemented: `Engine.SceneMutationFail
 `Engine.AudioWorldCellCapture`, `Engine.FrameFailureLifecycle`, `Engine.OwnedProcess`
 and `Editor.ExportLifecycle`. Their independent process-tree watchdogs reject
 missing/zero selections and enforce registered minimum counts. Current floors
-are respectively 39, 28, 10, 5, 7, 6 and 6. Actual acceptance results and the
-unchanged naming-policy baseline are recorded in
-[implementation-evidence.md](../specs/061-fix-engine-correctness/implementation-evidence.md).
+are respectively 39, 28, 10, 5, 7, 6 and 6. Retain native and live acceptance
+results with their installed artifact hashes and the naming-policy audit.
 
 Run in an x64 Visual Studio developer shell with supported SDK headers/libraries
 and pinned repository dependencies. Complete the build before using native
@@ -45,8 +44,7 @@ the exact fixture receipt and logged exception; native dispatch counts alone do
 not report exceptions caught inside the managed callback bridge.
 The runner uses isolated write-enabled preferences but never manufactures approval
 tokens. Optional timing/port arguments and the maintained managed-reload/export
-regressions are documented in the
-[correctness quickstart](../specs/061-fix-engine-correctness/quickstart.md).
+regressions are documented by the installed runner's parameter help.
 The runner preserves correlated native/live logs and package/managed/process
 observations; watchdog termination is a failed check, not an orderly shutdown.
 
@@ -386,9 +384,9 @@ The completed 2026-09-19 run `navigation-20260919-101315-261` records 48 passing
 application/cache/profile combinations and 240 semantic checks. Its two 600-second
 headless cohorts each admitted/finalized 60,000 requests: direct p95 31.2581 ms,
 agent p95 36.8347 ms, with zero residual runtime records. This is measured evidence
-on the recorded machine, not a guarantee for arbitrary scenes or hardware. See
-`specs/059-component-free-navigation/implementation-evidence.md` for raw logs,
-hashes, final build gates, and actual UI/MCP managed-outcome verification.
+on the recorded machine, not a guarantee for arbitrary scenes or hardware.
+Retain raw logs, hashes, final build gates, and actual UI/MCP managed-outcome
+verification with each qualification run.
 
 ### Navigation hard-break qualification (historical standalone runner)
 
@@ -482,8 +480,8 @@ installed bytes used by the run.
 
 ## External memory benchmark
 
-The memory qualification work keeps all benchmark implementation under
-`specs/056-benchmark-memory-system/benchmark`; it is not part of the engine CMake
+The memory qualification work uses a standalone benchmark workspace;
+it is not part of the engine CMake
 graph and is not installed with TerraEngine. Rejected custom memory tests are
 removed with their production candidates; the normal engine/editor suites remain
 the correctness gate for the candidate-free production tree.
@@ -501,10 +499,11 @@ cmake --build --preset RelWithDebInfo --target install
 
 This repository installs to `<build directory>/Build`; `--prefix` does not
 redirect that production tree. Build and self-test the independent benchmark
-against the exact installed bytes:
+against the exact installed bytes. Set `TERRAENGINE_MEMORY_BENCHMARK_ROOT` to
+the standalone benchmark directory containing its `CMakeLists.txt` and README:
 
 ```powershell
-$benchmarkRoot = (Resolve-Path 'specs/056-benchmark-memory-system/benchmark').Path
+$benchmarkRoot = (Resolve-Path $env:TERRAENGINE_MEMORY_BENCHMARK_ROOT).Path
 $benchmarkBuild = Join-Path $benchmarkRoot 'out/build/RelWithDebInfo'
 $installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
 cmake -S $benchmarkRoot -B $benchmarkBuild -DTERRAENGINE_INSTALL_ROOT=$installRoot
@@ -2235,7 +2234,7 @@ ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -j 1 --output-on-fai
 cmake --build --preset RelWithDebInfo --target install
 ```
 
-The installed fixture manifests, workloads, tools, translated-world shaders, and runtime binaries must be validated from the runnable bundle at `out/build/RelWithDebInfo/Build`; source-tree fallbacks are failures. Use `specs/052-unbounded-scenes/quickstart.md` for the installed scenario matrix, five-run 5% timing gate, fixed-residency 2% memory gate, five-minute smoke, and six-hour release soak. Missing hardware or evidence is incomplete, never a zero-cost pass.
+The installed fixture manifests, workloads, tools, translated-world shaders, and runtime binaries must be validated from the runnable bundle at `out/build/RelWithDebInfo/Build`; source-tree fallbacks are failures. Qualification requires the installed scenario matrix, five-run 5% timing gate, fixed-residency 2% memory gate, five-minute smoke, and six-hour release soak. Missing hardware or evidence is incomplete, never a zero-cost pass.
 
 ## Terrain surface layers
 
@@ -2351,7 +2350,7 @@ The expected resize coverage is the signed/partial runtime fixture in
 `Editor.Terrain.SaveRecovery`, the 1x1-through-8x8 and long-narrow matrix in
 `Engine.Terrain.MultithreadedStress`, and visible/automation fingerprint parity
 in `Editor.Terrain.Automation`. The audit must find editor/runtime binaries,
-terrain shaders, `terrain-edit-v1.schema.json`, save-recovery fixtures, workload
+terrain shaders, save-recovery fixtures, workload
 records, benchmark/stress executables, and architecture verification scripts in
 the installed tree. Source-tree artifacts do not satisfy this gate.
 
@@ -2535,3 +2534,82 @@ Re-run the installed audit after this final install. Completion requires the
 same installed bytes that were audited, soaked, and traversed; evidence from a
 different build, project identity, workload hash, or hardware identity is not
 comparable.
+# Lifecycle recovery validation
+
+Configure with `BUILD_TESTING=ON` in an x64 Visual Studio developer environment,
+then run `cmake --build --preset RelWithDebInfo --target install --parallel 2`.
+The maintained installed tree is `out/build/RelWithDebInfo/Build`. Tests and
+installed acceptance must use matching binaries and `correctness-artifacts.json`.
+
+The six recovery CTest slices enforce these minimum selected case counts:
+
+| Slice | Cases |
+| --- | ---: |
+| Engine.SceneLoadRecovery | 14 |
+| Engine.NestedTaskSettlement | 11 |
+| Editor.AssetDiscoveryRecovery | 8 |
+| Editor.AssetImportAdmission | 13 |
+| Editor.ExportArtifactValidation | 12 |
+| Editor.ExportRetention | 10 |
+
+Support slices `Engine.ArtifactValidation` and `Engine.OwnedImportExecutor`
+require six and five cases. Nested settlement includes actual animation and
+Vulkan rendering work; a helper-only run cannot satisfy that slice. Run the
+full single-job CTest suite after these focused gates and compare exact failures
+with the recorded pre-change baseline in
+the retained lifecycle recovery validation record.
+
+Imports default to four active physical jobs. `SetMaxActiveImports` accepts a
+positive limit only while the owner is quiescent; failed configuration preserves
+the current limit. Queued work and canceled-but-unsettled jobs remain owned.
+`GetImportAdmissionDiagnostics` exposes capacity, queued/active/peak work,
+cancellation and failure counts. Watcher recovery diagnostics expose pending
+reconciliation and the accepted project generation. Catalog index saves coalesce
+within one protected update; a rejected disk save retries on a later update.
+
+Exports retain 64 terminal observations by default. The protected owner may
+change that positive limit; lowering it expires the oldest results immediately.
+Active work remains independently owned. `RetentionDiagnostics` reports the
+limit, retained results, active/adoption work, expiry count and polling visits.
+Consumers use explicit Active/Terminal/Expired/Unknown dispositions.
+
+Use PowerShell 7 in the developer environment for installed acceptance. Give it
+a fresh work directory outside the installed tree and retain an outer process
+watchdog for the complete run, including NativeAOT compilation:
+
+```powershell
+$install = (Resolve-Path out/build/RelWithDebInfo/Build).Path
+$pwsh = (Get-Command pwsh.exe).Source
+& "$install/Tests/Tools/Correctness/RunWithWatchdog.ps1" `
+	-Executable $pwsh -TimeoutSeconds 1800 `
+	-LogDirectory out/validation/lifecycle-recovery-watchdog-fresh `
+	-ArgumentList @('-NoProfile', '-File',
+		"$install/Tests/Tools/LifecycleRecovery/RunInstalledLifecycleRecoveryAcceptance.ps1",
+		'-InstallRoot', $install, '-WorkRoot',
+		"$PWD/out/validation/lifecycle-recovery-fresh", '-AllowLiveAcceptance')
+if ($LASTEXITCODE -ne 0) { throw 'Installed lifecycle acceptance failed.' }
+```
+
+The live editor uses the installed default layout and normal MCP approval UI.
+Keep the Windows desktop unlocked for the complete interactive run. The editor
+watchdog requests a visible window; native regression jobs stay hidden. A locked
+desktop or unanswered dirty-scene exit prompt is a failed/incomplete live run,
+not evidence of normal shutdown.
+Acceptance requires fresh dirty reload/Save As/repaired reload, valid-word real
+NativeAOT managed readiness, all native floors and normal process settlement.
+Forced cleanup, stale artifacts, absent device checkpoints or missing approval
+cannot produce a passing summary. See the feature quickstart and retained
+validation record for the complete evidence map.
+
+Installed acceptance on 2026-10-04 passed all eight lifecycle/support case floors
+(14/11/8/13/12/10/6/5) with two actual frame workers. The live editor preserved
+unsaved edits across failed reload, Save As and repaired-source reload; retained
+managed callback continuity across export cancellation/retry; and closed normally
+while export descendants were held. Normal exit reported zero surviving
+processes and no watchdog timeout. The same fresh run validated a real NativeAOT
+shared library, its bootstrap/hash/byte receipt, managed readiness, package
+contents and orderly physics shutdown. Retained evidence is under
+`out/validation/lifecycle-recovery-live-unlocked`, including both summaries and
+the outer `lifecycle-recovery-live-watchdog-unlocked/watchdog.json`.
+
+The final complete CTest run passed all 143 registrations in 377.31 seconds, including the repository naming audit with zero violations.

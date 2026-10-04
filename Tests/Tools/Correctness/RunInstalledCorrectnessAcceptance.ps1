@@ -21,7 +21,8 @@ param(
 	[ValidateRange(30,600)][int]$StageTimeoutSeconds=180,
 	[ValidateRange(30,600)][int]$ApprovalTimeoutSeconds=180,
 	[ValidateRange(120,3600)][int]$EditorWatchdogSeconds=1800,
-	[switch]$AllowLiveAcceptance
+	[switch]$AllowLiveAcceptance,
+	[switch]$LifecycleRecovery
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
@@ -255,7 +256,7 @@ try {
 	JsonFile $prefs @{recentProjects=@();autoBuildScripts=$false;editorMcpEnabled=$true;editorMcpWriteModeDefault='writes_enabled';editorMcpListenPort=$McpPort;vulkanValidationLayers=$false;renderDebugDiagnostics=$false;rendererDiagnosticsPreferencesInitialized=$true}
 	$listener=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,$McpPort); try { $listener.Start() } finally { $listener.Stop() }
 	$script:editorLogs=Join-Path $work 'editor-logs'
-	$command='& '+(PsQuote $ownedWrapper)+' -Executable '+(PsQuote $editor)+' -ArgumentList @('+ (PsQuote '--project')+','+(PsQuote $project)+') -WorkingDirectory '+(PsQuote (Split-Path $editor))+' -LogDirectory '+(PsQuote $script:editorLogs)+' -TimeoutSeconds '+$EditorWatchdogSeconds+'; exit $LASTEXITCODE'
+	$command='& '+(PsQuote $ownedWrapper)+' -Executable '+(PsQuote $editor)+' -ArgumentList @('+ (PsQuote '--project')+','+(PsQuote $project)+') -VisibleWindow -WorkingDirectory '+(PsQuote (Split-Path $editor))+' -LogDirectory '+(PsQuote $script:editorLogs)+' -TimeoutSeconds '+$EditorWatchdogSeconds+'; exit $LASTEXITCODE'
 	$start=[Diagnostics.ProcessStartInfo]::new(); $start.FileName=$shell; $start.Arguments='-NoProfile -ExecutionPolicy Bypass -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command)); $start.UseShellExecute=$false; $start.CreateNoWindow=$true; $start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
 	foreach ($pair in @{TERRAENGINE_EDITOR_PREFS_SESSION_PATH=$prefs;TERRAENGINE_SUPPRESS_PROJECT_RECENTS='1';TERRAENGINE_CORRECTNESS_OBSERVATION_ROOT=$script:observation;TERRAENGINE_CORRECTNESS_HOLD_EXPORT='1';TERRAENGINE_CORRECTNESS_PROCESS_FIXTURE=$childFixture}.GetEnumerator()) { $start.EnvironmentVariables[$pair.Key]=$pair.Value }
 	$script:wrapperProcess=[Diagnostics.Process]::Start($start)
@@ -301,6 +302,36 @@ try {
 	$good=Tool 'transaction.execute' @{format='TerraSpatialTransactionV1';correlationId='correctness-mutation-accepted';label='accepted correctness batch';operations=@(@{kind='object.create';localId='created';name='CorrectnessPublishedObject'})}
 	if (@((Tool 'scene.list_objects' @{search='CorrectnessPublishedObject';limit=256}).data.objects).Count -ne 1) { throw 'Accepted transaction was not visible at the protected boundary.' }
 	Record 'accepted-mutation' $good
+	if ($LifecycleRecovery) {
+		# Preserve a dirty live document across a real failed source replacement,
+		# then save/reopen through the ordinary protected editor operations.
+		$dirtyState=(Tool 'project.state').data
+		$dirtyObjects=(Tool 'scene.list_objects' @{limit=256}).data.objects
+		if (!$dirtyState.sceneDirty) { throw 'The accepted mutation did not make the fixture dirty.' }
+		$reloadSource=Join-Path $project 'Assets/Scenes/Startup.tescene'
+		Set-Content -LiteralPath $reloadSource -Value '{"format":' -Encoding UTF8
+		Record 'failed-dirty-reload' (Tool 'scene.open' @{path='Assets/Scenes/Startup.tescene'} -ExpectFailure)
+		$retainedState=(Tool 'project.state').data
+		$retainedObjects=(Tool 'scene.list_objects' @{limit=256}).data.objects
+		if (!$retainedState.sceneDirty -or $retainedState.activeScene -ne $dirtyState.activeScene -or
+			$retainedState.sceneGeneration -ne $dirtyState.sceneGeneration -or
+			($dirtyObjects | ConvertTo-Json -Depth 40 -Compress) -ne ($retainedObjects | ConvertTo-Json -Depth 40 -Compress)) {
+			throw 'Failed dirty reload changed live authored state or its publication generation.'
+		}
+		$recoveredRelative='Assets/Scenes/Recovered.tescene'
+		Record 'dirty-reload-save-as' (Tool 'scene.save_as' @{path=$recoveredRelative})
+		Record 'dirty-reload-reopen' (Tool 'scene.open' @{path=$recoveredRelative})
+		if (@((Tool 'scene.list_objects' @{search='CorrectnessPublishedObject';limit=256}).data.objects).Count -ne 1) {
+			throw 'Save As/reopen lost the dirty authored object.'
+		}
+		# Restore the startup source from the newly saved authored bytes. Later
+		# scripting/export checks still run against the original startup path.
+		Copy-Item -LiteralPath (Join-Path $project $recoveredRelative) -Destination $reloadSource -Force
+		Record 'repaired-source-reload' (Tool 'scene.open' @{path='Assets/Scenes/Startup.tescene'})
+		if (@((Tool 'scene.list_objects' @{search='CorrectnessPublishedObject';limit=256}).data.objects).Count -ne 1) {
+			throw 'Repaired source reload did not preserve the recovered edit.'
+		}
+	}
 	$scene=Join-Path $project 'Assets/Scenes/Startup.tescene'; $oldHash=(Get-FileHash -LiteralPath $scene).Hash
 	# A deterministic directory blocker exercises real file publication failure.
 	$block=Join-Path $project 'Assets/Scenes/blocked.tescene'; New-Item -ItemType Directory -Path $block | Out-Null
@@ -372,15 +403,34 @@ try {
 	$validation=Get-Content -LiteralPath (Join-Path $evidence 'validation-report.json') -Raw | ConvertFrom-Json
 	$packageValidation=Get-Content -LiteralPath (Join-Path $evidence 'package-validation.txt') -Raw
 	$resolvedManifest=Get-Content -LiteralPath (Join-Path $evidence 'resolved-manifest.json') -Raw | ConvertFrom-Json
-	foreach ($line in @('Startup scene: PASS','Required runtime entries: PASS','Manifest asset references: PASS','Placeholder scan: PASS','Manifest evidence match: PASS','Final: PASS')) {
+	foreach ($line in @('Startup scene: PASS','Required runtime entries: PASS','Manifest asset references: PASS','Explicit stub evidence: PASS','Manifest evidence match: PASS','Final: PASS')) {
 		if ($packageValidation -notmatch ('(?m)^'+[regex]::Escape($line)+'\r?$')) { throw "Package validation did not prove $line" }
 	}
 	if ($resolvedManifest.startupScene -cne 'Scenes/Startup.tescene') { throw 'Resolved export manifest does not name the controlled startup scene.' }
 	if (!$exportResult.success -or $exportResult.runId -ne $success.result.runId -or $content.runId -ne $exportResult.runId -or
 		$content.schemaVersion -ne 1 -or $content.entryCount -ne @($content.entries).Count -or $content.entryCount -lt 1 -or
 		@($content.entries | Where-Object {$_.placeholderDetected}).Count -or !$validation.passed -or $validation.errorCount -ne 0 -or
-		$packageValidation -notmatch '(?m)^Final: PASS\r?$') { throw 'Export evidence does not prove this successful run without placeholders and with a validated package.' }
+		$packageValidation -notmatch '(?m)^Final: PASS\r?$') { throw 'Export evidence does not prove this successful run with valid artifacts and a validated package.' }
 	if (![IO.Path]::GetFullPath($exportResult.outputDirectory).Equals($publishedOutput,[StringComparison]::OrdinalIgnoreCase)) { throw 'Export evidence names a different published directory.' }
+	$nativeReceipts=@($exportResult.diagnostics | Where-Object {$_.code -eq 'export.native_artifact.valid'})
+	if ($nativeReceipts.Count -ne 1) { throw 'Export lacks one native artifact validity receipt.' }
+	$nativeValidity=$nativeReceipts[0].message | ConvertFrom-Json
+	$nativeImage=Join-Path $publishedOutput 'Managed/Assembly-CSharp.dll'
+	if (!(Test-Path -LiteralPath $nativeImage -PathType Leaf)) { throw 'Published native gameplay image is missing.' }
+	if (-not ('TerraEngineLifecycleArtifactHash' -as [type])) {
+		Add-Type -TypeDefinition @'
+public static class TerraEngineLifecycleArtifactHash {
+	public static string Compute(byte[] bytes) {
+		ulong hash = 14695981039346656037UL;
+		unchecked { foreach (byte value in bytes) { hash ^= value; hash *= 1099511628211UL; } }
+		return hash.ToString("x16", System.Globalization.CultureInfo.InvariantCulture);
+	}
+}
+'@
+	}
+	$nativeBytes=[IO.File]::ReadAllBytes($nativeImage)
+	if ($nativeValidity.validity -ne 'valid' -or $nativeValidity.bootstrap -notin @('InitManagedRuntimeV4','InitManagedRuntimeV3','InitManagedRuntime') -or
+		$nativeValidity.byteSize -ne $nativeBytes.Length -or $nativeValidity.contentHash -ne [TerraEngineLifecycleArtifactHash]::Compute($nativeBytes)) { throw 'Native artifact receipt does not match this published image.' }
 	$packages=@(Get-ChildItem -LiteralPath $publishedOutput -File -Filter '*.tepak')
 	if ($packages.Count -ne 1 -or $packages[0].Length -eq 0) { throw 'Published export did not contain one nonempty validated package.' }
 	if (![IO.Path]::GetFullPath($exportResult.package.archivePath).Equals($packages[0].FullName,[StringComparison]::OrdinalIgnoreCase) -or

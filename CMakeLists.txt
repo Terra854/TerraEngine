@@ -237,6 +237,8 @@ set(ENGINE_SOURCES
 	Engine/Resource/ResourceManagerShaderCollection.cpp
 	Engine/Resource/ResourceManagerTexture.cpp
 	Engine/Runtime/BootSummary.cpp
+	# Shared bounded artifact inspection agrees across editor and runtime gates.
+	Engine/Runtime/ArtifactValidation.cpp
 	Engine/Runtime/ExportStartupCoordinator.cpp
 	Engine/Scene/SceneGraphRuntime.cpp
 	Engine/Scene/WorldCoordinate.cpp
@@ -461,6 +463,7 @@ set(ENGINE_HEADERS
 	Engine/Window/WindowConfig.h
 	Engine/Window/WindowSystem.h
 	Engine/Window/GLFW/GlfwWindowBackend.h
+	Engine/ThreadPool/ScopedTaskSettlement.h
 	Engine/ThreadPool/ThreadPool.h
 	Engine/Profiling/Profiler.h
 	Engine/Profiling/ProfilerCapture.h
@@ -511,6 +514,7 @@ set(ENGINE_HEADERS
 	Engine/UI/UISystem.h
 	Engine/Runtime/ContentMount/ContentMount.h
 	Engine/Runtime/BootSummary.h
+	Engine/Runtime/ArtifactValidation.h
 	Engine/Runtime/ExportStartupCoordinator.h
 	Engine/Debug.h
 	${TERRAENGINE_ANIMATION_ENGINE_HEADERS}
@@ -2821,11 +2825,6 @@ file(COPY \"\${shader_stage_root}/\"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Help/TerrainHelp.md"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Help"
 	)
-	if(TERRAENGINE_TERRAIN_CONTRACT_FILES)
-		install(FILES ${TERRAENGINE_TERRAIN_CONTRACT_FILES}
-			DESTINATION "${ENGINE_INSTALL_DESTINATION}/Schemas/Terrain"
-		)
-	endif()
 	# Install the complete deterministic animated-page fixture so installed
 	# validation never reaches back into the source checkout for inputs.
 	install(DIRECTORY
@@ -2948,7 +2947,7 @@ if(BUILD_TESTING)
 	install(TARGETS TerraEngine-EngineTests TerraEngineCorrectnessProcessFixture
 		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Engine
 	)
-	install(TARGETS TerraEngine-EditorTests
+	install(TARGETS TerraEngine-EditorTests TerraEngineCorrectnessProcessFixture
 		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Editor
 	)
 	install(FILES
@@ -2961,12 +2960,29 @@ if(BUILD_TESTING)
 		${CMAKE_SOURCE_DIR}/Tests/Tools/Correctness/RunInstalledCorrectnessAcceptance.ps1
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Correctness
 	)
+	# Recovery acceptance consumes only sealed installed runners and authored inputs.
+	install(DIRECTORY ${CMAKE_SOURCE_DIR}/Tests/Tools/LifecycleRecovery/
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/LifecycleRecovery)
+	install(FILES ${CMAKE_SOURCE_DIR}/Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/ExportRuntimeBaseline)
+	install(DIRECTORY
+		${CMAKE_SOURCE_DIR}/Tests/Fixtures/ExportRuntimeBaseline
+		${CMAKE_SOURCE_DIR}/Tests/Fixtures/PhysicsExportRuntime
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Fixtures
+		PATTERN "obj" EXCLUDE PATTERN "bin" EXCLUDE PATTERN "Build" EXCLUDE
+		PATTERN "Builds" EXCLUDE PATTERN "Library" EXCLUDE PATTERN "Temp" EXCLUDE)
 	install(DIRECTORY ${CMAKE_SOURCE_DIR}/Tests/Tools/Correctness/Fixtures/
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Correctness/Fixtures
 		# Install authored fixtures only; local SDK validation outputs are not inputs.
 		PATTERN "obj" EXCLUDE PATTERN "bin" EXCLUDE PATTERN "Build" EXCLUDE
 		PATTERN "Builds" EXCLUDE PATTERN "Library" EXCLUDE PATTERN "Temp" EXCLUDE
 	)
+	install(FILES ${CMAKE_SOURCE_DIR}/Tests/Editor/AssetPipeline/Fixtures/Gltf/one-material.gltf
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Editor/Fixtures/AssetPipeline/Gltf)
+	# Genuine native import tests use the same colocated compiler lookup as the
+	# editor. Keep their child executable and matching runtime closure local.
+	install(TARGETS TerraEngineModelPackageCompiler
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Editor)
 	# Native installed tests must use the DLL closure beside their executable;
 	# never resolve an old build-tree engine when validating the installed tree.
 	if(WIN32)

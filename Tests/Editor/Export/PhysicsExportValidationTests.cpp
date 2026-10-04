@@ -104,7 +104,7 @@ namespace TerraEngine::EditorTests {
 		std::vector<std::byte> MakeSettings() {
 			nlohmann::json layers = nlohmann::json::array();
 			for(std::uint32_t index = 0U; index < 32U; ++index) layers.push_back({{"id", index}, {"name", "Layer" + std::to_string(index)}});
-			return Bytes(nlohmann::json{{"schemaVersion", 1}, {"layers", layers}}.dump());
+			return Bytes(nlohmann::json{{"schemaVersion", 1}, {"gravity", {0, -9.81, 0}}, {"layers", layers}}.dump());
 		}
 
 		void WriteRuntimeEntries(const PhysicsValidationWorkspace& workspace) {
@@ -119,7 +119,9 @@ namespace TerraEngine::EditorTests {
 				"Shaders/Lighting/ClusterLightPrefix.comp.spv", "Shaders/Lighting/LightCull.comp.spv", "Shaders/PostProcess/HiZGenerate.comp.spv",
 				"Shaders/PostProcess/VRSGenerate.comp.spv", "Shaders/PostProcess/GTAO.comp.spv", "Shaders/PostProcess/GTAOBlur.comp.spv", "Scenes/Startup.tescene"
 			};
-			for(const std::string_view entry : kEntries) workspace.WriteText(std::string(entry), "runtime-payload");
+			for(const std::string_view entry : kEntries) {
+				workspace.WriteText(std::string(entry), entry.ends_with(".tescene") ? R"({"format":"TerraSceneUnboundedV1","objects":[]})" : "runtime-support-payload");
+			}
 		}
 
 		nlohmann::json MakePhysicsManifest(const std::vector<std::byte>& settings, const std::vector<std::byte>& collider) {
@@ -132,7 +134,7 @@ namespace TerraEngine::EditorTests {
 				{"cookFormatVersion", 1},
 				{"settings", {{"packagePath", "ProjectSettings/PhysicsSettings.json"}, {"schemaVersion", 1}, {"contentHash", Hash(settings)}}},
 				{"layersHash", Hash(layers)}, {"defaultMaterialGuid", ""}, {"materials", nlohmann::json::array()},
-				{"colliders", nlohmann::json::array({{{"guid", "collider-guid"}, {"packagePath", "Physics/Level.tepcoll"}, {"checksum", Hash(collider)}, {"size", collider.size()}, {"sourceProvenanceHash", "source"}, {"recipeHash", "recipe"}}})},
+				{"colliders", nlohmann::json::array({{{"guid", "01000000000000000000000000000000"}, {"packagePath", "Physics/Level.tepcoll"}, {"checksum", Hash(collider)}, {"size", collider.size()}, {"sourceProvenanceHash", "source"}, {"recipeHash", "recipe"}}})},
 				{"validation", {{"fixtureSchemaVersion", 1}, {"status", "validated"}}}
 			};
 		}
@@ -176,7 +178,7 @@ namespace TerraEngine::EditorTests {
 				const std::vector<std::byte> placeholder = Bytes("PLACEHOLDER collider payload");
 				WritePhysicsPackage(workspace, MakePhysicsManifest(settings, placeholder), settings, placeholder);
 				std::string error;
-				context.Expect(!ValidateExportPackage(workspace.PackPath(), error) && error.find("placeholder") != std::string::npos, "Placeholder collider payloads must be rejected with a named diagnostic.");
+				context.Expect(!ValidateExportPackage(workspace.PackPath(), error) && error.find("artifact.collider") != std::string::npos, "Text cannot satisfy a cooked collider envelope and must report the structural diagnostic.");
 			}
 			{
 				PhysicsValidationWorkspace workspace;
@@ -201,7 +203,7 @@ namespace TerraEngine::EditorTests {
 				WritePhysicsPackage(workspace, physics, settings, validCollider);
 				// A scene reference is a dependency even when the recipe file itself
 				// was omitted from the archive. This guards the staging rewrite path.
-				workspace.WriteText("Scenes/Startup.tescene", R"({"physicsExportFixture":{"sourceCollider":"Assets/Colliders/Startup.tecollider"}})");
+				workspace.WriteText("Scenes/Startup.tescene", R"({"format":"TerraSceneUnboundedV1","objects":[],"physicsExportFixture":{"sourceCollider":"Assets/Colliders/Startup.tecollider"}})");
 				workspace.CreatePack();
 				std::string error;
 				context.Expect(!ValidateExportPackage(workspace.PackPath(), error) && error.find("source-only") != std::string::npos, "Startup scenes must not retain source-only collider dependencies.");
@@ -211,7 +213,7 @@ namespace TerraEngine::EditorTests {
 				nlohmann::json physics = MakePhysicsManifest(settings, validCollider);
 				physics["colliders"] = nlohmann::json::array();
 				WritePhysicsPackage(workspace, physics, settings, validCollider);
-				workspace.WriteText("Scenes/Startup.tescene", R"({"physicsExportFixture":{}})");
+				workspace.WriteText("Scenes/Startup.tescene", R"({"format":"TerraSceneUnboundedV1","objects":[],"physicsExportFixture":{}})");
 				workspace.CreatePack();
 				std::string error;
 				context.Expect(!ValidateExportPackage(workspace.PackPath(), error) && error.find("cooked collider") != std::string::npos, "A physics parity fixture must declare at least one cooked collider dependency.");

@@ -5,6 +5,7 @@
 #include "ExportPipeline.h"
 #include "ExportRuntimeLayout.h"
 #include "MaterialAssetWriter.h"
+#include "MeshCompiler.h"
 #include "TEPAK/PackReader.h"
 #include "Terrain/TerrainAssetStore.h"
 #include "Utilities/UUID.h"
@@ -138,7 +139,7 @@ namespace TerraEngine::EditorTests {
 				projectRoot / "Assets" / "Models" / "Headless.gltf";
 			Touch(
 				projectRoot / "Assets" / runtimePath,
-				R"({"objects":[]})");
+				R"({"format":"TerraSceneUnboundedV1","objects":[]})");
 			if(!SaveModelPackageImportResult(sourcePath, result))
 			{
 				return {};
@@ -206,9 +207,16 @@ namespace TerraEngine::EditorTests {
 			// its legacy parent output to exist. Staging still excludes the source
 			// model and registers only the generated child material.
 			Touch(sourcePath, R"({"asset":{"version":"2.0"}})");
-			Touch(
-				projectRoot / "Build" / "Assets"
-					/ "Models" / "HeadlessMaterial.temf");
+			// The parent mesh is a real positive artifact, even though this test
+			// focuses on generated-material discovery. Cook a deterministic triangle
+			// so canonical export validation reaches the material assertions.
+			const std::vector<RawMeshVertex> vertices{
+				{{0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 1.0F}, {0.0F, 0.0F}},
+				{{1.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 1.0F}, {1.0F, 0.0F}},
+				{{0.0F, 1.0F, 0.0F}, {0.0F, 0.0F, 1.0F}, {0.0F, 1.0F}}};
+			const auto meshPath = projectRoot / "Build" / "Assets" / "Models" / "HeadlessMaterial.temf";
+			std::filesystem::create_directories(meshPath.parent_path());
+			if(!CompileMeshFromRaw("Models/HeadlessMaterial.gltf", meshPath, vertices, {0U, 1U, 2U})) return {};
 			MaterialAssetWriteDesc materialDesc;
 			materialDesc.header =
 				CreateDefaultMaterialHeader(TerraEngine::EMPTY_UUID);
@@ -349,7 +357,7 @@ namespace TerraEngine::EditorTests {
 			ExportRequest request;
 			request.projectRoot = root / "Content Only Project";
 			Touch(request.projectRoot / "game.json", R"({"name":"Content Only Project"})");
-			Touch(request.projectRoot / "Assets" / "Scenes" / "Startup.tescene", R"({"objects":[]})");
+			Touch(request.projectRoot / "Assets" / "Scenes" / "Startup.tescene", R"({"format":"TerraSceneUnboundedV1","objects":[]})");
 			Touch(request.projectRoot / "Assets" / "UI" / "Baseline.teui", R"({"root":{}})");
 
 			request.profile.name = "Content Only";

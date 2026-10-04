@@ -65,7 +65,9 @@ namespace TerraEngine::EditorTests {
 				scene << nlohmann::json{{"format", "TerraSceneUnboundedV1"}, {"name", "Navigation Outcome Parity"},
 					{"sceneSettings", nlohmann::json::object()}, {"objects", nlohmann::json::array()}}.dump(2);
 				scene.close();
-				SceneManager::Instance().UnloadAll();
+				// Open this fixture's independent project lifetime explicitly;
+				// changing source roots does not reopen closed scene admission.
+				SceneManager::Instance().BeginLoadSession();
 				SceneManager::Instance().SetSceneRoot(context.projectManager->GetProjectRoot());
 				SceneManager::Instance().SetActiveScene(SceneManager::Instance().LoadScene(scenePath));
 				service.SetEditorContext(&context);

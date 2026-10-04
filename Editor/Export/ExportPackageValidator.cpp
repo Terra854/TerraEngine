@@ -1,6 +1,8 @@
 // ExportPackageValidator.cpp - TEPAK runtime package validation implementation.
 
 #include "ExportPackageValidator.h"
+#include "Runtime/ArtifactValidation.h"
+#include "Physics/Assets/PhysicsMaterial.h"
 
 #include "File Formats/TerraEngineMeshFile.h"
 #include "Resource/VirtualGeometryCodec.h"
@@ -256,14 +258,6 @@ std::string HashPhysicsPackageBytes(const tepak::ByteBuffer& bytes)
 	return output.str();
 }
 
-bool ContainsPlaceholderMarker(const tepak::ByteBuffer& bytes)
-{
-	static constexpr std::string_view kMarker = "placeholder";
-	return std::search(bytes.begin(), bytes.end(), kMarker.begin(), kMarker.end(),
-		[](std::uint8_t left, char right) {
-			return static_cast<char>(std::tolower(left)) == right;
-		}) != bytes.end();
-}
 
 bool ValidatePhysicsManifestAsset(
 	const tepak::PackReader& reader,
@@ -308,8 +302,11 @@ bool ValidatePhysicsManifestAsset(
 		outError = "Physics runtime " + std::string(assetKind) + " payload is empty: " + NormalizePackagePath(path) + ". Re-cook or republish it before exporting.";
 		return false;
 	}
-	if(ContainsPlaceholderMarker(bytes)) {
-		outError = "Physics runtime " + std::string(assetKind) + " payload contains a forbidden placeholder marker: " + NormalizePackagePath(path);
+	const auto validity = TerraEngine::Runtime::ValidateArtifact({std::as_bytes(std::span(bytes)),
+		assetKind == "collider" ? TerraEngine::Runtime::ArtifactKind::CookedCollider : TerraEngine::Runtime::ArtifactKind::PhysicsMaterial,
+		TerraEngine::Runtime::HostNativeImageTarget(), path});
+	if(!validity.IsValid()) {
+		outError = validity.code + ": " + path + ": " + validity.diagnostic;
 		return false;
 	}
 	if(bytes.size() != expectedSize || HashPhysicsPackageBytes(bytes) != checksum) {
@@ -327,6 +324,11 @@ bool ValidatePhysicsManifestAsset(
 			outError = "Physics cooked collider is corrupt: " + NormalizePackagePath(path) + ". " + detail + " Re-cook it before exporting.";
 			return false;
 		}
+		const auto expectedId = TerraEngine::ParseUUID(guid);
+		if(!expectedId || *expectedId != collider->Envelope().assetId) {
+			outError = "Physics collider GUID differs from its validated envelope: " + path;
+			return false;
+		}
 		const auto compatibility = collider->CheckCompatibility(
 			TerraEngine::Physics::CookedColliderAsset::HostPlatform(),
 			TerraEngine::Physics::CookedColliderProviderFamily::Jolt,
@@ -337,6 +339,17 @@ bool ValidatePhysicsManifestAsset(
 			return false;
 		}
 	}
+	if(assetKind == "material") {
+		const auto document = nlohmann::json::parse(bytes.begin(), bytes.end());
+		TerraEngine::Physics::PhysicsMaterial material; TerraEngine::Physics::PhysicsMaterialDiagnostics diagnostics;
+		const auto expectedId = TerraEngine::ParseUUID(guid);
+		if(!TerraEngine::Physics::PhysicsMaterial::LoadJson(document, material, diagnostics)
+			|| !expectedId || *expectedId != material.assetId) {
+			outError = "Physics material GUID differs from its validated schema: " + path;
+			return false;
+		}
+	}
+
 	return true;
 }
 
@@ -377,8 +390,8 @@ bool ValidatePhysicsManifestBlock(
 		return false;
 	}
 	const tepak::ByteBuffer settingsBytes = reader.ReadAll(settingsPath);
-	if(settingsBytes.empty() || ContainsPlaceholderMarker(settingsBytes) || HashPhysicsPackageBytes(settingsBytes) != settingsHash) {
-		outError = "Physics runtime settings payload is empty, placeholder, or checksum-mismatched: " + NormalizePackagePath(settingsPath);
+	if(settingsBytes.empty() || HashPhysicsPackageBytes(settingsBytes) != settingsHash) {
+		outError = "Physics runtime settings payload is empty or checksum-mismatched: " + NormalizePackagePath(settingsPath);
 		return false;
 	}
 	try {
@@ -543,6 +556,17 @@ bool ValidateExportPackage(const std::filesystem::path& packagePath, ExportPlatf
 			}
 		}
 
+		// The same typed policy checks all required known formats during staging,
+		// packaging, and startup. Opaque authored payloads retain their legal words.
+		for(const tepak::PackEntry& entry : reader.GetEntries()) {
+			const auto payload = reader.ReadAll(entry.normalizedPath);
+			const auto validity = TerraEngine::Runtime::ValidateArtifact({std::as_bytes(std::span(payload)),
+				TerraEngine::Runtime::InferArtifactKind(entry.normalizedPath),
+				platform == ExportPlatform::Windows ? TerraEngine::Runtime::NativeImageTarget::WindowsX64
+					: TerraEngine::Runtime::NativeImageTarget::LinuxX64, entry.normalizedPath});
+			if(!validity.IsValid()) { outError = validity.code + ": " + entry.normalizedPath + ": " + validity.diagnostic; return false; }
+		}
+
 		// Recipes are intentionally editor-only. Reject them even if a manifest
 		// forgets to list the file, because a standalone runtime must not depend on
 		// source geometry or a machine-installed cook tool.
@@ -674,21 +698,13 @@ ExportPackageValidationReport InspectExportPackage(
 			reinterpret_cast<const char*>(manifestBytes.data()), manifestBytes.size());
 		for(const tepak::PackEntry& entry : reader.GetEntries()) {
 			const tepak::ByteBuffer bytes = reader.ReadAll(entry.normalizedPath);
-			static constexpr std::string_view marker = "placeholder";
-			const bool hasPlaceholder = std::search(
-				bytes.begin(), bytes.end(), marker.begin(), marker.end(),
-				[](std::uint8_t left, char right) {
-					return static_cast<char>(std::tolower(static_cast<unsigned char>(left))) == right;
-				}) != bytes.end();
-			if(hasPlaceholder) {
+			const auto validity = TerraEngine::Runtime::ValidateArtifact({std::as_bytes(std::span(bytes)),
+				TerraEngine::Runtime::InferArtifactKind(entry.normalizedPath),
+				platform == ExportPlatform::Windows ? TerraEngine::Runtime::NativeImageTarget::WindowsX64
+					: TerraEngine::Runtime::NativeImageTarget::LinuxX64, entry.normalizedPath});
+			if(!validity.IsValid()) {
 				report.passed = false;
-				report.findings.push_back({
-					"export.package.placeholder_payload",
-					entry.normalizedPath,
-					"Packaged entry contains the forbidden placeholder marker.",
-					true,
-					true
-				});
+				report.findings.push_back({validity.code, entry.normalizedPath, validity.diagnostic, true, validity.IsExplicitStub()});
 			}
 		}
 	} catch(const std::exception& exception) {
@@ -707,7 +723,7 @@ ExportPackageValidationReport InspectExportPackage(
 	summary << "Startup scene: " << (report.passed ? "PASS" : "see findings") << '\n';
 	summary << "Required runtime entries: " << (report.passed ? "PASS" : "see findings") << '\n';
 	summary << "Manifest asset references: " << (report.passed ? "PASS" : "see findings") << '\n';
-	summary << "Placeholder scan: "
+	summary << "Explicit stub evidence: "
 		<< (std::none_of(report.findings.begin(), report.findings.end(), [](const auto& finding) { return finding.placeholderDetected; }) ? "PASS" : "FAIL") << '\n';
 	for(const ExportPackageValidationFinding& finding : report.findings) {
 		summary << "[" << finding.code << "] " << finding.path << " " << finding.message << '\n';

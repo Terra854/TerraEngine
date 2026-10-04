@@ -338,7 +338,5 @@ own-ancestor fallback depth, payload bytes/status, and halo state. Root, layer,
 malformed-page, stale-publication, and rollback diagnostics use stable codes so
 the editor, automation, and tests report the same failure.
 
-The normative details are in the terrain rendering overhaul contracts:
-[`TERRAROOT1`](../specs/054-terrain-rendering-overhaul/contracts/terraroot1.md),
-[terrain surface runtime](../specs/054-terrain-rendering-overhaul/contracts/terrain-surface-runtime.md),
-and [terrain LOD publication](../specs/054-terrain-rendering-overhaul/contracts/terrain-lod-publication.md).
+The root format, surface runtime, and LOD publication contracts are described
+by the authored schema, runtime pipeline, and protected publication sections above.

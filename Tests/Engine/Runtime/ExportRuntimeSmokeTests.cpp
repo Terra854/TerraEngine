@@ -135,6 +135,9 @@ namespace TerraEngine::Tests {
 			ResourceManager::Instance().ConfigureExportArchive(workspace.PackPath());
 			ResourceManager::Instance().Initialize();
 			SceneManager::Instance().SetSceneRoot(workspace.OutputRoot());
+			// The mounted fixture starts its own scene lifetime after installing
+			// the source roots, independently of earlier engine shutdown tests.
+			SceneManager::Instance().BeginLoadSession();
 		}
 	}
 

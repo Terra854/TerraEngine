@@ -24,6 +24,7 @@ namespace
 		std::filesystem::path assetRoot;
 		std::filesystem::path buildRoot;
 		std::filesystem::path sourceRelativePath;
+		TerraEngine::AssetPipeline::ModelPackagePreparationRoots preparationRoots;
 		TerraEngine::UUID packageGuid = TerraEngine::EMPTY_UUID;
 		TerraEngine::UUID shaderGuid = TerraEngine::EMPTY_UUID;
 		bool showHelp = false;
@@ -31,7 +32,7 @@ namespace
 
 	void PrintUsage()
 	{
-		std::cerr << "Usage: TerraEngineModelPackageCompiler --source <model.gltf|model.glb|model.fbx> --asset-root <Assets> --build-root <Build/Assets> --source-relative <relative path> --package-guid <uuid> --shader-guid <uuid>\n";
+		std::cerr << "Usage: TerraEngineModelPackageCompiler --source <model.gltf|model.glb|model.fbx> --asset-root <Assets> --build-root <Build/Assets> --source-relative <relative path> --package-guid <uuid> --shader-guid <uuid> [--prepare-asset-root <private Assets> --prepare-build-root <private Build>]\n";
 	}
 
 	bool ParseUuidArgument(std::string_view value, TerraEngine::UUID& outUuid)
@@ -77,6 +78,14 @@ namespace
 			{
 				args.sourceRelativePath = argv[++index];
 			}
+			else if (flag == "--prepare-asset-root")
+			{
+				args.preparationRoots.assetRoot = argv[++index];
+			}
+			else if (flag == "--prepare-build-root")
+			{
+				args.preparationRoots.buildRoot = argv[++index];
+			}
 			else if (flag == "--package-guid")
 			{
 				if (!ParseUuidArgument(argv[++index], args.packageGuid))
@@ -109,7 +118,8 @@ namespace
 			|| args.assetRoot.empty()
 			|| args.buildRoot.empty()
 			|| args.sourceRelativePath.empty()
-			|| args.packageGuid == TerraEngine::EMPTY_UUID)
+			|| args.packageGuid == TerraEngine::EMPTY_UUID
+			|| args.preparationRoots.assetRoot.empty() != args.preparationRoots.buildRoot.empty())
 		{
 			std::cerr << "Required model package compile arguments are missing.\n";
 			return false;
@@ -185,6 +195,7 @@ int main(int argc, char** argv)
 	options.packageGuid = args.packageGuid;
 	options.shaderCollectionId = args.shaderGuid;
 	options.forceReimport = true;
+	if(!args.preparationRoots.assetRoot.empty()) options.preparationRoots = args.preparationRoots;
 	options.progressCallback = [](float progress, std::string_view stage, std::string_view message) {
 		EmitProgress(progress, stage, message);
 	};
@@ -203,7 +214,12 @@ int main(int argc, char** argv)
 		RestorePerMeshVirtualGeometryOverrides(previousResult, importResult);
 	}
 
-	if (!TerraEngine::AssetPipeline::SaveModelPackageImportResult(args.sourcePath, importResult))
+	// Preparation never writes even a failure report beside authored sources.
+	// Successful candidates keep their sidecar with their private asset outputs.
+	if(options.preparationRoots && importResult.status == TerraEngine::AssetPipeline::ModelImportStatus::Failed) return 1;
+	const auto resultSourcePath = options.preparationRoots
+		? options.preparationRoots->assetRoot / args.sourceRelativePath : args.sourcePath;
+	if (!TerraEngine::AssetPipeline::SaveModelPackageImportResult(resultSourcePath, importResult))
 	{
 		std::cerr << "Failed to save model package import result sidecar for " << args.sourcePath << "\n";
 		return 1;
@@ -214,11 +230,12 @@ int main(int argc, char** argv)
 		&& std::all_of(
 			importResult.generatedMeshes.begin(),
 			importResult.generatedMeshes.end(),
-			[&args](const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh) {
+			[&args, &options](const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh) {
 				// Model packages now publish renderable child meshes. The compiler
 				// succeeds only when every generated child that appears in the
 				// sidecar has a matching compiled runtime mesh in Build/Assets.
-				return !mesh.compiledPath.empty() && std::filesystem::exists(args.buildRoot / mesh.compiledPath);
+				const auto& outputRoot = options.preparationRoots ? options.preparationRoots->buildRoot : args.buildRoot;
+				return !mesh.compiledPath.empty() && std::filesystem::exists(outputRoot / mesh.compiledPath);
 			});
 	const bool succeeded = importResult.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed && wroteCompiledMesh;
 	EmitProgress(succeeded ? 1.0f : 0.99f, succeeded ? "Complete" : "Failed", succeeded ? "Model package compile finished." : "Model package compile failed.");

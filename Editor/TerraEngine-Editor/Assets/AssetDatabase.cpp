@@ -1,8 +1,9 @@
-// AssetDatabase.cpp — Editor asset database implementation
+﻿// AssetDatabase.cpp — Editor asset database implementation
 //
 // Implements the asset lifecycle management including automated project scanning, metadata persistence, and asynchronous asset compilation. It integrates with the filesystem watcher to detect external changes and syncs the database with the engine's resource manager.
 
 #include "AssetDatabase.h"
+#include "ThreadPool/ThreadPool.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "Engine/Core/Logger/Logger.h"
 #include <array>
@@ -1247,6 +1248,15 @@ AssetDatabase::GetAnimationReloadGenerationForTests(const TerraEngine::UUID& ass
 
 // AssetDatabase::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
+	// Retire and physically settle the previous owner before changing roots used
+	// by compilers or scans. A fresh project receives independent scan authority.
+	Shutdown();
+	++discovery.projectGeneration;
+	discoveryOpen = true;
+	discovery.requestedGeneration = 1U;
+	discovery.scanningGeneration = discovery.completedGeneration = 0U;
+	discovery.pending = true;
+	discovery.lastFailure.clear();
 	// A project boundary invalidates prior dependency observations before the new
 	// index begins publishing its initial collider and material registrations.
 	TerraEngine::Physics::PhysicsAssetChangeJournal::Instance().BeginSourceEpoch();
@@ -1254,6 +1264,11 @@ void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 	this->assetRoot = this->projectRoot / "Assets";
 	this->buildRoot = this->projectRoot / "Build" / "Assets";
 	this->assetIndexPath = this->projectRoot / "Library" / "AssetIndex.json";
+	{
+		std::lock_guard lifecycle(importLifecycleMutex);
+		++importProjectGeneration;
+		importAdmissionOpen = true;
+	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!std::filesystem::exists(assetRoot)) std::filesystem::create_directories(assetRoot);
@@ -1288,6 +1303,7 @@ void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 	assetIndexSaveDeferred = false;
 	recentlyRemovedAssets.clear();
 	pendingReconcileImports.clear();
+	pendingReconcileRemovals.clear();
 	pendingReconcileOrphanedMetas.clear();
 	if (projectReconcileFuture.valid()) {
 		projectReconcileFuture.wait();
@@ -1312,17 +1328,30 @@ void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 
 // AssetDatabase::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::Shutdown() {
-	// Ordinary project/editor shutdown is not an instruction to delete authored
-	// content. Stop accepting watcher work, then let successful compiler jobs use
-	// the same metadata/resource publication path they would use during Update.
-	// The interactive "Continue Closing" path requests destructive cancellation
-	// before it reaches here, and DrainAllImportsAndWait preserves that intent.
+	{
+		// Closing authority precedes cancellation and every physical wait. Worker
+		// publication acquires this gate before its short per-request arbiter.
+		std::lock_guard lifecycle(importLifecycleMutex);
+		importAdmissionOpen = false;
+		++importProjectGeneration;
+	}
+	discoveryOpen = false;
+	++discovery.projectGeneration;
+	// Project close revokes future publication without deleting authored content.
+	// Cancel unfinished work, preserve monotonic explicit-discard intent, and
+	// physically settle every compiler before roots or executor ownership change.
 	fileWatcher.Stop();
+	RequestCancelAllImports(false);
 	DrainAllImportsAndWait();
+	importExecutor.reset(); // All bool futures/processes settled before pool destruction.
 	if (projectReconcileFuture.valid()) {
 		projectReconcileFuture.wait();
-		(void)projectReconcileFuture.get();
+		try { (void)projectReconcileFuture.get(); } catch (...) { ++discovery.failedScans; }
+		++discovery.retiredScans;
 	}
+	discovery.scanning = discovery.pending = false;
+	applyingReconcileGeneration = 0U;
+	pendingEvents.clear();
 	assets.clear();
 	generatedModelPackageResources.clear();
 	// Draining all imports completes the editor's protected shutdown boundary.
@@ -1334,13 +1363,22 @@ void AssetDatabase::Shutdown() {
 #endif
 	animationReloadBoundaryToRetireNextUpdate = 0u;
 	deferredImports.clear();
+	deferredImportMetadata.clear();
 	pendingReconcileImports.clear();
+	pendingReconcileRemovals.clear();
 	pendingReconcileOrphanedMetas.clear();
 	recentlyRemovedAssets.clear();
 }
 
 // AssetDatabase::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::Update() {
+	// One protected application can register/remove many records. Persist its
+	// complete catalog once, rather than rewriting the full index per record.
+	++assetIndexSaveBatchDepth;
+	struct IndexSaveBoundary {
+		AssetDatabase& owner;
+		~IndexSaveBoundary() noexcept { owner.EndAssetIndexSaveBatch(); }
+	} indexSaveBoundary{*this};
 	// The prior update boundary is now complete. The publisher still refuses to
 	// retire generations held by evaluator/GPU/managed references.
 	if (animationReloadBoundaryToRetireNextUpdate != 0u)
@@ -1356,11 +1394,21 @@ void AssetDatabase::Update() {
 		}
 	}
 	PruneRecentlyRemovedAssets();
+	// Loss is consumed before scan publication so a newer demand cannot be
+	// mistaken for the demand satisfied by an already-running scan.
+	if (discoveryOpen && fileWatcher.ConsumeReconcileRequired()) {
+		++discovery.requestedGeneration;
+		discovery.pending = true;
+	}
 	PublishBackgroundProjectReconcile();
 	ProcessPendingProjectReconcile();
 
 	// Process Watcher Events
 	auto events = fileWatcher.PopEvents();
+	if (discoveryOpen && !events.empty() && (discovery.scanning || applyingReconcileGeneration != 0U)) {
+		++discovery.requestedGeneration;
+		discovery.pending = true;
+	}
 	for (const auto& e : events) {
 		// Debounce: update or add entry in pending
 		// Debounce time: 200ms
@@ -1385,14 +1433,19 @@ void AssetDatabase::Update() {
 
 	// Process Async Jobs
 	std::vector<std::pair<std::filesystem::path, bool>> readyDeferredImports;
+	// Reserve before any completion ownership changes; moving a prepared path
+	// into this storage cannot lose a follow-up after its old record is erased.
+	readyDeferredImports.reserve(asyncJobs.size());
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto jobIt = asyncJobs.begin(); jobIt != asyncJobs.end(); ) {
-		if (jobIt->future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-			const std::filesystem::path completedPath = jobIt->absSourcePath;
-			FinalizeAsyncImportJob(*jobIt);
+		if (jobIt->submissionFailed || (!jobIt->admitted && jobIt->progressState->cancelRequested.load())
+			|| (jobIt->future.valid() && jobIt->future.wait_for(std::chrono::seconds(0)) == std::future_status::ready)) {
+			std::filesystem::path completedPath = jobIt->absSourcePath;
+			try { FinalizeAsyncImportJob(*jobIt); }
+			catch (...) { ++importAdmission.failed; try { TERRAENGINE_LOG(LogLevel::Error, "Import owner finalization failed; capacity was released."); } catch (...) {} }
 			jobIt = asyncJobs.erase(jobIt);
 			if (const auto deferredIt = deferredImports.find(completedPath); deferredIt != deferredImports.end()) {
-				readyDeferredImports.push_back(*deferredIt);
+				readyDeferredImports.emplace_back(std::move(completedPath), deferredIt->second);
 				deferredImports.erase(deferredIt);
 			}
 		} else {
@@ -1402,8 +1455,80 @@ void AssetDatabase::Update() {
 	for (const auto& [path, force] : readyDeferredImports) {
 		if (std::filesystem::exists(path)) {
 			ImportAssetWithProgress(path, force);
+		} else deferredImportMetadata.erase(path);
+	}
+	DispatchQueuedImports();
+	if (discoveryOpen && discovery.pending) StartBackgroundProjectReconcile();
+}
+
+bool AssetDatabase::SetMaxActiveImports(std::size_t limit)
+{
+	// Configuration belongs to a protected quiescent boundary. Recreating an
+	// idle owned executor never changes the independent global frame pool.
+	if (limit == 0U || !asyncJobs.empty() || !deferredImports.empty() || !deferredImportMetadata.empty()
+		|| importAdmission.active != 0U) return false;
+	importExecutor.reset();
+	importAdmission.configuredCapacity = limit;
+	importAdmission.peakActive = 0U;
+	return true;
+}
+
+AssetImportAdmissionDiagnostics AssetDatabase::GetImportAdmissionDiagnostics() const
+{
+	auto snapshot = importAdmission;
+	{ std::lock_guard lifecycle(importLifecycleMutex); snapshot.open = importAdmissionOpen; }
+	for (const auto& job : asyncJobs) if (!job.admitted && !job.submissionFailed && !job.progressState->cancelRequested.load()) ++snapshot.queued;
+	return snapshot;
+}
+
+void AssetDatabase::DispatchQueuedImports()
+{
+	{ std::lock_guard lifecycle(importLifecycleMutex); if (!importAdmissionOpen) return; }
+	for (auto& job : asyncJobs) {
+		if (importAdmission.active >= importAdmission.configuredCapacity) break;
+		if (job.admitted || job.submissionFailed || job.progressState->cancelRequested.load()) continue;
+		try {
+#ifdef TERRAENGINE_EDITOR_TESTS
+			const auto admissionHook = importAdmissionHookForTests;
+			job.progressState->beforePublicationHook = admissionHook;
+			if (admissionHook) admissionHook(job.absSourcePath, ImportAdmissionBoundaryForTests::ExecutorCreation);
+#endif
+			if (!importExecutor) importExecutor = ThreadPool::CreateOwned(importAdmission.configuredCapacity);
+			// A task captures owned immutable inputs. No callback reads the vector
+			// entry after admission, and only its bool future escapes this scope.
+			auto task = importExecutor->createTask([this, metadata = job.metadata, path = job.absSourcePath,
+				progress = job.progressState, settings = job.resolvedMeshSettings] {
+				return RunAsyncImportWork(metadata, path, progress, settings);
+			});
+			job.future = task->getFuture();
+			job.admitted = true;
+			++importAdmission.active;
+			try {
+#ifdef TERRAENGINE_EDITOR_TESTS
+				if (admissionHook) admissionHook(job.absSourcePath, ImportAdmissionBoundaryForTests::Enqueue);
+#endif
+				importExecutor->enqueue(task);
+			}
+			catch (...) {
+				// Failed insertion guarantees the task was never admitted. Discard
+				// its pending future instead of waiting for an unsubmitted promise.
+				job.future = {}; job.admitted = false; --importAdmission.active;
+				throw;
+			}
+			++importAdmission.submitted;
+			importAdmission.peakActive = std::max(importAdmission.peakActive, importAdmission.active);
+		} catch (...) {
+			job.submissionFailed = true;
+			try { SetImportProgress(job.progressState, "Failed", "Import submission failed; reserved capacity was released.", 1.0F, false, true); } catch (...) {}
 		}
 	}
+}
+
+AssetDiscoveryDiagnostics AssetDatabase::GetDiscoveryDiagnostics() const
+{
+	auto snapshot = discovery;
+	snapshot.pendingImports = pendingReconcileImports.size();
+	return snapshot;
 }
 // AssetDatabase::IsAssetCompiling is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool AssetDatabase::IsCompiling() const {
@@ -1420,7 +1545,9 @@ bool AssetDatabase::IsAssetCompiling(const std::filesystem::path& absSourcePath)
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& job : asyncJobs) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (job.absSourcePath == normalizedPath && (!job.progressState || !job.progressState->cancelRequested.load())) {
+		// Cancellation revokes publication, but the compiler still owns its staging
+		// paths until the retained future physically settles.
+		if (job.absSourcePath == normalizedPath) {
 			return true;
 		}
 	}
@@ -1428,13 +1555,9 @@ bool AssetDatabase::IsAssetCompiling(const std::filesystem::path& absSourcePath)
 }
 
 size_t AssetDatabase::GetCompileJobsCount() const {
-	size_t count = 0u;
-	for (const AsyncCompileJob& job : asyncJobs) {
-		if (!job.progressState || !job.progressState->cancelRequested.load()) {
-			++count;
-		}
-	}
-	return count;
+	// Logical cancellation hides UI work but cannot erase physical ownership.
+	// This count includes queued and canceled records until finalization settles.
+	return asyncJobs.size();
 }
 
 bool AssetDatabase::CancelImport(const std::filesystem::path& absSourcePath, bool removeAssetAfterCancel) {
@@ -1448,6 +1571,10 @@ bool AssetDatabase::CancelImport(const std::filesystem::path& absSourcePath, boo
 				return false;
 			}
 			TerminateCompilerProcess(job.progressState);
+			// Discard pre-cancel follow-up intent only here; a later explicit retry
+			// must survive the old generation's eventual physical cleanup.
+			deferredImports.erase(normalizedPath);
+			deferredImportMetadata.erase(normalizedPath);
 			SetImportProgress(job.progressState, "Cancelling", "Stopping import and preparing cleanup.", snapshot.progress, false, false);
 			CleanupCancelledImport(job.metadata, job.absSourcePath, job.progressState->removeAssetAfterCancel.load());
 			return true;
@@ -1459,18 +1586,23 @@ bool AssetDatabase::CancelImport(const std::filesystem::path& absSourcePath, boo
 void AssetDatabase::RequestCancelAllImports(bool removeAssetsAfterCancel) {
 	for (AsyncCompileJob& job : asyncJobs) {
 		if (job.progressState) {
-			const AssetImportProgress snapshot = SnapshotImportProgress(job.progressState);
 			if (!RequestImportCancellation(job.progressState, removeAssetsAfterCancel)) {
 				// A fully published compiler result is too late to cancel. The drain
 				// path below will register it instead of discarding coherent output.
 				continue;
 			}
 			TerminateCompilerProcess(job.progressState);
-			SetImportProgress(job.progressState, "Cancelling", "Stopping import and preparing cleanup.", snapshot.progress, false, false);
-			CleanupCancelledImport(job.metadata, job.absSourcePath, job.progressState->removeAssetAfterCancel.load());
+			// Diagnostics and catalog cleanup may allocate. Neither can prevent
+			// later requests from receiving cancellation or the subsequent drain.
+			try {
+				const auto snapshot = SnapshotImportProgress(job.progressState);
+				SetImportProgress(job.progressState, "Cancelling", "Stopping import and preparing cleanup.", snapshot.progress, false, false);
+			} catch (...) {}
+			try { CleanupCancelledImport(job.metadata, job.absSourcePath, job.progressState->removeAssetAfterCancel.load()); } catch (...) {}
 		}
 	}
 	deferredImports.clear();
+	deferredImportMetadata.clear();
 }
 
 void AssetDatabase::CancelAllImportsAndWait(bool removeAssetsAfterCancel) {
@@ -1479,19 +1611,29 @@ void AssetDatabase::CancelAllImportsAndWait(bool removeAssetsAfterCancel) {
 }
 
 void AssetDatabase::DrainAllImportsAndWait() {
-	// A successful job has already published a complete compiled file atomically,
-	// but metadata and live registration still belong to the caller thread. Drain
-	// every future and complete that final protected step before project state is
-	// cleared. Explicitly cancelled jobs retain their destructive/non-destructive
-	// mode and may reach CleanupCancelledImport repeatedly without changing it.
-	for (AsyncCompileJob& job : asyncJobs) FinalizeAsyncImportJob(job);
-
-	asyncJobs.clear();
+	// Only teardown or explicit cancellation waits. Keep every active future
+	// until it physically settles, then release its slot at owner finalization.
+	// Queued canceled records own no submitted task and therefore never wait.
+	while (!asyncJobs.empty()) {
+		DispatchQueuedImports();
+		// Cancellation/closed admission never starts a queued compiler. Ordinary
+		// explicit drains admit eligible FIFO work and settle it on the owner.
+		auto& job = asyncJobs.front();
+		if (!job.admitted && !job.submissionFailed) job.progressState->cancelRequested.store(true);
+		try { FinalizeAsyncImportJob(job); } catch (...) { ++importAdmission.failed; }
+		asyncJobs.erase(asyncJobs.begin());
+	}
 	deferredImports.clear();
+	deferredImportMetadata.clear();
 }
 
 void AssetDatabase::FinalizeAsyncImportJob(AsyncCompileJob& job)
 {
+	// A finalizer may allocate metadata or throw. Physical settlement is still
+	// required before slot release, and this guard releases that slot exactly once.
+	struct SlotRelease { AssetDatabase& database; AsyncCompileJob& job;
+		~SlotRelease() noexcept { if (job.admitted) { --database.importAdmission.active; job.admitted = false; } }
+	} slot{*this, job};
 	bool compiled = false;
 	bool workerReturned = false;
 	if (job.future.valid())
@@ -1516,9 +1658,19 @@ void AssetDatabase::FinalizeAsyncImportJob(AsyncCompileJob& job)
 		}
 	}
 
+	{ std::lock_guard lifecycle(importLifecycleMutex);
+		if (job.progressState->projectGeneration != importProjectGeneration || !importAdmissionOpen) {
+			job.progressState->cancelRequested.store(true); ++importAdmission.retired;
+		}
+	}
 	const bool cancelled = job.progressState && job.progressState->cancelRequested.load();
+#ifdef TERRAENGINE_EDITOR_TESTS
+	const auto finalizationHook = importAdmissionHookForTests;
+	if (finalizationHook) finalizationHook(job.absSourcePath, ImportAdmissionBoundaryForTests::Finalization);
+#endif
 	if (cancelled)
 	{
+		++importAdmission.canceled;
 		if (const std::optional<AssetType> animationType =
 			RuntimeAssetTypeForCookedAnimationImporter(job.metadata.importerName))
 		{
@@ -1548,6 +1700,7 @@ void AssetDatabase::FinalizeAsyncImportJob(AsyncCompileJob& job)
 	}
 	else
 	{
+		++importAdmission.failed;
 		if (const std::optional<AssetType> animationType =
 			RuntimeAssetTypeForCookedAnimationImporter(job.metadata.importerName))
 		{
@@ -1581,6 +1734,7 @@ void AssetDatabase::FinalizeActiveImportForExplicitReimport(const std::filesyste
 	});
 	if (active != asyncJobs.end())
 	{
+		if (!active->admitted) (void)RequestImportCancellation(active->progressState, false);
 		// Waiting only for the matching future preserves progress and throughput
 		// for unrelated startup/file-watcher jobs in this same editor session.
 		FinalizeAsyncImportJob(*active);
@@ -1590,6 +1744,8 @@ void AssetDatabase::FinalizeActiveImportForExplicitReimport(const std::filesyste
 	// A duplicate request may have arrived while this job was compiling. The
 	// explicit synchronous reimport below supersedes that one path only.
 	deferredImports.erase(normalizedPath);
+	deferredImportMetadata.erase(normalizedPath);
+	DispatchQueuedImports();
 }
 
 std::vector<AssetImportProgress> AssetDatabase::GetImportProgressSnapshot() const {
@@ -1754,7 +1910,9 @@ bool AssetDatabase::MarkImportPublicationComplete(
 		return true;
 	}
 
+	std::lock_guard lifecycle(importLifecycleMutex);
 	std::lock_guard<std::mutex> lock(progressState->publicationMutex);
+	if (!importAdmissionOpen || progressState->projectGeneration != importProjectGeneration) return false;
 	if (progressState->cancelRequested.load()) {
 		return false;
 	}
@@ -1772,7 +1930,9 @@ bool AssetDatabase::PublishCompiledAssetFromWorker(
 
 	// Hold only the short final rename boundary. Compiler work remains parallel,
 	// while cancellation can still terminate a long-running child process.
+	std::lock_guard lifecycle(importLifecycleMutex);
 	std::lock_guard<std::mutex> lock(progressState->publicationMutex);
+	if (!importAdmissionOpen || progressState->projectGeneration != importProjectGeneration) return false;
 	if (progressState->cancelRequested.load()) {
 		return false;
 	}
@@ -1869,16 +2029,40 @@ void AssetDatabase::ImportAssetWithProgress(const std::filesystem::path& sourceP
 
 // AssetDatabase::ImportAssetInternal is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath, bool force, bool allowAsyncCompile) {
+	{ std::lock_guard lifecycle(importLifecycleMutex); if (!importAdmissionOpen) return; }
 	const auto absSourcePath = std::filesystem::absolute(sourcePath);
 	if (absSourcePath.extension() == ".meta") return;
 	if (IsIgnoredAssetDatabasePath(absSourcePath)) return;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::filesystem::is_directory(absSourcePath)) return;
 	if (IsAssetCompiling(absSourcePath)) {
+		auto existing = std::find_if(asyncJobs.begin(), asyncJobs.end(), [&](const AsyncCompileJob& job) {
+			return job.absSourcePath == absSourcePath;
+		});
+		AssetMetadata latest = existing->metadata;
+		AssetMetadata sidecar;
+		if (LoadMetadata(absSourcePath.string() + ".meta", sidecar) && sidecar.guid == latest.guid) latest = std::move(sidecar);
+		latest.lastModified = std::filesystem::last_write_time(absSourcePath);
+		const bool latestNeedsImport = force || latest.lastModified != existing->metadata.lastModified
+			|| latest.settings != existing->metadata.settings;
+		if (!existing->admitted && !existing->progressState->cancelRequested.load()) {
+			// Unsubmitted work has no closure yet; replace its snapshot rather than
+			// launching a stale generation followed by a redundant compile.
+			existing->metadata = std::move(latest);
+			existing->needsImport = existing->needsImport || latestNeedsImport;
+			if (existing->metadata.importerName == "MeshImporter") {
+				VirtualGeometryAdaptiveSettingsMetadata settings;
+				TryGetVirtualGeometryAdaptiveSettings(existing->metadata, settings);
+				existing->resolvedMeshSettings = settings;
+			}
+			return;
+		}
+		// Preserve edits before the active finalizer writes its older sidecar.
+		deferredImportMetadata[absSourcePath] = std::move(latest);
 		// Worker-backed imports can receive repeated file watcher or reimport
 		// requests while the first compile is still running. Coalesce those into
 		// one follow-up pass so large glTF/FBX files do not start duplicate jobs.
-		deferredImports[absSourcePath] = deferredImports[absSourcePath] || force;
+		deferredImports[absSourcePath] = deferredImports[absSourcePath] || latestNeedsImport;
 		TERRAENGINE_LOG(LogLevel::Info, "Deferred duplicate asset import while compile is active: " << absSourcePath);
 		return;
 	}
@@ -1892,7 +2076,9 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 
 	// 1. Prefer in-memory metadata if we are forcing or it already exists
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (assets.count(absSourcePath)) {
+	if (const auto latest = deferredImportMetadata.find(absSourcePath); latest != deferredImportMetadata.end()) {
+		metadata = std::move(latest->second); deferredImportMetadata.erase(latest); metadataValid = true;
+	} else if (assets.count(absSourcePath)) {
 		metadata = assets[absSourcePath];
 		metadataValid = true;
 	} 
@@ -2015,55 +2201,9 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 					resolvedMeshSettings = settings;
 				}
 
-				auto future = std::async(std::launch::async, [this, metadata, absSourcePath, progressState, resolvedMeshSettings]() {
-					try {
-						if (const std::optional<AssetType> animationType =
-							RuntimeAssetTypeForCookedAnimationImporter(metadata.importerName))
-						{
-							RecordAnimationReimportStatus({absSourcePath, metadata.guid,
-								*ReloadAssetTypeForRuntimeType(*animationType), AnimationReimportState::Compiling,
-								0u, ResourceManager::Instance().GetAnimationAssetRuntimeGeneration(
-									metadata.guid, *animationType), 0u, 0u, true,
-								"Worker is validating and staging the complete cooked animation envelope."});
-						}
-						SetImportProgress(progressState, "Importing", "Reading source data and writing compiled output.", 0.15f, true, false);
-						bool compiled = false;
-#ifdef TERRAENGINE_EDITOR_TESTS
-						AsyncImportCompileHookForTests compileHook;
-						{
-							std::lock_guard<std::mutex> lock(asyncImportCompileHookMutex);
-							compileHook = asyncImportCompileHookForTests;
-						}
-						if (compileHook) {
-							compiled = compileHook(metadata, progressState->cancelRequested);
-						} else {
-							compiled = CompileAsset(metadata, progressState, resolvedMeshSettings);
-						}
-#else
-						compiled = CompileAsset(metadata, progressState, resolvedMeshSettings);
-#endif
-						// Compilers with a staged output mark this inside the publication
-						// lock. This second idempotent mark also covers package compilers
-						// and the deterministic test hook after they report success.
-						if (compiled) {
-							compiled = MarkImportPublicationComplete(progressState);
-						}
-						SetImportProgress(progressState,
-							compiled ? "Finalizing" : "Failed",
-							compiled ? "Compile output is ready for main-thread registration." : "Compilation failed; see the log for details.",
-							compiled ? 0.90f : 1.0f,
-							false,
-							!compiled);
-						return compiled;
-					} catch (const AssetImportCancelledException&) {
-						progressState->cancelRequested.store(true);
-						return false;
-					} catch (const std::exception& exception) {
-						TERRAENGINE_LOG(LogLevel::Error, "Asset import worker failed: " << exception.what());
-						return false;
-					}
-				});
-				asyncJobs.push_back({metadata, std::move(future), needsImport, absSourcePath, progressState});
+				progressState->projectGeneration = importProjectGeneration;
+				asyncJobs.push_back({metadata, {}, needsImport, absSourcePath, progressState, resolvedMeshSettings});
+				DispatchQueuedImports();
 				return; // Defer registration until async job finishes
 			} else {
 				bool compiled = CompileAsset(metadata);
@@ -2078,6 +2218,59 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 	FinishImport(metadata, absSourcePath, needsImport);
 }
 
+
+bool AssetDatabase::RunAsyncImportWork(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath,
+	const std::shared_ptr<AsyncImportProgressState>& progressState,
+	const std::optional<VirtualGeometryAdaptiveSettingsMetadata>& resolvedMeshSettings)
+{
+	try {
+		if (const std::optional<AssetType> animationType =
+			RuntimeAssetTypeForCookedAnimationImporter(metadata.importerName))
+		{
+			RecordAnimationReimportStatus({absSourcePath, metadata.guid,
+				*ReloadAssetTypeForRuntimeType(*animationType), AnimationReimportState::Compiling,
+				0u, ResourceManager::Instance().GetAnimationAssetRuntimeGeneration(
+					metadata.guid, *animationType), 0u, 0u, true,
+				"Worker is validating and staging the complete cooked animation envelope."});
+		}
+		SetImportProgress(progressState, "Importing", "Reading source data and writing compiled output.", 0.15f, true, false);
+		bool compiled = false;
+#ifdef TERRAENGINE_EDITOR_TESTS
+		AsyncImportCompileHookForTests compileHook;
+		{
+			std::lock_guard<std::mutex> lock(asyncImportCompileHookMutex);
+			compileHook = asyncImportCompileHookForTests;
+		}
+		if (compileHook) {
+			compiled = compileHook(metadata, progressState->cancelRequested);
+		} else {
+			compiled = CompileAsset(metadata, progressState, resolvedMeshSettings);
+		}
+#else
+		compiled = CompileAsset(metadata, progressState, resolvedMeshSettings);
+#endif
+		// Compilers with a staged output mark this inside the publication
+		// lock. This second idempotent mark also covers package compilers
+		// and the deterministic test hook after they report success.
+		if (compiled) {
+			compiled = MarkImportPublicationComplete(progressState);
+		}
+		SetImportProgress(progressState,
+			compiled ? "Finalizing" : "Failed",
+			compiled ? "Compile output is ready for main-thread registration." : "Compilation failed; see the log for details.",
+			compiled ? 0.90f : 1.0f,
+			false,
+			!compiled);
+		return compiled;
+	} catch (const AssetImportCancelledException&) {
+		progressState->cancelRequested.store(true);
+		return false;
+	} catch (const std::exception& exception) {
+		TERRAENGINE_LOG(LogLevel::Error, "Asset import worker failed: " << exception.what());
+		return false;
+	}
+
+}
 // AssetDatabase::FinishImport is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport) {
 	// Always save metadata
@@ -2391,17 +2584,33 @@ bool AssetDatabase::LoadAssetIndex() {
 }
 
 void AssetDatabase::RequestAssetIndexSave() {
-	if (loadingAssetIndex) {
+	assetIndexSaveDeferred = true;
+	if (loadingAssetIndex || assetIndexSaveBatchDepth != 0U) {
 		// Multiple generated materials and prefabs may be registered from one
 		// package entry. One final save publishes the complete database after the
 		// outer load finishes instead of racing a shared temporary file per child.
-		assetIndexSaveDeferred = true;
 		return;
 	}
-	(void)SaveAssetIndex();
+	TrySaveDeferredAssetIndex();
+}
+
+void AssetDatabase::EndAssetIndexSaveBatch() noexcept {
+	if (assetIndexSaveBatchDepth == 0U) return;
+	--assetIndexSaveBatchDepth;
+	if (assetIndexSaveBatchDepth == 0U && !loadingAssetIndex) TrySaveDeferredAssetIndex();
+}
+
+void AssetDatabase::TrySaveDeferredAssetIndex() noexcept {
+	if (!assetIndexSaveDeferred) return;
+	// Disk failure or allocation failure retains demand for the next protected
+	// Update. Scope destruction must never replace the original exception.
+	try { if (SaveAssetIndex()) assetIndexSaveDeferred = false; } catch (...) {}
 }
 
 bool AssetDatabase::SaveAssetIndex() const {
+#ifdef TERRAENGINE_EDITOR_TESTS
+	++assetIndexSaveAttemptsForTests;
+#endif
 	if (assetIndexPath.empty()) {
 		return false;
 	}
@@ -2454,13 +2663,28 @@ bool AssetDatabase::SaveAssetIndex() const {
 }
 
 void AssetDatabase::StartBackgroundProjectReconcile() {
-	if (projectReconcileFuture.valid()) {
+	if (!discoveryOpen || projectReconcileFuture.valid() || applyingReconcileGeneration != 0U) {
 		return;
 	}
 
 	const std::filesystem::path scanRoot = assetRoot;
-	projectReconcileFuture = std::async(std::launch::async, [scanRoot]() {
+	const auto projectGeneration = discovery.projectGeneration, requestedGeneration = discovery.requestedGeneration;
+#ifdef TERRAENGINE_EDITOR_TESTS
+	const auto scanHook = projectReconcileHookForTests;
+#endif
+	discovery.scanningGeneration = requestedGeneration;
+	discovery.scanning = true;
+	try {
+	projectReconcileFuture = std::async(std::launch::async, [scanRoot, projectGeneration, requestedGeneration
+#ifdef TERRAENGINE_EDITOR_TESTS
+		, scanHook
+#endif
+	]() {
 		ProjectReconcileSnapshot snapshot;
+		snapshot.projectGeneration = projectGeneration; snapshot.requestedGeneration = requestedGeneration;
+#ifdef TERRAENGINE_EDITOR_TESTS
+		if (scanHook) scanHook(false);
+#endif
 		if (!std::filesystem::exists(scanRoot)) {
 			return snapshot;
 		}
@@ -2480,8 +2704,15 @@ void AssetDatabase::StartBackgroundProjectReconcile() {
 				snapshot.sourceFiles.push_back(std::filesystem::absolute(path));
 			}
 		}
+#ifdef TERRAENGINE_EDITOR_TESTS
+		if (scanHook) scanHook(true);
+#endif
 		return snapshot;
 	});
+	} catch (...) {
+		discovery.scanning = false; discovery.pending = true; ++discovery.failedScans;
+		discovery.lastFailure = "Discovery scan submission failed; recovery remains pending.";
+	}
 }
 
 void AssetDatabase::PublishBackgroundProjectReconcile() {
@@ -2492,7 +2723,26 @@ void AssetDatabase::PublishBackgroundProjectReconcile() {
 		return;
 	}
 
-	ProjectReconcileSnapshot snapshot = projectReconcileFuture.get();
+	ProjectReconcileSnapshot snapshot;
+	try { snapshot = projectReconcileFuture.get(); }
+	catch (...) {
+		discovery.scanning = false; discovery.pending = true; ++discovery.failedScans;
+		discovery.lastFailure = "Discovery scan failed; recovery remains pending.";
+		return;
+	}
+	discovery.scanning = false;
+	if (!discoveryOpen || snapshot.projectGeneration != discovery.projectGeneration) { ++discovery.retiredScans; return; }
+	// The scan is authoritative for known source membership. Remove stale
+	// catalog entries at the protected owner boundary; never delete disk here.
+	std::set<std::filesystem::path> present(snapshot.sourceFiles.begin(), snapshot.sourceFiles.end());
+	for (auto iterator = assets.begin(); iterator != assets.end();) {
+		if (IsTrackedSourceAssetPath(iterator->first) && !present.contains(iterator->first)
+			&& !std::filesystem::exists(iterator->first)) {
+			pendingReconcileRemovals.push_back(iterator->first);
+			++iterator;
+		} else ++iterator;
+	}
+	applyingReconcileGeneration = snapshot.requestedGeneration;
 	for (const std::filesystem::path& metaPath : snapshot.orphanedMetaFiles) {
 		pendingReconcileOrphanedMetas.push_back(metaPath);
 	}
@@ -2505,8 +2755,12 @@ void AssetDatabase::PublishBackgroundProjectReconcile() {
 }
 
 void AssetDatabase::ProcessPendingProjectReconcile() {
-	if (!pendingReconcileOrphanedMetas.empty()) {
-		for (const std::filesystem::path& metaPath : pendingReconcileOrphanedMetas) {
+	// All disk/catalog application shares a small owner-boundary budget. The
+	// worker walks directories; normal editor frames never wait for that walk.
+	constexpr std::size_t kMaxReconcileImportsPerFrame = 16u;
+	std::size_t processedCount = 0u;
+	while (!pendingReconcileOrphanedMetas.empty() && processedCount < kMaxReconcileImportsPerFrame) {
+			const auto metaPath = pendingReconcileOrphanedMetas.front(); pendingReconcileOrphanedMetas.pop_front();
 			AssetMetadata tempMeta;
 			std::filesystem::path sourcePath = metaPath;
 			sourcePath.replace_extension("");
@@ -2516,13 +2770,14 @@ void AssetDatabase::ProcessPendingProjectReconcile() {
 			}
 			std::error_code removeMetaError;
 			std::filesystem::remove(metaPath, removeMetaError);
-		}
-		pendingReconcileOrphanedMetas.clear();
 		RequestAssetIndexSave();
+		++processedCount;
 	}
-
-	constexpr std::size_t kMaxReconcileImportsPerFrame = 16u;
-	std::size_t processedCount = 0u;
+	while (!pendingReconcileRemovals.empty() && processedCount < kMaxReconcileImportsPerFrame) {
+		const auto path = pendingReconcileRemovals.front(); pendingReconcileRemovals.pop_front();
+		if (!std::filesystem::exists(path)) OnFileEvent(path, FileStatus::Erased);
+		++processedCount;
+	}
 	while (!pendingReconcileImports.empty() && processedCount < kMaxReconcileImportsPerFrame) {
 		const std::filesystem::path sourcePath = pendingReconcileImports.front();
 		pendingReconcileImports.pop_front();
@@ -2533,6 +2788,11 @@ void AssetDatabase::ProcessPendingProjectReconcile() {
 			ImportAssetWithProgress(sourcePath);
 		}
 		++processedCount;
+	}
+	if (applyingReconcileGeneration != 0U && pendingReconcileImports.empty() && pendingReconcileRemovals.empty() && pendingReconcileOrphanedMetas.empty()) {
+		discovery.completedGeneration = applyingReconcileGeneration;
+		applyingReconcileGeneration = 0U;
+		discovery.pending = discovery.requestedGeneration > discovery.completedGeneration;
 	}
 }
 
@@ -3119,7 +3379,8 @@ void AssetDatabase::CleanupModelPackageGeneratedAssets(const AssetMetadata& meta
 
 void AssetDatabase::CleanupCancelledImport(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool removeSourceAsset) {
 	pendingEvents.erase(absSourcePath);
-	deferredImports.erase(absSourcePath);
+	// Retry ownership is managed by cancellation/admission, not by this old
+	// generation's cleanup: a fresh request may already be waiting for settlement.
 
 	if (!removeSourceAsset) {
 		// Shutdown and automation cancellation only stop worker-owned work. The
@@ -3391,25 +3652,21 @@ bool AssetDatabase::SaveMetadata(const AssetMetadata& metadata) {
 }
 
 bool AssetDatabase::CompileModelPackageWithProcess(const AssetMetadata& metadata, const std::shared_ptr<AsyncImportProgressState>& progressState) {
-	const std::filesystem::path fullSourcePath = assetRoot / metadata.sourcePath;
-	const std::filesystem::path expectedPackageSidecarPath = TerraEngine::AssetPipeline::GetImportResultPath(fullSourcePath);
-
-#ifdef _WIN32
-	const std::filesystem::path compilerPath = GetEditorExecutableDirectory() / kModelPackageCompilerName;
-	if (!std::filesystem::exists(compilerPath)) {
-		TERRAENGINE_LOG(LogLevel::Error, "Model package compiler executable is missing: " << compilerPath);
-		return false;
-	}
-	const std::wstring commandLine = QuoteCommandLineArgument(compilerPath)
-		+ L" --source " + QuoteCommandLineArgument(fullSourcePath)
-		+ L" --asset-root " + QuoteCommandLineArgument(assetRoot)
-		+ L" --build-root " + QuoteCommandLineArgument(buildRoot)
-		+ L" --source-relative " + QuoteCommandLineArgument(metadata.sourcePath)
-		+ L" --package-guid " + QuoteCommandLineArgument(UuidToString(metadata.guid))
-		+ L" --shader-guid " + QuoteCommandLineArgument(UuidToString(ResourceManager::Instance().GetDefaultShaderCollectionID()));
-	return RunCompilerProcess(compilerPath, commandLine, progressState, "Model package compiler", expectedPackageSidecarPath);
-#else
-	TerraEngine::AssetPipeline::ModelPackageImportOptions options{};
+	// Every process writes only private roots. The owner publishes the complete
+	// candidate after physical process settlement and its final authority check.
+	using namespace TerraEngine::AssetPipeline;
+	const auto fullSourcePath = assetRoot / metadata.sourcePath;
+	const auto token = UuidToString(TerraEngine::GenerateUUID());
+	const ModelPackagePreparationRoots preparation{assetRoot / (".ta-" + token), buildRoot / (".tb-" + token)};
+	struct CandidateCleanup {
+		const ModelPackagePreparationRoots& roots;
+		~CandidateCleanup() noexcept {
+			std::error_code ignored;
+			std::filesystem::remove_all(roots.assetRoot, ignored);
+			std::filesystem::remove_all(roots.buildRoot, ignored);
+		}
+	} cleanup{preparation};
+	ModelPackageImportOptions options{};
 	options.sourcePath = fullSourcePath;
 	options.assetRoot = assetRoot;
 	options.buildRoot = buildRoot;
@@ -3417,17 +3674,47 @@ bool AssetDatabase::CompileModelPackageWithProcess(const AssetMetadata& metadata
 	options.packageGuid = metadata.guid;
 	options.shaderCollectionId = ResourceManager::Instance().GetDefaultShaderCollectionID();
 	options.forceReimport = true;
+	options.preparationRoots = preparation;
+	const auto candidateSidecar = GetImportResultPath(preparation.assetRoot / metadata.sourcePath);
+#ifdef _WIN32
+	const auto compilerPath = GetEditorExecutableDirectory() / kModelPackageCompilerName;
+	if (!std::filesystem::exists(compilerPath)) return false;
+	const std::wstring commandLine = QuoteCommandLineArgument(compilerPath)
+		+ L" --source " + QuoteCommandLineArgument(fullSourcePath)
+		+ L" --asset-root " + QuoteCommandLineArgument(assetRoot)
+		+ L" --build-root " + QuoteCommandLineArgument(buildRoot)
+		+ L" --source-relative " + QuoteCommandLineArgument(metadata.sourcePath)
+		+ L" --package-guid " + QuoteCommandLineArgument(UuidToString(metadata.guid))
+		+ L" --shader-guid " + QuoteCommandLineArgument(UuidToString(options.shaderCollectionId))
+		+ L" --prepare-asset-root " + QuoteCommandLineArgument(preparation.assetRoot)
+		+ L" --prepare-build-root " + QuoteCommandLineArgument(preparation.buildRoot);
+	if (!RunCompilerProcess(compilerPath, commandLine, progressState, "Model package compiler", candidateSidecar)) return false;
+#else
 	options.progressCallback = [this, progressState](float progress, std::string_view stage, std::string_view message) {
-		if (progressState) {
-			SetImportProgress(progressState, std::string(stage), std::string(message), progress, false, false);
-		}
+		if (progressState) SetImportProgress(progressState, std::string(stage), std::string(message), progress, false, false);
 	};
-	TerraEngine::AssetPipeline::ModelPackageImportResult importResult = TerraEngine::AssetPipeline::ImportModelPackage(options);
-	if (!TerraEngine::AssetPipeline::SaveModelPackageImportResult(fullSourcePath, importResult)) {
-		TERRAENGINE_LOG(LogLevel::Warning, "Failed to save model package import result sidecar for " << fullSourcePath);
+	options.cancellationRequested = [progressState] { return progressState && progressState->cancelRequested.load(); };
+	// Read prior recipes from the authoritative sidecar, never from empty private
+	// roots. This mirrors the process compiler's retained per-mesh overrides.
+	ModelPackageImportResult previous;
+	if (LoadModelPackageImportResult(fullSourcePath, previous)) {
+		for (const auto& mesh : previous.generatedMeshes) if (mesh.virtualGeometrySettings.hasOverride)
+			options.virtualGeometryMeshOverrides.push_back({mesh.guid, mesh.virtualGeometrySettings});
 	}
-	return importResult.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed && std::filesystem::exists(expectedPackageSidecarPath);
+	const auto result = ImportModelPackage(options);
+	if (result.status == ModelImportStatus::Failed || !SaveModelPackageImportResult(preparation.assetRoot / metadata.sourcePath, result)) return false;
 #endif
+#ifdef TERRAENGINE_EDITOR_TESTS
+	if (progressState && progressState->beforePublicationHook)
+		progressState->beforePublicationHook(fullSourcePath, ImportAdmissionBoundaryForTests::BeforePublication);
+#endif
+	if (!progressState) return PublishPreparedModelPackage(preparation, options);
+	std::lock_guard lifecycle(importLifecycleMutex);
+	std::lock_guard publication(progressState->publicationMutex);
+	if (!importAdmissionOpen || progressState->projectGeneration != importProjectGeneration || progressState->cancelRequested.load()) return false;
+	if (!PublishPreparedModelPackage(preparation, options)) return false;
+	progressState->publicationCompleted = true;
+	return true;
 }
 
 bool AssetDatabase::RunCompilerProcess(const std::filesystem::path& compilerPath, const std::wstring& commandLine, const std::shared_ptr<AsyncImportProgressState>& progressState, std::string_view logPrefix, const std::filesystem::path& expectedOutputPath) {
@@ -3438,6 +3725,26 @@ bool AssetDatabase::RunCompilerProcess(const std::filesystem::path& compilerPath
 
 	HANDLE readPipe = nullptr;
 	HANDLE writePipe = nullptr;
+	PROCESS_INFORMATION processInfo{};
+	// Own pipes and the native process even when line capture/progress parsing
+	// throws. A failed worker cannot release its import slot while this child lives.
+	struct CompilerOwnership {
+		HANDLE& read; HANDLE& write; PROCESS_INFORMATION& process;
+		const std::shared_ptr<AsyncImportProgressState>& progress;
+		bool settled = false;
+		~CompilerOwnership() noexcept {
+			if (process.hProcess) {
+				if (!settled) { TerminateProcess(process.hProcess, 1U); WaitForSingleObject(process.hProcess, INFINITE); }
+				if (progress) { try {
+					std::lock_guard lock(progress->processMutex);
+					if (progress->compilerProcessHandle == process.hProcess) progress->compilerProcessHandle = nullptr;
+				} catch (...) {} }
+				CloseHandle(process.hThread); CloseHandle(process.hProcess);
+			}
+			if (read) CloseHandle(read);
+			if (write) CloseHandle(write);
+		}
+	} ownership{readPipe, writePipe, processInfo, progressState};
 	if (!CreatePipe(&readPipe, &writePipe, &securityAttributes, 0u)) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to create compiler output pipe for " << compilerPath);
 		return false;
@@ -3451,7 +3758,6 @@ bool AssetDatabase::RunCompilerProcess(const std::filesystem::path& compilerPath
 	startupInfo.hStdError = writePipe;
 	startupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
 
-	PROCESS_INFORMATION processInfo{};
 	std::vector<wchar_t> mutableCommandLine(commandLine.begin(), commandLine.end());
 	mutableCommandLine.push_back(L'\0');
 	const std::wstring workingDirectory = compilerPath.parent_path().wstring();
@@ -3467,9 +3773,11 @@ bool AssetDatabase::RunCompilerProcess(const std::filesystem::path& compilerPath
 		&startupInfo,
 		&processInfo);
 	CloseHandle(writePipe);
+	writePipe = nullptr;
 
 	if (!created) {
 		CloseHandle(readPipe);
+		readPipe = nullptr;
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to launch compiler: " << compilerPath);
 		return false;
 	}
@@ -3519,8 +3827,10 @@ bool AssetDatabase::RunCompilerProcess(const std::filesystem::path& compilerPath
 		}
 	}
 	CloseHandle(readPipe);
+	readPipe = nullptr;
 
 	WaitForSingleObject(processInfo.hProcess, INFINITE);
+	ownership.settled = true;
 	DWORD exitCode = 1u;
 	GetExitCodeProcess(processInfo.hProcess, &exitCode);
 	if (progressState) {
@@ -3529,8 +3839,6 @@ bool AssetDatabase::RunCompilerProcess(const std::filesystem::path& compilerPath
 			progressState->compilerProcessHandle = nullptr;
 		}
 	}
-	CloseHandle(processInfo.hThread);
-	CloseHandle(processInfo.hProcess);
 	return exitCode == 0u && (expectedOutputPath.empty() || std::filesystem::exists(expectedOutputPath));
 #else
 	(void)compilerPath;
@@ -3955,14 +4263,33 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata, const std::share
 		return CompilePhysicsColliderWithProcess(metadata, progressState);
 	}
 	else if(metadata.importerName == "AudioClipImporter") {
-		// The compiler writes and checks a sibling staging file before its atomic
-		// replace, so a failed watched reimport leaves the prior cooked generation.
+		// Cook into a private sibling first. Only the database's generation/cancel
+		// arbiter may replace the authoritative artifact after validation completes.
+		const auto stagedPath = fullCompiledPath.parent_path()
+			/ (fullCompiledPath.stem().string() + ".staged" + fullCompiledPath.extension().string());
+		const std::filesystem::path decoderStagingPath = stagedPath.string() + ".staged";
+		struct AudioCandidateCleanup {
+			const std::filesystem::path& path; const std::filesystem::path& decoderPath;
+			~AudioCandidateCleanup() noexcept {
+				std::error_code ignored; std::filesystem::remove(path, ignored);
+				std::filesystem::remove(decoderPath, ignored);
+			}
+		} cleanup{stagedPath, decoderStagingPath};
 		const TerraEngine::AssetPipeline::AudioClipCompileReport report =
-			TerraEngine::AssetPipeline::CompileAudioClip({fullSourcePath, fullCompiledPath, metadata.guid},
+			TerraEngine::AssetPipeline::CompileAudioClip({fullSourcePath, stagedPath, metadata.guid},
 				progressState ? &progressState->cancelRequested : nullptr);
 		if(!report.Succeeded()) {
 			TERRAENGINE_LOG(LogLevel::Error, "Audio clip compile failed ("
 				<< TerraEngine::AssetPipeline::ToString(report.status) << "): " << fullSourcePath);
+			return false;
+		}
+#ifdef TERRAENGINE_EDITOR_TESTS
+		if (progressState && progressState->beforePublicationHook)
+			progressState->beforePublicationHook(fullSourcePath, ImportAdmissionBoundaryForTests::BeforePublication);
+#endif
+		if (!PublishCompiledAssetFromWorker(stagedPath, fullCompiledPath, progressState)) {
+			std::error_code ignored;
+			std::filesystem::remove(stagedPath, ignored);
 			return false;
 		}
 		return true;

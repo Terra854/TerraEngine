@@ -47,7 +47,9 @@ namespace TerraEngine::EditorTests
 				}.dump(2);
 				scene.close();
 
-				SceneManager::Instance().UnloadAll();
+				// This fixture owns a fresh project load lifetime, even after an
+				// earlier test explicitly closed shared scene admission.
+				SceneManager::Instance().BeginLoadSession();
 				SceneManager::Instance().SetSceneRoot(context.projectManager->GetProjectRoot());
 				const TerraEngine::UUID sceneId = SceneManager::Instance().LoadScene(scenePath);
 				SceneManager::Instance().SetActiveScene(sceneId);

@@ -131,7 +131,7 @@ void SceneManager::Initialize()
 	// Clear any stale tracking in case the manager is restarted during a hot
 	// reload. At this stage nothing is loaded yet so the reset is cheap and
 	// keeps stale cache entries from leaking across sessions.
-	UnloadAll();
+	BeginLoadSession();
 	
 	ResourceManager::Instance().LoadDefaultResources();
 
@@ -165,9 +165,123 @@ void SceneManager::Update(float deltaTime)
 
 void SceneManager::Shutdown()
 {
-	// Release cached JSON blobs and let any outstanding futures drop their
-	// references so the thread pool can finish without holding scene data.
+	std::lock_guard transition(loadSessionTransitionMutex);
+	CloseAndDrainLoads();
 	UnloadAll();
+}
+
+void SceneManager::PrepareShutdown()
+{
+	std::lock_guard transition(loadSessionTransitionMutex);
+	CloseAndDrainLoads();
+}
+
+void SceneManager::BeginLoadSession()
+{
+	std::lock_guard transition(loadSessionTransitionMutex);
+	CloseAndDrainLoads();
+	UnloadAll();
+	std::lock_guard gate(lifecycleMutex);
+	loadAdmissionOpen = true;
+}
+
+void SceneManager::CloseAndDrainLoads()
+{
+	std::vector<std::shared_ptr<LoadRequest>> owned;
+	{
+		std::lock_guard gate(lifecycleMutex);
+		loadAdmissionOpen = false;
+		RetireCacheAuthorityLocked(false);
+		owned.swap(outstandingLoads);
+		drainingLoadCount = owned.size();
+	}
+	// Public completion also covers a submitter which reserved but has not yet
+	// enqueued. It must settle that reservation before we inspect physical work.
+	// No lock needed by submission, cleanup or publication is held while waiting.
+	for(const auto& request : owned) {
+		request->future.wait();
+		if(request->physicalCompletion.valid()) request->physicalCompletion.wait();
+	}
+	{
+		std::lock_guard gate(lifecycleMutex);
+		loadDiagnostics.physicallySettled += owned.size();
+		drainingLoadCount = 0;
+	}
+	// Callback captures are released outside manager locks after physical return.
+}
+
+void SceneManager::PruneSettledLoadsLocked()
+{
+	std::erase_if(outstandingLoads, [this](const auto& request) {
+		const bool settled = request->future.wait_for(std::chrono::seconds(0)) == std::future_status::ready
+			&& (!request->physicalCompletion.valid()
+				|| request->physicalCompletion.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+		if(settled) ++loadDiagnostics.physicallySettled;
+		return settled;
+	});
+}
+
+SceneLoadDiagnostics SceneManager::GetLoadDiagnostics()
+{
+	std::lock_guard gate(lifecycleMutex);
+	PruneSettledLoadsLocked();
+	std::shared_lock scenes(sceneCache.mutex);
+	std::shared_lock prefabs(prefabCache.mutex);
+	auto result = loadDiagnostics;
+	result.admissionOpen = loadAdmissionOpen;
+	result.sceneGeneration = sceneCache.generation;
+	result.prefabGeneration = prefabCache.generation;
+	result.pendingScenes = sceneCache.inFlight.size();
+	result.pendingPrefabs = prefabCache.inFlight.size();
+	result.ownedLoads = outstandingLoads.size() + drainingLoadCount;
+	return result;
+}
+
+void SceneManager::RecordLoadTerminalLocked(const std::shared_ptr<LoadRequest>& request, SceneLoadDisposition disposition) noexcept
+{
+	if(request->disposition != SceneLoadDisposition::Pending) return;
+	request->disposition = disposition;
+	switch(disposition) {
+	case SceneLoadDisposition::Published: ++loadDiagnostics.published; break;
+	case SceneLoadDisposition::InvalidDocument: ++loadDiagnostics.invalid; break;
+	case SceneLoadDisposition::Retired: ++loadDiagnostics.retired; break;
+	case SceneLoadDisposition::ClosedAdmission: ++loadDiagnostics.closedAdmissions; break;
+	case SceneLoadDisposition::AdmissionFailure: ++loadDiagnostics.admissionFailures; break;
+	case SceneLoadDisposition::SubmissionFailure: ++loadDiagnostics.submissionFailures; break;
+	case SceneLoadDisposition::LoaderException: ++loadDiagnostics.loaderExceptions; break;
+	case SceneLoadDisposition::PublicationFailure: ++loadDiagnostics.publicationFailures; break;
+	case SceneLoadDisposition::Pending: break;
+	}
+	if(request->source.requestId >= loadDiagnostics.latestRequestId) {
+		loadDiagnostics.latestRequestId = request->source.requestId;
+		loadDiagnostics.latestDisposition = disposition;
+	}
+}
+
+void SceneManager::ReportLoadTerminal(const std::shared_ptr<LoadRequest>& request, SceneLoadDisposition disposition) noexcept
+{
+	try {
+		std::lock_guard gate(lifecycleMutex);
+		RecordLoadTerminalLocked(request, disposition);
+	} catch(...) {
+		// Diagnostic lock failure cannot replace the initiating future exception.
+	}
+}
+
+void SceneManager::RetireCacheAuthorityLocked(bool clearDocuments)
+{
+	std::unique_lock scenes(sceneCache.mutex);
+	std::unique_lock prefabs(prefabCache.mutex);
+	++sceneCache.generation; ++prefabCache.generation;
+	sceneCache.inFlight.clear(); prefabCache.inFlight.clear();
+	if(clearDocuments) {
+		sceneCache.pathToId.clear(); sceneCache.resources.clear();
+		prefabCache.pathToId.clear(); prefabCache.resources.clear();
+		activeSceneId = TerraEngine::EMPTY_UUID;
+		++activeSceneAuthoredRevision;
+		activeSceneDirty = false; activeSceneSettingsDirty = false;
+		activeSceneRenderSettings = MakeDefaultSceneRenderSettings();
+	}
 }
 
 // SceneManager::SystemName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -181,7 +295,12 @@ void SceneManager::SetSceneRoot(const std::filesystem::path& root)
 {
 	// Normalize immediately so repeated calls with different relative forms map
 	// to the same cache keys.
-	sceneRoot = root.lexically_normal();
+	const auto capturedRoot = std::filesystem::absolute(root).lexically_normal();
+	std::lock_guard gate(lifecycleMutex);
+	if(sceneRoot != capturedRoot) {
+		RetireCacheAuthorityLocked(true);
+		sceneRoot = capturedRoot;
+	}
 	// Emit debug output so asset lookups can be traced back to the configured root.
 	TERRAENGINE_LOG(LogLevel::Debug, "Scene root set to " << sceneRoot);
 }
@@ -189,6 +308,7 @@ void SceneManager::SetSceneRoot(const std::filesystem::path& root)
 // SceneManager::GetSceneRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path SceneManager::GetSceneRoot() const
 {
+	std::lock_guard gate(lifecycleMutex);
 	return sceneRoot;
 }
 
@@ -207,41 +327,24 @@ std::filesystem::path SceneManager::GetStartupScene() const
 // SceneManager::LoadScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID SceneManager::LoadScene(const std::filesystem::path& path)
 {
-	// Trace synchronous scene requests to help diagnose cache behavior during authoring.
-	TERRAENGINE_LOG(LogLevel::Debug, "Request to load scene " << path);
-	return LoadOrGetCached<SceneDocument>(path, sceneCache, [this](const std::filesystem::path& resolvedPath, SceneFileType type) {
-		return LoadSceneDocument(resolvedPath, type);
-	}, SceneFileType::Scene);
+	return LoadScene(path, {});
 }
 
-// SceneManager::ReloadScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+TerraEngine::UUID SceneManager::LoadScene(const std::filesystem::path& path, SceneLoadOptions options)
+{
+	return RequestLoad(path, sceneCache, SceneFileType::Scene, false, false, std::move(options)).get();
+}
+
 TerraEngine::UUID SceneManager::ReloadScene(const std::filesystem::path& path)
 {
-	const std::filesystem::path resolvedPath = ResolveScenePath(path);
-	const std::string key = NormalizeKey(resolvedPath);
+	return ReloadScene(path, {});
+}
 
-	// An explicit reread cannot allow an older worker load to publish after the
-	// new document. Finish that one first; the old resident document remains
-	// readable until FinalizeLoad atomically replaces it below.
-	std::shared_future<TerraEngine::UUID> pendingLoad;
-	{
-		std::shared_lock lock(sceneCache.mutex);
-		if (const auto pending = sceneCache.inFlight.find(key); pending != sceneCache.inFlight.end())
-		{
-			pendingLoad = pending->second;
-		}
-	}
-	if (pendingLoad.valid())
-	{
-		(void)pendingLoad.get();
-	}
-
-	const TerraEngine::UUID id = EnsureResourceId(key, sceneCache);
-	// Loading is intentionally unconditional here. Scene-open is an authoring
-	// boundary, so reusing JSON solely because its path is unchanged would make
-	// offline edits invisible until a full project restart.
-	auto resource = LoadSceneDocument(resolvedPath, SceneFileType::Scene);
-	return FinalizeLoad(key, sceneCache, id, std::move(resource));
+TerraEngine::UUID SceneManager::ReloadScene(const std::filesystem::path& path, SceneLoadOptions options)
+{
+	// A new token revokes older source work without waiting for its I/O. Only a
+	// successful current replacement can exchange the retained document.
+	return RequestLoad(path, sceneCache, SceneFileType::Scene, true, false, std::move(options)).get();
 }
 
 TerraEngine::UUID SceneManager::LoadPreparedScene(
@@ -259,59 +362,249 @@ TerraEngine::UUID SceneManager::LoadPreparedScene(
 	if (!Serializer::ValidateUnboundedSceneDocument(sceneDocument)) return TerraEngine::EMPTY_UUID;
 	preparedScene = Serializer::PrepareSceneDecode(sceneDocument);
 	if (!preparedScene.accepted || preparedScene.cancelled) return TerraEngine::EMPTY_UUID;
-	const std::filesystem::path resolvedPath = ResolveScenePath(path);
-	const std::string key = NormalizeKey(resolvedPath);
-	const TerraEngine::UUID id = EnsureResourceId(key, sceneCache);
-	auto document = std::make_unique<SceneDocument>();
-	document->sourcePath = resolvedPath;
-	document->name = resolvedPath.stem().string();
-	document->parsedJson = std::move(sceneDocument);
-	document->preparedScene = std::move(preparedScene);
-	document->isPrefab = false;
-	return FinalizeLoad(key, sceneCache, id, std::move(document));
+	auto request = std::make_shared<LoadRequest>();
+	{
+		std::lock_guard gate(lifecycleMutex);
+		request->source.requestId = nextLoadRequestId++;
+		if(!loadAdmissionOpen) {
+			RecordLoadTerminalLocked(request, SceneLoadDisposition::ClosedAdmission);
+			return TerraEngine::EMPTY_UUID;
+		}
+		std::unique_lock lock(sceneCache.mutex);
+		request->source.root = std::filesystem::absolute(sceneRoot).lexically_normal();
+		request->source.absolutePath = path.is_absolute() ? path.lexically_normal() : (request->source.root / path).lexically_normal();
+		request->source.generation = sceneCache.generation;
+		request->key = NormalizeKey(request->source.absolutePath);
+		const auto resident = sceneCache.pathToId.find(request->key);
+		request->resourceId = resident == sceneCache.pathToId.end() ? TerraEngine::GenerateUUID() : resident->second;
+		PruneSettledLoadsLocked();
+		outstandingLoads.push_back(request);
+		try { sceneCache.inFlight.insert_or_assign(request->key, request); }
+		catch(...) { outstandingLoads.pop_back(); throw; }
+		++loadDiagnostics.admitted;
+		loadDiagnostics.latestRequestId = request->source.requestId;
+		loadDiagnostics.latestDisposition = SceneLoadDisposition::Pending;
+	}
+	try {
+		auto document = std::make_unique<SceneDocument>();
+		document->sourcePath = request->source.absolutePath;
+		document->name = request->source.absolutePath.stem().string();
+		document->parsedJson = std::move(sceneDocument);
+		document->preparedScene = std::move(preparedScene);
+		document->isPrefab = false;
+		const auto result = PublishLoad(request, sceneCache, std::move(document));
+		CleanupLoad(request, sceneCache);
+		request->completion.set_value(result);
+		return result;
+	} catch(...) {
+		CleanupLoad(request, sceneCache);
+		ReportLoadTerminal(request, SceneLoadDisposition::PublicationFailure);
+		request->completion.set_exception(std::current_exception());
+		throw;
+	}
 }
 
 // SceneManager::LoadPrefab is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID SceneManager::LoadPrefab(const std::filesystem::path& path)
 {
-	// Trace synchronous prefab requests so missing assets are obvious at debug verbosity.
-	TERRAENGINE_LOG(LogLevel::Debug, "Request to load prefab " << path);
-	const TerraEngine::UUID prefabId = LoadOrGetCached<SceneDocument>(path, prefabCache, [this](const std::filesystem::path& resolvedPath, SceneFileType type) {
-		return LoadSceneDocument(resolvedPath, type);
-	}, SceneFileType::Prefab);
-	if (const SceneDocument* prefab = GetPrefab(prefabId))
-	{
+	return LoadPrefab(path, {});
+}
+
+TerraEngine::UUID SceneManager::LoadPrefab(const std::filesystem::path& path, SceneLoadOptions options)
+{
+	const auto id = RequestLoad(path, prefabCache, SceneFileType::Prefab, false, false, std::move(options)).get();
+	if(const auto* prefab = GetPrefab(id)) {
 		TerraEngine::Scene::PrefabSource source;
-		source.sourceId = prefabId;
+		source.sourceId = id;
 		source.sourcePath = prefab->sourcePath;
 		source.sourceGraph = TerraEngine::Scene::BuildSceneGraphFromJson(prefab->parsedJson);
 		TerraEngine::Scene::ValidatePrefabSource(source);
-		for (const TerraEngine::Scene::SceneDiagnostic& diagnostic : source.sourceGraph.diagnostics)
-		{
+		for(const auto& diagnostic : source.sourceGraph.diagnostics) {
 			TERRAENGINE_LOG(LogLevel::Warning, "Prefab composition diagnostic: " << TerraEngine::Scene::FormatSceneDiagnostic(diagnostic));
 		}
 	}
-	return prefabId;
+	return id;
 }
 
-// SceneManager::LoadSceneAsync is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::shared_future<TerraEngine::UUID> SceneManager::LoadSceneAsync(const std::filesystem::path& path)
 {
-	// Debug logging clarifies when background scene streaming is requested.
-	TERRAENGINE_LOG(LogLevel::Debug, "Scheduling async load for scene " << path);
-	return LoadOrSchedule<SceneDocument>(path, sceneCache, [this](const std::filesystem::path& resolvedPath, SceneFileType type) {
-		return LoadSceneDocument(resolvedPath, type);
-	}, SceneFileType::Scene);
+	return LoadSceneAsync(path, {});
 }
 
-// SceneManager::LoadPrefabAsync is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+std::shared_future<TerraEngine::UUID> SceneManager::LoadSceneAsync(const std::filesystem::path& path, SceneLoadOptions options)
+{
+	return RequestLoad(path, sceneCache, SceneFileType::Scene, false, true, std::move(options));
+}
+
 std::shared_future<TerraEngine::UUID> SceneManager::LoadPrefabAsync(const std::filesystem::path& path)
 {
-	// Debug logging clarifies when background prefab streaming is requested.
-	TERRAENGINE_LOG(LogLevel::Debug, "Scheduling async load for prefab " << path);
-	return LoadOrSchedule<SceneDocument>(path, prefabCache, [this](const std::filesystem::path& resolvedPath, SceneFileType type) {
-		return LoadSceneDocument(resolvedPath, type);
-	}, SceneFileType::Prefab);
+	return LoadPrefabAsync(path, {});
+}
+
+std::shared_future<TerraEngine::UUID> SceneManager::LoadPrefabAsync(const std::filesystem::path& path, SceneLoadOptions options)
+{
+	return RequestLoad(path, prefabCache, SceneFileType::Prefab, false, true, std::move(options));
+}
+
+std::shared_future<TerraEngine::UUID> SceneManager::RequestLoad(const std::filesystem::path& path,
+	SceneCache<SceneDocument>& cache, SceneFileType type, bool reload, bool asynchronous, SceneLoadOptions options)
+{
+	auto request = std::make_shared<LoadRequest>();
+	request->options = std::move(options);
+	{
+		std::lock_guard gate(lifecycleMutex);
+		PruneSettledLoadsLocked();
+		request->source.requestId = nextLoadRequestId++;
+		if(!loadAdmissionOpen) {
+			RecordLoadTerminalLocked(request, SceneLoadDisposition::ClosedAdmission);
+			return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+		}
+		std::shared_lock lock(cache.mutex);
+		request->source.root = std::filesystem::absolute(sceneRoot).lexically_normal();
+		request->source.absolutePath = path.is_absolute() ? path.lexically_normal()
+			: (request->source.root / path).lexically_normal();
+		request->source.mountedLogicalPath = request->source.absolutePath.lexically_relative(request->source.root).generic_string();
+		request->source.generation = cache.generation;
+		request->source.isPrefab = type == SceneFileType::Prefab;
+		request->key = NormalizeKey(request->source.absolutePath);
+	}
+	// Admission injection is outside locks and before reservation. A throwing
+	// caller cannot leave an unpublished source occupying the pending index.
+	try {
+		if(request->options.checkpoint) request->options.checkpoint(SceneLoadCheckpoint::Admission, request->source);
+	} catch(...) {
+		ReportLoadTerminal(request, SceneLoadDisposition::AdmissionFailure);
+		throw;
+	}
+	{
+		std::lock_guard gate(lifecycleMutex);
+		std::unique_lock lock(cache.mutex);
+		if(!loadAdmissionOpen || request->source.generation != cache.generation
+			|| request->source.root != sceneRoot) {
+			RecordLoadTerminalLocked(request, loadAdmissionOpen ? SceneLoadDisposition::Retired : SceneLoadDisposition::ClosedAdmission);
+			return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+		}
+		if(!reload) {
+			if(const auto pending = cache.inFlight.find(request->key); pending != cache.inFlight.end()) return pending->second->future;
+			if(const auto resident = cache.pathToId.find(request->key); resident != cache.pathToId.end()
+				&& cache.resources.contains(resident->second)) return MakeReadyFuture(resident->second);
+		}
+		const auto resident = cache.pathToId.find(request->key);
+		request->resourceId = resident == cache.pathToId.end() ? TerraEngine::GenerateUUID() : resident->second;
+		outstandingLoads.push_back(request);
+		try { cache.inFlight.insert_or_assign(request->key, request); }
+		catch(...) { outstandingLoads.pop_back(); throw; }
+		++loadDiagnostics.admitted;
+		loadDiagnostics.latestRequestId = request->source.requestId;
+		loadDiagnostics.latestDisposition = SceneLoadDisposition::Pending;
+	}
+	try {
+		if(asynchronous) {
+			if(request->options.checkpoint) request->options.checkpoint(SceneLoadCheckpoint::Submission, request->source);
+			// A value-returning task has no pooled void promise. Failed submission
+			// can destroy it without leaving an unfulfilled cached task to await.
+			auto task = threadPool.createTask([this, request, &cache, type]() {
+				ExecuteLoad(request, cache, type);
+				return true;
+			});
+			auto physical = task->getFuture().share();
+			bool stillCurrent = false;
+			{
+				std::lock_guard gate(lifecycleMutex);
+				std::shared_lock lock(cache.mutex);
+				const auto pending = cache.inFlight.find(request->key);
+				stillCurrent = loadAdmissionOpen && request->source.generation == cache.generation
+					&& pending != cache.inFlight.end() && pending->second == request;
+				if(stillCurrent) {
+					request->physicalCompletion = physical;
+					try { threadPool.enqueue(task); }
+					catch(...) {
+						// Enqueue failed before admission: never await this unqueued
+						// task's promise while a shutdown owns the reservation.
+						request->physicalCompletion = {};
+						throw;
+					}
+				}
+			}
+			if(!stillCurrent) {
+				CleanupLoad(request, cache);
+				ReportLoadTerminal(request, SceneLoadDisposition::Retired);
+				request->completion.set_value(TerraEngine::EMPTY_UUID);
+			}
+		} else ExecuteLoad(request, cache, type);
+	} catch(...) {
+		const auto failure = std::current_exception();
+		CleanupLoad(request, cache);
+		ReportLoadTerminal(request, SceneLoadDisposition::SubmissionFailure);
+		request->completion.set_exception(failure);
+		throw;
+	}
+	return request->future;
+}
+
+void SceneManager::CleanupLoad(const std::shared_ptr<LoadRequest>& request, SceneCache<SceneDocument>& cache) noexcept
+{
+	try {
+		std::lock_guard gate(lifecycleMutex);
+		std::unique_lock lock(cache.mutex);
+		const auto pending = cache.inFlight.find(request->key);
+		if(pending != cache.inFlight.end() && pending->second == request
+			&& request->source.generation == cache.generation) cache.inFlight.erase(pending);
+	} catch(...) {
+		// Cleanup cannot replace the loader's initiating exception. No retained
+		// document or newer request is ever erased by a failed old request.
+	}
+}
+
+TerraEngine::UUID SceneManager::PublishLoad(const std::shared_ptr<LoadRequest>& request,
+	SceneCache<SceneDocument>& cache, std::unique_ptr<SceneDocument> resource)
+{
+	std::lock_guard gate(lifecycleMutex);
+	std::unique_lock lock(cache.mutex);
+	const auto pending = cache.inFlight.find(request->key);
+	if(!loadAdmissionOpen || request->source.generation != cache.generation
+		|| pending == cache.inFlight.end() || pending->second != request) {
+		RecordLoadTerminalLocked(request, SceneLoadDisposition::Retired);
+		return TerraEngine::EMPTY_UUID;
+	}
+	if(!resource) {
+		RecordLoadTerminalLocked(request, SceneLoadDisposition::InvalidDocument);
+		return TerraEngine::EMPTY_UUID;
+	}
+	// Allocate map ownership before exchanging a resident. If either insertion
+	// throws, existing authored data remains untouched and cleanup permits retry.
+	const auto [pathEntry, newPath] = cache.pathToId.try_emplace(request->key, request->resourceId);
+	try {
+		const auto [documentEntry, inserted] = cache.resources.try_emplace(request->resourceId);
+		(void)inserted;
+		documentEntry->second.swap(resource);
+	} catch(...) {
+		if(newPath) cache.pathToId.erase(pathEntry);
+		throw;
+	}
+	cache.inFlight.erase(pending);
+	RecordLoadTerminalLocked(request, SceneLoadDisposition::Published);
+	return request->resourceId;
+}
+
+void SceneManager::ExecuteLoad(const std::shared_ptr<LoadRequest>& request, SceneCache<SceneDocument>& cache, SceneFileType type)
+{
+	bool publishing = false;
+	try {
+		if(request->options.checkpoint) request->options.checkpoint(SceneLoadCheckpoint::BeforeRead, request->source);
+		auto resource = LoadSceneDocument(request->source, type);
+		if(request->options.checkpoint) request->options.checkpoint(SceneLoadCheckpoint::AfterInterpretation, request->source);
+		publishing = resource != nullptr;
+		if(resource && request->options.checkpoint) request->options.checkpoint(SceneLoadCheckpoint::Publication, request->source);
+		const auto result = PublishLoad(request, cache, std::move(resource));
+		CleanupLoad(request, cache);
+		request->completion.set_value(result);
+	} catch(...) {
+		const auto failure = std::current_exception();
+		CleanupLoad(request, cache);
+		ReportLoadTerminal(request, publishing ? SceneLoadDisposition::PublicationFailure : SceneLoadDisposition::LoaderException);
+		request->completion.set_exception(failure);
+	}
 }
 
 // SceneManager::GetScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -841,27 +1134,10 @@ bool SceneManager::RenameSceneFile(const std::filesystem::path& source, const st
 // SceneManager::UnloadAll is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::UnloadAll()
 {
-	// Acquire locks in a stable order to avoid deadlocks if multiple threads
-	// request clears simultaneously. Each cache is isolated so scene/prefab
-	// data can be reclaimed independently in the future.
-	{
-		std::unique_lock lock(sceneCache.mutex);
-		sceneCache.pathToId.clear();
-		sceneCache.resources.clear();
-		sceneCache.inFlight.clear();
-	}
-	{
-		std::unique_lock lock(prefabCache.mutex);
-		prefabCache.pathToId.clear();
-		prefabCache.resources.clear();
-		prefabCache.inFlight.clear();
-	}
-
-	activeSceneId = TerraEngine::EMPTY_UUID;
-	++activeSceneAuthoredRevision;
-	activeSceneDirty = false;
-	activeSceneSettingsDirty = false;
-	activeSceneRenderSettings = MakeDefaultSceneRenderSettings();
+	std::lock_guard gate(lifecycleMutex);
+	// Clear visible authority, not physical completion ownership. New requests
+	// may use this fresh cache generation while old readers settle independently.
+	RetireCacheAuthorityLocked(true);
 	// Remove the generated preview entity so repeated initializes do not leave
 	// stray objects in the registry when the manager is reused.
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1059,9 +1335,10 @@ void SceneManager::SpawnClusterBinSparseFixture()
 }
 
 // SceneManager::LoadSceneDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-std::unique_ptr<SceneDocument> SceneManager::LoadSceneDocument(const std::filesystem::path& path, SceneFileType type)
+std::unique_ptr<SceneDocument> SceneManager::LoadSceneDocument(const SceneLoadSourceSnapshot& source, SceneFileType type)
 {
-	const auto jsonText = ReadJsonFile(path, type);
+	const auto& path = source.absolutePath;
+	const auto jsonText = ReadJsonFile(source, type);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!jsonText)
 	{
@@ -1089,6 +1366,21 @@ std::unique_ptr<SceneDocument> SceneManager::LoadSceneDocument(const std::filesy
 		TERRAENGINE_LOG(LogLevel::Error, "Rejected legacy or malformed authored document " << path << ": " << formatError);
 		return nullptr;
 	}
+	if(parsed.contains("name") && !parsed["name"].is_string()) {
+		TERRAENGINE_LOG(LogLevel::Error, "Rejected malformed scene name field in " << path);
+		return nullptr;
+	}
+	// Check metadata before cache publication or protected activation can change
+	// live objects. Conversion errors here are malformed authored input, while
+	// allocation and external loader exceptions retain their exception channel.
+	if(const auto settings = parsed.find("sceneSettings"); settings != parsed.end()) {
+		if(!settings->is_object()) return nullptr;
+		try { (void)Serializer::DeserializeSceneRenderSettings(*settings); }
+		catch(const nlohmann::json::type_error& error) {
+			TERRAENGINE_LOG(LogLevel::Error, "Rejected malformed scene settings in " << path << ": " << error.what());
+			return nullptr;
+		}
+	}
 	auto document = std::make_unique<SceneDocument>();
 	document->sourcePath = path;
 	document->name = parsed.value("name", path.stem().string());
@@ -1101,8 +1393,9 @@ std::unique_ptr<SceneDocument> SceneManager::LoadSceneDocument(const std::filesy
 }
 
 // SceneManager::ReadJsonFile is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-std::optional<std::string> SceneManager::ReadJsonFile(const std::filesystem::path& path, SceneFileType type) const
+std::optional<std::string> SceneManager::ReadJsonFile(const SceneLoadSourceSnapshot& source, SceneFileType type) const
 {
+	const auto& path = source.absolutePath;
 	if (!ValidateExtension(path, type))
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Rejected load for " << path << " because the extension does not match the expected scene or prefab format.");
@@ -1113,9 +1406,9 @@ std::optional<std::string> SceneManager::ReadJsonFile(const std::filesystem::pat
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ContentMount::Instance().IsMounted())
 	{
-		const std::filesystem::path absolutePath = ResolveScenePath(path);
-		const std::filesystem::path logicalPath = absolutePath.lexically_relative(sceneRoot);
-		const std::string logicalPathString = logicalPath.generic_string();
+		// The mounted spelling belongs to admission's root, never to a mutable
+		// root which may have changed while this worker waited for execution.
+		const std::string& logicalPathString = source.mountedLogicalPath;
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ContentMount::Instance().Exists(logicalPathString))
@@ -1172,6 +1465,7 @@ bool SceneManager::ValidateExtension(const std::filesystem::path& path, SceneFil
 // SceneManager::ResolveScenePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path SceneManager::ResolveScenePath(const std::filesystem::path& path) const
 {
+	std::lock_guard gate(lifecycleMutex);
 	if (path.is_absolute())
 	{
 		return path.lexically_normal();

@@ -20,6 +20,10 @@ add_executable(TerraEngine-EngineTests
 	EngineTests.cpp
 	# Correctness cases exercise production entry points; watchdogs bound hangs.
 	Runtime/FrameFailureLifecycleTests.cpp
+	Runtime/ArtifactValidationTests.cpp
+	# Typed child settlement and isolated import capacity use real pool tasks.
+	ThreadPool/ScopedTaskSettlementTests.cpp
+	ThreadPool/OwnedImportExecutorTests.cpp
 	Audio/AudioWorldCellCaptureTests.cpp
 	Runtime/OwnedProcessTests.cpp
 	Resource/ResourceAsyncDependencyTests.cpp
@@ -28,6 +32,7 @@ add_executable(TerraEngine-EngineTests
 	Scene/SceneMutationQueueFailureSafetyTests.cpp
 	Resource/ResourcePublicationLifecycleTests.cpp
 	Scene/SceneSaveFailureSafetyTests.cpp
+	Scene/SceneAsyncLoadLifecycleTests.cpp
 	# Locomotion contracts are registered explicitly so empty filters cannot pass.
 	Locomotion/LocomotionSchedulerTests.cpp
 	Locomotion/LocomotionConfigurationTests.cpp
@@ -379,6 +384,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanUiSubmissionFailureTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/EditorFrameCompletionTrackerTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanRecordingSchedulingTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanNestedTaskSettlementTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanThreadLocalContextTests.cpp
 	# Animation ABI and managed parity tests live with the scripting boundary
 	# instead of the recursively discovered native Animation tests, so list them
@@ -502,7 +508,7 @@ add_test(NAME Engine.SpatialUnitTests COMMAND $<TARGET_FILE:TerraEngine-EngineTe
 # state or ThreadPool history, while full CTest still executes the exact gate.
 set_tests_properties(Engine.SpatialUnitTests PROPERTIES
 	LABELS "Engine"
-	ENVIRONMENT "TERRAENGINE_TEST_EXCLUDE_FILTER=Engine.ProfilerCapturePerformance.LiveThirtyThousandFramesStayResidentBounded,Engine.FrameFailureLifecycle,Engine.ResourceAsyncLifecycle,Engine.SceneMutationFailureSafety,Scene.SaveFailureSafety,Audio.WorldCellCapture,Engine.OwnedProcess"
+	ENVIRONMENT "TERRAENGINE_TEST_EXCLUDE_FILTER=Engine.ProfilerCapturePerformance.LiveThirtyThousandFramesStayResidentBounded,Engine.FrameFailureLifecycle,Engine.ResourceAsyncLifecycle,Engine.SceneMutationFailureSafety,Scene.SaveFailureSafety,Audio.WorldCellCapture,Engine.OwnedProcess,Engine.SceneLoadRecovery,Engine.NestedTaskSettlement,Engine.OwnedImportExecutor,Engine.ArtifactValidation"
 )
 
 # Keep the unbounded-scene scheduler contract independently selectable while
@@ -1010,3 +1016,12 @@ terraengine_add_correctness_slice(Engine.SceneSaveFailureSafety TerraEngine-Engi
 terraengine_add_correctness_slice(Engine.AudioWorldCellCapture TerraEngine-EngineTests Audio.WorldCellCapture 5)
 terraengine_add_correctness_slice(Engine.FrameFailureLifecycle TerraEngine-EngineTests Engine.FrameFailureLifecycle 7)
 terraengine_add_correctness_slice(Engine.OwnedProcess TerraEngine-EngineTests Engine.OwnedProcess 6)
+
+# Actual production groups and lifecycle unions retain mandatory nonzero floors.
+terraengine_add_correctness_slice(Engine.SceneLoadRecovery TerraEngine-EngineTests Engine.SceneLoadRecovery 14)
+terraengine_add_correctness_slice(Engine.NestedTaskSettlement TerraEngine-EngineTests Engine.NestedTaskSettlement 11)
+terraengine_add_correctness_slice(Engine.ArtifactValidation TerraEngine-EngineTests Engine.ArtifactValidation 6)
+terraengine_add_correctness_slice(Engine.OwnedImportExecutor TerraEngine-EngineTests Engine.OwnedImportExecutor 5)
+# The root install variable is declared later in the top-level file. Use the
+# maintained build-relative destination here instead of emitting an empty value.
+set_property(TEST Engine.NestedTaskSettlement APPEND PROPERTY ENVIRONMENT "TERRAENGINE_LIFECYCLE_INSTALL_ROOT=${CMAKE_BINARY_DIR}/Build")

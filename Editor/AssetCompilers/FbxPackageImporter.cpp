@@ -840,7 +840,10 @@ namespace TerraEngine::AssetPipeline
 			}
 
 			std::filesystem::path relativeTexturePath;
-			if (!TryMakeProjectRelative(options.assetRoot, std::filesystem::absolute(absoluteTexturePath), relativeTexturePath))
+			// Private generated-output roots must not change the spelling or
+			// eligibility of an authored texture beside the original FBX.
+			const auto& sourceRoot = options.sourceAssetRoot.empty() ? options.assetRoot : options.sourceAssetRoot;
+			if (!TryMakeProjectRelative(sourceRoot, std::filesystem::absolute(absoluteTexturePath), relativeTexturePath))
 			{
 				AddDiagnostic(result, ModelDiagnosticSeverity::Warning, "TextureOutsideProject", absoluteTexturePath.generic_string(), "FBX texture reference is outside the project Assets folder.", "Move or copy the texture beside the FBX before reimporting.");
 				return std::nullopt;

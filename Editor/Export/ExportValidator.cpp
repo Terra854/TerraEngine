@@ -3,6 +3,7 @@
 // Implements the validation rules for build profiles and C# source code, utilizing regex-based scanning to detect unsupported reflection or dynamic binder usage. It aggregates findings into a diagnostic report used to prevent failed or unstable exported builds.
 
 #include "ExportValidator.h"
+#include "Runtime/ArtifactValidation.h"
 
 #include <algorithm>
 #include <cctype>
@@ -480,14 +481,6 @@ static ExportValidationResult ValidateMaterialAssets(const std::filesystem::path
 // Physics collider recipes are editor input, whereas .tepcoll files are the
 // immutable runtime envelopes.  Validate the latter before export staging so a
 // creator can recook a bad asset without first producing a partial package.
-static bool ContainsPlaceholderMarker(const std::vector<std::byte>& bytes)
-{
-	static constexpr std::string_view kMarker = "placeholder";
-	return std::search(bytes.begin(), bytes.end(), kMarker.begin(), kMarker.end(),
-		[](std::byte left, char right) {
-			return static_cast<char>(std::tolower(static_cast<unsigned char>(std::to_integer<unsigned char>(left)))) == right;
-		}) != bytes.end();
-}
 
 static void ValidateCookedColliderFile(const std::filesystem::path& colliderPath, ExportValidationResult& result)
 {
@@ -507,9 +500,12 @@ static void ValidateCookedColliderFile(const std::filesystem::path& colliderPath
 			"Cooked collider payload is empty. Re-cook the collider before exporting.", colliderPath.string());
 		return;
 	}
-	if(ContainsPlaceholderMarker(bytes)) {
+	const auto validation = TerraEngine::Runtime::ValidateArtifact({bytes,
+		TerraEngine::Runtime::ArtifactKind::CookedCollider,
+		TerraEngine::Runtime::HostNativeImageTarget(), colliderPath.generic_string()});
+	if(!validation.IsValid()) {
 		AddDiagnostic(result, ExportDiagnosticSeverity::Error, "PhysicsCollider",
-			"Cooked collider contains a placeholder payload. Replace it with a completed Jolt cook before exporting.", colliderPath.string());
+			validation.code + ": " + validation.diagnostic + " Re-cook before exporting.", colliderPath.string());
 		return;
 	}
 

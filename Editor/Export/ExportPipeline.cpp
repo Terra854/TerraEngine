@@ -22,6 +22,7 @@
 #include "Resource/ResourceStreaming.h"
 #include "Terrain/TerrainAssetStore.h"
 #include "Engine/Utilities/OwnedProcess.h"
+#include "Runtime/ArtifactValidation.h"
 
 #include <algorithm>
 #include <array>
@@ -104,7 +105,7 @@ static std::string NativeAotTargetsArgument(const std::filesystem::path& path) {
 // Export provenance hashes are deterministic identifiers for package auditing,
 // not cryptographic signatures. The same FNV-1a representation is used by
 // ExportEvidence so manifest and inventory comparisons remain straightforward.
-static std::string HashBytesForExport(const std::vector<std::byte>& bytes) {
+static std::string HashBytesForExport(std::span<const std::byte> bytes) {
 	std::uint64_t hash = 14695981039346656037ULL;
 	for(const std::byte byte : bytes) {
 		hash ^= static_cast<std::uint8_t>(byte);
@@ -941,7 +942,7 @@ ExportResult ExportPipeline::Execute(
 		});
 		if(placeholderEntry != inventory.end()) {
 			return finish(ExportFailureCategory::AssetStagingFailed, result.stage,
-				"Required staged entry contains a placeholder marker: " + placeholderEntry->logicalPath);
+				"Required staged entry has explicit prohibited-stub evidence: " + placeholderEntry->logicalPath);
 		}
 
 		result.stage = ExportStage::Packaging;
@@ -1100,7 +1101,9 @@ void ExportPipeline::CheckCancellation() const {
 
 static bool ValidateManagedRuntimeOutput(
 	const std::filesystem::path& managedLibrary,
-	std::string& outError)
+	ExportPlatform platform,
+	std::string& outError,
+	ExportDiagnostic* acceptedEvidence = nullptr)
 {
 	std::error_code errorCode;
 	if(!std::filesystem::is_regular_file(managedLibrary, errorCode)) {
@@ -1116,16 +1119,27 @@ static bool ValidateManagedRuntimeOutput(
 	std::ifstream input(managedLibrary, std::ios::binary);
 	const std::vector<unsigned char> bytes{
 		std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
-	static constexpr std::string_view marker = "placeholder";
-	const bool containsPlaceholder = std::search(
-		bytes.begin(), bytes.end(), marker.begin(), marker.end(),
-		[](unsigned char left, char right) {
-			return static_cast<char>(std::tolower(left)) == right;
-		}) != bytes.end();
-	if(containsPlaceholder) {
-		outError = "NativeAOT gameplay library contains the forbidden placeholder marker: " + PathToUtf8(managedLibrary);
+	// Inspect headers, architecture, and a defined executable bootstrap without
+	// loading candidate code. Actual bridge/vtable readiness still runs at boot.
+	const auto validation = TerraEngine::Runtime::ValidateArtifact({
+		std::as_bytes(std::span(bytes)), TerraEngine::Runtime::ArtifactKind::NativeGameplay,
+		platform == ExportPlatform::Windows ? TerraEngine::Runtime::NativeImageTarget::WindowsX64
+			: TerraEngine::Runtime::NativeImageTarget::LinuxX64, PathToUtf8(managedLibrary)});
+	if(!validation.IsValid()) {
+		outError = "NativeAOT gameplay library is invalid: " + validation.code + ": " + validation.diagnostic;
 		return false;
 	}
+	if(acceptedEvidence) {
+		acceptedEvidence->severity = ExportDiagnosticSeverity::Info;
+		acceptedEvidence->category = "NativeGameplay";
+		acceptedEvidence->stage = "managed_compilation";
+		acceptedEvidence->code = "export.native_artifact.valid";
+		acceptedEvidence->filePath = "Managed/" + PathToUtf8(managedLibrary.filename());
+		acceptedEvidence->message = nlohmann::json{{"bootstrap", validation.bootstrap}, {"byteSize", bytes.size()},
+			{"contentHash", HashBytesForExport(std::as_bytes(std::span(bytes)))},
+			{"target", platform == ExportPlatform::Windows ? "windows-x64" : "linux-x64"}, {"validity", "valid"}}.dump();
+	}
+
 	return true;
 }
 
@@ -1288,7 +1302,7 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 	std::string managedOutputError;
 	if(!ValidateManagedRuntimeOutput(
 		nativeAotPublishOutputDir / GetExportManagedRuntimeLibraryName(profile.platform),
-		managedOutputError)) {
+		profile.platform, managedOutputError)) {
 		result.errorMessage = managedOutputError;
 		return false;
 	}
@@ -1305,12 +1319,16 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 			"from the private workspace: " + copyError.message();
 		return false;
 	}
+	ExportDiagnostic acceptedNativeEvidence;
 	if(!ValidateManagedRuntimeOutput(
 			managedOutputDir / GetExportManagedRuntimeLibraryName(profile.platform),
-			managedOutputError)) {
+			profile.platform, managedOutputError, &acceptedNativeEvidence)) {
 		result.errorMessage = managedOutputError;
 		return false;
 	}
+	// Keep this accepted structure/hash receipt with validation diagnostics so
+	// successful result serialization and all terminal paths retain it.
+	result.validationResult.diagnostics.push_back(std::move(acceptedNativeEvidence));
 
 	// Successful operations report cleanup failures instead of silently leaking
 	// a junction or per-run compiler state. Early failures use the same cleanup

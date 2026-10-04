@@ -13,17 +13,26 @@ set(correctness_required
 	"Editor/DotNet/dotnet@TERRAENGINE_EXECUTABLE_SUFFIX@"
 	"Editor/NativeAotNuGet/NuGet.Config"
 	"Editor/NativeAotNuGet/global.json"
+	"Editor/Fonts/Roboto-Medium.ttf"
 	# Fresh validation projects use these same authored layout templates as
 	# normal project creation; seal both docking and window visibility inputs.
 	"Editor/Project/Templates/UserSettings/EditorLayout.ini"
 	"Editor/Project/Templates/UserSettings/EditorLayout.terra"
 	"Tests/Engine/TerraEngine-EngineTests@TERRAENGINE_EXECUTABLE_SUFFIX@"
 	"Tests/Engine/CorrectnessProcessFixture@TERRAENGINE_EXECUTABLE_SUFFIX@"
+	"Tests/Editor/CorrectnessProcessFixture@TERRAENGINE_EXECUTABLE_SUFFIX@"
 	"Tests/Editor/TerraEngine-EditorTests@TERRAENGINE_EXECUTABLE_SUFFIX@"
+	"Tests/Editor/TerraEngineModelPackageCompiler@TERRAENGINE_EXECUTABLE_SUFFIX@"
+	"Tests/Editor/Fixtures/AssetPipeline/Gltf/one-material.gltf"
 	"Tests/Tools/Correctness/RunInstalledCorrectnessAcceptance.ps1"
 	"Tests/Tools/Correctness/RunNativeCorrectnessSlice.ps1"
 	"Tests/Tools/Correctness/RunWithWatchdog.ps1"
-	"Tests/Tools/Correctness/Fixtures/ManagedExportProject/game.json")
+	"Tests/Tools/Correctness/Fixtures/ManagedExportProject/game.json"
+	"Tests/Tools/LifecycleRecovery/RunInstalledLifecycleRecoveryAcceptance.ps1"
+	"Tests/Tools/LifecycleRecovery/Fixtures/README.md"
+	"Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1"
+	"Tests/Fixtures/ExportRuntimeBaseline/game.json"
+	"Tests/Fixtures/PhysicsExportRuntime/Scenes/Startup.tescene")
 foreach(correctness_relative IN LISTS correctness_required)
 	if(NOT EXISTS "${correctness_root}/${correctness_relative}")
 		message(FATAL_ERROR "Required installed correctness artifact is missing: ${correctness_relative}")
@@ -33,6 +42,7 @@ endforeach()
 # Check built targets against their installed copies before sealing the hashes.
 # Hashing an old install alone would merely bless a stale or mismatched binary.
 set(correctness_sources
+	"$<TARGET_FILE:TerraEngineModelPackageCompiler>"
 	"$<TARGET_FILE:TerraEngine-Engine>"
 	"$<TARGET_FILE:TerraEngine-Editor>"
 	"$<TARGET_FILE:TerraEngine-Export>"
@@ -40,8 +50,10 @@ set(correctness_sources
 	"$<TARGET_FILE:TerraEngine-Engine>"
 	"$<TARGET_FILE:TerraEngine-EngineTests>"
 	"$<TARGET_FILE:TerraEngine-EditorTests>"
+	"$<TARGET_FILE:TerraEngineCorrectnessProcessFixture>"
 	"$<TARGET_FILE:TerraEngineCorrectnessProcessFixture>")
 set(correctness_copies
+	"Tests/Editor/$<TARGET_FILE_NAME:TerraEngineModelPackageCompiler>"
 	"Editor/$<TARGET_FILE_NAME:TerraEngine-Engine>"
 	"Editor/$<TARGET_FILE_NAME:TerraEngine-Editor>"
 	"Editor/$<TARGET_FILE_NAME:TerraEngine-Export>"
@@ -49,7 +61,8 @@ set(correctness_copies
 	"Editor/ExportRuntime/$<TARGET_FILE_NAME:TerraEngine-Engine>"
 	"Tests/Engine/$<TARGET_FILE_NAME:TerraEngine-EngineTests>"
 	"Tests/Editor/$<TARGET_FILE_NAME:TerraEngine-EditorTests>"
-	"Tests/Engine/$<TARGET_FILE_NAME:TerraEngineCorrectnessProcessFixture>")
+	"Tests/Engine/$<TARGET_FILE_NAME:TerraEngineCorrectnessProcessFixture>"
+	"Tests/Editor/$<TARGET_FILE_NAME:TerraEngineCorrectnessProcessFixture>")
 list(LENGTH correctness_sources correctness_source_count)
 math(EXPR correctness_last "${correctness_source_count} - 1")
 foreach(correctness_index RANGE 0 ${correctness_last})
@@ -81,17 +94,22 @@ file(GLOB correctness_files RELATIVE "${correctness_root}"
 	"${correctness_root}/Tests/Editor/*.exe" "${correctness_root}/Tests/Editor/*.dll")
 file(GLOB_RECURSE correctness_support_files LIST_DIRECTORIES false RELATIVE "${correctness_root}"
 	"${correctness_root}/Editor/Managed/*" "${correctness_root}/Editor/Shaders/*"
+	"${correctness_root}/Editor/Fonts/*"
 	"${correctness_root}/Editor/DotNet/*" "${correctness_root}/Editor/ExportRuntime/*"
 	"${correctness_root}/Editor/NativeAotNuGet/*"
 	"${correctness_root}/Tests/Editor/Managed/*"
-	"${correctness_root}/Tests/Tools/Correctness/*")
+	"${correctness_root}/Tests/Tools/Correctness/*"
+	"${correctness_root}/Tests/Tools/LifecycleRecovery/*"
+	"${correctness_root}/Tests/Tools/ExportRuntimeBaseline/*"
+	"${correctness_root}/Tests/Fixtures/ExportRuntimeBaseline/*"
+	"${correctness_root}/Tests/Fixtures/PhysicsExportRuntime/*")
 list(APPEND correctness_files ${correctness_support_files} ${correctness_required} ${correctness_copies})
 # Historical local build directories are not maintained fixture assets, even
 # when a previous install left them in the destination tree.
-list(FILTER correctness_files EXCLUDE REGEX "^Tests/Tools/Correctness/Fixtures/.*/(obj|bin|Build|Builds|Library|Temp)/")
+list(FILTER correctness_files EXCLUDE REGEX "^Tests/(Tools/Correctness/Fixtures|Fixtures)/.*/(obj|bin|Build|Builds|Library|Temp)/")
 list(REMOVE_DUPLICATES correctness_files)
 list(SORT correctness_files)
-set(correctness_json "{\n  \"schemaVersion\":1,\n  \"minimumCases\":{\"Engine.SceneMutationFailureSafety\":39,\"Engine.ResourceAsyncLifecycle\":28,\"Scene.SaveFailureSafety\":10,\"Audio.WorldCellCapture\":5,\"Engine.FrameFailureLifecycle\":7,\"Engine.OwnedProcess\":6,\"Editor.ExportLifecycle\":6},\n  \"files\":[")
+set(correctness_json "{\n  \"schemaVersion\":1,\n  \"minimumCases\":{\"Engine.SceneMutationFailureSafety\":39,\"Engine.ResourceAsyncLifecycle\":28,\"Scene.SaveFailureSafety\":10,\"Audio.WorldCellCapture\":5,\"Engine.FrameFailureLifecycle\":7,\"Engine.OwnedProcess\":6,\"Editor.ExportLifecycle\":6,\"Engine.SceneLoadRecovery\":14,\"Engine.NestedTaskSettlement\":11,\"Editor.AssetDiscoveryRecovery\":8,\"Editor.AssetImportAdmission\":13,\"Editor.ExportArtifactValidation\":12,\"Editor.ExportRetention\":10,\"Engine.ArtifactValidation\":6,\"Engine.OwnedImportExecutor\":5},\n  \"files\":[")
 set(correctness_separator "")
 foreach(correctness_relative IN LISTS correctness_files)
 	file(SHA256 "${correctness_root}/${correctness_relative}" correctness_hash)

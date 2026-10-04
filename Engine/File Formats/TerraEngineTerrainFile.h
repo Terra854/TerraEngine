@@ -107,7 +107,7 @@ namespace TerraEngine::Terrain::Format
 		}
 	};
 
-	// This provider-neutral value mirrors terrain-asset-v1.schema.json. JSON IO
+	// This provider-neutral value defines the terrain root manifest. JSON IO
 	// is intentionally kept outside the contract so runtime mounts and editor
 	// saves can share the same validated representation.
 	struct TerrainRootManifestContract

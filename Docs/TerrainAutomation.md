@@ -1,7 +1,7 @@
 # Terrain automation
 
-Terrain automation accepts the versioned `terrain-edit-v1.schema.json` envelope
-at the editor boundary. The installed validation runner is
+Terrain automation validates versioned requests through the editor's typed
+automation boundary. The installed validation runner is
 `Tests/Tools/Terrain/RunTerrainValidation.ps1`; it checks the installed tree
 before any operation is attempted.
 
@@ -22,7 +22,7 @@ $install = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
 ```
 
 Dry-run verifies the editor, terrain compiler, fixture generator, benchmark,
-schema, terrain manifest, recovery manifest, and workload manifest. It records
+terrain manifest, recovery manifest, and workload manifest. It records
 metrics as unavailable because no provider or job was executed. Missing
 artifacts are an error and return a non-zero exit code.
 
@@ -32,7 +32,6 @@ For each requested operation it receives:
 
 ```text
 --operation <create|inspect|edit|rebuild|validate|import|export|save|parity>
---schema <installed terrain-edit-v1.schema.json>
 --fixture <installed terrain manifest>
 --recovery-fixture <installed save/recovery manifest>
 --output <receipt path>

@@ -101,8 +101,9 @@ namespace TerraEngine::EditorTests {
 
 			// Keep the platform-neutral package fixture valid under the same startup
 			// scene contract as production exports. With no physics manifest, this
-			// intentionally minimal serialized scene needs no additional payloads.
-			workspace.WriteText("Scenes/Startup.tescene", R"({"objects":[]})");
+			// canonical empty scene needs no additional payloads. The explicit format
+			// tag proves the package contains the runtime's supported scene envelope.
+			workspace.WriteText("Scenes/Startup.tescene", R"({"format":"TerraSceneUnboundedV1","objects":[]})");
 		}
 	}
 

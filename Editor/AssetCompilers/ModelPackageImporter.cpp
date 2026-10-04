@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cwctype>
 #include <chrono>
 #include <fstream>
 #include <iomanip>
@@ -72,9 +73,47 @@ namespace TerraEngine::AssetPipeline
 			std::filesystem::path stagedPath;
 			std::filesystem::path livePath;
 			std::filesystem::path backupPath;
-			bool hadPrevious = false;
-			bool published = false;
+			std::filesystem::path nativeStaged, nativeLive, nativeBackup, nativeParent;
+			bool hadPrevious = false, backupMoved = false, published = false;
 		};
+
+		bool ContainsRoot(const std::filesystem::path& parent, const std::filesystem::path& child)
+		{
+			const auto normalizedParent = std::filesystem::weakly_canonical(parent);
+			const auto normalizedChild = std::filesystem::weakly_canonical(child);
+			auto current = normalizedChild.begin();
+			for(const auto& part : normalizedParent) {
+				if(current == normalizedChild.end()) return false;
+#ifdef _WIN32
+				// Windows root containment must also recognize different case
+				// spellings of the same directory before candidate cleanup.
+				auto left = part.wstring(), right = current->wstring();
+				std::transform(left.begin(), left.end(), left.begin(), [](wchar_t value) { return std::towlower(value); });
+				std::transform(right.begin(), right.end(), right.begin(), [](wchar_t value) { return std::towlower(value); });
+				if(left != right) return false;
+#else
+				if(*current != part) return false;
+#endif
+				++current;
+			}
+			return true;
+		}
+
+		bool ValidPreparationRoots(const ModelPackagePreparationRoots& roots, const ModelPackageImportOptions& options)
+		{
+			if(options.sourceRelativePath.empty() || options.sourceRelativePath.has_root_path()) return false;
+			for(const auto& part : options.sourceRelativePath) if(part == "..") return false;
+			// Never allow cleanup of a candidate directory to erase a live root,
+			// or collection of one candidate tree to consume the other tree.
+			return !roots.assetRoot.empty() && !roots.buildRoot.empty()
+				&& !options.assetRoot.empty() && !options.buildRoot.empty()
+				&& !ContainsRoot(roots.assetRoot, options.assetRoot)
+				&& !ContainsRoot(roots.assetRoot, options.buildRoot)
+				&& !ContainsRoot(roots.buildRoot, options.assetRoot)
+				&& !ContainsRoot(roots.buildRoot, options.buildRoot)
+				&& !ContainsRoot(roots.assetRoot, roots.buildRoot)
+				&& !ContainsRoot(roots.buildRoot, roots.assetRoot);
+		}
 
 		bool ImportCancellationRequested(const ModelPackageImportOptions& options)
 		{
@@ -350,7 +389,7 @@ namespace TerraEngine::AssetPipeline
 			manifest.dependencyFingerprintHex = BuildAnimationImportDependencyFingerprint(manifest);
 		}
 
-		void CollectStagedFiles(
+		bool CollectStagedFiles(
 			const std::filesystem::path& stagedRoot,
 			const std::filesystem::path& liveRoot,
 			std::string_view token,
@@ -358,7 +397,7 @@ namespace TerraEngine::AssetPipeline
 		{
 			std::error_code error;
 			const std::filesystem::path nativeStagedRoot = NativeIoPath(stagedRoot);
-			if(!std::filesystem::exists(nativeStagedRoot, error)) return;
+			if(!std::filesystem::exists(nativeStagedRoot, error)) return false;
 			for(std::filesystem::recursive_directory_iterator iterator(nativeStagedRoot, error), end;
 				iterator != end && !error; iterator.increment(error))
 			{
@@ -375,75 +414,74 @@ namespace TerraEngine::AssetPipeline
 				file.backupPath = file.livePath.string() + ".ap-" + std::string(token);
 				files.push_back(std::move(file));
 			}
+			return !error;
 		}
 
 		bool PublishStagedFiles(std::vector<StagedPublicationFile>& files)
 		{
 			std::sort(files.begin(), files.end(), [](const auto& left, const auto& right) {
-				// The generation manifest is the visibility boundary. Publishing it
-				// after every asset/build payload prevents filesystem observers from
-				// treating a still-incomplete candidate as the current generation.
+				// Publish the generation marker after every payload and sidecar.
 				const bool leftIsManifest = left.livePath.parent_path().filename() == ".terra-animation-manifests";
 				const bool rightIsManifest = right.livePath.parent_path().filename() == ".terra-animation-manifests";
 				if(leftIsManifest != rightIsManifest) return !leftIsManifest;
 				return left.livePath.generic_string() < right.livePath.generic_string();
 			});
-			for(std::size_t index = 1u; index < files.size(); ++index)
-			{
-				if(files[index - 1u].livePath == files[index].livePath) return false;
+			for(std::size_t index = 1; index < files.size(); ++index)
+				if(files[index - 1].livePath == files[index].livePath) return false;
+			// Path conversion and parent extraction can allocate. Complete them
+			// all before moving the first authoritative file into a backup.
+			for(auto& file : files) {
+				file.nativeStaged = NativeIoPath(file.stagedPath);
+				file.nativeLive = NativeIoPath(file.livePath);
+				file.nativeBackup = NativeIoPath(file.backupPath);
+				file.nativeParent = NativeIoPath(file.livePath.parent_path());
 			}
-			for(std::size_t index = 0u; index < files.size(); ++index)
-			{
-				StagedPublicationFile& file = files[index];
+			for(auto& file : files) {
 				std::error_code error;
-				std::filesystem::create_directories(NativeIoPath(file.livePath.parent_path()), error);
-				if(error) goto rollback;
-				std::filesystem::remove(NativeIoPath(file.backupPath), error);
-				error.clear();
-				file.hadPrevious = std::filesystem::exists(NativeIoPath(file.livePath), error);
-				error.clear();
-				if(file.hadPrevious)
-				{
-					std::filesystem::rename(NativeIoPath(file.livePath), NativeIoPath(file.backupPath), error);
-					if(error) goto rollback;
-				}
-				std::filesystem::rename(NativeIoPath(file.stagedPath), NativeIoPath(file.livePath), error);
-				if(error)
-				{
-					if(file.hadPrevious)
-					{
-						std::error_code restoreError;
-						std::filesystem::rename(NativeIoPath(file.backupPath), NativeIoPath(file.livePath), restoreError);
-					}
-					goto rollback;
-				}
-				file.published = true;
-				continue;
-
-			rollback:
-				for(std::size_t rollbackIndex = index + 1u; rollbackIndex-- > 0u;)
-				{
-					StagedPublicationFile& published = files[rollbackIndex];
-					if(!published.published) continue;
-					std::error_code rollbackError;
-					std::filesystem::remove(NativeIoPath(published.livePath), rollbackError);
-					if(published.hadPrevious)
-					{
-						rollbackError.clear();
-						std::filesystem::rename(
-							NativeIoPath(published.backupPath),
-							NativeIoPath(published.livePath),
-							rollbackError);
-					}
-					published.published = false;
-				}
-				return false;
+				if(!std::filesystem::is_regular_file(file.nativeStaged, error) || error) return false;
+				std::filesystem::create_directories(file.nativeParent, error);
+				if(error) return false;
+				std::filesystem::remove(file.nativeBackup, error);
+				if(error) return false;
+				file.hadPrevious = std::filesystem::exists(file.nativeLive, error);
+				if(error) return false;
 			}
-			for(StagedPublicationFile& file : files)
-			{
-				if(!file.hadPrevious) continue;
-				std::error_code cleanupError;
-				std::filesystem::remove(NativeIoPath(file.backupPath), cleanupError);
+			struct PublicationRollback {
+				std::vector<StagedPublicationFile>& files;
+				bool committed = false;
+				~PublicationRollback() noexcept {
+					if(committed) return;
+					// Track backup ownership independently: a staged rename may
+					// fail after its predecessor was already moved out of the way.
+					// Cached paths avoid our own allocations during unwinding.
+					for(auto current = files.rbegin(); current != files.rend(); ++current) {
+						std::error_code ignored;
+						if(current->published) {
+							try { std::filesystem::remove(current->nativeLive, ignored); } catch(...) {}
+						}
+						if(current->backupMoved) {
+							try { std::filesystem::rename(current->nativeBackup, current->nativeLive, ignored); } catch(...) {}
+						}
+					}
+				}
+			} rollback{files};
+			for(auto& file : files) {
+				std::error_code error;
+				if(file.hadPrevious) {
+					std::filesystem::rename(file.nativeLive, file.nativeBackup, error);
+					if(error) return false;
+					file.backupMoved = true;
+				}
+				std::filesystem::rename(file.nativeStaged, file.nativeLive, error);
+				if(error) return false;
+				file.published = true;
+			}
+			rollback.committed = true;
+			// Once the complete generation is visible, optional backup cleanup
+			// cannot reclassify that committed publication as worker failure.
+			for(auto& file : files) if(file.backupMoved) {
+				std::error_code ignored;
+				try { std::filesystem::remove(file.nativeBackup, ignored); } catch(...) {}
 			}
 			return true;
 		}
@@ -895,6 +933,22 @@ namespace TerraEngine::AssetPipeline
 		return importerName == "GltfPackageImporter" || importerName == "FbxPackageImporter";
 	}
 
+	bool PublishPreparedModelPackage(const ModelPackagePreparationRoots& roots, const ModelPackageImportOptions& options)
+	{
+		if(!ValidPreparationRoots(roots, options)) return false;
+		// A process success receipt must correlate with both complete package
+		// markers. Missing sidecar/manifest ownership is never a publishable subset.
+		std::error_code error;
+		const auto sidecar = std::filesystem::path((roots.assetRoot / options.sourceRelativePath).string() + ".import.json");
+		if(!std::filesystem::is_regular_file(NativeIoPath(sidecar), error) || error) return false;
+		if(!std::filesystem::is_regular_file(NativeIoPath(roots.buildRoot / ManifestRelativePath(options.packageGuid)), error) || error) return false;
+		std::vector<StagedPublicationFile> files;
+		const auto token = BuildPublicationToken(options);
+		if(!CollectStagedFiles(roots.assetRoot, options.assetRoot, token, files)
+			|| !CollectStagedFiles(roots.buildRoot, options.buildRoot, token, files)) return false;
+		return !files.empty() && PublishStagedFiles(files);
+	}
+
 	ModelPackageImportResult ImportModelPackage(const ModelPackageImportOptions& options)
 	{
 		ModelPackageImportResult result;
@@ -922,7 +976,8 @@ namespace TerraEngine::AssetPipeline
 		};
 
 		if(options.packageGuid == TerraEngine::EMPTY_UUID || options.assetRoot.empty()
-			|| options.buildRoot.empty() || !IsModelPackageSourceExtension(options.sourcePath))
+			|| options.buildRoot.empty() || !IsModelPackageSourceExtension(options.sourcePath)
+			|| (options.preparationRoots && !ValidPreparationRoots(*options.preparationRoots, options)))
 		{
 			rejectCandidate("InvalidModelPackageImportOptions", "Package identity, roots, or source extension are invalid.", false);
 			return result;
@@ -937,8 +992,10 @@ namespace TerraEngine::AssetPipeline
 		// Keep private candidates beside their destination volume for atomic rename,
 		// but use one compact directory component so deeply nested Windows projects
 		// do not exhaust the legacy path budget before publication.
-		const std::filesystem::path assetStagingRoot = options.assetRoot / (".ta-" + token);
-		const std::filesystem::path buildStagingRoot = options.buildRoot / (".tb-" + token);
+		const std::filesystem::path assetStagingRoot = options.preparationRoots
+			? options.preparationRoots->assetRoot : options.assetRoot / (".ta-" + token);
+		const std::filesystem::path buildStagingRoot = options.preparationRoots
+			? options.preparationRoots->buildRoot : options.buildRoot / (".tb-" + token);
 		const auto cleanupStaging = [&]() {
 			std::error_code cleanupError;
 			std::filesystem::remove_all(NativeIoPath(assetStagingRoot), cleanupError);
@@ -957,6 +1014,7 @@ namespace TerraEngine::AssetPipeline
 		}
 
 		ModelPackageImportOptions stagedOptions = options;
+		stagedOptions.sourceAssetRoot = options.sourceAssetRoot.empty() ? options.assetRoot : options.sourceAssetRoot;
 		stagedOptions.assetRoot = assetStagingRoot;
 		stagedOptions.buildRoot = buildStagingRoot;
 		if(IsFbxPackageSourceExtension(options.sourcePath)) result = ImportFbxPackage(stagedOptions);
@@ -964,6 +1022,15 @@ namespace TerraEngine::AssetPipeline
 
 		AddFormatNeutralUnsupportedDiagnostics(stagedOptions, result);
 		PopulateMissingVirtualGeometryMetadata(stagedOptions, result);
+		// Deformable imports replace temporary inventory GUIDs with their final
+		// stable binding GUIDs. Preserve the authored recipe against that final
+		// identity, as the standalone compiler does when retaining prior sidecars;
+		// this changes metadata only, after the format-specific cook completed.
+		for(auto& mesh : result.generatedMeshes) {
+			const auto saved = std::find_if(options.virtualGeometryMeshOverrides.begin(), options.virtualGeometryMeshOverrides.end(),
+				[&mesh](const auto& override) { return override.meshGuid == mesh.guid && override.settings.hasOverride; });
+			if(saved != options.virtualGeometryMeshOverrides.end()) mesh.virtualGeometrySettings = saved->settings;
+		}
 		GenerateModelPackagePrefab(stagedOptions, result);
 		PromoteStatusFromDiagnostics(result);
 		if(ImportCancellationRequested(options))
@@ -1035,10 +1102,13 @@ namespace TerraEngine::AssetPipeline
 			return result;
 		}
 
+		// A child process returns a complete private generation. Only its owner
+		// may make it visible after checking project and cancellation authority.
+		if(options.preparationRoots) return result;
 		std::vector<StagedPublicationFile> publicationFiles;
-		CollectStagedFiles(assetStagingRoot, options.assetRoot, token, publicationFiles);
-		CollectStagedFiles(buildStagingRoot, options.buildRoot, token, publicationFiles);
-		if(publicationFiles.empty() || !PublishStagedFiles(publicationFiles))
+		if(!CollectStagedFiles(assetStagingRoot, options.assetRoot, token, publicationFiles)
+			|| !CollectStagedFiles(buildStagingRoot, options.buildRoot, token, publicationFiles)
+			|| publicationFiles.empty() || !PublishStagedFiles(publicationFiles))
 		{
 			rejectCandidate("AnimationImportPublicationFailed", "The complete staged package generation could not be published transactionally.", false);
 			cleanupStaging();

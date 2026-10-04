@@ -7,6 +7,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 struct EditorExportOperationRequest {
 	ExportRequest request;
@@ -27,18 +28,51 @@ struct EditorExportAdmission {
 	std::string error;
 };
 
+// Missing issued IDs expired; zero and never-issued IDs are unknown. A terminal
+// observation is a copied receipt, so evicting controller history cannot erase it.
+enum class EditorExportLookupDisposition { Active, Terminal, Expired, Unknown };
+struct EditorExportLookup {
+	EditorExportLookupDisposition disposition = EditorExportLookupDisposition::Unknown;
+	std::optional<EditorExportOperationObservation> observation;
+};
+struct EditorExportConsumption {
+	EditorExportLookupDisposition disposition = EditorExportLookupDisposition::Unknown;
+	std::optional<ExportResult> result;
+};
+struct EditorExportRetentionDiagnostics {
+	std::size_t terminalLimit = 64;
+	std::size_t retainedTerminal = 0;
+	std::size_t active = 0;
+	std::size_t adoptionPending = 0;
+	std::uint64_t lastIssuedId = 0;
+	std::uint64_t expiredCount = 0;
+	std::uint64_t pollVisits = 0;
+};
+
 class EditorExportOperationController final {
 public:
 	// Dependency injection supplies controlled stage gates in native tests; the
 	// ordinary constructor executes the real shared pipeline on ThreadPool.
 	using Executor = std::function<ExportResult(const ExportRequest&, ExportProgressCallback, std::shared_ptr<ExportCancellationState>)>;
-	explicit EditorExportOperationController(Executor executor = {});
+	// Native dependency seams stop at owner lifecycle boundaries. They never
+	// expose worker mutation or fault controls through editor automation.
+	struct OwnerHooks {
+		std::function<void()> beforeSubmission;
+		std::function<void()> beforeAdoption;
+	};
+	explicit EditorExportOperationController(Executor executor = {}, OwnerHooks hooks = {});
 	~EditorExportOperationController();
 	std::uint64_t Generation() const { return generation_; }
 	// Protected owner query keeps control requests from waiting on the worker
 	// occupied by the export they need to cancel or observe.
 	bool HasPendingOperation();
 	EditorExportAdmission Admit(EditorExportOperationRequest request);
+	EditorExportLookup Lookup(std::uint64_t id) const;
+	EditorExportConsumption Consume(std::uint64_t id, std::uint64_t observer);
+	void SetTerminalHistoryLimit(std::size_t limit);
+	EditorExportRetentionDiagnostics RetentionDiagnostics() const;
+	// Compatibility adapters deliberately omit the typed absence reason. New
+	// consumers use Lookup/Consume so expiry cannot look like unfinished work.
 	std::optional<EditorExportOperationObservation> Observe(std::uint64_t id) const;
 	std::optional<ExportResult> ConsumeFinal(std::uint64_t id, std::uint64_t observer);
 	std::optional<std::filesystem::path> TakeLaunch(std::uint64_t id);
@@ -63,12 +97,22 @@ private:
 	};
 	void RequireOwner() const;
 	void Adopt(const std::shared_ptr<Operation>& operation);
+	void RetireOldestLocked();
+	EditorExportLookupDisposition MissingDispositionLocked(std::uint64_t id) const;
 	Executor executor_;
+	OwnerHooks hooks_;
 	std::thread::id owner_ = std::this_thread::get_id();
 	// The map is owner-mutated; a separate lock permits concurrent copied
 	// observations without calling Poll/get() from a reader thread.
 	mutable std::mutex operationsMutex_;
 	std::unordered_map<std::uint64_t, std::shared_ptr<Operation>> operations_;
+	// Fixed storage is allocated before use. Appending an adopted receipt cannot
+	// fail halfway between terminal publication and FIFO accounting.
+	std::vector<std::uint64_t> terminalIds_;
+	std::size_t terminalHead_ = 0;
+	std::size_t terminalCount_ = 0;
+	std::uint64_t expiredCount_ = 0;
+	std::uint64_t pollVisits_ = 0;
 	std::uint64_t generation_ = 1;
 	std::uint64_t nextId_ = 1;
 	std::uint64_t activeId_ = 0;

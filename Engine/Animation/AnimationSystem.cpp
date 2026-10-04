@@ -37,6 +37,7 @@
 #include "Scene/SceneMutationQueue.h"
 #include "Scripting/ScriptingSystem.h"
 #include "ThreadPool/ThreadPool.h"
+#include "ThreadPool/ScopedTaskSettlement.h"
 
 #include <array>
 #include <algorithm>
@@ -2985,8 +2986,10 @@ namespace TerraEngine::Animation {
 			}
 		}
 
+		// Child creation/submission/execution can throw. Scoped settlement joins
+		// admitted readers first; the workload boundary reports the original error.
 		bool CaptureFrameLocked(AnimationFixedTick captureTick,
-								std::uint64_t candidateAuthorityGeneration) noexcept {
+								std::uint64_t candidateAuthorityGeneration) {
 			if(instances == nullptr || commands == nullptr || proceduralCommands == nullptr ||
 			   advancedCommands == nullptr || lifecycleLatch == nullptr ||
 			   candidateAuthorityGeneration == 0U)
@@ -3274,19 +3277,19 @@ namespace TerraEngine::Animation {
 										  (capturedFrameInputs.size() + workerCount - 1U) / workerCount;
 									  std::vector<std::future<void>> captureFutures;
 									  captureFutures.reserve(workerCount - 1U);
+										// Join children before the captured proof inputs can unwind.
+										TerraEngine::Tasks::ScopedTaskSettlement<void> captureFuturesSettlement(captureFutures, TerraEngine::Tasks::NestedTaskGroup::AnimationCompactCapture);
 									  for(std::size_t workerIndex = 1U; workerIndex < workerCount; ++workerIndex) {
 										  const std::size_t begin = workerIndex * chunkSize;
 										  const std::size_t end = std::min(
 											  capturedFrameInputs.size(), begin + chunkSize);
-										  auto task = ThreadPool::instance().createTask(
+										  captureFuturesSettlement.CreateAndEnqueue(ThreadPool::instance(),
 											  [&proveCompactRange, begin, end]() {
 												  proveCompactRange(begin, end);
 											  });
-										  captureFutures.push_back(task->getFuture());
-										  ThreadPool::instance().enqueue(task);
 									  }
-									  proveCompactRange(0U, std::min(capturedFrameInputs.size(), chunkSize));
-					for(std::future<void>& future : captureFutures) future.get();
+									  captureFuturesSettlement.RunInline([&] { proveCompactRange(0U, std::min(capturedFrameInputs.size(), chunkSize)); });
+					captureFuturesSettlement.GetAll();
 				  }
 								  std::size_t proceduralRangeIndex = 0U;
                                   for (std::size_t inputIndex = 0U;
@@ -8347,7 +8350,9 @@ namespace TerraEngine::Animation {
 			return true;
 		}
 
-		[[nodiscard]] bool SealAuthorityFrameCandidate() noexcept
+		// A failed nested batch must reach the scheduler's frame failure boundary,
+		// rather than terminate while unwinding an otherwise settled child group.
+		[[nodiscard]] bool SealAuthorityFrameCandidate()
 		{
 			sealedAuthorityCandidate = {};
 			sealedAuthorityCandidateReady = false;
@@ -8523,21 +8528,25 @@ namespace TerraEngine::Animation {
                                     return false;
 								  const std::shared_ptr<RuntimeRecordRoot>
 									  nextRuntimeRoot = expectedRuntimeRoot;
-								  auto nextCompactRuntimeRoot =
-									  std::make_shared<CompactRuntimeStateRoot>(
-										  expectedRuntimeRoot->size());
-                                  auto specialistSidecars = std::make_shared<
-                                      SealedSpecialistSidecarBatch>();
-                                  specialistSidecars->explicitRootMotion =
+								  // Large crowds prepare runtime state in its own settled task group.
+								  // Smaller crowds retain the measured single-pass publication path.
+								  const bool prepareRuntimeSeparately = capturedInputWorkIndices.size() >= 8192U;
+								  auto nextCompactRuntimeRoot = prepareRuntimeSeparately
+									  ? std::shared_ptr<CompactRuntimeStateRoot>{}
+									  : std::make_shared<CompactRuntimeStateRoot>(expectedRuntimeRoot->size());
+                                  auto specialistSidecars = prepareRuntimeSeparately
+                                      ? std::shared_ptr<SealedSpecialistSidecarBatch>{}
+                                      : std::make_shared<SealedSpecialistSidecarBatch>();
+                                  if (!prepareRuntimeSeparately) specialistSidecars->explicitRootMotion =
                                       pendingRootMotionApplications;
                                   // Assign each input one deterministic
                                   // destination before workers run.
                                   // Workers then write distinct
                                   // authority, sidecar, and runtime-root
                                   // elements without locks. Preparing
-                                  // both immutable roots in this one pass
-                                  // avoids a second crowd-sized dispatch
-                                  // and join.
+                                  // both immutable roots in one pass for smaller
+                                  // crowds avoids dispatch overhead. Large crowds
+                                  // prepare runtime state in its own settled group.
                                   std::vector<std::size_t> rowPositions(
                                       capturedInputWorkIndices.size());
                                   std::vector<std::size_t> pageRowCounts(
@@ -8604,7 +8613,7 @@ namespace TerraEngine::Animation {
                                       if (pageIndex >= mutablePages.size())
                                         return false;
                                       previousRuntimeSlot = handle.slotIndex;
-                                      if (current->rollbackHistoryActive) {
+                                      if (!prepareRuntimeSeparately && current->rollbackHistoryActive) {
                                         specialistSidecars
                                             ->rollbackHistoryAnimators
                                             .push_back(handle);
@@ -8626,7 +8635,7 @@ namespace TerraEngine::Animation {
                                       [this, session, candidateGeneration,
                                        &rowPositions, &mutablePages, &sidecars,
 									  &specialistSidecars, &nextCompactRuntimeRoot,
-									  &compactRowsValid](
+									  prepareRuntimeSeparately, &compactRowsValid](
                                           std::size_t begin, std::size_t end) {
                                         TERRAENGINE_PROFILE_SCOPE(
                                             "Animation Task: Build "
@@ -8691,6 +8700,7 @@ namespace TerraEngine::Animation {
                                                 std::memory_order_release);
                                           }
 
+									  if (!prepareRuntimeSeparately) {
 									  CompactRuntimeState& publishedState =
 										  nextCompactRuntimeRoot->at(handle.slotIndex);
 									  publishedState.handle = handle;
@@ -8705,6 +8715,7 @@ namespace TerraEngine::Animation {
 										  compact.runtimeRecords[compactIndex]->contentGeneration;
 									  publishedState.executionModeState =
 										  compact.executionDecisions[compactIndex].nextState;
+									  }
                                         }
                                       };
                                   // Compact rows perform only bounded
@@ -8736,6 +8747,8 @@ namespace TerraEngine::Animation {
                                       workerCount;
                                   std::vector<std::future<void>> futures;
                                   futures.reserve(workerCount);
+										// This guard dies before every input captured by admitted children.
+										TerraEngine::Tasks::ScopedTaskSettlement<void> futuresSettlement(futures, TerraEngine::Tasks::NestedTaskGroup::AnimationHomogeneousRows);
                                   // The scheduler worker already
                                   // executing this stage is useful
                                   // capacity. Queue the remaining chunks
@@ -8755,22 +8768,15 @@ namespace TerraEngine::Animation {
                                     const std::size_t end = std::min(
                                         capturedInputWorkIndices.size(),
                                         begin + chunkSize);
-                                    auto task =
-                                        ThreadPool::instance().createTask(
+                                    futuresSettlement.CreateAndEnqueue(ThreadPool::instance(),
                                             [&buildCompactPublicationRows,
                                              begin, end]() {
                                               buildCompactPublicationRows(begin,
                                                                           end);
                                             });
-                                    futures.push_back(task->getFuture());
-                                    ThreadPool::instance().enqueue(task);
                                   }
-                                  buildCompactPublicationRows(
-                                      0U,
-                                      std::min(capturedInputWorkIndices.size(),
-                                               chunkSize));
-                                  for (std::future<void> &future : futures)
-                                    future.get();
+                                  futuresSettlement.RunInline([&] { buildCompactPublicationRows(0U, std::min(capturedInputWorkIndices.size(), chunkSize)); });
+                                  futuresSettlement.GetAll();
                                   if (PollFrameCancellation() ||
                                       !compactRowsValid.load(
                                           std::memory_order_acquire))
@@ -8778,6 +8784,7 @@ namespace TerraEngine::Animation {
                                   compactPagesWorkerValidated = true;
                                   sidecars->workerValidatedAuthorityGeneration =
                                       candidateGeneration;
+                                  if (!prepareRuntimeSeparately) {
                                   publishedAuthorityCommit.expectedRuntimeRoot =
                                       expectedRuntimeRoot;
 								  publishedAuthorityCommit.nextRuntimeRoot =
@@ -8788,6 +8795,7 @@ namespace TerraEngine::Animation {
 									  std::move(nextCompactRuntimeRoot);
                                   publishedAuthorityCommit.specialistSidecars =
                                       std::move(specialistSidecars);
+                                  }
                                 } else if (compactGpuVisualCaptures.size() >=
                                                512U &&
                                            availableWorkerCount > 1U) {
@@ -8977,6 +8985,8 @@ namespace TerraEngine::Animation {
                                       workerCount;
                                   std::vector<std::future<void>> futures;
                                   futures.reserve(workerCount);
+										// This guard dies before every input captured by admitted children.
+										TerraEngine::Tasks::ScopedTaskSettlement<void> futuresSettlement(futures, TerraEngine::Tasks::NestedTaskGroup::AnimationMixedRows);
                                   // As in the homogeneous path, the current
                                   // scheduler worker builds the first disjoint
                                   // range while queued workers build the rest.
@@ -8991,21 +9001,14 @@ namespace TerraEngine::Animation {
                                     const std::size_t end = std::min(
                                         capturedInputWorkIndices.size(),
                                         begin + chunkSize);
-                                    auto task =
-                                        ThreadPool::instance().createTask(
+                                    futuresSettlement.CreateAndEnqueue(ThreadPool::instance(),
                                             [&buildMixedCompactRows, begin,
                                              end]() {
                                               buildMixedCompactRows(begin, end);
                                             });
-                                    futures.push_back(task->getFuture());
-                                    ThreadPool::instance().enqueue(task);
                                   }
-                                  buildMixedCompactRows(
-                                      0U,
-                                      std::min(capturedInputWorkIndices.size(),
-                                               chunkSize));
-                                  for (std::future<void> &future : futures)
-                                    future.get();
+                                  futuresSettlement.RunInline([&] { buildMixedCompactRows(0U, std::min(capturedInputWorkIndices.size(), chunkSize)); });
+                                  futuresSettlement.GetAll();
                                   if (PollFrameCancellation() ||
                                       !mixedRowsValid.load(
                                           std::memory_order_acquire))
@@ -9583,8 +9586,10 @@ namespace TerraEngine::Animation {
 			}
 		}
 
+		// Runtime candidate preparation owns child work and propagates failures
+		// only after those children stop accessing its captured candidate storage.
 		[[nodiscard]] bool PrepareRuntimeRootCandidate(
-			std::uint64_t authorityGeneration) noexcept
+			std::uint64_t authorityGeneration)
 		{
 			// Runtime evaluator state is internal mutable state, but it must advance with
 			// the same all-or-none visibility as the immutable authority frame.  Build a
@@ -9628,6 +9633,9 @@ namespace TerraEngine::Animation {
 						capturedInputWorkIndices.end(), [](const CapturedInputWorkIndex& captured) {
 							return captured.compact;
 						});
+				// Compact candidates must still refer to the exact root captured before
+				// evaluation; otherwise none of their private state may become visible.
+				if(allInputsCompact && expected != compactRuntimeCaptureRoot) return false;
 				// A few thousand scalar rows fit comfortably in cache and complete faster
 				// in one pass than through dozens of task submissions and future joins.
 				// Preserve the worker partition for truly large crowds where each task has
@@ -9737,13 +9745,15 @@ namespace TerraEngine::Animation {
 						+ workerCount - 1U) / workerCount;
 					std::vector<std::future<void>> futures;
 					futures.reserve(workerCount);
+										// This guard dies before every input captured by admitted children.
+										TerraEngine::Tasks::ScopedTaskSettlement<void> futuresSettlement(futures, TerraEngine::Tasks::NestedTaskGroup::AnimationCompactRuntime);
 					for(std::size_t workerIndex = 0U; workerIndex < workerCount;
 						++workerIndex) {
 						const std::size_t begin = workerIndex * chunkSize;
 						if(begin >= capturedInputWorkIndices.size()) break;
 						const std::size_t end = std::min(
 							capturedInputWorkIndices.size(), begin + chunkSize);
-						auto task = ThreadPool::instance().createTask(
+						futuresSettlement.CreateAndEnqueue(ThreadPool::instance(),
 							[this, begin, end, &compactHandles,
 								&nextCompact]() {
 								TERRAENGINE_PROFILE_SCOPE(
@@ -9772,10 +9782,8 @@ namespace TerraEngine::Animation {
 										compactGpuVisualCaptures.executionDecisions[compactIndex].nextState;
 								}
 							});
-						futures.push_back(task->getFuture());
-						ThreadPool::instance().enqueue(task);
 					}
-					for(std::future<void>& future : futures) future.get();
+					futuresSettlement.GetAll();
 					if(PollFrameCancellation()) return false;
 					for(std::size_t inputIndex = 0U; inputIndex < rollbackActive.size();
 						++inputIndex) {
@@ -13139,7 +13147,7 @@ namespace TerraEngine::Animation {
 			Physics::CharacterExternalRetirementIntent intent;
 			intent.expectedExternalLease = *external;
 			intent.externalOwnerId = externalOwnerId;
-			// Feature060 binds the primary frame. A still-valid copied row can
+			// Locomotion binds the primary frame. A still-valid copied row can
 			// supply its exact frame/generation; a removed AnimatorComponent may
 			// already stale that guard, so physical owner identity is authoritative.
 			intent.frame = {Physics::kPrimaryPhysicsFrameId,

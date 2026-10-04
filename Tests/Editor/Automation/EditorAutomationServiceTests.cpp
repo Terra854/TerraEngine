@@ -440,7 +440,9 @@ namespace TerraEngine::EditorTests
 			EditorContext editorContext = MakeProjectContext(workspace);
 			const std::filesystem::path scenes = editorContext.projectManager->GetProjectRoot() / "Assets" / "Scenes";
 			WriteTextFile(scenes / "Automation.tescene", MakeSceneJson("Automation").dump(4));
-			SceneManager::Instance().UnloadAll();
+			// This project fixture starts a fresh load lifetime explicitly; a
+			// root change does not reopen admission closed by an earlier test.
+			SceneManager::Instance().BeginLoadSession();
 			// Match MainEditorSubsystem: live scene paths resolve from Assets even
 			// though MCP clients use project-relative Assets/... spelling.
 			SceneManager::Instance().SetSceneRoot(editorContext.projectManager->GetProjectRoot() / "Assets");
@@ -479,7 +481,9 @@ namespace TerraEngine::EditorTests
 			};
 
 			WriteTextFile(scenePath, makeSceneWithObjectCount("Before Offline Rewrite", 2U).dump(4));
-			SceneManager::Instance().UnloadAll();
+			// Own one fresh session for both opens so the reread still exercises
+			// replacement within a lifetime rather than resetting between loads.
+			SceneManager::Instance().BeginLoadSession();
 			SceneManager::Instance().SetSceneRoot(editorContext.projectManager->GetProjectRoot() / "Assets");
 			EditorAutomationService service;
 			service.SetEditorContext(&editorContext);

@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "ExportEvidence.h"
+#include "Physics/Assets/PhysicsMaterial.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -105,7 +106,10 @@ namespace TerraEngine::EditorTests {
 			TempExportEvidenceDirectory tempDirectory;
 			const std::filesystem::path packageInput = tempDirectory.Root() / "PackageInput";
 			tempDirectory.WriteText("PackageInput/Zeta/Raw.txt", "ordinary source bytes");
-			tempDirectory.WriteText("PackageInput/Meshes/Baseline.temf", "binary-prefix-PLACEHOLDER-binary-suffix");
+			TerraEngine::UUID materialId{}; materialId[0] = 1;
+			auto material = TerraEngine::Physics::PhysicsMaterial::Defaults(materialId);
+			material.surfaceTag = "binary-prefix-PLACEHOLDER-binary-suffix";
+			tempDirectory.WriteText("PackageInput/Physics/Baseline.tephysmat", material.ToJson().dump());
 			tempDirectory.WriteText("PackageInput/game.json", R"({"startupScene":"Scenes/Startup.tescene"})");
 
 			std::vector<ExportContentInventoryEntry> entries;
@@ -117,12 +121,12 @@ namespace TerraEngine::EditorTests {
 			}), "Inventory paths should be lexically sorted before serialization.");
 
 			const auto mesh = std::find_if(entries.begin(), entries.end(), [](const auto& entry) {
-				return entry.logicalPath == "Meshes/Baseline.temf";
+				return entry.logicalPath == "Physics/Baseline.tephysmat";
 			});
-			context.Expect(mesh != entries.end(), "The compiled mesh should keep its normalized logical path.");
-			context.ExpectEqual(std::string("mesh"), mesh->assetType, "TEMF files should be identified as mesh assets.");
-			context.ExpectEqual(std::string("compiled"), mesh->sourceKind, "TEMF inventory entries should be identified as compiled payloads.");
-			context.Expect(mesh->placeholderDetected, "Placeholder scans should be case-insensitive even for binary payloads.");
+			context.Expect(mesh != entries.end(), "The runtime material should keep its normalized logical path.");
+			context.ExpectEqual(std::string("physics_material"), mesh->assetType, "TEPHYSMAT files should retain their typed identity.");
+			context.ExpectEqual(std::string("compiled"), mesh->sourceKind, "Runtime physics materials should be identified as compiled payloads.");
+			context.Expect(!mesh->placeholderDetected, "Ordinary material text must not be classified as explicit producer stub evidence.");
 			context.Expect(!mesh->contentHash.empty(), "Every inventory entry should carry a deterministic content identity.");
 		});
 

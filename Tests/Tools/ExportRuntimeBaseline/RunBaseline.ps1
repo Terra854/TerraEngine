@@ -222,12 +222,10 @@ function Assert-CompiledAsset {
 		throw "Generated child does not have a valid $Format header: '$Path'."
 	}
 
-	# A binary output that still contains the old fixture marker is never valid,
-	# even if its first four bytes were edited to resemble a format header.
-	$payloadText = [System.Text.Encoding]::ASCII.GetString($bytes)
-	if ($payloadText.IndexOf("placeholder", [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-		throw "Generated child contains a placeholder marker: '$Path'."
-	}
+	# This preliminary check establishes the declared format. The production
+	# exporter then applies complete codec/native validity and records correlated
+	# package/evidence decisions; ordinary payload vocabulary is legal.
+
 }
 
 function Test-CanonicalDirectResidentMesh {
@@ -319,7 +317,24 @@ else {
 $fixtureSource = Get-AbsolutePath -Path $FixtureRoot -BasePath $repoRoot
 $physicsFixtureSource = Get-AbsolutePath -Path $PhysicsFixtureRoot -BasePath $repoRoot
 $workDirectory = Get-AbsolutePath -Path $WorkRoot -BasePath $repoRoot
-Assert-PathIsBelow -Parent $outRoot -Child $workDirectory -Description "Disposable baseline work root"
+# An installed export cannot publish anywhere inside its runtime tree. Keep
+# disposable acceptance projects outside that tree and require a fresh path;
+# source invocations retain their established repository-out ownership rule.
+$installedInvocation = Test-Path -LiteralPath (Join-Path $repoRoot 'correctness-artifacts.json') -PathType Leaf
+if ($installedInvocation) {
+	if (!$PSBoundParameters.ContainsKey('WorkRoot')) {
+		$workDirectory = Join-Path ([IO.Path]::GetTempPath()) ('TerraEngine-native-aot-' + [Guid]::NewGuid().ToString('N'))
+	}
+	$runtimePrefix = $resolvedInstallRoot.TrimEnd('\','/') + [IO.Path]::DirectorySeparatorChar
+	$workPrefix = $workDirectory.TrimEnd('\','/') + [IO.Path]::DirectorySeparatorChar
+	if ($workDirectory -eq $resolvedInstallRoot -or $workDirectory.StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+		$resolvedInstallRoot.StartsWith($workPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+		throw 'Installed baseline WorkRoot and runtime tree must be separate.'
+	}
+	if (Test-Path -LiteralPath $workDirectory) { throw 'Installed baseline WorkRoot must be fresh.' }
+} else {
+	Assert-PathIsBelow -Parent $outRoot -Child $workDirectory -Description "Disposable baseline work root"
+}
 
 if (-not (Test-Path -LiteralPath $fixtureSource -PathType Container)) {
 	throw "Baseline source fixture was not found: '$fixtureSource'."
@@ -361,6 +376,28 @@ foreach ($directoryName in @("Scenes", "Scripts", "UI")) {
 Copy-Item -LiteralPath (Join-Path $physicsFixtureSource "Assets/Colliders") -Destination (Join-Path $projectRoot "Assets") -Recurse
 Copy-Item -LiteralPath (Join-Path $physicsFixtureSource "ProjectSettings/PhysicsSettings.json") -Destination (Join-Path $projectRoot "ProjectSettings/PhysicsSettings.json") -Force
 Copy-Item -LiteralPath (Join-Path $physicsFixtureSource "Scenes/Startup.tescene") -Destination (Join-Path $projectRoot "Assets/Scenes/Startup.tescene") -Force
+# The real physics scene supplies the runtime launch. Add the same legal-word
+# corpus signal there, preserving every authored component and identity.
+$validWordScenePath = Join-Path $projectRoot "Assets/Scenes/Startup.tescene"
+$validWordScene = Get-Content -LiteralPath $validWordScenePath -Raw | ConvertFrom-Json
+if (@($validWordScene.objects).Count -eq 0) { throw "The installed baseline scene has no authored objects." }
+$validWordScene.objects[0].name = "PlaceholderDoor"
+# Bind the actual authored sample in the dictionary-form physics scene. This
+# keeps the physics components unchanged while making the generated registry's
+# UTF-8 valid-word data reachable through a real runtime script callback.
+$baselineBinding = @{
+	bindingId = "63000000000000000000000000000001"
+	assetGuid = @(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+	className = "BaselineScript"
+	enabled = $true
+	orderIndex = 0
+	serializedValues = @()
+	authoredStateVersion = 1
+}
+$baselineBindingsJson = ConvertTo-Json -InputObject @($baselineBinding) -Depth 10 -Compress
+$validWordScene.objects[0].components | Add-Member -NotePropertyName Script -NotePropertyValue @{ BindingsJson = $baselineBindingsJson }
+$validWordScene | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $validWordScenePath -Encoding utf8
+
 
 $installedEditor = Join-Path $resolvedInstallRoot "Editor"
 # This fixture is assembled directly rather than through CreateProject. Seed
@@ -601,7 +638,7 @@ if (-not $exportResult.success) {
 $inventory = Get-Content -LiteralPath (Join-Path $evidenceRoot "content-inventory.json") -Raw | ConvertFrom-Json
 $placeholderEntries = @($inventory.entries | Where-Object { $_.placeholderDetected })
 if ($placeholderEntries.Count -ne 0) {
-	throw "Export inventory contains $($placeholderEntries.Count) placeholder-marked entries."
+	throw "Export inventory contains $($placeholderEntries.Count) explicitly prohibited stub entries."
 }
 foreach ($requiredAssetType in @("mesh", "material", "texture", "scene", "ui", "script")) {
 	$matchingEntries = @($inventory.entries | Where-Object { $_.assetType -eq $requiredAssetType })
@@ -614,10 +651,50 @@ if (-not (Test-Path -LiteralPath $managedRuntimePath -PathType Leaf)) {
 	throw "Published runtime is missing the NativeAOT gameplay library: '$managedRuntimePath'."
 }
 $managedRuntimeBytes = [System.IO.File]::ReadAllBytes($managedRuntimePath)
-if ($managedRuntimeBytes.Length -eq 0 -or
-	[System.Text.Encoding]::ASCII.GetString($managedRuntimeBytes).IndexOf("placeholder", [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-	throw "Published NativeAOT gameplay library is empty or contains a placeholder marker."
+if ($managedRuntimeBytes.Length -eq 0) {
+	throw "Published NativeAOT gameplay library is empty."
 }
+# This is a positive corpus assertion, never a content veto: the real native
+# image must contain the reachable sample's legal UTF-8 bytes for this run to
+# prove that structure validation accepted the formerly rejected vocabulary.
+if ([System.Text.Encoding]::ASCII.GetString($managedRuntimeBytes).IndexOf("legitimate placeholder runtime bytes", [System.StringComparison]::Ordinal) -lt 0) {
+	throw "NativeAOT output did not retain the actual valid-word sample bytes."
+}
+# Successful managed compilation is emitted only after the native policy has
+# inspected the published image's architecture, ranges and bootstrap exports.
+# Correlate that decision to this exact export result, retaining runtime boot
+# and bridge/vtable readiness below as independent executable checks.
+if ($exportResult.runId -ne $RunId -or $exportResult.stage -ne "complete" -or $exportResult.exitCode -ne 0) {
+	throw "Native artifact validity evidence does not identify this successful export run."
+}
+
+$nativeValidityReceipts = @($exportResult.diagnostics | Where-Object { $_.code -eq "export.native_artifact.valid" })
+if ($nativeValidityReceipts.Count -ne 1) { throw "Export must retain one native structure/hash validity receipt." }
+$nativeValidity = $nativeValidityReceipts[0].message | ConvertFrom-Json
+# Match the existing exporter provenance algorithm against the exact published
+# bytes. A receipt with only a hash-shaped string is insufficient correlation.
+if (-not ('TerraEngineLifecycleArtifactHash' -as [type])) {
+	Add-Type -TypeDefinition @'
+public static class TerraEngineLifecycleArtifactHash {
+	public static string Compute(byte[] bytes) {
+		ulong hash = 14695981039346656037UL;
+		unchecked { foreach (byte value in bytes) { hash ^= value; hash *= 1099511628211UL; } }
+		return hash.ToString("x16", System.Globalization.CultureInfo.InvariantCulture);
+	}
+}
+'@
+}
+if ($nativeValidity.validity -ne "valid" -or $nativeValidity.bootstrap -notin @("InitManagedRuntimeV4", "InitManagedRuntimeV3", "InitManagedRuntime") -or
+	$nativeValidity.byteSize -ne $managedRuntimeBytes.Length -or $nativeValidity.contentHash -ne [TerraEngineLifecycleArtifactHash]::Compute($managedRuntimeBytes)) {
+	throw "Native artifact validity evidence has an invalid bootstrap, byte count, or content identity."
+}
+@{
+	runId = $RunId
+	nativePath = $managedRuntimePath
+	structure = $nativeValidity
+	observedSha256 = (Get-FileHash -LiteralPath $managedRuntimePath -Algorithm SHA256).Hash.ToLowerInvariant()
+} | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $evidenceRoot "native-artifact-validation.json") -Encoding utf8
+
 $manifest = Get-Content -LiteralPath (Join-Path $evidenceRoot "resolved-manifest.json") -Raw | ConvertFrom-Json
 $profile = Get-Content -LiteralPath $profilePath -Raw | ConvertFrom-Json
 if ($manifest.startupScene -ne $profile.startupScene) {

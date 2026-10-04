@@ -11,6 +11,7 @@
 #include <future>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <string>
@@ -35,6 +36,37 @@
 class ResourceManager;
 struct SkyComponent;
 class Transform;
+
+// Per-call checkpoints run without manager locks. They expose native load
+// ordering to deterministic clients/tests without changing default requests.
+enum class SceneLoadCheckpoint { Admission, Submission, BeforeRead, AfterInterpretation, Publication };
+struct SceneLoadSourceSnapshot {
+	std::filesystem::path absolutePath;
+	std::filesystem::path root;
+	std::string mountedLogicalPath;
+	std::uint64_t requestId = 0;
+	std::uint64_t generation = 0;
+	bool isPrefab = false;
+};
+struct SceneLoadOptions {
+	std::function<void(SceneLoadCheckpoint, const SceneLoadSourceSnapshot&)> checkpoint;
+};
+enum class SceneLoadDisposition {
+	Pending, Published, InvalidDocument, Retired, ClosedAdmission,
+	AdmissionFailure, SubmissionFailure, LoaderException, PublicationFailure
+};
+// Cumulative scalar outcomes plus current ownership keep diagnostics bounded.
+// The newest request's disposition cannot be relabeled by an older completion.
+struct SceneLoadDiagnostics {
+	bool admissionOpen = true;
+	std::uint64_t sceneGeneration = 0, prefabGeneration = 0;
+	std::uint64_t latestRequestId = 0;
+	SceneLoadDisposition latestDisposition = SceneLoadDisposition::Pending;
+	std::size_t pendingScenes = 0, pendingPrefabs = 0, ownedLoads = 0;
+	std::uint64_t admitted = 0, published = 0, invalid = 0, retired = 0;
+	std::uint64_t closedAdmissions = 0, admissionFailures = 0, submissionFailures = 0;
+	std::uint64_t loaderExceptions = 0, publicationFailures = 0, physicallySettled = 0;
+};
 
 // Lightweight holder for a scene or prefab definition. The manager stores the
 // original JSON text so higher level systems can deserialize into game-specific
@@ -73,6 +105,13 @@ public:
 	void Initialize() override;
 	void Update(float deltaTime) override;
 	void Shutdown() override;
+	void PrepareShutdown() override;
+	// Start an empty load lifetime without resource startup or scene activation.
+	// Protected project/hub owners and isolated tests use this after retirement.
+	void BeginLoadSession();
+	// Snapshot terminal outcomes and current physical ownership without waiting
+	// for workers; lifecycle owners can expose this in their diagnostics.
+	SceneLoadDiagnostics GetLoadDiagnostics();
 	std::string SystemName() override;
 
 	// Configure the root directory used to resolve relative scene and prefab
@@ -100,11 +139,16 @@ public:
 		nlohmann::json sceneDocument,
 		TerraEngine::Scene::PreparedSceneDecode preparedScene);
 	TerraEngine::UUID LoadPrefab(const std::filesystem::path& path);
+	TerraEngine::UUID LoadScene(const std::filesystem::path& path, SceneLoadOptions options);
+	TerraEngine::UUID ReloadScene(const std::filesystem::path& path, SceneLoadOptions options);
+	TerraEngine::UUID LoadPrefab(const std::filesystem::path& path, SceneLoadOptions options);
 
 	// Asynchronous load helpers that schedule disk I/O on the shared thread
 	// pool. Duplicate requests join the same future to avoid redundant work.
 	std::shared_future<TerraEngine::UUID> LoadSceneAsync(const std::filesystem::path& path);
 	std::shared_future<TerraEngine::UUID> LoadPrefabAsync(const std::filesystem::path& path);
+	std::shared_future<TerraEngine::UUID> LoadSceneAsync(const std::filesystem::path& path, SceneLoadOptions options);
+	std::shared_future<TerraEngine::UUID> LoadPrefabAsync(const std::filesystem::path& path, SceneLoadOptions options);
 
 	// Accessors let callers retrieve cached data by UUID instead of passing raw
 	// filesystem paths around. Returned pointers remain valid until UnloadAll is
@@ -166,8 +210,9 @@ public:
 		const TerraEngine::Scene::BulkScenePublicationPacket& packet,
 		const std::function<bool()>& cancellationRequested = {});
 
-	// Clear all cached documents and abandon in-flight futures. Use during
-	// teardown to release memory when no other threads are reading scenes.
+	// Clear visible documents and revoke pending publication authority. Physical
+	// readers remain owned until completion; PrepareShutdown closes and drains
+	// them before their dependencies or mounted sources are released.
 	void UnloadAll();
 
 	// Scan the active scene and nullify any references to the given asset ID.
@@ -194,6 +239,18 @@ private:
 	};
 
 	SceneManager();
+	struct LoadRequest {
+		SceneLoadSourceSnapshot source;
+		std::string key;
+		TerraEngine::UUID resourceId = TerraEngine::EMPTY_UUID;
+		SceneLoadOptions options;
+		std::promise<TerraEngine::UUID> completion;
+		std::shared_future<TerraEngine::UUID> future = completion.get_future().share();
+		// Public completion can precede the task's final return. This separate
+		// future proves the worker physically stopped before dependencies release.
+		std::shared_future<bool> physicalCompletion;
+		SceneLoadDisposition disposition = SceneLoadDisposition::Pending;
+	};
 
 	template <typename Resource>
 	// struct SceneCache groups related state and operations so callers have one documented contract.
@@ -201,35 +258,28 @@ private:
 	{
 		std::unordered_map<std::string, TerraEngine::UUID> pathToId;
 		std::unordered_map<TerraEngine::UUID, std::unique_ptr<Resource>> resources;
-		std::unordered_map<std::string, std::shared_future<TerraEngine::UUID>> inFlight;
+		std::unordered_map<std::string, std::shared_ptr<LoadRequest>> inFlight;
+		std::uint64_t generation = 1;
 		mutable std::shared_mutex mutex;
 	};
-
-	template <typename Resource>
-	using LoaderFunction = std::function<std::unique_ptr<Resource>(const std::filesystem::path&, SceneFileType)>;
 
 	std::shared_future<TerraEngine::UUID> MakeReadyFuture(const TerraEngine::UUID& id);
 
 	template <typename Resource>
-	std::optional<TerraEngine::UUID> ResolveCached(const std::string& key, SceneCache<Resource>& cache);
-
-	template <typename Resource>
-	TerraEngine::UUID EnsureResourceId(const std::string& key, SceneCache<Resource>& cache);
-
-	template <typename Resource>
 	const Resource* GetResourceById(const TerraEngine::UUID& id, const SceneCache<Resource>& cache) const;
 
-	template <typename Resource>
-	TerraEngine::UUID LoadOrGetCached(const std::filesystem::path& path, SceneCache<Resource>& cache, const LoaderFunction<Resource>& loader, SceneFileType type);
-
-	template <typename Resource>
-	std::shared_future<TerraEngine::UUID> LoadOrSchedule(const std::filesystem::path& path, SceneCache<Resource>& cache, const LoaderFunction<Resource>& loader, SceneFileType type);
-
-	template <typename Resource>
-	TerraEngine::UUID FinalizeLoad(const std::string& key, SceneCache<Resource>& cache, const TerraEngine::UUID& id, std::unique_ptr<Resource> resource);
-
-	std::unique_ptr<SceneDocument> LoadSceneDocument(const std::filesystem::path& path, SceneFileType type);
-	std::optional<std::string> ReadJsonFile(const std::filesystem::path& path, SceneFileType type) const;
+	std::shared_future<TerraEngine::UUID> RequestLoad(const std::filesystem::path& path,
+		SceneCache<SceneDocument>& cache, SceneFileType type, bool reload, bool asynchronous, SceneLoadOptions options);
+	void ExecuteLoad(const std::shared_ptr<LoadRequest>& request, SceneCache<SceneDocument>& cache, SceneFileType type);
+	TerraEngine::UUID PublishLoad(const std::shared_ptr<LoadRequest>& request, SceneCache<SceneDocument>& cache, std::unique_ptr<SceneDocument> resource);
+	void CleanupLoad(const std::shared_ptr<LoadRequest>& request, SceneCache<SceneDocument>& cache) noexcept;
+	void ReportLoadTerminal(const std::shared_ptr<LoadRequest>& request, SceneLoadDisposition disposition) noexcept;
+	void RecordLoadTerminalLocked(const std::shared_ptr<LoadRequest>& request, SceneLoadDisposition disposition) noexcept;
+	void PruneSettledLoadsLocked();
+	void RetireCacheAuthorityLocked(bool clearDocuments);
+	void CloseAndDrainLoads();
+	std::unique_ptr<SceneDocument> LoadSceneDocument(const SceneLoadSourceSnapshot& source, SceneFileType type);
+	std::optional<std::string> ReadJsonFile(const SceneLoadSourceSnapshot& source, SceneFileType type) const;
 	bool ValidateExtension(const std::filesystem::path& path, SceneFileType type) const;
 
 	std::filesystem::path ResolveScenePath(const std::filesystem::path& path) const;
@@ -242,6 +292,17 @@ private:
 	Transform* GetPreviewTransform();
 
 	ThreadPool& threadPool;
+	// Admission/root authority always precedes a cache lock. Parsing and future
+	// waits hold neither, allowing completion and explicit reload to progress.
+	mutable std::mutex lifecycleMutex;
+	// Only lifecycle callers take this mutex; completion never needs it. It
+	// serializes reopen/drain while allowing waits outside the authority gate.
+	std::mutex loadSessionTransitionMutex;
+	bool loadAdmissionOpen = true;
+	std::uint64_t nextLoadRequestId = 1;
+	std::vector<std::shared_ptr<LoadRequest>> outstandingLoads;
+	std::size_t drainingLoadCount = 0;
+	SceneLoadDiagnostics loadDiagnostics;
 
 	std::filesystem::path sceneRoot;
 	std::filesystem::path m_StartupScene;
@@ -295,49 +356,6 @@ inline std::shared_future<TerraEngine::UUID> SceneManager::MakeReadyFuture(const
 }
 
 template <typename Resource>
-// SceneManager::ResolveCached is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-std::optional<TerraEngine::UUID> SceneManager::ResolveCached(const std::string& key, SceneCache<Resource>& cache)
-{
-	std::shared_lock lock(cache.mutex);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto existing = cache.pathToId.find(key); existing != cache.pathToId.end())
-	{
-		const TerraEngine::UUID& id = existing->second;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (cache.resources.find(id) != cache.resources.end())
-		{
-			return id;
-		}
-	}
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto pending = cache.inFlight.find(key); pending != cache.inFlight.end())
-	{
-		auto future = pending->second;
-		lock.unlock();
-		return future.get();
-	}
-
-	return std::nullopt;
-}
-
-template <typename Resource>
-// SceneManager::EnsureResourceId is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-TerraEngine::UUID SceneManager::EnsureResourceId(const std::string& key, SceneCache<Resource>& cache)
-{
-	std::unique_lock lock(cache.mutex);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto existing = cache.pathToId.find(key); existing != cache.pathToId.end())
-	{
-		return existing->second;
-	}
-
-	const auto id = TerraEngine::GenerateUUID();
-	cache.pathToId.emplace(key, id);
-	return id;
-}
-
-template <typename Resource>
 // SceneManager::GetResourceById is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const Resource* SceneManager::GetResourceById(const TerraEngine::UUID& id, const SceneCache<Resource>& cache) const
 {
@@ -349,85 +367,4 @@ const Resource* SceneManager::GetResourceById(const TerraEngine::UUID& id, const
 	}
 
 	return nullptr;
-}
-
-template <typename Resource>
-// SceneManager::FinalizeLoad is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-TerraEngine::UUID SceneManager::FinalizeLoad(const std::string& key, SceneCache<Resource>& cache, const TerraEngine::UUID& id, std::unique_ptr<Resource> resource)
-{
-	std::unique_lock lock(cache.mutex);
-	cache.pathToId[key] = id;
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (resource)
-	{
-		cache.resources[id] = std::move(resource);
-	}
-	else
-	{
-		cache.resources.erase(id);
-	}
-
-	cache.inFlight.erase(key);
-	return id;
-}
-
-template <typename Resource>
-// SceneManager::LoadOrGetCached is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-TerraEngine::UUID SceneManager::LoadOrGetCached(const std::filesystem::path& path, SceneCache<Resource>& cache, const LoaderFunction<Resource>& loader, SceneFileType type)
-{
-	const std::filesystem::path resolvedPath = ResolveScenePath(path);
-	const std::string key = NormalizeKey(resolvedPath);
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto cached = ResolveCached(key, cache))
-	{
-		return *cached;
-	}
-
-	const TerraEngine::UUID id = EnsureResourceId(key, cache);
-	auto resource = loader(resolvedPath, type);
-	return FinalizeLoad(key, cache, id, std::move(resource));
-}
-
-template <typename Resource>
-// SceneManager::LoadOrSchedule is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-std::shared_future<TerraEngine::UUID> SceneManager::LoadOrSchedule(const std::filesystem::path& path, SceneCache<Resource>& cache, const LoaderFunction<Resource>& loader, SceneFileType type)
-{
-	const std::filesystem::path resolvedPath = ResolveScenePath(path);
-	const std::string key = NormalizeKey(resolvedPath);
-
-	{
-		std::shared_lock lock(cache.mutex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto existing = cache.pathToId.find(key); existing != cache.pathToId.end())
-		{
-			if (cache.resources.find(existing->second) != cache.resources.end())
-			{
-				return MakeReadyFuture(existing->second);
-			}
-		}
-
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto pending = cache.inFlight.find(key); pending != cache.inFlight.end())
-		{
-			return pending->second;
-		}
-	}
-
-	const TerraEngine::UUID id = EnsureResourceId(key, cache);
-
-	auto task = threadPool.createTask([this, key, resolvedPath, &cache, id, loader, type]() -> TerraEngine::UUID {
-		auto resource = loader(resolvedPath, type);
-		return FinalizeLoad(key, cache, id, std::move(resource));
-	});
-
-	auto future = task->getFuture().share();
-	{
-		std::unique_lock lock(cache.mutex);
-		cache.inFlight[key] = future;
-	}
-	threadPool.enqueue(task);
-
-	return future;
 }

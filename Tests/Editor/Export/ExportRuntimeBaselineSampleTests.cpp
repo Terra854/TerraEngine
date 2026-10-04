@@ -21,18 +21,6 @@ namespace TerraEngine::EditorTests {
 			return buffer.str();
 		}
 
-		bool ContainsCaseInsensitive(std::string text, std::string needle) {
-			// Source fixtures are tiny, so normalizing copies keeps the placeholder
-			// rejection rule obvious and avoids locale-sensitive search behavior.
-			std::transform(text.begin(), text.end(), text.begin(), [](unsigned char value) {
-				return static_cast<char>(std::tolower(value));
-			});
-			std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char value) {
-				return static_cast<char>(std::tolower(value));
-			});
-			return text.find(needle) != std::string::npos;
-		}
-
 		bool IsCompiledBaselineExtension(const std::filesystem::path& path) {
 			const std::string extension = path.extension().string();
 			return extension == ".temf" || extension == ".tmat" || extension == ".tetf";
@@ -102,8 +90,7 @@ namespace TerraEngine::EditorTests {
 				if (!entry.is_regular_file()) {
 					continue;
 				}
-				const std::string contents = ReadText(entry.path());
-				context.Expect(!ContainsCaseInsensitive(contents, "placeholder"), "Authored baseline asset inputs must not contain the retired placeholder marker.");
+				// Authored words are legal; only prebuilt compiled children violate this source-only fixture contract.
 				if (IsCompiledBaselineExtension(entry.path())) {
 					++compiledFileCount;
 				}

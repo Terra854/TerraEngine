@@ -1,6 +1,7 @@
 // ThreadPool.cpp — Contains the Thread Pool queue state, worker coordination, and synchronization helpers implementation for task queue storage, worker thread lifecycle, and synchronization primitives.
 
 #include "ThreadPool.h"
+#include "ScopedTaskSettlement.h"
 #include "Core/Logger/Logger.h"
 #include "Profiling/Profiler.h"
 
@@ -8,9 +9,15 @@
 #include <chrono>
 #include <cstdlib>
 #include <limits>
+#include <stdexcept>
 
 namespace {
 	using TelemetryClock = std::chrono::steady_clock;
+	// During drain, a running dependency may still release its parent into the
+	// same queue. External producers are closed; worker completion remains owned.
+	thread_local ThreadPool* executingPool = nullptr;
+	std::atomic<bool> nestedHookEnabled{false};
+	std::atomic<std::shared_ptr<const TerraEngine::Tasks::NestedTaskHook>> nestedHook;
 
 	// Steady-clock nanoseconds are meaningful only as differences, which is
 	// exactly what worker telemetry needs. They are never serialized as wall time.
@@ -34,13 +41,50 @@ namespace {
 	}
 }
 
+void TerraEngine::Tasks::SetNestedTaskHookForTesting(NestedTaskHook hook)
+{
+	// Configure only at a native test's protected quiescent boundary. The copied
+	// callable remains alive until every already-admitted child has settled.
+	auto snapshot = hook ? std::make_shared<const NestedTaskHook>(std::move(hook)) : nullptr;
+	nestedHook.store(std::move(snapshot));
+	nestedHookEnabled.store(static_cast<bool>(nestedHook.load()));
+}
+
+std::shared_ptr<const TerraEngine::Tasks::NestedTaskHook> TerraEngine::Tasks::CaptureNestedTaskHookForTesting()
+{
+	// The ordinary frame path pays no shared-pointer lock when tests are absent.
+	return nestedHookEnabled.load(std::memory_order_relaxed) ? nestedHook.load() : nullptr;
+}
+
 ThreadPool& ThreadPool::instance() {
 	static ThreadPool instance;
 	return instance;
 }
 
+std::unique_ptr<ThreadPool> ThreadPool::CreateOwned(std::size_t workerCount,
+	std::function<void(std::size_t)> beforeWorker)
+{
+	if(workerCount == 0) throw std::invalid_argument("Owned executor capacity must be positive");
+	auto pool = std::unique_ptr<ThreadPool>(new ThreadPool);
+	pool->ownedExecutor = true;
+	pool->InitializeWorkers(workerCount, beforeWorker);
+	return pool;
+}
+
+ThreadPool::~ThreadPool()
+{
+	// The creating owner releases this pool only after request/process settlement.
+	// Joining also makes construction rollback and repeated shutdown harmless.
+	shutdown();
+}
+
 // ThreadPool::initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ThreadPool::initialize(std::size_t requestedWorkerCount) {
+	InitializeWorkers(requestedWorkerCount, {});
+}
+
+void ThreadPool::InitializeWorkers(std::size_t requestedWorkerCount,
+	const std::function<void(std::size_t)>& beforeWorker) {
 	{
 		std::lock_guard<std::mutex> lock(queue_mutex);
 		// Treat initialization as idempotent so callers can safely guard startup
@@ -79,8 +123,16 @@ void ThreadPool::initialize(std::size_t requestedWorkerCount) {
 	const size_t numThreads = std::max<std::size_t>(1, requestedWorkerCount == 0 ? detectedHardwareThreads : requestedWorkerCount);
 	ResetTelemetryForWorkers(numThreads);
 
-	for (size_t i = 0; i < numThreads; ++i) {
-		workers.emplace_back([this, i] { this->workerThread((int)i); });
+	try {
+		for (size_t i = 0; i < numThreads; ++i) {
+			if(beforeWorker) beforeWorker(i);
+			workers.emplace_back([this, i] { this->workerThread((int)i); });
+		}
+	} catch(...) {
+		// A partially started executor still owns joinable workers. Stop and join
+		// those workers before propagating the original construction failure.
+		shutdown();
+		throw;
 	}
 }
 
@@ -135,15 +187,18 @@ void ThreadPool::enqueue(std::shared_ptr<ITask> task, std::uint64_t usefulItemCo
 			// Lock the queue mutex to ensure exclusive access to the task queue
 			{
 				std::unique_lock<std::mutex> lock(queue_mutex);
+				if(stop && executingPool != this) {
+					throw std::runtime_error("ThreadPool admission is closed");
+				}
 				const std::size_t queueDepthAtEnqueue = tasks.size() + 1;
-				tasks.emplace(QueuedTask{[task]() {
+				tasks.emplace(QueuedTask{[this, task]() {
 					// The profiler returns whether a task sample was actually
 					// opened. Carry that through to completion so idle profiler
 					// sessions do not pay an unmatched EndSample call.
 					bool profilerSampleActive = false;
 					ObserveTaskSafely([&] { profilerSampleActive = TerraEngine::Profiling::Profiler::Instance().RecordTaskStarted("ThreadPool Task"); });
 					task->run();
-					ThreadPool::instance().completeTask(task);
+					completeTask(task);
 					ObserveTaskSafely([&] { TerraEngine::Profiling::Profiler::Instance().RecordTaskFinished(profilerSampleActive); });
 				}, queueDepthAtEnqueue, usefulItemCount, MonotonicNanoseconds()});
 			} // Release the lock asap when done to minimize the chances of deadlocks
@@ -353,6 +408,13 @@ void ThreadPool::RecordWorkerTaskFinished(
 
 void ThreadPool::workerThread(int threadNum)
 {
+	// Restore thread-local ownership even if a future implementation reuses a
+	// worker entry point. Queue callbacks finish before this owner joins the thread.
+	struct ExecutionOwner {
+		ThreadPool* previous = executingPool;
+		explicit ExecutionOwner(ThreadPool* pool) { executingPool = pool; }
+		~ExecutionOwner() { executingPool = previous; }
+	} executionOwner(this);
 	// Log that the worker thread is live so we can trace thread lifecycle events.
 	TERRAENGINE_LOG(LogLevel::Info, "Worker thread no. " << threadNum << " initialized and running.");
 	const std::size_t workerIndex = static_cast<std::size_t>(threadNum);

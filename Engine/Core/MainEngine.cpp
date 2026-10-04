@@ -87,8 +87,8 @@ namespace {
 		// layout preparation from protected scene mutation.
 		declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
 		declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
-		declaration.safeSubwork = "Hierarchy snapshots, dirty transform work plans, and compact runtime layout records from immutable scene copies.";
-		declaration.protectedCommit = "Active scene document ownership, scene load activation, and live ObjectManager hierarchy/component mutation.";
+		declaration.safeSubwork = "Immutable captured scene/prefab source parsing, hierarchy snapshots, dirty transform work plans, and compact runtime layout records.";
+		declaration.protectedCommit = "Request generation retirement, cache publication, load admission/drain boundaries, active scene ownership/activation, and live ObjectManager hierarchy/component mutation.";
 		declaration.protectedReason = declaration.protectedCommit;
 		return declaration;
 	}

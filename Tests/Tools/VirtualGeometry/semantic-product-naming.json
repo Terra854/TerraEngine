@@ -1,7 +1,7 @@
 {
 	"schemaVersion": 1,
-	"productRoots": ["Engine", "Editor", "Launcher", "Tests", "Tools", "Docs"],
-	"rootFiles": ["CMakeLists.txt", "CMakePresets.json"],
+	"productRoots": ["Engine", "Editor", "Launcher", "Tests", "Tools", "Docs", "cmake"],
+	"rootFiles": ["CMakeLists.txt", "CMakePresets.json", "AGENTS.md", "GEMINI.md", "README.md", ".gitignore", ".gitattributes", ".gitmodules", "global.json"],
 	"excludedRoots": [".agents", ".codex", ".specify", "specs", ".git", "graphify-out", "out"],
 	"excludedFiles": [
 		"Tests/Tools/VirtualGeometry/semantic-product-naming.json",
@@ -10,6 +10,8 @@
 	"textExtensions": [".bat", ".cmd", ".cmake", ".cpp", ".cs", ".frag", ".gltf", ".h", ".hlsl", ".hlsli", ".hpp", ".json", ".md", ".ps1", ".py", ".sh", ".teanimctrl", ".teanimmask", ".teprefab", ".tescene", ".tmat", ".txt", ".vert", ".yaml", ".yml"],
 	"maximumTextBytes": 4194304,
 	"patterns": [
+		{"name": "planning-workflow", "expression": "(?i)(?<![A-Za-z0-9])(?:spec[- ]kit|speckit(?:[-.][A-Za-z]+)*)(?![A-Za-z0-9])"},
+		{"name": "planning-document-link", "expression": "(?i)(?<![A-Za-z0-9])specs[/\\\\][0-9]{2,4}[-_]"},
 		{"name": "feature-or-specification", "expression": "(?i)(?<![A-Za-z0-9])(?:(?:feature|spec)(?:[-_ `]|%20|%2d|%5f|\\\\u0020|\\\\x20)*0*\\d{1,4}|specs?[/\\\\]0*\\d{2,4}[-_])(?![A-Za-z0-9])"},
 		{"name": "user-story", "expression": "(?i)(?<![A-Za-z0-9])US0*\\d{1,3}(?![A-Za-z0-9])"},
 		{"name": "requirement-or-success-criterion", "expression": "(?i)(?<![A-Za-z0-9])(?:FR|SC)-0*\\d{1,4}(?![A-Za-z0-9])"},

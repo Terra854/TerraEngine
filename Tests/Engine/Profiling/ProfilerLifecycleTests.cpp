@@ -31,15 +31,36 @@ public:
 
 bool WaitForCondition(const std::function<bool()>& predicate)
 {
-	for (std::uint32_t attempt = 0u; attempt < 100000u; ++attempt)
+	// Durable journal I/O runs at background priority. Give it elapsed time and
+	// release the polling thread between observations instead of spending an
+	// arbitrary CPU iteration budget while repeatedly acquiring its state mutex.
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	while (std::chrono::steady_clock::now() < deadline)
 	{
 		if (predicate())
 		{
 			return true;
 		}
-		std::this_thread::yield();
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
-	return false;
+	return predicate();
+}
+
+std::string DescribeFinalization(const TerraEngine::Profiling::ProfilerJournalFinalizationStatus& status)
+{
+	// Preserve the actual terminal/error evidence when a bounded wait fails so
+	// scheduling delay can be distinguished from stale ownership or sink failure.
+	using TerraEngine::Profiling::ProfilerJournalFinalizationState;
+	const char* state = "None";
+	switch (status.state)
+	{
+	case ProfilerJournalFinalizationState::Draining: state = "Draining"; break;
+	case ProfilerJournalFinalizationState::Completed: state = "Completed"; break;
+	case ProfilerJournalFinalizationState::Failed: state = "Failed"; break;
+	case ProfilerJournalFinalizationState::Stale: state = "Stale"; break;
+	case ProfilerJournalFinalizationState::None: break;
+	}
+	return std::string(" Finalization state: ") + state + "; error: " + status.error;
 }
 }
 
@@ -110,7 +131,9 @@ void RegisterProfilerLifecycleTests(TestRegistry& registry)
 		profiler.AbandonFrameAfterFailure();
 		profiler.BeginFrame(); profiler.EndFrame();
 		const auto ticket = profiler.FinishRecording();
-		context.Expect(WaitForCondition([&] { return profiler.GetJournalFinalizationStatus(ticket).state == ProfilerJournalFinalizationState::Completed; }), "Buffered valid journal frames must still finalize after abandonment.");
+		const bool finalized = WaitForCondition([&] { return profiler.GetJournalFinalizationStatus(ticket).state == ProfilerJournalFinalizationState::Completed; });
+		context.Expect(finalized, "Buffered valid journal frames must still finalize after abandonment."
+			+ DescribeFinalization(profiler.GetJournalFinalizationStatus(ticket)));
 		ProfilerJournalV1OpenResult index;
 		context.Expect(ReadProfilerJournalV1Index(path, index, error) == ProfilerJournalV1ResultCode::Ok && index.index.size() == 2u,
 			"The journal must retain its two valid frames and omit the discarded frame: " + error);
@@ -254,10 +277,12 @@ void RegisterProfilerLifecycleTests(TestRegistry& registry)
 		const ProfilerJournalFinalizationTicket ticket = profiler.FinishRecording();
 		context.Expect(ticket.accepted,
 			"A durable detailed frame must return a finalization ticket immediately.");
-		context.Expect(WaitForCondition([&]() {
+		const bool finalized = WaitForCondition([&]() {
 			return profiler.GetJournalFinalizationStatus(ticket).state
 				== ProfilerJournalFinalizationState::Completed;
-		}), "The dedicated journal worker must aggregate, persist, and finalize the frame.");
+		});
+		context.Expect(finalized, "The dedicated journal worker must aggregate, persist, and finalize the frame."
+			+ DescribeFinalization(profiler.GetJournalFinalizationStatus(ticket)));
 
 		const ProfilerCaptureHealth health = profiler.GetCaptureHealth();
 		context.Expect(health.committedFrameCount == 1u && health.producedFrameCount == 1u

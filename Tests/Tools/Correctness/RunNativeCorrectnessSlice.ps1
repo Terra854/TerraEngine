@@ -16,6 +16,20 @@ param(
 	[string]$LogDirectory = ''
 )
 $ErrorActionPreference = 'Stop'
+# These recovery filters are contracts rather than caller-selected smoke tests.
+# Preserve the generic wrapper for existing slices and compound/local filters,
+# but never allow an exact recovery slice to undercount its required cases.
+$recoveryFloors=@{
+	'Engine.SceneLoadRecovery'=14
+	'Engine.NestedTaskSettlement'=11
+	'Editor.AssetDiscoveryRecovery'=8
+	'Editor.AssetImportAdmission'=13
+	'Editor.ExportArtifactValidation'=12
+	'Editor.ExportRetention'=10
+}
+if ($recoveryFloors.ContainsKey($Filter) -and $MinimumCases -lt $recoveryFloors[$Filter]) {
+	throw "Recovery filter '$Filter' requires at least $($recoveryFloors[$Filter]) cases."
+}
 $sliceExecutable = (Resolve-Path -LiteralPath $Executable).Path
 if ([string]::IsNullOrEmpty($LogDirectory)) {
 	$LogDirectory = Join-Path ([IO.Path]::GetTempPath()) ('TerraEngine-correctness-slice-' + [Guid]::NewGuid().ToString('N'))

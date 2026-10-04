@@ -8,4 +8,4 @@ Scene writes are typed transactions. `SetWorldTransform`, `TranslateWorld`, repa
 
 This feature is intentionally breaking. There is no `Vector3 Position`, global float transform, legacy scene reader, converter, dual writer, or compatibility alias. Existing projects must be recreated in the new formats.
 
-For build, focused test, installed validation, performance, and six-hour soak commands, see [Testing](../Testing.md) and `specs/052-unbounded-scenes/quickstart.md`.
+For build, focused test, installed validation, performance, and six-hour soak commands, see [Testing](../Testing.md).

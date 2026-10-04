@@ -1580,6 +1580,9 @@ void MainEditorSubsystem::OnProjectOpened() {
 	// Set Scene Root to Assets folder so we can load scenes from anywhere inside Assets
 	SceneManager::Instance().SetSceneRoot(assetRoot.string());
 	ResourceManager::Instance().SetAssetRoot(assetRoot);
+	// Open scene admission only after the incoming project roots are captured.
+	// This starts an empty lifetime without loading the previous startup scene.
+	SceneManager::Instance().BeginLoadSession();
 	RenderSystem::Instance().LoadSettings();
 	if (auto preferences = GetWindow<PreferencesWindow>())
 	{
@@ -4109,6 +4112,9 @@ void MainEditorSubsystem::CloseCurrentProject() {
 	if (ctx && ctx->exportController) ctx->exportController->StopAndDrain();
 	if (ctx && ctx->editorMcpBridge) ctx->editorMcpBridge->PumpExportJobsAtProtectedFrame();
 	ScriptCompilationSubsystem::Instance().StopAdmissionsAndDrain();
+	// Scene loaders may still read project resources. Settle their physical work
+	// before resource admission closes or outgoing caches are released.
+	SceneManager::Instance().PrepareShutdown();
 	ResourceManager::Instance().StopAdmissionsAndDrain();
 	// History commands are project-scoped and may retain references to stores and
 	// queues owned by editor windows. Destroy every command while those owners are
@@ -4169,6 +4175,7 @@ void MainEditorSubsystem::CloseCurrentProject() {
 	// The outgoing project no longer owns physical work. Reopen a fresh hub
 	// request session for editor defaults without reviving its old tokens.
 	ResourceManager::Instance().BeginRequestSession();
+	SceneManager::Instance().BeginLoadSession();
 	ResourceManager::Instance().LoadDefaultResources();
 	
 	// Clear Renderer Resources

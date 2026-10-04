@@ -99,7 +99,7 @@ namespace TerraEngine::Tests {
 
 			bool Start(TestContext& context) {
 				auto& objects = ObjectManager::instance();
-				const Object object = objects.createObject("US1 authority character");
+				const Object object = objects.createObject("Locomotion authority character");
 				context.Expect(objects.AddComponent<Transform>(object) != nullptr
 					&& objects.AddComponent<CharacterControllerComponent>(object) != nullptr
 					&& objects.AddComponent<CharacterLocomotionComponent>(object) != nullptr,

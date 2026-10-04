@@ -1,4 +1,5 @@
 #include "Runtime/ExportStartupCoordinator.h"
+#include "Runtime/ArtifactValidation.h"
 
 #include <algorithm>
 #include <array>
@@ -44,12 +45,6 @@ namespace TerraEngine::Runtime {
 				result[result.size() - 1U - index] = hex[(hash >> (index * 4U)) & 0xFU];
 			}
 			return result;
-		}
-
-		bool ContainsPlaceholderMarker(const std::vector<uint8_t>& bytes) {
-			constexpr std::string_view marker = "placeholder";
-			return std::search(bytes.begin(), bytes.end(), marker.begin(), marker.end(),
-				[](uint8_t left, char right) { return static_cast<char>(std::tolower(left)) == right; }) != bytes.end();
 		}
 
 		bool LoadSettings(const nlohmann::json& document, TerraEngine::Physics::PhysicsSettings& settings, std::string& error) {
@@ -154,11 +149,13 @@ namespace TerraEngine::Runtime {
 				const std::string path = record.value("packagePath", std::string{});
 				if(path.empty() || !mount.Exists(path)) { result.diagnostic = "A packaged physics material is missing."; return result; }
 				const std::vector<uint8_t> bytes = mount.ReadAll(path);
-				if(bytes.empty() || ContainsPlaceholderMarker(bytes) || bytes.size() != record.value("size", 0ULL)
+				if(bytes.empty() || bytes.size() != record.value("size", 0ULL)
 					|| HashBytes(bytes) != record.value("checksum", std::string{})) {
-					result.diagnostic = "A packaged physics material is empty, placeholder-marked, or checksum-mismatched.";
+					result.diagnostic = "A packaged physics material is empty or checksum-mismatched.";
 					return result;
 				}
+				const auto validity = ValidateArtifact({std::as_bytes(std::span(bytes)), ArtifactKind::PhysicsMaterial, HostNativeImageTarget(), path});
+				if(!validity.IsValid()) { result.diagnostic = validity.code + ": " + path + ": " + validity.diagnostic; return result; }
 				const nlohmann::json document = nlohmann::json::parse(bytes.begin(), bytes.end());
 				TerraEngine::Physics::PhysicsMaterial material;
 				TerraEngine::Physics::PhysicsMaterialDiagnostics diagnostics;
@@ -181,11 +178,13 @@ namespace TerraEngine::Runtime {
 				const std::string path = record.value("packagePath", std::string{});
 				if(path.empty() || !mount.Exists(path)) { result.diagnostic = "A packaged cooked collider is missing."; return result; }
 				const std::vector<uint8_t> bytes = mount.ReadAll(path);
-				if(bytes.empty() || ContainsPlaceholderMarker(bytes) || bytes.size() != record.value("size", 0ULL)
+				if(bytes.empty() || bytes.size() != record.value("size", 0ULL)
 					|| HashBytes(bytes) != record.value("checksum", std::string{})) {
-					result.diagnostic = "A packaged cooked collider is empty, placeholder-marked, or checksum-mismatched.";
+					result.diagnostic = "A packaged cooked collider is empty or checksum-mismatched.";
 					return result;
 				}
+				const auto validity = ValidateArtifact({std::as_bytes(std::span(bytes)), ArtifactKind::CookedCollider, HostNativeImageTarget(), path});
+				if(!validity.IsValid()) { result.diagnostic = validity.code + ": " + path + ": " + validity.diagnostic; return result; }
 				std::vector<std::byte> binary(bytes.size());
 				if(!bytes.empty()) std::memcpy(binary.data(), bytes.data(), bytes.size());
 				TerraEngine::Physics::CookedColliderDiagnostics diagnostics;
@@ -217,9 +216,13 @@ namespace TerraEngine::Runtime {
 					}
 				}
 			}
-			result.managedBindingsLoaded = !managedBytes.empty() && !ContainsPlaceholderMarker(managedBytes);
+			// Native validity is inspection only; the Scripting startup gate still
+			// requires successful native loading and bridge/vtable initialization.
+			const auto managedValidity = ValidateArtifact({std::as_bytes(std::span(managedBytes)),
+				ArtifactKind::NativeGameplay, HostNativeImageTarget(), "Managed/Assembly-CSharp"});
+			result.managedBindingsLoaded = managedValidity.IsValid();
 			if(requireManagedBindings && !result.managedBindingsLoaded) {
-				result.diagnostic = "Physics export requires a non-placeholder Managed/Assembly-CSharp.dll binding payload.";
+				result.diagnostic = "Physics export requires a valid native gameplay binding: " + managedValidity.code + ": " + managedValidity.diagnostic;
 				return result;
 			}
 			result.loaded = true;

@@ -63,10 +63,8 @@ the last-known-good generation.
 
 Diagnostics expose stable root/layer codes, requested and effective sampler
 quality, material/control/geometry generations, page and residency state,
-stale-candidate rejection, and rollback. See the normative
-[`TERRAROOT1`](../../specs/054-terrain-rendering-overhaul/contracts/terraroot1.md)
-and [surface-runtime](../../specs/054-terrain-rendering-overhaul/contracts/terrain-surface-runtime.md)
-contracts.
+stale-candidate rejection, and rollback. See the root-format and surface-runtime
+guidance in [Terrain](../../Docs/Terrain.md).
 
 ## Focused verification
 

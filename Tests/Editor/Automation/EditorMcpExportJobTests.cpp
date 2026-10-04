@@ -4,10 +4,28 @@
 #include "BuildProfile.h"
 #include "EditorContext.h"
 #include "ProjectManager.h"
+#include "Editor/Export/EditorExportOperationController.h"
+#include "Engine/ThreadPool/ThreadPool.h"
+#include "Tests/Engine/Runtime/CorrectnessTestSupport.h"
 
 #include <filesystem>
 #include <memory>
 #include <string>
+
+namespace TerraEngine::Editor::Automation
+{
+	// This fixture-only access models a corrupt consumer reference without adding
+	// a runtime command that could rewrite controller identities or launch intent.
+	struct EditorExportRetentionTestAccess
+	{
+		static void Track(EditorAutomationService& service, const std::string& jobId,
+			std::shared_ptr<EditorExportOperationController> controller, std::uint64_t id)
+		{
+			service.activeExportOperations[jobId] = {std::move(controller), id, 0};
+		}
+		static std::size_t Pending(const EditorAutomationService& service) { return service.activeExportOperations.size(); }
+	};
+}
 
 namespace TerraEngine::EditorTests
 {
@@ -58,6 +76,52 @@ namespace TerraEngine::EditorTests
 
 	void RegisterEditorMcpExportJobTests(TestRegistry& registry)
 	{
+		for (const bool expired : {true, false}) {
+			registry.Add(expired ? "Editor.ExportRetention.AutomationExpiredTerminates" : "Editor.ExportRetention.AutomationUnknownTerminates", [expired](TestContext& context) {
+				using TerraEngine::Editor::Automation::EditorExportRetentionTestAccess;
+				ThreadPool::instance().shutdown(); ThreadPool::instance().initialize(2);
+				// Declare pool cleanup first so controller/service ownership retires
+				// before the global worker pool is shut down, even after an assertion.
+				struct PoolCleanup { ~PoolCleanup() { ThreadPool::instance().shutdown(); } } poolCleanup;
+				ExportJobFixture fixture;
+				auto controller = std::make_shared<EditorExportOperationController>([](const ExportRequest&, ExportProgressCallback, std::shared_ptr<ExportCancellationState> cancellation) {
+					ExportResult result; result.success = cancellation->Commit([] { return true; }); return result;
+				});
+				std::uint64_t operationId = 1234;
+				if (expired) {
+					EditorExportOperationRequest request; request.projectGeneration = controller->Generation();
+					request.request.runId = "expiry-fixture";
+					const auto admission = controller->Admit(request);
+					context.Expect(admission.accepted, "The native expiry fixture should admit its owned export.");
+					operationId = admission.operationId;
+					controller->BeginProject();
+				}
+				const auto job = fixture.service.GetJobService().Create(AutomationJobCreateRequest{"export", "export.start", "retention-request", "retention-correlation", "", true});
+				EditorExportRetentionTestAccess::Track(fixture.service, job.jobId, controller, operationId);
+				fixture.service.PumpExportJobsAtProtectedFrame();
+				const auto polled = fixture.service.HandleTool("jobs.get", {{"jobId", job.jobId}}, WriteMode::ReadOnly, "retention-poll");
+				context.Expect(polled.value("ok", false) && polled["data"]["job"].value("state", std::string{}) == "failed", "Expired or unknown export references must become explicit terminal jobs.");
+				context.Expect(polled["data"]["job"]["result"].value("category", std::string{}) == (expired ? "export.expired" : "export.unknown"), "Expiry and unknown references must expose distinguishable terminal diagnostics.");
+				context.Expect(EditorExportRetentionTestAccess::Pending(fixture.service) == 0, "A terminal missing reference must relinquish ongoing polling ownership.");
+				const auto retained = polled["data"]["job"];
+				controller->BeginProject(); fixture.service.PumpExportJobsAtProtectedFrame();
+				const auto again = fixture.service.HandleTool("jobs.get", {{"jobId", job.jobId}}, WriteMode::ReadOnly, "retention-reconnect");
+				context.Expect(again["data"]["job"]["result"] == retained["result"], "The service's copied terminal outcome must survive controller/project retirement.");
+				// A separately adopted successful outcome is copied into durable job
+				// state before project expiry, so it must never be relabeled as expired.
+				EditorExportOperationRequest successRequest; successRequest.projectGeneration = controller->Generation(); successRequest.request.runId = "copied-success";
+				const auto successAdmission = controller->Admit(successRequest);
+				const auto successJob = fixture.service.GetJobService().Create(AutomationJobCreateRequest{"export", "export.start", "copied-request", "copied-correlation", "", true});
+				EditorExportRetentionTestAccess::Track(fixture.service, successJob.jobId, controller, successAdmission.operationId);
+				bool copied = false; const auto deadline = std::chrono::steady_clock::now() + TerraEngine::Tests::Correctness::kDefaultTimeout;
+				while (!copied && std::chrono::steady_clock::now() < deadline) { fixture.service.PumpExportJobsAtProtectedFrame(); copied = EditorExportRetentionTestAccess::Pending(fixture.service) == 0; std::this_thread::yield(); }
+				context.Expect(successAdmission.accepted && copied, "A real controller success should copy into its automation job.");
+				const auto successBefore = fixture.service.HandleTool("jobs.get", {{"jobId", successJob.jobId}}, WriteMode::ReadOnly, "success-before-expiry");
+				controller->BeginProject(); fixture.service.PumpExportJobsAtProtectedFrame();
+				const auto successAfter = fixture.service.HandleTool("jobs.get", {{"jobId", successJob.jobId}}, WriteMode::ReadOnly, "success-after-expiry");
+				context.Expect(successAfter["data"]["job"].value("state", std::string{}) == "succeeded" && successBefore["data"]["job"]["result"] == successAfter["data"]["job"]["result"], "Copied successful job results must persist after project history expires.");
+			});
+		}
 		registry.Add("Editor.MCP.ExportJobs.AcceptPollAndReconnect", [](TestContext& context) {
 			ExportJobFixture fixture;
 			context.Expect(fixture.projectReady && fixture.profileReady, "Export job fixture should create its project and profile.");

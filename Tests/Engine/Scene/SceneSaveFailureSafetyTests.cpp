@@ -55,7 +55,7 @@ namespace TerraEngine::Tests {
 			SaveFixture(TestContext& context) {
 				SaveFaultComponent::registerType();
 				auto& scenes = SceneManager::Instance();
-				scenes.UnloadAll(); ObjectManager::instance().clear(); scenes.SetSceneRoot(files.Root());
+				scenes.BeginLoadSession(); ObjectManager::instance().clear(); scenes.SetSceneRoot(files.Root());
 				destination = files.Child("last-good.tescene");
 				const nlohmann::json document{{"format", "TerraSceneUnboundedV1"}, {"name", "Save failure fixture"}, {"objects", nlohmann::json::array()}};
 				{ std::ofstream output(destination); output << document.dump(4); context.Expect(output.good(), "The disposable scene must be written."); }
@@ -283,8 +283,60 @@ namespace TerraEngine::Tests {
 #endif
 		}
 
+		void VerifyFailedReplacement(TestContext& context, int failure, bool repair) {
+			SaveFixture fixture(context);
+			auto& scenes = SceneManager::Instance();
+			const auto goodBytes = ReadSavedBytes(fixture.destination);
+			const auto identity = scenes.GetActiveScene()->saveIdentity;
+			const auto document = scenes.GetActiveScene()->parsedJson;
+			const auto settings = Serializer::SerializeSceneRenderSettings(scenes.GetActiveSceneRenderSettings());
+			fixture.component->value = "Unsaved replacement recovery edit";
+			scenes.ForceMarkActiveSceneDirty();
+			// Removing the owned source is a reproducible unavailable-file failure.
+			// Other cases fail interpretation without any native filesystem timing.
+			if(failure == 0) std::filesystem::remove(fixture.destination);
+			else {
+				std::ofstream output(fixture.destination, std::ios::trunc);
+				if(failure == 1) output << "{ malformed scene";
+				else { auto wrong = document; wrong["name"] = 42; output << wrong.dump(); }
+			}
+			TerraEngine::UUID result = TerraEngine::EMPTY_UUID;
+			bool unexpected = false;
+			try { result = scenes.ReloadScene(fixture.destination); } catch(...) { unexpected = true; }
+			context.Expect(!unexpected && result == TerraEngine::EMPTY_UUID, "Ordinary failed replacement must report no usable identity without throwing.");
+			const auto* retained = scenes.GetScene(fixture.sceneId);
+			context.Expect(retained != nullptr, "Failed replacement must retain the last usable document.");
+			context.Expect(retained->saveIdentity == identity && retained->parsedJson == document
+				&& scenes.GetActiveSceneId() == fixture.sceneId && scenes.IsActiveSceneDirty()
+				&& Serializer::SerializeSceneRenderSettings(scenes.GetActiveSceneRenderSettings()) == settings
+				&& fixture.component->value == "Unsaved replacement recovery edit",
+				"Failure must preserve document ownership, active state, settings and unsaved live authored values.");
+			if(repair) {
+				{ std::ofstream output(fixture.destination); output << goodBytes; }
+				context.Expect(scenes.SaveScene() && !scenes.IsActiveSceneDirty(), "Normal save must remain available after source repair.");
+				context.Expect(ReadSavedBytes(fixture.destination).find("Unsaved replacement recovery edit") != std::string::npos,
+					"The repaired target must receive the retained live edit.");
+				context.Expect(scenes.ReloadScene(fixture.destination) == fixture.sceneId
+					&& scenes.GetScene(fixture.sceneId)->saveIdentity != identity,
+					"Explicit repaired reload must publish a fresh document under the retained source identity.");
+			}
+		}
+		void VerifyFirstLoadFailure(TestContext& context) {
+			SaveFixture fixture(context);
+			auto& scenes = SceneManager::Instance();
+			const auto before = scenes.GetLoadedSceneIds();
+			const auto missing = fixture.files.Child("never-loaded.tescene");
+			context.Expect(scenes.LoadScene(missing) == TerraEngine::EMPTY_UUID
+				&& scenes.GetLoadedSceneIds() == before && scenes.GetScene(fixture.sceneId) != nullptr,
+				"First-load failure must expose no usable UUID and must preserve unrelated loaded documents.");
+		}
 	}
 	void RegisterSceneSaveFailureSafetyTests(TestRegistry& registry) {
+		registry.Add("Scene.SaveFailureSafety.UnreadableReplacementPreservesEditableScene", [](TestContext& context) { VerifyFailedReplacement(context, 0, false); });
+		registry.Add("Scene.SaveFailureSafety.MalformedReplacementPreservesEditableScene", [](TestContext& context) { VerifyFailedReplacement(context, 1, false); });
+		registry.Add("Scene.SaveFailureSafety.WrongTypedReplacementPreservesEditableScene", [](TestContext& context) { VerifyFailedReplacement(context, 2, false); });
+		registry.Add("Scene.SaveFailureSafety.FirstLoadFailureHasNoUsableIdentity", VerifyFirstLoadFailure);
+		registry.Add("Scene.SaveFailureSafety.RepairedReloadAndNormalSave", [](TestContext& context) { VerifyFailedReplacement(context, 0, true); });
 		registry.Add("Scene.SaveFailureSafety.ThrowingAuthoredCaptureReturnsFailure", [](TestContext& context) { VerifyRejectedSave(context, 1, false); });
 		registry.Add("Scene.SaveFailureSafety.InvalidTextRetainsLastGoodDestination", [](TestContext& context) { VerifyRejectedSave(context, 2, false); });
 		registry.Add("Scene.SaveFailureSafety.NonfiniteAuthoredValueRetainsLastGoodDestination", [](TestContext& context) { VerifyRejectedSave(context, 3, false); });

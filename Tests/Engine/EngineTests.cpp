@@ -5,7 +5,11 @@
 namespace TerraEngine::Tests {
 	void RegisterAudioWorldCellCaptureTests(TestRegistry& registry);
 	void RegisterSceneSaveFailureSafetyTests(TestRegistry& registry);
+	void RegisterSceneAsyncLoadLifecycleTests(TestRegistry& registry);
 	void RegisterFrameFailureLifecycleTests(TestRegistry& registry);
+	void RegisterArtifactValidationTests(TestRegistry& registry);
+	void RegisterScopedTaskSettlementTests(TestRegistry& registry);
+	void RegisterOwnedImportExecutorTests(TestRegistry& registry);
 	void RegisterOwnedProcessTests(TestRegistry& registry);
 	void RegisterResourceAsyncDependencyTests(TestRegistry& registry);
 	void RegisterTransactionalMutationFailureSafetyTests(TestRegistry& registry);
@@ -238,6 +242,8 @@ namespace TerraEngine::Tests {
 	void RegisterLiveGpuSubmissionBoundaryTests(TestRegistry& registry);
 	void RegisterRenderWorkerTaskGroupTests(TestRegistry& registry);
 	void RegisterVulkanRecordingSchedulingTests(TestRegistry& registry);
+	void RegisterVulkanNestedTaskSettlementTests(TestRegistry& registry);
+	void RegisterAnimationNestedTaskSettlementTests(TestRegistry& registry);
 	void RegisterVulkanThreadLocalContextTests(TestRegistry& registry);
 	void RegisterRenderBackendStageTimingTests(TestRegistry& registry);
 	void RegisterRenderBackendStallDiagnosticsTests(TestRegistry& registry);
@@ -428,7 +434,11 @@ int main() {
 	TerraEngine::Tests::TestRegistry registry;
 	TerraEngine::Tests::RegisterAudioWorldCellCaptureTests(registry);
 	TerraEngine::Tests::RegisterSceneSaveFailureSafetyTests(registry);
+	TerraEngine::Tests::RegisterSceneAsyncLoadLifecycleTests(registry);
 	TerraEngine::Tests::RegisterFrameFailureLifecycleTests(registry);
+	TerraEngine::Tests::RegisterArtifactValidationTests(registry);
+	TerraEngine::Tests::RegisterScopedTaskSettlementTests(registry);
+	TerraEngine::Tests::RegisterOwnedImportExecutorTests(registry);
 	TerraEngine::Tests::RegisterOwnedProcessTests(registry);
 	TerraEngine::Tests::RegisterResourceAsyncDependencyTests(registry);
 	TerraEngine::Tests::RegisterTransactionalMutationFailureSafetyTests(registry);
@@ -763,6 +773,8 @@ int main() {
 	TerraEngine::Tests::RegisterLiveGpuSubmissionBoundaryTests(registry);
 	TerraEngine::Tests::RegisterRenderWorkerTaskGroupTests(registry);
 	TerraEngine::Tests::RegisterVulkanRecordingSchedulingTests(registry);
+	TerraEngine::Tests::RegisterVulkanNestedTaskSettlementTests(registry);
+	TerraEngine::Tests::RegisterAnimationNestedTaskSettlementTests(registry);
 	TerraEngine::Tests::RegisterVulkanFrameDiagnosticsTests(registry);
 	TerraEngine::Tests::RegisterVulkanVirtualGeometryTimingTests(registry);
 	TerraEngine::Tests::RegisterVulkanImageReadbackTests(registry);
