@@ -106,6 +106,74 @@ namespace TerraEngine::EditorTests {
 				&& Serializer::SerializeObject(restored->EntityId()) == snapshot, "Redo must preserve exact authored values and stable hierarchy identities.");
 			history.Clear(); queue.Clear(); objects.clear();
 		});
+		registry.Add("Editor.TransactionalMutation.RejectedDeferredReplayRestoresCursorAndSaveState", [](TestContext& context) {
+			using namespace TerraEngine::Scene;
+			ComponentRegistry::RegisterAllComponents();
+			ScriptingSystem::Instance().SetRunning(false);
+			auto& objects = ObjectManager::instance();
+			auto& queue = SceneMutationQueue::Instance();
+			auto& history = UndoRedoSystem::Instance();
+			objects.clear(); queue.Clear(); history.Clear();
+			const Object object = objects.createObject("Before history edit");
+			const auto id = objects.getUUID(object);
+			TransactionalMutationBuilder edit("rejected-replay-history", TransactionOrigin::Editor);
+			edit.SetUndoGroup("Rename replay fixture").SetName(id, "After history edit");
+			const auto transaction = edit.Build();
+			const auto committed = CommitTransaction(objects, transaction);
+			context.Expect(committed.status == TransactionStatus::Committed && history.RecordCommittedTransaction(transaction, committed),
+				"The real authored edit must enter history before replay is tested.");
+			history.SetSavePoint();
+			const auto commandId = history.GetUndoHistoryId();
+			const auto historyBytes = history.GetHistoryBytes();
+
+			// Exercise both stack directions. An intervening pair of real commits
+			// restores the authored name but advances its observed metadata revision,
+			// so the pending replay must conflict only at the protected queue flush.
+			for (const bool undo : { true, false }) {
+				const std::string currentName = undo ? "After history edit" : "Before history edit";
+				const std::string replayedName = undo ? "Before history edit" : "After history edit";
+				if (undo) history.Undo(); else history.Redo();
+				context.Expect(objects.getObjectName(object) == currentName, "Replay admission must not expose its write before the protected flush.");
+				TransactionalMutationBuilder conflict(undo ? "undo-replay-conflict" : "redo-replay-conflict", TransactionOrigin::Test);
+				conflict.SetName(id, "Intervening revision");
+				context.Expect(CommitTransaction(objects, conflict.Build()).status == TransactionStatus::Committed,
+					"The intervening transaction must advance the captured read-set revision.");
+				TransactionalMutationBuilder restore(undo ? "undo-conflict-restore" : "redo-conflict-restore", TransactionOrigin::Test);
+				restore.SetName(id, currentName);
+				context.Expect(CommitTransaction(objects, restore.Build()).status == TransactionStatus::Committed,
+					"Restoring the fixture value must retain the newer revision.");
+				queue.Apply(objects, undo ? "rejected-history-undo" : "rejected-history-redo");
+				auto receipts = queue.DrainCompletedEditorTransactionResults();
+				bool metadataConflict = false;
+				if (receipts.size() == 1U) {
+					for (const auto& conflictRecord : receipts.front().conflicts)
+						metadataConflict = metadataConflict || conflictRecord.reason == TransactionConflictReason::MetadataVersionMismatch;
+				}
+				context.Expect(receipts.size() == 1U && receipts.front().status == TransactionStatus::Conflicted && metadataConflict
+					&& receipts.front().appliedWriteCount == 0U, "The actual queued replay must reject its stale metadata read set without applying writes.");
+				context.Expect(receipts.size() == 1U && history.CompleteDeferredReplay(receipts.front()),
+					"The protected conflict receipt must repair the deferred history cursor.");
+				context.Expect(objects.getObjectName(object) == currentName, "Rejected replay must preserve the current authored value.");
+				context.Expect(history.GetUndoDepth() == (undo ? 1U : 0U) && history.GetRedoDepth() == (undo ? 0U : 1U)
+					&& (undo ? history.GetUndoHistoryId() : history.GetRedoHistoryId()) == commandId
+					&& (undo ? history.GetUndoLabel() : history.GetRedoLabel()) == "Rename replay fixture"
+					&& history.GetHistoryBytes() == historyBytes, "Rejection must restore the original command ownership, stack position and accounting.");
+				context.Expect(history.IsAtSavePoint() == undo && SceneManager::Instance().IsActiveSceneDirty() != undo,
+					"Rejected replay must restore the exact prior saved-state cursor and dirty flag.");
+
+				// Completing rejection must release the pending marker. The same command
+				// now observes the current revisions and can commit on its next attempt.
+				context.Expect(undo ? history.CanUndo() : history.CanRedo(), "The rejected command must be available for retry.");
+				if (undo) history.Undo(); else history.Redo();
+				queue.Apply(objects, undo ? "retried-history-undo" : "retried-history-redo");
+				receipts = queue.DrainCompletedEditorTransactionResults();
+				context.Expect(receipts.size() == 1U && receipts.front().status == TransactionStatus::Committed
+					&& history.CompleteDeferredReplay(receipts.front()), "Retry must settle one actual committed queue receipt.");
+				context.Expect(objects.getObjectName(object) == replayedName && history.IsAtSavePoint() != undo
+					&& SceneManager::Instance().IsActiveSceneDirty() == undo, "Successful retry must publish the command and move to the intended saved-state cursor.");
+			}
+			history.Clear(); queue.Clear(); objects.clear();
+		});
 		registry.Add("Editor.TransactionalMutation.ChildWorldScaleUndoRedoUsesProtectedBoundary", [](TestContext& context) {
 			using namespace TerraEngine::Scene;
 			ComponentRegistry::RegisterAllComponents();

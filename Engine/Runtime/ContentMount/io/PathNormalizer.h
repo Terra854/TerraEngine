@@ -12,6 +12,10 @@
 
 namespace tepak::io {
 
+// Persisted names are validated without repair. Empty is reserved for root.
+void ValidateStoredPath(std::string_view path, bool allowRoot);
+// Windows case-insensitive identity also catches non-ASCII filename aliases.
+std::string StoredPathIdentity(std::string_view path);
 std::string NormalizeRelativePath(const std::filesystem::path& inputRoot, const std::filesystem::path& sourcePath);
 std::string NormalizeLookupPath(std::string_view logicalPath);
 std::string ExtractLeafName(std::string_view normalizedPath);

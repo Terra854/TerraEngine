@@ -5,6 +5,7 @@
 #include "TEPAK/PackValidator.h"
 #include "TEPAK/PackWriter.h"
 #include "archive/ArchiveWorkflow.h"
+#include "Tests/Support/ArchiveSafetyFixtures.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -267,6 +268,13 @@ namespace TerraEngine::EditorTests {
 		});
 
 		registry.Add("Editor.PackRoundTrip.DictionaryDecisionChargesStoredDictionaryBytes", [](TestContext& context) {
+			// Exercise the selected trained dictionary as persisted bytes, including
+			// the existing deep validator's exact decoded-hash checks.
+			TerraEngine::Tests::ArchiveSafety::Fixture fixture;
+			(void)fixture.Build(TerraEngine::Tests::ArchiveSafety::Variant::Dictionary);
+			const auto report = tepak::PackValidator::Validate(fixture.PackPath(), true);
+			context.Expect(report.validationStatus && report.integrityChecksPerformed,
+				"Writer-selected dictionary corpus must pass deep integrity validation.");
 			context.Expect(!tepak::archive::IsDictionaryStorageBeneficial(1000u, 900u, 128u),
 				"A dictionary must be rejected when its stored bytes exceed the sampled extent savings.");
 			context.Expect(tepak::archive::IsDictionaryStorageBeneficial(1000u, 700u, 128u),

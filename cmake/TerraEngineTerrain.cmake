@@ -119,6 +119,8 @@ set(_TERRAENGINE_TERRAIN_EDITOR_FILES
 	Editor/TerraEngine-Editor/Terrain/TerrainPicking.h
 	Editor/TerraEngine-Editor/Terrain/TerrainCreationService.cpp
 	Editor/TerraEngine-Editor/Terrain/TerrainCreationService.h
+	Editor/TerraEngine-Editor/Terrain/TerrainIndependentCopyService.cpp
+	Editor/TerraEngine-Editor/Terrain/TerrainIndependentCopyService.h
 	Editor/TerraEngine-Editor/Terrain/TerrainMaterialCompiler.cpp
 	Editor/TerraEngine-Editor/Terrain/TerrainMaterialCompiler.h
 	Editor/TerraEngine-Editor/Terrain/TerrainAuthoringSystem.cpp

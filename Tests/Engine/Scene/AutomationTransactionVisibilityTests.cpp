@@ -3,6 +3,7 @@
 #include "Core/Scheduling/SystemScheduler.h"
 #include "Core/Object/ObjectManager.h"
 #include "Scene/SceneMutationQueue.h"
+#include "Editor/TerraEngine-Editor/Core/EditorSchedulerDeclaration.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -21,12 +22,10 @@ namespace TerraEngine::Tests
 			context.Expect(hasResource("EditorAutomationQueue"), "The scheduler should declare prepared automation work as a resource.");
 			context.Expect(hasResource("SceneMutationQueue"), "The scheduler should declare the typed deferred scene publication resource.");
 
-			const std::filesystem::path sourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Editor/TerraEngine-Editor/Core/EditorSystem.cpp";
-			std::ifstream input(sourcePath, std::ios::binary);
-			std::ostringstream source;
-			source << input.rdbuf();
-			context.Expect(source.str().find("post_editor_automation_flush") != std::string::npos, "EditorSystem diagnostics should name the transaction visibility boundary.");
-			context.Expect(source.str().find("SceneMutationQueue") != std::string::npos, "EditorSystem should declare scene mutation writes instead of direct object-storage writes.");
+			// Read the same metadata used at startup, without linking native UI.
+			const auto declaration = TerraEngine::Editor::MakeEditorSchedulerDeclaration();
+			context.Expect(declaration.protectedCommit.find("post_editor_automation_flush") != std::string::npos, "EditorSystem diagnostics should name the transaction visibility boundary.");
+			context.Expect(std::find(declaration.writes.begin(), declaration.writes.end(), "SceneMutationQueue") != declaration.writes.end(), "EditorSystem should declare deferred scene mutation writes.");
 		});
 
 		registry.Add("Engine.AutomationTransaction.VisibilityPublishesOnlyAtDeclaredFlush", [](TestContext& context) {

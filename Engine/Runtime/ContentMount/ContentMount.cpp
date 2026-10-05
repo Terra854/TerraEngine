@@ -68,7 +68,11 @@ namespace
 
 		try
 		{
-			result.bytes = impl.reader.ReadRange(normalized, offset, size);
+			// Full reads verify the complete entry even when its logical size is
+			// zero. An explicitly requested empty range intentionally stays lazy.
+			result.bytes = requestedSize.has_value()
+				? impl.reader.ReadRange(normalized, offset, size)
+				: impl.reader.ReadAll(normalized);
 			if(result.bytes.size() != size)
 			{
 				result.bytes.clear();
@@ -108,10 +112,13 @@ bool ContentMount::Mount(const std::filesystem::path& archivePath)
 	// Candidate construction intentionally happens without the live-mount lock.
 	// Existing worker reads continue while the new archive validates and indexes.
 	tepak::PackReader candidateReader;
+	std::filesystem::path candidatePath;
 	std::unordered_map<std::string, MountedContentEntry> candidateEntries;
 	try
 	{
-		candidateReader = tepak::PackReader::Open(archivePath);
+		// Path copying may allocate; finish it before publishing any live fields.
+		candidatePath = archivePath;
+		candidateReader = tepak::PackReader::Open(candidatePath);
 		for(const tepak::PackEntry& entry : candidateReader.GetEntries())
 		{
 			candidateEntries.emplace(entry.normalizedPath, CopyEntry(entry));
@@ -128,7 +135,7 @@ bool ContentMount::Mount(const std::filesystem::path& archivePath)
 		std::unique_lock lock(m_impl->archiveMutex);
 		m_impl->reader = std::move(candidateReader);
 		m_impl->entries = std::move(candidateEntries);
-		m_impl->archivePath = archivePath;
+		m_impl->archivePath.swap(candidatePath);
 		m_impl->mounted = true;
 	}
 

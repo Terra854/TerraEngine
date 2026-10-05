@@ -493,9 +493,13 @@ void UndoRedoSystem::PushCommand(std::unique_ptr<ICommand> command) {
 	entry.command = std::move(command);
 	entry.byteCost = entry.command->GetHistoryBytes();
 	entry.beforeStateId = m_CurrentStateId;
-	entry.afterStateId = m_NextStateId++;
-	m_CurrentStateId = entry.afterStateId;
+	entry.afterStateId = m_NextStateId;
+	// Allocation can fail while growing the deque. Publish state identities only
+	// after ownership transfers successfully, so a retained receipt can retry
+	// without inventing a history state that has no corresponding command.
 	undoStack.push_back(std::move(entry));
+	++m_NextStateId;
+	m_CurrentStateId = undoStack.back().afterStateId;
 	m_HistoryBytes += undoStack.back().byteCost;
 	++historySequence;
 	// New actions invalidate the redo branch as the scene state has branched.
@@ -651,9 +655,9 @@ bool UndoRedoSystem::CompleteDeferredReplay(const TerraEngine::Scene::Transactio
 	}
 
 	const DeferredReplay replay = *m_DeferredReplay;
-	m_DeferredReplay.reset();
 	if (result.status == TransactionStatus::Committed)
 	{
+		m_DeferredReplay.reset();
 		// SceneManager correctly marks every protected mutation flush dirty. Once
 		// this particular flush is known to be a history replay, restore the dirty
 		// flag from the exact saved history state selected by Undo or Redo.
@@ -666,18 +670,22 @@ bool UndoRedoSystem::CompleteDeferredReplay(const TerraEngine::Scene::Transactio
 	// with the protected transaction result.
 	if (replay.direction == DeferredReplayDirection::Undo && !redoStack.empty())
 	{
-		HistoryEntry entry = std::move(redoStack.back());
+		// Allocate an empty destination before moving the only command owner.
+		// If allocation throws, the receipt, replay marker and source stack remain
+		// intact for the next protected-frame retry.
+		undoStack.emplace_back();
+		undoStack.back() = std::move(redoStack.back());
 		redoStack.pop_back();
-		m_CurrentStateId = entry.afterStateId;
-		undoStack.push_back(std::move(entry));
+		m_CurrentStateId = undoStack.back().afterStateId;
 	}
 	else if (replay.direction == DeferredReplayDirection::Redo && !undoStack.empty())
 	{
-		HistoryEntry entry = std::move(undoStack.back());
+		redoStack.emplace_back();
+		redoStack.back() = std::move(undoStack.back());
 		undoStack.pop_back();
-		m_CurrentStateId = entry.beforeStateId;
-		redoStack.push_back(std::move(entry));
+		m_CurrentStateId = redoStack.back().beforeStateId;
 	}
+	m_DeferredReplay.reset();
 	++historySequence;
 	UpdateDirtyState();
 	TERRAENGINE_LOG(LogLevel::Warning, "History replay '" << result.transactionId

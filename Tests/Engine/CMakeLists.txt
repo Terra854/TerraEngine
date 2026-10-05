@@ -1025,3 +1025,13 @@ terraengine_add_correctness_slice(Engine.OwnedImportExecutor TerraEngine-EngineT
 # The root install variable is declared later in the top-level file. Use the
 # maintained build-relative destination here instead of emitting an empty value.
 set_property(TEST Engine.NestedTaskSettlement APPEND PROPERTY ENVIRONMENT "TERRAENGINE_LIFECYCLE_INSTALL_ROOT=${CMAKE_BINARY_DIR}/Build")
+
+# Safety groups are enabled only once their actual source files are present.
+# CONFIGURE_DEPENDS is intentionally unnecessary here: a deliberate reconfigure
+# before integrated acceptance captures the completed implementation handoff.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Runtime/ContentArchiveSafetyTests.cpp")
+	target_sources(TerraEngine-EngineTests PRIVATE Runtime/ContentArchiveSafetyTests.cpp)
+	target_compile_definitions(TerraEngine-EngineTests PRIVATE TERRAENGINE_HAS_CONTENT_ARCHIVE_SAFETY_TESTS=1)
+	terraengine_add_correctness_slice(Engine.ContentArchiveSafety TerraEngine-EngineTests Engine.ContentArchiveSafety 30)
+endif()
+terraengine_add_correctness_slice(Engine.AnimationCompileFailure TerraEngine-EngineTests Animation.ProgramPublisher 9)

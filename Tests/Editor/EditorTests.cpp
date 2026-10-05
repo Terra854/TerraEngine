@@ -1,8 +1,21 @@
 #include "TestHarness.h"
+#include "../Support/ArchiveSafetyFixtures.h"
 
 #include <iostream>
 
 namespace TerraEngine::EditorTests {
+	void RegisterEditorTransactionReceiptBatchTests(TestRegistry& registry);
+#ifdef TERRAENGINE_HAS_CONTENT_ARCHIVE_SAFETY_TESTS
+	// Conditional registration keeps staged source integration honest: a new
+	// acceptance group cannot silently succeed before its cases are linked.
+	void RegisterContentArchiveSafetyTests(TestRegistry& registry);
+#endif
+#ifdef TERRAENGINE_HAS_TERRAIN_INDEPENDENT_COPY_TESTS
+	void RegisterTerrainIndependentCopyTests(TestRegistry& registry);
+#endif
+#ifdef TERRAENGINE_HAS_TERRAIN_INDEPENDENT_COPY_FAILURE_TESTS
+	void RegisterTerrainIndependentCopyFailureTests(TestRegistry& registry);
+#endif
 	void RegisterExportLifecycleTests(TestRegistry& registry);
 	void RegisterExportArtifactValidationTests(TestRegistry& registry);
 	void RegisterAssetDiscoveryRecoveryTests(TestRegistry& registry);
@@ -251,6 +264,16 @@ namespace TerraEngine::EditorTests {
 
 int main() {
 	TerraEngine::EditorTests::TestRegistry registry;
+	TerraEngine::EditorTests::RegisterEditorTransactionReceiptBatchTests(registry);
+#ifdef TERRAENGINE_HAS_CONTENT_ARCHIVE_SAFETY_TESTS
+	TerraEngine::EditorTests::RegisterContentArchiveSafetyTests(registry);
+#endif
+#ifdef TERRAENGINE_HAS_TERRAIN_INDEPENDENT_COPY_TESTS
+	TerraEngine::EditorTests::RegisterTerrainIndependentCopyTests(registry);
+#endif
+#ifdef TERRAENGINE_HAS_TERRAIN_INDEPENDENT_COPY_FAILURE_TESTS
+	TerraEngine::EditorTests::RegisterTerrainIndependentCopyFailureTests(registry);
+#endif
 	TerraEngine::EditorTests::RegisterExportLifecycleTests(registry);
 	TerraEngine::EditorTests::RegisterExportArtifactValidationTests(registry);
 	TerraEngine::EditorTests::RegisterAssetDiscoveryRecoveryTests(registry);

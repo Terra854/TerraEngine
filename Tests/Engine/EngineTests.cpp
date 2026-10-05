@@ -1,8 +1,14 @@
 #include "TestHarness.h"
+#include "../Support/ArchiveSafetyFixtures.h"
 
 #include <iostream>
 
 namespace TerraEngine::Tests {
+#ifdef TERRAENGINE_HAS_CONTENT_ARCHIVE_SAFETY_TESTS
+	// The archive corpus is linked only after its implementation exists. This
+	// avoids advertising an empty acceptance slice during staged integration.
+	void RegisterContentArchiveSafetyTests(TestRegistry& registry);
+#endif
 	void RegisterAudioWorldCellCaptureTests(TestRegistry& registry);
 	void RegisterSceneSaveFailureSafetyTests(TestRegistry& registry);
 	void RegisterSceneAsyncLoadLifecycleTests(TestRegistry& registry);
@@ -432,6 +438,9 @@ namespace TerraEngine::Tests {
 
 int main() {
 	TerraEngine::Tests::TestRegistry registry;
+#ifdef TERRAENGINE_HAS_CONTENT_ARCHIVE_SAFETY_TESTS
+	TerraEngine::Tests::RegisterContentArchiveSafetyTests(registry);
+#endif
 	TerraEngine::Tests::RegisterAudioWorldCellCaptureTests(registry);
 	TerraEngine::Tests::RegisterSceneSaveFailureSafetyTests(registry);
 	TerraEngine::Tests::RegisterSceneAsyncLoadLifecycleTests(registry);

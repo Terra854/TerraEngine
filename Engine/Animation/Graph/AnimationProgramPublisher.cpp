@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <limits>
 #include <mutex>
+#include <type_traits>
 #include <utility>
 
 namespace TerraEngine::Animation {
@@ -125,6 +126,25 @@ struct AnimationProgramPublisher::SharedState {
 	AnimationGeneration nextProgramGeneration = 1U;
 	std::vector<std::shared_ptr<Job>> jobs;
 	std::optional<AnimationProgramPublishRecord> published;
+	// Keep injected immutable dependencies behind the existing state pointer so
+	// adding native worker seams does not enlarge the public publisher object.
+	WorkerDependencies workerDependencies;
+
+	// The caller holds mutex for every terminal transition. A cancelled job may
+	// already have been consumed by polling while its physical worker continues;
+	// neither that worker nor a late executor exception can revive its ownership.
+	[[nodiscard]] bool CanSettle(const Job& job) const noexcept {
+		return !shuttingDown && !job.cancelled && !job.completed;
+	}
+
+	void SettleInternalError(Job& job) noexcept {
+		if (!CanSettle(job)) return;
+		// Failure must not allocate another diagnostic while handling an exception.
+		// This scalar result is sufficient for protected polling to reclaim the job
+		// and preserve the newest-request barrier and last-known-good publication.
+		job.compilation.status = AnimationStatus::InternalError;
+		job.completed = true;
+	}
 };
 
 std::shared_ptr<AnimationProgramCompileExecutor> CreateThreadPoolAnimationProgramCompileExecutor(ThreadPool &pool) {
@@ -132,8 +152,18 @@ std::shared_ptr<AnimationProgramCompileExecutor> CreateThreadPoolAnimationProgra
 }
 
 AnimationProgramPublisher::AnimationProgramPublisher(std::shared_ptr<AnimationProgramCompileExecutor> executor, std::size_t maxPendingJobs)
+	: AnimationProgramPublisher(std::move(executor), maxPendingJobs, {}) {}
+
+AnimationProgramPublisher::AnimationProgramPublisher(std::shared_ptr<AnimationProgramCompileExecutor> executor,
+	std::size_t maxPendingJobs, WorkerDependencies workerDependencies)
 	: state_(std::make_shared<SharedState>()), executor_(std::move(executor)) {
 	state_->maxPendingJobs = std::min(maxPendingJobs, kAnimationProgramPublisherMaximumPendingJobs);
+	state_->workerDependencies = std::move(workerDependencies);
+	if (!state_->workerDependencies.compile) {
+		state_->workerDependencies.compile = [](const AnimationProgramCompileRequest& request, EvaluationProgram& output) {
+			return CompileAnimationControllerGraph(request.controller, {request.availableControllers}, output);
+		};
+	}
 }
 
 AnimationProgramPublisher::~AnimationProgramPublisher() {
@@ -181,15 +211,29 @@ AnimationStatus AnimationProgramPublisher::RequestCompile(const AnimationProgram
 	// publisher object itself may disappear immediately after RequestCompile.
 	const std::shared_ptr<SharedState> state = state_;
 	try {
-		executor_->Enqueue([state, job]() {
+		executor_->Enqueue([state, job, dependencies = state->workerDependencies]() {
 			EvaluationProgram staged;
-			const AnimationGraphCompilationResult compilation =
-				CompileAnimationControllerGraph(job->request.controller, {job->request.availableControllers}, staged);
-			std::scoped_lock lock(state->mutex);
-			if (state->shuttingDown || job->cancelled)
+			AnimationGraphCompilationResult compilation;
+			try {
+				// Compilation and all fallible result preparation belong to this worker.
+				// No task future is needed to carry terminal ownership back to polling.
+				compilation = dependencies.compile(job->request, staged);
+				if (dependencies.beforeResultStaging) dependencies.beforeResultStaging();
+			} catch (...) {
+				std::scoped_lock lock(state->mutex);
+				state->SettleInternalError(*job);
 				return;
-			job->compilation = compilation;
-			if (compilation.status == AnimationStatus::Ok)
+			}
+			std::scoped_lock lock(state->mutex);
+			if (!state->CanSettle(*job))
+				return;
+			// Default-allocator vectors transfer their storage without allocation.
+			// Assert that property here rather than copying diagnostics under mutex
+			// and risking an exception before the job becomes terminal.
+			static_assert(std::is_nothrow_move_assignable_v<AnimationGraphCompilationResult>);
+			static_assert(std::is_nothrow_move_assignable_v<EvaluationProgram>);
+			job->compilation = std::move(compilation);
+			if (job->compilation.status == AnimationStatus::Ok)
 				job->program = std::move(staged);
 			job->completed = true;
 		});
@@ -197,8 +241,7 @@ AnimationStatus AnimationProgramPublisher::RequestCompile(const AnimationProgram
 		// An executor failure is treated like a completed failed compile. This
 		// preserves ordering: an older job cannot publish through this request.
 		std::scoped_lock lock(state_->mutex);
-		job->compilation.status = AnimationStatus::InternalError;
-		job->completed = true;
+		state_->SettleInternalError(*job);
 	}
 	return AnimationStatus::Queued;
 }

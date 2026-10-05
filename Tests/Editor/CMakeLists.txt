@@ -6,6 +6,7 @@ file(GLOB_RECURSE TERRAENGINE_EDITOR_ANIMATION_TEST_SOURCES CONFIGURE_DEPENDS
 
 add_executable(TerraEngine-EditorTests
 	EditorTests.cpp
+	Scene/EditorTransactionReceiptBatchTests.cpp
 	Export/ExportLifecycleTests.cpp
 	# Lifecycle recovery cases use the same production gate and watcher paths.
 	Export/ExportArtifactValidationTests.cpp
@@ -735,3 +736,23 @@ terraengine_add_correctness_slice(Editor.ExportArtifactValidation TerraEngine-Ed
 terraengine_add_correctness_slice(Editor.ExportRetention TerraEngine-EditorTests Editor.ExportRetention 10)
 
 terraengine_add_correctness_slice(Editor.AssetImportAdmission TerraEngine-EditorTests Editor.AssetImportAdmission 13)
+
+# Conditional sources support a staged handoff without linker placeholders.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Export/ContentArchiveSafetyTests.cpp")
+	target_sources(TerraEngine-EditorTests PRIVATE Export/ContentArchiveSafetyTests.cpp)
+	target_compile_definitions(TerraEngine-EditorTests PRIVATE TERRAENGINE_HAS_CONTENT_ARCHIVE_SAFETY_TESTS=1)
+	terraengine_add_correctness_slice(Editor.ContentArchiveSafety TerraEngine-EditorTests Editor.ContentArchiveSafety 29)
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Terrain/TerrainIndependentCopyTests.cpp")
+	target_sources(TerraEngine-EditorTests PRIVATE Terrain/TerrainIndependentCopyTests.cpp)
+	target_sources(TerraEngine-EditorTests PRIVATE ${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Terrain/TerrainIndependentCopyService.cpp)
+	# Only the registrar entry point needs this switch. Keep the remaining
+	# objects reusable when a new test file lands during staged integration.
+	set_property(SOURCE EditorTests.cpp APPEND PROPERTY COMPILE_DEFINITIONS TERRAENGINE_HAS_TERRAIN_INDEPENDENT_COPY_TESTS=1)
+	terraengine_add_correctness_slice(Editor.Terrain.IndependentCopy TerraEngine-EditorTests Editor.TerrainIndependentCopy 24)
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Terrain/TerrainIndependentCopyFailureTests.cpp")
+	target_sources(TerraEngine-EditorTests PRIVATE Terrain/TerrainIndependentCopyFailureTests.cpp)
+	set_property(SOURCE EditorTests.cpp APPEND PROPERTY COMPILE_DEFINITIONS TERRAENGINE_HAS_TERRAIN_INDEPENDENT_COPY_FAILURE_TESTS=1)
+endif()
+terraengine_add_correctness_slice(Editor.McpAuthority TerraEngine-EditorTests Editor.MCP.Transport.HttpAuthority 4)

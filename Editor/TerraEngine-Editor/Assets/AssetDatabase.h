@@ -317,6 +317,13 @@ public:
 	// Delete an asset from disk and unregister it
 	void DeleteAsset(const std::filesystem::path& sourcePath);
 
+	// Protected editor boundary only. Remove a fresh copy's registration only
+	// while both its path and UUID still belong to that copy. The copy service
+	// owns file cleanup; this never nullifies scene references or deletes files.
+	// False reports lost ownership; exceptions leave a retryable cleanup duty.
+	bool UnregisterProvisionalTerrainCopy(const std::filesystem::path& sourcePath,
+		const TerraEngine::UUID& expectedId, std::string& outError);
+
 	// Getters
 	// GetAssets is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const std::map<std::filesystem::path, AssetMetadata>& GetAssets() const { return assets; }

@@ -3,6 +3,7 @@
 // Implements the primary editor workspace logic, including the main menu bar, toolbars, and global hotkey handling. It manages the lifecycle of all native editor windows and provides the necessary hooks for scene state capture and restoration during play mode.
 
 #include "MainEditorSubsystem.h"
+#include "../Terrain/TerrainCopySourceMetadata.h"
 #include "Editor/Export/EditorExportOperationController.h"
 #include "Editor/TerraEngine-Editor/Automation/EditorMcpBridge.h"
 #include "EditorRuntimeLayout.h"
@@ -74,6 +75,8 @@
 #include "../Windows/HierarchyWindow.h"
 #include "../Windows/InspectorWindow.h"
 #include "../Windows/TerrainWindow.h"
+#include "../Terrain/TerrainIndependentCopyService.h"
+#include <charconv>
 #include "../Windows/ProjectBrowserWindow.h"
 #include "../Windows/GameViewWindow.h"
 #include "../Windows/SceneViewWindow.h"
@@ -98,6 +101,9 @@
 
 namespace
 {
+	// Use the same bounded saved-pointer reader exercised by native copy tests.
+	using TerraEngine::Editor::Terrain::ReadTerrainCopyMetadata;
+	using TerraEngine::Editor::Terrain::ReadTerrainCopyRootHash;
 	// MainDraw contains viewport registration plus every native editor window.
 	// Publish fixed, bounded sub-stages only while a profiler capture is active so
 	// developers can identify one scaling window without enabling editor scopes in
@@ -1468,8 +1474,85 @@ namespace
 }
 
 // MainEditorSubsystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void MainEditorSubsystem::InitializeTerrainCopyService() {
+	using namespace TerraEngine::Editor::Terrain;
+	TerrainCopyCallbacks callbacks;
+	callbacks.identityAvailable = [](TerraEngine::UUID id) {
+		return id != TerraEngine::EMPTY_UUID && !AssetDatabase::Instance().FindAssetByGuid(id)
+			&& ResourceManager::Instance().GetRegisteredAssetPath(id, AssetType::Terrain).empty();
+	};
+	callbacks.validateSource = [this](const TerrainCopyCapture& capture, std::string& error) {
+		const AssetMetadata* metadata = AssetDatabase::Instance().FindAssetByGuid(capture.sourceAssetId);
+		if(!ctx || !ctx->projectManager->HasActiveProject() || capture.projectEpoch != m_TerrainCopyProjectEpoch
+			|| std::filesystem::absolute(AssetDatabase::Instance().GetAssetRoot()).lexically_normal() != capture.assetRoot
+			|| !metadata || metadata->importerName != "TerrainImporter"
+			|| (capture.assetRoot / metadata->sourcePath).lexically_normal() != capture.sourceDescriptorPath) {
+			error = "Terrain copy source or project changed during preparation.";
+			return false;
+		}
+		if(ReadTerrainCopyRootHash(capture.sourceDescriptorPath) != capture.sourceRootHash
+			|| ReadTerrainCopyMetadata(capture.sourceDescriptorPath, 1024U * 1024U) != capture.descriptorBytes) {
+			error = "Saved terrain changed during copy preparation; retry the copy.";
+			return false;
+		}
+		return true;
+	};
+	callbacks.registerProvisional = [this](const TerrainCopyPrepared&, const TerrainCopyOwnership& ownership, std::string& error) {
+		if(ownership.projectEpoch != m_TerrainCopyProjectEpoch) {
+			error = "Terrain copy belongs to a retired project.";
+			return false;
+		}
+		// The service installed and validated complete private outputs. Import runs
+		// only here, on the protected owner, and must adopt their fresh durable ID.
+		AssetDatabase::Instance().ImportAsset(ownership.descriptorPath, true);
+		const auto found = AssetDatabase::Instance().GetAssets().find(ownership.descriptorPath);
+		const auto resourcePath = ResourceManager::Instance().GetRegisteredAssetPath(ownership.freshAssetId, AssetType::Terrain);
+		if(found == AssetDatabase::Instance().GetAssets().end() || found->second.guid != ownership.freshAssetId
+			|| found->second.importerName != "TerrainImporter" || resourcePath.empty()
+			|| std::filesystem::absolute(resourcePath).lexically_normal() != ownership.descriptorPath) {
+			error = "Terrain copy import did not register its reserved independent identity.";
+			return false;
+		}
+		return true;
+	};
+	callbacks.finalizeProvisional = [](const TerrainCopyOwnership&) {
+		// A committed copy remains an ordinary asset after undo, allowing redo to
+		// restore the binding without rebuilding files or allocating another UUID.
+	};
+	callbacks.rollbackProvisional = [this](const TerrainCopyOwnership& ownership) {
+		if(ownership.projectEpoch != m_TerrainCopyProjectEpoch)
+			return TerrainCopyCleanupResult{TerrainCopyCleanupDisposition::OwnershipLost, "Terrain copy cleanup project ownership changed."};
+		std::string error;
+		if(!AssetDatabase::Instance().UnregisterProvisionalTerrainCopy(ownership.descriptorPath, ownership.freshAssetId, error))
+			return TerrainCopyCleanupResult{TerrainCopyCleanupDisposition::OwnershipLost, std::move(error)};
+		return TerrainCopyCleanupResult{};
+	};
+	m_TerrainCopies = std::make_unique<TerrainIndependentCopyService>(std::move(callbacks));
+}
+
+MainEditorSubsystem::MainEditorSubsystem() = default;
+MainEditorSubsystem::~MainEditorSubsystem() = default;
+
+bool MainEditorSubsystem::RetireTerrainCopies() {
+	if(!m_TerrainCopies) return true;
+	// Consume already-committed receipts before any SceneMutationQueue Clear.
+	// Physical draining belongs only to explicit close/shutdown, never a frame.
+	PublishCommittedEditorTransactionsToUndo();
+	if(m_EditorReceiptBatch.HasPending()) {
+		TERRAENGINE_LOG(LogLevel::Error, "Project transition waits for retained editor receipt recovery.");
+		return false;
+	}
+	m_TerrainCopies->RetireProject(m_TerrainCopyProjectEpoch);
+	if(!m_TerrainCopies->DrainAtShutdown()) {
+		TERRAENGINE_LOG(LogLevel::Error, "Project close waits for terrain copy receipt or cleanup recovery; project owners remain alive.");
+		return false;
+	}
+	return true;
+}
+
 void MainEditorSubsystem::Initialize(EditorContext& context) {
 	ctx = &context;
+	InitializeTerrainCopyService();
 	context.exportController = std::make_shared<EditorExportOperationController>();
 
 	// Set engine root to the executable's directory so default shaders can be found
@@ -1557,6 +1640,7 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 // MainEditorSubsystem::OnProjectOpened is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::OnProjectOpened() {
 	if (!ctx || !ctx->projectManager->HasActiveProject()) return;
+	++m_TerrainCopyProjectEpoch;
 	// A new project admits only requests captured for its new generation.
 	if (ctx->exportController) ctx->exportController->BeginProject();
 	auto& animationSystem = TerraEngine::Animation::AnimationSystem::Instance();
@@ -2146,6 +2230,8 @@ bool MainEditorSubsystem::LoadPrefabIntoIsolatedObjectManager(const std::filesys
 
 // MainEditorSubsystem::OpenScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
+	if(!RetireTerrainCopies()) return;
+	++m_TerrainCopyProjectEpoch;
 	if(auto terrainTools = GetWindow<TerrainWindow>())
 		terrainTools->CancelDetachedPreview("Terrain preview cancelled while opening another scene.");
 	if (m_IsPrefabEditingMode)
@@ -2293,6 +2379,8 @@ bool MainEditorSubsystem::InstantiatePrefabAsset(const TerraEngine::UUID& prefab
 
 bool MainEditorSubsystem::OpenPrefabAssetInternal(const std::filesystem::path& path, bool openedFromSceneObject)
 {
+	if(!RetireTerrainCopies()) return false;
+	++m_TerrainCopyProjectEpoch;
 	if(auto terrainTools = GetWindow<TerrainWindow>())
 		terrainTools->CancelDetachedPreview("Terrain preview cancelled while entering prefab editing.");
 	const std::filesystem::path absolutePath = std::filesystem::absolute(path).lexically_normal();
@@ -2481,6 +2569,8 @@ bool MainEditorSubsystem::SaveOpenPrefab()
 
 void MainEditorSubsystem::ClosePrefabMode()
 {
+	if(!RetireTerrainCopies()) return;
+	++m_TerrainCopyProjectEpoch;
 	if (!m_IsPrefabEditingMode)
 	{
 		return;
@@ -2505,6 +2595,8 @@ void MainEditorSubsystem::ClosePrefabMode()
 
 // MainEditorSubsystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::Shutdown() {
+	if(!RetireTerrainCopies())
+		throw std::runtime_error("Editor shutdown cannot discard unresolved terrain copy ownership.");
 	// Export work owns process trees and immutable requests. Settle it while
 	// the project, scripts, resource providers and worker pool still exist.
 	if (ctx && ctx->exportController) ctx->exportController->StopAndDrain();
@@ -2532,6 +2624,7 @@ void MainEditorSubsystem::Shutdown() {
 	ctx = nullptr;
 	m_Windows.clear();
 	m_TerrainTools.reset();
+	m_TerrainCopies.reset();
 	if(m_NavigationAuthoringTransactions)
 		m_NavigationAuthoringTransactions->ExitPlayMode();
 	TerraEngine::Navigation::NavigationSystem::Instance().RevokeAllOwners(
@@ -2543,6 +2636,8 @@ void MainEditorSubsystem::Shutdown() {
 
 bool MainEditorSubsystem::StartPlayMode()
 {
+	if(!RetireTerrainCopies()) return false;
+	++m_TerrainCopyProjectEpoch;
 	if(ScriptingSystem::Instance().IsRunning())
 	{
 		TERRAENGINE_LOG(LogLevel::Error,
@@ -2694,6 +2789,8 @@ bool MainEditorSubsystem::StepPlayMode()
 // MainEditorSubsystem::StopPlayMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::StopPlayMode()
 {
+	if(!RetireTerrainCopies()) return;
+	++m_TerrainCopyProjectEpoch;
 	if (!ScriptingSystem::Instance().IsRunning()
 		&& !TerraEngine::Physics::PhysicsSystem::Instance().WorldHandle().IsValid()
 		&& !m_HasPlayModeSceneSnapshot)
@@ -3139,6 +3236,12 @@ void MainEditorSubsystem::Update(float deltaTime) {
 			ctx->editorProfiler->PublishTerrainDiagnostics(terrainTools->DiagnosticSnapshot());
 	}
 	PublishCommittedEditorTransactionsToUndo();
+	if(m_TerrainCopies) {
+		// Workers publish owned prepared bundles. Registration, cleanup and typed
+		// queue admission occur only in this declared protected editor workload.
+		m_TerrainCopies->PollPrepared(m_TerrainCopyProjectEpoch);
+		m_TerrainCopies->RetryCleanup(m_TerrainCopyProjectEpoch);
+	}
 	// Advance the scripting coordinator after asset watcher events have been
 	// processed so queued C# rebuilds can start and completed async builds can
 	// clear their in-flight state during the same editor frame.
@@ -3356,62 +3459,64 @@ void MainEditorSubsystem::SetSelectedEntity(std::optional<entt::entity> entity)
 
 bool MainEditorSubsystem::CreateIndependentTerrainCopy(entt::entity entity, std::string& outError)
 {
-	ObjectManager& objects = ObjectManager::instance();
-	TerrainComponent* terrain = objects.getRegistry().try_get<TerrainComponent>(entity);
-	const std::optional<Object> object = objects.getObject(entity);
-	if(terrain == nullptr || !object || terrain->terrainAssetId == TerraEngine::EMPTY_UUID)
-	{
-		outError = "Select a terrain instance with a registered terrain asset before creating an independent copy.";
+	try {
+		ObjectManager& objects = ObjectManager::instance();
+		const TerrainComponent* terrain = objects.getRegistry().try_get<TerrainComponent>(entity);
+		const std::optional<Object> object = objects.getObject(entity);
+		if(!m_TerrainCopies || !ctx || !ctx->projectManager->HasActiveProject()
+			|| !terrain || !object || terrain->terrainAssetId == TerraEngine::EMPTY_UUID) {
+			outError = "Select a registered terrain instance in an active project.";
+			return false;
+		}
+		const AssetMetadata* source = AssetDatabase::Instance().FindAssetByGuid(terrain->terrainAssetId);
+		if(!source || source->importerName != "TerrainImporter") {
+			outError = "The selected terrain asset is not available in the Asset Database.";
+			return false;
+		}
+		TerraEngine::Editor::Terrain::TerrainCopyCapture capture;
+		capture.projectEpoch = m_TerrainCopyProjectEpoch;
+		capture.selectedObjectId = objects.getUUID(*object);
+		capture.sourceAssetId = terrain->terrainAssetId;
+		capture.assetRoot = std::filesystem::absolute(AssetDatabase::Instance().GetAssetRoot()).lexically_normal();
+		capture.sourceDescriptorPath = (capture.assetRoot / source->sourcePath).lexically_normal();
+		// Staging stays outside Assets so the watcher cannot import incomplete work.
+		capture.privateStagingRoot = capture.assetRoot.parent_path() / ".terrain-copy-staging";
+		capture.sourceRootHash = ReadTerrainCopyRootHash(capture.sourceDescriptorPath);
+		capture.descriptorBytes = ReadTerrainCopyMetadata(capture.sourceDescriptorPath, 1024U * 1024U);
+		TerraEngine::Scene::TransactionalMutationBuilder observation(
+			"terrain-copy-observation", TerraEngine::Scene::TransactionOrigin::Editor, "Terrain Independent Copy");
+		observation.ObserveScene(objects).ObserveObject(objects, capture.selectedObjectId);
+		capture.observedReadSet = observation.Build().readSet;
+		const auto selectedObjectId = capture.selectedObjectId;
+		auto submission = m_TerrainCopies->Begin(std::move(capture));
+		if(submission.operationId != TerraEngine::EMPTY_UUID) {
+			m_TerrainCopyAdmissions[m_TerrainCopyAdmissionNext] = {selectedObjectId, submission.operationId};
+			m_TerrainCopyAdmissionNext = (m_TerrainCopyAdmissionNext + 1U) % m_TerrainCopyAdmissions.size();
+			m_TerrainCopyAdmissionCount = std::min(m_TerrainCopyAdmissionCount + 1U, m_TerrainCopyAdmissions.size());
+		}
+		outError = std::move(submission.message);
+		return submission.accepted;
+	} catch(const std::exception& error) {
+		outError = std::string("Independent terrain copy could not start: ") + error.what();
 		return false;
 	}
-	const AssetMetadata* source = AssetDatabase::Instance().FindAssetByGuid(terrain->terrainAssetId);
-	if(source == nullptr || source->sourcePath.extension() != ".teterrain")
-	{
-		outError = "The selected terrain asset is not available in the Asset Database.";
-		return false;
-	}
-	const std::filesystem::path sourcePath = std::filesystem::absolute(AssetDatabase::Instance().GetAssetRoot() / source->sourcePath);
-	std::filesystem::path destination;
-	for(std::uint32_t index = 1U; ; ++index)
-	{
-		destination = sourcePath.parent_path() / (sourcePath.stem().string() + " Copy " + std::to_string(index) + sourcePath.extension().string());
-		if(!std::filesystem::exists(destination) && !std::filesystem::exists(destination.string() + ".data")) break;
-	}
-	std::error_code error;
-	std::filesystem::copy_file(sourcePath, destination, std::filesystem::copy_options::none, error);
-	if(error) { outError = "The terrain parent asset could not be copied."; return false; }
-	const std::filesystem::path sourceData = sourcePath.string() + ".data";
-	const std::filesystem::path destinationData = destination.string() + ".data";
-	if(!std::filesystem::exists(sourceData))
-	{
-		std::filesystem::remove(destination, error);
-		outError = "The selected terrain has no complete private data bundle to copy.";
-		return false;
-	}
-	else
-	{
-		std::filesystem::copy(sourceData, destinationData, std::filesystem::copy_options::recursive, error);
-		if(error) { std::filesystem::remove(destination, error); outError = "The private terrain data bundle could not be copied; the parent copy was rolled back."; return false; }
-	}
-	AssetDatabase::Instance().ImportAsset(destination, true);
-	const auto found = AssetDatabase::Instance().GetAssets().find(std::filesystem::absolute(destination));
-	if(found == AssetDatabase::Instance().GetAssets().end())
-	{
-		std::filesystem::remove_all(destinationData, error); std::filesystem::remove(destination, error);
-		outError = "The copied terrain was not registered; copied files were rolled back.";
-		return false;
-	}
-	TerraEngine::Scene::TransactionalMutationBuilder builder(
-		"terrain-independent-copy-" + TerraEngine::ToHexString(TerraEngine::GenerateUUID()),
-		TerraEngine::Scene::TransactionOrigin::Editor, "Terrain Independent Copy");
-	builder.ObserveScene(objects).ObserveObject(objects, objects.getUUID(*object))
-		.SetUndoGroup("Terrain Independent Copy")
-		.UpdateComponentProperty(objects.getUUID(*object), "TerrainComponent", "terrainAssetId", TerraEngine::Reflection::Variant{found->second.guid});
-	TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
-	outError = "Independent terrain copy is queued for the protected scene boundary.";
-	return true;
 }
 
+std::string MainEditorSubsystem::GetIndependentTerrainCopyStatus(entt::entity entity) const
+{
+	if(!m_TerrainCopies) return {};
+	const auto object = ObjectManager::instance().getObject(entity);
+	if(!object) return {};
+	const auto objectId = ObjectManager::instance().getUUID(*object);
+	const auto statuses = m_TerrainCopies->SnapshotStatus();
+	for(std::size_t index = 0U; index < m_TerrainCopyAdmissionCount; ++index) {
+		const auto& admission = m_TerrainCopyAdmissions[(m_TerrainCopyAdmissionNext + m_TerrainCopyAdmissions.size() - 1U - index) % m_TerrainCopyAdmissions.size()];
+		if(admission.first != objectId) continue;
+		for(const auto& status : statuses) if(status.operationId == admission.second) return status.diagnostic;
+		return {};
+	}
+	return {};
+}
 std::vector<entt::entity> MainEditorSubsystem::GetSelectedEntities() const
 {
 	std::vector<entt::entity> entities;
@@ -3482,34 +3587,35 @@ void MainEditorSubsystem::ToggleSelectedEntity(entt::entity entity)
 
 void MainEditorSubsystem::PublishCommittedEditorTransactionsToUndo()
 {
-	// The queue retains each immutable editor request beside its full commit
-	// receipt. Pairing them at the protected boundary avoids a frame-order race
-	// when async terrain publication enqueues and flushes between ImGui passes.
-	const std::vector<TerraEngine::Scene::EditorTransactionCompletion> completions =
-		TerraEngine::Scene::SceneMutationQueue::Instance().DrainCompletedEditorTransactions();
-	for (const TerraEngine::Scene::EditorTransactionCompletion& completion : completions)
-	{
-		const TerraEngine::Scene::Transaction& transaction = completion.transaction;
-		const TerraEngine::Scene::TransactionResult& result = completion.result;
-		// Undo/redo transactions already own a history entry. Their receipt only
-		// finalizes that entry and restores the dirty flag after SceneManager's
-		// protected flush marked the scene changed.
-		if (UndoRedoSystem::Instance().CompleteDeferredReplay(result))
-		{
-			continue;
-		}
-		if (result.status == TerraEngine::Scene::TransactionStatus::Committed)
-		{
-			UndoRedoSystem::Instance().RecordCommittedTransaction(transaction, result);
-		}
-		else
-		{
-			TERRAENGINE_LOG(LogLevel::Warning, "Editor transaction '" << result.transactionId
-				<< "' was rejected; no undo history entry was created.");
-		}
+	try {
+		m_EditorReceiptBatch.Publish(
+			[] { return TerraEngine::Scene::SceneMutationQueue::Instance().DrainCompletedEditorTransactions(); },
+			[this](const TerraEngine::Scene::EditorTransactionCompletion& completion) {
+				// Every provisional asset settles before any fallible history work.
+				// The retained batch retries a thrown consumer without another drain.
+				if(m_TerrainCopies) (void)m_TerrainCopies->HandleTransactionResult(completion.result);
+			},
+			[](const TerraEngine::Scene::EditorTransactionCompletion& completion) {
+				const auto& transaction = completion.transaction;
+				const auto& result = completion.result;
+				UndoRedoSystem& history = UndoRedoSystem::Instance();
+				if(history.CompleteDeferredReplay(result)) return;
+				if(result.status == TerraEngine::Scene::TransactionStatus::Committed) {
+					// A callback may throw after history publication. On retry, a
+					// matching top ID proves this receipt already created its entry.
+					if(history.GetUndoHistoryId() != transaction.id)
+						(void)history.RecordCommittedTransaction(transaction, result);
+				} else {
+					TERRAENGINE_LOG(LogLevel::Warning, "Editor transaction '" << result.transactionId
+						<< "' was rejected; no undo history entry was created.");
+				}
+			});
+	} catch(const std::exception& error) {
+		TERRAENGINE_LOG(LogLevel::Error, "Editor receipts remain owned for retry: " << error.what());
+	} catch(...) {
+		TERRAENGINE_LOG(LogLevel::Error, "Editor receipts remain owned after an unexpected consumer failure.");
 	}
 }
-
 // MainEditorSubsystem::SetSelectedAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::SetSelectedAsset(std::optional<std::filesystem::path> asset)
 {
@@ -3948,7 +4054,7 @@ void MainEditorSubsystem::RequestExit() {
 		m_PendingAction = PendingAction::Exit;
 		m_ShowSaveConfirmation = true;
 	} else {
-		CloseCurrentProject();
+		if(!CloseCurrentProject()) return;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ctx && ctx->engine) ctx->engine->SignalShutdown();
 	}
@@ -3964,7 +4070,9 @@ void MainEditorSubsystem::ExecutePendingAction() {
 			CloseCurrentProject();
 			break;
 		case PendingAction::Exit:
-			CloseCurrentProject();
+			// A recoverable ownership failure must also block the exit caller;
+			// merely returning from project close would still signal teardown here.
+			if(!CloseCurrentProject()) break;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ctx && ctx->engine) ctx->engine->SignalShutdown();
 			break;
@@ -4108,7 +4216,10 @@ void MainEditorSubsystem::DrawScriptCompilationModal() {
 }
 
 // MainEditorSubsystem::CloseCurrentProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void MainEditorSubsystem::CloseCurrentProject() {
+bool MainEditorSubsystem::CloseCurrentProject() {
+	if(!RetireTerrainCopies()) return false;
+	++m_TerrainCopyProjectEpoch;
+	m_TerrainCopyAdmissionCount = m_TerrainCopyAdmissionNext = 0U;
 	if (ctx && ctx->exportController) ctx->exportController->StopAndDrain();
 	if (ctx && ctx->editorMcpBridge) ctx->editorMcpBridge->PumpExportJobsAtProtectedFrame();
 	ScriptCompilationSubsystem::Instance().StopAdmissionsAndDrain();
@@ -4207,4 +4318,5 @@ void MainEditorSubsystem::CloseCurrentProject() {
 	if (ctx && ctx->projectManager) {
 		ctx->projectManager->CloseProject();
 	}
+	return true;
 }

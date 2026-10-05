@@ -350,11 +350,20 @@ ByteBuffer CodecProvider::Decompress(const ByteBuffer& storedBytes,
 	const PreparedDecompressionDictionary* preparedDictionary) const {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (mode == StorageMode::Raw) {
+		// Raw decoding is identity only when the declared length matches exactly.
+		if(storedBytes.size() != expectedSize) throw std::runtime_error("Raw extent size mismatch.");
 		return storedBytes;
 	}
 
+	if(mode != StorageMode::Zstd && mode != StorageMode::ZstdDictionary) throw std::runtime_error("Unknown extent codec.");
+	if(mode == StorageMode::ZstdDictionary && dictionaryBytes.empty()) throw std::runtime_error("Missing extent dictionary.");
+
 	// Every extent is decoded independently. That keeps random access simple and
 	// avoids hidden cross-extent history like a solid archive would require.
+	// Frame headers expose a cheap length check before decoded allocation.
+	// Unknown content sizes remain supported and are checked after decoding.
+	const auto frameSize=ZSTD_getFrameContentSize(storedBytes.data(),storedBytes.size());
+	if(frameSize==ZSTD_CONTENTSIZE_ERROR || (frameSize!=ZSTD_CONTENTSIZE_UNKNOWN && frameSize!=expectedSize)) throw std::runtime_error("Compressed frame length disagrees with extent metadata.");
 	ByteBuffer output(expectedSize);
 	std::size_t decompressedSize = 0U;
 	if (mode == StorageMode::Zstd) {

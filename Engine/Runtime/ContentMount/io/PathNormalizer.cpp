@@ -4,6 +4,12 @@
 #include "io/PathText.h"
 
 #include <algorithm>
+#include <limits>
+#ifdef _WIN32
+#include <windows.h>
+#undef min
+#undef max
+#endif
 #include <fstream>
 #include <map>
 #include <stdexcept>
@@ -71,6 +77,40 @@ struct DirectoryAccumulator final {
 } // namespace
 
 namespace tepak::io {
+
+void ValidateStoredPath(std::string_view path, bool allowRoot) {
+	if(path.empty()) { if(allowRoot) return; throw std::runtime_error("Only the archive root may have an empty path."); }
+	if(path != NormalizeLookupPath(path)) throw std::runtime_error("Stored archive path is not canonical.");
+	std::size_t begin=0;
+	while(begin<path.size()) {
+		const auto end=path.find('/',begin); const auto part=path.substr(begin,end==std::string_view::npos ? path.size()-begin : end-begin);
+		if(part.empty() || part=="." || part==".." || part.back()=='.' || part.back()==' ') throw std::runtime_error("Stored archive path has an unsafe component.");
+		for(const unsigned char c:part) if(c<32 || c==127 || std::string_view("\\:<>\"|?*").find(static_cast<char>(c))!=std::string_view::npos) throw std::runtime_error("Stored archive path has unsafe characters.");
+		const auto stem=part.substr(0,part.find('.'));
+		if(stem=="con" || stem=="prn" || stem=="aux" || stem=="nul" || stem=="clock$" ||
+			(stem.size()==4 && (stem.starts_with("com") || stem.starts_with("lpt")) && stem[3]>='1' && stem[3]<='9') ||
+			(stem.size()==5 && (stem.starts_with("com") || stem.starts_with("lpt")) && (stem.ends_with("\xc2\xb9") || stem.ends_with("\xc2\xb2") || stem.ends_with("\xc2\xb3")))) throw std::runtime_error("Stored archive path uses a reserved device name.");
+		if(end==std::string_view::npos) break; begin=end+1; if(begin==path.size()) throw std::runtime_error("Stored archive path has a trailing separator.");
+	}
+	(void)StoredPathIdentity(path);
+}
+std::string StoredPathIdentity(std::string_view path) {
+#ifdef _WIN32
+	if(path.empty()) return {};
+	if(path.size()>static_cast<std::size_t>(std::numeric_limits<int>::max())) throw std::runtime_error("Stored path exceeds supported Unicode size.");
+	const int size=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path.data(),static_cast<int>(path.size()),nullptr,0);
+	if(size==0) throw std::runtime_error("Stored path is not valid UTF-8.");
+	std::wstring wide(size,L'\0'); MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path.data(),static_cast<int>(path.size()),wide.data(),size);
+	const int foldedSize=LCMapStringEx(LOCALE_NAME_INVARIANT,LCMAP_LOWERCASE,wide.data(),size,nullptr,0,nullptr,nullptr,0);
+	if(foldedSize==0) throw std::runtime_error("Could not compare stored path identity.");
+	std::wstring folded(foldedSize,L'\0'); if(!LCMapStringEx(LOCALE_NAME_INVARIANT,LCMAP_LOWERCASE,wide.data(),size,folded.data(),foldedSize,nullptr,nullptr,0)) throw std::runtime_error("Could not fold stored path identity.");
+	const int bytes=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,folded.data(),foldedSize,nullptr,0,nullptr,nullptr);
+	if(bytes==0) throw std::runtime_error("Could not encode stored path identity.");
+	std::string result(bytes,'\0'); if(!WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,folded.data(),foldedSize,result.data(),bytes,nullptr,nullptr)) throw std::runtime_error("Could not encode stored path identity."); return result;
+#else
+	return NormalizeLookupPath(path);
+#endif
+}
 
 // NormalizeRelativePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string NormalizeRelativePath(const std::filesystem::path& inputRoot, const std::filesystem::path& sourcePath) {

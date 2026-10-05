@@ -33,6 +33,8 @@ namespace TerraEngine::Editor::Automation
 		void StopListening() noexcept;
 		bool IsListening() const;
 		std::uint16_t GetListenPort() const;
+		// Socket ownership is observable independently of MCP session admission.
+		std::size_t GetActiveClientCount() const;
 		std::string GetEndpoint() const;
 		std::string GetLastError() const;
 		nlohmann::json HandleMessage(const nlohmann::json& message);
@@ -49,7 +51,7 @@ namespace TerraEngine::Editor::Automation
 		};
 
 		void ListenLoop();
-		void HandleAcceptedClient(std::intptr_t clientHandle, std::string peerAddress, ClientWorker& worker);
+		void HandleAcceptedClient(std::intptr_t clientHandle, std::string peerAddress, std::uint16_t acceptedPort, ClientWorker& worker);
 		void ReleaseAcceptedClient(std::intptr_t clientHandle);
 		void ReapCompletedClientWorkers() noexcept;
 		void JoinAllClientWorkers() noexcept;

@@ -2613,3 +2613,102 @@ contents and orderly physics shutdown. Retained evidence is under
 the outer `lifecycle-recovery-live-watchdog-unlocked/watchdog.json`.
 
 The final complete CTest run passed all 143 registrations in 377.31 seconds, including the repository naming audit with zero violations.
+
+## Executable-adjacent Linux exports
+
+The Linux launcher resolves `/proc/self/exe` before deriving its adjacent archive
+and `Managed/` runtime paths. Deleted, unreadable, non-executable, relative or
+missing discovery results fail with a diagnostic before mounting content. Windows
+continues to use `GetModuleFileNameW`.
+
+Linux compilation/runtime has not been executed on the Windows development host.
+A genuine Linux build and complete export with bundled dependencies are required
+for the following acceptance checks. Set `export_bin` to the real executable,
+including its spaces if present, and run from a disposable directory containing
+unrelated decoy archive/runtime files:
+
+```bash
+set -euo pipefail
+export_bin=$(realpath '/absolute/path/to/My Game/MyGame')
+export_dir=$(dirname "$export_bin")
+exe_name=$(basename "$export_bin")
+accept_dir=$(mktemp -d)
+cd "$accept_dir"
+timeout 60 "$export_bin" --validate-export-bootstrap > absolute.log 2>&1
+relative_bin=$(realpath --relative-to="$PWD" "$export_bin")
+timeout 60 "$relative_bin" --validate-export-bootstrap > relative.log 2>&1
+PATH="$export_dir:$PATH" timeout 60 "$exe_name" --validate-export-bootstrap > path.log 2>&1
+ln -s "$export_bin" game-alias
+timeout 60 ./game-alias --validate-export-bootstrap > symlink.log 2>&1
+# This diagnostic-only mode exits before mounting content or loading gameplay.
+# A missing kernel link must fail; normal startup accepts no discovery override.
+if timeout 60 "$export_bin" --validate-executable-discovery /proc/self/terraengine-missing-executable > discovery-failure.log 2>&1; then
+    echo 'Missing executable discovery unexpectedly succeeded' >&2
+    exit 1
+fi
+```
+
+All four bootstrap invocations must use the real executable's adjacent archive
+and runtime, with the same content fingerprints. Inspect the failure log for an
+executable discovery diagnostic; a timeout alone is a failure of the check. Also
+exercise the diagnostic seam with relative-target, deleted and non-executable
+symlinks and require rejection. Preserve logs and actual Linux build results.
+
+## Archive reads, independent terrain copies and HTTP authority
+
+Configure with `cmake --preset RelWithDebInfo -DBUILD_TESTING=ON`, then run
+`cmake --build --preset RelWithDebInfo --target install --parallel 2`. The installed
+native harnesses and validation utilities live under
+`out/build/RelWithDebInfo/Build/Tests`. Use the bundled compiler/dependency setup
+and the developer environment described above.
+
+Run the five independent native slices after installation:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine\.ContentArchiveSafety|Editor\.ContentArchiveSafety|Editor\.Terrain\.IndependentCopy|Editor\.McpAuthority|Engine\.AnimationCompileFailure)$' --no-tests=error --output-on-failure
+if ($LASTEXITCODE -ne 0) { throw 'Safety regressions failed.' }
+# Check that all five entries were discovered and executed. Each harness slice
+# enforces a nonzero contract case floor in its independent process watchdog.
+& out/build/RelWithDebInfo/Build/Tests/Tools/ContentArchive/RunArchiveSafetyWatchdog.ps1 -InstallRoot out/build/RelWithDebInfo/Build -LogDirectory out/validation/archive-trees-fresh
+& out/build/RelWithDebInfo/Build/Tests/Tools/ContentArchive/RunArchiveSafetyStress.ps1 -InstallRoot out/build/RelWithDebInfo/Build -LogDirectory out/validation/archive-stress-fresh
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+```
+
+Use fresh evidence directories. Tree cases run in separate bounded children;
+stress runs isolated reader processes, with unique fixture trees, alongside
+animation worker exception/recovery cases. This does not assert that shared
+reader objects permit concurrent mutation. Archive fixtures use the actual
+writer for raw, compressed, dictionary, paged and empty output. Structural
+corruptions retain valid metadata hashes so structural rejection is tested
+independently. Range tests poison untouched payloads to verify lazy reads.
+Extraction tests preserve external sentinels and exercise destination links;
+record any privilege-dependent link coverage that could not run.
+
+The Inspector's **Make Independent** action copies the captured saved terrain
+root, including heights, holes, weights, layers and mapping metadata. Save edits
+before requesting a copy. It prepares a private bundle outside the watched Assets
+tree and reserves a fresh durable UUID. Pending status means preparation or a
+queued rebind; receipt-confirmed status means the existing protected scene flush
+committed the binding. Completed copy assets remain after undo so redo can
+restore the binding. Failed preparation, import, admission or conflicting
+receipts retain the original binding and conditionally clean up only owned copy
+outputs. Cleanup failures remain visible and retryable; lifecycle transitions
+settle receipts and owned work before releasing project resources.
+
+For installed editor acceptance, create an isolated project with the normal
+default editor layout. Author all terrain channels and at least three instances;
+make two independent copies and compare three durable UUIDs, private stores and
+resource paths. Edit one copy, save, reimport, close/reopen and compare original
+and other-copy fingerprints. Observe pending/committed status and exercise
+undo/redo. Native injected failure evidence must be distinguished from live
+editor observations. Close normally and confirm owned workers/processes settle.
+
+The HTTP listener requires exactly one `Host: 127.0.0.1:<actual-listener-port>`.
+Native clients may omit Origin. Browser clients must use exactly one
+`Origin: http://127.0.0.1:<actual-listener-port>`. Header names are case-insensitive;
+outer whitespace is allowed, while duplicate/malformed authority fields, aliases,
+omitted/wrong ports and alternate origins are rejected before session attachment
+or JSON dispatch. Use the actual endpoint port after each restart. Interleave
+rejected requests with valid native/browser traffic and compare dispatch counts,
+selection, objects and session fingerprints. The installed bridge has no cumulative dispatch counter; its last diagnostic request and bounded activity log provide live fingerprints, while native callbacks prove exact rejected dispatch counts. Valid authority retains existing
+read-only, write-mode, approval and cancellation controls.

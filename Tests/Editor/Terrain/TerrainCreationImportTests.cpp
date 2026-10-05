@@ -146,7 +146,7 @@ namespace TerraEngine::EditorTests
 				&& editorSubsystemSource.find(".Remove(removedAsset)") != std::string::npos,
 				"The editor must restore missing terrain derivatives and retire render/collision state when the last component disappears.");
 			const std::size_t projectClose = editorSubsystemSource.find(
-				"void MainEditorSubsystem::CloseCurrentProject()");
+				"bool MainEditorSubsystem::CloseCurrentProject()");
 			const std::size_t clearUndoHistory = editorSubsystemSource.find(
 				"UndoRedoSystem::Instance().Clear()", projectClose);
 			const std::size_t releaseProjectTerrain = editorSubsystemSource.find(

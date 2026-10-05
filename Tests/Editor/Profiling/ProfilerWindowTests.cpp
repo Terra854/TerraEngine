@@ -1,4 +1,5 @@
 #include "TestHarness.h"
+#include "Editor/TerraEngine-Editor/Core/EditorSchedulerDeclaration.h"
 #include "Editor/TerraEngine-Editor/Profiling/ProfilerDiagnosticAnalysis.h"
 #include "Editor/TerraEngine-Editor/Profiling/ProfilerSampleHierarchy.h"
 
@@ -432,8 +433,11 @@ namespace TerraEngine::EditorTests
 				"Profiler presentation must be published as one immutable snapshot instead of exposing mutable worker state to ImGui.");
 			context.Expect(editorDrain != std::string::npos && editorDraw != std::string::npos && editorDrain < editorDraw,
 				"EditorSystem must drain profiler completions before profiler-window drawing begins.");
-			context.Expect(editorSource.find("EditorProfilerWorkerCompletions") != std::string::npos
-				&& editorSource.find("EditorProfilerHealthPublication") != std::string::npos,
+			// Validate the production contract even when metadata lives in a
+			// shared header rather than beside the native UI execution code.
+			const auto declaration = TerraEngine::Editor::MakeEditorSchedulerDeclaration();
+			context.Expect(std::find(declaration.writes.begin(), declaration.writes.end(), "EditorProfilerWorkerCompletions") != declaration.writes.end()
+				&& std::find(declaration.writes.begin(), declaration.writes.end(), "EditorProfilerHealthPublication") != declaration.writes.end(),
 				"Scheduler diagnostics must declare profiler worker draining and protected health publication resources.");
 			context.Expect(closeEpoch != std::string::npos && sceneUnload != std::string::npos && closeEpoch < sceneUnload,
 				"Project close must invalidate profiler epochs before scene/resource teardown can expose stale results.");

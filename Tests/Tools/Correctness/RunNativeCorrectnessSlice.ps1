@@ -26,6 +26,11 @@ $recoveryFloors=@{
 	'Editor.AssetImportAdmission'=13
 	'Editor.ExportArtifactValidation'=12
 	'Editor.ExportRetention'=10
+	'Engine.ContentArchiveSafety'=30
+	'Editor.ContentArchiveSafety'=29
+	'Editor.TerrainIndependentCopy'=24
+	'Editor.MCP.Transport.HttpAuthority'=4
+	'Animation.ProgramPublisher'=9
 }
 if ($recoveryFloors.ContainsKey($Filter) -and $MinimumCases -lt $recoveryFloors[$Filter]) {
 	throw "Recovery filter '$Filter' requires at least $($recoveryFloors[$Filter]) cases."

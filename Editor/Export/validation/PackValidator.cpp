@@ -253,7 +253,7 @@ ValidationReport PackValidator::Validate(const std::filesystem::path& packPath, 
 
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (deepReadback) {
-				const auto reconstructed = archive::ReadLogicalBytes(openedPack, entry.normalizedPath, 0U, entry.logicalSize);
+				const auto reconstructed = archive::ReadLogicalBytes(openedPack, entry.normalizedPath, 0U, entry.logicalSize, true);
 				if (codecProvider.HashBytes(reconstructed) != entry.entryHash) {
 					validation::AddFinding(report,
 						ValidationSeverity::Error,

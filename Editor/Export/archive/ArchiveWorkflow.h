@@ -70,7 +70,7 @@ model::PackPlan BuildPackPlan(const PackagingRequest& request, const model::Pack
 // Opens and validates the metadata tables of an existing pack.
 OpenedPack OpenPackFile(const std::filesystem::path& packPath);
 // Reads one logical file or byte range by reconstructing the required extents.
-ByteBuffer ReadLogicalBytes(const OpenedPack& openedPack, std::string_view logicalPath, std::uint64_t offset, std::uint64_t size);
+ByteBuffer ReadLogicalBytes(const OpenedPack& openedPack, std::string_view logicalPath, std::uint64_t offset, std::uint64_t size, bool verifyEntry = false);
 // Extracts one file or directory subtree from an opened pack.
 void ExtractLogicalPath(const OpenedPack& openedPack, const ExtractRequest& request);
 

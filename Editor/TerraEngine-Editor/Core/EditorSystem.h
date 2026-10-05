@@ -50,6 +50,8 @@ private:
 	EditorContext context;
 	std::shared_ptr<ProjectHubSubsystem> projectHub;
 	std::shared_ptr<MainEditorSubsystem> mainEditor;
+	// GLFW polling records intent only; protected PostFrame owns project teardown.
+	bool nativeCloseRequested = false;
 	std::optional<std::filesystem::path> startupProjectPath;
 	std::optional<std::filesystem::path> physicsInvariantOutputPath;
 	std::optional<std::filesystem::path> terrainInvariantOutputPath;

@@ -5758,10 +5758,12 @@ void InspectorWindow::OnGui() {
 						{
 							std::string copyStatus;
 							const bool copyQueued = m_Owner->CreateIndependentTerrainCopy(obj, copyStatus);
-							// A successful queued copy becomes visible through the Asset row;
-							// persistent success prose would only crowd a narrow Inspector.
+							// Admission is pending; the receipt-owned status below reports when
+							// the protected scene boundary actually commits or rejects it.
 							m_TerrainInspectorError = copyQueued ? std::string{} : std::move(copyStatus);
 						}
+						const std::string independentStatus = m_Owner->GetIndependentTerrainCopyStatus(obj);
+						if(!independentStatus.empty()) ImGui::TextWrapped("%s", independentStatus.c_str());
 						if(!m_TerrainInspectorError.empty())
 						{
 							ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.35f, 1.0f));

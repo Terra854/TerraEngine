@@ -75,10 +75,22 @@ TERRAENGINE_API std::shared_ptr<AnimationProgramCompileExecutor> CreateThreadPoo
 
 class AnimationProgramPublisher {
 public:
+	// Native dependencies exercise the same worker boundary as the real compiler.
+	// Requests and prepared output are owned by that worker; the staging callback
+	// runs after compilation, before its result crosses into shared owner state.
+	struct WorkerDependencies {
+		using Compiler = std::function<AnimationGraphCompilationResult(
+			const AnimationProgramCompileRequest&, EvaluationProgram&)>;
+		Compiler compile;
+		std::function<void()> beforeResultStaging;
+	};
+
 	// maxPendingJobs is clamped to kAnimationProgramPublisherMaximumPendingJobs,
 	// preventing a changing asset from producing unbounded retained documents.
 	TERRAENGINE_API explicit AnimationProgramPublisher(std::shared_ptr<AnimationProgramCompileExecutor> executor,
 		std::size_t maxPendingJobs = 16U);
+	TERRAENGINE_API AnimationProgramPublisher(std::shared_ptr<AnimationProgramCompileExecutor> executor,
+		std::size_t maxPendingJobs, WorkerDependencies workerDependencies);
 	TERRAENGINE_API ~AnimationProgramPublisher();
 
 	AnimationProgramPublisher(const AnimationProgramPublisher &) = delete;

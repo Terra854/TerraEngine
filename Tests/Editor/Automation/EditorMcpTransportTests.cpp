@@ -214,7 +214,7 @@ namespace TerraEngine::EditorTests
 
 			std::ostringstream request;
 			request << "POST /mcp HTTP/1.1\r\n";
-			request << "Host: 127.0.0.1\r\n";
+			request << "Host: 127.0.0.1:" << port << "\r\n";
 			request << "Content-Type: application/json\r\n";
 			request << "Content-Length: " << body.size() << "\r\n";
 			request << "Connection: close\r\n\r\n";
@@ -271,6 +271,74 @@ namespace TerraEngine::EditorTests
 			}
 			return response;
 		}
+
+		std::string BuildAuthorityRequest(std::string_view headers, std::string_view body)
+		{
+			// Keep raw authority lines intact: normal HTTP clients normalize away
+			// the duplicate and malformed spellings that this listener must reject.
+			return "POST /mcp HTTP/1.1\r\n" + std::string(headers)
+				+ "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" + std::string(body);
+		}
+
+		class AuthoritySocketFixture
+		{
+		public:
+			AuthoritySocketFixture()
+			{
+				ObjectManager::instance().clear();
+				(void)ObjectManager::instance().createObject("Authority Selection Target");
+				bridge.Initialize(nullptr);
+				bridge.SetWriteMode(TerraEngine::Editor::Automation::WriteMode::WritesEnabled);
+				bridge.SetSelectionCallbacks(
+					[&]() -> std::optional<entt::entity> { return selection; },
+					[&](std::optional<entt::entity> value) { selection = value; ++dispatchCount; });
+				bridge.SetEnabled(true);
+				pump = std::jthread([&](std::stop_token stop) {
+					while (!stop.stop_requested())
+					{
+						bridge.Update(0.0f);
+						std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					}
+				});
+			}
+
+			~AuthoritySocketFixture()
+			{
+				// Join the protected dispatcher before destroying any captured state.
+				pump.request_stop();
+				pump.join();
+				bridge.Shutdown();
+				ObjectManager::instance().clear();
+			}
+
+			std::string Authority() const { return "127.0.0.1:" + std::to_string(bridge.GetListenPort()); }
+			std::string ValidHeaders() const { return "Host: " + Authority() + "\r\n"; }
+			std::string Send(std::string_view headers, std::string_view body = kSelectionBody)
+			{
+				return SendLoopbackRawHttpRequest(bridge.GetListenPort(), BuildAuthorityRequest(headers, body));
+			}
+			nlohmann::json Fingerprint() const
+			{
+				const auto status = bridge.BuildStatusJson();
+				// Socket activity diagnostics may change; protected/session policy
+				// and approval/request ownership must not change on rejected traffic.
+				return {{"enabled", status["enabled"]}, {"writeMode", status["writeMode"]},
+					{"pendingRequestCount", status["pendingRequestCount"]},
+					{"pendingApprovalCount", status["pendingApprovalCount"]},
+					{"recentApprovalCount", status["recentApprovalCount"]},
+					{"objects", ObjectManager::instance().getObjectsWithComponents<>().size()},
+					{"dispatches", dispatchCount.load()}};
+			}
+
+			static constexpr std::string_view kSelectionBody =
+				R"({"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"object.select","arguments":{"object":"Authority Selection Target"}}})";
+			// All captures precede their pump owner; atomic count also provides the
+			// response-to-owner observation boundary without reading live selection.
+			std::optional<entt::entity> selection;
+			std::atomic<std::size_t> dispatchCount = 0;
+			EditorMcpBridge bridge;
+			std::jthread pump;
+		};
 
 		nlohmann::json ParseLoopbackResourcePayload(std::string_view response)
 		{
@@ -672,6 +740,97 @@ namespace TerraEngine::EditorTests
 			context.Expect(!content[1].value("data", std::string()).empty(), "Game View capture image should include base64 data.");
 		});
 
+		registry.Add("Editor.MCP.Transport.HttpAuthorityRejectsInvalidHost", [](TestContext& context) {
+			AuthoritySocketFixture fixture;
+			context.Expect(fixture.bridge.GetListenPort() != 0, "Authority fixture must bind its actual listener.");
+			const std::string authority = fixture.Authority();
+			const std::vector<std::string> invalid = {
+				"", "Host: \r\n", "Host: 127.0.0.1\r\n", "Host: localhost:" + std::to_string(fixture.bridge.GetListenPort()) + "\r\n",
+				"Host: 127.0.0.1:0\r\n", "Host: 127.0.0.1:0" + std::to_string(fixture.bridge.GetListenPort()) + "\r\n",
+				"Host: user@" + authority + "\r\n", "Host: " + authority + "/mcp\r\n",
+				"Host: " + authority + ", " + authority + "\r\n",
+				"Host: " + authority + "\r\nhOsT: " + authority + "\r\n",
+				"Host: " + authority + "\r\nHost: foreign.example\r\n",
+				" Host: " + authority + "\r\n", "Host : " + authority + "\r\n",
+				"Host: " + authority + "\r\n	continued\r\n", "Host: " + authority + "\nX: value\r\n"
+			};
+			for (const auto& headers : invalid)
+			{
+				const auto before = fixture.Fingerprint();
+				const auto rejected = fixture.Send(headers);
+				context.Expect(rejected.starts_with("HTTP/1.1 400") || rejected.starts_with("HTTP/1.1 403"),
+					"Invalid Host must fail at HTTP authority boundary: " + headers);
+				context.ExpectEqual(before, fixture.Fingerprint(), "Invalid Host must not dispatch or mutate state.");
+				context.Expect(fixture.Send(fixture.ValidHeaders()).starts_with("HTTP/1.1 200"), "Native traffic must recover after each invalid Host.");
+			}
+		});
+
+		registry.Add("Editor.MCP.Transport.HttpAuthorityRejectsInvalidOrigin", [](TestContext& context) {
+			AuthoritySocketFixture fixture;
+			context.Expect(fixture.bridge.GetListenPort() != 0, "Origin fixture must bind its actual listener.");
+			const std::string origin = "http://" + fixture.Authority();
+			const std::vector<std::string> invalid = {
+				"Origin: \r\n", "Origin: null\r\n", "Origin: https://" + fixture.Authority() + "\r\n",
+				"Origin: http://foreign.example\r\n", "Origin: http://127.0.0.1\r\n", "Origin: http://127.0.0.1:0\r\n",
+				"Origin: " + origin + "/\r\n", "Origin: " + origin + "?x=1\r\n", "Origin: " + origin + "#fragment\r\n",
+				"Origin: " + origin + " " + origin + "\r\n", "Origin: " + origin + "," + origin + "\r\n",
+				"Origin: " + origin + "\r\noRiGiN: " + origin + "\r\n",
+				"Origin: " + origin + "\r\nOrigin: null\r\n", "Origin : " + origin + "\r\n",
+				"Origin: " + origin + "\r\n	" + origin + "\r\n"
+			};
+			for (const auto& originHeader : invalid)
+			{
+				const auto before = fixture.Fingerprint();
+				const auto rejected = fixture.Send(fixture.ValidHeaders() + originHeader);
+				context.Expect(rejected.starts_with("HTTP/1.1 400") || rejected.starts_with("HTTP/1.1 403"),
+					"Invalid Origin must fail before protected dispatch: " + originHeader);
+				context.ExpectEqual(before, fixture.Fingerprint(), "Invalid Origin must leave request/approval/scene state intact.");
+				context.Expect(fixture.Send(fixture.ValidHeaders() + "Origin: " + origin + "\r\n").starts_with("HTTP/1.1 200"),
+					"Exact browser origin must recover after every rejected request.");
+			}
+		});
+
+		registry.Add("Editor.MCP.Transport.HttpAuthorityValidNativeAndBrowserRecovery", [](TestContext& context) {
+			AuthoritySocketFixture fixture;
+			context.Expect(fixture.bridge.GetListenPort() != 0, "Recovery fixture must bind its listener.");
+			const std::string headers = "hOsT:	" + fixture.Authority() + " 	\r\noRiGiN: http://" + fixture.Authority() + "	\r\n";
+			context.Expect(fixture.Send(headers).starts_with("HTTP/1.1 200"), "Header case and outer whitespace must preserve exact browser authority.");
+			context.Expect(fixture.Send(fixture.ValidHeaders()).starts_with("HTTP/1.1 200"), "Native requests may omit Origin.");
+			context.ExpectEqual(std::size_t(2), fixture.dispatchCount.load(), "Valid requests must reach the real protected selection handler exactly once.");
+			const auto before = fixture.Fingerprint();
+			const auto rejected = fixture.Send("Host: foreign.example\r\n", "{not JSON");
+			context.Expect(rejected.find("Malformed JSON") == std::string::npos && !rejected.starts_with("HTTP/1.1 200"),
+				"Authority must reject malformed-body traffic before JSON parsing.");
+			context.ExpectEqual(before, fixture.Fingerprint(), "Pre-JSON rejection must leave protected state unchanged.");
+			fixture.bridge.SetEnabled(false);
+			fixture.bridge.SetEnabled(true);
+			context.Expect(fixture.Send(fixture.ValidHeaders()).starts_with("HTTP/1.1 200"), "Restart must validate the newly bound authority.");
+			context.ExpectEqual(std::size_t(3), fixture.dispatchCount.load(), "Fresh listener must dispatch one recovered native call.");
+		});
+
+		registry.Add("Editor.MCP.Transport.HttpAuthorityPreservesBridgeControls", [](TestContext& context) {
+			AuthoritySocketFixture fixture;
+			context.Expect(fixture.bridge.GetListenPort() != 0, "Policy fixture must bind its listener.");
+			fixture.bridge.SetWriteMode(TerraEngine::Editor::Automation::WriteMode::ReadOnly);
+			const auto before = fixture.Fingerprint();
+			const auto denied = fixture.Send(fixture.ValidHeaders(),
+				R"({"jsonrpc":"2.0","id":51,"method":"tools/call","params":{"name":"object.create","arguments":{"name":"Authority Must Not Create"}}})");
+			context.Expect(denied.starts_with("HTTP/1.1 200"), "Valid authority must still route the bridge's read-only response.");
+			context.Expect(denied.find("read-only mode") != std::string::npos, "HTTP authority acceptance must not bypass the read-only permission gate.");
+			context.ExpectEqual(before, fixture.Fingerprint(), "Read-only policy must prevent authored writes.");
+			fixture.bridge.SetWriteMode(TerraEngine::Editor::Automation::WriteMode::WritesEnabled);
+			const std::string approvalBody = R"({"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"asset.prepare_delete","arguments":{"path":"Assets/Missing.txt"}}})";
+			const auto beforeApproval = fixture.Fingerprint();
+			context.Expect(!fixture.Send(fixture.ValidHeaders() + "Origin: null\r\n", approvalBody).starts_with("HTTP/1.1 200"),
+				"Foreign authority must not create approvals.");
+			context.ExpectEqual(beforeApproval, fixture.Fingerprint(), "Rejected approval request must preserve policy state.");
+			context.Expect(fixture.Send(fixture.ValidHeaders(), approvalBody).find("waiting_approval") != std::string::npos,
+				"Valid high-impact request must retain its approval gate.");
+			context.ExpectEqual(std::size_t(1), fixture.bridge.GetPendingApprovals().size(), "Only the valid request may create an approval.");
+			context.Expect(fixture.Send(fixture.ValidHeaders(), R"({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"not-pending"}})").starts_with("HTTP/1.1 202"),
+				"Valid authority must preserve cancellation notification routing.");
+		});
+
 		registry.Add("Editor.MCP.Transport.HttpListenerParsesContentLengthWithWhitespace", [](TestContext& context) {
 			EditorMcpBridge bridge;
 			bridge.Initialize(nullptr);
@@ -693,16 +852,16 @@ namespace TerraEngine::EditorTests
 			context.Expect(port != 0, "Bounded HTTP fixture should own a loopback listener.");
 
 			const std::string missingLength = SendLoopbackRawHttpRequest(port,
-				"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n{\"jsonrpc\":\"2.0\"}");
+				"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:" + std::to_string(port) + "\r\n\r\n{\"jsonrpc\":\"2.0\"}");
 			const std::string malformedLength = SendLoopbackRawHttpRequest(port,
-				"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: not-a-number\r\n\r\n{}");
+				"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:" + std::to_string(port) + "\r\nContent-Length: not-a-number\r\n\r\n{}");
 			const std::string oversizedBody = SendLoopbackRawHttpRequest(port,
-				"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 1048577\r\n\r\n");
+				"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:" + std::to_string(port) + "\r\nContent-Length: 1048577\r\n\r\n");
 			const std::string oversizedHeader = SendLoopbackRawHttpRequest(port,
 				"POST /mcp HTTP/1.1\r\nX-Fill: " + std::string(16U * 1024U, 'x'));
 			const auto idleStart = std::chrono::steady_clock::now();
 			const std::string idleRequest = SendLoopbackRawHttpRequest(port,
-				"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+				"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:" + std::to_string(port) + "\r\n");
 			const auto idleElapsed = std::chrono::steady_clock::now() - idleStart;
 			std::string slowDripResponse;
 			auto slowDripElapsed = std::chrono::steady_clock::duration::zero();
@@ -714,7 +873,7 @@ namespace TerraEngine::EditorTests
 				if (slowClient.IsValid())
 				{
 					SetTestSocketReceiveTimeout(slowClient.Get(), std::chrono::seconds(2));
-					const std::string headers = "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\n\r\n";
+					const std::string headers = "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:" + std::to_string(port) + "\r\nContent-Length: 100\r\n\r\n";
 					send(slowClient.Get(), headers.data(), static_cast<int>(headers.size()), 0);
 					const auto slowStart = std::chrono::steady_clock::now();
 					// Keep the socket active until just before the three-second total
@@ -1147,29 +1306,34 @@ namespace TerraEngine::EditorTests
 			EditorMcpBridge bridge;
 			bridge.Initialize(nullptr);
 			bridge.SetEnabled(true);
+			// Observe the socket owner directly. An incomplete body must not attach
+			// an MCP session merely to make shutdown timing visible to this test.
+			EditorMcpTransport transport(bridge);
+			context.Expect(transport.StartListening(0), "Partial-request transport should bind an ephemeral listener.");
 			ScopedTestSocketRuntime socketRuntime;
 			context.Expect(socketRuntime.IsStarted(), "Test socket runtime should initialize.");
-			ScopedTestSocket client(OpenLoopbackConnection(bridge.GetListenPort()));
+			ScopedTestSocket client(OpenLoopbackConnection(transport.GetListenPort()));
 			context.Expect(client.IsValid(), "Partial-request client should connect to the listener.");
 			if (client.IsValid())
 			{
 				const std::string partialRequest =
-					"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\n\r\n{";
+					"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:" + std::to_string(transport.GetListenPort()) + "\r\nContent-Length: 100\r\n\r\n{";
 				const int sent = send(client.Get(), partialRequest.data(), static_cast<int>(partialRequest.size()), 0);
 				context.ExpectEqual(static_cast<int>(partialRequest.size()), sent,
 					"Partial-request fixture should send the complete incomplete-body prefix.");
 			}
 
 			const auto connectDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-			while (bridge.GetState() != TerraEngine::Editor::Automation::BridgeState::Connected
+			while (transport.GetActiveClientCount() == 0
 				&& std::chrono::steady_clock::now() < connectDeadline)
 			{
 				std::this_thread::sleep_for(std::chrono::milliseconds(1));
 			}
-			context.Expect(bridge.GetState() == TerraEngine::Editor::Automation::BridgeState::Connected,
-				"Listener should accept the partial request before shutdown.");
+			context.ExpectEqual(std::size_t(1), transport.GetActiveClientCount(),
+				"Listener should own the partial socket before shutdown without MCP session attachment.");
 
 			const auto shutdownStart = std::chrono::steady_clock::now();
+			transport.StopListening();
 			bridge.Shutdown();
 			const auto shutdownElapsed = std::chrono::steady_clock::now() - shutdownStart;
 			bool clientObservedShutdown = false;

@@ -3,9 +3,14 @@
 #include "TestHarness.h"
 
 #include "Animation/Graph/AnimationProgramPublisher.h"
+#include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <functional>
+#include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace TerraEngine::Tests {
@@ -15,8 +20,14 @@ using namespace TerraEngine::Animation;
 class ManualCompileExecutor final : public AnimationProgramCompileExecutor {
 public:
 	void Enqueue(std::function<void()> work) override {
+		if (rejectNext_) {
+			rejectNext_ = false;
+			throw std::runtime_error("Controlled compiler enqueue failure");
+		}
 		work_.push_back(std::move(work));
 	}
+
+	void RejectNext() noexcept { rejectNext_ = true; }
 
 	[[nodiscard]] std::size_t PendingCount() const noexcept {
 		return work_.size();
@@ -34,8 +45,15 @@ public:
 		work();
 	}
 
+	// Real Task::run retains an escaped worker exception in its future. This
+	// manual executor models that discarded-future boundary for deterministic
+	// ordering tests; the separate pool case exercises the actual Task path.
+	void RunNextAsTask() { try { RunNext(); } catch (...) {} }
+	void RunLastAsTask() { try { RunLast(); } catch (...) {} }
+
 private:
 	std::vector<std::function<void()>> work_;
+	bool rejectNext_ = false;
 };
 
 AnimationGuid Guid(std::uint8_t seed) {
@@ -65,9 +83,205 @@ AnimationProgramCompileRequest MakeRequest(AnimationGeneration sourceGeneration 
 AnimationProgramGenerationSnapshot SnapshotFor(const AnimationProgramCompileRequest &request) {
 	return {request.controller.assetId, request.sourceGeneration, request.dependencyGenerations};
 }
+
+struct WorkerFaultState {
+	std::atomic<bool> compilerFailure{false};
+	std::atomic<bool> stagingFailure{false};
+	std::atomic<std::size_t> compilerCalls{0U};
+	std::atomic<std::size_t> stagingCalls{0U};
+};
+
+AnimationProgramPublisher::WorkerDependencies FaultDependencies(const std::shared_ptr<WorkerFaultState>& fault) {
+	AnimationProgramPublisher::WorkerDependencies dependencies;
+	dependencies.compile = [fault](const AnimationProgramCompileRequest& request, EvaluationProgram& output) {
+		++fault->compilerCalls;
+		if (fault->compilerFailure.load()) throw std::runtime_error("Controlled inside-compiler failure");
+		return CompileAnimationControllerGraph(request.controller, {request.availableControllers}, output);
+	};
+	dependencies.beforeResultStaging = [fault] {
+		++fault->stagingCalls;
+		if (fault->stagingFailure.load()) throw std::runtime_error("Controlled compiled-result staging failure");
+	};
+	return dependencies;
+}
+
+AnimationProgramPublishPollResult WaitForTerminal(AnimationProgramPublisher& publisher,
+	const AnimationProgramCompileRequest& request) {
+	// Poll remains non-blocking in production. This bounded test-side wait gives
+	// actual workers time to finish without turning publisher polling into a join.
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	AnimationProgramPublishPollResult result;
+	do {
+		result = publisher.PollAndPublish(SnapshotFor(request));
+		if (result.status != AnimationStatus::NotReady) return result;
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	} while (std::chrono::steady_clock::now() < deadline);
+	return result;
+}
 } // namespace
 
 void RegisterAnimationProgramPublisherTests(TestRegistry &registry) {
+	registry.Add("Animation.ProgramPublisher.WorkerCompilerExceptionsReclaimCapacity", [](TestContext& context) {
+		constexpr std::size_t capacity = 2U;
+		auto executor = std::make_shared<ManualCompileExecutor>();
+		auto fault = std::make_shared<WorkerFaultState>();
+		AnimationProgramPublisher publisher(executor, capacity, FaultDependencies(fault));
+		const auto initial = MakeRequest();
+		context.Expect(publisher.RequestCompile(initial) == AnimationStatus::Queued, "A real valid compiler result must establish the initial publication.");
+		executor->RunNext();
+		context.Expect(publisher.PollAndPublish(SnapshotFor(initial)).published, "The initial program must publish before injected worker failures.");
+		const auto lastGood = publisher.GetPublishedRecord();
+		fault->compilerFailure = true;
+		for (std::size_t round = 0U; round < 2U; ++round) {
+			const auto older = MakeRequest(2U + round * capacity);
+			const auto newer = MakeRequest(3U + round * capacity);
+			context.Expect(publisher.RequestCompile(older) == AnimationStatus::Queued && publisher.RequestCompile(newer) == AnimationStatus::Queued
+				&& publisher.RequestCompile(newer) == AnimationStatus::Rejected, "Each failed batch must fill exactly the configured pending capacity.");
+			executor->RunNextAsTask(); executor->RunNextAsTask();
+			const auto terminal = publisher.PollAndPublish(SnapshotFor(newer));
+			context.Expect(terminal.status == AnimationStatus::InternalError && !terminal.published && publisher.GetPublishedRecord() == lastGood,
+				"Exceptions inside compilation must settle the newest failure and preserve the complete last-good record.");
+			context.Expect(publisher.PollAndPublish(SnapshotFor(newer)).status == AnimationStatus::NotReady,
+				"A terminal failed batch must be consumed once instead of retaining pending capacity.");
+		}
+		context.Expect(fault->compilerCalls == 1U + 2U * capacity && fault->stagingCalls == 1U,
+			"At least twice capacity must fail inside compiler execution, independently of result staging or enqueue.");
+		fault->compilerFailure = false;
+		const auto recovered = MakeRequest(10U);
+		context.Expect(publisher.RequestCompile(recovered) == AnimationStatus::Queued, "Failed compiler jobs must release capacity for a later valid request.");
+		executor->RunNext();
+		context.Expect(publisher.PollAndPublish(SnapshotFor(recovered)).published && publisher.GetPublishedRecord()->programGeneration == 2U,
+			"Successful recovery must publish exactly the next last-good program generation.");
+	});
+
+	registry.Add("Animation.ProgramPublisher.WorkerStagingExceptionsPreserveLastGood", [](TestContext& context) {
+		constexpr std::size_t capacity = 2U;
+		auto executor = std::make_shared<ManualCompileExecutor>();
+		auto fault = std::make_shared<WorkerFaultState>();
+		AnimationProgramPublisher publisher(executor, capacity, FaultDependencies(fault));
+		const auto initial = MakeRequest();
+		context.Expect(publisher.RequestCompile(initial) == AnimationStatus::Queued, "The staging fixture must admit a valid initial graph.");
+		executor->RunNext();
+		context.Expect(publisher.PollAndPublish(SnapshotFor(initial)).published, "The staging fixture must start with an actual last-good program.");
+		const auto lastGood = publisher.GetPublishedRecord();
+		fault->stagingFailure = true;
+		for (std::size_t index = 0U; index < 2U * capacity; ++index) {
+			const auto request = MakeRequest(2U + index);
+			context.Expect(publisher.RequestCompile(request) == AnimationStatus::Queued, "Every prior staging failure must relinquish capacity.");
+			executor->RunNextAsTask();
+			const auto terminal = publisher.PollAndPublish(SnapshotFor(request));
+			context.Expect(terminal.status == AnimationStatus::InternalError && !terminal.published && publisher.GetPublishedRecord() == lastGood,
+				"A result-staging exception after real compilation must settle without replacing last-good output.");
+		}
+		context.Expect(fault->compilerCalls == 1U + 2U * capacity && fault->stagingCalls == 1U + 2U * capacity,
+			"The staging fault must be reached after each real compiler execution, not injected by enqueue.");
+		fault->stagingFailure = false;
+		const auto recovered = MakeRequest(10U);
+		context.Expect(publisher.RequestCompile(recovered) == AnimationStatus::Queued, "Repeated staging failures must not exhaust the owner.");
+		executor->RunNext();
+		context.Expect(publisher.PollAndPublish(SnapshotFor(recovered)).published && publisher.GetPublishedRecord()->programGeneration == 2U,
+			"A valid staged result must recover with no skipped published generation.");
+	});
+
+	registry.Add("Animation.ProgramPublisher.ExceptionalNewestRequestPreventsOlderPublication", [](TestContext& context) {
+		auto executor = std::make_shared<ManualCompileExecutor>();
+		AnimationProgramPublisher::WorkerDependencies dependencies;
+		dependencies.compile = [](const AnimationProgramCompileRequest& request, EvaluationProgram& output) {
+			if (request.sourceGeneration == 3U) throw std::runtime_error("Newest request compiler failed");
+			return CompileAnimationControllerGraph(request.controller, {request.availableControllers}, output);
+		};
+		AnimationProgramPublisher publisher(executor, 2U, std::move(dependencies));
+		const auto initial = MakeRequest();
+		context.Expect(publisher.RequestCompile(initial) == AnimationStatus::Queued, "The ordering fixture must admit its initial program.");
+		executor->RunNext(); context.Expect(publisher.PollAndPublish(SnapshotFor(initial)).published, "The ordering fixture must establish last-good output.");
+		const auto lastGood = publisher.GetPublishedRecord();
+		const auto older = MakeRequest(2U); const auto newest = MakeRequest(3U);
+		context.Expect(publisher.RequestCompile(older) == AnimationStatus::Queued && publisher.RequestCompile(newest) == AnimationStatus::Queued,
+			"Both source generations must be admitted before reversing their physical completion order.");
+		executor->RunLastAsTask();
+		context.Expect(publisher.PollAndPublish(SnapshotFor(newest)).status == AnimationStatus::InternalError && publisher.GetPublishedRecord() == lastGood,
+			"A newest compiler exception must become terminal while retaining last-good output.");
+		executor->RunNext();
+		context.Expect(publisher.PollAndPublish(SnapshotFor(newest)).status == AnimationStatus::StaleHandle && publisher.GetPublishedRecord() == lastGood,
+			"A later physical completion from an older request must not publish through the failed newest request.");
+		const auto recovered = MakeRequest(4U);
+		context.Expect(publisher.RequestCompile(recovered) == AnimationStatus::Queued, "Ordering rejection must also reclaim capacity.");
+		executor->RunNext(); context.Expect(publisher.PollAndPublish(SnapshotFor(recovered)).published, "A newer valid request must recover after inverted exceptional completion.");
+	});
+
+	registry.Add("Animation.ProgramPublisher.CancelledAndRetiredWorkersCannotResurrect", [](TestContext& context) {
+		auto executor = std::make_shared<ManualCompileExecutor>();
+		auto fault = std::make_shared<WorkerFaultState>();
+		AnimationProgramPublisher publisher(executor, 1U, FaultDependencies(fault));
+		const auto cancelled = MakeRequest();
+		context.Expect(publisher.RequestCompile(cancelled) == AnimationStatus::Queued, "A worker must be admitted before cancellation.");
+		publisher.CancelPending();
+		context.Expect(publisher.PollAndPublish(SnapshotFor(cancelled)).status == AnimationStatus::Cancelled,
+			"Cancellation must be logically consumed without waiting for physical execution.");
+		const auto recovered = MakeRequest(2U);
+		context.Expect(publisher.RequestCompile(recovered) == AnimationStatus::Queued, "A logically consumed cancellation must immediately release capacity.");
+		fault->stagingFailure = true; executor->RunNextAsTask(); fault->stagingFailure = false;
+		context.Expect(publisher.PollAndPublish(SnapshotFor(recovered)).status == AnimationStatus::NotReady && !publisher.GetPublishedRecord(),
+			"A late cancelled worker's staging exception cannot resurrect a removed job or publish an old program.");
+		executor->RunNext(); context.Expect(publisher.PollAndPublish(SnapshotFor(recovered)).published, "The replacement request must remain eligible after late cancellation settlement.");
+		const auto lastGood = publisher.GetPublishedRecord();
+		auto lifetime = std::make_shared<int>(1); const std::weak_ptr<int> observedLifetime = lifetime;
+		AnimationProgramPublisher::WorkerDependencies retiredDependencies;
+		retiredDependencies.compile = [lifetime](const AnimationProgramCompileRequest&, EvaluationProgram&) -> AnimationGraphCompilationResult {
+			throw std::runtime_error("Retired owner compiler failure");
+		};
+		{
+			AnimationProgramPublisher retired(executor, 1U, std::move(retiredDependencies));
+			context.Expect(retired.RequestCompile(MakeRequest(3U)) == AnimationStatus::Queued, "The retirement fixture must own an admitted worker.");
+		}
+		lifetime.reset();
+		context.Expect(!observedLifetime.expired(), "The queued worker must retain its immutable dependencies after publisher destruction.");
+		executor->RunNextAsTask();
+		context.Expect(observedLifetime.expired() && publisher.GetPublishedRecord() == lastGood,
+			"Late retired compilation must release owned captures without accessing a destroyed publisher or changing another owner's publication.");
+	});
+
+	registry.Add("Animation.ProgramPublisher.EnqueueFailureSettlesOnce", [](TestContext& context) {
+		auto executor = std::make_shared<ManualCompileExecutor>();
+		auto fault = std::make_shared<WorkerFaultState>();
+		AnimationProgramPublisher publisher(executor, 1U, FaultDependencies(fault));
+		const auto request = MakeRequest(); executor->RejectNext();
+		context.Expect(publisher.RequestCompile(request) == AnimationStatus::Queued && executor->PendingCount() == 0U && fault->compilerCalls == 0U,
+			"An enqueue exception must be distinct from an admitted worker compiler exception.");
+		context.Expect(publisher.PollAndPublish(SnapshotFor(request)).status == AnimationStatus::InternalError
+			&& publisher.PollAndPublish(SnapshotFor(request)).status == AnimationStatus::NotReady,
+			"Enqueue failure must settle and reclaim the request exactly once.");
+		context.Expect(publisher.RequestCompile(request) == AnimationStatus::Queued, "An executor admission failure must leave capacity available for retry.");
+		executor->RunNext(); context.Expect(publisher.PollAndPublish(SnapshotFor(request)).published, "A valid retry must publish after enqueue rejection.");
+	});
+
+	registry.Add("Animation.ProgramPublisher.ThreadPoolWorkerFailuresRecoverCapacity", [](TestContext& context) {
+		constexpr std::size_t capacity = 2U;
+		// This executor is private to the fixture; global engine worker admission
+		// and profiler state remain owned by the surrounding harness.
+		auto pool = ThreadPool::CreateOwned(2U);
+		auto fault = std::make_shared<WorkerFaultState>();
+		AnimationProgramPublisher publisher(CreateThreadPoolAnimationProgramCompileExecutor(*pool), capacity, FaultDependencies(fault));
+		const auto initial = MakeRequest();
+		context.Expect(publisher.RequestCompile(initial) == AnimationStatus::Queued, "The real pool must accept initial immutable compiler work.");
+		context.Expect(WaitForTerminal(publisher, initial).published, "The production compiler must publish through the real ThreadPool adapter.");
+		const auto lastGood = publisher.GetPublishedRecord();
+		fault->compilerFailure = true;
+		for (std::size_t index = 0U; index < 2U * capacity; ++index) {
+			const auto request = MakeRequest(2U + index);
+			context.Expect(publisher.RequestCompile(request) == AnimationStatus::Queued, "A terminal failure must reclaim real worker capacity before the next request.");
+			const auto terminal = WaitForTerminal(publisher, request);
+			context.Expect(terminal.status == AnimationStatus::InternalError && !terminal.published && publisher.GetPublishedRecord() == lastGood,
+				"An exception retained by a discarded Task future must still settle publisher ownership and preserve last-good output.");
+		}
+		context.Expect(fault->compilerCalls == 1U + 2U * capacity, "Actual pool workers must execute at least twice capacity inside-compiler failures.");
+		fault->compilerFailure = false;
+		const auto recovered = MakeRequest(10U);
+		context.Expect(publisher.RequestCompile(recovered) == AnimationStatus::Queued && WaitForTerminal(publisher, recovered).published,
+			"Real worker exceptions must not leave jobs permanently pending or prevent a valid recovery publication.");
+		context.Expect(publisher.GetPublishedRecord()->programGeneration == 2U, "Only successful real-pool publications advance program generation.");
+	});
+
 	registry.Add("Animation.ProgramPublisher.PublishesOnlyCurrentImmutablePrograms", [](TestContext &context) {
 		auto executor = std::make_shared<ManualCompileExecutor>();
 		AnimationProgramPublisher publisher(executor, 2U);

@@ -4340,6 +4340,44 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata, const std::share
 	}
 }
 
+bool AssetDatabase::UnregisterProvisionalTerrainCopy(const std::filesystem::path& sourcePath,
+	const TerraEngine::UUID& expectedId, std::string& outError) {
+	// All identity checks precede any mutation. A reused path or UUID belongs to
+	// its new owner and must survive cleanup of an older failed operation.
+	const auto path = std::filesystem::absolute(sourcePath).lexically_normal();
+	const auto relative = path.lexically_relative(std::filesystem::absolute(assetRoot).lexically_normal());
+	if(expectedId == TerraEngine::EMPTY_UUID || relative.empty() || relative.is_absolute()
+		|| *relative.begin() == ".." || path.extension() != ".teterrain") {
+		outError = "Terrain copy cleanup path or identity is outside its asset ownership.";
+		return false;
+	}
+	const auto found = assets.find(path);
+	if(found != assets.end() && (found->second.guid != expectedId
+		|| found->second.importerName != "TerrainImporter")) {
+		outError = "Terrain copy cleanup found a different registration at the reserved path.";
+		return false;
+	}
+	for(const auto& [registeredPath, metadata] : assets) {
+		if(metadata.guid == expectedId && registeredPath.lexically_normal() != path) {
+			outError = "Terrain copy cleanup identity has another registered owner.";
+			return false;
+		}
+	}
+	ResourceManager& resources = ResourceManager::Instance();
+	const auto resourcePath = resources.GetRegisteredAssetPath(expectedId, AssetType::Terrain);
+	if(!resourcePath.empty() && std::filesystem::absolute(resourcePath).lexically_normal() != path) {
+		outError = "Terrain copy cleanup resource path belongs to another owner.";
+		return false;
+	}
+	// Resource removal and metadata removal are idempotent. File cleanup happens
+	// later in the service, which retains its obligation if any step throws.
+	if(!resourcePath.empty()) resources.DeleteResource(expectedId, AssetType::Terrain);
+	if(found != assets.end()) assets.erase(found);
+	RequestAssetIndexSave();
+	outError.clear();
+	return true;
+}
+
 // AssetDatabase::RemoveAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 	const auto absPath = std::filesystem::absolute(sourcePath);

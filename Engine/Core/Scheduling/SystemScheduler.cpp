@@ -363,6 +363,15 @@ namespace TerraEngine::Scheduling {
 			{ "EditorState", "Native and managed editor state.", "" },
 			{ "EditorExportOperationState", "Protected project-scoped export admission, cancellation, final adoption and captured launch.", "Owner drains exports before project/provider/pool teardown." },
 			{ "EditorExportWorkerResults", "Coherent copied export progress and terminal results from retained worker tasks.", "Workers own immutable requests and subprocess trees; owner adoption is protected." },
+			// Terrain copy declarations must be registered before validating the
+			// editor plan. Workers own prepared files; only PostFrame publishes
+			// registration and settles scene receipts at the existing boundary.
+			{ "TerrainCopyWorkerResults", "Retained terrain copy preparation outcomes.", "Workers publish copied outcomes; protected editor polling adopts them." },
+			{ "TerrainDurableRootMetadata", "Captured saved terrain roots and descriptor identities.", "Worker preparation reads captured values; protected publication revalidates the source." },
+			{ "EditorTransactionReceipts", "Terminal scene transaction results retained by the sole editor consumer.", "Terrain ownership settles before fallible history publication." },
+			{ "TerrainCopyOperationState", "Protected terrain copy admission, cancellation, and recovery state.", "Project retirement drains workers before releasing owners." },
+			{ "TerrainCopyAssetRegistration", "Protected provisional terrain asset identity and catalog registration.", "Typed scene rebinding commits before registration becomes final." },
+			{ "TerrainCopyPrivateOutputs", "Operation-owned terrain staging and provisional destination files.", "Workers prepare private output; protected cleanup checks ownership before removal." },
 			{ "ImGuiDrawData", "Final CPU draw data prepared for protected backend recording.", "" },
 			{ "EditorUiPresentation", "Protected native editor UI acquire, submit, and present state.", "" },
 			{ "ViewportTextureRegistry", "Scene and Game descriptor registration and retirement ownership.", "" },

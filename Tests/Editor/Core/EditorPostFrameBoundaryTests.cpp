@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "Editor/TerraEngine-Editor/Windows/SceneViewMarkerPipeline.h"
+#include "Editor/TerraEngine-Editor/Core/EditorSchedulerDeclaration.h"
 
 #include <filesystem>
 #include <fstream>
@@ -40,10 +41,12 @@ namespace TerraEngine::EditorTests
 				std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / path);
 				std::ostringstream source; source << input.rdbuf(); return source.str();
 			};
-			const std::string editor = read("Editor/TerraEngine-Editor/Core/EditorSystem.cpp");
 			const std::string engine = read("Engine/Core/MainEngine.cpp");
-			context.Expect(editor.find("declaration.phase = \"PostFrame\"") != std::string::npos, "EditorSystem must declare PostFrame.");
-			context.Expect(editor.find("HardBoundaryClassification::Protected") != std::string::npos, "ImGui/Vulkan work must remain protected.");
+			// Execute the shared production declaration instead of relying on its
+			// placement in the native editor implementation file.
+			const auto declaration = TerraEngine::Editor::MakeEditorSchedulerDeclaration();
+			context.Expect(declaration.phase == "PostFrame", "EditorSystem must declare PostFrame.");
+			context.Expect(declaration.boundaryClassification == TerraEngine::Scheduling::HardBoundaryClassification::Protected, "ImGui/Vulkan work must remain protected.");
 			context.Expect(engine.find("systemScheduler.RegisterSystem(*editorSystem") != std::string::npos, "The scheduler must own editor frame execution.");
 			context.Expect(engine.find("editorSystem->Update(deltaTime)") == std::string::npos, "Manual post-scheduler editor execution must be removed.");
 			// An armed capture must use the runtime lifecycle state at the engine

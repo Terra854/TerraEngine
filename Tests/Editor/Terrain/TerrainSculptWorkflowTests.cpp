@@ -3,12 +3,14 @@
 #include "TestHarness.h"
 
 #include "Editor/TerraEngine-Editor/Terrain/TerrainAuthoringSession.h"
+#include "Editor/TerraEngine-Editor/Terrain/TerrainCreationService.h"
 #include "Editor/TerraEngine-Editor/Terrain/TerrainPicking.h"
 #include "Editor/TerraEngine-Editor/Windows/TerrainWindow.h"
 
 #include "Terrain/TerrainPublication.h"
 
 #include <filesystem>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <set>
@@ -20,6 +22,77 @@ namespace TerraEngine::EditorTests
 {
 	void RegisterTerrainSculptWorkflowTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.TerrainSculpt.FlatCreationMaterializesOnlyTouchedAreas", [](TestContext& context) {
+			using namespace TerraEngine::Terrain;
+			// Start with the actual creation/open path: a flat asset deliberately has
+			// no directory entries until its first edit, rather than imported blobs.
+			const auto directory = std::filesystem::temp_directory_path()
+				/ ("TerrainFlatSculpt-" + TerraEngine::ToHexString(TerraEngine::GenerateUUID()));
+			struct Cleanup { std::filesystem::path path; ~Cleanup() { std::error_code error; std::filesystem::remove_all(path, error); } } cleanup{directory};
+			const auto descriptorPath = directory / "Flat.teterrain";
+			TerraEngine::AssetPipeline::TerrainImportRequest request;
+			request.assetId = TerraEngine::GenerateUUID(); request.flatWidth = 512u; request.flatDepth = 512u;
+			TerraEngine::Editor::Terrain::TerrainCreationService service;
+			const auto created = service.CreateOrImport(request, descriptorPath);
+			const auto opened = service.OpenExisting(descriptorPath);
+			context.Expect(created.succeeded && opened.succeeded && opened.store,
+				"Real flat creation and reopen must supply an authoring store.");
+			if (!opened.store) return;
+			auto& store = *opened.store;
+			const auto original = store.CaptureRoot();
+			context.Expect(original.root->directoryShards.empty(), "Unedited flat terrain must remain implicit.");
+			TerraEngine::Editor::Terrain::TerrainAuthoringSession session; std::string error;
+			context.Expect(session.Begin(original, error), "Flat defaults must provide valid authoring observations.");
+			session.SetResidentAreas({{0, 0}, {1, 1}});
+			std::vector<TerrainPatch> patches;
+			for (const TerrainAreaCoordinate coordinate : {TerrainAreaCoordinate{0, 0}, TerrainAreaCoordinate{1, 1}})
+			{
+				std::vector<std::int32_t> heights(kTerrainAreaSampleCount, 250);
+				context.Expect(session.AddHeightDelta(coordinate, heights, error), "Each implicit area must accept the detached stroke.");
+				std::vector<std::uint8_t> bytes(heights.size() * sizeof(std::int32_t));
+				std::memcpy(bytes.data(), heights.data(), bytes.size());
+				const auto hash = HashTerrainBytes(bytes);
+				context.Expect(store.Blobs().PutVerified(hash, bytes), "Prepared heights must enter the immutable blob store.");
+				TerrainPatch patch; patch.kind = TerrainPatchKind::ReplaceHeight; patch.preparedBlobHash = hash;
+				patch.replacement = store.ResolveDescriptorOrImplicit(*original.root, coordinate);
+				patch.replacement.editGeneration++; patch.replacement.authoredContentHash = hash;
+				patch.replacement.channels.heightHash = hash; patch.replacement.minHeightMm = 250; patch.replacement.maxHeightMm = 250;
+				patches.push_back(std::move(patch));
+			}
+			const auto transaction = session.BuildCommitRequest(std::move(patches), "First flat stroke", error);
+			context.Expect(transaction.has_value(), "The actual detached session must produce one grouped transaction.");
+			if (!transaction) return;
+			TerrainMutationQueue queue; TerrainPublication publication(store);
+			context.Expect(queue.Enqueue(*transaction).Succeeded() && store.CaptureRoot().root == original.root,
+				"Queued sculpting must not expose any new directory or height before the protected boundary.");
+			const auto receipts = publication.PublishQueued(queue);
+			context.Expect(receipts.size() == 1u && receipts[0].outcome == TerrainEditOutcome::Committed,
+				"The first grouped flat stroke must commit rather than reject missing directory shards.");
+			if (receipts.empty() || receipts[0].outcome != TerrainEditOutcome::Committed) return;
+			const auto committed = store.CaptureRoot();
+			context.Expect(committed.root->directoryShards.size() == 2u
+				&& store.FindDescriptor(*committed.root, {0, 0}) && store.FindDescriptor(*committed.root, {1, 1})
+				&& !store.FindDescriptor(*committed.root, {1, 0}) && original.root->directoryShards.empty(),
+				"Only touched areas must materialize atomically; untouched and captured roots stay implicit.");
+			// Stale retries and mixed valid/outside candidates cannot partially publish.
+			context.Expect(publication.Publish(*transaction).outcome == TerrainEditOutcome::Rejected
+				&& store.CaptureRoot().root == committed.root, "A stale first stroke must reject without a root change.");
+			auto valid = store.ResolveDescriptorOrImplicit(*committed.root, {1, 0});
+			auto outside = valid; outside.coordinate = {2, 0};
+			std::shared_ptr<const TerrainAssetRoot> rejected;
+			context.Expect(!store.BuildCandidateRoot(*committed.root, {valid, outside}, {}, rejected).Succeeded()
+				&& !rejected && store.CaptureRoot().root == committed.root,
+				"An outside area must reject the whole detached candidate, including preceding valid materialization.");
+			const auto saved = store.PersistAtomically({std::filesystem::path(descriptorPath.string() + ".data")});
+			context.Expect(saved.Succeeded(), "The first sculpt must save canonical durable height envelopes.");
+			const auto reopened = service.OpenExisting(descriptorPath);
+			context.Expect(reopened.succeeded && reopened.store, "Sculpted flat terrain must reopen normally.");
+			if (!reopened.store) return;
+			const auto loaded = reopened.store->LoadHeightAreaLazy(reopened.store->CaptureRoot(), {1, 1});
+			context.Expect(loaded.Succeeded() && loaded.decodedHeight && reopened.heightfield.heightsMm.front() == 250
+				&& reopened.heightfield.heightsMm[256u] == 0,
+				"Saved touched heights must survive reopening while untouched areas retain their flat default.");
+		});
 		registry.Add("Editor.TerrainSculpt.DetachedPreviewRejectsUnavailableArea", [](TestContext& context) {
 			auto root = std::make_shared<TerraEngine::Terrain::TerrainAssetRoot>(); root->assetUuid = TerraEngine::GenerateUUID(); root->publicationGeneration = 1U; root->rootContentHash = {1U, 2U}; root->layerStackGeneration = 1U;
 			TerraEngine::Editor::Terrain::TerrainAuthoringSession session; std::string error;

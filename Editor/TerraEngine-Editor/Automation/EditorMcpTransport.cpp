@@ -153,22 +153,37 @@ namespace TerraEngine::Editor::Automation
 			Present
 		};
 
-		struct ContentLengthParseResult
+		struct HttpHeaderParseResult
 		{
-			ContentLengthStatus status = ContentLengthStatus::Missing;
-			std::size_t value = 0;
+			ContentLengthStatus lengthStatus = ContentLengthStatus::Missing;
+			std::size_t contentLength = 0;
+			std::string_view host;
+			std::string_view origin;
+			bool hasHost = false;
+			bool hasOrigin = false;
+			bool malformed = false;
 		};
 
-		ContentLengthParseResult ParseContentLength(std::string_view headers)
+		bool HeaderNameEquals(std::string_view name, std::string_view expected)
 		{
-			// Parse individual header lines instead of searching a substring. This
-			// rejects duplicate or malformed lengths, which otherwise let different
-			// HTTP parsers disagree about where this request ends.
-			ContentLengthParseResult result;
+			return name.size() == expected.size() && std::equal(name.begin(), name.end(), expected.begin(),
+				[](unsigned char left, unsigned char right) {
+					// HTTP names are ASCII tokens; locale must not change authority matching.
+					return (left >= 'A' && left <= 'Z' ? left + ('a' - 'A') : left) == right;
+				});
+		}
+
+		HttpHeaderParseResult ParseHttpHeaders(std::string_view headers)
+		{
+			// The caller bounds the entire header block before this allocation-free
+			// pass. Reject ambiguous syntax for every field so intermediaries cannot
+			// disagree with our Host, Origin, or Content-Length interpretation.
+			HttpHeaderParseResult result;
 			std::size_t lineStart = headers.find("\r\n");
 			if (lineStart == std::string_view::npos)
 			{
-				return {ContentLengthStatus::Malformed, 0};
+				result.malformed = true;
+				return result;
 			}
 			lineStart += 2;
 			while (lineStart < headers.size())
@@ -176,46 +191,66 @@ namespace TerraEngine::Editor::Automation
 				const std::size_t lineEnd = headers.find("\r\n", lineStart);
 				const std::string_view line = headers.substr(lineStart,
 					lineEnd == std::string_view::npos ? std::string_view::npos : lineEnd - lineStart);
-				if (line.empty())
-				{
-					break;
-				}
 				const std::size_t separator = line.find(':');
-				if (separator == std::string_view::npos)
+				if (line.empty() || separator == 0 || separator == std::string_view::npos)
 				{
-					return {ContentLengthStatus::Malformed, 0};
+					result.malformed = true;
+					return result;
 				}
-				std::string name(line.substr(0, separator));
-				std::transform(name.begin(), name.end(), name.begin(), [](unsigned char character) {
-					return static_cast<char>(std::tolower(character));
-				});
-				if (name == "content-length")
+				const std::string_view name = line.substr(0, separator);
+				for (unsigned char character : name)
 				{
-					if (result.status == ContentLengthStatus::Present)
+					const bool token = (character >= 'a' && character <= 'z')
+						|| (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9')
+						|| std::string_view("!#$%&'*+-.^_`|~").find(static_cast<char>(character)) != std::string_view::npos;
+					if (!token)
 					{
-						return {ContentLengthStatus::Malformed, 0};
+						// Leading whitespace is obsolete folding, not a fresh header.
+						result.malformed = true;
+						return result;
 					}
-					std::string_view value = line.substr(separator + 1);
-					while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
+				}
+				std::string_view value = line.substr(separator + 1);
+				for (unsigned char character : value)
+				{
+					if ((character < 0x20 && character != '\t') || character == 0x7f)
 					{
-						value.remove_prefix(1);
+						result.malformed = true;
+						return result;
 					}
-					while (!value.empty() && (value.back() == ' ' || value.back() == '\t'))
+				}
+				while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
+				while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) value.remove_suffix(1);
+				if (HeaderNameEquals(name, "host"))
+				{
+					if (result.hasHost) { result.malformed = true; return result; }
+					result.hasHost = true;
+					result.host = value;
+				}
+				else if (HeaderNameEquals(name, "origin"))
+				{
+					if (result.hasOrigin) { result.malformed = true; return result; }
+					result.hasOrigin = true;
+					result.origin = value;
+				}
+				else if (HeaderNameEquals(name, "content-length"))
+				{
+					if (result.lengthStatus != ContentLengthStatus::Missing)
 					{
-						value.remove_suffix(1);
+						result.lengthStatus = ContentLengthStatus::Malformed;
+						return result;
 					}
 					std::size_t parsedLength = 0;
 					const auto [parsedEnd, error] = std::from_chars(value.data(), value.data() + value.size(), parsedLength);
 					if (value.empty() || error != std::errc{} || parsedEnd != value.data() + value.size())
 					{
-						return {ContentLengthStatus::Malformed, 0};
+						result.lengthStatus = ContentLengthStatus::Malformed;
+						return result;
 					}
-					result = {ContentLengthStatus::Present, parsedLength};
+					result.lengthStatus = ContentLengthStatus::Present;
+					result.contentLength = parsedLength;
 				}
-				if (lineEnd == std::string_view::npos)
-				{
-					break;
-				}
+				if (lineEnd == std::string_view::npos) break;
 				lineStart = lineEnd + 2;
 			}
 			return result;
@@ -588,6 +623,12 @@ namespace TerraEngine::Editor::Automation
 		return listenPort;
 	}
 
+	std::size_t EditorMcpTransport::GetActiveClientCount() const
+	{
+		std::lock_guard lock(socketMutex);
+		return activeClientSockets.size();
+	}
+
 	std::string EditorMcpTransport::GetEndpoint() const
 	{
 		const std::uint16_t port = GetListenPort();
@@ -696,6 +737,7 @@ namespace TerraEngine::Editor::Automation
 			}
 
 			bool published = false;
+			std::uint16_t acceptedPort = 0;
 			try
 			{
 				// Publish before checking stopRequested. StopListening can now
@@ -703,6 +745,8 @@ namespace TerraEngine::Editor::Automation
 				// already requested, this thread observes it and owns the close.
 				std::lock_guard lock(socketMutex);
 				activeClientSockets.push_back(static_cast<std::intptr_t>(client));
+				// Freeze this listener generation's authority before publishing its worker.
+				acceptedPort = listenPort;
 				published = true;
 			}
 			catch (...)
@@ -745,12 +789,12 @@ namespace TerraEngine::Editor::Automation
 				try
 				{
 					workerPointer->thread = std::thread(
-						[this, client, workerPointer, peerAddress = std::move(peerAddress)]() mutable {
+						[this, client, acceptedPort, workerPointer, peerAddress = std::move(peerAddress)]() mutable {
 							ScopeExitGuard cleanup([this, client, workerPointer]() {
 								ReleaseAcceptedClient(static_cast<std::intptr_t>(client));
 								workerPointer->completed.store(true, std::memory_order_release);
 							});
-							HandleAcceptedClient(static_cast<std::intptr_t>(client), std::move(peerAddress), *workerPointer);
+							HandleAcceptedClient(static_cast<std::intptr_t>(client), std::move(peerAddress), acceptedPort, *workerPointer);
 						});
 				}
 				catch (...)
@@ -781,7 +825,7 @@ namespace TerraEngine::Editor::Automation
 		ReapCompletedClientWorkers();
 	}
 
-	void EditorMcpTransport::HandleAcceptedClient(std::intptr_t clientHandle, std::string peerAddress, ClientWorker& worker)
+	void EditorMcpTransport::HandleAcceptedClient(std::intptr_t clientHandle, std::string peerAddress, std::uint16_t acceptedPort, ClientWorker& worker)
 	{
 		const SocketHandle client = static_cast<SocketHandle>(clientHandle);
 		bool peerAccepted = false;
@@ -794,13 +838,15 @@ namespace TerraEngine::Editor::Automation
 		});
 		try
 		{
-			if (!AcceptPeer(peerAddress, "http-json-rpc"))
+			// Socket admission is read-only until authority and framing validate.
+			if (!IsLocalAddress(peerAddress) || !bridge.IsEnabled())
 			{
 				SendAll(client, BuildHttpError(403, "Only enabled local clients may use the editor MCP bridge."));
 				return;
 			}
-			peerAccepted = true;
 
+			const std::string expectedAuthority = "127.0.0.1:" + std::to_string(acceptedPort);
+			const std::string expectedOrigin = "http://" + expectedAuthority;
 			std::string request;
 			std::array<char, 4096> buffer{};
 			std::size_t headerEnd = std::string::npos;
@@ -852,24 +898,39 @@ namespace TerraEngine::Editor::Automation
 				}
 				if (!parsedHeaders)
 				{
-					const ContentLengthParseResult parsedLength = ParseContentLength(std::string_view(request).substr(0, headerEnd));
-					if (parsedLength.status == ContentLengthStatus::Missing)
+					const HttpHeaderParseResult headers = ParseHttpHeaders(std::string_view(request).substr(0, headerEnd));
+					if (headers.malformed)
+					{
+						disconnectReason = "HTTP headers malformed";
+						SendAll(client, BuildHttpError(400, "HTTP request headers are malformed."));
+						return;
+					}
+					if (headers.lengthStatus == ContentLengthStatus::Missing)
 					{
 						disconnectReason = "HTTP Content-Length missing";
 						SendAll(client, BuildHttpError(411, "HTTP Content-Length is required."));
 						return;
 					}
-					if (parsedLength.status == ContentLengthStatus::Malformed)
+					if (headers.lengthStatus == ContentLengthStatus::Malformed)
 					{
 						disconnectReason = "HTTP Content-Length malformed";
 						SendAll(client, BuildHttpError(400, "HTTP Content-Length is malformed."));
 						return;
 					}
-					contentLength = parsedLength.value;
+					contentLength = headers.contentLength;
 					if (contentLength > kMaxHttpBodyBytes)
 					{
 						disconnectReason = "HTTP body exceeded limit";
 						SendAll(client, BuildHttpError(413, "HTTP request body exceeds the local bridge limit."));
+						return;
+					}
+					// Literal advertised authority is intentional: URI normalization,
+					// aliases, omitted ports and lists are not part of this browser policy.
+					if (acceptedPort == 0 || !headers.hasHost || headers.host != expectedAuthority
+						|| (headers.hasOrigin && headers.origin != expectedOrigin))
+					{
+						disconnectReason = "HTTP authority rejected";
+						SendAll(client, BuildHttpError(403, "HTTP Host or Origin does not match the local MCP authority."));
 						return;
 					}
 					parsedHeaders = true;
@@ -892,6 +953,21 @@ namespace TerraEngine::Editor::Automation
 				return;
 			}
 
+			// A truncated body is never a complete MCP request, even if the peer
+			// closes cleanly. Session attachment and JSON dispatch happen only once
+			// the full framed request has arrived and admission is rechecked.
+			if (!parsedHeaders || request.size() < headerEnd + 4 + contentLength)
+			{
+				disconnectReason = "HTTP body incomplete";
+				SendAll(client, BuildHttpError(400, "HTTP request body is incomplete."));
+				return;
+			}
+			if (!AcceptPeer(peerAddress, "http-json-rpc"))
+			{
+				SendAll(client, BuildHttpError(403, "Only enabled local clients may use the editor MCP bridge."));
+				return;
+			}
+			peerAccepted = true;
 			const std::string body = request.substr(headerEnd + 4, contentLength);
 			const nlohmann::json message = nlohmann::json::parse(body);
 			const bool cancellationNotification = message.is_object()

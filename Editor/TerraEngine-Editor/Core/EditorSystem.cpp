@@ -3,6 +3,7 @@
 // Implements the editor's core logic, including ImGui initialization, workspace layout management, and event callback chaining. It manages the loading of the managed editor assembly and provides the bridge between native engine events and C# UI windows.
 
 #include "EditorSystem.h"
+#include "EditorSchedulerDeclaration.h"
 #include "CheckedImGuiVulkanBridge.h"
 #include "ProjectHubSubsystem.h"
 #include "MainEditorSubsystem.h"
@@ -731,12 +732,11 @@ void EditorSystem::Initialize() {
 		if (g_EditorSystems.count(w)) {
 			EditorSystem* self = g_EditorSystems[w];
 			if (self->mainEditor) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (SceneManager::Instance().IsActiveSceneDirty() || AssetDatabase::Instance().IsCompiling()) {
-					glfwSetWindowShouldClose(w, GLFW_FALSE); // Stop immediate closure
-					self->mainEditor->RequestExit();
-					return;
-				}
+				// Even a clean scene can own pending receipts or cleanup. Window
+				// polling captures intent only; protected PostFrame performs teardown.
+				glfwSetWindowShouldClose(w, GLFW_FALSE);
+				self->nativeCloseRequested = true;
+				return;
 			}
 		}
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -878,6 +878,12 @@ void EditorSystem::Initialize() {
 // EditorSystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorSystem::Update(float deltaTime) {
 	if (!initialized) return;
+	if(nativeCloseRequested && mainEditor) {
+		// Both callbacks and this consumer run on the protected main thread.
+		// No worker touches the intent or releases project/copy owners.
+		nativeCloseRequested = false;
+		mainEditor->RequestExit();
+	}
 	// Editor UI runs as a protected PostFrame system, but it must not appear in
 	// the CPU Engine sample tree. This outer boundary measures the complete editor
 	// interval separately and suppresses every nested editor-only profiler marker.
@@ -1297,38 +1303,7 @@ std::string EditorSystem::SystemName() {
 }
 
 TerraEngine::Scheduling::SystemDeclaration EditorSystem::SchedulerDeclaration() {
-	TerraEngine::Scheduling::SystemDeclaration declaration;
-	declaration.name = SystemName();
-	declaration.phase = "PostFrame";
-	declaration.reads = {
-		"RendererOutput", "PresentationState", "WindowSnapshot", "InputSnapshot",
-		"ProjectState", "EditorState", "ImGuiDrawData", "EditorAutomationQueue",
-		"EditorAutomationSession", "EditorExportWorkerResults", "AnimationRuntimeState",
-		"LocomotionAuthority", "LocomotionObservations", "LocomotionReceipts",
-		"PhysicsCharacterMotionLeases", "LocomotionAnimatorBindings",
-		"Resources", "SceneGraph", "ObjectManager", "AnimationRagdollMappings"
-	};
-	declaration.writes = {
-		"EditorUiPresentation", "ViewportTextureRegistry", "EditorSubmissionCompletion",
-		"EditorDiagnostics", "EditorAutomationState", "EditorAutomationSession",
-		"SceneMutationQueue", "EditorProfilerTiming", "EditorProfilerWorkerCompletions",
-		"EditorProfilerHealthPublication", "EditorExportOperationState",
-		// Editor commands only queue intent; Play/project lifecycle also retires
-		// leases and root consumers before Physics or authored state is destroyed.
-		"LocomotionCommands", "LocomotionAuthority", "LocomotionObservations", "LocomotionReceipts",
-		"PhysicsWorld", "PhysicsCharacterMotionLeases", "LocomotionAnimatorBindings",
-		"AnimationConsumerMasks", "RootMotionIntervals", "RootMotionResults"
-	};
-	declaration.mainThread = true;
-	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
-	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::Protected;
-	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Automation schema validation and immutable request preparation may run on workers; immutable export requests and owned subprocesses, reference-impact scans, log filtering, editor subsystem snapshots, and profiler workers prepare owned results without touching live scene, scripting assemblies or ImGui.";
-	declaration.protectedCommit = "Export admission, coherent result adoption and captured launch, immutable animation recording capture, profiler completion drain and health publication, prepared automation request commit at post_editor_automation_flush, SceneMutationQueue publication, project and Play Mode transitions, ImGui frame mutation, checked Vulkan recording and presentation.";
-	declaration.protectedReason = declaration.protectedCommit;
-	declaration.profilingLabel = declaration.name;
-	declaration.usesDefaultMetadata = false;
-	return declaration;
+	return TerraEngine::Editor::MakeEditorSchedulerDeclaration();
 }
 
 std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> EditorSystem::DeclareFrameWorkloads(float deltaTime)

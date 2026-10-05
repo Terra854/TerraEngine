@@ -555,15 +555,33 @@ namespace TerraEngine::Terrain
 		auto candidate = std::make_shared<TerrainAssetRoot>(base); candidate->publicationGeneration = base.publicationGeneration + 1u;
 		if (candidate->persistedRootGeneration == 0u) candidate->persistedRootGeneration = 1u;
 		if (candidate->publicationGeneration == 0u) return {TerrainResultCode::Overflow, "Terrain root generation overflowed."};
+		const auto authoredAreas = TerrainAreasForSamples(base.authoredBounds);
 		for (const TerrainAreaDescriptor& replacement : replacements)
 		{
+			// Bounds authorize implicit default areas too. Reject before constructing
+			// a shard so a mixed valid/outside batch cannot escape its authored extent.
+			if (!authoredAreas || !authoredAreas->Contains(replacement.coordinate))
+				return {TerrainResultCode::OutOfBounds, "Terrain patch lies outside the authored extent."};
 			bool replaced = false;
 			for (TerrainDirectoryShard& shard : candidate->directoryShards)
 			{
 				if (!shard.areaBounds.Contains({replacement.coordinate.x, replacement.coordinate.z})) continue;
 				shard.descriptors[replacement.coordinate] = replacement; replaced = true; break;
 			}
-			if (!replaced) return {TerrainResultCode::OutOfBounds, "Terrain patch lies outside a declared directory shard."};
+			if (!replaced)
+			{
+				// Flat creation and expansion intentionally leave default areas sparse.
+				// Materialize only this touched area in the detached candidate; all patches
+				// become visible together at PublishCandidate's protected root swap.
+				if (replacement.coordinate.x == (std::numeric_limits<std::int64_t>::max)()
+					|| replacement.coordinate.z == (std::numeric_limits<std::int64_t>::max)())
+					return {TerrainResultCode::Overflow, "Terrain patch cannot form a bounded directory shard."};
+				TerrainDirectoryShard shard{};
+				shard.areaBounds = {replacement.coordinate.x, replacement.coordinate.z,
+					replacement.coordinate.x + 1, replacement.coordinate.z + 1};
+				shard.descriptors.emplace(replacement.coordinate, replacement);
+				candidate->directoryShards.push_back(std::move(shard));
+			}
 		}
 		if (auto validation = ValidateRoot(*candidate); !validation.Succeeded()) return validation;
 		RefreshDirectoryIdentities(*candidate);

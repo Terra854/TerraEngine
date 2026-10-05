@@ -1,6 +1,4 @@
-// PackReader.cpp — TEPAK archive reader implementation
-//
-// Provides the high-level implementation for the PackReader API, allowing for metadata inspection and random-access reading of archived content. it manages the lifecycle of an opened pack, including path resolution and range-based data reconstruction.
+// PackReader.cpp — Contains the Pack Reader read-side state, parsing helpers, and data extraction flow implementation for runtime TEPAK metadata parsing, extent reads, and mounted archive lookup flow.
 
 #include "TEPAK/PackReader.h"
 
@@ -10,6 +8,11 @@
 #include "Utilities/Tepak/BinaryIO.h"
 
 #include <fstream>
+#include <array>
+#include <memory>
+#include "xxhash.h"
+#include <limits>
+#include <unordered_set>
 #include <stdexcept>
 
 namespace {
@@ -19,7 +22,7 @@ std::string ReadPathFromTable(const std::string& pathTable, std::uint32_t offset
 	// All paths live in one shared string table, so every record must stay
 	// inside that table's bounds before the path can be reconstructed.
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (static_cast<std::size_t>(offset + length) > pathTable.size()) {
+	if (offset > pathTable.size() || length > pathTable.size() - offset) {
 		throw std::runtime_error(std::string(recordName) + " points outside the path table.");
 	}
 	return pathTable.substr(offset, length);
@@ -69,6 +72,52 @@ OpenedPack OpenPackFile(const std::filesystem::path& packPath) {
 		throw std::runtime_error("The pack metadata offsets are not ordered correctly.");
 	}
 
+	// Reject impossible sections before trusting counts for allocation or iteration.
+	// Each interval is checked by subtraction, so hostile additions cannot wrap.
+	const auto fits = [](std::uint64_t offset, std::uint64_t length, std::uint64_t end) {
+		return offset <= end && length <= end - offset;
+	};
+	const auto tableFits = [&](std::uint64_t offset, std::uint64_t count, std::uint64_t stride, std::uint64_t end) {
+		return offset <= end && count <= (end - offset) / stride;
+	};
+	const auto supportedSize = [](std::uint64_t size) {
+		return size <= static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()) &&
+			size <= static_cast<std::uint64_t>(std::numeric_limits<std::ptrdiff_t>::max()) &&
+			size <= static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max());
+	};
+	if(header.archiveSize < sizeof(header) || header.archiveSize > archiveSize || !supportedSize(header.archiveSize) ||
+		header.directoryTableOffset < sizeof(header) || header.pathTableOffset > header.dictionaryOffset ||
+		header.dictionaryOffset > header.dataRegionOffset || header.dataRegionOffset > header.archiveSize ||
+		!tableFits(header.directoryTableOffset, header.directoryCount, sizeof(model::BinaryDirectoryRecord), header.fileTableOffset) ||
+		!tableFits(header.fileTableOffset, header.fileCount, sizeof(model::BinaryEntryRecord), header.extentTableOffset) ||
+		!tableFits(header.extentTableOffset, header.extentCount, sizeof(model::BinaryExtentRecord), header.pathTableOffset) ||
+		!fits(header.pathTableOffset, header.pathTableBytes, header.dictionaryOffset) ||
+		!fits(header.dictionaryOffset, header.dictionarySize, header.dataRegionOffset) ||
+		header.directoryCount == 0 || header.rootDirectoryId != 0) {
+		throw std::runtime_error("The pack metadata sections exceed their physical intervals.");
+	}
+
+	// Hash the exact serialized table bytes, including record-internal padding,
+	// but excluding header, alignment padding, dictionary, and extent payloads.
+	std::unique_ptr<XXH3_state_t,decltype(&XXH3_freeState)> metadataState(XXH3_createState(),&XXH3_freeState);
+	if(!metadataState || XXH3_64bits_reset(metadataState.get())!=XXH_OK) throw std::runtime_error("Could not initialize archive metadata hash.");
+	std::array<std::uint8_t,64*1024> chunk{};
+	const auto hashSection=[&](std::uint64_t offset,std::uint64_t length) {
+		stream.seekg(static_cast<std::streamoff>(offset),std::ios::beg);
+		while(length!=0) {
+			const auto count=static_cast<std::size_t>(std::min<std::uint64_t>(length,chunk.size()));
+			stream.read(reinterpret_cast<char*>(chunk.data()),static_cast<std::streamsize>(count));
+			if(!stream || XXH3_64bits_update(metadataState.get(),chunk.data(),count)!=XXH_OK) throw std::runtime_error("Archive metadata bytes could not be verified.");
+			length-=count;
+		}
+	};
+	hashSection(header.directoryTableOffset,static_cast<std::uint64_t>(header.directoryCount)*sizeof(model::BinaryDirectoryRecord));
+	hashSection(header.fileTableOffset,static_cast<std::uint64_t>(header.fileCount)*sizeof(model::BinaryEntryRecord));
+	hashSection(header.extentTableOffset,static_cast<std::uint64_t>(header.extentCount)*sizeof(model::BinaryExtentRecord));
+	hashSection(header.pathTableOffset,header.pathTableBytes);
+	if(XXH3_64bits_digest(metadataState.get())!=header.metadataHash) throw std::runtime_error("Archive metadata hash mismatch.");
+	if((header.flags & ~1U)!=0 || HasDictionaryFlag(header.flags)!=(header.dictionarySize!=0)) throw std::runtime_error("Archive dictionary declarations disagree.");
+
 	// Copy the fixed header into the public descriptor first so later code can
 	// reason about one normalized in-memory representation of the archive.
 	openedPack.descriptor.archiveIdentifier = header.archiveIdentifier;
@@ -99,6 +148,7 @@ OpenedPack OpenPackFile(const std::filesystem::path& packPath) {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (header.pathTableBytes > 0U) {
 		stream.read(openedPack.pathTable.data(), static_cast<std::streamsize>(header.pathTableBytes));
+		if(!stream) throw std::runtime_error("The pack path table is truncated.");
 	}
 
 	stream.seekg(static_cast<std::streamoff>(header.dictionaryOffset), std::ios::beg);
@@ -106,8 +156,11 @@ OpenedPack OpenPackFile(const std::filesystem::path& packPath) {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (header.dictionarySize > 0U) {
 		stream.read(reinterpret_cast<char*>(openedPack.dictionaryBytes.data()), static_cast<std::streamsize>(header.dictionarySize));
+		if(!stream) throw std::runtime_error("The pack dictionary is truncated.");
 	}
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	const codec::CodecProvider dictionaryHasher;
+	if(dictionaryHasher.HashBytes(openedPack.dictionaryBytes)!=header.dictionaryHash) throw std::runtime_error("Archive dictionary hash mismatch.");
 	if (!openedPack.dictionaryBytes.empty()) {
 		// The opened pack keeps one prepared dictionary alive so every extent
 		// decode can reuse the digested tables instead of rebuilding them.
@@ -205,6 +258,73 @@ OpenedPack OpenPackFile(const std::filesystem::path& packPath) {
 		}
 		openedPack.fileLookup.emplace(entry.normalizedPath, entry.fileId);
 	}
+
+	// Validate persisted paths rather than applying lookup repair to metadata.
+	std::unordered_set<std::string> pathIdentities;
+	for(const auto& directory:openedPack.directories) {
+		io::ValidateStoredPath(directory.normalizedPath,directory.directoryId==0);
+		if(dictionaryHasher.HashBytes(directory.normalizedPath)!=directory.pathHash) throw std::runtime_error("Archive directory path hash mismatch.");
+		if(!pathIdentities.insert(io::StoredPathIdentity(directory.normalizedPath)).second) throw std::runtime_error("Archive paths collide.");
+	}
+	for(const auto& entry:openedPack.entries) {
+		io::ValidateStoredPath(entry.normalizedPath,false);
+		if(dictionaryHasher.HashBytes(entry.normalizedPath)!=entry.pathHash) throw std::runtime_error("Archive file path hash mismatch.");
+		if(!pathIdentities.insert(io::StoredPathIdentity(entry.normalizedPath)).second) throw std::runtime_error("Archive paths collide.");
+	}
+
+	// Iterative ownership traversal bounds malformed cycles and deep trees alike.
+	// Mark on enqueue, so duplicate edges are rejected before they can be revisited.
+	const auto& root=openedPack.directories.front();
+	if(!root.normalizedPath.empty() || root.parentDirectoryId!=kInvalidDirectoryId) throw std::runtime_error("Archive root representation is invalid.");
+	const auto parentPath=[](std::string_view path) { const auto slash=path.rfind('/'); return slash==std::string_view::npos ? std::string_view{} : path.substr(0,slash); };
+	std::vector<bool> directoryOwned(openedPack.directories.size()), fileOwned(openedPack.entries.size());
+	std::vector<std::uint32_t> pending{0}; directoryOwned[0]=true;
+	while(!pending.empty()) {
+		const auto id=pending.back(); pending.pop_back(); const auto& directory=openedPack.directories[id];
+		if(directory.firstChildDirectoryIndex>directoryOwned.size() || directory.childDirectoryCount>directoryOwned.size()-directory.firstChildDirectoryIndex ||
+			directory.firstChildFileIndex>fileOwned.size() || directory.childFileCount>fileOwned.size()-directory.firstChildFileIndex) throw std::runtime_error("Archive child span is invalid.");
+		for(std::uint32_t index=0; index<directory.childDirectoryCount; ++index) {
+			const auto childId=directory.firstChildDirectoryIndex+index; const auto& child=openedPack.directories[childId];
+			if(directoryOwned[childId] || child.parentDirectoryId!=id || child.normalizedPath.empty() || parentPath(child.normalizedPath)!=directory.normalizedPath) throw std::runtime_error("Archive directory has cyclic, duplicate, or inconsistent ownership.");
+			directoryOwned[childId]=true; pending.push_back(childId);
+		}
+		for(std::uint32_t index=0; index<directory.childFileCount; ++index) {
+			const auto childId=directory.firstChildFileIndex+index; const auto& child=openedPack.entries[childId];
+			if(fileOwned[childId] || child.parentDirectoryId!=id || parentPath(child.normalizedPath)!=directory.normalizedPath) throw std::runtime_error("Archive file has duplicate or inconsistent ownership.");
+			fileOwned[childId]=true;
+		}
+	}
+	if(std::find(directoryOwned.begin(),directoryOwned.end(),false)!=directoryOwned.end() || std::find(fileOwned.begin(),fileOwned.end(),false)!=fileOwned.end()) throw std::runtime_error("Archive contains unreachable records.");
+
+	// Every entry owns a contiguous, unique run in writer order. Empty files
+	// retain the writer's single zero extent rather than bypassing validation.
+	std::uint64_t nextExtent = 0;
+	for(const auto& entry : openedPack.entries) {
+		if(entry.firstExtentIndex != nextExtent || entry.entryExtentCount == 0 ||
+			nextExtent > openedPack.extents.size() || entry.entryExtentCount > openedPack.extents.size() - nextExtent ||
+			!supportedSize(entry.logicalSize) || !supportedSize(entry.storedSize) ||
+			(entry.logicalSize == 0 && entry.entryExtentCount != 1)) {
+			throw std::runtime_error("A file has invalid or multiply owned extent references.");
+		}
+		std::uint64_t logicalEnd = 0, storedTotal = 0;
+		for(std::uint32_t index = 0; index < entry.entryExtentCount; ++index) {
+			const auto& extent = openedPack.extents.at(static_cast<std::size_t>(nextExtent + index));
+			if(extent.fileOffset != logicalEnd || !fits(logicalEnd, extent.uncompressedSize, entry.logicalSize) ||
+				(entry.logicalSize != 0 && extent.uncompressedSize == 0) || !supportedSize(extent.uncompressedSize) || !supportedSize(extent.storedSize) ||
+				extent.storedOffset < header.dataRegionOffset || !fits(extent.storedOffset, extent.storedSize, header.archiveSize) ||
+				!fits(storedTotal, extent.storedSize, entry.storedSize) ||
+				(extent.codec != StorageMode::Raw && extent.codec != StorageMode::Zstd && extent.codec != StorageMode::ZstdDictionary) ||
+				(extent.codec == StorageMode::Raw && extent.storedSize != extent.uncompressedSize) ||
+				(extent.codec != StorageMode::Raw && extent.storedSize == 0) ||
+				(extent.codec == StorageMode::ZstdDictionary && (!openedPack.dictionary.dictionaryPresent || openedPack.dictionaryBytes.empty()))) {
+				throw std::runtime_error("A file extent has invalid coverage, codec, or physical bytes.");
+			}
+			logicalEnd += extent.uncompressedSize; storedTotal += extent.storedSize;
+		}
+		if(logicalEnd != entry.logicalSize || storedTotal != entry.storedSize) throw std::runtime_error("File extent coverage is incomplete.");
+		nextExtent += entry.entryExtentCount;
+	}
+	if(nextExtent != openedPack.extents.size()) throw std::runtime_error("The extent table contains unowned records.");
 
 	// Lookup maps let later list and read operations resolve logical paths in
 	// near-constant time instead of rescanning the metadata tables.
@@ -305,7 +425,7 @@ ByteBuffer PackReader::ReadAll(std::string_view logicalPath) const {
 	}
 
 	const auto& entry = m_impl->openedPack.entries.at(found->second);
-	return archive::ReadLogicalBytes(m_impl->openedPack, normalizedPath, 0U, entry.logicalSize);
+	return archive::ReadLogicalBytes(m_impl->openedPack, normalizedPath, 0U, entry.logicalSize, true);
 }
 
 // PackReader::ReadRange is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

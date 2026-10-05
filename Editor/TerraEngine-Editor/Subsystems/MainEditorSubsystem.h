@@ -7,6 +7,7 @@
 #include "Core/Scheduling/FrameWorkload.h"
 
 #include <cstdint>
+#include <array>
 #include <functional>
 #include <optional>
 #include <entt/entity/entity.hpp>
@@ -33,11 +34,13 @@
 #include "Engine/Utilities/UUID.h"
 #include "../Core/ViewportTextureRegistry.h"
 #include "../Navigation/NavigationAuthoringTransactions.h"
+#include "../Scene/EditorTransactionReceiptBatch.h"
 
 class Object;
 class VulkanContext;
 class TerrainWindow;
 namespace TerraEngine::Editor::Navigation { class NavigationWindow; }
+namespace TerraEngine::Editor::Terrain { class TerrainIndependentCopyService; }
 namespace TerraEngine::Runtime { struct PhysicsInvariantReport; }
 
 // PrefabAuthoringService owns the semantic prefab operations shared by the
@@ -164,6 +167,9 @@ public:
 		std::string displayName;
 	};
 
+	// Definitions live beside the complete copy service, keeping this header small.
+	MainEditorSubsystem();
+	~MainEditorSubsystem() override;
 	virtual void Initialize(EditorContext& context) override;
 	virtual void OnBackendReady() override;
 	virtual void Update(float deltaTime) override;
@@ -223,6 +229,8 @@ public:
 	// bundle, then queues the component reference change at the scene boundary.
 	// The original terrain remains untouched for every other scene instance.
 	bool CreateIndependentTerrainCopy(entt::entity entity, std::string& outError);
+	// Inspector consumes a bounded owner snapshot; the worker never accesses UI.
+	std::string GetIndependentTerrainCopyStatus(entt::entity entity) const;
 
 	// GetSelectedAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::optional<std::filesystem::path> GetSelectedAsset() const { return selectedAsset; }
@@ -304,6 +312,8 @@ public:
 	void DrawProjectHubWindows();
 
 private:
+	void InitializeTerrainCopyService();
+	bool RetireTerrainCopies();
 	void CapturePlayModeSceneState();
 	void RestorePlayModeSceneState();
 	void ClearPlayModeSceneState();
@@ -320,7 +330,8 @@ private:
 	void PublishCommittedEditorTransactionsToUndo();
 	void RefreshViewportTextures(VulkanContext& vulkan);
 	void DrawMainMenuBar();
-	void CloseCurrentProject();
+	// False keeps project owners alive when a copy receipt or cleanup must retry.
+	bool CloseCurrentProject();
 	
 	EditorContext* ctx = nullptr;
 	std::function<void()> onProjectClosed;
@@ -331,6 +342,13 @@ private:
 	// terrain authoring state, but it is a service consumed only by the Terrain
 	// Inspector, Scene View, automation, and editor lifecycle.
 	std::shared_ptr<TerrainWindow> m_TerrainTools;
+	std::unique_ptr<TerraEngine::Editor::Terrain::TerrainIndependentCopyService> m_TerrainCopies;
+	std::uint64_t m_TerrainCopyProjectEpoch = 0U;
+	// Fixed admission history selects the newest request for an Inspector object,
+	// independent of UUID sort order or asynchronous completion order.
+	std::array<std::pair<TerraEngine::UUID, TerraEngine::UUID>, 16U> m_TerrainCopyAdmissions{};
+	std::size_t m_TerrainCopyAdmissionCount = 0U, m_TerrainCopyAdmissionNext = 0U;
+	TerraEngine::Editor::EditorTransactionReceiptBatch m_EditorReceiptBatch;
 	// Navigation authoring keeps its own complete-state history snapshot so Play
 	// Mode can restore profile/settings history at the same lifecycle
 	// boundary as the scene graph.

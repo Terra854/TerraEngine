@@ -19,6 +19,10 @@
 
 #include <entt/entt.hpp>
 
+#if defined(__linux__)
+#	include <unistd.h>
+#endif
+
 #ifdef _WIN32
 #	ifndef NOMINMAX
 #		define NOMINMAX
@@ -48,6 +52,28 @@
 namespace {
 namespace fs = std::filesystem;
 
+#if defined(__linux__)
+// Read the kernel-owned executable link, rather than guessing from the command
+// spelling or current directory. The argument is also a bounded validation seam:
+// the diagnostic-only launcher switch can exercise discovery failure and exit.
+fs::path ResolveLinuxExecutableLink(const fs::path& linkPath) {
+	std::error_code error;
+	const fs::path executable = fs::read_symlink(linkPath, error);
+	if(error || !executable.is_absolute()) {
+		throw std::runtime_error("Linux executable discovery failed at " + linkPath.string()
+			+ ": " + (error ? error.message() : "kernel link did not contain an absolute path"));
+	}
+	// A removed running executable may still appear in procfs with a '(deleted)'
+	// suffix. Never use that spelling to locate an unrelated adjacent archive.
+	if(executable.native().ends_with(" (deleted)")
+		|| !fs::is_regular_file(executable, error) || error
+		|| ::access(executable.c_str(), R_OK | X_OK) != 0) {
+		throw std::runtime_error("Linux executable discovery returned a deleted or unusable file: " + executable.string());
+	}
+	return executable;
+}
+#endif
+
 // ResolveExecutablePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 fs::path ResolveExecutablePath(const char* argv0) {
 #ifdef _WIN32
@@ -58,6 +84,11 @@ fs::path ResolveExecutablePath(const char* argv0) {
 	if (length > 0 && length < buffer.size()) {
 		return fs::path(std::wstring(buffer.data(), length));
 	}
+#elif defined(__linux__)
+	// Kernel discovery covers absolute, relative, PATH and symlink launches.
+	// Failure propagates before bootstrap; Linux never falls back to argv/CWD.
+	(void)argv0;
+	return ResolveLinuxExecutableLink("/proc/self/exe");
 #endif
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -260,6 +291,7 @@ int RunExportLocomotionValidation(const NavigationValidationCommand& command, bo
 	Engine validationEngine;
 	bool initialized = false;
 	try {
+
 		nlohmann::json options = ReadNavigationValidationOptions(command.optionsPath);
 		const auto workers = ReadNavigationValidationWorkerCount(options);
 		if(!workers) throw std::runtime_error("Locomotion validation requires requiredWorkerCount.");
@@ -392,6 +424,16 @@ int main(int argc, char *argv[])
 #endif
 
 	try {
+#if defined(__linux__)
+		// Validation exits before mounting content or loading gameplay code. Normal
+		// startup always uses /proc/self/exe and accepts no discovery override.
+		if(HasArgument(argc, argv, "--validate-executable-discovery")) {
+			if(argc != 3 || std::strcmp(argv[1], "--validate-executable-discovery") != 0)
+				throw std::runtime_error("Usage: --validate-executable-discovery <kernel-link-path>");
+			std::cout << ResolveLinuxExecutableLink(fs::path(argv[2])).string() << std::endl;
+			return 0;
+		}
+#endif
 		// --- Export-mode bootstrap ---
 		// Exported builds are discovered by looking for "<ExeStem>.tepak" beside
 		// the executable. The normal game path lets Engine::Run() initialize the

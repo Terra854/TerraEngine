@@ -356,6 +356,7 @@ set(ENGINE_SOURCES
 	Engine/Runtime/ContentMount/archive/ArchiveSerialization.cpp
 	Engine/Runtime/ContentMount/codec/CodecProvider.cpp
 	Engine/Runtime/ContentMount/io/PathNormalizer.cpp
+	Engine/Runtime/ContentMount/io/ExtractionDestination.cpp
 	Engine/Utilities/Tepak/WorkerPool.cpp
 	${TERRAENGINE_ANIMATION_ENGINE_SOURCES}
 	${TERRAENGINE_VIRTUAL_GEOMETRY_ENGINE_SOURCES}
@@ -1646,6 +1647,7 @@ add_library(TerraEngine-ExportSupport STATIC
 	Editor/Export/archive/PackWriter.cpp
 	Editor/Export/codec/CodecProvider.cpp
 	Editor/Export/io/PathNormalizer.cpp
+	Editor/Export/io/ExtractionDestination.cpp
 	Editor/Export/validation/PackValidator.cpp
 	Editor/Export/validation/AnimationPackValidator.cpp
 )
@@ -2961,6 +2963,10 @@ if(BUILD_TESTING)
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Correctness
 	)
 	# Recovery acceptance consumes only sealed installed runners and authored inputs.
+	install(FILES
+		${CMAKE_SOURCE_DIR}/Tests/Tools/ContentArchive/RunArchiveSafetyWatchdog.ps1
+		${CMAKE_SOURCE_DIR}/Tests/Tools/ContentArchive/RunArchiveSafetyStress.ps1
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/ContentArchive)
 	install(DIRECTORY ${CMAKE_SOURCE_DIR}/Tests/Tools/LifecycleRecovery/
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/LifecycleRecovery)
 	install(FILES ${CMAKE_SOURCE_DIR}/Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1
