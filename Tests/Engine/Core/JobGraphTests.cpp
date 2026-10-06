@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "Core/Scheduling/JobGraph.h"
+#include "Core/Scheduling/JobGraphTestAccess.h"
 #include "Core/Scheduling/SystemScheduler.h"
 #include "Core/SystemBase.h"
 #include "ThreadPool/ThreadPool.h"
@@ -13,6 +14,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -113,8 +115,156 @@ namespace TerraEngine::Tests {
 		}
 	}
 
+	// Release precedes coordinator join on every test exit, including assertions
+	// or fixture setup failures. Production workers use only the real ThreadPool.
+	namespace {
+		using Graph = TerraEngine::Scheduling::JobGraph;
+		using Checkpoint = TerraEngine::Scheduling::JobGraphCheckpoint;
+		using Access = TerraEngine::Scheduling::JobGraphTestAccess;
+		using Policy = TerraEngine::Scheduling::JobGraphExecutionPolicy;
+		struct ReleaseAndJoin {
+			Correctness::ControlledGate& gate; std::future<std::exception_ptr>& coordinator;
+			~ReleaseAndJoin() { gate.Release(); if (coordinator.valid()) coordinator.wait(); }
+		};
+		struct CoordinatorCause final : std::runtime_error {
+			std::shared_ptr<const std::uint64_t> identity;
+			std::uint64_t detail = 0x9ac415U;
+			explicit CoordinatorCause(const char* message) : std::runtime_error(message), identity(std::make_shared<const std::uint64_t>(0x7bf901U)) {}
+		};
+		std::exception_ptr MakeCoordinatorCause(const char* message) { return std::make_exception_ptr(CoordinatorCause(message)); }
+		bool IsOriginalCause(const std::exception_ptr& actual, const std::exception_ptr& expected) {
+			// MSVC current_exception/rethrow_exception may copy the exception, making
+			// exception_ptr operator== false for the same causal exception. A unique
+			// immutable shared token, exact final subtype, state and message survive
+			// legitimate copies and reject replacement by any secondary failure.
+			if (!actual || !expected) return false;
+			try { std::rethrow_exception(actual); }
+			catch (const CoordinatorCause& cause) {
+				try { std::rethrow_exception(expected); }
+				catch (const CoordinatorCause& original) {
+					return cause.identity == original.identity && cause.detail == original.detail
+						&& std::string_view(cause.what()) == std::string_view(original.what());
+				} catch (...) {}
+			} catch (...) {}
+			return false;
+		}
+		std::exception_ptr ExecuteFailure(Graph& graph, const TerraEngine::Scheduling::JobGraphExecuteOptions& options = {}) {
+			try { (void)graph.Execute(options); } catch (...) { return std::current_exception(); } return {};
+		}
+		void CheckHeldFatal(TestContext& context, Checkpoint injected, bool boundary) {
+			Correctness::ControlledGate gate; auto waiter = gate.MakeWaiter(std::chrono::seconds(30));
+			std::atomic<unsigned> settled = 0U, laterCalls = 0U;
+			const auto primary = MakeCoordinatorCause("original coordinator cause");
+			std::promise<void> observed; auto observation = observed.get_future();
+			Graph graph("fatal-settlement", "Fatal settlement");
+			auto held = MakeJob("Held secondary failure", Policy::WorkerEligible);
+			held.work = [waiter, &settled](auto&) { (void)waiter(); ++settled; throw std::runtime_error("secondary worker cause"); };
+			graph.AddJob(std::move(held));
+			TerraEngine::Scheduling::JobGraphExecuteOptions options;
+			const auto throwPrimary = [&] { if (!gate.WaitForArrivals(1U)) throw std::runtime_error("Held worker did not enter."); observed.set_value(); std::rethrow_exception(primary); };
+			if (boundary) {
+				TerraEngine::Scheduling::JobGraphBarrierDeclaration barrier; barrier.name = "Failing owner boundary"; barrier.diagnosePendingMutations = true;
+				graph.AddBarrier(std::move(barrier)); options.mutationBarrierCallback = [&](const auto&) -> TerraEngine::Scheduling::MutationFlushRuntimeState { throwPrimary(); return {}; };
+			} else {
+				graph.AddJob(MakeJob("Later admission", Policy::WorkerEligible));
+				Access::SetCheckpoint(graph, [&](auto point, auto index) { if (point == injected && index == 1U) throwPrimary(); });
+			}
+			auto later = MakeJob("Never started after fatal", Policy::WorkerEligible); later.work = [&](auto&) { ++laterCalls; }; graph.AddJob(std::move(later));
+			auto coordinator = std::async(std::launch::async, [&] { return ExecuteFailure(graph, options); });
+			ReleaseAndJoin cleanup{gate, coordinator};
+			const bool fatalObserved = observation.wait_for(Correctness::kDefaultTimeout) == std::future_status::ready;
+			const bool retained = coordinator.wait_for(std::chrono::milliseconds(20)) != std::future_status::ready;
+			gate.Release(); const auto caught = coordinator.get();
+			context.Expect(fatalObserved && retained, "Fatal Execute must retain all admitted workers behind the explicit release gate.");
+			context.Expect(IsOriginalCause(caught, primary) && settled == 1U && laterCalls == 0U, "Original exception identity must survive secondary failure and stop later dispatch.");
+			context.Expect(!graph.LatestSummary().completed && !graph.LatestSummary().valid && graph.LatestSummary().fatalExecution
+				&& graph.LatestSummary().secondaryWorkerFailureCount == 1U && graph.LatestSummary().settledWorkerCount == 1U
+				&& std::all_of(graph.LatestSummary().terminalStates.begin(), graph.LatestSummary().terminalStates.end(), [](auto state) {
+					return state == TerraEngine::Scheduling::JobGraphNodeState::Completed || state == TerraEngine::Scheduling::JobGraphNodeState::Failed || state == TerraEngine::Scheduling::JobGraphNodeState::Blocked;
+				}), "Fatal summary must retain truthful bounded worker counts and terminal outcomes instead of prior success.");
+		}
+	}
+
 	void RegisterJobGraphTests(TestRegistry& registry)
 	{
+		registry.Add("Engine.JobGraph.FailureSettlement.HeldBoundaryPrimaryAndSecondary", [](TestContext& context) {
+			for (const auto workers : {1U, 2U}) { ThreadPoolSession session(workers);
+				for (unsigned iteration = 0U; iteration < 100U; ++iteration) CheckHeldFatal(context, Checkpoint::BeforePreparation, true);
+			}
+		});
+		registry.Add("Engine.JobGraph.FailureSettlement.BeforeAndFailedAdmission", [](TestContext& context) {
+			ThreadPoolSession session(1U);
+			for (const auto checkpoint : {Checkpoint::BeforePreparation, Checkpoint::BeforeSubmission}) {
+				Graph graph; graph.AddJob(MakeJob("First worker", Policy::WorkerEligible)); (void)graph.Execute();
+				const auto primary = MakeCoordinatorCause("unadmitted submission cause");
+				Access::SetCheckpoint(graph, [=](auto point, auto) { if (point == checkpoint) std::rethrow_exception(primary); });
+				context.Expect(IsOriginalCause(ExecuteFailure(graph), primary), "Submission failure must propagate without waiting an unadmitted promise.");
+				context.Expect(!graph.LatestSummary().completed && !graph.LatestSummary().valid, "A first-admission fault must invalidate prior success.");
+			}
+		});
+		registry.Add("Engine.JobGraph.FailureSettlement.LaterAdmissionRetainsEarlierWorker", [](TestContext& context) {
+			ThreadPoolSession session(2U);
+			for (const auto checkpoint : {Checkpoint::BeforePreparation, Checkpoint::BeforeSubmission}) CheckHeldFatal(context, checkpoint, false);
+		});
+		registry.Add("Engine.JobGraph.FailureSettlement.CompletionProcessingRetainsWorker", [](TestContext& context) {
+			ThreadPoolSession session(2U); Correctness::ControlledGate gate; auto waiter = gate.MakeWaiter(std::chrono::seconds(30));
+			Graph graph; std::atomic<unsigned> settled = 0U; std::promise<void> observed; auto observation = observed.get_future();
+			auto held = MakeJob("Held independent", Policy::WorkerEligible); held.work = [waiter, &settled](auto&) { (void)waiter(); ++settled; }; graph.AddJob(std::move(held));
+			graph.AddJob(MakeJob("Fast completion", Policy::WorkerEligible));
+			const auto primary = MakeCoordinatorCause("completion processing cause");
+			Access::SetCheckpoint(graph, [&](auto point, auto index) { if (point == Checkpoint::BeforeCompletion && index == 1U) {
+				if (!gate.WaitForArrivals(1U)) throw std::runtime_error("Held worker did not start."); observed.set_value(); std::rethrow_exception(primary);
+			} });
+			auto coordinator = std::async(std::launch::async, [&] { return ExecuteFailure(graph); }); ReleaseAndJoin cleanup{gate, coordinator};
+			const bool observedFatal = observation.wait_for(Correctness::kDefaultTimeout) == std::future_status::ready;
+			const bool retained = coordinator.wait_for(std::chrono::milliseconds(20)) != std::future_status::ready;
+			gate.Release(); context.Expect(IsOriginalCause(coordinator.get(), primary) && observedFatal && retained && settled == 1U,
+				"Completion bookkeeping faults must drain admitted work without relying on further mailbox reads.");
+		});
+		registry.Add("Engine.JobGraph.FailureSettlement.RearmAndDestructionAreQuiescent", [](TestContext& context) {
+			ThreadPoolSession session(2U); std::atomic<unsigned> calls = 0U;
+			// A burst crosses the initial cache reservation. Released unadmitted
+			// handles must be reusable without allocating during their deleters.
+			std::vector<std::shared_ptr<Task<void>>> burst; burst.reserve(80U);
+			for (unsigned index = 0U; index < 80U; ++index) burst.push_back(ThreadPool::instance().createTask([] {}));
+			const auto last = burst.back().get(); for (auto& task : burst) task.reset(); burst.clear();
+			const auto reused = ThreadPool::instance().createTask([] {});
+			context.Expect(reused.get() == last, "Global void-task cache must retain normal burst capacity for reuse.");
+			{ Graph graph; auto job = MakeJob("Reusable", Policy::WorkerEligible); job.work = [&](auto&) { ++calls; }; graph.AddJob(std::move(job));
+				(void)graph.Execute(); graph.Rearm("faulted invocation"); const auto primary = MakeCoordinatorCause("reuse cause");
+				Access::SetCheckpoint(graph, [=](auto point, auto) { if (point == Checkpoint::BeforeSubmission) std::rethrow_exception(primary); });
+				context.Expect(IsOriginalCause(ExecuteFailure(graph), primary) && !graph.LatestSummary().completed, "A settled fatal invocation must replace old success.");
+				Access::SetCheckpoint(graph, {}); graph.Rearm("healthy invocation"); const auto summary = graph.Execute();
+				context.Expect(summary.valid && summary.completed && calls == 2U, "Legal Rearm must execute fresh work after settlement exactly once.");
+			} context.Expect(calls == 2U, "Graph destruction after settlement must retain no old worker writes.");
+		});
+		registry.Add("Engine.JobGraph.FailureSettlement.EntryAndBodyNotifyExactlyOnce", [](TestContext& context) {
+			ThreadPoolSession session(2U);
+			{ Graph overlap; Correctness::ControlledGate gate; auto waiter = gate.MakeWaiter(std::chrono::seconds(30));
+				std::promise<void> dependentEntered; auto dependentObservation = dependentEntered.get_future();
+				auto held = MakeJob("Held healthy sibling", Policy::WorkerEligible); held.work = [waiter](auto&) { (void)waiter(); }; overlap.AddJob(std::move(held));
+				const auto fast = overlap.AddJob(MakeJob("Fast healthy sibling", Policy::WorkerEligible));
+				auto dependent = MakeJob("Completion driven dependent", Policy::Protected); dependent.dependencies = {fast}; dependent.work = [&](auto&) { dependentEntered.set_value(); }; overlap.AddJob(std::move(dependent));
+				auto coordinator = std::async(std::launch::async, [&] { return ExecuteFailure(overlap); }); ReleaseAndJoin cleanup{gate, coordinator};
+				const bool heldStarted = gate.WaitForArrivals(1U);
+				const bool overlapped = dependentObservation.wait_for(Correctness::kDefaultTimeout) == std::future_status::ready;
+				const bool retained = coordinator.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready;
+				gate.Release(); context.Expect(!coordinator.get() && heldStarted && overlapped && retained,
+					"A fast healthy completion must release its dependent while the unrelated sibling remains held.");
+			}
+			Graph graph; std::atomic<unsigned> calls = 0U;
+			const auto entry = graph.AddJob(MakeJob("Entry failure", Policy::WorkerEligible));
+			auto body = MakeJob("Body failure", Policy::WorkerEligible); body.work = [](auto&) { throw std::runtime_error("body cause"); }; graph.AddJob(std::move(body));
+			auto healthy = MakeJob("Healthy independent", Policy::WorkerEligible); healthy.work = [&](auto&) { ++calls; }; graph.AddJob(std::move(healthy));
+			auto blocked = MakeJob("Blocked entry descendant", Policy::Protected); blocked.dependencies = {entry}; blocked.work = [&](auto&) { ++calls; }; graph.AddJob(std::move(blocked));
+			Access::SetCheckpoint(graph, [](auto point, auto index) { if (point == Checkpoint::WorkerEntry && index == 0U) throw std::runtime_error("entry cause"); });
+			const auto summary = graph.Execute();
+			context.Expect(!summary.valid && summary.workerCompletionWakeCount == 3U && calls == 1U
+				&& HasJobState(summary, "Entry failure", TerraEngine::Scheduling::JobGraphNodeState::Failed)
+				&& HasJobState(summary, "Body failure", TerraEngine::Scheduling::JobGraphNodeState::Failed),
+				"Entry/setup and body failures must each publish exactly one completion and retain independent progress.");
+		});
+
 		registry.Add("Engine.JobGraph.ValidDependenciesCompleteDeterministically", [](TestContext& context) {
 			ThreadPoolSession session;
 			std::vector<std::string> firstLog;

@@ -22,6 +22,8 @@ namespace TerraEngine::Tests {
 	void RegisterGenericMutationFailureSafetyTests(TestRegistry& registry);
 	void RegisterSceneMutationQueueFailureSafetyTests(TestRegistry& registry);
 	void RegisterResourcePublicationLifecycleTests(TestRegistry& registry);
+	// Cooked texture bounds and decoded row layout use real resource requests.
+	void RegisterTextureLoadingTests(TestRegistry& registry);
 	// Animation story tests register through one stable entry point so their
 	// CTest filter can grow without adding global initialization side effects.
 	void RegisterAnimationTestScaffolding(TestRegistry& registry);
@@ -454,6 +456,7 @@ int main() {
 	TerraEngine::Tests::RegisterGenericMutationFailureSafetyTests(registry);
 	TerraEngine::Tests::RegisterSceneMutationQueueFailureSafetyTests(registry);
 	TerraEngine::Tests::RegisterResourcePublicationLifecycleTests(registry);
+	TerraEngine::Tests::RegisterTextureLoadingTests(registry);
 
 	registry.Add("Engine.Smoke.HarnessRuns", [](TerraEngine::Tests::TestContext& context) {
 		context.Expect(true, "The engine test harness should execute registered tests.");

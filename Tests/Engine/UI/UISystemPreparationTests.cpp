@@ -152,6 +152,77 @@ namespace {
 		std::vector<std::pair<MouseButton, KeyState>> queuedMouseEvents_;
 	};
 
+	// Small real documents prepare inline through UISystem and publish cloned
+	// roots. Tests attach event observers only after that production publication.
+	UIElement::Ptr MakeHitBox(std::string id, float width, float height, UIElementType type = UIElementType::VisualElement)
+	{
+		auto element = UIElement::Create(type);
+		element->id = std::move(id);
+		element->inlineStyle.width = UIValue::Points(width);
+		element->inlineStyle.height = UIValue::Points(height);
+		element->inlineStyle.flexShrink = 0.0f;
+		return element;
+	}
+
+	UIElement::Ptr MakeOverflowDocument()
+	{
+		auto root = MakeHitBox("root", 800, 600, UIElementType::Root);
+		auto parent = MakeHitBox("parent", 40, 40);
+		auto button = MakeHitBox("translated-button", 40, 40, UIElementType::Button);
+		button->inlineStyle.transform.translate = glm::vec2(80, 0);
+		button->inlineStyle.backgroundColor = glm::vec4(1, 0, 0, 1);
+		parent->AddChild(button); root->AddChild(parent);
+		return root;
+	}
+
+	void CountHitClick(UIElement& element, const glm::vec2&)
+	{
+		auto& count = element.attributes["observed-clicks"];
+		count = std::to_string(count.empty() ? 1 : std::stoi(count) + 1);
+	}
+
+	int HitClickCount(const UIElement::Ptr& element)
+	{
+		const auto found = element->attributes.find("observed-clicks");
+		return found == element->attributes.end() ? 0 : std::stoi(found->second);
+	}
+
+	class HitTestingFixture
+	{
+	public:
+		HitTestingFixture()
+		{
+			objects.clear(); ui.Shutdown();
+			ResourceManager::Instance().ConfigureExportArchive({});
+			ui.Initialize(); ui.SetGameViewportSize({800, 600});
+		}
+		~HitTestingFixture() { ui.Shutdown(); objects.clear(); }
+		Object AddDocument(const UIElement::Ptr& root)
+		{
+			const auto object = objects.createObject("Hit testing document");
+			auto* component = objects.AddComponent<UIComponent>(object);
+			component->SetRoot(root); component->MarkDirty();
+			return object;
+		}
+		void Pointer(glm::vec2 position, bool inside, bool down)
+		{
+			ui.SetEditorGameViewPointer(position, inside, down);
+			ui.Update(1.0f / 60.0f);
+		}
+		void Warm() { Pointer({-1, -1}, false, false); Pointer({-1, -1}, false, false); }
+		UIElement::Ptr Published(const Object& object) { return objects.GetComponent<UIComponent>(object)->GetRoot(); }
+		ObjectManager& objects = ObjectManager::instance();
+		UISystem& ui = UISystem::Instance();
+	};
+
+	void ExpectOverflowRectangle(TestContext& context, const UISystem& ui)
+	{
+		const auto batch = ui.GetCombinedFrameBatch();
+		context.Expect(batch.staticQuads.size() == 1U && batch.staticQuads.front().position == glm::vec2(80, 0)
+			&& batch.staticQuads.front().size == glm::vec2(40, 40),
+			"Production rendering must draw the authored child at (80,0), size (40,40), outside its parent.");
+	}
+
 	void ResetRuntimeInputState()
 	{
 		InputSystem::Instance().Shutdown();
@@ -162,6 +233,108 @@ namespace {
 
 void RegisterUISystemPreparationTests(TestRegistry& registry)
 {
+	registry.Add("Engine.UI.HitTesting.TranslatedChildMatchesRenderedRectangle", [](TestContext& context) {
+		HitTestingFixture fixture;
+		const auto object = fixture.AddDocument(MakeOverflowDocument()); fixture.Warm();
+		ExpectOverflowRectangle(context, fixture.ui);
+		auto button = fixture.Published(object)->FindById("translated-button"); button->OnClick = CountHitClick;
+		fixture.Pointer({90, 10}, true, false);
+		context.Expect(fixture.ui.IsElementHovered("translated-button"), "Visible overflow must hover at its drawn position.");
+		fixture.Pointer({90, 10}, true, true);
+		context.Expect(fixture.ui.WasElementClicked("translated-button") && HitClickCount(button) == 1,
+			"The rendered overflow target must receive exactly one accepted click.");
+	});
+
+	registry.Add("Engine.UI.HitTesting.NestedOverflowPreservesContainedAncestorHover", [](TestContext& context) {
+		HitTestingFixture fixture;
+		auto root = MakeOverflowDocument();
+		auto containing = MakeHitBox("containing-ancestor", 200, 100);
+		auto inner = MakeHitBox("inner-noncontaining", 20, 20);
+		auto parent = root->children.front(); auto button = parent->children.front();
+		parent->ClearChildren(); inner->AddChild(button); parent->AddChild(inner);
+		root->ClearChildren(); containing->AddChild(parent); root->AddChild(containing);
+		fixture.AddDocument(root); fixture.Warm(); ExpectOverflowRectangle(context, fixture.ui);
+		fixture.Pointer({90, 10}, true, false);
+		context.Expect(fixture.ui.IsElementHovered("translated-button") && fixture.ui.IsElementHovered("containing-ancestor")
+			&& fixture.ui.IsElementHovered("root"), "Contained ancestors and the descendant must retain hover.");
+		context.Expect(!fixture.ui.IsElementHovered("parent") && !fixture.ui.IsElementHovered("inner-noncontaining"),
+			"Non-containing ancestors must permit targeting without acquiring their own hover.");
+	});
+
+	registry.Add("Engine.UI.HitTesting.HiddenSubtreesAndComponentsStayExcluded", [](TestContext& context) {
+		for (int hiddenKind = 0; hiddenKind < 3; ++hiddenKind) {
+			HitTestingFixture fixture; auto root = MakeOverflowDocument();
+			if (hiddenKind == 0) root->FindById("translated-button")->SetVisible(false);
+			if (hiddenKind == 1) root->FindById("parent")->SetVisible(false);
+			const auto object = fixture.AddDocument(root);
+			if (hiddenKind == 2) fixture.objects.GetComponent<UIComponent>(object)->SetVisible(false);
+			fixture.Warm(); fixture.Pointer({90, 10}, true, false); fixture.Pointer({90, 10}, true, true);
+			context.Expect(fixture.ui.GetCombinedFrameBatch().staticQuads.empty()
+				&& !fixture.ui.IsElementHovered("translated-button") && !fixture.ui.WasElementClicked("translated-button"),
+				"Hidden child, ancestor or document must exclude its rendered subtree and all target input.");
+		}
+	});
+
+	registry.Add("Engine.UI.HitTesting.ReverseSiblingOverflowWinsOverlap", [](TestContext& context) {
+		HitTestingFixture fixture; auto root = MakeHitBox("root", 800, 600, UIElementType::Root);
+		root->inlineStyle.flexDirection = UIFlexDirection::Row;
+		auto back = MakeHitBox("back-button", 40, 40, UIElementType::Button);
+		back->inlineStyle.transform.translate = glm::vec2(80, 0); back->inlineStyle.backgroundColor = glm::vec4(0, 0, 1, 1);
+		auto frontParent = MakeHitBox("front-parent", 40, 40);
+		auto front = MakeHitBox("front-button", 40, 40, UIElementType::Button);
+		front->inlineStyle.transform.translate = glm::vec2(40, 0); front->inlineStyle.backgroundColor = glm::vec4(1, 0, 0, 1);
+		frontParent->AddChild(front); root->AddChild(back); root->AddChild(frontParent);
+		const auto object = fixture.AddDocument(root); fixture.Warm();
+		const auto batch = fixture.ui.GetCombinedFrameBatch();
+		context.Expect(batch.staticQuads.size() == 2U && batch.staticQuads[0].position == glm::vec2(80, 0)
+			&& batch.staticQuads[1].position == glm::vec2(80, 0), "Both siblings must really draw the independently expected overlapping rectangles.");
+		auto published = fixture.Published(object); auto frontTarget = published->FindById("front-button");
+		auto backTarget = published->FindById("back-button"); frontTarget->OnClick = CountHitClick; backTarget->OnClick = CountHitClick;
+		fixture.Pointer({90, 10}, true, false); fixture.Pointer({90, 10}, true, true);
+		context.Expect(fixture.ui.IsElementHovered("front-button") && !fixture.ui.IsElementHovered("back-button")
+			&& HitClickCount(frontTarget) == 1 && HitClickCount(backTarget) == 0,
+			"Reverse sibling targeting must select the front overflow descendant exactly once.");
+	});
+
+	registry.Add("Engine.UI.HitTesting.DocumentConsumptionAndViewportStayAuthoritative", [](TestContext& context) {
+		HitTestingFixture fixture;
+		auto firstRoot = MakeOverflowDocument(); firstRoot->FindById("translated-button")->id = "first-document-button";
+		auto secondRoot = MakeOverflowDocument(); secondRoot->FindById("translated-button")->id = "second-document-button";
+		const auto first = fixture.AddDocument(firstRoot); const auto second = fixture.AddDocument(secondRoot); fixture.Warm();
+		// Existing input precedence is reverse UUID membership, independently of
+		// render-batch entity order. Preserve that contract without a stacking change.
+		const bool firstWins = fixture.objects.getUUID(first) > fixture.objects.getUUID(second);
+		const std::string winner = firstWins ? "first-document-button" : "second-document-button";
+		const std::string loser = firstWins ? "second-document-button" : "first-document-button";
+		auto firstButton = fixture.Published(first)->FindById("first-document-button");
+		auto secondButton = fixture.Published(second)->FindById("second-document-button");
+		firstButton->OnClick = CountHitClick; secondButton->OnClick = CountHitClick;
+		fixture.Pointer({90, 10}, true, false); fixture.Pointer({90, 10}, true, true);
+		context.Expect(fixture.ui.IsElementHovered(winner) && fixture.ui.WasElementClicked(winner)
+			&& !fixture.ui.IsElementHovered(loser) && !fixture.ui.WasElementClicked(loser)
+			&& HitClickCount(firstButton) + HitClickCount(secondButton) == 1,
+			"The established front input document must consume one click and exclude lower documents.");
+		fixture.Pointer({90, 10}, false, false); fixture.Pointer({90, 10}, false, true);
+		context.Expect(!fixture.ui.IsElementHovered(winner) && !fixture.ui.WasElementClicked(winner)
+			&& HitClickCount(firstButton) + HitClickCount(secondButton) == 1,
+			"Outside the active viewport, even a point inside a drawn rectangle must produce no interaction.");
+	});
+
+	registry.Add("Engine.UI.HitTesting.PressHoldReleaseCountsAcceptedPresses", [](TestContext& context) {
+		HitTestingFixture fixture; const auto object = fixture.AddDocument(MakeOverflowDocument()); fixture.Warm();
+		auto button = fixture.Published(object)->FindById("translated-button"); button->OnClick = CountHitClick;
+		fixture.Pointer({90, 10}, true, false); fixture.Pointer({90, 10}, true, true);
+		context.Expect(fixture.ui.WasElementClicked("translated-button") && HitClickCount(button) == 1, "First press must click once.");
+		for (int heldFrame = 0; heldFrame < 3; ++heldFrame) {
+			fixture.Pointer({90, 10}, true, true);
+			context.Expect(!fixture.ui.WasElementClicked("translated-button") && HitClickCount(button) == 1, "Held input must not repeat a click.");
+		}
+		fixture.Pointer({90, 10}, true, false);
+		context.Expect(!fixture.ui.WasElementClicked("translated-button") && HitClickCount(button) == 1, "Release must not click.");
+		fixture.Pointer({90, 10}, true, true);
+		context.Expect(fixture.ui.WasElementClicked("translated-button") && HitClickCount(button) == 2, "Second accepted press must produce exactly the second callback.");
+	});
+
 	registry.Add("Engine.UISystemPreparation.CountsClonedTreeDeterministically", [](TestContext& context) {
 		const UIElement::Ptr root = MakeRootWithChildren(4);
 		const UIElement::Ptr clone = root->Clone();

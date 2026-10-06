@@ -2952,6 +2952,8 @@ if(BUILD_TESTING)
 	install(TARGETS TerraEngine-EditorTests TerraEngineCorrectnessProcessFixture
 		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Editor
 	)
+	install(TARGETS TerraEngineTextureUiFixtureGenerator
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Correctness)
 	install(FILES
 		${CMAKE_SOURCE_DIR}/Tests/Engine/Runtime/CorrectnessTestSupport.h
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Include/Runtime
@@ -2960,6 +2962,7 @@ if(BUILD_TESTING)
 		${CMAKE_SOURCE_DIR}/Tests/Tools/Correctness/RunWithWatchdog.ps1
 		${CMAKE_SOURCE_DIR}/Tests/Tools/Correctness/RunNativeCorrectnessSlice.ps1
 		${CMAKE_SOURCE_DIR}/Tests/Tools/Correctness/RunInstalledCorrectnessAcceptance.ps1
+		${CMAKE_SOURCE_DIR}/Tests/Tools/Correctness/RunInstalledTextureUiAcceptance.ps1
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Correctness
 	)
 	# Recovery acceptance consumes only sealed installed runners and authored inputs.
@@ -2992,6 +2995,9 @@ if(BUILD_TESTING)
 	# Native installed tests must use the DLL closure beside their executable;
 	# never resolve an old build-tree engine when validating the installed tree.
 	if(WIN32)
+		# The generator must load the same installed engine closure as its tests.
+		install(FILES $<TARGET_RUNTIME_DLLS:TerraEngineTextureUiFixtureGenerator>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Correctness)
 		install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-EngineTests>
 			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Engine
 		)

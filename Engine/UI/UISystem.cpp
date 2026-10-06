@@ -63,13 +63,13 @@ bool BuildHoveredElementPath(
 		&& localPointerPosition.y >= elementMin.y
 		&& localPointerPosition.x <= elementMax.x
 		&& localPointerPosition.y <= elementMax.y;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!pointerInsideElement)
+	// Rendering does not clip children to this rectangle. Own containment
+	// controls only this element's hover/fallback target; visible descendants
+	// must still be searched when translation places them outside an ancestor.
+	if (pointerInsideElement)
 	{
-		return false;
+		hoveredPath.push_back(element);
 	}
-
-	hoveredPath.push_back(element);
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::size_t reverseIndex = element->children.size(); reverseIndex > 0; --reverseIndex)
 	{
@@ -81,8 +81,14 @@ bool BuildHoveredElementPath(
 		}
 	}
 
-	outHitElement = element;
-	return true;
+	// Children retain reverse-order precedence. A non-containing ancestor
+	// contributes neither its own hover nor a fallback hit after child search.
+	if (pointerInsideElement)
+	{
+		outHitElement = element;
+		return true;
+	}
+	return false;
 }
 
 TerraEngine::Scheduling::EcsComponentQueryDeclaration MakeProtectedUiQuery(

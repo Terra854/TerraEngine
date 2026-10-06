@@ -5,6 +5,7 @@
 // attach those jobs through the same handles, barriers, and task groups.
 
 #include "JobGraph.h"
+#include "JobGraphTestAccess.h"
 
 #include "Profiling/ProfilerScope.h"
 #include "ThreadPool/ThreadPool.h"
@@ -13,7 +14,6 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
-#include <deque>
 #include <exception>
 #include <future>
 #include <map>
@@ -22,6 +22,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -150,6 +151,7 @@ namespace TerraEngine::Scheduling {
 		JobGraphCancellationRequest cancellation;
 		std::atomic<bool> cancellationRequested = false;
 		JobGraphSummary latestSummary;
+		JobGraphCheckpointCallback checkpoint;
 		// Topology validation is immutable until a node or edge is added. Frame
 		// callback replacement deliberately leaves this cache intact.
 		std::vector<JobGraphDependencyEdge> validatedEdges;
@@ -882,16 +884,28 @@ namespace TerraEngine::Scheduling {
 		return impl->latestSummary;
 	}
 
+	void JobGraphTestAccess::SetCheckpoint(JobGraph& graph, JobGraphCheckpointCallback callback) { graph.impl->checkpoint = std::move(callback); }
+
 	const JobGraphSummary& JobGraph::Execute(const JobGraphExecuteOptions& options)
 	{
+		// Invalidate a previous success before any allocating preparation can fail.
+		impl->latestSummary = {};
+		impl->latestSummary.valid = false;
 		if (impl->topologyDirty)
 		{
 			Validate(options.formatSummary);
 		}
 		if (!impl->validatedTopologyValid)
 		{
+			// Invalid cached topology still returns its validation evidence after
+			// stale execution state is cleared; no work was admitted here.
+			impl->latestSummary = impl->BuildSummary(impl->validatedEdges, impl->validatedDiagnostics, options.formatSummary);
 			return impl->latestSummary;
 		}
+
+		impl->latestSummary.completed = false;
+		impl->latestSummary.valid = false;
+		std::vector<JobGraphNodeState> fatalTerminalStates(impl->nodes.size(), JobGraphNodeState::Pending);
 
 		// Reused graphs retain only topology diagnostics and edges. Execution
 		// diagnostics from the prior frame never leak into this frame's summary.
@@ -1012,237 +1026,267 @@ namespace TerraEngine::Scheduling {
 			std::shared_ptr<Task<void>> task;
 			std::future<void> future;
 		};
+		static_assert(std::is_nothrow_move_constructible_v<RunningWorker>);
 		struct WorkerCompletionState {
 			std::mutex mutex;
 			std::condition_variable condition;
-			std::deque<std::size_t> completedIndices;
+			// Every node dispatches once, so node-count storage bounds the entire
+			// invocation. Publication only writes an existing slot under this mutex.
+			std::vector<std::size_t> completedIndices;
+			std::size_t read = 0U, written = 0U;
+			explicit WorkerCompletionState(std::size_t count) : completedIndices(count) {}
 		};
-		const auto completionState = std::make_shared<WorkerCompletionState>();
+		const auto completionState = std::make_shared<WorkerCompletionState>(impl->nodes.size());
 		std::vector<RunningWorker> runningWorkers;
 		runningWorkers.reserve(impl->nodes.size());
 
+		const auto checkpoint = impl->checkpoint;
 		std::size_t terminalCount = 0;
 		std::size_t workerCompletionWakeCount = 0u;
 		std::size_t completionDrivenDispatchCount = 0u;
 		std::size_t peakConcurrentWorkerCount = 0u;
 		std::uint64_t completionSequence = 0u;
-		while (terminalCount < impl->nodes.size())
-		{
-			while (!readyQueue.empty())
-			{
-				const std::size_t index = readyQueue.top();
-				readyQueue.pop();
-				Impl::Node& node = impl->nodes[index];
-				if (node.kind == JobGraphNodeKind::Job && node.requiresSuccessfulDependencies && dependencyFailed(index))
-				{
-					// Blocking is terminal for this invocation. Continue settling
-					// independent dispatched work; never run a failed job's dependents.
-					completeNode(index, JobGraphNodeState::Blocked);
-					++terminalCount;
-					impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Warning, JobGraphDiagnosticCategory::Execution, node.name, "Required dependency did not complete successfully.", "Keep this job blocked until the dependency failure is resolved.");
-					continue;
+		std::size_t secondaryWorkerFailureCount = 0U, settledWorkerCount = 0U;
+		struct SettlementOwner {
+			Impl& graph; std::vector<RunningWorker>& workers;
+			std::size_t& secondaryFailures; std::size_t& settledWorkers;
+			void Drain() noexcept {
+				// No mailbox lock, diagnostics, queue growth or allocation during drain.
+				for (auto& worker : workers) {
+					if (!worker.future.valid()) continue;
+					try { worker.future.get(); graph.nodes[worker.index].state = JobGraphNodeState::Completed; }
+					catch (...) { graph.nodes[worker.index].state = JobGraphNodeState::Failed; ++secondaryFailures; }
+					++settledWorkers;
 				}
-				if (cancellationApplies(node))
-				{
-					completeNode(index, JobGraphNodeState::Cancelled);
-					++terminalCount;
-					impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Info, JobGraphDiagnosticCategory::Cancellation, node.name, "Pending cancellable job was cancelled before execution.", "No action required unless this job should ignore graph cancellation.");
-					continue;
-				}
-				if (node.kind == JobGraphNodeKind::TaskGroup)
-				{
-					completeNode(index,
-						dependencyFailed(index) ? JobGraphNodeState::Blocked : JobGraphNodeState::Completed,
-						unlockedByWorkerCompletion[index]);
-					++terminalCount;
-					continue;
-				}
-				if (node.kind == JobGraphNodeKind::Barrier)
-				{
-					if (node.diagnosePendingMutations && options.mutationBarrierCallback)
-					{
-						const MutationFlushRuntimeState state = options.mutationBarrierCallback(node.name);
-						if (state.pendingAfterFlush > 0)
-						{
-							impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Mutation, node.name, "Mutation barrier completed with pending mutations.", "Flush or reject pending SceneMutationQueue requests before crossing this barrier.");
-						}
-					}
-					completeNode(index,
-						dependencyFailed(index) ? JobGraphNodeState::Blocked : JobGraphNodeState::Completed,
-						unlockedByWorkerCompletion[index]);
-					++terminalCount;
-					continue;
-				}
-
-				node.state = JobGraphNodeState::Ready;
-				if (node.executionPolicy == JobGraphExecutionPolicy::WorkerEligible)
-				{
-					if (unlockedByWorkerCompletion[index] && !runningWorkers.empty())
-					{
-						++completionDrivenDispatchCount;
-					}
-					node.state = JobGraphNodeState::Running;
-					node.enqueuedAt = std::chrono::steady_clock::now();
-					node.dispatchCount = 1u;
-					auto task = ThreadPool::instance().createTask([this, index, context, &workerTimeNs, completionState]() mutable {
-						const auto start = std::chrono::steady_clock::now();
-						Impl::Node& workerNode = impl->nodes[index];
-						workerNode.queueDurationNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(start - workerNode.enqueuedAt).count());
-						WorkerSafetyScope workerSafetyScope(workerNode.name);
-						TERRAENGINE_PROFILE_TASK_SCOPE("JobGraph::WorkerJob", TerraEngine::Profiling::ProfilerModuleId::TaskExecution, workerNode.profilingLabel.c_str());
-						const auto publishCompletion = [&]() {
-							const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-								std::chrono::steady_clock::now() - start).count();
-							workerNode.runDurationNs = static_cast<std::uint64_t>(elapsed);
-							workerTimeNs.fetch_add(workerNode.runDurationNs, std::memory_order_relaxed);
-							{
-								std::scoped_lock completionLock(completionState->mutex);
-								completionState->completedIndices.push_back(index);
-							}
-							completionState->condition.notify_one();
-						};
-						try
-						{
-							if (workerNode.work)
-							{
-								workerNode.work(context);
-							}
-							publishCompletion();
-						}
-						catch (...)
-						{
-							publishCompletion();
-							throw;
-						}
-					});
-					RunningWorker worker;
-					worker.index = index;
-					worker.future = task->getFuture();
-					worker.task = std::move(task);
-					ThreadPool::instance().enqueue(worker.task, node.usefulWorkItemCount);
-					runningWorkers.push_back(std::move(worker));
-					peakConcurrentWorkerCount = std::max(peakConcurrentWorkerCount, runningWorkers.size());
-					continue;
-				}
-				try
-				{
-					node.state = JobGraphNodeState::Running;
-					const auto start = std::chrono::steady_clock::now();
-					node.dispatchCount = 1u;
-					TERRAENGINE_PROFILE_TASK_SCOPE("JobGraph::ProtectedJob", TerraEngine::Profiling::ProfilerModuleId::CpuEngine, node.profilingLabel.c_str());
-					if (node.work)
-					{
-						node.work(context);
-					}
-					const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-					node.runDurationNs = static_cast<std::uint64_t>(elapsed);
-					protectedTimeNs += node.runDurationNs;
-					completeNode(index, JobGraphNodeState::Completed);
-				}
-				catch (...)
-				{
-					completeNode(index, JobGraphNodeState::Failed);
-					impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Execution, node.name, "Job threw during protected execution: " + ExceptionMessage() + ".", "Fix the job body or catch expected failures inside the job.");
-				}
-				++terminalCount;
+				workers.clear();
 			}
+			~SettlementOwner() noexcept { Drain(); }
+		} settlement{*impl, runningWorkers, secondaryWorkerFailureCount, settledWorkerCount};
+		// This guard is declared after every worker-captured stack local. Fatal
+		// exits settle physical futures before graph/time/mailbox captures expire.
+		try {
 
-			if (terminalCount == impl->nodes.size())
+			while (terminalCount < impl->nodes.size())
 			{
-				break;
-			}
-
-			if (runningWorkers.empty())
-			{
-				for (std::size_t index = 0; index < impl->nodes.size(); ++index)
+				while (!readyQueue.empty())
 				{
-					if (!IsTerminal(impl->nodes[index].state))
+					const std::size_t index = readyQueue.top();
+					readyQueue.pop();
+					Impl::Node& node = impl->nodes[index];
+					if (node.kind == JobGraphNodeKind::Job && node.requiresSuccessfulDependencies && dependencyFailed(index))
 					{
+						// Blocking is terminal for this invocation. Continue settling
+						// independent dispatched work; never run a failed job's dependents.
 						completeNode(index, JobGraphNodeState::Blocked);
 						++terminalCount;
-						impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Execution, impl->nodes[index].name, "Graph execution stalled before this node became ready.", "Inspect earlier dependency failures or validation gaps.");
+						impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Warning, JobGraphDiagnosticCategory::Execution, node.name, "Required dependency did not complete successfully.", "Keep this job blocked until the dependency failure is resolved.");
+						continue;
 					}
-				}
-				break;
-			}
+					if (cancellationApplies(node))
+					{
+						completeNode(index, JobGraphNodeState::Cancelled);
+						++terminalCount;
+						impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Info, JobGraphDiagnosticCategory::Cancellation, node.name, "Pending cancellable job was cancelled before execution.", "No action required unless this job should ignore graph cancellation.");
+						continue;
+					}
+					if (node.kind == JobGraphNodeKind::TaskGroup)
+					{
+						completeNode(index,
+							dependencyFailed(index) ? JobGraphNodeState::Blocked : JobGraphNodeState::Completed,
+							unlockedByWorkerCompletion[index]);
+						++terminalCount;
+						continue;
+					}
+					if (node.kind == JobGraphNodeKind::Barrier)
+					{
+						if (node.diagnosePendingMutations && options.mutationBarrierCallback)
+						{
+							const MutationFlushRuntimeState state = options.mutationBarrierCallback(node.name);
+							if (state.pendingAfterFlush > 0)
+							{
+								impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Mutation, node.name, "Mutation barrier completed with pending mutations.", "Flush or reject pending SceneMutationQueue requests before crossing this barrier.");
+							}
+						}
+						completeNode(index,
+							dependencyFailed(index) ? JobGraphNodeState::Blocked : JobGraphNodeState::Completed,
+							unlockedByWorkerCompletion[index]);
+						++terminalCount;
+						continue;
+					}
 
-			{
-				// Wait for one completion, then immediately dispatch work unlocked by
-				// that worker while unrelated workers remain active. The old bulk-wave
-				// join delayed short dependency chains behind the slowest sibling.
-				TERRAENGINE_PROFILE_SCOPE("JobGraph: Coordinator Wait",
-					TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
-				const auto waitStart = std::chrono::steady_clock::now();
-				std::size_t completedIndex = 0u;
-				{
-					std::unique_lock completionLock(completionState->mutex);
-					completionState->condition.wait(completionLock, [&]() {
-						return !completionState->completedIndices.empty();
-					});
-					completedIndex = completionState->completedIndices.front();
-					completionState->completedIndices.pop_front();
+					node.state = JobGraphNodeState::Ready;
+					if (node.executionPolicy == JobGraphExecutionPolicy::WorkerEligible)
+					{
+						if (unlockedByWorkerCompletion[index] && !runningWorkers.empty())
+						{
+							++completionDrivenDispatchCount;
+						}
+						node.state = JobGraphNodeState::Running;
+						node.enqueuedAt = std::chrono::steady_clock::now();
+						node.dispatchCount = 1u;
+						if (checkpoint) checkpoint(JobGraphCheckpoint::BeforePreparation, index);
+						auto task = ThreadPool::instance().createTask([this, index, context, &workerTimeNs, completionState, checkpoint]() mutable {
+							const auto start = std::chrono::steady_clock::now();
+							Impl::Node& workerNode = impl->nodes[index];
+							// Install notification ownership before entry/setup/profiler hooks.
+							// Stack unwinding publishes once without allocating or retrying.
+							struct NotifyCompletion {
+								Impl::Node& node; std::size_t index; std::chrono::steady_clock::time_point start;
+								std::atomic<std::uint64_t>& time; WorkerCompletionState& mailbox;
+								~NotifyCompletion() noexcept {
+									node.runDurationNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+									time.fetch_add(node.runDurationNs, std::memory_order_relaxed);
+									{ std::scoped_lock lock(mailbox.mutex); mailbox.completedIndices[mailbox.written++] = index; }
+									mailbox.condition.notify_one();
+								}
+							} notification{workerNode, index, start, workerTimeNs, *completionState};
+							if (checkpoint) checkpoint(JobGraphCheckpoint::WorkerEntry, index);
+							workerNode.queueDurationNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(start - workerNode.enqueuedAt).count());
+							WorkerSafetyScope workerSafetyScope(workerNode.name);
+							TERRAENGINE_PROFILE_TASK_SCOPE("JobGraph::WorkerJob", TerraEngine::Profiling::ProfilerModuleId::TaskExecution, workerNode.profilingLabel.c_str());
+							if (workerNode.work) workerNode.work(context);
+						});
+						RunningWorker worker;
+						worker.index = index; worker.future = task->getFuture(); worker.task = std::move(task);
+						// Reserved tracking precedes transfer. A throwing dependency-free
+						// enqueue never owns its promise, so rollback never waits on it.
+						runningWorkers.push_back(std::move(worker));
+						try {
+							if (checkpoint) checkpoint(JobGraphCheckpoint::BeforeSubmission, index);
+							ThreadPool::instance().enqueue(runningWorkers.back().task, node.usefulWorkItemCount);
+						} catch (...) { runningWorkers.pop_back(); node.state = JobGraphNodeState::Failed; throw; }
+						peakConcurrentWorkerCount = std::max(peakConcurrentWorkerCount, runningWorkers.size());
+						continue;
+					}
+					std::exception_ptr protectedFailure;
+					node.state = JobGraphNodeState::Running;
+					const auto start = std::chrono::steady_clock::now(); node.dispatchCount = 1u;
+					try {
+						TERRAENGINE_PROFILE_TASK_SCOPE("JobGraph::ProtectedJob", TerraEngine::Profiling::ProfilerModuleId::CpuEngine, node.profilingLabel.c_str());
+						if (node.work) node.work(context);
+					} catch (...) { protectedFailure = std::current_exception(); }
+					node.runDurationNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+					protectedTimeNs += node.runDurationNs;
+					completeNode(index, protectedFailure ? JobGraphNodeState::Failed : JobGraphNodeState::Completed);
+					if (protectedFailure) {
+						try { std::rethrow_exception(protectedFailure); }
+						catch (...) { impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Execution, node.name, "Job threw during protected execution: " + ExceptionMessage() + ".", "Fix the job body or catch expected failures inside the job."); }
+					}
+					++terminalCount;
 				}
-				const auto waitElapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-					std::chrono::steady_clock::now() - waitStart).count();
-				++workerCompletionWakeCount;
-				const auto completedWorker = std::find_if(
-					runningWorkers.begin(), runningWorkers.end(), [&](const RunningWorker& worker) {
-						return worker.index == completedIndex;
-					});
-				if (completedWorker == runningWorkers.end())
+
+				if (terminalCount == impl->nodes.size())
 				{
-					impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Execution, "", "Worker completion did not match an active graph node.", "Inspect ThreadPool completion ownership and graph lifetime handling.");
-					continue;
+					break;
 				}
-				Impl::Node& node = impl->nodes[completedIndex];
-				node.coordinatorWaitDurationNs += static_cast<std::uint64_t>(waitElapsed);
-				coordinatorWaitTimeNs += static_cast<std::uint64_t>(waitElapsed);
-				try
+
+				if (runningWorkers.empty())
 				{
-					completedWorker->future.get();
+					for (std::size_t index = 0; index < impl->nodes.size(); ++index)
+					{
+						if (!IsTerminal(impl->nodes[index].state))
+						{
+							completeNode(index, JobGraphNodeState::Blocked);
+							++terminalCount;
+							impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Execution, impl->nodes[index].name, "Graph execution stalled before this node became ready.", "Inspect earlier dependency failures or validation gaps.");
+						}
+					}
+					break;
+				}
+
+				{
+					// Wait for one completion, then immediately dispatch work unlocked by
+					// that worker while unrelated workers remain active. The old bulk-wave
+					// join delayed short dependency chains behind the slowest sibling.
+					TERRAENGINE_PROFILE_SCOPE("JobGraph: Coordinator Wait",
+						TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
+					const auto waitStart = std::chrono::steady_clock::now();
+					std::size_t completedIndex = 0u;
+					{
+						std::unique_lock completionLock(completionState->mutex);
+						completionState->condition.wait(completionLock, [&]() {
+							return completionState->read != completionState->written;
+						});
+						completedIndex = completionState->completedIndices[completionState->read++];
+					}
+					if (checkpoint) checkpoint(JobGraphCheckpoint::BeforeCompletion, completedIndex);
+					const auto waitElapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+						std::chrono::steady_clock::now() - waitStart).count();
+					++workerCompletionWakeCount;
+					const auto completedWorker = std::find_if(
+						runningWorkers.begin(), runningWorkers.end(), [&](const RunningWorker& worker) {
+							return worker.index == completedIndex;
+						});
+					if (completedWorker == runningWorkers.end())
+					{
+						impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Execution, "", "Worker completion did not match an active graph node.", "Inspect ThreadPool completion ownership and graph lifetime handling.");
+						continue;
+					}
+					Impl::Node& node = impl->nodes[completedIndex];
+					node.coordinatorWaitDurationNs += static_cast<std::uint64_t>(waitElapsed);
+					coordinatorWaitTimeNs += static_cast<std::uint64_t>(waitElapsed);
+					std::exception_ptr workerFailure;
+					++settledWorkerCount;
+					try { completedWorker->future.get(); }
+					catch (...) { workerFailure = std::current_exception(); ++secondaryWorkerFailureCount; }
 					node.completionSequence = ++completionSequence;
-					completeNode(completedIndex, JobGraphNodeState::Completed, true);
+					// Future failure belongs to the worker. Ready-queue/diagnostic failure
+					// belongs to the coordinator and must reach the whole-run owner.
+					completeNode(completedIndex, workerFailure ? JobGraphNodeState::Failed : JobGraphNodeState::Completed, true);
+					if (workerFailure) {
+						try { std::rethrow_exception(workerFailure); }
+						catch (...) { impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Execution, node.name, "Job threw during worker execution: " + ExceptionMessage() + ".", "Fix the job body or catch expected failures inside the job."); }
+					}
+					runningWorkers.erase(completedWorker);
+					++terminalCount;
 				}
-				catch (...)
-				{
-					node.completionSequence = ++completionSequence;
-					completeNode(completedIndex, JobGraphNodeState::Failed, true);
-					impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Execution, node.name, "Job threw during worker execution: " + ExceptionMessage() + ".", "Fix the job body or catch expected failures inside the job.");
-				}
-				runningWorkers.erase(completedWorker);
-				++terminalCount;
 			}
-		}
 
-		std::vector<std::uint64_t> criticalPathByNode(impl->nodes.size(), 0u);
-		std::uint64_t criticalPathDurationNs = 0u;
-		for (const std::size_t index : topologicalOrder)
-		{
-			criticalPathByNode[index] += impl->nodes[index].runDurationNs;
-			criticalPathDurationNs = std::max(criticalPathDurationNs, criticalPathByNode[index]);
-			for (const std::size_t dependent : outgoing[index])
+			std::vector<std::uint64_t> criticalPathByNode(impl->nodes.size(), 0u);
+			std::uint64_t criticalPathDurationNs = 0u;
+			for (const std::size_t index : topologicalOrder)
 			{
-				criticalPathByNode[dependent] = std::max(
-					criticalPathByNode[dependent], criticalPathByNode[index]);
+				criticalPathByNode[index] += impl->nodes[index].runDurationNs;
+				criticalPathDurationNs = std::max(criticalPathDurationNs, criticalPathByNode[index]);
+				for (const std::size_t dependent : outgoing[index])
+				{
+					criticalPathByNode[dependent] = std::max(
+						criticalPathByNode[dependent], criticalPathByNode[index]);
+				}
 			}
-		}
 
-		impl->latestSummary = impl->BuildSummary(edges, std::move(diagnostics), options.formatSummary);
-		impl->latestSummary.workerTimeNs = workerTimeNs.load(std::memory_order_relaxed);
-		impl->latestSummary.protectedTimeNs = protectedTimeNs;
-		impl->latestSummary.coordinatorWaitTimeNs = coordinatorWaitTimeNs;
-		impl->latestSummary.criticalPathDurationNs = criticalPathDurationNs;
-		impl->latestSummary.dependencyWaveCount = dependencyWaveCount;
-		impl->latestSummary.workerCompletionWakeCount = workerCompletionWakeCount;
-		impl->latestSummary.completionDrivenDispatchCount = completionDrivenDispatchCount;
-		impl->latestSummary.peakConcurrentWorkerCount = peakConcurrentWorkerCount;
-		const std::uint64_t totalMeasuredTimeNs = impl->latestSummary.workerTimeNs + impl->latestSummary.protectedTimeNs + impl->latestSummary.coordinatorWaitTimeNs;
-		impl->latestSummary.workerUtilization = totalMeasuredTimeNs == 0
-			? 0.0
-			: static_cast<double>(impl->latestSummary.workerTimeNs) / static_cast<double>(totalMeasuredTimeNs);
-		if (options.formatSummary)
-		{
-			impl->latestSummary.formatted = FormatJobGraphSummary(impl->latestSummary);
+			impl->latestSummary = impl->BuildSummary(edges, std::move(diagnostics), options.formatSummary);
+			impl->latestSummary.workerTimeNs = workerTimeNs.load(std::memory_order_relaxed);
+			impl->latestSummary.protectedTimeNs = protectedTimeNs;
+			impl->latestSummary.coordinatorWaitTimeNs = coordinatorWaitTimeNs;
+			impl->latestSummary.criticalPathDurationNs = criticalPathDurationNs;
+			impl->latestSummary.dependencyWaveCount = dependencyWaveCount;
+			impl->latestSummary.workerCompletionWakeCount = workerCompletionWakeCount;
+			impl->latestSummary.completionDrivenDispatchCount = completionDrivenDispatchCount;
+			impl->latestSummary.peakConcurrentWorkerCount = peakConcurrentWorkerCount;
+			const std::uint64_t totalMeasuredTimeNs = impl->latestSummary.workerTimeNs + impl->latestSummary.protectedTimeNs + impl->latestSummary.coordinatorWaitTimeNs;
+			impl->latestSummary.workerUtilization = totalMeasuredTimeNs == 0
+				? 0.0
+				: static_cast<double>(impl->latestSummary.workerTimeNs) / static_cast<double>(totalMeasuredTimeNs);
+			if (options.formatSummary)
+			{
+				impl->latestSummary.formatted = FormatJobGraphSummary(impl->latestSummary);
+			}
+		} catch (...) {
+			const auto primary = std::current_exception();
+			settlement.Drain();
+			impl->latestSummary.valid = false; impl->latestSummary.completed = false; impl->latestSummary.fatalExecution = true;
+			impl->latestSummary.secondaryWorkerFailureCount = secondaryWorkerFailureCount;
+			impl->latestSummary.settledWorkerCount = settledWorkerCount;
+			impl->latestSummary.formatted.clear();
+			impl->latestSummary.terminalStates = std::move(fatalTerminalStates);
+			// Stop dispatch permanently for this invocation and retain only bounded
+			// typed outcomes; string formatting must never obscure the primary cause.
+			for (std::size_t index = 0U; index < impl->nodes.size(); ++index) {
+				if (!IsTerminal(impl->nodes[index].state)) impl->nodes[index].state = JobGraphNodeState::Blocked;
+				if (index < impl->latestSummary.terminalStates.size()) impl->latestSummary.terminalStates[index] = impl->nodes[index].state;
+			}
+			std::rethrow_exception(primary);
 		}
 		return impl->latestSummary;
 	}

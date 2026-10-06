@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 #include "Runtime/ArtifactValidation.h"
 #include "ArtifactValidationTestCorpus.h"
+#include "../Resource/TextureTestFixtures.h"
 #include "File Formats/TerraEngineTextureFile.h"
 #include <cstring>
 #include <limits>
@@ -69,6 +70,18 @@ namespace TerraEngine::Tests {
 			const auto inspectTexture = [](const ArtifactCorpus::Buffer& bytes) {
 				return Runtime::ValidateArtifact({bytes, Runtime::ArtifactKind::Texture, Runtime::NativeImageTarget::Unsupported, "Textures/Bounds.tetf"});
 			};
+			// Legal partial and full chains use fresh legal UASTC blocks. The gate
+			// remains structural: successful inspection does not promise decoding.
+			for(const unsigned mips : {2U,4U}) {
+				const auto fixture=TextureFixtures::Make(8,4,mips);
+				context.Expect(Runtime::ValidateArtifact({fixture.bytes,Runtime::ArtifactKind::Texture,Runtime::NativeImageTarget::Unsupported,"Textures/compiler-control.tetf"}).IsValid(), "Legal partial/full compiler-style mip domains remain supported.");
+			}
+			for(const unsigned row : {0U,1U,2U,3U}) {
+				auto fixture=TextureFixtures::Make(8,8,4); auto desc=fixture.Desc();
+				if(row==0) desc.width=0; else if(row==1) desc.height=0; else if(row==2) desc.mipCount=0; else { desc.width=4; desc.height=4; }
+				fixture.SetDesc(desc); fixture.Checksum();
+				context.Expect(!Runtime::ValidateArtifact({fixture.bytes,Runtime::ArtifactKind::Texture,Runtime::NativeImageTarget::Unsupported,"Textures/mip-domain.tetf"}).IsValid(), "Zero or overlong 2D mip domains must reject before descriptor shifts.");
+			}
 			const auto completeTexture = TextureEnvelope();
 			context.Expect(inspectTexture(completeTexture).IsValid(), "Complete texture metadata must pass nonexecuting inspection.");
 			auto texture = completeTexture;

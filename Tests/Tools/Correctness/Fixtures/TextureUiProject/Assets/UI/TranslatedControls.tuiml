@@ -1,0 +1,43 @@
+<UIRoot id="observation-root" style="width: 100%; height: 100%; flex-direction: column;">
+	<!-- The small parent intentionally does not clip its red translated child. -->
+	<VisualElement id="overflow-parent" style="width: 40px; height: 40px; flex-shrink: 0; background-color: #444444;">
+		<Button id="translated-button" style="width: 40px; height: 40px; flex-shrink: 0; translate: 80 0; background-color: #dd3333; color: #ffffff;" />
+	</VisualElement>
+	<Label id="hover-status" text="Awaiting managed observer" style="width: 760px; height: 30px; flex-shrink: 0; color: #ffffff; font-size: 18px;" />
+	<Label id="click-status" text="Translated clicks: 0; front: 0; back: 0; hidden: 0" style="width: 760px; height: 30px; flex-shrink: 0; color: #ffffff; font-size: 18px;" />
+	<Label text="Red target: (80,0). Green front: (80,130). Hidden target: (80,170)." style="width: 760px; height: 30px; flex-shrink: 0; color: #ffffff; font-size: 16px;" />
+	<!-- The later sibling's descendant is visually and interactively in front. -->
+	<VisualElement id="overlap-row" style="width: 200px; height: 40px; flex-shrink: 0; flex-direction: row;">
+		<Button id="overlap-back" style="width: 40px; height: 40px; flex-shrink: 0; translate: 80 0; background-color: #3333dd;" />
+		<VisualElement id="overlap-parent" style="width: 40px; height: 40px; flex-shrink: 0;">
+			<Button id="overlap-front" style="width: 40px; height: 40px; flex-shrink: 0; translate: 40 0; background-color: #33cc55;" />
+		</VisualElement>
+	</VisualElement>
+	<!-- The observer hides this ancestor before declaring readiness. -->
+	<VisualElement id="hidden-row" style="width: 200px; height: 40px; flex-shrink: 0;">
+		<VisualElement id="hidden-parent" style="width: 40px; height: 40px; flex-shrink: 0;">
+			<Button id="hidden-button" style="width: 40px; height: 40px; flex-shrink: 0; translate: 80 0; background-color: #ff00ff;" />
+		</VisualElement>
+	</VisualElement>
+	<Label text="Generated RGBA linear witness / quadrants / sRGB midtone" style="width: 760px; height: 30px; flex-shrink: 0; color: #ffffff; font-size: 16px;" />
+	<VisualElement style="width: 600px; height: 128px; flex-shrink: 0; flex-direction: row;">
+		<Image id="linear-witness" src="Textures/witness-linear.tetf" style="width: 256px; height: 128px; flex-shrink: 0;" />
+		<Image id="linear-quadrants" src="Textures/quadrants-linear.tetf" style="width: 128px; height: 128px; flex-shrink: 0;" />
+		<Image id="srgb-midtone" src="Textures/midtone-srgb.tetf" style="width: 128px; height: 128px; flex-shrink: 0;" />
+	</VisualElement>
+	<Label text="Partial-edge RGBA / alpha RGBA / compressed BC7 control" style="width: 760px; height: 30px; flex-shrink: 0; color: #ffffff; font-size: 16px;" />
+	<VisualElement style="width: 600px; height: 96px; flex-shrink: 0; flex-direction: row;">
+		<Image id="linear-edges" src="Textures/edges-linear.tetf" style="width: 160px; height: 96px; flex-shrink: 0;" />
+		<Image id="linear-alpha" src="Textures/alpha-linear.tetf" style="width: 128px; height: 96px; flex-shrink: 0;" />
+		<Image id="compressed-control" src="Textures/control-bc7.tetf" style="width: 128px; height: 96px; flex-shrink: 0;" />
+	</VisualElement>
+	<!-- Magnification and minification exercise the same uploaded RGBA mip chain.
+	     The tiny controls are reviewed in backend pixels, not by screen labels. -->
+	<Label text="RGBA mip chain: enlarged base / 4x2 / 2x1 / 1x1" style="width: 760px; height: 24px; flex-shrink: 0; color: #ffffff; font-size: 16px;" />
+	<VisualElement style="width: 600px; height: 64px; flex-shrink: 0; flex-direction: row;">
+		<Image id="mip-base" src="Textures/mips-linear.tetf" style="width: 128px; height: 64px; flex-shrink: 0;" />
+		<Image id="mip-one" src="Textures/mips-linear.tetf" style="width: 4px; height: 2px; flex-shrink: 0;" />
+		<Image id="mip-two" src="Textures/mips-linear.tetf" style="width: 2px; height: 1px; flex-shrink: 0;" />
+		<Image id="mip-three" src="Textures/mips-linear.tetf" style="width: 1px; height: 1px; flex-shrink: 0;" />
+	</VisualElement>
+</UIRoot>

@@ -138,6 +138,12 @@ namespace TerraEngine::Scheduling {
 		bool valid = true;
 		bool completed = false;
 		bool cancelled = false;
+		// Fatal coordinator failure propagates only after admitted workers settle.
+		// These bounded typed outcomes remain usable when diagnostic allocation fails.
+		bool fatalExecution = false;
+		std::size_t secondaryWorkerFailureCount = 0U;
+		std::size_t settledWorkerCount = 0U;
+		std::vector<JobGraphNodeState> terminalStates;
 		std::string graphId;
 		std::string label;
 		std::vector<JobGraphResultEntry> jobs;
@@ -264,12 +270,17 @@ namespace TerraEngine::Scheduling {
 		bool IsCancellationRequested() const;
 
 		const JobGraphSummary& Validate(bool formatSummary = true);
+		// Execute owns every admitted worker until physical settlement, even if a
+		// coordinator callback/allocation throws. The exact fatal exception is then
+		// rethrown; LatestSummary is incomplete with bounded terminal outcomes.
+		// Reset/Rearm/Execute are quiescent-owner operations, never concurrent.
 		const JobGraphSummary& Execute(const JobGraphExecuteOptions& options = {});
 		const JobGraphSummary& LatestSummary() const;
 
 		static JobGraph FromSchedulerLowering(const JobGraphSchedulerLoweringInput& input);
 
 	private:
+		friend class JobGraphTestAccess;
 		struct Impl;
 		std::unique_ptr<Impl> impl;
 	};

@@ -221,31 +221,45 @@ std::shared_ptr<Task<void>> ThreadPool::AllocateVoidTask(std::function<void()> f
 	Task<void>* ptr = nullptr;
 	{
 		std::lock_guard<std::mutex> lock(poolMutex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!voidTaskPool.empty()) {
-			ptr = voidTaskPool.back();
-			voidTaskPool.pop_back();
+		// Reserve the observed concurrent peak before acquiring any task. Reserve
+		// failure leaves both the cache and ownership count unchanged; geometric
+		// growth keeps normal reusable graph bursts efficient across frames.
+		if (outstandingVoidTasks >= voidTaskPool.capacity()) {
+			const auto maximum = voidTaskPool.max_size();
+			if (outstandingVoidTasks >= maximum) throw std::length_error("Void task cache capacity exceeded.");
+			const auto capacity = voidTaskPool.capacity();
+			const auto next = capacity > maximum / 2U ? maximum : std::max<std::size_t>(64U, capacity * 2U);
+			voidTaskPool.reserve(std::min(maximum, next));
 		}
+		++outstandingVoidTasks;
+		if (!voidTaskPool.empty()) { ptr = voidTaskPool.back(); voidTaskPool.pop_back(); }
 	}
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!ptr) {
-		ptr = new Task<void>(std::move(func));
-	} else {
-		ptr->reset(std::move(func));
+	try {
+		if (!ptr) ptr = new Task<void>(std::move(func));
+		else ptr->reset(std::move(func));
+	} catch (...) {
+		// A null rollback releases only the early ownership reservation. A
+		// failed reset still owns its task and returns it through the safe path.
+		ReleaseVoidTask(ptr); throw;
 	}
-
-	// Return shared_ptr with custom deleter that returns to pool
-	return std::shared_ptr<Task<void>>(ptr, [this](Task<void>* t) {
-		ReleaseVoidTask(t);
-	});
+	// If shared_ptr control-block allocation fails, its constructor invokes this
+	// deleter exactly once. Do not also roll back that transferred pointer.
+	return std::shared_ptr<Task<void>>(ptr, [this](Task<void>* task) noexcept { ReleaseVoidTask(task); });
 }
 
-// ThreadPool::ReleaseVoidTask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void ThreadPool::ReleaseVoidTask(Task<void>* task)
+// The shared-task deleter may run during fatal settlement or stack unwinding.
+// Pointer insertion cannot allocate when size is below reserved capacity;
+// excess tasks and any unexpected cache/lock failure are deleted unlocked.
+void ThreadPool::ReleaseVoidTask(Task<void>* task) noexcept
 {
-	std::lock_guard<std::mutex> lock(poolMutex);
-	voidTaskPool.push_back(task);
+	try {
+		std::lock_guard<std::mutex> lock(poolMutex);
+		if (outstandingVoidTasks != 0U) --outstandingVoidTasks;
+		if (task && voidTaskPool.size() < voidTaskPool.capacity()) {
+			voidTaskPool.push_back(task); task = nullptr;
+		}
+	} catch (...) {}
+	delete task;
 }
 
 // Notify that a task has completed; decrement unresolvedDependencies of the parent task

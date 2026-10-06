@@ -4055,6 +4055,18 @@ void VulkanContext::RenderFrame(
 
 			vkBeginCommandBuffer(uiCmd, &begin);
 			impl->CreateUIPipelines(renderPassInfo.renderPass);
+			// Secondary command buffers do not inherit viewport/scissor state.
+			// Use this exact Game target, including offscreen editor targets, so
+			// UI geometry and the published logical pointer mapping agree.
+			VkViewport uiViewport{};
+			uiViewport.width = static_cast<float>(activeRenderExtent.width);
+			uiViewport.height = static_cast<float>(activeRenderExtent.height);
+			uiViewport.minDepth = 0.0f;
+			uiViewport.maxDepth = 1.0f;
+			vkCmdSetViewport(uiCmd, 0u, 1u, &uiViewport);
+			VkRect2D uiScissor{};
+			uiScissor.extent = activeRenderExtent;
+			vkCmdSetScissor(uiCmd, 0u, 1u, &uiScissor);
 			impl->RenderUI(uiCmd, publicationPresentation->uiBatch);
 			vkEndCommandBuffer(uiCmd);
 			secondaryBuffers.push_back(uiCmd);

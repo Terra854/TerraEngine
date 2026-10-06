@@ -31,6 +31,8 @@ add_executable(TerraEngine-EngineTests
 	Scene/GenericMutationFailureSafetyTests.cpp
 	Scene/SceneMutationQueueFailureSafetyTests.cpp
 	Resource/ResourcePublicationLifecycleTests.cpp
+	# Fresh legal cooked fixtures exercise safe ranges and tight RGBA image rows.
+	Resource/TextureLoadingTests.cpp
 	Scene/SceneSaveFailureSafetyTests.cpp
 	Scene/SceneAsyncLoadLifecycleTests.cpp
 	# Locomotion contracts are registered explicitly so empty filters cannot pass.
@@ -476,6 +478,19 @@ target_link_libraries(TerraEngine-EngineTests
 		xxhash
 )
 
+# Generate owned legal texture inputs beside the installed acceptance runner.
+# This validation utility reuses fixture definitions and the production engine
+# for file writing; expected image grids remain independently authored in tests.
+add_executable(TerraEngineTextureUiFixtureGenerator
+	${CMAKE_SOURCE_DIR}/Tests/Tools/Correctness/TextureUiFixtureGenerator.cpp)
+target_compile_features(TerraEngineTextureUiFixtureGenerator PRIVATE cxx_std_20)
+target_include_directories(TerraEngineTextureUiFixtureGenerator PRIVATE
+	${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Tests/Engine
+	${CMAKE_SOURCE_DIR}/External/json/include)
+target_link_libraries(TerraEngineTextureUiFixtureGenerator PRIVATE TerraEngine-Engine)
+set_target_properties(TerraEngineTextureUiFixtureGenerator PROPERTIES
+	RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+
 set_target_properties(TerraEngine-EngineTests PROPERTIES
 	RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
@@ -502,13 +517,15 @@ if(WIN32)
 	)
 endif()
 
+# Keep held-worker fault cases in their owned watchdog lane, so a regression
+# cannot strand the aggregate native test process on an unreleased worker.
 add_test(NAME Engine.SpatialUnitTests COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 # The long journal gate owns a singleton profiler plus a controlled worker pool.
 # Run it in its own process below so the aggregate registry cannot inherit test
 # state or ThreadPool history, while full CTest still executes the exact gate.
 set_tests_properties(Engine.SpatialUnitTests PROPERTIES
 	LABELS "Engine"
-	ENVIRONMENT "TERRAENGINE_TEST_EXCLUDE_FILTER=Engine.ProfilerCapturePerformance.LiveThirtyThousandFramesStayResidentBounded,Engine.FrameFailureLifecycle,Engine.ResourceAsyncLifecycle,Engine.SceneMutationFailureSafety,Scene.SaveFailureSafety,Audio.WorldCellCapture,Engine.OwnedProcess,Engine.SceneLoadRecovery,Engine.NestedTaskSettlement,Engine.OwnedImportExecutor,Engine.ArtifactValidation"
+	ENVIRONMENT "TERRAENGINE_TEST_EXCLUDE_FILTER=Engine.ProfilerCapturePerformance.LiveThirtyThousandFramesStayResidentBounded,Engine.FrameFailureLifecycle,Engine.ResourceAsyncLifecycle,Engine.SceneMutationFailureSafety,Scene.SaveFailureSafety,Audio.WorldCellCapture,Engine.OwnedProcess,Engine.SceneLoadRecovery,Engine.NestedTaskSettlement,Engine.OwnedImportExecutor,Engine.ArtifactValidation,Engine.JobGraph.FailureSettlement"
 )
 
 # Keep the unbounded-scene scheduler contract independently selectable while
@@ -1022,6 +1039,14 @@ terraengine_add_correctness_slice(Engine.SceneLoadRecovery TerraEngine-EngineTes
 terraengine_add_correctness_slice(Engine.NestedTaskSettlement TerraEngine-EngineTests Engine.NestedTaskSettlement 11)
 terraengine_add_correctness_slice(Engine.ArtifactValidation TerraEngine-EngineTests Engine.ArtifactValidation 6)
 terraengine_add_correctness_slice(Engine.OwnedImportExecutor TerraEngine-EngineTests Engine.OwnedImportExecutor 5)
+
+# Keep each reproduced failure independently selectable and reject empty lanes.
+# JobGraph owns its held workers even when a coordinator exception is injected;
+# the process watchdog bounds a regression without blessing forced cleanup.
+terraengine_add_correctness_slice(Engine.TextureRangeValidation TerraEngine-EngineTests Engine.Resource.Texture.Bounds 8)
+terraengine_add_correctness_slice(Engine.TextureRgbaLayout TerraEngine-EngineTests Engine.Resource.Texture.Rgba 5)
+terraengine_add_correctness_slice(Engine.JobGraphFailureSettlement TerraEngine-EngineTests Engine.JobGraph.FailureSettlement 6)
+terraengine_add_correctness_slice(Engine.UIHitTesting TerraEngine-EngineTests Engine.UI.HitTesting 6)
 # The root install variable is declared later in the top-level file. Use the
 # maintained build-relative destination here instead of emitting an empty value.
 set_property(TEST Engine.NestedTaskSettlement APPEND PROPERTY ENVIRONMENT "TERRAENGINE_LIFECYCLE_INSTALL_ROOT=${CMAKE_BINARY_DIR}/Build")

@@ -1,0 +1,129 @@
+{
+	"format": "TerraSceneUnboundedV1",
+	"name": "Installed Texture and UI Observation",
+	"objects": [
+		{
+			"uuid": "71000000000000000000000000000001",
+			"name": "Observation Camera",
+			"components": {
+				"Transform": {
+					"WorldPose": {
+						"position": {
+							"cell": {
+								"y": "0",
+								"x": "0",
+								"z": "0"
+							},
+							"offsetMetres": [
+								0.0,
+								1.0,
+								4.0
+							]
+						},
+						"rotation": [
+							1.0,
+							0.0,
+							0.0,
+							0.0
+						],
+						"scale": [
+							1.0,
+							1.0,
+							1.0
+						]
+					},
+					"ParentRelativePose": {
+						"translationMetres": [
+							0.0,
+							1.0,
+							4.0
+						],
+						"rotation": [
+							1.0,
+							0.0,
+							0.0,
+							0.0
+						],
+						"scale": [
+							1.0,
+							1.0,
+							1.0
+						],
+						"transformSpaceId": 0
+					}
+				},
+				"CameraComponent": {
+					"aspectRatio": 1.7777778,
+					"verticalFovDegrees": 60.0,
+					"farPlane": 100.0,
+					"up": [
+						0.0,
+						1.0,
+						0.0
+					],
+					"nearPlane": 0.1
+				}
+			}
+		},
+		{
+			"uuid": "71000000000000000000000000000002",
+			"name": "Texture and UI Observation",
+			"components": {
+				"Transform": {
+					"WorldPose": {
+						"position": {
+							"cell": {
+								"y": "0",
+								"x": "0",
+								"z": "0"
+							},
+							"offsetMetres": [
+								0.0,
+								0.0,
+								0.0
+							]
+						},
+						"rotation": [
+							1.0,
+							0.0,
+							0.0,
+							0.0
+						],
+						"scale": [
+							1.0,
+							1.0,
+							1.0
+						]
+					},
+					"ParentRelativePose": {
+						"translationMetres": [
+							0.0,
+							0.0,
+							0.0
+						],
+						"rotation": [
+							1.0,
+							0.0,
+							0.0,
+							0.0
+						],
+						"scale": [
+							1.0,
+							1.0,
+							1.0
+						],
+						"transformSpaceId": 0
+					}
+				},
+				"Script": {
+					"BindingsJson": "[{\"bindingId\":\"72000000000000000000000000000001\",\"assetGuid\":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],\"className\":\"TextureUiObserver\",\"enabled\":true,\"orderIndex\":0,\"serializedValues\":[],\"authoredStateVersion\":1}]"
+				},
+				"UIComponent": {
+					"sourceMarkup": "UI/TranslatedControls.tuiml",
+					"sourceStyle": "",
+					"visible": true
+				}
+			}
+		}
+	]
+}

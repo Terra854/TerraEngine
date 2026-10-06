@@ -219,7 +219,7 @@ public:
 	void completeTask(std::shared_ptr<ITask> completedTask);
 
 	std::shared_ptr<Task<void>> AllocateVoidTask(std::function<void()> func);
-	void ReleaseVoidTask(Task<void>* task);
+	void ReleaseVoidTask(Task<void>* task) noexcept;
 
 	// getThreadCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	size_t getThreadCount() const { return workers.size(); }
@@ -290,6 +290,8 @@ private:
 	bool ownedExecutor = false;
 	
 	std::vector<Task<void>*> voidTaskPool;
+	// Peak reservation happens before ownership; return-to-cache never grows.
+	std::size_t outstandingVoidTasks = 0U;
 	std::mutex poolMutex;
 
 	mutable std::mutex telemetryMutex;

@@ -31,6 +31,11 @@ $recoveryFloors=@{
 	'Editor.TerrainIndependentCopy'=24
 	'Editor.MCP.Transport.HttpAuthority'=4
 	'Animation.ProgramPublisher'=9
+	# Counts describe registered behavioral cases, not corpus rows/loop iterations.
+	'Engine.Resource.Texture.Bounds'=8
+	'Engine.Resource.Texture.Rgba'=5
+	'Engine.JobGraph.FailureSettlement'=6
+	'Engine.UI.HitTesting'=6
 }
 if ($recoveryFloors.ContainsKey($Filter) -and $MinimumCases -lt $recoveryFloors[$Filter]) {
 	throw "Recovery filter '$Filter' requires at least $($recoveryFloors[$Filter]) cases."

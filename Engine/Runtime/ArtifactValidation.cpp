@@ -2,6 +2,7 @@
 
 #include "File Formats/TerraEngineMaterialFile.h"
 #include "File Formats/TerraEngineTextureFile.h"
+#include <bit>
 #include "Physics/Assets/CookedColliderAsset.h"
 #include "Physics/Assets/PhysicsMaterial.h"
 #include "Physics/PhysicsSettings.h"
@@ -297,6 +298,11 @@ namespace TerraEngine::Runtime {
 				if(!descriptor || descriptor->size < sizeof(TETFDesc) || !payload || !payload->size)
 					return Invalid("artifact.texture.chunks", "TETF descriptor or UAST payload is missing.");
 				TETFDesc desc{}; std::memcpy(&desc, request.bytes.data() + descriptor->offset, sizeof(desc));
+				// uint16 dimensions permit at most sixteen positive 2D levels. Admit
+				// legal partial chains, but reject repeated 1x1 tails and zero domains.
+				const auto fullChain=std::bit_width(std::max(unsigned(desc.width),unsigned(desc.height)));
+				if(!desc.width || !desc.height || !desc.mipCount || desc.mipCount>16 || desc.mipCount>fullChain) return Invalid("artifact.texture.mip_domain","TETF dimensions or mip count are outside the legal 2D domain.");
+				if((desc.userMetadataChunk!=TETF_INVALID_CHUNK_INDEX && desc.userMetadataChunk>=header.chunkCount) || (desc.thumbnailChunk!=TETF_INVALID_CHUNK_INDEX && desc.thumbnailChunk>=header.chunkCount)) return Invalid("artifact.texture.optional_chunk","TETF optional chunk index is invalid.");
 				const auto tableSize = std::uint64_t(desc.mipCount) * sizeof(TETFLevelEntry);
 				if(tableSize > descriptor->size - sizeof(desc)) return Invalid("artifact.texture.mip_table", "TETF descriptor contains a truncated mip table.");
 				std::uint64_t requiredBlocks = 0;

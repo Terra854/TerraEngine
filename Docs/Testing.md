@@ -2712,3 +2712,73 @@ or JSON dispatch. Use the actual endpoint port after each restart. Interleave
 rejected requests with valid native/browser traffic and compare dispatch counts,
 selection, objects and session fingerprints. The installed bridge has no cumulative dispatch counter; its last diagnostic request and bounded activity log provide live fingerprints, while native callbacks prove exact rejected dispatch counts. Valid authority retains existing
 read-only, write-mode, approval and cancellation controls.
+
+## Texture ranges, RGBA rows, fatal task settlement and UI targeting
+
+From the bundled developer environment, configure, compile and install:
+
+```powershell
+cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
+cmake --build --preset RelWithDebInfo --target install --parallel 2
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine\.TextureRangeValidation|Engine\.TextureRgbaLayout|Engine\.JobGraphFailureSettlement|Engine\.UIHitTesting)$' --no-tests=error --output-on-failure
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+```
+
+The four owned-watchdog lanes require 8 texture bounds, 5 RGBA layout, 6 fatal
+settlement and 6 UI hit-testing cases. Fatal settlement includes 100 held-worker
+iterations at one worker and 100 at two workers, preserving the primary failure,
+settled terminal states, no later admission and healthy graph reuse. The native
+corpus generates legal mode-8 UASTC blocks with independently specified pixels;
+structural admission, decoder success and representation are separate assertions.
+Malformed reloads must preserve resident identity, pixels and byte accounting.
+
+Installed GPU and physical-pointer acceptance requires an unlocked Windows
+desktop and a fresh owned directory:
+
+```powershell
+& out/build/RelWithDebInfo/Build/Tests/Tools/Correctness/RunInstalledTextureUiAcceptance.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/validation/texture-ui-live-fresh -AllowLiveAcceptance
+```
+
+The installed runner verifies its artifact seal, matching native DLL closure,
+bundled SDK, fixture generator and authored project. It seeds both default
+layout templates, isolates preferences and recents, generates eight fresh
+textures, checks loopback endpoint/process identity, compiles normal managed
+scripts and enters Play. Approve any ordinary displayed request in the editor's
+normal approval UI. Captures require `backendReadback=true` and
+`deterministicFallback=false`; a fallback image never proves rendered acceptance.
+
+After `pointer-ready.json`, use the actual Game View image bounds and the fixture
+README to map logical button coordinates to desktop pixels. Observe real hover,
+press/hold/release, second press, front overlap, hidden target and outside-image
+input. The managed observer atomically writes real counters in
+`observations/texture-ui.json`; it does not inject input. Save screenshots with
+visible labels and retain coordinate/actions/count observations. Compare rendered
+witness halves, quadrants, partial edges, alpha, sRGB midtone and compressed
+control with the independently authored texture README; account for scaling and
+display conversion. CPU byte tests remain the exact mip/color oracle.
+
+The reviewing parent writes `live-review.json` only after these observations:
+boolean fields `physicalPointer`, `hoverObserved`, `holdDidNotRepeat`,
+`secondPressObserved`, `frontOnly`, `hiddenExcluded`, `outsideExcluded`,
+`rgbaRegionsMatch`, `edgeRegionsMatch`, `mipRegionsMatch`, `alphaAndSrgbMatch`,
+`compressedControlMatch`; at least six `observations` records and three
+`screenshots` paths relative to WorkRoot. The runner validates these records,
+two `kind: held-sample` records with distinct `state.updates`, `state.pointerDown=true` and translated count 1, then a `kind: release` record with `state.pointerDown=false` and count 1. It checks actual final counters (translated 2, front 1, back/hidden 0), captures a final GPU
+image, exits Play and closes normally. A missing review remains pending; watchdog
+termination, a locked desktop or synthetic native pointer tests cannot count as
+physical acceptance. Preserve summary.json, MCP logs, PNGs and process logs.
+
+## Capturing displayed runtime UI
+
+Activate the Game View before reviewing the installed texture/UI fixture.
+`game_view.capture` with `freshness: latestCompleted` reads its displayed target.
+The `nextFrame` route creates a separate camera render with no UI; likewise,
+custom-camera output does not prove these UI swatches. Keep backend readback
+flags and frame IDs, review interior pixels with the documented color/blend
+conversion, and use a native target-size capture for one-pixel mip controls.
+Exercise a Game View resize as part of physical hover/click acceptance.
+When the runner writes `pointer-ready.json`, activate and observe that owned
+editor's Game View, then write `game-view-ready.json` with `observed: true` and
+its `editorPid`. This prevents a fresh Scene-tab layout from being captured as
+UI evidence. Proceed with pixel and physical review only after this actual view
+is visible; write `live-review.json` after those checks pass.

@@ -1,0 +1,5 @@
+{
+	"name": "Installed Texture and UI Observation",
+	"version": "1.0.0",
+	"startupScene": "Scenes/Startup.tescene"
+}

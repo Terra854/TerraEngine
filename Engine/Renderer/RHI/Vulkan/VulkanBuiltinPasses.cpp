@@ -581,24 +581,18 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 	inputAssembly.primitiveRestartEnable = VK_FALSE;
 
-	VkViewport viewport{};
-	viewport.x = 0.0f;
-	viewport.y = 0.0f;
-	viewport.width = (float)swapchainExtent.width;
-	viewport.height = (float)swapchainExtent.height;
-	viewport.minDepth = 0.0f;
-	viewport.maxDepth = 1.0f;
-
-	VkRect2D scissor{};
-	scissor.offset = { 0, 0 };
-	scissor.extent = swapchainExtent;
-
 	VkPipelineViewportStateCreateInfo viewportState{};
 	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
 	viewportState.viewportCount = 1;
-	viewportState.pViewports = &viewport;
 	viewportState.scissorCount = 1;
-	viewportState.pScissors = &scissor;
+	// One UI pipeline serves the runtime swapchain and differently sized editor
+	// Game targets. Record their viewport/scissor in each command buffer instead
+	// of baking the window size into the pipeline and moving visible hit targets.
+	const VkDynamicState uiDynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineDynamicStateCreateInfo dynamicState{};
+	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	dynamicState.dynamicStateCount = 2;
+	dynamicState.pDynamicStates = uiDynamicStates;
 
 	VkPipelineRasterizationStateCreateInfo rasterizer{};
 	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
@@ -700,6 +694,7 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 			pipelineInfo.pDepthStencilState = &depthStencil;
 			pipelineInfo.pColorBlendState = &colorBlending;
 			pipelineInfo.layout = staticUiPipelineLayout;
+			pipelineInfo.pDynamicState = &dynamicState;
 			pipelineInfo.renderPass = renderPass;
 			pipelineInfo.subpass = 0;
 
@@ -804,6 +799,7 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 			pipelineInfo.pDepthStencilState = &depthStencil;
 			pipelineInfo.pColorBlendState = &colorBlending;
 			pipelineInfo.layout = sdfTextPipelineLayout;
+			pipelineInfo.pDynamicState = &dynamicState;
 			pipelineInfo.renderPass = renderPass;
 			pipelineInfo.subpass = 0;
 
