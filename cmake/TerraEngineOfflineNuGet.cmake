@@ -614,6 +614,9 @@ function(terraengine_add_offline_nuget_restore_target target_name runtime_id)
 		"DOTNET_ROOT=${TERRAENGINE_DOTNET_SDK_ROOT}"
 		"DOTNET_MULTILEVEL_LOOKUP=0"
 		"DOTNET_CLI_HOME=${dotnet_cli_home}"
+		# Each build tree has a disposable CLI home, not installed global tools.
+		# Prevent first-run setup from appending it to the user's persistent PATH.
+		"DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0"
 		"DOTNET_CLI_TELEMETRY_OPTOUT=1"
 		"DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1"
 		"DOTNET_NOLOGO=1"

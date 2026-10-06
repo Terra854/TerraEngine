@@ -16,6 +16,7 @@ $probeIntermediate = Join-Path (Get-Location) "out/validation/managed-locomotion
 $env:DOTNET_ROOT = (Resolve-Path "External/dotnet/sdk/win-x64/10.0.303").Path
 $env:DOTNET_MULTILEVEL_LOOKUP = "0"
 $env:DOTNET_CLI_HOME = Join-Path (Get-Location) "out/build/RelWithDebInfo/DotNetCliHome"
+$env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH = "0" # Keep disposable CLI homes out of the user PATH.
 $env:NUGET_PACKAGES = Join-Path (Get-Location) "out/build/RelWithDebInfo/NuGetPackages"
 New-Item -ItemType Directory -Force $probeOut | Out-Null
 

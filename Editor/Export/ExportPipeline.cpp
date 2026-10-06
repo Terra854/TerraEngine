@@ -531,7 +531,10 @@ static int ExecuteNativeAotToolchainCommand(
 	TerraEngine::Utilities::OwnedProcessRequest request;
 	request.commandLine = commandLine;
 	request.workingDirectory = context.workingDirectory;
+	// Export CLI homes are temporary. SDK first-run setup must not persist their
+	// .dotnet/tools paths in the user's environment and eventually break cmd.exe.
 	request.environment = {{"NUGET_PACKAGES", PathToUtf8(context.packageCache)}, {"DOTNET_CLI_HOME", PathToUtf8(context.dotnetCliHome)},
+		{"DOTNET_ADD_GLOBAL_TOOLS_TO_PATH", "0"},
 		{"DOTNET_CLI_TELEMETRY_OPTOUT", "1"}, {"DOTNET_SKIP_FIRST_TIME_EXPERIENCE", "1"}, {"DOTNET_NOLOGO", "1"}, {"NUGET_XMLDOC_MODE", "skip"}, {"NUGET_CERT_REVOCATION_MODE", "offline"}};
 	const std::atomic_bool neverCanceled = false;
 	const auto result = TerraEngine::Utilities::OwnedProcess::Run(request, cancellation ? cancellation->requested : neverCanceled);

@@ -791,6 +791,7 @@ $env:DOTNET_CLI_HOME = Join-Path $coldRoot "dotnet-home"
 $env:NUGET_PACKAGES = $packageCache
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = "1"
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
+$env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH = "0"
 $env:DOTNET_NOLOGO = "1"
 $env:NUGET_XMLDOC_MODE = "skip"
 $env:NUGET_CERT_REVOCATION_MODE = "offline"
@@ -830,6 +831,7 @@ Remove-Item Env:NUGET_PACKAGES
 Remove-Item Env:DOTNET_CLI_HOME
 Remove-Item Env:DOTNET_CLI_TELEMETRY_OPTOUT
 Remove-Item Env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE
+Remove-Item Env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH
 Remove-Item Env:DOTNET_NOLOGO
 Remove-Item Env:NUGET_XMLDOC_MODE
 Remove-Item Env:NUGET_CERT_REVOCATION_MODE
@@ -2782,3 +2784,29 @@ editor's Game View, then write `game-view-ready.json` with `observed: true` and
 its `editorPid`. This prevents a fresh Scene-tab layout from being captured as
 UI evidence. Proceed with pixel and physical review only after this actual view
 is visible; write `live-review.json` after those checks pass.
+
+
+## Visual Studio cannot find Windows SDK tools
+
+If CMake fails its compiler check with `rc` unavailable or
+`CMAKE_MT-NOTFOUND`, check the inherited `PATH` before reinstalling the SDK.
+Windows `cmd.exe` ignores inherited environment variables longer than 8,191
+characters. Temporary `.dotnet/tools` entries from isolated CLI homes can push
+PATH past that limit and prevent Visual Studio's developer setup from finding
+`reg.exe`, the SDK headers/libraries, `rc.exe`, and `mt.exe`.
+
+TerraEngine's managed build and NativeAOT export commands set
+`DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0`. This keeps SDK first-run setup from adding
+each disposable `DOTNET_CLI_HOME` to the user's persistent PATH. Also set it
+when manually running the SDK with a temporary CLI home; the older
+`DOTNET_SKIP_FIRST_TIME_EXPERIENCE` setting does not provide this protection.
+
+For an already affected machine, back up the user PATH and remove only the
+recognized temporary build/export `.dotnet/tools` entries. Preserve normal
+tool installations and the machine PATH. Close and reopen Visual Studio so it
+inherits the repaired environment, then regenerate the selected CMake preset
+and build/install using the commands above. Do not delete project sources or
+install replacement system dependencies to work around a missing PATH.
+
+References: [Windows command prompt variable limit](https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/command-line-string-limitation)
+and [.NET environment variables](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-environment-variables).
