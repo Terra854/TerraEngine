@@ -14,6 +14,10 @@ bool VulkanContext::Impl::PrepareDepthForCompute(VkCommandBuffer cmd, VkImage so
 		|| depthView == VK_NULL_HANDLE) {
 		return false;
 	}
+	// Admit the persistent descriptor before recording any layout transition.
+	// A failed existing drain leaves this image available to the draw fallback.
+	if (updateGlobalDepthDescriptor && (globalDescriptorSets[currentFrame] == VK_NULL_HANDLE
+		|| !WaitForDescriptorMutationIdle())) return false;
 
 	// Depth-dependent compute passes sample the depth image through a descriptor
 	// after graphics has populated it. Vulkan may perform depth writes during
@@ -46,15 +50,13 @@ bool VulkanContext::Impl::PrepareDepthForCompute(VkCommandBuffer cmd, VkImage so
 	if (!updateGlobalDepthDescriptor) {
 		return true;
 	}
-	if (globalDescriptorSets[currentFrame] == VK_NULL_HANDLE) {
-		return false;
-	}
 
 	// Binding 12 lives in the persistent global descriptor set. Even though the
 	// binding is update-after-bind, exported builds can still have a submitted
 	// runtime command buffer tracked for this frame slot, so drain that work
 	// before changing which depth view clustered lighting samples.
-	WaitForDescriptorMutationIdle();
+	// The existing drain was checked before the barrier; no additional wait is
+	// introduced here and no failed admission can leave a borrowed image layout.
 
 	VkDescriptorImageInfo sampledDepthInfo{};
 	sampledDepthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;

@@ -229,6 +229,9 @@ inline constexpr bool IsValidShaderProvenanceExtension(const ShaderProvenanceBac
 // and the string table. Serialization will populate these fields.
 struct Shader
 {
+	// Runtime publication identity is assigned only after a validated payload is
+	// accepted. It is not part of the TSPF file header or serialized file layout.
+	std::uint64_t publicationGeneration = 0U;
 	ShaderHeader header{};
 	ShaderReflection reflection{};
 	CompiledStageBinary binary{};

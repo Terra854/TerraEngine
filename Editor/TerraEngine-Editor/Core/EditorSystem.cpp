@@ -11,6 +11,7 @@
 #include "AssetDatabase.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "../Automation/EditorMcpBridge.h"
+#include "Tests/Support/RendererEfficiency/Editor/EditorRendererEfficiencyValidation.h"
 #include "Editor/Export/EditorExportOperationController.h"
 #include "../Profiling/EditorProfilerService.h"
 #include "../Windows/SceneViewWindow.h"
@@ -659,6 +660,10 @@ void EditorSystem::LoadWorkspaceLayout() {
 
 // EditorSystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorSystem::Initialize() {
+	// An editor restart cannot carry a request or failed native binding from the
+	// preceding lifetime into its newly created ImGui context.
+	{ std::lock_guard lock(rendererEfficiencyDeviceRecreationMutex); pendingRendererEfficiencyDeviceRecreation.reset(); rendererEfficiencyDeviceRecreationReceipt = {}; }
+	rendererEfficiencyBackendUnavailable = false;
 	// Initialize ImGui and Backends
 	
 	// 1. Get Vulkan Context
@@ -764,47 +769,7 @@ void EditorSystem::Initialize() {
 	});
 	
 	ownsWindowCallbacks = true;
-	ImGui_ImplVulkan_InitInfo init_info = {};
-	init_info.Instance = (VkInstance)handles.instance;
-	init_info.PhysicalDevice = (VkPhysicalDevice)handles.physicalDevice;
-	init_info.Device = (VkDevice)handles.device;
-	init_info.QueueFamily = handles.queueFamily;
-	init_info.Queue = (VkQueue)handles.queue;
-	init_info.PipelineCache = VK_NULL_HANDLE;
-	init_info.DescriptorPool = (VkDescriptorPool)handles.descriptorPool;
-	init_info.MinImageCount = handles.minImageCount;
-	init_info.ImageCount = handles.imageCount;
-	init_info.Allocator = nullptr;
-	init_info.CheckVkResultFn = [](VkResult result) {
-		TerraEngine::Editor::CheckedImGuiVulkanBridge::CheckVkResult(result);
-	};
-	init_info.PipelineInfoMain.RenderPass = (VkRenderPass)handles.renderPass;
-	init_info.PipelineInfoMain.Subpass = 0;
-	init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-	
-	// Load Vulkan functions
-	std::pair<PFN_vkGetInstanceProcAddr, VkInstance> loaderParams = {
-		(PFN_vkGetInstanceProcAddr)handles.vkGetInstanceProcAddr,
-		(VkInstance)handles.instance
-	};
-	const bool functionsLoaded = ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_3, [](const char* function_name, void* user_data) {
-		auto* p = (std::pair<PFN_vkGetInstanceProcAddr, VkInstance>*)user_data;
-		return p->first(p->second, function_name);
-	}, &loaderParams);
-	// A missing dispatch function is a startup failure, not a usable partial
-	// backend. Throw while the engine still owns callback/context cleanup.
-	if (!functionsLoaded) {
-		throw std::runtime_error("Dear ImGui Vulkan function loading failed.");
-	}
-	
-	const auto backendInit = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
-		TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
-		[&]() { ImGui_ImplVulkan_Init(&init_info); });
-	if (!backendInit.success) {
-		throw std::runtime_error("Dear ImGui Vulkan backend initialization failed with result "
-			+ std::to_string(backendInit.nativeResult));
-	}
-	imguiPresentationGeneration = vulkan->GetEditorSubmissionProgress().presentationGeneration;
+	InitializeImGuiVulkanBackend(*vulkan);
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (projectHub) projectHub->OnBackendReady();
@@ -932,6 +897,8 @@ void EditorSystem::Update(float deltaTime) {
 		pendingSaveLayout = false;
 	}
 
+	ProcessRendererEfficiencyDeviceRecreation();
+	if (rendererEfficiencyBackendUnavailable) return;
 	auto& renderSystem = RenderSystem::Instance();
 	auto* rhi = renderSystem.GetContext();
 	auto* vulkan = dynamic_cast<VulkanContext*>(rhi);
@@ -1161,6 +1128,11 @@ void EditorSystem::PrepareShutdown() {
 }
 
 void EditorSystem::Shutdown() {
+	{ std::lock_guard lock(rendererEfficiencyDeviceRecreationMutex); pendingRendererEfficiencyDeviceRecreation.reset();
+		if (rendererEfficiencyDeviceRecreationReceipt.status == RendererEfficiencyDeviceRecreationStatus::Pending) {
+			rendererEfficiencyDeviceRecreationReceipt.status = RendererEfficiencyDeviceRecreationStatus::Rejected;
+			rendererEfficiencyDeviceRecreationReceipt.reason = "Editor lifetime ended before device recreation.";
+		} }
 	// Keep the first error for Engine's lifecycle report, but release every
 	// independent acquired owner before rethrowing. Workspace persistence may
 	// fail on a read-only/deleted project and must never bypass native cleanup.
@@ -1346,4 +1318,167 @@ void EditorSystem::GetManagedWindows(void (*callback)(const char*, int)) {
 	if (managedGetWindows) {
 		managedGetWindows(callback);
 	}
+}
+
+bool EditorSystem::QueueRendererEfficiencyDeviceRecreation(const RendererEfficiencyDeviceRecreationRequest& request, std::string& reason)
+{
+	reason.clear();
+#if !defined(TERRAENGINE_RENDERER_EFFICIENCY_VALIDATION)
+	reason = "Device recreation is unavailable outside the validation build."; return false;
+#else
+	// Ingress copies intent only. Current project/fixture ownership is checked
+	// again at execution, so a worker cannot carry permission across project close.
+	if (!IsCompleteRendererEfficiencyDeviceRecreationRequest(request))
+	{ reason = "Device recreation requires a complete validation owner and backend identity."; return false; }
+	std::lock_guard lock(rendererEfficiencyDeviceRecreationMutex);
+	if (pendingRendererEfficiencyDeviceRecreation || rendererEfficiencyDeviceRecreationReceipt.status == RendererEfficiencyDeviceRecreationStatus::Pending)
+	{ reason = "An owned device recreation is already pending."; return false; }
+	if (rendererEfficiencyDeviceRecreationReceipt.request.operationId == request.operationId
+		&& rendererEfficiencyDeviceRecreationReceipt.request.fixtureStepId == request.fixtureStepId
+		&& rendererEfficiencyDeviceRecreationReceipt.request.expectedRendererSessionGeneration == request.expectedRendererSessionGeneration
+		&& rendererEfficiencyDeviceRecreationReceipt.request.expectedBackendResourceGeneration == request.expectedBackendResourceGeneration)
+	{ reason = "This operation step already requested device recreation."; return false; }
+	pendingRendererEfficiencyDeviceRecreation = request;
+	rendererEfficiencyDeviceRecreationReceipt = {}; rendererEfficiencyDeviceRecreationReceipt.request = request;
+	rendererEfficiencyDeviceRecreationReceipt.status = RendererEfficiencyDeviceRecreationStatus::Pending;
+	return true;
+#endif
+}
+
+RendererEfficiencyDeviceRecreationReceipt EditorSystem::GetRendererEfficiencyDeviceRecreationReceipt() const
+{
+	std::lock_guard lock(rendererEfficiencyDeviceRecreationMutex);
+	return rendererEfficiencyDeviceRecreationReceipt;
+}
+
+void EditorSystem::ProcessRendererEfficiencyDeviceRecreation()
+{
+	std::optional<RendererEfficiencyDeviceRecreationRequest> request;
+	{ std::lock_guard lock(rendererEfficiencyDeviceRecreationMutex); request.swap(pendingRendererEfficiencyDeviceRecreation); }
+	if (!request) return;
+	RendererEfficiencyDeviceRecreationReceipt receipt; receipt.request = *request;
+	receipt.status = RendererEfficiencyDeviceRecreationStatus::Rejected;
+	const auto publish = [&] { std::lock_guard lock(rendererEfficiencyDeviceRecreationMutex); rendererEfficiencyDeviceRecreationReceipt = receipt; };
+	auto& renderer = RenderSystem::Instance();
+	auto* vulkan = dynamic_cast<VulkanContext*>(renderer.GetContext());
+	std::string ownershipError;
+	const auto intent = renderer.GetRendererEfficiencyFixtureControlSnapshot();
+	if (!initialized || !ownsImGuiContext || rendererEfficiencyBackendUnavailable || !vulkan || !context.projectManager || !context.editorMcpBridge
+		|| !context.projectManager->HasActiveProject() || intent.correlation.operationId != request->operationId
+		|| intent.correlation.fixtureStepId != request->fixtureStepId
+		|| !TerraEngine::Editor::Automation::ValidateRendererEfficiencyOwnedProject(context.projectManager->GetProjectRoot(), request->fixtureId, request->fixtureHash, ownershipError)
+		|| !context.editorMcpBridge->ValidateRendererEfficiencyDeviceRecreationOwner(request->projectRoot, request->projectGeneration, request->operationId, request->fixtureStepId, ownershipError))
+	{ receipt.reason = ownershipError.empty() ? "Current protected fixture ownership is unavailable." : ownershipError; publish(); return; }
+	receipt.oldRendererSessionGeneration = vulkan->GetLatestRendererRecoverySnapshot().renderSessionGeneration;
+	receipt.oldBackendResourceGeneration = vulkan->GetBackendResourceGeneration();
+	if (!MatchesRendererEfficiencyDeviceRecreationBackend(*request, receipt.oldRendererSessionGeneration, receipt.oldBackendResourceGeneration))
+	{ receipt.reason = "Device recreation request belongs to an obsolete backend lifetime."; publish(); return; }
+	bool backendDetached = false;
+	try
+	{
+		// Device recreation is deliberately sequential and validation-only. Drain
+		// admitted resource workers before replacing their native upload owner;
+		// regular frames keep their task-based preparation and never perform this wait.
+		auto& resources = ResourceManager::Instance();
+		struct ReopenResourceRequests {
+			ResourceManager& owner; bool reopened = false;
+			~ReopenResourceRequests() { if (!reopened) { try { owner.BeginRequestSession(); } catch (...) {} } }
+		} reopen{resources};
+		resources.StopAdmissionsAndDrain();
+		if (!vulkan->PrepareRendererEfficiencyDeviceRecreation())
+		{ receipt.reason = "Healthy native GPU idle could not be proven; original UI bindings retained."; publish(); return; }
+		receipt.idleProven = true;
+		// Mark unavailable before entering a release that could partially complete.
+		// After this point no ImGui call may use the original device handles.
+		backendDetached = true; rendererEfficiencyBackendUnavailable = true;
+		auto* primaryWindow = static_cast<GLFWwindow*>(WindowSystem::Instance().GetNativeHandle());
+		if (!primaryWindow || primaryWindow != editorCallbackWindow || !ImGui::GetIO().BackendPlatformUserData)
+			throw std::runtime_error("Original editor platform window is unavailable before device recreation.");
+		if (mainEditor) { mainEditor->AbandonViewportDrawDataUses(); mainEditor->ShutdownViewportTextures(false); }
+		const auto stopped = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
+			TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
+			[&] { vulkan->RunWithQueueAccess([] { ImGui_ImplVulkan_Shutdown(); }); });
+		if (!stopped.success) throw std::runtime_error("Dear ImGui Vulkan release failed before device recreation.");
+		// Vulkan shutdown destroys every ImGui platform viewport, including the
+		// main viewport's GLFW handle/userdata, while keeping its application
+		// window alive. Recreate the platform owner on that same window before
+		// any NewFrame can query it. This sequential protected lifecycle keeps
+		// frame/event execution outside the partially rebound renderer boundary.
+		const auto platformReady = [primaryWindow] {
+			const auto* viewport = ImGui::GetMainViewport();
+			return ImGui::GetIO().BackendPlatformUserData && viewport
+				&& viewport->PlatformUserData && viewport->PlatformHandle == primaryWindow;
+		};
+		if (!RebindRendererEfficiencyPlatformBackend(primaryWindow,
+			[] { ImGui_ImplGlfw_Shutdown(); },
+			[primaryWindow] { return ImGui_ImplGlfw_InitForVulkan(primaryWindow, false); }, platformReady))
+			throw std::runtime_error("Dear ImGui GLFW platform rebind failed before device recreation.");
+		// Fresh Vulkan initialization loads its bundled shaders through the
+		// resource manager. Reopen once after all old physical workers are drained;
+		// the protected editor owner prevents fixture jobs from entering meanwhile.
+		resources.BeginRequestSession(); reopen.reopened = true;
+		if (!vulkan->RecreateRendererEfficiencyDevice()) throw std::runtime_error("Native Vulkan device recreation did not complete.");
+		vulkan->EnableEditorMode();
+		InitializeImGuiVulkanBackend(*vulkan);
+		if (projectHub) projectHub->OnBackendReady();
+		if (mainEditor) mainEditor->OnBackendReady();
+		if (!platformReady() || !ImGui::GetIO().BackendRendererUserData)
+			throw std::runtime_error("Recreated editor platform and renderer owners are not ready for NewFrame.");
+		receipt.newRendererSessionGeneration = vulkan->GetLatestRendererRecoverySnapshot().renderSessionGeneration;
+		receipt.newBackendResourceGeneration = vulkan->GetBackendResourceGeneration();
+		if (receipt.newRendererSessionGeneration <= receipt.oldRendererSessionGeneration || receipt.newBackendResourceGeneration <= receipt.oldBackendResourceGeneration)
+			throw std::runtime_error("Recreated native backend did not advance its real lifetime identities.");
+		receipt.rebound = true; receipt.status = RendererEfficiencyDeviceRecreationStatus::Completed;
+		rendererEfficiencyBackendUnavailable = false;
+	}
+	catch (const std::exception& error) { receipt.status = RendererEfficiencyDeviceRecreationStatus::Unavailable; receipt.reason = error.what(); }
+	catch (...) { receipt.status = RendererEfficiencyDeviceRecreationStatus::Unavailable; receipt.reason = "Native device recreation ended exceptionally."; }
+	if (backendDetached && !receipt.rebound) rendererEfficiencyBackendUnavailable = true;
+	publish();
+}
+
+void EditorSystem::InitializeImGuiVulkanBackend(VulkanContext& vulkan)
+{
+	VulkanContext::EditorHandles handles; vulkan.GetEditorHandles(handles);
+	ImGui_ImplVulkan_InitInfo init_info = {};
+	init_info.Instance = (VkInstance)handles.instance;
+	init_info.PhysicalDevice = (VkPhysicalDevice)handles.physicalDevice;
+	init_info.Device = (VkDevice)handles.device;
+	init_info.QueueFamily = handles.queueFamily;
+	init_info.Queue = (VkQueue)handles.queue;
+	init_info.PipelineCache = VK_NULL_HANDLE;
+	init_info.DescriptorPool = (VkDescriptorPool)handles.descriptorPool;
+	init_info.MinImageCount = handles.minImageCount;
+	init_info.ImageCount = handles.imageCount;
+	init_info.Allocator = nullptr;
+	init_info.CheckVkResultFn = [](VkResult result) {
+		TerraEngine::Editor::CheckedImGuiVulkanBridge::CheckVkResult(result);
+	};
+	init_info.PipelineInfoMain.RenderPass = (VkRenderPass)handles.renderPass;
+	init_info.PipelineInfoMain.Subpass = 0;
+	init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+
+	// Load Vulkan functions
+	std::pair<PFN_vkGetInstanceProcAddr, VkInstance> loaderParams = {
+		(PFN_vkGetInstanceProcAddr)handles.vkGetInstanceProcAddr,
+		(VkInstance)handles.instance
+	};
+	const bool functionsLoaded = ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_3, [](const char* function_name, void* user_data) {
+		auto* p = (std::pair<PFN_vkGetInstanceProcAddr, VkInstance>*)user_data;
+		return p->first(p->second, function_name);
+	}, &loaderParams);
+	// A missing dispatch function is a startup failure, not a usable partial
+	// backend. Throw while the engine still owns callback/context cleanup.
+	if (!functionsLoaded) {
+		throw std::runtime_error("Dear ImGui Vulkan function loading failed.");
+	}
+
+	const auto backendInit = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
+		TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
+		[&]() { ImGui_ImplVulkan_Init(&init_info); });
+	if (!backendInit.success) {
+		throw std::runtime_error("Dear ImGui Vulkan backend initialization failed with result "
+			+ std::to_string(backendInit.nativeResult));
+	}
+	imguiPresentationGeneration = vulkan.GetEditorSubmissionProgress().presentationGeneration;
 }

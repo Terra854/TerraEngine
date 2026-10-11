@@ -13,6 +13,7 @@
 #include "Renderer/RHI/Vulkan/VulkanUploadPlanning.h"
 #include "Core/Export.h"
 #include "Utilities/UUID.h"
+#include "Renderer/ShadowWorkPlan.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -127,6 +128,64 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::size_t dirtyRecordCount = 0u;
 		bool completeReplacement = false;
 	};
+	// Shadow streams have their own physical frame/snapshot allocation. A main
+	// view's successful upload cannot authorize a different light or shadow view.
+	struct ShadowGroupedStreamOwner
+	{
+		std::uint64_t rendererSessionGeneration = 0, backendGeneration = 0;
+		std::uint64_t allocationId = 0, allocationGeneration = 0;
+		std::uint64_t frameSerial = 0, commandSerial = 0;
+		std::uint32_t frameSlot = 0, snapshotSlot = 0;
+		bool operator==(const ShadowGroupedStreamOwner&) const = default;
+	};
+	struct ShadowGroupedStreamPlan
+	{
+		ShadowViewKey view{};
+		ShadowGroupedStreamOwner owner{};
+		std::vector<ShadowBatchGroup> groups;
+		std::vector<std::uint32_t> singletonIndices, allSingletonIndices;
+		std::size_t instanceBytes = 0;
+		bool valid = false;
+	};
+	struct ShadowGroupedUploadReceipt
+	{
+		ShadowViewKey view{};
+		ShadowGroupedStreamOwner owner{};
+		bool frameSlotSafe = false, ownerCurrent = false;
+		bool mapSucceeded = false, writeSucceeded = false;
+		bool flushSucceeded = false, descriptorPublished = false;
+	};
+	struct ShadowGroupedExecutionSelection
+	{
+		std::vector<ShadowBatchGroup> groups;
+		std::vector<std::uint32_t> singletonIndices;
+		bool grouped = false;
+	};
+	struct ShadowGroupedRecordingReceipt
+	{
+		ShadowViewKey view{};
+		ShadowGroupedStreamOwner owner{};
+		std::vector<std::uint32_t> recordedGroupIndices, recordedSingletonIndices;
+		bool recorded = false;
+	};
+	struct ShadowGroupedRecordedCounts
+	{
+		std::size_t groups = 0, singletons = 0, draws = 0, segments = 0;
+		bool valid = false;
+	};
+	// Expected records are indexed by selected member, while stream records use
+	// the sealed group's physical indices. Comparing complete records preserves
+	// animation and page selectors rather than inventing a reduced GPU ABI.
+	TERRAENGINE_API ShadowGroupedStreamPlan BuildShadowGroupedStreamPlan(
+		const ShadowBatchPlan& batch, std::span<const ShadowBatchMember> members,
+		std::span<const RenderInstanceRecord> expectedRecords,
+		std::span<const RenderInstanceRecord> streamRecords,
+		const ShadowGroupedStreamOwner& owner, std::size_t capacityBytes);
+	TERRAENGINE_API ShadowGroupedExecutionSelection SelectShadowGroupedExecution(
+		const ShadowGroupedStreamPlan& plan, const ShadowGroupedUploadReceipt& receipt);
+	TERRAENGINE_API ShadowGroupedRecordedCounts CountShadowGroupedRecording(
+		const ShadowGroupedStreamPlan& plan, const ShadowGroupedExecutionSelection& selection,
+		const ShadowGroupedRecordingReceipt& receipt);
 
 	// Vulkan handles are converted to stable value identities before entering this
 	// backend-neutral contract. Every field can invalidate inherited secondary

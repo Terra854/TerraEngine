@@ -136,6 +136,43 @@ namespace TerraEngine::EditorTests {
 			unsigned matches = 0U; for (const auto& entry : fixture.gate->Entries()) if (entry.guid == fixture.ids[1]) { ++matches; context.Expect(entry.settings.value("revision", 0U) == 7U, "Queued work must use the refreshed sidecar settings."); }
 			context.Expect(matches == 1U, "Queued duplicate edits must update one request without launching a stale compiler.");
 		});
+		registry.Add("Editor.AssetImportAdmission.QueuedPlaceholderPreservesDerivedDestination", [](TestContext& context) {
+			AdmissionFixture fixture(1U, 2U);
+			auto& database = AssetDatabase::Instance();
+			const auto build = fixture.root / "Build" / "Assets";
+			database.SetAsyncImportCompileHookForTests([gate = fixture.gate, build](const AssetMetadata& metadata, const std::atomic_bool& canceled) {
+				if (!gate->Compile(metadata, canceled)) return false;
+				// The real dispatcher must supply its normalized destination. Write
+				// output only there, rather than granting success to an empty path.
+				if (metadata.compiledPath.empty()) return false;
+				std::ofstream output(build / metadata.compiledPath, std::ios::trunc);
+				output << "compiled-revision-" << metadata.settings.value("revision", 0U);
+				output.close(); return static_cast<bool>(output);
+			});
+			fixture.Import(0U); context.Expect(fixture.gate->Wait(1U), "First source must hold the only admission slot.");
+			fixture.Import(1U);
+			// Match the generated package's same-GUID placeholder sidecar while
+			// its second source is queued but has no immutable worker closure yet.
+			nlohmann::json placeholder{{"guid", TerraEngine::ToHexString(fixture.ids[1])},
+				{"importerName", "PhysicsColliderRecipeImporter"}, {"sourcePath", "source1.tecollider"},
+				{"compiledPath", ""}, {"lastModified", 0}, {"settings", {{"revision", 7U}}}};
+			{ std::ofstream sidecar(fixture.Source(1U).string() + ".meta", std::ios::trunc); sidecar << placeholder.dump(); }
+			fixture.Import(1U); fixture.gate->Release();
+			context.Expect(fixture.Settle(), "Both queued sources must physically settle after release.");
+			const auto entries = fixture.gate->Entries();
+			unsigned matches = 0U;
+			for (const auto& entry : entries) if (entry.guid == fixture.ids[1]) {
+				++matches;
+				context.Expect(entry.sourcePath == "source1.tecollider" && entry.importerName == "PhysicsColliderRecipeImporter"
+					&& entry.compiledPath == "source1.tepcoll", "Queued replacement must retain its actual normalized source, importer and destination.");
+				context.Expect(entry.settings.value("revision", 0U) == 7U, "Authored settings must still merge into the single queued request.");
+			}
+			context.Expect(matches == 1U && entries.size() == 2U && fixture.gate->Peak() == 1U, "Coalescing must compile the second identity once without exceeding capacity.");
+			std::ifstream output(build / "source1.tepcoll"); std::string bytes; output >> bytes;
+			context.Expect(bytes == "compiled-revision-7", "Compiler output must replace last-good bytes at the preserved derived destination.");
+			const auto* published = database.FindAssetByGuid(fixture.ids[1]);
+			context.Expect(published && published->compiledPath == "source1.tepcoll", "Protected finalization must publish the real compiled destination.");
+		});
 		registry.Add("Editor.AssetImportAdmission.ActiveDuplicateFollowup", [](TestContext& context) {
 			AdmissionFixture fixture(1U, 1U); fixture.Import(0U); context.Expect(fixture.gate->Wait(1U), "The first source generation must be active.");
 			fixture.WriteMetadata(0U, 3U); fixture.Import(0U); fixture.WriteMetadata(0U, 9U); fixture.Import(0U);

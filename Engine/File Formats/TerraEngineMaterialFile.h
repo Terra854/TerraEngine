@@ -250,6 +250,8 @@ inline constexpr bool IsValidVirtualGeometryMaterialExtension(const VirtualGeome
 // struct Material groups related state and operations so callers have one documented contract.
 struct Material
 {
+	// Runtime-only identity assigned by accepted ResourceManager publication.
+	std::uint64_t publicationGeneration = 0U;
 	MaterialHeader header{};
 	TerraEngine::UUID shaderCollectionId = TerraEngine::EMPTY_UUID;
 	MaterialFileShadowBehavior shadowBehavior = MaterialFileShadowBehavior::Opaque;

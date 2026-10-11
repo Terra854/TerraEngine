@@ -47,6 +47,7 @@
 // complete mesh payload through this already broad system header.
 struct Mesh;
 struct Material;
+enum class AssetType : std::uint32_t;
 struct RenderSystemLifetimeState;
 struct RenderFrameExecution;
 
@@ -301,6 +302,24 @@ public:
 	RenderSettings GetRuntimeRenderSettingsSnapshot() const;
 	QualityPreset GetRuntimeQualityPresetSnapshot() const;
 	std::uint64_t GetRuntimeRenderSettingsGeneration() const;
+	// Comparison controls share the existing protected settings boundary. These
+	// APIs copy CPU values only and never save authored renderer preferences.
+	TerraEngine::Renderer::RendererEfficiencyOptionsReceipt QueueRendererEfficiencyOptions(
+		const TerraEngine::Renderer::RendererEfficiencyOptions& options);
+	TerraEngine::Renderer::RendererEfficiencyOptionsReceipt QueueRendererEfficiencyRestore(
+		const TerraEngine::Renderer::RendererEfficiencyOptionsToken& token);
+	TerraEngine::Renderer::RendererEfficiencyOptionsSnapshot GetRendererEfficiencyOptionsSnapshot() const;
+	TerraEngine::Renderer::RendererEfficiencyEvidence GetLatestRendererEfficiencyEvidence(
+		RenderViewType viewType, std::uint32_t viewId = 0U) const;
+	TerraEngine::Renderer::RendererEfficiencyFixtureIntentReceipt QueueRendererEfficiencyFixtureIntent(
+		const TerraEngine::Renderer::RendererEfficiencyFixtureIntent& intent);
+	void ClearRendererEfficiencyFixtureIntent(std::string_view operationId);
+	TerraEngine::Renderer::RendererEfficiencyFixtureIntent GetRendererEfficiencyFixtureControlSnapshot() const;
+	std::optional<TerraEngine::Renderer::RendererEfficiencyFixtureTargetProof> GetRendererEfficiencyFixtureTarget(const TerraEngine::UUID& objectId) const;
+	bool QueueRendererResourcePublicationInvalidation(const TerraEngine::UUID& assetId, AssetType type,
+		std::uint64_t publicationGeneration, std::string* reason = nullptr);
+	TerraEngine::Renderer::RendererEfficiencyEvidenceBatch GetRendererEfficiencyEvidenceBatch(
+		std::uint64_t afterBatchSequence) const;
 	// Applies editor/user diagnostic preferences to the running renderer without
 	// saving RenderSettings.json, keeping Preferences separate from project data.
 	void ApplyTransientRenderDiagnostics(bool validationEnabled, bool debugEnabled);
@@ -475,6 +494,8 @@ private:
 	// payloads, but it never re-enters ResourceManager or observes a mixed reload.
 	std::unordered_map<TerraEngine::UUID, const Mesh*> retainedRuntimeMeshResources;
 	std::unordered_map<TerraEngine::UUID, const Material*> retainedRuntimeMaterialResources;
+	std::unordered_map<TerraEngine::UUID, std::shared_ptr<const Mesh>> retainedRuntimeMeshOwners;
+	std::unordered_map<TerraEngine::UUID, std::shared_ptr<const Material>> retainedRuntimeMaterialOwners;
 	std::unordered_map<TerraEngine::UUID, TerraEngine::Scene::SpatialAABB>
 		retainedMeshLocalBounds;
 	std::uint64_t retainedRenderableCaptureSourceSignature = 0U;
@@ -710,6 +731,25 @@ private:
 	mutable std::mutex runtimeRenderSettingsMutex;
 	std::optional<RuntimeRenderSettingsRequest> pendingRuntimeRenderSettings;
 	std::uint64_t runtimeRenderSettingsGeneration = 0U;
+	TerraEngine::Renderer::RendererEfficiencyOptionsQueue rendererEfficiencyOptionsQueue;
+	std::optional<TerraEngine::Renderer::RendererEfficiencyFixtureIntent> pendingRendererEfficiencyFixtureIntent;
+	TerraEngine::Renderer::RendererEfficiencyFixtureIntent capturedRendererEfficiencyFixtureIntent{};
+	std::uint64_t nextRendererEfficiencyFixtureControlGeneration = 0;
+	// Owned cooked range copies are published under statsMutex; host lookups never
+	// retain a loader cache pointer beyond the protected frame capture.
+	std::vector<TerraEngine::Renderer::RendererEfficiencyFixtureTargetProof> latestRendererEfficiencyFixtureTargets;
+	struct RendererResourcePublicationInvalidation
+	{
+		TerraEngine::UUID assetId;
+		AssetType type;
+		std::uint64_t publicationGeneration, optionsSessionGeneration;
+	};
+	std::vector<RendererResourcePublicationInvalidation> pendingRendererResourceInvalidations;
+	std::uint64_t efficiencyObservedBackendSession = 0U;
+	// Copied records are published with the existing stats mutex; workers never
+	// retain references into this renderer-owned diagnostic collection.
+	std::vector<TerraEngine::Renderer::RendererEfficiencyEvidence> latestRendererEfficiencyEvidence;
+	TerraEngine::Renderer::RendererEfficiencyEvidenceBatch latestRendererEfficiencyEvidenceBatch{};
 	QualityPreset currentPreset = QualityPreset::High;
 	RenderSettings currentSettings;
 };

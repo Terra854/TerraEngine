@@ -278,6 +278,9 @@
 		// Shared topology retains only the canonical pose. A model matrix does not
 		// exist until one view-local reference frame materializes it.
 		TerraEngine::Scene::WorldPose canonicalWorldPose{};
+		// Protected capture seals resource and deformation proof once per object;
+		// every camera and shadow command retains the same immutable owner.
+		std::shared_ptr<const ShadowCasterStamp> shadowCasterInputs;
 	};
 
 	// A compact lookup table lets a conventional raster identity resolve direct

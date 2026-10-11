@@ -10,6 +10,7 @@
 #include "Animation/Retargeting/RetargetValidator.h"
 #include "AnimationClipCompiler.h"
 #include "Core/Scheduling/FrameWorkload.h"
+#include "Core/Object/ObjectManager.h"
 #include "Scripting/ScriptGlue.h"
 
 #include <algorithm>
@@ -88,15 +89,16 @@ namespace TerraEngine::Tests {
 			const SkeletonAsset& skeleton,
 			std::uint8_t assetSeed = 20U,
 			float beginTranslationX = 0.0F,
-			float endTranslationX = 1.0F)
+			float endTranslationX = 1.0F,
+			AnimationFixedTick durationTicks = 1)
 		{
 			AnimationClipCompileInput input;
 			input.assetId = MakeIntegrationGuid(assetSeed);
 			input.skeletonAssetId = skeleton.assetId;
 			input.compatibilityFingerprint = skeleton.compatibilityFingerprint;
-			input.durationTicks = 1;
+			input.durationTicks = durationTicks;
 			input.sampleRate = 60U;
-			input.segmentDurationTicks = 1;
+			input.segmentDurationTicks = durationTicks;
 
 			AnimationSourceTrack translation;
 			translation.stableTargetId = skeleton.joints[0U].stableId;
@@ -106,7 +108,7 @@ namespace TerraEngine::Tests {
 			begin.tick = 0;
 			begin.vectorValue = {beginTranslationX, 0.0F, 0.0F};
 			AnimationSourceKey end;
-			end.tick = 1;
+			end.tick = durationTicks;
 			end.vectorValue = {endTranslationX, 0.0F, 0.0F};
 			translation.keys = {begin, end};
 			input.tracks.push_back(std::move(translation));
@@ -430,6 +432,181 @@ namespace TerraEngine::Tests {
 			return binding;
 		}
 
+		template<typename Value>
+		void WriteFixtureValue(std::vector<std::uint8_t>& bytes, std::size_t offset, const Value& value) {
+			if (offset > bytes.size() || sizeof(Value) > bytes.size() - offset) throw std::out_of_range("GPU fixture byte range");
+			std::memcpy(bytes.data() + offset, &value, sizeof(Value));
+		}
+		[[nodiscard]] std::shared_ptr<const GpuAnimationResidentPayloads>
+		MakeCommandResidentPayload(float constantTranslationX)
+		{
+			GpuAnimationResidentPayloads payload{};
+
+			// One ATD1 directory selects one valid constant track. All T/R/S lanes
+			// may share it because atlas relocation is concerned with addresses,
+			// while these cases exercise CPU planning and ownership, not shader execution.
+			GpuAnimationTrackDirectoryHeader directory{};
+			directory.entryCount = 1U;
+			GpuAnimationTrackDirectoryEntry entry{};
+			entry.startTick = 0U;
+			entry.endTick = 60U;
+			entry.trackHeaderOffsetBytes =
+				sizeof(GpuAnimationTrackDirectoryHeader)
+				+ sizeof(GpuAnimationTrackDirectoryEntry);
+			AnimationCodecTrackHeaderV1 track{};
+			track.encoding = AnimationCodecValueEncoding::Vector3Unorm16;
+			track.flags = kAnimationCodecConstantTrack;
+			track.byteSize = sizeof(AnimationCodecTrackHeaderV1);
+			track.keyCount = 1U;
+			track.segmentStartTick = 0;
+			track.segmentEndTick = 60;
+			track.constantVector.x = constantTranslationX;
+			payload.packedClipBytes.resize(
+				entry.trackHeaderOffsetBytes + sizeof(track), 0U);
+			WriteFixtureValue(payload.packedClipBytes, 0U, directory);
+			WriteFixtureValue(
+				payload.packedClipBytes,
+				sizeof(directory),
+				entry);
+			WriteFixtureValue(
+				payload.packedClipBytes,
+				entry.trackHeaderOffsetBytes,
+				track);
+
+			// The frozen program layout is a 64-byte directory followed by one
+			// 16-byte joint record containing T/R/S locators and a reserved lane.
+			payload.programWords.assign(20U, 0U);
+			payload.programWords[16U] = 0U;
+			payload.programWords[17U] = 0U;
+			payload.programWords[18U] = 0U;
+
+			// The one-joint skeleton contains a directory, parent table, explicit
+			// per-joint depth, and one 64-byte palette/inverse-bind record.
+			payload.skeletonTables.resize(112U, 0U);
+			const std::uint32_t parentTableOffset = 16U;
+			const std::uint32_t depthTableOffset = 32U;
+			const std::uint32_t levelCount = 1U;
+			const std::uint32_t paletteTableOffset = 48U;
+			const std::int32_t rootParent = -1;
+			WriteFixtureValue(payload.skeletonTables, 0U, parentTableOffset);
+			WriteFixtureValue(payload.skeletonTables, 4U, depthTableOffset);
+			WriteFixtureValue(payload.skeletonTables, 8U, levelCount);
+			WriteFixtureValue(payload.skeletonTables, 12U, paletteTableOffset);
+			WriteFixtureValue(payload.skeletonTables, parentTableOffset, rootParent);
+			const std::uint32_t rootDepth = 0U;
+			WriteFixtureValue(payload.skeletonTables, depthTableOffset, rootDepth);
+			const std::uint32_t paletteJoint = 0U;
+			WriteFixtureValue(payload.skeletonTables, paletteTableOffset, paletteJoint);
+			const std::array<float, 12U> identityRows{
+				1.0F, 0.0F, 0.0F, 0.0F,
+				0.0F, 1.0F, 0.0F, 0.0F,
+				0.0F, 0.0F, 1.0F, 0.0F};
+			WriteFixtureValue(
+				payload.skeletonTables,
+				paletteTableOffset + 16U,
+				identityRows);
+
+			// Bounds always consume the morph resource, even when this atlas-only
+			// fixture has no animated targets. A checked zero-count AMT1 table keeps
+			// the validated request aligned with production deformable bindings.
+			GpuAnimationMorphTableHeader morphHeader{};
+			GpuAnimationMorphBoundsRecord morphBounds{};
+			morphBounds.minimum = {-1.0F, -1.0F, -1.0F, 0.0F};
+			morphBounds.maximum = {1.0F, 1.0F, 1.0F, 0.0F};
+			payload.morphInputs.resize(
+				sizeof(morphHeader) + sizeof(morphBounds), 0U);
+			WriteFixtureValue(payload.morphInputs, 0U, morphHeader);
+			WriteFixtureValue(
+				payload.morphInputs,
+				sizeof(morphHeader),
+				morphBounds);
+			return std::make_shared<const GpuAnimationResidentPayloads>(
+				std::move(payload));
+		}
+
+
+
+		AnimatorPlaybackBinding MakeCompactCommandBinding(TestContext& context) {
+			AnimatorPlaybackBinding binding;
+			binding.skeleton = MakeIntegrationSkeleton();
+			binding.clip = MakeIntegrationClip(context, *binding.skeleton, 20U, 1.0F, 1.0F, 60);
+			binding.residentSegments.assign(binding.clip->segments.size(), 1U);
+			binding.jointStableIds = {101U}; binding.jointParents = {-1};
+			binding.requestedExecutionPolicy = AnimationExecutionPolicy::ForceGpuVisual;
+			binding.updatePolicy = AnimatorUpdatePolicy::EveryFrame;
+			binding.eventPolicy = AnimatorEventPolicy::Suppress;
+			binding.playback.loop = false; binding.playOnBind = false;
+			binding.rootMotionPolicy = AnimatorRootMotionPolicy::Ignore;
+			binding.evaluationGenerations.residencyGeneration = 1U;
+			// The same checked direct-clip program shape is authored by the real
+			// component coordinator. No controller transition or CPU consumer is added.
+			auto program = std::make_shared<EvaluationProgram>();
+			program->controllerAssetId = MakeIntegrationGuid(80U);
+			program->compatibilityFingerprint = binding.skeleton->compatibilityFingerprint;
+			program->scratchPlan = {64U, 16U};
+			EvaluationInstruction instruction;
+			instruction.sourceStableId = 1U; instruction.opcode = EvaluationOpcode::SampleClip;
+			instruction.dependencyAssetId = binding.clip->assetId;
+			instruction.dependencyGeneration = 1U;
+			instruction.dependencyFingerprint = binding.skeleton->compatibilityFingerprint;
+			program->instructions.push_back(instruction);
+			program->bytecode.push_back(static_cast<std::uint8_t>(EvaluationOpcode::SampleClip));
+			program->states.push_back({1U, 0U, true, false, false, 1U, EvaluationOpcode::SampleClip});
+			EvaluationLayer layer; layer.stableId = 2U; layer.rootStateId = 1U; layer.defaultWeight = 1.0F;
+			program->layers.push_back(layer);
+			program->stableHash = ComputeEvaluationProgramStableHash(*program);
+			EvaluationDispatchState checked;
+			context.Expect(DispatchEvaluationProgramCpu(*program, checked) == AnimationStatus::Ok && checked.dispatchedInstructionCount == 1U,
+				"The real direct-clip evaluation program must pass production validation.");
+			binding.evaluationProgram = program;
+			binding.controllerClips.push_back({1U, binding.clip, binding.residentSegments, 1U});
+			binding.stateId = 1U;
+			binding.gpuResidentPayloads = MakeCommandResidentPayload(1.0F);
+			binding.gpuProgramResourceIndex = 0U;
+			binding.gpuVisual.skeletonTopologyId = 1U;
+			binding.gpuVisual.compatibilityFingerprint = binding.skeleton->compatibilityFingerprint;
+			binding.gpuVisual.clipResourceIndex = 0U; binding.gpuVisual.skeletonResourceIndex = 0U;
+			binding.gpuVisual.morphResourceIndex = 0U;
+			binding.gpuVisual.jointCount = 1U; binding.gpuVisual.paletteEntryCount = 1U;
+			binding.gpuVisual.palettePartitionCount = 1U; binding.gpuVisual.looping = true;
+			binding.gpuVisual.generations.resourceGeneration = 1U;
+			binding.gpuVisual.renderIdentity.meshId[0] = 1U;
+			binding.gpuVisual.renderIdentity.meshHeaderVersion = 1U;
+			binding.gpuVisual.renderIdentity.deformablePayloadGeneration = 1U;
+			binding.gpuVisual.renderIdentity.rendererGeneration = 1U;
+			binding.gpuVisual.renderIdentity.sceneGeneration = ObjectManager::instance().GetSceneGeneration();
+			binding.gpuVisual.renderIdentity.skeletonCompatibilityFingerprint = binding.skeleton->compatibilityFingerprint;
+			auto fast = std::make_shared<AnimatorPlaybackBinding::GpuFastBinding>();
+			fast->programResourceIndex = 0U; fast->visual = binding.gpuVisual;
+			fast->residentPayloads = binding.gpuResidentPayloads;
+			fast->residentByteCount = fast->residentPayloads->programWords.size() * sizeof(std::uint32_t)
+				+ fast->residentPayloads->packedClipBytes.size() + fast->residentPayloads->skeletonTables.size() + fast->residentPayloads->morphInputs.size();
+			binding.gpuFastBinding = fast;
+			binding.gpuExecution = {true, true, true, true, static_cast<double>(fast->residentByteCount), 1.0e9};
+			// Use the checked default path, never the planner's prevalidated flags.
+			GpuAnimationLoweringInput lowering;
+			lowering.program = {program, program->stableHash, 0U}; lowering.visual = binding.gpuVisual;
+			lowering.visual.stableInstanceId = 1U;
+			lowering.visual.generations.instanceGeneration = 1U;
+			lowering.visual.generations.componentGeneration = 1U;
+			lowering.visual.generations.workGeneration = 1U;
+			lowering.visual.generations.programGeneration = 1U;
+			lowering.visual.generations.controllerGeneration = 1U;
+			lowering.visual.generations.clipGeneration = 1U;
+			lowering.visual.generations.skeletonGeneration = 1U;
+			lowering.visual.generations.meshGeneration = 1U;
+			lowering.visual.generations.rendererGeneration = 1U;
+			lowering.visual.generations.sceneGeneration = static_cast<std::uint32_t>(ObjectManager::instance().GetSceneGeneration());
+			lowering.visual.generations.frameIdLow = 1U;
+			lowering.effectiveMode = AnimationEffectiveExecutionMode::GpuVisual;
+			lowering.residentPayloads = binding.gpuResidentPayloads;
+			GpuAnimationWorkRequest lowered;
+			context.Expect(LowerGpuAnimationWorkRequest(lowering, lowered) == GpuAnimationLoweringStatus::Ok
+				&& ValidateGpuAnimationResidentPayloads(lowered, *binding.gpuResidentPayloads),
+				"The production GPU lowerer must accept the exact fixture program and resident bytes.");
+			return binding;
+		}
+
 		bool ExecuteIntegrationFrame(
 			AnimationSystem& system,
 			const char* frameId)
@@ -445,6 +622,104 @@ namespace TerraEngine::Tests {
 
 	void RegisterAnimationScaleFoundationIntegrationTests(TestRegistry& registry)
 	{
+		registry.Add("Animation.ScaleFoundation.CompactSeekCommitsExactReceipt", [](TestContext& context) {
+			AnimationSystem& system = AnimationSystem::Instance(); system.Initialize();
+			const auto animator = system.CreateAnimatorInstance(MakeIntegrationDescriptor(111U));
+			IntegrationAnimatorGuard cleanup(system, animator);
+			context.Expect(system.BindAnimatorPlayback(animator, MakeCompactCommandBinding(context)) == AnimationStatus::Ok,
+				"The checked resident direct clip must bind through the native GPU-visual path.");
+			for(int frame = 0; frame < 3; ++frame) context.Expect(ExecuteIntegrationFrame(system, "compact-command-warmup"), "The real declared compact graph must publish before command admission.");
+			context.Expect(system.ReadProductionIntegrationSnapshot().itemCount == 0 && system.LoadPublishedAuthorityFrame(),
+				"Warmup must establish the compact path with no complete CPU work items.");
+			// Explicit commands must cross the compact-to-complete boundary and
+			// settle their exact receipt only after the runtime/authority exchange.
+			for(const auto sequence : {1ULL, 2ULL}) {
+				AnimationCommand command; command.target = animator; command.kind = AnimationCommandKind::Seek;
+				command.playbackTick = sequence == 1 ? 0 : 30; command.producerId = 111U;
+				command.producerSequence = sequence; command.correlationId = 11100 + sequence;
+				context.Expect(system.SubmitCommandBatch(std::span(&command, 1)).status == AnimationStatus::Queued, "Native seek admission must be queued atomically.");
+				const auto prior = system.LoadPublishedAuthorityFrame();
+				context.Expect(ExecuteIntegrationFrame(system, "compact-command-seek"), "The command-bearing graph must execute all declared phases.");
+				const auto receipt = system.ReadCommandReceipt(command.producerId, command.producerSequence, command.correlationId);
+				const auto diagnostics = system.ReadProductionIntegrationSnapshot();
+				context.Expect(receipt.status == AnimationStatus::Ok && receipt.publicationGeneration != 0,
+					"A compact owner seek must receive a real terminal Ok publication rather than an orphaned Queued receipt: status="
+					+ std::string(ToString(receipt.status)) + " plan=" + std::string(ToString(diagnostics.planStatus))
+					+ " reason=" + std::string(ToString(diagnostics.rejectionReason)) + " item=" + std::to_string(diagnostics.rejectionItemIndex));
+				const auto published = system.LoadPublishedAuthorityFrame();
+				context.Expect(published && published != prior && published->authorityGeneration >= receipt.publicationGeneration
+					&& published->Find(animator) && system.LoadAnimatorPlaybackState(animator).absoluteTick == command.playbackTick,
+					"The accepted command receipt must name the actual committed authority and exact stopped playback tick.");
+			}
+		});
+		registry.Add("Animation.ScaleFoundation.FailedCommandFrameSettlesWithoutPublication", [](TestContext& context) {
+			AnimationSystem& system = AnimationSystem::Instance(); system.Initialize();
+			const auto animator = system.CreateAnimatorInstance(MakeIntegrationDescriptor(112U));
+			IntegrationAnimatorGuard cleanup(system, animator);
+			context.Expect(system.BindAnimatorPlayback(animator, MakeIntegrationBinding(context)) == AnimationStatus::Ok
+				&& ExecuteIntegrationFrame(system, "failed-command-baseline"), "A real baseline authority must exist before cancellation.");
+			const auto prior = system.LoadPublishedAuthorityFrame(); const auto priorTick = system.LoadAnimatorPlaybackState(animator).absoluteTick;
+			AnimationCommand command; command.target = animator; command.kind = AnimationCommandKind::Seek; command.playbackTick = 1;
+			command.producerId = 112U; command.producerSequence = 1; command.correlationId = 11201;
+			context.Expect(system.SubmitCommand(command).status == AnimationStatus::Queued, "The cancellation fixture must admit one actual native command.");
+			auto workloads = system.DeclareFrameWorkloads(0);
+			// Cancel the seal phase after capture/planning/evaluation have consumed
+			// the command. The protected finalizer must still settle the failed batch.
+			workloads.at(5).work = [](TerraEngine::Scheduling::JobGraphContext&) {};
+			const auto plan = TerraEngine::Scheduling::ExecuteFrameWorkloadsCompatibility(std::move(workloads), "failed-command-seal");
+			const auto receipt = system.ReadCommandReceipt(command.producerId, command.producerSequence, command.correlationId);
+			context.Expect(plan.valid && plan.completed && (receipt.status == AnimationStatus::Rejected || receipt.status == AnimationStatus::Cancelled),
+				"A drained command whose seal did not run must settle terminally without inventing Ok.");
+			context.Expect(receipt.publicationGeneration == 0 && system.LoadPublishedAuthorityFrame() == prior
+				&& system.LoadAnimatorPlaybackState(animator).absoluteTick == priorTick,
+				"Failed command settlement must preserve the exact authority root and playback state without a partial commit.");
+			// Once authority and runtime roots really commit, a later specialist
+			// finalizer omission cannot turn that accepted seek into a rejection.
+			command.producerSequence = 2; command.correlationId = 11202;
+			context.Expect(system.SubmitCommand(command).status == AnimationStatus::Queued, "A fresh exact command must be admissible after failed-frame settlement.");
+			workloads = system.DeclareFrameWorkloads(0); workloads.at(8).work = [](TerraEngine::Scheduling::JobGraphContext&) {};
+			const auto committedPlan = TerraEngine::Scheduling::ExecuteFrameWorkloadsCompatibility(std::move(workloads), "committed-command-finalizer-omitted");
+			const auto committedAuthority = system.LoadPublishedAuthorityFrame();
+			context.Expect(committedPlan.valid && committedPlan.completed && committedAuthority != prior
+				&& system.LoadAnimatorPlaybackState(animator).absoluteTick == command.playbackTick,
+				"The omitted-finalizer fixture must first prove a genuine authority/runtime commit.");
+			context.Expect(ExecuteIntegrationFrame(system, "committed-command-recovery"), "The next actual capture must settle the committed historical receipt before replacing its command vector.");
+			const auto committed = system.ReadCommandReceipt(command.producerId, command.producerSequence, command.correlationId);
+			context.Expect(committed.status == AnimationStatus::Ok && committedAuthority
+				&& committed.publicationGeneration == committedAuthority->authorityGeneration,
+				"An actually committed command must retain its true Ok publication even when subsequent specialist work does not run.");
+			// Lifecycle retirement may happen before another capture. A committed
+			// command still names its historical root, while an unsealed command
+			// must cancel without applying any of its pending playback changes.
+			command.producerSequence = 3; command.correlationId = 11203; command.playbackTick = 0;
+			context.Expect(system.SubmitCommand(command).status == AnimationStatus::Queued, "Lifecycle recovery must admit an exact fresh command.");
+			workloads = system.DeclareFrameWorkloads(0); workloads.at(8).work = [](TerraEngine::Scheduling::JobGraphContext&) {};
+			const auto lifecyclePlan = TerraEngine::Scheduling::ExecuteFrameWorkloadsCompatibility(std::move(workloads), "committed-command-lifecycle");
+			const auto lifecycleAuthority = system.LoadPublishedAuthorityFrame();
+			context.Expect(lifecyclePlan.valid && lifecyclePlan.completed && lifecycleAuthority
+				&& system.LoadAnimatorPlaybackState(animator).absoluteTick == 0, "The lifecycle fixture must first prove its actual protected runtime commit.");
+			(void)system.NotifyLifecycleInvalidation(AnimationLifecycleBoundary::Renderer);
+			const auto lifecycleReceipt = system.ReadCommandReceipt(command.producerId, command.producerSequence, command.correlationId);
+			context.Expect(lifecycleReceipt.status == AnimationStatus::Ok && lifecycleAuthority
+				&& lifecycleReceipt.publicationGeneration == lifecycleAuthority->authorityGeneration,
+				"Lifecycle retirement must preserve the exact historical committed receipt before discarding its token.");
+			context.Expect(ExecuteIntegrationFrame(system, "lifecycle-command-baseline"), "A fresh graph must establish the post-lifecycle baseline.");
+			const auto beforeFailedLifecycleTick = system.LoadAnimatorPlaybackState(animator).absoluteTick;
+			command.producerSequence = 4; command.correlationId = 11204; command.playbackTick = 1;
+			context.Expect(system.SubmitCommand(command).status == AnimationStatus::Queued, "The uncommitted lifecycle fixture must admit its exact native command.");
+			workloads = system.DeclareFrameWorkloads(0);
+			workloads.at(5).work = [](TerraEngine::Scheduling::JobGraphContext&) {};
+			workloads.at(8).work = [](TerraEngine::Scheduling::JobGraphContext&) {};
+			const auto failedLifecyclePlan = TerraEngine::Scheduling::ExecuteFrameWorkloadsCompatibility(std::move(workloads), "uncommitted-command-lifecycle");
+			(void)system.NotifyLifecycleInvalidation(AnimationLifecycleBoundary::Renderer);
+			const auto failedLifecycleReceipt = system.ReadCommandReceipt(command.producerId, command.producerSequence, command.correlationId);
+			context.Expect(failedLifecyclePlan.valid && failedLifecyclePlan.completed
+				&& (failedLifecycleReceipt.status == AnimationStatus::Rejected || failedLifecycleReceipt.status == AnimationStatus::Cancelled)
+				&& failedLifecycleReceipt.publicationGeneration == 0
+				&& system.LoadAnimatorPlaybackState(animator).absoluteTick == beforeFailedLifecycleTick
+				&& !system.LoadPublishedAuthorityFrame(),
+				"Lifecycle retirement must cancel the drained uncommitted batch, retain playback, and clear the retired public root.");
+		});
 		registry.Add("Animation.ScaleFoundation.ZeroChannelShellAdvancesAuthority", [](TestContext& context) {
 			AnimationSystem& system = AnimationSystem::Instance();
 			system.Initialize();

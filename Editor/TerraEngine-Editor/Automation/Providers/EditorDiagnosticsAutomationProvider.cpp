@@ -119,6 +119,23 @@ namespace TerraEngine::Editor::Automation
 			descriptor.execution.commitWrites = mutationMode == MutationMode::ReadOnly
 				? std::vector<std::string>{}
 				: std::vector<std::string>{"ProjectState", "EditorAutomationSession"};
+			if(descriptor.name.starts_with("renderer.efficiency."))
+			{
+				// These controls change session-local renderer options, never persisted
+				// project preferences. Fixture work is deferred to the existing queue.
+				descriptor.description = "Read renderer efficiency evidence or control an owned transient validation session.";
+				descriptor.execution.preparationReads = {"EditorAutomationSession", "RendererEfficiencyEvidence", "RendererEfficiencyOptions"};
+				descriptor.execution.commitWrites = mutationMode == MutationMode::ReadOnly ? std::vector<std::string>{}
+					: std::vector<std::string>{"EditorAutomationSession", "RendererEfficiencyOptionsQueue"};
+				descriptor.execution.visibilityBoundary = mutationMode == MutationMode::ReadOnly ? "immutable_snapshot" : "protected_render_settings_capture";
+				if(descriptor.name.ends_with(".start") || descriptor.name.ends_with(".stop"))
+				{
+					descriptor.execution.commitWrites.push_back("SceneMutationQueue");
+					descriptor.execution.visibilityBoundary = "protected_scene_mutation_flush";
+				}
+				descriptor.generationContract = {{"settingsVisibility", "next protected renderer capture"}, {"progress", "completion-qualified immutable GPU evidence"}};
+				descriptor.limits = {{"staticShadowCacheBudgetBytes", {{"minimum", 0}, {"maximum", 1073741824}}}};
+			}
 
 			const std::string toolName = descriptor.name;
 			AutomationHandler handler = resolver(toolName);
@@ -181,6 +198,12 @@ namespace TerraEngine::Editor::Automation
 		capabilities.push_back(MakeRegistration(resolveHandler, "camera.capture_object", "capture", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, true, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "camera.capture_custom", "capture", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.virtualGeometry.stats", "renderer", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
+		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.efficiency.stats", "renderer", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
+		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.efficiency.validation.set", "renderer", MutationMode::EditorSelection, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, false, false, true));
+		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.efficiency.validation.reset", "renderer", MutationMode::EditorSelection, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, false, false, true));
+		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.efficiency.validation.start", "renderer", MutationMode::SceneMutation, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true));
+		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.efficiency.validation.status", "renderer", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
+		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.efficiency.validation.stop", "renderer", MutationMode::SceneMutation, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, false, false, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.virtualGeometry.capabilityEvidence", "renderer", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
 		// Validation-route overrides are transient session selections, like selecting
 		// an authored object. Project-write permission is sufficient and avoids

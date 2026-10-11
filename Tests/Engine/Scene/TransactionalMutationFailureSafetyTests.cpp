@@ -2,6 +2,7 @@
 #include "Scene/TransactionalMutationTestFixtures.h"
 
 #include "Components/Transform.h"
+#include "Components/MeshRenderComponent.h"
 #include "Core/Object/ObjectManager.h"
 #include "Scene/Serializer.h"
 #include "Scene/TransactionalMutation.h"
@@ -127,7 +128,75 @@ namespace TerraEngine::Tests {
 		}
 	}
 
+	// Match the actual six-operation fixture recipe. All post-create writes use
+	// the transaction-local reference, never the deleted stable identity.
+	static TerraEngine::Scene::Transaction Replacement(TransactionalMutationFixture& fixture) {
+		using namespace TerraEngine::Scene;
+		auto tx = TransactionalMutationBuilder("same-uuid-replacement", TransactionOrigin::Test)
+			.ObserveScene(fixture.objects).ObserveObject(fixture.objects, fixture.rootId).DeleteObject(fixture.rootId).Build();
+		TransactionWriteOperation create; create.kind = TransactionWriteKind::CreateObject;
+		create.createdLocalObjectId = 1; create.createdStableObjectId = fixture.rootId; create.displayName = "Replacement";
+		tx.writeSet.operations.push_back(create);
+		TransactionWriteOperation component; component.kind = TransactionWriteKind::AddComponent;
+		component.target = LocalObject(1); component.componentName = "MeshRenderComponent"; tx.writeSet.operations.push_back(component);
+		for(const char* property : {"meshId", "materialId"}) {
+			TransactionWriteOperation binding; binding.kind = TransactionWriteKind::UpdateComponentProperty;
+			binding.target = LocalObject(1); binding.componentName = "MeshRenderComponent"; binding.propertyName = property;
+			binding.propertyValue = TerraEngine::Reflection::Variant(fixture.rootId); tx.writeSet.operations.push_back(binding);
+		}
+		TransactionWriteOperation pose; pose.kind = TransactionWriteKind::SetWorldTransform; pose.target = LocalObject(1);
+		pose.worldPose.position.offsetMetres = {2.0, 3.0, 4.0}; tx.writeSet.operations.push_back(pose);
+		return tx;
+	}
+
 	void RegisterTransactionalMutationFailureSafetyTests(TestRegistry& registry) {
+
+		registry.Add("Engine.SceneMutationFailureSafety.SameUuidReplacementPublishesNewLifetimeAtDrain", [](TestContext& context) {
+			auto fixture = MakeTransactionalMutationFixture(); const auto oldLifetime = fixture.objects.getObjectLifetimeGeneration(fixture.root);
+			(void)fixture.objects.PublishSceneChangePacket(); const auto oldPacket = fixture.objects.LoadPublishedSceneChangePacket().PublicationRevision();
+			TerraEngine::Scene::SceneMutationQueue queue; queue.EnqueueTransaction(Replacement(fixture));
+			context.Expect(fixture.objects.getObject(fixture.rootId)->EntityId() == fixture.root.EntityId(), "Queued replacement must remain invisible before the existing drain.");
+			const auto results = queue.DrainTransactions(fixture.objects);
+			context.Expect(results.size() == 1 && results[0].status == TerraEngine::Scene::TransactionStatus::Committed, "The actual six-operation same-UUID recipe must commit: " + (results.empty() || results[0].conflicts.empty() ? std::string("no conflict detail") : results[0].conflicts[0].humanMessage));
+			const auto current = fixture.objects.getObject(fixture.rootId); context.Expect(current.has_value(), "Old final deletion must preserve the new UUID owner.");
+			context.Expect(current->EntityId() != fixture.root.EntityId() && fixture.objects.getObjectLifetimeGeneration(*current) != oldLifetime && !fixture.objects.isObjectValid(fixture.root), "Replacement needs a real fresh lifetime and must invalidate the old handle.");
+			const auto* mesh = fixture.objects.GetComponent<MeshRenderComponent>(*current);
+			context.Expect(mesh && mesh->meshId == fixture.rootId && mesh->materialId == fixture.rootId, "Both authored bindings must survive ordered replacement.");
+			context.ExpectEqual(2.0, fixture.objects.GetCanonicalWorldPose(*current)->position.offsetMetres.x, "The local replacement receives its authored world pose.");
+			context.ExpectEqual(oldPacket, fixture.objects.LoadPublishedSceneChangePacket().PublicationRevision(), "Commit must not introduce an extra scene publication boundary.");
+			const auto packet = fixture.objects.PublishSceneChangePacket();
+			context.Expect(std::any_of(packet.Added().begin(), packet.Added().end(), [&](const auto& added) { return added.objectId == fixture.rootId && added.lifetimeGeneration == fixture.objects.getObjectLifetimeGeneration(*current); }), "The existing publication must expose the replacement's new Added lifetime.");
+		});
+		registry.Add("Engine.SceneMutationFailureSafety.SameUuidReplacementAbortRestoresOriginalIdentity", [](TestContext& context) {
+			for(std::size_t fault : {std::size_t(2), std::size_t(5)}) {
+				auto fixture = MakeTransactionalMutationFixture(); (void)fixture.objects.PublishSceneChangePacket();
+				const auto before = Capture(fixture.objects); const auto lifetime = fixture.objects.getObjectLifetimeGeneration(fixture.root);
+				auto tx = Replacement(fixture); tx.injectedFailureOperationIndex = fault;
+				const auto result = TerraEngine::Scene::CommitTransaction(fixture.objects, tx);
+				context.Expect(result.status == TerraEngine::Scene::TransactionStatus::Rejected && std::any_of(result.conflicts.begin(), result.conflicts.end(), [](const auto& conflict) { return conflict.reason == TerraEngine::Scene::TransactionConflictReason::InjectedCommitFailure; }), "Post-create injection must actually execute and roll back the whole batch.");
+				const auto current = fixture.objects.getObject(fixture.rootId);
+				context.Expect(current && current->EntityId() == fixture.root.EntityId() && fixture.objects.isObjectValid(fixture.root) && fixture.objects.getObjectLifetimeGeneration(*current) == lifetime, "Abort must restore the exact retained UUID owner and old handle/lifetime.");
+				ExpectUnchanged(context, fixture.objects, before);
+			}
+		});
+		registry.Add("Engine.SceneMutationFailureSafety.SameUuidReplacementRejectsCollisionsAndDeletedRefs", [](TestContext& context) {
+			for(unsigned variant = 0; variant < 6; ++variant) {
+				auto fixture = MakeTransactionalMutationFixture();
+				// A separate live parent proves that current ordered hierarchy, rather
+				// than the original CreateObject parent, controls root-only admission.
+				const auto parent = fixture.objects.createObject("Existing Parent");
+				(void)fixture.objects.PublishSceneChangePacket(); const auto before = Capture(fixture.objects);
+				auto tx = Replacement(fixture);
+				if(variant == 0) tx.writeSet.operations.erase(tx.writeSet.operations.begin());
+				if(variant == 1) { auto duplicate = tx.writeSet.operations[1]; duplicate.createdLocalObjectId = 2; tx.writeSet.operations.push_back(duplicate); }
+				if(variant == 2) tx.writeSet.operations.back().target = TerraEngine::Scene::ExistingObject(fixture.rootId);
+				if(variant == 3) { TerraEngine::Scene::TransactionWriteOperation remove; remove.kind = TerraEngine::Scene::TransactionWriteKind::DeleteObject; remove.target = TerraEngine::Scene::LocalObject(1); tx.writeSet.operations.insert(tx.writeSet.operations.end() - 1, remove); }
+				if(variant == 4) tx.writeSet.operations.back().kind = TerraEngine::Scene::TransactionWriteKind::TranslateWorld;
+				if(variant == 5) { TerraEngine::Scene::TransactionWriteOperation reparent; reparent.kind = TerraEngine::Scene::TransactionWriteKind::ReparentObject; reparent.target = TerraEngine::Scene::LocalObject(1); reparent.parent = TerraEngine::Scene::ExistingObject(fixture.objects.getUUID(parent)); tx.writeSet.operations.insert(tx.writeSet.operations.end() - 1, reparent); }
+				context.Expect(TerraEngine::Scene::CommitTransaction(fixture.objects, tx).status != TerraEngine::Scene::TransactionStatus::Committed, "Live collisions, duplicate reservations and deleted old references remain rejected.");
+				ExpectUnchanged(context, fixture.objects, before);
+			}
+		});
 		registry.Add("Engine.SceneMutationFailureSafety.RestoreNodeBudgetRejectsBeforeAnyWrite", [](TestContext& context) {
 			auto fixture = MakeTransactionalMutationFixture();
 			const Object source = fixture.objects.createObject("Budget Root");

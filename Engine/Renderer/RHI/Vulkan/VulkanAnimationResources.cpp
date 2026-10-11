@@ -681,8 +681,8 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 
 			if(!reuseStaticPageUpload && beginsStaticPage)
 			{
-				const Mesh* mesh = ResourceManager::Instance().GetMesh(
-					source.key.page.meshId);
+				const auto meshOwner = ResourceManager::Instance().AcquireMeshSnapshot(source.key.page.meshId);
+				const Mesh* mesh = meshOwner.get(); // Reload cannot release this page's source bytes mid-copy.
 				if(mesh == nullptr || !mesh->hasDeformableDemandedPages)
 				{
 					return false;
@@ -1959,4 +1959,3 @@ void VulkanContext::Impl::CompleteVulkanAnimationFrameResources(std::uint32_t fr
 	}
 	resources.completionPending = false;
 }
-

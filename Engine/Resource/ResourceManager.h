@@ -196,6 +196,31 @@ struct NavigationGeometryLoadResult
 // raw Mesh pointers out of protected frame-boundary work, while a missing
 // optional from the query below explicitly means a publisher currently owns
 // the cache lock and the caller should retry on the next frame.
+// Validation observes existing publications without loading or retaining cache
+// pointers. Path, generation and compact geometry counts belong to one locked
+// publication; present=false denotes absence and nullopt denotes a busy writer.
+struct RendererEfficiencyResourcePublicationSnapshot
+{
+	TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+	AssetType type = AssetType::Mesh;
+	bool present = false;
+	std::uint64_t resourceGeneration = 0;
+	std::filesystem::path registeredPath;
+	std::uint32_t cookedLods = 0, cookedMeshlets = 0;
+	std::uint64_t deformablePayloadGeneration = 0;
+};
+
+// A scoped reload retains the exact native request, not a later cache lookup.
+// Only ResourceManager may inspect or restore its private publication owner.
+class RendererEfficiencyShaderPublicationReceipt
+{
+public:
+	std::shared_future<TerraEngine::UUID> completion;
+private:
+	std::shared_ptr<void> nativeRequest;
+	friend class ResourceManager;
+};
+
 struct MeshAnimationBindingSnapshot
 {
 	bool present = false;
@@ -379,6 +404,9 @@ public:
 	// Observe only an already-published stage. The shared owner keeps every
 	// internal span valid across cache clear/replacement and never triggers IO.
 	[[nodiscard]] std::shared_ptr<const Shader> AcquireShaderSnapshot(const TerraEngine::UUID& id) const;
+	// Retain the collection and its immutable reflected stage owners during
+	// pipeline lookup/build; a cache replacement cannot invalidate these spans.
+	[[nodiscard]] std::shared_ptr<const ShaderCollection> AcquireShaderCollectionSnapshot(const TerraEngine::UUID& id) const;
 	// Native tests may coordinate production decoding/publication or throw at
 	// an enqueue boundary. Hooks are copied then called outside all manager
 	// locks; ordinary runtime and editor automation never install them.
@@ -528,6 +556,9 @@ public:
 	// Re-parse a material from disk to pick up authored changes without clearing
 	// the entire cache. This ensures the renderer sees new parameters immediately.
 	void ReloadMaterial(const TerraEngine::UUID& id);
+	// Return the actual cache publication future so protected automation can
+	// poll completion without occupying a frame boundary while IO/cooking runs.
+	std::shared_future<TerraEngine::UUID> ReloadMaterialAsync(const TerraEngine::UUID& id);
 	// Inspector edits are already complete validated TMAT files. Publish that
 	// authored file directly into the live cache while keeping the registered
 	// cooked path unchanged for later project loads and exports.
@@ -537,9 +568,11 @@ public:
 
 	// Re-parse a mesh from disk to pick up authored changes.
 	void ReloadMesh(const TerraEngine::UUID& id);
+	std::shared_future<TerraEngine::UUID> ReloadMeshAsync(const TerraEngine::UUID& id);
 
 	// Re-parse a texture from disk to pick up authored changes.
 	std::shared_future<void> ReloadTexture(const TerraEngine::UUID& id);
+	std::shared_future<TerraEngine::UUID> ReloadTexturePublicationAsync(const TerraEngine::UUID& id);
 
 	// Unregister a resource from the cache and trigger any necessary renderer invalidations.
 	void DeleteResource(const TerraEngine::UUID& id, AssetType type);
@@ -725,7 +758,15 @@ public:
 	std::shared_future<TerraEngine::UUID> LoadMaterialAsync(const std::filesystem::path& path);
 	std::shared_future<TerraEngine::UUID> LoadMeshAsync(const std::filesystem::path& path);
 	std::shared_future<TerraEngine::UUID> LoadShaderAsync(const std::filesystem::path& path);
+	// Detached compiled previews retain normal durable reload identity/authority.
+	std::shared_future<TerraEngine::UUID> ReloadShaderFromAuthoredPathAsync(const TerraEngine::UUID& id, const std::filesystem::path& authoredPath);
+	RendererEfficiencyShaderPublicationReceipt BeginRendererEfficiencyShaderOverride(const TerraEngine::UUID& id, const std::filesystem::path& authoredPath);
+	[[nodiscard]] std::shared_ptr<const Shader> GetRendererEfficiencyShaderOverrideOwner(const RendererEfficiencyShaderPublicationReceipt& receipt) const;
+	// Nonblocking: pending, superseded, or different-project requests reject.
+	bool RestoreRendererEfficiencyShaderOverride(const RendererEfficiencyShaderPublicationReceipt& receipt);
 	std::shared_future<TerraEngine::UUID> LoadShaderCollectionAsync(const std::vector<ShaderStagePath>& stagePaths);
+	// Reassemble from accepted stage owners after explicit shader reloads finish.
+	std::shared_future<TerraEngine::UUID> ReloadShaderCollectionAsync(const std::vector<ShaderStagePath>& stagePaths);
 	std::shared_future<TerraEngine::UUID> LoadTextureAsync(const std::filesystem::path& path);
 	std::shared_future<TerraEngine::UUID> LoadAnimationAssetAsync(
 		const std::filesystem::path& path,
@@ -737,11 +778,21 @@ public:
 	// or a subsequent reload replaces the resource.
 	Material* GetMaterial(const TerraEngine::UUID& id);
 	Mesh* GetMesh(const TerraEngine::UUID& id);
+	// Pin already-published payloads while a frame reads them. Reload jobs may
+	// atomically replace the cache entry; these immutable owners keep older
+	// pointers valid until that frame releases its capture. No IO is scheduled.
+	[[nodiscard]] std::shared_ptr<const Mesh> AcquireMeshSnapshot(const TerraEngine::UUID& id) const;
+	[[nodiscard]] std::shared_ptr<const Material> AcquireMaterialSnapshot(const TerraEngine::UUID& id) const;
+	[[nodiscard]] std::shared_ptr<const Texture> AcquireTextureSnapshot(const TerraEngine::UUID& id) const;
 	// Observe an already-published mesh without starting a synchronous load or
 	// waiting behind an importer. A contained snapshot with present=false means
 	// the mesh is not currently cached; nullopt means the cache is writer-owned.
 	[[nodiscard]] std::optional<MeshAnimationBindingSnapshot>
 		TryCopyMeshAnimationBindingSnapshot(const TerraEngine::UUID& id) const;
+	// Protected validation work must retry rather than wait behind an importer.
+	// This never schedules a load or returns a non-owning payload pointer.
+	[[nodiscard]] std::optional<RendererEfficiencyResourcePublicationSnapshot>
+		TryCopyRendererEfficiencyResourcePublication(const TerraEngine::UUID& id, AssetType type) const;
 	TerraEngine::Animation::SkeletonAsset* GetSkeleton(const TerraEngine::UUID& id);
 	TerraEngine::Animation::AnimationClipAsset* GetAnimationClip(const TerraEngine::UUID& id);
 	[[nodiscard]] std::shared_ptr<const TerraEngine::Audio::AudioClipAsset> GetAudioClip(const TerraEngine::UUID& id);
@@ -886,6 +937,7 @@ private:
 		std::vector<std::weak_ptr<CacheRequest>> consumers;
 		std::vector<std::weak_ptr<CacheRequest>> dependencies;
 		std::shared_ptr<const Shader> shaderPayload;
+		std::shared_ptr<Shader> previousShaderPayload;
 		// Subscriber state is only acquired after the publication gate; callers
 		// release it before invoking callbacks or acquiring the gate again.
 		std::mutex subscriberMutex;
@@ -952,7 +1004,7 @@ private:
 	void ScheduleRequestWork(const RequestPtr& request, std::function<void()> work, bool inlineDispatch = false);
 	void InvokeRequestHook(const std::string& key, unsigned boundary);
 	RequestPtr AdmitShaderDependency(const std::filesystem::path& path, const RequestPtr& consumer);
-	std::shared_future<TerraEngine::UUID> RequestShaderCollection(const std::vector<ShaderStagePath>& paths);
+	std::shared_future<TerraEngine::UUID> RequestShaderCollection(const std::vector<ShaderStagePath>& paths, bool reload = false);
 	std::shared_future<TerraEngine::UUID> RequestAudioClip(const std::filesystem::path& path,
 		const TerraEngine::UUID& expectedIdentity = TerraEngine::EMPTY_UUID, bool reload = false);
 
@@ -969,9 +1021,17 @@ private:
 		// deterministic deduplication across synchronous/async callers.
 		std::unordered_map<std::string, TerraEngine::UUID> pathToId;
 		std::unordered_map<TerraEngine::UUID, std::string> idToPath;
-		// Stage consumers retain the exact immutable backing storage, including
-		// every span/string view. Other cache types retain their existing owners.
-		using Owner = std::conditional_t<std::is_same_v<Resource, Shader>, std::shared_ptr<Resource>, std::unique_ptr<Resource>>;
+		// Unlike registration's reverse map, this index changes only when real
+		// payload bytes are accepted. Package sibling GUIDs can therefore retain
+		// the published owner without guessing which registration was last.
+		struct AcceptedPayload { TerraEngine::UUID ownerId = TerraEngine::EMPTY_UUID; std::uint64_t publicationGeneration = 0U; };
+		std::unordered_map<std::string, AcceptedPayload> acceptedPayloads;
+		// Renderer and stage consumers retain immutable backing storage, including
+		// every span/string view, while a worker publishes a replacement owner.
+		using Owner = std::conditional_t<std::is_same_v<Resource, Shader>
+			|| std::is_same_v<Resource, ShaderCollection> || std::is_same_v<Resource, Mesh>
+			|| std::is_same_v<Resource, Material> || std::is_same_v<Resource, Texture>,
+			std::shared_ptr<Resource>, std::unique_ptr<Resource>>;
 		std::unordered_map<TerraEngine::UUID, Owner> resources;
 		// Retained tombstones make a delete/reload distinguishable from a first
 		// publication of the same durable GUID for the lifetime of this manager.
@@ -989,6 +1049,41 @@ private:
 		bool tracksResidency = false;
 		mutable std::shared_mutex mutex;
 	};
+
+	template <typename Resource>
+	static bool HasCurrentAcceptedPayload(const ResourceCache<Resource>& cache, const std::string& key, const TerraEngine::UUID& id)
+	{
+		// The caller already owns this typed cache lock. Checking provenance here
+		// prevents a cached B payload from satisfying a later A-path request for
+		// the same durable identity; async admission can then load actual A bytes.
+		if constexpr (std::is_same_v<Resource, Mesh> || std::is_same_v<Resource, Material>) {
+			const auto owner = cache.resources.find(id);
+			if (owner == cache.resources.end() || !owner->second) return false;
+			const auto accepted = cache.acceptedPayloads.find(key);
+			const auto registration = cache.idToPath.find(id);
+			return accepted != cache.acceptedPayloads.end() && accepted->second.ownerId == id
+				&& accepted->second.publicationGeneration > 0U
+				&& owner->second->publicationGeneration == accepted->second.publicationGeneration
+				&& registration != cache.idToPath.end() && registration->second == key;
+		}
+		return cache.resources.contains(id);
+	}
+
+	template <typename Resource>
+	static std::shared_ptr<const Resource> AcquireOwnedSnapshot(const ResourceCache<Resource>& cache, const TerraEngine::UUID& id)
+	{
+		std::shared_lock lock(cache.mutex);
+		const auto registration = cache.idToPath.find(id);
+		if (registration == cache.idToPath.end()) return {};
+		const auto accepted = cache.acceptedPayloads.find(registration->second);
+		if (accepted == cache.acceptedPayloads.end()) return {};
+		const auto owner = cache.resources.find(accepted->second.ownerId);
+		// Both registrations must still name the same actually accepted native
+		// payload. Re-registering either identity cannot lend old bytes to a new
+		// path, and a retained lease remains alive after deletion or reload.
+		if (!HasCurrentAcceptedPayload(cache, registration->second, accepted->second.ownerId)) return {};
+		return owner->second;
+	}
 
 	struct AssetPathRegistry
 	{
@@ -1236,6 +1331,11 @@ private:
 	// and materials must invalidate draw preparation without waking the expensive
 	// animator binding coordinator.
 	std::atomic_uint64_t m_RendererResourcePublicationGeneration{1U};
+	// Publication-gate protected clocks never reset with cache teardown. A
+	// successfully accepted replacement therefore cannot reuse an old key.
+	std::uint64_t m_ShaderPublicationGeneration = 0U;
+	std::uint64_t m_ShaderCollectionPublicationGeneration = 0U;
+	std::uint64_t m_RendererPayloadPublicationGeneration = 0U;
 
 	ResourceCache<Material> materialCache;
 	ResourceCache<Mesh> meshCache;
@@ -1308,7 +1408,7 @@ std::optional<TerraEngine::UUID> ResourceManager::ResolveCached(const std::strin
 	{
 		const TerraEngine::UUID& id = existing->second;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (cache.resources.find(id) != cache.resources.end())
+		if (HasCurrentAcceptedPayload(cache, key, id))
 		{
 			// Debug log helps trace cache reuse when resources are requested repeatedly.
 			TERRAENGINE_LOG(LogLevel::Debug, "Resource cache hit for " << key << " (id " << ToHexString(id) << ")");
@@ -1543,7 +1643,7 @@ TerraEngine::UUID ResourceManager::FinalizeLoad(
 			ResourceCache<Resource>& cache;
 			const std::string& key;
 			const TerraEngine::UUID& id;
-			bool path = false, identity = false, owner = false, generation = false, bounds = false, committed = false;
+			bool path = false, identity = false, owner = false, generation = false, bounds = false, accepted = false, committed = false;
 			~Destinations() noexcept {
 				if (committed) return;
 				if (path) cache.pathToId.erase(key);
@@ -1551,6 +1651,7 @@ TerraEngine::UUID ResourceManager::FinalizeLoad(
 				if (owner) cache.resources.erase(id);
 				if (generation) cache.runtimeGenerations.erase(id);
 				if (bounds) manager.m_MeshLocalBoundsCache.erase(id);
+				if (accepted) cache.acceptedPayloads.erase(key);
 			}
 		} destinations{*this, cache, key, publicationId};
 		const auto pathSlot = cache.pathToId.try_emplace(key, publicationId);
@@ -1559,6 +1660,14 @@ TerraEngine::UUID ResourceManager::FinalizeLoad(
 		destinations.identity = identitySlot.second;
 		const auto ownerSlot = cache.resources.try_emplace(publicationId);
 		destinations.owner = ownerSlot.second;
+		typename ResourceCache<Resource>::AcceptedPayload* acceptedSlot = nullptr;
+		if constexpr (std::is_same_v<Resource, Mesh> || std::is_same_v<Resource, Material>) {
+			// Allocate the provenance node before any public owner or clock changes.
+			// A rejected publication rolls this node back with the other staging.
+			const auto accepted = cache.acceptedPayloads.try_emplace(key);
+			destinations.accepted = accepted.second;
+			acceptedSlot = &accepted.first->second;
+		}
 		TerraEngine::Animation::AnimationGeneration* generationSlot = nullptr;
 		if (IsAnimationAssetType(cache.assetType)) {
 			const auto generation = cache.runtimeGenerations.try_emplace(publicationId, 0U);
@@ -1576,7 +1685,27 @@ TerraEngine::UUID ResourceManager::FinalizeLoad(
 		}
 		// From the first swap onward every operation is allocation-free and
 		// noexcept. Receipt completion also owns its delivery storage already.
+		if constexpr (std::is_same_v<Resource, Shader>) {
+			if (m_ShaderPublicationGeneration == std::numeric_limits<std::uint64_t>::max())
+				throw std::runtime_error("Shader publication generation exhausted.");
+			stagedOwner->publicationGeneration = ++m_ShaderPublicationGeneration;
+		}
+		if constexpr (std::is_same_v<Resource, ShaderCollection>) {
+			if (m_ShaderCollectionPublicationGeneration == std::numeric_limits<std::uint64_t>::max())
+				throw std::runtime_error("Shader collection publication generation exhausted.");
+			stagedOwner->collectionGeneration = ++m_ShaderCollectionPublicationGeneration;
+		}
+		if constexpr (std::is_same_v<Resource, Mesh> || std::is_same_v<Resource, Material> || std::is_same_v<Resource, Texture>) {
+			// This accepted immutable payload identity is independent of frame
+			// presentation and broad renderer resource invalidation counters.
+			if (m_RendererPayloadPublicationGeneration == std::numeric_limits<std::uint64_t>::max())
+				throw std::runtime_error("Renderer payload publication generation exhausted.");
+			stagedOwner->publicationGeneration = ++m_RendererPayloadPublicationGeneration;
+		}
 		ownerSlot.first->second.swap(stagedOwner);
+		if constexpr (std::is_same_v<Resource, Mesh> || std::is_same_v<Resource, Material>) {
+			if (acceptedSlot) *acceptedSlot = {publicationId, ownerSlot.first->second->publicationGeneration};
+		}
 		if constexpr (std::is_same_v<Resource, Shader>) {
 			if (request) request->shaderPayload = ownerSlot.first->second;
 		}
@@ -1708,7 +1837,7 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadOrSchedule(
 				try { cache.idToPath[id] = key; }
 				catch (...) { cache.pathToId.erase(key); throw; }
 			}
-			cached = !reload && cache.resources.contains(id);
+			cached = !reload && HasCurrentAcceptedPayload(cache, key, id);
 		}
 		const auto mapKey = std::to_string(static_cast<std::uint32_t>(CacheKind(cache))) + ":" + key;
 		const auto old = m_Requests.find(mapKey);
@@ -1734,6 +1863,14 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadOrSchedule(
 					}
 				};
 				std::unique_lock lock(cache.mutex);
+				if constexpr (std::is_same_v<Resource, Shader>) {
+					// Admission and prior-owner capture share the publication gate.
+					// A concurrent producer cannot slip between these two decisions.
+					if (reload) {
+						const auto owner = cache.resources.find(id);
+						if (owner != cache.resources.end()) request->previousShaderPayload = owner->second;
+					}
+				}
 				cache.inFlight[key] = request->future;
 				cache.inFlightTokens[key] = request->version;
 				if (cached) {

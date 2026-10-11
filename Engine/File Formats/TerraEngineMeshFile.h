@@ -961,6 +961,8 @@ struct GeneratedDirectMeshletRouteMetadata
 // Raw byte storage keeps payload ownership in one place while spans/vectors expose typed views.
 struct Mesh
 {
+	// Native accepted payload identity is runtime-only, outside the TEMF format.
+	std::uint64_t publicationGeneration = 0U;
 	// This decoded layout is populated only after production-directory
 	// validation; it is intentionally distinct from the serialized root header.
 	MeshletRuntimeLayout runtimeLayout{};

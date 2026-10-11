@@ -43,6 +43,17 @@ if(TERRAENGINE_POWERSHELL_EXECUTABLE)
 		LABELS "Repository;Naming;Contract"
 		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 	)
+	# Exercise the actual audit against isolated miniature repositories, proving
+	# that wire metadata does not exempt product names or unrelated planning text.
+	add_test(NAME Repository.SemanticProductNamingContracts
+		COMMAND "${TERRAENGINE_POWERSHELL_EXECUTABLE}"
+			-NoProfile -ExecutionPolicy Bypass
+			-File "${CMAKE_CURRENT_SOURCE_DIR}/SemanticProductNaming.Tests.ps1")
+	set_tests_properties(Repository.SemanticProductNamingContracts PROPERTIES
+		LABELS "Repository;Naming;Contract"
+		PASS_REGULAR_EXPRESSION "13/13 naming audit regressions passed[.]"
+		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+		RUN_SERIAL TRUE TIMEOUT 180)
 else()
 	message(WARNING
 		"PowerShell is unavailable; Repository.SemanticProductNaming cannot be registered.")

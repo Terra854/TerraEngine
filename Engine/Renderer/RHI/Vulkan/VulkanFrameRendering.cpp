@@ -5,6 +5,7 @@
 
 #include "VulkanContextSource.h"
 #include "ThreadPool/ScopedTaskSettlement.h"
+#include "Renderer/Graph/RenderFrameSnapshot.h"
 
 // VulkanContext::RenderFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::RenderFrame(
@@ -62,7 +63,25 @@ void VulkanContext::RenderFrame(
 		impl->pendingPrimaryCommandBuffersSubmitted.resize(impl->MAX_FRAMES_IN_FLIGHT, 0u);
 	}
 	auto& pendingCmdsForSnapshot = impl->pendingPrimaryCommandBuffers[currentFrame];
-	uint32_t snapshotSlotIndex = static_cast<uint32_t>(pendingCmdsForSnapshot.size());
+	uint32_t snapshotSlotIndex = VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME;
+	const auto& lightingControl = presentation.efficiencyFixtureIntent.lightingControls;
+	const bool controlledSnapshot = presentation.efficiencyFixtureIntent.controlsApplied
+		&& lightingControl && lightingControl->snapshotSlot;
+	const bool requestedSnapshotView = controlledSnapshot
+		&& lightingControl->snapshotViewType == renderViewType
+		&& lightingControl->snapshotOutputId == diagnosticViewId;
+	const auto chooseSnapshotSlot = [&]() {
+		const auto& occupied = impl->renderSnapshotSlotsUsed[currentFrame];
+		if (requestedSnapshotView) {
+			const auto requested = *lightingControl->snapshotSlot;
+			return requested < occupied.size() && !occupied[requested] ? requested
+				: VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME;
+		}
+		for (std::uint32_t candidate = 0; candidate < occupied.size(); ++candidate)
+			if (!occupied[candidate] && (!controlledSnapshot || candidate != *lightingControl->snapshotSlot)) return candidate;
+		return VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME;
+	};
+	snapshotSlotIndex = chooseSnapshotSlot();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (snapshotSlotIndex >= VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME) {
 		TERRAENGINE_PROFILE_SCOPE("Vulkan: RenderFrame Snapshot Budget Recovery", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -95,7 +114,12 @@ void VulkanContext::RenderFrame(
 		pendingSubmitInfo.commandBufferCount = static_cast<uint32_t>(pendingCmdsForSnapshot.size());
 		pendingSubmitInfo.pCommandBuffers = pendingCmdsForSnapshot.data();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		impl->lightingUploadFrameSlotSafe[currentFrame] = false;
 		const VkResult submitResult = impl->SubmitGraphicsQueue(1, &pendingSubmitInfo, VK_NULL_HANDLE);
+		if (submitResult != VK_SUCCESS) {
+			impl->ResetLightingUploadMirrors();
+			impl->DiscardRecordedShadowWrites(currentFrame);
+		}
 		if (impl->MarkDeviceLost(submitResult, "intermediate editor view submit after snapshot budget exhaustion")) {
 			return;
 		}
@@ -114,6 +138,7 @@ void VulkanContext::RenderFrame(
 			impl->pendingPrimaryCommandBuffersSubmitted[currentFrame] = 1u;
 		}
 		impl->ConfirmHiZWritesSubmitted(currentFrame);
+		impl->ConfirmShadowWritesSubmitted(currentFrame, pendingCmdsForSnapshot);
 		const auto forcedIdleStart = BackendClock::now();
 		const VkResult forcedIdleResult = impl->WaitGraphicsQueueIdle();
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
@@ -124,20 +149,30 @@ void VulkanContext::RenderFrame(
 			"Snapshot budget exhaustion forced serialization; increase snapshot capacity or reduce required editor outputs.");
 		if (forcedIdleResult != VK_SUCCESS)
 		{
+			// Failed prefix completion cannot preserve a skip authorization, even
+			// if a later frame eventually establishes a new safe-write boundary.
+			impl->ResetLightingUploadMirrors();
 			if (impl->MarkDeviceLost(forcedIdleResult, "intermediate editor view queue idle after snapshot budget exhaustion")) {
 				return;
 			}
 			TERRAENGINE_LOG(LogLevel::Error, "failed to wait for intermediate editor view command buffers after snapshot budget exhaustion: " << forcedIdleResult);
 			return;
 		}
+		impl->CompleteShadowWrites(currentFrame); // Existing queue-idle proof above.
+		impl->lightingUploadFrameSlotSafe[currentFrame] = true;
+		impl->renderSnapshotSlotsUsed[currentFrame].fill(false);
 		pendingCmdsForSnapshot.clear();
 		if (currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
 			impl->pendingPrimaryCommandBuffersSubmitted[currentFrame] = 0u;
 		}
 		fallback.result = RenderSnapshotFallbackResult::SerializedSafely;
 		impl->pendingRenderSnapshotDiagnostics.fallbackEvents.push_back(fallback);
-		snapshotSlotIndex = 0u;
+		snapshotSlotIndex = chooseSnapshotSlot();
 	}
+	// Reserve on recording admission, including failed recordings: releasing a
+	// partially overwritten slice inside this frame could authorize unsafe reuse.
+	if (snapshotSlotIndex >= VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME) return;
+	impl->renderSnapshotSlotsUsed[currentFrame][snapshotSlotIndex] = true;
 
 	// `OffscreenTexture` is also the diagnostic classification used by shadow
 	// outputs. Only camera-like Game/Scene outputs own captureView: letting a
@@ -219,6 +254,229 @@ void VulkanContext::RenderFrame(
 		}
 	}
 
+	// Apply the long-term preset policy on the CPU before upload so clustered
+	// lighting receives a predictable retained-light list and an independent
+	// shadow subset while the lightweight GPU analysis path observes a larger
+	// uploaded candidate set for the next frame.
+	const VulkanContext::Impl::LightBudgetApplicationResult budgetResult =
+		impl->ApplyFrameLightBudgets(*publicationPresentation, renderViewType);
+	const uint32_t requestedShadowSlotCount = std::min(budgetResult.diagnostics.shadowLightBudget, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
+	VulkanContext::Impl::ShadowResourceRequest requestedShadowResources{};
+	requestedShadowResources.directionalCount = std::min(budgetResult.diagnostics.allocatedDirectionalRegionCount, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
+	requestedShadowResources.spotCount = std::min(budgetResult.diagnostics.allocatedSpotRegionCount, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
+	requestedShadowResources.areaCount = std::min(budgetResult.diagnostics.allocatedAreaRegionCount, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
+	requestedShadowResources.pointCount = std::min(budgetResult.diagnostics.allocatedPointRegionCount, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
+
+	std::optional<TerraEngine::Renderer::RendererEfficiencyFixtureActionReceipt> shadowResourceRecreationAction;
+	const auto EnsureShadowRenderResources = [&]() -> bool {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (requestedShadowSlotCount == 0u || requestedShadowResources.TotalCount() == 0u) {
+			return true;
+		}
+		const bool directionalMissing = requestedShadowResources.directionalCount > 0u
+			&& (impl->directionalShadowDepths[0].view == VK_NULL_HANDLE || impl->directionalShadowColors[0].view == VK_NULL_HANDLE);
+		const bool spotMissing = requestedShadowResources.spotCount > 0u
+			&& (impl->spotShadowDepths[0].view == VK_NULL_HANDLE || impl->spotShadowColors[0].view == VK_NULL_HANDLE);
+		const bool areaMissing = requestedShadowResources.areaCount > 0u
+			&& (impl->areaShadowDepths[0].view == VK_NULL_HANDLE || impl->areaShadowColors[0].view == VK_NULL_HANDLE);
+		const bool pointMissing = requestedShadowResources.pointCount > 0u
+			&& impl->pointShadowCubeDepths[0].view == VK_NULL_HANDLE;
+		bool forceOwnedRecreation = false;
+#if defined(TERRAENGINE_RENDERER_EFFICIENCY_VALIDATION)
+		const auto recreationKey = presentation.efficiencyFixtureIntent.correlation.operationId + ":" + presentation.efficiencyFixtureIntent.correlation.fixtureStepId;
+		forceOwnedRecreation = !presentation.efficiencyFixtureIntent.correlation.operationId.empty()
+			&& presentation.efficiencyFixtureIntent.injection == TerraEngine::Renderer::RendererEfficiencyFixtureInjection::ShadowResourceRecreation
+			&& recreationKey != impl->lastShadowValidationResourceRecreationKey;
+#endif
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (!(impl->activeShadowResourceRequest == requestedShadowResources)
+			|| directionalMissing
+			|| spotMissing
+			|| areaMissing
+			|| pointMissing || forceOwnedRecreation) {
+			const auto oldAllocation = impl->shadowAllocationGeneration;
+			const auto oldLogicalEntries = impl->shadowPublicationLedger.RetainedLogicalEntryCount();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (!impl->EnsureShadowRenderResources(requestedShadowResources)) {
+				return false;
+			}
+#if defined(TERRAENGINE_RENDERER_EFFICIENCY_VALIDATION)
+			if (forceOwnedRecreation) {
+				impl->lastShadowValidationResourceRecreationKey = recreationKey;
+				TerraEngine::Renderer::RendererEfficiencyFixtureActionReceipt action;
+				action.injection = TerraEngine::Renderer::RendererEfficiencyFixtureInjection::ShadowResourceRecreation;
+				action.correlation = presentation.efficiencyFixtureIntent.correlation;
+				action.frameSerial = publication->frameId; action.commandSerial = 0; action.recorded = true;
+				action.oldAllocationGeneration = oldAllocation; action.newAllocationGeneration = impl->shadowAllocationGeneration;
+				action.priorOwnerRejected = oldLogicalEntries != 0 && impl->shadowPublicationLedger.RetainedLogicalEntryCount() == 0
+					&& action.newAllocationGeneration > oldAllocation;
+				action.reason = action.priorOwnerRejected ? "Actual shadow resource replacement revoked prior allocation claims."
+					: "Actual shadow resource replacement occurred; no prior retained owner was available to reject.";
+				shadowResourceRecreationAction = std::move(action);
+			}
+#endif
+		}
+
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (impl->shadowRenderPass == VK_NULL_HANDLE) {
+			VkAttachmentDescription colorAttachment{};
+			colorAttachment.format = impl->swapchainImageFormat;
+			colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+			colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+			colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			// Shadow images are explicitly initialized and persist across frames.
+			// Preserve their real attachment layout instead of discarding it again.
+			colorAttachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+			colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+			VkAttachmentDescription depthAttachment{};
+			depthAttachment.format = impl->depthFormat;
+			depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+			depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+			depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+			depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			// RecordShadowPass explicitly transitions the reused depth layer back to
+			// attachment layout. Keeping both layouts equal prevents an implicit
+			// begin-pass transition from racing a write in an earlier queue submit.
+			depthAttachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+			depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+			VkAttachmentReference colorAttachmentRef{};
+			colorAttachmentRef.attachment = 0;
+			colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+			VkAttachmentReference depthAttachmentRef{};
+			depthAttachmentRef.attachment = 1;
+			depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+			VkSubpassDescription subpass{};
+			subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+			subpass.colorAttachmentCount = 1;
+			subpass.pColorAttachments = &colorAttachmentRef;
+			subpass.pDepthStencilAttachment = &depthAttachmentRef;
+
+			std::array<VkSubpassDependency, 2> dependencies{};
+			dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+			dependencies[0].dstSubpass = 0;
+			// Shadow images persist across frames. Order the previous render-pass
+			// writes and fragment sampling before clearing the same attachments again;
+			// queue submission order alone is not a memory dependency for these accesses.
+			dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+				| VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+				| VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+			dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT
+				| VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+				| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+				| VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+				| VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+			dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+				| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+				| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+			dependencies[1].srcSubpass = 0;
+			dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+			dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+			dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+			dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+			std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
+			VkRenderPassCreateInfo renderPassInfo{};
+			renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+			renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+			renderPassInfo.pAttachments = attachments.data();
+			renderPassInfo.subpassCount = 1;
+			renderPassInfo.pSubpasses = &subpass;
+			renderPassInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
+			renderPassInfo.pDependencies = dependencies.data();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (vkCreateRenderPass(impl->device, &renderPassInfo, nullptr, &impl->shadowRenderPass) != VK_SUCCESS) {
+				TERRAENGINE_LOG(LogLevel::Warning, "failed to create shadow render pass");
+				impl->shadowRenderPass = VK_NULL_HANDLE;
+				return false;
+			}
+		}
+
+		const uint32_t pointShadowSize = VulkanContext::Impl::POINT_SHADOW_MAP_RESOLUTION;
+		const auto Shadow2DRegionSizeForSlot = [](std::uint32_t typedSlot) {
+			// Slots after the full-quality reserve are backed by smaller images,
+			// so their framebuffers must be created at the same reduced extent.
+			return typedSlot >= 16u
+				? VulkanContext::Impl::SHADOW_MAP_RESOLUTION / 2u
+				: VulkanContext::Impl::SHADOW_MAP_RESOLUTION;
+		};
+
+		auto EnsureFramebuffer = [&](VkFramebuffer& framebuffer, VkImageView colorView, VkImageView depthView, uint32_t width, uint32_t height) -> bool {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (framebuffer != VK_NULL_HANDLE) {
+				return true;
+			}
+			std::array<VkImageView, 2> attachments = { colorView, depthView };
+			VkFramebufferCreateInfo framebufferInfo{};
+			framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+			framebufferInfo.renderPass = impl->shadowRenderPass;
+			framebufferInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+			framebufferInfo.pAttachments = attachments.data();
+			framebufferInfo.width = width;
+			framebufferInfo.height = height;
+			framebufferInfo.layers = 1;
+			return vkCreateFramebuffer(impl->device, &framebufferInfo, nullptr, &framebuffer) == VK_SUCCESS;
+		};
+
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+		for (uint32_t slotIndex = 0u; slotIndex < impl->activeShadowResourceRequest.directionalCount; ++slotIndex) {
+			const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
+			if (!EnsureFramebuffer(impl->directionalShadowFramebuffers[slotIndex], impl->directionalShadowColors[slotIndex].view, impl->directionalShadowDepths[slotIndex].view, regionSize, regionSize)) {
+				return false;
+			}
+		}
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+		for (uint32_t slotIndex = 0u; slotIndex < impl->activeShadowResourceRequest.spotCount; ++slotIndex) {
+			const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
+			if (!EnsureFramebuffer(impl->spotShadowFramebuffers[slotIndex], impl->spotShadowColors[slotIndex].view, impl->spotShadowDepths[slotIndex].view, regionSize, regionSize)) {
+				return false;
+			}
+		}
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+		for (uint32_t slotIndex = 0u; slotIndex < impl->activeShadowResourceRequest.areaCount; ++slotIndex) {
+			const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
+			if (!EnsureFramebuffer(impl->areaShadowFramebuffers[slotIndex], impl->areaShadowColors[slotIndex].view, impl->areaShadowDepths[slotIndex].view, regionSize, regionSize)) {
+				return false;
+			}
+		}
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+		for (uint32_t slotIndex = 0u; slotIndex < impl->activeShadowResourceRequest.pointCount; ++slotIndex) {
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+			for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+				if (impl->pointShadowColorFaceViewsBySlot[slotIndex][faceIndex] == VK_NULL_HANDLE || impl->pointShadowDepthFaceViewsBySlot[slotIndex][faceIndex] == VK_NULL_HANDLE) {
+					return false;
+				}
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+				if (!EnsureFramebuffer(impl->pointShadowFaceFramebuffersBySlot[slotIndex][faceIndex], impl->pointShadowColorFaceViewsBySlot[slotIndex][faceIndex], impl->pointShadowDepthFaceViewsBySlot[slotIndex][faceIndex], pointShadowSize, pointShadowSize)) {
+					return false;
+				}
+			}
+		}
+
+		return true;
+	};
+
+	const bool shadowResourcesReady = EnsureShadowRenderResources();
+
+	// Shadow allocation and descriptor replacement happen before any primary is
+	// recording. Cold startup/recovery must also create the pass before pipeline
+	// prewarm; a null pass cannot establish a reusable shadow pipeline.
+	if (impl->deviceLost) return;
+
+	// Retain typed pass provenance; handles are compared directly, never cast to integers.
+	const VkRenderPass shadowPrewarmPass = impl->shadowRenderPass;
+	const auto shadowPrewarmAllocation = impl->shadowAllocationGeneration;
 	// 1. Prepare All Resources (Pipelines, Meshes, Materials) BEFORE starting command recording.
 	// This ensures descriptor set updates don't invalidate the recording command buffer.
 	const TerraEngine::UUID defaultMeshCollectionId = ResourceManager::Instance().GetDefaultShaderCollectionID();
@@ -295,19 +553,44 @@ void VulkanContext::RenderFrame(
 	// combinations. Keep the bucket array proportional to expected diversity.
 	preparedDrawResourceKeys.reserve(std::min<std::size_t>(
 		drawResourceUpperBound, 128u));
+	// Mesh/material IDs are intentionally empty in this local key: graphics
+	// pipeline selection depends only on the exact pass/collection/flags tuple.
+	std::unordered_map<DrawResourcePreparationKey, VulkanPipeline*, DrawResourcePreparationKeyHash> preparedFramePipelines;
+	preparedFramePipelines.reserve(std::min<std::size_t>(drawResourceUpperBound, 128U));
+	const auto PrepareFramePipeline = [&](TerraEngine::UUID collection, VkRenderPass pass, std::uint32_t flags) {
+		const bool identity = impl->UsesConventionalVisibilityAttachments(pass);
+		impl->EnsurePipeline(collection, pass, flags, identity);
+		const auto cachedPass = impl->pipelineCache.find(pass);
+		if (cachedPass == impl->pipelineCache.end()) return;
+		VulkanPipeline* selected = nullptr;
+		std::uint64_t selectedGeneration = 0;
+		for (auto& [key, pipeline] : cachedPass->second) {
+			if (key.shaderCollectionId == collection && key.materialFlags == flags && key.usesConventionalVisibilityIdentity == identity
+				&& pipeline.pipeline != VK_NULL_HANDLE && pipeline.layout != VK_NULL_HANDLE
+				&& (!selected || key.collectionGeneration > selectedGeneration)) {
+				selected = &pipeline; selectedGeneration = key.collectionGeneration;
+			}
+		}
+		// Valid historical entries remain allocated. If a new shader cannot build,
+		// retain the latest real usable GPU pipeline rather than fabricate a new
+		// publication or remove complete geometry during command recording.
+		if (selected) preparedFramePipelines[{TerraEngine::EMPTY_UUID, TerraEngine::EMPTY_UUID, collection, pass, flags, identity}] = selected;
+	};
 	TerraEngine::UUID lastPreparationMaterialId = TerraEngine::EMPTY_UUID;
-	Material* lastPreparationMaterial = nullptr;
+	std::shared_ptr<const Material> lastPreparationMaterialOwner;
+	const Material* lastPreparationMaterial = nullptr;
 	std::optional<DrawResourcePreparationKey> lastPreparedResourceKey;
 	const auto PrepareDrawResources = [&](const RenderItemRecord& command,
 		VkRenderPass preparationPass) {
-		Material* material = nullptr;
+		const Material* material = nullptr;
 		if(command.materialId == lastPreparationMaterialId)
 		{
 			material = lastPreparationMaterial;
 		}
 		else
 		{
-			material = ResourceManager::Instance().GetMaterial(command.materialId);
+			lastPreparationMaterialOwner = ResourceManager::Instance().AcquireMaterialSnapshot(command.materialId);
+			material = lastPreparationMaterialOwner.get();
 			lastPreparationMaterialId = command.materialId;
 			lastPreparationMaterial = material;
 		}
@@ -424,7 +707,27 @@ void VulkanContext::RenderFrame(
 				// virtualMeshletOffset/Count already selected by RenderSystem. The
 				// backend prepares the same mesh-shader resources as the camera path,
 				// but shadow visibility never reuses camera Hi-Z decisions.
-				PrepareDrawResources(command, impl->shadowRenderPass);
+				if (shadowResourcesReady && impl->shadowRenderPass != VK_NULL_HANDLE)
+					PrepareDrawResources(command, impl->shadowRenderPass);
+				// Prewarm every real light-qualified cut, including off-camera
+				// casters. Resource-key deduplication cannot substitute another
+				// light's selected range; page preparation owns its exact cut key.
+				const auto mesh = impl->meshCache.find(command.meshId);
+				const auto material = impl->materialSourceOwners.find(command.materialId);
+				if (mesh != impl->meshCache.end() && material != impl->materialSourceOwners.end() && material->second) {
+					TerraEngine::Renderer::Vulkan::ShadowPageCutRequest pageRequest;
+					pageRequest.meshId = command.meshId; pageRequest.mesh = mesh->second.sourceOwner;
+					pageRequest.cpuPublicationGeneration = mesh->second.cpuPublicationGeneration;
+					pageRequest.ownerMeshletOffset = std::min(command.virtualMeshletOffset, mesh->second.meshletCount);
+					const auto available = mesh->second.meshletCount - pageRequest.ownerMeshletOffset;
+					pageRequest.ownerMeshletCount = command.virtualMeshletCount == 0U ? available : std::min(command.virtualMeshletCount, available);
+					pageRequest.selectedLod = command.selectedVirtualLod;
+					pageRequest.deformationUnsupported = command.animationBinding.HasCpuDeformation() || command.HasCompleteGpuAnimation();
+					const auto collection = material->second->header.shaderCollectionId;
+					pageRequest.materialUnsupported = collection != TerraEngine::EMPTY_UUID
+						&& collection != defaultMeshCollectionId && collection != defaultTaskCollectionId;
+					(void)impl->EnsureShadowAuthoredPagePayload(pageRequest);
+				}
 			}
 		}
 
@@ -432,6 +735,20 @@ void VulkanContext::RenderFrame(
 		if (presentation.sky.hasTexture && presentation.sky.textureId != TerraEngine::EMPTY_UUID)
 		{
 			impl->EnsureTexture(presentation.sky.textureId);
+		}
+		// Texture publication may have rebuilt a material with a newer immutable
+		// owner than the initial CPU lookup. Seal pipelines from the final uploaded
+		// SSBO owners after all resource preparation, before this primary begins.
+		for (const auto& key : preparedDrawResourceKeys) {
+			const auto uploaded = impl->materialSourceOwners.find(key.materialId);
+			if (uploaded == impl->materialSourceOwners.end() || !uploaded->second) continue;
+			auto collection = uploaded->second->header.shaderCollectionId;
+			if (collection == TerraEngine::EMPTY_UUID) collection = defaultMeshCollectionId;
+			PrepareFramePipeline(collection, key.renderPass, uploaded->second->header.flags);
+			if (collection == defaultMeshCollectionId || collection == defaultTaskCollectionId) {
+				PrepareFramePipeline(defaultMeshCollectionId, key.renderPass, uploaded->second->header.flags);
+				if (defaultTaskPipelineAvailable) PrepareFramePipeline(defaultTaskCollectionId, key.renderPass, uploaded->second->header.flags);
+			}
 		}
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
 			impl->pendingBackendFrameBreakdown,
@@ -506,6 +823,51 @@ void VulkanContext::RenderFrame(
 	if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS) {
 		return;
 	}
+	const std::uint64_t shadowCommandSerial = impl->nextShadowCommandSerial++;
+	impl->shadowCommandOwnership[cmd] = {shadowCommandSerial, currentFrame};
+	// The resource replacement already occurred at protected preparation. Bind
+	// its receipt to this real command only after recording has begun.
+	if (shadowResourceRecreationAction)
+		shadowResourceRecreationAction->commandSerial = shadowCommandSerial;
+#if defined(TERRAENGINE_RENDERER_EFFICIENCY_VALIDATION)
+	if(presentation.efficiencyFixtureIntent.injection == TerraEngine::Renderer::RendererEfficiencyFixtureInjection::RecordedSubmitAbort
+		&& !presentation.efficiencyFixtureIntent.correlation.operationId.empty())
+	{
+		impl->shadowCommandOwnership[cmd].validationAbortKey = presentation.efficiencyFixtureIntent.correlation.operationId
+			+ ":" + presentation.efficiencyFixtureIntent.correlation.fixtureStepId;
+		impl->shadowCommandOwnership[cmd].validationAbortCorrelation = presentation.efficiencyFixtureIntent.correlation;
+		impl->shadowCommandOwnership[cmd].validationFrameSerial = publication->frameId;
+	}
+#endif
+	// Every exit after recording begins must revoke unsubmitted shadow writes.
+	// The guard is released only once the completed primary joins EndFrame's
+	// actual ordered command list; exceptions cannot strand reusable candidates.
+	struct ShadowRecordingSettlement
+	{
+		VulkanContext::Impl* owner;
+		VkCommandBuffer command;
+		std::uint64_t serial;
+		bool admitted = false;
+		~ShadowRecordingSettlement() noexcept
+		{
+			if (admitted) return;
+			owner->staticShadowLifetime.DiscardUnsubmitted(serial);
+			owner->staticShadowDiscardedCommands[owner->staticShadowDiscardCursor++ % owner->staticShadowDiscardedCommands.size()] = serial;
+			for (auto& entry : owner->staticShadowEntries) if (!entry->layoutEstablished && entry->initializationCommand == serial) {
+				entry->layouts.fill(VK_IMAGE_LAYOUT_UNDEFINED); entry->initializationCommand = 0;
+			}
+			try { owner->staticShadowPublicationLedger.Discard(serial); }
+			catch (...) { owner->staticShadowPublicationLedger.Reset(owner->renderSessionGeneration); }
+			try { owner->lightingDepthEvidence.DiscardCommand(serial); owner->shadowValidationReadback.DiscardCommand(serial); owner->shadowPublicationLedger.Discard(serial); }
+			catch (...) { owner->shadowPublicationLedger.Reset(owner->renderSessionGeneration); }
+			owner->shadowCommandOwnership.erase(command);
+		}
+	} shadowRecordingSettlement{impl.get(), cmd, shadowCommandSerial};
+	// A mixed P2 cohort captures lighting and shadow adjuncts from the same real
+	// targeted frame. Untargeted frames still render, but do not seize its token.
+	const bool shadowValidationRequested = !presentation.efficiencyFixtureIntent.correlation.operationId.empty()
+		&& (!lightingControl || !lightingControl->frameSlot || *lightingControl->frameSlot == currentFrame);
+	if(shadowValidationRequested) impl->shadowValidationReadback.Init(impl->allocator, impl->physicalDevice);
 	// The outer scope measures the complete primary recording interval, while
 	// these sequential child scopes separate CPU preparation from Vulkan command
 	// emission. Keeping only one child alive at a time preserves an exact sample
@@ -924,195 +1286,6 @@ void VulkanContext::RenderFrame(
 	ownerSummary.shadowAssignmentsIsolated = true;
 	ownerSummary.indirectDrawsIsolated = true;
 	impl->pendingRenderSnapshotDiagnostics.ownerSummaries.push_back(ownerSummary);
-	// Apply the long-term preset policy on the CPU before upload so clustered
-	// lighting receives a predictable retained-light list and an independent
-	// shadow subset while the lightweight GPU analysis path observes a larger
-	// uploaded candidate set for the next frame.
-	const VulkanContext::Impl::LightBudgetApplicationResult budgetResult =
-		impl->ApplyFrameLightBudgets(*publicationPresentation, renderViewType);
-	const uint32_t requestedShadowSlotCount = std::min(budgetResult.diagnostics.shadowLightBudget, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
-	VulkanContext::Impl::ShadowResourceRequest requestedShadowResources{};
-	requestedShadowResources.directionalCount = std::min(budgetResult.diagnostics.allocatedDirectionalRegionCount, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
-	requestedShadowResources.spotCount = std::min(budgetResult.diagnostics.allocatedSpotRegionCount, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
-	requestedShadowResources.areaCount = std::min(budgetResult.diagnostics.allocatedAreaRegionCount, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
-	requestedShadowResources.pointCount = std::min(budgetResult.diagnostics.allocatedPointRegionCount, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
-
-	const auto EnsureShadowRenderResources = [&]() -> bool {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (requestedShadowSlotCount == 0u || requestedShadowResources.TotalCount() == 0u) {
-			return true;
-		}
-		const bool directionalMissing = requestedShadowResources.directionalCount > 0u
-			&& (impl->directionalShadowDepths[0].view == VK_NULL_HANDLE || impl->directionalShadowColors[0].view == VK_NULL_HANDLE);
-		const bool spotMissing = requestedShadowResources.spotCount > 0u
-			&& (impl->spotShadowDepths[0].view == VK_NULL_HANDLE || impl->spotShadowColors[0].view == VK_NULL_HANDLE);
-		const bool areaMissing = requestedShadowResources.areaCount > 0u
-			&& (impl->areaShadowDepths[0].view == VK_NULL_HANDLE || impl->areaShadowColors[0].view == VK_NULL_HANDLE);
-		const bool pointMissing = requestedShadowResources.pointCount > 0u
-			&& impl->pointShadowCubeDepths[0].view == VK_NULL_HANDLE;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!(impl->activeShadowResourceRequest == requestedShadowResources)
-			|| directionalMissing
-			|| spotMissing
-			|| areaMissing
-			|| pointMissing) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (!impl->EnsureShadowRenderResources(requestedShadowResources)) {
-				return false;
-			}
-		}
-
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (impl->shadowRenderPass == VK_NULL_HANDLE) {
-			VkAttachmentDescription colorAttachment{};
-			colorAttachment.format = impl->swapchainImageFormat;
-			colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-			colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-			colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-			colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			// Shadow images are explicitly initialized and persist across frames.
-			// Preserve their real attachment layout instead of discarding it again.
-			colorAttachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-			VkAttachmentDescription depthAttachment{};
-			depthAttachment.format = impl->depthFormat;
-			depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-			depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-			depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-			depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-			depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			// RecordShadowPass explicitly transitions the reused depth layer back to
-			// attachment layout. Keeping both layouts equal prevents an implicit
-			// begin-pass transition from racing a write in an earlier queue submit.
-			depthAttachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-			depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-
-			VkAttachmentReference colorAttachmentRef{};
-			colorAttachmentRef.attachment = 0;
-			colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-			VkAttachmentReference depthAttachmentRef{};
-			depthAttachmentRef.attachment = 1;
-			depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-			VkSubpassDescription subpass{};
-			subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-			subpass.colorAttachmentCount = 1;
-			subpass.pColorAttachments = &colorAttachmentRef;
-			subpass.pDepthStencilAttachment = &depthAttachmentRef;
-
-			std::array<VkSubpassDependency, 2> dependencies{};
-			dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
-			dependencies[0].dstSubpass = 0;
-			// Shadow images persist across frames. Order the previous render-pass
-			// writes and fragment sampling before clearing the same attachments again;
-			// queue submission order alone is not a memory dependency for these accesses.
-			dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-				| VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-				| VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-			dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT
-				| VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-				| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-			dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-				| VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
-				| VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-			dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-				| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
-				| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-			dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-			dependencies[1].srcSubpass = 0;
-			dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
-			dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-			dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-			dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-			dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-			dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-
-			std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
-			VkRenderPassCreateInfo renderPassInfo{};
-			renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-			renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
-			renderPassInfo.pAttachments = attachments.data();
-			renderPassInfo.subpassCount = 1;
-			renderPassInfo.pSubpasses = &subpass;
-			renderPassInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
-			renderPassInfo.pDependencies = dependencies.data();
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (vkCreateRenderPass(impl->device, &renderPassInfo, nullptr, &impl->shadowRenderPass) != VK_SUCCESS) {
-				TERRAENGINE_LOG(LogLevel::Warning, "failed to create shadow render pass");
-				impl->shadowRenderPass = VK_NULL_HANDLE;
-				return false;
-			}
-		}
-
-		const uint32_t pointShadowSize = VulkanContext::Impl::POINT_SHADOW_MAP_RESOLUTION;
-		const auto Shadow2DRegionSizeForSlot = [](std::uint32_t typedSlot) {
-			// Slots after the full-quality reserve are backed by smaller images,
-			// so their framebuffers must be created at the same reduced extent.
-			return typedSlot >= 16u
-				? VulkanContext::Impl::SHADOW_MAP_RESOLUTION / 2u
-				: VulkanContext::Impl::SHADOW_MAP_RESOLUTION;
-		};
-
-		auto EnsureFramebuffer = [&](VkFramebuffer& framebuffer, VkImageView colorView, VkImageView depthView, uint32_t width, uint32_t height) -> bool {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (framebuffer != VK_NULL_HANDLE) {
-				return true;
-			}
-			std::array<VkImageView, 2> attachments = { colorView, depthView };
-			VkFramebufferCreateInfo framebufferInfo{};
-			framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-			framebufferInfo.renderPass = impl->shadowRenderPass;
-			framebufferInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
-			framebufferInfo.pAttachments = attachments.data();
-			framebufferInfo.width = width;
-			framebufferInfo.height = height;
-			framebufferInfo.layers = 1;
-			return vkCreateFramebuffer(impl->device, &framebufferInfo, nullptr, &framebuffer) == VK_SUCCESS;
-		};
-
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (uint32_t slotIndex = 0u; slotIndex < impl->activeShadowResourceRequest.directionalCount; ++slotIndex) {
-			const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
-			if (!EnsureFramebuffer(impl->directionalShadowFramebuffers[slotIndex], impl->directionalShadowColors[slotIndex].view, impl->directionalShadowDepths[slotIndex].view, regionSize, regionSize)) {
-				return false;
-			}
-		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (uint32_t slotIndex = 0u; slotIndex < impl->activeShadowResourceRequest.spotCount; ++slotIndex) {
-			const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
-			if (!EnsureFramebuffer(impl->spotShadowFramebuffers[slotIndex], impl->spotShadowColors[slotIndex].view, impl->spotShadowDepths[slotIndex].view, regionSize, regionSize)) {
-				return false;
-			}
-		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (uint32_t slotIndex = 0u; slotIndex < impl->activeShadowResourceRequest.areaCount; ++slotIndex) {
-			const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
-			if (!EnsureFramebuffer(impl->areaShadowFramebuffers[slotIndex], impl->areaShadowColors[slotIndex].view, impl->areaShadowDepths[slotIndex].view, regionSize, regionSize)) {
-				return false;
-			}
-		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (uint32_t slotIndex = 0u; slotIndex < impl->activeShadowResourceRequest.pointCount; ++slotIndex) {
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-			for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (impl->pointShadowColorFaceViewsBySlot[slotIndex][faceIndex] == VK_NULL_HANDLE || impl->pointShadowDepthFaceViewsBySlot[slotIndex][faceIndex] == VK_NULL_HANDLE) {
-					return false;
-				}
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (!EnsureFramebuffer(impl->pointShadowFaceFramebuffersBySlot[slotIndex][faceIndex], impl->pointShadowColorFaceViewsBySlot[slotIndex][faceIndex], impl->pointShadowDepthFaceViewsBySlot[slotIndex][faceIndex], pointShadowSize, pointShadowSize)) {
-					return false;
-				}
-			}
-		}
-
-		return true;
-	};
-
-	const bool shadowResourcesReady = EnsureShadowRenderResources();
 
 	std::vector<GPULight> analysisLightingPayload;
 	analysisLightingPayload.reserve(budgetResult.uploadedCandidates.size());
@@ -1185,6 +1358,31 @@ void VulkanContext::RenderFrame(
 		}
 		lightingPayload.push_back(light);
 	}
+	// Canonical serialization reads only immutable copied payloads. Jobs operate
+	// on distinct owned blocks and settle before the protected map/write boundary.
+	using namespace TerraEngine::Renderer::VulkanLightingUpload;
+	auto canonicalFinalLights = std::make_unique<CanonicalBlock>();
+	auto canonicalAnalysisLights = std::make_unique<CanonicalBlock>();
+	std::array<std::uint64_t, 2> canonicalPreparationNanoseconds{};
+	std::vector<std::future<void>> lightingPreparationFutures;
+	lightingPreparationFutures.reserve(2);
+	TerraEngine::Tasks::ScopedTaskSettlement<void> lightingPreparationSettlement(lightingPreparationFutures);
+	const auto prepareLighting = [&](std::uint32_t purpose) {
+		const auto started = std::chrono::steady_clock::now();
+		CanonicalizeLighting(purpose == 0 ? lightingPayload : analysisLightingPayload,
+			purpose == 0 ? *canonicalFinalLights : *canonicalAnalysisLights);
+		canonicalPreparationNanoseconds[purpose] = static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
+	};
+	for (std::uint32_t purpose = 0; purpose < 2; ++purpose) {
+		if (presentation.efficiencyOptions.options.validationPreparation == TerraEngine::Renderer::RendererEfficiencyPreparation::Concurrent)
+			lightingPreparationSettlement.CreateAndEnqueue(ThreadPool::instance(), [&, purpose]() { prepareLighting(purpose); });
+		else lightingPreparationSettlement.RunInline([&, purpose]() { prepareLighting(purpose); });
+	}
+	lightingPreparationSettlement.GetAll();
+	std::array<TerraEngine::Renderer::RendererEfficiencyLightingUploadEvidence, 2> lightingUploadEvidence;
+	const bool forceFullLighting = presentation.efficiencyOptions.options.lightingUploads
+		== TerraEngine::Renderer::RendererEfficiencyLightingUploads::Full;
 	const auto EnsureLightingComputePipelines = [&]() {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (impl->lightingComputePipelineLayout == VK_NULL_HANDLE) {
@@ -1354,7 +1552,24 @@ void VulkanContext::RenderFrame(
 		}
 
 		CreateComputePipeline(impl->clusterGridComputePipeline, "Shaders/Lighting/ClusterGrid.comp.spv");
-		CreateComputePipeline(impl->clusterDepthMaskComputePipeline, "Shaders/Lighting/ClusterDepthMask.comp.spv");
+		if (!impl->clusterDepthDeviceLimitsChecked) {
+			VkPhysicalDeviceProperties depthDeviceProperties{};
+			vkGetPhysicalDeviceProperties(impl->physicalDevice, &depthDeviceProperties);
+			const auto& limits = depthDeviceProperties.limits;
+			impl->clusterDepthCooperativeDeviceSupported = limits.maxComputeWorkGroupInvocations >= 64
+				&& limits.maxComputeWorkGroupSize[0] >= 64 && limits.maxComputeSharedMemorySize >= 1024
+				&& limits.maxComputeWorkGroupCount[0] >= kLightingClusterDimX
+				&& limits.maxComputeWorkGroupCount[1] >= kLightingClusterDimY;
+			impl->clusterDepthReferenceDeviceSupported = limits.maxComputeWorkGroupInvocations >= 64
+				&& limits.maxComputeWorkGroupSize[0] >= 8 && limits.maxComputeWorkGroupSize[1] >= 8
+				&& limits.maxComputeWorkGroupCount[0] >= (kLightingClusterDimX + 7) / 8
+				&& limits.maxComputeWorkGroupCount[1] >= (kLightingClusterDimY + 7) / 8;
+			impl->clusterDepthDeviceLimitsChecked = true;
+		}
+		if (impl->clusterDepthCooperativeDeviceSupported)
+			CreateComputePipeline(impl->clusterDepthMaskComputePipeline, "Shaders/Lighting/ClusterDepthMask.comp.spv");
+		if (impl->clusterDepthReferenceDeviceSupported)
+			CreateComputePipeline(impl->clusterDepthMaskReferenceComputePipeline, "Shaders/Lighting/ClusterDepthMaskReference.comp.spv");
 		CreateComputePipeline(impl->clusterLightCountComputePipeline, "Shaders/Lighting/ClusterLightCount.comp.spv");
 		CreateComputePipeline(impl->clusterLightPrefixComputePipeline, "Shaders/Lighting/ClusterLightPrefix.comp.spv");
 		CreateComputePipeline(impl->clusterLightFillComputePipeline, "Shaders/Lighting/ClusterLightFill.comp.spv");
@@ -1366,6 +1581,30 @@ void VulkanContext::RenderFrame(
 	};
 
 	EnsureLightingComputePipelines();
+	if (!impl->lightingDepthEvidenceInitializationAttempted) {
+		impl->lightingDepthEvidenceInitializationAttempted = true;
+		// The collector consumes immutable shader words during initialization. No
+		// file lookup, startup query reset submission or GPU wait enters sampling.
+		const auto loadDepthOracleWords = [](const char* path) {
+			const auto bytes = ResourceManager::Instance().ReadFileBytes(ResourceManager::Instance().ResolveEngineAssetPath(path));
+			std::vector<std::uint32_t> words;
+			if (!bytes.empty() && bytes.size() % sizeof(std::uint32_t) == 0) {
+				words.resize(bytes.size() / sizeof(std::uint32_t));
+				std::memcpy(words.data(), bytes.data(), bytes.size());
+			}
+			return words;
+		};
+		const auto cooperativeOracleWords = loadDepthOracleWords("Shaders/Lighting/ClusterDepthMaskOracle.comp.spv");
+		const auto referenceOracleWords = loadDepthOracleWords("Shaders/Lighting/ClusterDepthMaskReferenceOracle.comp.spv");
+		TerraEngine::Renderer::VulkanLightingDepthEvidence::Config config;
+		config.device = impl->device; config.physical = impl->physicalDevice; config.allocator = impl->allocator;
+		config.rendererSessionGeneration = impl->renderSessionGeneration;
+		config.backendResourceGeneration = impl->lightingUploadAllocationGeneration;
+		config.timestampValidBits = impl->lightingDepthTimestampValidBits;
+		config.periodNanoseconds = impl->gpuTimestampPeriodNanoseconds;
+		config.cooperativeOracleSpirv = cooperativeOracleWords; config.referenceOracleSpirv = referenceOracleWords;
+		impl->lightingDepthEvidenceInitialized = impl->lightingDepthEvidence.Initialize(config);
+	}
 
 	const glm::mat4 currentViewProjection = presentation.projectionMatrix * presentation.viewMatrix;
 	VulkanContext::Impl::ViewDepthHistoryState& depthHistory = impl->depthHistoryByView[viewIndex];
@@ -1506,9 +1745,17 @@ void VulkanContext::RenderFrame(
 
 	const uint32_t clusterCount = kLightingClusterDimX * kLightingClusterDimY * kLightingClusterDimZ;
 	constexpr uint32_t kClusteredLightingMinimumLightCount = 16u;
+	// A requested reference must execute its full-scan shader. Cooperative mode
+	// may conservatively use the reference when its pipeline or limits are absent.
+	const bool cooperativeDepthRequested = presentation.efficiencyOptions.options.lightingDepth
+		== TerraEngine::Renderer::RendererEfficiencyLightingDepth::Cooperative;
+	const bool cooperativeDepthSelected = cooperativeDepthRequested
+		&& impl->clusterDepthCooperativeDeviceSupported && impl->clusterDepthMaskComputePipeline != VK_NULL_HANDLE;
+	const VkPipeline selectedDepthPipeline = cooperativeDepthSelected ? impl->clusterDepthMaskComputePipeline
+		: (impl->clusterDepthReferenceDeviceSupported ? impl->clusterDepthMaskReferenceComputePipeline : VK_NULL_HANDLE);
 	const bool clusteredLightingPipelineReady = impl->lightingComputePipelineLayout != VK_NULL_HANDLE
 		&& impl->clusterGridComputePipeline != VK_NULL_HANDLE
-		&& impl->clusterDepthMaskComputePipeline != VK_NULL_HANDLE
+		&& selectedDepthPipeline != VK_NULL_HANDLE
 		&& impl->clusterLightCountComputePipeline != VK_NULL_HANDLE
 		&& impl->clusterLightPrefixComputePipeline != VK_NULL_HANDLE
 		&& impl->clusterLightFillComputePipeline != VK_NULL_HANDLE;
@@ -1557,6 +1804,59 @@ void VulkanContext::RenderFrame(
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	// Even zero lights upload/clear the analysis tail. Failed writes stop this
+	// command before shaders can consume partly updated or stale light records.
+	if (!impl->UploadLightAnalysisInputData(*canonicalAnalysisLights, renderViewType, diagnosticViewId,
+		forceFullLighting, lightingUploadEvidence[1])
+		|| !impl->UploadLightingData(*canonicalFinalLights, renderViewType, diagnosticViewId,
+			forceFullLighting, lightingUploadEvidence[0])) {
+		TERRAENGINE_LOG(LogLevel::Error, "Lighting upload failed; this view is withheld and will retry on the next safe frame.");
+		return;
+	}
+	for (std::uint32_t purpose = 0; purpose < 2; ++purpose)
+		lightingUploadEvidence[purpose].mirrorCpuDurationNanoseconds += canonicalPreparationNanoseconds[purpose];
+	const bool lightingSampleFrame = !lightingControl || !lightingControl->frameSlot
+		|| *lightingControl->frameSlot == currentFrame;
+	// Shadow receipts also export the real lighting upload owners. Capture their
+	// selected IDs for every validation view, including the original P1 fixtures.
+	if (shadowValidationRequested) {
+		lightingUploadEvidence[0].payloadLightIds.reserve(budgetResult.retainedLights.size());
+		lightingUploadEvidence[1].payloadLightIds.reserve(budgetResult.uploadedCandidates.size());
+		for (const auto& selected : budgetResult.retainedLights) lightingUploadEvidence[0].payloadLightIds.push_back(selected.lightId);
+		for (const auto& selected : budgetResult.uploadedCandidates) lightingUploadEvidence[1].payloadLightIds.push_back(selected.lightId);
+	}
+	if (shadowValidationRequested && presentation.efficiencyFixtureIntent.lightingControls && lightingSampleFrame) {
+		// These rows are independent of shadow lights, so zero-light illumination
+		// still has both physical upload purposes and real same-command color.
+		for (std::uint32_t purpose = 0; purpose < 2; ++purpose) {
+			TerraEngine::Renderer::RendererEfficiencyEvidence evidence;
+			evidence.kind = TerraEngine::Renderer::RendererEfficiencyEvidenceKind::Lighting;
+			evidence.analysisPurpose = purpose == 1; evidence.lightingUploads = lightingUploadEvidence;
+			evidence.viewType = renderViewType; evidence.viewId = diagnosticViewId;
+			evidence.frameSerial = publication->frameId; evidence.commandSerial = shadowCommandSerial;
+			evidence.effectiveOptions = presentation.efficiencyOptions;
+			evidence.fixtureCorrelation = presentation.efficiencyFixtureIntent.correlation;
+			evidence.fixtureControlGeneration = presentation.efficiencyFixtureIntent.controlGeneration;
+			evidence.preparationWorkerTasks = presentation.efficiencyOptions.options.validationPreparation
+				== TerraEngine::Renderer::RendererEfficiencyPreparation::Concurrent ? 2 : 0;
+			evidence.preparationInlineTasks = 2 - evidence.preparationWorkerTasks;
+			evidence.preparationSettled = true;
+			const auto measured = [](std::uint64_t value) { return TerraEngine::Renderer::RendererEfficiencyCounter{
+				TerraEngine::Renderer::RendererEfficiencyEvidenceStatus::Valid, value, {}}; };
+			const auto& upload = lightingUploadEvidence[purpose];
+			evidence.lightingLogicalWriteBytes = measured(upload.logicalWriteBytes);
+			evidence.lightingWriteRecords = measured(upload.logicalWriteRecords);
+			evidence.lightingWriteRanges = measured(upload.logicalWriteRanges.size());
+			evidence.lightingPhysicalFlushBytes = measured(upload.physicalFlushBytes);
+			evidence.lightingFlushRanges = measured(upload.physicalFlushRanges.size());
+			const auto& buffer = purpose == 0 ? impl->globalLightSSBOs[currentFrame] : impl->lightAnalysisInputSSBOs[currentFrame];
+			// Capture the immutable candidate population before either upload budget
+			// truncates it, so validation can distinguish 1,025 sources from 1,024 records.
+			(void)impl->shadowValidationReadback.RecordLighting(cmd, buffer.buffer,
+				static_cast<std::uint64_t>(snapshotSlotIndex) * kBlockBytes, kBlockBytes, evidence,
+				static_cast<std::uint32_t>(presentation.lightCandidates.size()));
+		}
+	}
 	if (gpuLightAnalysisAvailable && !analysisLightingPayload.empty()) {
 		struct AnalysisPushConstants
 		{
@@ -1567,7 +1867,6 @@ void VulkanContext::RenderFrame(
 			std::uint32_t padding[12]{};
 		};
 
-		impl->UploadLightAnalysisInputData(analysisLightingPayload);
 		impl->RecordPendingLightAnalysisCandidates(statsSlotIndex, budgetResult.uploadedCandidates);
 		impl->UpdateFrameCullingData(statsSlotIndex, analysisCullingData);
 
@@ -1592,7 +1891,6 @@ void VulkanContext::RenderFrame(
 		impl->RecordPendingLightAnalysisCandidates(statsSlotIndex, {});
 	}
 
-	impl->UploadLightingData(lightingPayload);
 	cullingData.clusteredLightingValid = clusteredLightingAvailable ? 1u : 0u;
 	cullingData.clusteredLightingOverflowed = 0u;
 
@@ -1674,9 +1972,54 @@ void VulkanContext::RenderFrame(
 		barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
 		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+		TerraEngine::Renderer::VulkanLightingDepthEvidence::Request depthRequest;
+		depthRequest.frameSlot = currentFrame; depthRequest.snapshotSlot = snapshotSlotIndex;
+		depthRequest.width = activeRenderExtent.width; depthRequest.height = activeRenderExtent.height;
+		depthRequest.cooperative = cooperativeDepthSelected;
+		depthRequest.validation = shadowValidationRequested && presentation.efficiencyFixtureIntent.controlsApplied
+			&& presentation.efficiencyFixtureIntent.depthControls.has_value();
+		auto& depthEvidence = depthRequest.evidence;
+		depthEvidence.kind = TerraEngine::Renderer::RendererEfficiencyEvidenceKind::LightingDepth;
+		depthEvidence.viewType = renderViewType; depthEvidence.viewId = diagnosticViewId;
+		depthEvidence.frameSerial = publication->frameId; depthEvidence.commandSerial = shadowCommandSerial;
+		depthEvidence.resolution = {activeRenderExtent.width, activeRenderExtent.height};
+		depthEvidence.effectiveOptions = presentation.efficiencyOptions;
+		if (depthRequest.validation) {
+			// Large selected-light identity lists are portable validation evidence.
+			// Ordinary high-frequency timestamp samples need only typed query
+			// ownership and avoid copying these two 1,024-record identity lists.
+			depthEvidence.lightingUploads = lightingUploadEvidence;
+			depthEvidence.fixtureCorrelation = presentation.efficiencyFixtureIntent.correlation;
+			depthEvidence.fixtureControlGeneration = presentation.efficiencyFixtureIntent.controlGeneration;
+			depthRequest.oracleRecipe = presentation.efficiencyFixtureIntent.depthControls->oracleRecipe;
+			depthEvidence.preparationWorkerTasks = presentation.efficiencyOptions.options.validationPreparation
+				== TerraEngine::Renderer::RendererEfficiencyPreparation::Concurrent ? 2 : 0;
+			depthEvidence.preparationInlineTasks = 2 - depthEvidence.preparationWorkerTasks;
+			depthEvidence.preparationSettled = true;
+		}
+		if (cooperativeDepthRequested && !cooperativeDepthSelected)
+			depthEvidence.fallbackReason = "Cooperative depth pipeline or device limits unavailable; complete-scan reference selected.";
+		// Both compute markers follow the grid barrier and enclose only depth
+		// dispatch. Count/fill and validation copies remain outside the interval.
+		const bool depthTimingRecorded = impl->lightingDepthEvidenceInitialized
+			&& impl->lightingDepthEvidence.BeginProduction(cmd, depthRequest);
 
-		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->clusterDepthMaskComputePipeline);
-		vkCmdDispatch(cmd, (kLightingClusterDimX + 7u) / 8u, (kLightingClusterDimY + 7u) / 8u, 1u);
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, selectedDepthPipeline);
+		// Cooperative work distributes every tile's pixels across one 64-lane
+		// group; the reference keeps one serial full scan per 8x8 invocation.
+		vkCmdDispatch(cmd, cooperativeDepthSelected ? kLightingClusterDimX : (kLightingClusterDimX + 7u) / 8u,
+			cooperativeDepthSelected ? kLightingClusterDimY : (kLightingClusterDimY + 7u) / 8u, 1u);
+		if (depthTimingRecorded) impl->lightingDepthEvidence.EndProduction(cmd, depthRequest);
+		if (depthTimingRecorded && depthRequest.validation) {
+			// This transfer sits outside the measured dispatch and copies only
+			// this command's physical snapshot slice. The collector restores
+			// compute visibility before the following count/fill passes.
+			constexpr std::uint64_t tileBytes = sizeof(float) * 2u * kLightingClusterDimX * kLightingClusterDimY;
+			impl->lightingDepthEvidence.RecordProductionBounds(cmd, depthRequest,
+				impl->clusterDepthSSBOs[currentFrame].buffer,
+				std::uint64_t(renderSnapshot.clusterDepthOffset) * sizeof(float) * 2u,
+				tileBytes * VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME);
+		}
 		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->clusterLightCountComputePipeline);
@@ -1700,6 +2043,14 @@ void VulkanContext::RenderFrame(
 			0, nullptr,
 			0, nullptr
 		);
+		if (depthTimingRecorded && depthRequest.validation && depthRequest.oracleRecipe
+			&& presentation.efficiencyDepthOracleInput) {
+			// Isolated oracle bindings replace compute state only after every
+			// production count/fill dispatch. Its upload, timing and readback do
+			// not alter production lighting buffers or enter the speed interval.
+			impl->lightingDepthEvidence.RecordOracle(cmd, depthRequest,
+				*depthRequest.oracleRecipe, *presentation.efficiencyDepthOracleInput, cullingData);
+		}
 	}
 	if (depthPreparedForPreSceneCompute) {
 		// Pre-scene AO and cluster building sample the previous frame depth.
@@ -1732,6 +2083,8 @@ void VulkanContext::RenderFrame(
 		PushConstants push{};
 		std::uint32_t materialFlags = 0u;
 		uint32_t indirectBufferIndex = 0;
+		bool shadowGrouped = false;
+		std::uint32_t shadowMemberIndex = 0, shadowGroupIndex = 0;
 		// CPU keeps pipeline/descriptors/push ownership. This selects only the
 		// command source after the GPU executor produced a bounded uint4 record.
 		bool useGeneratedVirtualGeometryIndirect = false;
@@ -1869,9 +2222,27 @@ void VulkanContext::RenderFrame(
 		}
 	}
 	std::uint32_t cameraVisibleShadowCasterCount = 0U;
+	// This exact immutable membership is independent of grouped main-pass draw
+	// counts. It proves off-camera casters even when camera submissions collapse.
+	std::unordered_set<std::uint32_t> cameraVisibleShadowOrdinals;
+	for (const auto& key : selection.VisibleOrdinals()) cameraVisibleShadowOrdinals.insert(key.ordinal);
 	struct PreparedShadowList {
 		TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
 		std::vector<PreparedDraw> draws;
+		std::vector<PreparedDraw> groupedDraws;
+		std::vector<TerraEngine::Renderer::ShadowBatchMember> batchMembers;
+		std::vector<TerraEngine::Renderer::RendererEfficiencyShadowBatchSource> batchSources;
+		std::vector<RenderInstanceRecord> expectedInstances;
+		TerraEngine::Renderer::ShadowBatchPlan batch;
+		TerraEngine::Renderer::Vulkan::ShadowGroupedStreamPlan streamPlan;
+		TerraEngine::Renderer::Vulkan::ShadowGroupedExecutionSelection execution;
+		std::string batchFallback;
+		std::vector<TerraEngine::Renderer::ShadowCasterStampInput> casterInputs;
+		TerraEngine::Renderer::ShadowCasterMembership membership;
+		TerraEngine::Renderer::StaticShadowPartition staticPartition;
+		bool recordingReady = true;
+		VulkanContext::Impl::ShadowPreparationRejection rejection;
+		std::size_t sourceOrdinalCount = 0;
 	};
 	thread_local std::vector<PreparedShadowList> preparedShadowLists;
 	if(preparedShadowLists.size() > presentation.shadowDrawLists.size()) {
@@ -1883,6 +2254,15 @@ void VulkanContext::RenderFrame(
 	for(PreparedShadowList& preparedList : preparedShadowLists) {
 		preparedList.lightId = TerraEngine::EMPTY_UUID;
 		preparedList.draws.clear();
+		preparedList.groupedDraws.clear(); preparedList.batchMembers.clear();
+		preparedList.batchSources.clear();
+		preparedList.expectedInstances.clear(); preparedList.batch = {};
+		preparedList.streamPlan = {}; preparedList.execution = {}; preparedList.batchFallback.clear();
+		preparedList.casterInputs.clear();
+		preparedList.membership = {};
+		preparedList.staticPartition = {};
+		preparedList.recordingReady = true;
+		preparedList.rejection = {}; preparedList.sourceOrdinalCount = 0;
 	}
 	struct PrimitiveEstimateKey
 	{
@@ -1962,29 +2342,23 @@ void VulkanContext::RenderFrame(
 		}
 		const bool pipelineUsesConventionalVisibilityIdentity =
 			impl->UsesConventionalVisibilityAttachments(currentPass);
-		impl->EnsurePipeline(shaderCollectionId, currentPass, materialFlags,
-			pipelineUsesConventionalVisibilityIdentity);
-		auto passIt = impl->pipelineCache.find(currentPass);
+		// Resource publication happens before vkBeginCommandBuffer. A shader
+		// reload arriving during recording waits for next frame's preparation;
+		// this lookup must never replace resources used by the active command.
+		const DrawResourcePreparationKey selection{TerraEngine::EMPTY_UUID, TerraEngine::EMPTY_UUID,
+			shaderCollectionId, currentPass, materialFlags, pipelineUsesConventionalVisibilityIdentity};
+		const auto pipelineIt = preparedFramePipelines.find(selection);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (passIt == impl->pipelineCache.end()) {
+		if (pipelineIt == preparedFramePipelines.end() || pipelineIt->second == nullptr) {
 			return nullptr;
 		}
-
-		const std::optional<PipelineKey> pipeKey =
-			impl->BuildPipelineKey(shaderCollectionId, materialFlags,
-				pipelineUsesConventionalVisibilityIdentity);
-		if (!pipeKey.has_value()) {
-			return nullptr;
-		}
-		auto pipelineIt = passIt->second.find(*pipeKey);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (pipelineIt == passIt->second.end()
-			|| pipelineIt->second.pipeline == VK_NULL_HANDLE
-			|| pipelineIt->second.layout == VK_NULL_HANDLE) {
+		if (pipelineIt->second->pipeline == VK_NULL_HANDLE
+			|| pipelineIt->second->layout == VK_NULL_HANDLE) {
 			return nullptr;
 		}
 		if (pipelineUsesConventionalVisibilityIdentity
-			&& !pipelineIt->second.usesConventionalVisibilityIdentity) {
+			&& !pipelineIt->second->usesConventionalVisibilityIdentity) {
 			// A visible mesh drawn through target0-only SPIR-V would leave the
 			// integer attachment clear and turn an object hit into false zero data.
 			// Reject that command rather than letting automation misreport it.
@@ -1993,19 +2367,19 @@ void VulkanContext::RenderFrame(
 			return nullptr;
 		}
 
-		return &pipelineIt->second;
+		return pipelineIt->second;
 	};
-	thread_local std::unordered_map<TerraEngine::UUID, Material*>
+	thread_local std::unordered_map<TerraEngine::UUID, std::shared_ptr<const Material>>
 		materialLookupCache;
 	materialLookupCache.clear();
 	materialLookupCache.reserve(std::min<std::size_t>(
 		commandResolver.Count(), 128u));
 	TerraEngine::UUID lastMaterialId = TerraEngine::EMPTY_UUID;
-	Material* lastMaterial = nullptr;
-	const auto ResolveMaterial = [&](const TerraEngine::UUID& materialId) -> Material* {
-		// Material reloads invalidate backend state between frames. Within one
-		// RenderFrame call the reflected command list is immutable, so repeated
-		// camera and shadow draws can share the same ResourceManager lookup.
+	const Material* lastMaterial = nullptr;
+	const auto ResolveMaterial = [&](const TerraEngine::UUID& materialId) -> const Material* {
+		// Draw behavior must come from the immutable owner actually uploaded to
+		// the material SSBO before recording began. A newer CPU publication is
+		// considered at the next preparation boundary, not mixed into old GPU data.
 		if(materialId == lastMaterialId)
 		{
 			return lastMaterial;
@@ -2013,11 +2387,14 @@ void VulkanContext::RenderFrame(
 		auto existing = materialLookupCache.find(materialId);
 		if (existing != materialLookupCache.end()) {
 			lastMaterialId = materialId;
-			lastMaterial = existing->second;
+			lastMaterial = existing->second.get();
 			return lastMaterial;
 		}
-		Material* material = ResourceManager::Instance().GetMaterial(materialId);
-		materialLookupCache.emplace(materialId, material);
+		const auto uploaded = impl->materialSourceOwners.find(materialId);
+		auto materialOwner = uploaded == impl->materialSourceOwners.end()
+			? std::shared_ptr<const Material>{} : uploaded->second;
+		const Material* material = materialOwner.get();
+		materialLookupCache.emplace(materialId, std::move(materialOwner));
 		lastMaterialId = materialId;
 		lastMaterial = material;
 		return lastMaterial;
@@ -2440,10 +2817,14 @@ void VulkanContext::RenderFrame(
 	};
 	struct StaticDrawPreparation
 	{
+		const char* rejectionStage = nullptr;
 		VkPipeline pipeline = VK_NULL_HANDLE;
 		VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 		VkDescriptorSet meshDescriptorSet = VK_NULL_HANDLE;
 		TerraEngine::UUID selectedCollectionId = TerraEngine::EMPTY_UUID;
+		std::uint64_t collectionGeneration = 0;
+		std::shared_ptr<const Mesh> meshOwner;
+		std::uint64_t meshPublicationGeneration = 0, meshAllocationGeneration = 0;
 		std::uint32_t meshletCount = 0u;
 		std::uint32_t indexCount = 0u;
 		bool hasMeshletBounds = false;
@@ -2462,6 +2843,7 @@ void VulkanContext::RenderFrame(
 		commandResolver.Count() + presentation.shadowDrawLists.size(), 128U));
 	std::optional<StaticDrawPreparationKey> lastStaticPreparationKey;
 	std::optional<StaticDrawPreparation> lastStaticPreparation;
+	const char* staticPreparationFailure = nullptr;
 	const auto ResolveStaticDrawPreparation = [&](const RenderItemRecord& command,
 		TerraEngine::UUID requestedCollectionId,
 		VkRenderPass renderPass,
@@ -2484,6 +2866,7 @@ void VulkanContext::RenderFrame(
 		{
 			lastStaticPreparationKey = key;
 			lastStaticPreparation = cached->second;
+			staticPreparationFailure = cached->second.rejectionStage;
 			return lastStaticPreparation->pipeline != VK_NULL_HANDLE
 				&& lastStaticPreparation->pipelineLayout != VK_NULL_HANDLE
 				&& lastStaticPreparation->meshDescriptorSet != VK_NULL_HANDLE
@@ -2491,10 +2874,15 @@ void VulkanContext::RenderFrame(
 				? &*lastStaticPreparation : nullptr;
 		}
 
-		impl->EnsureMesh(command.meshId);
+		// All normal camera commands and every off-camera light caster were
+		// prepared before command recording. Missing resources reject this draw;
+		// reacquiring a newer CPU owner here could invalidate earlier copied GPU
+		// handles while the same primary is still being recorded.
 		auto meshIt = impl->meshCache.find(command.meshId);
 		if(meshIt == impl->meshCache.end() || !HasMeshletPayload(meshIt->second)) {
-			staticDrawPreparationCache.emplace(key, StaticDrawPreparation{});
+			staticPreparationFailure = meshIt == impl->meshCache.end() ? "MeshCacheMissing" : "MeshletPayloadIncomplete";
+			StaticDrawPreparation rejected; rejected.rejectionStage = staticPreparationFailure;
+			staticDrawPreparationCache.emplace(key, std::move(rejected));
 			lastStaticPreparationKey = key;
 			lastStaticPreparation.reset();
 			return nullptr;
@@ -2508,17 +2896,29 @@ void VulkanContext::RenderFrame(
 			pipeline = ResolvePipeline(selectedCollectionId, renderPass, materialFlags);
 		}
 		if(pipeline == nullptr) {
-			staticDrawPreparationCache.emplace(key, StaticDrawPreparation{});
+			staticPreparationFailure = "FrozenPipeline";
+			StaticDrawPreparation rejected; rejected.rejectionStage = staticPreparationFailure;
+			staticDrawPreparationCache.emplace(key, std::move(rejected));
 			lastStaticPreparationKey = key;
 			lastStaticPreparation.reset();
 			return nullptr;
 		}
 
-		impl->EnsureMaterialDescriptorSets(selectedCollectionId, command.materialId);
+		if (!impl->materialIndexMap.contains(command.materialId)
+			|| !impl->materialSourceOwners.contains(command.materialId)) {
+			staticPreparationFailure = !impl->materialIndexMap.contains(command.materialId) ? "MaterialIndexMissing" : "MaterialOwnerMissing";
+			StaticDrawPreparation rejected; rejected.rejectionStage = staticPreparationFailure;
+			staticDrawPreparationCache.emplace(key, std::move(rejected));
+			lastStaticPreparationKey = key;
+			lastStaticPreparation.reset();
+			return nullptr;
+		}
 		const VkDescriptorSet meshDescriptorSet =
 			impl->EnsureMeshDescriptorSet(command.meshId, *pipeline);
 		if(meshDescriptorSet == VK_NULL_HANDLE) {
-			staticDrawPreparationCache.emplace(key, StaticDrawPreparation{});
+			staticPreparationFailure = "MeshDescriptorSet";
+			StaticDrawPreparation rejected; rejected.rejectionStage = staticPreparationFailure;
+			staticDrawPreparationCache.emplace(key, std::move(rejected));
 			lastStaticPreparationKey = key;
 			lastStaticPreparation.reset();
 			return nullptr;
@@ -2527,7 +2927,9 @@ void VulkanContext::RenderFrame(
 		{
 			TERRAENGINE_LOG(LogLevel::Error,
 				"Skipping draw because the reflected pipeline exposes more push-constant ranges than the prepared draw can retain.");
-			staticDrawPreparationCache.emplace(key, StaticDrawPreparation{});
+			staticPreparationFailure = "PushConstantRange";
+			StaticDrawPreparation rejected; rejected.rejectionStage = staticPreparationFailure;
+			staticDrawPreparationCache.emplace(key, std::move(rejected));
 			lastStaticPreparationKey = key;
 			lastStaticPreparation.reset();
 			return nullptr;
@@ -2537,6 +2939,10 @@ void VulkanContext::RenderFrame(
 		preparation.pipelineLayout = pipeline->layout;
 		preparation.meshDescriptorSet = meshDescriptorSet;
 		preparation.selectedCollectionId = selectedCollectionId;
+		preparation.collectionGeneration = pipeline->collectionGeneration;
+		preparation.meshOwner = meshIt->second.sourceOwner;
+		preparation.meshPublicationGeneration = meshIt->second.cpuPublicationGeneration;
+		preparation.meshAllocationGeneration = meshIt->second.allocationGeneration;
 		preparation.meshletCount = meshIt->second.meshletCount;
 		preparation.indexCount = meshIt->second.indexCount;
 		preparation.hasMeshletBounds = meshIt->second.hasMeshletBounds;
@@ -2553,6 +2959,7 @@ void VulkanContext::RenderFrame(
 		(void)wasInserted;
 		lastStaticPreparationKey = key;
 		lastStaticPreparation = inserted->second;
+		staticPreparationFailure = nullptr;
 		return &*lastStaticPreparation;
 	};
 
@@ -2564,7 +2971,7 @@ void VulkanContext::RenderFrame(
 		}
 		RenderItemRecord command{};
 		if(!commandResolver.Resolve(commandIndex, command)) continue;
-		Material* material = ResolveMaterial(command.materialId);
+		const Material* material = ResolveMaterial(command.materialId);
 		if (!material) continue;
 
 		VkRenderPass currentPass = (impl->editorMode || renderingDedicatedCaptureTarget)
@@ -2910,6 +3317,7 @@ void VulkanContext::RenderFrame(
 		PreparedShadowList& preparedList =
 			preparedShadowLists[shadowListIndex];
 		preparedList.lightId = shadowDrawList.lightId;
+		preparedList.sourceOrdinalCount = shadowDrawList.stableOrdinals.size();
 		preparedList.draws.reserve(shadowDrawList.stableOrdinals.size());
 
 		// The renderer already asked the spatial index for one list per light.
@@ -2918,13 +3326,27 @@ void VulkanContext::RenderFrame(
 		for(std::size_t itemIndex = 0u;
 			itemIndex < shadowDrawList.stableOrdinals.size(); ++itemIndex) {
 			RenderItemRecord command{};
+			TerraEngine::Renderer::RendererEfficiencyShadowBatchSource source;
+			source.sourceOrdinal = shadowDrawList.stableOrdinals[itemIndex];
+			preparedList.batchSources.push_back(source);
+			auto& batchSource = preparedList.batchSources.back();
 			if(!TerraEngine::Renderer::ResolveShadowDrawListItem(
 				*publication, presentation.referenceFrame,
 				shadowDrawList, itemIndex, command)) {
+				preparedList.recordingReady = false;
+				preparedList.rejection.Capture("ResolveShadowItem", shadowDrawList.stableOrdinals[itemIndex]);
 				continue;
 			}
-			Material* material = ResolveMaterial(command.materialId);
+			batchSource.objectId = command.objectId; batchSource.lifetimeGeneration = command.objectLifetimeGeneration;
+			batchSource.cameraVisible = cameraVisibleShadowOrdinals.contains(batchSource.sourceOrdinal);
+			const Material* material = ResolveMaterial(command.materialId);
 			if (material == nullptr || !shadowResourcesReady || !ShouldMaterialCastShadow(material->shadowBehavior)) {
+				batchSource.excludedByMaterial = material && !ShouldMaterialCastShadow(material->shadowBehavior);
+				batchSource.resolved = batchSource.excludedByMaterial;
+				if (material == nullptr || !shadowResourcesReady) {
+					preparedList.recordingReady = false;
+					preparedList.rejection.Capture(material == nullptr ? "MaterialOwner" : "ShadowResources", shadowDrawList.stableOrdinals[itemIndex], &command);
+				}
 				continue;
 			}
 
@@ -2956,6 +3378,8 @@ void VulkanContext::RenderFrame(
 				ResolveStaticDrawPreparation(
 					command, collectionId, impl->shadowRenderPass, materialFlags);
 			if(shadowPreparation == nullptr) {
+				preparedList.recordingReady = false;
+				preparedList.rejection.Capture(staticPreparationFailure ? staticPreparationFailure : "StaticPreparation", shadowDrawList.stableOrdinals[itemIndex], &command);
 				continue;
 			}
 			const VkDescriptorSet shadowMeshDescriptorSet =
@@ -3000,6 +3424,9 @@ void VulkanContext::RenderFrame(
 				? (shadowPreparation->meshletCount - selectedShadowMeshletOffset)
 				: std::min(command.virtualMeshletCount,
 					shadowPreparation->meshletCount - selectedShadowMeshletOffset);
+			batchSource.ownerFirstMeshlet = selectedShadowMeshletOffset;
+			batchSource.ownerMeshletCount = selectedShadowMeshletCount;
+			batchSource.resolved = selectedShadowMeshletCount != 0;
 			shadowDraw.push.virtualMeshletOffset = selectedShadowMeshletOffset;
 			shadowDraw.push.virtualMeshletCount = selectedShadowMeshletCount;
 			shadowDraw.push.selectedVirtualLod = command.selectedVirtualLod;
@@ -3029,21 +3456,260 @@ void VulkanContext::RenderFrame(
 			shadowDraw.push.virtualGeometryPacketDescriptorIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 			shadowDraw.push.editorTint = glm::vec4(0.0f);
 			shadowDraw.materialFlags = materialFlags;
+			// Qualify the exact range that the validated owner-buffer path consumes,
+			// rather than a zero meaning 'all meshlets' or a camera packet offset.
+			RenderItemRecord semanticCommand = command;
+			semanticCommand.virtualMeshletOffset = selectedShadowMeshletOffset;
+			semanticCommand.virtualMeshletCount = selectedShadowMeshletCount;
+			semanticCommand.virtualGeometryFlags = shadowDraw.push.virtualGeometryFlags;
+			const std::uint64_t segmentId = (static_cast<std::uint64_t>(selectedShadowMeshletOffset) << 32U)
+				| selectedShadowMeshletCount;
+			auto casterInput = TerraEngine::Renderer::BuildShadowCasterStampInput(
+				semanticCommand, presentation.referenceFrame, segmentId);
+			// This protected preparation already resolved the actual shadow pipeline
+			// and owner buffers. Authored/unknown shader proof remains conservative.
+			casterInput.semantic.shaderId = shadowPreparation->selectedCollectionId;
+			casterInput.semantic.shaderRevision = shadowPreparation->collectionGeneration;
+			if (!shadowPreparation->collectionGeneration)
+				casterInput.semantic.evidenceMask &= ~static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Shader);
+			const auto currentShaderCollection = ResourceManager::Instance().AcquireShaderCollectionSnapshot(shadowPreparation->selectedCollectionId);
+			if (!currentShaderCollection || currentShaderCollection->collectionGeneration != shadowPreparation->collectionGeneration)
+				casterInput.semantic.evidenceMask &= ~static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Shader);
+			// A publication can race the end of immutable capture. The actual GPU
+			// preparation must not authorize an older semantic row under new data.
+			const auto currentResourceGeneration = ResourceManager::Instance().GetRendererResourcePublicationGeneration();
+			if (casterInput.semantic.meshRevision != currentResourceGeneration
+				|| casterInput.semantic.materialRevision != currentResourceGeneration)
+				casterInput.semantic.evidenceMask &= ~(static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Geometry)
+					| static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Material)
+					| static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Residency));
+			if (shadowPreparation->selectedCollectionId != defaultMeshCollectionId
+				&& shadowPreparation->selectedCollectionId != defaultTaskCollectionId)
+				casterInput.semantic.evidenceMask &= ~static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Shader);
+			if (command.animationBinding.HasCpuDeformation()
+				&& (impl->activeCpuAnimationGraphicsBufferIndex == VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX
+					|| shadowDraw.push.meshDataIndex != impl->activeCpuAnimationGraphicsBufferIndex
+					|| shadowDraw.push.textureIndex != command.animationBinding.cpuDeformationRecordIndex))
+			{
+				// A rejected upload selects bind pose. Exact intended CPU arrays cannot
+				// authorize caching that fallback under a future successful palette.
+				casterInput.semantic.evidenceMask &= ~static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Deformation);
+			}
+			casterInput.semantic.meshRevision = shadowPreparation->meshPublicationGeneration;
+			// These owners are the successfully uploaded material and pixels bound
+			// by this draw. Current CPU publications alone cannot prove GPU content.
+			const auto materialOwner = impl->materialSourceOwners.find(command.materialId);
+			const bool actualMaterial = materialOwner != impl->materialSourceOwners.end()
+				&& materialOwner->second && materialOwner->second.get() == material
+				&& ResourceManager::Instance().AcquireMaterialSnapshot(command.materialId) == materialOwner->second
+				&& materialOwner->second->publicationGeneration != 0;
+			if (actualMaterial) casterInput.semantic.materialRevision = materialOwner->second->publicationGeneration;
+			else casterInput.semantic.evidenceMask &= ~static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Material);
+			casterInput.semantic.textureId = TerraEngine::EMPTY_UUID;
+			casterInput.semantic.textureRevision = 0;
+			bool textureProof = actualMaterial && material->header.alphaMode == static_cast<std::uint32_t>(AlphaMode::Opaque);
+			if (actualMaterial && material->header.alphaMode == static_cast<std::uint32_t>(AlphaMode::Mask)) {
+				const auto dependencies = impl->materialTextureSourceOwners.find(command.materialId);
+				textureProof = dependencies != impl->materialTextureSourceOwners.end();
+				if (textureProof) for (std::size_t binding = 0; binding < dependencies->second.size(); ++binding) {
+					const auto& dependency = dependencies->second[binding];
+					if (dependency.first == TerraEngine::EMPTY_UUID) continue;
+					const auto uploaded = impl->textureCache.find(dependency.first);
+					if (!dependency.second || !dependency.second->publicationGeneration
+						|| uploaded == impl->textureCache.end() || uploaded->second.sourceOwner != dependency.second
+						|| ResourceManager::Instance().AcquireTextureSnapshot(dependency.first) != dependency.second) {
+						textureProof = false; break;
+					}
+					casterInput.semantic.texturePublications.push_back({dependency.first, dependency.second->publicationGeneration, static_cast<std::uint32_t>(binding)});
+				}
+				if (!casterInput.semantic.texturePublications.empty()) {
+					casterInput.semantic.textureId = casterInput.semantic.texturePublications.front().textureId;
+					casterInput.semantic.textureRevision = casterInput.semantic.texturePublications.front().publicationGeneration;
+				}
+			}
+			if (textureProof) casterInput.semantic.evidenceMask |= static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Texture);
+			else casterInput.semantic.evidenceMask &= ~static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Texture);
+			casterInput.semantic.assetRevision = shadowPreparation->meshPublicationGeneration;
+			casterInput.semantic.residencyGeneration = shadowPreparation->meshAllocationGeneration;
+			if (!shadowPreparation->meshOwner || !shadowPreparation->meshPublicationGeneration
+				|| !shadowPreparation->meshAllocationGeneration
+				|| ResourceManager::Instance().AcquireMeshSnapshot(command.meshId) != shadowPreparation->meshOwner)
+				casterInput.semantic.evidenceMask &= ~(static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Geometry)
+					| static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Residency));
+			if (selectedShadowMeshletCount == 0U) {
+				preparedList.recordingReady = false;
+				preparedList.rejection.Capture("EmptySelectedMeshletRange", shadowDrawList.stableOrdinals[itemIndex], &command);
+			}
 
-			const uint32_t kTaskBatchSize = 32u;
-			const uint32_t taskGroupCount = shadowPreparation->hasTaskStage
-				? ((selectedShadowMeshletCount + (kTaskBatchSize - 1u)) / kTaskBatchSize)
-				: selectedShadowMeshletCount;
-			VkDrawMeshTasksIndirectCommandEXT shadowIndirectCmd{};
-			shadowIndirectCmd.groupCountX = taskGroupCount;
-			shadowIndirectCmd.groupCountY = 1u;
-			shadowIndirectCmd.groupCountZ = 1u;
-			shadowDraw.indirectBufferIndex = static_cast<uint32_t>(indirectCommands.size());
-			indirectCommands.push_back(shadowIndirectCmd);
-
-			preparedList.draws.push_back(std::move(shadowDraw));
+			// The complete light-selected owner cut is independent of camera
+			// visibility. Only a fully validated/uploaded page set replaces it.
+			TerraEngine::Renderer::Vulkan::ShadowPageCutRequest pageRequest;
+			pageRequest.meshId = command.meshId; pageRequest.mesh = shadowPreparation->meshOwner;
+			pageRequest.cpuPublicationGeneration = shadowPreparation->meshPublicationGeneration;
+			pageRequest.ownerMeshletOffset = selectedShadowMeshletOffset;
+			pageRequest.ownerMeshletCount = selectedShadowMeshletCount;
+			pageRequest.selectedLod = command.selectedVirtualLod;
+			pageRequest.deformationUnsupported = command.animationBinding.HasCpuDeformation() || command.HasCompleteGpuAnimation();
+			// Page-local geometry needs initialized task payload indices; a mesh-only
+			// fallback must retain the complete owner-buffer path instead.
+			pageRequest.materialUnsupported = !shadowPreparation->hasTaskStage
+				|| (shadowPreparation->selectedCollectionId != defaultTaskCollectionId
+					&& shadowPreparation->selectedCollectionId != defaultMeshCollectionId);
+			const auto pageSet = impl->EnsureShadowAuthoredPagePayload(pageRequest, false);
+			const auto emit = [&](PreparedDraw draw, TerraEngine::Renderer::ShadowCasterStampInput input, std::uint32_t count) {
+				// Static admission follows accepted native owners, never an authored
+				// flag or empty animation palette alone. Unknown proof stays dynamic.
+				auto& support = input.semantic.staticSupport;
+				support.knownDefaultShadowAbi = support.knownDefaultShadowAbi
+					&& (shadowPreparation->selectedCollectionId == defaultTaskCollectionId
+						|| shadowPreparation->selectedCollectionId == defaultMeshCollectionId);
+				support.ownerPublicationsComplete = input.semantic.evidenceMask
+					== TerraEngine::Renderer::kCompleteShadowCasterEvidence;
+				support.materialShadowSupported = actualMaterial && textureProof
+					&& (material->header.alphaMode == static_cast<std::uint32_t>(AlphaMode::Opaque)
+						|| material->header.alphaMode == static_cast<std::uint32_t>(AlphaMode::Mask));
+				support.geometrySupported = shadowPreparation->meshOwner
+					&& shadowPreparation->meshAllocationGeneration != 0 && count != 0
+					&& command.geometryRoute != TerraEngine::Renderer::GeometryRoute::VirtualGeometryCompute;
+				support.deformationAbsent = support.deformationAbsent
+					&& !command.animationBinding.HasCpuDeformation() && !command.HasCompleteGpuAnimation();
+				const auto classification = TerraEngine::Renderer::ClassifyStaticShadowCaster(input.semantic);
+				input.semantic.staticEligible = classification.eligible;
+				input.semantic.staticClassificationReason = static_cast<std::uint32_t>(classification.reason);
+				// Copy accepted native proof; worker planning below has no cache,
+				// Vulkan or scene lookups. Preserve each page segment as its own member.
+				TerraEngine::Renderer::ShadowBatchMember member;
+				const auto& stamp = input.semantic;
+				member.sourceOrdinal = shadowDrawList.stableOrdinals[itemIndex];
+				member.objectId = stamp.objectId; member.lifetimeGeneration = stamp.lifetimeGeneration;
+				// Compatibility uses the native payload-relative range. The independent
+				// source/stamp receipt retains its full owner-space coverage, including
+				// page cuts whose native meshlet stream starts at zero.
+				member.segmentId = stamp.segmentId; member.firstMeshlet = draw.push.virtualMeshletOffset;
+				member.meshletCount = stamp.meshletCount; member.firstCluster = stamp.firstCluster;
+				member.clusterCount = stamp.clusterCount; member.pageId = stamp.pageId;
+				member.payloadOffset = stamp.payloadByteOffset; member.payloadSize = stamp.payloadByteSize;
+				auto& key = member.key; key.meshId = stamp.meshId; key.materialId = stamp.materialId;
+				key.shaderId = stamp.shaderId;
+				key.pipeline = reinterpret_cast<std::uintptr_t>(draw.pipeline);
+				key.layout = reinterpret_cast<std::uintptr_t>(draw.pipelineLayout);
+				key.pipelineGeneration = key.layoutGeneration = shadowPreparation->collectionGeneration;
+				key.descriptors = {reinterpret_cast<std::uintptr_t>(draw.descriptorSets[0]),
+					reinterpret_cast<std::uintptr_t>(draw.descriptorSets[1])};
+				key.descriptorGenerations = {impl->backendResourceGeneration, shadowPreparation->meshAllocationGeneration};
+				key.meshGeneration = stamp.meshRevision; key.materialGeneration = stamp.materialRevision;
+				key.shaderGeneration = stamp.shaderRevision; key.residencyGeneration = stamp.residencyGeneration;
+				key.materialSelector = draw.push.materialIndex; key.textureSelector = draw.push.textureIndex;
+				key.materialFlags = draw.materialFlags; key.shadowPolicy = static_cast<std::uint32_t>(stamp.shadowBehavior);
+				key.geometryRoute = stamp.geometryRoute; key.deformationPolicy = static_cast<std::uint32_t>(command.animationBinding.source);
+				key.selectionFlags = draw.push.virtualGeometryFlags; key.selectedLod = draw.push.selectedVirtualLod;
+				key.dispatchMeshletCount = count; key.pushRangeCount = draw.pushConstantRangeCount;
+				if (key.pushRangeCount <= key.pushRanges.size()) for (std::size_t range = 0; range < key.pushRangeCount; ++range)
+					key.pushRanges[range] = {draw.pushConstantRanges[range].stageFlags,
+						draw.pushConstantRanges[range].offset, draw.pushConstantRanges[range].size};
+				member.knownDefaultTaskAbi = shadowPreparation->hasTaskStage
+					&& shadowPreparation->selectedCollectionId == defaultTaskCollectionId;
+				member.supportedRoute = command.geometryRoute != TerraEngine::Renderer::GeometryRoute::VirtualGeometryCompute;
+				member.conservativeDeformation = command.animationBinding.RequiresConservativeCoarseVisibility()
+					|| command.animationBinding.HasCpuDeformation();
+				member.deformationBridgeComplete = !command.HasCompleteGpuAnimation()
+					|| (canonicalGraphicsGroup.has_value() && draw.push.meshDataIndex != VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX
+						&& draw.push.textureIndex != VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX);
+				const bool sourceCurrent = TerraEngine::Renderer::ShadowPreparedInstanceInputsCurrent(*publication, presentation, shadowDrawList);
+				member.knownDefaultTaskAbi = member.knownDefaultTaskAbi && sourceCurrent;
+				RenderInstanceRecord record;
+				if (sourceCurrent) record = shadowDrawList.instanceInputs->records[itemIndex];
+				// The protected lowering patches every actually consumed selector after
+				// accepted native resource/animation/page preparation, preserving identity.
+				record.modelMatrix = draw.push.model; record.editorTint = draw.push.editorTint;
+				record.materialAndTexture.x = draw.push.materialIndex; record.materialAndTexture.y = draw.push.textureIndex;
+				record.animationSelectors.x = draw.push.meshDataIndex; record.animationSelectors.y = draw.push.textureIndex;
+				record.objectIdentity.z = draw.push.virtualGeometryFlags;
+				record.geometrySelectors = glm::uvec4(draw.push.selectedVirtualLod, draw.push.virtualGeometryPacketDescriptorIndex,
+					draw.push.virtualMeshletOffset, draw.push.virtualMeshletCount);
+				record.virtualGeometrySelectors = glm::uvec4(draw.push.selectedVirtualClusterOffset, draw.push.selectedVirtualClusterCount,
+					draw.push.selectedVirtualPageNeedOffset, draw.push.selectedVirtualPageNeedCount);
+				record.virtualGeometryPayloadSelectors = glm::uvec4(draw.push.virtualGeometryPayloadSource,
+					draw.push.virtualGeometryEmittedSource, draw.push.virtualGeometryPagePayloadByteOffset,
+					draw.push.virtualGeometryPagePayloadByteSize);
+				preparedList.batchMembers.push_back(member); preparedList.expectedInstances.push_back(record);
+				draw.shadowMemberIndex = static_cast<std::uint32_t>(preparedList.draws.size());
+				VkDrawMeshTasksIndirectCommandEXT indirect{};
+				indirect.groupCountX = shadowPreparation->hasTaskStage ? (count + 31U) / 32U : count;
+				indirect.groupCountY = 1U; indirect.groupCountZ = 1U;
+				draw.indirectBufferIndex = static_cast<std::uint32_t>(indirectCommands.size());
+				indirectCommands.push_back(indirect);
+				preparedList.casterInputs.push_back(std::move(input));
+				preparedList.draws.push_back(std::move(draw));
+			};
+			// Validate the entire native page cohort before suppressing any owner
+			// meshlet. One missing byte span or stale binding keeps whole coverage.
+			std::vector<TerraEngine::Renderer::ShadowCasterStamp> pageStamps;
+			bool pageBindingsReady = pageSet.complete && !pageSet.bindings.empty();
+			if (pageBindingsReady) {
+				pageStamps.reserve(pageSet.bindings.size());
+				for (const auto& binding : pageSet.bindings) {
+					auto stamp = casterInput.semantic;
+					if (!TerraEngine::Renderer::Vulkan::ApplyShadowAuthoredPageBinding(binding, stamp)) {
+						pageBindingsReady = false;
+						break;
+					}
+					pageStamps.push_back(std::move(stamp));
+				}
+			}
+			if (pageBindingsReady) {
+				for (std::size_t bindingIndex = 0U; bindingIndex < pageSet.bindings.size(); ++bindingIndex) {
+					const auto& binding = pageSet.bindings[bindingIndex];
+					auto pageDraw = shadowDraw; auto pageInput = casterInput;
+					const auto& segment = binding.segment;
+					// Descriptor stream meshlets are page-local. Original owner ranges
+					// remain in semantic identity, rather than transient GPU offsets.
+					pageDraw.push.virtualMeshletOffset = 0;
+					pageDraw.push.virtualMeshletCount = segment.ownerMeshletCount;
+					pageDraw.push.virtualGeometryPagePayloadBufferIndex = binding.payloadBufferIndex;
+					pageDraw.push.virtualGeometryPacketDescriptorIndex = binding.descriptorIndex;
+					pageDraw.push.virtualGeometryPayloadSource = static_cast<std::uint32_t>(VirtualGeometryPagePayloadSource::ResidentPagePayload);
+					pageDraw.push.virtualGeometryEmittedSource = static_cast<std::uint32_t>(VirtualGeometryEmittedPageSource::HighDetailPage);
+					pageInput.semantic = std::move(pageStamps[bindingIndex]);
+					emit(std::move(pageDraw), std::move(pageInput), segment.ownerMeshletCount);
+				}
+			} else {
+				// Unknown page topology/deformation/upload keeps every owner meshlet.
+				// No partially prepared page list can suppress complete geometry.
+				emit(std::move(shadowDraw), std::move(casterInput), selectedShadowMeshletCount);
+			}
 		}
 
+	}
+	// Exact row normalization is worker-safe: inputs own copied canonical values
+	// and immutable resource proof, with no Vulkan or live scene lookups in jobs.
+	std::vector<std::future<void>> shadowMembershipFutures;
+	std::uint32_t shadowPreparationWorkerTasks = 0, shadowPreparationInlineTasks = 0;
+	bool shadowPreparationSettled = false;
+	shadowMembershipFutures.reserve(preparedShadowLists.size());
+	TerraEngine::Tasks::ScopedTaskSettlement<void> shadowMembershipSettlement(shadowMembershipFutures);
+	const bool parallelShadowProof = presentation.efficiencyOptions.options.validationPreparation
+		== TerraEngine::Renderer::RendererEfficiencyPreparation::Concurrent && preparedShadowLists.size() > 1U;
+	try
+	{
+		for (auto& list : preparedShadowLists)
+		{
+			const auto normalize = [&list]() { list.membership = TerraEngine::Renderer::NormalizeShadowCasterMembership(list.casterInputs); };
+			if (parallelShadowProof) {
+				shadowMembershipSettlement.CreateAndEnqueue(ThreadPool::instance(), normalize);
+				++shadowPreparationWorkerTasks;
+			} else {
+				shadowMembershipSettlement.RunInline(normalize);
+				++shadowPreparationInlineTasks;
+			}
+		}
+		shadowMembershipSettlement.GetAll();
+		shadowPreparationSettled = true;
+	}
+	catch (...)
+	{
+		shadowMembershipSettlement.Wait();
+		for (auto& list : preparedShadowLists) { list.membership = {}; list.recordingReady = false; list.rejection.Capture("MembershipSettlementException", UINT32_MAX); }
 	}
 
 	pendingBudgetDiagnostics.cameraVisibleShadowCasterCount =
@@ -3079,79 +3745,6 @@ void VulkanContext::RenderFrame(
 	// available without pretending the offscreen target was an editor viewport.
 	impl->RecordPendingStats(statsSlotIndex, pendingStats);
 
-	// Shadow-map rendering and the main scene pass both consume the same
-	// indirect draw command buffer. Upload it before any shadow pass records
-	// indirect draws, otherwise the shadow map can render stale or empty draw
-	// commands and blockers will not occlude the light.
-	if (!indirectCommands.empty()) {
-		const auto rejectIndirectGeometry = [&]() {
-			// The primary command buffer is already recording by this point. Keep it
-			// structurally valid and reject every consumer of this range together, so
-			// no main or shadow pass can reference stale indirect commands.
-			prepared.clear();
-			for (PreparedShadowList& preparedList : preparedShadowLists) {
-				preparedList.draws.clear();
-			}
-			indirectCommands.clear();
-			pendingStats.drawCalls = 0u;
-			pendingStats.triangleCount = 0u;
-			pendingStats.meshletsTotal = 0u;
-			pendingStats.meshletsDispatched = 0u;
-			impl->RecordPendingStats(statsSlotIndex, pendingStats);
-		};
-		std::uint32_t indirectDrawOffset = 0u;
-		if (!impl->ReserveIndirectDrawCommands(
-			indirectCommands.size(), indirectDrawOffset)) {
-			TERRAENGINE_LOG(LogLevel::Error,
-				"Vulkan could not reserve a non-overlapping indirect command range; "
-					"omitting geometry from this view while preserving its valid background and overlays.");
-			rejectIndirectGeometry();
-		} else {
-			renderSnapshot.indirectDrawOffset = indirectDrawOffset;
-			// Draw preparation runs before the complete shadow list is known. Patch
-			// the final range into every prepared command together so secondary main
-			// recording and primary shadow recording address the same uploaded bytes.
-			for (PreparedDraw& draw : prepared) {
-				draw.push.indirectDrawOffset = indirectDrawOffset;
-			}
-			for (PreparedShadowList& preparedList : preparedShadowLists) {
-				for (PreparedDraw& draw : preparedList.draws) {
-					draw.push.indirectDrawOffset = indirectDrawOffset;
-				}
-			}
-			const VulkanBuffer& indirectDrawBuffer = impl->indirectDrawBuffers[impl->currentFrame];
-			void* data = nullptr;
-			const VkResult mapResult = vmaMapMemory(
-				impl->allocator, indirectDrawBuffer.allocation, &data);
-			if (mapResult != VK_SUCCESS || data == nullptr) {
-				TERRAENGINE_LOG(LogLevel::Error,
-					"Vulkan could not map the indirect command range; omitting geometry from this view.");
-				rejectIndirectGeometry();
-			} else {
-				auto* snapshotIndirectCommands =
-					static_cast<VkDrawMeshTasksIndirectCommandEXT*>(data) + renderSnapshot.indirectDrawOffset;
-				std::memcpy(snapshotIndirectCommands, indirectCommands.data(),
-					indirectCommands.size() * sizeof(VkDrawMeshTasksIndirectCommandEXT));
-				// The indirect command buffer is ordinary mapped CPU_TO_GPU memory, not a
-				// staging upload. Release and exported builds can land this allocation in
-				// non-coherent memory, so flush the snapshot range before shadow/main
-				// passes consume it through vkCmdDrawMeshTasksIndirectEXT.
-				const VkDeviceSize indirectByteOffset = static_cast<VkDeviceSize>(renderSnapshot.indirectDrawOffset)
-					* sizeof(VkDrawMeshTasksIndirectCommandEXT);
-				const VkDeviceSize indirectByteSize = static_cast<VkDeviceSize>(indirectCommands.size())
-					* sizeof(VkDrawMeshTasksIndirectCommandEXT);
-				const VkResult flushResult = vmaFlushAllocation(impl->allocator,
-					indirectDrawBuffer.allocation, indirectByteOffset, indirectByteSize);
-				vmaUnmapMemory(impl->allocator, indirectDrawBuffer.allocation);
-				if (flushResult != VK_SUCCESS) {
-					TERRAENGINE_LOG(LogLevel::Error,
-						"Vulkan could not flush the indirect command range; omitting geometry from this view.");
-					rejectIndirectGeometry();
-				}
-			}
-		}
-	}
-
 	const auto HashCombine = [](std::uint64_t& seed, std::uint64_t value) {
 		seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
 	};
@@ -3178,38 +3771,6 @@ void VulkanContext::RenderFrame(
 		for (int column = 0; column < 4; ++column) {
 			HashVec4(seed, value[column]);
 		}
-	};
-	const auto HashUUID = [&](std::uint64_t& seed, const TerraEngine::UUID& value) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (std::uint8_t byte : value) {
-			HashCombine(seed, byte);
-		}
-	};
-	const auto BuildLightShadowSignature = [&](const GPULight& light) {
-		std::uint64_t signature = 1469598103934665603ull;
-		HashVec4(signature, light.positionAndType);
-		HashVec4(signature, light.directionAndRange);
-		HashVec4(signature, light.colorAndIntensity);
-		HashVec4(signature, light.coneAnglesAndArea);
-		HashVec4(signature, light.extraParams);
-		HashVec4(signature, light.shadowMatrixC0);
-		HashVec4(signature, light.shadowMatrixC1);
-		HashVec4(signature, light.shadowMatrixC2);
-		HashVec4(signature, light.shadowMatrixC3);
-		return signature;
-	};
-	const auto BuildCasterShadowSignature = [&](const std::vector<PreparedDraw>& draws) {
-		std::uint64_t signature = 1469598103934665603ull;
-		HashCombine(signature, static_cast<std::uint64_t>(draws.size()));
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const PreparedDraw& draw : draws) {
-			HashUUID(signature, draw.meshId);
-			HashUUID(signature, draw.materialId);
-			HashMat4(signature, draw.push.model);
-			HashCombine(signature, draw.materialFlags);
-			HashCombine(signature, draw.meshletCount);
-		}
-		return signature;
 	};
 
 	// If this is a subsequent pass targeting the swapchain (multi-camera),
@@ -3254,29 +3815,27 @@ void VulkanContext::RenderFrame(
 		std::uint32_t regionY = 0u;
 		std::uint32_t regionWidth = VulkanContext::Impl::SHADOW_MAP_RESOLUTION;
 		std::uint32_t regionHeight = VulkanContext::Impl::SHADOW_MAP_RESOLUTION;
-		std::uint64_t lightSignature = 0u;
-		std::uint64_t casterSignature = 0u;
-		std::uint64_t viewSignature = 0u;
+		PreparedShadowList* preparedList = nullptr;
+		TerraEngine::Renderer::Vulkan::ShadowGroupedRecordedCounts recordedBatchCounts;
+		TerraEngine::Renderer::RendererEfficiencyShadowBatchExecution recordedBatchExecution;
+		TerraEngine::Renderer::ShadowViewKey qualifiedKey{};
+		std::uint64_t contentToken = 0U, physicalRegionKey = 0U;
+		VulkanContext::Impl::StaticShadowEntry* staticEntry = nullptr;
+		std::vector<PreparedDraw> staticDraws, dynamicDraws;
+		std::string staticFallback;
+		double staticPriority = 0;
+		bool staticReused = false, staticComposition = false;
+		std::uint8_t staticRecordedFaceMask = 0, copiedFaceMask = 0;
+		std::uint64_t staticSourceCommand = 0, staticSourceSubmit = 0;
+		std::uint32_t staticRecordedDraws = 0, dynamicRecordedDraws = 0;
+		std::array<std::uint32_t, 6> staticFaceDraws{}, dynamicFaceDraws{};
+		std::array<TerraEngine::Renderer::RendererEfficiencyShadowBatchExecution, 6> staticFaceExecutions;
+		std::uint8_t recordedFaceMask = 0U;
 		bool reusedCachedResult = false;
 		bool invalidatedThisFrame = false;
-	};
-	const auto BuildRecordViewShadowSignature = [&](const ShadowLightRecord& record) {
-		std::uint64_t signature = 1469598103934665603ull;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (record.light == nullptr) {
-			return signature;
-		}
-
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (record.type == 1u) {
-			for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
-				HashMat4(signature, BuildPointShadowViewProjection(*record.light, faceIndex));
-			}
-		}
-		else {
-			HashMat4(signature, LoadShadowViewProjection(*record.light));
-		}
-		return signature;
+		bool validationIncompletePointFaces = false;
+		std::uint64_t validationPriorContentToken = 0;
+		TerraEngine::Renderer::ShadowViewKey validationPriorPhysicalKey{};
 	};
 	std::vector<ShadowLightRecord> shadowLightRecords;
 	shadowLightRecords.reserve(VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
@@ -3318,15 +3877,15 @@ void VulkanContext::RenderFrame(
 			ShadowLightRecord record{};
 			record.light = &light;
 			record.lightId = retainedCandidate.lightId;
+			record.staticPriority = retainedCandidate.gpuLight.extraParams.w;
 			record.type = lightType;
 			record.slot = slotIndex;
-			record.lightSignature = BuildLightShadowSignature(light);
 			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-			for (const PreparedShadowList& preparedList : preparedShadowLists) {
+			for (PreparedShadowList& preparedList : preparedShadowLists) {
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (preparedList.lightId == retainedCandidate.lightId) {
 					record.preparedDraws = &preparedList.draws;
-					record.casterSignature = BuildCasterShadowSignature(preparedList.draws);
+					record.preparedList = &preparedList;
 					break;
 				}
 			}
@@ -3334,9 +3893,7 @@ void VulkanContext::RenderFrame(
 			if (record.preparedDraws == nullptr) {
 				static const std::vector<PreparedDraw> kEmptyPreparedShadowDraws{};
 				record.preparedDraws = &kEmptyPreparedShadowDraws;
-				record.casterSignature = BuildCasterShadowSignature(*record.preparedDraws);
 			}
-			record.viewSignature = BuildRecordViewShadowSignature(record);
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (const ShadowResourceAssignmentDiagnostic* assignment = FindShadowAssignment(retainedCandidate.lightId)) {
 				record.atlasId = assignment->atlasId;
@@ -3363,65 +3920,482 @@ void VulkanContext::RenderFrame(
 		default: return ShadowResourceKind::Unsupported;
 		}
 	};
-	const std::uint64_t diagnosticsFrameSerial = pendingBudgetDiagnostics.shadowAssignments.empty()
-		? 0u
-		: pendingBudgetDiagnostics.shadowAssignments.front().frameSerial;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (ShadowLightRecord& record : shadowLightRecords) {
-		VulkanContext::Impl::ShadowCacheEntry& cacheEntry = impl->shadowCacheEntries[record.lightId];
-		const ShadowResourceKind recordKind = ShadowKindFromRecord(record.type);
-		const bool cacheMatches =
-			cacheEntry.valid
-			&& cacheEntry.resourceKind == recordKind
-			&& cacheEntry.storageRegionId == record.slot
-			&& cacheEntry.lightSignature == record.lightSignature
-			&& cacheEntry.casterSignature == record.casterSignature
-			&& cacheEntry.viewSignature == record.viewSignature;
-
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (cacheMatches) {
-			record.reusedCachedResult = true;
-			cacheEntry.state = VulkanContext::Impl::ShadowCacheEntryState::Cached;
-			cacheEntry.lastTouchedFrameSerial = diagnosticsFrameSerial;
-			pendingBudgetDiagnostics.cacheReuseCount += 1u;
+	const auto exactMatrix = [](const glm::mat4& source) {
+		std::array<double, 16> result{};
+		for (std::size_t column = 0; column < 4; ++column)
+			for (std::size_t row = 0; row < 4; ++row) result[column * 4 + row] = source[column][row];
+		return result;
+	};
+	std::string incompletePointFacesKey;
+	bool selectIncompletePointFaces = false;
+#if defined(TERRAENGINE_RENDERER_EFFICIENCY_VALIDATION)
+	incompletePointFacesKey = presentation.efficiencyFixtureIntent.correlation.operationId + ":" + presentation.efficiencyFixtureIntent.correlation.fixtureStepId;
+	selectIncompletePointFaces = !presentation.efficiencyFixtureIntent.correlation.operationId.empty()
+		&& presentation.efficiencyFixtureIntent.injection == TerraEngine::Renderer::RendererEfficiencyFixtureInjection::IncompletePointFaces
+		&& incompletePointFacesKey != impl->lastShadowValidationIncompletePointFacesKey;
+#endif
+	for (ShadowLightRecord& record : shadowLightRecords)
+	{
+		// Full qualified inputs include actual allocation lifetime, canonical view
+		// origin and every point face. Per-frame/upload bookkeeping is excluded.
+		auto& key = record.qualifiedKey;
+		key.rendererSessionGeneration = impl->renderSessionGeneration;
+		key.viewType = renderViewType; key.viewId = diagnosticViewId;
+		const auto& origin = presentation.referenceFrame.canonicalOrigin;
+		key.referenceOrigin = {{origin.cell.x, origin.cell.y, origin.cell.z},
+			{origin.offsetMetres.x, origin.offsetMetres.y, origin.offsetMetres.z}};
+		key.lightId = record.lightId; key.resourceKind = ShadowKindFromRecord(record.type);
+		key.allocationGeneration = impl->shadowAllocationGeneration; key.regionId = record.slot;
+		key.extent = record.type == 1U
+			? std::array<std::uint32_t, 2>{VulkanContext::Impl::POINT_SHADOW_MAP_RESOLUTION, VulkanContext::Impl::POINT_SHADOW_MAP_RESOLUTION}
+			: std::array<std::uint32_t, 2>{record.regionWidth, record.regionHeight};
+		key.depthFormat = static_cast<std::uint32_t>(impl->depthFormat != VK_FORMAT_UNDEFINED ? impl->depthFormat : impl->FindDepthFormat());
+		key.lightProjectionStamp.viewProjection = exactMatrix(record.type == 1U
+			? BuildPointShadowViewProjection(*record.light, 0U) : LoadShadowViewProjection(*record.light));
+		key.lightProjectionStamp.lightParameters = {record.light->positionAndType.w, record.light->directionAndRange.w,
+			record.light->coneAnglesAndArea.x, record.light->coneAnglesAndArea.y};
+		key.lightProjectionStamp.shadowFilterParameters = {record.light->coneAnglesAndArea.z, record.light->coneAnglesAndArea.w,
+			record.light->extraParams.x, record.light->extraParams.y};
+		if (record.type == 1U)
+		{
+			for (std::uint32_t face = 0U; face < 6U; ++face)
+				key.lightProjectionStamp.cubeViewProjections[face] = exactMatrix(BuildPointShadowViewProjection(*record.light, face));
+			key.lightProjectionStamp.cubeProjectionEvidenceComplete = true;
 		}
+		record.physicalRegionKey = (static_cast<std::uint64_t>(record.type) << 32U) | record.slot;
+		const auto previous = impl->shadowPublicationLedger.Find(key);
+		if (record.type == 1U && selectIncompletePointFaces) {
+			record.validationIncompletePointFaces = true; selectIncompletePointFaces = false;
+		}
+		if (record.validationIncompletePointFaces) {
+			const auto physicalOwner = impl->shadowPublicationLedger.FindSubmittedPhysicalOwner(key);
+			if (physicalOwner && impl->shadowPublicationLedger.CanReuse(physicalOwner->view, physicalOwner->contentToken)) {
+				record.validationPriorContentToken = physicalOwner->contentToken;
+				record.validationPriorPhysicalKey = physicalOwner->view;
+			}
+		}
+		record.invalidatedThisFrame = previous.has_value();
+		const bool reuseRequested = presentation.efficiencyOptions.options.shadowReuse
+			== TerraEngine::Renderer::RendererEfficiencyShadowReuse::Enabled;
+		if (reuseRequested && !record.validationIncompletePointFaces && record.preparedList != nullptr && record.preparedList->recordingReady
+			&& record.preparedList->membership.reusable)
+		{
+			// The physical token is only a hint. Alias promotion independently checks
+			// all exact inputs, current submitted ownership and pending overwrites.
+			const auto hint = impl->shadowPhysicalTokenHints.find(record.physicalRegionKey);
+			if (hint != impl->shadowPhysicalTokenHints.end())
+			{
+				record.contentToken = hint->second;
+				try
+				{
+					record.reusedCachedResult = impl->shadowPublicationLedger.AliasSubmittedContent(
+						key, record.contentToken, record.preparedList->membership)
+						&& impl->shadowPublicationLedger.CanReuse(key, record.contentToken);
+				}
+				catch (...) { impl->shadowPublicationLedger.Reset(impl->renderSessionGeneration); record.reusedCachedResult = false; }
+			}
+		}
+		if (record.reusedCachedResult) ++pendingBudgetDiagnostics.cacheReuseCount;
+		else if (record.invalidatedThisFrame) ++pendingBudgetDiagnostics.cacheInvalidationCount;
+		if(!record.reusedCachedResult) record.contentToken = impl->nextShadowContentToken++;
+		// Recording below supplies actual refresh counts and completeness. No
+		// valid flag is published merely because preparation selected a refresh.
+	}
+
+	// Partition jobs consume sealed native proofs and original singleton indices.
+	// Unknown dynamic semantic inputs retain drawable coverage, independently of
+	// fully proven static content. No job allocates or touches live scene storage.
+	std::vector<std::future<void>> staticPartitionFutures;
+	TerraEngine::Tasks::ScopedTaskSettlement<void> staticPartitionSettlement(staticPartitionFutures);
+	staticPartitionFutures.reserve(shadowLightRecords.size());
+	try {
+		for (auto& record : shadowLightRecords) {
+			const auto partition = [&record]() {
+				if (record.preparedList) record.preparedList->staticPartition =
+					TerraEngine::Renderer::BuildStaticShadowPartition(record.qualifiedKey, record.preparedList->casterInputs);
+			};
+			if (parallelShadowProof) { staticPartitionSettlement.CreateAndEnqueue(ThreadPool::instance(), partition); ++shadowPreparationWorkerTasks; }
+			else { staticPartitionSettlement.RunInline(partition); ++shadowPreparationInlineTasks; }
+		}
+		staticPartitionSettlement.GetAll();
+	} catch (...) {
+		staticPartitionSettlement.Wait();
+		for (auto& record : shadowLightRecords) if (record.preparedList) record.preparedList->staticPartition = {};
+	}
+	// Physical charges include all views and retirements. Preserve another view's
+	// qualified owners; only obsolete keys for this current view are replaced.
+	impl->staticShadowRequestedBudget = presentation.efficiencyOptions.options.staticShadowCacheBudgetBytes;
+	impl->ReleaseCompletedStaticShadowEntries();
+	std::vector<TerraEngine::Renderer::StaticShadowAdmissionRequest> staticRequests;
+	std::vector<TerraEngine::Renderer::StaticShadowAllocationCharge> staticCharges;
+	std::vector<ShadowLightRecord*> staticRequestRecords;
+	try {
+		// The owned failure seam exercises a fresh allocator admission. Retire
+		// this view's inherited cache logically first, while exact native users
+		// keep its physical storage charged until their real fence/discard proof.
+		if (presentation.efficiencyFixtureIntent.staticShadowControls
+			&& presentation.efficiencyFixtureIntent.staticShadowControls->failAllocation)
+			for (auto& entry : impl->staticShadowEntries)
+				if (!entry->retiring && entry->finalView.viewType == renderViewType
+					&& entry->finalView.viewId == diagnosticViewId) {
+					entry->retiring = true;
+					impl->staticShadowPublicationLedger.InvalidatePhysicalRegion(entry->staticView);
+					impl->staticShadowLifetime.RequestRetirement(entry->owner);
+				}
+		for (auto& record : shadowLightRecords) {
+			if (!record.preparedList || !record.preparedList->recordingReady) { record.staticFallback = "IncompleteCasterPreparation"; continue; }
+			auto& partition = record.preparedList->staticPartition;
+			if (!partition.valid) { record.staticFallback = "InvalidStaticPartition"; continue; }
+			// Retain one complete all-caster vector for final validity/diagnostics;
+			// partition recording needs only its separate category rows and indices.
+			record.preparedList->membership = std::move(partition.allMembership);
+			if (partition.staticSourceIndices.empty()) { record.staticFallback = "EmptyStaticMembership"; continue; }
+			if (!impl->staticShadowRequestedBudget) { record.staticFallback = "StaticBudgetDisabled"; continue; }
+			if (record.validationIncompletePointFaces) { record.staticFallback = "IncompletePointValidation"; continue; }
+			if (presentation.efficiencyFixtureIntent.staticShadowControls
+				&& presentation.efficiencyFixtureIntent.staticShadowControls->forceTransferUnavailable) {
+				record.staticFallback = "OwnedTransferUnavailable"; continue;
+			}
+			TerraEngine::Renderer::StaticShadowAdmissionRequest request;
+			if (!impl->QueryStaticShadowRequirements(record.qualifiedKey, request, record.staticFallback)) continue;
+			request.retainedLightPriority = record.staticPriority;
+			staticRequests.push_back(request); staticRequestRecords.push_back(&record);
+		}
+		for (const auto& entry : impl->staticShadowEntries) {
+			staticCharges.push_back({entry->finalView, entry->owner.allocationGeneration, entry->owner.actualBytes, 0,
+				entry->priority, entry->retiring ? TerraEngine::Renderer::StaticShadowChargeState::Retiring : TerraEngine::Renderer::StaticShadowChargeState::Resident});
+			if (!entry->retiring && entry->finalView.rendererSessionGeneration == impl->renderSessionGeneration
+				&& entry->borrowedColorGeneration == impl->shadowAllocationGeneration
+				&& (entry->finalView.viewType != renderViewType || entry->finalView.viewId != diagnosticViewId)) {
+				staticRequests.push_back({entry->finalView, entry->priority, entry->owner.actualBytes, 0,
+					static_cast<std::uint8_t>(entry->owner.layers == 6 ? 0x3f : 1)});
+				staticRequestRecords.push_back(nullptr);
+			}
+		}
+		const auto admission = TerraEngine::Renderer::BuildStaticShadowAdmissionPlan(impl->staticShadowRequestedBudget,
+			impl->staticShadowEffectiveBudget, staticRequests, staticCharges);
+		if (!admission.valid) { impl->RetireStaticShadowEntries(); }
 		else {
-			record.invalidatedThisFrame = cacheEntry.valid;
-			pendingBudgetDiagnostics.cacheRefreshCount += 1u;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (record.invalidatedThisFrame) {
-				pendingBudgetDiagnostics.cacheInvalidationCount += 1u;
+			impl->staticShadowEffectiveBudget = admission.effectiveBytes; impl->staticShadowBudgetDraining = admission.draining;
+			for (auto index : admission.retireChargeIndices) {
+				auto& entry = impl->staticShadowEntries[index]; entry->retiring = true;
+				impl->staticShadowPublicationLedger.InvalidatePhysicalRegion(entry->staticView);
+				impl->staticShadowLifetime.RequestRetirement(entry->owner);
 			}
-			cacheEntry.lightId = record.lightId;
-			cacheEntry.resourceKind = recordKind;
-			cacheEntry.storageRegionId = record.slot;
-			cacheEntry.lightSignature = record.lightSignature;
-			cacheEntry.casterSignature = record.casterSignature;
-			cacheEntry.viewSignature = record.viewSignature;
-			cacheEntry.lastTouchedFrameSerial = diagnosticsFrameSerial;
-			cacheEntry.state = VulkanContext::Impl::ShadowCacheEntryState::Refreshed;
-			cacheEntry.valid = true;
+			// Keep stable pointers until all admission indices have been consumed.
+			for (auto index : admission.retainedChargeIndices) {
+				auto& entry = impl->staticShadowEntries[index];
+				for (auto& record : shadowLightRecords) if (record.qualifiedKey == entry->finalView) record.staticEntry = entry.get();
+			}
+			for (auto index : admission.admittedRequestIndices) {
+				auto* record = staticRequestRecords[index]; if (!record) continue;
+				if (presentation.efficiencyFixtureIntent.staticShadowControls
+					&& presentation.efficiencyFixtureIntent.staticShadowControls->failAllocation) {
+					record->staticFallback = "OwnedAllocationFailure"; continue;
+				}
+				std::array<VkImageView, 6> colors{};
+				if (record->type == 1) colors = impl->pointShadowColorFaceViewsBySlot[record->slot];
+				else colors[0] = record->type == 0 ? impl->directionalShadowColors[record->slot].view
+					: record->type == 2 ? impl->spotShadowColors[record->slot].view : impl->areaShadowColors[record->slot].view;
+				impl->CreateStaticShadowEntry(staticRequests[index], std::span(colors.data(), record->type == 1 ? 6 : 1),
+					record->staticPriority, record->staticEntry, record->staticFallback);
+			}
 		}
-
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (ShadowResourceAssignmentDiagnostic& assignment : pendingBudgetDiagnostics.shadowAssignments) {
-			if (assignment.lightId != record.lightId || !assignment.assigned) {
-				continue;
+		for (auto& record : shadowLightRecords) {
+			if (!record.staticEntry || record.reusedCachedResult) continue;
+			auto& partition = record.preparedList->staticPartition;
+			for (auto index : partition.staticSourceIndices) record.staticDraws.push_back(record.preparedList->draws[index]);
+			for (auto index : partition.dynamicSourceIndices) record.dynamicDraws.push_back(record.preparedList->draws[index]);
+			auto& entry = *record.staticEntry;
+			if (!entry.layoutEstablished && entry.initializationCommand != 0
+				&& entry.initializationCommand != shadowCommandSerial) {
+				record.staticEntry = nullptr; record.staticFallback = "StaticInitializationPendingSubmit"; continue;
 			}
-			assignment.reusedCachedResult = record.reusedCachedResult;
-			assignment.refreshedThisFrame = !record.reusedCachedResult;
-			assignment.invalidatedThisFrame = record.invalidatedThisFrame;
-			assignment.refreshReason = record.reusedCachedResult
-				? ShadowRefreshReason::CacheHit
-				: (record.invalidatedThisFrame ? ShadowRefreshReason::CacheInvalidated : ShadowRefreshReason::RenderedThisFrame);
-			break;
+			record.staticReused = entry.contentToken && impl->staticShadowPublicationLedger.AliasSubmittedContent(
+				entry.staticView, entry.contentToken, partition.staticMembership)
+				&& impl->staticShadowPublicationLedger.CanReuse(entry.staticView, entry.contentToken);
+			if (record.staticReused) {
+				const auto source = impl->staticShadowPublicationLedger.Find(entry.staticView);
+				if (source) { record.staticSourceCommand = source->commandSerial; record.staticSourceSubmit = source->submitSerial; }
+			}
+			if (!impl->staticShadowLifetime.ReserveRecordedUse(entry.owner, shadowCommandSerial, currentFrame)) {
+				record.staticEntry = nullptr; record.staticFallback = "RecordedLifetimeReservationFailed";
+			}
+		}
+	} catch (...) {
+		// Complete combined singleton/grouped lists remain available if admission
+		// or copied policy allocation fails. No partial partition is recorded.
+		for (auto& record : shadowLightRecords) { record.staticEntry = nullptr; record.staticFallback = "StaticAdmissionException"; }
+		impl->staticShadowPublicationLedger.Reset(impl->renderSessionGeneration);
+	}
+	impl->ReleaseCompletedStaticShadowEntries();
+	// Native compatibility is now copied and qualified by actual light/region.
+	// Pure planning runs in jobs; the protected boundary alone allocates, writes
+	// and publishes the physical frame/snapshot stream after the existing fence.
+	std::vector<RenderInstanceRecord> shadowStreamRecords;
+	std::vector<std::future<void>> shadowBatchFutures;
+	TerraEngine::Tasks::ScopedTaskSettlement<void> shadowBatchSettlement(shadowBatchFutures);
+	bool shadowStreamPrepared = impl->lightingUploadFrameSlotSafe[currentFrame];
+	std::uint64_t shadowStreamRecordCount = 0;
+	const auto& batchControls = presentation.efficiencyFixtureIntent.shadowBatchControls;
+	try
+	{
+		for (auto& record : shadowLightRecords)
+		{
+			auto* list = record.preparedList;
+			if (!list) continue;
+			TerraEngine::Renderer::ShadowBatchLimits limits;
+			limits.firstInstance = static_cast<std::uint32_t>(shadowStreamRecordCount);
+			limits.instanceCapacity = static_cast<std::uint32_t>(list->batchMembers.size());
+			limits.maxInstancesPerGroup = 65536;
+			limits.maxGroups = limits.instanceCapacity;
+			limits.maxTaskGroupsX = impl->maximumTaskGroupsX;
+			limits.maxTaskGroupsTotal = impl->maximumTaskGroupsTotal;
+			if (presentation.efficiencyFixtureIntent.controlsApplied && batchControls)
+			{
+				if (batchControls->maxInstancesPerGroup) limits.maxInstancesPerGroup = std::min(limits.maxInstancesPerGroup, batchControls->maxInstancesPerGroup);
+				if (batchControls->maxTaskGroupsX) limits.maxTaskGroupsX = std::min(limits.maxTaskGroupsX, batchControls->maxTaskGroupsX);
+			}
+			shadowStreamRecordCount += list->batchMembers.size();
+			const auto maximumRecords = std::min<std::uint64_t>(UINT32_MAX / 44U,
+				impl->maximumStorageBufferRange / sizeof(RenderInstanceRecord));
+			if (shadowStreamRecordCount > maximumRecords) { shadowStreamPrepared = false; break; }
+			const auto plan = [list, key = record.qualifiedKey, limits]() {
+				list->batch = TerraEngine::Renderer::BuildShadowBatchPlan(key, list->batchMembers, limits);
+			};
+			if (presentation.efficiencyOptions.options.validationPreparation == TerraEngine::Renderer::RendererEfficiencyPreparation::Concurrent)
+			{ shadowBatchSettlement.CreateAndEnqueue(ThreadPool::instance(), plan); ++shadowPreparationWorkerTasks; }
+			else { shadowBatchSettlement.RunInline(plan); ++shadowPreparationInlineTasks; }
+		}
+		shadowBatchSettlement.GetAll();
+		if (shadowStreamPrepared)
+		{
+			shadowStreamRecords.resize(static_cast<std::size_t>(shadowStreamRecordCount));
+			for (auto& record : shadowLightRecords) if (record.preparedList)
+				for (const auto& group : record.preparedList->batch.groups)
+					for (std::size_t lane = 0; lane < group.memberIndices.size(); ++lane)
+						shadowStreamRecords[group.firstInstance + lane] = record.preparedList->expectedInstances[group.memberIndices[lane]];
+		}
+	}
+	catch (...) { shadowBatchSettlement.Wait(); shadowStreamPrepared = false; }
+	bool shadowInstanceUploaded = false;
+	auto& shadowStream = impl->shadowInstanceStreams[currentFrame][snapshotSlotIndex];
+	const VkDeviceSize shadowInstanceBytes = static_cast<VkDeviceSize>(shadowStreamRecords.size()) * sizeof(RenderInstanceRecord);
+	const bool wantsShadowGroups = presentation.efficiencyOptions.options.shadowSubmission
+		== TerraEngine::Renderer::RendererEfficiencyShadowSubmission::Grouped
+		&& std::any_of(shadowLightRecords.begin(), shadowLightRecords.end(), [](const auto& record) {
+			return record.preparedList && !record.reusedCachedResult && !record.preparedList->batch.groups.empty(); });
+	if (shadowStreamPrepared && wantsShadowGroups && shadowInstanceBytes)
+	{
+		try
+		{
+			if (shadowStream.buffer.buffer == VK_NULL_HANDLE || shadowStream.capacity < shadowInstanceBytes)
+			{
+				VulkanBuffer replacement = impl->CreateBuffer(shadowInstanceBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+					VMA_MEMORY_USAGE_CPU_TO_GPU, "Shadow Frame Snapshot Instance Stream");
+				try { impl->RetireBuffer(shadowStream.buffer); }
+				catch (...) { impl->DestroyBufferImmediate(replacement); throw; }
+				shadowStream.buffer = replacement;
+				shadowStream.capacity = shadowInstanceBytes;
+				shadowStream.allocationGeneration = impl->nextShadowInstanceAllocationGeneration++;
+			}
+			if (shadowStream.bindlessIndex == VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX)
+				shadowStream.bindlessIndex = impl->AllocateBufferIndex();
+			// Inject once at the actual map/write seam, then restore the full
+			// original draw list. A planned group is never evidence of execution.
+			const bool injectFailure = presentation.efficiencyFixtureIntent.controlsApplied && batchControls
+				&& batchControls->failInstanceUpload && impl->shadowInstanceFailureControlGeneration
+					!= presentation.efficiencyFixtureIntent.controlGeneration;
+			if (injectFailure) impl->shadowInstanceFailureControlGeneration = presentation.efficiencyFixtureIntent.controlGeneration;
+			void* mapped = nullptr;
+			if (!injectFailure && shadowStream.buffer.buffer && shadowStream.buffer.allocation
+				&& vmaMapMemory(impl->allocator, shadowStream.buffer.allocation, &mapped) == VK_SUCCESS && mapped)
+			{
+				std::memcpy(mapped, shadowStreamRecords.data(), static_cast<std::size_t>(shadowInstanceBytes));
+				const bool flushed = vmaFlushAllocation(impl->allocator, shadowStream.buffer.allocation, 0, shadowInstanceBytes) == VK_SUCCESS;
+				vmaUnmapMemory(impl->allocator, shadowStream.buffer.allocation);
+				shadowInstanceUploaded = flushed && impl->UpdateGlobalBufferForFrame(currentFrame, shadowStream.bindlessIndex,
+					shadowStream.buffer.buffer, 0, shadowInstanceBytes, true);
+			}
+			if (shadowInstanceUploaded)
+			{
+				VkBufferMemoryBarrier hostVisibility{};
+				hostVisibility.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+				hostVisibility.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT; hostVisibility.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+				hostVisibility.srcQueueFamilyIndex = hostVisibility.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				hostVisibility.buffer = shadowStream.buffer.buffer; hostVisibility.size = shadowInstanceBytes;
+				vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT,
+					VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT, 0, 0, nullptr, 1, &hostVisibility, 0, nullptr);
+			}
+		}
+		catch (...) { shadowInstanceUploaded = false; }
+	}
+	TerraEngine::Renderer::Vulkan::ShadowGroupedStreamOwner shadowStreamOwner;
+	shadowStreamOwner.rendererSessionGeneration = publication->rendererSessionGeneration;
+	shadowStreamOwner.backendGeneration = impl->backendResourceGeneration;
+	shadowStreamOwner.allocationId = reinterpret_cast<std::uintptr_t>(shadowStream.buffer.buffer);
+	shadowStreamOwner.allocationGeneration = shadowStream.allocationGeneration;
+	shadowStreamOwner.frameSerial = publication->frameId; shadowStreamOwner.commandSerial = shadowCommandSerial;
+	shadowStreamOwner.frameSlot = currentFrame; shadowStreamOwner.snapshotSlot = snapshotSlotIndex;
+	for (auto& record : shadowLightRecords) if (record.preparedList)
+	{
+		auto& list = *record.preparedList;
+		const auto originalCommandCount = indirectCommands.size();
+		try
+		{
+		list.batch.view = record.qualifiedKey;
+		list.streamPlan = TerraEngine::Renderer::Vulkan::BuildShadowGroupedStreamPlan(list.batch,
+			list.batchMembers, list.expectedInstances, shadowStreamRecords, shadowStreamOwner, shadowStream.capacity);
+		TerraEngine::Renderer::Vulkan::ShadowGroupedUploadReceipt upload;
+		upload.view = record.qualifiedKey; upload.owner = shadowStreamOwner;
+		upload.frameSlotSafe = impl->lightingUploadFrameSlotSafe[currentFrame]; upload.ownerCurrent = shadowInstanceUploaded;
+		upload.mapSucceeded = upload.writeSucceeded = upload.flushSucceeded = upload.descriptorPublished = shadowInstanceUploaded;
+		list.execution = TerraEngine::Renderer::Vulkan::SelectShadowGroupedExecution(list.streamPlan, upload);
+		if (!list.execution.grouped)
+		{
+			list.batchFallback = !wantsShadowGroups ? "SingletonReference" : (!shadowInstanceUploaded
+				? "ShadowInstanceUploadUnavailable" : "ShadowGroupProofUnavailable");
+			continue;
+		}
+		// Original singleton commands remain retained. Only a fully accepted
+		// execution selection chooses this alternate vector for actual recording.
+		for (std::size_t groupIndex = 0; groupIndex < list.execution.groups.size(); ++groupIndex)
+		{
+			const auto& group = list.execution.groups[groupIndex];
+			PreparedDraw draw = list.draws[group.representativeIndex];
+			draw.shadowGrouped = true; draw.shadowGroupIndex = static_cast<std::uint32_t>(groupIndex);
+			draw.push.virtualGeometryFlags |= 0x80000000U;
+			draw.push.virtualGeometryFlags &= ~0x40000000U;
+			draw.push.model[3] = glm::vec4(std::bit_cast<float>(shadowStream.bindlessIndex),
+				std::bit_cast<float>(group.firstInstance), std::bit_cast<float>(group.instanceCount),
+				std::bit_cast<float>(static_cast<std::uint32_t>(shadowStreamRecords.size())));
+			VkDrawMeshTasksIndirectCommandEXT command{group.taskGroupsX, 1, 1};
+			draw.indirectBufferIndex = static_cast<std::uint32_t>(indirectCommands.size()); indirectCommands.push_back(command);
+			list.groupedDraws.push_back(draw);
+		}
+		for (const auto index : list.execution.singletonIndices) list.groupedDraws.push_back(list.draws[index]);
+		record.preparedDraws = &list.groupedDraws;
+		}
+		catch (...)
+		{
+			indirectCommands.resize(originalCommandCount); list.groupedDraws.clear();
+			// Selection retains capacity for every original member, even when its
+			// accepted groups contain no singletons. Keep that storage when alternate
+			// draw assembly fails so actual fallback draws retain their exact proof.
+			list.execution.groups.clear(); list.execution.grouped = false;
+			try
+			{
+				list.execution.singletonIndices.assign(list.streamPlan.allSingletonIndices.begin(),
+					list.streamPlan.allSingletonIndices.end());
+			}
+			catch (...)
+			{
+				// If the earlier planner itself exhausted memory, original draws still
+				// survive. Missing receipt storage must conservatively disable reuse.
+				list.recordingReady = false;
+			}
+			list.batchFallback = "ShadowGroupSelectionAllocation";
+			record.preparedDraws = &list.draws;
+		}
+	}
+
+	// Shadow-map rendering and the main scene pass both consume the same
+	// indirect draw command buffer. Upload it before any shadow pass records
+	// indirect draws, otherwise the shadow map can render stale or empty draw
+	// commands and blockers will not occlude the light.
+	if (!indirectCommands.empty()) {
+		const auto rejectIndirectGeometry = [&]() {
+			// The primary command buffer is already recording by this point. Keep it
+			// structurally valid and reject every consumer of this range together, so
+			// no main or shadow pass can reference stale indirect commands.
+			prepared.clear();
+			for (PreparedShadowList& preparedList : preparedShadowLists) {
+				preparedList.draws.clear();
+				preparedList.groupedDraws.clear(); preparedList.execution = {};
+				preparedList.recordingReady = false;
+				preparedList.rejection.Capture("IndirectRangeUpload", UINT32_MAX);
+			}
+			indirectCommands.clear();
+			pendingStats.drawCalls = 0u;
+			pendingStats.triangleCount = 0u;
+			pendingStats.meshletsTotal = 0u;
+			pendingStats.meshletsDispatched = 0u;
+			impl->RecordPendingStats(statsSlotIndex, pendingStats);
+		};
+		std::uint32_t indirectDrawOffset = 0u;
+		if (!impl->ReserveIndirectDrawCommands(
+			indirectCommands.size(), indirectDrawOffset)) {
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Vulkan could not reserve a non-overlapping indirect command range; "
+					"omitting geometry from this view while preserving its valid background and overlays.");
+			rejectIndirectGeometry();
+		} else {
+			renderSnapshot.indirectDrawOffset = indirectDrawOffset;
+			// Draw preparation runs before the complete shadow list is known. Patch
+			// the final range into every prepared command together so secondary main
+			// recording and primary shadow recording address the same uploaded bytes.
+			for (PreparedDraw& draw : prepared) {
+				draw.push.indirectDrawOffset = indirectDrawOffset;
+			}
+			for (PreparedShadowList& preparedList : preparedShadowLists) {
+				for (PreparedDraw& draw : preparedList.draws) {
+					draw.push.indirectDrawOffset = indirectDrawOffset;
+				}
+				for (PreparedDraw& draw : preparedList.groupedDraws) draw.push.indirectDrawOffset = indirectDrawOffset;
+			}
+			const VulkanBuffer& indirectDrawBuffer = impl->indirectDrawBuffers[impl->currentFrame];
+			void* data = nullptr;
+			const VkResult mapResult = vmaMapMemory(
+				impl->allocator, indirectDrawBuffer.allocation, &data);
+			if (mapResult != VK_SUCCESS || data == nullptr) {
+				TERRAENGINE_LOG(LogLevel::Error,
+					"Vulkan could not map the indirect command range; omitting geometry from this view.");
+				rejectIndirectGeometry();
+			} else {
+				auto* snapshotIndirectCommands =
+					static_cast<VkDrawMeshTasksIndirectCommandEXT*>(data) + renderSnapshot.indirectDrawOffset;
+				std::memcpy(snapshotIndirectCommands, indirectCommands.data(),
+					indirectCommands.size() * sizeof(VkDrawMeshTasksIndirectCommandEXT));
+				// The indirect command buffer is ordinary mapped CPU_TO_GPU memory, not a
+				// staging upload. Release and exported builds can land this allocation in
+				// non-coherent memory, so flush the snapshot range before shadow/main
+				// passes consume it through vkCmdDrawMeshTasksIndirectEXT.
+				const VkDeviceSize indirectByteOffset = static_cast<VkDeviceSize>(renderSnapshot.indirectDrawOffset)
+					* sizeof(VkDrawMeshTasksIndirectCommandEXT);
+				const VkDeviceSize indirectByteSize = static_cast<VkDeviceSize>(indirectCommands.size())
+					* sizeof(VkDrawMeshTasksIndirectCommandEXT);
+				const VkResult flushResult = vmaFlushAllocation(impl->allocator,
+					indirectDrawBuffer.allocation, indirectByteOffset, indirectByteSize);
+				vmaUnmapMemory(impl->allocator, indirectDrawBuffer.allocation);
+				if (flushResult != VK_SUCCESS) {
+					TERRAENGINE_LOG(LogLevel::Error,
+						"Vulkan could not flush the indirect command range; omitting geometry from this view.");
+					rejectIndirectGeometry();
+				}
+			}
 		}
 	}
 
 	beginCommandRecordingPhase(
 		"Vulkan: Primary Record Shadow Commands");
-	auto RecordShadowDraws = [&](const std::vector<PreparedDraw>& shadowDraws, const glm::mat4& lightViewProjection) {
+	auto RecordShadowDraws = [&](ShadowLightRecord& record, const std::vector<PreparedDraw>& shadowDraws, const glm::mat4& lightViewProjection, bool partitionDraw = false) {
 		std::uint32_t recordedDrawCount = 0u;
+		TerraEngine::Renderer::Vulkan::ShadowGroupedRecordingReceipt recording;
+		recording.view = record.qualifiedKey; recording.owner = shadowStreamOwner;
+		record.recordedBatchExecution = {};
+		auto& executionEvidence = record.recordedBatchExecution;
+		if (shadowValidationRequested && record.preparedList)
+		{
+			executionEvidence.available = true; executionEvidence.sources = record.preparedList->batchSources;
+			executionEvidence.frameSlotSafe = impl->lightingUploadFrameSlotSafe[currentFrame];
+			executionEvidence.uploadAttempted = shadowStreamPrepared && wantsShadowGroups && shadowInstanceBytes != 0;
+			executionEvidence.uploadSucceeded = shadowInstanceUploaded;
+			executionEvidence.allocationIdentity = shadowStreamOwner.allocationId;
+			executionEvidence.allocationGeneration = shadowStreamOwner.allocationGeneration;
+			executionEvidence.backendGeneration = shadowStreamOwner.backendGeneration;
+			executionEvidence.instanceBytes = shadowInstanceBytes;
+			executionEvidence.frameSlot = currentFrame; executionEvidence.snapshotSlot = snapshotSlotIndex;
+		}
 		VkPipeline boundPipeline = VK_NULL_HANDLE;
 		VkPipelineLayout boundDescriptorLayout = VK_NULL_HANDLE;
 		std::array<VkDescriptorSet, 2u> boundDescriptorSets{};
@@ -3471,12 +4445,186 @@ void VulkanContext::RenderFrame(
 			VkDeviceSize offset = static_cast<VkDeviceSize>(draw.push.indirectDrawOffset + draw.indirectBufferIndex) * sizeof(VkDrawMeshTasksIndirectCommandEXT);
 			vkCmdDrawMeshTasksIndirectEXT(cmd, impl->indirectDrawBuffers[impl->currentFrame].buffer, offset, 1, sizeof(VkDrawMeshTasksIndirectCommandEXT));
 			recordedDrawCount += 1u;
+			// These receipts follow the actual native call. Planned groups alone
+			// cannot increment the exported submission or caster coverage counters.
+			if (draw.shadowGrouped)
+			{
+				recording.recordedGroupIndices.push_back(draw.shadowGroupIndex);
+				if (shadowValidationRequested && record.preparedList)
+				{
+					const auto& group = record.preparedList->execution.groups[draw.shadowGroupIndex];
+					TerraEngine::Renderer::RendererEfficiencyShadowBatchGroup receipt;
+					receipt.firstInstance = group.firstInstance; receipt.instanceCount = group.instanceCount;
+					receipt.taskGroupsX = group.taskGroupsX; receipt.pipelineIdentity = group.key.pipeline;
+					receipt.layoutIdentity = group.key.layout;
+					for (const auto index : group.memberIndices)
+					{
+						const auto& member = record.preparedList->batchMembers[index];
+						receipt.members.push_back({member.objectId, member.lifetimeGeneration, member.segmentId});
+					}
+					executionEvidence.groups.push_back(std::move(receipt));
+				}
+			}
+			else
+			{
+				recording.recordedSingletonIndices.push_back(draw.shadowMemberIndex);
+				if (shadowValidationRequested && record.preparedList)
+				{
+					const auto& member = record.preparedList->batchMembers[draw.shadowMemberIndex];
+					executionEvidence.singletons.push_back({member.objectId, member.lifetimeGeneration, member.segmentId});
+				}
+			}
+		}
+		recording.recorded = true;
+		if (record.preparedList && partitionDraw)
+		{
+			// Partitioned commands retain validated original singleton indices. The
+			// whole-list P4 counter must not reject a deliberate static/dynamic subset.
+			record.recordedBatchCounts = {};
+			record.recordedBatchCounts.valid = recordedDrawCount == shadowDraws.size()
+				&& recording.recordedGroupIndices.empty() && record.preparedList->staticPartition.valid;
+			record.recordedBatchCounts.singletons = record.recordedBatchCounts.segments = recordedDrawCount;
+			record.recordedBatchCounts.draws = recordedDrawCount;
+			executionEvidence.recordedComplete = record.recordedBatchCounts.valid;
+		}
+		else if (record.preparedList)
+		{
+			record.recordedBatchCounts = TerraEngine::Renderer::Vulkan::CountShadowGroupedRecording(
+				record.preparedList->streamPlan, record.preparedList->execution, recording);
+			executionEvidence.recordedComplete = record.recordedBatchCounts.valid && record.preparedList->recordingReady;
 		}
 		return recordedDrawCount;
 	};
 
 	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.shadows.begin" : "game.shadows.begin");
-	auto RecordShadowPass = [&](VkFramebuffer framebuffer, VkImage colorImage, VkImage depthImage, uint32_t arrayLayer, uint32_t width, uint32_t height, const ShadowLightRecord& record, const glm::mat4& lightViewProjection) -> bool {
+	// Copy a face before a later view can overwrite the same physical image.
+	// Counts describe actual recorded work and remain Pending until real submit
+	// and completion receipts qualify both the depth and matching frame color.
+	const auto recordShadowValidationFace = [&](const ShadowLightRecord& record, VkImage depthImage,
+		std::uint32_t face, std::uint32_t recordedDraws) {
+		if(!shadowValidationRequested) return;
+		TerraEngine::Renderer::ShadowValidationObservation observation;
+		observation.key = record.qualifiedKey;
+		observation.key.faceIndex = face;
+		if(record.type == 1U) observation.key.lightProjectionStamp.viewProjection =
+			observation.key.lightProjectionStamp.cubeViewProjections[face];
+		observation.contentToken = record.contentToken;
+		observation.preparationComplete = record.preparedList != nullptr && record.preparedList->recordingReady
+			&& (record.reusedCachedResult || record.recordedBatchCounts.valid);
+		if(record.preparedList) {
+			observation.membership = record.preparedList->membership;
+			if(!record.reusedCachedResult && observation.preparationComplete) {
+				if (record.staticComposition && record.staticReused) observation.submittedSegments = record.preparedList->staticPartition.dynamicMembership.rows;
+				else observation.submittedSegments = observation.membership.rows;
+			}
+		}
+		auto& evidence = observation.evidence;
+		evidence.viewType = renderViewType; evidence.viewId = diagnosticViewId;
+		evidence.lightId = record.lightId; evidence.faceIndex = face;
+		evidence.resolution = {record.regionWidth, record.regionHeight};
+		evidence.frameSerial = publication->frameId; evidence.commandSerial = shadowCommandSerial;
+		evidence.effectiveOptions = presentation.efficiencyOptions;
+		evidence.lightingUploads = lightingUploadEvidence;
+		evidence.fixtureCorrelation = presentation.efficiencyFixtureIntent.correlation;
+		evidence.fixtureControlGeneration = presentation.efficiencyFixtureIntent.controlGeneration;
+		evidence.shadowBatchExecution = record.recordedBatchExecution;
+		if (record.reusedCachedResult && record.preparedList)
+		{
+			evidence.shadowBatchExecution.available = true; evidence.shadowBatchExecution.recordedComplete = true;
+			evidence.shadowBatchExecution.frameSlotSafe = impl->lightingUploadFrameSlotSafe[currentFrame];
+			evidence.shadowBatchExecution.backendGeneration = impl->backendResourceGeneration;
+			evidence.shadowBatchExecution.frameSlot = currentFrame; evidence.shadowBatchExecution.snapshotSlot = snapshotSlotIndex;
+			evidence.shadowBatchExecution.sources = record.preparedList->batchSources;
+		}
+		evidence.preparationWorkerTasks = shadowPreparationWorkerTasks;
+		evidence.preparationInlineTasks = shadowPreparationInlineTasks;
+		evidence.preparationSettled = shadowPreparationSettled;
+		if (shadowResourceRecreationAction) evidence.fixtureActions.push_back(*shadowResourceRecreationAction);
+		evidence.contentOwner = std::to_string(record.contentToken);
+		evidence.refreshReason = record.reusedCachedResult ? "ExactSubmittedContent"
+			: (presentation.efficiencyOptions.options.shadowReuse == TerraEngine::Renderer::RendererEfficiencyShadowReuse::AlwaysRefresh
+				? "AlwaysRefresh" : (observation.membership.reusable ? "ContentOrOwnerChanged" : "MissingSemanticProof"));
+		const auto measured = [](std::uint64_t value) {
+			return TerraEngine::Renderer::RendererEfficiencyCounter{TerraEngine::Renderer::RendererEfficiencyEvidenceStatus::Valid, value, {}};
+		};
+		evidence.eligibleCasterSegments = measured(observation.membership.rows.size());
+		std::uint64_t lightingBytes = 0, lightingRecords = 0, lightingRanges = 0, flushBytes = 0, flushRanges = 0;
+		for (const auto& upload : lightingUploadEvidence) {
+			lightingBytes += upload.logicalWriteBytes; lightingRecords += upload.logicalWriteRecords;
+			lightingRanges += upload.logicalWriteRanges.size(); flushBytes += upload.physicalFlushBytes;
+			flushRanges += upload.physicalFlushRanges.size();
+		}
+		evidence.lightingLogicalWriteBytes = measured(lightingBytes); evidence.lightingWriteRecords = measured(lightingRecords);
+		evidence.lightingWriteRanges = measured(lightingRanges); evidence.lightingPhysicalFlushBytes = measured(flushBytes);
+		evidence.lightingFlushRanges = measured(flushRanges);
+		evidence.submittedCasterSegments = measured(observation.submittedSegments.size());
+		evidence.actualDrawSubmissions = measured(recordedDraws);
+		evidence.groups = measured(record.reusedCachedResult ? 0 : record.recordedBatchCounts.groups);
+		evidence.singletons = measured(record.reusedCachedResult ? 0 : record.recordedBatchCounts.singletons);
+		if (record.preparedList) evidence.fallbackReason = record.preparedList->batchFallback;
+		const auto* partition = record.preparedList ? &record.preparedList->staticPartition : nullptr;
+		auto& staticExecution = evidence.staticShadowExecution;
+		staticExecution.available = true; staticExecution.partitionComplete = partition && partition->valid;
+		staticExecution.backendGeneration = impl->backendResourceGeneration;
+		staticExecution.copyOverlay = record.staticComposition; staticExecution.staticReused = record.staticComposition && record.staticReused;
+		impl->CaptureStaticShadowAllocations(staticExecution);
+		staticExecution.requiredFaceMask = record.type == 1 ? 0x3f : 1;
+		staticExecution.staticRecordedFaceMask = record.staticRecordedFaceMask; staticExecution.copiedFaceMask = record.copiedFaceMask;
+		staticExecution.recordedComplete = observation.preparationComplete
+			&& (!record.staticComposition || (record.copiedFaceMask == staticExecution.requiredFaceMask
+				&& record.recordedFaceMask == staticExecution.requiredFaceMask));
+		if (partition && partition->valid) {
+			staticExecution.staticMembership = partition->staticMembership.rows;
+			staticExecution.dynamicMembership = partition->dynamicMembership.rows;
+		}
+		staticExecution.staticDraws = record.staticComposition ? record.staticFaceDraws[face]
+			: 0;
+		staticExecution.dynamicDraws = record.staticComposition ? record.dynamicFaceDraws[face]
+			: 0;
+		// Fallback counters describe caster segments; grouped draws may contain
+		// several of them. Copy-overlay uses original singleton calls explicitly.
+		staticExecution.fallbackReason = record.staticComposition ? std::string{} : record.staticFallback;
+		if (record.staticComposition && record.staticEntry) {
+			const auto& entry = *record.staticEntry; staticExecution.staticView = entry.staticView;
+			staticExecution.staticContentToken = entry.contentToken;
+			staticExecution.sourceCommandSerial = record.staticSourceCommand; staticExecution.sourceSubmitSerial = record.staticSourceSubmit;
+			staticExecution.allocationIdentity = entry.owner.allocationIdentity; staticExecution.allocationGeneration = entry.owner.allocationGeneration;
+			staticExecution.backendGeneration = entry.owner.backendGeneration; staticExecution.actualBytes = entry.owner.actualBytes;
+		}
+		evidence.staticRefreshes = measured(record.staticComposition ? staticExecution.staticDraws
+			: record.reusedCachedResult ? 0 : staticExecution.staticMembership.size());
+		evidence.dynamicRefreshes = measured(record.staticComposition ? staticExecution.dynamicDraws
+			: record.reusedCachedResult ? 0 : staticExecution.dynamicMembership.size());
+		evidence.staticReservedBytes = measured(0); // Synchronous admission has no outstanding queried reservation at recording.
+		evidence.staticActiveBytes = measured(impl->staticShadowLifetime.ResidentBytes());
+		evidence.staticRetiringBytes = measured(impl->staticShadowLifetime.RetiringBytes());
+		evidence.staticCacheBudgetRequestedBytes = impl->staticShadowRequestedBudget;
+		evidence.staticCacheBudgetEffectiveBytes = impl->staticShadowEffectiveBudget; evidence.staticCacheDraining = impl->staticShadowBudgetDraining;
+		evidence.shadowReuses = measured(record.reusedCachedResult ? 1 : 0);
+		if(record.preparedList == nullptr || !record.preparedList->recordingReady) {
+			// Allocate diagnostic text only after failed typed preparation.
+			const auto* list = record.preparedList;
+			const auto* failure = list ? &list->rejection : nullptr;
+			evidence.fallbackReason = std::string("Caster preparation incomplete; stage=")
+				+ (failure && failure->stage ? failure->stage : "MissingPreparedList")
+				+ "; ordinal=" + std::to_string(failure ? failure->ordinal : UINT32_MAX)
+				+ "; object=" + ToHexString(failure ? failure->objectId : TerraEngine::EMPTY_UUID)
+				+ "; mesh=" + ToHexString(failure ? failure->meshId : TerraEngine::EMPTY_UUID)
+				+ "; material=" + ToHexString(failure ? failure->materialId : TerraEngine::EMPTY_UUID)
+				+ "; sourceOrdinals=" + std::to_string(list ? list->sourceOrdinalCount : 0)
+				+ "; prewarmPassMatches=" + (shadowPrewarmPass == impl->shadowRenderPass ? "true" : "false")
+				+ "; prewarmPassPresent=" + (shadowPrewarmPass != VK_NULL_HANDLE ? "true" : "false")
+				+ "; recordingPassPresent=" + (impl->shadowRenderPass != VK_NULL_HANDLE ? "true" : "false")
+				+ "; prewarmAllocation=" + std::to_string(shadowPrewarmAllocation)
+				+ "; recordingAllocation=" + std::to_string(impl->shadowAllocationGeneration)
+				+ "; requestedSlots=" + std::to_string(requestedShadowResources.TotalCount())
+				+ "; activeSlots=" + std::to_string(impl->activeShadowResourceRequest.TotalCount())
+				+ "; requestedPointSlots=" + std::to_string(requestedShadowResources.pointCount)
+				+ "; activePointSlots=" + std::to_string(impl->activeShadowResourceRequest.pointCount);
+		}
+		impl->shadowValidationReadback.RecordFace(cmd, depthImage, static_cast<VkFormat>(record.qualifiedKey.depthFormat), face, observation);
+	};
+	auto RecordShadowPass = [&](VkFramebuffer framebuffer, VkImage colorImage, VkImage depthImage, uint32_t arrayLayer, uint32_t width, uint32_t height, ShadowLightRecord& record, const glm::mat4& lightViewProjection) -> bool {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (framebuffer == VK_NULL_HANDLE || colorImage == VK_NULL_HANDLE || depthImage == VK_NULL_HANDLE || impl->shadowRenderPass == VK_NULL_HANDLE) {
 			return false;
@@ -3555,46 +4703,259 @@ void VulkanContext::RenderFrame(
 		const std::vector<PreparedDraw>& shadowDraws = record.preparedDraws != nullptr
 			? *record.preparedDraws
 			: kEmptyPreparedShadowDraws;
-		pendingBudgetDiagnostics.shadowDrawSubmissionCount += RecordShadowDraws(shadowDraws, lightViewProjection);
+		const auto recordedDraws = RecordShadowDraws(record, shadowDraws, lightViewProjection);
+		pendingBudgetDiagnostics.shadowDrawSubmissionCount += recordedDraws;
+		if (record.recordedBatchCounts.valid)
+		{
+			pendingBudgetDiagnostics.shadowGroupedSubmissionCount += static_cast<std::uint32_t>(record.recordedBatchCounts.groups);
+			pendingBudgetDiagnostics.shadowSingletonSubmissionCount += static_cast<std::uint32_t>(record.recordedBatchCounts.singletons);
+			pendingBudgetDiagnostics.shadowGroupedCasterSegmentCount += static_cast<std::uint32_t>(record.recordedBatchCounts.segments - record.recordedBatchCounts.singletons);
+		}
 		vkCmdEndRenderPass(cmd);
+		recordShadowValidationFace(record, depthImage, arrayLayer, recordedDraws);
 		return true;
 	};
 
+	// All operations below remain in the existing primary/queue boundary. Each
+	// depth layer moves explicitly through attachment, transfer and sampling
+	// layouts; no separate submission or idle is added for the static cache.
+	const auto staticDepthBarrier = [&](VkImage image, std::uint32_t face, VkImageLayout oldLayout,
+		VkImageLayout newLayout, VkAccessFlags source, VkAccessFlags destination,
+		VkPipelineStageFlags sourceStage, VkPipelineStageFlags destinationStage) {
+		VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+		barrier.oldLayout = oldLayout; barrier.newLayout = newLayout;
+		barrier.srcAccessMask = source; barrier.dstAccessMask = destination;
+		barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = image; barrier.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, face, 1};
+		vkCmdPipelineBarrier(cmd, sourceStage, destinationStage, VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &barrier);
+	};
+	const auto recordPartitionPass = [&](ShadowLightRecord& record, VkRenderPass pass, VkFramebuffer framebuffer,
+		std::uint32_t face, const std::vector<PreparedDraw>& draws) {
+		// The static and final passes borrow the same unused color attachment.
+		// Its clears still write memory, even though shadow pipelines mask color.
+		const auto colorImage = record.type == 0 ? impl->directionalShadowColors[record.slot].image
+			: record.type == 1 ? impl->pointShadowCubeColors[record.slot].image
+			: record.type == 2 ? impl->spotShadowColors[record.slot].image : impl->areaShadowColors[record.slot].image;
+		VkImageMemoryBarrier colorBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+		colorBarrier.image = colorImage; colorBarrier.oldLayout = colorBarrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		colorBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		colorBarrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		colorBarrier.srcQueueFamilyIndex = colorBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		colorBarrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, face, 1};
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &colorBarrier);
+		VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+		begin.renderPass = pass; begin.framebuffer = framebuffer; begin.renderArea.extent = {record.qualifiedKey.extent[0], record.qualifiedKey.extent[1]};
+		std::array<VkClearValue, 2> clear{}; clear[1].depthStencil = {1.0f, 0};
+		begin.clearValueCount = 2; begin.pClearValues = clear.data();
+		vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
+		VkViewport viewport{0, 0, static_cast<float>(begin.renderArea.extent.width), static_cast<float>(begin.renderArea.extent.height), 0, 1};
+		VkRect2D scissor{{0, 0}, begin.renderArea.extent};
+		vkCmdSetViewport(cmd, 0, 1, &viewport); vkCmdSetScissor(cmd, 0, 1, &scissor);
+		const auto matrix = record.type == 1 ? BuildPointShadowViewProjection(*record.light, face) : LoadShadowViewProjection(*record.light);
+		const auto count = RecordShadowDraws(record, draws, matrix, true);
+		vkCmdEndRenderPass(cmd);
+		return count;
+	};
+	const auto recordStaticComposition = [&](ShadowLightRecord& record) {
+		if (!record.staticEntry || !record.preparedList || !impl->staticShadowLoadRenderPass) return false;
+		auto& entry = *record.staticEntry;
+		const auto layers = record.type == 1 ? 6U : 1U;
+		const auto requiredMask = static_cast<std::uint8_t>(layers == 6 ? 0x3f : 1);
+		auto& finalDepth = record.type == 0 ? impl->directionalShadowDepths[record.slot]
+			: record.type == 1 ? impl->pointShadowCubeDepths[record.slot]
+			: record.type == 2 ? impl->spotShadowDepths[record.slot] : impl->areaShadowDepths[record.slot];
+		const auto finalFramebuffer = [&](std::uint32_t face) {
+			return record.type == 0 ? impl->directionalShadowFramebuffers[record.slot]
+				: record.type == 1 ? impl->pointShadowFaceFramebuffersBySlot[record.slot][face]
+				: record.type == 2 ? impl->spotShadowFramebuffers[record.slot] : impl->areaShadowFramebuffers[record.slot];
+		};
+		for (std::uint32_t face = 0; face < layers; ++face)
+			if (!finalFramebuffer(face) || !entry.framebuffers[face]) return false;
+		if (!finalDepth.image || !finalDepth.allocation || !entry.depth.image) return false;
+		if (!record.staticReused) {
+			if (!impl->nextShadowContentToken) { record.staticFallback = "StaticTokenExhausted"; return false; }
+			entry.contentToken = impl->nextShadowContentToken++;
+			if (!entry.layoutEstablished) entry.initializationCommand = shadowCommandSerial;
+			for (std::uint32_t face = 0; face < layers; ++face) {
+				const auto oldLayout = entry.layouts[face];
+				staticDepthBarrier(entry.depth.image, face, oldLayout, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+					oldLayout == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+					VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+					oldLayout == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+					VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+				record.staticFaceDraws[face] = recordPartitionPass(record, impl->shadowRenderPass, entry.framebuffers[face], face, record.staticDraws);
+				if (shadowValidationRequested) record.staticFaceExecutions[face] = record.recordedBatchExecution;
+				entry.layouts[face] = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+				if (record.recordedBatchCounts.valid) record.staticRecordedFaceMask |= static_cast<std::uint8_t>(1U << face);
+				pendingBudgetDiagnostics.shadowDrawSubmissionCount += record.staticFaceDraws[face];
+				pendingBudgetDiagnostics.shadowSingletonSubmissionCount += record.staticFaceDraws[face];
+			}
+			TerraEngine::Renderer::ShadowRefreshCandidate candidate;
+			candidate.view = entry.staticView; candidate.membership = record.preparedList->staticPartition.staticMembership;
+			candidate.contentToken = entry.contentToken; candidate.frameSerial = publication->frameId;
+			candidate.commandSerial = shadowCommandSerial; candidate.requiredFaceMask = requiredMask;
+			candidate.recordedFaceMask = record.staticRecordedFaceMask; candidate.recordingComplete = record.staticRecordedFaceMask == requiredMask;
+			if (!impl->staticShadowPublicationLedger.Record(candidate)) { record.staticFallback = "IncompleteStaticRecording"; return false; }
+			record.staticSourceCommand = shadowCommandSerial; record.staticSourceSubmit = 0;
+		}
+		// Cached source coverage is proved by the submitted publication below.
+		// Keep this frame's recorded mask zero when no static pass was recorded,
+		// so copied diagnostics distinguish reuse from fresh native work.
+		VmaAllocationInfo finalAllocation{}; vmaGetAllocationInfo(impl->allocator, finalDepth.allocation, &finalAllocation);
+		TerraEngine::Renderer::VulkanStaticShadow::StaticShadowCompositionRequest request;
+		request.staticView = entry.staticView; request.finalView = record.qualifiedKey; request.staticContentToken = entry.contentToken;
+		request.currentCommandSerial = shadowCommandSerial; request.sourceRecordedCommandSerial = record.staticReused ? 0 : shadowCommandSerial;
+		request.source = entry.owner;
+		request.destination = {impl->renderSessionGeneration, impl->backendResourceGeneration,
+			reinterpret_cast<std::uint64_t>(finalDepth.allocation), impl->shadowAllocationGeneration, finalAllocation.size,
+			record.qualifiedKey.depthFormat, layers, record.qualifiedKey.extent};
+		request.requiredFaceMask = request.sourceFaceMask = requiredMask;
+		// Creation queried both complete usage descriptors and these pipelines are
+		// the original shadow LESS/cutout pipelines with color writes disabled.
+		request.sourceTransferSupported = request.destinationTransferSupported = true;
+		request.sourceTransferUsage = request.destinationTransferUsage = true;
+		request.sameShadowPipeline = request.lessDepthComparison = request.colorWritesDisabled = request.cutoutBehaviorPreserved = true;
+		const auto composition = TerraEngine::Renderer::VulkanStaticShadow::BuildStaticShadowCompositionPlan(request, impl->staticShadowPublicationLedger);
+		if (composition.route != TerraEngine::Renderer::VulkanStaticShadow::StaticShadowCompositionRoute::CacheCopyOverlay) {
+			record.staticFallback = "StaticCompositionProofRejected"; return false;
+		}
+		for (std::uint32_t face = 0; face < layers; ++face) {
+			staticDepthBarrier(entry.depth.image, face, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+				VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+				VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+			staticDepthBarrier(finalDepth.image, face, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+			VkImageCopy copy{}; copy.srcSubresource = copy.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, face, 1};
+			copy.extent = {record.qualifiedKey.extent[0], record.qualifiedKey.extent[1], 1};
+			vkCmdCopyImage(cmd, entry.depth.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, finalDepth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+			record.copiedFaceMask |= static_cast<std::uint8_t>(1U << face);
+			staticDepthBarrier(entry.depth.image, face, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+				VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+			staticDepthBarrier(finalDepth.image, face, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+			record.dynamicFaceDraws[face] = recordPartitionPass(record, impl->staticShadowLoadRenderPass, finalFramebuffer(face), face, record.dynamicDraws);
+			if (!record.staticReused) {
+				// Fresh composition records both subsets. Preserve their actual native
+				// singleton receipts instead of replacing them with the final overlay.
+				if (shadowValidationRequested) {
+					const auto& staticExecution = record.staticFaceExecutions[face];
+					record.recordedBatchExecution.singletons.insert(record.recordedBatchExecution.singletons.begin(),
+						staticExecution.singletons.begin(), staticExecution.singletons.end());
+				}
+				record.recordedBatchCounts.draws += record.staticFaceDraws[face];
+				record.recordedBatchCounts.singletons += record.staticFaceDraws[face];
+				record.recordedBatchCounts.segments += record.staticFaceDraws[face];
+			}
+			if (record.recordedBatchCounts.valid) record.recordedFaceMask |= static_cast<std::uint8_t>(1U << face);
+			pendingBudgetDiagnostics.shadowDrawSubmissionCount += record.dynamicFaceDraws[face];
+			pendingBudgetDiagnostics.shadowSingletonSubmissionCount += record.dynamicFaceDraws[face];
+		}
+		record.staticComposition = true;
+		// Capture after every face is complete so each observation has the whole
+		// atomic cube receipt. Later lights/views cannot overwrite before copies.
+		for (std::uint32_t face = 0; face < layers; ++face)
+			recordShadowValidationFace(record, finalDepth.image, face, record.staticFaceDraws[face] + record.dynamicFaceDraws[face]);
+		return true;
+	};
 	bool recordedAnyShadowPass = false;
 	const uint32_t pointShadowSize = VulkanContext::Impl::POINT_SHADOW_MAP_RESOLUTION;
 	pendingBudgetDiagnostics.shadowDrawSubmissionCount = 0u;
+	pendingBudgetDiagnostics.shadowGroupedSubmissionCount = pendingBudgetDiagnostics.shadowSingletonSubmissionCount = 0;
+	pendingBudgetDiagnostics.shadowGroupedCasterSegmentCount = 0;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (shadowResourcesReady && impl->shadowRenderPass != VK_NULL_HANDLE && !shadowLightRecords.empty()) {
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const ShadowLightRecord& record : shadowLightRecords) {
+		for (ShadowLightRecord& record : shadowLightRecords) {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (record.light == nullptr || record.slot >= VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS) {
 				continue;
 			}
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (record.reusedCachedResult) {
+				const auto image = record.type == 0U ? impl->directionalShadowDepths[record.slot].image
+					: (record.type == 1U ? impl->pointShadowCubeDepths[record.slot].image
+						: (record.type == 2U ? impl->spotShadowDepths[record.slot].image : impl->areaShadowDepths[record.slot].image));
+				for(std::uint32_t face = 0; face < (record.type == 1U ? 6U : 1U); ++face)
+					recordShadowValidationFace(record, image, face, 0);
 				continue;
 			}
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (recordStaticComposition(record)) continue;
 			if (record.type == 0u) {
 				const glm::mat4 lightViewProjection = LoadShadowViewProjection(*record.light);
-				recordedAnyShadowPass = RecordShadowPass(impl->directionalShadowFramebuffers[record.slot], impl->directionalShadowColors[record.slot].image, impl->directionalShadowDepths[record.slot].image, 0u, record.regionWidth, record.regionHeight, record, lightViewProjection) || recordedAnyShadowPass;
+				if (RecordShadowPass(impl->directionalShadowFramebuffers[record.slot], impl->directionalShadowColors[record.slot].image, impl->directionalShadowDepths[record.slot].image, 0u, record.regionWidth, record.regionHeight, record, lightViewProjection)) record.recordedFaceMask |= 1U;
 			}
 			else if (record.type == 1u) {
 				// Point lights render one atlas face per cubemap direction.
 				for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
+					if (record.validationIncompletePointFaces && faceIndex == 5U) {
+						// This owned action omits the sixth native pass/draw/copy. The
+						// untouched face cannot qualify a full-cube submitted owner.
+						impl->lastShadowValidationIncompletePointFacesKey = incompletePointFacesKey;
+						continue;
+					}
 					const glm::mat4 lightViewProjection = BuildPointShadowViewProjection(*record.light, faceIndex);
-					recordedAnyShadowPass = RecordShadowPass(impl->pointShadowFaceFramebuffersBySlot[record.slot][faceIndex], impl->pointShadowCubeColors[record.slot].image, impl->pointShadowCubeDepths[record.slot].image, faceIndex, pointShadowSize, pointShadowSize, record, lightViewProjection) || recordedAnyShadowPass;
+					if (RecordShadowPass(impl->pointShadowFaceFramebuffersBySlot[record.slot][faceIndex], impl->pointShadowCubeColors[record.slot].image, impl->pointShadowCubeDepths[record.slot].image, faceIndex, pointShadowSize, pointShadowSize, record, lightViewProjection)) record.recordedFaceMask |= static_cast<std::uint8_t>(1U << faceIndex);
 				}
 			}
 			else if (record.type == 2u) {
 				const glm::mat4 lightViewProjection = LoadShadowViewProjection(*record.light);
-				recordedAnyShadowPass = RecordShadowPass(impl->spotShadowFramebuffers[record.slot], impl->spotShadowColors[record.slot].image, impl->spotShadowDepths[record.slot].image, 0u, record.regionWidth, record.regionHeight, record, lightViewProjection) || recordedAnyShadowPass;
+				if (RecordShadowPass(impl->spotShadowFramebuffers[record.slot], impl->spotShadowColors[record.slot].image, impl->spotShadowDepths[record.slot].image, 0u, record.regionWidth, record.regionHeight, record, lightViewProjection)) record.recordedFaceMask |= 1U;
 			}
 			else if (record.type == 3u) {
 				const glm::mat4 lightViewProjection = LoadShadowViewProjection(*record.light);
-				recordedAnyShadowPass = RecordShadowPass(impl->areaShadowFramebuffers[record.slot], impl->areaShadowColors[record.slot].image, impl->areaShadowDepths[record.slot].image, 0u, record.regionWidth, record.regionHeight, record, lightViewProjection) || recordedAnyShadowPass;
+				if (RecordShadowPass(impl->areaShadowFramebuffers[record.slot], impl->areaShadowColors[record.slot].image, impl->areaShadowDepths[record.slot].image, 0u, record.regionWidth, record.regionHeight, record, lightViewProjection)) record.recordedFaceMask |= 1U;
 			}
+		}
+	}
+
+	for (auto& record : shadowLightRecords)
+	{
+		const std::uint8_t requiredFaces = record.type == 1U ? 0x3FU : 1U;
+		if (!record.reusedCachedResult && record.recordedFaceMask != 0U)
+		{
+			recordedAnyShadowPass = true;
+			++pendingBudgetDiagnostics.cacheRefreshCount;
+			TerraEngine::Renderer::ShadowRefreshCandidate candidate;
+			candidate.view = record.qualifiedKey;
+			candidate.contentToken = record.contentToken;
+			candidate.frameSerial = publication->frameId; candidate.commandSerial = shadowCommandSerial;
+			candidate.requiredFaceMask = requiredFaces; candidate.recordedFaceMask = record.recordedFaceMask;
+			candidate.recordingComplete = record.recordedFaceMask == requiredFaces && record.preparedList != nullptr && record.preparedList->recordingReady;
+			try
+			{
+				if (record.preparedList != nullptr) candidate.membership = record.preparedList->membership;
+				// Record blocks every older alias even if completeness or proof fails.
+				// Submission alone can promote a fully validated pending candidate.
+				impl->shadowPublicationLedger.Record(candidate);
+				impl->shadowPhysicalTokenHints[record.physicalRegionKey] = candidate.contentToken;
+			}
+			catch (...) { impl->shadowPublicationLedger.Reset(impl->renderSessionGeneration); impl->shadowPhysicalTokenHints.clear(); }
+			if (record.validationIncompletePointFaces) {
+				TerraEngine::Renderer::RendererEfficiencyFixtureActionReceipt action;
+				action.injection = TerraEngine::Renderer::RendererEfficiencyFixtureInjection::IncompletePointFaces;
+				action.correlation = presentation.efficiencyFixtureIntent.correlation;
+				action.frameSerial = publication->frameId; action.commandSerial = shadowCommandSerial; action.recorded = true;
+				action.requiredFaceMask = requiredFaces; action.recordedFaceMask = record.recordedFaceMask;
+				action.oldAllocationGeneration = action.newAllocationGeneration = impl->shadowAllocationGeneration;
+				action.priorOwnerRejected = record.validationPriorContentToken != 0
+					&& !impl->shadowPublicationLedger.CanReuse(record.validationPriorPhysicalKey, record.validationPriorContentToken);
+				action.reason = "Sixth native point shadow pass was intentionally omitted; incomplete cube cannot publish cache ownership.";
+				impl->shadowValidationReadback.AttachFixtureAction(shadowCommandSerial, action);
+			}
+		}
+		for (auto& assignment : pendingBudgetDiagnostics.shadowAssignments)
+		{
+			if (assignment.lightId != record.lightId || !assignment.assigned) continue;
+			assignment.reusedCachedResult = record.reusedCachedResult;
+			assignment.refreshedThisFrame = !record.reusedCachedResult && record.recordedFaceMask == requiredFaces;
+			assignment.invalidatedThisFrame = record.invalidatedThisFrame;
+			assignment.refreshReason = record.reusedCachedResult ? ShadowRefreshReason::CacheHit
+				: (record.invalidatedThisFrame ? ShadowRefreshReason::CacheInvalidated : ShadowRefreshReason::RenderedThisFrame);
+			break;
 		}
 	}
 
@@ -4162,6 +5523,24 @@ void VulkanContext::RenderFrame(
 			presentation.referenceFrame.residencyGeneration;
 	}
 	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.mainpass.end" : "game.mainpass.end");
+	if(shadowValidationRequested)
+	{
+		// The native offscreen attachment has finished its render pass. Record
+		// one color copy for this view and share its completed bytes across faces.
+		const bool offscreenColor = impl->editorMode || renderingDedicatedCaptureTarget;
+		const VkImage color = offscreenColor
+			? (renderingDedicatedCaptureTarget ? impl->captureView.image
+				: (view == ViewType::Scene ? impl->sceneView.image : impl->gameView.image))
+			: impl->swapchainImages[imageIndex];
+		const VkImageLayout layout = offscreenColor
+			? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		// Match staging bytes to the actual image: an RGBA16F offscreen attachment
+		// occupies twice the bytes of a typical BGRA8 swapchain attachment.
+		const VkFormat colorFormat = offscreenColor ? impl->offscreenColorFormat : impl->swapchainImageFormat;
+		impl->shadowValidationReadback.RecordFrameColor(cmd, color, colorFormat,
+			activeRenderExtent.width, activeRenderExtent.height, layout,
+			{impl->renderSessionGeneration, publication->frameId, shadowCommandSerial, renderViewType, diagnosticViewId});
+	}
 
 	// VRS Generation for next frame
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -4194,7 +5573,12 @@ void VulkanContext::RenderFrame(
 	impl->MarkGpuTimestampEnd(cmd, impl->currentFrame, view);
 	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.primary.end" : "game.primary.end");
 
-	vkEndCommandBuffer(cmd);
+	const VkResult primaryRecordingResult = vkEndCommandBuffer(cmd);
+	if (primaryRecordingResult != VK_SUCCESS)
+	{
+		impl->MarkDeviceLost(primaryRecordingResult, "primary shadow/view recording completion");
+		return;
+	}
 	commandRecordingPhaseProfile.reset();
 	commandRecordingProfile.reset();
 	const float commandRecordingMs = ElapsedMilliseconds(commandRecordingStart);
@@ -4263,6 +5647,7 @@ void VulkanContext::RenderFrame(
 		impl->pendingPrimaryCommandBuffersSubmitted.resize(impl->MAX_FRAMES_IN_FLIGHT, 0u);
 	}
 	impl->pendingPrimaryCommandBuffers[impl->currentFrame].push_back(cmd);
+	shadowRecordingSettlement.admitted = true;
 	impl->activeRenderSnapshot.state = RenderSnapshotState::Recorded;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!impl->pendingRenderSnapshotDiagnostics.ownerSummaries.empty()) {

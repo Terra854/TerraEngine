@@ -331,6 +331,15 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadTextureAsync(const st
 }
 
 // ResourceManager::ReloadTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+std::shared_future<TerraEngine::UUID> ResourceManager::ReloadTexturePublicationAsync(const TerraEngine::UUID& id)
+{
+	// Unlike the compatibility void future, this reports the actual accepted
+	// asset identity. Missing or failed producers cannot impersonate publication.
+	return ReloadCached<Texture>(id, textureCache, [this](const std::filesystem::path& path) {
+		return IsCompiledTexturePath(path) ? LoadTextureFile(*this, path) : std::unique_ptr<Texture>{};
+	}, false);
+}
+
 std::shared_future<void> ResourceManager::ReloadTexture(const TerraEngine::UUID& id)
 {
 	RequestPtr request;

@@ -120,6 +120,11 @@ namespace TerraEngine::Editor::Automation
 		Shutdown();
 	}
 
+	bool EditorMcpBridge::ValidateRendererEfficiencyDeviceRecreationOwner(const std::filesystem::path& root,
+		std::uint64_t generation, std::string_view operation, std::string_view step, std::string& error) const
+	{
+		return service.ValidateRendererEfficiencyDeviceRecreationOwner(root, generation, operation, step, error);
+	}
 	void EditorMcpBridge::Initialize(EditorContext* context, MainEditorSubsystem* editor)
 	{
 		std::lock_guard lifecycleLock(lifecycleMutex);

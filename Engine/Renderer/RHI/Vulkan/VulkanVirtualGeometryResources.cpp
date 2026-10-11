@@ -5,6 +5,151 @@
 
 #include "VulkanResourceSource.h"
 
+TerraEngine::Renderer::Vulkan::PreparedShadowPageSet VulkanContext::Impl::EnsureShadowAuthoredPagePayload(
+	const TerraEngine::Renderer::Vulkan::ShadowPageCutRequest& request, bool allowUpload)
+{
+	using namespace TerraEngine::Renderer::Vulkan;
+	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
+	const auto reject = [](const char* reason) { return PreparedShadowPageSet{false, {}, reason}; };
+	try {
+		const auto cut = BuildShadowAuthoredPageCut(request);
+		if (!cut.complete) return {false, {}, cut.fallbackReason};
+		if (deviceLost || !initialized || allocator == VK_NULL_HANDLE
+			|| std::any_of(globalDescriptorSets.begin(), globalDescriptorSets.end(), [](VkDescriptorSet set) { return set == VK_NULL_HANDLE; })
+			|| request.mesh->publicationGeneration != request.cpuPublicationGeneration
+			|| ResourceManager::Instance().AcquireMeshSnapshot(request.meshId) != request.mesh)
+			return reject("Current native authored payload or device is unavailable.");
+
+		PreparedShadowPageSet result;
+		result.bindings.reserve(cut.segments.size());
+		for (std::size_t index = 0U; index < cut.segments.size(); ++index) {
+			PreparedShadowPageBinding binding;
+			binding.segment = cut.segments[index]; binding.descriptorIndex = static_cast<std::uint32_t>(index);
+			binding.cpuPublicationGeneration = request.cpuPublicationGeneration;
+			result.bindings.push_back(binding);
+		}
+		const auto cached = std::find_if(shadowAuthoredPageResources.begin(), shadowAuthoredPageResources.end(), [&](const auto& resource) {
+			return resource.meshId == request.meshId && resource.retainedMesh == request.mesh
+				&& resource.cpuPublicationGeneration == request.cpuPublicationGeneration && resource.segments == cut.segments;
+		});
+		if (cached != shadowAuthoredPageResources.end()) {
+			if (cached->payload.buffer == VK_NULL_HANDLE || cached->payload.size == 0U || cached->allocationGeneration == 0U
+				|| cached->bindlessIndex == INVALID_BINDLESS_BUFFER_INDEX) return reject("Cached authored shadow payload is unavailable.");
+			for (auto& binding : result.bindings) {
+				binding.payloadBufferIndex = cached->bindlessIndex;
+				binding.payloadAllocationGeneration = cached->allocationGeneration;
+				// Every descriptor reads the same complete native word stream. Its
+				// logical buffer extent is the proof, rather than an estimated page size.
+				binding.payloadByteOffset = 0U;
+				binding.payloadByteSize = cached->payload.size;
+			}
+			result.complete = true;
+			return result;
+		}
+		// Recording consumes only bindings published before its primary began.
+		// A changed cut or loader publication keeps the complete owner fallback;
+		// the next frame can prepare its missing page descriptors safely.
+		if (!allowUpload) return reject("Authored shadow page cut was not prepared before command recording.");
+
+		// Each light-selected cut gets independent packet descriptors. Camera
+		// visibility cannot remove an off-camera caster from this complete stream.
+		std::vector<GpuVirtualGeometryPacketRecord> packets;
+		packets.reserve(cut.segments.size());
+		for (std::size_t index = 0U; index < cut.segments.size(); ++index) {
+			const auto& segment = cut.segments[index];
+			GpuVirtualGeometryPacketRecord packet;
+			packet.packetId = static_cast<std::uint32_t>(index); packet.meshId = request.meshId;
+			packet.pageId = segment.pageId; packet.fallbackPageId = segment.fallbackPageId;
+			packet.clusterId = segment.clusterId; packet.selectedLod = segment.selectedLod;
+			packet.meshletOffset = segment.ownerMeshletOffset; packet.meshletCount = segment.ownerMeshletCount;
+			packet.payloadSource = VirtualGeometryPagePayloadSource::ResidentPagePayload;
+			packet.emittedSource = VirtualGeometryEmittedPageSource::HighDetailPage;
+			packets.push_back(packet);
+		}
+		// This existing translator packs real owner topology into page-local shader
+		// streams. No persistent streamed-page allocation receipt qualifies them.
+		const auto payload = BuildVirtualGeometryPageLocalPayloadWords(packets);
+		if (payload.words.empty() || payload.words.size() > (64U * 1024U * 1024U)
+			|| ResourceManager::Instance().AcquireMeshSnapshot(request.meshId) != request.mesh)
+			return reject("Authored page translation is empty, excessive, or raced a CPU replacement.");
+		for (std::size_t index = 0U; index < cut.segments.size(); ++index) {
+			const std::size_t row = index * kVirtualGeometryPagePayloadDescriptorStrideWords;
+			if (row + kVirtualGeometryPagePayloadDescriptorStrideWords > payload.words.size())
+				return reject("Authored descriptor table is incomplete.");
+			const auto* words = payload.words.data() + row;
+			const auto inRange = [&](std::uint32_t offset, std::uint64_t count) {
+				return count != 0U && static_cast<std::uint64_t>(offset) + count <= payload.words.size();
+			};
+			const std::uint32_t meshletCount = words[kVirtualGeometryPagePayloadDescriptorMeshletCount];
+			if (meshletCount != cut.segments[index].ownerMeshletCount
+				|| words[kVirtualGeometryPagePayloadDescriptorBoundsCount] < meshletCount
+				|| words[kVirtualGeometryPagePayloadDescriptorLocalVertexCount] == 0U
+				|| !inRange(words[kVirtualGeometryPagePayloadDescriptorVertexWordOffset], words[kVirtualGeometryPagePayloadDescriptorVertexWordSize])
+				|| !inRange(words[kVirtualGeometryPagePayloadDescriptorPrimitiveWordOffset], (static_cast<std::uint64_t>(words[kVirtualGeometryPagePayloadDescriptorPrimitiveByteSize]) + 3U) / 4U)
+				|| !inRange(words[kVirtualGeometryPagePayloadDescriptorRemapWordOffset], words[kVirtualGeometryPagePayloadDescriptorRemapCount])
+				|| !inRange(words[kVirtualGeometryPagePayloadDescriptorMeshletWordOffset], static_cast<std::uint64_t>(meshletCount) * sizeof(MeshletRecord) / 4U)
+				|| !inRange(words[kVirtualGeometryPagePayloadDescriptorBoundsWordOffset], static_cast<std::uint64_t>(words[kVirtualGeometryPagePayloadDescriptorBoundsCount]) * sizeof(MeshletBounds) / 4U)
+				|| !inRange(words[kVirtualGeometryPagePayloadDescriptorDecodeWordOffset], sizeof(VirtualGeometryPageLocalMeshDecodeInfo) / 4U))
+				return reject("One authored page payload failed full shader stream validation.");
+		}
+		if (nextShadowPageAllocationGeneration == 0U) return reject("Authored shadow allocation generations are exhausted.");
+		VkPhysicalDeviceProperties properties{};
+		vkGetPhysicalDeviceProperties(physicalDevice, &properties);
+		if (static_cast<std::uint64_t>(payload.words.size()) * 4U > properties.limits.maxStorageBufferRange)
+			return reject("Authored shadow-local stream exceeds the device storage-buffer range.");
+		ShadowAuthoredPageResource staged;
+		staged.meshId = request.meshId; staged.retainedMesh = request.mesh;
+		staged.cpuPublicationGeneration = request.cpuPublicationGeneration; staged.segments = cut.segments;
+		shadowAuthoredPageResources.reserve(shadowAuthoredPageResources.size() + 1U);
+		// The unpublished resource has never appeared in a GPU command. RAII can
+		// release it immediately if allocation/upload/descriptor publication fails.
+		struct UnpublishedGuard {
+			Impl& impl; ShadowAuthoredPageResource& resource; bool committed = false;
+			~UnpublishedGuard() noexcept {
+				if (committed) return;
+				impl.DestroyBufferImmediate(resource.payload);
+				if (resource.bindlessIndex != INVALID_BINDLESS_BUFFER_INDEX) {
+					try { impl.freeBufferIndices.push_back(resource.bindlessIndex); } catch (...) {}
+				}
+			}
+		} guard{*this, staged};
+		staged.payload = CreateBuffer(static_cast<VkDeviceSize>(payload.words.size()) * 4U,
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "Authored Shadow Local Page Payload");
+		if (staged.payload.buffer == VK_NULL_HANDLE
+			|| !WriteMappedBuffer(allocator, staged.payload, payload.words.data(), staged.payload.size))
+			return reject("Authored shadow-local payload allocation or upload failed.");
+		staged.bindlessIndex = AllocateBufferIndex();
+		if (!UpdateGlobalBuffer(staged.bindlessIndex, staged.payload.buffer, 0U, staged.payload.size))
+			return reject("Authored shadow descriptor publication lacks actual idle proof.");
+		if (deviceLost) return reject("Authored shadow descriptor publication lost the device.");
+		staged.allocationGeneration = nextShadowPageAllocationGeneration++;
+		for (auto& binding : result.bindings) {
+			binding.payloadBufferIndex = staged.bindlessIndex;
+			binding.payloadAllocationGeneration = staged.allocationGeneration;
+			binding.payloadByteOffset = 0U;
+			binding.payloadByteSize = staged.payload.size;
+		}
+		shadowAuthoredPageResources.push_back(std::move(staged));
+		guard.committed = true;
+		result.complete = true;
+		return result;
+	} catch (const std::exception&) {
+		return reject("Authored shadow preparation failed; complete owner geometry remains authoritative.");
+	}
+}
+
+void VulkanContext::Impl::DestroyShadowAuthoredPagePayloads(TerraEngine::UUID meshId)
+{
+	// The caller owns existing descriptor-idle/device-idle proof. This helper
+	// adds no wait and destroys only resources that can no longer be sampled.
+	for (auto it = shadowAuthoredPageResources.begin(); it != shadowAuthoredPageResources.end();) {
+		if (meshId != TerraEngine::EMPTY_UUID && it->meshId != meshId) { ++it; continue; }
+		if (it->bindlessIndex != INVALID_BINDLESS_BUFFER_INDEX) freeBufferIndices.push_back(it->bindlessIndex);
+		DestroyBufferImmediate(it->payload);
+		it = shadowAuthoredPageResources.erase(it);
+	}
+}
+
 void VulkanContext::Impl::DestroyVirtualGeometryGpuPacketResources(VirtualGeometryGpuPacketFrameResources& resources)
 {
 	// The descriptor pool permits individual frees. Releasing this per-view set
@@ -77,6 +222,9 @@ void VulkanContext::Impl::PublishVirtualGeometryDecodedPageResources(
 	}
 
 	auto& pending = pendingVirtualGeometryPublicationsByFrame[currentFrame];
+	// Reserve before descriptor publication so committing native ownership cannot allocate.
+	persistentVirtualGeometryPages.reserve(persistentVirtualGeometryPages.size() + presentation.virtualGeometryDecodedPageUploads.size());
+	pending.reserve(pending.size() + presentation.virtualGeometryDecodedPageUploads.size());
 	for (const VirtualGeometryDecodedPageUploadRecord& upload : presentation.virtualGeometryDecodedPageUploads)
 	{
 		if (upload.assetId == TerraEngine::EMPTY_UUID
@@ -103,47 +251,30 @@ void VulkanContext::Impl::PublishVirtualGeometryDecodedPageResources(
 			continue;
 		}
 
-		std::uint64_t retiredAllocationId = 0u;
-		if (resource == persistentVirtualGeometryPages.end())
-		{
-			persistentVirtualGeometryPages.push_back({});
-			resource = std::prev(persistentVirtualGeometryPages.end());
-			resource->assetId = upload.assetId;
-			resource->pageId = upload.pageId;
-			resource->bindlessIndex = AllocateBufferIndex();
-		}
-		else
-		{
-			retiredAllocationId = resource->allocationId;
-			RetireBuffer(resource->buffer);
-		}
-
-		resource->buffer = CreateBuffer(
-			static_cast<VkDeviceSize>(upload.decodedBytes.size()),
+		if (nextVirtualGeometryPersistentPageAllocationId == 0U) continue;
+		const bool replacing = resource != persistentVirtualGeometryPages.end();
+		const std::uint64_t retiredAllocationId = replacing ? resource->allocationId : 0U;
+		PersistentVirtualGeometryPageResource staged;
+		staged.assetId = upload.assetId; staged.pageId = upload.pageId;
+		staged.bindlessIndex = replacing ? resource->bindlessIndex : AllocateBufferIndex();
+		staged.publicationGeneration = upload.publicationGeneration;
+		staged.allocationId = nextVirtualGeometryPersistentPageAllocationId;
+		struct UnpublishedPageGuard {
+			Impl& owner; PersistentVirtualGeometryPageResource& page; bool newIndex; bool committed = false;
+			~UnpublishedPageGuard() noexcept {
+				if (committed) return;
+				owner.DestroyBufferImmediate(page.buffer);
+				if (newIndex) try { owner.freeBufferIndices.push_back(page.bindlessIndex); } catch (...) {}
+			}
+		} guard{*this, staged, !replacing};
+		staged.buffer = CreateBuffer(static_cast<VkDeviceSize>(upload.decodedBytes.size()),
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-			VMA_MEMORY_USAGE_CPU_TO_GPU,
-			"Persistent Virtual Geometry Decoded Page");
-		if (resource->buffer.buffer == VK_NULL_HANDLE
-			|| !WriteMappedBuffer(
-				allocator,
-				resource->buffer,
-				upload.decodedBytes.data(),
-				static_cast<VkDeviceSize>(upload.decodedBytes.size())))
-		{
-			RetireBuffer(resource->buffer);
-			continue;
-		}
-
-		resource->publicationGeneration = upload.publicationGeneration;
-		resource->allocationId = nextVirtualGeometryPersistentPageAllocationId++;
-		UpdateGlobalBuffer(
-			resource->bindlessIndex,
-			resource->buffer.buffer,
-			0u,
-			resource->buffer.size);
+			VMA_MEMORY_USAGE_CPU_TO_GPU, "Persistent Virtual Geometry Decoded Page");
+		if (staged.buffer.buffer == VK_NULL_HANDLE || !WriteMappedBuffer(allocator,
+			staged.buffer, upload.decodedBytes.data(), static_cast<VkDeviceSize>(upload.decodedBytes.size()))) continue;
 
 		TerraEngine::Resource::VirtualGeometryPagePublicationCandidate candidate{};
-		candidate.candidateId = resource->allocationId;
+		candidate.candidateId = staged.allocationId;
 		candidate.publicationGeneration = upload.publicationGeneration;
 		candidate.key.asset.assetId = upload.assetId;
 		candidate.key.asset.sourceHash = upload.integrityValue;
@@ -174,9 +305,9 @@ void VulkanContext::Impl::PublishVirtualGeometryDecodedPageResources(
 				: upload.fallbackPageId;
 		candidate.hierarchy.fallbackCoverageVerified = true;
 		candidate.hierarchy.hierarchyAcyclic = true;
-		candidate.descriptor.allocationId = resource->allocationId;
-		candidate.descriptor.bufferIndex = resource->bindlessIndex;
-		candidate.descriptor.descriptorIndex = resource->bindlessIndex;
+		candidate.descriptor.allocationId = staged.allocationId;
+		candidate.descriptor.bufferIndex = staged.bindlessIndex;
+		candidate.descriptor.descriptorIndex = staged.bindlessIndex;
 		// BeginFrame changes this to true only after the owning slot fence.
 		candidate.descriptor.uploadCompleted = false;
 		for (const std::uint32_t dependency : upload.dependencyPageIds)
@@ -210,10 +341,18 @@ void VulkanContext::Impl::PublishVirtualGeometryDecodedPageResources(
 					&& existing.publicationGeneration
 						== candidate.publicationGeneration;
 			});
-		if (duplicate == pending.end())
-		{
-			pending.push_back(std::move(candidate));
-		}
+		if (duplicate != pending.end()) continue;
+		// Failed idle leaves the previous resource and descriptor exactly intact.
+		// The staged mapped buffer has never appeared in any accepted GPU command.
+		if (!UpdateGlobalBuffer(staged.bindlessIndex, staged.buffer.buffer, 0U, staged.buffer.size)) continue;
+		if (replacing) {
+			// The successful descriptor idle proof covers all old native readers.
+			DestroyBufferImmediate(resource->buffer);
+			*resource = staged;
+		} else persistentVirtualGeometryPages.push_back(staged);
+		guard.committed = true;
+		++nextVirtualGeometryPersistentPageAllocationId;
+		pending.push_back(std::move(candidate));
 	}
 }
 
@@ -1083,7 +1222,8 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 			{
 				continue;
 			}
-			const Mesh* mesh = ResourceManager::Instance().GetMesh(packet.meshId);
+			const auto meshOwner = ResourceManager::Instance().AcquireMeshSnapshot(packet.meshId);
+			const Mesh* mesh = meshOwner.get();
 			const PublicationDrawEvidence* drawEvidence = nullptr;
 			const auto [drawBegin, drawEnd] =
 				publicationDrawsByObject.equal_range(packet.objectId);
@@ -1114,8 +1254,8 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 			packet.materialId)
 			? materialIndexMap.at(packet.materialId)
 			: 0u;
-		const Material* packetMaterial =
-			ResourceManager::Instance().GetMaterial(packet.materialId);
+		const auto materialOwner = ResourceManager::Instance().AcquireMaterialSnapshot(packet.materialId);
+		const Material* packetMaterial = materialOwner.get();
 		const bool doubleSided = packetMaterial != nullptr
 			&& (packetMaterial->header.flags & DoubleSided) != 0u;
 		VirtualGeometryRasterPacketSetupUpload setup;

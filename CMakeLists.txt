@@ -306,6 +306,8 @@ set(ENGINE_SOURCES
 	Engine/Renderer/Graph/RenderFrameBreakdown.cpp
 	Engine/Renderer/Graph/RenderFramePublication.cpp
 	Engine/Renderer/Graph/RenderFrameSnapshot.cpp
+	# Typed shadow policies consume copied semantic inputs outside GPU ownership.
+	Engine/Renderer/ShadowWorkPlan.cpp
 	Engine/Renderer/Graph/RenderGraph.cpp
 	Engine/Renderer/Graph/RenderWorkerTaskGroup.cpp
 	Engine/Renderer/Backend/RenderBackendWork.cpp
@@ -319,6 +321,15 @@ set(ENGINE_SOURCES
 	Engine/Renderer/RHI/Vulkan/VulkanGlobalResources.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanGpuDiagnostics.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanLightingResources.cpp
+	# Pure canonical payload and ownership policy is shared with headless tests.
+	Engine/Renderer/RHI/Vulkan/VulkanLightingUploadPlan.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanStaticShadowPolicy.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanStaticShadowResources.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanStaticShadowLifecycle.cpp
+	# Headless depth and query policies support the installed native oracle.
+	Engine/Renderer/LightingDepthReduction.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanLightingDepthTiming.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanLightingDepthEvidence.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanPipelineResources.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanPostProcessing.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanReadback.cpp
@@ -330,6 +341,8 @@ set(ENGINE_SOURCES
 	Engine/Renderer/RHI/Vulkan/VulkanVirtualGeometryExecutor.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanPipelineStateKeys.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanReadbackConversion.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanShadowValidationReadback.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanShadowPagePreparation.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanRecordingContext.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanRendererWorkCache.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanTransitionPlanning.cpp
@@ -742,6 +755,9 @@ target_include_directories(TerraEngine-Engine
 		# Copied TEPAK reader sources use internal relative includes that
 		# expect the source root as an include path.
 		${CMAKE_CURRENT_SOURCE_DIR}/Engine/Runtime/ContentMount
+		# Validation support is owned by Tests; only implementation files use
+		# these helpers, so consumers do not inherit this include directory.
+		${CMAKE_CURRENT_SOURCE_DIR}
 		${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Navigation
 		${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Locomotion
 )
@@ -945,6 +961,11 @@ target_compile_definitions(TerraEngine-Engine
 		XXH_STATIC_LINKING_ONLY
 		ZSTD_STATIC_LINKING_ONLY
 )
+
+if(BUILD_TESTING)
+	# Restrict fault controls to installed correctness-enabled engine builds.
+	target_compile_definitions(TerraEngine-Engine PRIVATE TERRAENGINE_RENDERER_EFFICIENCY_VALIDATION=1)
+endif()
 
 set_target_properties(TerraEngine-Engine PROPERTIES
 	OUTPUT_NAME "TerraEngine"
@@ -1711,6 +1732,13 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Core/CheckedImGuiVulkanBridge.cpp
 	Editor/TerraEngine-Editor/Core/ViewportTextureRegistry.cpp
 	Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp
+	# Owned validation sessions copy evidence and queue changes at existing boundaries.
+	Tests/Support/RendererEfficiency/Editor/EditorRendererEfficiencyValidation.cpp
+	Tests/Support/RendererEfficiency/Editor/RendererEfficiencyFixtureBindings.cpp
+	# Fixture tokens wait for the scheduler's real committed scene publication.
+	Tests/Support/RendererEfficiency/Editor/RendererEfficiencyScenePublication.cpp
+	Tests/Support/RendererEfficiency/Editor/RendererEfficiencyEvidenceExport.cpp
+	Tests/Support/RendererEfficiency/Editor/RendererEfficiencyInstallIdentity.cpp
 	Editor/TerraEngine-Editor/Automation/EditorAutomationRegistry.cpp
 	Editor/TerraEngine-Editor/Automation/EditorAutomationTransaction.cpp
 	Editor/TerraEngine-Editor/Automation/EditorAutomationJobService.cpp
@@ -1821,6 +1849,7 @@ target_include_directories(TerraEngine-Editor
 
 # Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_compile_definitions(TerraEngine-Editor PRIVATE
+	$<$<BOOL:${BUILD_TESTING}>:TERRAENGINE_RENDERER_EFFICIENCY_VALIDATION=1>
 	IMGUI_IMPL_VULKAN_NO_PROTOTYPES
 	USE_STD_FILESYSTEM
 	GLM_ENABLE_EXPERIMENTAL
@@ -1871,7 +1900,8 @@ if(WIN32)
 		COMMAND_EXPAND_LISTS
 	)
 
-	target_link_libraries(TerraEngine-Editor PRIVATE ws2_32)
+	# Windows CNG supplies the OS SHA256 API used by owned native evidence seals.
+	target_link_libraries(TerraEngine-Editor PRIVATE ws2_32 bcrypt)
 endif()
 
 add_dependencies(TerraEngine-Editor TerraEngineModelPackageCompiler TerraEngineMeshCompiler TerraEngineTextureCompiler TerraEngineShaderCompiler TerraEnginePhysicsColliderCompiler)
@@ -2284,6 +2314,17 @@ execute_process(
 if(NOT compile_cluster_depth EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile ClusterDepthMask.comp.hlsl during install\")
 endif()
+
+# The reference and isolated oracle use the same standalone numerical source.
+# Compile all installed variants so validation never depends on source files.
+foreach(depth_variant IN ITEMS ClusterDepthMaskReference ClusterDepthMaskOracle ClusterDepthMaskReferenceOracle)
+	execute_process(
+		COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/\${depth_variant}.comp.spv\" -spirv \"\${lighting_src_dir}/\${depth_variant}.comp.hlsl\"
+		RESULT_VARIABLE compile_depth_variant)
+	if(NOT compile_depth_variant EQUAL 0)
+		message(FATAL_ERROR \"Failed to compile \${depth_variant}.comp.hlsl during install\")
+	endif()
+endforeach()
 
 execute_process(
 	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/LightCull.comp.spv\" -spirv \"\${lighting_src_dir}/LightCull.comp.hlsl\"
@@ -3082,4 +3123,10 @@ if(BUILD_TESTING)
 	file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/WriteCorrectnessArtifactManifest-$<CONFIG>.cmake
 		INPUT ${CMAKE_CURRENT_BINARY_DIR}/WriteCorrectnessArtifactManifest.configured.cmake)
 	install(SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/WriteCorrectnessArtifactManifest-$<CONFIG>.cmake)
+endif()
+
+# Renderer validation seals its dedicated inputs after the shared correctness
+# inventory, so installed acceptance never combines old tools with new binaries.
+if(BUILD_TESTING AND WIN32)
+	add_subdirectory(Tests/Tools/RendererEfficiency)
 endif()

@@ -19,6 +19,8 @@ namespace TerraEngine::EditorTests {
 	void RegisterExportLifecycleTests(TestRegistry& registry);
 	void RegisterExportArtifactValidationTests(TestRegistry& registry);
 	void RegisterAssetDiscoveryRecoveryTests(TestRegistry& registry);
+	// The browser must reject compiler staging paths before filesystem probes.
+	void RegisterAssetImportTemporaryPathTests(TestRegistry& registry);
 	void RegisterAssetImportAdmissionTests(TestRegistry& registry);
 	void RegisterEditorSceneSaveFailureSafetyTests(TestRegistry& registry);
 	void RegisterAudioClipCompilerTests(TestRegistry& registry);
@@ -100,6 +102,19 @@ namespace TerraEngine::EditorTests {
 	void RegisterMainEditorToolbarTests(TestRegistry& registry);
 	void RegisterEditorAutomationServiceTests(TestRegistry& registry);
 	void RegisterEditorAutomationRegistryTests(TestRegistry& registry);
+	void RegisterRendererEfficiencyAutomationTests(TestRegistry& registry);
+	void RegisterRendererEfficiencyEvidenceTests(TestRegistry& registry);
+	void RegisterRendererEfficiencyMutationTests(TestRegistry& registry);
+	void RegisterRendererEfficiencyControlTransitionExportTests(TestRegistry& registry);
+	void RegisterRendererEfficiencyLightingEvidenceTests(TestRegistry& registry);
+	void RegisterRendererEfficiencyDepthEvidenceExportTests(TestRegistry& registry);
+	void RegisterRendererEfficiencyDepthFixtureTests(TestRegistry& registry);
+	void RegisterRendererEfficiencyShadowBatchExportTests(TestRegistry& registry);
+	void RegisterRendererEfficiencyShadowBatchFixtureTests(TestRegistry& registry);
+	void RegisterRendererEfficiencyStaticShadowFixtureTests(TestRegistry& registry);
+	void RegisterRendererEfficiencyLightingFixtureTests(TestRegistry& registry);
+	void RegisterRendererEfficiencyInstallIdentityTests(TestRegistry& registry);
+	void RegisterRendererEfficiencyDeviceRecreationTests(TestRegistry& registry);
 	void RegisterEditorAutomationJobTests(TestRegistry& registry);
 	void RegisterEditorAutomationLogTests(TestRegistry& registry);
 	void RegisterEditorAutomationIdempotencyTests(TestRegistry& registry);
@@ -277,6 +292,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterExportLifecycleTests(registry);
 	TerraEngine::EditorTests::RegisterExportArtifactValidationTests(registry);
 	TerraEngine::EditorTests::RegisterAssetDiscoveryRecoveryTests(registry);
+	TerraEngine::EditorTests::RegisterAssetImportTemporaryPathTests(registry);
 	TerraEngine::EditorTests::RegisterAssetImportAdmissionTests(registry);
 	TerraEngine::EditorTests::RegisterEditorSceneSaveFailureSafetyTests(registry);
 
@@ -390,6 +406,21 @@ int main() {
 	TerraEngine::EditorTests::RegisterMainEditorToolbarTests(registry);
 	TerraEngine::EditorTests::RegisterEditorAutomationServiceTests(registry);
 	TerraEngine::EditorTests::RegisterEditorAutomationRegistryTests(registry);
+	TerraEngine::EditorTests::RegisterRendererEfficiencyAutomationTests(registry);
+	TerraEngine::EditorTests::RegisterRendererEfficiencyEvidenceTests(registry);
+	TerraEngine::EditorTests::RegisterRendererEfficiencyMutationTests(registry);
+	TerraEngine::EditorTests::RegisterRendererEfficiencyControlTransitionExportTests(registry);
+	// Purpose-specific zero-light bundles and typed fixture transactions are
+	// verified without opening an editor or manufacturing GPU acceptance.
+	TerraEngine::EditorTests::RegisterRendererEfficiencyLightingEvidenceTests(registry);
+	TerraEngine::EditorTests::RegisterRendererEfficiencyDepthEvidenceExportTests(registry);
+	TerraEngine::EditorTests::RegisterRendererEfficiencyDepthFixtureTests(registry);
+	TerraEngine::EditorTests::RegisterRendererEfficiencyShadowBatchExportTests(registry);
+	TerraEngine::EditorTests::RegisterRendererEfficiencyShadowBatchFixtureTests(registry);
+	TerraEngine::EditorTests::RegisterRendererEfficiencyStaticShadowFixtureTests(registry);
+	TerraEngine::EditorTests::RegisterRendererEfficiencyLightingFixtureTests(registry);
+	TerraEngine::EditorTests::RegisterRendererEfficiencyInstallIdentityTests(registry);
+	TerraEngine::EditorTests::RegisterRendererEfficiencyDeviceRecreationTests(registry);
 	TerraEngine::EditorTests::RegisterEditorAutomationJobTests(registry);
 	TerraEngine::EditorTests::RegisterEditorAutomationLogTests(registry);
 	TerraEngine::EditorTests::RegisterEditorAutomationIdempotencyTests(registry);

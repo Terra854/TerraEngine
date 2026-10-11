@@ -74,6 +74,43 @@ namespace TerraEngine::EditorTests {
 
 	void RegisterAssetDiscoveryRecoveryTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.AssetDiscoveryRecovery.ModelPackagePrivateRoots", [](TestContext& context) {
+			RecoveryFixture fixture; auto& database = AssetDatabase::Instance();
+			// The process importer owns full UUID scratch roots. Keep the legacy
+			// token reserved too, but retain ordinary authored dot-folders.
+			const std::vector<std::string> privateRoots{".ta-e670ee3d30de244946dd1ad5ab2b433d", ".ta-0123456789abcdef"};
+			for(const auto& name : privateRoots) {
+				std::filesystem::create_directories(fixture.Source(name + "/Models/Generated"));
+				fixture.Write(name + "/Models/Generated/private.txt", "unpublished");
+				fixture.Write(name + "/Models/Generated/private.txt.meta", "private metadata");
+			}
+			std::filesystem::create_directories(fixture.Source(".ta-authored"));
+			fixture.Write(".ta-authored/visible.txt"); fixture.Write("authored.txt");
+			fixture.Open(); context.Expect(Converge(database), "Discovery must settle without importing private package candidates.");
+			context.Expect(database.GetAssets().size() == 2U && database.GetAssets().contains(fixture.Source("authored.txt"))
+				&& database.GetAssets().contains(fixture.Source(".ta-authored/visible.txt")), "Only exact reserved scratch roots must be excluded; authored dot-folders remain discoverable.");
+			for(const auto& name : privateRoots) {
+				const auto source = fixture.Source(name + "/Models/Generated/private.txt");
+				database.ImportAssetWithProgress(source, true); database.Update();
+				context.Expect(!database.GetAssets().contains(source) && !database.IsAssetCompiling(source), "Direct importer ingress must reject unpublished candidates as well as discovery.");
+				std::ifstream input(source.string() + ".meta"); std::string bytes((std::istreambuf_iterator<char>(input)), {});
+				context.Expect(bytes == "private metadata", "Discovery cleanup must leave compiler-owned metadata untouched.");
+			}
+			// An older editor could have saved the leaked candidate in its index.
+			// Reopening that cache must not bypass the current discovery exclusion.
+			nlohmann::json index; { std::ifstream input(fixture.root / "Library/AssetIndex.json"); input >> index; }
+			auto leaked = index.at("assets").front(); leaked["guid"] = "e670ee3d30de244946dd1ad5ab2b433d";
+			leaked["sourcePath"] = privateRoots.front() + "/Models/Generated/private.txt"; leaked["compiledPath"] = "";
+			index["assets"].push_back(std::move(leaked));
+			{ std::ofstream output(fixture.root / "Library/AssetIndex.json"); output << index; }
+			database.Shutdown(); fixture.Open();
+			context.Expect(Converge(database) && database.GetAssets().size() == 2U, "A stale durable index must not resurrect an unpublished candidate.");
+			// Publication retires the private tree. Recovery must still converge
+			// without retaining vanished staging paths in its authoritative catalog.
+			for(const auto& name : privateRoots) std::filesystem::remove_all(fixture.Source(name));
+			database.InjectWatcherCompletionForTests({}, true);
+			context.Expect(Converge(database) && database.GetAssets().size() == 2U, "Retired private trees must never create pending imports or stale catalog entries.");
+		});
 		registry.Add("Editor.AssetDiscoveryRecovery.ZeroCompletion", [](TestContext& context) {
 			FileWatcher watcher;
 			watcher.ProcessWindowsCompletionForTests({}, true);

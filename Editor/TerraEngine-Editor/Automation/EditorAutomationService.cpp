@@ -72,6 +72,8 @@
 #include "Engine/Renderer/RendererRecovery.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Resource/ResourceManager.h"
+#include "Engine/Resource/ShaderCollection.h"
+#include "../Core/EditorSystem.h"
 #include "Engine/Resource/VirtualGeometryStreamingSystem.h"
 #include "Engine/Physics/PhysicsSystem.h"
 #include "Engine/Physics/Assets/ColliderRecipe.h"
@@ -2580,8 +2582,658 @@ namespace TerraEngine::Editor::Automation
 		AnimationAutomationJobs(jobService).PumpActiveRecordingsFromPublishedSnapshots();
 	}
 
+	bool EditorAutomationService::RestoreRendererEfficiencySourcesAtProtectedFrame(std::string& error)
+	{
+		if(rendererEfficiencyDirtySources.empty()) { error.clear(); return true; }
+		if(!editorContext || !editorContext->projectManager || !editorContext->assetDatabase)
+		{ error = "Owned source restoration is unavailable without its original project."; return false; }
+		const auto root = editorContext->projectManager->GetProjectRoot();
+		const auto operation = rendererEfficiencyValidation.Status().at("operationId").get<std::string>();
+		if(!rendererEfficiencyValidation.ValidateOwnedRestoration(root, BuildAutomationStateSnapshot().projectGeneration, operation, error)) return false;
+		// Stop must not leave an authored variant behind for the next run. These
+		// rare bounded file replacements are sequential at the protected boundary;
+		// expensive compile/reload work continues through native asynchronous jobs.
+		for(auto it = rendererEfficiencyDirtySources.begin(); it != rendererEfficiencyDirtySources.end();)
+		{
+			const auto baseline = rendererEfficiencySourceBaselines.find(*it);
+			if(baseline == rendererEfficiencySourceBaselines.end()) { error = "The original owned source bytes are unavailable."; return false; }
+			RendererEfficiencySourcePatch patch;
+			if(!PrepareRendererEfficiencySourcePatch(root, *it, {}, baseline->second.first, baseline->second.second, patch, error)
+				|| !ApplyRendererEfficiencySourcePatch(root, patch, error)) return false;
+			baseline->second.second = patch.replacementHash;
+			editorContext->assetDatabase->ImportAssetWithProgress(root / *it, true);
+			it = rendererEfficiencyDirtySources.erase(it);
+		}
+		rendererEfficiencyResourceWork = {}; error.clear(); return true;
+	}
+	void EditorAutomationService::PumpRendererEfficiencyResourceMutationsAtProtectedFrame(RenderSystem& renderer)
+	{
+		if(!editorContext || !editorContext->projectManager || !editorContext->assetDatabase || !rendererEfficiencyValidation.Active()) return;
+		// Marker-only foundation sessions have no resource recipe. Explicit stop
+		// restoration remains in its separate existing cleanup entry point.
+		if(rendererEfficiencyValidation.InstalledSteps().is_null()) return;
+		const auto root = editorContext->projectManager->GetProjectRoot();
+		const auto generation = BuildAutomationStateSnapshot().projectGeneration;
+		const auto status = rendererEfficiencyValidation.Status();
+		const auto operation = status.at("operationId").get<std::string>();
+		auto& work = rendererEfficiencyResourceWork;
+		std::string error;
+		if(!rendererEfficiencyValidation.ValidateOwnedAdmission(root, generation, operation, error)) return;
+		try
+		{
+			if(!work.operationId.empty() && work.operationId != operation) work = {};
+			const auto now = std::chrono::steady_clock::now();
+			if(!work.phase.empty() && work.phase != "Failed" && now >= work.deadline)
+				throw std::runtime_error("Owned resource stage exceeded 300 seconds: " + work.phase + " (" + work.sourcePath.generic_string() + ").");
+			// Count an import only when the native database actually retains its
+			// same-source job. A declined ingress is bounded rather than resubmitted
+			// every frame. Original patch and cleanup bytes survive all retries.
+			const auto dispatchImport = [&]() {
+				work.phase = "AwaitingImportAdmission"; work.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+				editorContext->assetDatabase->ImportAssetWithProgress(root / work.sourcePath, true);
+				if(editorContext->assetDatabase->IsAssetCompiling(root / work.sourcePath)) {
+					++work.admittedImports; work.phase = "AwaitingImportSettlement";
+				}
+			};
+			if(work.phase.empty())
+			{
+				std::filesystem::path source, replacement;
+				bool baseline = false, denseBaseline = false;
+				const auto denseStep = rendererEfficiencyValidation.PendingDenseResourceBaseline();
+				const auto currentIndex = status.at("completedSteps").get<std::size_t>();
+				const auto& currentSteps = rendererEfficiencyValidation.InstalledSteps().at("steps");
+				const bool densePageStep = currentIndex < currentSteps.size() && currentSteps.at(currentIndex).at("action") == "page-revision";
+				const auto restorable = std::find_if(rendererEfficiencyDirtySources.begin(), rendererEfficiencyDirtySources.end(), [&](const auto& path) {
+					return !densePageStep || !rendererEfficiencyDenseSourceBaselines.contains(path);
+				});
+				// Prepare dense geometry before this step's normal authored/animation
+				// baseline. Subsequent steps still restore the original direct source.
+				if(!denseStep.is_null())
+				{
+					if(!rendererEfficiencyValidation.BeginResourceBaselineReset(root, generation, error, true)) return;
+					baseline = denseBaseline = true;
+					source = std::filesystem::path("Assets") / denseStep.at("nativePayload").at("sourcePath").get<std::string>();
+					replacement = denseStep.at("nativePayload").at("denseBaselineReplacementPath").get<std::string>();
+				}
+				else if(status.at("state") == "PreparingBaseline" && restorable != rendererEfficiencyDirtySources.end())
+				{
+					if(!rendererEfficiencyValidation.BeginResourceBaselineReset(root, generation, error)) return;
+					baseline = true; source = *restorable;
+				}
+				else
+				{
+					const auto step = rendererEfficiencyValidation.PendingNativeStep();
+					if(step.is_null() || !step.at("nativePayload").contains("replacementPath")) return;
+					source = std::filesystem::path("Assets") / step.at("nativePayload").at("sourcePath").get<std::string>();
+					replacement = step.at("nativePayload").at("replacementPath").get<std::string>();
+				}
+				work.operationId = operation; work.stepId = status.at("fixtureStepId").get<std::string>();
+				work.sourcePath = source; work.baseline = baseline; work.denseBaseline = denseBaseline; work.phase = "PreparingPatch";
+				work.deadline = now + std::chrono::seconds(300);
+				for(const auto& asset : rendererEfficiencyValidation.InstalledSteps().at("assets"))
+					if(std::filesystem::path("Assets") / asset.at("sourcePath").get<std::string>() == source) {
+						const auto id = TerraEngine::ParseUUID(asset.at("packageGuid").get<std::string>());
+						if(id) work.packageId = *id;
+					}
+				if(work.packageId == TerraEngine::EMPTY_UUID) throw std::runtime_error("Owned resource source has no sealed package identity.");
+				const auto found = rendererEfficiencySourceBaselines.find(source);
+				const auto retained = found == rendererEfficiencySourceBaselines.end() ? std::pair<std::string, std::string>{} : found->second;
+				const auto semantic = rendererEfficiencyDenseSourceBaselines.find(source);
+				const auto semanticBytes = !baseline && semantic != rendererEfficiencyDenseSourceBaselines.end() ? semantic->second : std::string{};
+				auto task = ThreadPool::instance().createTask([root, source, replacement, retained, semanticBytes]() {
+					RendererEfficiencySourcePatch patch; std::string reason;
+					if(!semanticBytes.empty()) (void)PrepareRendererEfficiencyPageVariantPatch(root, source, replacement, retained.first, retained.second, semanticBytes, patch, reason);
+					else (void)PrepareRendererEfficiencySourcePatch(root, source, replacement, retained.first, retained.second, patch, reason);
+					return std::pair{std::move(patch), std::move(reason)};
+				});
+				work.patchJob = task->getFuture(); ThreadPool::instance().enqueue(task); return;
+			}
+			if(work.phase == "PreparingPatch")
+			{
+				if(work.patchJob.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+				auto [patch, reason] = work.patchJob.get();
+				if(!reason.empty()) throw std::runtime_error(reason);
+				// The second protected check is after detached file preparation and
+				// before either authored input or importer ingress changes.
+				if(!rendererEfficiencyValidation.ValidateOwnedAdmission(root, generation, operation, reason)) throw std::runtime_error(reason);
+				if(!ApplyRendererEfficiencySourcePatch(root, patch, reason)) throw std::runtime_error(reason);
+				// Never replace cleanup's original topology with the dense comparison
+				// baseline retained inside a subsequent page-edit receipt.
+				auto [original, inserted] = rendererEfficiencySourceBaselines.try_emplace(work.sourcePath, patch.baselineBytes, patch.replacementHash);
+				original->second.second = patch.replacementHash;
+				if(work.denseBaseline) rendererEfficiencyDenseSourceBaselines[work.sourcePath] = patch.replacementBytes;
+				else if(work.baseline) rendererEfficiencyDenseSourceBaselines.erase(work.sourcePath);
+				rendererEfficiencyDirtySources.insert(work.sourcePath); work.patch = std::move(patch);
+				work.priorGeneration = ResourceManager::Instance().GetRendererResourcePublicationGeneration();
+				dispatchImport();
+			}
+			if(work.phase == "AwaitingImportAdmission")
+			{
+				rendererEfficiencyValidation.ReportNativeResourcePending("Awaiting actual same-source import admission: " + work.sourcePath.generic_string());
+				if(!editorContext->assetDatabase->IsAssetCompiling(root / work.sourcePath)) return;
+				++work.admittedImports; work.phase = "AwaitingImportSettlement"; work.deadline = now + std::chrono::seconds(300);
+			}
+			if(work.phase == "AwaitingImportSettlement")
+			{
+				rendererEfficiencyValidation.ReportNativeResourcePending("Awaiting physical same-source import settlement (attempt " + std::to_string(work.admittedImports) + "/3): " + work.sourcePath.generic_string());
+				if(editorContext->assetDatabase->IsAssetCompiling(root / work.sourcePath)) return;
+				work.phase = "AwaitingImportReceipt"; work.deadline = now + std::chrono::seconds(300);
+			}
+			if(work.phase == "AwaitingImportReceipt")
+			{
+				// Discovery can admit a same-source job between two protected polls.
+				// Never classify or retry a terminal sidecar while that owner is still
+				// physically retained; this also includes canceled draining jobs.
+				if(editorContext->assetDatabase->IsAssetCompiling(root / work.sourcePath)) {
+					rendererEfficiencyValidation.ReportNativeResourcePending("Awaiting physical same-source import settlement before receipt decision."); return;
+				}
+				if(!work.importJob.valid() && std::chrono::steady_clock::now() >= work.retry)
+				{
+					const auto steps = rendererEfficiencyValidation.InstalledSteps();
+					const auto source = work.sourcePath; const auto expectedSourceHash = work.patch->replacementHash; const auto package = work.packageId;
+					auto task = ThreadPool::instance().createTask([root, steps, source, expectedSourceHash, package]() {
+						RendererEfficiencyResourceWork::ImportPreparation result;
+						// The copied typed observation binds terminal decisions to actual
+						// source SHA and package identity, not an error-message substring.
+						result.observation = InspectRendererEfficiencyOwnedImport(root, source, package, expectedSourceHash);
+						if(result.observation.disposition == RendererEfficiencyImportDisposition::Ready)
+							(void)PrepareRendererEfficiencyFixtureBindings(root, steps, result.prepared, result.error);
+						return result;
+					});
+					work.importJob = task->getFuture(); ThreadPool::instance().enqueue(task);
+				}
+				if(!work.importJob.valid() || work.importJob.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+				auto result = work.importJob.get();
+				const auto decision = DecideRendererEfficiencyImportAdmission(result.observation, work.admittedImports, work.lastFailedImportGeneration);
+				if(decision == RendererEfficiencyImportDecision::Fail)
+					throw std::runtime_error("Owned import admission failed after " + std::to_string(work.admittedImports) + "/3 imports: " + result.observation.reason);
+				if(decision == RendererEfficiencyImportDecision::Reimport) {
+					work.lastFailedImportGeneration = result.observation.generation;
+					// Settlement was proven above; no second source patch is applied.
+					dispatchImport(); return;
+				}
+				if(decision == RendererEfficiencyImportDecision::Wait || !result.error.empty()) {
+					rendererEfficiencyValidation.ReportNativeResourcePending("Awaiting strict owned import receipt/bindings: " + (result.error.empty() ? result.observation.reason : result.error));
+					work.retry = std::chrono::steady_clock::now() + std::chrono::milliseconds(250); return;
+				}
+				work.preparation = std::move(result.prepared);
+				for(const auto& candidate : work.preparation->candidates)
+				{
+					const auto& binding = candidate.binding;
+					if(binding.sourcePath != std::filesystem::canonical(root / work.sourcePath)) continue;
+					auto& resources = ResourceManager::Instance();
+					const auto type = binding.kind == "Texture" ? AssetType::Texture : binding.kind == "Material" ? AssetType::Material : AssetType::Mesh;
+					const auto prior = resources.TryCopyRendererEfficiencyResourcePublication(binding.assetId, type);
+					if(prior) work.priorAssetGenerations[binding.assetId] = prior->resourceGeneration;
+					if(binding.kind == "Mesh" || binding.kind == "DeformableMesh") work.reloads.emplace_back(binding.assetId, resources.ReloadMeshAsync(binding.assetId));
+					else if(binding.kind == "Material") work.reloads.emplace_back(binding.assetId, resources.ReloadMaterialAsync(binding.assetId));
+					else if(binding.kind == "Texture") work.reloads.emplace_back(binding.assetId, resources.ReloadTexturePublicationAsync(binding.assetId));
+				}
+				if(work.reloads.empty()) throw std::runtime_error("The owned source has no supported actual resource reloads.");
+				work.phase = "AwaitingNativePublication";
+				work.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+			}
+			if(work.phase == "AwaitingNativePublication")
+			{
+				rendererEfficiencyValidation.ReportNativeResourcePending("Awaiting exact native resource publication: " + work.sourcePath.generic_string());
+				for(const auto& [id, future] : work.reloads)
+				{
+					if(future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+					if(future.get() != id) throw std::runtime_error("Native resource reload did not publish the expected asset identity.");
+				}
+				if(ResourceManager::Instance().GetRendererResourcePublicationGeneration() <= work.priorGeneration) return;
+				std::vector<RendererEfficiencyPublishedBinding> bindings;
+				if(!ResolveRendererEfficiencyFixtureBindings(*work.preparation, ResourceManager::Instance(), bindings, error)) {
+					rendererEfficiencyValidation.ReportNativeResourcePending("Awaiting strict native publication: " + error); return;
+				}
+				// Invalidate only after the real CPU reload and immutable cache snapshot
+				// agree. The protected renderer capture then reuploads that owner;
+				// acceptance still requires the subsequently completed GPU evidence.
+				for(const auto& [id, future] : work.reloads)
+				{
+					const auto binding = std::find_if(bindings.begin(), bindings.end(), [&](const auto& value) { return value.assetId == id; });
+					if(binding == bindings.end()) throw std::runtime_error("Reloaded resource is absent from fresh native binding receipt.");
+					const auto prior = work.priorAssetGenerations.find(id);
+					if(prior == work.priorAssetGenerations.end() || !prior->second || binding->resourceGeneration <= prior->second) throw std::runtime_error("Native asset publication did not advance from its exact captured owner generation.");
+					const auto type = binding->kind == "Texture" ? AssetType::Texture : binding->kind == "Material" ? AssetType::Material : AssetType::Mesh;
+					if(!renderer.QueueRendererResourcePublicationInvalidation(id, type, binding->resourceGeneration, &error)) throw std::runtime_error(error);
+					const auto currentStep = rendererEfficiencyValidation.InstalledSteps().at("steps").at(status.at("completedSteps").get<std::size_t>());
+					const nlohmann::json publication{{"kind", "ResourcePublication"}, {"fixtureStepId", work.stepId}, {"action", work.denseBaseline ? "dense-page-baseline" : work.baseline ? "baseline-restoration" : currentStep.at("action").get<std::string>()},
+						{"assetId", TerraEngine::ToHexString(id)}, {"assetType", binding->kind}, {"sourcePath", work.sourcePath.generic_string()},
+						{"sourceSha256", work.patch->replacementHash}, {"baselineSourceSha256", work.patch->baselineHash},
+						{"publicationGeneration", binding->resourceGeneration}, {"previousPublicationGeneration", prior->second}, {"actualNativeOwnerAccepted", true}};
+					if(!rendererEfficiencyValidation.RecordFixtureReceipt(root, generation, operation, publication, error)) throw std::runtime_error(error);
+				}
+				if(work.denseBaseline)
+				{
+					const auto grid = std::find_if(bindings.begin(), bindings.end(), [](const auto& binding) { return binding.bindingKey == "grid.mesh"; });
+					if(grid == bindings.end() || !rendererEfficiencyValidation.RetainDenseResourceBaselineOwner(root, generation, grid->assetId, grid->resourceGeneration, error)) throw std::runtime_error(error.empty() ? "Dense baseline has no exact named grid publication." : error);
+				}
+				if(!rendererEfficiencyValidation.AdmitPublishedFixtureBindings(root, generation, operation, bindings,
+					ObjectManager::instance(), TerraEngine::Scene::SceneMutationQueue::Instance(), error)) throw std::runtime_error(error);
+				if(work.baseline && !work.denseBaseline) rendererEfficiencyDirtySources.erase(work.sourcePath);
+				work = {};
+			}
+		}
+		catch(const std::exception& exception)
+		{
+			// A failed real importer/cache publication cannot be converted into a
+			// fixture frame. Retain cleanup bytes and owned Stop identity while
+			// ending the collector promptly with the actual terminal limitation.
+			rendererEfficiencyValidation.FailNativeResourcePreparation(exception.what());
+			renderer.ClearRendererEfficiencyFixtureIntent(operation);
+			work.phase = "Failed";
+		}
+	}
+	bool EditorAutomationService::PumpRendererEfficiencyDeviceRecreationAtProtectedFrame(RenderSystem& renderer)
+	{
+#if defined(TERRAENGINE_EDITOR_TESTS)
+		(void)renderer;
+		const auto pending = rendererEfficiencyValidation.PendingNativeStep();
+		if(!pending.is_null() && pending.at("action") == "device-recovery")
+			rendererEfficiencyValidation.ReportNativeUnavailable("The headless editor test lane has no native Vulkan/UI device recreation provider.");
+		return true;
+#else
+		if(!rendererEfficiencyValidation.Active() || !editorContext || !editorContext->engine || !editorContext->projectManager) return true;
+		auto* editor = dynamic_cast<EditorSystem*>(editorContext->engine->GetEditorSystem());
+		if(!editor) return true;
+		const auto root = editorContext->projectManager->GetProjectRoot(); const auto generation = BuildAutomationStateSnapshot().projectGeneration;
+		const auto status = rendererEfficiencyValidation.Status(); const auto operation = status.at("operationId").get<std::string>(); std::string error;
+		if(!rendererEfficiencyValidation.ValidateOwnedAdmission(root, generation, operation, error)) return true;
+		const auto pending = rendererEfficiencyValidation.PendingNativeStep();
+		if(!rendererEfficiencyDeviceRequest)
+		{
+			if(pending.is_null() || pending.at("action") != "device-recovery") return true;
+			const auto options = renderer.GetRendererEfficiencyOptionsSnapshot(); const auto step = pending.at("id").get<std::string>();
+			const auto captured = renderer.GetRendererEfficiencyFixtureControlSnapshot();
+			if(captured.correlation.operationId != operation || captured.correlation.fixtureStepId != step || !captured.controlsApplied)
+			{
+				Renderer::RendererEfficiencyFixtureIntent intent; intent.cameras = rendererEfficiencyValidation.FixtureCameras(); intent.correlation = {operation, step, 0, status.at("mutationGeneration").get<std::uint64_t>(), options.settingsGeneration, options.rendererSessionGeneration};
+				const auto receipt = renderer.QueueRendererEfficiencyFixtureIntent(intent);
+				if(!receipt.accepted) rendererEfficiencyValidation.ReportNativeUnavailable(receipt.reason);
+				return true;
+			}
+			RendererEfficiencyDeviceRecreationRequest request{operation, step, status.at("fixtureId").get<std::string>(), status.at("fixtureHash").get<std::string>(), root,
+				generation, options.rendererSessionGeneration, renderer.GetContext() ? renderer.GetContext()->GetBackendResourceGeneration() : 0};
+			if(!editor->QueueRendererEfficiencyDeviceRecreation(request, error)) { rendererEfficiencyValidation.ReportNativeUnavailable(error); return true; }
+			rendererEfficiencyDeviceRequest = request; rendererEfficiencyPreDeviceOptions = options; rendererEfficiencyDeviceSettingsGeneration = 0; return true;
+		}
+		const auto& request = *rendererEfficiencyDeviceRequest; const auto receipt = editor->GetRendererEfficiencyDeviceRecreationReceipt();
+		if(request.operationId != operation || receipt.request.operationId != request.operationId || receipt.request.fixtureStepId != request.fixtureStepId
+			|| receipt.request.projectRoot != root || receipt.request.projectGeneration != generation
+			|| receipt.request.expectedRendererSessionGeneration != request.expectedRendererSessionGeneration
+			|| receipt.request.expectedBackendResourceGeneration != request.expectedBackendResourceGeneration) return true;
+		if(receipt.status == RendererEfficiencyDeviceRecreationStatus::Pending) return true;
+		if(!HasCompletedRendererEfficiencyDeviceRecreation(receipt)) { rendererEfficiencyValidation.ReportNativeUnavailable(receipt.reason); return true; }
+		const auto actual = renderer.GetLatestRendererRecoverySnapshot();
+		if(actual.renderSessionGeneration != receipt.newRendererSessionGeneration || !renderer.GetContext()
+			|| renderer.GetContext()->GetBackendResourceGeneration() != receipt.newBackendResourceGeneration) return true;
+		// Only this exact completion receipt permits the expected epoch transition.
+		// An arbitrary renderer replacement still follows the normal failure path.
+		if(!rendererEfficiencyDeviceSettingsGeneration)
+		{
+			// Backend recreation completes before RenderSystem observes its new
+			// lifetime. That capture invalidates old pending options; wait until
+			// it has rebound the actual new session before enqueueing our controls.
+			const auto rebound = renderer.GetRendererEfficiencyOptionsSnapshot();
+			if(rebound.rendererSessionGeneration != receipt.newRendererSessionGeneration
+				|| rebound.optionsSessionGeneration <= rendererEfficiencyPreDeviceOptions.optionsSessionGeneration) return false;
+			const auto optionsReceipt = renderer.QueueRendererEfficiencyOptions(rendererEfficiencyPreDeviceOptions.options);
+			if(!optionsReceipt.accepted) { rendererEfficiencyValidation.ReportNativeUnavailable(optionsReceipt.error); return false; }
+			rendererEfficiencyDeviceSettingsGeneration = optionsReceipt.requestedGeneration; return false;
+		}
+		const auto fresh = renderer.GetRendererEfficiencyOptionsSnapshot();
+		if(fresh.settingsGeneration != rendererEfficiencyDeviceSettingsGeneration || fresh.rendererSessionGeneration != receipt.newRendererSessionGeneration) return false;
+		const auto& cameras = rendererEfficiencyValidation.FixtureCameras();
+		const auto selectedView = cameras.empty() ? RenderViewType::Scene : cameras.front().viewType;
+		const auto copied = renderer.GetLatestRendererEfficiencyEvidence(selectedView);
+		if(copied.effectiveOptions.optionsSessionGeneration != fresh.optionsSessionGeneration
+			|| copied.effectiveOptions.rendererSessionGeneration != receipt.newRendererSessionGeneration
+			|| copied.effectiveOptions.settingsGeneration != rendererEfficiencyDeviceSettingsGeneration) return false;
+		const nlohmann::json nativeDeviceReceipt = {{"kind", "DeviceRecreation"}, {"fixtureStepId", request.fixtureStepId}, {"status", "Completed"},
+			{"idleProven", receipt.idleProven}, {"rebound", receipt.rebound}, {"oldRendererSessionGeneration", receipt.oldRendererSessionGeneration}, {"newRendererSessionGeneration", receipt.newRendererSessionGeneration},
+			{"oldBackendResourceGeneration", receipt.oldBackendResourceGeneration}, {"newBackendResourceGeneration", receipt.newBackendResourceGeneration},
+			{"priorOptionsEpoch", rendererEfficiencyPreDeviceOptions.optionsSessionGeneration}, {"newOptionsEpoch", fresh.optionsSessionGeneration}, {"visibleSettingsGeneration", fresh.settingsGeneration},
+			{"request", {{"operationId", request.operationId}, {"fixtureStepId", request.fixtureStepId}, {"fixtureId", request.fixtureId}, {"fixtureHash", request.fixtureHash}, {"projectGeneration", request.projectGeneration},
+				{"expectedRendererSessionGeneration", request.expectedRendererSessionGeneration}, {"expectedBackendResourceGeneration", request.expectedBackendResourceGeneration}}}, {"reason", receipt.reason}};
+		if(!rendererEfficiencyValidation.RecordFixtureReceipt(root, generation, operation, nativeDeviceReceipt, error)) { rendererEfficiencyValidation.ReportNativeUnavailable(error); return true; }
+		if(rendererEfficiencyValidation.Status().value("stage",std::string{})=="P5") {
+			// The existing native recovery path already queued and observed these
+			// exact settings. Record the new epoch instead of reusing an old receipt.
+			const nlohmann::json budgetReceipt={{"kind","StaticBudgetPublication"},{"fixtureStepId",request.fixtureStepId},{"operationId",operation},
+				{"requestedGeneration",rendererEfficiencyDeviceSettingsGeneration},{"priorOptions",SerializeRendererEfficiencyOptions(rendererEfficiencyPreDeviceOptions.options)},
+				{"requestedOptions",SerializeRendererEfficiencyOptions(fresh.options)},{"effectiveOptions",SerializeRendererEfficiencyOptions(fresh.options)},
+				{"settingsGeneration",fresh.settingsGeneration},{"rendererSessionGeneration",fresh.rendererSessionGeneration},{"optionsSessionGeneration",fresh.optionsSessionGeneration}};
+			if(!rendererEfficiencyValidation.RecordFixtureReceipt(root,generation,operation,budgetReceipt,error)){rendererEfficiencyValidation.ReportNativeUnavailable(error);return true;}
+		}
+		if(!rendererEfficiencyValidation.AdmitCompletedDeviceRecreation(root, generation, operation, request.fixtureStepId,
+			rendererEfficiencyPreDeviceOptions.optionsSessionGeneration, fresh, receipt.newBackendResourceGeneration, error))
+		{ rendererEfficiencyValidation.ReportNativeUnavailable(error); return true; }
+		rendererEfficiencyDeviceRequest.reset(); rendererEfficiencyDeviceSettingsGeneration = 0; return true;
+#endif
+	}
+	struct EditorAutomationService::RendererEfficiencyShaderWork
+	{
+		std::string operationId, stepId, phase;
+		TerraEngine::UUID shaderId{};
+		std::uint64_t priorObservedGeneration = 0;
+		std::filesystem::path copiedSourcePath;
+		std::string copiedSourceHash;
+		std::vector<std::pair<TerraEngine::UUID, std::vector<ShaderStagePath>>> collections;
+		std::map<TerraEngine::UUID, std::uint64_t> priorCollectionGenerations;
+		std::future<std::tuple<std::filesystem::path, std::string, std::string>> copyJob;
+		RendererEfficiencyShaderPublicationReceipt receipt;
+		std::vector<std::pair<TerraEngine::UUID, std::shared_future<TerraEngine::UUID>>> rebuilds;
+		std::future<std::pair<bool, std::string>> restoreJob;
+		bool dirty = false;
+	};
+	void EditorAutomationService::ScheduleRendererEfficiencyShaderRestoreAtProtectedFrame()
+	{
+		if(!rendererEfficiencyShaderWork || rendererEfficiencyShaderWork->restoreJob.valid()
+			|| !rendererEfficiencyShaderWork->receipt.completion.valid()) return;
+		const auto receipt = rendererEfficiencyShaderWork->receipt; const auto collections = rendererEfficiencyShaderWork->collections;
+		auto task = ThreadPool::instance().createTask([receipt, collections]() {
+			try
+			{
+				// The dependent wait runs on a worker, never the editor/render boundary.
+				// Native restore compares our exact request owner and cache epoch, so a
+				// later unrelated shader publication cannot be overwritten by cleanup.
+				if(receipt.completion.get() == TerraEngine::EMPTY_UUID) return std::make_pair(false, std::string("Owned shader publication failed before restoration."));
+				auto& resources = ResourceManager::Instance();
+				if(!resources.RestoreRendererEfficiencyShaderOverride(receipt)) return std::make_pair(false, std::string("Owned shader restoration was superseded or its resource epoch retired."));
+				for(const auto& [id, paths] : collections)
+					if(resources.ReloadShaderCollectionAsync(paths).get() != id) return std::make_pair(false, std::string("Default shader collection restoration did not publish its expected identity."));
+				return std::make_pair(true, std::string{});
+			}
+			catch(const std::exception& exception) { return std::make_pair(false, std::string(exception.what())); }
+		});
+		rendererEfficiencyShaderWork->restoreJob = task->getFuture(); ThreadPool::instance().enqueue(task);
+	}
+	void EditorAutomationService::PumpRendererEfficiencyShaderMutationAtProtectedFrame()
+	{
+		if(!editorContext || !editorContext->projectManager || !rendererEfficiencyValidation.Active()) return;
+		const auto root = editorContext->projectManager->GetProjectRoot(); const auto generation = BuildAutomationStateSnapshot().projectGeneration;
+		const auto status = rendererEfficiencyValidation.Status(); const auto operation = status.at("operationId").get<std::string>(); std::string error;
+		if(!rendererEfficiencyValidation.ValidateOwnedAdmission(root, generation, operation, error)) { rendererEfficiencyValidation.ReportNativeUnavailable(error); return; }
+		try
+		{
+			if(rendererEfficiencyShaderWork && rendererEfficiencyShaderWork->dirty && status.at("state") == "PreparingBaseline")
+			{
+				if(!rendererEfficiencyValidation.BeginResourceBaselineReset(root, generation, error)) throw std::runtime_error(error);
+				ScheduleRendererEfficiencyShaderRestoreAtProtectedFrame(); return;
+			}
+			if(rendererEfficiencyShaderWork && rendererEfficiencyShaderWork->restoreJob.valid())
+			{
+				if(rendererEfficiencyShaderWork->restoreJob.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+				auto [restored, reason] = rendererEfficiencyShaderWork->restoreJob.get();
+				if(!restored) throw std::runtime_error(reason);
+				rendererEfficiencyShaderWork.reset();
+				if(!rendererEfficiencyValidation.AdmitResourceBaselinePublication(root, generation, ResourceManager::Instance().GetRendererResourcePublicationGeneration(), error)) throw std::runtime_error(error);
+				return;
+			}
+			const auto step = rendererEfficiencyValidation.PendingNativeStep();
+			if(step.is_null() || step.at("action") != "shader-revision") return;
+			auto& resources = ResourceManager::Instance();
+			if(!rendererEfficiencyShaderWork)
+			{
+				auto work = std::make_shared<RendererEfficiencyShaderWork>(); work->operationId = operation; work->stepId = step.at("id").get<std::string>();
+				const auto engineRoot = resources.GetEngineRoot();
+				const auto mesh = engineRoot / "Shaders/Default.mesh.tspf", fragment = engineRoot / "Shaders/Default.frag.tspf", taskPath = engineRoot / "Shaders/Default.task.tspf";
+				for(const auto& id : {resources.GetDefaultShaderCollectionID(), resources.GetDefaultTaskShaderCollectionID()})
+				{
+					const auto collection = resources.AcquireShaderCollectionSnapshot(id); if(!collection) continue;
+					std::vector<ShaderStagePath> paths;
+					if(std::any_of(collection->stages.begin(), collection->stages.end(), [](const auto& binding) { return binding.stage == ShaderStage::Task; })) paths.push_back({ShaderStage::Task, taskPath});
+					paths.push_back({ShaderStage::Mesh, mesh}); paths.push_back({ShaderStage::Fragment, fragment});
+					for(const auto& binding : collection->stages) if(binding.stage == ShaderStage::Mesh)
+					{
+						if(!binding.shader || !binding.publicationGeneration || (work->shaderId != TerraEngine::EMPTY_UUID && work->shaderId != binding.shaderId)) throw std::runtime_error("Actual default Mesh stage publication is unavailable or inconsistent.");
+						work->shaderId = binding.shaderId;
+						if(work->priorObservedGeneration && work->priorObservedGeneration != binding.publicationGeneration) throw std::runtime_error("Default shader collections disagree on their accepted Mesh publication.");
+						work->priorObservedGeneration = binding.publicationGeneration;
+					}
+					if(!collection->collectionGeneration) throw std::runtime_error("Default shader collection has no accepted publication generation.");
+					work->priorCollectionGenerations[id] = collection->collectionGeneration;
+					work->collections.emplace_back(id, std::move(paths));
+				}
+				if(work->shaderId == TerraEngine::EMPTY_UUID || work->collections.empty()) throw std::runtime_error("No actual default Mesh shader collection is published.");
+				auto task = ThreadPool::instance().createTask([root, operation, mesh]() {
+					try
+					{
+						RendererEfficiencyInstallIdentity identity; std::string reason;
+						if(!PrepareRendererEfficiencyInstallIdentity(identity, reason)) throw std::runtime_error(reason);
+						const auto source = std::filesystem::canonical(mesh), install = std::filesystem::canonical(identity.installRoot);
+						const auto relative = source.lexically_relative(install); if(relative.empty() || *relative.begin() == "..") throw std::runtime_error("Default shader is outside the actual verified install closure.");
+						const auto folder = root / "renderer-efficiency-shaders" / operation;
+						std::filesystem::path checked;
+						for(const auto& part : folder)
+						{
+							checked /= part;
+							if(std::filesystem::is_symlink(checked)) throw std::runtime_error("Owned shader copy folder redirects outside its project.");
+#if defined(_WIN32)
+							const auto attributes = GetFileAttributesW(checked.c_str()); if(attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) throw std::runtime_error("Owned shader copy folder traverses a junction.");
+#endif
+						}
+						std::filesystem::create_directories(folder); const auto destination = folder / "Default.mesh.tspf";
+						if(std::filesystem::is_symlink(destination)) throw std::runtime_error("Owned shader destination is a symbolic link.");
+#if defined(_WIN32)
+						const auto destinationAttributes = GetFileAttributesW(destination.c_str());
+						if(destinationAttributes != INVALID_FILE_ATTRIBUTES && (destinationAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) throw std::runtime_error("Owned shader destination is a reparse point.");
+#endif
+						std::filesystem::copy_file(source, destination, std::filesystem::copy_options::overwrite_existing);
+						std::string hash;
+						if(!HashRendererEfficiencyOwnedInput(root, destination.lexically_relative(root), hash, reason)) throw std::runtime_error(reason);
+						return std::tuple{destination, std::move(hash), std::string{}};
+					}
+					catch(const std::exception& exception) { return std::tuple{std::filesystem::path{}, std::string{}, std::string(exception.what())}; }
+				});
+				work->copyJob = task->getFuture(); work->phase = "Copying"; ThreadPool::instance().enqueue(task); rendererEfficiencyShaderWork = std::move(work); return;
+			}
+			auto& work = *rendererEfficiencyShaderWork;
+			if(work.operationId != operation || work.stepId != step.at("id").get<std::string>()) throw std::runtime_error("Owned shader operation changed while publication was pending.");
+			if(work.phase == "Copying")
+			{
+				if(work.copyJob.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+				auto [path, hash, reason] = work.copyJob.get(); if(!reason.empty()) throw std::runtime_error(reason);
+				work.copiedSourcePath = path.lexically_relative(root); work.copiedSourceHash = std::move(hash);
+				work.receipt = resources.BeginRendererEfficiencyShaderOverride(work.shaderId, path);
+				if(!work.receipt.completion.valid()) throw std::runtime_error("Native scoped shader publication was not admitted.");
+				work.phase = "AwaitingShader";
+			}
+			if(work.phase == "AwaitingShader")
+			{
+				if(work.receipt.completion.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+				if(work.receipt.completion.get() != work.shaderId || !resources.GetRendererEfficiencyShaderOverrideOwner(work.receipt)) throw std::runtime_error("Native scoped shader request did not publish its exact owner.");
+				work.dirty = true;
+				for(const auto& [id, paths] : work.collections) work.rebuilds.emplace_back(id, resources.ReloadShaderCollectionAsync(paths));
+				work.phase = "AwaitingCollections";
+			}
+			if(work.phase == "AwaitingCollections")
+			{
+				const auto owner = resources.GetRendererEfficiencyShaderOverrideOwner(work.receipt);
+				nlohmann::json acceptedCollections = nlohmann::json::array();
+				for(const auto& [id, future] : work.rebuilds)
+				{
+					if(future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+					if(future.get() != id) throw std::runtime_error("Actual default shader collection reassembly failed.");
+					const auto collection = resources.AcquireShaderCollectionSnapshot(id);
+					if(!collection || !owner || !std::any_of(collection->stages.begin(), collection->stages.end(), [&](const auto& binding) { return binding.stage == ShaderStage::Mesh && binding.shader == owner; })) throw std::runtime_error("Default collection does not retain the exact owned shader publication.");
+					nlohmann::json stages = nlohmann::json::array();
+					for(const auto& binding : collection->stages)
+					{
+						if(!binding.shader || !binding.publicationGeneration || binding.shader->publicationGeneration != binding.publicationGeneration) throw std::runtime_error("Dependent shader stage lacks an exact accepted immutable publication.");
+						stages.push_back({{"stage", static_cast<std::uint32_t>(binding.stage)}, {"shaderId", TerraEngine::ToHexString(binding.shaderId)}, {"publicationGeneration", binding.publicationGeneration}, {"acceptedOverrideOwner", binding.shader == owner}});
+					}
+					if(collection->collectionGeneration <= work.priorCollectionGenerations.at(id)) throw std::runtime_error("Dependent shader collection publication did not advance.");
+					acceptedCollections.push_back({{"collectionId", TerraEngine::ToHexString(id)}, {"collectionGeneration", collection->collectionGeneration}, {"previousCollectionGeneration", work.priorCollectionGenerations.at(id)}, {"stages", std::move(stages)}});
+				}
+				if(!owner || owner->publicationGeneration <= work.priorObservedGeneration) throw std::runtime_error("Scoped shader publication did not advance from the actual observed baseline owner.");
+				for(const auto& collection : acceptedCollections)
+				{
+					// Caster stamps name a shader collection, while the lease owns one
+					// stage. Preserve both real identities instead of conflating epochs.
+					const nlohmann::json publication{{"kind", "ShaderPublication"}, {"fixtureStepId", work.stepId}, {"action", "shader-revision"},
+						{"shaderId", collection.at("collectionId")}, {"shaderStageId", TerraEngine::ToHexString(work.shaderId)},
+						{"sourcePath", work.copiedSourcePath.generic_string()}, {"sourceSha256", work.copiedSourceHash},
+						{"shaderCollectionGeneration", collection.at("collectionGeneration")}, {"previousShaderCollectionGeneration", collection.at("previousCollectionGeneration")},
+						{"shaderStagePublicationGeneration", owner->publicationGeneration}, {"previousObservedShaderStagePublicationGeneration", work.priorObservedGeneration},
+						{"actualNativeOwnerAccepted", true}, {"stages", collection.at("stages")}};
+					if(!rendererEfficiencyValidation.RecordFixtureReceipt(root, generation, operation, publication, error)) throw std::runtime_error(error);
+				}
+				if(!rendererEfficiencyValidation.AdmitNativeStepPublication(root, generation, operation, work.stepId, owner->publicationGeneration, error)) throw std::runtime_error(error);
+				work.phase = "Published";
+			}
+		}
+		catch(const std::exception& exception)
+		{
+			rendererEfficiencyValidation.ReportNativeUnavailable(exception.what());
+			if(rendererEfficiencyShaderWork) rendererEfficiencyShaderWork->phase = "Failed";
+		}
+	}
+	bool EditorAutomationService::ValidateRendererEfficiencyDeviceRecreationOwner(const std::filesystem::path& root,
+		std::uint64_t generation, std::string_view operation, std::string_view step, std::string& error) const
+	{
+		std::lock_guard lock(rendererEfficiencyMutex);
+		if(!editorContext || !editorContext->projectManager || BuildAutomationStateSnapshot().projectGeneration != generation
+			|| editorContext->projectManager->GetProjectRoot().lexically_normal() != root.lexically_normal())
+		{ error = "Device recreation project ownership changed before execution."; return false; }
+		if(!rendererEfficiencyValidation.ValidateOwnedAdmission(root, generation, operation, error)) return false;
+		const auto pending = rendererEfficiencyValidation.PendingNativeStep();
+		if(pending.is_null() || pending.at("id").get<std::string>() != step || pending.at("action") != "device-recovery")
+		{ error = "Device recreation does not match the pending owned recovery step."; return false; }
+		error.clear(); return true;
+	}
 	void EditorAutomationService::PumpRendererValidationMutationsAtProtectedFrame()
 	{
+		{
+			// Observe immutable renderer receipts at the existing protected editor
+			// boundary. Polling MCP status never becomes a frame producer.
+			std::lock_guard efficiencyLock(rendererEfficiencyMutex);
+			if(rendererEfficiencyValidation.Active() && editorContext && editorContext->engine)
+			{
+				if(auto* renderer = editorContext->engine->GetSystem<RenderSystem>())
+				{
+					rendererEfficiencyValidation.PumpFixtureReceiptsAtProtectedFrame(
+						editorContext->projectManager ? editorContext->projectManager->GetProjectRoot() : std::filesystem::path{},
+						BuildAutomationStateSnapshot().projectGeneration, ObjectManager::instance(), TerraEngine::Scene::SceneMutationQueue::Instance());
+					if(PumpRendererEfficiencyDeviceRecreationAtProtectedFrame(*renderer))
+					rendererEfficiencyValidation.ObserveAtProtectedFrame(editorContext->projectManager ? editorContext->projectManager->GetProjectRoot() : std::filesystem::path{},
+						BuildAutomationStateSnapshot().projectGeneration, renderer->GetLatestRendererEfficiencyEvidence(RenderViewType::Scene));
+					if(rendererEfficiencyValidation.Active() && rendererEfficiencyValidation.Status().at("state") == "AwaitingAssets")
+					{
+						const auto operation = rendererEfficiencyValidation.Status().at("operationId").get<std::string>();
+						const auto root = editorContext->projectManager->GetProjectRoot();
+						if(rendererEfficiencyBootstrapOperation != operation)
+						{
+							rendererEfficiencyBootstrapOperation = operation; rendererEfficiencyDeviceRequest.reset(); rendererEfficiencyDeviceSettingsGeneration = 0;
+							// Serialize published scheduler values once per owned run. Do not
+							// retain its work callbacks or invent declaration/parallelism claims.
+							const auto& schedule = editorContext->engine->GetSchedulerSummary();
+							const auto& plan = editorContext->engine->GetParallelFrameExecutionPlan();
+							nlohmann::json workloads = nlohmann::json::array();
+							for(const auto& workload : plan.workloads) workloads.push_back({{"name", workload.workloadName}, {"ownerSystem", workload.ownerSystem}, {"phase", workload.phase},
+								{"reads", workload.reads}, {"writes", workload.writes}, {"dependencies", workload.explicitDependencies}, {"workerEligible", workload.workerEligible},
+								{"mainThreadRequired", workload.mainThreadRequired}, {"phaseKind", TerraEngine::Scheduling::ToString(workload.phaseKind)}, {"boundaryClassification", TerraEngine::Scheduling::ToString(workload.boundaryClassification)},
+								{"mutationPolicy", TerraEngine::Scheduling::ToString(workload.mutationPolicy)}, {"protectedCommit", workload.protectedCommit}, {"protectedReason", workload.protectedReason}, {"safeSubwork", workload.safeSubwork}});
+							const nlohmann::json schedulerReceipt = {{"kind", "Scheduler"}, {"frameId", plan.frameId}, {"valid", plan.valid}, {"completed", plan.completed},
+								{"executionMode", TerraEngine::Scheduling::ToString(plan.executionMode)}, {"parallelExecutionUsed", plan.parallelExecutionUsed},
+								{"preparationOption", SerializeRendererEfficiencyOptions(renderer->GetRendererEfficiencyOptionsSnapshot().options).at("validationPreparation")},
+								{"systems", schedule.systems}, {"phases", schedule.phases}, {"flushPoints", schedule.flushPoints}, {"mainThreadSystems", schedule.mainThreadSystems},
+								{"workerCategories", schedule.workerCoverageReport.workerCategories}, {"protectedCategories", schedule.workerCoverageReport.protectedCategories}, {"workloads", std::move(workloads)}};
+							std::string schedulerError;
+							if(!rendererEfficiencyValidation.RecordFixtureReceipt(root, BuildAutomationStateSnapshot().projectGeneration, operation, schedulerReceipt, schedulerError)) rendererEfficiencyValidation.ReportBootstrapUnavailable(schedulerError);
+							rendererEfficiencyBindingJob = {}; rendererEfficiencyBindingPreparation.reset(); rendererEfficiencyBindingLoads.clear();
+							rendererEfficiencySourceBaselines.clear(); rendererEfficiencyDenseSourceBaselines.clear(); rendererEfficiencyDirtySources.clear(); rendererEfficiencyResourceWork = {};
+							rendererEfficiencyBootstrapRetry = {};
+						}
+						if(!rendererEfficiencyBindingPreparation && !rendererEfficiencyBindingJob.valid()
+							&& std::chrono::steady_clock::now() >= rendererEfficiencyBootstrapRetry)
+						{
+							const auto steps = rendererEfficiencyValidation.InstalledSteps();
+							auto task = ThreadPool::instance().createTask([root, steps]() {
+								RendererEfficiencyFixtureBindingPreparation prepared; std::string reason;
+								(void)PrepareRendererEfficiencyFixtureBindings(root, steps, prepared, reason);
+								return std::pair{std::move(prepared), std::move(reason)};
+							});
+							rendererEfficiencyBindingJob = task->getFuture(); ThreadPool::instance().enqueue(task);
+						}
+						if(rendererEfficiencyBindingJob.valid() && rendererEfficiencyBindingJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+						{
+							auto [prepared, reason] = rendererEfficiencyBindingJob.get();
+							if(!reason.empty() || prepared.candidates.empty())
+							{
+								rendererEfficiencyValidation.ReportBootstrapUnavailable(reason.empty() ? "No native package bindings have been prepared." : reason);
+								rendererEfficiencyBootstrapRetry = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+							}
+							else rendererEfficiencyBindingPreparation = std::move(prepared);
+						}
+						if(rendererEfficiencyBindingPreparation)
+						{
+							// Resource loads are native asynchronous requests. Their futures do
+							// not prove publication; the compact resolver checks actual caches.
+							if(rendererEfficiencyBindingLoads.empty())
+								for(const auto& candidate : rendererEfficiencyBindingPreparation->candidates)
+								{
+									const auto& binding = candidate.binding; auto& resources = ResourceManager::Instance();
+									if(binding.kind == "Mesh" || binding.kind == "DeformableMesh")
+									{
+										const auto current = resources.TryCopyRendererEfficiencyResourcePublication(binding.assetId, AssetType::Mesh);
+										rendererEfficiencyBindingLoads.push_back(current && current->present ? resources.ReloadMeshAsync(binding.assetId) : resources.LoadMeshAsync(binding.cookedPath));
+									}
+									else if(binding.kind == "Material")
+									{
+										const auto current = resources.TryCopyRendererEfficiencyResourcePublication(binding.assetId, AssetType::Material);
+										rendererEfficiencyBindingLoads.push_back(current && current->present ? resources.ReloadMaterialAsync(binding.assetId) : resources.LoadMaterialAsync(binding.cookedPath));
+									}
+									else if(binding.kind == "Texture")
+									{
+										const auto current = resources.TryCopyRendererEfficiencyResourcePublication(binding.assetId, AssetType::Texture);
+										rendererEfficiencyBindingLoads.push_back(current && current->present ? resources.ReloadTexturePublicationAsync(binding.assetId) : resources.LoadTextureAsync(binding.cookedPath));
+									}
+									else if(binding.kind == "Skeleton") rendererEfficiencyBindingLoads.push_back(resources.LoadAnimationAssetAsync(binding.cookedPath, AssetType::Skeleton));
+									else if(binding.kind == "AnimationClip") rendererEfficiencyBindingLoads.push_back(resources.LoadAnimationAssetAsync(binding.cookedPath, AssetType::AnimationClip));
+									else rendererEfficiencyValidation.ReportBootstrapUnavailable("Unsupported published binding resource kind: " + binding.kind);
+								}
+							std::vector<RendererEfficiencyPublishedBinding> bindings; std::string reason;
+							// A cached older payload cannot satisfy a still-pending reload.
+							bool loadsPublished = rendererEfficiencyBindingLoads.size() == rendererEfficiencyBindingPreparation->candidates.size();
+							for(std::size_t index = 0; loadsPublished && index < rendererEfficiencyBindingLoads.size(); ++index)
+							{
+								const auto& future = rendererEfficiencyBindingLoads[index];
+								loadsPublished = future.valid() && future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+								if(loadsPublished)
+								{
+									try { loadsPublished = future.get() == rendererEfficiencyBindingPreparation->candidates[index].binding.assetId; }
+									catch(const std::exception& exception) { loadsPublished = false; reason = exception.what(); }
+								}
+							}
+							if(!loadsPublished) rendererEfficiencyValidation.ReportBootstrapUnavailable(reason.empty() ? "Awaiting actual native asset load/reload completion." : reason);
+							else if(ResolveRendererEfficiencyFixtureBindings(*rendererEfficiencyBindingPreparation, ResourceManager::Instance(), bindings, reason))
+							{
+								if(!rendererEfficiencyValidation.AdmitPublishedFixtureBindings(root, BuildAutomationStateSnapshot().projectGeneration,
+									operation, bindings, ObjectManager::instance(), TerraEngine::Scene::SceneMutationQueue::Instance(), reason))
+									rendererEfficiencyValidation.ReportBootstrapUnavailable(reason);
+							}
+							else rendererEfficiencyValidation.ReportBootstrapUnavailable(reason);
+						}
+					}
+					PumpRendererEfficiencyShaderMutationAtProtectedFrame();
+					PumpRendererEfficiencyResourceMutationsAtProtectedFrame(*renderer);
+					rendererEfficiencyValidation.PumpFixtureAtProtectedFrame(
+						editorContext->projectManager ? editorContext->projectManager->GetProjectRoot() : std::filesystem::path{},
+						BuildAutomationStateSnapshot().projectGeneration, ObjectManager::instance(), TerraEngine::Scene::SceneMutationQueue::Instance(), *renderer);
+					if(!rendererEfficiencyValidation.Active())
+					{
+						rendererEfficiencyValidation.CancelPendingFixtureWorkAtProtectedFrame(TerraEngine::Scene::SceneMutationQueue::Instance());
+						renderer->ClearRendererEfficiencyFixtureIntent(rendererEfficiencyValidation.Status().value("operationId", std::string{}));
+						ScheduleRendererEfficiencyShaderRestoreAtProtectedFrame();
+			std::string sourceRestoreError; (void)RestoreRendererEfficiencySourcesAtProtectedFrame(sourceRestoreError);
+					}
+					if(!rendererEfficiencyValidation.Active() && rendererEfficiencyValidation.PriorToken().valid)
+						(void)renderer->QueueRendererEfficiencyRestore(rendererEfficiencyValidation.PriorToken());
+				}
+			}
+		}
 		std::lock_guard lock(sparseTransformMutationMutex);
 		SparseTransformMutationState& state = sparseTransformMutation;
 		// A stop request disables new batches immediately, but the last batch may
@@ -5794,6 +6446,12 @@ namespace TerraEngine::Editor::Automation
 		if (operation == AutomationOperation("game_view.capture")) return HandleGameViewCapture(arguments, requestId);
 		if (operation == AutomationOperation("camera.capture_object")) return HandleCameraObjectCapture(arguments, requestId);
 		if (operation == AutomationOperation("camera.capture_custom")) return HandleCustomCameraCapture(arguments, requestId);
+		if (operation == AutomationOperation("renderer.efficiency.stats")) return HandleRendererEfficiency(0, arguments, requestId);
+		if (operation == AutomationOperation("renderer.efficiency.validation.set")) return HandleRendererEfficiency(1, arguments, requestId);
+		if (operation == AutomationOperation("renderer.efficiency.validation.reset")) return HandleRendererEfficiency(2, arguments, requestId);
+		if (operation == AutomationOperation("renderer.efficiency.validation.start")) return HandleRendererEfficiency(3, arguments, requestId);
+		if (operation == AutomationOperation("renderer.efficiency.validation.status")) return HandleRendererEfficiency(4, arguments, requestId);
+		if (operation == AutomationOperation("renderer.efficiency.validation.stop")) return HandleRendererEfficiency(5, arguments, requestId);
 		if (operation == AutomationOperation("renderer.virtualGeometry.stats")) return HandleRendererVirtualGeometryStats(arguments, requestId);
 		if (operation == AutomationOperation("renderer.virtualGeometry.capabilityEvidence")) return HandleRendererVirtualGeometryCapabilityEvidence(arguments, requestId);
 		if (operation == AutomationOperation("renderer.virtualGeometry.validationRoute.set")) return HandleRendererVirtualGeometryValidationRouteSet(arguments, requestId);
@@ -7549,7 +8207,13 @@ namespace TerraEngine::Editor::Automation
 		else data["canonicalIdentity"] = "";
 		const auto* scene = SceneManager::Instance().GetActiveScene();
 		data["activeScene"] = scene != nullptr ? scene->name : "";
+		// The retained native source path is the actual default SaveScene target,
+		// so owned automation can check containment without guessing from the display name.
+		data["activeScenePath"] = scene != nullptr ? scene->sourcePath.generic_string() : "";
 		data["sceneDirty"] = SceneManager::Instance().IsActiveSceneDirty();
+		// Automation checks the native close-dialog readiness at this protected snapshot,
+		// rather than assuming a completed validation operation has settled imports.
+		data["assetImportsActive"] = AssetDatabase::Instance().IsCompiling();
 		data["playMode"] = ScriptingSystem::Instance().IsRunning();
 		const AutomationStateSnapshot automationState = BuildAutomationStateSnapshot();
 		data["playState"] = automationState.playState;
@@ -9858,6 +10522,157 @@ namespace TerraEngine::Editor::Automation
 			{"viewType", ToString(captureViewType)}
 		};
 		return result;
+	}
+
+	nlohmann::json EditorAutomationService::HandleRendererEfficiency(int action, const nlohmann::json& arguments, const std::string& requestId)
+	{
+		using namespace TerraEngine::Renderer;
+		std::lock_guard lock(rendererEfficiencyMutex);
+		if(!editorContext || !editorContext->engine) return BuildError(requestId, ErrorCategory::MissingTarget, "Renderer is unavailable.");
+		auto* renderer = editorContext->engine->GetSystem<RenderSystem>();
+		if(!renderer) return BuildError(requestId, ErrorCategory::MissingTarget, "RenderSystem is not registered.");
+		std::string error;
+		if(action == 0)
+		{
+			RenderViewType view = RenderViewType::Game;
+			if(arguments.contains("viewType"))
+			{
+				if(!arguments["viewType"].is_string()) return BuildError(requestId, ErrorCategory::Validation, "viewType must be Game or Scene.");
+				const auto type = arguments["viewType"].get<std::string>();
+				if(type != "Game" && type != "Scene") return BuildError(requestId, ErrorCategory::Validation, "viewType must be Game or Scene.");
+				view = type == "Game" ? RenderViewType::Game : RenderViewType::Scene;
+			}
+			// Numeric selectors are validated before conversion; negatives and
+			// oversized values must never wrap into a different view's identity.
+			std::uint64_t viewId = 0, after = 0;
+			for(const char* key : {"viewId", "afterFrameSerial"})
+			{
+				if(!arguments.contains(key)) continue;
+				const auto& value = arguments[key];
+				if(!value.is_number_integer() || (!value.is_number_unsigned() && value.get<std::int64_t>() < 0))
+					return BuildError(requestId, ErrorCategory::Validation, std::string(key) + " must be a nonnegative integer.");
+				const auto number = value.get<std::uint64_t>();
+				if(std::string_view(key) == "viewId") viewId = number; else after = number;
+			}
+			if(viewId > UINT32_MAX) return BuildError(requestId, ErrorCategory::Validation, "viewId exceeds uint32.");
+			const auto evidence = renderer->GetLatestRendererEfficiencyEvidence(view, static_cast<std::uint32_t>(viewId));
+			auto data = SerializeRendererEfficiencyEvidence(evidence);
+			data["fresh"] = evidence.frameSerial > after;
+			data["publicationStatus"] = data["status"];
+			return BuildSuccess(requestId, "Read copied renderer efficiency evidence.", std::move(data));
+		}
+		if(action == 1 || action == 2)
+		{
+			RendererEfficiencyOptionsReceipt receipt;
+			if(action == 1)
+			{
+				RendererEfficiencyOptions options;
+				if(!ParseRendererEfficiencyOptions(arguments, renderer->GetRendererEfficiencyOptionsSnapshot().options, options, error))
+					return BuildError(requestId, ErrorCategory::Validation, error);
+				receipt = renderer->QueueRendererEfficiencyOptions(options);
+			}
+			else if(arguments.contains("priorToken"))
+			{
+				RendererEfficiencyOptionsToken token;
+				if(!ParseRendererEfficiencyToken(arguments["priorToken"], token, error)) return BuildError(requestId, ErrorCategory::Validation, error);
+				receipt = renderer->QueueRendererEfficiencyRestore(token);
+			}
+			else receipt = renderer->QueueRendererEfficiencyOptions({});
+			if(!receipt.accepted) return BuildError(requestId, ErrorCategory::Unavailable, receipt.error);
+			return BuildSuccess(requestId, "Queued transient options for the next protected renderer capture.",
+				{{"requestedGeneration", receipt.requestedGeneration}, {"queuedSettingsGeneration", receipt.requestedGeneration},
+					{"priorToken", SerializeRendererEfficiencyToken(receipt.priorToken)}, {"visibilityBoundary", "protected_render_settings_capture"}});
+		}
+		if(action == 3)
+		{
+			if(!editorContext->projectManager || !BuildAutomationStateSnapshot().sceneAvailable)
+				return BuildError(requestId, ErrorCategory::MissingTarget, "An owned fixture project and scene must be open.");
+			if(rendererEfficiencyValidation.Active()) return BuildError(requestId, ErrorCategory::Conflict, "A validation session is already active.");
+			if(rendererEfficiencyShaderWork)
+			{
+				ScheduleRendererEfficiencyShaderRestoreAtProtectedFrame();
+				if(rendererEfficiencyShaderWork->restoreJob.valid())
+				{
+					if(rendererEfficiencyShaderWork->restoreJob.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+						return BuildError(requestId, ErrorCategory::Conflict, "Prior owned default shader restoration is still pending.");
+					const auto [restored, reason] = rendererEfficiencyShaderWork->restoreJob.get();
+					if(!restored) { rendererEfficiencyShaderWork.reset(); return BuildError(requestId, ErrorCategory::Unavailable, reason); }
+				}
+				rendererEfficiencyShaderWork.reset();
+			}
+			if(!rendererEfficiencyValidation.Start(editorContext->projectManager->GetProjectRoot(), BuildAutomationStateSnapshot().projectGeneration,
+				arguments, renderer->GetRendererEfficiencyOptionsSnapshot(), error)) return BuildError(requestId, ErrorCategory::Validation, error);
+			if(!rendererEfficiencyValidation.InstalledSteps().is_null() && editorContext->assetDatabase)
+			{
+				// The normal asset pipeline publishes results during its protected
+				// update. Queueing an import never counts as bootstrap completion.
+				try
+				{
+					const auto ownedAssets = std::filesystem::canonical(editorContext->projectManager->GetProjectRoot() / "Assets");
+					if(std::filesystem::canonical(editorContext->assetDatabase->GetAssetRoot()) != ownedAssets)
+						throw std::runtime_error("Asset pipeline root does not match the owned validation project.");
+					for(const auto& asset : rendererEfficiencyValidation.InstalledSteps().at("assets"))
+					{
+						const std::filesystem::path relative(asset.at("sourcePath").get<std::string>());
+						if(relative.empty() || relative.is_absolute()) throw std::runtime_error("Owned import source must be Assets-relative.");
+						std::filesystem::path source = ownedAssets;
+						for(const auto& component : relative)
+						{
+							if(component == "." || component == "..") throw std::runtime_error("Owned import source cannot escape Assets.");
+							source /= component;
+							if(std::filesystem::is_symlink(source)) throw std::runtime_error("Owned import source redirects outside its project.");
+#if defined(_WIN32)
+							const auto attributes = GetFileAttributesW(source.c_str());
+							if(attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT))
+								throw std::runtime_error("Owned import source traverses a junction/reparse point.");
+#endif
+						}
+						if(!std::filesystem::is_regular_file(source)) throw std::runtime_error("Owned import source is not a regular file.");
+						if(!rendererEfficiencyValidation.ValidateOwnedAdmission(editorContext->projectManager->GetProjectRoot(), BuildAutomationStateSnapshot().projectGeneration,
+							rendererEfficiencyValidation.Status().at("operationId").get<std::string>(), error)) throw std::runtime_error(error);
+						// Force the normal importer to publish this owned source, even if
+						// a staged placeholder previously had a matching timestamp.
+						editorContext->assetDatabase->ImportAssetWithProgress(source, true);
+					}
+				}
+				catch(const std::exception& exception)
+				{
+					std::string ignored;
+					rendererEfficiencyValidation.Stop(rendererEfficiencyValidation.Status().at("operationId").get<std::string>(), ignored);
+					return BuildError(requestId, ErrorCategory::Unavailable, exception.what());
+				}
+			}
+			return BuildSuccess(requestId, "Opened owned validation session; stage GPU acceptance remains unavailable until measured.", rendererEfficiencyValidation.Status());
+		}
+		if(!arguments.contains("operationId") || !arguments["operationId"].is_string())
+			return BuildError(requestId, ErrorCategory::Validation, "operationId is required.");
+		const auto operationId = arguments["operationId"].get<std::string>();
+		if(!rendererEfficiencyValidation.HasOperation(operationId)) return BuildError(requestId, ErrorCategory::MissingTarget, "Validation operation was not found.");
+		if(action == 5)
+		{
+			// Stop production even when recovery invalidates restoration. Reporting
+			// that failure must not leave an active session blocking future starts.
+			if(!rendererEfficiencyValidation.Stop(operationId, error)) return BuildError(requestId, ErrorCategory::MissingTarget, error);
+			rendererEfficiencyValidation.CancelPendingFixtureWorkAtProtectedFrame(TerraEngine::Scene::SceneMutationQueue::Instance());
+			renderer->ClearRendererEfficiencyFixtureIntent(operationId);
+			ScheduleRendererEfficiencyShaderRestoreAtProtectedFrame();
+			std::string sourceRestoreError;
+			const bool sourceRestored = RestoreRendererEfficiencySourcesAtProtectedFrame(sourceRestoreError);
+			RendererEfficiencyOptionsReceipt restore;
+			if(rendererEfficiencyValidation.PriorToken().valid)
+				restore = renderer->QueueRendererEfficiencyRestore(rendererEfficiencyValidation.PriorToken());
+			else restore.error = "Prior options token belongs to a retired renderer options session.";
+			auto data = rendererEfficiencyValidation.Status();
+			data["shaderRestorationStatus"] = rendererEfficiencyShaderWork && rendererEfficiencyShaderWork->restoreJob.valid() ? "Pending" : "NotRequired";
+			data["sourceRestorationStatus"] = sourceRestored ? "Restored" : "Unavailable";
+			data["sourceRestorationError"] = sourceRestoreError;
+			data["restorationStatus"] = restore.accepted ? "Queued" : "Unavailable";
+			data["restorationError"] = restore.error;
+			data["requestedGeneration"] = restore.accepted ? nlohmann::json(restore.requestedGeneration) : nlohmann::json(nullptr);
+			return BuildSuccess(requestId, restore.accepted ? "Stopped owned validation session and queued its prior options."
+				: "Stopped owned validation session; prior options restoration is unavailable.", std::move(data));
+		}
+		return BuildSuccess(requestId, "Read validation progress without advancing fixture steps.", rendererEfficiencyValidation.Status());
 	}
 
 	nlohmann::json EditorAutomationService::HandleRendererVirtualGeometryStats(const nlohmann::json& arguments, const std::string& requestId)

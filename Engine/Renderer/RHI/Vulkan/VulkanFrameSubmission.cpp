@@ -5,15 +5,188 @@
 
 #include "VulkanContextSource.h"
 
+// These receipt operations run only at the existing protected queue/fence
+// boundaries. Their clocks describe actual submissions, never CPU recording.
+void VulkanContext::Impl::ConfirmShadowWritesSubmitted(std::uint32_t frameIndex,
+	std::span<const VkCommandBuffer> commands)
+{
+	if (frameIndex >= shadowSubmitReceiptsByFrame.size()) return;
+	const bool hasNewCommands = std::any_of(commands.begin(), commands.end(), [&](auto command) {
+		const auto found = shadowCommandOwnership.find(command);
+		return found != shadowCommandOwnership.end() && found->second.frameIndex == frameIndex && found->second.submitSerial == 0U;
+	});
+	if (!hasNewCommands) return;
+	if (nextShadowSubmitSerial == 0U) return; // Exhausted receipts never recycle.
+	const auto receipt = nextShadowSubmitSerial++;
+	// Native work is already accepted. Preserve staging with no allocations before
+	// building CPU lists; even an allocation failure must retain its GPU lifetime.
+	for (auto command : commands)
+	{
+		const auto found = shadowCommandOwnership.find(command);
+		if (found != shadowCommandOwnership.end() && found->second.frameIndex == frameIndex && found->second.submitSerial == 0U)
+		{
+			found->second.submitSerial = receipt;
+			// Fixed storage preserves the actual command-to-submit join even when
+			// later diagnostic allocation fails after native work was accepted.
+			staticShadowAcceptedSubmissions[staticShadowAcceptedCursor++ % staticShadowAcceptedSubmissions.size()]
+				= {found->second.serial, receipt, frameIndex};
+			shadowValidationReadback.PreserveSubmittedCommand(found->second.serial, receipt);
+			lightingDepthEvidence.PreserveSubmittedCommand(found->second.serial, receipt);
+			// No allocation follows accepted queue work in this lifetime handoff.
+			staticShadowLifetime.PreserveSubmittedUse(found->second.serial, receipt);
+			for (auto& entry : staticShadowEntries)
+				if (entry->initializationCommand == found->second.serial) entry->layoutEstablished = true;
+		}
+	}
+	const auto invalidateLedger = [&]() {
+		shadowPublicationLedger.Reset(renderSessionGeneration);
+		staticShadowPublicationLedger.Reset(renderSessionGeneration);
+		shadowPhysicalTokenHints.clear(); shadowCacheEntries.clear();
+	};
+	try
+	{
+		std::vector<std::uint64_t> ordered;
+		std::vector<std::uint64_t> validationCommands;
+		std::vector<std::uint64_t> staticOrdered;
+		ordered.reserve(commands.size());
+		validationCommands.reserve(commands.size());
+		staticOrdered.reserve(commands.size());
+		for (auto command : commands)
+		{
+			const auto found = shadowCommandOwnership.find(command);
+			if (found != shadowCommandOwnership.end() && found->second.frameIndex == frameIndex && found->second.submitSerial == receipt)
+			{
+				validationCommands.push_back(found->second.serial);
+				if (shadowPublicationLedger.HasRecordedCandidate(found->second.serial)) ordered.push_back(found->second.serial);
+				if (staticShadowPublicationLedger.HasRecordedCandidate(found->second.serial)) staticOrdered.push_back(found->second.serial);
+			}
+		}
+		if (validationCommands.empty()) return; // Shadow-free primaries do not invent coverage.
+		// The command map remains a nonallocating completion fallback if this push
+		// fails. Normal resets retain its submitted entries until actual completion.
+		shadowSubmitReceiptsByFrame[frameIndex].push_back(receipt);
+		shadowValidationReadback.ConfirmSubmitted(validationCommands, receipt);
+		lightingDepthEvidence.ConfirmSubmitted(validationCommands, receipt);
+		if (!staticOrdered.empty() && !staticShadowPublicationLedger.ConfirmSubmissionBatch(staticOrdered, receipt, true))
+			staticShadowPublicationLedger.Reset(renderSessionGeneration);
+		if (!ordered.empty() && !shadowPublicationLedger.ConfirmSubmissionBatch(ordered, receipt, true))
+		{
+			invalidateLedger();
+			return;
+		}
+	}
+	catch (const std::bad_alloc&)
+	{
+		// GPU work was accepted, but missing CPU proof conservatively disables reuse.
+		invalidateLedger();
+	}
+}
+
+void VulkanContext::Impl::DiscardRecordedShadowWrites(std::uint32_t frameIndex) noexcept
+{
+	try
+	{
+		for (auto it = shadowCommandOwnership.begin(); it != shadowCommandOwnership.end();)
+		{
+			if (it->second.frameIndex == frameIndex && it->second.submitSerial == 0U)
+			{
+				// Release nonallocating depth reservations before shadow telemetry
+				// cleanup can allocate and throw. An unsubmitted command owns no
+				// GPU work, so its exact fixture token may safely retry next frame.
+				lightingDepthEvidence.DiscardCommand(it->second.serial);
+				staticShadowLifetime.DiscardUnsubmitted(it->second.serial);
+				staticShadowDiscardedCommands[staticShadowDiscardCursor++ % staticShadowDiscardedCommands.size()] = it->second.serial;
+				for (auto& entry : staticShadowEntries) if (!entry->layoutEstablished
+					&& entry->initializationCommand == it->second.serial) {
+					entry->layouts.fill(VK_IMAGE_LAYOUT_UNDEFINED); entry->initializationCommand = 0;
+				}
+				staticShadowPublicationLedger.Discard(it->second.serial);
+				shadowPublicationLedger.Discard(it->second.serial);
+				shadowValidationReadback.DiscardCommand(it->second.serial);
+				it = shadowCommandOwnership.erase(it);
+			}
+			else ++it; // UI skips never revoke already accepted queue work.
+		}
+	}
+	catch (const std::bad_alloc&) { ResetShadowPublication(false); }
+}
+
+void VulkanContext::Impl::CompleteShadowWrites(std::uint32_t frameIndex) noexcept
+{
+	if (frameIndex >= shadowSubmitReceiptsByFrame.size()) return;
+	auto& receipts = shadowSubmitReceiptsByFrame[frameIndex];
+	std::erase_if(receipts, [&](auto receipt) {
+		staticShadowLifetime.CompleteSubmission(receipt);
+		staticShadowCompletedSubmissions[staticShadowCompletionCursor++ % staticShadowCompletedSubmissions.size()] = receipt;
+		try
+		{
+			shadowPublicationLedger.Complete(receipt, receipt);
+			staticShadowPublicationLedger.Complete(receipt, receipt);
+			shadowValidationReadback.CompleteSubmission(receipt, receipt);
+			lightingDepthEvidence.CompleteSubmission(receipt, receipt);
+			return true;
+		}
+		catch (const std::bad_alloc&) { return false; } // Retry on a later proven boundary.
+	});
+	std::erase_if(shadowCommandOwnership, [&](const auto& pair) {
+		if (pair.second.frameIndex != frameIndex || pair.second.submitSerial == 0U) return false;
+		staticShadowLifetime.CompleteSubmission(pair.second.submitSerial);
+		if (std::find(staticShadowCompletedSubmissions.begin(), staticShadowCompletedSubmissions.end(), pair.second.submitSerial)
+			== staticShadowCompletedSubmissions.end())
+			staticShadowCompletedSubmissions[staticShadowCompletionCursor++ % staticShadowCompletedSubmissions.size()] = pair.second.submitSerial;
+		try
+		{
+			// Covers accepted submits whose receipt-vector allocation failed. Repeating
+			// a completed receipt for several commands is intentionally idempotent.
+			shadowPublicationLedger.Complete(pair.second.submitSerial, pair.second.submitSerial);
+			staticShadowPublicationLedger.Complete(pair.second.submitSerial, pair.second.submitSerial);
+			shadowValidationReadback.CompleteSubmission(pair.second.submitSerial, pair.second.submitSerial);
+			lightingDepthEvidence.CompleteSubmission(pair.second.submitSerial, pair.second.submitSerial);
+			return true;
+		}
+		catch (const std::bad_alloc&) { return false; }
+	});
+	ReleaseCompletedStaticShadowEntries();
+}
+
+void VulkanContext::Impl::ResetShadowPublication(bool allocationReplaced) noexcept
+{
+	shadowPublicationLedger.Reset(renderSessionGeneration);
+	staticShadowPublicationLedger.Reset(renderSessionGeneration);
+	if (allocationReplaced) RetireStaticShadowEntries();
+	try { shadowValidationReadback.Reset(renderSessionGeneration, deviceLost); }
+	catch (const std::bad_alloc&) { /* Retain staging; completion/shutdown still owns its native lifetime. */ }
+	// Shadow-content invalidation cannot cancel unrelated depth work. Device loss
+	// is terminal and supplies the existing safe release proof for both owners.
+	if (deviceLost) lightingDepthEvidence.Reset(renderSessionGeneration, true);
+	shadowPhysicalTokenHints.clear();
+	shadowCacheEntries.clear();
+	if (deviceLost) shadowCommandOwnership.clear();
+	// Ordinary edits invalidate observations but recorded primaries may still be
+	// submitted by descriptor-mutation synchronization. Keep all command owners
+	// until actual submission/completion or explicit proof that they were dropped.
+	if (deviceLost) for (auto& receipts : shadowSubmitReceiptsByFrame) receipts.clear();
+	// Zero after exhaustion fails closed rather than recycling an allocation ID.
+	if (allocationReplaced && shadowAllocationGeneration != 0U) ++shadowAllocationGeneration;
+}
+
 // VulkanContext::EndFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::EndFrame() {
 	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
-	if (!impl->initialized || impl->skipFrame || impl->deviceLost) return;
+	// EndFrame may submit these slices. A later host write requires BeginFrame's
+	// next fence proof, never the fact that a mirror previously succeeded.
+	impl->lightingUploadFrameSlotSafe[impl->currentFrame] = false;
+	if (!impl->initialized || impl->skipFrame || impl->deviceLost)
+	{
+		impl->DiscardRecordedShadowWrites(impl->currentFrame);
+		return;
+	}
 
 	const auto endFrameStart = BackendClock::now();
 	// Submit all recorded camera command buffers together so the swapchain is
 	// presented once using the final camera's output.
 	if (impl->currentFrame >= impl->pendingPrimaryCommandBuffers.size()) {
+		impl->DiscardRecordedShadowWrites(impl->currentFrame);
 		return;
 	}
 
@@ -35,6 +208,7 @@ void VulkanContext::EndFrame() {
 		// some drivers. Drop this frame and rebuild the resized targets before
 		// the editor UI pass acquires the next swapchain image.
 		impl->DiscardRecordedHiZWrites(impl->currentFrame);
+		impl->DiscardRecordedShadowWrites(impl->currentFrame);
 		cmds.clear();
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
 			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
@@ -55,8 +229,38 @@ void VulkanContext::EndFrame() {
 			"Editor resize was processed before submitting stale scene/game command buffers.");
 		return;
 	}
+#if defined(TERRAENGINE_RENDERER_EFFICIENCY_VALIDATION)
+	for(const auto command : cmds)
+	{
+		const auto owner = impl->shadowCommandOwnership.find(command);
+		if(owner == impl->shadowCommandOwnership.end() || owner->second.validationAbortKey.empty()
+			|| owner->second.validationAbortKey == impl->lastShadowValidationAbortKey) continue;
+		// The commands are fully recorded but have not reached vkQueueSubmit.
+		// Drop the entire multi-view frame, preserving physical GPU contents while
+		// revoking every recorded cache candidate. No native failure is simulated.
+		impl->lastShadowValidationAbortKey = owner->second.validationAbortKey;
+		// Each dropped primary gets its own actual recording receipt. Attach before
+		// discard publishes Unavailable rows and releases their unsubmitted staging.
+		for (const auto dropped : cmds) {
+			const auto droppedOwner = impl->shadowCommandOwnership.find(dropped);
+			if (droppedOwner == impl->shadowCommandOwnership.end() || droppedOwner->second.validationAbortKey.empty()) continue;
+			TerraEngine::Renderer::RendererEfficiencyFixtureActionReceipt action;
+			action.injection = TerraEngine::Renderer::RendererEfficiencyFixtureInjection::RecordedSubmitAbort;
+			action.correlation = droppedOwner->second.validationAbortCorrelation;
+			action.frameSerial = droppedOwner->second.validationFrameSerial; action.commandSerial = droppedOwner->second.serial;
+			action.recorded = true; action.reason = "Actual fully recorded primary was dropped before vkQueueSubmit.";
+			impl->shadowValidationReadback.AttachFixtureAction(action.commandSerial, action);
+		}
+		impl->DiscardRecordedShadowWrites(impl->currentFrame);
+		impl->DiscardRecordedHiZWrites(impl->currentFrame);
+		cmds.clear();
+		impl->editorRenderSubmitted = false;
+		break;
+	}
+#endif
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (cmds.empty()) {
+		impl->DiscardRecordedShadowWrites(impl->currentFrame);
 		if (!impl->editorMode && impl->swapchainImageAcquired) {
 			// Standalone runtime acquires the swapchain image in BeginFrame.
 			// If render graph rejection or startup state leaves no recorded
@@ -80,6 +284,8 @@ void VulkanContext::EndFrame() {
 			const auto resetFenceStart = BackendClock::now();
 			const VkResult resetResult = vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
 			if (resetResult != VK_SUCCESS) {
+				impl->ResetLightingUploadMirrors();
+			impl->DiscardRecordedShadowWrites(impl->currentFrame);
 				if (impl->MarkDeviceLost(resetResult, "empty runtime frame fence reset")) return;
 				TERRAENGINE_LOG(LogLevel::Error, "Empty runtime frame fence reset failed: " << resetResult);
 				impl->RecreateSwapChain();
@@ -98,6 +304,8 @@ void VulkanContext::EndFrame() {
 				ElapsedMilliseconds(submitStart),
 				0.25f);
 			if (submitResult != VK_SUCCESS) {
+				impl->ResetLightingUploadMirrors();
+			impl->DiscardRecordedShadowWrites(impl->currentFrame);
 				if (impl->MarkDeviceLost(submitResult, "empty runtime queue submit")) {
 					return;
 				}
@@ -196,6 +404,10 @@ void VulkanContext::EndFrame() {
 			ElapsedMilliseconds(submitStart),
 			0.25f);
 		if (submitResult != VK_SUCCESS) {
+			// A failed protected submission revokes host-mirror reuse proof. Keep
+			// the last successful bytes for diagnostics and retry a full slice.
+			impl->ResetLightingUploadMirrors();
+			impl->DiscardRecordedShadowWrites(impl->currentFrame);
 			if (impl->MarkDeviceLost(submitResult, "editor render queue submit")) {
 				cmds.clear();
 				return;
@@ -234,6 +446,7 @@ void VulkanContext::EndFrame() {
 			impl->animationComputeSubmissionMarkedForCurrentFrame = true;
 		}
 		impl->ConfirmHiZWritesSubmitted(impl->currentFrame);
+		impl->ConfirmShadowWritesSubmitted(impl->currentFrame, cmds);
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
 			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 1u;
 		}
@@ -241,6 +454,8 @@ void VulkanContext::EndFrame() {
 		const auto resetFenceStart = BackendClock::now();
 		const VkResult resetResult = vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
 		if (resetResult != VK_SUCCESS) {
+			impl->ResetLightingUploadMirrors();
+			impl->DiscardRecordedShadowWrites(impl->currentFrame);
 			if (impl->MarkDeviceLost(resetResult, "runtime frame fence reset")) return;
 			TERRAENGINE_LOG(LogLevel::Error, "Runtime frame fence reset failed: " << resetResult);
 			impl->RecreateSwapChain();
@@ -259,6 +474,8 @@ void VulkanContext::EndFrame() {
 			0.25f);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (submitResult != VK_SUCCESS) {
+			impl->ResetLightingUploadMirrors();
+			impl->DiscardRecordedShadowWrites(impl->currentFrame);
 			if (impl->MarkDeviceLost(submitResult, "runtime render queue submit")) {
 				return;
 			}
@@ -281,6 +498,7 @@ void VulkanContext::EndFrame() {
 			impl->animationComputeSubmissionMarkedForCurrentFrame = true;
 		}
 		impl->ConfirmHiZWritesSubmitted(impl->currentFrame);
+		impl->ConfirmShadowWritesSubmitted(impl->currentFrame, cmds);
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
 			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 1u;
 		}
@@ -355,4 +573,3 @@ void VulkanContext::EndFrame() {
 		impl->latestBackendFrameBreakdown = impl->pendingBackendFrameBreakdown;
 	}
 }
-

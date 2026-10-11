@@ -117,6 +117,9 @@ namespace
 			ShaderCollection::StageBinding binding{};
 			binding.stage = request.stage;
 			binding.shaderId = shaderId;
+			binding.shader = payloads[index].second;
+			binding.publicationGeneration = shader->publicationGeneration;
+			if (binding.publicationGeneration == 0U) return nullptr;
 			collection->stages.push_back(binding);
 		}
 
@@ -172,18 +175,8 @@ namespace
 		collection->geometryPolicy = ShaderGeometryPolicy::EngineManaged;
 		collection->reflectionComplete = hasGeometryProvider
 			&& (!hasFragment || fragmentShader != nullptr);
-		std::uint64_t generation = 1469598103934665603ull;
-		for(const ShaderCollection::StageBinding& binding : collection->stages)
-		{
-			generation ^= static_cast<std::uint32_t>(binding.stage);
-			generation *= 1099511628211ull;
-			for(const std::uint8_t byte : binding.shaderId)
-			{
-				generation ^= byte;
-				generation *= 1099511628211ull;
-			}
-		}
-		collection->collectionGeneration = generation == 0u ? 1u : generation;
+		// FinalizeLoad assigns an actual accepted publication generation. UUID
+		// hashes cannot distinguish different stage payloads at the same identity.
 		if(!collection->reflectionComplete)
 		{
 			collection->geometryContractDiagnostic =
@@ -206,7 +199,7 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadShaderCollectionAsync
 	return RequestShaderCollection(stagePaths);
 }
 
-std::shared_future<TerraEngine::UUID> ResourceManager::RequestShaderCollection(const std::vector<ShaderStagePath>& stagePaths)
+std::shared_future<TerraEngine::UUID> ResourceManager::RequestShaderCollection(const std::vector<ShaderStagePath>& stagePaths, bool reload)
 {
 	std::vector<StageRequest> stages;
 	RequestPtr parent;
@@ -236,7 +229,7 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestShaderCollection(c
 			std::unique_lock lock(shaderCollectionCache.mutex);
 			if (const auto found = shaderCollectionCache.pathToId.find(key); found != shaderCollectionCache.pathToId.end()) {
 				id = found->second;
-				if (shaderCollectionCache.resources.contains(id)) return MakeReadyFuture(id);
+				if (!reload && shaderCollectionCache.resources.contains(id)) return MakeReadyFuture(id);
 			} else {
 				id = TerraEngine::GenerateUUID();
 				shaderCollectionCache.pathToId[key] = id;
@@ -247,7 +240,7 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestShaderCollection(c
 		const auto mapKey = std::to_string(static_cast<std::uint32_t>(CacheKind(shaderCollectionCache))) + ":" + key;
 		const auto prior = m_Requests.find(mapKey);
 		const auto previous = prior == m_Requests.end() ? RequestPtr{} : prior->second;
-		parent = AdmitRequestLocked(CacheKind(shaderCollectionCache), key, id, false, true, {}, deliveries);
+		parent = AdmitRequestLocked(CacheKind(shaderCollectionCache), key, id, reload, true, {}, deliveries);
 		if (!parent) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
 		admitted = parent != previous;
 		if (admitted) {
@@ -330,4 +323,20 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestShaderCollection(c
 		if (admitted) AbortRequestSetup(parent);
 		return parent ? parent->future : MakeReadyFuture(TerraEngine::EMPTY_UUID);
 	}
+}
+
+std::shared_ptr<const ShaderCollection> ResourceManager::AcquireShaderCollectionSnapshot(const TerraEngine::UUID& id) const
+{
+	// The collection retains the very stage owners whose reflection was checked.
+	// Holding its shared owner spans cache replacement without a second lookup.
+	std::shared_lock lock(shaderCollectionCache.mutex);
+	const auto found = shaderCollectionCache.resources.find(id);
+	return found == shaderCollectionCache.resources.end() ? nullptr : found->second;
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::ReloadShaderCollectionAsync(const std::vector<ShaderStagePath>& stagePaths)
+{
+	// Reuse dependency continuations without blocking a worker. Their leases
+	// retain the exact accepted payloads used for both reflection and modules.
+	return RequestShaderCollection(stagePaths, true);
 }

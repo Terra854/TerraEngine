@@ -17,6 +17,33 @@ namespace {
 
 	void RegisterResourceStreamingResidencyIntegrationTests(TestRegistry& registry)
 	{
+		registry.Add("Resource.Streaming.Residency.OwnedAnimatorNeedsPersistUntilRelease", [](TestContext& context) {
+			ResourceManager& resources = ResourceManager::Instance();
+			const auto asset = GenerateUUID(), firstOwner = GenerateUUID(), secondOwner = GenerateUUID();
+			resources.RegisterStreamableAsset(asset, AssetType::Skeleton, "Tests/Fixtures/owned-residency.teskeleton");
+			resources.MarkStreamingNeed(asset, AssetType::Skeleton, Resource::StreamingNeedType::RuntimeExplicit, 1, "active animator dependency", 100, firstOwner);
+			resources.MarkStreamingNeed(asset, AssetType::Skeleton, Resource::StreamingNeedType::RuntimeExplicit, 1, "active animator dependency", 100, secondOwner);
+			resources.MarkStreamingNeed(asset, AssetType::Skeleton, Resource::StreamingNeedType::RuntimeExplicit, 1, "transient explicit request");
+			const auto published = resources.GetStreamableAsset(asset);
+			context.Expect(published && published->needSources.size() == 3, "Native publication must retain two animator owners and one transient request.");
+			// Apply the existing pure expiry calculation to actual native records.
+			// No sleep or process-wide test clock is needed to prove their lifetime.
+			const double future = published->lastNeededSeconds + 86400.0;
+			const auto retained = Resource::MergeStreamingNeeds(published->needSources, future);
+			context.Expect(retained.size() == 2 && retained[0].objectId != EMPTY_UUID && retained[1].objectId != EMPTY_UUID,
+				"Owned animator needs must survive transient expiry without periodic publication spam.");
+			context.Expect(resources.ReleaseStreamingNeedsForObject(firstOwner, Resource::StreamingNeedType::RuntimeExplicit) == 1,
+				"Explicit removal must release only the first animator owner.");
+			const auto shared = resources.GetStreamableAsset(asset);
+			const auto remaining = Resource::MergeStreamingNeeds(shared->needSources, future);
+			context.Expect(remaining.size() == 1 && remaining[0].objectId == secondOwner,
+				"One owner removal must not unprotect another animator sharing the asset.");
+			context.Expect(resources.ReleaseStreamingNeedsForObject(secondOwner, Resource::StreamingNeedType::RuntimeExplicit) == 1,
+				"Removing the final owner must release its persistent need.");
+			const auto released = resources.GetStreamableAsset(asset);
+			context.Expect(Resource::MergeStreamingNeeds(released->needSources, future).empty(),
+				"The remaining transient request must still expire normally.");
+		});
 		registry.Add("Resource.Streaming.Residency.RetentionDefersCleanup", [](TestContext& context) {
 			Resource::ResidencyPolicy residency = Resource::MakeDefaultResidencyPolicy();
 			residency.cpu.idleSecondsThreshold = 10.0;

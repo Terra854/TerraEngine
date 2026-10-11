@@ -204,6 +204,72 @@ namespace TerraEngine::Tests {
 
 	void RegisterResourcePublicationLifecycleTests(TestRegistry& registry)
 	{
+		registry.Add("Renderer.Efficiency.Resource.OwnedDemandUsesCookedRegistration", [](TestContext& context) {
+			Correctness::DisposableFixturePath fixture;
+			PublicationPoolSession session;
+			auto& resources = ResourceManager::Instance();
+			const auto identity = TerraEngine::GenerateUUID();
+			const auto cooked = fixture.Child("owner.tmat");
+			WriteTinyMaterial(cooked, 0.37F);
+			resources.RegisterAssetPath(identity, cooked, AssetType::Material);
+			// Package registration also associates the child with its authored source.
+			// This must not replace the already registered native load path.
+			resources.RegisterAssetPath(identity, fixture.Child("package.gltf"), AssetType::Material);
+			const auto before = resources.GetRendererResourcePublicationGeneration();
+			context.Expect(!resources.AcquireMaterialSnapshot(identity), "Owned acquisition must not synchronously load an unprepared material.");
+			context.Expect(resources.GetRendererResourcePublicationGeneration() == before, "A missing-owner probe must not publish or advance renderer clocks.");
+			const auto demand = resources.RequestStreamableLoad(identity, AssetType::Material, Resource::StreamingNeedType::Visible, 1U, "missing-render-owner", TerraEngine::GenerateUUID());
+			context.Expect(demand.wait_for(Correctness::kDefaultTimeout) == std::future_status::ready, "Typed asynchronous demand must settle within the bounded fixture deadline.");
+			context.Expect(demand.get() == identity, "Typed demand must load the cooked child rather than reject its authored source extension.");
+			const auto owner = resources.AcquireMaterialSnapshot(identity);
+			context.Expect(owner && owner->publicationGeneration > 0U && owner->header.baseColorFactor[0] == 0.37F, "The acquired owner must contain the actual successfully published cooked payload.");
+		});
+
+		registry.Add("Renderer.Efficiency.Resource.OwnedSiblingRetainsReloadAndRejectsChangedPath", [](TestContext& context) {
+			Correctness::DisposableFixturePath fixture;
+			PublicationPoolSession session;
+			auto& resources = ResourceManager::Instance();
+			const auto sibling = TerraEngine::GenerateUUID(), canonical = TerraEngine::GenerateUUID();
+			const auto path = fixture.Child("shared.tmat");
+			WriteTinyMaterial(path, 0.21F);
+			resources.RegisterAssetPath(sibling, path, AssetType::Material);
+			resources.RegisterAssetPath(canonical, path, AssetType::Material);
+			context.Expect(resources.LoadMaterial(path) == canonical, "The real cooked loader must accept the current canonical registration.");
+			const auto retained = resources.AcquireMaterialSnapshot(canonical);
+			context.Expect(retained && resources.AcquireMaterialSnapshot(sibling) == retained, "Only an accepted real payload may back the sibling owner.");
+			// A later legitimate sibling registration must not erase accepted proof.
+			const auto third = TerraEngine::GenerateUUID();
+			resources.RegisterAssetPath(third, path, AssetType::Material);
+			context.Expect(resources.AcquireMaterialSnapshot(third) == retained, "Adding a child for the same accepted native path preserves its actual backing owner.");
+			// Restore the canonical reverse registration before the actual reload.
+			resources.RegisterAssetPath(canonical, path, AssetType::Material);
+			WriteTinyMaterial(path, 0.72F);
+			const auto reload = resources.ReloadMaterialAsync(canonical);
+			context.Expect(reload.wait_for(Correctness::kDefaultTimeout) == std::future_status::ready && reload.get() == canonical, "The real async reload must publish its new material owner.");
+			const auto fresh = resources.AcquireMaterialSnapshot(sibling);
+			context.Expect(fresh && fresh != retained && fresh->publicationGeneration > retained->publicationGeneration
+				&& fresh->header.baseColorFactor[0] == 0.72F && retained->header.baseColorFactor[0] == 0.21F, "Aliased acquisition follows actual reload while retained bytes and generation remain immutable.");
+			resources.RegisterAssetPath(sibling, fixture.Child("different.tmat"), AssetType::Material);
+			context.Expect(!resources.AcquireMaterialSnapshot(sibling), "Changed sibling registration must immediately reject the old accepted path.");
+			resources.RegisterAssetPath(canonical, fixture.Child("canonical-different.tmat"), AssetType::Material);
+			context.Expect(!resources.AcquireMaterialSnapshot(third) && !resources.AcquireMaterialSnapshot(canonical), "Changed canonical registration must not expose retained old bytes through any alias.");
+			const auto otherPath = fixture.Child("canonical-different.tmat");
+			WriteTinyMaterial(otherPath, 0.91F);
+			const auto otherLoad = resources.RequestStreamableLoad(canonical, AssetType::Material, Resource::StreamingNeedType::Visible, 2U, "new-native-owner");
+			context.Expect(otherLoad.wait_for(Correctness::kDefaultTimeout) == std::future_status::ready && otherLoad.get() == canonical, "The other native path must actually publish under the same durable identity.");
+			const auto otherOwner = resources.AcquireMaterialSnapshot(canonical);
+			context.Expect(otherOwner && otherOwner->header.baseColorFactor[0] == 0.91F, "Changed registration demand must not return the previous path's cached material.");
+			resources.RegisterAssetPath(canonical, path, AssetType::Material);
+			context.Expect(!resources.AcquireMaterialSnapshot(canonical) && !resources.AcquireMaterialSnapshot(third), "A-to-B publication then A registration must not resurrect B bytes through A's old accepted UUID association.");
+			const auto restoredLoad = resources.RequestStreamableLoad(canonical, AssetType::Material, Resource::StreamingNeedType::Visible, 3U, "restored-native-owner");
+			context.Expect(restoredLoad.wait_for(Correctness::kDefaultTimeout) == std::future_status::ready && restoredLoad.get() == canonical, "A new typed demand must actually republish the restored native path.");
+			const auto restored = resources.AcquireMaterialSnapshot(third);
+			context.Expect(restored && restored->header.baseColorFactor[0] == 0.72F && restored->publicationGeneration > otherOwner->publicationGeneration
+				&& otherOwner->header.baseColorFactor[0] == 0.91F && retained->header.baseColorFactor[0] == 0.21F, "Restored aliases follow a new actual A publication while old A and B leases retain their exact bytes.");
+			resources.ClearCaches();
+			context.Expect(!resources.AcquireMaterialSnapshot(third) && retained->header.baseColorFactor[0] == 0.21F, "Clear removes association while a copied shared owner remains alive.");
+		});
+
 		registry.Add("Engine.ResourceAsyncLifecycle.Publication.ReloadAfterClearCannotResurrect", [](TestContext& context) {
 			Correctness::DisposableFixturePath fixture;
 			PublicationPoolSession session;

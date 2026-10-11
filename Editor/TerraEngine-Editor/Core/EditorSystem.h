@@ -6,10 +6,15 @@
 
 #include "Core/SystemBase.h"
 #include "EditorContext.h"
+#include "Tests/Support/RendererEfficiency/Editor/RendererEfficiencyDeviceRecreation.h"
 #include <filesystem>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <mutex>
+#include <string>
+
+class VulkanContext;
 
 class ProjectHubSubsystem;
 class MainEditorSubsystem;
@@ -45,8 +50,17 @@ public:
 	void LoadWorkspaceLayout();
 
 	void Draw();
+	bool QueueRendererEfficiencyDeviceRecreation(const RendererEfficiencyDeviceRecreationRequest& request, std::string& reason);
+	RendererEfficiencyDeviceRecreationReceipt GetRendererEfficiencyDeviceRecreationReceipt() const;
 
 private:
+	void ProcessRendererEfficiencyDeviceRecreation();
+	void InitializeImGuiVulkanBackend(VulkanContext& vulkan);
+	mutable std::mutex rendererEfficiencyDeviceRecreationMutex;
+	std::optional<RendererEfficiencyDeviceRecreationRequest> pendingRendererEfficiencyDeviceRecreation;
+	RendererEfficiencyDeviceRecreationReceipt rendererEfficiencyDeviceRecreationReceipt;
+	// After teardown begins, a failed rebind must suppress every old-handle draw.
+	bool rendererEfficiencyBackendUnavailable = false;
 	EditorContext context;
 	std::shared_ptr<ProjectHubSubsystem> projectHub;
 	std::shared_ptr<MainEditorSubsystem> mainEditor;

@@ -57,7 +57,14 @@ try {
 	[Environment]::SetEnvironmentVariable('TERRAENGINE_TEST_EXCLUDE_FILTER', $sliceOldExclude)
 }
 $sliceOutput = [IO.File]::ReadAllText((Join-Path $sliceLogRoot 'stdout.log'))
-$sliceSummary = [regex]::Match($sliceOutput, '(?m)^(\d+) selected tests[^\r\n]*')
+# A background logger can emit terminal color controls between the count and
+# its following whitespace. Normalize only the parsing/display copy; preserve
+# raw watchdog bytes so this does not hide diagnostics or weaken the case floor.
+$sliceOutput = [regex]::Replace($sliceOutput, '\x1B\[[0-?]*[ -/]*[@-~]', '')
+# Worker logging can finish immediately before the harness summary on the same
+# line. Match the exact count phrase anywhere, still requiring a numeric token
+# boundary and the unchanged case floor; preserve all original log bytes.
+$sliceSummary = [regex]::Match($sliceOutput, '(?m)(?<![0-9A-Za-z])(\d+) selected tests\b[^\r\n]*')
 $sliceOutput -split '\r?\n' | Where-Object { $_ -match '^\[(PASS|FAIL|ERROR)\]' } | Write-Output
 if ($sliceExit -ne 0) {
 	Write-Error "Native filter failed with exit $sliceExit; evidence: $sliceLogRoot" -ErrorAction Continue

@@ -27,6 +27,8 @@
 #include "Renderer/VirtualGeometry/Capability/VirtualGeometryCapability.h"
 #include "Renderer/VirtualGeometry/Geometry/VirtualGeometryRepresentations.h"
 #include "Utilities/UUID.h"
+#include "Renderer/LightingDepthEvidence.h"
+#include "Renderer/ShadowWorkPlan.h"
 
 namespace TerraEngine::Animation {
 	struct AnimationAuthorityRow;
@@ -2485,6 +2487,440 @@ inline constexpr std::uint32_t kMaxShadowResourceSlots = 32u;
 inline constexpr std::uint32_t kGpuLightAnalysisFlagVisible = 1u << 0;
 inline constexpr std::uint32_t kGpuLightAnalysisFlagDirectional = 1u << 1;
 
+namespace TerraEngine::Renderer
+{
+	// Transient comparison modes travel as CPU values; none changes a GPU ABI or
+	// writes the author's project settings. Each two-state enum has explicit names.
+	enum class RendererEfficiencyShadowReuse : std::uint8_t { Enabled, AlwaysRefresh };
+	enum class RendererEfficiencyLightingUploads : std::uint8_t { Dirty, Full };
+	enum class RendererEfficiencyLightingDepth : std::uint8_t { Cooperative, CompleteScan };
+	enum class RendererEfficiencyShadowSubmission : std::uint8_t { Grouped, Singleton };
+	enum class RendererEfficiencyPreparation : std::uint8_t { Concurrent, Serial };
+	enum class RendererEfficiencyEvidenceStatus : std::uint8_t { Pending, Valid, Unavailable };
+	inline constexpr std::uint64_t kRendererEfficiencyDefaultStaticBudgetBytes = 64ULL * 1024ULL * 1024ULL;
+	inline constexpr std::uint64_t kRendererEfficiencyMaximumStaticBudgetBytes = 1024ULL * 1024ULL * 1024ULL;
+
+	struct RendererEfficiencyOptions
+	{
+		RendererEfficiencyShadowReuse shadowReuse = RendererEfficiencyShadowReuse::Enabled;
+		RendererEfficiencyLightingUploads lightingUploads = RendererEfficiencyLightingUploads::Dirty;
+		RendererEfficiencyLightingDepth lightingDepth = RendererEfficiencyLightingDepth::Cooperative;
+		RendererEfficiencyShadowSubmission shadowSubmission = RendererEfficiencyShadowSubmission::Grouped;
+		std::uint64_t staticShadowCacheBudgetBytes = kRendererEfficiencyDefaultStaticBudgetBytes;
+		RendererEfficiencyPreparation validationPreparation = RendererEfficiencyPreparation::Concurrent;
+		bool operator==(const RendererEfficiencyOptions&) const = default;
+	};
+
+	// Tokens restore a copied value only in the renderer session that issued it.
+	struct RendererEfficiencyOptionsToken
+	{
+		std::uint64_t optionsSessionGeneration = 0U;
+		RendererEfficiencyOptions options{};
+		bool valid = false;
+	};
+	struct RendererEfficiencyOptionsReceipt
+	{
+		bool accepted = false;
+		std::uint64_t requestedGeneration = 0U;
+		RendererEfficiencyOptionsToken priorToken{};
+		std::string error;
+	};
+	struct RendererEfficiencyOptionsSnapshot
+	{
+		RendererEfficiencyOptions options{};
+		std::uint64_t settingsGeneration = 0U;
+		// This epoch survives backend instance replacement and qualifies restore
+		// tokens even when a new Vulkan instance restarts its own session counter.
+		std::uint64_t optionsSessionGeneration = 1U;
+		std::uint64_t rendererSessionGeneration = 0U;
+	};
+	struct RendererEfficiencyStageTiming
+	{
+		RendererEfficiencyEvidenceStatus status = RendererEfficiencyEvidenceStatus::Unavailable;
+		std::optional<double> durationMilliseconds;
+		std::string unavailableReason = "No completion-qualified stage sample has been published.";
+	};
+	// Fixture identity is captured with the frame and returned only with actual
+	// completed GPU observations. Polling cannot advance these immutable values.
+	struct RendererEfficiencyFixtureCorrelation
+	{
+		std::string operationId, fixtureStepId;
+		std::uint64_t stepFrame = 0U, mutationGeneration = 0U;
+		std::uint64_t settingsGeneration = 0U, rendererSessionGeneration = 0U;
+		bool operator==(const RendererEfficiencyFixtureCorrelation&) const = default;
+	};
+	enum class RendererEfficiencyFixtureInjection : std::uint8_t { None, RecordedSubmitAbort, IncompletePointFaces, ShadowResourceRecreation };
+	// Validation action receipts come from actual native ownership transitions.
+	// An intended fault alone cannot prove that recording or recreation occurred.
+	struct RendererEfficiencyFixtureActionReceipt
+	{
+		RendererEfficiencyFixtureInjection injection = RendererEfficiencyFixtureInjection::None;
+		RendererEfficiencyFixtureCorrelation correlation{};
+		std::uint64_t frameSerial = 0, commandSerial = 0, submitSerial = 0, completionSerial = 0;
+		std::uint64_t oldAllocationGeneration = 0, newAllocationGeneration = 0;
+		std::uint32_t requiredFaceMask = 0, recordedFaceMask = 0;
+		bool recorded = false, submitted = false, completed = false, priorOwnerRejected = false;
+		std::string reason;
+	};
+	struct RendererEfficiencyFixtureDetailRange
+	{
+		std::uint32_t lodIndex = 0, meshletOffset = 0, meshletCount = 0;
+		bool operator==(const RendererEfficiencyFixtureDetailRange&) const = default;
+	};
+	struct RendererEfficiencyFixtureTargetProof
+	{
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID, meshId = TerraEngine::EMPTY_UUID;
+		std::uint64_t lifetimeGeneration = 0, resourceGeneration = 0;
+		std::uint32_t meshletCapacity = 0;
+		bool ownerGeometrySupported = false;
+		std::vector<RendererEfficiencyFixtureDetailRange> detailLevels;
+		// Actual protected authoring publication, used to correlate typed SetStatic
+		// steps with the first immutable renderer capture after the scene flush.
+		bool isStatic = false;
+		std::uint64_t metadataGeneration = 0, spatialRevision = 0;
+	};
+	enum class RendererEfficiencyFixtureSelectionKind : std::uint8_t { DetailLevel, MeshletRange };
+	struct RendererEfficiencyFixtureShadowSelection
+	{
+		RendererEfficiencyFixtureSelectionKind kind = RendererEfficiencyFixtureSelectionKind::DetailLevel;
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID, meshId = TerraEngine::EMPTY_UUID;
+		std::uint64_t lifetimeGeneration = 0, resourceGeneration = 0;
+		std::uint32_t lodIndex = 0, meshletOffset = 0, meshletCount = 0;
+		bool operator==(const RendererEfficiencyFixtureShadowSelection&) const = default;
+	};
+	// Validation controls identify real prepared outputs. A permutation changes
+	// their actual recording order; per-view deltas re-express canonical positions.
+	struct RendererEfficiencyFixtureViewOrderEntry
+	{
+		RenderViewType viewType = RenderViewType::Scene;
+		std::uint32_t outputId = 0;
+		bool operator==(const RendererEfficiencyFixtureViewOrderEntry&) const = default;
+	};
+	struct RendererEfficiencyFixtureViewOrigin
+	{
+		RenderViewType viewType = RenderViewType::Scene;
+		std::uint32_t outputId = 0;
+		TerraEngine::Scene::WorldDelta delta{};
+		bool operator==(const RendererEfficiencyFixtureViewOrigin&) const = default;
+	};
+	// Sealed fixture cameras use canonical positions. Their native extent is
+	// independent of editor panel sizes, and rebasing changes only coordinates.
+	struct RendererEfficiencyFixtureCamera
+	{
+		RenderViewType viewType = RenderViewType::Scene;
+		std::uint32_t outputId = 0;
+		TerraEngine::Scene::WorldPosition cameraPosition{}, lookAtTarget{}, referenceOrigin{};
+		glm::dvec3 up{0.0, 1.0, 0.0};
+		double verticalFovDegrees = 60.0, nearPlane = 0.1, farPlane = 250.0;
+		glm::uvec2 nativeExtent{1920, 1080};
+		bool operator==(const RendererEfficiencyFixtureCamera&) const = default;
+	};
+	// View-specific allowlists change light caster membership in an owned fixture,
+	// while the ordinary camera draw list still contains the complete scene.
+	struct RendererEfficiencyFixtureCasterSelection
+	{
+		RenderViewType viewType = RenderViewType::Scene;
+		std::uint32_t outputId = 0;
+		std::vector<TerraEngine::UUID> objectIds;
+		bool operator==(const RendererEfficiencyFixtureCasterSelection&) const = default;
+	};
+	// Validation-only order and legal budgets operate on copied light candidates.
+	// The controller queues these alongside existing protected fixture controls.
+	struct RendererEfficiencyFixtureLightingControls
+	{
+		std::vector<TerraEngine::UUID> candidateOrder;
+		std::uint32_t maxUploadedLights = 1024, maxDynamicLights = 1024, maxShadowLights = 0;
+		// Validation selects a real slice for one view; other views receive disjoint
+		// free slices. This exercises ownership without fabricating slot receipts.
+		std::optional<std::uint32_t> snapshotSlot;
+		// Baseline capture can target a real frame slot. First-change capture clears
+		// this filter so it observes the earliest rendered changed frame.
+		std::optional<std::uint32_t> frameSlot;
+		RenderViewType snapshotViewType = RenderViewType::Scene;
+		std::uint32_t snapshotOutputId = 1;
+		bool operator==(const RendererEfficiencyFixtureLightingControls&) const = default;
+	};
+	// Owned controls exercise actual splitting and the upload seam. Zero keeps
+	// the queried device limit; ordinary rendering leaves this control absent.
+	struct RendererEfficiencyFixtureShadowBatchControls
+	{
+		std::uint32_t maxInstancesPerGroup = 0, maxTaskGroupsX = 0;
+		bool failInstanceUpload = false;
+		bool operator==(const RendererEfficiencyFixtureShadowBatchControls&) const = default;
+	};
+	// Disposable validation sessions can reject actual admission at supported
+	// seams. These controls never fabricate transfer support or completion.
+	struct RendererEfficiencyFixtureStaticShadowControls
+	{
+		bool forceTransferUnavailable = false, failAllocation = false;
+		bool operator==(const RendererEfficiencyFixtureStaticShadowControls&) const = default;
+	};
+	struct RendererEfficiencyFixtureIntent
+	{
+		RendererEfficiencyFixtureCorrelation correlation{};
+		bool holdFixedTick = true;
+		std::int64_t sampleTick = 0;
+		RendererEfficiencyFixtureInjection injection = RendererEfficiencyFixtureInjection::None;
+		std::optional<TerraEngine::Scene::WorldDelta> referenceOriginDelta;
+		std::optional<RendererEfficiencyFixtureShadowSelection> shadowSelection;
+		std::vector<RendererEfficiencyFixtureViewOrderEntry> viewOrder;
+		std::vector<RendererEfficiencyFixtureViewOrigin> viewOrigins;
+		std::vector<RendererEfficiencyFixtureCamera> cameras;
+		std::vector<RendererEfficiencyFixtureCasterSelection> casterSelections;
+		std::optional<RendererEfficiencyFixtureLightingControls> lightingControls;
+		// Captured beside the other typed controls; workers prepare isolated input
+		// bytes without changing the real scene depth or live component storage.
+		std::optional<RendererEfficiencyFixtureDepthControls> depthControls;
+		std::optional<RendererEfficiencyFixtureShadowBatchControls> shadowBatchControls;
+		std::optional<RendererEfficiencyFixtureStaticShadowControls> staticShadowControls;
+		// Ingress acceptance only queues controls. A published protected capture
+		// acknowledges their exact generation after checking current target proof.
+		std::uint64_t controlGeneration = 0;
+		bool controlsApplied = false;
+		std::string controlReason;
+	};
+	struct RendererEfficiencyFixtureIntentReceipt
+	{
+		bool accepted = false;
+		std::string reason;
+		RendererEfficiencyFixtureCorrelation correlation{};
+		std::uint64_t controlGeneration = 0;
+	};
+
+	// Validate all fields before publishing any ingress state. Values are rejected
+	// rather than clamped so the caller's requested comparison remains precise.
+	inline bool ValidateRendererEfficiencyOptions(const RendererEfficiencyOptions& options, std::string* outReason = nullptr)
+	{
+		const char* reason = nullptr;
+		if (options.shadowReuse > RendererEfficiencyShadowReuse::AlwaysRefresh) reason = "Invalid shadowReuse mode.";
+		else if (options.lightingUploads > RendererEfficiencyLightingUploads::Full) reason = "Invalid lightingUploads mode.";
+		else if (options.lightingDepth > RendererEfficiencyLightingDepth::CompleteScan) reason = "Invalid lightingDepth mode.";
+		else if (options.shadowSubmission > RendererEfficiencyShadowSubmission::Singleton) reason = "Invalid shadowSubmission mode.";
+		else if (options.validationPreparation > RendererEfficiencyPreparation::Serial) reason = "Invalid validationPreparation mode.";
+		else if (options.staticShadowCacheBudgetBytes > kRendererEfficiencyMaximumStaticBudgetBytes) reason = "Static shadow budget exceeds 1 GiB.";
+		if (outReason) *outReason = reason ? reason : "";
+		return reason == nullptr;
+	}
+	class RendererEfficiencyOptionsQueue
+	{
+	public:
+		// RenderSystem supplies its ingress mutex; workers only enqueue copied
+		// values, while capture is called solely from the protected render boundary.
+		RendererEfficiencyOptionsReceipt Queue(const RendererEfficiencyOptions& options)
+		{
+			RendererEfficiencyOptionsReceipt receipt;
+			if (!ValidateRendererEfficiencyOptions(options, &receipt.error)) return receipt;
+			if (nextGeneration == std::numeric_limits<std::uint64_t>::max())
+			{
+				receipt.error = "Renderer efficiency request generation exhausted.";
+				return receipt;
+			}
+			// A second coalesced request restores the preceding queued value, rather
+			// than the older applied snapshot. Ingress never modifies the snapshot.
+			receipt.priorToken = {snapshot.optionsSessionGeneration,
+				pending ? pending->options : snapshot.options, true};
+			receipt.requestedGeneration = ++nextGeneration;
+			receipt.accepted = true;
+			pending = RendererEfficiencyOptionsSnapshot{options,
+				receipt.requestedGeneration, snapshot.optionsSessionGeneration,
+				snapshot.rendererSessionGeneration};
+			return receipt;
+		}
+		RendererEfficiencyOptionsReceipt Restore(const RendererEfficiencyOptionsToken& token)
+		{
+			if (!token.valid || token.optionsSessionGeneration != snapshot.optionsSessionGeneration)
+				return {false, 0U, {}, "Restore token belongs to an unavailable renderer session."};
+			return Queue(token.options);
+		}
+		RendererEfficiencyOptionsSnapshot Snapshot() const { return snapshot; }
+		bool CaptureAtProtectedBoundary()
+		{
+			if (!pending) return false;
+			snapshot = *pending;
+			pending.reset();
+			return true;
+		}
+		// The first backend binding preserves CPU-only ingress. Later bindings
+		// invalidate its session; pending GPU-qualified work cannot cross recovery.
+		void BindRendererSession(std::uint64_t session)
+		{
+			if (snapshot.rendererSessionGeneration != 0U && snapshot.rendererSessionGeneration != session)
+				InvalidateSession();
+			snapshot.rendererSessionGeneration = session;
+			if (pending) pending->rendererSessionGeneration = session;
+		}
+		// Recovery discards old-session ingress and restoration tokens. Applied
+		// options remain transient, but their generation cannot authorize old work.
+		void InvalidateSession()
+		{
+			pending.reset();
+			++snapshot.optionsSessionGeneration;
+			snapshot.rendererSessionGeneration = 0U;
+			snapshot.settingsGeneration = ++nextGeneration;
+		}
+		// An ended renderer lifetime cannot retain interrupted validation modes.
+		// Keep the token epoch monotonic while restoring the transient defaults.
+		void ResetForNewLifetime()
+		{
+			InvalidateSession();
+			snapshot.options = RendererEfficiencyOptions{};
+		}
+	private:
+		RendererEfficiencyOptionsSnapshot snapshot{};
+		std::optional<RendererEfficiencyOptionsSnapshot> pending;
+		std::uint64_t nextGeneration = 0U;
+	};
+
+	// Typed optional counters preserve the distinction between measured zero and
+	// missing native/GPU evidence. JSON conversion belongs to editor export only.
+	struct RendererEfficiencyCounter
+	{
+		RendererEfficiencyEvidenceStatus status = RendererEfficiencyEvidenceStatus::Unavailable;
+		std::optional<std::uint64_t> value;
+		std::string reason = "This stage has not published a measured counter.";
+	};
+	struct RendererEfficiencyArtifacts;
+	// Copied receipts describe real host writes to a physical region. Publishing
+	// frame evidence additionally requires the owning command's completion.
+	struct RendererEfficiencyLightingUploadEvidence
+	{
+		bool available = false, succeeded = false, coherent = false, analysisPurpose = false;
+		std::uint64_t allocationId = 0, allocationGeneration = 0;
+		std::uint64_t allocationSizeBytes = 0, regionOffsetBytes = 0, regionSizeBytes = 0;
+		std::uint64_t nonCoherentAtomSize = 1;
+		std::uint32_t frameSlot = 0, snapshotSlot = 0, activeRecordCount = 0;
+		std::uint64_t logicalWriteBytes = 0, logicalWriteRecords = 0, physicalFlushBytes = 0;
+		std::uint64_t mirrorCpuDurationNanoseconds = 0;
+		// Allocation-relative offset/byte-count pairs distinguish actual memcpy
+		// ranges from noncoherent atom flushes; coherent writes have no flushes.
+		std::vector<std::array<std::uint64_t, 2>> logicalWriteRanges, physicalFlushRanges;
+		// Validation copies actual selected UUIDs in GPU record order. UUIDs are
+		// not embedded into GPULight, so this preserves the unchanged shader ABI.
+		std::vector<TerraEngine::UUID> payloadLightIds;
+		std::string reason;
+	};
+	enum class RendererEfficiencyEvidenceKind : std::uint8_t { Shadow, Lighting, LightingDepth };
+	struct RendererEfficiencyShadowBatchMember
+	{
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::uint64_t lifetimeGeneration = 0, segmentId = 0;
+	};
+	struct RendererEfficiencyShadowBatchSource
+	{
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::uint64_t lifetimeGeneration = 0;
+		std::uint32_t sourceOrdinal = 0, ownerFirstMeshlet = 0, ownerMeshletCount = 0;
+		bool resolved = false, excludedByMaterial = false, cameraVisible = false;
+	};
+	struct RendererEfficiencyShadowBatchGroup
+	{
+		std::uint32_t firstInstance = 0, instanceCount = 0, taskGroupsX = 0;
+		std::uint64_t pipelineIdentity = 0, layoutIdentity = 0;
+		std::vector<RendererEfficiencyShadowBatchMember> members;
+	};
+	// Actual command receipts are copied only after vkCmdDrawMeshTasksIndirect.
+	// Completion still comes from the existing native submit/readback owner.
+	struct RendererEfficiencyShadowBatchExecution
+	{
+		bool available = false, recordedComplete = false, frameSlotSafe = false;
+		bool uploadAttempted = false, uploadSucceeded = false;
+		std::uint64_t allocationIdentity = 0, allocationGeneration = 0, backendGeneration = 0, instanceBytes = 0;
+		std::uint32_t frameSlot = 0, snapshotSlot = 0;
+		std::vector<RendererEfficiencyShadowBatchSource> sources;
+		std::vector<RendererEfficiencyShadowBatchGroup> groups;
+		std::vector<RendererEfficiencyShadowBatchMember> singletons;
+	};
+	// Copy receipts describe the exact static owner and full face coverage;
+	// drawn rows remain separate from cached rows in completed evidence.
+	struct RendererEfficiencyStaticShadowUse
+	{
+		std::uint64_t commandSerial = 0, submitSerial = 0;
+		std::uint32_t frameSlot = 0;
+	};
+	struct RendererEfficiencyStaticShadowAllocation
+	{
+		std::uint64_t sessionGeneration = 0, backendGeneration = 0;
+		std::uint64_t allocationIdentity = 0, allocationGeneration = 0, actualBytes = 0;
+		std::uint32_t depthFormat = 0, layers = 0;
+		std::array<std::uint32_t, 2> extent{};
+		bool retiring = false;
+		std::vector<RendererEfficiencyStaticShadowUse> uses;
+	};
+	struct RendererEfficiencyStaticShadowExecution
+	{
+		bool available = false, partitionComplete = false, copyOverlay = false;
+		bool staticReused = false, recordedComplete = false;
+		std::uint8_t requiredFaceMask = 0, staticRecordedFaceMask = 0, copiedFaceMask = 0;
+		ShadowViewKey staticView{};
+		std::uint64_t staticContentToken = 0, sourceCommandSerial = 0, sourceSubmitSerial = 0;
+		std::uint64_t allocationIdentity = 0, allocationGeneration = 0, backendGeneration = 0, actualBytes = 0;
+		std::uint64_t staticDraws = 0, dynamicDraws = 0;
+		std::vector<ShadowCasterStamp> staticMembership, dynamicMembership;
+		std::string fallbackReason;
+		// Physical inventory and bounded actual receipt history are copied only
+		// for validation; neither logical tokens nor this inventory prove a fence.
+		std::vector<RendererEfficiencyStaticShadowAllocation> allocations;
+		// Actual accepted queue mappings let later observations join recorded uses
+		// to fence receipts without assuming the two independent clocks coincide.
+		std::vector<RendererEfficiencyStaticShadowUse> acceptedSubmissions;
+		std::vector<std::uint64_t> completedSubmissions, discardedCommands;
+	};
+	struct RendererEfficiencyEvidence
+	{
+		std::uint32_t schemaVersion = 1U;
+		RendererEfficiencyShadowBatchExecution shadowBatchExecution;
+		RendererEfficiencyStaticShadowExecution staticShadowExecution;
+		RendererEfficiencyEvidenceStatus status = RendererEfficiencyEvidenceStatus::Unavailable;
+		std::string unavailableReason = "Renderer efficiency stages are not implemented.";
+		RendererEfficiencyEvidenceKind kind = RendererEfficiencyEvidenceKind::Shadow;
+		std::array<RendererEfficiencyLightingUploadEvidence, 2> lightingUploads{};
+		// A lighting row names a purpose even for an empty light set.
+		bool analysisPurpose = false;
+		RenderViewType viewType = RenderViewType::Game;
+		std::uint32_t viewId = 0U;
+		TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
+		std::uint32_t faceIndex = 0U;
+		glm::uvec2 resolution{0U};
+		std::uint64_t frameSerial = 0U;
+		std::uint64_t commandSerial = 0U;
+		std::uint64_t submitSerial = 0U;
+		std::uint64_t completionSerial = 0U;
+		RendererEfficiencyOptionsSnapshot effectiveOptions{};
+		RendererEfficiencyFixtureCorrelation fixtureCorrelation{};
+		// Captured on the real native command; a completed row acknowledges that
+		// these protected fixture controls reached GPU recording and submission.
+		std::uint64_t fixtureControlGeneration = 0;
+		std::vector<RendererEfficiencyFixtureActionReceipt> fixtureActions;
+		// Actual preparation execution counts, copied after scoped task settlement.
+		std::uint32_t preparationWorkerTasks = 0, preparationInlineTasks = 0;
+		bool preparationSettled = false;
+		// Validation-only immutable bytes and exact caster rows. Production frames
+		// leave this empty; recording cannot expose unfinished GPU staging memory.
+		std::shared_ptr<const RendererEfficiencyArtifacts> artifacts;
+		RendererEfficiencyCounter lightingLogicalWriteBytes, lightingWriteRecords, lightingWriteRanges;
+		RendererEfficiencyCounter lightingPhysicalFlushBytes, lightingFlushRanges;
+		RendererEfficiencyCounter eligibleCasterSegments, submittedCasterSegments, actualDrawSubmissions;
+		RendererEfficiencyCounter groups, singletons, staticRefreshes, dynamicRefreshes, shadowReuses;
+		RendererEfficiencyCounter staticReservedBytes, staticActiveBytes, staticRetiringBytes;
+		std::uint64_t staticCacheBudgetRequestedBytes = kRendererEfficiencyDefaultStaticBudgetBytes;
+		std::uint64_t staticCacheBudgetEffectiveBytes = kRendererEfficiencyDefaultStaticBudgetBytes;
+		bool staticCacheDraining = false;
+		RendererEfficiencyStageTiming lightingDepthTiming{};
+		std::string refreshReason, fallbackReason, contentOwner;
+	};
+	struct RendererEfficiencyEvidenceBatch
+	{
+		// Separate from submit/completion serials: several views and faces share
+		// one actual queue receipt and must arrive together under one cursor.
+		std::uint64_t batchSequence = 0U;
+		std::vector<RendererEfficiencyEvidence> rows;
+	};
+}
+
+namespace TerraEngine::Renderer {
+	struct ShadowCasterStamp;
+}
+
 // struct RenderSettings groups related state and operations so callers have one documented contract.
 struct RenderSettings
 {
@@ -2647,6 +3083,11 @@ struct RenderItemRecord
 	{
 		std::uint64_t stableInstanceId = 0U;
 		std::uint64_t poseGeneration = 0U;
+		// Semantic deformation identity remains CPU-side; it does not alter the
+		// shader instance ABI or include transient upload packet addresses.
+		std::uint64_t morphGeneration = 0U;
+		std::uint64_t deformationContentIdLow = 0U;
+		std::uint64_t deformationContentIdHigh = 0U;
 		std::uint64_t paletteGeneration = 0U;
 		std::uint64_t deformablePayloadGeneration = 0U;
 		std::uint64_t programGeneration = 0U;
@@ -2663,6 +3104,11 @@ struct RenderItemRecord
 		bool operator==(const PublishedAnimationGeneration&) const = default;
 	};
 	PublishedAnimationGeneration animation{};
+	// A recycled persistent ordinal must never inherit another object's shadow.
+	std::uint64_t objectLifetimeGeneration = 0U;
+	// One owned immutable input row is shared across views. Backend preparation
+	// merges light-local geometry selectors without reading live scene resources.
+	std::shared_ptr<const TerraEngine::Renderer::ShadowCasterStamp> shadowCasterInputs;
 	TerraEngine::Renderer::PublishedAnimationRenderBinding animationBinding{};
 	// Editor-only tint is submitted per draw so Scene View context modes can
 	// de-emphasize surrounding objects without changing runtime materials.
@@ -2759,6 +3205,7 @@ struct RenderViewCommandLane
 // light-view selectors. Vulkan resolves one local item at a time from the
 // sealed persistent/dynamic roots; no crowd-sized shadow command copy crosses
 // the protected backend boundary.
+struct ShadowPreparedInstanceInputs;
 struct ShadowDrawList
 {
 	TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
@@ -2768,6 +3215,9 @@ struct ShadowDrawList
 	std::vector<std::uint32_t> routeSelectors;
 	std::vector<glm::vec4> editorTints;
 	std::vector<RenderViewCommandLane> commandLanes;
+	// Each light owns a worker-sealed stream from immutable publication roots.
+	// The selection cache never owns these per-frame transforms or animation rows.
+	std::shared_ptr<const ShadowPreparedInstanceInputs> instanceInputs;
 
 	[[nodiscard]] bool HasParallelLengths() const noexcept
 	{
@@ -3043,6 +3493,19 @@ static_assert(offsetof(RenderInstanceRecord, geometrySelectors) == 128u);
 static_assert(offsetof(RenderInstanceRecord, virtualGeometrySelectors) == 144u);
 static_assert(offsetof(RenderInstanceRecord, virtualGeometryPayloadSelectors) == 160u);
 
+// Qualification makes a cached light selection insufficient to authorize old
+// transforms. Records are independent of the camera-visible command selection.
+struct ShadowPreparedInstanceInputs
+{
+	std::uint64_t frameSerial = 0, sessionGeneration = 0, topologyGeneration = 0;
+	TerraEngine::Renderer::RenderReferenceFrame referenceFrame{};
+	RenderViewType viewType = RenderViewType::Scene;
+	std::uint32_t outputId = 0;
+	TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
+	std::vector<RenderInstanceRecord> records;
+	bool complete = false;
+};
+
 // A group is executable only after its entire contiguous instance range was
 // initialized and generation-checked by the protected Vulkan boundary.
 struct SharedRenderGroup
@@ -3217,6 +3680,10 @@ struct FrameBudgetDiagnosticsSnapshot
 	std::uint32_t cameraVisibleShadowCasterCount = 0u;
 	std::uint32_t lightVisibleShadowCasterCount = 0u;
 	std::uint32_t shadowDrawSubmissionCount = 0u;
+	// These counters increment after actual native recording, independently from
+	// the planner's candidate count or the camera-visible caster population.
+	std::uint32_t shadowGroupedSubmissionCount = 0u, shadowSingletonSubmissionCount = 0u;
+	std::uint32_t shadowGroupedCasterSegmentCount = 0u;
 	// Per-light assignment data explains which shadow-capable retained lights
 	// received a resource this frame and which ones were degraded by the budget.
 	std::vector<ShadowResourceAssignmentDiagnostic> shadowAssignments;
@@ -3366,6 +3833,8 @@ struct RenderViewBuildState
 	QualityPreset activePreset = QualityPreset::High;
 	bool customOverrideActive = false;
 	RenderSettings settings;
+	TerraEngine::Renderer::RendererEfficiencyOptionsSnapshot efficiencyOptions{};
+	TerraEngine::Renderer::RendererEfficiencyFixtureIntent efficiencyFixtureIntent{};
 	FrameSkyData sky;
 	std::vector<FrameLightCandidate> lightCandidates;
 	// Grouped submission records refer to the compact command-lane indices sealed

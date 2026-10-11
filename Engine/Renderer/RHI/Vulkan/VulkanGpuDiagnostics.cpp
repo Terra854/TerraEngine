@@ -8,6 +8,7 @@
 // VulkanContext::Impl::CreateGpuTimestampQueries is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::CreateGpuTimestampQueries() {
 	gpuTimestampQueriesSupported = false;
+	lightingDepthTimestampValidBits = 0;
 	gpuTimestampPeriodNanoseconds = 0.0f;
 	completedVirtualGeometryExecutionReceipts.clear();
 	completedVirtualGeometryMeasurements.clear();
@@ -52,6 +53,10 @@ bool VulkanContext::Impl::CreateGpuTimestampQueries() {
 	const bool graphicsQueueHasTimestampBits = indices.graphicsFamily.has_value()
 		&& *indices.graphicsFamily < queueFamilies.size()
 		&& queueFamilies[*indices.graphicsFamily].timestampValidBits > 0u;
+	// The isolated collector creates its own pool without the legacy profiler's
+	// startup reset submission. Both read the actual selected graphics queue.
+	if (deviceProperties.limits.timestampComputeAndGraphics && graphicsQueueHasTimestampBits)
+		lightingDepthTimestampValidBits = queueFamilies[*indices.graphicsFamily].timestampValidBits;
 	if (!deviceProperties.limits.timestampComputeAndGraphics
 		|| !graphicsQueueHasTimestampBits
 		|| gpuTimestampPeriodNanoseconds <= 0.0f) {
@@ -480,6 +485,9 @@ void VulkanContext::Impl::RecordPendingLightAnalysisCandidates(uint32_t statsSlo
 
 // VulkanContext::Impl::PublishCompletedFrameStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
+	// Called only after the frame fence (and any stranded editor drain) proves
+	// real completion; publishing counters must not manufacture shadow completion.
+	CompleteShadowWrites(frameIndex);
 	ResolveCompletedGpuTimestamps(frameIndex);
 	ResolveCompletedVirtualGeometryTimestamps(frameIndex);
 
@@ -1129,6 +1137,11 @@ void VulkanContext::Impl::WriteClusterValidationCapture(const ClusterValidationS
 		capture["camera_visible_shadow_caster_count"] = diagnostics.cameraVisibleShadowCasterCount;
 		capture["light_visible_shadow_caster_count"] = diagnostics.lightVisibleShadowCasterCount;
 		capture["shadow_draw_submission_count"] = diagnostics.shadowDrawSubmissionCount;
+		// Native recording receipts supply these values; candidate groups never
+		// inflate diagnostics when upload or indirect command publication fails.
+		capture["shadow_grouped_submission_count"] = diagnostics.shadowGroupedSubmissionCount;
+		capture["shadow_singleton_submission_count"] = diagnostics.shadowSingletonSubmissionCount;
+		capture["shadow_grouped_caster_segment_count"] = diagnostics.shadowGroupedCasterSegmentCount;
 		capture["shadow_pass_recorded"] = diagnostics.shadowPassRecorded;
 		capture["shadow_assignments"] = nlohmann::json::array();
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
@@ -1194,4 +1207,3 @@ void VulkanContext::Impl::WriteClusterValidationCapture(const ClusterValidationS
 		TERRAENGINE_LOG(LogLevel::Warning, "Failed to write cluster validation capture: " << exception.what());
 	}
 }
-

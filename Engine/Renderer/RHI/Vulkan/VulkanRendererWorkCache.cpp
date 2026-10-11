@@ -4,9 +4,156 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <set>
+#include <tuple>
 #include <unordered_set>
 
 namespace TerraEngine::Renderer::Vulkan {
+	ShadowGroupedStreamPlan BuildShadowGroupedStreamPlan(const ShadowBatchPlan& batch,
+		std::span<const ShadowBatchMember> members, std::span<const RenderInstanceRecord> expected,
+		std::span<const RenderInstanceRecord> stream, const ShadowGroupedStreamOwner& owner,
+		std::size_t capacityBytes)
+	{
+		ShadowGroupedStreamPlan plan;
+		plan.view = batch.view; plan.owner = owner;
+		// Derive fallback from actual selected inputs, never a malformed planner
+		// list. An invalid optimized range must not silently drop original draws.
+		if(members.size() > std::numeric_limits<std::uint32_t>::max()) return plan;
+		for(std::size_t index = 0; index < members.size(); ++index)
+			plan.allSingletonIndices.push_back(static_cast<std::uint32_t>(index));
+		if(!batch.coverageComplete || batch.failure != ShadowBatchFailure::None
+			|| batch.allSingletonIndices != plan.allSingletonIndices || expected.size() != members.size()
+			|| !owner.rendererSessionGeneration || !owner.backendGeneration || !owner.allocationId
+			|| !owner.allocationGeneration || !owner.frameSerial || !owner.commandSerial
+			|| owner.frameSlot >= 3 || owner.snapshotSlot >= 8
+			|| batch.view.rendererSessionGeneration != owner.rendererSessionGeneration
+			|| batch.view.lightId == EMPTY_UUID || !batch.view.allocationGeneration
+			|| !batch.view.extent[0] || !batch.view.extent[1]
+			|| (batch.view.viewType != RenderViewType::Scene && batch.view.viewType != RenderViewType::Game)
+			|| stream.size() > std::numeric_limits<std::size_t>::max() / sizeof(RenderInstanceRecord)
+			|| stream.size() * sizeof(RenderInstanceRecord) > capacityBytes) return plan;
+		std::vector<bool> covered(members.size(), false);
+		std::set<std::tuple<UUID, std::uint64_t, std::uint64_t>> contributions;
+		for(const auto& member : members)
+		{
+			if(member.objectId == EMPTY_UUID || !member.lifetimeGeneration || !member.meshletCount
+				|| member.firstMeshlet > std::numeric_limits<std::uint64_t>::max() - member.meshletCount
+				|| member.firstCluster > std::numeric_limits<std::uint64_t>::max() - member.clusterCount
+				|| member.payloadOffset > std::numeric_limits<std::uint64_t>::max() - member.payloadSize
+				|| !contributions.emplace(member.objectId, member.lifetimeGeneration, member.segmentId).second) return plan;
+		}
+		std::size_t nextInstance = batch.groups.empty() ? 0 : batch.groups.front().firstInstance;
+		for(const auto& group : batch.groups)
+		{
+			const std::size_t first = group.firstInstance, count = group.instanceCount;
+			if(count < 2 || count != group.memberIndices.size() || first != nextInstance
+				|| first > stream.size() || count > stream.size() - first
+				|| group.representativeIndex >= members.size()
+				|| std::find(group.memberIndices.begin(), group.memberIndices.end(), group.representativeIndex) == group.memberIndices.end()) return plan;
+			// Exact descriptor/push identities and dispatch count are part of the
+			// planner contract, not assumptions implied by a default shader name.
+			if(!group.key.pushRangeCount || group.key.pushRangeCount > group.key.pushRanges.size()
+				|| group.taskGroupsX != ((std::uint64_t(group.key.dispatchMeshletCount) + 31) / 32) * count) return plan;
+			for(std::size_t set = 0; set < group.key.descriptors.size(); ++set)
+				if(!group.key.descriptors[set] || !group.key.descriptorGenerations[set]) return plan;
+			for(std::size_t range = 0; range < group.key.pushRangeCount; ++range)
+				if(!group.key.pushRanges[range][0] || !group.key.pushRanges[range][2]
+					|| group.key.pushRanges[range][1] > std::numeric_limits<std::uint32_t>::max() - group.key.pushRanges[range][2]) return plan;
+			for(std::size_t index = 0; index < count; ++index)
+			{
+				const auto memberIndex = group.memberIndices[index];
+				if(memberIndex >= members.size() || covered[memberIndex]) return plan;
+				const auto& member = members[memberIndex];
+				if(member.key != group.key || !member.knownDefaultTaskAbi || !member.supportedRoute
+					|| !member.deformationBridgeComplete || member.conservativeDeformation
+					|| member.objectId == EMPTY_UUID || !member.lifetimeGeneration
+					|| !member.meshletCount || member.meshletCount != group.key.dispatchMeshletCount
+					|| group.key.meshId == EMPTY_UUID || group.key.materialId == EMPTY_UUID || group.key.shaderId == EMPTY_UUID
+					|| !group.key.pipeline || !group.key.layout || !group.key.pipelineGeneration || !group.key.layoutGeneration
+					|| !group.key.meshGeneration || !group.key.materialGeneration || !group.key.shaderGeneration || !group.key.residencyGeneration
+					|| expected[memberIndex].materialAndTexture.x != group.key.materialSelector
+					|| expected[memberIndex].materialAndTexture.y != group.key.textureSelector
+					|| expected[memberIndex].geometrySelectors.x != group.key.selectedLod
+					|| expected[memberIndex].geometrySelectors.z != member.firstMeshlet
+					|| expected[memberIndex].geometrySelectors.w != member.meshletCount
+					|| std::memcmp(&stream[first + index], &expected[memberIndex], sizeof(RenderInstanceRecord)) != 0) return plan;
+				covered[memberIndex] = true;
+			}
+			nextInstance = first + count;
+		}
+		for(const auto index : batch.singletonIndices)
+		{
+			if(index >= members.size() || covered[index]) return plan;
+			covered[index] = true;
+		}
+		if(std::find(covered.begin(), covered.end(), false) != covered.end()) return plan;
+		// No GPU state is changed here. Publish the immutable ranges only after
+		// every selected contribution and byte range has passed validation.
+		plan.groups = batch.groups; plan.singletonIndices = batch.singletonIndices;
+		plan.instanceBytes = stream.size() * sizeof(RenderInstanceRecord);
+		plan.valid = true;
+		return plan;
+	}
+	ShadowGroupedExecutionSelection SelectShadowGroupedExecution(
+		const ShadowGroupedStreamPlan& plan, const ShadowGroupedUploadReceipt& receipt)
+	{
+		ShadowGroupedExecutionSelection selection;
+		selection.singletonIndices = plan.allSingletonIndices;
+		// Upload success is separate from planned compatibility. Fence, actual
+		// byte transfer and descriptor publication must all belong to this owner.
+		if(plan.valid && receipt.view == plan.view && receipt.owner == plan.owner
+			&& receipt.frameSlotSafe && receipt.ownerCurrent && receipt.mapSucceeded
+			&& receipt.writeSucceeded && receipt.flushSucceeded && receipt.descriptorPublished)
+		{
+			selection.groups = plan.groups; selection.singletonIndices = plan.singletonIndices;
+			selection.grouped = true;
+		}
+		return selection;
+	}
+	ShadowGroupedRecordedCounts CountShadowGroupedRecording(
+		const ShadowGroupedStreamPlan& plan, const ShadowGroupedExecutionSelection& selection,
+		const ShadowGroupedRecordingReceipt& receipt)
+	{
+		ShadowGroupedRecordedCounts counts;
+		if(!receipt.recorded || receipt.owner != plan.owner || receipt.view != plan.view
+			|| !plan.owner.rendererSessionGeneration || !plan.owner.backendGeneration
+			|| (selection.grouped && (!plan.owner.allocationId || !plan.owner.allocationGeneration))
+			|| !plan.owner.frameSerial || !plan.owner.commandSerial
+			|| plan.owner.frameSlot >= 3 || plan.owner.snapshotSlot >= 8
+			|| plan.view.rendererSessionGeneration != plan.owner.rendererSessionGeneration
+			|| plan.view.lightId == EMPTY_UUID) return counts;
+		if(selection.grouped)
+		{
+			if(!plan.valid || selection.groups.size() != plan.groups.size()
+				|| selection.singletonIndices != plan.singletonIndices) return counts;
+			for(std::size_t index = 0; index < plan.groups.size(); ++index)
+			{
+				const auto& actual = selection.groups[index]; const auto& sealed = plan.groups[index];
+				if(actual.key != sealed.key || actual.representativeIndex != sealed.representativeIndex
+					|| actual.firstInstance != sealed.firstInstance || actual.instanceCount != sealed.instanceCount
+					|| actual.taskGroupsX != sealed.taskGroupsX || actual.memberIndices != sealed.memberIndices) return counts;
+			}
+		}
+		else if(!selection.groups.empty() || selection.singletonIndices != plan.allSingletonIndices) return counts;
+		// Original singletons do not read the grouped allocation. They can have
+		// honest recording counts even when creating that allocation failed.
+		std::vector<bool> recordedGroups(selection.groups.size(), false);
+		for(const auto index : receipt.recordedGroupIndices)
+		{
+			if(index >= recordedGroups.size() || recordedGroups[index]) return counts;
+			recordedGroups[index] = true;
+		}
+		if(std::find(recordedGroups.begin(), recordedGroups.end(), false) != recordedGroups.end()) return counts;
+		auto singles = receipt.recordedSingletonIndices;
+		auto required = selection.singletonIndices;
+		std::sort(singles.begin(), singles.end()); std::sort(required.begin(), required.end());
+		if(singles != required) return counts;
+		counts.groups = recordedGroups.size(); counts.singletons = singles.size();
+		counts.draws = counts.groups + counts.singletons; counts.segments = counts.singletons;
+		for(const auto& group : selection.groups) counts.segments += group.instanceCount;
+		counts.valid = true;
+		return counts;
+	}
 namespace {
 	constexpr std::size_t kCacheEntryLimit = 64u;
 	constexpr std::size_t kParallelPreparationThreshold = 64u;

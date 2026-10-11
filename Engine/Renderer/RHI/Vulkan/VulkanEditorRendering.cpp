@@ -104,7 +104,12 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		const std::uint32_t frameSlot = impl->currentFrame;
 		const VkResult resetResult = vkResetFences(
 			impl->device, 1, &impl->inFlightFences[frameSlot]);
-		if (resetResult != VK_SUCCESS) return resetResult;
+		if (resetResult != VK_SUCCESS) {
+			// Failed fence admission revokes lighting reuse, even when later UI
+			// recovery repairs the native fence and allows this slot to retry.
+			impl->ResetLightingUploadMirrors();
+			return resetResult;
+		}
 
 		VkSemaphore renderSemaphore = impl->renderFinishedSemaphores[frameSlot];
 		VkPipelineStageFlags renderStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -116,6 +121,7 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		const VkResult submitResult = impl->SubmitGraphicsQueue(
 			1, &completionSubmit, impl->inFlightFences[frameSlot]);
 		if (submitResult != VK_SUCCESS) {
+			impl->ResetLightingUploadMirrors();
 			// A failed submit consumes no semaphore and leaves the reset fence
 			// unsignaled. Keep the rare recovery path conservative: consume the
 			// signal synchronously, then replace the unusable fence before retrying.
@@ -332,6 +338,7 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 	const VkResult resetFenceResult = vkResetFences(
 		impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
 	if (resetFenceResult != VK_SUCCESS) {
+		impl->ResetLightingUploadMirrors();
 		consumeOutstandingSemaphores(true);
 		return fail(EditorUiFrameStage::ResetFrameFence, resetFenceResult, "editor UI frame fence reset");
 	}
@@ -342,6 +349,7 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 			1, &submit, impl->inFlightFences[impl->currentFrame]);
 	}
 	if (submitResult != VK_SUCCESS) {
+		impl->ResetLightingUploadMirrors();
 		// Failed submission consumes no waits. Drain them, then replace the now
 		// unsignaled fence so the frame slot remains reusable.
 		const VkResult drainResult = consumeOutstandingSemaphores(true);
@@ -941,6 +949,7 @@ void VulkanContext::Impl::RecreateOffscreenResources() {
 // VulkanContext::Impl::ClearResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::ClearResources() {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	if (!device) return;
 	const VkResult idleResult = WaitDeviceIdle();
 	if (MarkDeviceLost(idleResult, "clear Vulkan resources device idle")) {
@@ -950,6 +959,44 @@ void VulkanContext::Impl::ClearResources() {
 		TERRAENGINE_LOG(LogLevel::Error, "Skipping Vulkan resource clear because the device did not become idle: " << idleResult);
 		return;
 	}
+	// Idle protects previously submitted work, but live descriptor sets must also
+	// stop naming these images and alias samplers before their owners are freed.
+	// Defaults 0-2 survive this clear. Every allocated runtime slot, including
+	// environment slots 3-5 and already-free slots, is reset to the readable white
+	// owner before the heap is reused. Keep all owners and indices on rejection.
+	if (nextTextureIndex < 3U || nextTextureIndex > MAX_BINDLESS_TEXTURES) {
+		TERRAENGINE_LOG(LogLevel::Error, "Skipping Vulkan resource clear because the texture heap extent is invalid.");
+		return;
+	}
+	std::vector<std::uint32_t> retiredTextureSlots;
+	try {
+		retiredTextureSlots.reserve(nextTextureIndex - 3U);
+		for (std::uint32_t index = 3U; index < nextTextureIndex; ++index)
+			retiredTextureSlots.push_back(index);
+	} catch (const std::bad_alloc&) {
+		TERRAENGINE_LOG(LogLevel::Error, "Skipping Vulkan resource clear because descriptor retirement preparation could not allocate.");
+		return;
+	}
+	if (!RetireGlobalTextureDescriptorSlotsAfterIdle(retiredTextureSlots)) {
+		TERRAENGINE_LOG(LogLevel::Error, "Skipping Vulkan resource clear because runtime texture descriptors could not retire safely.");
+		return;
+	}
+	// The fallback writes above removed every alias reference from every frame
+	// set. Drop alias lookups before releasing their shared sampler owners, so a
+	// future material preparation must publish a fresh slot after heap reset.
+	sampledTextureAliases.clear();
+	for (auto& [key, cachedSampler] : textureSamplerCache) {
+		(void)key;
+		if (cachedSampler.handle != VK_NULL_HANDLE)
+			vkDestroySampler(device, cachedSampler.handle, nullptr);
+	}
+	textureSamplerCache.clear();
+	textureViewGenerations.clear();
+	// The protected idle above permits teardown. Invalidate depth ownership before
+	// any mesh or shadow image is destroyed, including partial teardown failures.
+	ResetShadowPublication(true);
+	DestroyShadowAuthoredPagePayloads(); // The existing device-idle proof covers every page buffer.
+	ReleaseAmbiguousUploadsAfterIdle();
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& [id, mesh] : meshCache) {
@@ -974,6 +1021,12 @@ void VulkanContext::Impl::ClearResources() {
 		vmaDestroyBuffer(allocator, mesh.meshShaderVertexBuffer.buffer, mesh.meshShaderVertexBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshletVertexRemapBuffer.buffer, mesh.meshletVertexRemapBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshSkinningBuffer.buffer, mesh.meshSkinningBuffer.allocation);
+		// Morph deltas share the cached mesh lifetime. The device-idle proof above
+		// permits release before clearing the cache drops its allocation handles.
+		if (mesh.meshMorphDeltaBuffer.buffer != VK_NULL_HANDLE) {
+			vmaDestroyBuffer(allocator, mesh.meshMorphDeltaBuffer.buffer, mesh.meshMorphDeltaBuffer.allocation);
+			mesh.meshMorphDeltaBuffer = {};
+		}
 		vmaDestroyBuffer(allocator, mesh.meshDecodeInfoBuffer.buffer, mesh.meshDecodeInfoBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshletBuffer.buffer, mesh.meshletBuffer.allocation);
 		if (mesh.meshletSectionBuffer.buffer != VK_NULL_HANDLE) {
@@ -1184,7 +1237,6 @@ void VulkanContext::Impl::ClearResources() {
 	areaShadowTextureIndices.fill(0u);
 	activeShadowResourceRequest = {};
 	shadowStorageRegions.fill({});
-	shadowCacheEntries.clear();
 	ltcAmplitudeTextureIndex = 0;
 	ltcInverseTextureIndex = 0;
 	environmentIrradianceTextureIndex = 0;
@@ -1206,6 +1258,8 @@ void VulkanContext::Impl::ClearResources() {
 	}
 
 	materialIndexMap.clear();
+	materialSourceOwners.clear();
+	materialTextureSourceOwners.clear();
 	freeMaterialIndices.clear();
 	// Material slot zero is the permanent fallback material, so rebuilt caches
 	// must resume authored material allocation at slot one.

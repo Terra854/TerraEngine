@@ -11,6 +11,8 @@ add_executable(TerraEngine-EditorTests
 	# Lifecycle recovery cases use the same production gate and watcher paths.
 	Export/ExportArtifactValidationTests.cpp
 	AssetPipeline/AssetDiscoveryRecoveryTests.cpp
+	# Private import candidates must be pruned before the browser queries status.
+	AssetPipeline/AssetImportTemporaryPathTests.cpp
 	AssetPipeline/AssetImportAdmissionTests.cpp
 	Scene/SceneSaveFailureSafetyTests.cpp
 	# The actual export frontend actions share the production window/controller.
@@ -281,6 +283,31 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets/AssetDatabase.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets/FileWatcher.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp
+	${CMAKE_SOURCE_DIR}/Tests/Support/RendererEfficiency/Editor/EditorRendererEfficiencyValidation.cpp
+	${CMAKE_SOURCE_DIR}/Tests/Support/RendererEfficiency/Editor/RendererEfficiencyFixtureBindings.cpp
+	# Test the same causal publication gate used by the installed editor host.
+	${CMAKE_SOURCE_DIR}/Tests/Support/RendererEfficiency/Editor/RendererEfficiencyScenePublication.cpp
+	${CMAKE_SOURCE_DIR}/Tests/Support/RendererEfficiency/Editor/RendererEfficiencyEvidenceExport.cpp
+	${CMAKE_SOURCE_DIR}/Tests/Support/RendererEfficiency/Editor/RendererEfficiencyInstallIdentity.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Automation/RendererEfficiencyInstallIdentityTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererEfficiencyDeviceRecreationTests.cpp
+	Automation/RendererEfficiencyAutomationTests.cpp
+	# Exercise production export rejection and independent overhead availability.
+	Automation/RendererEfficiencyEvidenceTests.cpp
+	# Owned fixture edits use the existing atomic scene queue and flush boundary.
+	Automation/RendererEfficiencyMutationTests.cpp
+	Automation/RendererEfficiencyControlTransitionExportTests.cpp
+	# P2 ingress/export cases stay headless; native acceptance is a separate gate.
+	Automation/RendererEfficiencyLightingEvidenceTests.cpp
+	Automation/RendererEfficiencyDepthEvidenceExportTests.cpp
+	Automation/RendererEfficiencyDepthFixtureTests.cpp
+	Automation/RendererEfficiencyShadowBatchExportTests.cpp
+	Automation/RendererEfficiencyShadowBatchFixtureTests.cpp
+	Automation/RendererEfficiencyStaticShadowFixtureTests.cpp
+	${CMAKE_SOURCE_DIR}/Tests/Tools/RendererEfficiency/StaticShadowFixture.cpp
+	${CMAKE_SOURCE_DIR}/Tests/Tools/RendererEfficiency/ShadowBatchingFixture.cpp
+	${CMAKE_SOURCE_DIR}/Tests/Tools/RendererEfficiency/ShadowInvalidationFixture.cpp
+	Automation/RendererEfficiencyLightingFixtureTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorAutomationRegistry.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorAutomationTransaction.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorAutomationJobService.cpp
@@ -413,7 +440,8 @@ add_dependencies(TerraEngine-EditorTests
 )
 
 if(WIN32)
-	target_link_libraries(TerraEngine-EditorTests PRIVATE ws2_32)
+	# Match the editor's OS hashing API when exercising native install identities.
+	target_link_libraries(TerraEngine-EditorTests PRIVATE ws2_32 bcrypt)
 endif()
 
 if(WIN32)
@@ -731,11 +759,11 @@ set_tests_properties(Editor.Terrain.LargeWorld PROPERTIES
 terraengine_add_correctness_slice(Editor.ExportLifecycle TerraEngine-EditorTests Editor.ExportLifecycle 6)
 
 # Recovery slices retain independent process-tree watchdogs and exact case floors.
-terraengine_add_correctness_slice(Editor.AssetDiscoveryRecovery TerraEngine-EditorTests Editor.AssetDiscoveryRecovery 8)
+terraengine_add_correctness_slice(Editor.AssetDiscoveryRecovery TerraEngine-EditorTests Editor.AssetDiscoveryRecovery 9)
 terraengine_add_correctness_slice(Editor.ExportArtifactValidation TerraEngine-EditorTests Editor.ExportArtifactValidation 12)
 terraengine_add_correctness_slice(Editor.ExportRetention TerraEngine-EditorTests Editor.ExportRetention 10)
 
-terraengine_add_correctness_slice(Editor.AssetImportAdmission TerraEngine-EditorTests Editor.AssetImportAdmission 13)
+terraengine_add_correctness_slice(Editor.AssetImportAdmission TerraEngine-EditorTests Editor.AssetImportAdmission 14)
 
 # Conditional sources support a staged handoff without linker placeholders.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Export/ContentArchiveSafetyTests.cpp")
@@ -756,3 +784,37 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Terrain/TerrainIndependentCopyFailureTest
 	set_property(SOURCE EditorTests.cpp APPEND PROPERTY COMPILE_DEFINITIONS TERRAENGINE_HAS_TERRAIN_INDEPENDENT_COPY_FAILURE_TESTS=1)
 endif()
 terraengine_add_correctness_slice(Editor.McpAuthority TerraEngine-EditorTests Editor.MCP.Transport.HttpAuthority 4)
+# Include native device-recreation guards as well as automation contracts.
+terraengine_add_correctness_slice(Editor.RendererEfficiency TerraEngine-EditorTests Renderer.Efficiency 94)
+
+# This opt-in lane creates one hidden native desktop window and therefore stays
+# separate from the deterministic headless editor executable. It exercises the
+# actual bundled platform backend without starting an editor or Vulkan device.
+option(TERRAENGINE_BUILD_NATIVE_GLFW_RECOVERY_TEST "Build the isolated hidden-window GLFW recovery regression" OFF)
+if(TERRAENGINE_BUILD_NATIVE_GLFW_RECOVERY_TEST)
+	add_executable(TerraEngine-RendererEfficiencyGlfwRecoveryTests
+		Renderer/RendererEfficiencyGlfwRecoveryTests.cpp)
+	target_compile_features(TerraEngine-RendererEfficiencyGlfwRecoveryTests PRIVATE cxx_std_20)
+	set_target_properties(TerraEngine-RendererEfficiencyGlfwRecoveryTests PROPERTIES
+		BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}" INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}")
+	target_include_directories(TerraEngine-RendererEfficiencyGlfwRecoveryTests PRIVATE ${CMAKE_SOURCE_DIR})
+	target_link_libraries(TerraEngine-RendererEfficiencyGlfwRecoveryTests PRIVATE cimgui glfw)
+	if(WIN32)
+		target_compile_definitions(TerraEngine-RendererEfficiencyGlfwRecoveryTests PRIVATE NOMINMAX GLFW_DLL)
+		target_link_libraries(TerraEngine-RendererEfficiencyGlfwRecoveryTests PRIVATE user32)
+		add_custom_command(TARGET TerraEngine-RendererEfficiencyGlfwRecoveryTests POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different
+				$<TARGET_RUNTIME_DLLS:TerraEngine-RendererEfficiencyGlfwRecoveryTests>
+				$<TARGET_FILE_DIR:TerraEngine-RendererEfficiencyGlfwRecoveryTests>
+			COMMAND_EXPAND_LISTS)
+	endif()
+	add_test(NAME Editor.RendererEfficiency.NativeGlfwRecovery
+		COMMAND $<TARGET_FILE:TerraEngine-RendererEfficiencyGlfwRecoveryTests>)
+	set_tests_properties(Editor.RendererEfficiency.NativeGlfwRecovery PROPERTIES
+		LABELS "Editor;Renderer;Recovery;Native;OptIn" RUN_SERIAL TRUE TIMEOUT 30)
+	# The installed diagnostic consumes only the same bundled runtime libraries.
+	install(TARGETS TerraEngine-RendererEfficiencyGlfwRecoveryTests
+		RUNTIME DESTINATION ${CMAKE_BINARY_DIR}/Build/Tests/Editor/NativeGlfwRecovery)
+	install(FILES $<TARGET_FILE:cimgui> $<TARGET_FILE:glfw>
+		DESTINATION ${CMAKE_BINARY_DIR}/Build/Tests/Editor/NativeGlfwRecovery)
+endif()

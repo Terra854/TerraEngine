@@ -499,3 +499,67 @@ std::shared_ptr<const Shader> ResourceManager::AcquireShaderSnapshot(const Terra
 	const auto found = shaderCache.resources.find(id);
 	return found == shaderCache.resources.end() ? nullptr : found->second;
 }
+
+std::shared_future<TerraEngine::UUID> ResourceManager::ReloadShaderFromAuthoredPathAsync(
+	const TerraEngine::UUID& id, const std::filesystem::path& authoredPath)
+{
+	if (!IsCompiledShaderPath(authoredPath)) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	// Normal request cancellation and publication own durable identity; this
+	// detached compiled input selects the validated bytes prepared by the job.
+	return ReloadCached<Shader>(id, shaderCache, [this, authoredPath](const std::filesystem::path&) {
+		return LoadShaderFile(*this, authoredPath);
+	}, false);
+}
+
+RendererEfficiencyShaderPublicationReceipt ResourceManager::BeginRendererEfficiencyShaderOverride(
+	const TerraEngine::UUID& id, const std::filesystem::path& authoredPath)
+{
+	RendererEfficiencyShaderPublicationReceipt receipt;
+	if (!IsCompiledShaderPath(authoredPath)) {
+		receipt.completion = MakeReadyFuture(TerraEngine::EMPTY_UUID);
+		return receipt;
+	}
+	RequestPtr request;
+	receipt.completion = ReloadCached<Shader>(id, shaderCache,
+		[this, authoredPath](const std::filesystem::path&) { return LoadShaderFile(*this, authoredPath); }, false, &request);
+	receipt.nativeRequest = std::move(request);
+	return receipt;
+}
+
+std::shared_ptr<const Shader> ResourceManager::GetRendererEfficiencyShaderOverrideOwner(
+	const RendererEfficiencyShaderPublicationReceipt& receipt) const
+{
+	std::lock_guard gate(m_PublicationGate);
+	const auto request = std::static_pointer_cast<CacheRequest>(receipt.nativeRequest);
+	return request && request->terminal && request->outcome == RequestOutcome::Published
+		? request->shaderPayload : nullptr;
+}
+
+bool ResourceManager::RestoreRendererEfficiencyShaderOverride(
+	const RendererEfficiencyShaderPublicationReceipt& receipt)
+{
+	RequestDeliveries deliveries;
+	std::unique_lock gate(m_PublicationGate);
+	const auto request = std::static_pointer_cast<CacheRequest>(receipt.nativeRequest);
+	if (!request || !request->terminal || request->epoch != m_RequestEpoch
+		|| request->outcome != RequestOutcome::Published || !request->shaderPayload || !request->previousShaderPayload)
+		return false;
+	const auto authority = m_Requests.find(request->mapKey);
+	if (authority == m_Requests.end() || authority->second != request) return false;
+	std::unique_lock cacheLock(shaderCache.mutex);
+	const auto current = shaderCache.resources.find(request->id);
+	if (current == shaderCache.resources.end() || current->second != request->shaderPayload) return false;
+	// Restore only our exact accepted owner. Another reload or project lifecycle
+	// supersedes this lease and is never replaced by a canceled fixture cleanup.
+	const auto key = shaderCache.idToPath.find(request->id);
+	if (key == shaderCache.idToPath.end() || key->second != request->key) return false;
+	auto accounting = PrepareResourceAccounting(request->id, shaderCache.assetType, request->key,
+		EstimateLoadedResourceBytes(request->previousShaderPayload), shaderCache.tracksResidency);
+	InvalidateKeyLocked(ResourceKind::Shader, request->key, deliveries);
+	current->second = request->previousShaderPayload;
+	CommitResourceAccounting(*accounting);
+	m_RendererResourcePublicationGeneration.fetch_add(1U, std::memory_order_release);
+	cacheLock.unlock(); gate.unlock();
+	DeliverRequests(std::move(deliveries));
+	return true;
+}

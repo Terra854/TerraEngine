@@ -1,0 +1,2795 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "urn:terraengine:renderer-efficiency:evidence:v1",
+	"title": "Renderer efficiency run evidence",
+	"description": "Export-only schema. Valid syntax is not acceptance: the comparer must enforce matched identities, exact coverage, per-SC metrics, per-run thresholds and manifest sample counts. All required unavailable values are explicit; empty samples never pass.",
+	"type": "object",
+	"additionalProperties": false,
+	"required": [
+		"schemaVersion",
+		"identity",
+		"requestedOptions",
+		"measurementPolicy",
+		"frames",
+		"successCriteria",
+		"artifacts"
+	],
+	"properties": {
+		"schemaVersion": {
+			"const": 1
+		},
+		"identity": {
+			"$ref": "#/$defs/identity"
+		},
+		"requestedOptions": {
+			"$ref": "#/$defs/options"
+		},
+		"measurementPolicy": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"warmupFrames",
+				"measuredFrames",
+				"runs",
+				"depthAbsoluteTolerance",
+				"imageNormalizedChannelTolerance",
+				"coverageMismatchTolerance",
+				"casterIdentityMismatchTolerance",
+				"allowExcludedImageRegions"
+			],
+			"properties": {
+				"warmupFrames": {
+					"type": "integer",
+					"minimum": 60
+				},
+				"measuredFrames": {
+					"type": "integer",
+					"minimum": 300
+				},
+				"runs": {
+					"type": "integer",
+					"minimum": 3
+				},
+				"depthAbsoluteTolerance": {
+					"const": 1e-06
+				},
+				"imageNormalizedChannelTolerance": {
+					"const": 0.00784313725490196
+				},
+				"coverageMismatchTolerance": {
+					"const": 0
+				},
+				"casterIdentityMismatchTolerance": {
+					"const": 0
+				},
+				"allowExcludedImageRegions": {
+					"const": false
+				}
+			}
+		},
+		"frames": {
+			"type": "array",
+			"items": {
+				"$ref": "#/$defs/frame"
+			}
+		},
+		"successCriteria": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"SC-001",
+				"SC-002",
+				"SC-003",
+				"SC-004",
+				"SC-005",
+				"SC-006",
+				"SC-007",
+				"SC-008",
+				"SC-009"
+			],
+			"properties": {
+				"SC-001": {
+					"$ref": "#/$defs/comparison"
+				},
+				"SC-002": {
+					"$ref": "#/$defs/comparison"
+				},
+				"SC-003": {
+					"$ref": "#/$defs/comparison"
+				},
+				"SC-004": {
+					"allOf": [
+						{
+							"$ref": "#/$defs/performanceComparison"
+						},
+						{
+							"if": {
+								"properties": {
+									"status": {
+										"const": "Passed"
+									}
+								}
+							},
+							"then": {
+								"properties": {
+									"metricScope": {
+										"const": "StageGPU"
+									},
+									"referenceMedianNanoseconds": {
+										"properties": {
+											"status": {
+												"const": "Valid"
+											}
+										}
+									},
+									"candidateMedianNanoseconds": {
+										"properties": {
+											"status": {
+												"const": "Valid"
+											}
+										}
+									}
+								}
+							}
+						}
+					]
+				},
+				"SC-005": {
+					"$ref": "#/$defs/comparison"
+				},
+				"SC-006": {
+					"$ref": "#/$defs/comparison"
+				},
+				"SC-007": {
+					"$ref": "#/$defs/comparison"
+				},
+				"SC-008": {
+					"allOf": [
+						{
+							"$ref": "#/$defs/performanceComparison"
+						},
+						{
+							"if": {
+								"properties": {
+									"status": {
+										"const": "Passed"
+									}
+								}
+							},
+							"then": {
+								"properties": {
+									"metricScope": {
+										"const": "TotalFrame"
+									},
+									"referenceMedianNanoseconds": {
+										"properties": {
+											"status": {
+												"const": "Valid"
+											}
+										}
+									},
+									"candidateMedianNanoseconds": {
+										"properties": {
+											"status": {
+												"const": "Valid"
+											}
+										}
+									},
+									"referenceP95Nanoseconds": {
+										"properties": {
+											"status": {
+												"const": "Valid"
+											}
+										}
+									},
+									"candidateP95Nanoseconds": {
+										"properties": {
+											"status": {
+												"const": "Valid"
+											}
+										}
+									}
+								}
+							}
+						}
+					]
+				},
+				"SC-009": {
+					"$ref": "#/$defs/comparison"
+				}
+			}
+		},
+		"artifacts": {
+			"type": "array",
+			"items": {
+				"$ref": "#/$defs/artifact"
+			}
+		}
+	},
+	"$defs": {
+		"unsigned": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"status",
+				"value",
+				"reason"
+			],
+			"properties": {
+				"status": {
+					"enum": [
+						"Valid",
+						"Unavailable"
+					]
+				},
+				"value": {
+					"anyOf": [
+						{
+							"type": "integer",
+							"minimum": 0,
+							"maximum": 9007199254740991
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"reason": {
+					"type": "string"
+				}
+			},
+			"allOf": [
+				{
+					"if": {
+						"properties": {
+							"status": {
+								"const": "Valid"
+							}
+						}
+					},
+					"then": {
+						"properties": {
+							"value": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 9007199254740991
+							},
+							"reason": {
+								"const": ""
+							}
+						}
+					},
+					"else": {
+						"properties": {
+							"value": {
+								"type": "null"
+							},
+							"reason": {
+								"type": "string",
+								"minLength": 1
+							}
+						}
+					}
+				}
+			]
+		},
+		"number": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"status",
+				"value",
+				"reason"
+			],
+			"properties": {
+				"status": {
+					"enum": [
+						"Valid",
+						"Unavailable"
+					]
+				},
+				"value": {
+					"anyOf": [
+						{
+							"type": "number",
+							"minimum": 0
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"reason": {
+					"type": "string"
+				}
+			},
+			"allOf": [
+				{
+					"if": {
+						"properties": {
+							"status": {
+								"const": "Valid"
+							}
+						}
+					},
+					"then": {
+						"properties": {
+							"value": {
+								"type": "number",
+								"minimum": 0
+							},
+							"reason": {
+								"const": ""
+							}
+						}
+					},
+					"else": {
+						"properties": {
+							"value": {
+								"type": "null"
+							},
+							"reason": {
+								"type": "string",
+								"minLength": 1
+							}
+						}
+					}
+				}
+			]
+		},
+		"text": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"status",
+				"value",
+				"reason"
+			],
+			"properties": {
+				"status": {
+					"enum": [
+						"Valid",
+						"Unavailable"
+					]
+				},
+				"value": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"reason": {
+					"type": "string"
+				}
+			},
+			"allOf": [
+				{
+					"if": {
+						"properties": {
+							"status": {
+								"const": "Valid"
+							}
+						}
+					},
+					"then": {
+						"properties": {
+							"value": {
+								"type": "string",
+								"minLength": 1
+							},
+							"reason": {
+								"const": ""
+							}
+						}
+					},
+					"else": {
+						"properties": {
+							"value": {
+								"type": "null"
+							},
+							"reason": {
+								"type": "string",
+								"minLength": 1
+							}
+						}
+					}
+				}
+			]
+		},
+		"hash": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"status",
+				"value",
+				"reason"
+			],
+			"properties": {
+				"status": {
+					"enum": [
+						"Valid",
+						"Unavailable"
+					]
+				},
+				"value": {
+					"anyOf": [
+						{
+							"type": "string",
+							"pattern": "^[a-fA-F0-9]{64}$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"reason": {
+					"type": "string"
+				}
+			},
+			"allOf": [
+				{
+					"if": {
+						"properties": {
+							"status": {
+								"const": "Valid"
+							}
+						}
+					},
+					"then": {
+						"properties": {
+							"value": {
+								"type": "string",
+								"pattern": "^[a-fA-F0-9]{64}$"
+							},
+							"reason": {
+								"const": ""
+							}
+						}
+					},
+					"else": {
+						"properties": {
+							"value": {
+								"type": "null"
+							},
+							"reason": {
+								"type": "string",
+								"minLength": 1
+							}
+						}
+					}
+				}
+			]
+		},
+		"range": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"offsetBytes",
+				"lengthBytes"
+			],
+			"properties": {
+				"offsetBytes": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"lengthBytes": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				}
+			}
+		},
+		"ranges": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"status",
+				"value",
+				"reason"
+			],
+			"properties": {
+				"status": {
+					"enum": [
+						"Valid",
+						"Unavailable"
+					]
+				},
+				"value": {
+					"anyOf": [
+						{
+							"type": "array",
+							"items": {
+								"$ref": "#/$defs/range"
+							}
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"reason": {
+					"type": "string"
+				}
+			},
+			"allOf": [
+				{
+					"if": {
+						"properties": {
+							"status": {
+								"const": "Valid"
+							}
+						}
+					},
+					"then": {
+						"properties": {
+							"value": {
+								"type": "array",
+								"items": {
+									"$ref": "#/$defs/range"
+								}
+							},
+							"reason": {
+								"const": ""
+							}
+						}
+					},
+					"else": {
+						"properties": {
+							"value": {
+								"type": "null"
+							},
+							"reason": {
+								"type": "string",
+								"minLength": 1
+							}
+						}
+					}
+				}
+			]
+		},
+		"timing": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"status",
+				"value",
+				"reason"
+			],
+			"properties": {
+				"status": {
+					"enum": [
+						"Pending",
+						"Valid",
+						"Unavailable"
+					]
+				},
+				"value": {
+					"anyOf": [
+						{
+							"type": "number",
+							"minimum": 0
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"reason": {
+					"type": "string"
+				}
+			},
+			"allOf": [
+				{
+					"if": {
+						"properties": {
+							"status": {
+								"const": "Valid"
+							}
+						}
+					},
+					"then": {
+						"properties": {
+							"value": {
+								"type": "number",
+								"minimum": 0
+							},
+							"reason": {
+								"const": ""
+							}
+						}
+					},
+					"else": {
+						"properties": {
+							"value": {
+								"type": "null"
+							},
+							"reason": {
+								"type": "string",
+								"minLength": 1
+							}
+						}
+					}
+				}
+			],
+			"description": "Duration in nanoseconds; Pending/Unavailable is null with a nonempty reason. Valid is completion-qualified. Zero is allowed only for an actual resolved sample."
+		},
+		"options": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"shadowReuse",
+				"lightingUploads",
+				"lightingDepth",
+				"shadowSubmission",
+				"staticShadowCacheBudgetBytes",
+				"validationPreparation"
+			],
+			"properties": {
+				"shadowReuse": {
+					"enum": [
+						"Enabled",
+						"AlwaysRefresh"
+					]
+				},
+				"lightingUploads": {
+					"enum": [
+						"Dirty",
+						"Full"
+					]
+				},
+				"lightingDepth": {
+					"enum": [
+						"Cooperative",
+						"CompleteScan"
+					]
+				},
+				"shadowSubmission": {
+					"enum": [
+						"Grouped",
+						"Singleton"
+					]
+				},
+				"staticShadowCacheBudgetBytes": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 1073741824
+				},
+				"validationPreparation": {
+					"enum": [
+						"Concurrent",
+						"Serial"
+					]
+				}
+			}
+		},
+		"resolution": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"width",
+				"height"
+			],
+			"properties": {
+				"width": {
+					"type": "integer",
+					"minimum": 1
+				},
+				"height": {
+					"type": "integer",
+					"minimum": 1
+				}
+			}
+		},
+		"artifact": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"kind",
+				"status",
+				"path",
+				"sha256",
+				"reason"
+			],
+			"properties": {
+				"kind": {
+					"enum": [
+						"Image",
+						"Depth",
+						"Coverage",
+						"Counters",
+						"Timestamps",
+						"Requests",
+						"Profiler",
+						"Summary",
+						"InstallReceipt",
+						"FixtureReceipt",
+						"LightingPayload",
+						"ProductionDepthBounds",
+						"DepthInput",
+						"DepthBounds",
+						"DepthCoverage"
+					]
+				},
+				"status": {
+					"enum": [
+						"Valid",
+						"Unavailable"
+					]
+				},
+				"path": {
+					"type": [
+						"string",
+						"null"
+					]
+				},
+				"sha256": {
+					"anyOf": [
+						{
+							"type": "string",
+							"pattern": "^[a-fA-F0-9]{64}$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"reason": {
+					"type": "string"
+				},
+				"payloadPurpose": {
+					"enum": [
+						"FinalLights",
+						"Analysis"
+					]
+				}
+			},
+			"allOf": [
+				{
+					"if": {
+						"properties": {
+							"status": {
+								"const": "Valid"
+							}
+						}
+					},
+					"then": {
+						"properties": {
+							"path": {
+								"type": "string",
+								"minLength": 1
+							},
+							"sha256": {
+								"type": "string",
+								"pattern": "^[a-fA-F0-9]{64}$"
+							},
+							"reason": {
+								"const": ""
+							}
+						}
+					},
+					"else": {
+						"properties": {
+							"path": {
+								"type": "null"
+							},
+							"sha256": {
+								"type": "null"
+							},
+							"reason": {
+								"type": "string",
+								"minLength": 1
+							}
+						}
+					}
+				},
+				{
+					"if": {
+						"properties": {
+							"kind": {
+								"const": "LightingPayload"
+							}
+						}
+					},
+					"then": {
+						"required": [
+							"payloadPurpose"
+						]
+					}
+				}
+			]
+		},
+		"identity": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"runId",
+				"runIndex",
+				"stage",
+				"mode",
+				"fixtureId",
+				"fixtureHash",
+				"seed",
+				"cameraHash",
+				"geometryMaterialRevisionHash",
+				"referenceRevision",
+				"candidateRevision",
+				"installedBinaryHash",
+				"installedShaderClosureHash",
+				"installedAssetClosureHash",
+				"postP1BaselineClosureHash",
+				"adapter",
+				"driver",
+				"resolution"
+			],
+			"properties": {
+				"runId": {
+					"type": "string",
+					"minLength": 1
+				},
+				"runIndex": {
+					"type": "integer",
+					"minimum": 0
+				},
+				"stage": {
+					"enum": [
+						"P1",
+						"P2",
+						"P3",
+						"P4",
+						"P5",
+						"All"
+					]
+				},
+				"mode": {
+					"enum": [
+						"Reference",
+						"Candidate"
+					]
+				},
+				"fixtureId": {
+					"enum": [
+						"shadow-invalidation",
+						"lighting-dirty",
+						"lighting-thresholds",
+						"depth-coverage",
+						"depth-heavy",
+						"shadow-batching",
+						"static-dynamic",
+						"multiview-lights",
+						"recovery-capacity"
+					]
+				},
+				"fixtureHash": {
+					"$ref": "#/$defs/hash"
+				},
+				"seed": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"cameraHash": {
+					"$ref": "#/$defs/hash"
+				},
+				"geometryMaterialRevisionHash": {
+					"$ref": "#/$defs/hash"
+				},
+				"referenceRevision": {
+					"$ref": "#/$defs/text"
+				},
+				"candidateRevision": {
+					"$ref": "#/$defs/text"
+				},
+				"installedBinaryHash": {
+					"$ref": "#/$defs/hash"
+				},
+				"installedShaderClosureHash": {
+					"$ref": "#/$defs/hash"
+				},
+				"installedAssetClosureHash": {
+					"$ref": "#/$defs/hash"
+				},
+				"postP1BaselineClosureHash": {
+					"$ref": "#/$defs/hash"
+				},
+				"adapter": {
+					"$ref": "#/$defs/text"
+				},
+				"driver": {
+					"$ref": "#/$defs/text"
+				},
+				"resolution": {
+					"$ref": "#/$defs/resolution"
+				}
+			}
+		},
+		"lighting": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"purpose",
+				"allocationGeneration",
+				"frameSlot",
+				"snapshotSlot",
+				"activeRecordCount",
+				"logicalWriteBytes",
+				"logicalWriteRecords",
+				"logicalWriteRanges",
+				"physicalFlushBytes",
+				"physicalFlushRanges",
+				"mirrorCpuDurationNanoseconds",
+				"hostWriteStatus",
+				"reason"
+			],
+			"properties": {
+				"purpose": {
+					"enum": [
+						"FinalLights",
+						"Analysis"
+					]
+				},
+				"allocationGeneration": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"frameSlot": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"snapshotSlot": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"activeRecordCount": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"logicalWriteBytes": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"logicalWriteRecords": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"logicalWriteRanges": {
+					"$ref": "#/$defs/ranges"
+				},
+				"physicalFlushBytes": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"physicalFlushRanges": {
+					"$ref": "#/$defs/ranges"
+				},
+				"mirrorCpuDurationNanoseconds": {
+					"$ref": "#/$defs/number"
+				},
+				"hostWriteStatus": {
+					"enum": [
+						"NotAttempted",
+						"Succeeded",
+						"Failed",
+						"Unavailable"
+					]
+				},
+				"reason": {
+					"type": "string"
+				},
+				"allocationId": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"allocationSizeBytes": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"regionOffsetBytes": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"nonCoherentAtomSize": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"coherent": {
+					"type": "boolean"
+				},
+				"regionSizeBytes": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"payloadLightIds": {
+					"$ref": "#/$defs/lightIds"
+				}
+			}
+		},
+		"shadow": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"eligibleCasterSegments",
+				"submittedCasterSegments",
+				"actualDrawSubmissions",
+				"groups",
+				"singletons",
+				"staticRefreshCasterSegments",
+				"dynamicRefreshCasterSegments",
+				"reuseRegionCount",
+				"staticReuseRegionCount",
+				"contentOwner",
+				"refreshReason",
+				"fallbackReason"
+			],
+			"properties": {
+				"eligibleCasterSegments": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"submittedCasterSegments": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"actualDrawSubmissions": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"groups": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"singletons": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"staticRefreshCasterSegments": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"dynamicRefreshCasterSegments": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"reuseRegionCount": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"staticReuseRegionCount": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"contentOwner": {
+					"$ref": "#/$defs/text"
+				},
+				"refreshReason": {
+					"$ref": "#/$defs/text"
+				},
+				"fallbackReason": {
+					"$ref": "#/$defs/text"
+				}
+			}
+		},
+		"memory": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"staticCacheBudgetRequestedBytes",
+				"staticCacheBudgetEffectiveBytes",
+				"reservedBytes",
+				"activeBytes",
+				"retiringBytes",
+				"auxiliaryBytes",
+				"draining",
+				"admissionReason",
+				"fallbackReason"
+			],
+			"properties": {
+				"staticCacheBudgetRequestedBytes": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"staticCacheBudgetEffectiveBytes": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"reservedBytes": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"activeBytes": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"retiringBytes": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"auxiliaryBytes": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"draining": {
+					"enum": [
+						"Yes",
+						"No",
+						"Unavailable"
+					]
+				},
+				"admissionReason": {
+					"$ref": "#/$defs/text"
+				},
+				"fallbackReason": {
+					"$ref": "#/$defs/text"
+				}
+			}
+		},
+		"frame": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"fixtureStepId",
+				"stepFrame",
+				"measurementPhase",
+				"viewType",
+				"viewId",
+				"lightId",
+				"faceIndex",
+				"frameSerial",
+				"settingsGeneration",
+				"mutationGeneration",
+				"rendererSessionGeneration",
+				"commandSerial",
+				"submitSerial",
+				"completionSerial",
+				"publicationState",
+				"effectiveOptions",
+				"lighting",
+				"shadow",
+				"memory",
+				"depthStageTimingNanoseconds",
+				"totalFrameTimingNanoseconds",
+				"artifacts"
+			],
+			"properties": {
+				"fixtureStepId": {
+					"type": "string",
+					"minLength": 1
+				},
+				"stepFrame": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"measurementPhase": {
+					"enum": [
+						"Warmup",
+						"Measured"
+					]
+				},
+				"viewType": {
+					"enum": [
+						"Scene",
+						"Game"
+					]
+				},
+				"viewId": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"lightId": {
+					"$ref": "#/$defs/text"
+				},
+				"faceIndex": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"frameSerial": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"settingsGeneration": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"mutationGeneration": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"rendererSessionGeneration": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"commandSerial": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"submitSerial": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"completionSerial": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"publicationState": {
+					"enum": [
+						"Prepared",
+						"Recorded",
+						"Submitted",
+						"Complete",
+						"Invalid",
+						"Unavailable"
+					]
+				},
+				"effectiveOptions": {
+					"$ref": "#/$defs/options"
+				},
+				"lighting": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/lighting"
+					},
+					"maxItems": 2
+				},
+				"shadow": {
+					"$ref": "#/$defs/shadow"
+				},
+				"memory": {
+					"$ref": "#/$defs/memory"
+				},
+				"depthStageTimingNanoseconds": {
+					"$ref": "#/$defs/timing"
+				},
+				"totalFrameTimingNanoseconds": {
+					"$ref": "#/$defs/timing"
+				},
+				"artifacts": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/artifact"
+					}
+				},
+				"evidenceKind": {
+					"enum": [
+						"Shadow",
+						"Lighting",
+						"LightingDepth"
+					]
+				},
+				"payloadPurpose": {
+					"enum": [
+						"FinalLights",
+						"Analysis",
+						"Production"
+					]
+				},
+				"fullSourceCandidateCount": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"depthFallbackReason": {
+					"$ref": "#/$defs/text"
+				}
+			},
+			"allOf": [
+				{
+					"if": {
+						"required": [
+							"evidenceKind"
+						],
+						"properties": {
+							"evidenceKind": {
+								"const": "Lighting"
+							}
+						}
+					},
+					"then": {
+						"required": [
+							"payloadPurpose",
+							"fullSourceCandidateCount"
+						],
+						"properties": {
+							"lighting": {
+								"minItems": 2,
+								"maxItems": 2,
+								"items": {
+									"allOf": [
+										{
+											"$ref": "#/$defs/lighting"
+										},
+										{
+											"required": [
+												"allocationId",
+												"allocationSizeBytes",
+												"regionOffsetBytes",
+												"nonCoherentAtomSize",
+												"coherent",
+												"regionSizeBytes",
+												"payloadLightIds"
+											]
+										}
+									]
+								}
+							}
+						}
+					}
+				},
+				{
+					"if": {
+						"required": [
+							"evidenceKind"
+						],
+						"properties": {
+							"evidenceKind": {
+								"const": "LightingDepth"
+							}
+						}
+					},
+					"then": {
+						"required": [
+							"payloadPurpose"
+						],
+						"properties": {
+							"payloadPurpose": {
+								"const": "Production"
+							}
+						}
+					}
+				}
+			]
+		},
+		"comparison": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"status",
+				"reason",
+				"validMeasuredFramesPerRun",
+				"runCount",
+				"excludedWarmupSamples",
+				"excludedPendingSamples",
+				"excludedInvalidSamples",
+				"coverageMismatchCount",
+				"casterIdentityMismatchCount",
+				"maxDepthAbsoluteError",
+				"maxImageNormalizedChannelError",
+				"referenceMedianNanoseconds",
+				"candidateMedianNanoseconds",
+				"referenceP95Nanoseconds",
+				"candidateP95Nanoseconds",
+				"metricScope"
+			],
+			"properties": {
+				"status": {
+					"enum": [
+						"Passed",
+						"Failed",
+						"Unverified"
+					]
+				},
+				"reason": {
+					"type": "string"
+				},
+				"validMeasuredFramesPerRun": {
+					"type": "array",
+					"items": {
+						"type": "integer",
+						"minimum": 0,
+						"maximum": 9007199254740991
+					}
+				},
+				"runCount": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"excludedWarmupSamples": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"excludedPendingSamples": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"excludedInvalidSamples": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"coverageMismatchCount": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"casterIdentityMismatchCount": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"maxDepthAbsoluteError": {
+					"$ref": "#/$defs/number"
+				},
+				"maxImageNormalizedChannelError": {
+					"$ref": "#/$defs/number"
+				},
+				"referenceMedianNanoseconds": {
+					"$ref": "#/$defs/number"
+				},
+				"candidateMedianNanoseconds": {
+					"$ref": "#/$defs/number"
+				},
+				"referenceP95Nanoseconds": {
+					"$ref": "#/$defs/number"
+				},
+				"candidateP95Nanoseconds": {
+					"$ref": "#/$defs/number"
+				},
+				"metricScope": {
+					"enum": [
+						"StageGPU",
+						"TotalFrame",
+						"WorkCounters",
+						"Correctness",
+						"Reproducibility",
+						"Unavailable"
+					]
+				}
+			},
+			"allOf": [
+				{
+					"if": {
+						"properties": {
+							"status": {
+								"const": "Passed"
+							}
+						}
+					},
+					"then": {
+						"properties": {
+							"coverageMismatchCount": {
+								"properties": {
+									"status": {
+										"const": "Valid"
+									},
+									"value": {
+										"const": 0
+									}
+								}
+							},
+							"casterIdentityMismatchCount": {
+								"properties": {
+									"status": {
+										"const": "Valid"
+									},
+									"value": {
+										"const": 0
+									}
+								}
+							},
+							"reason": {
+								"const": ""
+							}
+						}
+					},
+					"else": {
+						"properties": {
+							"reason": {
+								"type": "string",
+								"minLength": 1
+							}
+						}
+					}
+				}
+			],
+			"description": "Unrequested SCs use Unverified with reason NotRequested. The comparer evaluates only the requested stage/fixture SC mapping; unrelated Unverified entries do not fail that stage. Passed never substitutes for raw evidence."
+		},
+		"performanceComparison": {
+			"description": "Only timed performance SCs enforce three runs with 300 valid samples per run here. Other SC sample/work requirements are checked against the frozen manifest by the comparer.",
+			"allOf": [
+				{
+					"$ref": "#/$defs/comparison"
+				},
+				{
+					"if": {
+						"properties": {
+							"status": {
+								"const": "Passed"
+							}
+						}
+					},
+					"then": {
+						"properties": {
+							"runCount": {
+								"type": "integer",
+								"minimum": 3
+							},
+							"validMeasuredFramesPerRun": {
+								"type": "array",
+								"minItems": 3,
+								"items": {
+									"type": "integer",
+									"minimum": 300
+								}
+							}
+						}
+					}
+				}
+			]
+		},
+		"nativePositiveDecimal": {
+			"type": "string",
+			"pattern": "^[1-9][0-9]{0,19}$",
+			"description": "Canonical positive native decimal serial; the verifier additionally checks the uint64 range and exact runtime identity."
+		},
+		"controlTransitionCorrelation": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"operationId",
+				"fixtureStepId",
+				"stepFrame",
+				"mutationGeneration",
+				"settingsGeneration",
+				"rendererSessionGeneration"
+			],
+			"properties": {
+				"operationId": {
+					"type": "string",
+					"minLength": 1
+				},
+				"fixtureStepId": {
+					"type": "string",
+					"minLength": 1
+				},
+				"stepFrame": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"mutationGeneration": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"settingsGeneration": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"rendererSessionGeneration": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				}
+			}
+		},
+		"transitionFrame": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"fixtureStepId",
+				"stepFrame",
+				"measurementPhase",
+				"viewType",
+				"viewId",
+				"lightId",
+				"faceIndex",
+				"frameSerial",
+				"settingsGeneration",
+				"mutationGeneration",
+				"rendererSessionGeneration",
+				"commandSerial",
+				"submitSerial",
+				"completionSerial",
+				"publicationState",
+				"effectiveOptions",
+				"lighting",
+				"shadow",
+				"memory",
+				"depthStageTimingNanoseconds",
+				"totalFrameTimingNanoseconds",
+				"artifacts"
+			],
+			"properties": {
+				"fixtureStepId": {
+					"type": "string",
+					"minLength": 1
+				},
+				"stepFrame": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"measurementPhase": {
+					"const": "Transition"
+				},
+				"viewType": {
+					"enum": [
+						"Scene",
+						"Game"
+					]
+				},
+				"viewId": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"lightId": {
+					"$ref": "#/$defs/text"
+				},
+				"faceIndex": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"frameSerial": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"settingsGeneration": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"mutationGeneration": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"rendererSessionGeneration": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"commandSerial": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"submitSerial": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"completionSerial": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"publicationState": {
+					"enum": [
+						"Prepared",
+						"Recorded",
+						"Submitted",
+						"Complete",
+						"Invalid",
+						"Unavailable"
+					]
+				},
+				"effectiveOptions": {
+					"$ref": "#/$defs/options"
+				},
+				"lighting": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/lighting"
+					},
+					"maxItems": 2
+				},
+				"shadow": {
+					"$ref": "#/$defs/shadow"
+				},
+				"memory": {
+					"$ref": "#/$defs/memory"
+				},
+				"depthStageTimingNanoseconds": {
+					"$ref": "#/$defs/timing"
+				},
+				"totalFrameTimingNanoseconds": {
+					"$ref": "#/$defs/timing"
+				},
+				"artifacts": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/artifact"
+					}
+				},
+				"evidenceKind": {
+					"enum": [
+						"Shadow",
+						"Lighting",
+						"LightingDepth"
+					]
+				},
+				"payloadPurpose": {
+					"enum": [
+						"FinalLights",
+						"Analysis",
+						"Production"
+					]
+				},
+				"fullSourceCandidateCount": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"depthFallbackReason": {
+					"$ref": "#/$defs/text"
+				}
+			},
+			"description": "Completion-qualified native control or residency observation retained only inside a native receipt; never a warmup or measured sample.",
+			"allOf": [
+				{
+					"if": {
+						"required": [
+							"evidenceKind"
+						],
+						"properties": {
+							"evidenceKind": {
+								"const": "Lighting"
+							}
+						}
+					},
+					"then": {
+						"required": [
+							"payloadPurpose",
+							"fullSourceCandidateCount"
+						],
+						"properties": {
+							"lighting": {
+								"minItems": 2,
+								"maxItems": 2,
+								"items": {
+									"allOf": [
+										{
+											"$ref": "#/$defs/lighting"
+										},
+										{
+											"required": [
+												"allocationId",
+												"allocationSizeBytes",
+												"regionOffsetBytes",
+												"nonCoherentAtomSize",
+												"coherent",
+												"regionSizeBytes",
+												"payloadLightIds"
+											]
+										}
+									]
+								}
+							}
+						}
+					}
+				},
+				{
+					"if": {
+						"required": [
+							"evidenceKind"
+						],
+						"properties": {
+							"evidenceKind": {
+								"const": "LightingDepth"
+							}
+						}
+					},
+					"then": {
+						"required": [
+							"payloadPurpose"
+						],
+						"properties": {
+							"payloadPurpose": {
+								"const": "Production"
+							}
+						}
+					}
+				}
+			]
+		},
+		"controlTransitionReceipt": {
+			"description": "Authoritative native receipt-sidecar contract consumed directly by the comparer. Root evidence frames retain Warmup or Measured only. Artifact references are also retained in the root manifest.",
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"kind",
+				"fixtureStepId",
+				"action",
+				"controlGeneration",
+				"originalCorrelation",
+				"frameSerial",
+				"commandSerial",
+				"submitSerial",
+				"completionSerial",
+				"frames",
+				"artifacts"
+			],
+			"properties": {
+				"kind": {
+					"const": "ControlTransition"
+				},
+				"fixtureStepId": {
+					"type": "string",
+					"minLength": 1
+				},
+				"action": {
+					"type": "string",
+					"minLength": 1
+				},
+				"controlGeneration": {
+					"$ref": "#/$defs/nativePositiveDecimal"
+				},
+				"originalCorrelation": {
+					"$ref": "#/$defs/controlTransitionCorrelation"
+				},
+				"frameSerial": {
+					"$ref": "#/$defs/nativePositiveDecimal"
+				},
+				"commandSerial": {
+					"$ref": "#/$defs/nativePositiveDecimal",
+					"description": "Representative actual commandSerial from frames[0]; nested frames retain each qualified view's own command identity."
+				},
+				"submitSerial": {
+					"$ref": "#/$defs/nativePositiveDecimal"
+				},
+				"completionSerial": {
+					"$ref": "#/$defs/nativePositiveDecimal"
+				},
+				"frames": {
+					"type": "array",
+					"minItems": 1,
+					"items": {
+						"$ref": "#/$defs/transitionFrame"
+					}
+				},
+				"artifacts": {
+					"type": "array",
+					"minItems": 1,
+					"items": {
+						"$ref": "#/$defs/artifact"
+					}
+				}
+			}
+		},
+		"nativeCompletedTransitionObservation": {
+			"description": "Completion-qualified native residency observation. The baseline precedes the first actual reupload; original correlation and per-view command identities are retained. Nested artifact hashes also belong to the root artifact closure.",
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"controlGeneration",
+				"originalCorrelation",
+				"frameSerial",
+				"commandSerial",
+				"submitSerial",
+				"completionSerial",
+				"frames",
+				"artifacts"
+			],
+			"properties": {
+				"controlGeneration": {
+					"$ref": "#/$defs/nativePositiveDecimal"
+				},
+				"frameSerial": {
+					"$ref": "#/$defs/nativePositiveDecimal"
+				},
+				"commandSerial": {
+					"description": "Representative actual commandSerial from frames[0]; nested frames retain each qualified view command identity.",
+					"$ref": "#/$defs/nativePositiveDecimal"
+				},
+				"submitSerial": {
+					"$ref": "#/$defs/nativePositiveDecimal"
+				},
+				"completionSerial": {
+					"$ref": "#/$defs/nativePositiveDecimal"
+				},
+				"originalCorrelation": {
+					"$ref": "#/$defs/controlTransitionCorrelation"
+				},
+				"frames": {
+					"items": {
+						"$ref": "#/$defs/transitionFrame"
+					},
+					"minItems": 1,
+					"type": "array"
+				},
+				"artifacts": {
+					"items": {
+						"$ref": "#/$defs/artifact"
+					},
+					"minItems": 1,
+					"type": "array"
+				}
+			}
+		},
+		"residencyPublicationReceipt": {
+			"description": "Authoritative native residency receipt: an actual completed baseline observation followed by the first completed reupload observation, before warmup. Both nested artifact closures are also retained in root artifacts; publication equality and allocation change are checked against native evidence by the comparer.",
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"kind",
+				"fixtureStepId",
+				"targetObjectId",
+				"meshId",
+				"previousMeshPublicationGeneration",
+				"newMeshPublicationGeneration",
+				"previousAllocationGeneration",
+				"newAllocationGeneration",
+				"previousActualFrameSerial",
+				"newActualFrameSerial",
+				"commandSerial",
+				"submitSerial",
+				"completionSerial",
+				"baselineObservation",
+				"reuploadObservation"
+			],
+			"properties": {
+				"kind": {
+					"const": "ResidencyPublication"
+				},
+				"fixtureStepId": {
+					"type": "string",
+					"minLength": 1
+				},
+				"targetObjectId": {
+					"type": "string",
+					"pattern": "^[0-9a-f]{32}$"
+				},
+				"meshId": {
+					"type": "string",
+					"pattern": "^[0-9a-f]{32}$"
+				},
+				"previousMeshPublicationGeneration": {
+					"minimum": 1,
+					"maximum": 9007199254740991,
+					"type": "integer"
+				},
+				"newMeshPublicationGeneration": {
+					"minimum": 1,
+					"maximum": 9007199254740991,
+					"type": "integer"
+				},
+				"previousAllocationGeneration": {
+					"minimum": 1,
+					"maximum": 9007199254740991,
+					"type": "integer"
+				},
+				"newAllocationGeneration": {
+					"minimum": 1,
+					"maximum": 9007199254740991,
+					"type": "integer"
+				},
+				"previousActualFrameSerial": {
+					"minimum": 1,
+					"maximum": 9007199254740991,
+					"type": "integer"
+				},
+				"newActualFrameSerial": {
+					"minimum": 1,
+					"maximum": 9007199254740991,
+					"type": "integer"
+				},
+				"commandSerial": {
+					"minimum": 1,
+					"maximum": 9007199254740991,
+					"type": "integer"
+				},
+				"submitSerial": {
+					"minimum": 1,
+					"maximum": 9007199254740991,
+					"type": "integer"
+				},
+				"completionSerial": {
+					"minimum": 1,
+					"maximum": 9007199254740991,
+					"type": "integer"
+				},
+				"baselineObservation": {
+					"$ref": "#/$defs/nativeCompletedTransitionObservation"
+				},
+				"reuploadObservation": {
+					"$ref": "#/$defs/nativeCompletedTransitionObservation"
+				}
+			}
+		},
+		"lightingBaselineFrame": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"fixtureStepId",
+				"stepFrame",
+				"measurementPhase",
+				"viewType",
+				"viewId",
+				"lightId",
+				"faceIndex",
+				"frameSerial",
+				"settingsGeneration",
+				"mutationGeneration",
+				"rendererSessionGeneration",
+				"commandSerial",
+				"submitSerial",
+				"completionSerial",
+				"publicationState",
+				"effectiveOptions",
+				"lighting",
+				"shadow",
+				"memory",
+				"depthStageTimingNanoseconds",
+				"totalFrameTimingNanoseconds",
+				"artifacts"
+			],
+			"properties": {
+				"fixtureStepId": {
+					"type": "string",
+					"minLength": 1
+				},
+				"stepFrame": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 59
+				},
+				"measurementPhase": {
+					"const": "LightingBaseline"
+				},
+				"viewType": {
+					"enum": [
+						"Scene",
+						"Game"
+					]
+				},
+				"viewId": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"lightId": {
+					"$ref": "#/$defs/text"
+				},
+				"faceIndex": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"frameSerial": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"settingsGeneration": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"mutationGeneration": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"rendererSessionGeneration": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"commandSerial": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"submitSerial": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"completionSerial": {
+					"$ref": "#/$defs/unsigned"
+				},
+				"publicationState": {
+					"enum": [
+						"Prepared",
+						"Recorded",
+						"Submitted",
+						"Complete",
+						"Invalid",
+						"Unavailable"
+					]
+				},
+				"effectiveOptions": {
+					"$ref": "#/$defs/options"
+				},
+				"lighting": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/lighting"
+					},
+					"maxItems": 2
+				},
+				"shadow": {
+					"$ref": "#/$defs/shadow"
+				},
+				"memory": {
+					"$ref": "#/$defs/memory"
+				},
+				"depthStageTimingNanoseconds": {
+					"$ref": "#/$defs/timing"
+				},
+				"totalFrameTimingNanoseconds": {
+					"$ref": "#/$defs/timing"
+				},
+				"artifacts": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/artifact"
+					}
+				},
+				"evidenceKind": {
+					"enum": [
+						"Shadow",
+						"Lighting"
+					]
+				},
+				"payloadPurpose": {
+					"enum": [
+						"FinalLights",
+						"Analysis"
+					]
+				},
+				"fullSourceCandidateCount": {
+					"$ref": "#/$defs/unsigned"
+				}
+			},
+			"description": "Completion-qualified native control or residency observation retained only inside a native receipt; never a warmup or measured sample.",
+			"allOf": [
+				{
+					"if": {
+						"required": [
+							"evidenceKind"
+						],
+						"properties": {
+							"evidenceKind": {
+								"const": "Lighting"
+							}
+						}
+					},
+					"then": {
+						"required": [
+							"payloadPurpose",
+							"fullSourceCandidateCount"
+						],
+						"properties": {
+							"lighting": {
+								"minItems": 2,
+								"maxItems": 2,
+								"items": {
+									"allOf": [
+										{
+											"$ref": "#/$defs/lighting"
+										},
+										{
+											"required": [
+												"allocationId",
+												"allocationSizeBytes",
+												"regionOffsetBytes",
+												"nonCoherentAtomSize",
+												"coherent",
+												"regionSizeBytes",
+												"payloadLightIds"
+											]
+										}
+									]
+								}
+							}
+						}
+					}
+				}
+			]
+		},
+		"lightingBaseline": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"kind",
+				"fixtureStepId",
+				"frames",
+				"artifacts"
+			],
+			"properties": {
+				"kind": {
+					"const": "LightingBaseline"
+				},
+				"fixtureStepId": {
+					"type": "string",
+					"minLength": 1
+				},
+				"frames": {
+					"type": "array",
+					"minItems": 120,
+					"maxItems": 240,
+					"items": {
+						"$ref": "#/$defs/lightingBaselineFrame"
+					}
+				},
+				"artifacts": {
+					"type": "array",
+					"minItems": 1,
+					"items": {
+						"$ref": "#/$defs/artifact"
+					}
+				}
+			}
+		},
+		"lightIds": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"status",
+				"value",
+				"reason"
+			],
+			"properties": {
+				"status": {
+					"enum": [
+						"Valid",
+						"Unavailable"
+					]
+				},
+				"value": {
+					"anyOf": [
+						{
+							"type": "array",
+							"maxItems": 1024,
+							"items": {
+								"type": "string",
+								"pattern": "^[0-9a-f]{32}$"
+							}
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"reason": {
+					"type": "string"
+				}
+			},
+			"allOf": [
+				{
+					"if": {
+						"properties": {
+							"status": {
+								"const": "Valid"
+							}
+						}
+					},
+					"then": {
+						"properties": {
+							"value": {
+								"type": "array"
+							},
+							"reason": {
+								"const": ""
+							}
+						}
+					},
+					"else": {
+						"properties": {
+							"value": {
+								"type": "null"
+							},
+							"reason": {
+								"minLength": 1
+							}
+						}
+					}
+				}
+			]
+		},
+		"nativeShadowBatchMember": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"objectId",
+				"lifetimeGeneration",
+				"segmentId"
+			],
+			"properties": {
+				"objectId": {
+					"type": "string",
+					"pattern": "^[0-9a-f]{32}$"
+				},
+				"lifetimeGeneration": {
+					"type": "string",
+					"pattern": "^[1-9][0-9]*$"
+				},
+				"segmentId": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				}
+			}
+		},
+		"nativeShadowBatchSource": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"objectId",
+				"lifetimeGeneration",
+				"sourceOrdinal",
+				"ownerFirstMeshlet",
+				"ownerMeshletCount",
+				"resolved",
+				"excludedByMaterial",
+				"cameraVisible"
+			],
+			"properties": {
+				"objectId": {
+					"type": "string",
+					"pattern": "^[0-9a-f]{32}$"
+				},
+				"lifetimeGeneration": {
+					"type": "string",
+					"pattern": "^[1-9][0-9]*$"
+				},
+				"sourceOrdinal": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 4294967295
+				},
+				"ownerFirstMeshlet": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 4294967295
+				},
+				"ownerMeshletCount": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 4294967295
+				},
+				"resolved": {
+					"type": "boolean"
+				},
+				"cameraVisible": {
+					"type": "boolean"
+				},
+				"excludedByMaterial": {
+					"type": "boolean"
+				}
+			}
+		},
+		"nativeShadowBatchGroup": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"firstInstance",
+				"instanceCount",
+				"taskGroupsX",
+				"pipelineIdentity",
+				"layoutIdentity",
+				"members"
+			],
+			"properties": {
+				"firstInstance": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 4294967295
+				},
+				"instanceCount": {
+					"type": "integer",
+					"minimum": 2,
+					"maximum": 4294967295
+				},
+				"taskGroupsX": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 4294967295
+				},
+				"pipelineIdentity": {
+					"type": "string",
+					"pattern": "^[1-9][0-9]*$"
+				},
+				"layoutIdentity": {
+					"type": "string",
+					"pattern": "^[1-9][0-9]*$"
+				},
+				"members": {
+					"type": "array",
+					"minItems": 2,
+					"items": {
+						"$ref": "#/$defs/nativeShadowBatchMember"
+					}
+				}
+			}
+		},
+		"nativeShadowBatchExecution": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"available",
+				"recordedComplete",
+				"frameSlotSafe",
+				"uploadAttempted",
+				"uploadSucceeded",
+				"allocationIdentity",
+				"allocationGeneration",
+				"backendGeneration",
+				"instanceBytes",
+				"frameSlot",
+				"snapshotSlot",
+				"sources",
+				"groups",
+				"singletons"
+			],
+			"properties": {
+				"available": {
+					"type": "boolean"
+				},
+				"recordedComplete": {
+					"type": "boolean"
+				},
+				"frameSlotSafe": {
+					"type": "boolean"
+				},
+				"uploadAttempted": {
+					"type": "boolean"
+				},
+				"uploadSucceeded": {
+					"type": "boolean"
+				},
+				"allocationIdentity": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"allocationGeneration": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"backendGeneration": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"instanceBytes": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"frameSlot": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 2
+				},
+				"snapshotSlot": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 7
+				},
+				"sources": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/nativeShadowBatchSource"
+					}
+				},
+				"groups": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/nativeShadowBatchGroup"
+					}
+				},
+				"singletons": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/nativeShadowBatchMember"
+					}
+				}
+			}
+		},
+		"nativeStaticShadowSupport": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"authoredStatic",
+				"knownDefaultShadowAbi",
+				"ownerPublicationsComplete",
+				"materialShadowSupported",
+				"geometrySupported",
+				"deformationAbsent"
+			],
+			"properties": {
+				"authoredStatic": {
+					"type": "boolean"
+				},
+				"knownDefaultShadowAbi": {
+					"type": "boolean"
+				},
+				"ownerPublicationsComplete": {
+					"type": "boolean"
+				},
+				"materialShadowSupported": {
+					"type": "boolean"
+				},
+				"geometrySupported": {
+					"type": "boolean"
+				},
+				"deformationAbsent": {
+					"type": "boolean"
+				}
+			}
+		},
+		"nativeStaticShadowExecution": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"available",
+				"partitionComplete",
+				"copyOverlay",
+				"staticReused",
+				"recordedComplete",
+				"requiredFaceMask",
+				"staticRecordedFaceMask",
+				"copiedFaceMask",
+				"staticContentToken",
+				"sourceCommandSerial",
+				"sourceSubmitSerial",
+				"allocationIdentity",
+				"allocationGeneration",
+				"backendGeneration",
+				"actualBytes",
+				"staticDraws",
+				"dynamicDraws",
+				"staticView",
+				"staticMembership",
+				"dynamicMembership",
+				"fallbackReason",
+				"allocations",
+				"completedSubmissions",
+				"discardedCommands",
+				"acceptedSubmissions"
+			],
+			"properties": {
+				"available": {
+					"type": "boolean"
+				},
+				"partitionComplete": {
+					"type": "boolean"
+				},
+				"copyOverlay": {
+					"type": "boolean"
+				},
+				"staticReused": {
+					"type": "boolean"
+				},
+				"recordedComplete": {
+					"type": "boolean"
+				},
+				"requiredFaceMask": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 63
+				},
+				"staticRecordedFaceMask": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 63
+				},
+				"copiedFaceMask": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 63
+				},
+				"staticContentToken": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"sourceCommandSerial": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"sourceSubmitSerial": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"allocationIdentity": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"allocationGeneration": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"backendGeneration": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"actualBytes": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"staticDraws": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"dynamicDraws": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"staticView": {
+					"type": "object"
+				},
+				"staticMembership": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"required": [
+							"objectId",
+							"lifetimeGeneration",
+							"segmentId",
+							"staticEligible",
+							"staticClassificationReason",
+							"staticSupport",
+							"evidenceMask"
+						],
+						"properties": {
+							"staticSupport": {
+								"$ref": "#/$defs/nativeStaticShadowSupport"
+							}
+						}
+					}
+				},
+				"dynamicMembership": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"required": [
+							"objectId",
+							"lifetimeGeneration",
+							"segmentId",
+							"staticEligible",
+							"staticClassificationReason",
+							"staticSupport",
+							"evidenceMask"
+						],
+						"properties": {
+							"staticSupport": {
+								"$ref": "#/$defs/nativeStaticShadowSupport"
+							}
+						}
+					}
+				},
+				"fallbackReason": {
+					"type": "string"
+				},
+				"allocations": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/nativeStaticShadowAllocation"
+					}
+				},
+				"completedSubmissions": {
+					"type": "array",
+					"uniqueItems": true,
+					"items": {
+						"type": "string",
+						"pattern": "^(0|[1-9][0-9]*)$"
+					}
+				},
+				"discardedCommands": {
+					"type": "array",
+					"uniqueItems": true,
+					"items": {
+						"type": "string",
+						"pattern": "^(0|[1-9][0-9]*)$"
+					}
+				},
+				"acceptedSubmissions": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"additionalProperties": false,
+						"required": [
+							"commandSerial",
+							"submitSerial",
+							"frameSlot"
+						],
+						"properties": {
+							"commandSerial": {
+								"type": "string",
+								"pattern": "^[1-9][0-9]*$"
+							},
+							"submitSerial": {
+								"type": "string",
+								"pattern": "^[1-9][0-9]*$"
+							},
+							"frameSlot": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 2
+							}
+						}
+					}
+				}
+			}
+		},
+		"nativeStaticShadowAllocation": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"sessionGeneration",
+				"backendGeneration",
+				"allocationIdentity",
+				"allocationGeneration",
+				"actualBytes",
+				"depthFormat",
+				"layers",
+				"extent",
+				"retiring",
+				"uses"
+			],
+			"properties": {
+				"sessionGeneration": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"backendGeneration": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"allocationIdentity": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"allocationGeneration": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"actualBytes": {
+					"type": "string",
+					"pattern": "^(0|[1-9][0-9]*)$"
+				},
+				"depthFormat": {
+					"type": "integer",
+					"enum": [
+						124,
+						125,
+						126
+					]
+				},
+				"layers": {
+					"type": "integer",
+					"enum": [
+						1,
+						6
+					]
+				},
+				"extent": {
+					"type": "array",
+					"minItems": 2,
+					"maxItems": 2,
+					"items": {
+						"type": "integer",
+						"minimum": 1,
+						"maximum": 32768
+					}
+				},
+				"retiring": {
+					"type": "boolean"
+				},
+				"uses": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"additionalProperties": false,
+						"required": [
+							"commandSerial",
+							"submitSerial",
+							"frameSlot"
+						],
+						"properties": {
+							"commandSerial": {
+								"type": "string",
+								"pattern": "^(0|[1-9][0-9]*)$"
+							},
+							"submitSerial": {
+								"type": "string",
+								"pattern": "^(0|[1-9][0-9]*)$"
+							},
+							"frameSlot": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 2
+							}
+						}
+					}
+				}
+			}
+		},
+		"staticBudgetPublicationReceipt": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"kind",
+				"fixtureStepId",
+				"operationId",
+				"requestedGeneration",
+				"settingsGeneration",
+				"rendererSessionGeneration",
+				"optionsSessionGeneration",
+				"priorOptions",
+				"requestedOptions",
+				"effectiveOptions"
+			],
+			"properties": {
+				"kind": {
+					"const": "StaticBudgetPublication"
+				},
+				"fixtureStepId": {
+					"type": "string",
+					"minLength": 1
+				},
+				"operationId": {
+					"type": "string",
+					"pattern": "^[0-9a-f]{32}$"
+				},
+				"requestedGeneration": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"settingsGeneration": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"rendererSessionGeneration": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"optionsSessionGeneration": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"priorOptions": {
+					"$ref": "#/$defs/options"
+				},
+				"requestedOptions": {
+					"$ref": "#/$defs/options"
+				},
+				"effectiveOptions": {
+					"$ref": "#/$defs/options"
+				}
+			}
+		}
+	}
+}

@@ -150,6 +150,19 @@ public:
 	{
 		return {};
 	}
+	// Protected diagnostics consume owned, completed validation observations.
+	// Backends without GPU evidence return an empty batch, never a measured zero.
+	virtual std::vector<TerraEngine::Renderer::RendererEfficiencyEvidence> PollRendererEfficiencyEvidence()
+	{
+		return {};
+	}
+	// Validation reads current physical references at the protected boundary.
+	// This CPU snapshot does not wait, complete commands, or authorize release.
+	virtual std::optional<TerraEngine::Renderer::RendererEfficiencyStaticShadowExecution>
+		GetRendererEfficiencyStaticLifetimeSnapshot() const
+	{
+		return std::nullopt;
+	}
 	// GetLatestRenderStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const
 	{

@@ -18,6 +18,9 @@ file(GLOB_RECURSE TERRAENGINE_ENGINE_ANIMATION_TEST_SOURCES CONFIGURE_DEPENDS
 
 add_executable(TerraEngine-EngineTests
 	EngineTests.cpp
+	# Lighting transfer regressions use the production pure planner, without a GPU.
+	Renderer/LightingUploadPlanTests.cpp
+	Renderer/LightingUploadOwnershipTests.cpp
 	# Correctness cases exercise production entry points; watchdogs bound hangs.
 	Runtime/FrameFailureLifecycleTests.cpp
 	Runtime/ArtifactValidationTests.cpp
@@ -301,6 +304,35 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderReferenceFrameTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderPreparationCacheTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderInstanceAbiTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererEfficiencyContractTests.cpp
+	# Final evidence tests use production timing/session policies, without a GPU.
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererEfficiencyEvidenceTests.cpp
+	# CPU contracts distinguish numerical expectations from actual GPU proof.
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/LightingDepthReductionTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/LightingDepthTimingTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/LightingDepthFixtureControlTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/LightingDepthEvidenceTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/LightingDepthSchedulerTests.cpp
+	# Shadow checks distinguish semantic identity from GPU publication and capture.
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/ShadowInvalidationTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/ShadowCachePublicationTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/ShadowPreparationBoundaryTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/ShadowBatchPlanTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/ShadowGroupedSubmissionTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/ShadowBatchFixtureControlTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/StaticShadowPolicyTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/StaticShadowPublicationTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/ShadowValidationReadbackTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/ShaderPipelinePublicationTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/ShadowPagePreparationTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanUploadAcceptanceTests.cpp
+	# Bootstrap fallback texture writes must precede renderer readiness.
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanTextureDescriptorAdmissionTests.cpp
+	# Cold and recreated HiZ descriptors must stay valid without inventing history.
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanHiZDescriptorPlanTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanTextureDescriptorRetirementTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererEfficiencyFixtureControlTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererEfficiencyFixtureCameraTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderResourceReadinessTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderStreamingNeedTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderShadowParallelParityTests.cpp
@@ -1027,7 +1059,7 @@ function(terraengine_add_correctness_slice name target filter minimum_cases)
 		TIMEOUT 135 RUN_SERIAL TRUE
 		ENVIRONMENT "TERRAENGINE_TEST_FILTER=${filter};TERRAENGINE_THREADPOOL_WORKERS=${worker_count}")
 endfunction()
-terraengine_add_correctness_slice(Engine.SceneMutationFailureSafety TerraEngine-EngineTests Engine.SceneMutationFailureSafety 39)
+terraengine_add_correctness_slice(Engine.SceneMutationFailureSafety TerraEngine-EngineTests Engine.SceneMutationFailureSafety 42)
 terraengine_add_correctness_slice(Engine.ResourceAsyncLifecycle TerraEngine-EngineTests Engine.ResourceAsyncLifecycle 28)
 terraengine_add_correctness_slice(Engine.SceneSaveFailureSafety TerraEngine-EngineTests Scene.SaveFailureSafety 10)
 terraengine_add_correctness_slice(Engine.AudioWorldCellCapture TerraEngine-EngineTests Audio.WorldCellCapture 5)
@@ -1060,3 +1092,5 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Runtime/ContentArchiveSafetyTests.cpp")
 	terraengine_add_correctness_slice(Engine.ContentArchiveSafety TerraEngine-EngineTests Engine.ContentArchiveSafety 30)
 endif()
 terraengine_add_correctness_slice(Engine.AnimationCompileFailure TerraEngine-EngineTests Animation.ProgramPublisher 9)
+# Select every efficiency regression, including ownership, uploads and readbacks.
+terraengine_add_correctness_slice(Engine.RendererEfficiency TerraEngine-EngineTests Renderer.Efficiency 297)

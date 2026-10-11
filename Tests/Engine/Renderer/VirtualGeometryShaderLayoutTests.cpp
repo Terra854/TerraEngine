@@ -3,6 +3,7 @@
 
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Renderer/RHI/Vulkan/VulkanHiZ.h"
+#include "Renderer/RHI/Vulkan/VulkanHiZDescriptorPlan.h"
 #include "Renderer/RenderTypes.h"
 
 #include <array>
@@ -621,7 +622,19 @@ namespace TerraEngine::Tests
 			const std::string vulkanResources = ReadVulkanContextResourcesSource();
 
 			context.Expect(ShaderContains(vulkanResources, "publication.buffer == buffer.buffer"), "View-local VG bindless descriptors should skip redundant descriptor-set updates when the published buffer did not change.");
-			context.Expect(ShaderContains(vulkanResources, "WaitForDescriptorMutationIdle();"), "Changing a VG bindless descriptor should route through the shared descriptor-idle helper.");
+			// A failed idle proof must return before publishing the changed descriptor.
+			const auto updateStart = vulkanResources.find("bool VulkanContext::Impl::UpdateGlobalBufferForFrame(");
+			const auto updateEnd = updateStart == std::string::npos ? std::string::npos
+				: vulkanResources.find("bool VulkanContext::Impl::UpdateGlobalHiZ(", updateStart);
+			// Bound the inspected body so an unrelated later idle guard cannot
+			// satisfy this descriptor's failure and publication ordering contract.
+			const auto updateBody = updateStart == std::string::npos || updateEnd == std::string::npos
+				? std::string{} : vulkanResources.substr(updateStart, updateEnd - updateStart);
+			const auto checkedIdle = updateBody.find("if (!WaitForDescriptorMutationIdle()) return false;");
+			const auto descriptorWrite = updateBody.find("vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);");
+			context.Expect(!updateBody.empty() && checkedIdle != std::string::npos
+				&& descriptorWrite != std::string::npos && checkedIdle < descriptorWrite,
+				"Changing a VG bindless descriptor must fail closed on the shared descriptor-idle proof before descriptor publication.");
 			context.Expect(ShaderContains(vulkanResources, "prefixSubmit.pCommandBuffers = pendingCommandBuffers.data();"), "Recorded views should be submitted before a shared descriptor set is updated.");
 			context.Expect(ShaderContains(vulkanResources, "WaitGraphicsQueueIdle();"), "The descriptor mutation path should still drain already-submitted view work through the synchronized queue boundary before mutating the shared bindless set.");
 			context.Expect(ShaderContains(vulkanResources, "if (currentFrame < pendingPrimaryCommandBuffers.size())"), "The central descriptor mutation idle helper should drain recorded view command buffers in editor and exported runtime builds.");
@@ -645,17 +658,31 @@ namespace TerraEngine::Tests
 					&& depthPreparePosition < lightAnalysisBindPosition,
 				"Depth descriptor publication must happen before the first global compute descriptor bind.");
 			const std::size_t prepareFunctionPosition = vulkanSource.find("bool VulkanContext::Impl::PrepareDepthForCompute");
-			const std::size_t depthIdlePosition = prepareFunctionPosition == std::string::npos
-				? std::string::npos
-				: vulkanSource.find("WaitForDescriptorMutationIdle();", prepareFunctionPosition);
-			const std::size_t depthWritePosition = prepareFunctionPosition == std::string::npos
-				? std::string::npos
-				: vulkanSource.find("VkDescriptorImageInfo sampledDepthInfo{};", prepareFunctionPosition);
+			const auto prepareFunctionEnd = prepareFunctionPosition == std::string::npos ? std::string::npos
+				: vulkanSource.find("void VulkanContext::Impl::RestoreDepthForAttachment", prepareFunctionPosition);
+			const auto prepareBody = prepareFunctionPosition == std::string::npos || prepareFunctionEnd == std::string::npos
+				? std::string{} : vulkanSource.substr(prepareFunctionPosition, prepareFunctionEnd - prepareFunctionPosition);
+			// Failed admission must leave both the descriptor and borrowed depth
+			// layout untouched; require the checked guard before either mutation.
+			const auto depthIdlePosition = prepareBody.find("if (updateGlobalDepthDescriptor && (globalDescriptorSets[currentFrame] == VK_NULL_HANDLE");
+			const auto depthFailurePosition = prepareBody.find("|| !WaitForDescriptorMutationIdle())) return false;", depthIdlePosition);
+			const auto depthBarrierPosition = prepareBody.find("vkCmdPipelineBarrier(");
+			const auto depthWritePosition = prepareBody.find("VkDescriptorImageInfo sampledDepthInfo{};");
+			const auto depthBindingPosition = prepareBody.find("depthWrite.dstBinding = 12u;");
+			const auto depthPublishPosition = prepareBody.find("vkUpdateDescriptorSets(device, 1u, &depthWrite, 0u, nullptr);");
 			context.Expect(
-				prepareFunctionPosition != std::string::npos
+				!prepareBody.empty()
 					&& depthIdlePosition != std::string::npos
+					&& depthFailurePosition != std::string::npos
+					&& depthBarrierPosition != std::string::npos
 					&& depthWritePosition != std::string::npos
-					&& depthIdlePosition < depthWritePosition,
+					&& depthBindingPosition != std::string::npos
+					&& depthPublishPosition != std::string::npos
+					&& depthIdlePosition < depthFailurePosition
+					&& depthFailurePosition < depthBarrierPosition
+					&& depthBarrierPosition < depthWritePosition
+					&& depthWritePosition < depthBindingPosition
+					&& depthBindingPosition < depthPublishPosition,
 				"Binding 12 depth descriptor updates should drain submitted runtime/editor command buffers before mutation.");
 		});
 
@@ -745,12 +772,19 @@ namespace TerraEngine::Tests
 					&& ShaderContains(vulkanContext,
 						"preparationUsesConventionalVisibilityIdentity);"),
 				"Prepared-resource fallback checks should use the generation-aware pipeline key and the matching identity-target variant.");
-			context.Expect(
-				ShaderContains(vulkanContext,
-					"impl->BuildPipelineKey(shaderCollectionId, materialFlags,")
-					&& ShaderContains(vulkanContext,
-						"pipelineUsesConventionalVisibilityIdentity);"),
-				"Draw-time pipeline resolution should use the generation-aware pipeline key and the matching identity-target variant.");
+			// Recording consumes a frozen real pipeline rather than reacquiring a
+			// newer shader publication that could replace already copied GPU handles.
+			context.Expect(ShaderContains(vulkanContext, "key.shaderCollectionId == collection && key.materialFlags == flags && key.usesConventionalVisibilityIdentity == identity")
+				&& ShaderContains(vulkanContext, "key.collectionGeneration > selectedGeneration")
+				&& ShaderContains(vulkanContext, "preparedFramePipelines[{TerraEngine::EMPTY_UUID, TerraEngine::EMPTY_UUID, collection, pass, flags, identity}] = selected;")
+				&& ShaderContains(vulkanContext, "shaderCollectionId, currentPass, materialFlags, pipelineUsesConventionalVisibilityIdentity};")
+				&& ShaderContains(vulkanContext, "preparedFramePipelines.find(selection)"),
+				"Draw-time pipeline resolution must consume the frozen usable generation with the exact collection, material, pass and identity-target route.");
+			context.Expect(ShaderContains(vulkanResources, "key.collectionGeneration = collection.collectionGeneration;")
+				&& ShaderContains(vulkanResources, "key.geometryAbiVersion = collection.geometryAbiVersion;")
+				&& ShaderContains(vulkanResources, "key.geometryPolicy = static_cast<std::uint32_t>(collection.geometryPolicy);")
+				&& ShaderContains(vulkanResources, "key.stagePublications.push_back({binding.stage, binding.shaderId, binding.publicationGeneration});"),
+				"Frozen selection still requires complete collection, geometry contract and stage publication keys at pipeline creation.");
 			context.Expect(
 				!ShaderContains(vulkanContext, "PipelineKey pipeKey = {"),
 				"Vulkan pipeline lookups must not silently zero generation and geometry-contract fields.");
@@ -860,9 +894,16 @@ namespace TerraEngine::Tests
 		registry.Add("VirtualGeometry.ShaderLayout.GlobalHiZDescriptorsPublishValidViewWhenPeerMissing", [](TestContext& context) {
 			const std::string vulkanResourcesSource = ReadVulkanContextResourcesSource();
 
-			context.Expect(ShaderContains(vulkanResourcesSource, "const VulkanHiZ* fallbackHiZ = nullptr;"), "Global Hi-Z descriptor publication should find a valid per-view fallback.");
-			context.Expect(ShaderContains(vulkanResourcesSource, "const VulkanHiZ& readableHiZ = isReadableHiZ(hiZ) ? hiZ : *fallbackHiZ;"), "A missing Scene/Game pyramid should not block the other view's descriptor update.");
-			context.Expect(ShaderContains(vulkanResourcesSource, "samplerInfo.sampler = fallbackHiZ->sampler;"), "The global Hi-Z sampler should come from the same valid fallback image owner.");
+			// Check descriptor ownership behavior instead of obsolete local variable
+			// names. A cold peer must remain valid without borrowing another view's
+			// depth content or authorizing occlusion against unfinished history.
+			const Renderer::HiZDescriptorOwnerProof white{true, true, true, true, false};
+			std::array<Renderer::HiZDescriptorOwnerProof, 2> histories{};
+			histories[0] = {true, true, true, true, true};
+			const auto plan = Renderer::BuildHiZDescriptorPlan(true, histories, white);
+			context.Expect(plan.valid && plan.imageWrites == 2, "A missing peer must not leave either sampled-image descriptor unwritten.");
+			context.Expect(plan.imageOwners[0] == 0 && plan.imageOwners[1] == -1, "The completed view keeps its own depth; the cold peer uses the real white fallback.");
+			context.Expect(plan.samplerOwner == 0 && !histories[1].completedHistory, "A valid owned sampler must not manufacture completed peer history.");
 			context.Expect(ShaderContains(vulkanResourcesSource, "VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 11: Hi-Z sampler"), "The global Hi-Z sampler binding should be update-after-bind so descriptor republish cannot invalidate already-recorded Scene/Game command buffers.");
 			context.Expect(ShaderContains(vulkanResourcesSource, "VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 8: Point-shadow sampler"), "The point-shadow sampler binding should be update-after-bind because shadow resource rebuilds can republish it between editor views.");
 			context.Expect(!ShaderContains(vulkanResourcesSource, "if (hiZ.fullView == VK_NULL_HANDLE || hiZ.sampler == VK_NULL_HANDLE) return;"), "Global Hi-Z descriptor publication must not return early just because one editor view is missing.");
@@ -874,7 +915,8 @@ namespace TerraEngine::Tests
 			// Vulkan validates statically used descriptors independently of the
 			// runtime deformation branch. These source contracts keep every
 			// reflected binding 6 valid and preserve real deformable owner data.
-			context.Expect(ShaderContains(vulkanResourcesSource, "&& !cpuMesh->hasDeformablePayload;"), "Page-local virtual geometry must retain full owner buffers for deformable draws until page-local skinning is implemented.");
+			context.Expect(ShaderContains(vulkanResourcesSource, "const bool usePageLocalVirtualGeometry = false;"), "Conservative shadow fallback must retain full owner buffers, including deformable skinning payloads.");
+			context.Expect(ShaderContains(vulkanResourcesSource, "cpuMesh->meshletSkinningData.data(), skinningDataSize"), "Deformable owner uploads must copy the actual complete skinning payload.");
 			context.Expect(ShaderContains(vulkanResourcesSource, "createPlaceholderStorageBuffer(kTemfSkinningStrideBytes, \"Virtual Geometry Owner Placeholder Skinning Buffer\")"), "Page-local static meshes should own an explicit zero skinning record.");
 			context.Expect(ShaderContains(vulkanResourcesSource, "createPlaceholderStorageBuffer(kTemfSkinningStrideBytes, \"Static Mesh Skinning Fallback Buffer\")"), "Owning static meshes should own the same stride-correct zero skinning record.");
 			context.Expect(ShaderContains(vulkanResourcesSource, "if (HasStorageBinding(6) && mesh.meshSkinningBuffer.buffer == VK_NULL_HANDLE)"), "Descriptor creation should fail closed if the required skinning owner could not be created.");
@@ -897,12 +939,21 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanResourcesSource,
 				"CreateBuffer(primitiveIndexUploadSize"),
 				"8-bit primitive storage should allocate its padded descriptor range.");
+			// The shared copy loop uses each staging allocation's padded size. Keep
+			// both pairings and successful whole-range initialization explicit.
+			std::string compactSource;
+			for (const char value : vulkanResourcesSource) {
+				if (value != ' ' && value != '\t' && value != '\r' && value != '\n') compactSource += value;
+			}
+			context.Expect(ShaderContains(vulkanResourcesSource, "mappedUploadsReady &= ClearMappedBuffer(allocator, stagingVertexRemap)")
+				&& ShaderContains(vulkanResourcesSource, "mappedUploadsReady &= ClearMappedBuffer(allocator, stagingIndex)"),
+				"Both padded streams must reject uploads when complete-range initialization fails.");
+			context.Expect(ShaderContains(compactSource, "stages[]={&stagingPackedVertex,&stagingVertexRemap,&stagingSkinning,&stagingMorphDeltas,&stagingDecodeInfo,&stagingIndex,&stagingMeshletTable,&stagingMeshletSection,&stagingMeshletBounds}")
+				&& ShaderContains(compactSource, "destinations[]={&vMesh.meshShaderVertexBuffer,&vMesh.meshletVertexRemapBuffer,&vMesh.meshSkinningBuffer,&vMesh.meshMorphDeltaBuffer,&vMesh.meshDecodeInfoBuffer,&vMesh.indexBuffer,&vMesh.meshletBuffer,&vMesh.meshletSectionBuffer,&vMesh.meshletBoundsBuffer}"),
+				"The upload table must pair remap and primitive staging allocations with their owning destinations.");
 			context.Expect(ShaderContains(vulkanResourcesSource,
-				"CopyBuffer(stagingVertexRemap.buffer, vMesh.meshletVertexRemapBuffer.buffer, vertexRemapUploadSize)"),
-				"The remap upload should initialize the complete padded range.");
-			context.Expect(ShaderContains(vulkanResourcesSource,
-				"CopyBuffer(stagingIndex.buffer, vMesh.indexBuffer.buffer, primitiveIndexUploadSize)"),
-				"The primitive upload should initialize the complete padded range.");
+				"CopyBuffer(stages[index]->buffer, destinations[index]->buffer, stages[index]->size)"),
+				"The shared upload must copy each complete padded staging allocation.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.TerrainLayerBlendAppliesComponentTintOnce", [](TestContext& context) {
@@ -944,7 +995,7 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanSource, "impl->desiredHiZExtentByView[hiZViewIndex] = glm::uvec2(hiZTargetWidth, hiZTargetHeight);"), "RenderFrame should record the actual Scene/Game render target size without destroying Vulkan objects mid-frame.");
 			context.Expect(ShaderContains(vulkanImplSource, "std::array<glm::uvec2, kHiZViewCount> desiredHiZExtentByView{}"), "Per-view desired Hi-Z sizes should live with the backend state so BeginFrame can consume them at a fence-safe boundary.");
 			context.Expect(ShaderContains(vulkanSource, "doing this inside"), "The fence-safe resize path should document why RenderFrame is not allowed to rebuild the sampler-backed Hi-Z resources.");
-			context.Expect(ShaderContains(vulkanSource, "impl->UpdateGlobalHiZ(impl->currentFrame);"), "After a fence-safe Hi-Z resize, the global descriptors should be republished before new command buffers bind them.");
+			context.Expect(ShaderContains(vulkanSource, "if (!impl->UpdateGlobalHiZ(impl->currentFrame))"), "Fence-safe Hi-Z publication must stop the frame if native descriptor owners are unavailable.");
 			context.Expect(ShaderContains(vulkanSource, "currentFrameHiZ.width == hiZTargetWidth"), "Hi-Z readiness should compare against the current render target width, not just the swapchain width.");
 			context.Expect(ShaderContains(vulkanSource, "currentFrameHiZ.height == hiZTargetHeight"), "Hi-Z readiness should compare against the current render target height, not just the swapchain height.");
 			context.Expect(ShaderContains(vulkanSource, "hiZ.Create(impl->device, impl->allocator, desiredExtent.x, desiredExtent.y"), "Recreated Hi-Z pyramids should use the queued view render area extent.");
@@ -953,10 +1004,12 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanSource, "impl->readableHiZHistoryByViewFrame[hiZViewIndex][impl->currentFrame] = impl->CurrentHiZ(hiZViewIndex).history;"), "Readable Hi-Z history should be refreshed after resize before the validation gate is evaluated.");
 			context.Expect(ShaderContains(vulkanResourcesSource, "const auto hasReadableCompletedHiZ"), "Completed stats should verify the readable Hi-Z resource, not only a raw image handle.");
 			context.Expect(ShaderContains(vulkanResourcesSource, "hiZ.width == stats.renderSize.x && hiZ.height == stats.renderSize.y"), "Completed stats should mark Hi-Z active only when the backend pyramid matches the completed view size.");
-			const std::size_t updateGlobalHiZStart = vulkanResourcesSource.find("void VulkanContext::Impl::UpdateGlobalHiZ");
-			const std::size_t descriptorIdleStart = vulkanResourcesSource.find("void VulkanContext::Impl::WaitForDescriptorMutationIdle");
-			context.Expect(updateGlobalHiZStart != std::string::npos && descriptorIdleStart > updateGlobalHiZStart, "The Hi-Z descriptor publisher should remain independently inspectable from the general descriptor-mutation synchronization path.");
-			if (updateGlobalHiZStart != std::string::npos && descriptorIdleStart > updateGlobalHiZStart) {
+			// Match qualified names independently of return types, and reject either
+			// missing delimiter so the scan cannot silently include the rest of a file.
+			const std::size_t updateGlobalHiZStart = vulkanResourcesSource.find("VulkanContext::Impl::UpdateGlobalHiZ(");
+			const std::size_t descriptorIdleStart = vulkanResourcesSource.find("VulkanContext::Impl::WaitForDescriptorMutationIdle(");
+			context.Expect(updateGlobalHiZStart != std::string::npos && descriptorIdleStart != std::string::npos && descriptorIdleStart > updateGlobalHiZStart, "The Hi-Z descriptor publisher should remain independently inspectable from the general descriptor-mutation synchronization path.");
+			if (updateGlobalHiZStart != std::string::npos && descriptorIdleStart != std::string::npos && descriptorIdleStart > updateGlobalHiZStart) {
 				const std::string updateGlobalHiZBody = vulkanResourcesSource.substr(updateGlobalHiZStart, descriptorIdleStart - updateGlobalHiZStart);
 				context.Expect(!ShaderContains(updateGlobalHiZBody, "WaitForDescriptorMutationIdle();"), "Fence-safe per-frame Hi-Z descriptor publication must not wait for unrelated graphics-queue work.");
 			}

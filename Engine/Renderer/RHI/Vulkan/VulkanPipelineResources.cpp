@@ -25,7 +25,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& stage : collection.stages) {
-		Shader* shader = ResourceManager::Instance().GetShader(stage.shaderId);
+		const Shader* shader = stage.shader.get();
 		if (!shader) {
 			TERRAENGINE_LOG(LogLevel::Error, "Shader stage missing for collection; cannot build pipeline layouts");
 			return false;
@@ -163,47 +163,40 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 	return true;
 }
 
+namespace
+{
+	std::optional<PipelineKey> BuildOwnedPipelineKey(const ShaderCollection& collection,
+		TerraEngine::UUID shaderCollectionId, uint32_t materialFlags,
+		bool usesConventionalVisibilityIdentity)
+	{
+		// Stage order and accepted publication identities are exact equality
+		// inputs. A bytecode-length digest cannot prove identical module bytes.
+		PipelineKey key{};
+		key.shaderCollectionId = shaderCollectionId;
+		key.materialFlags = materialFlags;
+		key.collectionGeneration = collection.collectionGeneration;
+		key.geometryAbiVersion = collection.geometryAbiVersion;
+		key.geometryPolicy = static_cast<std::uint32_t>(collection.geometryPolicy);
+		key.usesConventionalVisibilityIdentity = usesConventionalVisibilityIdentity;
+		key.stagePublications.reserve(collection.stages.size());
+		for (const auto& binding : collection.stages)
+		{
+			if (!binding.shader || binding.publicationGeneration == 0U
+				|| binding.shader->publicationGeneration != binding.publicationGeneration)
+				return std::nullopt;
+			key.stagePublications.push_back({binding.stage, binding.shaderId, binding.publicationGeneration});
+		}
+		return key;
+	}
+}
+
 std::optional<PipelineKey> VulkanContext::Impl::BuildPipelineKey(
-	TerraEngine::UUID shaderCollectionId,
-	uint32_t materialFlags,
+	TerraEngine::UUID shaderCollectionId, uint32_t materialFlags,
 	bool usesConventionalVisibilityIdentity) const
 {
-	// Pipeline lookup must use every generation and ABI field used by insertion.
-	// Otherwise a successfully-created pipeline is unreachable as soon as the
-	// cache key grows beyond the collection UUID and material flags.
-	ShaderCollection* collection =
-		ResourceManager::Instance().GetShaderCollection(shaderCollectionId);
-	if(collection == nullptr)
-	{
-		return std::nullopt;
-	}
-
-	std::uint64_t shaderModuleGeneration = 1469598103934665603ull;
-	for(const ShaderCollection::StageBinding& binding : collection->stages)
-	{
-		for(const std::uint8_t byte : binding.shaderId)
-		{
-			shaderModuleGeneration ^= byte;
-			shaderModuleGeneration *= 1099511628211ull;
-		}
-		const Shader* shader = ResourceManager::Instance().GetShader(binding.shaderId);
-		if(shader == nullptr)
-		{
-			return std::nullopt;
-		}
-		shaderModuleGeneration ^= shader->bytecode.size();
-		shaderModuleGeneration *= 1099511628211ull;
-	}
-
-	return PipelineKey{
-		shaderCollectionId,
-		materialFlags,
-		collection->collectionGeneration,
-		shaderModuleGeneration,
-		collection->geometryAbiVersion,
-		static_cast<std::uint32_t>(collection->geometryPolicy),
-		usesConventionalVisibilityIdentity
-	};
+	const auto collection = ResourceManager::Instance().AcquireShaderCollectionSnapshot(shaderCollectionId);
+	return collection ? BuildOwnedPipelineKey(*collection, shaderCollectionId,
+		materialFlags, usesConventionalVisibilityIdentity) : std::nullopt;
 }
 
 // VulkanContext::Impl::EnsurePipeline is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -217,8 +210,7 @@ void VulkanContext::Impl::EnsurePipeline(
 		TERRAENGINE_LOG(LogLevel::Error, "Cannot ensure pipeline: render pass handle is null.");
 		return;
 	}
-	ShaderCollection* collection =
-		ResourceManager::Instance().GetShaderCollection(shaderCollectionId);
+	const auto collection = ResourceManager::Instance().AcquireShaderCollectionSnapshot(shaderCollectionId);
 	if(collection == nullptr || !collection->reflectionComplete
 		|| collection->usesReservedBindings
 		|| collection->usesAnimationBindings
@@ -248,7 +240,7 @@ void VulkanContext::Impl::EnsurePipeline(
 		}
 		return;
 	}
-	const std::optional<PipelineKey> key = BuildPipelineKey(
+	const std::optional<PipelineKey> key = BuildOwnedPipelineKey(*collection,
 		shaderCollectionId, materialFlags, usesConventionalVisibilityIdentity);
 	if(!key.has_value())
 	{
@@ -318,7 +310,7 @@ void VulkanContext::Impl::EnsurePipeline(
 	bool identityVariantLoadFailed = false;
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& stage : collection->stages) {
-		Shader* shader = ResourceManager::Instance().GetShader(stage.shaderId);
+		const Shader* shader = stage.shader.get();
 		if (shader) {
 			VkShaderModuleCreateInfo createInfo{};
 			createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -658,6 +650,7 @@ void VulkanContext::Impl::EnsurePipeline(
 
 	VulkanPipeline pipeline{};
 	pipeline.pipeline = graphicsPipeline;
+	pipeline.collectionGeneration = key->collectionGeneration;
 	pipeline.layout = pipelineLayout;
 	pipeline.setLayouts = std::move(setLayouts);
 	pipeline.bindingsPerSet = std::move(bindingsPerSet);

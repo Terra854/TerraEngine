@@ -1,0 +1,93 @@
+# Install-time identity is based on the actual built target and every maintained
+# input, including shader bytes. A revision alone cannot identify dirty builds.
+set(renderer_efficiency_root "@ENGINE_INSTALL_DESTINATION@")
+set(renderer_efficiency_required
+	"Editor/TerraEngine-Editor.exe" "Editor/TerraEngine.dll"
+	"Editor/glfw3.dll" "Editor/dxcompiler.dll"
+	"Editor/Project/Templates/UserSettings/EditorLayout.ini"
+	"Editor/Project/Templates/UserSettings/EditorLayout.terra"
+	"Tests/Engine/TerraEngine-EngineTests.exe" "Tests/Editor/TerraEngine-EditorTests.exe"
+	"Tests/Tools/RendererEfficiency/TerraEngine-RendererEfficiencyFixtureMaterializer.exe"
+	"Tests/Tools/RendererEfficiency/TerraEngine-RendererEfficiencyDepthFixtureTests.exe"
+	"Tests/Tools/RendererEfficiency/TerraEngine-RendererEfficiencyProfilerJournalInspector.exe"
+	"Tests/Tools/RendererEfficiency/TerraEngine-RendererEfficiencyProfilerJournalFixture.exe"
+	"Tests/Tools/RendererEfficiency/Compare-RendererEfficiencyBaselineTiming.ps1"
+	"Tests/Tools/RendererEfficiency/Test-RendererEfficiencyBaselineTiming.ps1"
+	"Tests/Tools/RendererEfficiency/RendererEfficiencyBaselineTimingCapture.ps1"
+	"Tests/Tools/RendererEfficiency/Test-RendererEfficiencyBaselineTimingCapture.ps1"
+	"Intermediate/InstalledShaders/$<CONFIG>/Lighting/ClusterDepthMask.comp.spv"
+	"Intermediate/InstalledShaders/$<CONFIG>/Lighting/ClusterDepthMaskReference.comp.spv"
+	"Intermediate/InstalledShaders/$<CONFIG>/Lighting/ClusterDepthMaskOracle.comp.spv"
+	"Intermediate/InstalledShaders/$<CONFIG>/Lighting/ClusterDepthMaskReferenceOracle.comp.spv"
+	"Editor/Shaders/Lighting/ClusterDepthMask.comp.spv"
+	"Editor/Shaders/Lighting/ClusterDepthMaskReference.comp.spv"
+	"Editor/Shaders/Lighting/ClusterDepthMaskOracle.comp.spv"
+	"Editor/Shaders/Lighting/ClusterDepthMaskReferenceOracle.comp.spv"
+	"Tests/Tools/RendererEfficiency/Invoke-RendererEfficiencyValidation.ps1"
+	"Tests/Tools/RendererEfficiency/Compare-RendererEfficiencyEvidence.ps1"
+	"Tests/Tools/RendererEfficiency/Test-RendererEfficiencyDepthEvidence.ps1"
+	"Tests/Tools/RendererEfficiency/Test-ShadowBatchingEvidence.ps1"
+	"Tests/Tools/RendererEfficiency/StaticShadowEvidence.Tests.ps1"
+	"Tests/Tools/RendererEfficiency/README.md"
+	"Tests/Tools/RendererEfficiency/Schemas/evidence.schema.json"
+	"Tests/Fixtures/RendererEfficiency/workloads.json" "correctness-artifacts.json")
+# An enabled native regression is part of the runnable install, including its
+# bundled platform libraries. Require those files before sealing their bytes.
+if("@TERRAENGINE_BUILD_NATIVE_GLFW_RECOVERY_TEST@")
+	list(APPEND renderer_efficiency_required
+		"Tests/Editor/NativeGlfwRecovery/TerraEngine-RendererEfficiencyGlfwRecoveryTests@TERRAENGINE_EXECUTABLE_SUFFIX@")
+	if("@WIN32@")
+		list(APPEND renderer_efficiency_required
+			"Tests/Editor/NativeGlfwRecovery/cimgui.dll" "Tests/Editor/NativeGlfwRecovery/glfw3.dll")
+	endif()
+endif()
+foreach(renderer_efficiency_relative IN LISTS renderer_efficiency_required)
+	if(NOT EXISTS "${renderer_efficiency_root}/${renderer_efficiency_relative}")
+		message(FATAL_ERROR "Missing renderer validation installed input: ${renderer_efficiency_relative}")
+	endif()
+endforeach()
+# Refuse to seal an old bootstrap executable left by an interrupted install.
+file(SHA256 "$<TARGET_FILE:TerraEngine-RendererEfficiencyFixtureMaterializer>" renderer_efficiency_built_hash)
+file(SHA256 "${renderer_efficiency_root}/Tests/Tools/RendererEfficiency/TerraEngine-RendererEfficiencyFixtureMaterializer.exe" renderer_efficiency_installed_hash)
+if(NOT renderer_efficiency_built_hash STREQUAL renderer_efficiency_installed_hash)
+	message(FATAL_ERROR "Installed renderer fixture materializer differs from its built target")
+endif()
+file(GLOB renderer_efficiency_files RELATIVE "${renderer_efficiency_root}"
+	"${renderer_efficiency_root}/Editor/*.exe" "${renderer_efficiency_root}/Editor/*.dll"
+	"${renderer_efficiency_root}/Tests/Engine/*.exe" "${renderer_efficiency_root}/Tests/Engine/*.dll"
+	"${renderer_efficiency_root}/Tests/Editor/*.exe" "${renderer_efficiency_root}/Tests/Editor/*.dll")
+file(GLOB_RECURSE renderer_efficiency_support LIST_DIRECTORIES false RELATIVE "${renderer_efficiency_root}"
+	# Nested native test dependencies must be hashed just like top-level tests.
+	"${renderer_efficiency_root}/Tests/Editor/NativeGlfwRecovery/*"
+	"${renderer_efficiency_root}/Tests/Tools/RendererEfficiency/*"
+	"${renderer_efficiency_root}/Tests/Fixtures/RendererEfficiency/*"
+	"${renderer_efficiency_root}/Intermediate/InstalledShaders/*"
+	"${renderer_efficiency_root}/Editor/Shaders/*"
+	"${renderer_efficiency_root}/Editor/Managed/*"
+	"${renderer_efficiency_root}/Editor/DotNet/*"
+	"${renderer_efficiency_root}/Editor/Fonts/*")
+list(APPEND renderer_efficiency_files ${renderer_efficiency_support} ${renderer_efficiency_required})
+# Exclude this receipt itself so repeated installs produce a verifiable closure.
+list(FILTER renderer_efficiency_files EXCLUDE REGEX "renderer-efficiency-artifacts[.]json$")
+list(REMOVE_DUPLICATES renderer_efficiency_files)
+list(SORT renderer_efficiency_files)
+execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "@PROJECT_SOURCE_DIR@"
+	OUTPUT_VARIABLE renderer_efficiency_revision OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+execute_process(COMMAND git status --porcelain WORKING_DIRECTORY "@PROJECT_SOURCE_DIR@"
+	OUTPUT_VARIABLE renderer_efficiency_dirty OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+set(renderer_efficiency_dirty_json false)
+if(NOT renderer_efficiency_dirty STREQUAL "")
+	set(renderer_efficiency_dirty_json true)
+endif()
+set(renderer_efficiency_json "{\n  \"schemaVersion\":1,\n  \"revision\":\"${renderer_efficiency_revision}\",\n  \"buildConfiguration\":\"$<CONFIG>\",\n  \"sourceDirty\":${renderer_efficiency_dirty_json},\n  \"artifacts\":[")
+set(renderer_efficiency_separator "")
+foreach(renderer_efficiency_relative IN LISTS renderer_efficiency_files)
+	file(SHA256 "${renderer_efficiency_root}/${renderer_efficiency_relative}" renderer_efficiency_hash)
+	file(SIZE "${renderer_efficiency_root}/${renderer_efficiency_relative}" renderer_efficiency_size)
+	string(APPEND renderer_efficiency_json "${renderer_efficiency_separator}\n    {\"path\":\"${renderer_efficiency_relative}\",\"sha256\":\"${renderer_efficiency_hash}\",\"bytes\":${renderer_efficiency_size}}")
+	set(renderer_efficiency_separator ",")
+endforeach()
+string(TIMESTAMP renderer_efficiency_timestamp "%Y-%m-%dT%H:%M:%SZ" UTC)
+string(APPEND renderer_efficiency_json "\n  ],\n  \"builtAtUtc\":\"${renderer_efficiency_timestamp}\"\n}\n")
+file(WRITE "${renderer_efficiency_root}/Tests/Tools/RendererEfficiency/renderer-efficiency-artifacts.json" "${renderer_efficiency_json}")
+message(STATUS "Sealed installed renderer efficiency artifacts")

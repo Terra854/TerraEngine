@@ -17,6 +17,79 @@
 
 namespace TerraEngine::Renderer {
 
+	ShadowCasterStampInput BuildShadowCasterStampInput(const RenderItemRecord& command,
+		const RenderReferenceFrame& referenceFrame, std::uint64_t segmentId,
+		std::optional<std::uint64_t> selectedClusterId)
+	{
+		ShadowCasterStampInput result;
+		// Each worker owns this value copy. Shared base ownership cannot expose live
+		// scene storage, and missing base evidence remains explicitly incomplete.
+		if(command.shadowCasterInputs != nullptr) result.semantic = *command.shadowCasterInputs;
+		auto& stamp = result.semantic;
+		stamp.objectId = command.objectId;
+		stamp.meshId = command.meshId;
+		stamp.materialId = command.materialId;
+		stamp.segmentId = segmentId;
+		if(stamp.lifetimeGeneration == 0) stamp.lifetimeGeneration = command.objectLifetimeGeneration;
+		const auto copyOrigin = [](const TerraEngine::Scene::WorldPosition& value) {
+			return ShadowCanonicalOrigin{{value.cell.x, value.cell.y, value.cell.z},
+				{value.offsetMetres.x, value.offsetMetres.y, value.offsetMetres.z}};
+		};
+		stamp.worldPosition = copyOrigin(command.canonicalWorldPose.position);
+		stamp.referenceOrigin = copyOrigin(referenceFrame.canonicalOrigin);
+		const auto& rotation = command.canonicalWorldPose.rotation;
+		stamp.rotation = {rotation.w, rotation.x, rotation.y, rotation.z};
+		const auto& scale = command.canonicalWorldPose.scale;
+		stamp.scale = {scale.x, scale.y, scale.z};
+		stamp.geometryRoute = static_cast<std::uint32_t>(command.geometryRoute);
+		stamp.selectedLod = command.selectedVirtualLod;
+		// Include all flags conservatively: owner deformation and fail-open choices
+		// can alter emitted coverage; extra diagnostic invalidation remains safe.
+		stamp.selectionFlags = command.virtualGeometryFlags;
+		stamp.firstMeshlet = command.virtualMeshletOffset;
+		stamp.meshletCount = command.virtualMeshletCount;
+		stamp.pageId = command.virtualGeometryPageId;
+		stamp.fallbackPageId = command.virtualGeometryFallbackPageId;
+		stamp.payloadByteOffset = command.virtualGeometryPagePayloadByteOffset;
+		stamp.payloadByteSize = command.virtualGeometryPagePayloadByteSize;
+		stamp.payloadSource = static_cast<std::uint32_t>(command.virtualGeometryPayloadSource);
+		stamp.emittedSource = static_cast<std::uint32_t>(command.virtualGeometryEmittedSource);
+		// Packet table offsets are transient. A real selected cluster identity is
+		// required before a virtual segment can claim exact selection evidence.
+		stamp.firstCluster = selectedClusterId.value_or(0);
+		stamp.clusterCount = command.selectedVirtualClusterCount;
+		const auto selectionEvidence = static_cast<std::uint64_t>(ShadowCasterEvidence::Selection);
+		const auto geometryEvidence = static_cast<std::uint64_t>(ShadowCasterEvidence::Geometry);
+		stamp.evidenceMask &= ~selectionEvidence;
+		// Selection proof requires a proven captured geometry owner. Direct draws
+		// name an exact meshlet span; virtual draws also need one actual cluster.
+		if(command.shadowCasterInputs != nullptr && (stamp.evidenceMask & geometryEvidence) != 0
+			&& command.virtualMeshletCount != 0
+			&& (!command.UsesVirtualGeometryRoute()
+				|| command.selectedVirtualClusterCount == 0
+				|| (selectedClusterId && command.selectedVirtualClusterCount == 1)))
+			stamp.evidenceMask |= selectionEvidence;
+		const auto& animation = command.animation;
+		stamp.animationInstanceId = animation.stableInstanceId;
+		stamp.poseGeneration = animation.poseGeneration;
+		stamp.morphGeneration = animation.morphGeneration;
+		stamp.deformationGeneration = animation.deformablePayloadGeneration;
+		stamp.deformationProgramGeneration = animation.programGeneration;
+		stamp.deformationContentIdLow = animation.deformationContentIdLow;
+		stamp.deformationContentIdHigh = animation.deformationContentIdHigh;
+		// Palette presentation ownership is deliberately excluded. GPU work epochs
+		// cannot establish effective output equality; discard any older CPU proof.
+		stamp.paletteGeneration = 0;
+		if(animation.source == static_cast<std::uint8_t>(AnimationRenderEvaluationSource::GpuVisual)
+			|| animation.source == static_cast<std::uint8_t>(AnimationRenderEvaluationSource::HybridAuthoritative))
+		{
+			stamp.evidenceMask &= ~static_cast<std::uint64_t>(ShadowCasterEvidence::Deformation);
+			stamp.deformationPalette.clear(); stamp.morphWeights.clear();
+			stamp.deformationContentIdLow = 0; stamp.deformationContentIdHigh = 0;
+		}
+		return result;
+	}
+
 	RenderLocalizationResult BuildLocalizedRenderPose(
 		const TerraEngine::Scene::WorldPose& pose,
 		const RenderReferenceFrame& currentFrame,
@@ -1157,6 +1230,18 @@ namespace TerraEngine::Renderer {
 	std::uint64_t BuildSnapshotDeterministicHash(const RenderFrameSnapshot& snapshot)
 	{
 		std::uint64_t hash = snapshot.frameId;
+		// Comparison modes are immutable frame inputs. Include their generation
+		// and exact values so a prepared root cannot outlive a transient switch.
+		HashCombine(hash, snapshot.efficiencyOptions.settingsGeneration);
+		HashCombine(hash, snapshot.efficiencyOptions.optionsSessionGeneration);
+		HashCombine(hash, snapshot.efficiencyOptions.rendererSessionGeneration);
+		const auto& options = snapshot.efficiencyOptions.options;
+		HashCombine(hash, static_cast<std::uint64_t>(options.shadowReuse));
+		HashCombine(hash, static_cast<std::uint64_t>(options.lightingUploads));
+		HashCombine(hash, static_cast<std::uint64_t>(options.lightingDepth));
+		HashCombine(hash, static_cast<std::uint64_t>(options.shadowSubmission));
+		HashCombine(hash, options.staticShadowCacheBudgetBytes);
+		HashCombine(hash, static_cast<std::uint64_t>(options.validationPreparation));
 		HashCombine(hash, snapshot.sceneRevision);
 		HashCombine(hash, snapshot.resourceRevision);
 		HashCombine(hash, snapshot.valid ? 1u : 0u);

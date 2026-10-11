@@ -260,9 +260,15 @@ TerraEngine::UUID ResourceManager::RegisterMaterial(const std::string& cacheKey,
 
 void ResourceManager::ReloadMaterial(const TerraEngine::UUID& id)
 {
-	ReloadCached<Material>(id, materialCache, [this](const std::filesystem::path& path) {
+	ReloadMaterialAsync(id).get();
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::ReloadMaterialAsync(const TerraEngine::UUID& id)
+{
+	// Publication and failure preserve the established cache transaction rules.
+	return ReloadCached<Material>(id, materialCache, [this](const std::filesystem::path& path) {
 		return IsCompiledMaterialPath(path) ? LoadMaterialFile(*this, path) : std::unique_ptr<Material>{};
-	}, true).get();
+	}, false);
 }
 
 bool ResourceManager::ReloadMaterialFromAuthoredPath(const TerraEngine::UUID& id,

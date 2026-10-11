@@ -338,7 +338,8 @@ namespace
 			{
 				continue;
 			}
-			const Mesh* mesh = ResourceManager::Instance().GetMesh(packet.meshId);
+			const auto meshOwner = ResourceManager::Instance().AcquireMeshSnapshot(packet.meshId);
+			const Mesh* mesh = meshOwner.get(); // Keep metadata alive across a concurrent reload.
 			// ResourceManager replaces a loaded Mesh instance on reload. Including
 			// both object and backing-storage identity invalidates cached page bytes
 			// without hashing the full vertex stream every rendered frame.
@@ -464,7 +465,8 @@ namespace
 			return false;
 		}
 
-		const Mesh* cpuMesh = ResourceManager::Instance().GetMesh(packet.meshId);
+		const auto meshOwner = ResourceManager::Instance().AcquireMeshSnapshot(packet.meshId);
+		const Mesh* cpuMesh = meshOwner.get(); // Packing consumes this retained immutable publication.
 		if (cpuMesh == nullptr
 			|| cpuMesh->runtimeLayout.layout.strideBytes != kMeshletPackedVertexStrideBytes)
 		{

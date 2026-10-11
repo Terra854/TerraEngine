@@ -1734,20 +1734,46 @@ TerraEngine::UUID ResourceManager::RegisterMesh(const std::string& cacheKey, std
 
 void ResourceManager::ReloadMesh(const TerraEngine::UUID& id)
 {
-	ReloadCached<Mesh>(id, meshCache, [this](const std::filesystem::path& path) {
+	ReloadMeshAsync(id).get();
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::ReloadMeshAsync(const TerraEngine::UUID& id)
+{
+	// The existing publisher owns cancellation, immutable replacement and
+	// generation advancement; callers receive its real decision without waiting.
+	return ReloadCached<Mesh>(id, meshCache, [this](const std::filesystem::path& path) {
 		return IsCompiledMeshPath(path) ? LoadMeshFile(*this, path) : std::unique_ptr<Mesh>{};
-	}, true).get();
+	}, false);
 }
 
 // ResourceManager::GetMeshLocalBounds is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::Scene::SpatialAABB ResourceManager::GetMeshLocalBounds(const TerraEngine::UUID& id)
 {
+	bool registered = false;
 	{
-		std::shared_lock lock(m_MeshLocalBoundsMutex);
-		if (const auto boundsIt = m_MeshLocalBoundsCache.find(id); boundsIt != m_MeshLocalBoundsCache.end())
-		{
-			return boundsIt->second;
+		// Package children can retain one accepted native owner under different
+		// authored GUIDs. Read its already published bounds without loading bytes
+		// or inserting an alias entry. Cache-before-bounds is the publication lock
+		// order, so an async reload cannot mix owner and spatial generations.
+		std::shared_lock cacheLock(meshCache.mutex);
+		const auto registration = meshCache.idToPath.find(id);
+		if (registration != meshCache.idToPath.end()) {
+			registered = true;
+			const auto accepted = meshCache.acceptedPayloads.find(registration->second);
+			if (accepted != meshCache.acceptedPayloads.end()
+				&& HasCurrentAcceptedPayload(meshCache, registration->second, accepted->second.ownerId)) {
+				std::shared_lock boundsLock(m_MeshLocalBoundsMutex);
+				const auto bounds = m_MeshLocalBoundsCache.find(accepted->second.ownerId);
+				if (bounds != m_MeshLocalBoundsCache.end()) return bounds->second;
+			}
 		}
+	}
+	if (!registered) {
+		// Compatibility-only exact bounds are useful without a current typed
+		// registration. Registered children must use current accepted provenance
+		// above; a legacy alias entry may otherwise survive a canonical reload.
+		std::shared_lock lock(m_MeshLocalBoundsMutex);
+		if (const auto bounds = m_MeshLocalBoundsCache.find(id); bounds != m_MeshLocalBoundsCache.end()) return bounds->second;
 	}
 
 	// Spatial-index refresh must not load the full mesh payload just to find a

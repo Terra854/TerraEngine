@@ -4,8 +4,13 @@
 #include "FbxTestHelpers.h"
 #include "ModelPackageImporter.h"
 #include "Resource/ResourceManager.h"
+#include "Renderer/RHI/Vulkan/VulkanShadowPagePreparation.h"
+#include "ThreadPool/ThreadPool.h"
+#include "../../Engine/Runtime/CorrectnessTestSupport.h"
 
 #include <algorithm>
+#include <array>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -15,6 +20,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <fastgltf/base64.hpp>
 
 namespace TerraEngine::EditorTests
 {
@@ -89,10 +95,188 @@ namespace TerraEngine::EditorTests
 		{
 			return std::find(mesh.virtualGeometryCoverageTags.begin(), mesh.virtualGeometryCoverageTags.end(), std::string(expectedTag)) != mesh.virtualGeometryCoverageTags.end();
 		}
+
+		// Keep the logical glTF child and two authored material sections fixed while
+		// changing only tessellation or position. The normal importer cooks every byte.
+		nlohmann::json WriteSelectedGeometryGrid(const std::filesystem::path& root, unsigned divisions, float displacement)
+		{
+			std::vector<std::byte> bytes;
+			const auto append = [&bytes]<typename T>(T value) {
+				const auto offset = bytes.size(); bytes.resize(offset + sizeof(T));
+				std::memcpy(bytes.data() + offset, &value, sizeof(T));
+			};
+			const unsigned vertices = (divisions + 1) * (divisions + 1);
+			for(unsigned y = 0; y <= divisions; ++y) for(unsigned x = 0; x <= divisions; ++x) {
+				append(float(x) / divisions * 4 - 2 + displacement); append(float(y) / divisions * 4); append(0.F);
+			}
+			const auto normals = bytes.size();
+			for(unsigned i = 0; i < vertices; ++i) { append(0.F); append(0.F); append(1.F); }
+			const auto uvs = bytes.size();
+			for(unsigned y = 0; y <= divisions; ++y) for(unsigned x = 0; x <= divisions; ++x) { append(float(x) / divisions); append(float(y) / divisions); }
+			std::array<std::size_t, 2> offsets{}; std::array<unsigned, 2> counts{};
+			for(unsigned section = 0; section < 2; ++section) {
+				offsets[section] = bytes.size();
+				for(unsigned y = 0; y < divisions; ++y) for(unsigned x = 0; x < divisions; ++x) {
+					if(x * 2 / divisions != section) continue;
+					const unsigned a = y * (divisions + 1) + x, b = a + 1, c = a + divisions + 1, d = c + 1;
+					for(unsigned index : {a, b, c, b, d, c}) append(static_cast<std::uint16_t>(index));
+					counts[section] += 6;
+				}
+			}
+			std::ofstream buffer(root / "grid.bin", std::ios::binary);
+			buffer.write(reinterpret_cast<const char*>(bytes.data()), bytes.size()); buffer.close();
+			using Json = nlohmann::json;
+			Json document = {{"asset", {{"version", "2.0"}}}, {"buffers", Json::array({{{"uri", "grid.bin"}, {"byteLength", bytes.size()}}})},
+				{"bufferViews", Json::array({{{"buffer", 0}, {"byteOffset", 0}, {"byteLength", normals}},
+					{{"buffer", 0}, {"byteOffset", normals}, {"byteLength", uvs - normals}}, {{"buffer", 0}, {"byteOffset", uvs}, {"byteLength", offsets[0] - uvs}}})},
+				{"accessors", Json::array({{{"bufferView", 0}, {"componentType", 5126}, {"count", vertices}, {"type", "VEC3"}, {"min", {-2 + displacement, 0, 0}}, {"max", {2 + displacement, 4, 0}}},
+					{{"bufferView", 1}, {"componentType", 5126}, {"count", vertices}, {"type", "VEC3"}}, {{"bufferView", 2}, {"componentType", 5126}, {"count", vertices}, {"type", "VEC2"}}})},
+				{"materials", Json::array({{{"name", "SelectedGeometryMaterial0"}, {"doubleSided", true}}, {{"name", "SelectedGeometryMaterial1"}, {"doubleSided", true}}})},
+				{"nodes", Json::array({{{"name", "SelectedGeometry"}, {"mesh", 0}}})}, {"scenes", Json::array({{{"nodes", {0}}}})}, {"scene", 0}};
+			Json primitives = Json::array();
+			for(unsigned section = 0; section < 2; ++section) {
+				document["bufferViews"].push_back({{"buffer", 0}, {"byteOffset", offsets[section]}, {"byteLength", counts[section] * sizeof(std::uint16_t)}});
+				document["accessors"].push_back({{"bufferView", 3 + section}, {"componentType", 5123}, {"count", counts[section]}, {"type", "SCALAR"}});
+				primitives.push_back({{"attributes", {{"POSITION", 0}, {"NORMAL", 1}, {"TEXCOORD_0", 2}}}, {"indices", 3 + section}, {"material", section}});
+			}
+			document["meshes"] = Json::array({{{"name", "SelectedGeometry"}, {"primitives", primitives}}});
+			return document;
+		}
 	}
 
 	void RegisterVirtualGeometryPackageImportTests(TestRegistry& registry)
 	{
+		registry.Add("Renderer.Efficiency.Editor.PackageSiblingOwnsAcceptedNativePublication", [](TestContext& context) {
+			TerraEngine::Tests::Correctness::DisposableFixturePath fixture;
+			const auto root = fixture.Root();
+			const auto source = root / "hero.gltf";
+			std::filesystem::copy_file(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Tests/Fixtures/Animation/ImportValidation/Assets/Models/ImportedHero.gltf", source);
+			const auto result = TerraEngine::AssetPipeline::ImportModelPackage(BuildPackageOptions(root, source, "Models/hero.gltf", TerraEngine::GenerateUUID()));
+			context.Expect(result.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed, "The committed embedded glTF must recook through the current native importer.");
+			const auto& children = result.animationManifest.subAssets;
+			const auto mesh = std::find_if(children.begin(), children.end(), [](const auto& child) { return child.kind == TerraEngine::AssetPipeline::AnimationImportSubAssetKind::DeformableMesh; });
+			const auto morph = std::find_if(children.begin(), children.end(), [](const auto& child) { return child.kind == TerraEngine::AssetPipeline::AnimationImportSubAssetKind::MorphTarget; });
+			context.Expect(mesh != children.end() && morph != children.end() && mesh->guid != morph->guid && mesh->compiledPath == morph->compiledPath, "The real importer must publish distinct durable children sharing one actual cooked TEMF.");
+			if (mesh == children.end() || morph == children.end()) return;
+			// Cache isolation and a real loader worker keep the test independent of
+			// previous imported packages. The retained owner outlives every reload.
+			auto& resources = ResourceManager::Instance();
+			ThreadPool::instance().shutdown(); resources.BeginRequestSession(); resources.ClearCaches(); ThreadPool::instance().initialize(1U);
+			struct Cleanup { ResourceManager& resources; ~Cleanup() { ThreadPool::instance().shutdown(); resources.ClearCaches(); resources.BeginRequestSession(); } } cleanup{resources};
+			const auto cooked = root / "Build" / mesh->compiledPath;
+			resources.RegisterAssetPath(mesh->guid, cooked, AssetType::Mesh);
+			resources.RegisterAssetPath(morph->guid, cooked, AssetType::Mesh);
+			const auto before = resources.GetRendererResourcePublicationGeneration();
+			context.Expect(!resources.AcquireMeshSnapshot(mesh->guid) && resources.GetRendererResourcePublicationGeneration() == before, "Registration alone must not publish, load, or manufacture an alias owner.");
+			const auto future = resources.RequestStreamableLoad(mesh->guid, AssetType::Mesh, TerraEngine::Resource::StreamingNeedType::Visible, 1U, "owned-package-child", TerraEngine::GenerateUUID());
+			context.Expect(future.wait_for(std::chrono::seconds(10)) == std::future_status::ready, "The real native async load must settle within a bounded deadline.");
+			const auto acceptedId = future.get();
+			const auto owner = resources.AcquireMeshSnapshot(acceptedId);
+			context.Expect(acceptedId != TerraEngine::EMPTY_UUID && owner && owner->publicationGeneration > 0U, "An actual accepted cooked publication is required before any alias proof.");
+			context.Expect(resources.AcquireMeshSnapshot(mesh->guid) == owner, "The sibling must share the actual successfully accepted immutable payload.");
+			const auto generation = resources.GetRendererResourcePublicationGeneration();
+			const auto canonicalBounds = resources.GetMeshLocalBounds(acceptedId);
+			const auto aliasBounds = resources.GetMeshLocalBounds(mesh->guid);
+			const auto morphBounds = resources.GetMeshLocalBounds(morph->guid);
+			context.Expect(canonicalBounds.min != glm::vec3(-1.0F) || canonicalBounds.max != glm::vec3(1.0F), "The actual imported deformation envelope must differ from the unloaded unit fallback.");
+			context.Expect(aliasBounds.min == canonicalBounds.min && aliasBounds.max == canonicalBounds.max
+				&& morphBounds.min == canonicalBounds.min && morphBounds.max == canonicalBounds.max,
+				"Every currently accepted package child must query the canonical payload's exact published spatial envelope.");
+			context.Expect(resources.GetRendererResourcePublicationGeneration() == generation, "Alias bounds lookup must not load, insert a payload, or advance publication clocks.");
+			context.Expect(resources.GetMesh(mesh->guid) == owner.get(), "The real legacy alias accessor must retain the same published owner and cache its old bounds.");
+			const auto retainedStorage = owner->storage;
+			const auto retainedPublication = owner->publicationGeneration;
+			// Recook genuine source morph geometry, keeping the package and child identities.
+			// This makes a stale exact alias-bounds entry observably wrong after reload.
+			auto document = nlohmann::json::parse(ReadTextFile(source));
+			const auto uri = document["buffers"][0]["uri"].get<std::string>();
+			const auto decoded = fastgltf::base64::decode(std::string_view(uri).substr(uri.find(',') + 1U));
+			std::vector<std::uint8_t> bytes(decoded.begin(), decoded.end());
+			context.Expect(bytes.size() >= 276U, "The committed fixture must contain its real float3 morph displacements.");
+			// Report a broken fixture before accessing its displacement stream.
+			if (bytes.size() < 276U) return;
+			// Expand the first morph displacement, keeping base mesh topology and child identity unchanged.
+			float expandedDisplacement = -5.0F;
+			std::memcpy(bytes.data() + 240U, &expandedDisplacement, sizeof(expandedDisplacement));
+			{ std::ofstream output(root / "changed.bin", std::ios::binary); output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())); }
+			document["buffers"][0]["uri"] = "changed.bin";
+			WriteGltfFixture(root, "hero.gltf", document);
+			const auto recooked = TerraEngine::AssetPipeline::ImportModelPackage(BuildPackageOptions(root, source, "Models/hero.gltf", result.packageGuid));
+			context.Expect(recooked.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed, "Changed real morph geometry must produce another valid native package generation.");
+			const auto recookedMesh = std::find_if(recooked.animationManifest.subAssets.begin(), recooked.animationManifest.subAssets.end(), [&](const auto& child) { return child.guid == mesh->guid; });
+			context.Expect(recookedMesh != recooked.animationManifest.subAssets.end() && recookedMesh->compiledPath == mesh->compiledPath, "The real recook must preserve the authored child identity and native path.");
+			const auto reload = resources.ReloadMeshAsync(acceptedId);
+			context.Expect(reload.wait_for(std::chrono::seconds(10)) == std::future_status::ready && reload.get() == acceptedId, "The canonical actual mesh reload must accept the changed cooked bytes.");
+			const auto freshOwner = resources.AcquireMeshSnapshot(mesh->guid);
+			const auto freshBounds = resources.GetMeshLocalBounds(acceptedId);
+			context.Expect(freshOwner && freshOwner != owner && freshOwner->publicationGeneration > owner->publicationGeneration
+				&& (freshBounds.min != canonicalBounds.min || freshBounds.max != canonicalBounds.max), "A real different deformation envelope and owner must be published before comparing alias bounds.");
+			context.Expect(owner->storage == retainedStorage && owner->publicationGeneration == retainedPublication
+				&& freshOwner->storage != retainedStorage, "Reload must replace actual cooked bytes while a retained owner preserves its original bytes and publication.");
+			const auto freshAliasBounds = resources.GetMeshLocalBounds(mesh->guid);
+			context.Expect(freshAliasBounds.min == freshBounds.min && freshAliasBounds.max == freshBounds.max,
+				"A legacy exact alias entry must not mask the current accepted canonical deformation envelope.");
+			// Native re-registration breaks the old association immediately; it may
+			// not silently borrow the previous path's still-retained owner.
+			resources.RegisterAssetPath(mesh->guid, root / "different.temf", AssetType::Mesh);
+			context.Expect(!resources.AcquireMeshSnapshot(mesh->guid) && owner->publicationGeneration > 0U, "Changed registration must reject a stale alias without invalidating an existing shared lease.");
+			const auto rejectedBounds = resources.GetMeshLocalBounds(mesh->guid);
+			context.Expect(rejectedBounds.min == glm::vec3(-1.0F) && rejectedBounds.max == glm::vec3(1.0F), "An invalid registered native association must not expose cached legacy alias bounds.");
+		});
+
+		registry.Add("Renderer.Efficiency.Editor.DensePageImportPreservesIdentity", [](TestContext& context) {
+			const auto root = MakeVirtualGeometryPackageTempRoot("DensePageIdentity");
+			const auto packageGuid = TerraEngine::GenerateUUID();
+			const auto expected = TerraEngine::AssetPipeline::BuildStableGeneratedModelUuid(packageGuid, "gltf-mesh", 0);
+			std::array<std::string, 4> sourceBytes, cookedBytes;
+			std::vector<TerraEngine::UUID> materials;
+			// The original owner grid remains direct. Page validation first cooks a
+			// dense baseline, changes its positions, then restores the exact original.
+			const std::array<unsigned, 4> divisions{32, 64, 64, 32};
+			for(unsigned stage = 0; stage < divisions.size(); ++stage) {
+				const auto document = WriteSelectedGeometryGrid(root, divisions[stage], stage == 2 ? 0.5F : 0.F);
+				const auto source = WriteGltfFixture(root, "grid.gltf", document);
+				const auto result = TerraEngine::AssetPipeline::ImportModelPackage(BuildPackageOptions(root, source, "Models/RendererEfficiency_grid.gltf", packageGuid));
+				context.Expect(result.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed && result.generatedMeshes.size() == 1, "Each native recook must publish exactly one usable mesh.");
+				const auto& child = result.generatedMeshes.front();
+				context.Expect(child.guid == expected && child.displayName == "SelectedGeometry" && child.sourcePath == "Models/RendererEfficiency_grid.gltf", "Source topology changes must preserve the exact package child identity.");
+				context.ExpectEqual(2u * divisions[stage] * divisions[stage], child.virtualGeometrySourceTriangles, "The two sections partition one grid; source triangles must describe the entire mesh.");
+				const auto packageSource = root / "Assets/Models/RendererEfficiency_grid.gltf";
+				context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(packageSource, result), "Actual importer identity metadata must persist.");
+				TerraEngine::AssetPipeline::ModelPackageImportResult persisted;
+				context.Expect(TerraEngine::AssetPipeline::LoadModelPackageImportResult(packageSource, persisted)
+					&& persisted.packageGuid == packageGuid && persisted.generatedMeshes.size() == 1 && persisted.generatedMeshes.front().guid == expected,
+					"Every persisted native package/child identity must round-trip unchanged.");
+				context.Expect(result.generatedMaterials.size() == 2 && result.materialAssignments.size() == 2, "Both authored material slots must survive every recook.");
+				for(unsigned slot = 0; slot < 2; ++slot) {
+					if(stage == 0) materials.push_back(result.generatedMaterials[slot].guid);
+					context.Expect(result.generatedMaterials[slot].guid == materials[slot] && result.materialAssignments[slot].meshGuid == expected && result.materialAssignments[slot].materialGuid == materials[slot], "Material order and mesh/material joins must remain stable.");
+				}
+				const auto cooked = root / "Build" / child.compiledPath;
+				sourceBytes[stage] = document.dump(); cookedBytes[stage] = ReadTextFile(cooked);
+				const auto evidence = root / ("stage" + std::to_string(stage)); std::filesystem::create_directories(evidence);
+				std::filesystem::copy_file(source, evidence / "grid.gltf", std::filesystem::copy_options::overwrite_existing);
+				std::filesystem::copy_file(root / "grid.bin", evidence / "grid.bin", std::filesystem::copy_options::overwrite_existing);
+				std::filesystem::copy_file(cooked, evidence / "grid.temf", std::filesystem::copy_options::overwrite_existing);
+				// LoadMesh gives each isolated cooked-byte probe a fresh cache key.
+				// Authored child identity is proven above from importer and persisted metadata.
+				ResourceManager& manager = ResourceManager::Instance(); manager.ClearCaches();
+				Mesh* mesh = manager.GetMesh(manager.LoadMesh(cooked));
+				context.Expect(mesh != nullptr, "The actual native TEMF must load.");
+				const bool dense = stage == 1 || stage == 2;
+				context.Expect(mesh->hasVirtualGeometry == dense, "Only the dense baseline and displaced variant must publish actual virtual pages.");
+				context.Expect(mesh->virtualGeometryDetailLevels.size() >= 2, "Every cook must retain selectable native LOD ranges.");
+				if(dense) {
+					context.Expect(!mesh->virtualGeometryPages.empty() && !mesh->virtualGeometryClusters.empty() && !mesh->virtualGeometryClusterPageLinks.empty(), "Dense native cook must retain page, cluster and join records.");
+					const auto& lod = mesh->virtualGeometryDetailLevels.front();
+					TerraEngine::Renderer::Vulkan::ShadowPageCutRequest request{expected, std::shared_ptr<const Mesh>(mesh, [](const Mesh*) {}), mesh->publicationGeneration, lod.meshletOffset, lod.meshletCount, lod.lodIndex};
+					const auto cut = TerraEngine::Renderer::Vulkan::BuildShadowAuthoredPageCut(request);
+					context.Expect(cut.complete && !cut.segments.empty(), "Actual cooked joins must authorize complete authored shadow-page coverage.");
+				}
+			}
+			context.Expect(sourceBytes[1] != sourceBytes[2] && cookedBytes[1] != cookedBytes[2], "The displaced dense variant must change real source and cooked bytes.");
+			context.Expect(sourceBytes[0] == sourceBytes[3] && cookedBytes[0] == cookedBytes[3], "Restoration must recover the original source and deterministic cooked bytes.");
+		});
 		registry.Add("VirtualGeometry.Editor.PackageImport.HardeningFixtureManifestCoversRequiredCategories", [](TestContext& context) {
 			const nlohmann::json manifest = LoadHardeningFixtureManifest();
 			context.ExpectEqual(1, manifest.value("schemaVersion", 0), "Hardening fixture manifest should use schema version 1.");

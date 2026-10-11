@@ -40,6 +40,11 @@ struct ObjectManager::ProtectedMutationJournal {
 	std::vector<ComponentBefore> components;
 	std::vector<entt::entity> created;
 	std::vector<entt::entity> deleted;
+	// Retain lookup nodes until commit so abort restores owners by assignment,
+	// without allocating after a failed stable-identity replacement.
+	struct UuidLookupBefore { TerraEngine::UUID id; std::optional<entt::entity> owner; };
+	std::vector<UuidLookupBefore> uuidLookups;
+	std::vector<std::pair<entt::entity, TerraEngine::UUID>> entityIdentities;
 	std::vector<entt::entity> spatialNotifications;
 	std::unordered_map<std::string, std::optional<std::vector<entt::entity>>> names;
 	std::unordered_map<std::string, std::optional<std::vector<entt::entity>>> tags;
@@ -124,7 +129,16 @@ void ObjectManager::DiscardProtectedEntity(entt::entity entity) noexcept {
 	}
 	childrenMap.erase(entity);
 	if (const auto identity = entityToUuid.find(entity); identity != entityToUuid.end()) {
-		uuidToEntity.erase(identity->second); entityToUuid.erase(identity);
+		const auto lookup = uuidToEntity.find(identity->second);
+		// Old deferred storage may share a UUID with its newly created replacement.
+		// Erase only the mapping still owned by the entity being discarded.
+		if (lookup != uuidToEntity.end() && lookup->second == entity) {
+			const bool retained = protectedMutation && std::any_of(protectedMutation->uuidLookups.begin(), protectedMutation->uuidLookups.end(),
+				[&](const auto& before) { return before.id == identity->second && before.owner.has_value(); });
+			if (retained) lookup->second = entt::null;
+			else uuidToEntity.erase(lookup);
+		}
+		entityToUuid.erase(identity);
 	}
 	generationByEntity.erase(entity); transformRevisionByEntity.erase(entity); spatialRevisionByEntity.erase(entity);
 	if (registry.valid(entity)) registry.destroy(entity);
@@ -139,6 +153,14 @@ bool ObjectManager::AbortProtectedMutation() noexcept {
 		else entry->access.entityRemoveComponent(registry, entry->entity);
 	}
 	for (auto entity = protectedMutation->created.rbegin(); entity != protectedMutation->created.rend(); ++entity) DiscardProtectedEntity(*entity);
+	for (const auto& [entity, id] : protectedMutation->entityIdentities) {
+		// Existing authored entities remain allocated throughout protected rollback.
+		if (registry.valid(entity)) entityToUuid.at(entity) = id;
+	}
+	for (const auto& before : protectedMutation->uuidLookups) {
+		if (before.owner) uuidToEntity.at(before.id) = *before.owner;
+		else uuidToEntity.erase(before.id);
+	}
 	for (auto& [entity, before] : protectedMutation->entities) {
 		if (!registry.valid(entity)) { restored = false; continue; }
 		metadataMap.at(entity) = std::move(before.metadata);
@@ -183,6 +205,11 @@ void ObjectManager::PrepareProtectedMutationCommit() {
 void ObjectManager::FinishProtectedMutation() {
 	if (!protectedMutation) throw std::logic_error("No protected mutation to finish.");
 	for (entt::entity entity : protectedMutation->deleted) DiscardProtectedEntity(entity);
+	// Null lookup tombstones are rollback storage only, never published identities.
+	for (const auto& before : protectedMutation->uuidLookups) {
+		const auto lookup = uuidToEntity.find(before.id);
+		if (lookup != uuidToEntity.end() && lookup->second == entt::null) uuidToEntity.erase(lookup);
+	}
 	for (const auto& [entity, before] : protectedMutation->entities) {
 		if (!registry.valid(entity)) continue;
 		const bool active = metadataMap.at(entity).active;
@@ -1798,20 +1825,37 @@ void ObjectManager::UpdateObjectUUID(const Object& object, const TerraEngine::UU
 	if (!registry.valid(entity)) return;
 	const TerraEngine::Scene::SceneObjectRevisionSnapshot oldSnapshot = captureSceneObjectRevision(object);
 
-	// Allows the identity of an existing entity to be swapped. Primarily used
-	// during scene deserialization to restore authored or undo-session IDs
-	// while keeping the lookup table in sync.
-	if (auto it = entityToUuid.find(entity); it != entityToUuid.end())
-	{
-		uuidToEntity.erase(it->second);
-		it->second = newId;
-		uuidToEntity[newId] = entity;
+	// Capture both lookup owners before changing either key. A deleted old owner
+	// stays allocated until commit, so its exact identity/lifetime can be restored.
+	const auto identity = entityToUuid.find(entity);
+	const auto oldId = identity == entityToUuid.end() ? TerraEngine::EMPTY_UUID : identity->second;
+	if (protectedMutation) {
+		const auto created = [&](entt::entity value) { return std::find(protectedMutation->created.begin(), protectedMutation->created.end(), value) != protectedMutation->created.end(); };
+		const auto retain = [&](const TerraEngine::UUID& id) {
+			if (id == TerraEngine::EMPTY_UUID || std::any_of(protectedMutation->uuidLookups.begin(), protectedMutation->uuidLookups.end(), [&](const auto& before) { return before.id == id; })) return;
+			const auto prior = uuidToEntity.find(id);
+			std::optional<entt::entity> owner;
+			if (prior != uuidToEntity.end() && !created(prior->second)) owner = prior->second;
+			protectedMutation->uuidLookups.push_back({id, owner});
+		};
+		retain(oldId); retain(newId);
+		if (!created(entity) && std::none_of(protectedMutation->entityIdentities.begin(), protectedMutation->entityIdentities.end(), [&](const auto& before) { return before.first == entity; }))
+			protectedMutation->entityIdentities.emplace_back(entity, oldId);
 	}
-	else
-	{
-		entityToUuid[entity] = newId;
-		uuidToEntity[newId] = entity;
+	// Any insertion allocation happens before removing the previous live lookup.
+	auto [next, inserted] = uuidToEntity.try_emplace(newId, entity);
+	(void)inserted;
+	if (oldId != newId) {
+		const auto old = uuidToEntity.find(oldId);
+		if (old != uuidToEntity.end() && old->second == entity) {
+			const bool retained = protectedMutation && std::any_of(protectedMutation->uuidLookups.begin(), protectedMutation->uuidLookups.end(), [&](const auto& before) { return before.id == oldId && before.owner.has_value(); });
+			if (retained) old->second = entt::null;
+			else uuidToEntity.erase(old);
+		}
 	}
+	next->second = entity;
+	if (identity != entityToUuid.end()) identity->second = newId;
+	else entityToUuid.emplace(entity, newId);
 	generationByEntity.try_emplace(entity, nextObjectGeneration++);
 	invalidateRuntimeActiveMembership();
 	notifySpatialObjectDirty(entity);

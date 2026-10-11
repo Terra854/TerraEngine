@@ -17,6 +17,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 class ObjectManager;
@@ -186,6 +187,15 @@ namespace TerraEngine::Scene {
 		Transaction transaction;
 		TransactionResult result;
 	};
+	// Automation observes an actual protected-flush decision by its own ID.
+	// This small copied receipt carries no undo history or live scene ownership.
+	struct AutomationTransactionReceipt {
+		std::string transactionId;
+		TransactionStatus status = TransactionStatus::Pending;
+		std::size_t appliedWriteCount = 0U, rejectedWriteCount = 0U;
+		std::uint64_t spatialPublicationGeneration = 0U;
+		std::string message;
+	};
 
 	class TERRAENGINE_API SceneMutationQueue {
 	public:
@@ -214,6 +224,9 @@ namespace TerraEngine::Scene {
 		// short-lived receipt channel at the beginning of its following frame.
 		std::vector<TransactionResult> DrainCompletedEditorTransactionResults();
 		std::vector<EditorTransactionCompletion> DrainCompletedEditorTransactions();
+		// Matching-ID consumption leaves unrelated automation and editor history
+		// intact. A pending or evicted decision has no completed receipt.
+		std::optional<AutomationTransactionReceipt> TakeCompletedAutomationTransactionReceipt(std::string_view transactionId);
 		std::vector<NavigationSourceMutationReceipt> DrainCompletedNavigationSourceMutationReceipts();
 		// Fatal group publication cannot return its normal batch. This channel
 		// retains those terminal group receipts until one consumer takes them.
@@ -237,6 +250,8 @@ namespace TerraEngine::Scene {
 		void RestorePendingIntents(std::vector<NavigationSourceMutationIntent>& intents);
 		void CancelPreparedExecution(std::vector<Transaction>& pending, std::vector<TransactionPublicationGroup>& groups,
 			std::vector<NavigationSourceMutationIntent>& intents);
+		// Called only while requestsMutex is held after a real terminal decision.
+		void RetainAutomationTransactionReceipt(const Transaction&, const TransactionResult&) noexcept;
 		std::vector<SceneMutationRequest> requests;
 		std::vector<SceneMutationWorkerBuffer> workerBuffers;
 		std::vector<Transaction> transactions;
@@ -247,6 +262,7 @@ namespace TerraEngine::Scene {
 		// it could make an old source update alias a newer committed change.
 		std::uint64_t nextNavigationSourceChangeSequence = 1U;
 		std::vector<EditorTransactionCompletion> completedEditorTransactions;
+		std::vector<AutomationTransactionReceipt> completedAutomationTransactions;
 		std::vector<NavigationSourceMutationReceipt> completedNavigationSourceMutationReceipts;
 		std::vector<TransactionPublicationGroupResult> completedPublicationGroupResults;
 		TransactionDiagnostics transactionDiagnostics;

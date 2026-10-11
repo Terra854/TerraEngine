@@ -6,11 +6,26 @@
 #include <algorithm>
 #include <memory>
 #include <numeric>
+#include <type_traits>
 
 namespace TerraEngine::Tests
 {
 	namespace
 	{
+		template <typename Binding>
+		constexpr bool HasWorkerAnimationEnvelope()
+		{
+			// Check the actual omitted worker fields instead of comparing padded
+			// structure sizes: semantic scalar provenance may legitimately grow.
+			return requires(Binding value) { value.meshId; }
+				|| requires(Binding value) { value.animatorObjectId; }
+				|| requires(Binding value) { value.skeletonAssetId; }
+				|| requires(Binding value) { value.animatorSlotIndex; }
+				|| requires(Binding value) { value.presentationFrame; }
+				|| requires(Binding value) { value.authorityRow; }
+				|| requires(Binding value) { value.gpu; };
+		}
+
 		std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication>
 			BuildPublication(std::uint64_t session, std::uint64_t previous)
 		{
@@ -99,6 +114,9 @@ namespace TerraEngine::Tests
 			RenderItemRecord::PublishedAnimationGeneration generation{};
 			generation.stableInstanceId = 11u;
 			generation.poseGeneration = 13u;
+			generation.morphGeneration = 47u;
+			generation.deformationContentIdLow = 53u;
+			generation.deformationContentIdHigh = 59u;
 			generation.paletteGeneration = 17u;
 			generation.deformablePayloadGeneration = 19u;
 			generation.programGeneration = 23u;
@@ -110,9 +128,18 @@ namespace TerraEngine::Tests
 			generation.source = static_cast<std::uint8_t>(
 				AnimationRenderEvaluationSource::GpuVisual);
 			generation.complete = true;
-			context.Expect(sizeof(RenderItemRecord::PublishedAnimationGeneration)
-				< sizeof(AnimationRenderGenerationRecord),
-				"The sealed dynamic lane must not retain worker-only animation identities.");
+			context.Expect(std::is_trivially_copyable_v<RenderItemRecord::PublishedAnimationGeneration>
+				&& std::is_standard_layout_v<RenderItemRecord::PublishedAnimationGeneration>
+				&& !HasWorkerAnimationEnvelope<RenderItemRecord::PublishedAnimationGeneration>(),
+				"Published animation provenance must remain scalar-only without worker runtime identities or owners.");
+			// Copy through the real dynamic lane so semantic provenance is explicitly
+			// preserved rather than accidentally omitted to meet a size threshold.
+			RenderDynamicLane semanticLane{};
+			semanticLane.animation = generation;
+			context.Expect(semanticLane.animation.morphGeneration == 47u
+				&& semanticLane.animation.deformationContentIdLow == 53u
+				&& semanticLane.animation.deformationContentIdHigh == 59u,
+				"The sealed lane must retain morph generation and both exact deformation content identity halves.");
 			context.Expect(generation.stableInstanceId == 11u
 				&& generation.poseGeneration == 13u
 				&& generation.paletteGeneration == 17u
@@ -138,7 +165,9 @@ namespace TerraEngine::Tests
 			resolved.pageLocalDeformationAvailable = true;
 			const PublishedAnimationRenderBinding published(resolved);
 			context.Expect(sizeof(PublishedAnimationRenderBinding)
-				< sizeof(AnimationRenderBinding),
+				< sizeof(AnimationRenderBinding)
+				&& HasWorkerAnimationEnvelope<AnimationRenderBinding>()
+				&& !HasWorkerAnimationEnvelope<PublishedAnimationRenderBinding>(),
 				"Protected publication must not duplicate the worker-facing animation identity envelope for every object.");
 			context.Expect(published.animationAuthorityGeneration == 17u
 				&& published.posePublicationGeneration == 19u
@@ -255,6 +284,11 @@ namespace TerraEngine::Tests
 			using namespace TerraEngine::Renderer;
 			auto publication = std::make_shared<RenderFramePublication>(
 				*BuildPublication(1u, 0u));
+			// Topology rebuilds and slot recycling have independent clocks. Keep
+			// lifetime 1 on the real slot/lane while advancing only the root to 23.
+			auto topology = std::make_shared<RenderPersistentTopologyRoot>(*publication->persistent);
+			topology->generation = 23u;
+			publication->persistent = topology;
 			ShadowDrawList shadow{};
 			shadow.lightId = GenerateUUID();
 			shadow.topologyGeneration = publication->persistent->generation;
@@ -280,6 +314,10 @@ namespace TerraEngine::Tests
 				&& resolved.virtualMeshletOffset == 17u
 				&& resolved.virtualMeshletCount == 4u,
 				"A shadow pass must resolve one local item from sealed roots and compact light-view selectors without retaining a full command vector.");
+			shadow.topologyGeneration = 1u;
+			context.Expect(!ResolveShadowDrawListItem(*publication,
+				publication->presentationInputs.front().referenceFrame, shadow, 0u, resolved),
+				"A stale topology must reject even when its generation equals the current slot lifetime.");
 
 			publication->presentationInputs.front().shadowDrawLists.front()
 				.topologyGeneration += 1u;

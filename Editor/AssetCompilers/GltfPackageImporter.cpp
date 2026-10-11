@@ -3457,6 +3457,16 @@ namespace TerraEngine::AssetPipeline
 
 			MaterialAssetWriteDesc materialDesc{};
 			materialDesc.header = CreateDefaultMaterialHeader(options.shaderCollectionId);
+			// Preserve the authored opacity class and threshold in the cooked
+			// header: both camera and shadow fragments use them for alpha coverage.
+			// Map explicitly so the file format does not depend on glTF enum values.
+			switch(sourceMaterial.alphaMode)
+			{
+			case fastgltf::AlphaMode::Opaque: materialDesc.header.alphaMode = static_cast<std::uint32_t>(AlphaMode::Opaque); break;
+			case fastgltf::AlphaMode::Mask: materialDesc.header.alphaMode = static_cast<std::uint32_t>(AlphaMode::Mask); break;
+			case fastgltf::AlphaMode::Blend: materialDesc.header.alphaMode = static_cast<std::uint32_t>(AlphaMode::Blend); break;
+			}
+			materialDesc.header.alphaCutoff = static_cast<float>(sourceMaterial.alphaCutoff);
 			materialDesc.header.baseColorFactor[0] = material.baseColorFactor[0];
 			materialDesc.header.baseColorFactor[1] = material.baseColorFactor[1];
 			materialDesc.header.baseColorFactor[2] = material.baseColorFactor[2];

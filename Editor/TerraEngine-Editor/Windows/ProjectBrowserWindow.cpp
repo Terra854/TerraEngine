@@ -10,6 +10,7 @@
 #include "UIBuilderWindow.h"
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
+#include "ModelPackagePrivatePaths.h"
 #include "AssetImportResult.h"
 #include "ModelPackageImporter.h"
 #include "Engine/Resource/ResourceManager.h"
@@ -532,7 +533,11 @@ void ProjectBrowserWindow::OnGui() {
 			(void)m_AnimationAssetActions.SetAssetRoot(root);
 		}
 		PollAnimationValidation();
-		if (m_CurrentDirectory.empty() || !std::filesystem::exists(m_CurrentDirectory)) {
+		// A previously selected compiler candidate must return to the public root
+		// before any existence probe, directory iteration or editable selection.
+		if (m_CurrentDirectory.empty()
+			|| TerraEngine::Editor::Assets::IsModelPackageTransactionPath(m_CurrentDirectory)
+			|| !std::filesystem::exists(m_CurrentDirectory)) {
 			m_CurrentDirectory = root;
 		}
 
@@ -917,12 +922,16 @@ void ProjectBrowserWindow::CreateNamedAsset()
 
 // ProjectBrowserWindow::DrawDirectoryTree is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectBrowserWindow::DrawDirectoryTree(const std::filesystem::path& path) {
+	// Also reject a stale direct request before touching private disk storage.
+	if (TerraEngine::Editor::Assets::IsModelPackageTransactionPath(path)) return;
 	if (!std::filesystem::exists(path)) return;
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& entry : std::filesystem::directory_iterator(path)) {
 		if (entry.path().extension() == ".meta") continue;
-		if (!entry.is_directory()) continue;
+		const auto directory = TerraEngine::Editor::Assets::InspectProjectBrowserEntry(entry.path(),
+			[&entry](const std::filesystem::path&) { return entry.is_directory(); });
+		if (!directory || !*directory) continue;
 		if (IsTerrainPrivateDataDirectory(entry.path())) continue;
 
 		std::string filename = entry.path().filename().string();
@@ -949,6 +958,8 @@ void ProjectBrowserWindow::DrawDirectoryTree(const std::filesystem::path& path) 
 
 // ProjectBrowserWindow::DrawDirectoryContent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& path) {
+	// No private transaction can enter the sortable/editable entry collection.
+	if (TerraEngine::Editor::Assets::IsModelPackageTransactionPath(path)) return;
 	float cellSize = m_ThumbnailSize + m_Padding;
 	float panelWidth = ImGui::GetContentRegionAvail().x;
 	int columnCount = (int)(panelWidth / cellSize);
@@ -960,7 +971,10 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 	for (const auto& entry : std::filesystem::directory_iterator(path)) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (entry.path().extension() == ".meta") continue;
-		if (!entry.is_directory() && IsImportResultSidecarPath(entry.path())) continue;
+		const auto directory = TerraEngine::Editor::Assets::InspectProjectBrowserEntry(entry.path(),
+			[&entry](const std::filesystem::path&) { return entry.is_directory(); });
+		if (!directory) continue;
+		if (!*directory && IsImportResultSidecarPath(entry.path())) continue;
 		if (entry.is_directory() && IsGeneratedFolderForPackage(entry.path())) continue;
 		if (entry.is_directory() && IsTerrainPrivateDataDirectory(entry.path())) continue;
 		entries.push_back(entry);

@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -24,14 +25,18 @@ enum class ShaderGeometryPolicy : std::uint32_t
 };
 
 // Grouped shaders keyed by stage so render code can bind a single UUID and pull
-// every stage needed for a pipeline. Entries only store shader UUIDs; paths are
-// resolved during load and discarded once cached.
+// every stage needed for a pipeline. Entries retain the accepted immutable
+// shader owners; paths are resolved during load and discarded once cached.
 struct ShaderCollection
 {
 	struct StageBinding
 	{
 		ShaderStage stage = ShaderStage::Vertex;
 		TerraEngine::UUID shaderId = TerraEngine::EMPTY_UUID;
+		// The reflected contract and Vulkan module must consume the same accepted
+		// immutable payload, even if the shader cache publishes a replacement.
+		std::shared_ptr<const Shader> shader;
+		std::uint64_t publicationGeneration = 0U;
 	};
 
 	std::vector<StageBinding> stages;

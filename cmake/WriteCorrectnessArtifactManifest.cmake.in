@@ -40,6 +40,16 @@ set(correctness_required
 	"Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1"
 	"Tests/Fixtures/ExportRuntimeBaseline/game.json"
 	"Tests/Fixtures/PhysicsExportRuntime/Scenes/Startup.tescene")
+# The opt-in hidden-window regression has its own bundled dependency directory.
+# Missing native inputs are install failures, rather than an unsealed test lane.
+if("@TERRAENGINE_BUILD_NATIVE_GLFW_RECOVERY_TEST@")
+	list(APPEND correctness_required
+		"Tests/Editor/NativeGlfwRecovery/TerraEngine-RendererEfficiencyGlfwRecoveryTests@TERRAENGINE_EXECUTABLE_SUFFIX@")
+	if("@WIN32@")
+		list(APPEND correctness_required
+			"Tests/Editor/NativeGlfwRecovery/cimgui.dll" "Tests/Editor/NativeGlfwRecovery/glfw3.dll")
+	endif()
+endif()
 foreach(correctness_relative IN LISTS correctness_required)
 	if(NOT EXISTS "${correctness_root}/${correctness_relative}")
 		message(FATAL_ERROR "Required installed correctness artifact is missing: ${correctness_relative}")
@@ -102,6 +112,8 @@ file(GLOB correctness_files RELATIVE "${correctness_root}"
 	"${correctness_root}/Tests/Engine/*.exe" "${correctness_root}/Tests/Engine/*.dll"
 	"${correctness_root}/Tests/Editor/*.exe" "${correctness_root}/Tests/Editor/*.dll")
 file(GLOB_RECURSE correctness_support_files LIST_DIRECTORIES false RELATIVE "${correctness_root}"
+	# Include every runtime byte of the isolated native platform test.
+	"${correctness_root}/Tests/Editor/NativeGlfwRecovery/*"
 	"${correctness_root}/Editor/Managed/*" "${correctness_root}/Editor/Shaders/*"
 	"${correctness_root}/Editor/Fonts/*"
 	"${correctness_root}/Editor/DotNet/*" "${correctness_root}/Editor/ExportRuntime/*"

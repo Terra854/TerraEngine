@@ -49,17 +49,87 @@ function Test-ExcludedPath([string]$RelativePath, $ConfigurationDocument)
 	return $false
 }
 
+# Inspect quote boundaries in the supplied text. This rejects a quoted token
+# nested inside a longer diagnostic string, including escaped JSON quotes.
+# No decoding or rewriting occurs here: the caller supplies the audited text.
+function Get-CompleteQuotedLiteralStarts([string]$Text, $Literals)
+{
+	$starts = [Collections.Generic.HashSet[int]]::new()
+	$opening = -1
+	$enclosing = [char]0
+	$lineComment = $false
+	$blockComment = $false
+	for($i = 0; $i -lt $Text.Length; ++$i)
+	{
+		$character = $Text[$i]
+		if($lineComment)
+		{
+			if($character -eq [char]10) { $lineComment = $false }
+			continue
+		}
+		if($blockComment)
+		{
+			if($character -eq [char]42 -and $i + 1 -lt $Text.Length -and $Text[$i + 1] -eq [char]47) { $blockComment = $false; ++$i }
+			continue
+		}
+		if($enclosing -ne [char]0)
+		{
+			# JSON/C++ backslash and PowerShell backtick escapes cannot open a
+			# new literal. Doubled single quotes stay inside a PS literal too.
+			if($character -eq [char]92 -or $character -eq [char]96) { ++$i; continue }
+			if($character -eq $enclosing)
+			{
+				if($i + 1 -lt $Text.Length -and $Text[$i + 1] -eq $enclosing) { ++$i; continue }
+				if($Text.Substring($opening + 1, $i - $opening - 1) -cin @($Literals)) { [void]$starts.Add($opening + 1) }
+				$enclosing = [char]0
+			}
+		}
+		elseif($character -eq [char]34 -or $character -eq [char]39) { $enclosing = $character; $opening = $i }
+		elseif($character -eq [char]35) { $lineComment = $true }
+		elseif($character -eq [char]47 -and $i + 1 -lt $Text.Length)
+		{
+			if($Text[$i + 1] -eq [char]47) { $lineComment = $true; ++$i }
+			elseif($Text[$i + 1] -eq [char]42) { $blockComment = $true; ++$i }
+		}
+	}
+	# Keep the typed set as one result even when it is empty. Scan once per
+	# eligible text, rather than rescanning a large contract for every match.
+	return ,$starts
+}
+
 function Add-Violations(
 	[Collections.Generic.List[object]]$Violations,
 	[string]$RelativePath,
 	[string]$Kind,
 	[string]$Text,
-	$Patterns)
+	$Patterns,
+	$ConfigurationDocument)
 {
+	$allowance = $ConfigurationDocument.protocolMetadataAllowance
+	$literalStarts = [Collections.Generic.HashSet[int]]::new()
+	if($Kind -in @('content', 'encoded-content') -and $RelativePath -cin @($allowance.files))
+	{
+		$literalStarts = Get-CompleteQuotedLiteralStarts $Text $allowance.literals
+	}
 	foreach($pattern in $Patterns)
 	{
 		foreach($match in [regex]::Matches($Text, [string]$pattern.expression))
 		{
+			# Version-one validation evidence has nine stable wire identifiers. Only
+			# an entire quoted identifier in a declared contract file is metadata;
+			# filenames, descriptions, unknown identifiers and other rules still fail.
+			$after = $match.Index + $match.Length
+			if($Kind -in @('content', 'encoded-content') -and
+				$pattern.name -ceq $allowance.pattern -and
+				$RelativePath -cin @($allowance.files) -and
+				$match.Value -cin @($allowance.literals) -and
+				$match.Index -gt 0 -and $after -lt $Text.Length)
+			{
+				if($literalStarts.Contains($match.Index))
+				{
+					continue
+				}
+			}
 			$line = 1 + @($Text.Substring(0, $match.Index) -split "`n").Count - 1
 			$lineStart = $Text.LastIndexOf("`n", [Math]::Max(0, $match.Index - 1)) + 1
 			$Violations.Add([ordered]@{
@@ -146,7 +216,7 @@ foreach($file in @($files | Sort-Object FullName -Unique))
 		continue
 	}
 	++$scannedFiles
-	Add-Violations $violations $relativePath 'filename' $relativePath $configurationDocument.patterns
+	Add-Violations $violations $relativePath 'filename' $relativePath $configurationDocument.patterns $configurationDocument
 	# Explicit root files are text even when they have no familiar extension,
 	# so contributor guides and repository settings cannot escape this audit.
 	if($file.Length -gt [int64]$configurationDocument.maximumTextBytes -or
@@ -156,10 +226,10 @@ foreach($file in @($files | Sort-Object FullName -Unique))
 		continue
 	}
 	$text = Get-Content -Raw -LiteralPath $file.FullName
-	Add-Violations $violations $relativePath 'content' $text $configurationDocument.patterns
+	Add-Violations $violations $relativePath 'content' $text $configurationDocument.patterns $configurationDocument
 	foreach($decodedText in Get-DecodedTextCandidates $text)
 	{
-		Add-Violations $violations $relativePath 'encoded-content' $decodedText $configurationDocument.patterns
+		Add-Violations $violations $relativePath 'encoded-content' $decodedText $configurationDocument.patterns $configurationDocument
 	}
 }
 

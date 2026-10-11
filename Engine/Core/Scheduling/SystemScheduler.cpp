@@ -356,6 +356,26 @@ namespace TerraEngine::Scheduling {
 			{ "RendererDiagnostics", "Stable renderer and presentation diagnostic snapshots.", "" },
 			{ kResourceRuntimeRenderSettingsQueue, "Copied game-wide rendering overrides submitted by managed gameplay callbacks.", "Consumed only by RenderSystem at its protected frame boundary." },
 			{ kResourceRuntimeRenderSettings, "Effective game-wide runtime rendering settings used to build immutable frame snapshots.", "Published by RenderSystem after draining the managed settings queue." },
+			// Transient validation has its own ingress and copied publication. Register
+			// every declared resource so the production startup validator can prove
+			// worker preparation does not read a mutable automation request directly.
+			{ "RendererEfficiencyOptionsQueue", "Copied transient renderer validation requests and restoration tokens.", "Editor automation queues intent at protected PostFrame; RenderSystem consumes it at protected capture on a later frame." },
+			{ "RendererEfficiencyOptions", "Immutable validated options with renderer and token-session generations.", "RenderSystem publishes complete values at protected capture; renderer workers and editor diagnostics read copies." },
+			{ "RendererEfficiencyEvidence", "Copied frame, view and completion-qualified efficiency diagnostic values.", "RenderSystem publishes only at its protected boundary; absent stage measurements remain explicitly unavailable." },
+			// Native lighting preparation reads copied payloads; physical mirrors,
+			// frame-fence proof and transfer receipts remain protected backend state.
+			{ "LightingUploadMirrors", "Successful canonical lighting bytes owned by allocation, frame, snapshot and purpose.", "Worker plans are immutable; only a successful protected transfer advances the mirror." },
+			{ "LightingFrameSlotCompletion", "Existing frame-fence proof permitting physical lighting slice reuse.", "The protected backend checks completion before mapping or changing a lighting owner." },
+			{ "LightingUploadEvidence", "Copied actual logical-write, atom-flush and physical-owner transfer receipts.", "Protected native upload and command completion publish these values; workers never fabricate success." },
+			{ "LightingDepthPreparedInputs", "Immutable exact-bit isolated depth inputs prepared from admitted fixture recipes.", "Worker preparation owns CPU bytes; it never changes production depth or scene storage." },
+			{ "LightingDepthQueryOwners", "Physical frame/snapshot/purpose query ranges owned by actual native commands.", "Only protected command recording, successful submit and real completion update query ownership." },
+			{ "LightingDepthEvidence", "Copied completed production/oracle bounds, coverage, input and timestamp receipts.", "Protected native completion publishes exact owners without query WAIT or a scene flush." },
+			{ "ShadowGroupedPreparedInputs", "Immutable light-specific full instance records and exact copied compatibility plans.", "Worker tasks consume sealed roots and settle before protected publication; camera membership cannot replace light membership." },
+			{ "ShadowGroupedPhysicalOwners", "Separate native frame/snapshot instance allocations and complete upload receipts.", "The existing slot completion proof permits host writes; only BackendCommit changes native resources." },
+			{ "ShadowGroupedExecutionEvidence", "Actual group/singleton command receipts qualified by native submission and completion.", "Planned groups cannot count as recorded draws, and rejected optimized work retains every original singleton." },
+			{ "StaticShadowClassificationInputs", "Immutable authoring, material, geometry and deformation facts for each complete light membership.", "Workers classify copied facts only; unknown silhouettes stay in the complete dynamic draw path." },
+			{ "StaticShadowPhysicalOwners", "Queried and actual native depth allocations, including recorded, submitted and retiring references.", "Only the protected backend reserves, admits or releases storage after exact completion or discard proof." },
+			{ "StaticShadowExecutionEvidence", "Actual static passes, copied faces, dynamic overlays and allocation lifetime receipts.", "Protected recording and completion publish copied diagnostics; cached faces never count as newly recorded work." },
 			{ "RendererOutput", "Renderer output images and immutable editor-facing handles.", "" },
 			{ "WindowSnapshot", "Immutable window state observed by protected editor UI work.", "" },
 			{ "InputSnapshot", "Immutable input state observed by protected editor UI work.", "" },
@@ -445,6 +465,9 @@ namespace TerraEngine::Scheduling {
 			{ kResourceTerrainPublishedTransactions, "Accepted terrain editor transaction receipts.", "Protected authoring publication writes receipts after atomic terrain-root validation." },
 			{ kResourceTerrainDiagnostics, "Revisioned terrain job, residency, and boundary diagnostics.", "Read by editor panels and automation without reaching live terrain state." },
 			{ "Resources", "Runtime asset and content mount state.", "" },
+			// Protected renderer admission records typed needs without waiting for
+			// payloads; workers consume immutable publications after that boundary.
+			{ "StreamingNeeds", "Typed asynchronous resource demand and its bounded admission state.", "Recorded by protected resource consumers and used by ResourceManager streaming admission." },
 			{ "Profiler", "CPU/GPU profiling capture state.", "" },
 			{ "Editor", "Editor-only systems and tooling state.", "" }
 		};

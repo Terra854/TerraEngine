@@ -2815,6 +2815,7 @@ void ResourceManager::ClearCaches()
 	{
 		std::unique_lock lock(materialCache.mutex);
 		materialCache.pathToId.clear();
+		materialCache.acceptedPayloads.clear();
 		materialCache.idToPath.clear();
 		materialCache.resources.clear();
 		materialCache.inFlight.clear();
@@ -2823,6 +2824,7 @@ void ResourceManager::ClearCaches()
 	{
 		std::unique_lock lock(meshCache.mutex);
 		meshCache.pathToId.clear();
+		meshCache.acceptedPayloads.clear();
 		meshCache.idToPath.clear();
 		meshCache.resources.clear();
 		meshCache.inFlight.clear();
@@ -4254,6 +4256,14 @@ void ResourceManager::MarkStreamingNeed(
 	{
 		need.expiresAtSeconds = nowSeconds + m_StreamingPolicy.visibleRetentionSeconds;
 	}
+	else if (needType == TerraEngine::Resource::StreamingNeedType::RuntimeExplicit
+		&& ownerObjectId != TerraEngine::EMPTY_UUID)
+	{
+		// Animator dependency ownership is retained until its protected component
+		// synchronization explicitly removes this owner. Stable bindings do not
+		// republish every frame, and another animator may share the same asset.
+		need.expiresAtSeconds = 0.0;
+	}
 	else if (needType != TerraEngine::Resource::StreamingNeedType::FallbackDefault
 		&& needType != TerraEngine::Resource::StreamingNeedType::BackendInFlight)
 	{
@@ -4446,10 +4456,14 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestStreamableLoad(
 		}
 	}
 
-	std::filesystem::path sourcePath;
+	// Streaming records may retain an authored package source for diagnostics.
+	// Native renderer demands instead use the currently registered cooked path;
+	// the asynchronous loader still validates its request/session at publication.
+	std::filesystem::path sourcePath = (type == AssetType::Mesh || type == AssetType::Material)
+		? GetRegisteredAssetPath(id, type) : std::filesystem::path{};
 	{
 		std::shared_lock lock(m_StreamingMutex);
-		if (auto it = m_StreamableAssets.find(id); it != m_StreamableAssets.end())
+		if (auto it = m_StreamableAssets.find(id); sourcePath.empty() && it != m_StreamableAssets.end())
 		{
 			sourcePath = it->second.sourceKey;
 		}
@@ -5064,6 +5078,83 @@ Material* ResourceManager::GetMaterial(const TerraEngine::UUID& id)
 Mesh* ResourceManager::GetMesh(const TerraEngine::UUID& id)
 {
 	return GetResourceById<Mesh>(id, meshCache, [this](const std::filesystem::path& p) { return LoadMesh(p); });
+}
+
+std::shared_ptr<const Mesh> ResourceManager::AcquireMeshSnapshot(const TerraEngine::UUID& id) const
+{
+	return AcquireOwnedSnapshot(meshCache, id);
+}
+
+std::shared_ptr<const Material> ResourceManager::AcquireMaterialSnapshot(const TerraEngine::UUID& id) const
+{
+	return AcquireOwnedSnapshot(materialCache, id);
+}
+
+std::shared_ptr<const Texture> ResourceManager::AcquireTextureSnapshot(const TerraEngine::UUID& id) const
+{
+	std::shared_lock lock(textureCache.mutex);
+	const auto found = textureCache.resources.find(id);
+	return found != textureCache.resources.end() ? found->second : std::shared_ptr<const Texture>{};
+}
+
+std::optional<RendererEfficiencyResourcePublicationSnapshot>
+ResourceManager::TryCopyRendererEfficiencyResourcePublication(
+	const TerraEngine::UUID& id, AssetType type) const
+{
+	const auto capture = [&](const auto& cache) -> std::optional<RendererEfficiencyResourcePublicationSnapshot> {
+		RendererEfficiencyResourcePublicationSnapshot snapshot;
+		snapshot.assetId = id;
+		snapshot.type = type;
+		std::shared_lock lock(cache.mutex, std::try_to_lock);
+		if(!lock.owns_lock()) return std::nullopt;
+		const auto resource = cache.resources.find(id);
+		const auto path = cache.idToPath.find(id);
+		if(id == TerraEngine::EMPTY_UUID || resource == cache.resources.end()
+			|| !resource->second || path == cache.idToPath.end()) return snapshot;
+		// Animation generations retain tombstones, so payload presence alone
+		// does not authorize a published generation. Renderer caches use their
+		// existing monotonic publication token, copied while the payload is locked.
+		if(IsAnimationAssetType(type)) {
+			const auto generation = cache.runtimeGenerations.find(id);
+			if(generation == cache.runtimeGenerations.end() || generation->second == 0) return snapshot;
+			snapshot.resourceGeneration = generation->second;
+		} else {
+			using Payload = std::remove_cvref_t<decltype(*resource->second)>;
+			if constexpr(requires(const Payload& value) { value.publicationGeneration; })
+				snapshot.resourceGeneration = resource->second->publicationGeneration;
+			else if constexpr(std::is_same_v<Payload, ShaderCollection>)
+				snapshot.resourceGeneration = resource->second->collectionGeneration;
+			else return snapshot;
+		}
+		snapshot.registeredPath = path->second;
+		using Payload = std::remove_cvref_t<decltype(*resource->second)>;
+		if constexpr(std::is_same_v<Payload, Mesh>) {
+			const Mesh& mesh = *resource->second;
+			if(mesh.virtualGeometryDetailLevels.size() > std::numeric_limits<std::uint32_t>::max()
+				|| mesh.meshletRecords.size() > std::numeric_limits<std::uint32_t>::max()) return snapshot;
+			snapshot.cookedLods = static_cast<std::uint32_t>(mesh.virtualGeometryDetailLevels.size());
+			snapshot.cookedMeshlets = static_cast<std::uint32_t>(mesh.meshletRecords.size());
+			snapshot.deformablePayloadGeneration = mesh.deformablePayloadGeneration;
+		}
+		snapshot.present = snapshot.resourceGeneration != 0;
+		return snapshot;
+	};
+	// Each arm observes exactly one typed cache. Unsupported asset types have
+	// no renderer/animation publication and cannot bootstrap a fixture binding.
+	switch(type) {
+	case AssetType::Mesh: return capture(meshCache);
+	case AssetType::Material: return capture(materialCache);
+	case AssetType::Texture: return capture(textureCache);
+	case AssetType::ShaderCollection: return capture(shaderCollectionCache);
+	case AssetType::Skeleton: return capture(skeletonCache);
+	case AssetType::AnimationClip: return capture(animationClipCache);
+	case AssetType::AnimationController: return capture(animationControllerCache);
+	case AssetType::AnimationMask: return capture(animationMaskCache);
+	case AssetType::RetargetProfile: return capture(retargetProfileCache);
+	case AssetType::MotionDatabase: return capture(motionDatabaseCache);
+	case AssetType::RagdollProfile: return capture(ragdollProfileCache);
+	default: return std::nullopt;
+	}
 }
 
 std::optional<MeshAnimationBindingSnapshot>

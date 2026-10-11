@@ -5,6 +5,7 @@
 #include "TextureCompiler.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +13,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
+#include <random>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -84,11 +87,12 @@ namespace {
 
 	// InitializeBasisu is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void InitializeBasisu() {
-		static bool initialized = false;
-		if (!initialized) {
+		// Separate package jobs may reach the encoder concurrently. Only one job
+		// initializes its shared tables; the remaining jobs observe completed setup.
+		static std::once_flag initialized;
+		std::call_once(initialized, [] {
 			basisu::basisu_encoder_init();
-			initialized = true;
-		}
+		});
 	}
 
 	void ReportTextureProgress(const TextureCompileProgressCallback& callback, float progress, std::string_view stage, std::string_view message) {
@@ -99,24 +103,54 @@ namespace {
 
 	// GetCrc32Table is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const std::uint32_t* GetCrc32Table() {
-		static std::uint32_t table[256];
-		static bool initialized = false;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!initialized) {
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+		// C++ static initialization publishes this immutable table atomically, so
+		// parallel cooks never read a partially initialized checksum table.
+		static const std::array<std::uint32_t, 256> table = [] {
+			std::array<std::uint32_t, 256> values{};
 			for (std::uint32_t i = 0; i < 256; ++i) {
 				std::uint32_t crc = i;
 				for (int j = 0; j < 8; ++j) {
 					const bool bit = crc & 1u;
 					crc = (crc >> 1) ^ (bit ? 0xEDB88320u : 0u);
 				}
-				table[i] = crc;
+				values[i] = crc;
 			}
-			initialized = true;
-		}
+			return values;
+		}();
 
-		return table;
+		return table.data();
 	}
+
+	// Directory creation is the ownership test, even if two threads or processes
+	// happen to generate the same name. Never adopt or clean another cook's path.
+	struct PackageTextureScratch {
+		std::filesystem::path ownedDirectory;
+		PackageTextureScratch() = default;
+		PackageTextureScratch(const PackageTextureScratch&) = delete;
+		PackageTextureScratch& operator=(const PackageTextureScratch&) = delete;
+		~PackageTextureScratch() {
+			if(!ownedDirectory.empty()) {
+				std::error_code ignored;
+				std::filesystem::remove_all(ownedDirectory, ignored);
+			}
+		}
+		bool Create(const std::filesystem::path& root) {
+			std::error_code error;
+			std::filesystem::create_directories(root, error);
+			if(error) return false;
+			std::random_device random;
+			static std::atomic<std::uint64_t> sequence{0U};
+			for(unsigned attempt = 0U; attempt < 32U; ++attempt) {
+				const auto name = "cook-" + std::to_string(random()) + "-" + std::to_string(random())
+					+ "-" + std::to_string(random()) + "-" + std::to_string(sequence.fetch_add(1U, std::memory_order_relaxed));
+				const auto candidate = root / name;
+				error.clear();
+				if(std::filesystem::create_directory(candidate, error)) { ownedDirectory = candidate; return true; }
+				if(error && error != std::errc::file_exists) return false;
+			}
+			return false;
+		}
+	};
 
 	// UpdateCrc32 is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::uint32_t UpdateCrc32(std::uint32_t crc, const std::uint8_t* data, std::size_t size) {
@@ -438,8 +472,14 @@ bool CompileTextureFromBytes(
 	}
 
 	const std::filesystem::path tempRoot = std::filesystem::temp_directory_path() / "TerraEnginePackageTextureCompile";
-	std::filesystem::create_directories(tempRoot);
-	const std::filesystem::path stagedImage = tempRoot / output.filename().replace_extension(sourceExtension);
+	PackageTextureScratch scratch;
+	if(!scratch.Create(tempRoot)) {
+		std::cerr << "Failed to create owned package texture scratch directory: " << tempRoot << "\n";
+		return false;
+	}
+	const std::filesystem::path stagedImage = scratch.ownedDirectory / output.filename().replace_extension(sourceExtension);
+	// The staged decoder input must remain inside the directory this call owns.
+	if(stagedImage.parent_path() != scratch.ownedDirectory) return false;
 
 	ReportTextureProgress(progressCallback, 0.02f, "Texture Stage", "Staging embedded package texture bytes.");
 	{
@@ -455,8 +495,5 @@ bool CompileTextureFromBytes(
 		}
 	}
 
-	const bool result = CompileTexture(stagedImage, output, semantic, quality, generateMipmaps, filter, progressCallback);
-	std::error_code removeError;
-	std::filesystem::remove(stagedImage, removeError);
-	return result;
+	return CompileTexture(stagedImage, output, semantic, quality, generateMipmaps, filter, progressCallback);
 }

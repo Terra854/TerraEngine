@@ -50,6 +50,9 @@ public:
 	bool IsTaskShaderSupported() const override;
 	bool SupportsVirtualGeometryMeshShaderRoute() const override;
 	RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const override;
+	std::vector<TerraEngine::Renderer::RendererEfficiencyEvidence> PollRendererEfficiencyEvidence() override;
+	std::optional<TerraEngine::Renderer::RendererEfficiencyStaticShadowExecution>
+		GetRendererEfficiencyStaticLifetimeSnapshot() const override;
 	FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const override;
 	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const override;
 	RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const override;
@@ -71,6 +74,10 @@ public:
 	void WaitIdle() override;
 	void Shutdown() override;
 	void ClearResources() override;
+	// Opt-in validation handshake. Editor releases all old device bindings between
+	// these calls; healthy recreation never fabricates a device-loss result.
+	bool PrepareRendererEfficiencyDeviceRecreation();
+	bool RecreateRendererEfficiencyDevice();
 	void SetValidationLayersRequested(bool enabled);
 	void SetVariableRateShadingEnabled(bool enabled);
 
@@ -135,4 +142,5 @@ private:
 	// struct Impl groups related state and operations so callers have one documented contract.
 	struct Impl;
 	std::unique_ptr<Impl> impl;
+	bool efficiencyDeviceRecreationPrepared = false;
 };

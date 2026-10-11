@@ -498,8 +498,12 @@ namespace TerraEngine::Scene {
 						result.status = TransactionStatus::Rejected;
 						AddConflict(result, TransactionConflictReason::InvalidPayload, TerraEngine::EMPTY_UUID, index, "Created objects need unique nonzero transaction-local ids.", 0, 0, {}, {}, operation.kind);
 					}
+					// Only an earlier ordered deletion releases this exact stable identity.
+					// Later writes must still use the new local reference, not the old lifetime.
 					if (operation.createdStableObjectId != TerraEngine::EMPTY_UUID
-						&& (objects.getObject(operation.createdStableObjectId) || !snapshotRestoreIds.insert(operation.createdStableObjectId).second)) {
+						&& ((objects.getObject(operation.createdStableObjectId)
+							&& !deletedTargets.contains(MakeObjectRefKey(ExistingObject(operation.createdStableObjectId))))
+							|| !snapshotRestoreIds.insert(operation.createdStableObjectId).second)) {
 						result.status = TransactionStatus::Rejected;
 						AddConflict(result, TransactionConflictReason::InvalidPayload, operation.createdStableObjectId, index,
 							"Reserved creation UUID already belongs to another ordered object.", 0, 0, {}, {}, operation.kind);
@@ -590,11 +594,22 @@ namespace TerraEngine::Scene {
 				}
 				if (IsSpatialWrite(operation.kind))
 				{
-					if (operation.target.UsesLocalObject() || operation.target.objectId == TerraEngine::EMPTY_UUID)
+					// Root creation already supplies a detached default Transform. Admit
+					// its absolute pose without consulting an entity that does not exist
+					// yet. Check current ordered hierarchy: an intervening reparent must
+					// not admit unsupported local frame conversions.
+					const auto orderedParent = shadowParents.find(MakeObjectRefKey(operation.target));
+					const bool preparedLocalRoot = operation.kind == TransactionWriteKind::SetWorldTransform
+						&& operation.target.UsesLocalObject() && existsInOrder(operation.target)
+						&& orderedParent != shadowParents.end() && !HasObjectRef(orderedParent->second)
+						&& std::any_of(transaction.writeSet.operations.begin(), transaction.writeSet.operations.begin() + index,
+							[&](const auto& earlier) { return earlier.kind == TransactionWriteKind::CreateObject
+								&& earlier.createdLocalObjectId == operation.target.localObjectId && !HasObjectRef(earlier.parent); });
+					if (!preparedLocalRoot && (operation.target.UsesLocalObject() || operation.target.objectId == TerraEngine::EMPTY_UUID))
 					{
 						result.status = TransactionStatus::Rejected;
 						AddConflict(result, TransactionConflictReason::InvalidPayload, operation.target.objectId, index,
-							"Canonical spatial writes require one existing stable object identity.", 0, 0, {}, {}, operation.kind);
+							"Canonical spatial writes require an existing stable identity or an earlier live root creation with SetWorldTransform.", 0, 0, {}, {}, operation.kind);
 						continue;
 					}
 					if (!spatiallyTouchedTargets.insert(MakeObjectRefKey(operation.target)).second)

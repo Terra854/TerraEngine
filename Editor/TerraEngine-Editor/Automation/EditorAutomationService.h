@@ -11,6 +11,9 @@
 #include "EditorAutomationJobService.h"
 #include "EditorAutomationLogStore.h"
 #include "EditorAutomationRegistry.h"
+#include "Tests/Support/RendererEfficiency/Editor/EditorRendererEfficiencyValidation.h"
+#include "Tests/Support/RendererEfficiency/Editor/RendererEfficiencyFixtureBindings.h"
+#include "Tests/Support/RendererEfficiency/Editor/RendererEfficiencyDeviceRecreation.h"
 #include "AnimationAutomationTransactions.h"
 #include "AnimationRuntimeOperations.h"
 #include "../Animation/AnimationPreviewController.h"
@@ -25,6 +28,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -82,6 +86,10 @@ namespace TerraEngine::Editor::Automation
 		// protected editor frame owns transaction creation so network polling never
 		// determines how many scene changes become visible in a rendered frame.
 		void PumpRendererValidationMutationsAtProtectedFrame();
+		// Device recreation executes later than ingress; recheck the exact owned
+		// operation/project/step immediately before the editor admits that reset.
+		bool ValidateRendererEfficiencyDeviceRecreationOwner(const std::filesystem::path& root,
+			std::uint64_t generation, std::string_view operation, std::string_view step, std::string& error) const;
 		// Completes terrain derived jobs only after their protected engine boundary
 		// has published or rejected the generation-checked candidate.
 		void PumpTerrainAutomationJobsAtProtectedFrame();
@@ -176,6 +184,8 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json HandleCameraObjectCapture(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleCustomCameraCapture(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleRendererVirtualGeometryStats(const nlohmann::json& arguments, const std::string& requestId);
+		// Action is bound at provider registration; JSON remains at the editor edge.
+		nlohmann::json HandleRendererEfficiency(int action, const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleRendererVirtualGeometryCapabilityEvidence(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleRendererVirtualGeometryValidationRouteSet(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleRendererVirtualGeometryValidationRouteReset(const nlohmann::json& arguments, const std::string& requestId);
@@ -322,6 +332,59 @@ namespace TerraEngine::Editor::Automation
 		// Tool dispatch and the protected frame pump can be reached from different
 		// bridge phases. One mutex keeps lifecycle and exact evidence coherent.
 		std::mutex sparseTransformMutationMutex;
+		mutable std::mutex rendererEfficiencyMutex;
+		EditorRendererEfficiencyValidation rendererEfficiencyValidation;
+		// Importer-file jobs carry detached preparation; native publication/load
+		// decisions stay at the existing protected automation boundary.
+		std::future<std::pair<RendererEfficiencyFixtureBindingPreparation, std::string>> rendererEfficiencyBindingJob;
+		std::optional<RendererEfficiencyFixtureBindingPreparation> rendererEfficiencyBindingPreparation;
+		std::vector<std::shared_future<TerraEngine::UUID>> rendererEfficiencyBindingLoads;
+		std::string rendererEfficiencyBootstrapOperation;
+		std::chrono::steady_clock::time_point rendererEfficiencyBootstrapRetry{};
+		struct RendererEfficiencyResourceWork
+		{
+			std::string operationId, stepId, phase;
+			std::filesystem::path sourcePath;
+			bool baseline = false, denseBaseline = false;
+			std::uint64_t priorGeneration = 0;
+			TerraEngine::UUID packageId{};
+			std::uint32_t admittedImports = 0;
+			std::uint64_t lastFailedImportGeneration = 0;
+			// Each physical admission/settlement/publication stage gets its own
+			// bounded deadline; polling does not extend it or create import jobs.
+			std::chrono::steady_clock::time_point deadline{};
+			std::map<TerraEngine::UUID, std::uint64_t> priorAssetGenerations;
+			std::future<std::pair<RendererEfficiencySourcePatch, std::string>> patchJob;
+			std::optional<RendererEfficiencySourcePatch> patch;
+			struct ImportPreparation
+			{
+				RendererEfficiencyImportObservation observation;
+				RendererEfficiencyFixtureBindingPreparation prepared;
+				std::string error;
+			};
+			std::future<ImportPreparation> importJob;
+			std::optional<RendererEfficiencyFixtureBindingPreparation> preparation;
+			std::vector<std::pair<TerraEngine::UUID, std::shared_future<TerraEngine::UUID>>> reloads;
+			std::chrono::steady_clock::time_point retry{};
+		};
+		RendererEfficiencyResourceWork rendererEfficiencyResourceWork;
+		// Baseline bytes remain detached and survive a variant so each next step
+		// genuinely reimports the initial source before resetting scene values.
+		std::map<std::filesystem::path, std::pair<std::string, std::string>> rendererEfficiencySourceBaselines;
+		// The dense page baseline is a separate content comparison owner, never
+		// a replacement for the original bytes required by cleanup/restoration.
+		std::map<std::filesystem::path, std::string> rendererEfficiencyDenseSourceBaselines;
+		std::set<std::filesystem::path> rendererEfficiencyDirtySources;
+		std::optional<RendererEfficiencyDeviceRecreationRequest> rendererEfficiencyDeviceRequest;
+		Renderer::RendererEfficiencyOptionsSnapshot rendererEfficiencyPreDeviceOptions{};
+		std::uint64_t rendererEfficiencyDeviceSettingsGeneration = 0;
+		bool PumpRendererEfficiencyDeviceRecreationAtProtectedFrame(RenderSystem& renderer);
+		struct RendererEfficiencyShaderWork;
+		std::shared_ptr<RendererEfficiencyShaderWork> rendererEfficiencyShaderWork;
+		void PumpRendererEfficiencyShaderMutationAtProtectedFrame();
+		void ScheduleRendererEfficiencyShaderRestoreAtProtectedFrame();
+		void PumpRendererEfficiencyResourceMutationsAtProtectedFrame(RenderSystem& renderer);
+		bool RestoreRendererEfficiencySourcesAtProtectedFrame(std::string& error);
 		SparseTransformMutationState sparseTransformMutation;
 		PrefabAuthoringService prefabAuthoringService;
 	};

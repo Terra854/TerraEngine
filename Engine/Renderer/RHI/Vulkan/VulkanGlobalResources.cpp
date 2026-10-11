@@ -357,6 +357,8 @@ void VulkanContext::Impl::CreateMaterialBufferResources() {
 	// accidentally sample an authored material or uninitialized GPU memory.
 	freeMaterialIndices.clear();
 	materialIndexMap.clear();
+	materialSourceOwners.clear();
+	materialTextureSourceOwners.clear();
 	nextMaterialIndex = kFirstRuntimeMaterialIndex;
 }
 
@@ -437,6 +439,12 @@ void VulkanContext::Impl::CreateCullingBufferResources() {
 
 // VulkanContext::Impl::CreateLightingBufferResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateLightingBufferResources() {
+	// Resource recreation changes identity even if VMA later reuses a handle.
+	ResetLightingUploadMirrors();
+	++lightingUploadAllocationGeneration;
+	VkPhysicalDeviceProperties lightingProperties{};
+	vkGetPhysicalDeviceProperties(physicalDevice, &lightingProperties);
+	lightingUploadAtomSize = std::max<VkDeviceSize>(lightingProperties.limits.nonCoherentAtomSize, 1);
 	const VkDeviceSize lightBufferSize = static_cast<VkDeviceSize>(sizeof(GPULight) * MAX_GLOBAL_LIGHTS * MAX_RENDER_SNAPSHOTS_PER_FRAME);
 	const VkDeviceSize clusterBufferSize = static_cast<VkDeviceSize>(sizeof(ClusterData) * MAX_LIGHT_CLUSTERS * MAX_RENDER_SNAPSHOTS_PER_FRAME);
 	const VkDeviceSize lightIndexBufferSize = static_cast<VkDeviceSize>(sizeof(uint32_t) * MAX_LIGHT_INDEX_ENTRIES * MAX_RENDER_SNAPSHOTS_PER_FRAME);
@@ -464,11 +472,15 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		// Light uploads are CPU-driven every frame, so this buffer must remain
 		// CPU-visible regardless of whether validation capture is active.
-		globalLightSSBOs[i] = CreateBuffer(lightBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-		lightAnalysisInputSSBOs[i] = CreateBuffer(lightBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "Light Analysis Input Buffer");
+		// Transfer source usage supports validation-only completion-qualified byte
+		// readback; normal rendering never allocates or records that staging work.
+		globalLightSSBOs[i] = CreateBuffer(lightBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+		lightAnalysisInputSSBOs[i] = CreateBuffer(lightBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "Light Analysis Input Buffer");
 		clusterGridSSBOs[i] = CreateBuffer(clusterBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, clusterBufferMemoryUsage);
 		lightIndexSSBOs[i] = CreateBuffer(lightIndexBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, clusterBufferMemoryUsage);
-		clusterDepthSSBOs[i] = CreateBuffer(clusterDepthBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, clusterBufferMemoryUsage);
+		// Validation copies the exact completed production tile slice. Ordinary
+		// frames keep using this storage buffer without recording any readback.
+		clusterDepthSSBOs[i] = CreateBuffer(clusterDepthBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, clusterBufferMemoryUsage);
 		lightAnalysisSSBOs[i] = CreateBuffer(lightAnalysisBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU, "Light Analysis Buffer");
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -598,7 +610,8 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 		vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 	}
 
-	UploadLightingData({});
+	// Each physical slice is initialized completely by its first safe upload.
+	// Startup has no frame-fence proof and must not publish a successful mirror.
 }
 
 // VulkanContext::Impl::CreateIndirectDrawResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1031,4 +1044,3 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 		vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
 	}
 }
-

@@ -23,6 +23,7 @@
 #include "VulkanContextImpl.h"
 #include "VulkanFrameDiagnostics.h"
 #include "VulkanReadbackConversion.h"
+
 #include "VulkanRendererWorkCache.h"
 #include "Renderer/RenderCaptureEncoding.h"
 #include "Profiling/ProfilerScope.h"
@@ -33,10 +34,26 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <sstream>
 
 #include "VulkanContextSource.h"
+
+std::vector<TerraEngine::Renderer::RendererEfficiencyEvidence> VulkanContext::PollRendererEfficiencyEvidence()
+{
+	if (!impl) return {};
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	// Draining already completed copied evidence never waits for the GPU.
+	auto rows = impl->shadowValidationReadback.DrainCompleted();
+	// Both collectors consumed the same real queue/fence receipts. Attach color
+	// only after an exact command/frame/view/control/options owner comparison;
+	// a late query retains its immutable color owner until it can be resolved.
+	for (const auto& row : rows) impl->lightingDepthEvidence.AttachCompletedFrameColor(row);
+	auto depthRows = impl->lightingDepthEvidence.DrainCompleted();
+	rows.insert(rows.end(), std::make_move_iterator(depthRows.begin()), std::make_move_iterator(depthRows.end()));
+	return rows;
+}
 
 // VulkanContext::Impl::ApplyFrameLightBudgets is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 VulkanContext::Impl::LightBudgetApplicationResult
@@ -574,6 +591,7 @@ bool VulkanContext::Impl::MarkDeviceLost(VkResult result, std::string_view opera
 		return true;
 	}
 
+	ResetShadowPublication(false); // First device-loss transition revokes every claim.
 	const std::string checkpointSummary = CollectDiagnosticCheckpointSummary();
 	skipFrame = true;
 	editorRenderSubmitted = false;
@@ -813,6 +831,8 @@ void VulkanContext::Resize(int width, int height, ViewType view) {
 // VulkanContext::BeginFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::BeginFrame() {
 	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	// Only the successful existing frame-fence wait below grants host-write use.
+	impl->lightingUploadFrameSlotSafe[impl->currentFrame] = false;
 	// Wait until the GPU is done with the resources for this frame before reusing them.
 	if (!impl->initialized || impl->deviceLost) return;
 
@@ -841,6 +861,9 @@ void VulkanContext::BeginFrame() {
 			fenceWaitResult = vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
 		}
 	}
+	// A failed completion proof revokes every lighting reuse receipt. A later
+	// successful fence may permit writes, but must initialize its slice again.
+	if (fenceWaitResult != VK_SUCCESS) impl->ResetLightingUploadMirrors();
 	if (impl->MarkDeviceLost(fenceWaitResult, "begin frame fence wait")) {
 		return;
 	}
@@ -849,6 +872,7 @@ void VulkanContext::BeginFrame() {
 		impl->skipFrame = true;
 		return;
 	}
+	impl->renderSnapshotSlotsUsed[impl->currentFrame].fill(false);
 	// A decoded page was uploaded while this frame slot last recorded. The fence
 	// is the first point at which both its bytes and bindless descriptor are
 	// proven complete. Queue complete value candidates now; the streaming
@@ -932,13 +956,20 @@ void VulkanContext::BeginFrame() {
 		waitSubmitInfo.commandBufferCount = 0;
 
 		const VkResult drainResult = impl->SubmitGraphicsQueue(1, &waitSubmitInfo, VK_NULL_HANDLE);
+		if (drainResult != VK_SUCCESS) impl->ResetLightingUploadMirrors();
 		if (impl->MarkDeviceLost(drainResult, "stranded editor render semaphore drain submit")) {
 			return;
 		}
 		if (drainResult == VK_SUCCESS) {
 			const VkResult idleResult = impl->WaitGraphicsQueueIdle();
+			if (idleResult != VK_SUCCESS) impl->ResetLightingUploadMirrors();
 			if (impl->MarkDeviceLost(idleResult, "stranded editor render semaphore drain idle")) {
 				return;
+			}
+			if (idleResult != VK_SUCCESS)
+			{
+				impl->skipFrame = true;
+				return; // The old UI fence does not prove this offscreen submit complete.
 			}
 		} else {
 			TERRAENGINE_LOG(LogLevel::Error, "BeginFrame failed to drain stranded editor render semaphore: " << drainResult);
@@ -946,9 +977,13 @@ void VulkanContext::BeginFrame() {
 			if (impl->MarkDeviceLost(idleResult, "stranded editor render semaphore failure idle")) {
 				return;
 			}
+			impl->skipFrame = true;
+			return; // The signal was not consumed; retain its submitted ownership.
 		}
+		impl->CompleteShadowWrites(impl->currentFrame); // Successful drain plus queue idle.
 		impl->editorRenderSubmitted = false;
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
+			impl->DiscardRecordedShadowWrites(impl->currentFrame);
 			impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
 		}
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
@@ -968,7 +1003,14 @@ void VulkanContext::BeginFrame() {
 		}
 		if (promotedHiZ)
 		{
-			impl->UpdateGlobalHiZ(impl->currentFrame);
+			// The completed slot can be rewritten here, but a missing native owner
+			// must stop this frame before any draw consumes invalid descriptors.
+			if (!impl->UpdateGlobalHiZ(impl->currentFrame))
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "BeginFrame cannot publish valid completed HiZ descriptors.");
+				impl->skipFrame = true;
+				return;
+			}
 		}
 	}
 	{
@@ -1015,7 +1057,14 @@ void VulkanContext::BeginFrame() {
 	}
 	if (resizedHiZ)
 	{
-		impl->UpdateGlobalHiZ(impl->currentFrame);
+		// Fresh pyramids have no completed history. They still require real
+		// fallback descriptors while the ordinary history gate stays disabled.
+		if (!impl->UpdateGlobalHiZ(impl->currentFrame))
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "BeginFrame cannot initialize valid resized HiZ descriptors.");
+			impl->skipFrame = true;
+			return;
+		}
 	}
 	// Freeze the completed Hi-Z metadata for this CPU frame. RenderFrame may
 	// record multiple outputs before the GPU executes any of them; every output
@@ -1057,6 +1106,7 @@ void VulkanContext::BeginFrame() {
 		}
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
+			impl->DiscardRecordedShadowWrites(impl->currentFrame);
 			impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
 		}
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
@@ -1266,6 +1316,10 @@ void VulkanContext::BeginFrame() {
 			return;
 		}
 	}
+	// All existing fence, stranded-submit drain and resource checks succeeded.
+	// Grant host-write safety only here, so an earlier failed drain cannot leave
+	// a misleading successful marker even when normal rendering is skipped.
+	impl->lightingUploadFrameSlotSafe[impl->currentFrame] = true;
 	TerraEngine::Renderer::Vulkan::RecordVulkanFrameCost(
 		impl->pendingBackendFrameBreakdown,
 		{ TerraEngine::Renderer::BackendFrameCostCategory::RhiBeginFrame, TerraEngine::Renderer::BackendSubmitStage::Other, RenderViewType::Game, 0u, "RHI Begin Frame", true, false },
@@ -1670,7 +1724,13 @@ TerraEngine::Renderer::RendererRecoverySnapshot VulkanContext::GetLatestRenderer
 		return TerraEngine::Renderer::MakeActiveRecoverySnapshot();
 	}
 	std::lock_guard<std::mutex> lock(impl->statsMutex);
-	return impl->latestRendererRecoverySnapshot;
+	auto snapshot = impl->latestRendererRecoverySnapshot;
+	// Hardware identity exists during normal rendering as well as incidents.
+	// These strings come from the selected native physical-device properties.
+	snapshot.hardwareName = impl->selectedPhysicalDeviceName;
+	snapshot.driverVersion = impl->selectedDriverVersionString;
+	snapshot.apiVersion = impl->selectedApiVersionString;
+	return snapshot;
 }
 
 std::uint64_t VulkanContext::GetBackendResourceGeneration() const
@@ -1678,6 +1738,20 @@ std::uint64_t VulkanContext::GetBackendResourceGeneration() const
 	if (!impl) return 1u;
 	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	return impl->backendResourceGeneration;
+}
+
+std::optional<TerraEngine::Renderer::RendererEfficiencyStaticShadowExecution>
+VulkanContext::GetRendererEfficiencyStaticLifetimeSnapshot() const
+{
+	if (!impl) return std::nullopt;
+	// Recording, submission and fence completion share this lock, so copied
+	// uses describe outstanding references now rather than an earlier readback.
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	TerraEngine::Renderer::RendererEfficiencyStaticShadowExecution snapshot;
+	snapshot.available = true;
+	snapshot.backendGeneration = impl->backendResourceGeneration;
+	impl->CaptureStaticShadowAllocations(snapshot);
+	return snapshot;
 }
 
 void VulkanContext::PublishRendererRecoverySnapshot(TerraEngine::Renderer::RendererRecoverySnapshot snapshot)
@@ -1756,6 +1830,10 @@ void VulkanContext::WaitIdle() {
 			TERRAENGINE_LOG(LogLevel::Error, "Explicit Vulkan WaitIdle failed: " << idleResult);
 			return;
 		}
+		// Reuse this explicit proof for every accepted shadow/readback receipt;
+		// observing completion here adds no synchronization of its own.
+		for (std::uint32_t frame = 0; frame < impl->MAX_FRAMES_IN_FLIGHT; ++frame)
+			impl->CompleteShadowWrites(frame);
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 			impl->pendingBackendFrameBreakdown,
 			{ TerraEngine::Renderer::BackendFrameCostCategory::DeviceIdleWait, TerraEngine::Renderer::BackendSubmitStage::ForcedIdle, RenderViewType::Game, 0u, "Explicit Vulkan WaitIdle", true, false },
@@ -1772,6 +1850,69 @@ void VulkanContext::Shutdown() {
 }
 
 // VulkanContext::ClearResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+bool VulkanContext::PrepareRendererEfficiencyDeviceRecreation()
+{
+	efficiencyDeviceRecreationPrepared = false;
+#if defined(TERRAENGINE_RENDERER_EFFICIENCY_VALIDATION)
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	if (!impl->initialized || impl->deviceLost || !impl->windowSystem) return false;
+	// Explicit validation recovery is a protected lifecycle operation. It reuses
+	// the existing idle primitive; ordinary frame rendering never calls it.
+	const auto result = impl->WaitDeviceIdle();
+	if (result != VK_SUCCESS) return false;
+	for (std::uint32_t frame = 0; frame < impl->MAX_FRAMES_IN_FLIGHT; ++frame) {
+		impl->CompleteShadowWrites(frame);
+		impl->DiscardRecordedShadowWrites(frame);
+	}
+	efficiencyDeviceRecreationPrepared = true;
+	return true;
+#else
+	return false;
+#endif
+}
+
+bool VulkanContext::RecreateRendererEfficiencyDevice()
+{
+#if defined(TERRAENGINE_RENDERER_EFFICIENCY_VALIDATION)
+	if (!efficiencyDeviceRecreationPrepared || !impl) return false;
+	efficiencyDeviceRecreationPrepared = false;
+	WindowSystem* window = nullptr;
+	std::uint64_t previousSession = 0, previousBackend = 0;
+	bool validationLayers = false, vrsEnabled = false;
+	{
+		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+		if (impl->deviceLost || !impl->windowSystem) return false;
+		window = impl->windowSystem;
+		previousSession = impl->renderSessionGeneration;
+		previousBackend = impl->backendResourceGeneration;
+		validationLayers = impl->validationLayersRequested;
+		vrsEnabled = impl->vrsAttachmentRuntimeEnabled;
+		// Editor has already released descriptors and its Vulkan backend. Normal
+		// cleanup still proves native presentation completion before destroying it.
+		impl->Cleanup();
+		if (impl->device != VK_NULL_HANDLE || impl->allocator != VK_NULL_HANDLE) return false;
+	}
+	if (previousSession == std::numeric_limits<std::uint64_t>::max()
+		|| previousBackend == std::numeric_limits<std::uint64_t>::max()) return false;
+	// Release the old mutex before replacing its owner. A fresh implementation
+	// also resets editorMode, ensuring viewport resources are actually recreated.
+	auto replacement = std::make_unique<Impl>();
+	replacement->latestStatsByView[0].viewType = RenderViewType::Game;
+	replacement->latestStatsByView[1].viewType = RenderViewType::Scene;
+	replacement->renderSessionGeneration = previousSession;
+	replacement->backendResourceGeneration = previousBackend;
+	replacement->validationLayersRequested = validationLayers;
+	replacement->validationLayersEnabled = validationLayers;
+	replacement->vrsAttachmentRuntimeEnabled = vrsEnabled;
+	impl = std::move(replacement);
+	if (!impl->InitVulkan(*window)) return false;
+	return impl->initialized && impl->renderSessionGeneration > previousSession
+		&& impl->backendResourceGeneration > previousBackend;
+#else
+	return false;
+#endif
+}
+
 void VulkanContext::ClearResources() {
 	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	impl->ClearResources();

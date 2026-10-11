@@ -38,6 +38,7 @@
 #include "Scripting/ScriptingSystem.h"
 #include "ThreadPool/ThreadPool.h"
 #include "ThreadPool/ScopedTaskSettlement.h"
+#include "Core/Logger/Logger.h"
 
 #include <array>
 #include <algorithm>
@@ -1496,6 +1497,9 @@ namespace TerraEngine::Animation {
                 // staged values into observable receipts together with the pose
                 // generation they affected.
                 std::vector<AnimationStatus> capturedCommandStatuses;
+		// Ordered workload phases retain the first failed command-frame boundary
+		// until protected settlement logs it. Stable command-free frames do no IO.
+		const char* commandFrameFailurePhase = nullptr;
                 // Procedural requests use their own fixed ABI record because
                 // the original gameplay command stride is pinned. They are
                 // still drained and completed at the same protected frame
@@ -1844,6 +1848,10 @@ namespace TerraEngine::Animation {
                 }
 
                 void RetireLifecyclePublicationStateLocked() noexcept {
+			// Resolve copied commands before retirement discards their commit token.
+			// Accepted historical commits survive; uncommitted work is cancelled.
+			PublishCommittedOrdinaryCommandsLocked();
+			SettleFailedFrameCommandsLocked(AnimationStatus::Cancelled, "LifecycleRetirement");
                   // A lifecycle boundary is different from an ordinary failed
                   // frame: the old immutable result names a world that no
                   // longer exists.  Clear the public root before releasing
@@ -2994,6 +3002,11 @@ namespace TerraEngine::Animation {
 			   advancedCommands == nullptr || lifecycleLatch == nullptr ||
 			   candidateAuthorityGeneration == 0U)
 				return false;
+			// A thrown/cancelled graph may skip its finalizer. Complete its drained
+			// commands before the next capture replaces the copied command vector.
+			PublishCommittedOrdinaryCommandsLocked();
+			SettleFailedFrameCommandsLocked(AnimationStatus::Cancelled, "NextCapture");
+			commandFrameFailurePhase = nullptr;
 			ResetFrameIntegrationStateLocked();
 			if(evaluationCancellationSource.Initialize(
 				   AnimationCancellationOperation::CpuEvaluation, *lifecycleLatch) !=
@@ -8297,6 +8310,18 @@ namespace TerraEngine::Animation {
 				}
 				compactGpuVisualCompletions.results[compactIndex] = result;
 				compactGpuVisualCompletions.statuses[compactIndex] = AnimationStatus::Ok;
+				// A command needs broad capture to prepare its private playback state,
+				// but can still evaluate as a GPU-only packet. Publish that packet's
+				// real completion back to its owned broad row, so the later COW runtime
+				// candidate can commit the seek without expecting a CPU evaluator run.
+				if(auto* item = CompleteWorkForInputIndex(compactGpuVisualWorkItems.frameWorkIndices[compactIndex])) {
+					if(item->input.handle != compactGpuVisualWorkItems.animators[compactIndex]
+						|| item->candidateAuthorityPublicationGeneration != compactGpuVisualWorkItems.sourceGenerations[compactIndex]
+						|| item->processingClass != AnimationProcessingClass::CompactGpuVisual) {
+						compactGpuVisualCompletions.statuses[compactIndex] = AnimationStatus::Rejected; continue;
+					}
+					item->safePose = false; item->evaluationStatus = AnimationStatus::Ok; item->evaluated = true;
+				}
 				++locallyCompleted;
 			}
 			if(locallyCompleted != 0U) {
@@ -9505,6 +9530,7 @@ namespace TerraEngine::Animation {
                                     SealAnimationFrameResult(input);
                                 sealedAuthorityCandidateReady =
                                     sealedAuthorityCandidate.IsValid();
+								if(!sealedAuthorityCandidateReady) commandFrameFailurePhase = "SealAnimationFrameResult";
                                 if (sealedAuthorityCandidateReady) {
                                   // The candidate itself contains the
                                   // authoritative predecessor proof. Keep only
@@ -9533,6 +9559,7 @@ namespace TerraEngine::Animation {
                                   if (!runtimeRootPrepared &&
                                       !PrepareRuntimeRootCandidate(
                                           candidateGeneration)) {
+									if(!commandFrameFailurePhase) commandFrameFailurePhase = "PrepareRuntimeRootCandidate";
                                     sealedAuthorityCandidate = {};
                                     sealedAuthorityCandidateReady = false;
                                     publishedAuthorityCommit = {};
@@ -9591,6 +9618,7 @@ namespace TerraEngine::Animation {
 		[[nodiscard]] bool PrepareRuntimeRootCandidate(
 			std::uint64_t authorityGeneration)
 		{
+			commandFrameFailurePhase = "RuntimeCandidateCompletionGate";
 			// Runtime evaluator state is internal mutable state, but it must advance with
 			// the same all-or-none visibility as the immutable authority frame.  Build a
 			// copy-on-write root on this worker: unchanged slots retain their shared
@@ -9614,7 +9642,7 @@ namespace TerraEngine::Animation {
 				if(!expected) return false;
 				const std::shared_ptr<const CompactRuntimeStateRoot> expectedCompact =
 					compactRuntimeStates.load(std::memory_order_acquire);
-				if(expectedCompact != compactRuntimeStateCaptureRoot) return false;
+				if(expectedCompact != compactRuntimeStateCaptureRoot) { commandFrameFailurePhase = "RuntimeCandidateCompactRootChanged"; return false; }
 				auto nextCompact =
 					std::make_shared<CompactRuntimeStateRoot>(expected->size());
 				const std::uint64_t liveSceneGeneration =
@@ -9868,7 +9896,7 @@ namespace TerraEngine::Animation {
 									!= current->poseGeneration
 							: item.candidatePoseGeneration != current->poseGeneration + 1U)
 						|| item.candidateAuthorityPublicationGeneration != authorityGeneration
-						|| !item.evaluated) return false;
+						|| !item.evaluated) { commandFrameFailurePhase = "RuntimeCandidateCompleteGenerationGate"; return false; }
 
 					record->playback = item.playback;
 					if(item.compactCaptureOnly) {
@@ -10092,6 +10120,7 @@ namespace TerraEngine::Animation {
 				publishedAuthorityCommit.expectedCompactRuntimeRoot = expectedCompact;
 				publishedAuthorityCommit.nextCompactRuntimeRoot = std::move(nextCompact);
 				publishedAuthorityCommit.specialistSidecars = std::move(specialistSidecars);
+				commandFrameFailurePhase = nullptr;
 				return true;
 			} catch(const std::bad_alloc&) {
 				// The token owns every candidate sidecar. Dropping it makes a failed
@@ -11092,6 +11121,40 @@ namespace TerraEngine::Animation {
 				.ReadCharacterMotionLease(found->controller);
 			return lease && lease->state == Physics::CharacterMotionLeaseState::ExternalExclusive
 				&& lease->externalOwnerId == RagdollExternalOwnerId(record.handle);
+		}
+
+		void SettleFailedFrameCommandsLocked(AnimationStatus status, const char* fallbackPhase) noexcept
+		{
+			if(commands == nullptr) return;
+			std::size_t unsettled = 0;
+			for(const auto& command : capturedCommands) {
+				const auto receipt = commands->ReadReceipt(command.producerId, command.producerSequence, command.correlationId);
+				if(receipt.status != AnimationStatus::Queued && receipt.status != AnimationStatus::NotReady) continue;
+				commands->PublishCompletion(command, status, frameTick, 0);
+				++unsettled;
+			}
+			if(!unsettled) return;
+			try {
+				// One bounded record survives later successful frames; diagnostic
+				// summaries only describe the latest accepted authority publication.
+				Logger::Instance().Log(LogLevel::Warning, __FILE__, __LINE__, __func__,
+					"Animation command frame failed phase=" + std::string(commandFrameFailurePhase ? commandFrameFailurePhase : fallbackPhase)
+					+ " status=" + std::string(ToString(status)) + " commandCount=" + std::to_string(unsettled)
+					+ " planReason=" + std::string(ToString(workPlanRejectionReason))
+					+ " planned=" + std::to_string(plannedAnimatorCount.load()) + " evaluated=" + std::to_string(evaluatedAnimatorCount.load())
+					+ " producer=" + std::to_string(capturedCommands.front().producerId)
+					+ " sequence=" + std::to_string(capturedCommands.front().producerSequence));
+			} catch(...) { /* Logging cannot alter failed-batch settlement. */ }
+		}
+
+		void PublishCommittedOrdinaryCommandsLocked() noexcept
+		{
+			// ready is set only after the actual protected authority/runtime exchange.
+			// It proves a historical commit even if later specialist work is skipped
+			// or the next frame changes lifecycle. Never infer it from a planned token.
+			const auto& token = publishedAuthorityCommit;
+			if(token.ready && token.authorityGeneration != 0)
+				PublishCommandCompletionsLocked(token.authorityGeneration);
 		}
 
 		AnimationStatus AbortFailedRagdollAdmissionLocked(RuntimeRecord& record) noexcept
@@ -12695,6 +12758,9 @@ namespace TerraEngine::Animation {
 					impl_->authorityPublicationGeneration.fetch_add(1U, std::memory_order_acq_rel);
 				}
 				std::scoped_lock lock(impl_->runtimeOwnershipMutex);
+				// Last-membership retirement also releases the copied command batch.
+				impl_->PublishCommittedOrdinaryCommandsLocked();
+				impl_->SettleFailedFrameCommandsLocked(AnimationStatus::Cancelled, "DormantRetirement");
 				impl_->ResetFrameIntegrationStateLocked();
 				impl_->capturedFrameInputs.clear();
 				impl_->capturedCommands.clear();
@@ -12747,7 +12813,7 @@ namespace TerraEngine::Animation {
 				"Resources", "SceneGraph", "ObjectManager",
 				kResourceAnimatedObjectVisibilitySnapshot,
 				kResourceLocomotionAnimatorBindings, kResourceAnimationRagdollMappings},
-			{kResourceAnimationFrameInputs},
+			{kResourceAnimationFrameInputs, kResourceAnimationCommandQueues},
 			"Live animator membership, component configuration, commands, transforms, and resource views are copied before worker access.");
 		ConfigureWorkerWorkload(
 			descriptors[1],
@@ -12817,7 +12883,7 @@ namespace TerraEngine::Animation {
 				kResourceRootMotionResults, kResourceAnimationRagdollMappings,
 				kResourcePhysicsCharacterMotionLeases, "PhysicsWorld",
 				"RagdollPhysicsSnapshots", "RagdollPhysicsResults"},
-			{kResourceAnimationRuntimeState, kResourceAnimationPhysicsHandoffQueue,
+			{kResourceAnimationRuntimeState, kResourceAnimationCommandQueues, kResourceAnimationPhysicsHandoffQueue,
 				kResourceAnimationManagedCallbackBatches, kResourceRootMotionIntervals,
 				kResourceRootMotionResults, kResourcePhysicsCharacterMotionLeases,
 				kResourceAnimationRagdollMappings, "PhysicsWorld", "RagdollPhysicsQueue",
@@ -12928,7 +12994,8 @@ namespace TerraEngine::Animation {
 				|| impl_->frameDeclarationEpoch.load(std::memory_order_acquire) != frameDeclarationEpoch) return;
 			// Sealing performs all allocations and deterministic merging on a worker.
 			// The following protected workload can therefore exchange only one root.
-			(void)impl_->SealAuthorityFrameCandidate();
+			impl_->commandFrameFailurePhase = "SealAnimationAuthority";
+			if(impl_->SealAuthorityFrameCandidate()) impl_->commandFrameFailurePhase = nullptr;
 		};
 		descriptors[6].work = [this, animatorCount, runtimeSessionEpoch, frameDeclarationEpoch](JobGraphContext& context) {
 			TERRAENGINE_PROFILE_SCOPE("Animation: Publish Animation Authority",
@@ -12952,6 +13019,7 @@ namespace TerraEngine::Animation {
 				return;
 			}
 			const Impl::PublishedAuthorityCommitToken token = impl_->publishedAuthorityCommit;
+			impl_->commandFrameFailurePhase = "PublishAnimationAuthorityGenerationGate";
 			if(token.authorityGeneration == 0U || token.animatorCount != animatorCount
 				|| token.frameEpoch != frameDeclarationEpoch
 				|| token.sessionGeneration != runtimeSessionEpoch
@@ -12983,7 +13051,7 @@ namespace TerraEngine::Animation {
 				impl_->sealedAuthorityCandidate,
 				runtimeSessionEpoch,
 				impl_->frameLifecycleGenerations.Generation(AnimationLifecycleBoundary::Scene));
-			if(!authorityReceipt.Published()) return;
+			if(!authorityReceipt.Published()) { impl_->commandFrameFailurePhase = "AuthorityPublisherRejected"; return; }
 			// The expected-root identity check above proves no lifecycle or authored
 			// mutation replaced evaluator state after worker sealing.  The store is the
 			// complete runtime-state commit; it performs no record traversal or allocation.
@@ -12995,6 +13063,7 @@ namespace TerraEngine::Animation {
 			// one immutable root.  Crowd-sized internal state and specialist batches
 			// are deferred to the dependent finalizer below.
 			impl_->publishedAuthorityCommit.ready = true;
+			impl_->commandFrameFailurePhase = nullptr;
 			impl_->authorityPublicationGeneration.store(token.authorityGeneration, std::memory_order_release);
 		};
 		descriptors[7].work = [this, animatorCount, runtimeSessionEpoch, frameDeclarationEpoch](JobGraphContext& context) {
@@ -13013,20 +13082,32 @@ namespace TerraEngine::Animation {
 				runtimeSessionEpoch);
 		};
 		descriptors[8].work = [this, animatorCount, runtimeSessionEpoch, frameDeclarationEpoch](JobGraphContext& context) {
-			if(context.IsCancellationRequested()) return;
+			if(context.IsCancellationRequested()) {
+				std::scoped_lock lock(impl_->runtimeOwnershipMutex);
+				impl_->PublishCommittedOrdinaryCommandsLocked();
+				impl_->SettleFailedFrameCommandsLocked(AnimationStatus::Cancelled, "FinalizeGraphCancelled"); return;
+			}
 			// Drain previous completed physical ticks before opening the next
 			// authority publication. Physics never calls back under its mutex.
 			AnimationRootMotionResultPublisher::Instance().ObserveRootMotionIntervalResults(
 				Physics::PhysicsSystem::Instance());
 			std::scoped_lock lock(impl_->runtimeOwnershipMutex);
+			// Ordinary command state already belongs to the committed runtime root.
+			// Its exact receipt must precede fallible specialist side effects; failed
+			// settlement below only changes commands that remain genuinely uncommitted.
+			impl_->PublishCommittedOrdinaryCommandsLocked();
 			Impl::PublishedAuthorityCommitToken token = impl_->publishedAuthorityCommit;
 			if(!token.ready || token.animatorCount != animatorCount || token.frameEpoch != frameDeclarationEpoch
 				|| token.sessionGeneration != runtimeSessionEpoch
 				|| token.sceneLifecycleGeneration
 					!= impl_->frameLifecycleGenerations.Generation(AnimationLifecycleBoundary::Scene)
 				|| !impl_->runtimeActive.load(std::memory_order_acquire)
-				|| !token.specialistSidecars) return;
-			if(!impl_->ApplySealedSpecialistSidecars(token)) return;
+				|| !token.specialistSidecars) {
+				impl_->SettleFailedFrameCommandsLocked(AnimationStatus::Rejected, "FinalizeAuthorityGate"); return;
+			}
+			if(!impl_->ApplySealedSpecialistSidecars(token)) {
+				impl_->SettleFailedFrameCommandsLocked(AnimationStatus::Rejected, "ApplySpecialistSidecars"); return;
+			}
 			// The accepted packet has now consumed every copied explicit root-motion
 			// request. Clear the live capture queue only after that success point.
 			impl_->pendingRootMotionApplications.clear();

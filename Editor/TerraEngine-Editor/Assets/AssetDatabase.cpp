@@ -3,6 +3,7 @@
 // Implements the asset lifecycle management including automated project scanning, metadata persistence, and asynchronous asset compilation. It integrates with the filesystem watcher to detect external changes and syncs the database with the engine's resource manager.
 
 #include "AssetDatabase.h"
+#include "ModelPackagePrivatePaths.h"
 #include "ThreadPool/ThreadPool.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "Engine/Core/Logger/Logger.h"
@@ -477,25 +478,7 @@ namespace {
 	}
 
 	bool IsModelPackageTransactionPath(const std::filesystem::path& path) {
-		// ModelPackageImporter writes package candidates below a reserved
-		// `.ta-<16 lowercase hex digits>` Assets directory. Those files are one
-		// unpublished transaction, not independently authored assets. Ignoring only
-		// the exact reserved shape keeps ordinary dot-folders discoverable while
-		// preventing the watcher from racing package publication or assigning
-		// metadata to private material/prefab candidates.
-		for(const std::filesystem::path& part : path) {
-			const std::string name = part.string();
-			if(name.size() != 20U || !name.starts_with(".ta-")) {
-				continue;
-			}
-			const bool isLowerHexToken = std::all_of(name.begin() + 4, name.end(), [](char value) {
-				return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
-			});
-			if(isLowerHexToken) {
-				return true;
-			}
-		}
-		return false;
+		return TerraEngine::Editor::Assets::IsModelPackageTransactionPath(path);
 	}
 
 	bool IsIgnoredAssetDatabasePath(const std::filesystem::path& path) {
@@ -1973,7 +1956,11 @@ void AssetDatabase::ScanProject() {
 	// 1. Cleanup orphaned .meta files
 	if (std::filesystem::exists(assetRoot)) {
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const auto& entry : std::filesystem::recursive_directory_iterator(assetRoot)) {
+		for (std::filesystem::recursive_directory_iterator iterator(assetRoot), end; iterator != end; ++iterator) {
+			const auto& entry = *iterator;
+			// Never inspect or clean compiler-owned candidates. Prune before any
+			// file metadata probe: publication may rename this whole tree at once.
+			if(IsModelPackageTransactionPath(entry.path())) { iterator.disable_recursion_pending(); continue; }
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (entry.path().extension() == ".meta") {
 				std::filesystem::path sourcePath = entry.path();
@@ -2008,7 +1995,9 @@ void AssetDatabase::ScanProject() {
 	// 2. Import existing assets (Sync DB with Disk)
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::filesystem::exists(assetRoot)) {
-		for (const auto& entry : std::filesystem::recursive_directory_iterator(assetRoot)) {
+		for (std::filesystem::recursive_directory_iterator iterator(assetRoot), end; iterator != end; ++iterator) {
+			const auto& entry = *iterator;
+			if(IsModelPackageTransactionPath(entry.path())) { iterator.disable_recursion_pending(); continue; }
 			if (entry.is_regular_file()) {
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (entry.path().extension() == ".meta") continue;
@@ -2041,7 +2030,13 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 		});
 		AssetMetadata latest = existing->metadata;
 		AssetMetadata sidecar;
-		if (LoadMetadata(absSourcePath.string() + ".meta", sidecar) && sidecar.guid == latest.guid) latest = std::move(sidecar);
+		if (LoadMetadata(absSourcePath.string() + ".meta", sidecar) && sidecar.guid == latest.guid) {
+			// The queued owner already derived its source, importer and compiled
+			// destination from the actual source path. A fresh authored sidecar can
+			// contain an empty placeholder destination; merge only its settings so
+			// coalescing cannot silently turn required compilation into a no-op.
+			latest.settings = std::move(sidecar.settings);
+		}
 		latest.lastModified = std::filesystem::last_write_time(absSourcePath);
 		const bool latestNeedsImport = force || latest.lastModified != existing->metadata.lastModified
 			|| latest.settings != existing->metadata.settings;
@@ -2558,6 +2553,9 @@ bool AssetDatabase::LoadAssetIndex() {
 			metadata.settings = entry.value("settings", json::object());
 
 			const std::filesystem::path absSourcePath = std::filesystem::absolute(assetRoot / metadata.sourcePath);
+			// Older discovery could persist a private compiler candidate. An index
+			// is a cache, so it must not reopen that unpublished transaction either.
+			if(IsModelPackageTransactionPath(absSourcePath)) continue;
 			if (!std::filesystem::exists(absSourcePath)) {
 				continue;
 			}
@@ -2689,8 +2687,12 @@ void AssetDatabase::StartBackgroundProjectReconcile() {
 			return snapshot;
 		}
 
-		for (const auto& entry : std::filesystem::recursive_directory_iterator(scanRoot)) {
+		for (std::filesystem::recursive_directory_iterator iterator(scanRoot), end; iterator != end; ++iterator) {
+			const auto& entry = *iterator;
 			const std::filesystem::path path = entry.path();
+			// Private package publication is independent of discovery. Exclude its
+			// exact root before querying transient descendants or sidecar metadata.
+			if(IsModelPackageTransactionPath(path)) { iterator.disable_recursion_pending(); continue; }
 			if (entry.is_regular_file() && path.extension() == ".meta") {
 				std::filesystem::path sourcePath = path;
 				sourcePath.replace_extension("");

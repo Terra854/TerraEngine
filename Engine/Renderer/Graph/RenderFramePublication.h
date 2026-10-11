@@ -113,6 +113,8 @@ namespace TerraEngine::Renderer
 		// immutable binding here prevents every camera from retaining the same pose,
 		// palette, and fallback ownership again in its compact selector lanes.
 		PublishedAnimationRenderBinding animationBinding{};
+		// Resource/content proof accompanies the COW lane, never a live manager.
+		std::shared_ptr<const ShadowCasterStamp> shadowCasterInputs;
 		std::uint64_t transformGeneration = 0u;
 		std::uint64_t animationPresentationGeneration = 0u;
 		std::uint64_t materialOverrideGeneration = 0u;
@@ -379,6 +381,11 @@ namespace TerraEngine::Renderer
 		QualityPreset activePreset = QualityPreset::High;
 		bool customOverrideActive = false;
 		RenderSettings settings{};
+		RendererEfficiencyOptionsSnapshot efficiencyOptions{};
+		RendererEfficiencyFixtureIntent efficiencyFixtureIntent{};
+		// Workers materialize isolated oracle input from captured typed recipes.
+		// The protected backend reads this immutable owner without scanning JSON.
+		std::shared_ptr<const std::vector<std::uint32_t>> efficiencyDepthOracleInput;
 		RenderOptimizationSummary renderOptimization{};
 		// One compact lane is retained for each prepared command. The parallel map
 		// names its visible selection, or kInvalidOrdinal when diagnostics/grouping
@@ -626,6 +633,14 @@ namespace TerraEngine::Renderer
 		const ShadowDrawList& shadow,
 		std::size_t itemIndex,
 		RenderItemRecord& output) noexcept;
+	// Worker-only construction reads the sealed-root candidate, never live scene
+	// storage. A failed item leaves no partially executable instance stream.
+	[[nodiscard]] TERRAENGINE_API std::shared_ptr<const ShadowPreparedInstanceInputs>
+		BuildShadowPreparedInstanceInputs(const RenderFramePublication& publication,
+			const RenderViewPresentationInput& presentation, const ShadowDrawList& shadow);
+	[[nodiscard]] TERRAENGINE_API bool ShadowPreparedInstanceInputsCurrent(
+		const RenderFramePublication& publication, const RenderViewPresentationInput& presentation,
+		const ShadowDrawList& shadow) noexcept;
 
 	// This test-only input allows deterministic validation of rejection rollback.
 	// It is never a renderer setting and production callers leave it defaulted.

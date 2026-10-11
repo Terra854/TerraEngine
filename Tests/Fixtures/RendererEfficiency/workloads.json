@@ -1,0 +1,1320 @@
+{
+  "schemaVersion": 1,
+  "manifestId": "renderer-efficiency-v1",
+  "definitionStatus": "DefinitionOnly",
+  "description": "Frozen workload recipes. Neither this manifest nor a successful parse proves fixtures are materialized or GPU acceptance is verified.",
+  "identityPolicy": {
+    "manifestHash": "SHA-256 of installed manifest bytes",
+    "cameraHash": "SHA-256 of canonical materialized camera receipt",
+    "geometryMaterialRevisionHash": "SHA-256 of installed input closure receipt",
+    "frameCorrespondence": "fixtureId, seed, stepId, stepFrame, viewType, viewId, lightId, faceIndex",
+    "sourceDependencies": "Installed bundle only; no source-tree runtime paths"
+  },
+  "measurementPolicy": {
+    "runs": 3,
+    "warmupFrames": 60,
+    "measuredFrames": 300,
+    "minimumValidMeasuredFramesPerRun": 300,
+    "fixedSimulationStepSeconds": 0.016666666666666666,
+    "animationPoseSequence": "deterministic-fixed-step",
+    "temporalJitter": false,
+    "postEffects": false,
+    "preparationModes": [
+      "Serial",
+      "Concurrent"
+    ],
+    "primaryResolution": {
+      "width": 1920,
+      "height": 1080
+    },
+    "edgeResolutions": [
+      {
+        "width": 1919,
+        "height": 1079
+      },
+      {
+        "width": 7,
+        "height": 5
+      }
+    ],
+    "grid": [
+      16,
+      9,
+      24
+    ],
+    "tolerances": {
+      "coverageMismatchCount": 0,
+      "casterIdentityMismatchCount": 0,
+      "depthAbsoluteError": 1E-06,
+      "imageNormalizedChannelError": 0.00784313725490196,
+      "allowExcludedImageRegions": false
+    },
+    "thresholds": {
+      "depthStageMedianImprovementFraction": 0.1,
+      "shadowSubmissionReductionFraction": 0.9,
+      "totalFrameMedianRegressionFraction": 0.05,
+      "totalFrameP95RegressionFraction": 0.05
+    },
+    "missingEvidenceResult": "Unverified",
+    "timingSource": "completion-qualified-stage-specific-GPU-timestamps"
+  },
+  "stageReferences": {
+    "P1": {
+      "shadowReuse": "AlwaysRefresh"
+    },
+    "P2": {
+      "lightingUploads": "Full"
+    },
+    "P3": {
+      "lightingDepth": "CompleteScan"
+    },
+    "P4": {
+      "shadowSubmission": "Singleton",
+      "forceEquivalentRefresh": true
+    },
+    "P5": {
+      "staticShadowCacheBudgetBytes": 0,
+      "forceEquivalentRefresh": true
+    },
+    "SC008": {
+      "baseline": "independent-archived-post-P1-installed-closure",
+      "matchExistingProfilerInterface": true
+    }
+  },
+  "cameras": [
+    {
+      "id": "scene-fixed",
+      "viewType": "Scene",
+      "viewId": 1,
+      "position": [
+        0,
+        4,
+        12
+      ],
+      "target": [
+        0,
+        1,
+        0
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "verticalFovDegrees": 60,
+      "nearPlane": 0.1,
+      "farPlane": 250,
+      "referenceOrigin": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "game-fixed",
+      "viewType": "Game",
+      "viewId": 2,
+      "position": [
+        12,
+        6,
+        8
+      ],
+      "target": [
+        0,
+        1,
+        0
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "verticalFovDegrees": 60,
+      "nearPlane": 0.1,
+      "farPlane": 250,
+      "referenceOrigin": [
+        100,
+        0,
+        0
+      ]
+    }
+  ],
+  "workloads": [
+    {
+      "id": "shadow-invalidation",
+      "definitionStatus": "DefinitionOnly",
+      "seed": 65001,
+      "stage": "P1",
+      "successCriteria": [
+        "SC-001",
+        "SC-002",
+        "SC-007",
+        "SC-009"
+      ],
+      "representativeForSC008": false,
+      "cameraIds": [
+        "scene-fixed"
+      ],
+      "geometryRecipeRevision": 1,
+      "materialRecipeRevision": 1,
+      "parameters": {
+        "lightCount": 1,
+        "stationarySkeletalCasters": 1,
+        "morphCasters": 1,
+        "receiverCount": 1
+      },
+      "steps": [
+        {
+          "id": "shadow-invalidation-00",
+          "action": "stable",
+          "ordinal": 0,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-01",
+          "action": "transform",
+          "ordinal": 1,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-02",
+          "action": "pose",
+          "ordinal": 2,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-03",
+          "action": "morph",
+          "ordinal": 3,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-04",
+          "action": "mesh-revision",
+          "ordinal": 4,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-05",
+          "action": "material-revision",
+          "ordinal": 5,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-06",
+          "action": "shader-revision",
+          "ordinal": 6,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-07",
+          "action": "texture-revision",
+          "ordinal": 7,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-08",
+          "action": "cutout",
+          "ordinal": 8,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-09",
+          "action": "selected-lod",
+          "ordinal": 9,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-10",
+          "action": "selected-meshlet",
+          "ordinal": 10,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-11",
+          "action": "page-revision",
+          "ordinal": 11,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-12",
+          "action": "residency",
+          "ordinal": 12,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-13",
+          "action": "origin",
+          "ordinal": 13,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-14",
+          "action": "light-assignment",
+          "ordinal": 14,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-15",
+          "action": "membership-removal",
+          "ordinal": 15,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "shadow-invalidation-16",
+          "action": "lifetime-replacement",
+          "ordinal": 16,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        }
+      ]
+    },
+    {
+      "id": "lighting-dirty",
+      "definitionStatus": "DefinitionOnly",
+      "seed": 65002,
+      "stage": "P2",
+      "successCriteria": [
+        "SC-003",
+        "SC-007",
+        "SC-009"
+      ],
+      "representativeForSC008": false,
+      "cameraIds": [
+        "scene-fixed"
+      ],
+      "geometryRecipeRevision": 1,
+      "materialRecipeRevision": 1,
+      "parameters": {
+        "lightCount": 1000,
+        "uploadCapacity": 1024,
+        "retainedLightBudget": 1000,
+        "lightOrder": "stable-id-ascending",
+        "selectionTies": false
+      },
+      "steps": [
+        {
+          "id": "lighting-dirty-00",
+          "action": "stable-all-slots",
+          "ordinal": 0,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "lighting-dirty-01",
+          "action": "edit-retained-light-500",
+          "ordinal": 1,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "lighting-dirty-02",
+          "action": "edit-outside-retained-subset",
+          "ordinal": 2,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "lighting-dirty-03",
+          "action": "add-light",
+          "ordinal": 3,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "lighting-dirty-04",
+          "action": "remove-light",
+          "ordinal": 4,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "lighting-dirty-05",
+          "action": "reorder-lights",
+          "ordinal": 5,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "lighting-dirty-06",
+          "action": "shrink-light-count",
+          "ordinal": 6,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "lighting-dirty-07",
+          "action": "zero-lights",
+          "ordinal": 7,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        }
+      ]
+    },
+    {
+      "id": "lighting-thresholds",
+      "definitionStatus": "DefinitionOnly",
+      "seed": 65003,
+      "stage": "P2",
+      "successCriteria": [
+        "SC-003",
+        "SC-007",
+        "SC-009"
+      ],
+      "representativeForSC008": false,
+      "cameraIds": [
+        "scene-fixed"
+      ],
+      "geometryRecipeRevision": 1,
+      "materialRecipeRevision": 1,
+      "parameters": {
+        "lightCounts": [
+          0,
+          16,
+          17,
+          1024,
+          1025
+        ],
+        "uploadCapacity": 1024,
+        "retainedLightBudget": 1024,
+        "lightOrder": "stable-id-ascending",
+        "selectionTies": false
+      },
+      "steps": [
+        {
+          "id": "lighting-thresholds-00",
+          "action": "zero",
+          "ordinal": 0,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "lighting-thresholds-01",
+          "action": "fallback-16",
+          "ordinal": 1,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "lighting-thresholds-02",
+          "action": "clustered-17",
+          "ordinal": 2,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "lighting-thresholds-03",
+          "action": "capacity-1024",
+          "ordinal": 3,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "lighting-thresholds-04",
+          "action": "over-cap-1025",
+          "ordinal": 4,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        }
+      ]
+    },
+    {
+      "id": "depth-coverage",
+      "definitionStatus": "DefinitionOnly",
+      "seed": 65004,
+      "stage": "P3",
+      "successCriteria": [
+        "SC-004",
+        "SC-007",
+        "SC-009"
+      ],
+      "representativeForSC008": false,
+      "cameraIds": [
+        "scene-fixed"
+      ],
+      "geometryRecipeRevision": 1,
+      "materialRecipeRevision": 1,
+      "parameters": {
+        "lightCount": 17,
+        "grid": [
+          16,
+          9,
+          24
+        ],
+        "syntheticDepthValues": [
+          "clear-one",
+          "zero",
+          "near",
+          "far-below-one",
+          "negative",
+          "over-one",
+          "nan",
+          "positive-infinity",
+          "negative-infinity"
+        ],
+        "coverageCases": [
+          "layered-opaque",
+          "one-pixel-every-tile",
+          "thin-distant",
+          "empty",
+          "near-far-edge",
+          "odd-viewport",
+          "viewport-smaller-than-grid"
+        ]
+      },
+      "steps": [
+        {
+          "id": "depth-coverage-00",
+          "nativeExtent": {
+            "width": 1920,
+            "height": 1080
+          },
+          "action": "full-coverage",
+          "ordinal": 0,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "depth-coverage-01",
+          "nativeExtent": {
+            "width": 1920,
+            "height": 1080
+          },
+          "action": "single-pixel-skipped-sample-positions",
+          "ordinal": 1,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "depth-coverage-02",
+          "nativeExtent": {
+            "width": 1920,
+            "height": 1080
+          },
+          "action": "clear-only",
+          "ordinal": 2,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "depth-coverage-03",
+          "nativeExtent": {
+            "width": 1920,
+            "height": 1080
+          },
+          "action": "invalid-depth",
+          "ordinal": 3,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "depth-coverage-04",
+          "nativeExtent": {
+            "width": 1919,
+            "height": 1079
+          },
+          "action": "resize-odd",
+          "ordinal": 4,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "depth-coverage-05",
+          "nativeExtent": {
+            "width": 7,
+            "height": 5
+          },
+          "action": "resize-small",
+          "ordinal": 5,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        }
+      ]
+    },
+    {
+      "id": "depth-heavy",
+      "definitionStatus": "DefinitionOnly",
+      "seed": 65005,
+      "stage": "P3",
+      "successCriteria": [
+        "SC-004",
+        "SC-008",
+        "SC-009"
+      ],
+      "representativeForSC008": true,
+      "cameraIds": [
+        "scene-fixed"
+      ],
+      "geometryRecipeRevision": 1,
+      "materialRecipeRevision": 1,
+      "parameters": {
+        "lightCount": 1000,
+        "grid": [
+          16,
+          9,
+          24
+        ],
+        "opaqueCoverage": "full-viewport-layered",
+        "uploadCapacity": 1024,
+        "retainedLightBudget": 1000
+      },
+      "steps": [
+        {
+          "id": "depth-heavy-00",
+          "nativeExtent": {
+            "width": 1920,
+            "height": 1080
+          },
+          "action": "stable-depth-heavy",
+          "ordinal": 0,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        }
+      ]
+    },
+    {
+      "id": "shadow-batching",
+      "definitionStatus": "DefinitionOnly",
+      "seed": 65006,
+      "stage": "P4",
+      "successCriteria": [
+        "SC-005",
+        "SC-007",
+        "SC-008",
+        "SC-009"
+      ],
+      "representativeForSC008": true,
+      "cameraIds": [
+        "scene-fixed",
+        "game-fixed"
+      ],
+      "geometryRecipeRevision": 1,
+      "materialRecipeRevision": 1,
+      "parameters": {
+        "compatibleCasterCount": 1000,
+        "shadowRegions": 1,
+        "regionKind": "2D",
+        "forceEquivalentRefresh": true
+      },
+      "steps": [
+        {
+          "id": "shadow-batching-00",
+          "action": "compatible-1000",
+          "ordinal": 0,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300,
+          "requiredBundle": {
+            "views": [
+              {
+                "viewType": "Scene",
+                "viewId": 1,
+                "lightId": "65000000000000000000000000000041",
+                "lightType": 0,
+                "faceIndices": [
+                  0
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "id": "shadow-batching-01",
+          "action": "mixed-route",
+          "ordinal": 1,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300,
+          "requiredBundle": {
+            "views": [
+              {
+                "viewType": "Scene",
+                "viewId": 1,
+                "lightId": "65000000000000000000000000000041",
+                "lightType": 0,
+                "faceIndices": [
+                  0
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "id": "shadow-batching-02",
+          "action": "deformed",
+          "ordinal": 2,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300,
+          "requiredBundle": {
+            "views": [
+              {
+                "viewType": "Scene",
+                "viewId": 1,
+                "lightId": "65000000000000000000000000000041",
+                "lightType": 0,
+                "faceIndices": [
+                  0
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "id": "shadow-batching-03",
+          "action": "cutout",
+          "ordinal": 3,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300,
+          "requiredBundle": {
+            "views": [
+              {
+                "viewType": "Scene",
+                "viewId": 1,
+                "lightId": "65000000000000000000000000000041",
+                "lightType": 0,
+                "faceIndices": [
+                  0
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "id": "shadow-batching-04",
+          "action": "off-camera",
+          "ordinal": 4,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300,
+          "requiredBundle": {
+            "views": [
+              {
+                "viewType": "Scene",
+                "viewId": 1,
+                "lightId": "65000000000000000000000000000041",
+                "lightType": 0,
+                "faceIndices": [
+                  0
+                ]
+              },
+              {
+                "viewType": "Scene",
+                "viewId": 1,
+                "lightId": "65000000000000000000000000000040",
+                "lightType": 1,
+                "faceIndices": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5
+                ]
+              },
+              {
+                "viewType": "Scene",
+                "viewId": 1,
+                "lightId": "65000000000000000000000000000042",
+                "lightType": 2,
+                "faceIndices": [
+                  0
+                ]
+              },
+              {
+                "viewType": "Scene",
+                "viewId": 1,
+                "lightId": "65000000000000000000000000000043",
+                "lightType": 3,
+                "faceIndices": [
+                  0
+                ]
+              },
+              {
+                "viewType": "Game",
+                "viewId": 2,
+                "lightId": "65000000000000000000000000000041",
+                "lightType": 0,
+                "faceIndices": [
+                  0
+                ]
+              },
+              {
+                "viewType": "Game",
+                "viewId": 2,
+                "lightId": "65000000000000000000000000000040",
+                "lightType": 1,
+                "faceIndices": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5
+                ]
+              },
+              {
+                "viewType": "Game",
+                "viewId": 2,
+                "lightId": "65000000000000000000000000000042",
+                "lightType": 2,
+                "faceIndices": [
+                  0
+                ]
+              },
+              {
+                "viewType": "Game",
+                "viewId": 2,
+                "lightId": "65000000000000000000000000000043",
+                "lightType": 3,
+                "faceIndices": [
+                  0
+                ]
+              }
+            ]
+          },
+          "offCameraSourceProofRequired": true
+        },
+        {
+          "id": "shadow-batching-05",
+          "action": "dispatch-limit-split",
+          "ordinal": 5,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300,
+          "requiredBundle": {
+            "views": [
+              {
+                "viewType": "Scene",
+                "viewId": 1,
+                "lightId": "65000000000000000000000000000041",
+                "lightType": 0,
+                "faceIndices": [
+                  0
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "id": "shadow-batching-06",
+          "action": "upload-failure-fallback",
+          "ordinal": 6,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300,
+          "requiredBundle": {
+            "views": [
+              {
+                "viewType": "Scene",
+                "viewId": 1,
+                "lightId": "65000000000000000000000000000041",
+                "lightType": 0,
+                "faceIndices": [
+                  0
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "static-dynamic",
+      "definitionStatus": "DefinitionOnly",
+      "seed": 65007,
+      "stage": "P5",
+      "successCriteria": [
+        "SC-001",
+        "SC-006",
+        "SC-007",
+        "SC-008",
+        "SC-009"
+      ],
+      "representativeForSC008": true,
+      "cameraIds": [
+        "scene-fixed",
+        "game-fixed"
+      ],
+      "geometryRecipeRevision": 1,
+      "materialRecipeRevision": 1,
+      "parameters": {
+        "staticCasterCount": 1000,
+        "dynamicAnimatedCasterCount": 1,
+        "staticCacheBudgetBytes": 67108864,
+        "forceEquivalentRefresh": true
+      },
+      "steps": [
+        {
+          "id": "static-dynamic-00",
+          "action": "animate-dynamic-stable-static",
+          "ordinal": 0,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "static-dynamic-01",
+          "action": "overlapping-occlusion",
+          "ordinal": 1,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "static-dynamic-02",
+          "action": "static-to-dynamic",
+          "ordinal": 2,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "static-dynamic-03",
+          "action": "dynamic-to-static",
+          "ordinal": 3,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "static-dynamic-04",
+          "action": "remove-static",
+          "ordinal": 4,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "static-dynamic-05",
+          "action": "remove-dynamic",
+          "ordinal": 5,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "static-dynamic-06",
+          "action": "cutout-revision",
+          "ordinal": 6,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "static-dynamic-07",
+          "action": "zero-budget",
+          "ordinal": 7,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "static-dynamic-08",
+          "action": "too-small-budget",
+          "ordinal": 8,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "static-dynamic-09",
+          "action": "whole-cube-admission",
+          "ordinal": 9,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "static-dynamic-10",
+          "action": "unsupported-depth-transfer",
+          "ordinal": 10,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "static-dynamic-11",
+          "action": "allocation-failure",
+          "ordinal": 11,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "static-dynamic-12",
+          "action": "lower-budget-in-flight",
+          "ordinal": 12,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "static-dynamic-13",
+          "action": "retirement-view-churn",
+          "ordinal": 13,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "static-dynamic-14",
+          "action": "morph-animation",
+          "ordinal": 14,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        }
+      ]
+    },
+    {
+      "id": "multiview-lights",
+      "definitionStatus": "DefinitionOnly",
+      "seed": 65008,
+      "stage": "All",
+      "successCriteria": [
+        "SC-001",
+        "SC-002",
+        "SC-003",
+        "SC-005",
+        "SC-006",
+        "SC-007",
+        "SC-008",
+        "SC-009"
+      ],
+      "representativeForSC008": true,
+      "cameraIds": [
+        "scene-fixed",
+        "game-fixed"
+      ],
+      "geometryRecipeRevision": 1,
+      "materialRecipeRevision": 1,
+      "parameters": {
+        "lightKinds": "all-engine-supported",
+        "pointLightFaces": 6,
+        "viewOrder": [
+          "Scene-Game",
+          "Game-Scene"
+        ],
+        "snapshotSlots": 8
+      },
+      "steps": [
+        {
+          "id": "multiview-lights-00",
+          "action": "distinct-origins",
+          "ordinal": 0,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "multiview-lights-01",
+          "action": "different-caster-selections",
+          "ordinal": 1,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "multiview-lights-02",
+          "action": "alternate-view-order",
+          "ordinal": 2,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "multiview-lights-03",
+          "action": "alternate-snapshot-slot",
+          "ordinal": 3,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "multiview-lights-04",
+          "action": "B-record-overwrite-before-A-old-owner-hit",
+          "ordinal": 4,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        }
+      ]
+    },
+    {
+      "id": "recovery-capacity",
+      "definitionStatus": "DefinitionOnly",
+      "seed": 65009,
+      "stage": "All",
+      "successCriteria": [
+        "SC-001",
+        "SC-003",
+        "SC-005",
+        "SC-006",
+        "SC-007",
+        "SC-008",
+        "SC-009"
+      ],
+      "representativeForSC008": true,
+      "cameraIds": [
+        "scene-fixed"
+      ],
+      "geometryRecipeRevision": 1,
+      "materialRecipeRevision": 1,
+      "parameters": {
+        "staticCacheBudgetsBytes": [
+          0,
+          1048576,
+          67108864
+        ],
+        "faultsRequireOwnedValidationSession": true
+      },
+      "steps": [
+        {
+          "id": "recovery-capacity-00",
+          "action": "recorded-submit-abort",
+          "ordinal": 0,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "recovery-capacity-01",
+          "action": "incomplete-point-faces",
+          "ordinal": 1,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "recovery-capacity-02",
+          "action": "resource-recreation",
+          "ordinal": 2,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "recovery-capacity-03",
+          "action": "device-recovery",
+          "ordinal": 3,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "recovery-capacity-04",
+          "action": "buffer-overflow",
+          "ordinal": 4,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "recovery-capacity-05",
+          "action": "group-overflow",
+          "ordinal": 5,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "recovery-capacity-06",
+          "action": "unsupported-grouped-route",
+          "ordinal": 6,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "recovery-capacity-07",
+          "action": "unsupported-depth-transfer",
+          "ordinal": 7,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "recovery-capacity-08",
+          "action": "zero-budget",
+          "ordinal": 8,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "recovery-capacity-09",
+          "action": "too-small-budget",
+          "ordinal": 9,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "recovery-capacity-10",
+          "action": "whole-cube-admission",
+          "ordinal": 10,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "recovery-capacity-11",
+          "action": "lower-budget-in-flight",
+          "ordinal": 11,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "recovery-capacity-12",
+          "action": "retirement-view-churn",
+          "ordinal": 12,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        },
+        {
+          "id": "recovery-capacity-13",
+          "action": "transaction-conflict-rollback",
+          "ordinal": 13,
+          "applyAt": "existing-protected-transaction-boundary",
+          "observeAt": "first-rendered-frame-observing-settings-and-mutation-generation",
+          "warmupFrames": 60,
+          "measuredFrames": 300
+        }
+      ]
+    }
+  ]
+}

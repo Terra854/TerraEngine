@@ -115,23 +115,45 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!CreateGlobalDescriptorResources()) return false;
 	
-	for (uint32_t frameIndex = 0u; frameIndex < MAX_FRAMES_IN_FLIGHT; ++frameIndex) {
-		UpdateGlobalHiZ(frameIndex);
+	{
+		// Sequential protected initialization owns this fresh device and all its
+		// descriptor sets. No frame can observe it until initialized is published.
+		// The scoped grant permits bootstrap writes without a needless idle wait;
+		// every early exit, including cleanup, revokes that permission.
+		const bool setsReady = globalDescriptorSets.size() == MAX_FRAMES_IN_FLIGHT
+			&& std::all_of(globalDescriptorSets.begin(), globalDescriptorSets.end(),
+				[](VkDescriptorSet set) { return set != VK_NULL_HANDLE; });
+		TerraEngine::Renderer::ScopedTextureDescriptorBootstrap bootstrap(
+			textureDescriptorBootstrap, reinterpret_cast<std::uintptr_t>(device),
+			renderSessionGeneration, !initialized && !deviceLost && setsReady);
+		try {
+			CreateDefaultTexture();
+			CreateEnvironmentLightingResources();
+			CreateMaterialBufferResources();
+			CreateCullingBufferResources();
+			CreateLightingBufferResources();
+			CreateAmbientOcclusionResources();
+			CreateIndirectDrawResources();
+		} catch (const std::exception& e) {
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to create bootstrap resources: " << e.what());
+			Cleanup();
+			return false;
+		}
+		if (!textureDescriptorBootstrap.RequiredWritesComplete()) {
+			TERRAENGINE_LOG(LogLevel::Error, "Vulkan texture descriptor bootstrap did not publish every required fallback.");
+			Cleanup();
+			return false;
+		}
+		// Cold pyramids have no completed depth yet. Populate every sampled-image
+		// slot with the uploaded white owner before shaders can query dimensions.
+		for (uint32_t frameIndex = 0u; frameIndex < MAX_FRAMES_IN_FLIGHT; ++frameIndex) {
+			if (!UpdateGlobalHiZ(frameIndex)) {
+				TERRAENGINE_LOG(LogLevel::Error, "Vulkan Hi-Z descriptor bootstrap has no valid fallback owner.");
+				Cleanup();
+				return false;
+			}
+		}
 	}
-
-	try {
-		CreateDefaultTexture();
-	} catch (const std::exception& e) {
-		TERRAENGINE_LOG(LogLevel::Error, "Failed to create default texture: " << e.what());
-		Cleanup();
-		return false;
-	}
-	CreateEnvironmentLightingResources();
-	CreateMaterialBufferResources();
-	CreateCullingBufferResources();
-	CreateLightingBufferResources();
-	CreateAmbientOcclusionResources();
-	CreateIndirectDrawResources();
 
 	workerCommandPools.resize(MAX_FRAMES_IN_FLIGHT);
 	workerCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -893,9 +915,16 @@ void VulkanContext::Impl::DestroyVulkanDeformationComputePipelines()
 // VulkanContext::Impl::Cleanup is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
+	textureDescriptorBootstrap.Reset();
+	defaultTextureShaderReadable = false;
+	// Shutdown/device recovery invalidates depth ownership even if the native
+	// device is already gone and teardown skips its normal resource branches.
+	ResetShadowPublication(true);
+	bool shadowTeardownProven = deviceLost;
 	bool presentationFenceWaitAllowed = device != VK_NULL_HANDLE && !skipDeviceIdle && !deviceLost;
 	if (device && !skipDeviceIdle) {
 		const VkResult idleResult = WaitDeviceIdle();
+		shadowTeardownProven = idleResult == VK_SUCCESS || idleResult == VK_ERROR_DEVICE_LOST;
 		if (idleResult != VK_SUCCESS)
 		{
 			TERRAENGINE_LOG(LogLevel::Warning, "Vulkan cleanup could not prove the device idle before teardown: " << idleResult);
@@ -903,6 +932,11 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 			// device-loss cleanup therefore skips the otherwise blocking proof wait.
 			if (idleResult == VK_ERROR_DEVICE_LOST) presentationFenceWaitAllowed = false;
 		}
+	}
+	if (device != VK_NULL_HANDLE && !shadowTeardownProven) {
+		// Retain all owners when idle is unproven. Neither a readback-free frame
+		// nor an empty cache makes pending mesh/upload memory safe to destroy.
+		return;
 	}
 	if (presentationFenceWaitAllowed) {
 		// Device-idle alone does not prove that the presentation engine released a
@@ -927,11 +961,32 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 			if (presentationIdleResult != VK_SUCCESS) {
 				TERRAENGINE_LOG(LogLevel::Warning, "Vulkan cleanup could not prove presentation completion before teardown: "
 					<< presentationIdleResult);
+				if (presentationIdleResult != VK_ERROR_DEVICE_LOST) return;
 			}
 		}
 	}
 
+	// Terminal cleanup abandons primaries before releasing borrowed color views.
+	for (auto& commands : pendingPrimaryCommandBuffers) commands.clear();
+	ReleaseStaticShadowEntriesForTeardown(deviceLost);
+	// Validation staging must release while its allocator exists. If an earlier
+	// idle failed, Shutdown refuses outstanding submissions and teardown pauses
+	// rather than destroying memory still referenced by accepted GPU commands.
+	try
+	{
+		if (!shadowValidationReadback.Shutdown(shadowTeardownProven)) return;
+		if (!lightingDepthEvidence.Shutdown(shadowTeardownProven)) return;
+		lightingDepthEvidenceInitialized = false;
+		lightingDepthEvidenceInitializationAttempted = false;
+	}
+	catch (const std::bad_alloc&)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Pausing Vulkan cleanup because validation staging could not retire safely.");
+		return;
+	}
 	// Readback objects are not part of the normal frame arrays. Drain them
+	DestroyShadowAuthoredPagePayloads(); // Idle/device-loss proof precedes allocator teardown.
+	if (shadowTeardownProven) ReleaseAmbiguousUploadsAfterIdle();
 	// explicitly while the allocator, command pools, and device still exist.
 	// Device-loss teardown is terminal for submitted work, while normal cleanup
 	// has already waited for device idle above.
@@ -1025,6 +1080,16 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		DestroyBufferImmediate(buffer);
 	}
 	groupedInstanceCapacities.fill(0u);
+	// Existing shutdown completion proves every physical stream idle.
+	for (auto& frameStreams : shadowInstanceStreams) for (auto& stream : frameStreams)
+	{
+		DestroyBufferImmediate(stream.buffer);
+		if (stream.bindlessIndex != INVALID_BINDLESS_BUFFER_INDEX)
+			freeBufferIndices.push_back(stream.bindlessIndex);
+		stream = {};
+	}
+	nextShadowInstanceAllocationGeneration = 1;
+	shadowInstanceFailureControlGeneration = 0;
 	for (std::vector<RenderInstanceRecord>& mirror : groupedInstanceUploadMirrors)
 	{
 		mirror.clear();
@@ -1326,6 +1391,12 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 			vkDestroyPipeline(device, clusterDepthMaskComputePipeline, nullptr);
 			clusterDepthMaskComputePipeline = VK_NULL_HANDLE;
 		}
+		if (clusterDepthMaskReferenceComputePipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, clusterDepthMaskReferenceComputePipeline, nullptr);
+			clusterDepthMaskReferenceComputePipeline = VK_NULL_HANDLE;
+		}
+		clusterDepthDeviceLimitsChecked = false;
+		clusterDepthCooperativeDeviceSupported = clusterDepthReferenceDeviceSupported = false;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (clusterLightCountComputePipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, clusterLightCountComputePipeline, nullptr);
@@ -1451,7 +1522,6 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		}
 		activeShadowResourceRequest = {};
 		shadowStorageRegions.fill({});
-		shadowCacheEntries.clear();
 	}
 
 	auto DestroyVulkanImage = [&](VulkanImage& image) {
@@ -1523,6 +1593,7 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	DestroyBufferVector(globalFrameCullingSSBOs);
 	DestroyBufferVector(globalMeshletCountersSSBOs);
 	DestroyBufferVector(globalLightSSBOs);
+	ResetLightingUploadMirrors();
 	DestroyBufferVector(lightAnalysisInputSSBOs);
 	DestroyBufferVector(clusterGridSSBOs);
 	DestroyBufferVector(lightIndexSSBOs);
@@ -1614,6 +1685,7 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	device = VK_NULL_HANDLE;
 	physicalDevice = VK_NULL_HANDLE;
 	maximumStorageBufferRange = 0U;
+	maximumTaskGroupsX = maximumTaskGroupsTotal = 0;
 
 	if (validationLayersEnabled && instance) {
 		DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
@@ -1747,6 +1819,14 @@ bool VulkanContext::Impl::PickPhysicalDevice() {
 		VkPhysicalDeviceProperties deviceProperties;
 		vkGetPhysicalDeviceProperties(physicalDevice, &deviceProperties);
 		maximumStorageBufferRange = deviceProperties.limits.maxStorageBufferRange;
+		VkPhysicalDeviceMeshShaderPropertiesEXT meshProperties{};
+		meshProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT;
+		VkPhysicalDeviceProperties2 extendedProperties{};
+		extendedProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+		extendedProperties.pNext = &meshProperties;
+		vkGetPhysicalDeviceProperties2(physicalDevice, &extendedProperties);
+		maximumTaskGroupsX = meshProperties.maxTaskWorkGroupCount[0];
+		maximumTaskGroupsTotal = meshProperties.maxTaskWorkGroupTotalCount;
 
 		VkPhysicalDeviceMeshShaderFeaturesEXT queriedMeshFeatures{};
 		queriedMeshFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
@@ -1866,6 +1946,16 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 
 	vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 	vulkan13Features.shaderDemoteToHelperInvocation = VK_TRUE;
+	// Image requirement queries before allocation need maintenance4 explicitly
+	// enabled. This optional optimization never rejects an otherwise usable GPU.
+	VkPhysicalDeviceVulkan13Features supportedStaticFeatures{};
+	supportedStaticFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+	VkPhysicalDeviceFeatures2 staticFeaturesQuery{};
+	staticFeaturesQuery.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+	staticFeaturesQuery.pNext = &supportedStaticFeatures;
+	vkGetPhysicalDeviceFeatures2(physicalDevice, &staticFeaturesQuery);
+	staticShadowMaintenance4Enabled = supportedStaticFeatures.maintenance4 == VK_TRUE;
+	vulkan13Features.maintenance4 = staticShadowMaintenance4Enabled ? VK_TRUE : VK_FALSE;
 
 	// Mesh shaders are the required runtime geometry path for this feature.
 	meshShaderFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
@@ -3560,7 +3650,20 @@ void VulkanContext::Impl::RecreateSwapChain() {
 		for (std::array<bool, MAX_FRAMES_IN_FLIGHT>& swaps : hiZWritePendingSwapByViewFrame) swaps.fill(false);
 		CreateAmbientOcclusionResources();
 		for (std::uint32_t frameIndex = 0; frameIndex < MAX_FRAMES_IN_FLIGHT; ++frameIndex) {
-			UpdateGlobalHiZ(frameIndex);
+			if (!UpdateGlobalHiZ(frameIndex)) {
+				// This is late descriptor-readiness failure: the replacement chain
+				// exists, so retry it without pretending the retired old chain can
+				// be restored or that no replacement was created.
+				skipFrame = true;
+				framebufferResized = true;
+				presentationRecreation.PublishFailure(false);
+				presentationLifecycle.PublishRecreation(
+					TerraEngine::Renderer::Vulkan::PresentationRecreationOutcome::RecoverableFailure,
+					surfaceMinimumImageCount, requestedSwapchainImageCount,
+					static_cast<std::uint32_t>(swapchainImages.size()));
+				TERRAENGINE_LOG(LogLevel::Error, "Swapchain recreation has no valid Hi-Z descriptor fallback owner.");
+				return;
+			}
 		}
 	}
 

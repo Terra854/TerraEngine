@@ -491,6 +491,35 @@ namespace TerraEngine::Scene {
 		return completed;
 	}
 
+	std::optional<AutomationTransactionReceipt> SceneMutationQueue::TakeCompletedAutomationTransactionReceipt(std::string_view transactionId)
+	{
+		std::scoped_lock lock(requestsMutex);
+		const auto found = std::find_if(completedAutomationTransactions.begin(), completedAutomationTransactions.end(),
+			[transactionId](const auto& receipt) { return receipt.transactionId == transactionId; });
+		if (found == completedAutomationTransactions.end()) return std::nullopt;
+		auto receipt = std::move(*found);
+		completedAutomationTransactions.erase(found);
+		return receipt;
+	}
+
+	void SceneMutationQueue::RetainAutomationTransactionReceipt(const Transaction& transaction, const TransactionResult& result) noexcept
+	{
+		if (transaction.origin != TransactionOrigin::Automation || result.status == TransactionStatus::Pending) return;
+		try
+		{
+			// Retain small observation receipts, never duplicate undo inverse deltas.
+			// Eviction/allocation failure produces missing evidence, never fabricated
+			// success, and must not change the outcome of an already committed scene.
+			constexpr std::size_t maximumReceipts = 256U;
+			AutomationTransactionReceipt receipt{result.transactionId, result.status,
+				result.appliedWriteCount, result.rejectedWriteCount, result.spatialPublicationGeneration, result.message};
+			if (completedAutomationTransactions.size() == maximumReceipts)
+				completedAutomationTransactions.erase(completedAutomationTransactions.begin());
+			completedAutomationTransactions.push_back(std::move(receipt));
+		}
+		catch (...) { /* Optional receipt loss cannot become an additional authored-write failure. */ }
+	}
+
 	std::vector<NavigationSourceMutationReceipt> SceneMutationQueue::DrainCompletedNavigationSourceMutationReceipts()
 	{
 		std::scoped_lock lock(requestsMutex);
@@ -532,6 +561,7 @@ namespace TerraEngine::Scene {
 		completedNavigationSourceMutationReceipts.reserve(completedNavigationSourceMutationReceipts.size() + navigationSourceMutationIntents.size());
 		for (auto& transaction : transactions) {
 			auto result = CanceledExecutionResult(transaction);
+			RetainAutomationTransactionReceipt(transaction, result);
 			AccumulateTransactionDiagnostics(transactionDiagnostics, transaction, result);
 			SettleProducerReceipts(result, navigationSourceMutationIntents, completedNavigationSourceMutationReceipts, nextNavigationSourceChangeSequence);
 			if (transaction.origin == TransactionOrigin::Editor && (!transaction.undoGroupName.empty() || transaction.originName == "UndoRedoReplay"))
@@ -574,6 +604,7 @@ namespace TerraEngine::Scene {
 		publicationGroups.clear();
 		navigationSourceMutationIntents.clear();
 		completedEditorTransactions.clear();
+		completedAutomationTransactions.clear();
 		completedNavigationSourceMutationReceipts.clear();
 		completedPublicationGroupResults.clear();
 	}
@@ -1039,6 +1070,7 @@ namespace TerraEngine::Scene {
 		auto retain = [&](std::size_t index, TransactionResult result, bool producerSettlement) {
 			std::scoped_lock lock(requestsMutex);
 			AccumulateTransactionDiagnostics(transactionDiagnostics, pending[index], result);
+			RetainAutomationTransactionReceipt(pending[index], result);
 			if (producerSettlement) SettleProducerReceipts(result, navigationSourceMutationIntents,
 				completedNavigationSourceMutationReceipts, nextNavigationSourceChangeSequence);
 			if (pending[index].origin == TransactionOrigin::Editor

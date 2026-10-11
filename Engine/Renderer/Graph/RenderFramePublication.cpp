@@ -234,6 +234,9 @@ namespace TerraEngine::Renderer
 						"A compact command lane does not name a valid view selection.");
 				for(const ShadowDrawList& shadow : presentation.shadowDrawLists)
 				{
+					if (shadow.instanceInputs && !ShadowPreparedInstanceInputsCurrent(publication, presentation, shadow))
+						return Reject(publication, RenderPublicationOutcome::RejectedSelectorLength,
+							"A shadow instance stream names a stale frame, light, view or reference frame.");
 					if(shadow.lightId == TerraEngine::EMPTY_UUID
 						|| !shadow.HasParallelLengths()
 						|| shadow.topologyGeneration != publication.persistent->generation
@@ -645,6 +648,11 @@ namespace TerraEngine::Renderer
 			resolved.meshId = persistent.meshId;
 			resolved.materialId = persistent.materialId;
 			resolved.objectId = persistent.objectId;
+			resolved.shadowCasterInputs = dynamic.shadowCasterInputs;
+			resolved.objectLifetimeGeneration = dynamic.shadowCasterInputs != nullptr
+				&& dynamic.shadowCasterInputs->lifetimeGeneration != 0
+				? dynamic.shadowCasterInputs->lifetimeGeneration : persistent.key.lifetimeGeneration;
+			resolved.canonicalWorldPose = dynamic.canonicalWorldPose;
 			if(dynamic.hasCanonicalWorldPose)
 			{
 				// Dynamic pages are shared by every camera. Localize their precise
@@ -689,6 +697,10 @@ namespace TerraEngine::Renderer
 						resolved.animation.paletteGeneration =
 							publication.animationPresentationGeneration;
 						resolved.animation.poseGeneration = generation.workGeneration;
+						resolved.animation.morphGeneration = generation.workGeneration;
+						// Current GPU work has no retained exact CPU output proof.
+						resolved.animation.deformationContentIdLow = 0;
+						resolved.animation.deformationContentIdHigh = 0;
 						resolved.animation.programGeneration =
 							generation.programGeneration;
 						resolved.animation.rendererGeneration =
@@ -753,14 +765,89 @@ namespace TerraEngine::Renderer
 		RenderItemRecord& output) noexcept
 	{
 		if(!shadow.HasParallelLengths() || shadow.topologyGeneration == 0u
-			|| itemIndex >= shadow.stableOrdinals.size()) {
+			|| itemIndex >= shadow.stableOrdinals.size() || publication.persistent == nullptr
+			|| publication.persistent->generation != shadow.topologyGeneration) {
 			return false;
 		}
+		// The list's generation identifies the topology root, not a slot lifetime.
+		// Recover the actual occupied slot key; the shared resolver still validates
+		// its lifetime against the matching immutable dynamic lane before use.
+		const auto ordinal = shadow.stableOrdinals[itemIndex];
+		const std::size_t pageIndex = ordinal / kRenderPublicationPageCapacity;
+		const std::size_t slotIndex = ordinal % kRenderPublicationPageCapacity;
+		if (pageIndex >= publication.persistent->pages.size()) return false;
+		const auto& page = publication.persistent->pages[pageIndex];
+		if (!page || slotIndex >= page->slots.size()) return false;
+		const auto key = page->slots[slotIndex].key;
+		if (!key.IsValid() || key.ordinal != ordinal) return false;
 		return ResolvePublishedItem(publication, referenceFrame,
-			{ shadow.stableOrdinals[itemIndex], shadow.topologyGeneration },
+			key,
 			static_cast<GeometryRoute>(shadow.routeSelectors[itemIndex]),
 			shadow.selectedLods[itemIndex], shadow.editorTints[itemIndex],
 			shadow.commandLanes[itemIndex], output);
+	}
+
+	std::shared_ptr<const ShadowPreparedInstanceInputs> BuildShadowPreparedInstanceInputs(
+		const RenderFramePublication& publication, const RenderViewPresentationInput& presentation,
+		const ShadowDrawList& shadow)
+	{
+		auto inputs = std::make_shared<ShadowPreparedInstanceInputs>();
+		inputs->frameSerial = publication.frameId;
+		inputs->sessionGeneration = publication.rendererSessionGeneration;
+		inputs->topologyGeneration = shadow.topologyGeneration;
+		inputs->referenceFrame = presentation.referenceFrame;
+		inputs->viewType = presentation.output.diagnosticsView; inputs->outputId = presentation.output.outputId;
+		inputs->lightId = shadow.lightId; inputs->records.reserve(shadow.stableOrdinals.size());
+		for (std::size_t index = 0; index < shadow.stableOrdinals.size(); ++index)
+		{
+			RenderItemRecord item;
+			if (!ResolveShadowDrawListItem(publication, presentation.referenceFrame, shadow, index, item))
+			{
+				// Failed optional preparation cannot reject an otherwise valid view.
+				// Absence selects the retained singleton path, whose ordinary resolver
+				// still reports any genuinely unsupported source at BackendCommit.
+				return nullptr;
+			}
+			RenderInstanceRecord record;
+			record.modelMatrix = item.modelMatrix; record.editorTint = item.editorTint;
+			record.objectIdentity = glm::uvec4(item.conventionalVisibilityIdentityIndex,
+				static_cast<std::uint32_t>(item.geometryRoute), item.virtualGeometryFlags,
+				RenderInstanceRecord::PackCompatibilityPolicy(false, static_cast<std::uint32_t>(item.animationBinding.source),
+					item.animationBinding.RequiresConservativeCoarseVisibility()));
+			record.materialAndTexture = glm::uvec4(item.materialIndex, item.textureIndex,
+				shadow.stableOrdinals[index], item.conventionalVisibilityIdentityIndex);
+			// These copied immutable selectors are lowered to accepted native bridge
+			// selectors only at BackendCommit, after real uploads have succeeded.
+			record.animationSelectors = glm::uvec4(item.animation.firstGpuWorkPacket,
+				static_cast<std::uint32_t>(item.animation.animationPlanGeneration),
+				static_cast<std::uint32_t>(item.animation.rendererGeneration),
+				static_cast<std::uint32_t>(item.animation.programGeneration));
+			record.geometrySelectors = glm::uvec4(item.selectedVirtualLod, item.virtualGeometryPacketDescriptorIndex,
+				item.virtualMeshletOffset, item.virtualMeshletCount);
+			record.virtualGeometrySelectors = glm::uvec4(item.selectedVirtualClusterOffset, item.selectedVirtualClusterCount,
+				item.selectedVirtualPageNeedOffset, item.selectedVirtualPageNeedCount);
+			record.virtualGeometryPayloadSelectors = glm::uvec4(static_cast<std::uint32_t>(item.virtualGeometryPayloadSource),
+				static_cast<std::uint32_t>(item.virtualGeometryEmittedSource),
+				static_cast<std::uint32_t>(item.virtualGeometryPagePayloadByteOffset),
+				static_cast<std::uint32_t>(item.virtualGeometryPagePayloadByteSize));
+			inputs->records.push_back(record);
+		}
+		inputs->complete = true; return inputs;
+	}
+	bool ShadowPreparedInstanceInputsCurrent(const RenderFramePublication& publication,
+		const RenderViewPresentationInput& presentation, const ShadowDrawList& shadow) noexcept
+	{
+		const auto& owner = shadow.instanceInputs;
+		return owner && owner->complete && publication.frameId && publication.rendererSessionGeneration
+			&& shadow.lightId != TerraEngine::EMPTY_UUID && presentation.referenceFrame.IsValid() && shadow.HasParallelLengths()
+			&& owner->records.size() == shadow.stableOrdinals.size() && owner->lightId == shadow.lightId
+			&& owner->frameSerial == publication.frameId && owner->sessionGeneration == publication.rendererSessionGeneration
+			&& owner->topologyGeneration == shadow.topologyGeneration && publication.persistent
+			&& owner->topologyGeneration == publication.persistent->generation
+			&& owner->referenceFrame.frameId == presentation.referenceFrame.frameId
+			&& owner->referenceFrame.MatchesGeneration(presentation.referenceFrame)
+			&& owner->referenceFrame.canonicalOrigin == presentation.referenceFrame.canonicalOrigin
+			&& owner->viewType == presentation.output.diagnosticsView && owner->outputId == presentation.output.outputId;
 	}
 
 	std::shared_ptr<RenderDynamicPage> RenderDynamicPageRecyclePool::Acquire(

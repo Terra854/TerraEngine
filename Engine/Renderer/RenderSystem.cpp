@@ -9,6 +9,11 @@
 #include "RHI/Vulkan/VulkanContext.h"
 #include "RHI/Vulkan/VulkanRendererWorkCache.h"
 #include "Renderer/Graph/RenderGraph.h"
+#include "Renderer/ShadowWorkPlan.h"
+#include "Tests/Support/RendererEfficiency/Renderer/RendererEfficiencyFixtureControls.h"
+#include "Tests/Support/RendererEfficiency/Renderer/RendererEfficiencyFixtureCameras.h"
+#include "Tests/Support/RendererEfficiency/Renderer/RendererEfficiencyFixtureDepthControls.h"
+#include "Tests/Support/RendererEfficiency/Renderer/RendererEfficiencyFixtureShadowBatchControls.h"
 #include "Renderer/VirtualGeometry/Selection/VirtualGeometryGpuPlan.h"
 #include "Renderer/VirtualGeometry/Selection/VirtualGeometrySelection.h"
 #include "Renderer/VirtualGeometry/Visibility/VirtualGeometryRasterBins.h"
@@ -30,12 +35,14 @@
 #include "Core/Object/ObjectManager.h"
 #include "Components/Transform.h"
 #include "Resource/ResourceManager.h"
+#include "Resource/ShaderCollection.h"
 #include "Resource/ResourceStreaming.h"
 #include "Resource/VirtualGeometryStreamingSystem.h"
 #include "Renderer/Terrain/TerrainRenderProxyRegistry.h"
 #include "Renderer/Terrain/TerrainMaterialRuntimeRegistry.h"
 #include "Utilities/PlatformUtils.h"
 #include "ThreadPool/ThreadPool.h"
+#include "ThreadPool/ScopedTaskSettlement.h"
 #include "Profiling/Profiler.h"
 #include "Profiling/ProfilerScope.h"
 #include "Core/Memory/FrameArena.h"
@@ -75,6 +82,21 @@
 
 namespace
 {
+	bool ValidateDepthFixtureIntent(const TerraEngine::Renderer::RendererEfficiencyFixtureIntent& intent, std::string& reason)
+	{
+		if (intent.staticShadowControls && intent.correlation.operationId.empty()) {
+			reason = "Static shadow fault controls require an owned validation session."; return false;
+		}
+		if (!TerraEngine::Renderer::ValidateRendererEfficiencyFixtureShadowBatchControls(
+			intent.shadowBatchControls, !intent.correlation.operationId.empty(), reason)) return false;
+		if (!intent.depthControls) { reason.clear(); return true; }
+		std::array<TerraEngine::Renderer::LightingDepthReduction::Extent,2> extents{};
+		if (intent.cameras.size()>extents.size()) { reason="Depth controls exceed the sealed camera capacity."; return false; }
+		for (std::size_t index=0;index<intent.cameras.size();++index)
+			extents[index]={intent.cameras[index].nativeExtent.x,intent.cameras[index].nativeExtent.y};
+		return TerraEngine::Renderer::ValidateRendererEfficiencyFixtureDepthControls(intent.depthControls,
+			!intent.correlation.operationId.empty(),std::span(extents.data(),intent.cameras.size()),reason);
+	}
 	const glm::vec3 kSkyReferenceSunDirection = glm::normalize(glm::vec3(0.0f, 0.35f, -1.0f));
 	constexpr float kDirectionalShadowNear = 0.1f;
 	constexpr float kDirectionalShadowFar = 180.0f;
@@ -88,29 +110,6 @@ namespace
 
 	RenderItemRecord::PublishedAnimationGeneration
 	BuildPublishedAnimationGeneration(
-		const TerraEngine::Renderer::AnimationRenderGenerationRecord& source) noexcept
-	{
-		// The backend consumes only the exact packet and renderer identities needed
-		// for this draw. Preserve them without copying the worker-facing record's
-		// CPU-only palette and morph bookkeeping into every command.
-		RenderItemRecord::PublishedAnimationGeneration result{};
-		result.stableInstanceId = source.stableInstanceId;
-		result.poseGeneration = source.poseGeneration;
-		result.paletteGeneration = source.paletteGeneration;
-		result.deformablePayloadGeneration = source.deformablePayloadGeneration;
-		result.programGeneration = source.programGeneration;
-		result.animationPlanGeneration = source.animationPlanGeneration;
-		result.rendererGeneration = source.rendererGeneration;
-		result.firstGpuWorkPacket = source.firstGpuWorkPacket;
-		result.gpuWorkPacketCount = source.gpuWorkPacketCount;
-		result.gpuStageMask = source.gpuStageMask;
-		result.source = static_cast<std::uint8_t>(source.source);
-		result.complete = source.complete;
-		return result;
-	}
-
-	RenderItemRecord::PublishedAnimationGeneration
-	BuildPublishedAnimationGeneration(
 		const TerraEngine::Renderer::AnimationRenderBinding& source) noexcept
 	{
 		RenderItemRecord::PublishedAnimationGeneration result{};
@@ -119,6 +118,9 @@ namespace
 			: (static_cast<std::uint64_t>(source.animatorSlotIndex) << 32U)
 				| source.animatorGeneration;
 		result.poseGeneration = source.posePublicationGeneration;
+		result.morphGeneration = source.posePublicationGeneration;
+		result.deformationContentIdLow = source.deformationContentIdLow;
+		result.deformationContentIdHigh = source.deformationContentIdHigh;
 		result.paletteGeneration = source.gpu.IsComplete()
 			? source.gpu.paletteGeneration : source.posePublicationGeneration;
 		result.deformablePayloadGeneration = source.deformablePayloadGeneration;
@@ -694,6 +696,12 @@ namespace
 	struct ShadowDrawListCacheRecord
 	{
 		std::uint64_t signature = 0u;
+		// Fixture cache selectors retain exact identity beyond the mismatch hash.
+		RenderViewType controlledViewType = RenderViewType::Scene;
+		std::uint32_t controlledOutputId = 0;
+		std::uint64_t fixtureControlGeneration = 0;
+		std::vector<TerraEngine::UUID> controlledCasterIds;
+		bool controlledCasterSelection = false;
 		std::uint64_t lastTouchedFrameId = 0u;
 		std::vector<ShadowDrawList> shadowDrawLists;
 	};
@@ -2052,7 +2060,7 @@ namespace
 		}
 	}
 
-	std::uint64_t BuildLightSetSignature(const std::vector<FrameLightCandidate>& lights)
+	std::uint64_t BuildLightSetSignature(std::span<const FrameLightCandidate> lights)
 	{
 		std::uint64_t seed = kRenderHashOffset;
 		HashCombine(seed, static_cast<std::uint64_t>(lights.size()));
@@ -2131,6 +2139,9 @@ namespace
 		const std::size_t chunkSize = (itemCount + workerCount - 1u) / workerCount;
 		std::vector<std::future<void>> futures;
 		futures.reserve(workerCount - 1U);
+		// Children borrow the callback and its immutable input spans. Settle every
+		// admitted child before an inline, queue, or result exception can unwind them.
+		TerraEngine::Tasks::ScopedTaskSettlement<void> settlement(futures);
 		// This helper is called from an existing scheduler worker. Queue every
 		// remaining disjoint range, then execute range zero on the current worker so
 		// large renderer batches do not pay for an avoidable future and handoff.
@@ -2142,22 +2153,17 @@ namespace
 				break;
 			}
 			const std::size_t end = std::min(itemCount, begin + chunkSize);
-			auto task = ThreadPool::instance().createTask([begin, end, taskLabel, &work]() {
+			settlement.CreateAndEnqueue(ThreadPool::instance(), [begin, end, taskLabel, &work]() {
 				TERRAENGINE_PROFILE_DYNAMIC_SCOPE(taskLabel, TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
 				work(begin, end);
 			});
-			futures.push_back(task->getFuture());
-			ThreadPool::instance().enqueue(task);
 		}
 		{
 			TERRAENGINE_PROFILE_DYNAMIC_SCOPE(taskLabel,
 				TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
-			work(0U, std::min(itemCount, chunkSize));
+			settlement.RunInline([&]() { work(0U, std::min(itemCount, chunkSize)); });
 		}
-		for (auto& future : futures)
-		{
-			future.get();
-		}
+		settlement.GetAll();
 	}
 
 	// ResolveRuntimeSettingsDirectory is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -4665,6 +4671,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		&& immutableGpuAnimationPlan->topologyInputSignature != 0U
 		&& immutableGpuAnimationPlan->topologyRendererGeneration != 0U;
 	auto& resourceManager = ResourceManager::Instance();
+	const auto protectedRendererResourceOwnerRevision = resourceManager.GetRendererResourcePublicationGeneration();
 	const std::uint64_t protectedTerrainProxyGeneration =
 		TerraEngine::Renderer::Terrain::TerrainRenderProxyRegistry::Instance()
 			.PublicationGeneration();
@@ -4688,7 +4695,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	HashCombine(renderableCaptureSourceSignature,
 		objManager.GetRuntimeActiveMembershipRevision());
 	HashCombine(renderableCaptureSourceSignature,
-		resourceManager.GetRendererResourcePublicationGeneration());
+		protectedRendererResourceOwnerRevision);
 	HashCombine(renderableCaptureSourceSignature,
 		resourceManager.GetAnimationBindingResourceRevision());
 	HashCombine(renderableCaptureSourceSignature, protectedRendererGeneration);
@@ -4701,8 +4708,20 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				? animationPresentationFrame->presentationGeneration : 0U);
 	if(renderableCaptureSourceSignature == 0U)
 		renderableCaptureSourceSignature = 1U;
-	const bool reuseProtectedRenderableCapture =
-		retainedRenderableEntriesReusable
+	// Retained authoring flags must observe the scene journal too. SetStatic
+	// changes metadata/bounds without changing component or active revisions.
+	// A newer metadata row (or a journal gap) requires the existing delta/full
+	// capture; warm transform-only packets can retain binding topology.
+	const bool renderableMetadataCaptureCurrent = protectedSceneChanges != nullptr
+		&& protectedSceneChanges->Validate(protectedSceneGeneration).valid
+		&& protectedSceneChanges->PublicationRevision() != 0U
+		&& objManager.CanApplySceneChangePacketToLiveState(*protectedSceneChanges,
+			protectedSceneChanges->PublicationRevision() - 1U)
+		&& (protectedSceneChanges->PublicationRevision() == renderableMembershipPacketRevision
+			|| (objManager.CanApplySceneChangePacketToLiveState(*protectedSceneChanges, renderableMembershipPacketRevision)
+				&& protectedSceneChanges->MetadataChanged().empty()));
+	const bool reuseProtectedRenderableCapture = renderableMetadataCaptureCurrent
+		&& retainedRenderableEntriesReusable
 		&& retainedRenderableCaptureSourceSignature
 			== renderableCaptureSourceSignature
 		&& renderableMembershipSceneGeneration == objManager.GetSceneGeneration()
@@ -4755,6 +4774,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		aliveCompatibleAnimationObjects.reserve(compatibleAnimationPoseCache.size());
 	}
 	std::optional<std::uint64_t> animationAuthorityGeneration;
+	// Missing immutable publications keep capture open for next-frame async retries.
+	bool renderableResourcePublicationsComplete = true;
 	std::size_t runtimeLayoutRejectedRecordCount = 0u;
 	std::vector<std::string> runtimeLayoutRejectionReasons;
 	// CaptureImage enqueues a custom/camera-object request before the next render
@@ -4922,6 +4943,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	{
 		frameMeshResources.clear();
 		frameMaterialResources.clear();
+		retainedRuntimeMeshOwners.clear();
+		retainedRuntimeMaterialOwners.clear();
 		frameMeshLocalBounds.clear();
 	}
 	frameResourceAvailability.reserve(32U);
@@ -4963,7 +4986,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			{ "Transform", "MeshRenderComponent", "TerrainComponent", "AnimatorComponent" },
 			{ "Render.CameraCollection", TerraEngine::Scheduling::kResourceAnimatorComponents,
 				TerraEngine::Scheduling::kResourceAnimationRuntimeState },
-			{ "Render.RenderableCollection" },
+			// Protected admission records streaming needs and may accept ready resource publications.
+			{ "Render.RenderableCollection", "Resources", "StreamingNeeds" },
 			[&cameras, &renderables, &aliveCompatibleAnimationObjects,
 				&hasCpuDeformationCandidates,
 				&hasQueuedDedicatedCapture,
@@ -4971,12 +4995,14 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				&animationPresentationFrame,
 				&protectedSceneChanges,
 				&runtimeLayoutRejectedRecordCount, &runtimeLayoutRejectionReasons,
+				&renderableResourcePublicationsComplete,
 				&findUniqueGpuAnimationIdentity, &frameResourceAvailability,
 				&frameMeshResources, &frameMaterialResources,
 				&frameMeshLocalBounds, &resourceManager, &registry,
 				protectedRendererGeneration,
 				protectedSceneGeneration, protectedTerrainProxyGeneration,
 				reuseProtectedRenderableCapture,
+				renderableMetadataCaptureCurrent,
 				this](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Renderables", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -5103,7 +5129,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 					return cached;
 				};
 				const bool membershipChanged =
-					renderableMembershipSceneGeneration != membershipSceneGeneration
+					!renderableMetadataCaptureCurrent
+					|| renderableMembershipSceneGeneration != membershipSceneGeneration
 					|| renderableMembershipComponentRevision != membershipComponentRevision
 					|| renderableMembershipHierarchyRevision != membershipHierarchyRevision
 					|| renderableMembershipActiveRevision != membershipActiveRevision
@@ -5254,7 +5281,19 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 							if(cachedMesh != frameMeshResources.end()) {
 								lastRuntimeMesh = cachedMesh->second;
 							} else {
-								lastRuntimeMesh = resourceManager.GetMesh(meshId);
+								const auto owner = resourceManager.AcquireMeshSnapshot(meshId);
+								if(!owner || owner->publicationGeneration == 0U)
+								{
+									// Demand every active membership before camera/light culling, including
+									// off-camera shadow casters. The frame map deduplicates this ID; native
+									// admission owns budgeting and job coalescing without blocking capture.
+									renderableResourcePublicationsComplete = false;
+									(void)resourceManager.RequestStreamableLoad(meshId, AssetType::Mesh,
+										TerraEngine::Resource::StreamingNeedType::Visible, nextRenderFrameId,
+										"renderer-missing-mesh-publication", cached.objectId);
+								}
+								retainedRuntimeMeshOwners[meshId] = owner;
+								lastRuntimeMesh = owner.get();
 								frameMeshResources.emplace(meshId, lastRuntimeMesh);
 							}
 							if(!frameMeshLocalBounds.contains(meshId))
@@ -5273,8 +5312,18 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 							lastMaterialAvailable = resourceAvailable(materialId);
 							if(!frameMaterialResources.contains(materialId))
 							{
-								frameMaterialResources.emplace(materialId,
-									resourceManager.GetMaterial(materialId));
+								const auto owner = resourceManager.AcquireMaterialSnapshot(materialId);
+								if(!owner || owner->publicationGeneration == 0U)
+								{
+									// Retain the missing result honestly for this immutable frame. A later
+									// accepted publication, rather than the request itself, enables reuse.
+									renderableResourcePublicationsComplete = false;
+									(void)resourceManager.RequestStreamableLoad(materialId, AssetType::Material,
+										TerraEngine::Resource::StreamingNeedType::Visible, nextRenderFrameId,
+										"renderer-missing-material-publication", cached.objectId);
+								}
+								retainedRuntimeMaterialOwners[materialId] = owner;
+								frameMaterialResources.emplace(materialId, owner.get());
 							}
 						}
 						if (!lastMeshAvailable || !lastMaterialAvailable)
@@ -5944,19 +5993,27 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	const std::uint64_t capturedAnimatorComponentRevision =
 		objManager.GetComponentValueMutationRevision(
 			AnimatorComponent::kComponentName);
-	const std::uint64_t capturedRendererResourceRevision =
-		resourceManager.GetRendererResourcePublicationGeneration();
-	const std::uint64_t capturedAnimationBindingResourceRevision =
-		resourceManager.GetAnimationBindingResourceRevision();
+	// Close the same protected loader cohort after retaining shader, mesh and
+	// material owners. A concurrent publication disables snapshot reuse rather
+	// than mixing a newer shader owner with an older reusable capture signature.
 	const TerraEngine::UUID capturedDefaultShaderCollectionId =
 		resourceManager.GetDefaultShaderCollectionID();
 	const TerraEngine::UUID capturedDefaultTaskShaderCollectionId =
 		resourceManager.GetDefaultTaskShaderCollectionID();
+	const auto capturedShadowMeshCollection = resourceManager.AcquireShaderCollectionSnapshot(capturedDefaultShaderCollectionId);
+	const auto capturedShadowTaskCollection = capturedDefaultTaskShaderCollectionId == capturedDefaultShaderCollectionId
+		? capturedShadowMeshCollection : resourceManager.AcquireShaderCollectionSnapshot(capturedDefaultTaskShaderCollectionId);
+	const std::uint64_t capturedRendererResourceRevision =
+		resourceManager.GetRendererResourcePublicationGeneration();
+	const bool rendererResourceOwnerCohortStable = protectedRendererResourceOwnerRevision == capturedRendererResourceRevision;
+	const std::uint64_t capturedAnimationBindingResourceRevision =
+		resourceManager.GetAnimationBindingResourceRevision();
 	const std::uint64_t capturedVirtualGeometryResidencyGeneration =
 		TerraEngine::Resource::VirtualGeometryStreamingSystem::Instance()
 			.ResidencySnapshot().publicationGeneration;
 	const RenderSettings capturedRenderSettings =
 		SanitizeRenderSettings(currentSettings);
+	const auto capturedEfficiencyOptions = GetRendererEfficiencyOptionsSnapshot();
 	std::uint64_t capturedRenderableSourceSignature = kRenderHashOffset;
 	HashCombine(capturedRenderableSourceSignature, capturedSceneGeneration);
 	HashCombine(capturedRenderableSourceSignature, capturedSpatialRevision);
@@ -6036,7 +6093,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	const bool capturedRenderableConsumer = !cameras.empty()
 		|| hasSceneViewCamera || hasQueuedDedicatedCapture;
 	retainedRenderableEntriesReusable = renderableBindingsReusable
-		&& capturedRenderableConsumer;
+		&& renderableResourcePublicationsComplete
+		&& capturedRenderableConsumer && rendererResourceOwnerCohortStable;
 	retainedRenderableCaptureSourceSignature =
 		retainedRenderableEntriesReusable
 		? renderableCaptureSourceSignature : 0U;
@@ -6050,6 +6108,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	const std::vector<TerraEngine::Renderer::RenderFrameViewRequest>
 		previousViewRequests = renderFrameSnapshot.viewRequests;
 	const bool reuseRenderableRecords = renderableBindingsReusable
+		&& renderableResourcePublicationsComplete
+		&& rendererResourceOwnerCohortStable
 		&& !detailedRenderableEvidenceRequested
 		&& renderFrameSnapshot.reusableRenderableRecords
 		&& renderFrameSnapshot.renderableSourceSignature
@@ -6088,13 +6148,122 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	renderFrameSnapshot.renderableSourceSignature =
 		capturedRenderableSourceSignature;
 	renderFrameSnapshot.reusableRenderableRecords = renderableBindingsReusable
-		&& !detailedRenderableEvidenceRequested;
+		&& renderableResourcePublicationsComplete
+		&& !detailedRenderableEvidenceRequested && rendererResourceOwnerCohortStable;
 	renderFrameSnapshot.renderSettings = capturedRenderSettings;
+	renderFrameSnapshot.efficiencyOptions = capturedEfficiencyOptions;
+	{
+		std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
+		renderFrameSnapshot.efficiencyFixtureIntent = capturedRendererEfficiencyFixtureIntent;
+	}
 	// Renderer asset publication is monotonic and advances only after a complete
 	// mesh, material, or texture cache replacement. Backend preparation caches use
 	// it to reject plans built from older immutable payloads.
 	renderFrameSnapshot.resourceRevision = capturedRendererResourceRevision;
 	renderFrameSnapshot.sceneRevision = capturedSpatialRevision;
+	std::vector<TerraEngine::Renderer::RendererEfficiencyFixtureTargetProof> fixtureTargets;
+	std::vector<TerraEngine::Renderer::RendererEfficiencyResolvedFixtureCamera> sealedFixtureCameras;
+	if (!renderFrameSnapshot.efficiencyFixtureIntent.correlation.operationId.empty())
+	{
+		// Validation alone requests owned cooked range copies. Ordinary frames
+		// avoid this allocation; no host can retain live loader pointers.
+		fixtureTargets.reserve(renderables.size());
+		for (const auto& entry : renderables)
+		{
+			const auto found = frameMeshResources.find(entry.mesh->meshId);
+			const Mesh* mesh = found != frameMeshResources.end() ? found->second : nullptr;
+			if (mesh == nullptr) continue;
+			TerraEngine::Renderer::RendererEfficiencyFixtureTargetProof proof;
+			proof.objectId = entry.objectId; proof.meshId = entry.mesh->meshId;
+			if (const auto object = objManager.getObject(entry.entity); object.has_value()) {
+				proof.lifetimeGeneration = objManager.getObjectLifetimeGeneration(*object);
+				proof.isStatic = objManager.isObjectStatic(*object);
+				proof.metadataGeneration = objManager.getObjectMetadataGeneration(*object);
+				proof.spatialRevision = objManager.GetObjectSpatialRevision(*object);
+			}
+			proof.resourceGeneration = rendererResourceOwnerCohortStable ? renderFrameSnapshot.resourceRevision : 0;
+			proof.meshletCapacity = mesh->runtimeLayout.meshletCount;
+			proof.ownerGeometrySupported = !mesh->hasVirtualGeometry &&
+				getGeometryRouteFacts(entry.mesh->meshId, *mesh).directUsable;
+			for (const auto& detail : mesh->virtualGeometryDetailLevels)
+				proof.detailLevels.push_back({detail.lodIndex, detail.meshletOffset, detail.meshletCount});
+			fixtureTargets.push_back(std::move(proof));
+		}
+	}
+	{
+		auto& intent = renderFrameSnapshot.efficiencyFixtureIntent;
+		intent.controlsApplied = !intent.correlation.operationId.empty(); intent.controlReason.clear();
+		if(!TerraEngine::Renderer::ResolveRendererEfficiencyFixtureCameras(intent, sealedFixtureCameras, intent.controlReason)) intent.controlsApplied = false;
+		if(intent.controlsApplied && !ValidateDepthFixtureIntent(intent,intent.controlReason)) intent.controlsApplied = false;
+		if(intent.controlsApplied && !TerraEngine::Renderer::ValidateRendererEfficiencyFixtureCasterSelections(intent,fixtureTargets,intent.controlReason)) intent.controlsApplied = false;
+		if (intent.controlsApplied && intent.lightingControls)
+		{
+			// Capture the complete active input, before camera queries or budgets.
+			// Inactive scene lights cannot be introduced by a validation ordering.
+			std::vector<TerraEngine::UUID> activeLightIds; activeLightIds.reserve(lights.size());
+			for (const auto& light : lights) activeLightIds.push_back(light.lightId);
+			if (!TerraEngine::Renderer::ValidateRendererEfficiencyFixtureLightingControls(intent, activeLightIds, intent.controlReason)) intent.controlsApplied = false;
+		}
+		if (intent.shadowSelection)
+		{
+			const auto target = std::find_if(fixtureTargets.begin(), fixtureTargets.end(), [&](const auto& row) { return row.objectId == intent.shadowSelection->objectId; });
+			TerraEngine::Renderer::RendererEfficiencyFixtureDetailRange range;
+			if (target == fixtureTargets.end()) { intent.controlsApplied = false; intent.controlReason = "Requested fixture object is absent from current protected capture."; }
+			else if (!TerraEngine::Renderer::ResolveRendererEfficiencyFixtureSelection(*intent.shadowSelection, *target, range, intent.controlReason)) intent.controlsApplied = false;
+		}
+		std::vector<TerraEngine::Renderer::RendererEfficiencyFixtureViewOrderEntry> actualViews;
+		if(!sealedFixtureCameras.empty() && intent.controlsApplied) {for(const auto& camera:sealedFixtureCameras) actualViews.push_back({camera.viewType,camera.outputId});}
+		else {
+			if (hasSceneViewCamera && (!editorModeEnabled || (sceneViewTargetSize.x && sceneViewTargetSize.y))) actualViews.push_back({RenderViewType::Scene, 1});
+			if (!gameViewSuppressed && (!editorModeEnabled || (gameViewTargetSize.x && gameViewTargetSize.y)) && (!gameViewCameras.empty() || !cameras.empty())) actualViews.push_back({RenderViewType::Game, 2});
+		}
+		std::vector<std::size_t> viewIndices; std::string viewReason;
+		if (intent.controlsApplied && intent.lightingControls && intent.lightingControls->snapshotSlot
+			&& std::none_of(actualViews.begin(), actualViews.end(), [&](const auto& view) {
+				return view.viewType == intent.lightingControls->snapshotViewType && view.outputId == intent.lightingControls->snapshotOutputId;
+			}))
+		{ intent.controlsApplied = false; intent.controlReason = "Lighting snapshot target is absent from the captured output membership."; }
+		if (!TerraEngine::Renderer::ResolveRendererEfficiencyFixtureViewOrder(intent, actualViews, viewIndices, viewReason))
+		{ intent.controlsApplied = false; intent.controlReason = viewReason; }
+		if (sealedFixtureCameras.empty() && (!intent.viewOrder.empty() || !intent.viewOrigins.empty())
+			&& (gameViewCameras.size() > 1 || (gameViewCameras.empty() && cameras.size() > 1)))
+		{ intent.controlsApplied = false; intent.controlReason = "Controlled view identity is ambiguous across multiple Game cameras."; }
+		if (sealedFixtureCameras.empty() && (intent.referenceOriginDelta || !intent.viewOrigins.empty()))
+		{
+			// Validate every affected view before changing any reference frame.
+			const auto validCamera = [&](const TerraEngine::Scene::WorldPosition& camera, RenderViewType type, std::uint32_t output) {
+				const auto delta = TerraEngine::Renderer::RendererEfficiencyFixtureOriginDelta(intent, type, output);
+				if (!delta) return true;
+				TerraEngine::Renderer::RenderReferenceFrame frame; frame.canonicalOrigin = camera;
+				glm::mat4 view(1); glm::vec3 local(0);
+				return TerraEngine::Renderer::RebaseRendererEfficiencyFixtureView(camera, *delta, frame, view, local);
+			};
+			bool valid = !hasSceneViewCamera || validCamera(sceneViewCamera.canonicalPosition, RenderViewType::Scene, 1);
+			for (const auto& camera : gameViewCameras) valid = valid && validCamera(camera.canonicalPosition, RenderViewType::Game, 2);
+			for (const auto& camera : cameras)
+			{
+				const auto pose = worldTransforms->find(camera.entity);
+				valid = valid && pose != worldTransforms->end() && validCamera(pose->second.position, RenderViewType::Game, 2);
+			}
+			if (!valid) { intent.controlsApplied = false; intent.controlReason = "Reference-origin delta cannot be safely localized for both views."; }
+		}
+		// A user's pending dedicated capture retains its ordinary completion path.
+		// Reject the fixture controls instead of acknowledging an unexpected view.
+		if(!intent.correlation.operationId.empty() && hasPendingDedicatedCaptureRender)
+		{ intent.controlsApplied = false; intent.controlReason = "Owned fixture controls rejected because a dedicated capture is pending."; }
+	}
+	// Sealed descriptors are coroutine-owned immutable copies. Window visibility,
+	// orbit controls and panel dimensions cannot overwrite validation view inputs.
+	const auto sealedCamera = [&](RenderViewType type, std::uint32_t output) -> const TerraEngine::Renderer::RendererEfficiencyResolvedFixtureCamera* {
+		if(!renderFrameSnapshot.efficiencyFixtureIntent.controlsApplied) return nullptr;
+		const auto found = std::find_if(sealedFixtureCameras.begin(),sealedFixtureCameras.end(),[&](const auto& camera) {return camera.viewType==type && camera.outputId==output;});
+		return found==sealedFixtureCameras.end() ? nullptr : &*found;
+	};
+	const auto* fixedSceneCamera = sealedCamera(RenderViewType::Scene,1);
+	const auto* fixedGameCamera = sealedCamera(RenderViewType::Game,2);
+	const bool sealedCameraRecipeActive = renderFrameSnapshot.efficiencyFixtureIntent.controlsApplied && !sealedFixtureCameras.empty();
+	const glm::uvec2 effectiveSceneTargetSize = fixedSceneCamera ? fixedSceneCamera->nativeExtent : sceneViewTargetSize;
+	const glm::uvec2 effectiveGameTargetSize = fixedGameCamera ? fixedGameCamera->nativeExtent : gameViewTargetSize;
 	// Capture the renderer lifetime once. Every animated record in this immutable
 	// frame must agree with it; querying recovery state per renderable could mix a
 	// pre-loss and post-loss generation in one snapshot.
@@ -6115,6 +6284,16 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		request.referenceFrame.viewId = static_cast<std::uint64_t>(outputId);
 		request.referenceFrame.outputId = outputId;
 		request.referenceFrame.canonicalOrigin = canonicalOrigin;
+		const auto* fixedCamera = sealedCamera(viewType,outputId);
+		if(fixedCamera) request.referenceFrame.canonicalOrigin = fixedCamera->referenceOrigin;
+		const auto& fixtureIntent = renderFrameSnapshot.efficiencyFixtureIntent;
+		const auto originDelta = TerraEngine::Renderer::RendererEfficiencyFixtureOriginDelta(fixtureIntent, viewType, outputId);
+		if (!fixedCamera && fixtureIntent.controlsApplied && originDelta
+			&& (outputKind == RenderOutputKind::SceneView || outputKind == RenderOutputKind::GameView || outputKind == RenderOutputKind::MainRuntimeView))
+		{
+			const auto changed = TerraEngine::Scene::ApplyWorldDelta(canonicalOrigin, *originDelta);
+			if (changed.Succeeded()) request.referenceFrame.canonicalOrigin = changed.position;
+		}
 		request.referenceFrame.originGeneration = activeRenderFrameId;
 		request.referenceFrame.spatialGeneration =
 			std::max<std::uint64_t>(1U, capturedSpatialRevision);
@@ -6123,19 +6302,19 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		return request;
 	};
 	renderFrameSnapshot.viewRequests.reserve(3u + gameViewCameras.size() + cameras.size());
-	if (hasSceneViewCamera && (!editorModeEnabled || (sceneViewTargetSize.x > 0u && sceneViewTargetSize.y > 0u)))
+	if (fixedSceneCamera || (!sealedCameraRecipeActive && hasSceneViewCamera && (!editorModeEnabled || (sceneViewTargetSize.x > 0u && sceneViewTargetSize.y > 0u))))
 	{
 		renderFrameSnapshot.viewRequests.push_back(makeViewRequest(
 			RenderOutputKind::SceneView, RenderViewType::Scene,
-			sceneViewTargetSize, 1U, sceneViewCamera.canonicalPosition));
+			effectiveSceneTargetSize, 1U, fixedSceneCamera ? fixedSceneCamera->cameraPosition : sceneViewCamera.canonicalPosition));
 	}
-	if (!gameViewSuppressed && (!editorModeEnabled || (gameViewTargetSize.x > 0u && gameViewTargetSize.y > 0u)))
+	if (fixedGameCamera || (!sealedCameraRecipeActive && !gameViewSuppressed && (!editorModeEnabled || (gameViewTargetSize.x > 0u && gameViewTargetSize.y > 0u))))
 	{
-		if (!gameViewCameras.empty())
+		if (fixedGameCamera || !gameViewCameras.empty())
 		{
 			renderFrameSnapshot.viewRequests.push_back(makeViewRequest(
 				RenderOutputKind::GameView, RenderViewType::Game,
-				gameViewTargetSize, 2U, gameViewCameras.front().canonicalPosition));
+				effectiveGameTargetSize, 2U, fixedGameCamera ? fixedGameCamera->cameraPosition : gameViewCameras.front().canonicalPosition));
 		}
 		else if (!cameras.empty())
 		{
@@ -6147,7 +6326,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			}
 			renderFrameSnapshot.viewRequests.push_back(makeViewRequest(
 				RenderOutputKind::MainRuntimeView, RenderViewType::Game,
-				gameViewTargetSize, 2U, runtimeCameraPosition));
+				effectiveGameTargetSize, 2U, runtimeCameraPosition));
 		}
 	}
 	if (hasPendingDedicatedCaptureRender)
@@ -6314,6 +6493,18 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 						component->sourceAsset, AssetType::Texture);
 				}
 			}
+		}
+	}
+	// Only protected capture can inspect live identity and loader ownership.
+	// Copy lifetimes only when rebuilding rows; compatible warm snapshots retain
+	// their sealed values. Shader owners stay alive across worker suspension even
+	// when an asynchronous reload replaces the ResourceManager cache entry.
+	std::vector<std::uint64_t> capturedShadowObjectLifetimes;
+	if(!reuseRenderableRecords) {
+		capturedShadowObjectLifetimes.resize(renderables.size());
+		for(std::size_t index = 0U; index < renderables.size(); ++index) {
+			if(const auto object = objManager.getObject(renderables[index].entity); object.has_value())
+				capturedShadowObjectLifetimes[index] = objManager.getObjectLifetimeGeneration(*object);
 		}
 	}
 	// Boundary 1 ends immediately after immutable capture. Route scoring, snapshot
@@ -6742,6 +6933,129 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		// warm frames. Copy only on a rebuilt snapshot; compatible frames skip this
 		// entire loop, so the shared presentation owner is not churned per frame.
 		snapshotRenderable.animationBinding = entry.animationBinding;
+		// Worker assembly consumes only identity values and shared shader owners
+		// sealed above. It must never reopen live ECS or loader state after suspend.
+		try
+		{
+			auto shadowInputs = std::make_shared<TerraEngine::Renderer::ShadowCasterStamp>();
+			shadowInputs->objectId = entry.objectId;
+			shadowInputs->lifetimeGeneration = capturedShadowObjectLifetimes[renderableIndex];
+			shadowInputs->meshId = entry.mesh->meshId;
+			shadowInputs->assetId = entry.terrainAssetId != TerraEngine::EMPTY_UUID
+				? entry.terrainAssetId : entry.mesh->meshId;
+			shadowInputs->materialId = entry.mesh->materialId;
+			const auto& shadowPose = snapshotRenderable.canonicalWorldPose;
+			shadowInputs->worldPosition.cell = {shadowPose.position.cell.x, shadowPose.position.cell.y, shadowPose.position.cell.z};
+			shadowInputs->worldPosition.offsetMetres = {shadowPose.position.offsetMetres.x, shadowPose.position.offsetMetres.y, shadowPose.position.offsetMetres.z};
+			shadowInputs->rotation = {shadowPose.rotation.w, shadowPose.rotation.x, shadowPose.rotation.y, shadowPose.rotation.z};
+			shadowInputs->scale = {shadowPose.scale.x, shadowPose.scale.y, shadowPose.scale.z};
+			shadowInputs->staticEligible = entry.isStatic;
+			// Authoring is one input to static admission. Backend preparation must
+			// independently prove the resources and shader actually used by each draw.
+			shadowInputs->staticSupport.authoredStatic = entry.isStatic;
+			using ShadowProof = TerraEngine::Renderer::ShadowCasterEvidence;
+			const auto addShadowProof = [&](ShadowProof proof) { shadowInputs->evidenceMask |= static_cast<std::uint64_t>(proof); };
+			if (shadowInputs->lifetimeGeneration != 0U) addShadowProof(ShadowProof::Identity);
+			addShadowProof(ShadowProof::Transform);
+			// This is the actual resource publication counter, not an identity hash.
+			// One broad counter intentionally over-invalidates when an unrelated asset
+			// changes; it safely covers payload, material, shader and texture commits.
+			const auto shadowResourceRevision = rendererResourceOwnerCohortStable ? renderFrameSnapshot.resourceRevision : 0;
+			if (mesh != nullptr && shadowResourceRevision != 0U)
+			{
+				shadowInputs->meshRevision = shadowResourceRevision;
+				shadowInputs->assetRevision = shadowResourceRevision;
+				addShadowProof(ShadowProof::Geometry);
+				if (routeFacts.directUsable)
+				{
+					// Canonical complete owner geometry is retained even when visibility
+					// chose a VG route. Current shadows read that whole owner, not streamed
+					// pages; backend recording still must prove its actual buffers ready.
+					// Sparse VG page packets require their own selected publication proof.
+					shadowInputs->pageContentRevision = shadowResourceRevision;
+					shadowInputs->payloadContentRevision = shadowResourceRevision;
+					shadowInputs->residencyGeneration = shadowResourceRevision;
+					addShadowProof(ShadowProof::Residency);
+				}
+			}
+			const auto shadowMaterialEntry = frameMaterialResources.find(entry.mesh->materialId);
+			const Material* shadowMaterial = shadowMaterialEntry != frameMaterialResources.end() ? shadowMaterialEntry->second : nullptr;
+			if (shadowMaterial != nullptr && shadowResourceRevision != 0U)
+			{
+				shadowInputs->materialRevision = shadowResourceRevision;
+				shadowInputs->shadowBehavior = static_cast<std::uint64_t>(shadowMaterial->shadowBehavior)
+					| (static_cast<std::uint64_t>(shadowMaterial->header.alphaMode) << 32U)
+					| (static_cast<std::uint64_t>(shadowMaterial->header.flags) << 40U);
+				shadowInputs->materialShadowParameters = {shadowMaterial->header.alphaCutoff,
+					shadowMaterial->header.baseColorFactor[3], 0.0, 0.0};
+				addShadowProof(ShadowProof::Material);
+				const auto authoredShader = shadowMaterial->header.shaderCollectionId;
+				const bool knownDefault = authoredShader == TerraEngine::EMPTY_UUID
+					|| authoredShader == capturedDefaultShaderCollectionId || authoredShader == capturedDefaultTaskShaderCollectionId;
+				shadowInputs->shaderId = authoredShader == TerraEngine::EMPTY_UUID ? capturedDefaultTaskShaderCollectionId : authoredShader;
+				shadowInputs->shaderRevision = shadowResourceRevision;
+				// An authored surface can discard or displace with hidden/time-varying
+				// inputs. Its UUID/revision alone does not prove an unchanged silhouette.
+				const auto& shadowCollection = shadowInputs->shaderId == capturedDefaultTaskShaderCollectionId
+					? capturedShadowTaskCollection : capturedShadowMeshCollection;
+				if (knownDefault && shadowInputs->shaderId != TerraEngine::EMPTY_UUID
+					&& shadowCollection != nullptr && shadowCollection->collectionGeneration != 0)
+				{
+					shadowInputs->shaderRevision = shadowCollection->collectionGeneration;
+					addShadowProof(ShadowProof::Shader);
+					shadowInputs->staticSupport.knownDefaultShadowAbi = true;
+				}
+				// Default opaque shadow texture samples cannot clip the depth silhouette.
+				// Cutout and other texture-dependent silhouettes remain unknown until exact sampling
+				// inputs are explicitly supported, forcing the correct full refresh.
+				shadowInputs->textureRevision = shadowResourceRevision;
+				if (knownDefault && shadowMaterial->header.alphaMode == static_cast<std::uint32_t>(AlphaMode::Opaque))
+					addShadowProof(ShadowProof::Texture);
+			}
+			const bool knownNondeformable = mesh != nullptr && !mesh->hasDeformablePayload;
+			// Bind pose on a deformable mesh remains dynamic: a later animation
+			// callback can change it without changing the author's static flag.
+			shadowInputs->staticSupport.deformationAbsent = knownNondeformable
+				&& !binding.HasCpuDeformation() && !binding.gpu.IsComplete();
+			const bool knownBindPose = mesh != nullptr && binding.meshId == entry.mesh->meshId
+				&& binding.deformablePayloadGeneration == mesh->deformablePayloadGeneration
+				&& binding.source == TerraEngine::Renderer::AnimationRenderPoseSource::BindPose
+				&& binding.status == TerraEngine::Renderer::AnimationRenderBindingStatus::Ready;
+			if (knownNondeformable || knownBindPose)
+				addShadowProof(ShadowProof::Deformation); // Explicit known bind-pose zero.
+			else if (!binding.gpu.IsComplete() && binding.HasCpuDeformation()
+				&& binding.cpuDeformation->jointCount == binding.cpuDeformation->paletteMatrices.size())
+			{
+				const auto& cpu = *binding.cpuDeformation;
+				shadowInputs->animationInstanceId = BuildStableAnimationInstanceId(binding, entry.objectId);
+				shadowInputs->deformationGeneration = binding.deformablePayloadGeneration;
+				shadowInputs->deformationContentIdLow = cpu.contentIdLow;
+				shadowInputs->deformationContentIdHigh = cpu.contentIdHigh;
+				shadowInputs->deformationPalette.reserve(cpu.paletteMatrices.size());
+				for (const auto& palette : cpu.paletteMatrices)
+				{
+					std::array<double, 16> matrix{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+					for (std::size_t component = 0; component < 4; ++component)
+					{
+						matrix[component] = palette.row0[component];
+						matrix[4 + component] = palette.row1[component];
+						matrix[8 + component] = palette.row2[component];
+					}
+					shadowInputs->deformationPalette.push_back(matrix);
+				}
+				shadowInputs->morphWeights.assign(cpu.morphWeights.begin(), cpu.morphWeights.end());
+				addShadowProof(ShadowProof::Deformation);
+			}
+			// Pure GPU work/palette publication generations are transient selectors;
+			// their output cannot be proven exact without a CPU-owned immutable value.
+			snapshotRenderable.shadowCasterInputs = std::move(shadowInputs);
+		}
+		catch (const std::bad_alloc&)
+		{
+			// Missing copied evidence conservatively refreshes; allocation failure
+			// must never publish a partially built known-content proof.
+			snapshotRenderable.shadowCasterInputs.reset();
+		}
 		if(lastSnapshotMeshId != entry.mesh->meshId) {
 			lastSnapshotMeshId = entry.mesh->meshId;
 			if(snapshotMeshIds.emplace(entry.mesh->meshId).second) {
@@ -7607,7 +7921,11 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	{
 		ReportFatalRendererRecoveryFailure(recoverySnapshot);
 	}
-	const size_t renderGraphWorkerCount = std::max<size_t>(1u, backendCapabilities.maxRecordingWorkers);
+	// Serial validation uses the same immutable inputs and protected boundaries,
+	// with one preparation lane so comparisons can detect concurrency defects.
+	const size_t renderGraphWorkerCount = renderFrameSnapshot.efficiencyOptions.options.validationPreparation
+		== TerraEngine::Renderer::RendererEfficiencyPreparation::Serial ? 1U
+		: std::max<size_t>(1u, backendCapabilities.maxRecordingWorkers);
 	VisibleCommandCacheState& visibleCommandCache = lifetimeState->visibleCommandCache;
 	ShadowDrawListCacheState& shadowDrawListCache = lifetimeState->shadowDrawListCache;
 	visibleCommandCache.hitCount = 0u;
@@ -7951,6 +8269,17 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				+ "/"
 				+ std::to_string(drawCommandCache.hitCount + drawCommandCache.missCount));
 		}
+	}
+	// Base draw caches intentionally ignore animation presentation serials. Attach
+	// the current immutable semantic owner after every hit/miss path so later
+	// candidate and legacy shadow materialization cannot retain an old CPU pose.
+	for (std::size_t index = 0; index < renderableDrawCommands.size()
+		&& index < renderFrameSnapshot.renderables.size(); ++index)
+	{
+		auto& command = renderableDrawCommands[index];
+		command.shadowCasterInputs = renderFrameSnapshot.renderables[index].shadowCasterInputs;
+		command.objectLifetimeGeneration = command.shadowCasterInputs != nullptr
+			? command.shadowCasterInputs->lifetimeGeneration : 0U;
 	}
 	// Visibility and LOD selection depend on stable geometry inputs, not the
 	// animation publication produced for the same object this frame. Keep a
@@ -9292,6 +9621,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		return packet;
 	};
 
+	std::atomic<bool> fixtureShadowSelectionApplied = false;
 	auto applyShadowVirtualGeometrySelection = [&](std::vector<RenderItemRecord>& commands) {
 		for (RenderItemRecord& command : commands)
 		{
@@ -9332,6 +9662,14 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			command.selectedVirtualLod = range.selectedLodIndex;
 			command.virtualGeometryFlags = (range.virtualGeometryActive ? kVirtualGeometryFlagActive : 0u)
 				| (range.failOpen ? kVirtualGeometryFlagFailOpen : 0u);
+		}
+		const auto& intent = renderFrameSnapshot.efficiencyFixtureIntent;
+		if (intent.controlsApplied && intent.shadowSelection)
+		{
+			const auto target = std::find_if(fixtureTargets.begin(), fixtureTargets.end(), [&](const auto& row) { return row.objectId == intent.shadowSelection->objectId; });
+			if (target != fixtureTargets.end())
+				for (auto& command : commands)
+					if (TerraEngine::Renderer::ApplyRendererEfficiencyFixtureSelection(command, *intent.shadowSelection, *target)) fixtureShadowSelectionApplied.store(true, std::memory_order_relaxed);
 		}
 		collectVirtualGeometryDiagnosticsAssets(commands, RenderViewType::Shadow);
 	};
@@ -10031,15 +10369,59 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		return commands;
 	};
 
-	auto buildShadowDrawLists = [&](const glm::vec3& cameraLocalPosition) {
+	auto buildShadowDrawLists = [&](std::span<const FrameLightCandidate> ownedViewLights,
+		const glm::vec3& viewCameraLocalPosition, const TerraEngine::Renderer::RenderReferenceFrame& viewReferenceFrame,
+		RenderViewType viewType = RenderViewType::Scene, std::uint32_t outputId = 0U) {
+		// Per-view frame storage owns these candidates after the producer vector moves.
+		// Chunk jobs settle before this borrowed span leaves the protected builder.
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Shadow Draw Lists Cache Lookup", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		const std::uint64_t signature = BuildShadowDrawListCacheKey(
+		// Spatial queries use the index's own frame, regardless of a view rebase.
+		const auto indexedFrame = spatialIndex.GetReferenceFrame();
+		TerraEngine::Scene::WorldDelta cameraDelta;
+		cameraDelta.offsetMetres = glm::dvec3(viewCameraLocalPosition);
+		const auto canonicalCamera = TerraEngine::Scene::ApplyWorldDelta(viewReferenceFrame.canonicalOrigin, cameraDelta);
+		const auto localizedCamera = canonicalCamera.Succeeded()
+			? TerraEngine::Scene::LocalizeWorldPosition(canonicalCamera.position, indexedFrame.canonicalOrigin, indexedFrame.maximumLocalDistanceMetres)
+			: TerraEngine::Scene::WorldLocalizationResult{{}, canonicalCamera.error};
+		const glm::vec3 cameraLocalPosition = localizedCamera.Succeeded() ? glm::vec3(localizedCamera.offsetMetres) : glm::vec3(0);
+		std::vector<FrameLightCandidate> queryLights(ownedViewLights.begin(), ownedViewLights.end());
+		std::vector<bool> queryLightLocalized(queryLights.size(), false);
+		for (std::size_t i = 0; i < queryLights.size(); ++i) {
+			const auto localized = TerraEngine::Scene::LocalizeWorldPosition(queryLights[i].canonicalPosition,
+				indexedFrame.canonicalOrigin, indexedFrame.maximumLocalDistanceMetres);
+			queryLightLocalized[i] = localized.Succeeded();
+			queryLights[i].gpuLight.positionAndType = glm::vec4(localized.Succeeded() ? glm::vec3(localized.offsetMetres) : glm::vec3(0),
+				queryLights[i].gpuLight.positionAndType.w);
+		}
+		std::uint64_t signature = BuildShadowDrawListCacheKey(
 			renderFrameSnapshot.sceneRevision,
 			renderPreparationSettingsSignature,
 			renderableSubmissionSignature,
-			BuildLightSetSignature(packedLights),
+			BuildLightSetSignature(queryLights),
 			cameraLocalPosition);
-		if (const auto existing = shadowDrawListCache.recordsBySignature.find(signature); existing != shadowDrawListCache.recordsBySignature.end())
+		// Fixture controls change actual selector bytes, so old compact lists must
+		// not bypass their application. The generation is stable across step frames.
+		HashCombine(signature, renderFrameSnapshot.efficiencyFixtureIntent.controlGeneration);
+		HashCombine(signature, indexedFrame.generation);
+		HashCombine(signature, std::hash<double>{}(indexedFrame.maximumLocalDistanceMetres));
+		HashCombine(signature, TerraEngine::Scene::WorldPositionHash{}(indexedFrame.canonicalOrigin));
+		HashCombine(signature, localizedCamera.Succeeded() ? 1U : 0U);
+		for (const bool known : queryLightLocalized) HashCombine(signature, known ? 1U : 0U);
+		const auto* casterSelection = TerraEngine::Renderer::ResolveRendererEfficiencyFixtureCasterSelection(
+			renderFrameSnapshot.efficiencyFixtureIntent, viewType, outputId);
+		// View-qualified membership is stable through this captured job batch.
+		// Hash every UUID byte so equal camera positions cannot share different
+		// controlled caster lists, or accidentally reuse an uncontrolled list.
+		HashCombine(signature, static_cast<std::uint32_t>(viewType));
+		HashCombine(signature, outputId);
+		HashCombine(signature, casterSelection ? casterSelection->objectIds.size() : 0U);
+		if (casterSelection) for (const auto& id : casterSelection->objectIds)
+			for (const auto byte : id) HashCombine(signature, byte);
+		if (const auto existing = shadowDrawListCache.recordsBySignature.find(signature); existing != shadowDrawListCache.recordsBySignature.end()
+			&& existing->second.controlledViewType == viewType && existing->second.controlledOutputId == outputId
+			&& existing->second.fixtureControlGeneration == renderFrameSnapshot.efficiencyFixtureIntent.controlGeneration
+			&& existing->second.controlledCasterSelection == (casterSelection != nullptr)
+			&& (casterSelection ? existing->second.controlledCasterIds == casterSelection->objectIds : existing->second.controlledCasterIds.empty()))
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			++shadowDrawListCache.hitCount;
@@ -10047,13 +10429,27 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			std::vector<ShadowDrawList> cachedShadowDrawLists;
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Copy Cached Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-				cachedShadowDrawLists = existing->second.shadowDrawLists;
+			cachedShadowDrawLists = existing->second.shadowDrawLists;
 			}
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Shadow VG Selection Stats", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			for (std::size_t shadowIndex = 0u; shadowIndex < cachedShadowDrawLists.size(); ++shadowIndex)
 			{
 				const std::vector<RenderItemRecord> diagnosticCommands =
 					materializeShadowDrawList(cachedShadowDrawLists[shadowIndex]);
+				const auto& intent = renderFrameSnapshot.efficiencyFixtureIntent;
+				if (intent.controlsApplied && intent.shadowSelection)
+				{
+					const auto proof = std::find_if(fixtureTargets.begin(), fixtureTargets.end(), [&](const auto& row) { return row.objectId == intent.shadowSelection->objectId; });
+					if (proof != fixtureTargets.end()) for (const auto& actual : diagnosticCommands)
+					{
+						auto expected = actual;
+						if (TerraEngine::Renderer::ApplyRendererEfficiencyFixtureSelection(expected, *intent.shadowSelection, *proof)
+							&& expected.selectedVirtualLod == actual.selectedVirtualLod
+							&& expected.virtualMeshletOffset == actual.virtualMeshletOffset
+							&& expected.virtualMeshletCount == actual.virtualMeshletCount)
+							fixtureShadowSelectionApplied.store(true, std::memory_order_relaxed);
+					}
+				}
 				collectVirtualGeometryDiagnosticsAssets(
 					diagnosticCommands, RenderViewType::Shadow);
 				recordVirtualGeometryViewSelection(
@@ -10077,12 +10473,12 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		}
 
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Rebuild Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		std::vector<std::optional<ShadowDrawList>> shadowDrawListsByLight(packedLights.size());
+		std::vector<std::optional<ShadowDrawList>> shadowDrawListsByLight(ownedViewLights.size());
 		TerraEngine::Scene::SpatialQueryFilter filter{};
 		filter.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable;
 
 		RunRenderChunkedWork(
-			packedLights.size(),
+			ownedViewLights.size(),
 			renderGraphWorkerCount,
 			kRenderParallelThreshold,
 			"RenderSystem Task: Build Shadow Draw Lists",
@@ -10090,7 +10486,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			{
 				for (std::size_t lightIndex = start; lightIndex < end; ++lightIndex)
 				{
-					const FrameLightCandidate& candidate = packedLights[lightIndex];
+					const FrameLightCandidate& candidate = queryLights[lightIndex];
 					if ((candidate.candidateFlags & kFrameLightCandidateFlagShadowCapable) == 0u)
 					{
 						continue;
@@ -10102,7 +10498,12 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 					const std::uint32_t lightType = static_cast<std::uint32_t>(std::max(candidate.gpuLight.positionAndType.w, 0.0f) + 0.5f);
 					TerraEngine::Scene::SpatialQueryResult query{};
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (lightType == static_cast<std::uint32_t>(LightType::Directional))
+					const bool queryReady = lightType == static_cast<std::uint32_t>(LightType::Directional)
+					? localizedCamera.Succeeded() : queryLightLocalized[lightIndex];
+					if (!queryReady) {
+						// An unrepresentable query must retain complete immutable caster coverage.
+					}
+					else if (lightType == static_cast<std::uint32_t>(LightType::Directional))
 					{
 						const glm::mat4 lightViewProjection = BuildDirectionalShadowViewProjection(candidate.gpuLight, cameraLocalPosition);
 						query = spatialIndex.QueryFrustum(TerraEngine::Scene::ExtractFrustum(lightViewProjection), filter);
@@ -10129,8 +10530,9 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 					}
 
 					std::vector<RenderItemRecord> shadowCommands =
-						buildDrawCommandsFromCandidateIndices(collectCandidateIndices(query));
+						queryReady ? buildDrawCommandsFromCandidateIndices(collectCandidateIndices(query)) : renderableDrawCommands;
 					applyShadowVirtualGeometrySelection(shadowCommands);
+					TerraEngine::Renderer::FilterRendererEfficiencyFixtureShadowCasters(shadowCommands, casterSelection);
 					shadowDrawList = compactShadowDrawList(
 						candidate.lightId, shadowCommands);
 					shadowDrawListsByLight[lightIndex] = std::move(shadowDrawList);
@@ -10170,6 +10572,12 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 
 		ShadowDrawListCacheRecord record;
 		record.signature = signature;
+		// The digest narrows lookup; exact qualified membership still authorizes
+		// cache reuse, so collisions cannot substitute another view's caster set.
+		record.controlledViewType = viewType; record.controlledOutputId = outputId;
+		record.fixtureControlGeneration = renderFrameSnapshot.efficiencyFixtureIntent.controlGeneration;
+		record.controlledCasterSelection = casterSelection != nullptr;
+		if (casterSelection) record.controlledCasterIds = casterSelection->objectIds;
 		record.lastTouchedFrameId = activeRenderFrameId;
 		record.shadowDrawLists = shadowDrawLists;
 		shadowDrawListCache.recordsBySignature[signature] = std::move(record);
@@ -10279,6 +10687,14 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	frameData.activePreset = currentPreset;
 	frameData.customOverrideActive = (currentPreset == QualityPreset::Custom);
 	frameData.settings = SanitizeRenderSettings(currentSettings);
+	// Reorder only owned captured candidates and copied settings. The backend's
+	// ordinary ApplyFrameLightBudgets consumes these genuine inputs for each view.
+	if (renderFrameSnapshot.efficiencyFixtureIntent.controlsApplied
+		&& !TerraEngine::Renderer::ApplyRendererEfficiencyFixtureLightingControls(renderFrameSnapshot.efficiencyFixtureIntent,
+			packedLights, frameData.settings, renderFrameSnapshot.efficiencyFixtureIntent.controlReason))
+		renderFrameSnapshot.efficiencyFixtureIntent.controlsApplied = false;
+	frameData.efficiencyOptions = renderFrameSnapshot.efficiencyOptions;
+	frameData.efficiencyFixtureIntent = renderFrameSnapshot.efficiencyFixtureIntent;
 	frameData.sky.renderBackground = true;
 	frameData.sky.hasTexture = skyRuntimeState.resolvedSkyHandle != TerraEngine::EMPTY_UUID && !skyRuntimeState.usingFallback;
 	frameData.sky.usingFallback = skyRuntimeState.usingFallback;
@@ -10345,15 +10761,15 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		request.kind = kind;
 		request.priority = RenderOutputPriority::Required;
 		request.diagnosticsView = diagnosticsView;
-		// Editor windows supply panel-sized targets so Vulkan records offscreen
-		// passes against the exact texture rectangle ImGui will present.
+		// Normal editor targets follow panel dimensions; sealed fixture targets
+		// retain their actual native extent through query, submission and readback.
 		if (kind == RenderOutputKind::SceneView)
 		{
-			request.targetSize = sceneViewTargetSize;
+			request.targetSize = effectiveSceneTargetSize;
 		}
 		else if (kind == RenderOutputKind::GameView || kind == RenderOutputKind::MainRuntimeView)
 		{
-			request.targetSize = gameViewTargetSize;
+			request.targetSize = effectiveGameTargetSize;
 		}
 		request.outputId = outputId;
 		return request;
@@ -10387,6 +10803,22 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		input.activePreset = frame.activePreset;
 		input.customOverrideActive = frame.customOverrideActive;
 		input.settings = frame.settings;
+		input.efficiencyOptions = frame.efficiencyOptions;
+		input.efficiencyFixtureIntent = frame.efficiencyFixtureIntent;
+		if (input.efficiencyFixtureIntent.controlsApplied && input.efficiencyFixtureIntent.depthControls
+			&& input.efficiencyFixtureIntent.depthControls->oracleRecipe) {
+			// This conversion already runs in the view preparation job (or the
+			// explicitly requested inline reference). Only immutable owned controls
+			// are read; no GPU mapping or live scene mutation happens on the worker.
+			const auto& recipe=*input.efficiencyFixtureIntent.depthControls->oracleRecipe;
+			auto pixels=std::make_shared<std::vector<std::uint32_t>>(std::size_t(recipe.extent.width)*recipe.extent.height);
+			if (TerraEngine::Renderer::LightingDepthReduction::MaterializeDepthRecipe(recipe,*pixels))
+				input.efficiencyDepthOracleInput=std::move(pixels);
+			else {
+				input.efficiencyFixtureIntent.controlsApplied=false;
+				input.efficiencyFixtureIntent.controlReason="Captured isolated depth recipe could not materialize atomically.";
+			}
+		}
 		input.renderOptimization = frame.renderOptimization;
 		input.groupedInstanceRecords = std::move(frame.groupedInstanceRecords);
 		input.groupedSubmissions = std::move(frame.groupedSubmissions);
@@ -11019,8 +11451,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		}
 		target.renderOptimization.valid = 1u;
 	};
-	const bool sceneViewTargetReady = !editorModeEnabled || (sceneViewTargetSize.x > 0u && sceneViewTargetSize.y > 0u);
-	const bool gameViewTargetReady = !editorModeEnabled || (gameViewTargetSize.x > 0u && gameViewTargetSize.y > 0u);
+	const bool sceneViewTargetReady = fixedSceneCamera || !editorModeEnabled || (sceneViewTargetSize.x > 0u && sceneViewTargetSize.y > 0u);
+	const bool gameViewTargetReady = fixedGameCamera || !editorModeEnabled || (gameViewTargetSize.x > 0u && gameViewTargetSize.y > 0u);
 	const auto findReferenceFrame = [&](RenderOutputKind outputKind,
 		std::uint32_t outputId)
 	{
@@ -11053,23 +11485,37 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				return false;
 			}), view.lightCandidates.end());
 	};
+	const auto localizeFixtureCamera = [&](RenderViewBuildState& view, const TerraEngine::Scene::WorldPosition& canonicalCamera) {
+		// Sealed matrices already incorporate both baseline and per-step origins.
+		// Applying the legacy UI-camera translation again would double the rebase.
+		if(sealedCamera(view.referenceFrame.outputId == 1 ? RenderViewType::Scene : RenderViewType::Game,view.referenceFrame.outputId)) return;
+		if (!view.efficiencyFixtureIntent.controlsApplied || !TerraEngine::Renderer::RendererEfficiencyFixtureOriginDelta(
+			view.efficiencyFixtureIntent, view.referenceFrame.outputId == 1 ? RenderViewType::Scene : RenderViewType::Game,
+			view.referenceFrame.outputId)) return;
+		const auto localized = TerraEngine::Renderer::LocalizeRenderPosition(canonicalCamera, view.referenceFrame);
+		if (!localized.Succeeded()) return; // Preflight already rejects unsafe view deltas.
+		const glm::vec3 camera(localized.offsetMetres);
+		view.viewMatrix = view.viewMatrix * glm::translate(glm::mat4(1), view.cameraLocalPosition - camera);
+		view.cameraLocalPosition = camera;
+	};
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (hasSceneViewCamera && sceneViewTargetReady)
+	if ((fixedSceneCamera || (!sealedCameraRecipeActive && hasSceneViewCamera)) && sceneViewTargetReady)
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Scene View", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		// Start from the small common frame header, then build this view in its own
 		// owner. Copying the shared header before materialization avoids deep-copying
 		// thousands of completed command and page records when the view is queued.
 		RenderViewBuildState sceneFrameData = frameData;
-		sceneFrameData.viewMatrix = sceneViewCamera.view;
-		sceneFrameData.projectionMatrix = sceneViewCamera.proj;
+		sceneFrameData.viewMatrix = fixedSceneCamera ? fixedSceneCamera->viewMatrix : sceneViewCamera.view;
+		sceneFrameData.projectionMatrix = fixedSceneCamera ? fixedSceneCamera->projectionMatrix : sceneViewCamera.proj;
 		sceneFrameData.referenceFrame = findReferenceFrame(
 			RenderOutputKind::SceneView, 1U);
-		sceneFrameData.cameraLocalPosition = glm::vec3(0.0F);
+		sceneFrameData.cameraLocalPosition = fixedSceneCamera ? fixedSceneCamera->cameraLocalPosition : glm::vec3(0.0F);
+		localizeFixtureCamera(sceneFrameData, sceneViewCamera.canonicalPosition);
 		localizeFrameLights(sceneFrameData);
-		sceneFrameData.sceneViewGridVisible = sceneViewGridVisible;
-		sceneFrameData.sceneViewOrthographic = sceneViewCamera.orthographic;
+		sceneFrameData.sceneViewGridVisible = !fixedSceneCamera && sceneViewGridVisible;
+		sceneFrameData.sceneViewOrthographic = !fixedSceneCamera && sceneViewCamera.orthographic;
 		VisibleCommandBuildResult visibleCommands;
 		std::vector<RenderItemRecord>& sceneCommands =
 			lifetimeState->viewCommandScratch;
@@ -11079,7 +11525,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Scene View Visible Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			visibleCommands = buildVisibleDrawCommands(
 				sceneFrameData.projectionMatrix * sceneFrameData.viewMatrix,
-				sceneViewTargetSize, RenderOutputKind::SceneView,
+				effectiveSceneTargetSize, RenderOutputKind::SceneView,
 				RenderViewType::Scene, 1U, sceneFrameData.cameraLocalPosition,
 				sceneFrameData.referenceFrame);
 		}
@@ -11103,7 +11549,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Apply Scene View Context",
 				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-			applySceneViewContextTint(sceneFrameData, sceneCommands);
+			if(!fixedSceneCamera) applySceneViewContextTint(sceneFrameData, sceneCommands);
 		}
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build Scene View Groups",
@@ -11116,7 +11562,9 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		}
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Scene View Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-			sceneFrameData.shadowDrawLists = buildShadowDrawLists(sceneFrameData.cameraLocalPosition);
+			// The spatial query uses its unchanged canonical index frame, not the
+			// deliberately shifted GPU view frame. Rebasing cannot change membership.
+			sceneFrameData.shadowDrawLists = buildShadowDrawLists(sceneFrameData.lightCandidates, sceneFrameData.cameraLocalPosition, sceneFrameData.referenceFrame, RenderViewType::Scene,1);
 		}
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Queue Scene View Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -11136,11 +11584,18 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	// Asset-style prefab editing has no active runtime scene. When the editor
 	// requests suppression, skip every Game View submission path so opening a
 	// prefab asset cannot burn a full offscreen game render every frame.
-	if (!gameViewSuppressed && gameViewTargetReady && !gameViewCameras.empty())
+	if (fixedGameCamera || (!sealedCameraRecipeActive && !gameViewSuppressed && gameViewTargetReady && !gameViewCameras.empty()))
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Game View Cameras", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const auto& cam : gameViewCameras)
+		// Use the same existing GameView query/submission path with one immutable
+		// sealed descriptor; author components and UI descriptors remain untouched.
+		std::array<OverrideCameraData,1> sealedGameDescriptor{};
+		std::span<const OverrideCameraData> effectiveGameCameras = gameViewCameras;
+		if(fixedGameCamera) {
+			sealedGameDescriptor[0] = {fixedGameCamera->viewMatrix,fixedGameCamera->projectionMatrix,fixedGameCamera->cameraPosition,false};
+			effectiveGameCameras = sealedGameDescriptor;
+		}
+		for (const auto& cam : effectiveGameCameras)
 		{
 			RenderViewBuildState gameFrameData = frameData;
 			gameFrameData.editorContextTint = glm::vec4(0.0f);
@@ -11148,7 +11603,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			gameFrameData.projectionMatrix = cam.proj;
 			gameFrameData.referenceFrame = findReferenceFrame(
 				RenderOutputKind::GameView, 2U);
-			gameFrameData.cameraLocalPosition = glm::vec3(0.0F);
+			gameFrameData.cameraLocalPosition = fixedGameCamera ? fixedGameCamera->cameraLocalPosition : glm::vec3(0.0F);
+			localizeFixtureCamera(gameFrameData, cam.canonicalPosition);
 			localizeFrameLights(gameFrameData);
 			VisibleCommandBuildResult visibleCommands;
 			std::vector<RenderItemRecord>& gameCommands =
@@ -11159,7 +11615,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Game View Visible Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				visibleCommands = buildVisibleDrawCommands(
 					gameFrameData.projectionMatrix * gameFrameData.viewMatrix,
-					gameViewTargetSize, RenderOutputKind::GameView,
+					effectiveGameTargetSize, RenderOutputKind::GameView,
 					RenderViewType::Game, 2U, gameFrameData.cameraLocalPosition,
 					gameFrameData.referenceFrame);
 			}
@@ -11179,7 +11635,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				visibleCommands.cacheHit);
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Game View Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-				gameFrameData.shadowDrawLists = buildShadowDrawLists(gameFrameData.cameraLocalPosition);
+				gameFrameData.shadowDrawLists = buildShadowDrawLists(gameFrameData.lightCandidates, gameFrameData.cameraLocalPosition, gameFrameData.referenceFrame, RenderViewType::Game,2);
 			}
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Queue Game View Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -11191,7 +11647,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		}
 	}
 	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	else if (!gameViewSuppressed && gameViewTargetReady && cameras.empty())
+	else if (!sealedCameraRecipeActive && !gameViewSuppressed && gameViewTargetReady && cameras.empty())
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Blank Game View", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		RenderViewBuildState blankData{};
@@ -11205,6 +11661,8 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			blankData.activePreset = currentPreset;
 			blankData.customOverrideActive = (currentPreset == QualityPreset::Custom);
 			blankData.settings = SanitizeRenderSettings(currentSettings);
+			blankData.efficiencyOptions = renderFrameSnapshot.efficiencyOptions;
+			blankData.efficiencyFixtureIntent = renderFrameSnapshot.efficiencyFixtureIntent;
 			blankData.sky = frameData.sky;
 			blankData.editorContextTint = glm::vec4(0.0f);
 			blankData.virtualGeometryGpuPackets.clear();
@@ -11221,7 +11679,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				{}, nullptr);
 			latestGameViewFrameId = activeRenderFrameId;
 	}
-	else if (!gameViewSuppressed && gameViewTargetReady)
+	else if (!sealedCameraRecipeActive && !gameViewSuppressed && gameViewTargetReady)
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Runtime Cameras", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
@@ -11262,6 +11720,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			runtimeFrameData.cameraLocalPosition = glm::vec3(0.0F);
 			runtimeFrameData.referenceFrame = findReferenceFrame(
 				RenderOutputKind::MainRuntimeView, 2U);
+			localizeFixtureCamera(runtimeFrameData, cameraTransform.position);
 			localizeFrameLights(runtimeFrameData);
 			// The editor publishes this descriptor through GameViewWindow. A
 			// packaged runtime has no dock, so publish the exact authored camera
@@ -11298,7 +11757,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				RenderViewType::Game, 2u,
 				runtimeGroupingCompatibilitySignature,
 				visibleCommands.cacheHit);
-			runtimeFrameData.shadowDrawLists = buildShadowDrawLists(runtimeFrameData.cameraLocalPosition);
+			runtimeFrameData.shadowDrawLists = buildShadowDrawLists(runtimeFrameData.lightCandidates, runtimeFrameData.cameraLocalPosition, runtimeFrameData.referenceFrame, RenderViewType::Game,2);
 
 			queuePreparedSubmission(std::move(runtimeFrameData),
 				makeOutputRequest(RenderOutputKind::MainRuntimeView,
@@ -11380,7 +11839,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			captureIdentity.outputId,
 			captureGroupingCompatibilitySignature,
 			visibleCommands.cacheHit);
-		captureFrameData.shadowDrawLists = buildShadowDrawLists(captureFrameData.cameraLocalPosition);
+		captureFrameData.shadowDrawLists = buildShadowDrawLists(captureFrameData.lightCandidates, captureFrameData.cameraLocalPosition, captureFrameData.referenceFrame);
 
 		RenderOutputRequest captureOutputRequest = makeOutputRequest(
 			RenderOutputKind::OffscreenTexture, captureIdentity.viewType,
@@ -11389,6 +11848,29 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		queuePreparedSubmission(std::move(captureFrameData),
 			std::move(captureOutputRequest), captureCommands,
 			visibleCommands.cachedRecord);
+	}
+	if (renderFrameSnapshot.efficiencyFixtureIntent.controlsApplied && !renderFrameSnapshot.efficiencyFixtureIntent.viewOrder.empty())
+	{
+		std::vector<std::size_t> actualSlots;
+		std::vector<TerraEngine::Renderer::RendererEfficiencyFixtureViewOrderEntry> actual;
+		for (std::size_t index = 0; index < preparedRenderSubmissions.size(); ++index)
+		{
+			const auto& output = preparedRenderSubmissions[index].output;
+			if (output.kind == RenderOutputKind::SceneView || output.kind == RenderOutputKind::GameView || output.kind == RenderOutputKind::MainRuntimeView)
+			{ actualSlots.push_back(index); actual.push_back({output.diagnosticsView, output.outputId}); }
+		}
+		std::vector<std::size_t> order; std::string reason;
+		if (TerraEngine::Renderer::ResolveRendererEfficiencyFixtureViewOrder(renderFrameSnapshot.efficiencyFixtureIntent, actual, order, reason))
+		{
+			// Move the actual presentation owners before sealing ranges and snapshot
+			// slots. RHI iteration and vkQueueSubmit now consume this exact order.
+			std::vector<PreparedRenderSubmission> reordered; reordered.reserve(preparedRenderSubmissions.size());
+			for (const auto index : order) reordered.push_back(std::move(preparedRenderSubmissions[actualSlots[index]]));
+			for (std::size_t index = 0; index < preparedRenderSubmissions.size(); ++index)
+				if (std::find(actualSlots.begin(), actualSlots.end(), index) == actualSlots.end()) reordered.push_back(std::move(preparedRenderSubmissions[index]));
+			preparedRenderSubmissions = std::move(reordered);
+		}
+		else { renderFrameSnapshot.efficiencyFixtureIntent.controlsApplied = false; renderFrameSnapshot.efficiencyFixtureIntent.controlReason = reason; }
 	}
 	// View-local history is valid only while its exact output identity remains in
 	// the protected request set. Removing a view retires its Hi-Z/LOD/debug state;
@@ -11703,6 +12185,9 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			const TerraEngine::Renderer::RenderDynamicLane& right) noexcept
 		{
 			return left.key == right.key && left.transformGeneration == right.transformGeneration
+				&& (left.shadowCasterInputs == right.shadowCasterInputs
+					|| (left.shadowCasterInputs != nullptr && right.shadowCasterInputs != nullptr
+						&& *left.shadowCasterInputs == *right.shadowCasterInputs))
 				&& left.hasCanonicalWorldPose == right.hasCanonicalWorldPose
 				&& left.canonicalWorldPose.position == right.canonicalWorldPose.position
 				&& left.canonicalWorldPose.rotation == right.canonicalWorldPose.rotation
@@ -11915,6 +12400,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
                                         .animationPlanGeneration),
                                 renderable.animation.firstGpuWorkPacket,
                                 renderable.animation.gpuStageMask);
+							lane.shadowCasterInputs = renderable.shadowCasterInputs;
                             lane.animationBinding = TerraEngine::Renderer::
                                 PublishedAnimationRenderBinding(
                                     renderable.animationBinding);
@@ -12072,6 +12558,32 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				resourcePreparationRecords,
 				std::max<std::uint64_t>(1u, renderFrameSnapshot.resourceRevision));
 		const auto viewPublicationEnd = std::chrono::steady_clock::now();
+		// Read only the completed immutable roots. Each task writes its own light
+		// list, and settlement precedes publication; no new scene flush is needed.
+		std::vector<std::future<void>> shadowStreamFutures;
+		TerraEngine::Tasks::ScopedTaskSettlement<void> shadowStreamSettlement(shadowStreamFutures);
+		try
+		{
+			for (auto& presentation : publication->presentationInputs)
+				for (auto& shadow : presentation.shadowDrawLists)
+				{
+					const auto seal = [&publication, &presentation, &shadow]() {
+						shadow.instanceInputs = TerraEngine::Renderer::BuildShadowPreparedInstanceInputs(
+							*publication, presentation, shadow);
+					};
+					if (presentation.efficiencyOptions.options.validationPreparation
+						== TerraEngine::Renderer::RendererEfficiencyPreparation::Concurrent)
+						shadowStreamSettlement.CreateAndEnqueue(ThreadPool::instance(), seal);
+					else shadowStreamSettlement.RunInline(seal);
+				}
+			shadowStreamSettlement.GetAll();
+		}
+		catch (...)
+		{
+			shadowStreamSettlement.Wait();
+			for (auto& presentation : publication->presentationInputs)
+				for (auto& shadow : presentation.shadowDrawLists) shadow.instanceInputs.reset();
+		}
 		const TerraEngine::Renderer::SealedRenderFramePublication sealedPublication =
 			TerraEngine::Renderer::SealRenderFramePublication(
 				std::move(publication), publicationSessionGeneration);
@@ -12718,10 +13230,48 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 				: TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot{};
 			latestRenderGraphDiagnostics = renderGraphDiagnostics;
 		}
+		// Capture identity without inventing backend measurements. Story-specific
+		// receipts replace the explicit unavailable counters as stages are added.
+		auto completedEfficiencyRows = rhi->PollRendererEfficiencyEvidence();
+		std::erase_if(completedEfficiencyRows, [&](const auto& row) {
+			return !TerraEngine::Renderer::IsCurrentRendererEfficiencyFixtureEvidence(row,
+				renderFrameSnapshot.efficiencyOptions, renderFrameSnapshot.efficiencyFixtureIntent);
+		});
+		if(!completedEfficiencyRows.empty())
+		{
+			// One cursor owns the entire completed batch. View and face counts do
+			// not advance fixture frame progression independently.
+			++latestRendererEfficiencyEvidenceBatch.batchSequence;
+			latestRendererEfficiencyEvidenceBatch.rows = std::move(completedEfficiencyRows);
+			latestRendererEfficiencyEvidence = latestRendererEfficiencyEvidenceBatch.rows;
+		}
+		else if(latestRendererEfficiencyEvidence.empty())
+		{
+		for (const auto& view : renderFrameSnapshot.viewRequests)
+		{
+			TerraEngine::Renderer::RendererEfficiencyEvidence evidence;
+			evidence.viewType = view.viewType;
+			evidence.viewId = view.outputId;
+			evidence.frameSerial = renderFrameSnapshot.frameId;
+			evidence.resolution = view.targetSize;
+			evidence.effectiveOptions = renderFrameSnapshot.efficiencyOptions;
+			evidence.staticCacheBudgetRequestedBytes = evidence.effectiveOptions.options.staticShadowCacheBudgetBytes;
+			evidence.staticCacheBudgetEffectiveBytes = evidence.staticCacheBudgetRequestedBytes;
+			evidence.fallbackReason = "Optimized stage support has not been published by the backend.";
+			latestRendererEfficiencyEvidence.push_back(std::move(evidence));
+		}
+		}
 		// The renderer has finished every backend and statistics read of the local
 		// snapshot. Transfer its owned vectors into the protected publication instead
 		// of deep-copying thousands of renderables, route decisions, and batch members.
 		// The feedback pass below only reads this completed publication.
+		if (renderFrameSnapshot.efficiencyFixtureIntent.controlsApplied && renderFrameSnapshot.efficiencyFixtureIntent.shadowSelection
+			&& !fixtureShadowSelectionApplied.load(std::memory_order_relaxed))
+		{
+			renderFrameSnapshot.efficiencyFixtureIntent.controlsApplied = false;
+			renderFrameSnapshot.efficiencyFixtureIntent.controlReason = "Requested target did not appear in an emitted shadow owner-range command.";
+		}
+		latestRendererEfficiencyFixtureTargets = std::move(fixtureTargets);
 		std::swap(latestRenderFrameSnapshot, renderFrameSnapshot);
 		recycledRenderFrameSnapshot = std::move(renderFrameSnapshot);
 		latestSceneVirtualGeometryVisibilityRecords =
@@ -12926,6 +13476,22 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 // RenderSystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::Shutdown()
 {
+	// Restore tokens and pending requests belong to this renderer lifetime, not
+	// just Vulkan's counter (which may restart with a replacement instance).
+	{
+		std::lock_guard lock(runtimeRenderSettingsMutex);
+		rendererEfficiencyOptionsQueue.ResetForNewLifetime();
+		pendingRendererEfficiencyFixtureIntent.reset();
+		capturedRendererEfficiencyFixtureIntent = {};
+		pendingRendererResourceInvalidations.clear();
+		efficiencyObservedBackendSession = 0U;
+	}
+	{
+		std::lock_guard lock(statsMutex);
+		latestRendererEfficiencyEvidence.clear();
+		latestRendererEfficiencyFixtureTargets.clear();
+		TerraEngine::Renderer::ResetRendererEfficiencyFixtureEvidenceBatch(latestRendererEfficiencyEvidenceBatch);
+	}
 	// Drop copied scene data before backend teardown so a later editor restart
 	// cannot reuse transforms or sky entities from the previous scene session.
 	worldTransformCache.Clear();
@@ -12934,6 +13500,8 @@ void RenderSystem::Shutdown()
 	retainedRenderableEntries.clear();
 	retainedRuntimeMeshResources.clear();
 	retainedRuntimeMaterialResources.clear();
+	retainedRuntimeMeshOwners.clear();
+	retainedRuntimeMaterialOwners.clear();
 	retainedMeshLocalBounds.clear();
 	retainedRenderableCaptureSourceSignature = 0U;
 	retainedRenderableEntriesReusable = false;
@@ -12987,6 +13555,9 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.name = "RenderSystem";
 	declaration.phase = "Render";
 	declaration.reads = {
+		"RendererEfficiencyOptionsQueue", "RendererEfficiencyOptions",
+		"LightingUploadMirrors", "LightingFrameSlotCompletion",
+		"LightingDepthPreparedInputs", "LightingDepthQueryOwners",
 		"Window",
 		"ActivePresentationState",
 		"SceneGraph",
@@ -13019,6 +13590,10 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceAnimatedGeometryPublications
 	};
 	declaration.writes = {
+		"RendererEfficiencyOptions", "RendererEfficiencyEvidence",
+		// Protected capture may admit a deduplicated async mesh/material request;
+		// accepting a ready resource also changes its publication cohort.
+		"Resources", "StreamingNeeds",
 		"Renderer",
 		TerraEngine::Scheduling::kResourcePersistentRenderTopology,
 		TerraEngine::Scheduling::kResourceDynamicRenderInstanceCandidates,
@@ -13076,8 +13651,34 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Immutable render snapshots, generation-validated animation pose bindings, frame-wide animated page demand union, checked morph-before-skin deformation prefix planning, history compatibility lookup, visible-command cache lookup, draw packets, culling and lighting preparation, generation-tagged submission plans, virtual geometry LOD/page preparation, page request planning, page payload source planning, resource readiness, secondary command buffers, and submit descriptions.";
-	declaration.protectedCommit = "Runtime render-settings queue application, live hierarchy/AnimatorComponent/deformable-resource capture, immutable AnimationRuntimeState pose capture, Swapchain acquire, acquired-image generation validation, animated geometry allocation and atomic geometry/history/bounds publication with one cross-view generation, descriptor writes, deformation command recording, fence-delayed animated output retirement, command/fence ownership, queue submit/present, presentation recreation, completion publication, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU publication, virtual geometry diagnostics publication, renderer diagnostics, and device-loss containment.";
+	declaration.safeSubwork = "Immutable render snapshots, exact shadowcaster membership preparation from copied input proofs, generation-validated animation pose bindings, frame-wide animated page demand union, checked morph-before-skin deformation prefix planning, history compatibility lookup, visible-command cache lookup, draw packets, culling and lighting preparation, generation-tagged submission plans, virtual geometry LOD/page preparation, page request planning, page payload source planning, resource readiness, secondary command buffers, and submit descriptions.";
+	declaration.protectedCommit = "Runtime render-settings queue application, protected deduplicated async admission of missing mesh/material publications, live hierarchy/AnimatorComponent/deformable-resource and immutable shadowcaster lifetime/resource/deformation proof capture, immutable AnimationRuntimeState pose capture, Swapchain acquire, acquired-image generation validation, animated geometry allocation and atomic geometry/history/bounds publication with one cross-view generation, descriptor writes, deformation command recording, fence-delayed animated output retirement, command/fence ownership, queue submit/present, presentation recreation, completion publication, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU publication, virtual geometry diagnostics publication, renderer diagnostics, and device-loss containment.";
+	declaration.safeSubwork += " Canonical lighting payload serialization from immutable copied final/analysis records and exact physical dirty-range planning.";
+	declaration.protectedCommit += " Lighting allocation/frame/snapshot/purpose owner validation, fence-proven host map/write/atom-flush, success-only mirror publication and completion-qualified lighting evidence.";
+	declaration.writes.push_back("LightingUploadMirrors");
+	// BeginFrame and submission failure paths also update the fence-backed
+	// physical reuse proof inside this same protected renderer boundary.
+	declaration.writes.push_back("LightingFrameSlotCompletion");
+	declaration.writes.push_back("LightingUploadEvidence");
+	declaration.writes.push_back("LightingDepthPreparedInputs");
+	declaration.writes.push_back("LightingDepthQueryOwners");
+	declaration.writes.push_back("LightingDepthEvidence");
+	declaration.reads.push_back("ShadowGroupedPreparedInputs");
+	declaration.reads.push_back("ShadowGroupedPhysicalOwners");
+	declaration.writes.push_back("ShadowGroupedPreparedInputs");
+	declaration.writes.push_back("ShadowGroupedPhysicalOwners");
+	declaration.writes.push_back("ShadowGroupedExecutionEvidence");
+	declaration.reads.push_back("StaticShadowClassificationInputs");
+	declaration.reads.push_back("StaticShadowPhysicalOwners");
+	declaration.writes.push_back("StaticShadowClassificationInputs");
+	declaration.writes.push_back("StaticShadowPhysicalOwners");
+	declaration.writes.push_back("StaticShadowExecutionEvidence");
+	declaration.safeSubwork += " Partitions copied complete light-selected caster proofs and plans deterministic queried byte admission in settled jobs.";
+	declaration.protectedCommit += " Owns static allocation, CLEAR/copy/LOAD recording and separate static/final submit tokens; exact command completion retains retiring charges without adding an idle or scene flush.";
+	declaration.safeSubwork += " Seals full light-selected instance streams from immutable roots and plans copied exact native compatibility in settled jobs.";
+	declaration.protectedCommit += " Publishes separate frame/snapshot shadow instance ranges only after complete upload/descriptor proof and records actual grouped/singleton receipts; rejection restores the complete original draws.";
+	declaration.safeSubwork += " Materializes exact-bit isolated depth recipes into immutable worker-owned CPU inputs.";
+	declaration.protectedCommit += " Records physical depth query pairs and optional validation transfers; successful submit and existing fence completion qualify copied bounds, coverage, input and same-command color without query waits.";
 	declaration.protectedReason = "Live GPU queue and presentation ownership remain protected after worker preparation.";
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
@@ -13107,6 +13708,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	snapshot.activationPredicateKey = "render-system-frame";
 	snapshot.reads = {
 		"Window", "SceneGraph", "Resources",
+		kResourceRuntimeRenderSettingsQueue, "RendererEfficiencyOptionsQueue",
 		kResourceSceneChangePublication,
 		kResourceAnimationPresentationFrame,
 		kResourceVirtualGeometryPagePublications,
@@ -13115,6 +13717,10 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 		kResourceAnimatedGeometryPublications
 	};
 	snapshot.writes = {
+		kResourceRuntimeRenderSettings, "RendererEfficiencyOptions",
+		// Request admission stays at this protected boundary; workers consume
+		// only the captured owners and never request or wait for a live load.
+		"Resources", "StreamingNeeds",
 		kResourceRenderCaptureInputs,
 		kResourceAnimatedObjectVisibilitySnapshot
 	};
@@ -13125,7 +13731,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	snapshot.phaseKind = WorkerSystemPhaseKind::Snapshot;
 	snapshot.boundaryClassification = HardBoundaryClassification::Protected;
 	snapshot.hardBoundary = true;
-	snapshot.protectedCommit = "Captures the already-published scene change packet, exact transforms, resources, animation presentation, page publication, readback, requested views, backend capabilities, and renderer generations without lowering the crowd.";
+	snapshot.protectedCommit = "Admits deduplicated async requests for missing mesh/material publications, then captures the already-published scene change packet, exact transforms, resources, immutable shadowcaster lifetime/resource/deformation inputs, animation presentation, page publication, readback, requested views, backend capabilities, and renderer generations without lowering the crowd.";
 	snapshot.protectedReason = snapshot.protectedCommit;
 	snapshot.profilingLabel = "RenderSystem.RenderPublicationCapture";
 
@@ -13136,6 +13742,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	routePrepare.stableDescriptorId = "RenderSystem/Render/GeometryRoutePrepare";
 	routePrepare.activationPredicateKey = snapshot.activationPredicateKey;
 	routePrepare.reads = {
+		"RendererEfficiencyOptions",
 		kResourceRenderCaptureInputs,
 		kResourceVirtualGeometryQualityProfile
 	};
@@ -13159,6 +13766,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	prepare.stableDescriptorId = "RenderSystem/Render/VirtualGeometryPrepare";
 	prepare.activationPredicateKey = snapshot.activationPredicateKey;
 	prepare.reads = {
+		"RendererEfficiencyOptions",
 		kResourcePersistentRenderSceneState, kResourceDynamicRenderFrameState,
 		kResourceVirtualGeometryQualityProfile,
 		kResourceVirtualGeometryPageResidencySnapshots,
@@ -13180,6 +13788,11 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	prepare.phaseKind = WorkerSystemPhaseKind::WorkerPrepare;
 	prepare.boundaryClassification = HardBoundaryClassification::WorkerSafe;
 	prepare.safeSubwork = "Consumes only immutable persistent scene state, dynamic lanes, compact view selections, and prior immutable publications to produce typed virtual geometry selection, packet, page-need, and deformation plans.";
+	prepare.writes.push_back("LightingDepthPreparedInputs");
+	prepare.writes.push_back("ShadowGroupedPreparedInputs");
+	prepare.writes.push_back("StaticShadowClassificationInputs");
+	prepare.safeSubwork += " Seals each light's immutable instance rows without using camera-visible membership.";
+	prepare.safeSubwork += " Per-view preparation materializes admitted exact-bit depth recipes into immutable owned bytes.";
 	prepare.profilingLabel = "RenderSystem.VirtualGeometryPrepare";
 
 	FrameWorkloadDeclaration& commit = workloads[3];
@@ -13189,16 +13802,27 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	commit.stableDescriptorId = "RenderSystem/Render/BackendCommit";
 	commit.activationPredicateKey = snapshot.activationPredicateKey;
 	commit.reads = {
+		"RendererEfficiencyOptions",
+		"LightingDepthPreparedInputs", "LightingDepthQueryOwners",
 		kResourcePersistentRenderSceneState, kResourceDynamicRenderFrameState,
 		kResourceRenderViewSelections, kResourceVirtualGeometryClusterPackets,
 		kResourceVirtualGeometryBatchPlans,
 		kResourceVirtualGeometryPageNeedPackets, kResourceAnimatedGeometryDeformationPlans
 	};
 	commit.writes = {
+		"LightingDepthQueryOwners", "LightingDepthEvidence",
 		kResourceRenderFramePublication, kResourceRenderInstanceStreamPublication,
 		kResourceVirtualGeometryGpuPacketFrameSets, kResourceVirtualGeometryGeneratedSubmissions,
 		kResourceVirtualGeometryCounterReadbacks, kResourceVirtualGeometryVisibilitySnapshots
 	};
+	commit.reads.push_back("ShadowGroupedPreparedInputs");
+	commit.reads.push_back("ShadowGroupedPhysicalOwners");
+	commit.writes.push_back("ShadowGroupedPhysicalOwners");
+	commit.writes.push_back("ShadowGroupedExecutionEvidence");
+	commit.reads.push_back("StaticShadowClassificationInputs");
+	commit.reads.push_back("StaticShadowPhysicalOwners");
+	commit.writes.push_back("StaticShadowPhysicalOwners");
+	commit.writes.push_back("StaticShadowExecutionEvidence");
 	commit.explicitDependencies = { prepare.stableDescriptorId };
 	commit.workerEligible = false;
 	commit.mainThreadRequired = true;
@@ -13206,6 +13830,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	commit.boundaryClassification = HardBoundaryClassification::Protected;
 	commit.hardBoundary = true;
 	commit.protectedCommit = "Validates and seals one render-frame publication, then owns backend resource mutation, typed-range recording, queue submission, pending counters, and visibility targets.";
+	commit.protectedCommit += " Depth query recording, actual submit/completion ownership and optional completed validation copies stay here; workers do not issue Vulkan commands or mutate the scene.";
 	commit.protectedReason = commit.protectedCommit;
 	commit.profilingLabel = "RenderSystem.BackendCommit";
 
@@ -13221,6 +13846,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 		kResourceVirtualGeometryVisibilitySnapshots
 	};
 	publication.writes = {
+		"RendererEfficiencyEvidence",
 		"RendererDiagnostics", kResourceVirtualGeometryDiagnostics,
 		kResourceProfilerFramePublicationEvidence
 	};
@@ -14203,6 +14829,8 @@ void RenderSystem::Clear()
 	retainedRenderableEntries.clear();
 	retainedRuntimeMeshResources.clear();
 	retainedRuntimeMaterialResources.clear();
+	retainedRuntimeMeshOwners.clear();
+	retainedRuntimeMaterialOwners.clear();
 	retainedMeshLocalBounds.clear();
 	retainedRenderableCaptureSourceSignature = 0U;
 	retainedRenderableEntriesReusable = false;
@@ -15064,11 +15692,63 @@ std::uint64_t RenderSystem::GetRuntimeRenderSettingsGeneration() const
 
 void RenderSystem::ApplyQueuedRuntimeRenderSettings()
 {
+	// The existing capture boundary is the sole consumer of transient options.
+	// Recovery changes token ownership before any prior-session ingress can apply.
+	const std::uint64_t backendSession = rhi
+		? rhi->GetLatestRendererRecoverySnapshot().renderSessionGeneration : 0U;
 	std::optional<RuntimeRenderSettingsRequest> request;
+	std::vector<RendererResourcePublicationInvalidation> resourceInvalidations;
+	std::uint64_t currentOptionsEpoch = 0;
+	bool resetEfficiencyEvidence = false;
 	{
 		std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
+		if (efficiencyObservedBackendSession != 0U && backendSession != efficiencyObservedBackendSession)
+		{
+			rendererEfficiencyOptionsQueue.InvalidateSession();
+			resetEfficiencyEvidence = true;
+		}
+		efficiencyObservedBackendSession = backendSession;
+		rendererEfficiencyOptionsQueue.BindRendererSession(backendSession);
+		rendererEfficiencyOptionsQueue.CaptureAtProtectedBoundary();
+		const auto options = rendererEfficiencyOptionsQueue.Snapshot();
+		currentOptionsEpoch = options.optionsSessionGeneration;
+		resourceInvalidations.swap(pendingRendererResourceInvalidations);
+		if (pendingRendererEfficiencyFixtureIntent)
+		{
+			const auto& correlation = pendingRendererEfficiencyFixtureIntent->correlation;
+			if (correlation.settingsGeneration == options.settingsGeneration
+				&& correlation.rendererSessionGeneration == options.rendererSessionGeneration)
+				capturedRendererEfficiencyFixtureIntent = std::move(*pendingRendererEfficiencyFixtureIntent);
+			pendingRendererEfficiencyFixtureIntent.reset();
+		}
+		if (capturedRendererEfficiencyFixtureIntent.correlation.settingsGeneration != options.settingsGeneration
+			|| capturedRendererEfficiencyFixtureIntent.correlation.rendererSessionGeneration != options.rendererSessionGeneration)
+			capturedRendererEfficiencyFixtureIntent = {};
 		request = std::move(pendingRuntimeRenderSettings);
 		pendingRuntimeRenderSettings.reset();
+	}
+	if (resetEfficiencyEvidence)
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		latestRendererEfficiencyEvidence.clear(); latestRendererEfficiencyFixtureTargets.clear();
+		latestRenderFrameSnapshot.efficiencyFixtureIntent = {};
+		TerraEngine::Renderer::ResetRendererEfficiencyFixtureEvidenceBatch(latestRendererEfficiencyEvidenceBatch);
+	}
+	// Actual asynchronous loader publication happens before ingress. Only this
+	// existing protected boundary invalidates GPU payloads; it neither reloads CPU
+	// resources nor introduces a scene mutation flush or a new GPU wait.
+	const auto publicationGeneration = ResourceManager::Instance().GetRendererResourcePublicationGeneration();
+	for (const auto& invalidation : resourceInvalidations)
+	{
+		if (!rhi || invalidation.optionsSessionGeneration != currentOptionsEpoch || !invalidation.publicationGeneration
+			|| invalidation.publicationGeneration > publicationGeneration) continue;
+		switch (invalidation.type)
+		{
+		case AssetType::Mesh: rhi->InvalidateMesh(invalidation.assetId); break;
+		case AssetType::Material: rhi->InvalidateMaterial(invalidation.assetId); break;
+		case AssetType::Texture: rhi->InvalidateTexture(invalidation.assetId); break;
+		default: break;
+		}
 	}
 	if (!request)
 	{
@@ -15108,6 +15788,166 @@ void RenderSystem::ApplyQueuedRuntimeRenderSettings()
 		std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
 		++runtimeRenderSettingsGeneration;
 	}
+}
+
+TerraEngine::Renderer::RendererEfficiencyOptionsReceipt RenderSystem::QueueRendererEfficiencyOptions(
+	const TerraEngine::Renderer::RendererEfficiencyOptions& options)
+{
+	std::lock_guard lock(runtimeRenderSettingsMutex);
+	return rendererEfficiencyOptionsQueue.Queue(options);
+}
+
+TerraEngine::Renderer::RendererEfficiencyOptionsReceipt RenderSystem::QueueRendererEfficiencyRestore(
+	const TerraEngine::Renderer::RendererEfficiencyOptionsToken& token)
+{
+	std::lock_guard lock(runtimeRenderSettingsMutex);
+	return rendererEfficiencyOptionsQueue.Restore(token);
+}
+
+TerraEngine::Renderer::RendererEfficiencyOptionsSnapshot RenderSystem::GetRendererEfficiencyOptionsSnapshot() const
+{
+	std::lock_guard lock(runtimeRenderSettingsMutex);
+	return rendererEfficiencyOptionsQueue.Snapshot();
+}
+
+TerraEngine::Renderer::RendererEfficiencyEvidence RenderSystem::GetLatestRendererEfficiencyEvidence(
+	RenderViewType viewType, std::uint32_t viewId) const
+{
+	// Do not nest the ingress and diagnostic locks: requests may arrive while
+	// protected publication replaces the copied per-view evidence collection.
+	const auto options = GetRendererEfficiencyOptionsSnapshot();
+	TerraEngine::Renderer::RendererEfficiencyFixtureIntent activeIntent;
+	{ std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex); activeIntent = capturedRendererEfficiencyFixtureIntent; }
+	std::lock_guard lock(statsMutex);
+	for (const auto& evidence : latestRendererEfficiencyEvidence)
+		if (evidence.viewType == viewType && evidence.viewId == viewId
+			&& TerraEngine::Renderer::IsCurrentRendererEfficiencyFixtureEvidence(evidence, options, activeIntent)) return evidence;
+	TerraEngine::Renderer::RendererEfficiencyEvidence unavailable;
+	unavailable.viewType = viewType;
+	unavailable.viewId = viewId;
+	unavailable.effectiveOptions = options;
+	unavailable.staticCacheBudgetRequestedBytes = options.options.staticShadowCacheBudgetBytes;
+	unavailable.staticCacheBudgetEffectiveBytes = unavailable.staticCacheBudgetRequestedBytes;
+	unavailable.unavailableReason = "No completed renderer efficiency publication exists for this view.";
+	return unavailable;
+}
+
+TerraEngine::Renderer::RendererEfficiencyFixtureIntentReceipt RenderSystem::QueueRendererEfficiencyFixtureIntent(
+	const TerraEngine::Renderer::RendererEfficiencyFixtureIntent& intent)
+{
+	std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
+	TerraEngine::Renderer::RendererEfficiencyFixtureIntentReceipt receipt;
+	receipt.correlation = intent.correlation;
+	const auto options = rendererEfficiencyOptionsQueue.Snapshot();
+	const auto& correlation = intent.correlation;
+	if (correlation.operationId.empty() || correlation.fixtureStepId.empty()
+		|| correlation.rendererSessionGeneration == 0U
+		|| correlation.rendererSessionGeneration != options.rendererSessionGeneration
+		|| correlation.settingsGeneration != options.settingsGeneration)
+	{ receipt.reason = "Fixture correlation belongs to an unavailable settings/renderer generation."; return receipt; }
+	if (intent.viewOrder.size() > 2 || intent.viewOrigins.size() > 2 || intent.cameras.size() > 2 || intent.casterSelections.size() > 2 || (intent.referenceOriginDelta && !intent.viewOrigins.empty()))
+	{ receipt.reason = "Fixture view controls exceed bounded outputs or specify ambiguous origins."; return receipt; }
+	if (!TerraEngine::Renderer::ValidateRendererEfficiencyFixtureCameras(intent, receipt.reason)) return receipt;
+	if (!TerraEngine::Renderer::ValidateRendererEfficiencyFixtureCasterSelections(intent, receipt.reason)) return receipt;
+	if (!TerraEngine::Renderer::ValidateRendererEfficiencyFixtureLightingControls(intent, receipt.reason)) return receipt;
+	if (!ValidateDepthFixtureIntent(intent,receipt.reason)) return receipt;
+#if !defined(TERRAENGINE_RENDERER_EFFICIENCY_VALIDATION)
+	if (intent.injection != TerraEngine::Renderer::RendererEfficiencyFixtureInjection::None)
+	{ receipt.reason = "Recorded-submit injection is unavailable until its protected backend control is installed."; return receipt; }
+#else
+	if (intent.injection > TerraEngine::Renderer::RendererEfficiencyFixtureInjection::ShadowResourceRecreation)
+	{ receipt.reason = "Unknown validation-only submit injection."; return receipt; }
+#endif
+	const auto& activeOperation = capturedRendererEfficiencyFixtureIntent.correlation.operationId;
+	if ((!activeOperation.empty() && activeOperation != correlation.operationId)
+		|| (pendingRendererEfficiencyFixtureIntent && pendingRendererEfficiencyFixtureIntent->correlation.operationId != correlation.operationId))
+	{ receipt.reason = "Another fixture operation already owns the renderer intent."; return receipt; }
+	// Ingress copies the whole intent. Only the existing settings/capture boundary
+	// publishes it, preserving frame identity while jobs prepare immutable work.
+	auto copied = intent;
+	const auto& prior = pendingRendererEfficiencyFixtureIntent ? *pendingRendererEfficiencyFixtureIntent : capturedRendererEfficiencyFixtureIntent;
+	const bool sameControl = prior.correlation.operationId == correlation.operationId && prior.correlation.fixtureStepId == correlation.fixtureStepId
+		&& prior.referenceOriginDelta == intent.referenceOriginDelta && prior.shadowSelection == intent.shadowSelection && prior.injection == intent.injection
+		&& prior.viewOrder == intent.viewOrder && prior.viewOrigins == intent.viewOrigins && prior.cameras == intent.cameras
+		&& prior.casterSelections == intent.casterSelections && prior.lightingControls == intent.lightingControls
+		&& prior.depthControls == intent.depthControls
+		&& prior.shadowBatchControls == intent.shadowBatchControls
+		&& prior.staticShadowControls == intent.staticShadowControls;
+	copied.controlGeneration = sameControl && prior.controlGeneration ? prior.controlGeneration : ++nextRendererEfficiencyFixtureControlGeneration;
+	copied.controlsApplied = false; copied.controlReason.clear();
+	receipt.controlGeneration = copied.controlGeneration;
+	pendingRendererEfficiencyFixtureIntent = std::move(copied);
+	receipt.accepted = true;
+	return receipt;
+}
+
+void RenderSystem::ClearRendererEfficiencyFixtureIntent(std::string_view operationId)
+{
+	if (operationId.empty()) return;
+	bool cleared = false;
+	{
+	std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
+	if (pendingRendererEfficiencyFixtureIntent && pendingRendererEfficiencyFixtureIntent->correlation.operationId == operationId)
+	{ pendingRendererEfficiencyFixtureIntent.reset(); cleared = true; }
+	if (capturedRendererEfficiencyFixtureIntent.correlation.operationId == operationId)
+	{ capturedRendererEfficiencyFixtureIntent = {}; cleared = true; }
+	}
+	std::lock_guard<std::mutex> lock(statsMutex);
+	if (latestRenderFrameSnapshot.efficiencyFixtureIntent.correlation.operationId == operationId)
+	{ latestRenderFrameSnapshot.efficiencyFixtureIntent = {}; cleared = true; }
+	if (cleared)
+	{
+		latestRendererEfficiencyFixtureTargets.clear(); latestRendererEfficiencyEvidence.clear();
+		TerraEngine::Renderer::ResetRendererEfficiencyFixtureEvidenceBatch(latestRendererEfficiencyEvidenceBatch);
+	}
+}
+
+TerraEngine::Renderer::RendererEfficiencyFixtureIntent RenderSystem::GetRendererEfficiencyFixtureControlSnapshot() const
+{
+	TerraEngine::Renderer::RendererEfficiencyFixtureIntent activeIntent;
+	{ std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex); activeIntent = capturedRendererEfficiencyFixtureIntent; }
+	std::lock_guard<std::mutex> lock(statsMutex);
+	auto result = latestRenderFrameSnapshot.efficiencyFixtureIntent;
+	if (result.correlation.operationId != activeIntent.correlation.operationId || result.controlGeneration != activeIntent.controlGeneration) return {};
+	if (result.controlsApplied && !TerraEngine::Renderer::HasRendererEfficiencyFixtureControlAcknowledgment(latestRendererEfficiencyEvidenceBatch.rows, result))
+	{
+		result.controlsApplied = false;
+		result.controlReason = "Awaiting an actual recorded-command completion receipt for these fixture controls.";
+	}
+	return result;
+}
+std::optional<TerraEngine::Renderer::RendererEfficiencyFixtureTargetProof> RenderSystem::GetRendererEfficiencyFixtureTarget(const TerraEngine::UUID& objectId) const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	const auto found = std::find_if(latestRendererEfficiencyFixtureTargets.begin(), latestRendererEfficiencyFixtureTargets.end(), [&](const auto& row) { return row.objectId == objectId; });
+	return found == latestRendererEfficiencyFixtureTargets.end() ? std::nullopt : std::optional(*found);
+}
+bool RenderSystem::QueueRendererResourcePublicationInvalidation(const TerraEngine::UUID& assetId, AssetType type,
+	std::uint64_t generation, std::string* reason)
+{
+	if (reason) reason->clear();
+	const auto current = ResourceManager::Instance().GetRendererResourcePublicationGeneration();
+	if (assetId == TerraEngine::EMPTY_UUID || !generation || generation > current
+		|| (type != AssetType::Mesh && type != AssetType::Material && type != AssetType::Texture))
+	{ if (reason) *reason = "Actual renderer resource publication identity is unavailable."; return false; }
+	std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
+	const auto epoch = rendererEfficiencyOptionsQueue.Snapshot().optionsSessionGeneration;
+	const auto found = std::find_if(pendingRendererResourceInvalidations.begin(), pendingRendererResourceInvalidations.end(), [&](const auto& row) { return row.assetId == assetId && row.type == type; });
+	if (found == pendingRendererResourceInvalidations.end()) pendingRendererResourceInvalidations.push_back({assetId, type, generation, epoch});
+	else *found = {assetId, type, generation, epoch};
+	return true;
+}
+
+TerraEngine::Renderer::RendererEfficiencyEvidenceBatch RenderSystem::GetRendererEfficiencyEvidenceBatch(std::uint64_t afterBatchSequence) const
+{
+	const auto options = GetRendererEfficiencyOptionsSnapshot();
+	TerraEngine::Renderer::RendererEfficiencyFixtureIntent activeIntent;
+	{ std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex); activeIntent = capturedRendererEfficiencyFixtureIntent; }
+	std::lock_guard<std::mutex> lock(statsMutex);
+	if (latestRendererEfficiencyEvidenceBatch.batchSequence <= afterBatchSequence) return {};
+	auto result = latestRendererEfficiencyEvidenceBatch;
+	std::erase_if(result.rows, [&](const auto& row) { return !TerraEngine::Renderer::IsCurrentRendererEfficiencyFixtureEvidence(row, options, activeIntent); });
+	return result;
 }
 
 void RenderSystem::ApplyTransientRenderDiagnostics(bool validationEnabled, bool debugEnabled)

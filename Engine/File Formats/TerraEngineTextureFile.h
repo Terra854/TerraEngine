@@ -113,6 +113,8 @@ uint32_t ComputeCrc32(const uint8_t* data, size_t size);
 // Fully loaded representation of a .TETF blob. 
 // struct Texture groups related state and operations so callers have one documented contract.
 struct Texture {
+	// Runtime-only identity assigned by accepted ResourceManager publication.
+	std::uint64_t publicationGeneration = 0U;
 	TETFHeader header{};
 	TETFDesc descriptor{};
 	std::vector<TETFLevelEntry> levelTable; // Extracted from DESC chunk

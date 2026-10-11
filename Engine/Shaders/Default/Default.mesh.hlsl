@@ -492,6 +492,12 @@ groupshared uint gMeshShaderPageLocalGeometry;
 groupshared uint gMeshShaderPacketDescriptorIndex;
 groupshared uint gMeshShaderPageId;
 groupshared uint gMeshShaderSelectedVirtualLod;
+// Lane zero validates the member once; all lanes reject together after the
+// barrier. These selected ranges belong to the member, not the group locator.
+groupshared uint gMeshShaderInstanceValid;
+groupshared uint gMeshShaderSelectedMeshletOffset;
+groupshared uint gMeshShaderSelectedMeshletCount;
+groupshared uint gMeshShaderPayloadSource;
 	// Every mesh shader workgroup emits one meshlet. The task payload selects
 	// the owner record so transformed vertices never borrow the representative
 	// command's model matrix.
@@ -1023,7 +1029,7 @@ void EmitMeshlet(
 				deformedNormal,
 				deformedTangent);
 		}
-		
+
 		const float2 uv = decode.uvOffsetScale.xy
 			+ decodedVertex.normalizedTextureCoordinate
 				* decode.uvOffsetScale.zw;
@@ -1226,33 +1232,54 @@ void main(
 	out primitives StableVisibilityPrimitive outputPrimitiveData[kMaxMeshletTriangles])
 {
 	const uint visibleIndex = groupId.x;
+	const bool taskPayloadValid =
+		(SceneUniforms.virtualGeometryFlags & kVirtualGeometryFlagTaskPayloadValid) != 0u;
+	// Mesh-only dispatches have no task payload. Never read its arrays, and
+	// reject malformed task/grouped indices uniformly before any group barrier.
+	if ((taskPayloadValid && visibleIndex >= kTaskBatchSize)
+		|| (!taskPayloadValid && (SceneUniforms.virtualGeometryFlags & kRenderInstanceGroupedFlag) != 0u))
+	{
+		SetMeshOutputCounts(0, 0);
+		return;
+	}
 	if (groupThreadIndex == 0u)
 	{
 		// Only lane zero performs generation and bounds-table validation. Every
 		// other lane consumes the exact same immutable result after the barrier.
-		gMeshShaderPacketDescriptorIndex =
-			taskPayload.packetDescriptorIndices[visibleIndex];
+		gMeshShaderPacketDescriptorIndex = taskPayloadValid
+			? taskPayload.packetDescriptorIndices[visibleIndex]
+			: SceneUniforms.virtualGeometryPacketDescriptorIndex;
 		gMeshShaderAnimationRecord = (DefaultGpuAnimationGraphicsRecord)0;
 		gMeshShaderCanonicalDeformation = (TeAnimatedGraphicsBridge)0;
 		gMeshShaderCanonicalPage = (TeAnimatedGraphicsPage)0;
 		gMeshShaderPageDescriptor = (PageLocalPayloadDescriptor)0;
 		gMeshShaderPageId = 0xffffffffu;
-		gMeshShaderSelectedVirtualLod = taskPayload.selectedVirtualLods[visibleIndex];
+		gMeshShaderSelectedVirtualLod = taskPayloadValid
+			? taskPayload.selectedVirtualLods[visibleIndex] : SceneUniforms.selectedVirtualLod;
 		// Grouped task work disables task culling and replaces this model before
 		// any mesh transform. Vulkan stores a transient stream locator in the
 		// representative translation lane only for that mode.
+		gMeshShaderInstanceValid = 1u;
+		gMeshShaderSelectedMeshletOffset = SceneUniforms.virtualMeshletOffset;
+		gMeshShaderSelectedMeshletCount = SceneUniforms.virtualMeshletCount;
+		gMeshShaderPayloadSource = SceneUniforms.virtualGeometryPayloadSource;
 		gMeshShaderModelMatrix = SceneUniforms.model;
 		gMeshShaderObjectIdentity = uint4(0u, 0u, 0u, 0u);
 		gMeshShaderAnimationBufferIndex = SceneUniforms.meshDataIndex;
 		gMeshShaderAnimationRecordIndex = SceneUniforms.textureIndex;
-		if((SceneUniforms.virtualGeometryFlags & kRenderInstanceGroupedFlag) != 0u) {
-		RenderInstanceRecord instanceRecord;
-		if(TryLoadRenderInstance(
-			// The CPU writes the group locator to GLM column 3. HLSL's first
-			// matrix index selects a row, so `.w` selects that column's element.
-			globalBuffers[NonUniformResourceIndex(asuint(SceneUniforms.model[0].w))],
-			taskPayload.instanceIndices[visibleIndex],
-			asuint(SceneUniforms.model[3].w), instanceRecord)) {
+		if ((SceneUniforms.virtualGeometryFlags & kRenderInstanceGroupedFlag) != 0u)
+		{
+			RenderInstanceRecord instanceRecord;
+			if (TryLoadRenderInstance(
+				// The CPU writes the group locator to GLM column 3. HLSL's first
+				// matrix index selects a row, so `.w` selects that column's element.
+				globalBuffers[NonUniformResourceIndex(asuint(SceneUniforms.model[0].w))],
+				taskPayload.instanceIndices[visibleIndex],
+				asuint(SceneUniforms.model[3].w), instanceRecord))
+			{
+				gMeshShaderSelectedMeshletOffset = instanceRecord.geometrySelectors.z;
+				gMeshShaderSelectedMeshletCount = instanceRecord.geometrySelectors.w;
+				gMeshShaderPayloadSource = instanceRecord.virtualGeometryPayloadSelectors.x;
 				gMeshShaderModelMatrix = instanceRecord.modelMatrix;
 				gMeshShaderObjectIdentity = instanceRecord.objectIdentity;
 				const bool sharedAnimationBuffer =
@@ -1265,54 +1292,69 @@ void main(
 					? instanceRecord.animationSelectors.x
 					: instanceRecord.animationSelectors.y;
 			}
-		}
-		gMeshShaderGpuDeformationAvailable =
-			TryLoadGpuAnimationGraphicsRecordAt(
-				gMeshShaderAnimationBufferIndex,
-				gMeshShaderAnimationRecordIndex,
-				gMeshShaderAnimationRecord)
-				? 1u : 0u;
-		gMeshShaderCanonicalDeformationAvailable =
-			TeTryLoadAnimatedGraphicsBridge(
-				gMeshShaderAnimationBufferIndex,
-				gMeshShaderAnimationRecordIndex,
-				gMeshShaderCanonicalDeformation)
-				? 1u : 0u;
-		gMeshShaderPageLocalGeometry =
-			IsVirtualGeometryPageLocalSource(
-				SceneUniforms.virtualGeometryPayloadSource)
-			// Canonical compute output is keyed by the same physical page id as
-			// this packet. Legacy owner deformation has no such publication and
-			// therefore keeps using the complete owner payload.
-			&& (SceneUniforms.virtualGeometryFlags
-				& kVirtualGeometryFlagOwnerPaletteDeformation) == 0u
-			&& (gMeshShaderCanonicalDeformationAvailable != 0u
-				|| gMeshShaderGpuDeformationAvailable == 0u)
-			&& TryLoadPageLocalPayloadDescriptorAt(
-				gMeshShaderPacketDescriptorIndex,
-				gMeshShaderPageDescriptor)
-				? 1u : 0u;
-		gMeshShaderCanonicalPageAvailable = 0u;
-		if (gMeshShaderPageLocalGeometry != 0u)
-		{
-			gMeshShaderPageId =
-				LoadVirtualGeometryPagePayloadDescriptorWordAt(
-					gMeshShaderPacketDescriptorIndex,
-					0u,
-					0xffffffffu);
-			if (gMeshShaderCanonicalDeformationAvailable != 0u)
+			else
 			{
-				gMeshShaderCanonicalPageAvailable =
-					TeTryResolveAnimatedGraphicsPage(
-						gMeshShaderAnimationBufferIndex,
-						gMeshShaderCanonicalDeformation,
-						gMeshShaderPageId,
-						gMeshShaderCanonicalPage)
-						? 1u : 0u;
+				gMeshShaderInstanceValid = 0u;
+			}
+		}
+		// Invalid members must not read representative animation or page owners.
+		if (gMeshShaderInstanceValid != 0u)
+		{
+			gMeshShaderGpuDeformationAvailable =
+				TryLoadGpuAnimationGraphicsRecordAt(
+					gMeshShaderAnimationBufferIndex,
+					gMeshShaderAnimationRecordIndex,
+					gMeshShaderAnimationRecord)
+					? 1u : 0u;
+			gMeshShaderCanonicalDeformationAvailable =
+				TeTryLoadAnimatedGraphicsBridge(
+					gMeshShaderAnimationBufferIndex,
+					gMeshShaderAnimationRecordIndex,
+					gMeshShaderCanonicalDeformation)
+					? 1u : 0u;
+			gMeshShaderPageLocalGeometry =
+				IsVirtualGeometryPageLocalSource(
+					gMeshShaderPayloadSource)
+				// Canonical compute output is keyed by the same physical page id as
+				// this packet. Legacy owner deformation has no such publication and
+				// therefore keeps using the complete owner payload.
+				&& (SceneUniforms.virtualGeometryFlags
+					& kVirtualGeometryFlagOwnerPaletteDeformation) == 0u
+				&& (gMeshShaderCanonicalDeformationAvailable != 0u
+					|| gMeshShaderGpuDeformationAvailable == 0u)
+				&& TryLoadPageLocalPayloadDescriptorAt(
+					gMeshShaderPacketDescriptorIndex,
+					gMeshShaderPageDescriptor)
+					? 1u : 0u;
+			gMeshShaderCanonicalPageAvailable = 0u;
+			if (gMeshShaderPageLocalGeometry != 0u)
+			{
+				gMeshShaderPageId =
+					LoadVirtualGeometryPagePayloadDescriptorWordAt(
+						gMeshShaderPacketDescriptorIndex,
+						0u,
+						0xffffffffu);
+				if (gMeshShaderCanonicalDeformationAvailable != 0u)
+				{
+					gMeshShaderCanonicalPageAvailable =
+						TeTryResolveAnimatedGraphicsPage(
+							gMeshShaderAnimationBufferIndex,
+							gMeshShaderCanonicalDeformation,
+							gMeshShaderPageId,
+							gMeshShaderCanonicalPage)
+							? 1u : 0u;
+				}
 			}
 		}
 	}
 	GroupMemoryBarrierWithGroupSync();
+	// Every lane sees the same validity result, so this exit cannot strand a
+	// peer at a later mesh emission barrier.
+	if (gMeshShaderInstanceValid == 0u)
+	{
+		SetMeshOutputCounts(0, 0);
+		return;
+	}
 
 	const uint packetDescriptorIndex = gMeshShaderPacketDescriptorIndex;
 	const DefaultGpuAnimationGraphicsRecord animationRecord =
@@ -1339,17 +1381,18 @@ void main(
 		: (decode.counts.w & 0x7FFFFFFFu);
 	const uint selectedMeshletOffset = pageLocalGeometry
 		? 0u
-		: min(SceneUniforms.virtualMeshletOffset, meshletCount);
-	const uint selectedMeshletCount = SceneUniforms.virtualMeshletCount == 0u
+		: min(gMeshShaderSelectedMeshletOffset, meshletCount);
+	const uint selectedMeshletCount = gMeshShaderSelectedMeshletCount == 0u
 		? (meshletCount - selectedMeshletOffset)
-		: min(SceneUniforms.virtualMeshletCount, meshletCount - selectedMeshletOffset);
-	const bool taskPayloadValid =
-		(SceneUniforms.virtualGeometryFlags & kVirtualGeometryFlagTaskPayloadValid) != 0u;
+		: min(gMeshShaderSelectedMeshletCount, meshletCount - selectedMeshletOffset);
 	const uint meshletIndex = taskPayloadValid
 		? taskPayload.meshletIndices[visibleIndex]
 		: selectedMeshletOffset + visibleIndex;
 	if (pageLocalGeometry)
 	{
+		// Page-local selection is established by the task stage; malformed
+		// mesh-only page commands cannot consume an uninitialized payload.
+		if (!taskPayloadValid) { SetMeshOutputCounts(0, 0); return; }
 		// Page-local indices are always resolved by the task stage. This remains
 		// true when culling is disabled because task compaction still establishes
 		// the packet descriptor and local meshlet pair for the mesh stage.

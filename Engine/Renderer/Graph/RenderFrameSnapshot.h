@@ -3,9 +3,39 @@
 #pragma once
 
 #include "Renderer/VirtualGeometry/Selection/RenderViewSelectionData.h"
+#include "Renderer/ShadowWorkPlan.h"
 
 namespace TerraEngine::Renderer
 {
+	// Copy the worker generation into backend-owned command storage. This pure
+	// mapping is shared by publication and tests so no live animation lookup is
+	// required when a light-specific command is later resolved.
+	inline RenderItemRecord::PublishedAnimationGeneration
+	BuildPublishedAnimationGeneration(const AnimationRenderGenerationRecord& source) noexcept
+	{
+		RenderItemRecord::PublishedAnimationGeneration result{};
+		result.stableInstanceId = source.stableInstanceId;
+		result.poseGeneration = source.poseGeneration;
+		result.morphGeneration = source.morphGeneration;
+		result.deformationContentIdLow = source.deformationContentIdLow;
+		result.deformationContentIdHigh = source.deformationContentIdHigh;
+		result.paletteGeneration = source.paletteGeneration;
+		result.deformablePayloadGeneration = source.deformablePayloadGeneration;
+		result.programGeneration = source.programGeneration;
+		result.animationPlanGeneration = source.animationPlanGeneration;
+		result.rendererGeneration = source.rendererGeneration;
+		result.firstGpuWorkPacket = source.firstGpuWorkPacket;
+		result.gpuWorkPacketCount = source.gpuWorkPacketCount;
+		result.gpuStageMask = source.gpuStageMask;
+		result.source = static_cast<std::uint8_t>(source.source);
+		result.complete = source.complete;
+		return result;
+	}
+
+	// Merge only immutable semantic command inputs; unknown evidence forbids reuse.
+	TERRAENGINE_API ShadowCasterStampInput BuildShadowCasterStampInput(const RenderItemRecord&,
+		const RenderReferenceFrame&, std::uint64_t, std::optional<std::uint64_t> = std::nullopt);
+
 	struct RenderViewTransformRecord
 	{
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
@@ -49,6 +79,8 @@ namespace TerraEngine::Renderer
 		std::vector<DeformationPageDemand> animatedGeometryPageDemands;
 		std::size_t animatedGeometryPageDemandCount = 0u;
 		RenderSettings renderSettings;
+		RendererEfficiencyOptionsSnapshot efficiencyOptions{};
+		RendererEfficiencyFixtureIntent efficiencyFixtureIntent{};
 		std::uint64_t resourceRevision = 0u;
 		std::uint64_t sceneRevision = 0u;
 		bool valid = true;

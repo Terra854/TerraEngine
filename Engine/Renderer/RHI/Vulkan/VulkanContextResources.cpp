@@ -1,3 +1,4 @@
+#include "VulkanUploadAcceptance.h"
 // VulkanContextResources.cpp — Core Vulkan buffer, texture, mesh, and descriptor resources
 //
 // This module owns the shared resource primitives used by the specialized resource modules.
@@ -52,12 +53,27 @@ namespace
 
 // VulkanContext::Impl::CreateDefaultTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateDefaultTexture() {
+	defaultTextureShaderReadable = false;
 	// 1. Create Default White Texture (Index 0)
 	{
 		uint32_t whitePixel = 0xFFFFFFFF;
 		VkDeviceSize imageSize = 4;
 		VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Generic Staging Buffer");
-		WriteMappedBuffer(allocator, stagingBuffer, &whitePixel, imageSize);
+		// This upload is also the cold HiZ fallback. Keep its temporary allocation
+		// owned on every failure path, and never publish a merely allocated image
+		// as shader-readable when an upload or layout submission failed.
+		struct WhiteStagingOwner
+		{
+			VmaAllocator allocator;
+			VulkanBuffer& buffer;
+			~WhiteStagingOwner()
+			{
+				if (buffer.buffer != VK_NULL_HANDLE)
+					vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
+			}
+		} stagingOwner{ allocator, stagingBuffer };
+		if (stagingBuffer.buffer == VK_NULL_HANDLE || !WriteMappedBuffer(allocator, stagingBuffer, &whitePixel, imageSize))
+			throw std::runtime_error("Failed to stage the default white texture.");
 
 		VkImageCreateInfo imageInfo{};
 		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -73,15 +89,25 @@ void VulkanContext::Impl::CreateDefaultTexture() {
 
 		VmaAllocationCreateInfo allocInfo = {};
 		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-		vmaCreateImage(allocator, &imageInfo, &allocInfo, &defaultTexture.image, &defaultTexture.allocation, nullptr);
+		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &defaultTexture.image, &defaultTexture.allocation, nullptr) != VK_SUCCESS)
+			throw std::runtime_error("Failed to allocate the default white texture.");
 		vmaSetAllocationName(allocator, defaultTexture.allocation, "Default White Texture");
 
-		TransitionImageLayout(defaultTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-		CopyBufferToImage(stagingBuffer.buffer, defaultTexture.image, 1, 1);
-		TransitionImageLayout(defaultTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		// Reserve before submission so uncertain completion can transfer ownership
+		// without allocating. Cleanup releases retained uploads only at its existing
+		// idle/device-loss boundary; a failed fence does not prove this buffer unused.
+		ambiguousUploadBuffers.reserve(ambiguousUploadBuffers.size() + 1U);
+		if (!TransitionImageLayout(defaultTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+			|| !CopyBufferToImage(stagingBuffer.buffer, defaultTexture.image, 1, 1)
+			|| !TransitionImageLayout(defaultTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+		{
+			RetainAmbiguousUpload(stagingBuffer);
+			throw std::runtime_error("Failed to complete the default white texture upload and shader-readable layout.");
+		}
 
-		vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 		defaultTexture.view = CreateImageView(defaultTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
+		if (defaultTexture.view == VK_NULL_HANDLE)
+			throw std::runtime_error("Failed to create the default white texture view.");
 
 		VkSamplerCreateInfo samplerInfo{};
 		samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -90,7 +116,8 @@ void VulkanContext::Impl::CreateDefaultTexture() {
 		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		vkCreateSampler(device, &samplerInfo, nullptr, &defaultTexture.sampler);
+		if (vkCreateSampler(device, &samplerInfo, nullptr, &defaultTexture.sampler) != VK_SUCCESS)
+			throw std::runtime_error("Failed to create the default white texture sampler.");
 
 		uint32_t idx = AllocateTextureIndex(); // Should be 0
 		UpdateGlobalTexture(idx, defaultTexture);
@@ -186,6 +213,9 @@ void VulkanContext::Impl::CreateDefaultTexture() {
 		uint32_t idx = AllocateTextureIndex(); // Should be 2
 		UpdateGlobalTexture(idx, defaultMaterialMaskTexture);
 	}
+	// Slot-zero publication follows its synchronous upload/layout transitions.
+	// The initialization grant records the actual native descriptor writes.
+	defaultTextureShaderReadable = !deviceLost && textureDescriptorBootstrap.RequiredWritesComplete();
 }
 
 // VulkanContext::Impl::CreateBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -261,18 +291,40 @@ void VulkanContext::Impl::RetireBuffer(VulkanBuffer& buffer)
 
 
 // VulkanContext::Impl::CopyBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+bool VulkanContext::Impl::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
-	if (commandBuffer == VK_NULL_HANDLE)
-	{
-		return;
-	}
-
+	if (commandBuffer == VK_NULL_HANDLE) return false;
 	VkBufferCopy copyRegion{};
 	copyRegion.size = size;
 	vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+	return EndSingleTimeCommands(commandBuffer, "buffer copy");
+}
 
-	(void)EndSingleTimeCommands(commandBuffer, "buffer copy");
+void VulkanContext::Impl::RetainAmbiguousUpload(VulkanBuffer& buffer) noexcept {
+	// Capacity is reserved before native submission; ownership transfer cannot allocate afterward.
+	if (buffer.buffer == VK_NULL_HANDLE) return;
+	assert(ambiguousUploadBuffers.size() < ambiguousUploadBuffers.capacity());
+	ambiguousUploadBuffers.push_back(buffer);
+	buffer = {};
+}
+
+void VulkanContext::Impl::RetainAmbiguousUpload(VulkanImage& image) noexcept {
+	if (image.image == VK_NULL_HANDLE) return;
+	assert(ambiguousUploadImages.size() < ambiguousUploadImages.capacity());
+	ambiguousUploadImages.push_back(image);
+	image = {};
+}
+
+void VulkanContext::Impl::ReleaseAmbiguousUploadsAfterIdle() noexcept {
+	// Caller supplies actual idle proof or terminal device-loss teardown.
+	for (auto& buffer : ambiguousUploadBuffers) DestroyBufferImmediate(buffer);
+	for (auto& image : ambiguousUploadImages) {
+		if (image.sampler != VK_NULL_HANDLE) vkDestroySampler(device, image.sampler, nullptr);
+		if (image.view != VK_NULL_HANDLE) vkDestroyImageView(device, image.view, nullptr);
+		if (image.image != VK_NULL_HANDLE) vmaDestroyImage(allocator, image.image, image.allocation);
+	}
+	ambiguousUploadImages.clear();
+	ambiguousUploadBuffers.clear();
 }
 
 // VulkanContext::Impl::BeginSingleTimeCommands is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -737,18 +789,21 @@ VkFormat VulkanContext::Impl::MapTextureFormat(uint32_t vkFormat) {
 // VulkanContext::Impl::EnsureTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
+	if (deviceLost || !initialized) return;
+	const auto textureOwner = ResourceManager::Instance().AcquireTextureSnapshot(textureId);
 	if (textureCache.contains(textureId)) {
 		const VulkanImage& cachedTexture = textureCache[textureId];
 		const TerraEngine::Resource::TextureMipResidency desiredMipResidency =
 			ResourceManager::Instance().ResolveTextureMipResidencyForTexture(textureId, cachedTexture.sourceMipCount);
-		if (desiredMipResidency.residentMipCount != cachedTexture.residentMipCount
+		if (cachedTexture.sourceOwner != textureOwner
+			|| desiredMipResidency.residentMipCount != cachedTexture.residentMipCount
 			|| desiredMipResidency.sourceMipOffset != cachedTexture.residentMipOffset)
 		{
-			// Texture streaming policy and view distance can change while a
-			// texture is cached. Recreate the image when the desired mip tail no
-			// longer matches the cached VkImage dimensions, then fall through to
-			// the normal upload path below.
+			// UUID identity survives CPU replacement. The uploaded pixels must
+			// follow the actual immutable owner as well as the desired mip tail.
 			InvalidateTexture(textureId, false, true);
+			if (textureCache.contains(textureId)) return;
+			if (deviceLost || !initialized) return;
 		}
 		else
 		{
@@ -769,9 +824,11 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 		}
 	}
 
-	Texture* cpuTexture = ResourceManager::Instance().GetTexture(textureId);
+	ambiguousUploadBuffers.reserve(ambiguousUploadBuffers.size() + 1U);
+	ambiguousUploadImages.reserve(ambiguousUploadImages.size() + 1U);
+	const Texture* cpuTexture = textureOwner.get(); // Retain bytes across asynchronous publication.
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!cpuTexture) return;
+	if (!cpuTexture || cpuTexture->publicationGeneration == 0U) return;
 
 	// Ensure we have transcoded UASTC data
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -835,7 +892,13 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	}
 
 	VulkanBuffer stagingBuffer = CreateBuffer(residentPayloadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Texture Mip Staging Buffer");
-	WriteMappedBuffer(allocator, stagingBuffer, residentUploadData.data(), residentPayloadSize);
+	if (stagingBuffer.buffer == VK_NULL_HANDLE
+		|| !WriteMappedBuffer(allocator, stagingBuffer, residentUploadData.data(), residentPayloadSize)) {
+		// No command references this allocation yet; failed mapped writes cannot
+		// publish an image whose pixels would be uninitialized.
+		DestroyBufferImmediate(stagingBuffer);
+		return;
+	}
 
 	VkImageCreateInfo imageInfo{};
 	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -852,7 +915,7 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-	VulkanImage vImage;
+	VulkanImage vImage{};
 	VmaAllocationCreateInfo allocInfo = {};
 	allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
@@ -914,6 +977,8 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 		// If the queue did not prove completion, leave the upload allocations
 		// alone instead of destroying resources a possibly-pending command
 		// buffer may still reference. The texture is not cached or published.
+		RetainAmbiguousUpload(stagingBuffer);
+		RetainAmbiguousUpload(vImage);
 		return;
 	}
 
@@ -949,6 +1014,11 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 		return;
 	}
 
+	if (!UpdateSampledTextureAliases(textureId, vImage)) {
+		RetainAmbiguousUpload(vImage);
+		return;
+	}
+	vImage.sourceOwner = textureOwner;
 	textureCache[textureId] = vImage;
 	ResourceManager::Instance().MarkResourceUploadedToGpu(
 		textureId,
@@ -963,7 +1033,6 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	// A mip replacement retains existing alias indices. Publish the new view to
 	// every sampler variant first, then ensure legacy callers have the ordinary
 	// trilinear-repeat alias recorded in textureIndexMap.
-	UpdateSampledTextureAliases(textureId, vImage);
 	const auto defaultKey = NormalizeTextureSampler(DefaultTextureSamplerRequest());
 	textureIndexMap[textureId] = AcquireSampledTextureAlias(textureId, defaultKey);
 }
@@ -971,16 +1040,71 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 // VulkanContext::Impl::EnsureMaterialDescriptorSets is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(TerraEngine::UUID shaderCollectionId, TerraEngine::UUID materialId) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
+	if (deviceLost || !initialized || currentFrame >= globalDescriptorSets.size()) return {};
 	// No longer returns descriptor sets, but acts as an upload mechanism for material data.
 	// The return value is kept for now to minimize API breakage, but it will be empty besides the global set.
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (materialIndexMap.contains(materialId)) {
+	const auto materialOwner = ResourceManager::Instance().AcquireMaterialSnapshot(materialId);
+	const Material* material = materialOwner.get();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	if (!material || material->publicationGeneration == 0U || material->header.textureCount > material->textures.size()) {
+		if (materialIndexMap.contains(materialId)) InvalidateMaterial(materialId);
 		return { globalDescriptorSets[currentFrame] };
 	}
+	if (materialIndexMap.contains(materialId)
+		&& (!materialSourceOwners.contains(materialId) || materialSourceOwners.at(materialId) != materialOwner))
+		InvalidateMaterial(materialId);
+	if (deviceLost) return {};
 
-	Material* material = ResourceManager::Instance().GetMaterial(materialId);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!material) return { globalDescriptorSets[currentFrame] };
+	// Texture publication can replace pixels without changing material UUID or
+	// sampler intent. Ensure dependencies before trusting an existing SSBO index;
+	// that operation may itself invalidate every material lookup.
+	std::vector<std::pair<TerraEngine::UUID, std::shared_ptr<const Texture>>> uploadedDependencies;
+	auto prepareDependency = [&](TerraEngine::UUID id, const TerraEngine::Renderer::Vulkan::SamplerKey& sampler) {
+		if (id == TerraEngine::EMPTY_UUID) return;
+		EnsureTexture(id);
+		const auto alias = AcquireSampledTextureAlias(id, sampler);
+		const auto texture = textureCache.find(id);
+		uploadedDependencies.emplace_back(id, alias != 0U && texture != textureCache.end()
+			? texture->second.sourceOwner : nullptr);
+	};
+	for (std::uint32_t index = 0U; index < material->header.textureCount; ++index) {
+		const auto& binding = material->textures[index];
+		prepareDependency(binding.textureUuid, NormalizeTextureSampler(MaterialSamplerRequest(binding)));
+	}
+	const auto terrainBinding = TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeRegistry::Instance().Resolve(materialId);
+	if (terrainBinding && terrainBinding->IsComplete()) {
+		prepareDependency(terrainBinding->weightTextureId, NormalizeTextureSampler(DefaultTextureSamplerRequest()));
+		prepareDependency(terrainBinding->layerIdTextureId, NormalizeTextureSampler(DefaultTextureSamplerRequest()));
+		for (std::uint32_t layerIndex = 0U; layerIndex < terrainBinding->layerCount; ++layerIndex) {
+			const auto& layer = terrainBinding->layers[layerIndex];
+			const std::array<TerraEngine::UUID, 4U> ids{layer.baseColorTextureId, layer.normalTextureId, layer.ormTextureId, layer.emissiveTextureId};
+			for (std::size_t index = 0U; index < ids.size(); ++index)
+				prepareDependency(ids[index], NormalizeTextureSampler(layer.samplers[index]));
+		}
+	}
+	if (deviceLost || ResourceManager::Instance().AcquireMaterialSnapshot(materialId) != materialOwner)
+		return { globalDescriptorSets[currentFrame] };
+	if (materialIndexMap.contains(materialId)) {
+		if (materialSourceOwners.contains(materialId) && materialSourceOwners.at(materialId) == materialOwner
+			&& materialTextureSourceOwners.contains(materialId)
+			&& materialTextureSourceOwners.at(materialId) == uploadedDependencies)
+			return { globalDescriptorSets[currentFrame] };
+		InvalidateMaterial(materialId);
+	}
+	if (deviceLost || materialIndexMap.contains(materialId)) return {};
+	std::size_t dependencyCursor = 0U;
+	auto refreshUploadedDependency = [&](TerraEngine::UUID id, std::uint32_t alias) {
+		if (id == TerraEngine::EMPTY_UUID) return;
+		const auto texture = textureCache.find(id);
+		// Keep duplicate UUID bindings distinct: a failed base sampler must not
+		// gain proof from a later successful normal sampler using the same image.
+		if (dependencyCursor < uploadedDependencies.size()) {
+			uploadedDependencies[dependencyCursor].second = alias != 0U && texture != textureCache.end()
+				? texture->second.sourceOwner : nullptr;
+			++dependencyCursor;
+		}
+	};
 
 	MaterialData data = CreateFallbackMaterialData();
 	data.BaseColorFactor = glm::vec4(
@@ -1028,6 +1152,7 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 		// different filter or addressing behavior.
 		const auto samplerKey = NormalizeTextureSampler(MaterialSamplerRequest(binding));
 		const uint32_t gpuIndex = AcquireSampledTextureAlias(binding.textureUuid, samplerKey);
+		refreshUploadedDependency(binding.textureUuid, gpuIndex);
 
 		// Dispatch by explicit engine state so each case documents one supported behavior.
 		switch (binding.semantic) {
@@ -1044,8 +1169,7 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 		}
 	}
 
-	if(const auto terrainBinding = TerraEngine::Renderer::Terrain::TerrainMaterialRuntimeRegistry::Instance().Resolve(materialId);
-		terrainBinding && terrainBinding->IsComplete())
+	if(terrainBinding && terrainBinding->IsComplete())
 	{
 		// Terrain control maps and layer tables are runtime-derived resources. They
 		// stay outside TMAT v1 serialization while sharing the ordinary bindless heap
@@ -1054,6 +1178,8 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 		EnsureTexture(terrainBinding->layerIdTextureId);
 		const auto weightIndex = textureIndexMap.find(terrainBinding->weightTextureId);
 		const auto idIndex = textureIndexMap.find(terrainBinding->layerIdTextureId);
+		refreshUploadedDependency(terrainBinding->weightTextureId, weightIndex != textureIndexMap.end() ? weightIndex->second : 0U);
+		refreshUploadedDependency(terrainBinding->layerIdTextureId, idIndex != textureIndexMap.end() ? idIndex->second : 0U);
 		if(weightIndex != textureIndexMap.end() && idIndex != textureIndexMap.end())
 		{
 			// Terrain runtime layers already include the component tint in each
@@ -1076,6 +1202,7 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 					EnsureTexture(sourceIds[semanticIndex]);
 					const auto key = NormalizeTextureSampler(layer.samplers[semanticIndex]);
 					textureIndices[semanticIndex] = AcquireSampledTextureAlias(sourceIds[semanticIndex], key);
+					refreshUploadedDependency(sourceIds[semanticIndex], textureIndices[semanticIndex]);
 				}
 				// The compatibility material record currently exposes base color only;
 				// dedicated terrain packets consume all four indices from their fixed
@@ -1092,15 +1219,38 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 		}
 	}
 
-	uint32_t materialIndex = AllocateMaterialIndex();
-	materialIndexMap[materialId] = materialIndex;
-
-	VkDeviceSize bufferSize = sizeof(MaterialData);
-	VulkanBuffer stagingBuffer = CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Material Data Staging Buffer");
-	WriteMappedBuffer(allocator, stagingBuffer, &data, bufferSize);
-
+	// Reserve bookkeeping before the GPU can accept work. The final node insert
+	// and owner swaps are allocation-free; an index is visible only after proof.
+	ambiguousUploadBuffers.reserve(ambiguousUploadBuffers.size() + 1U);
+	materialIndexMap.reserve(materialIndexMap.size() + 1U);
+	auto ownerSlot = materialSourceOwners.try_emplace(materialId).first;
+	auto dependencySlot = materialTextureSourceOwners.try_emplace(materialId).first;
+	const uint32_t materialIndex = AllocateMaterialIndex();
+	VulkanBuffer stagingBuffer{};
+	bool uploadMayBePending = false, committed = false;
+	struct UploadGuard {
+		Impl& impl; TerraEngine::UUID id; std::uint32_t index; VulkanBuffer& staging;
+		bool& mayBePending; bool& committed;
+		~UploadGuard() noexcept {
+			if (!mayBePending) impl.DestroyBufferImmediate(staging);
+			else impl.RetainAmbiguousUpload(staging);
+			if (!committed) {
+				impl.materialSourceOwners.erase(id); impl.materialTextureSourceOwners.erase(id);
+				// Unknown completion must not recycle an SSBO index still targeted
+				// by a possibly accepted one-shot upload.
+				if (!mayBePending) try { impl.freeMaterialIndices.push_back(index); } catch (...) {}
+			}
+		}
+	} guard{*this, materialId, materialIndex, stagingBuffer, uploadMayBePending, committed};
+	std::unordered_map<TerraEngine::UUID, uint32_t> stagedIndex;
+	stagedIndex.emplace(materialId, materialIndex);
+	auto indexNode = stagedIndex.extract(materialId);
+	const VkDeviceSize bufferSize = sizeof(MaterialData);
+	stagingBuffer = CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Material Data Staging Buffer");
+	if (stagingBuffer.buffer == VK_NULL_HANDLE || !WriteMappedBuffer(allocator, stagingBuffer, &data, bufferSize))
+		return { globalDescriptorSets[currentFrame] };
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
-	if (commandBuffer != VK_NULL_HANDLE)
+	if (commandBuffer == VK_NULL_HANDLE) return { globalDescriptorSets[currentFrame] };
 	{
 		VkBufferCopy copyRegion{};
 		copyRegion.srcOffset = 0;
@@ -1110,10 +1260,15 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 			vkCmdCopyBuffer(commandBuffer, stagingBuffer.buffer, globalMaterialSSBOs[i].buffer, 1, &copyRegion);
 		}
-		EndSingleTimeCommands(commandBuffer, "material data upload");
+		uploadMayBePending = true;
+		if (!EndSingleTimeCommands(commandBuffer, "material data upload"))
+			return { globalDescriptorSets[currentFrame] };
+		uploadMayBePending = false;
 	}
-
-	vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
+	ownerSlot->second = materialOwner;
+	dependencySlot->second.swap(uploadedDependencies);
+	materialIndexMap.insert(std::move(indexNode));
+	committed = true;
 
 	return { globalDescriptorSets[currentFrame] };
 }
@@ -1124,14 +1279,19 @@ void VulkanContext::Impl::InvalidateMaterial(TerraEngine::UUID materialId) {
 	// Material edits can change alpha clipping or shadow behavior, so cached
 	// shadow results are conservatively invalidated before the material is
 	// rebound.
-	shadowCacheEntries.clear();
+	ResetShadowPublication(false);
 	auto it = materialIndexMap.find(materialId);
 	if (it != materialIndexMap.end()) {
+		// Existing recorded primaries must submit/complete before a replacement
+		// overwrites their material SSBO index. Warm cache hits never wait here.
+		if (!WaitForDescriptorMutationIdle()) return;
 		if (it->second != kFallbackMaterialIndex) {
 			freeMaterialIndices.push_back(it->second);
 		}
 		materialIndexMap.erase(it);
 	}
+	materialSourceOwners.erase(materialId);
+	materialTextureSourceOwners.erase(materialId);
 }
 
 // VulkanContext::Impl::InvalidateMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1140,14 +1300,16 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	// Mesh edits change caster geometry. Clear every cache entry rather than
 	// trying to prove which light was affected.
-	shadowCacheEntries.clear();
+	ResetShadowPublication(false);
 	auto it = meshCache.find(meshId);
 	if (it != meshCache.end()) {
 		// Pending command buffers can still reference the mesh-local descriptor
 		// sets and bindless buffer slot while a project reload is invalidating
 		// resources. Wait once before mutating or freeing any descriptor-backed
 		// state owned by this mesh.
-		WaitForDescriptorMutationIdle();
+		if (!WaitForDescriptorMutationIdle()) return;
+		// The same idle proof protects every shadow-local authored page buffer.
+		DestroyShadowAuthoredPagePayloads(meshId);
 		if (it->second.bindlessIndex != INVALID_BINDLESS_BUFFER_INDEX) {
 			// The descriptor still contains the old buffer handle until the slot
 			// is reused, but no live draw should index this mesh after the cache
@@ -1202,7 +1364,8 @@ void VulkanContext::Impl::InvalidateTexture(
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	// Texture edits may affect alpha-tested caster silhouettes, so shadow cache
 	// reuse falls back to refresh after the texture changes.
-	shadowCacheEntries.clear();
+	ResetShadowPublication(false);
+	if (!WaitForDescriptorMutationIdle()) return;
 	bool textureWasKnown = false;
 	const bool retainAliases = reloadAfterInvalidate || preserveAliasesForReplacement;
 	const bool hasAliases = std::any_of(
@@ -1211,9 +1374,9 @@ void VulkanContext::Impl::InvalidateTexture(
 	if(hasAliases)
 	{
 		if(retainAliases)
-			UpdateSampledTextureAliases(textureId, defaultTexture);
+		{ if (!UpdateSampledTextureAliases(textureId, defaultTexture)) return; }
 		else
-			RetireSampledTextureAliases(textureId);
+		{ if (!RetireSampledTextureAliases(textureId)) return; }
 		textureWasKnown = true;
 	}
 	auto it = textureCache.find(textureId);
@@ -1225,7 +1388,7 @@ void VulkanContext::Impl::InvalidateTexture(
 		// No descriptor may continue naming a view that is about to be destroyed.
 		// Immediate reload and mip-tail replacement retain stable alias indices;
 		// eviction retires the aliases and returns their slots to the global heap.
-		WaitForDescriptorMutationIdle();
+		if (!WaitForDescriptorMutationIdle()) return;
 		vkDestroySampler(device, it->second.sampler, nullptr);
 		vkDestroyImageView(device, it->second.view, nullptr);
 		vmaDestroyImage(allocator, it->second.image, it->second.allocation);
@@ -1256,6 +1419,8 @@ void VulkanContext::Impl::InvalidateTexture(
 			}
 		}
 		materialIndexMap.clear();
+		materialSourceOwners.clear();
+		materialTextureSourceOwners.clear();
 	}
 
 	if (reloadAfterInvalidate)
@@ -1278,12 +1443,22 @@ void VulkanContext::Impl::InvalidateResource(TerraEngine::UUID id, bool reloadTe
 // VulkanContext::Impl::EnsureMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
+	const auto meshOwner = ResourceManager::Instance().AcquireMeshSnapshot(meshId);
 	auto existingMeshIt = meshCache.find(meshId);
+	if (existingMeshIt != meshCache.end() && existingMeshIt->second.sourceOwner != meshOwner) {
+		// A CPU publication can replace geometry at the same durable UUID. Drain
+		// existing descriptor users through the ordinary invalidation boundary
+		// before rebuilding, so old GPU bytes never acquire the new CPU revision.
+		InvalidateMesh(meshId);
+		if (meshCache.contains(meshId)) return;
+		existingMeshIt = meshCache.end();
+		if (deviceLost || !initialized) return;
+	}
 	if (existingMeshIt != meshCache.end())
 	{
 		const VulkanMesh& mesh = existingMeshIt->second;
 		const VkDeviceSize totalGpuBytes = TotalMeshGpuBytes(mesh);
-		const Mesh* cpuMesh = ResourceManager::Instance().GetMesh(meshId);
+		const Mesh* cpuMesh = meshOwner.get();
 		std::string uploadDetail = "vulkan mesh cache hit";
 		if (cpuMesh != nullptr && cpuMesh->hasVirtualGeometry && cpuMesh->virtualGeometryPageStreamingReady)
 		{
@@ -1300,9 +1475,9 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 		return;
 	}
 
-	Mesh* cpuMesh = ResourceManager::Instance().GetMesh(meshId);
+	const Mesh* cpuMesh = meshOwner.get(); // One immutable payload supplies the complete GPU upload.
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!cpuMesh) return;
+	if (!cpuMesh || cpuMesh->publicationGeneration == 0U || nextMeshAllocationGeneration == 0U) return;
 
 	const VkDeviceSize packedVertexSize = static_cast<VkDeviceSize>(cpuMesh->meshletVertexData.size());
 	const VkDeviceSize vertexRemapSize = static_cast<VkDeviceSize>(cpuMesh->meshletVertexRemapData.size());
@@ -1391,6 +1566,9 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 		TERRAENGINE_LOG(LogLevel::Warning, "Mesh morph runtime data was inconsistent; uploading a zero morph delta fallback for UUID " << ToHexString(meshId));
 	}
 
+	// Reserve rare failure retirement before any native upload can be accepted.
+	ambiguousUploadBuffers.reserve(ambiguousUploadBuffers.size() + 24U);
+	meshCache.reserve(meshCache.size() + 1U);
 	VulkanMesh vMesh{};
 	vMesh.indexCount = cpuMesh->runtimeLayout.meshletPrimitiveIndexCount;
 	vMesh.indexType = VK_INDEX_TYPE_UINT16;
@@ -1406,14 +1584,9 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 		return buffer;
 	};
 
-	const bool usePageLocalVirtualGeometry =
-		cpuMesh->hasVirtualGeometry
-		&& cpuMesh->virtualGeometryPageStreamingReady
-		&& cpuMesh->virtualGeometryOwnerFallbackReason.empty()
-		// Deformable draws currently consume owner skinning and morph streams
-		// through the graphics bridge. Retain those full streams until the
-		// page-local path can provide equivalent deformable payloads.
-		&& !cpuMesh->hasDeformablePayload;
+	// P1 shadow cuts can reject any authored page set. Keep complete owner bytes
+	// so the conservative shadow fallback never samples camera-only placeholders.
+	const bool usePageLocalVirtualGeometry = false;
 	if (usePageLocalVirtualGeometry)
 	{
 		// Page-streamed virtual geometry uses the per-frame page-local payload
@@ -1433,53 +1606,56 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	}
 	else
 	{
+		bool mappedUploadsReady = true;
 		VulkanBuffer stagingPackedVertex = CreateBuffer(packedVertexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-		WriteMappedBuffer(allocator, stagingPackedVertex, cpuMesh->meshletVertexData.data(), packedVertexSize);
+		mappedUploadsReady &= WriteMappedBuffer(allocator, stagingPackedVertex, cpuMesh->meshletVertexData.data(), packedVertexSize);
 
 		VulkanBuffer stagingVertexRemap = CreateBuffer(vertexRemapUploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
 		// Zero-copy: upload raw on-disk bytes (u16 or u32) without CPU expansion.
-		ClearMappedBuffer(allocator, stagingVertexRemap);
-		WriteMappedBuffer(allocator, stagingVertexRemap, cpuMesh->meshletVertexRemapData.data(), vertexRemapSize);
+		// Padding is shader-readable: a failed clear must reject the whole upload.
+		mappedUploadsReady &= ClearMappedBuffer(allocator, stagingVertexRemap);
+		mappedUploadsReady &= WriteMappedBuffer(allocator, stagingVertexRemap, cpuMesh->meshletVertexRemapData.data(), vertexRemapSize);
 
 		VulkanBuffer stagingSkinning = { VK_NULL_HANDLE, VK_NULL_HANDLE, 0 };
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (skinningDataSize > 0)
 		{
 			stagingSkinning = CreateBuffer(skinningDataSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-			WriteMappedBuffer(allocator, stagingSkinning, cpuMesh->meshletSkinningData.data(), skinningDataSize);
+			mappedUploadsReady &= WriteMappedBuffer(allocator, stagingSkinning, cpuMesh->meshletSkinningData.data(), skinningDataSize);
 		}
 
 		VulkanBuffer stagingMorphDeltas = CreateBuffer(morphDeltaSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-		WriteMappedBuffer(allocator, stagingMorphDeltas, morphDeltaRecords.data(), morphDeltaSize);
+		mappedUploadsReady &= WriteMappedBuffer(allocator, stagingMorphDeltas, morphDeltaRecords.data(), morphDeltaSize);
 
 		VulkanBuffer stagingIndex = CreateBuffer(primitiveIndexUploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-		ClearMappedBuffer(allocator, stagingIndex);
-		WriteMappedBuffer(allocator, stagingIndex, cpuMesh->meshletPrimitiveIndexData.data(), primitiveIndexSize);
+		// Keep the final complete word initialized before any GPU copy is admitted.
+		mappedUploadsReady &= ClearMappedBuffer(allocator, stagingIndex);
+		mappedUploadsReady &= WriteMappedBuffer(allocator, stagingIndex, cpuMesh->meshletPrimitiveIndexData.data(), primitiveIndexSize);
 
 		VulkanBuffer stagingMeshletTable = CreateBuffer(meshletTableSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-		WriteMappedBuffer(allocator, stagingMeshletTable, cpuMesh->meshletRecords.data(), meshletTableSize);
+		mappedUploadsReady &= WriteMappedBuffer(allocator, stagingMeshletTable, cpuMesh->meshletRecords.data(), meshletTableSize);
 
 		VulkanBuffer stagingMeshletSection = CreateBuffer(meshletSectionSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
 		// Virtual geometry stores one meshlet section range per emitted LOD in the MVP.
 		// Upload it with the other resident streams now; later stories bind it when
 		// shaders start selecting LOD ranges directly.
-		WriteMappedBuffer(allocator, stagingMeshletSection, cpuMesh->meshletSections.data(), meshletSectionSize);
+		mappedUploadsReady &= WriteMappedBuffer(allocator, stagingMeshletSection, cpuMesh->meshletSections.data(), meshletSectionSize);
 
 		VulkanBuffer stagingMeshletBounds = CreateBuffer(boundsUploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (hasBoundsPayload)
 		{
-			WriteMappedBuffer(allocator, stagingMeshletBounds, cpuMesh->meshletBounds.data(), meshletBoundsSize);
+			mappedUploadsReady &= WriteMappedBuffer(allocator, stagingMeshletBounds, cpuMesh->meshletBounds.data(), meshletBoundsSize);
 		}
 		else
 		{
 			MeshletBounds fallbackBounds{};
 			fallbackBounds.coneCutoff = 2.0f;
-			WriteMappedBuffer(allocator, stagingMeshletBounds, &fallbackBounds, sizeof(fallbackBounds));
+			mappedUploadsReady &= WriteMappedBuffer(allocator, stagingMeshletBounds, &fallbackBounds, sizeof(fallbackBounds));
 		}
 
 		VulkanBuffer stagingDecodeInfo = CreateBuffer(sizeof(MeshDecodeInfo), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-		WriteMappedBuffer(allocator, stagingDecodeInfo, &decodeInfo, sizeof(MeshDecodeInfo));
+		mappedUploadsReady &= WriteMappedBuffer(allocator, stagingDecodeInfo, &decodeInfo, sizeof(MeshDecodeInfo));
 
 		// No CPU repack path: mesh shader reads the packed payload directly from storage buffers.
 		vMesh.meshShaderVertexBuffer = CreateBuffer(packedVertexSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
@@ -1503,39 +1679,54 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 		vMesh.meshletBoundsBuffer = CreateBuffer(boundsUploadSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 		vMesh.hasMeshletBounds = hasBoundsPayload;
 
-		CopyBuffer(stagingPackedVertex.buffer, vMesh.meshShaderVertexBuffer.buffer, packedVertexSize);
-		CopyBuffer(stagingVertexRemap.buffer, vMesh.meshletVertexRemapBuffer.buffer, vertexRemapUploadSize);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (skinningDataSize > 0)
-		{
-			CopyBuffer(stagingSkinning.buffer, vMesh.meshSkinningBuffer.buffer, skinningDataSize);
+		VulkanBuffer* stages[] = {&stagingPackedVertex, &stagingVertexRemap, &stagingSkinning,
+			&stagingMorphDeltas, &stagingDecodeInfo, &stagingIndex, &stagingMeshletTable,
+			&stagingMeshletSection, &stagingMeshletBounds};
+		VulkanBuffer* destinations[] = {&vMesh.meshShaderVertexBuffer, &vMesh.meshletVertexRemapBuffer,
+			&vMesh.meshSkinningBuffer, &vMesh.meshMorphDeltaBuffer, &vMesh.meshDecodeInfoBuffer,
+			&vMesh.indexBuffer, &vMesh.meshletBuffer, &vMesh.meshletSectionBuffer, &vMesh.meshletBoundsBuffer};
+		if (!mappedUploadsReady) {
+			for (auto* source : stages) DestroyBufferImmediate(*source);
+			for (auto* target : destinations) DestroyBufferImmediate(*target);
+			return;
 		}
-		CopyBuffer(stagingMorphDeltas.buffer, vMesh.meshMorphDeltaBuffer.buffer, morphDeltaSize);
-		CopyBuffer(stagingDecodeInfo.buffer, vMesh.meshDecodeInfoBuffer.buffer, sizeof(MeshDecodeInfo));
-		CopyBuffer(stagingIndex.buffer, vMesh.indexBuffer.buffer, primitiveIndexUploadSize);
-		CopyBuffer(stagingMeshletTable.buffer, vMesh.meshletBuffer.buffer, meshletTableSize);
-		CopyBuffer(stagingMeshletSection.buffer, vMesh.meshletSectionBuffer.buffer, meshletSectionSize);
-		CopyBuffer(stagingMeshletBounds.buffer, vMesh.meshletBoundsBuffer.buffer, boundsUploadSize);
-
-		vmaDestroyBuffer(allocator, stagingPackedVertex.buffer, stagingPackedVertex.allocation);
-		vmaDestroyBuffer(allocator, stagingVertexRemap.buffer, stagingVertexRemap.allocation);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (skinningDataSize > 0)
-		{
-			vmaDestroyBuffer(allocator, stagingSkinning.buffer, stagingSkinning.allocation);
+		const auto requiredCopies = std::count_if(std::begin(stages), std::end(stages), [](const auto* source) { return source->buffer != VK_NULL_HANDLE; });
+		TerraEngine::Renderer::Vulkan::UploadAcceptance uploadProof(requiredCopies, mappedUploadsReady);
+		for (std::size_t index = 0U; index < std::size(stages); ++index) {
+			if (stages[index]->buffer == VK_NULL_HANDLE) continue;
+			const bool completed = CopyBuffer(stages[index]->buffer, destinations[index]->buffer, stages[index]->size);
+			uploadProof.RecordCopy(completed);
+			if (!completed) {
+				break;
+			}
 		}
-		vmaDestroyBuffer(allocator, stagingMorphDeltas.buffer, stagingMorphDeltas.allocation);
-		vmaDestroyBuffer(allocator, stagingDecodeInfo.buffer, stagingDecodeInfo.allocation);
-		vmaDestroyBuffer(allocator, stagingIndex.buffer, stagingIndex.allocation);
-		vmaDestroyBuffer(allocator, stagingMeshletTable.buffer, stagingMeshletTable.allocation);
-		vmaDestroyBuffer(allocator, stagingMeshletSection.buffer, stagingMeshletSection.allocation);
-		vmaDestroyBuffer(allocator, stagingMeshletBounds.buffer, stagingMeshletBounds.allocation);
+		if (!uploadProof.CanPublish(true, !deviceLost && initialized)) {
+			// False may mean accepted work with an unproven fence. Retain both
+			// endpoints; no CPU owner, residency generation or cache hit is published.
+			for (auto* source : stages) RetainAmbiguousUpload(*source);
+			for (auto* target : destinations) RetainAmbiguousUpload(*target);
+			return;
+		}
+		for (auto* source : stages) DestroyBufferImmediate(*source);
 	}
 
 	vMesh.bindlessIndex = AllocateBufferIndex();
-	UpdateGlobalBuffer(vMesh.bindlessIndex, vMesh.meshDecodeInfoBuffer.buffer, 0, vMesh.meshDecodeInfoBuffer.size);
+	if (!UpdateGlobalBuffer(vMesh.bindlessIndex, vMesh.meshDecodeInfoBuffer.buffer, 0, vMesh.meshDecodeInfoBuffer.size)) {
+		// Uploaded bytes are complete, but old descriptor readers may still exist.
+		RetainAmbiguousUpload(vMesh.meshShaderVertexBuffer); RetainAmbiguousUpload(vMesh.meshletVertexRemapBuffer);
+		RetainAmbiguousUpload(vMesh.meshSkinningBuffer); RetainAmbiguousUpload(vMesh.meshMorphDeltaBuffer);
+		RetainAmbiguousUpload(vMesh.meshDecodeInfoBuffer); RetainAmbiguousUpload(vMesh.indexBuffer);
+		RetainAmbiguousUpload(vMesh.meshletBuffer); RetainAmbiguousUpload(vMesh.meshletSectionBuffer);
+		RetainAmbiguousUpload(vMesh.meshletBoundsBuffer);
+		return;
+	}
 
+	vMesh.sourceOwner = meshOwner;
+	vMesh.cpuPublicationGeneration = cpuMesh->publicationGeneration;
 	meshCache[meshId] = vMesh;
+	// Only a complete accepted GPU cache insertion advances residency. Ordinary
+	// frame slots and repeated cache hits retain this same physical generation.
+	meshCache[meshId].allocationGeneration = nextMeshAllocationGeneration++;
 	const VkDeviceSize totalGpuBytes = TotalMeshGpuBytes(meshCache[meshId]);
 	const bool hasVirtualGeometryPageMetadata = cpuMesh->hasVirtualGeometry && !cpuMesh->virtualGeometryPages.empty();
 	std::string uploadDetail = "vulkan mesh buffer upload";
@@ -1827,6 +2018,7 @@ uint32_t VulkanContext::Impl::AcquireSampledTextureAlias(
 	const VkSampler sampler = AcquireCachedTextureSampler(key);
 	if(sampler == VK_NULL_HANDLE) return 0u;
 
+	if (!WaitForDescriptorMutationIdle()) return 0U;
 	const uint32_t descriptorIndex = AllocateTextureIndex();
 	CachedTextureSampler& cachedSampler = textureSamplerCache.at(key);
 	++cachedSampler.aliasReferenceCount;
@@ -1834,22 +2026,21 @@ uint32_t VulkanContext::Impl::AcquireSampledTextureAlias(
 	sampledTextureAliases.emplace(aliasKey,
 		SampledTextureAlias{descriptorIndex, sampler, generation});
 
-	WaitForDescriptorMutationIdle();
 	WriteGlobalTextureAlias(descriptorIndex, image->second.view, sampler);
 	return descriptorIndex;
 }
 
-void VulkanContext::Impl::UpdateSampledTextureAliases(
+bool VulkanContext::Impl::UpdateSampledTextureAliases(
 	TerraEngine::UUID textureId, const VulkanImage& image)
 {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
-	if(image.view == VK_NULL_HANDLE) return;
+	if(image.view == VK_NULL_HANDLE) return true;
 	const bool hasAliases = std::any_of(
 		sampledTextureAliases.begin(), sampledTextureAliases.end(),
 		[textureId](const auto& entry) { return entry.first.textureId == textureId; });
-	if(!hasAliases) return;
+	if(!hasAliases) return true;
 
-	WaitForDescriptorMutationIdle();
+	if (!WaitForDescriptorMutationIdle()) return false;
 	const std::uint64_t generation = ++textureViewGenerations[textureId];
 	for(auto& [key, alias] : sampledTextureAliases)
 	{
@@ -1857,20 +2048,21 @@ void VulkanContext::Impl::UpdateSampledTextureAliases(
 		WriteGlobalTextureAlias(alias.descriptorIndex, image.view, alias.sampler);
 		alias.imageViewGeneration = generation;
 	}
+	return true;
 }
 
-void VulkanContext::Impl::RetireSampledTextureAliases(TerraEngine::UUID textureId)
+bool VulkanContext::Impl::RetireSampledTextureAliases(TerraEngine::UUID textureId)
 {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	std::vector<VulkanSampledTextureAliasKey> retiredKeys;
 	for(const auto& [key, alias] : sampledTextureAliases)
 		if(key.textureId == textureId) retiredKeys.push_back(key);
-	if(retiredKeys.empty()) return;
+	if(retiredKeys.empty()) return true;
 
 	// Submitted work is completed before descriptors stop naming the old view.
 	// Slots are rewritten to the engine fallback before sampler destruction, so
 	// no live descriptor retains a retired VkSampler handle.
-	WaitForDescriptorMutationIdle();
+	if (!WaitForDescriptorMutationIdle()) return false;
 	for(const VulkanSampledTextureAliasKey& key : retiredKeys)
 	{
 		const auto found = sampledTextureAliases.find(key);
@@ -1884,6 +2076,7 @@ void VulkanContext::Impl::RetireSampledTextureAliases(TerraEngine::UUID textureI
 	}
 	textureIndexMap.erase(textureId);
 	textureViewGenerations.erase(textureId);
+	return true;
 }
 
 // VulkanContext::Impl::AllocateMaterialIndex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1909,8 +2102,83 @@ uint32_t VulkanContext::Impl::AllocateMaterialIndex() {
 // VulkanContext::Impl::UpdateGlobalTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::UpdateGlobalTexture(uint32_t index, const VulkanImage& image) {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
-	WaitForDescriptorMutationIdle();
-	WriteGlobalTextureAlias(index, image.view, image.sampler);
+	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
+	using namespace TerraEngine::Renderer;
+	const bool setsReady = globalDescriptorSets.size() == MAX_FRAMES_IN_FLIGHT
+		&& std::all_of(globalDescriptorSets.begin(), globalDescriptorSets.end(),
+		[](VkDescriptorSet set) { return set != VK_NULL_HANDLE; });
+	const bool pendingWork = editorRenderSubmitted || swapchainImageAcquired
+		|| animationComputeRecordedForCurrentFrame || animationComputeSubmissionMarkedForCurrentFrame
+		|| deformationComputeRecordedForCurrentFrame
+		|| std::any_of(pendingPrimaryCommandBuffers.begin(), pendingPrimaryCommandBuffers.end(),
+			[](const auto& commands) { return !commands.empty(); })
+		|| std::any_of(pendingPrimaryCommandBuffersSubmitted.begin(), pendingPrimaryCommandBuffersSubmitted.end(),
+			[](auto submitted) { return submitted != 0; });
+	const auto& grant = textureDescriptorBootstrap;
+	const TextureDescriptorAdmissionProof proof{ initialized,
+		device != VK_NULL_HANDLE && graphicsQueue != VK_NULL_HANDLE, deviceLost, setsReady, pendingWork,
+		grant.Matches(reinterpret_cast<std::uintptr_t>(device), renderSessionGeneration) };
+	// A created image alone is insufficient: every sampled descriptor must own
+	// its actual view and sampler before initialization can publish readiness.
+	const bool ownersValid = index < MAX_BINDLESS_TEXTURES && image.image != VK_NULL_HANDLE
+		&& image.view != VK_NULL_HANDLE && image.sampler != VK_NULL_HANDLE;
+	const auto admission = DecideTextureDescriptorAdmission(proof);
+	const bool written = ownersValid && ApplyTextureDescriptorAdmission(admission,
+		[&] { return WaitForDescriptorMutationIdle(); },
+		[&] { WriteGlobalTextureAlias(index, image.view, image.sampler); });
+	textureDescriptorBootstrap.RecordWrite(index, written);
+}
+
+bool VulkanContext::Impl::RetireGlobalTextureDescriptorSlotsAfterIdle(
+	std::span<const std::uint32_t> indices)
+{
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
+	// This entry point is only called after the caller's existing native idle
+	// proof. It cannot wait again or let invalid fallback ownership authorize
+	// destruction. Every set is checked before the first native descriptor write.
+	const bool setsReady = globalDescriptorSets.size() == MAX_FRAMES_IN_FLIGHT
+		&& std::all_of(globalDescriptorSets.begin(), globalDescriptorSets.end(),
+			[](VkDescriptorSet set) { return set != VK_NULL_HANDLE; });
+	const TerraEngine::Renderer::Vulkan::TextureDescriptorRetirementProof proof{
+		initialized && device != VK_NULL_HANDLE && !deviceLost, true, setsReady,
+		defaultTexture.image != VK_NULL_HANDLE, defaultTexture.view != VK_NULL_HANDLE,
+		defaultTexture.sampler != VK_NULL_HANDLE, defaultTextureShaderReadable,
+		MAX_FRAMES_IN_FLIGHT, MAX_BINDLESS_TEXTURES };
+	return TerraEngine::Renderer::Vulkan::RetireTextureDescriptorSlots(proof, indices,
+		[&](std::uint32_t index, std::uint32_t frame) {
+			VkDescriptorImageInfo fallback{};
+			fallback.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			fallback.imageView = defaultTexture.view;
+			fallback.sampler = defaultTexture.sampler;
+			VkWriteDescriptorSet write{};
+			write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			write.dstSet = globalDescriptorSets[frame];
+			write.dstBinding = 0;
+			write.dstArrayElement = index;
+			write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			write.descriptorCount = 1;
+			write.pImageInfo = &fallback;
+			// Vulkan's descriptor update is void. Its owner/set validity has already
+			// been established above; the shared policy can reject injected writes
+			// in tests without allowing the subsequent owner teardown.
+			vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+			return true;
+		}, [&](std::uint32_t frame) {
+			// Binding 8 is the shared point-shadow sampler and is not partially
+			// bound. It must stop naming the retired cube owner's sampler even if
+			// the replacement request contains no point or 2D shadows.
+			VkDescriptorImageInfo fallback{};
+			fallback.sampler = defaultTexture.sampler;
+			VkWriteDescriptorSet write{};
+			write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			write.dstSet = globalDescriptorSets[frame];
+			write.dstBinding = 8;
+			write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+			write.descriptorCount = 1;
+			write.pImageInfo = &fallback;
+			vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+			return true;
+		});
 }
 
 void VulkanContext::Impl::WriteGlobalTextureAlias(
@@ -1954,16 +2222,16 @@ uint32_t VulkanContext::Impl::AllocateBufferIndex() {
 }
 
 // VulkanContext::Impl::UpdateGlobalBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range) {
+bool VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range) {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	if (index >= MAX_BINDLESS_BUFFERS
 		|| buffer == VK_NULL_HANDLE
 		|| range == 0u)
 	{
-		return;
+		return false;
 	}
 
-	WaitForDescriptorMutationIdle();
+	if (!WaitForDescriptorMutationIdle()) return false;
 
 	VkDescriptorBufferInfo bufferInfo{};
 	bufferInfo.buffer = buffer;
@@ -1983,9 +2251,10 @@ void VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, Vk
 
 		vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
 	}
+	return true;
 }
 
-void VulkanContext::Impl::UpdateGlobalBufferForFrame(
+bool VulkanContext::Impl::UpdateGlobalBufferForFrame(
 	uint32_t frameIndex,
 	uint32_t index,
 	VkBuffer buffer,
@@ -2000,7 +2269,7 @@ void VulkanContext::Impl::UpdateGlobalBufferForFrame(
 		|| buffer == VK_NULL_HANDLE
 		|| range == 0u)
 	{
-		return;
+		return false;
 	}
 
 	if (frameIndex == currentFrame && !frameSlotKnownIdle)
@@ -2009,7 +2278,7 @@ void VulkanContext::Impl::UpdateGlobalBufferForFrame(
 		// set. Reuse the central descriptor-idle path so already-submitted editor
 		// view command buffers are waited on instead of accidentally submitted a
 		// second time.
-		WaitForDescriptorMutationIdle();
+		if (!WaitForDescriptorMutationIdle()) return false;
 	}
 
 	VkDescriptorBufferInfo bufferInfo{};
@@ -2027,35 +2296,28 @@ void VulkanContext::Impl::UpdateGlobalBufferForFrame(
 	descriptorWrite.pBufferInfo = &bufferInfo;
 
 	vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+	return true;
 }
 
 // VulkanContext::Impl::UpdateGlobalHiZ is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::UpdateGlobalHiZ(uint32_t frameIndex) {
+bool VulkanContext::Impl::UpdateGlobalHiZ(uint32_t frameIndex) {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
-	if (frameIndex >= globalDescriptorSets.size()) return;
+	if (device == VK_NULL_HANDLE || deviceLost || globalDescriptorSets.size() != MAX_FRAMES_IN_FLIGHT
+		|| frameIndex >= globalDescriptorSets.size()
+		|| globalDescriptorSets[frameIndex] == VK_NULL_HANDLE) return false;
 
 	std::array<VkDescriptorImageInfo, kHiZViewCount> imageInfos{};
-	const auto isReadableHiZ = [](const VulkanHiZ& hiZ) {
-		return hiZ.fullView != VK_NULL_HANDLE
-			&& hiZ.sampler != VK_NULL_HANDLE
-			&& hiZ.layoutInitialized
-			&& hiZ.history.valid;
-	};
-	const VulkanHiZ* samplerOwner = nullptr;
-	const VulkanHiZ* fallbackHiZ = nullptr;
+	std::array<TerraEngine::Renderer::HiZDescriptorOwnerProof, kHiZViewCount> histories{};
 	for (uint32_t hiZViewIndex = 0u; hiZViewIndex < kHiZViewCount; ++hiZViewIndex) {
 		const VulkanHiZ& hiZ = HiZForFrame(hiZViewIndex, frameIndex);
-		if (samplerOwner == nullptr && hiZ.sampler != VK_NULL_HANDLE) {
-			samplerOwner = &hiZ;
-		}
-		if (isReadableHiZ(hiZ)) {
-			fallbackHiZ = &hiZ;
-			break;
-		}
+		histories[hiZViewIndex] = { hiZ.image != VK_NULL_HANDLE, hiZ.fullView != VK_NULL_HANDLE,
+			hiZ.sampler != VK_NULL_HANDLE, hiZ.layoutInitialized, hiZ.history.valid };
 	}
-	if (samplerOwner == nullptr) {
-		return;
-	}
+	const TerraEngine::Renderer::HiZDescriptorOwnerProof fallback{
+		defaultTexture.image != VK_NULL_HANDLE, defaultTexture.view != VK_NULL_HANDLE,
+		defaultTexture.sampler != VK_NULL_HANDLE, defaultTextureShaderReadable, false };
+	const auto plan = TerraEngine::Renderer::BuildHiZDescriptorPlan(true, histories, fallback);
+	if (!plan.valid) return false;
 
 	// Each global descriptor set belongs to one frame slot. Initialization has
 	// no submitted work, swapchain recreation already idles the device, and the
@@ -2064,37 +2326,21 @@ void VulkanContext::Impl::UpdateGlobalHiZ(uint32_t frameIndex) {
 	// another in-flight slot to the CPU, with dense virtual geometry paying the
 	// full outstanding GPU duration on every Hi-Z promotion.
 	VkDescriptorImageInfo samplerInfo{};
-	samplerInfo.sampler = samplerOwner->sampler;
-
-	// The sampler is safe before the image has a layout. Binding 10 is partially
-	// bound and frame data keeps sampling disabled until a completed write is
-	// promoted, so do not publish an UNDEFINED image merely to fill the slot.
-	if (fallbackHiZ == nullptr) {
-		VkWriteDescriptorSet samplerWrite{};
-		samplerWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		samplerWrite.dstSet = globalDescriptorSets[frameIndex];
-		samplerWrite.dstBinding = 11;
-		samplerWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-		samplerWrite.descriptorCount = 1;
-		samplerWrite.pImageInfo = &samplerInfo;
-		vkUpdateDescriptorSets(device, 1, &samplerWrite, 0, nullptr);
-		return;
-	}
 
 	for (uint32_t hiZViewIndex = 0u; hiZViewIndex < kHiZViewCount; ++hiZViewIndex) {
 		const VulkanHiZ& hiZ = HiZForFrame(hiZViewIndex, frameIndex);
-		const VulkanHiZ& readableHiZ = isReadableHiZ(hiZ) ? hiZ : *fallbackHiZ;
 		// Binding 10 is an array so editor Scene/Game command buffers can be
 		// recorded once and submitted together without racing a descriptor
-		// mutation between views. If one editor view has not produced a pyramid
-		// yet, keep its descriptor valid with the other view's image while that
-		// missing view's frame-data gate keeps Hi-Z sampling fail-open.
+		// mutation between views. A cold slot uses uploaded normalized red=1:
+		// dimension queries remain legal, while its history gate stays fail-open.
 		imageInfos[hiZViewIndex].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		imageInfos[hiZViewIndex].imageView = readableHiZ.fullView;
+		imageInfos[hiZViewIndex].imageView = plan.imageOwners[hiZViewIndex] == -1
+			? defaultTexture.view : hiZ.fullView;
 		imageInfos[hiZViewIndex].sampler = VK_NULL_HANDLE;
 	}
 
-	samplerInfo.sampler = fallbackHiZ->sampler;
+	samplerInfo.sampler = plan.samplerOwner == -1 ? defaultTexture.sampler
+		: HiZForFrame(static_cast<uint32_t>(plan.samplerOwner), frameIndex).sampler;
 
 	VkWriteDescriptorSet writes[2]{};
 	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2112,12 +2358,13 @@ void VulkanContext::Impl::UpdateGlobalHiZ(uint32_t frameIndex) {
 	writes[1].pImageInfo = &samplerInfo;
 
 	vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+	return true;
 }
 
-void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
+bool VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	if (!initialized || device == VK_NULL_HANDLE || graphicsQueue == VK_NULL_HANDLE) {
-		return;
+		return false;
 	}
 
 	// Global bindless sets and mesh-local descriptor sets are persistent across
@@ -2153,14 +2400,19 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 				}
 
 				const VkResult submitResult = SubmitGraphicsQueue(1u, &prefixSubmit, VK_NULL_HANDLE);
+				if (submitResult != VK_SUCCESS)
+				{
+					// Failed native submission never publishes recorded depth contents.
+					DiscardRecordedShadowWrites(currentFrame);
+				}
 				if (MarkDeviceLost(submitResult, "recorded view prefix submit before descriptor mutation"))
 				{
-					return;
+					return false;
 				}
 				if (submitResult != VK_SUCCESS)
 				{
 					TERRAENGINE_LOG(LogLevel::Error, "failed to submit recorded views before descriptor mutation: " << submitResult);
-					return;
+					return false;
 				}
 				if (currentFrame < pendingPrimaryCommandBuffersSubmitted.size())
 				{
@@ -2173,6 +2425,8 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 				}
 				if (consumesRuntimeAcquire) swapchainAcquireWaitConsumed = true;
 				ConfirmHiZWritesSubmitted(currentFrame);
+				// This is the exact ordered command list accepted by the queue above.
+				ConfirmShadowWritesSubmitted(currentFrame, pendingCommandBuffers);
 				for (RenderSnapshotOwnerSummary& owner : pendingRenderSnapshotDiagnostics.ownerSummaries)
 				{
 					if (owner.state == RenderSnapshotState::Recorded)
@@ -2185,13 +2439,16 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 			const VkResult prefixIdleResult = WaitGraphicsQueueIdle();
 			if (MarkDeviceLost(prefixIdleResult, "render command buffer idle before descriptor mutation"))
 			{
-				return;
+				return false;
 			}
 			if (prefixIdleResult != VK_SUCCESS)
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "failed to wait for render command buffers before descriptor mutation: " << prefixIdleResult);
-				return;
+				return false;
 			}
+			// Existing queue-idle proof completes both newly submitted prefixes and
+			// prefixes already accepted earlier; never discard their real receipts.
+			CompleteShadowWrites(currentFrame);
 			if (editorMode && editorRenderSubmitted)
 			{
 				// EndFrame signaled this slot's binary render-finished semaphore,
@@ -2215,7 +2472,7 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 						drainResult,
 						"descriptor mutation editor render semaphore drain"))
 				{
-					return;
+					return false;
 				}
 				if (drainResult != VK_SUCCESS)
 				{
@@ -2223,14 +2480,14 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 						LogLevel::Error,
 						"failed to consume editor render semaphore before descriptor mutation: "
 							<< drainResult);
-					return;
+					return false;
 				}
 				const VkResult drainIdleResult = WaitGraphicsQueueIdle();
 				if (MarkDeviceLost(
 						drainIdleResult,
 						"descriptor mutation editor render semaphore drain idle"))
 				{
-					return;
+					return false;
 				}
 				if (drainIdleResult != VK_SUCCESS)
 				{
@@ -2238,7 +2495,7 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 						LogLevel::Error,
 						"failed to finish editor render semaphore drain before descriptor mutation: "
 							<< drainIdleResult);
-					return;
+					return false;
 				}
 				editorRenderSubmitted = false;
 			}
@@ -2253,10 +2510,13 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 	const VkResult idleResult = WaitGraphicsQueueIdle();
 	if (MarkDeviceLost(idleResult, "descriptor mutation queue idle"))
 	{
-		return;
+		return false;
 	}
 	if (idleResult != VK_SUCCESS)
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "failed to wait for descriptor mutation queue idle: " << idleResult);
+		return false;
 	}
+	ReleaseAmbiguousUploadsAfterIdle();
+	return true;
 }

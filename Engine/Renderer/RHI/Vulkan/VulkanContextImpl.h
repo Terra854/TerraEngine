@@ -11,12 +11,21 @@
 #include "VulkanHiZ.h"
 #include "VulkanVRS.h"
 #include "VulkanUploadPlanning.h"
+#include "VulkanLightingUploadPlan.h"
 #include "VulkanDescriptorPlanning.h"
+#include "VulkanTextureDescriptorAdmission.h"
+#include "VulkanHiZDescriptorPlan.h"
+#include "VulkanTextureDescriptorRetirement.h"
 #include "VulkanCommandRecording.h"
 #include "VulkanVirtualGeometryExecutor.h"
 #include "VulkanFrameDiagnostics.h"
 #include "VulkanSamplerPolicy.h"
 #include "Renderer/VirtualGeometry/Visibility/VirtualGeometryVisibility.h"
+#include "Renderer/ShadowWorkPlan.h"
+#include "VulkanShadowValidationReadback.h"
+#include "VulkanLightingDepthEvidence.h"
+#include "VulkanShadowPagePreparation.h"
+#include "VulkanStaticShadowPolicy.h"
 
 #include "Core/Logger/Logger.h"
 #include "Window/WindowSystem.h"
@@ -135,11 +144,17 @@ struct VulkanImage {
 	std::uint32_t sourceMipCount = 1u;
 	std::uint32_t residentMipCount = 1u;
 	std::uint32_t residentMipOffset = 0u;
+	// Retain the exact accepted texture bytes represented by this uploaded image.
+	std::shared_ptr<const Texture> sourceOwner;
 };
 
 // Mesh buffers cached on the GPU.
 // struct VulkanMesh groups related state and operations so callers have one documented contract.
 struct VulkanMesh {
+	// Exact immutable CPU owner and accepted publication qualify these buffers.
+	// Reuploads get a new allocation generation; frame slots never change it.
+	std::shared_ptr<const Mesh> sourceOwner;
+	std::uint64_t cpuPublicationGeneration = 0U, allocationGeneration = 0U;
 	VulkanBuffer meshShaderVertexBuffer;
 	VulkanBuffer meshletVertexRemapBuffer;
 	// Binding 6 always receives this buffer. Non-skinned meshes own one
@@ -167,6 +182,8 @@ struct VulkanMesh {
 // struct VulkanPipeline groups related state and operations so callers have one documented contract.
 struct VulkanPipeline {
 	VkPipeline pipeline;
+	// Identity of the immutable collection actually used to build this pipeline.
+	std::uint64_t collectionGeneration = 0;
 	VkPipelineLayout layout;
 	std::vector<VkDescriptorSetLayout> setLayouts;
 	std::vector<std::vector<DescriptorBinding>> bindingsPerSet;
@@ -222,10 +239,19 @@ static_assert(sizeof(MaterialData) == 768u);
 
 // struct PipelineKey groups related state and operations so callers have one documented contract.
 struct PipelineKey {
+	struct StagePublication {
+		ShaderStage stage = ShaderStage::Vertex;
+		TerraEngine::UUID shaderId = TerraEngine::EMPTY_UUID;
+		std::uint64_t generation = 0U;
+		bool operator==(const StagePublication&) const = default;
+	};
 	TerraEngine::UUID shaderCollectionId;
 	uint32_t materialFlags;
 	std::uint64_t collectionGeneration = 0u;
 	std::uint64_t shaderModuleGeneration = 0u;
+	// Equality retains every exact ordered publication tuple. Hash collisions
+	// may share a bucket but never authorize reuse of an older shader module.
+	std::vector<StagePublication> stagePublications;
 	std::uint32_t geometryAbiVersion = 0u;
 	std::uint32_t geometryPolicy = 0u;
 	// Only the default conventional surface pipeline can exchange its ordinary
@@ -237,6 +263,7 @@ struct PipelineKey {
 			&& materialFlags == other.materialFlags
 			&& collectionGeneration == other.collectionGeneration
 			&& shaderModuleGeneration == other.shaderModuleGeneration
+			&& stagePublications == other.stagePublications
 			&& geometryAbiVersion == other.geometryAbiVersion
 			&& geometryPolicy == other.geometryPolicy
 			&& usesConventionalVisibilityIdentity == other.usesConventionalVisibilityIdentity;
@@ -251,6 +278,11 @@ struct PipelineKeyHash {
 		std::size_t hash = h1 ^ (h2 << 1);
 		hash ^= std::hash<std::uint64_t>{}(k.collectionGeneration) << 2u;
 		hash ^= std::hash<std::uint64_t>{}(k.shaderModuleGeneration) << 3u;
+		for (const auto& stage : k.stagePublications) {
+			hash ^= std::hash<TerraEngine::UUID>{}(stage.shaderId) + (hash << 6U) + (hash >> 2U);
+			hash ^= std::hash<std::uint64_t>{}(stage.generation) + (hash << 6U) + (hash >> 2U);
+			hash ^= std::hash<std::uint32_t>{}(static_cast<std::uint32_t>(stage.stage)) + (hash << 6U) + (hash >> 2U);
+		}
 		hash ^= std::hash<std::uint32_t>{}(k.geometryAbiVersion) << 4u;
 		hash ^= std::hash<std::uint32_t>{}(k.geometryPolicy) << 5u;
 		hash ^= std::hash<bool>{}(k.usesConventionalVisibilityIdentity) << 6u;
@@ -294,6 +326,8 @@ struct VulkanContext::Impl {
 	// publication can reject oversized storage-buffer descriptors without a
 	// driver query on the render hot path.
 	VkDeviceSize maximumStorageBufferRange = 0U;
+	// Worker plans use these once-queried task limits without driver calls.
+	std::uint32_t maximumTaskGroupsX = 0, maximumTaskGroupsTotal = 0;
 	// Sampler anisotropy is optional. These values are captured once from the
 	// selected physical device and drive normalized terrain sampler aliases.
 	bool samplerAnisotropySupported = false;
@@ -511,6 +545,7 @@ struct VulkanContext::Impl {
 	}
 	static constexpr int MAX_FRAMES_IN_FLIGHT = 3;
 	bool initialized = false;
+	TerraEngine::Renderer::TextureDescriptorBootstrap textureDescriptorBootstrap;
 	bool editorMode = false;
 
 	VkPhysicalDeviceVulkan12Features vulkan12Features{};
@@ -562,6 +597,25 @@ struct VulkanContext::Impl {
 	static constexpr uint32_t LTC_LUT_RESOLUTION = 64u;
 	static constexpr VkFormat AMBIENT_OCCLUSION_FORMAT = VK_FORMAT_R32_SFLOAT;
 
+	// First failure is copied without allocation; diagnostics never change coverage.
+	struct ShadowPreparationRejection
+	{
+		const char* stage = nullptr;
+		std::uint32_t ordinal = std::numeric_limits<std::uint32_t>::max();
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
+
+		void Capture(const char* failure, std::uint32_t sourceOrdinal,
+			const RenderItemRecord* command = nullptr) noexcept
+		{
+			if (stage != nullptr) return;
+			stage = failure; ordinal = sourceOrdinal;
+			if (command != nullptr) {
+				objectId = command->objectId; meshId = command->meshId; materialId = command->materialId;
+			}
+		}
+	};
 	// struct ShadowResourceRequest groups related state and operations so callers have one documented contract.
 	struct ShadowResourceRequest
 	{
@@ -646,6 +700,13 @@ struct VulkanContext::Impl {
 	std::vector<VulkanBuffer> globalMeshletCountersSSBOs;
 	std::vector<VulkanBuffer> globalLightSSBOs;
 	std::vector<VulkanBuffer> lightAnalysisInputSSBOs;
+	// Mirrors are owned by physical frame/snapshot/purpose, with view identity
+	// validated by the planner. BeginFrame supplies the existing fence proof.
+	std::array<std::array<std::array<TerraEngine::Renderer::VulkanLightingUpload::Mirror, 2>, MAX_RENDER_SNAPSHOTS_PER_FRAME>, MAX_FRAMES_IN_FLIGHT> lightingUploadMirrors{};
+	std::array<bool, MAX_FRAMES_IN_FLIGHT> lightingUploadFrameSlotSafe{};
+	std::array<std::array<bool, MAX_RENDER_SNAPSHOTS_PER_FRAME>, MAX_FRAMES_IN_FLIGHT> renderSnapshotSlotsUsed{};
+	std::uint64_t lightingUploadAllocationGeneration = 0;
+	std::uint64_t lightingUploadAtomSize = 1;
 		std::vector<VulkanBuffer> clusterGridSSBOs;
 		std::vector<VulkanBuffer> lightIndexSSBOs;
 		std::vector<VulkanBuffer> clusterDepthSSBOs;
@@ -666,6 +727,18 @@ struct VulkanContext::Impl {
 				std::array<std::vector<RenderInstanceRecord>, MAX_FRAMES_IN_FLIGHT>
 					groupedInstanceUploadMirrors{};
 				std::uint32_t groupedInstanceBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+				struct ShadowInstanceStreamResources
+				{
+					VulkanBuffer buffer{};
+					VkDeviceSize capacity = 0;
+					std::uint64_t allocationGeneration = 0;
+					std::uint32_t bindlessIndex = INVALID_BINDLESS_BUFFER_INDEX;
+				};
+				// Every recorded view retains separate physical frame/snapshot bytes.
+				std::array<std::array<ShadowInstanceStreamResources, MAX_RENDER_SNAPSHOTS_PER_FRAME>,
+					MAX_FRAMES_IN_FLIGHT> shadowInstanceStreams{};
+				std::uint64_t nextShadowInstanceAllocationGeneration = 1;
+				std::uint64_t shadowInstanceFailureControlGeneration = 0;
 				// GPU virtual geometry packet buffers are owned per frame slot
 				// and per view. The public frame snapshot stores value records;
 				// this private resource record owns the Vulkan handles and the
@@ -973,6 +1046,90 @@ struct VulkanContext::Impl {
 	ShadowResourceRequest activeShadowResourceRequest{};
 	std::array<ShadowStorageRegion, MAX_SHADOW_RESOURCE_SLOTS> shadowStorageRegions{};
 	std::unordered_map<TerraEngine::UUID, ShadowCacheEntry> shadowCacheEntries{};
+	// Exact shadow ownership is protected by deviceStateMutex. A recorded write
+	// is provisional until its real graphics submission receives a serial.
+	TerraEngine::Renderer::ShadowCachePublicationLedger shadowPublicationLedger{1U};
+	// Logical static validity and physical lifetime are independent. A reset
+	// revokes hits while recorded/submitted users continue charging their bytes.
+	TerraEngine::Renderer::ShadowCachePublicationLedger staticShadowPublicationLedger{1U};
+	TerraEngine::Renderer::VulkanStaticShadow::StaticShadowLifetimeTracker staticShadowLifetime;
+	struct StaticShadowEntry
+	{
+		VkDevice device = VK_NULL_HANDLE;
+		VmaAllocator allocator = VK_NULL_HANDLE;
+		TerraEngine::Renderer::ShadowViewKey finalView{}, staticView{};
+		TerraEngine::Renderer::VulkanStaticShadow::StaticShadowAllocationOwner owner{};
+		VulkanImage depth;
+		std::array<VkImageView, 6> faceViews{};
+		std::array<VkFramebuffer, 6> framebuffers{};
+		std::array<VkImageLayout, 6> layouts{}; // UNDEFINED until actual recording.
+		std::uint64_t contentToken = 0, borrowedColorGeneration = 0;
+		double priority = 0;
+		bool retiring = false;
+		bool layoutEstablished = false;
+		std::uint64_t initializationCommand = 0;
+		// Protected lifetime policy must authorize destruction before this RAII
+		// owner leaves the container; unused partial construction is safe too.
+		~StaticShadowEntry();
+	};
+	std::vector<std::unique_ptr<StaticShadowEntry>> staticShadowEntries;
+	std::uint64_t nextStaticShadowAllocationGeneration = 1;
+	std::uint64_t staticShadowRequestedBudget = 64ULL * 1024ULL * 1024ULL;
+	std::uint64_t staticShadowEffectiveBudget = 64ULL * 1024ULL * 1024ULL;
+	bool staticShadowBudgetDraining = false, staticShadowMaintenance4Enabled = false;
+	VkRenderPass staticShadowLoadRenderPass = VK_NULL_HANDLE;
+	// These bounded rings allocate nothing at submit/fence/discard boundaries.
+	std::array<std::uint64_t, 128> staticShadowCompletedSubmissions{};
+	std::array<std::uint64_t, 256> staticShadowDiscardedCommands{};
+	std::array<TerraEngine::Renderer::RendererEfficiencyStaticShadowUse, 256> staticShadowAcceptedSubmissions{};
+	std::size_t staticShadowAcceptedCursor = 0;
+	std::size_t staticShadowCompletionCursor = 0, staticShadowDiscardCursor = 0;
+	void CaptureStaticShadowAllocations(TerraEngine::Renderer::RendererEfficiencyStaticShadowExecution& execution) const;
+	bool QueryStaticShadowRequirements(const TerraEngine::Renderer::ShadowViewKey& view,
+		TerraEngine::Renderer::StaticShadowAdmissionRequest& result, std::string& reason);
+	bool EnsureStaticShadowLoadRenderPass();
+	bool CreateStaticShadowEntry(const TerraEngine::Renderer::StaticShadowAdmissionRequest& reservation,
+		std::span<const VkImageView> colorViews, double priority, StaticShadowEntry*& result, std::string& reason);
+	void RetireStaticShadowEntries() noexcept;
+	void ReleaseCompletedStaticShadowEntries() noexcept;
+	bool ReleaseStaticShadowEntriesBeforeColorReplacement() noexcept;
+	void ReleaseStaticShadowEntriesForTeardown(bool lost) noexcept;
+	// Opt-in fixture copies share primary commands and existing completion
+	// receipts. Ordinary frames never reserve staging or export pixel data.
+	TerraEngine::Renderer::VulkanShadowValidationReadback shadowValidationReadback;
+	// Query and staging ownership follows the same actual primary receipts,
+	// while retaining an independent pool for isolated lighting-depth intervals.
+	TerraEngine::Renderer::VulkanLightingDepthEvidence lightingDepthEvidence;
+	bool lightingDepthEvidenceInitialized = false;
+	// Initialization belongs to one actual backend lifetime. Unsupported
+	// timestamps or failed installed shader inputs must not trigger file I/O
+	// and pipeline creation again on every ordinary render frame.
+	bool lightingDepthEvidenceInitializationAttempted = false;
+	std::uint32_t lightingDepthTimestampValidBits = 0;
+	std::uint64_t shadowAllocationGeneration = 1U;
+	std::uint64_t nextShadowCommandSerial = 1U, nextShadowContentToken = 1U, nextShadowSubmitSerial = 1U;
+	struct ShadowCommandOwnership
+	{
+		std::uint64_t serial = 0U;
+		std::uint32_t frameIndex = 0U;
+		std::uint64_t submitSerial = 0U;
+		// Empty during production. Validation aborts one complete recorded frame
+		// for this operation/step before the existing native submit boundary.
+		std::string validationAbortKey;
+		TerraEngine::Renderer::RendererEfficiencyFixtureCorrelation validationAbortCorrelation;
+		std::uint64_t validationFrameSerial = 0U;
+	};
+	std::unordered_map<VkCommandBuffer, ShadowCommandOwnership> shadowCommandOwnership;
+	std::string lastShadowValidationAbortKey;
+	std::string lastShadowValidationIncompletePointFacesKey, lastShadowValidationResourceRecreationKey;
+	// A region's most recent token is only a lookup hint. The ledger still
+	// verifies actual submission, blocked overwrites and complete exact inputs.
+	std::unordered_map<std::uint64_t, std::uint64_t> shadowPhysicalTokenHints;
+	std::array<std::vector<std::uint64_t>, MAX_FRAMES_IN_FLIGHT> shadowSubmitReceiptsByFrame;
+	void ConfirmShadowWritesSubmitted(std::uint32_t frameIndex, std::span<const VkCommandBuffer> commands);
+	void DiscardRecordedShadowWrites(std::uint32_t frameIndex) noexcept;
+	void CompleteShadowWrites(std::uint32_t frameIndex) noexcept;
+	void ResetShadowPublication(bool allocationReplaced) noexcept;
 	VulkanImage ltcAmplitudeTexture;
 	VulkanImage ltcInverseTexture;
 	uint32_t ltcAmplitudeTextureIndex = 0u;
@@ -987,6 +1144,12 @@ struct VulkanContext::Impl {
 	VkPipelineLayout lightingComputePipelineLayout = VK_NULL_HANDLE;
 	VkPipeline clusterGridComputePipeline = VK_NULL_HANDLE;
 	VkPipeline clusterDepthMaskComputePipeline = VK_NULL_HANDLE;
+	// Both variants preserve the global float2/grid ABI. Device limits are
+	// captured once per backend lifetime before selecting the 64-lane variant.
+	VkPipeline clusterDepthMaskReferenceComputePipeline = VK_NULL_HANDLE;
+	bool clusterDepthDeviceLimitsChecked = false;
+	bool clusterDepthCooperativeDeviceSupported = false;
+	bool clusterDepthReferenceDeviceSupported = false;
 	VkPipeline clusterLightCountComputePipeline = VK_NULL_HANDLE;
 	VkPipeline clusterLightPrefixComputePipeline = VK_NULL_HANDLE;
 	VkPipeline clusterLightFillComputePipeline = VK_NULL_HANDLE;
@@ -1176,6 +1339,10 @@ struct VulkanContext::Impl {
 
 	std::vector<uint32_t> freeMaterialIndices;
 	std::unordered_map<TerraEngine::UUID, uint32_t> materialIndexMap;
+	std::unordered_map<TerraEngine::UUID, std::shared_ptr<const Material>> materialSourceOwners;
+	// These owners describe textures actually uploaded for the material. A null
+	// dependency means native fallback pixels were selected, never authored proof.
+	std::unordered_map<TerraEngine::UUID, std::vector<std::pair<TerraEngine::UUID, std::shared_ptr<const Texture>>>> materialTextureSourceOwners;
 	uint32_t nextMaterialIndex = 0;
 
 	std::vector<uint32_t> freeBufferIndices;
@@ -1191,8 +1358,19 @@ struct VulkanContext::Impl {
 		void CreateAmbientOcclusionResources();
 		void DestroyAmbientOcclusionResources();
 		bool EnsureShadowRenderResources(const ShadowResourceRequest& request);
-		void UploadLightingData(const std::vector<GPULight>& lights);
-		void UploadLightAnalysisInputData(const std::vector<GPULight>& lights);
+	// Payload construction is worker-safe. These functions own protected map,
+	// write, flush and successful-mirror publication, using existing slot fences.
+	bool UploadLightingData(const TerraEngine::Renderer::VulkanLightingUpload::CanonicalBlock& lights,
+		RenderViewType view, std::uint32_t output, bool forceFull,
+		TerraEngine::Renderer::RendererEfficiencyLightingUploadEvidence& evidence);
+	bool UploadLightAnalysisInputData(const TerraEngine::Renderer::VulkanLightingUpload::CanonicalBlock& lights,
+		RenderViewType view, std::uint32_t output, bool forceFull,
+		TerraEngine::Renderer::RendererEfficiencyLightingUploadEvidence& evidence);
+	bool UploadCanonicalLighting(const TerraEngine::Renderer::VulkanLightingUpload::CanonicalBlock& lights,
+		TerraEngine::Renderer::VulkanLightingUpload::Purpose purpose, RenderViewType view,
+		std::uint32_t output, bool forceFull,
+		TerraEngine::Renderer::RendererEfficiencyLightingUploadEvidence& evidence);
+	void ResetLightingUploadMirrors();
 			bool PrepareDepthForCompute(VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, bool updateGlobalDepthDescriptor);
 			void RestoreDepthForAttachment(VkCommandBuffer cmd, VkImage sourceDepthImage);
 			void StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd, VkImage sourceDepthImage, uint32_t viewIndex, const glm::mat4& viewProjection);
@@ -1268,21 +1446,32 @@ struct VulkanContext::Impl {
 	[[nodiscard]] uint32_t AcquireSampledTextureAlias(
 		TerraEngine::UUID textureId,
 		const TerraEngine::Renderer::Vulkan::SamplerKey& key);
-	void UpdateSampledTextureAliases(TerraEngine::UUID textureId, const VulkanImage& image);
-	void RetireSampledTextureAliases(TerraEngine::UUID textureId);
+	bool UpdateSampledTextureAliases(TerraEngine::UUID textureId, const VulkanImage& image);
+	bool RetireSampledTextureAliases(TerraEngine::UUID textureId);
 	void WriteGlobalTextureAlias(uint32_t index, VkImageView view, VkSampler sampler);
+	// Caller has already proven completion at its existing protected boundary.
+	// Failure leaves every owner alive; this helper performs no additional wait.
+	bool RetireGlobalTextureDescriptorSlotsAfterIdle(std::span<const std::uint32_t> indices);
 
 	uint32_t AllocateBufferIndex();
-	void UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range);
-	void UpdateGlobalBufferForFrame(
+	bool UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range);
+	// Returns actual publication success so a grouped draw cannot trust a silent
+	// descriptor rejection after its instance bytes were uploaded.
+	bool UpdateGlobalBufferForFrame(
 		uint32_t frameIndex,
 		uint32_t index,
 		VkBuffer buffer,
 		VkDeviceSize offset,
 		VkDeviceSize range,
 		bool frameSlotKnownIdle = false);
-	void UpdateGlobalHiZ(uint32_t frameIndex);
-	void WaitForDescriptorMutationIdle();
+	bool UpdateGlobalHiZ(uint32_t frameIndex);
+	bool WaitForDescriptorMutationIdle();
+	// Failed upload submissions retain their buffers until existing idle or terminal cleanup proves safety.
+	std::vector<VulkanBuffer> ambiguousUploadBuffers;
+	std::vector<VulkanImage> ambiguousUploadImages;
+	void RetainAmbiguousUpload(VulkanImage& image) noexcept;
+	void RetainAmbiguousUpload(VulkanBuffer& buffer) noexcept;
+	void ReleaseAmbiguousUploadsAfterIdle() noexcept;
 
 	uint32_t AllocateMaterialIndex();
 
@@ -1377,11 +1566,25 @@ struct VulkanContext::Impl {
 	VkFormat offscreenColorFormat = VK_FORMAT_UNDEFINED;
 
 	std::unordered_map<TerraEngine::UUID, VulkanMesh> meshCache;
+	std::uint64_t nextMeshAllocationGeneration = 1U;
+	struct ShadowAuthoredPageResource {
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		std::shared_ptr<const Mesh> retainedMesh;
+		std::uint64_t cpuPublicationGeneration = 0U, allocationGeneration = 0U;
+		std::vector<TerraEngine::Renderer::Vulkan::ShadowAuthoredPageSegment> segments;
+		VulkanBuffer payload{};
+		std::uint32_t bindlessIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	};
+	std::vector<ShadowAuthoredPageResource> shadowAuthoredPageResources;
+	std::uint64_t nextShadowPageAllocationGeneration = 1U;
 	std::unordered_map<TerraEngine::UUID, VulkanImage> textureCache;
 	// Pipelines keyed by RenderPass then PipelineKey (ShaderID + Flags)
 	std::unordered_map<VkRenderPass, std::unordered_map<PipelineKey, VulkanPipeline, PipelineKeyHash>> pipelineCache;
 
 	VulkanImage defaultTexture;
+	// This owner is uploaded and transitioned during protected initialization;
+	// cleanup revokes the proof before destroying any descriptor/image owners.
+	bool defaultTextureShaderReadable = false;
 	VulkanImage defaultNormalTexture;
 	VulkanImage defaultMaterialMaskTexture;
 	std::vector<std::vector<VkCommandPool>> workerCommandPools; // Per-frame command pools for worker threads
@@ -1865,7 +2068,7 @@ struct VulkanContext::Impl {
 	void RetireVulkanAnimationFrameResources(VulkanAnimationFrameResources& resources);
 	void RetireVulkanCpuAnimationFrameResources(
 		VulkanCpuAnimationFrameResources& resources);
-	void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
+	bool CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
 	VkCommandBuffer BeginSingleTimeCommands();
 	bool EndSingleTimeCommands(VkCommandBuffer commandBuffer, std::string_view operation = "immediate command");
 	bool TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels = VK_REMAINING_MIP_LEVELS, uint32_t arrayLayers = 1u);
@@ -1881,6 +2084,11 @@ struct VulkanContext::Impl {
 		bool preserveAliasesForReplacement = false);
 	void InvalidateResource(TerraEngine::UUID id, bool reloadTexturesAfterInvalidate = true);
 	void EnsureMesh(TerraEngine::UUID meshId);
+	// Protected native preparation publishes an all-or-owner-fallback binding
+	// set. Destruction requires the caller's existing descriptor-idle proof.
+	TerraEngine::Renderer::Vulkan::PreparedShadowPageSet EnsureShadowAuthoredPagePayload(
+		const TerraEngine::Renderer::Vulkan::ShadowPageCutRequest& request, bool allowUpload = true);
+	void DestroyShadowAuthoredPagePayloads(TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID);
 	std::optional<PipelineKey> BuildPipelineKey(
 		TerraEngine::UUID shaderCollectionId,
 		uint32_t materialFlags,

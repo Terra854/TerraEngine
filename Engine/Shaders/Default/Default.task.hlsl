@@ -1197,7 +1197,7 @@ bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDeco
 	{
 		return false;
 	}
-	
+
 	// Depth-buffer values are non-linear. A world-space culling epsilon becomes
 	// far too large when applied directly to normalized device depth, especially
 	// with a 0.1-1000 camera where useful occluders commonly sit above 0.995.
@@ -1206,7 +1206,7 @@ bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDeco
 	// editor tests where a wall is only a few world units in front of a mesh at
 	// long camera distance; that separation can be less than 1e-5 in depth.
 	float occlusionBias = clamp(epsilon * 0.01f, 0.000001f, 0.00002f);
-	
+
 	// Occluded if every sampled texel in the projected meshlet rectangle is in
 	// front of the nearest projected meshlet vertex.
 	if (meshletClosestDepth > (furthestDepth + occlusionBias))
@@ -1255,264 +1255,274 @@ void main(uint3 groupId : SV_GroupID)
 			&& groupedInstanceCount <= groupedStreamRecordCount - groupedFirstInstance
 			&& groupedInstanceRelative < groupedInstanceCount);
 	const uint groupedInstanceIndex = groupedFirstInstance + groupedInstanceRelative;
-	RenderInstanceRecord groupedInstanceRecord;
-	const bool groupedInstanceRecordValid = !groupedInstances
-		|| (groupedRangeValid && TryLoadRenderInstance(
+	RenderInstanceRecord groupedInstanceRecord = (RenderInstanceRecord)0;
+	bool groupedInstanceRecordValid = !groupedInstances;
+	// Keep bindless stream access inside an explicit branch. Ordinary draws
+	// contain a real model matrix rather than a stream descriptor locator.
+	if (groupedInstances && groupedRangeValid)
+	{
+		groupedInstanceRecordValid = TryLoadRenderInstance(
 			globalBuffers[NonUniformResourceIndex(asuint(SceneUniforms.model[0].w))],
 			groupedInstanceIndex,
 			groupedStreamRecordCount,
-			groupedInstanceRecord));
-	// A valid grouped record replaces every dynamic selector used by task-stage
-	// bounds and page resolution. The representative push packet remains only a
-	// fail-open fallback for an impossible/stale stream; it is never culling proof
-	// for another crowd member.
-	const uint animationBufferIndex = groupedInstances && groupedInstanceRecordValid
-		? (groupedSharedAnimationBuffer
-			? SceneUniforms.meshDataIndex
-			: groupedInstanceRecord.animationSelectors.x)
-		: SceneUniforms.meshDataIndex;
-	const uint animationRecordIndex = groupedInstances && groupedInstanceRecordValid
-		? (groupedSharedAnimationBuffer
-			? groupedInstanceRecord.animationSelectors.x
-			: groupedInstanceRecord.animationSelectors.y)
-		: SceneUniforms.textureIndex;
-	const uint packetDescriptorIndexForInstance = groupedInstances && groupedInstanceRecordValid
-		? groupedInstanceRecord.geometrySelectors.y
-		: SceneUniforms.virtualGeometryPacketDescriptorIndex;
-	const uint selectedMeshletOffsetForInstance = groupedInstances && groupedInstanceRecordValid
-		? groupedInstanceRecord.geometrySelectors.z : SceneUniforms.virtualMeshletOffset;
-	const uint selectedMeshletCountForInstance = groupedInstances && groupedInstanceRecordValid
-		? groupedInstanceRecord.geometrySelectors.w : SceneUniforms.virtualMeshletCount;
-	const uint selectedVirtualLodForInstance = groupedInstances && groupedInstanceRecordValid
-		? groupedInstanceRecord.geometrySelectors.x : SceneUniforms.selectedVirtualLod;
-	const uint selectedPacketCountForInstance = groupedInstances && groupedInstanceRecordValid
-		? groupedInstanceRecord.virtualGeometrySelectors.y
-		: SceneUniforms.selectedVirtualClusterCount;
-	const uint payloadSourceForInstance = groupedInstances && groupedInstanceRecordValid
-		? groupedInstanceRecord.virtualGeometryPayloadSelectors.x
-		: SceneUniforms.virtualGeometryPayloadSource;
-	const column_major float4x4 cullingModelMatrix = groupedInstances
-		&& groupedInstanceRecordValid ? groupedInstanceRecord.modelMatrix : SceneUniforms.model;
-	// Vulkan validates this selector and the whole record range before it emits
-	// the grouped indirect command. The shader repeats the same bound in the
-	// payload decode below, so a future indirect producer cannot read beyond the
-	// published stream even if it supplies an overlarge group count.
-	DefaultGpuAnimationGraphicsRecord animationRecord;
-	const bool gpuDeformationAvailable = TryLoadGpuAnimationGraphicsRecordAt(
-		animationBufferIndex, animationRecordIndex, animationRecord);
-	TeAnimatedGraphicsBridge canonicalDeformation;
-	const bool canonicalDeformationAvailable =
-		TeTryLoadAnimatedGraphicsBridge(
-			animationBufferIndex,
-			animationRecordIndex,
-			canonicalDeformation);
-	PageLocalPayloadDescriptor pageDescriptor;
-	// The compute bridge makes animated pages self-contained. Legacy owner
-	// deformation still suppresses page-local selection because it has no
-	// matching page publication.
-	const bool pageLocalGeometry =
-		(SceneUniforms.virtualGeometryFlags
-			& kVirtualGeometryFlagOwnerPaletteDeformation) == 0u
-		&& (canonicalDeformationAvailable || !gpuDeformationAvailable)
-		&& TryUsePageLocalGeometryForSource(packetDescriptorIndexForInstance,
-			payloadSourceForInstance, pageDescriptor);
-	// Do not touch the owner decode buffer for resident page packets. Page-local
-	// descriptors carry a complete decode record and must remain independently
-	// usable when the full owner geometry allocation is intentionally skipped.
-	MeshDecodeInfo decode;
-	if (pageLocalGeometry)
-	{
-		// Resident page packets are self-contained. Their decode record describes
-		// only the local vertex/remap/primitive/meshlet streams in the page
-		// payload buffer, so task culling never has to read owner mesh buffers.
-		decode = LoadPageLocalDecodeInfo(pageDescriptor);
+			groupedInstanceRecord);
 	}
-	else
-	{
-		decode = meshDecodeInfo[0];
-	}
-	const uint meshletCount = pageLocalGeometry
-		? selectedMeshletCountForInstance
-		: (decode.counts.w & 0x7FFFFFFFu);
-	const uint packetRunSeed = LoadVirtualGeometryPacketRunSeed();
-	const uint selectedMeshletOffset = pageLocalGeometry
-		? 0u
-		: min(selectedMeshletOffsetForInstance + (packetRunSeed & 0u), meshletCount);
-	const uint selectedMeshletCount = selectedMeshletCountForInstance == 0u
-		? (meshletCount - selectedMeshletOffset)
-		: min(selectedMeshletCountForInstance, meshletCount - selectedMeshletOffset);
-	const uint statsIndex = min(SceneUniforms.statsSlotIndex, kMaxStatsSlots - 1u);
-	const FrameCullingData frameData = frameCullingData[statsIndex];
-	const float epsilon = max(SceneUniforms.cullingEpsilon, frameData.cameraPositionAndEpsilon.w);
-	const float3 cameraPosition = frameData.cameraPositionAndEpsilon.xyz;
-	const bool hiZPyramidAvailable = frameData.renderSettings2.w > 0.5f;
-	const uint virtualGeometryDebugMode = (SceneUniforms.virtualGeometryFlags >> kVirtualGeometryDebugModeShift) & kVirtualGeometryDebugModeMask;
-	const bool debugCulledMeshlets = virtualGeometryDebugMode == 4u;
-	const bool coneCullingSafe = (SceneUniforms.virtualGeometryFlags & kVirtualGeometryFlagConeCullingSafe) != 0u;
-	const uint hiZViewIndex = HiZViewIndexFromStatsSlot(statsIndex);
-
+	// Invalid grouped records emit zero children without reading deformation or
+	// page owners. Keep one final DispatchMesh call: the task stage terminates
+	// there, and all paths must reach that same compiler-supported terminator.
 	uint visibleCount = 0u;
-	MeshletCullingCounters localCounters = MakeEmptyMeshletCullingCounters();
-
-	const bool cullingEnabled = (!groupedInstances || groupedInstanceRecordValid)
-		&& (SceneUniforms.taskCullingEnabled != 0u)
-		&& (frameData.globalTaskCullingEnabled != 0u)
-		&& (frameData.taskShaderSupported != 0u)
-		// Canonical animated pages publish current dynamic cluster bounds. The
-		// rejection code below still fails open whenever that proof is missing,
-		// stale, or corrupt; only legacy owner deformation disables culling.
-		&& (!gpuDeformationAvailable || canonicalDeformationAvailable);
-
-	for (uint localIndex = 0u;
-		groupedRangeValid && localIndex < kTaskBatchSize; ++localIndex)
+	if (groupedInstanceRecordValid)
 	{
-		const uint selectedLocalIndex = taskGroupWithinInstance * kTaskBatchSize + localIndex;
-		uint meshletIndex = ResolvePageLocalMeshletIndex(selectedMeshletOffset, taskGroupWithinInstance * kTaskBatchSize, localIndex, pageLocalGeometry);
-		uint packetDescriptorIndex = packetDescriptorIndexForInstance;
-		PageLocalPayloadDescriptor activePageDescriptor = pageDescriptor;
-		if (selectedLocalIndex >= selectedMeshletCount)
+		// A valid grouped record replaces every dynamic selector used by task-stage
+		// bounds and page resolution. Non-grouped work retains its ordinary push
+		// selectors; a rejected grouped stream never reaches these reads.
+		const uint animationBufferIndex = groupedInstances && groupedInstanceRecordValid
+			? (groupedSharedAnimationBuffer
+				? SceneUniforms.meshDataIndex
+				: groupedInstanceRecord.animationSelectors.x)
+			: SceneUniforms.meshDataIndex;
+		const uint animationRecordIndex = groupedInstances && groupedInstanceRecordValid
+			? (groupedSharedAnimationBuffer
+				? groupedInstanceRecord.animationSelectors.x
+				: groupedInstanceRecord.animationSelectors.y)
+			: SceneUniforms.textureIndex;
+		const uint packetDescriptorIndexForInstance = groupedInstances && groupedInstanceRecordValid
+			? groupedInstanceRecord.geometrySelectors.y
+			: SceneUniforms.virtualGeometryPacketDescriptorIndex;
+		const uint selectedMeshletOffsetForInstance = groupedInstances && groupedInstanceRecordValid
+			? groupedInstanceRecord.geometrySelectors.z : SceneUniforms.virtualMeshletOffset;
+		const uint selectedMeshletCountForInstance = groupedInstances && groupedInstanceRecordValid
+			? groupedInstanceRecord.geometrySelectors.w : SceneUniforms.virtualMeshletCount;
+		const uint selectedVirtualLodForInstance = groupedInstances && groupedInstanceRecordValid
+			? groupedInstanceRecord.geometrySelectors.x : SceneUniforms.selectedVirtualLod;
+		const uint selectedPacketCountForInstance = groupedInstances && groupedInstanceRecordValid
+			? groupedInstanceRecord.virtualGeometrySelectors.y
+			: SceneUniforms.selectedVirtualClusterCount;
+		const uint payloadSourceForInstance = groupedInstances && groupedInstanceRecordValid
+			? groupedInstanceRecord.virtualGeometryPayloadSelectors.x
+			: SceneUniforms.virtualGeometryPayloadSource;
+		const column_major float4x4 cullingModelMatrix = groupedInstances
+			&& groupedInstanceRecordValid ? groupedInstanceRecord.modelMatrix : SceneUniforms.model;
+		// Vulkan validates this selector and the whole record range before it emits
+		// the grouped indirect command. The shader repeats the same bound in the
+		// payload decode below, so a future indirect producer cannot read beyond the
+		// published stream even if it supplies an overlarge group count.
+		DefaultGpuAnimationGraphicsRecord animationRecord;
+		const bool gpuDeformationAvailable = TryLoadGpuAnimationGraphicsRecordAt(
+			animationBufferIndex, animationRecordIndex, animationRecord);
+		TeAnimatedGraphicsBridge canonicalDeformation;
+		const bool canonicalDeformationAvailable =
+			TeTryLoadAnimatedGraphicsBridge(
+				animationBufferIndex,
+				animationRecordIndex,
+				canonicalDeformation);
+		PageLocalPayloadDescriptor pageDescriptor;
+		// The compute bridge makes animated pages self-contained. Legacy owner
+		// deformation still suppresses page-local selection because it has no
+		// matching page publication.
+		const bool pageLocalGeometry =
+			(SceneUniforms.virtualGeometryFlags
+				& kVirtualGeometryFlagOwnerPaletteDeformation) == 0u
+			&& (canonicalDeformationAvailable || !gpuDeformationAvailable)
+			&& TryUsePageLocalGeometryForSource(packetDescriptorIndexForInstance,
+				payloadSourceForInstance, pageDescriptor);
+		// Do not touch the owner decode buffer for resident page packets. Page-local
+		// descriptors carry a complete decode record and must remain independently
+		// usable when the full owner geometry allocation is intentionally skipped.
+		MeshDecodeInfo decode;
+		if (pageLocalGeometry)
 		{
-			break;
+			// Resident page packets are self-contained. Their decode record describes
+			// only the local vertex/remap/primitive/meshlet streams in the page
+			// payload buffer, so task culling never has to read owner mesh buffers.
+			decode = LoadPageLocalDecodeInfo(pageDescriptor);
 		}
-		if (pageLocalGeometry
-			&& !TryResolvePageLocalMeshletForSource(selectedLocalIndex,
-				packetDescriptorIndexForInstance, selectedPacketCountForInstance,
-				payloadSourceForInstance, packetDescriptorIndex, meshletIndex,
-				activePageDescriptor))
+		else
 		{
-			// A missing descriptor means the run publication is incomplete. Stop at
-			// the last fully owned packet instead of reading another page's bytes.
-			break;
+			decode = meshDecodeInfo[0];
 		}
-		const uint activeMeshletCount = pageLocalGeometry ? activePageDescriptor.meshletCount : meshletCount;
-		if (meshletIndex >= activeMeshletCount)
-		{
-			break;
-		}
+		const uint meshletCount = pageLocalGeometry
+			? selectedMeshletCountForInstance
+			: (decode.counts.w & 0x7FFFFFFFu);
+		const uint packetRunSeed = LoadVirtualGeometryPacketRunSeed();
+		const uint selectedMeshletOffset = pageLocalGeometry
+			? 0u
+			: min(selectedMeshletOffsetForInstance + (packetRunSeed & 0u), meshletCount);
+		const uint selectedMeshletCount = selectedMeshletCountForInstance == 0u
+			? (meshletCount - selectedMeshletOffset)
+			: min(selectedMeshletCountForInstance, meshletCount - selectedMeshletOffset);
+		const uint statsIndex = min(SceneUniforms.statsSlotIndex, kMaxStatsSlots - 1u);
+		const FrameCullingData frameData = frameCullingData[statsIndex];
+		const float epsilon = max(SceneUniforms.cullingEpsilon, frameData.cameraPositionAndEpsilon.w);
+		const float3 cameraPosition = frameData.cameraPositionAndEpsilon.xyz;
+		const bool hiZPyramidAvailable = frameData.renderSettings2.w > 0.5f;
+		const uint virtualGeometryDebugMode = (SceneUniforms.virtualGeometryFlags >> kVirtualGeometryDebugModeShift) & kVirtualGeometryDebugModeMask;
+		const bool debugCulledMeshlets = virtualGeometryDebugMode == 4u;
+		const bool coneCullingSafe = (SceneUniforms.virtualGeometryFlags & kVirtualGeometryFlagConeCullingSafe) != 0u;
+		const uint hiZViewIndex = HiZViewIndexFromStatsSlot(statsIndex);
 
-		localCounters.meshletsTotal += 1u;
+		MeshletCullingCounters localCounters = MakeEmptyMeshletCullingCounters();
 
-		bool culled = false;
-		if (cullingEnabled)
+		const bool cullingEnabled = (!groupedInstances || groupedInstanceRecordValid)
+			&& (SceneUniforms.taskCullingEnabled != 0u)
+			&& (frameData.globalTaskCullingEnabled != 0u)
+			&& (frameData.taskShaderSupported != 0u)
+			// Canonical animated pages publish current dynamic cluster bounds. The
+			// rejection code below still fails open whenever that proof is missing,
+			// stale, or corrupt; only legacy owner deformation disables culling.
+			&& (!gpuDeformationAvailable || canonicalDeformationAvailable);
+
+		for (uint localIndex = 0u;
+			groupedRangeValid && localIndex < kTaskBatchSize; ++localIndex)
 		{
-			// Load bounds from exactly one source so a page-local culling pass does
-			// not issue a speculative read through the owner mesh descriptor.
-			MeshletBounds bounds;
-			bool currentDynamicProof = false;
-			if (pageLocalGeometry)
+			const uint selectedLocalIndex = taskGroupWithinInstance * kTaskBatchSize + localIndex;
+			uint meshletIndex = ResolvePageLocalMeshletIndex(selectedMeshletOffset, taskGroupWithinInstance * kTaskBatchSize, localIndex, pageLocalGeometry);
+			uint packetDescriptorIndex = packetDescriptorIndexForInstance;
+			PageLocalPayloadDescriptor activePageDescriptor = pageDescriptor;
+			if (selectedLocalIndex >= selectedMeshletCount)
 			{
-				bounds = LoadPageLocalMeshletBounds(activePageDescriptor, meshletIndex);
-				if(canonicalDeformationAvailable)
+				break;
+			}
+			if (pageLocalGeometry
+				&& !TryResolvePageLocalMeshletForSource(selectedLocalIndex,
+					packetDescriptorIndexForInstance, selectedPacketCountForInstance,
+					payloadSourceForInstance, packetDescriptorIndex, meshletIndex,
+					activePageDescriptor))
+			{
+				// A missing descriptor means the run publication is incomplete. Stop at
+				// the last fully owned packet instead of reading another page's bytes.
+				break;
+			}
+			const uint activeMeshletCount = pageLocalGeometry ? activePageDescriptor.meshletCount : meshletCount;
+			if (meshletIndex >= activeMeshletCount)
+			{
+				break;
+			}
+
+			localCounters.meshletsTotal += 1u;
+
+			bool culled = false;
+			if (cullingEnabled)
+			{
+				// Load bounds from exactly one source so a page-local culling pass does
+				// not issue a speculative read through the owner mesh descriptor.
+				MeshletBounds bounds;
+				bool currentDynamicProof = false;
+				if (pageLocalGeometry)
 				{
-					const uint pageId =
-						LoadVirtualGeometryPagePayloadDescriptorWordAt(
-							packetDescriptorIndex,
-							0u,
-							0xffffffffu);
-					TeAnimatedGraphicsPage animatedPage;
-					TeAnimatedDynamicBounds animatedBounds;
-					currentDynamicProof =
-						TeTryResolveAnimatedGraphicsPage(
-							animationBufferIndex,
-							canonicalDeformation,
-							pageId,
-							animatedPage)
-						&& TeTryLoadAnimatedBounds(
-							canonicalDeformation,
-							animatedPage,
-							animatedBounds);
-					if(currentDynamicProof)
+					bounds = LoadPageLocalMeshletBounds(activePageDescriptor, meshletIndex);
+					if(canonicalDeformationAvailable)
 					{
-						bounds.center = animatedBounds.sphere.xyz;
-						bounds.radius = animatedBounds.sphere.w;
+						const uint pageId =
+							LoadVirtualGeometryPagePayloadDescriptorWordAt(
+								packetDescriptorIndex,
+								0u,
+								0xffffffffu);
+						TeAnimatedGraphicsPage animatedPage;
+						TeAnimatedDynamicBounds animatedBounds;
+						currentDynamicProof =
+							TeTryResolveAnimatedGraphicsPage(
+								animationBufferIndex,
+								canonicalDeformation,
+								pageId,
+								animatedPage)
+							&& TeTryLoadAnimatedBounds(
+								canonicalDeformation,
+								animatedPage,
+								animatedBounds);
+						if(currentDynamicProof)
+						{
+							bounds.center = animatedBounds.sphere.xyz;
+							bounds.radius = animatedBounds.sphere.w;
+						}
+					}
+				}
+				else
+				{
+					bounds = meshletBounds[meshletIndex];
+				}
+				const float3 worldCenter = mul(cullingModelMatrix, float4(bounds.center, 1.0f)).xyz;
+				const float3 worldAxisX = mul((float3x3)cullingModelMatrix, float3(1.0f, 0.0f, 0.0f));
+				const float3 worldAxisY = mul((float3x3)cullingModelMatrix, float3(0.0f, 1.0f, 0.0f));
+				const float3 worldAxisZ = mul((float3x3)cullingModelMatrix, float3(0.0f, 0.0f, 1.0f));
+				const float maxScale = max(length(worldAxisX), max(length(worldAxisY), length(worldAxisZ)));
+				const float worldRadius = bounds.radius * max(maxScale, 1e-6f);
+
+				// Missing, stale, or corrupt animated bounds fail open. Static page
+				// bounds are never used to reject a deformed publication.
+				const bool rejectionProofAvailable =
+					!canonicalDeformationAvailable || currentDynamicProof;
+				culled = rejectionProofAvailable
+					&& IsFrustumCulled(
+						worldCenter,
+						worldRadius,
+						frameData,
+						epsilon);
+				// Cone backface culling is only armed by RenderSystem when every
+				// selected cluster has cooked proof for one-sided opaque materials,
+				// consistent winding, low thin-shell risk, and valid cone bounds.
+				// Imported GLB/FBX package meshes currently leave this bit off until
+				// per-cluster material proof exists, so risky content still fails open.
+				if (!culled && coneCullingSafe
+					&& !canonicalDeformationAvailable)
+				{
+					const float3 worldConeApex = mul(cullingModelMatrix, float4(bounds.coneApex, 1.0f)).xyz;
+					const float3 worldConeAxis = mul((float3x3)cullingModelMatrix, bounds.coneAxis);
+					culled = IsConeBackfacing(worldConeApex, worldConeAxis, bounds.coneCutoff, worldRadius, cameraPosition, epsilon);
+				}
+				// The validated renderer contract preserves this single current-pyramid decision path:
+				// no shader quality tiers are introduced while cluster batches are
+				// being validated against the accepted Hi-Z baseline. Shadow passes
+				// consume their light-view meshlet ranges with this gate off, because
+				// camera Hi-Z cannot answer light visibility.
+				if (!culled && hiZPyramidAvailable
+					&& rejectionProofAvailable
+					// The current compute publication contains one conservative
+					// bound for the whole animated page. IsOccluded still projects
+					// individual packed page vertices, which remain in bind pose.
+					// Using those stale positions could reject visible moving
+					// meshlets, so animated pages fail open for Hi-Z until the ABI
+					// publishes current per-meshlet projection geometry.
+					&& !canonicalDeformationAvailable)
+				{
+					MeshDecodeInfo activeDecode = decode;
+					// HLSL cannot select structure values with the conditional operator,
+					// so assign the packet-local decode explicitly after source selection.
+					if (pageLocalGeometry)
+					{
+						activeDecode = LoadPageLocalDecodeInfo(activePageDescriptor);
+					}
+					if (IsOccluded(meshletIndex, activeMeshletCount, activeDecode, frameData, hiZViewIndex, localCounters, epsilon, activePageDescriptor, pageLocalGeometry))
+					{
+						localCounters.meshletsCulledHiZ += 1u;
+						culled = true;
 					}
 				}
 			}
-			else
-			{
-				bounds = meshletBounds[meshletIndex];
-			}
-			const float3 worldCenter = mul(cullingModelMatrix, float4(bounds.center, 1.0f)).xyz;
-			const float3 worldAxisX = mul((float3x3)cullingModelMatrix, float3(1.0f, 0.0f, 0.0f));
-			const float3 worldAxisY = mul((float3x3)cullingModelMatrix, float3(0.0f, 1.0f, 0.0f));
-			const float3 worldAxisZ = mul((float3x3)cullingModelMatrix, float3(0.0f, 0.0f, 1.0f));
-			const float maxScale = max(length(worldAxisX), max(length(worldAxisY), length(worldAxisZ)));
-			const float worldRadius = bounds.radius * max(maxScale, 1e-6f);
 
-			// Missing, stale, or corrupt animated bounds fail open. Static page
-			// bounds are never used to reject a deformed publication.
-			const bool rejectionProofAvailable =
-				!canonicalDeformationAvailable || currentDynamicProof;
-			culled = rejectionProofAvailable
-				&& IsFrustumCulled(
-					worldCenter,
-					worldRadius,
-					frameData,
-					epsilon);
-			// Cone backface culling is only armed by RenderSystem when every
-			// selected cluster has cooked proof for one-sided opaque materials,
-			// consistent winding, low thin-shell risk, and valid cone bounds.
-			// Imported GLB/FBX package meshes currently leave this bit off until
-			// per-cluster material proof exists, so risky content still fails open.
-			if (!culled && coneCullingSafe
-				&& !canonicalDeformationAvailable)
+			if (culled && !debugCulledMeshlets)
 			{
-				const float3 worldConeApex = mul(cullingModelMatrix, float4(bounds.coneApex, 1.0f)).xyz;
-				const float3 worldConeAxis = mul((float3x3)cullingModelMatrix, bounds.coneAxis);
-				culled = IsConeBackfacing(worldConeApex, worldConeAxis, bounds.coneCutoff, worldRadius, cameraPosition, epsilon);
+				localCounters.meshletsCulled += 1u;
+				continue;
 			}
-			// The validated renderer contract preserves this single current-pyramid decision path:
-			// no shader quality tiers are introduced while cluster batches are
-			// being validated against the accepted Hi-Z baseline. Shadow passes
-			// consume their light-view meshlet ranges with this gate off, because
-			// camera Hi-Z cannot answer light visibility.
-			if (!culled && hiZPyramidAvailable
-				&& rejectionProofAvailable
-				// The current compute publication contains one conservative
-				// bound for the whole animated page. IsOccluded still projects
-				// individual packed page vertices, which remain in bind pose.
-				// Using those stale positions could reject visible moving
-				// meshlets, so animated pages fail open for Hi-Z until the ABI
-				// publishes current per-meshlet projection geometry.
-				&& !canonicalDeformationAvailable)
+			if (culled)
 			{
-				MeshDecodeInfo activeDecode = decode;
-				// HLSL cannot select structure values with the conditional operator,
-				// so assign the packet-local decode explicitly after source selection.
-				if (pageLocalGeometry)
-				{
-					activeDecode = LoadPageLocalDecodeInfo(activePageDescriptor);
-				}
-				if (IsOccluded(meshletIndex, activeMeshletCount, activeDecode, frameData, hiZViewIndex, localCounters, epsilon, activePageDescriptor, pageLocalGeometry))
-				{
-					localCounters.meshletsCulledHiZ += 1u;
-					culled = true;
-				}
+				// Culled debug mode deliberately keeps rejected meshlets in the
+				// payload so the mesh/fragment stages can color them by the rejection
+				// reason. Normal rendering still drops them above.
+				localCounters.meshletsCulled += 1u;
 			}
+
+			gTaskPayload.meshletIndices[visibleCount] = meshletIndex;
+			gTaskPayload.packetDescriptorIndices[visibleCount] = packetDescriptorIndex;
+			gTaskPayload.instanceIndices[visibleCount] = groupedInstances
+				? groupedFirstInstance + groupedInstanceRelative : 0u;
+			gTaskPayload.selectedVirtualLods[visibleCount] = selectedVirtualLodForInstance;
+			visibleCount++;
+			localCounters.meshletsDispatched += 1u;
 		}
 
-		if (culled && !debugCulledMeshlets)
-		{
-			localCounters.meshletsCulled += 1u;
-			continue;
-		}
-		if (culled)
-		{
-			// Culled debug mode deliberately keeps rejected meshlets in the
-			// payload so the mesh/fragment stages can color them by the rejection
-			// reason. Normal rendering still drops them above.
-			localCounters.meshletsCulled += 1u;
-		}
-
-		gTaskPayload.meshletIndices[visibleCount] = meshletIndex;
-		gTaskPayload.packetDescriptorIndices[visibleCount] = packetDescriptorIndex;
-		gTaskPayload.instanceIndices[visibleCount] = groupedInstances
-			? groupedFirstInstance + groupedInstanceRelative : 0u;
-		gTaskPayload.selectedVirtualLods[visibleCount] = selectedVirtualLodForInstance;
-		visibleCount++;
-		localCounters.meshletsDispatched += 1u;
+		FlushMeshletCullingCounters(statsIndex, localCounters);
 	}
-
-	FlushMeshletCullingCounters(statsIndex, localCounters);
 	DispatchMesh(visibleCount, 1u, 1u, gTaskPayload);
 }

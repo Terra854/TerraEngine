@@ -7,7 +7,7 @@ The seven focused correctness entries are implemented: `Engine.SceneMutationFail
 `Engine.AudioWorldCellCapture`, `Engine.FrameFailureLifecycle`, `Engine.OwnedProcess`
 and `Editor.ExportLifecycle`. Their independent process-tree watchdogs reject
 missing/zero selections and enforce registered minimum counts. Current floors
-are respectively 39, 28, 10, 5, 7, 6 and 6. Retain native and live acceptance
+are respectively 42, 28, 10, 5, 7, 6 and 6. Retain native and live acceptance
 results with their installed artifact hashes and the naming-policy audit.
 
 Run in an x64 Visual Studio developer shell with supported SDK headers/libraries
@@ -2810,3 +2810,148 @@ install replacement system dependencies to work around a missing PATH.
 
 References: [Windows command prompt variable limit](https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/command-line-string-limitation)
 and [.NET environment variables](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-environment-variables).
+
+### Native GLFW recovery regression
+
+On a machine with an available native desktop, enable the isolated renderer
+recovery test from an x64 Visual Studio developer terminal:
+
+```powershell
+cmake --preset RelWithDebInfo -DBUILD_TESTING=ON -DTERRAENGINE_BUILD_NATIVE_GLFW_RECOVERY_TEST=ON
+cmake --build --preset RelWithDebInfo --target install --parallel 2
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^Editor\.RendererEfficiency\.NativeGlfwRecovery$' --no-tests=error --output-on-failure
+& ./out/build/RelWithDebInfo/Build/Tests/Editor/NativeGlfwRecovery/TerraEngine-RendererEfficiencyGlfwRecoveryTests.exe
+```
+
+The test creates one hidden GLFW window and uses the bundled GLFW/ImGui
+backends. It checks actual main-viewport destruction, the production platform
+rebind, preserved editor callbacks, the first recovered GLFW frame, and cleanup.
+Its installed directory includes its runtime libraries. The option defaults to
+off because a native desktop is required; the headless editor tests remain
+available independently. No Vulkan device is created, so these results support
+the repair but do not replace the installed renderer-efficiency GPU matrix,
+device-recovery receipts, or normal editor shutdown checks.
+
+The ordinary `Engine.RendererEfficiency` suite also checks fallback texture
+descriptor admission before renderer readiness. A scoped initialization grant
+permits writes to the fresh descriptor sets without adding an idle wait; runtime
+writes retain their existing synchronization. The CPU regression checks admission
+and revocation. The installed recovery fixture must separately prove actual GPU
+descriptor validity on both the initial and recreated device.
+
+The frozen delete-then-transform rollback fixture produces the scene queue's
+actual `conflicted` decision. Its host and evidence verifier require zero applied
+writes, both operations rejected, and identical protected target state before and
+after the existing flush. A fabricated `Rejected` label or incomplete rejected
+write count cannot satisfy that fixture.
+
+Cold HiZ descriptor slots use the device-owned white 1x1 texture until that
+view has a completed, readable pyramid. The fallback supplies valid image
+queries without making history ready or changing the occlusion gates. CPU
+descriptor-plan tests cover cold and mixed-view selection; the installed
+GPU-assisted recovery diagnostic must check both native device epochs before
+the ordinary comparison matrix can establish acceptance.
+
+The rollback fixture retains a validated prior scheduler packet and the actual
+renderer spatial revision at its protected preparation boundary. A conflicted
+transaction publishes no new revision, so its raw receipt may correctly contain
+zero. The fixture proves unchanged target state and compares rendered frames
+with the observed prior revision; it does not create a publication or flush the
+scene journal to manufacture that token.
+
+Shadow and LTC resource rebuilds retain their descriptor indices and rewrite
+retiring descriptors to the uploaded white fallback at the existing protected
+idle boundary before destroying image views or samplers. Active replacements
+then bind their real images to those same slots. Bulk resource clearing also
+removes texture aliases before reusing the descriptor heap. The
+`Renderer.Efficiency.TextureRetirement` cases exercise retirement ordering,
+stable assignments, and rejection before destruction; native validation and
+rendered comparisons remain necessary to establish GPU correctness.
+
+The `Renderer.Efficiency.Editor.AssetImportTemporary` cases exercise the same
+Project Browser admission helper used by both directory listings. Exact private
+model-package staging paths (`.ta-` followed by 32 or 16 lowercase hexadecimal
+characters) and their descendants are rejected before filesystem status probes.
+Authored near-matches remain visible, and their filesystem errors still propagate.
+The regression injects a denied status probe without depending on a transient
+Windows file lock. Run it from the freshly built and installed test tree:
+
+```powershell
+$priorAssetTemporaryTestFilter = [Environment]::GetEnvironmentVariable('TERRAENGINE_TEST_FILTER', 'Process')
+try {
+	$env:TERRAENGINE_TEST_FILTER = 'Renderer.Efficiency.Editor.AssetImportTemporary'
+	& ./out/build/RelWithDebInfo/Build/Tests/Editor/TerraEngine-EditorTests.exe
+	if($LASTEXITCODE -ne 0) { throw 'Private import-path regressions failed.' }
+} finally {
+	[Environment]::SetEnvironmentVariable('TERRAENGINE_TEST_FILTER', $priorAssetTemporaryTestFilter, 'Process')
+}
+```
+
+These policy checks support the installed fixture workflow; they do not replace
+normal editor lifecycle checks or the full renderer comparison matrix.
+
+## Renderer efficiency P1–P5 workflow
+
+The renderer efficiency implementation has passed the P1–P5 integrated code
+gates. Consult `out/evidence/renderer-efficiency/final/build-and-tests.json` for
+the final integrated compile/install and CPU verification outcome. Native
+Serial/Concurrent collection and GPU/performance acceptance remain paused by
+user direction. Supporting diagnostics and a preserved first-stage installation
+do not establish an accepted comparison or total-frame regression baseline.
+
+From an x64 Visual Studio developer PowerShell at the repository root:
+
+```powershell
+git submodule update --init --recursive
+cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
+cmake --build --preset RelWithDebInfo --target install --parallel 2
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine|Editor)\.RendererEfficiency$|^Renderer\.Efficiency\..*Contracts$' --no-tests=error --output-on-failure
+```
+
+Use the maintained installation at `out/build/RelWithDebInfo/Build`. Verify the
+files declared by its `renderer-efficiency-artifacts.json` and
+`correctness-artifacts.json`, including their actual hashes, before using
+installed tools. A checkout runner or mixed installation is not supported.
+
+The current full registration contains 168 CTest groups. This CPU command selects
+166, excluding the mixed nested-settlement group and hidden-window GLFW test:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -E '^(Engine\.NestedTaskSettlement|Editor\.RendererEfficiency\.NativeGlfwRecovery)$' --no-tests=error --output-on-failure
+```
+
+`Engine.SpatialUnitTests` already excludes the nested-settlement prefix. Run its
+ten CPU-only cases separately through the installed watchdog wrapper:
+
+```powershell
+$installedTests = './out/build/RelWithDebInfo/Build/Tests'
+$nestedCpuFilter = 'Engine.NestedTaskSettlement.Animation,Engine.NestedTaskSettlement.UnqueuedPooledVoidRemoved,Engine.NestedTaskSettlement.NoThrowUnwind,Engine.NestedTaskSettlement.ConsumedFutureSkipped,Engine.NestedTaskSettlement.HeldSiblingSettled,Engine.NestedTaskSettlement.PrimaryExceptionPreserved,Engine.NestedTaskSettlement.SuccessfulCollection'
+& "$installedTests/Tools/Correctness/RunNativeCorrectnessSlice.ps1" -Executable "$installedTests/Engine/TerraEngine-EngineTests.exe" -Filter $nestedCpuFilter -MinimumCases 10 -TimeoutSeconds 120 -LogDirectory './out/evidence/renderer-efficiency-final-nested-cpu'
+if ($LASTEXITCODE -ne 0) { throw 'Nested CPU settlement slice failed.' }
+```
+
+This compound filter does not change the normal mixed group's minimum of 11.
+The separately registered `Editor.RendererEfficiency.NativeGlfwRecovery` uses a
+real hidden GLFW window and needs a desktop; it is not part of the 166-group CPU
+command. Neither command proves rendered pixels or GPU completion.
+
+See the [renderer efficiency tools README](../Tests/Tools/RendererEfficiency/README.md)
+for exact installed runner parameters, exit codes, fresh-root requirements,
+transient options, fixtures and evidence paths. The installed manifest and schema
+retain the frozen comparison counts and tolerances. Native commands are documented for a later explicitly
+resumed run, not as a continuation of the CPU checks.
+
+P5 reserves queried image requirements and reconciles actual allocation bytes
+against its additional 64 MiB default budget. Zero disables admission; the
+too-small fixture uses one byte. Reserved, live and retiring owners remain
+charged, including pending recorded/submitted uses. Lowering a budget drains
+without new admission; unsupported admission retains the complete final-shadow
+fallback. Native receipts preserve partition rows, source copies, physical
+inventory and actual command/submit/completion mappings.
+
+Collection requires normal owned cleanup and complete content-addressed artifact
+closure. First-control, residency and lighting-baseline receipts do not replace
+the 60 warmup/300 measured windows. A failed collector or incomplete session
+cannot be manually promoted into accepted evidence. The current independent
+baseline compatibility collector deliberately reports Unverified until actual
+matched total-frame baseline proof is supplied.
