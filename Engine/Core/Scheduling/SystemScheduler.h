@@ -183,6 +183,9 @@ namespace TerraEngine::Scheduling {
 	// renderer workers. Keeping this resource separate from the persistent and
 	// dynamic roots makes scheduler diagnostics reflect the real ownership split.
 	inline constexpr const char kResourceRenderCaptureInputs[] = "RenderCaptureInputs";
+	// Renderer capture owns exclusive scratch allocation/reset. Later stages
+	// borrow completed collections; publication copies terminal facts only.
+	inline constexpr const char kResourceRendererFrameScratch[] = "RendererFrameScratch";
 	inline constexpr const char kResourcePersistentRenderSceneState[] = "PersistentRenderSceneState";
 	inline constexpr const char kResourceDynamicRenderFrameState[] = "DynamicRenderFrameState";
 	inline constexpr const char kResourceRenderViewSelections[] = "RenderViewSelections";

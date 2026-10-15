@@ -5,6 +5,7 @@
 #include "RenderFrameBreakdown.h"
 #include "RenderGraph.h"
 #include "RenderWorkerTaskGroup.h"
+#include "RenderFrameScratch.h"
 #include "Core/Export.h"
 #include "Renderer/RenderTypes.h"
 #include "Renderer/RendererRecovery.h"
@@ -365,6 +366,11 @@ namespace TerraEngine::Renderer {
 	struct RenderDiagnosticsSummary
 	{
 		std::uint64_t frameId = 0u;
+		// Terminal copies survive protected reset and renderer lifetime replacement.
+		// No collection, allocator, or resource pointer escapes through diagnostics.
+		RenderFrameScratchDiagnostics frameScratch;
+		RenderFrameScratchDiagnostics previousFrameScratch;
+		RenderFrameScratchReclamationDiagnostics frameScratchReclamation;
 		// These identities name the exact sealed root behind diagnostics, avoiding
 		// ambiguity when a delayed backend receipt follows presentation recovery.
 		std::uint64_t publicationGeneration = 0u;
@@ -461,6 +467,12 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API bool RenderDiagnosticsRequested();
 	TERRAENGINE_API void SetRenderDiagnosticsRequested(bool requested);
 	TERRAENGINE_API void ClearPublishedRenderDiagnostics();
+	// Pure copying keeps native observations independent of JSON/editor state.
+	TERRAENGINE_API void ApplyFrameScratchDiagnostics(RenderDiagnosticsSummary& summary,
+		const RenderFrameScratchDiagnostics& latest, const RenderFrameScratchDiagnostics& previous,
+		const RenderFrameScratchReclamationDiagnostics& reclamation);
+	TERRAENGINE_API void PublishFrameScratchDiagnostics(const RenderFrameScratchDiagnostics& latest,
+		const RenderFrameScratchDiagnostics& previous, const RenderFrameScratchReclamationDiagnostics& reclamation);
 	TERRAENGINE_API void PublishRenderDiagnostics(RenderDiagnosticsSummary summary);
 	TERRAENGINE_API RenderDiagnosticsSummary LatestRenderDiagnostics();
 	TERRAENGINE_API RenderProfilerFrameSnapshot LatestRenderProfilerFrameSnapshot();

@@ -1,4 +1,5 @@
 #include "TestHarness.h"
+#include "Core/Logger/Logger.h"
 #include "../Support/ArchiveSafetyFixtures.h"
 
 #include <iostream>
@@ -16,6 +17,7 @@ namespace TerraEngine::Tests {
 	void RegisterArtifactValidationTests(TestRegistry& registry);
 	void RegisterScopedTaskSettlementTests(TestRegistry& registry);
 	void RegisterOwnedImportExecutorTests(TestRegistry& registry);
+	void RegisterDependencyAdmissionFailureTests(TestRegistry& registry);
 	void RegisterOwnedProcessTests(TestRegistry& registry);
 	void RegisterResourceAsyncDependencyTests(TestRegistry& registry);
 	void RegisterTransactionalMutationFailureSafetyTests(TestRegistry& registry);
@@ -32,6 +34,10 @@ namespace TerraEngine::Tests {
 	void RegisterBinaryIOTests(TestRegistry& registry);
 	void RegisterBoundedRingBufferTests(TestRegistry& registry);
 	void RegisterMemoryFoundationTests(TestRegistry& registry);
+	// These cases retain standalone arena coverage after the renderer migrates.
+	void RegisterFrameArenaSafetyTests(TestRegistry& registry);
+	void RegisterRenderFrameScratchTests(TestRegistry& registry);
+	void RegisterVulkanEmptyFramePolicyTests(TestRegistry& registry);
 	void RegisterBootSummaryValidationTests(TestRegistry& registry);
 	void RegisterCodecProviderTests(TestRegistry& registry);
 	void RegisterContentMountPathNormalizerTests(TestRegistry& registry);
@@ -476,6 +482,7 @@ int main() {
 	TerraEngine::Tests::RegisterArtifactValidationTests(registry);
 	TerraEngine::Tests::RegisterScopedTaskSettlementTests(registry);
 	TerraEngine::Tests::RegisterOwnedImportExecutorTests(registry);
+	TerraEngine::Tests::RegisterDependencyAdmissionFailureTests(registry);
 	TerraEngine::Tests::RegisterOwnedProcessTests(registry);
 	TerraEngine::Tests::RegisterResourceAsyncDependencyTests(registry);
 	TerraEngine::Tests::RegisterTransactionalMutationFailureSafetyTests(registry);
@@ -499,6 +506,9 @@ int main() {
 	TerraEngine::Tests::RegisterBinaryIOTests(registry);
 	TerraEngine::Tests::RegisterBoundedRingBufferTests(registry);
 	TerraEngine::Tests::RegisterMemoryFoundationTests(registry);
+	TerraEngine::Tests::RegisterFrameArenaSafetyTests(registry);
+	TerraEngine::Tests::RegisterRenderFrameScratchTests(registry);
+	TerraEngine::Tests::RegisterVulkanEmptyFramePolicyTests(registry);
 	TerraEngine::Tests::RegisterBootSummaryValidationTests(registry);
 	TerraEngine::Tests::RegisterCodecProviderTests(registry);
 	TerraEngine::Tests::RegisterContentMountPathNormalizerTests(registry);
@@ -932,5 +942,11 @@ int main() {
 	TerraEngine::Tests::RegisterTerrainExportRuntimeTests(registry);
 #endif
 
-	return registry.RunAll(std::cout);
+	const int result = registry.RunAll(std::cout);
+	// Complete asynchronous log writes before flushing the final harness record.
+	// Explicitly flushing here also preserves the summary on very short native
+	// processes; a successful exit without a selected count cannot pass tooling.
+	Logger::Instance().Shutdown();
+	std::cout.flush();
+	return result;
 }

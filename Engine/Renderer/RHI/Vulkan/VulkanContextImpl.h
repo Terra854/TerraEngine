@@ -320,6 +320,18 @@ struct VulkanContext::Impl {
 	// never keep the engine from booting.
 	bool validationLayersRequested = false;
 	bool validationLayersEnabled = false;
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	TerraEngine::Renderer::Vulkan::EmptyFrameValidationRequest emptyFrameValidationRequest{};
+	TerraEngine::Renderer::Vulkan::EmptyFrameValidationRequest emptyFrameValidationActiveRequest{};
+	TerraEngine::Renderer::Vulkan::EmptyFrameValidationReceipt emptyFrameValidationReceipt{};
+	std::atomic<std::uint64_t> emptyFrameValidationErrors{0};
+	bool emptyFrameValidationRejectCandidate = false;
+	TerraEngine::Renderer::Vulkan::EmptyFrameCandidateCheckpoint emptyFrameValidationCandidateCheckpoint = TerraEngine::Renderer::Vulkan::EmptyFrameCandidateCheckpoint::None;
+	bool emptyFrameValidationDisableMaintenance = false;
+	std::uint64_t emptyFrameValidationOrdinarySerial = 0;
+#endif
+	TerraEngine::Renderer::Vulkan::EmptyFrameRecoveryState emptyFrameRecovery;
+	VkFence emptyFrameAcquireDrainFence = VK_NULL_HANDLE;
 	VkSurfaceKHR surface = VK_NULL_HANDLE;
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 	// Cached once during physical-device selection so per-frame animation
@@ -374,6 +386,8 @@ struct VulkanContext::Impl {
 
 	VkRenderPass renderPass = VK_NULL_HANDLE;
 	std::vector<VkFramebuffer> framebuffers;
+	VkRenderPass emptyFrameRenderPass = VK_NULL_HANDLE;
+	std::vector<VkFramebuffer> emptyFrameFramebuffers;
 
 	VkImage depthImage = VK_NULL_HANDLE;
 	VmaAllocation depthImageAllocation = VK_NULL_HANDLE;
@@ -392,6 +406,7 @@ struct VulkanContext::Impl {
 
 	std::vector<VkCommandPool> commandPools;
 	std::vector<VkCommandBuffer> commandBuffers;
+	std::vector<VkCommandBuffer> emptyFrameCommandBuffers;
 	// Editor UI recording uses pools that are independent from scene rendering.
 	// Project-hub frames have no camera and therefore never enter the renderer's
 	// BeginFrame cleanup, so sharing its pools would retain one UI command buffer
@@ -431,6 +446,8 @@ struct VulkanContext::Impl {
 		std::vector<VkImageView> imageViews;
 		VkRenderPass renderPass = VK_NULL_HANDLE;
 		std::vector<VkFramebuffer> framebuffers;
+		VkRenderPass emptyFrameRenderPass = VK_NULL_HANDLE;
+		std::vector<VkFramebuffer> emptyFrameFramebuffers;
 		VkImage depthImage = VK_NULL_HANDLE;
 		VmaAllocation depthAllocation = VK_NULL_HANDLE;
 		VkImageView depthView = VK_NULL_HANDLE;
@@ -927,6 +944,7 @@ struct VulkanContext::Impl {
 				std::array<std::array<std::array<VulkanHiZ, 2>, MAX_FRAMES_IN_FLIGHT>, kHiZViewCount> hiZByViewFrame{};
 				std::array<std::array<uint32_t, MAX_FRAMES_IN_FLIGHT>, kHiZViewCount> hiZReadIndexByViewFrame{};
 				std::array<std::array<bool, MAX_FRAMES_IN_FLIGHT>, kHiZViewCount> hiZWritePendingSwapByViewFrame{};
+				std::array<std::array<TerraEngine::Renderer::Vulkan::EmptyFrameSubmittedHiZState<VulkanHiZHistoryMetadata>, MAX_FRAMES_IN_FLIGHT>, kHiZViewCount> submittedHiZWritesByViewFrame{};
 				// RenderFrame discovers the true Scene/Game target sizes, but
 				// Vulkan objects may only be recreated at a frame-slot fence
 				// boundary. BeginFrame consumes these desired extents before any
@@ -986,17 +1004,19 @@ struct VulkanContext::Impl {
 						VulkanHiZ& submittedHiZ = WritableHiZForFrame(viewSlot, slot);
 						submittedHiZ.layoutInitialized = true;
 						submittedHiZ.layoutTransitionRecorded = false;
+						submittedHiZWritesByViewFrame[viewSlot][slot].Confirm(submittedHiZ.history);
 					}
 				}
 
-				void DiscardRecordedHiZWrites(uint32_t frameIndex)
+				void DiscardRecordedHiZWrites(uint32_t frameIndex, bool preserveSubmittedPrefix = false)
 				{
 					const uint32_t slot = std::min(frameIndex, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT - 1));
 					for (uint32_t viewSlot = 0u; viewSlot < kHiZViewCount; ++viewSlot)
 					{
 						VulkanHiZ& discardedHiZ = WritableHiZForFrame(viewSlot, slot);
 						discardedHiZ.layoutTransitionRecorded = false;
-						hiZWritePendingSwapByViewFrame[viewSlot][slot] = false;
+						hiZWritePendingSwapByViewFrame[viewSlot][slot] = submittedHiZWritesByViewFrame[viewSlot][slot]
+							.DiscardUnsubmitted(preserveSubmittedPrefix, discardedHiZ.history);
 					}
 				}
 
@@ -1010,6 +1030,7 @@ struct VulkanContext::Impl {
 					}
 					hiZReadIndexByViewFrame[viewSlot][slot] ^= 1u;
 					hiZWritePendingSwapByViewFrame[viewSlot][slot] = false;
+					submittedHiZWritesByViewFrame[viewSlot][slot].Reset();
 					return true;
 				}
 
@@ -1997,6 +2018,10 @@ struct VulkanContext::Impl {
 	VkFormat FindSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features);
 	bool CreateDepthResources();
 	bool CreateRenderPass();
+	bool CreateEmptyFrameFallbackResources();
+	bool RecordEmptyRuntimeFallback(VkCommandBuffer& command);
+	bool DrainEmptyRuntimeAcquire();
+	void SuspendEmptyRuntimeFrame(bool drainAcquire = true);
 	bool CreateFramebuffers();
 	bool CreateCommandPool();
 	bool CreateSyncObjects();
@@ -2006,7 +2031,6 @@ struct VulkanContext::Impl {
 	PresentationResourceBundle TakePresentationResourceBundle();
 	void RestorePresentationResourceBundle(PresentationResourceBundle&& bundle);
 	void DestroyPresentationResourceBundle(PresentationResourceBundle& bundle);
-	void RetirePresentationResourceBundle(PresentationResourceBundle&& bundle, std::uint64_t generation);
 	void CollectCompletedPresentationResourceBundles();
 	bool PreparePresentationCompletionFence(std::uint32_t imageIndex,
 		VkPresentInfoKHR& presentInfo, VkSwapchainPresentFenceInfoKHR& completionInfo);

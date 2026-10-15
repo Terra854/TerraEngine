@@ -459,6 +459,7 @@ namespace TerraEngine::Tests {
 			const std::vector<TerraEngine::Scheduling::SchedulerResourceDefinition> resources =
 				TerraEngine::Scheduling::DefaultSchedulerResources();
 			const std::vector<std::string> requiredVirtualGeometryResources = {
+				TerraEngine::Scheduling::kResourceRendererFrameScratch,
 				TerraEngine::Scheduling::kResourcePersistentRenderTopology,
 				TerraEngine::Scheduling::kResourceDynamicRenderInstanceCandidates,
 				TerraEngine::Scheduling::kResourceRenderCompatibilityGroups,

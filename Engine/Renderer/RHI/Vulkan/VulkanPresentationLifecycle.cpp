@@ -81,6 +81,16 @@ namespace TerraEngine::Renderer::Vulkan
 		retirementProofPending_ = false;
 	}
 
+	void PresentationRecreationCoordinator::PublishReservationFailure() noexcept
+	{
+		// No native owner moved, but the suspended frame cannot acquire another
+		// image to generate a new recovery event. Arm a fresh revision for the
+		// next protected frame boundary; Claim consumes it once, so persistent
+		// memory pressure cannot recurse or spin within this failed attempt.
+		PublishFailure(false);
+		Request(PresentationRecreationReason::CandidateFailure);
+	}
+
 	void PresentationRecreationCoordinator::PublishRetirementBlocked(bool oldSwapchainWasConsumed) noexcept
 	{
 		// This failure is different from a bad candidate: retrying becomes useful

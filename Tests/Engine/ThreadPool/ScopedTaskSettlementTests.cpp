@@ -58,6 +58,19 @@ namespace TerraEngine::Tests {
 
 	void RegisterScopedTaskSettlementTests(TestRegistry& registry)
 	{
+		registry.Add("Engine.NestedTaskSettlement.ProductionClosedAdmissionDoesNotTrackFuture", [](TestContext& context) {
+			auto pool = ThreadPool::CreateOwned(1);
+			pool->shutdown();
+			std::vector<std::future<void>> futures;
+			futures.reserve(1);
+			ScopedTaskSettlement<void> group(futures);
+			auto task = pool->createTask([] {});
+			bool rejected = false;
+			try { group.Enqueue(*pool, task); }
+			catch(const std::runtime_error&) { rejected = true; }
+			context.Expect(rejected && futures.empty(),
+				"Real dependency-free queue rejection must leave no accepted ownership or tracked pending future.");
+		});
 		registry.Add("Engine.NestedTaskSettlement.UnqueuedPooledVoidRemoved", [](TestContext& context) {
 			PoolOwner owner;
 			std::vector<std::future<void>> futures;

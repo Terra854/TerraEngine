@@ -1,0 +1,86 @@
+# Seal only installed bytes after verifying the new executables match their
+# built targets. This is validation provenance, not a runtime acceptance result.
+set(runtime_memory_root "@ENGINE_INSTALL_DESTINATION@")
+set(runtime_memory_subdir "Tests/Tools/RuntimeMemorySafety")
+set(runtime_memory_required
+	"${runtime_memory_subdir}/RuntimeMemorySafetyFixture.exe"
+	"${runtime_memory_subdir}/TerraEngine.dll" "${runtime_memory_subdir}/glfw3.dll"
+	"${runtime_memory_subdir}/TerraEngine-RuntimeMemorySafetyTimingInspector.exe"
+	"${runtime_memory_subdir}/TerraEngine-RuntimeMemorySafetyTimingJournalFixture.exe"
+	"${runtime_memory_subdir}/CaptureRuntimeMemorySafetyTiming.ps1"
+	"${runtime_memory_subdir}/CompareRuntimeMemorySafetyTiming.ps1"
+	"${runtime_memory_subdir}/InvokeRuntimeMemorySafetyTimingMatrix.ps1"
+	"${runtime_memory_subdir}/Test-RuntimeMemorySafetyTiming.ps1"
+	"${runtime_memory_subdir}/Test-RuntimeMemorySafetyTimingInspector.ps1"
+	"${runtime_memory_subdir}/MaterializeRuntimeMemorySafetyFixture.ps1"
+	"${runtime_memory_subdir}/RunInstalledRuntimeMemorySafety.ps1"
+	"${runtime_memory_subdir}/InvokeRuntimeMemorySafetyEditorDiagnostics.ps1"
+	"${runtime_memory_subdir}/Test-RuntimeMemorySafetyRunner.ps1"
+	"${runtime_memory_subdir}/Test-RuntimeMemorySafetyRendererProtocol.ps1"
+	"${runtime_memory_subdir}/Test-RuntimeMemorySafetyEditorProtocol.ps1"
+	"${runtime_memory_subdir}/Test-RuntimeMemorySafetyRecordedEvidence.ps1"
+	"${runtime_memory_subdir}/ValidationCases.json" "${runtime_memory_subdir}/Fixtures/manifest.json"
+	"${runtime_memory_subdir}/README.md"
+	"${runtime_memory_subdir}/Parity/CMakeLists.txt"
+	"${runtime_memory_subdir}/Parity/RuntimeMemorySafetyParityHost.cpp"
+	"${runtime_memory_subdir}/Parity/Run-RuntimeMemorySafetyParity.ps1"
+	"${runtime_memory_subdir}/Parity/Qualify-RuntimeMemorySafetyParityProject.ps1"
+	"${runtime_memory_subdir}/Parity/Collect-RuntimeMemorySafetyPostImportClosure.ps1"
+	"${runtime_memory_subdir}/Parity/Compare-RuntimeMemorySafetyParity.py"
+	"${runtime_memory_subdir}/Parity/Test-RuntimeMemorySafetyParity.py"
+	"${runtime_memory_subdir}/Parity/Join-RuntimeMemorySafetyParity.ps1"
+	"${runtime_memory_subdir}/Parity/Test-RuntimeMemorySafetyParityJoin.ps1"
+	"${runtime_memory_subdir}/Parity/New-RuntimeMemorySafetyRendererSourceProof.ps1"
+	"${runtime_memory_subdir}/Parity/README.md"
+	"${runtime_memory_subdir}/Parity/support-pins.json"
+	"${runtime_memory_subdir}/Parity/support/Renderer/RendererEfficiencyArtifacts.h"
+	"${runtime_memory_subdir}/Parity/support/Renderer/RendererEfficiencyFixtureControls.h"
+	"Editor/TerraEngine-Editor.exe" "Editor/TerraEngine.dll" "Editor/glfw3.dll"
+	"Tests/Engine/TerraEngine-EngineTests.exe" "Tests/Engine/TerraEngine.dll"
+	"Tests/Editor/TerraEngine-EditorTests.exe" "Tests/Editor/TerraEngine.dll"
+	"Tests/Tools/Correctness/RunWithWatchdog.ps1"
+	"Tests/Tools/Correctness/RunNativeCorrectnessSlice.ps1"
+	"Tests/Tools/RendererEfficiency/TerraEngine-RendererEfficiencyFixtureMaterializer.exe"
+	"Tests/Fixtures/RendererEfficiency/workloads.json" "correctness-artifacts.json")
+foreach(runtime_memory_pair IN ITEMS
+	"$<TARGET_FILE:RuntimeMemorySafetyFixture>|RuntimeMemorySafetyFixture.exe"
+	"$<TARGET_FILE:TerraEngine-RuntimeMemorySafetyTimingInspector>|TerraEngine-RuntimeMemorySafetyTimingInspector.exe"
+	"$<TARGET_FILE:TerraEngine-RuntimeMemorySafetyTimingJournalFixture>|TerraEngine-RuntimeMemorySafetyTimingJournalFixture.exe")
+	string(REPLACE "|" ";" runtime_memory_pair_parts "${runtime_memory_pair}")
+	list(GET runtime_memory_pair_parts 0 runtime_memory_built)
+	list(GET runtime_memory_pair_parts 1 runtime_memory_name)
+	file(SHA256 "${runtime_memory_built}" runtime_memory_built_hash)
+	file(SHA256 "${runtime_memory_root}/${runtime_memory_subdir}/${runtime_memory_name}" runtime_memory_installed_hash)
+	if(NOT runtime_memory_built_hash STREQUAL runtime_memory_installed_hash)
+		message(FATAL_ERROR "Runtime-memory installed target differs from its build: ${runtime_memory_name}")
+	endif()
+endforeach()
+# Preserve the shader/managed/template/support closure used by live validation,
+# including dynamically loaded DLLs not described by CMake link dependencies.
+file(GLOB_RECURSE runtime_memory_closure RELATIVE "${runtime_memory_root}"
+	"${runtime_memory_root}/Editor/*" "${runtime_memory_root}/Engine/*"
+	"${runtime_memory_root}/Binaries/*" "${runtime_memory_root}/Tools/*"
+	"${runtime_memory_root}/Intermediate/InstalledShaders/*"
+	"${runtime_memory_root}/Tests/Fixtures/RendererEfficiency/*")
+list(APPEND runtime_memory_required ${runtime_memory_closure})
+# Include the complete maintained parity source package as well as the required
+# entry points above, so an added support script cannot escape provenance checks.
+file(GLOB_RECURSE runtime_memory_parity_closure RELATIVE "${runtime_memory_root}"
+	"${runtime_memory_root}/${runtime_memory_subdir}/Parity/*")
+list(APPEND runtime_memory_required ${runtime_memory_parity_closure})
+list(REMOVE_DUPLICATES runtime_memory_required)
+list(SORT runtime_memory_required)
+set(runtime_memory_json "{\"schemaVersion\":\"runtime-memory-safety-v1\",\"nativeAcceptance\":false,\"files\":[")
+set(runtime_memory_separator "")
+foreach(runtime_memory_relative IN LISTS runtime_memory_required)
+	if(NOT EXISTS "${runtime_memory_root}/${runtime_memory_relative}")
+		message(FATAL_ERROR "Missing runtime-memory installed input: ${runtime_memory_relative}")
+	endif()
+	file(SHA256 "${runtime_memory_root}/${runtime_memory_relative}" runtime_memory_hash)
+	file(SIZE "${runtime_memory_root}/${runtime_memory_relative}" runtime_memory_size)
+	string(APPEND runtime_memory_json "${runtime_memory_separator}{\"path\":\"${runtime_memory_relative}\",\"sha256\":\"${runtime_memory_hash}\",\"length\":${runtime_memory_size}}")
+	set(runtime_memory_separator ",")
+endforeach()
+string(APPEND runtime_memory_json "]}")
+file(WRITE "${runtime_memory_root}/${runtime_memory_subdir}/runtime-memory-safety-artifacts.json" "${runtime_memory_json}\n")
+message(STATUS "Sealed installed runtime-memory validation artifacts")

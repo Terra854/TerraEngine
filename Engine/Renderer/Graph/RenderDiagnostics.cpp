@@ -1850,6 +1850,25 @@ namespace TerraEngine::Renderer {
 		g_latestRenderDiagnostics = {};
 	}
 
+	void ApplyFrameScratchDiagnostics(RenderDiagnosticsSummary& summary,
+		const RenderFrameScratchDiagnostics& latest, const RenderFrameScratchDiagnostics& previous,
+		const RenderFrameScratchReclamationDiagnostics& reclamation)
+	{
+		summary.frameScratch = latest;
+		summary.previousFrameScratch = previous;
+		summary.frameScratchReclamation = reclamation;
+	}
+
+	void PublishFrameScratchDiagnostics(const RenderFrameScratchDiagnostics& latest,
+		const RenderFrameScratchDiagnostics& previous, const RenderFrameScratchReclamationDiagnostics& reclamation)
+	{
+		if(!RenderDiagnosticsRequested()) return;
+		std::lock_guard lock(g_renderDiagnosticsMutex);
+		// Only the small copied facts change at terminal retirement; avoid copying
+		// every optional diagnostics vector a second time on the protected path.
+		ApplyFrameScratchDiagnostics(g_latestRenderDiagnostics, latest, previous, reclamation);
+	}
+
 	void PublishRenderDiagnostics(RenderDiagnosticsSummary summary)
 	{
 		if (!RenderDiagnosticsRequested())

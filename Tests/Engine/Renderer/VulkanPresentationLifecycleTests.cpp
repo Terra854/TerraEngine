@@ -1,5 +1,10 @@
 #include "TestHarness.h"
+#include "VulkanSourceTestUtils.h"
+#include "Renderer/RHI/Vulkan/VulkanEmptyFramePolicy.h"
 #include "Renderer/RHI/Vulkan/VulkanPresentationLifecycle.h"
+
+#include <new>
+#include <vector>
 
 namespace TerraEngine::Tests
 {
@@ -69,6 +74,77 @@ namespace TerraEngine::Tests
 			context.Expect(coordinator.IsSuspendedForZeroExtent() && !coordinator.Claim().has_value(), "Minimize should suspend instead of claiming periodic zero-extent rebuilds.");
 			coordinator.RequestFramebufferExtent({ 1280u, 720u });
 			context.Expect(coordinator.Claim().has_value(), "Restore with a new nonzero extent should create exactly one fresh request.");
+		});
+
+		registry.Add("Renderer.VulkanPresentationLifecycle.ReservationFailureRetriesWithoutResize", [](TestContext& context) {
+			using namespace TerraEngine::Renderer::Vulkan;
+			// Fault only the production reservation's host container. No global
+			// allocator override, native device, or window callback is needed.
+			struct Retired { int resources = 0; std::uint64_t generation = 0; };
+			struct RetirementQueue {
+				std::vector<Retired> entries;
+				bool fail = true;
+				void emplace_back() { if(fail) throw std::bad_alloc(); entries.emplace_back(); }
+				Retired& back() { return entries.back(); }
+				void pop_back() { entries.pop_back(); }
+			} retired;
+			PresentationLifecycle lifecycle;
+			context.Expect(lifecycle.Configure(3, 2, 2, 3), "Initial presentation owners must be usable.");
+			const auto originalGeneration = lifecycle.Generation();
+			const PresentationExtent extent{1280, 720};
+			PresentationRecreationCoordinator coordinator;
+			coordinator.SetActiveExtent(extent);
+			coordinator.RequestOutOfDate();
+			EmptyFrameRecoveryState recovery;
+			int activeBundle = 55;
+			std::uint64_t previousRevision = 0;
+			// Each iteration represents a later protected BeginFrame. Repeated
+			// failures must preserve ownership and permit exactly one next attempt
+			// without a new extent, OUT_OF_DATE result, or retirement-fence event.
+			for(unsigned attempt = 0; attempt < 3; ++attempt) {
+				const auto request = coordinator.Claim();
+				context.Expect(request && request->extent == extent && request->revision > previousRevision,
+					"Reservation failure must re-arm recovery at the unchanged window extent.");
+				previousRevision = request->revision;
+				context.Expect(!coordinator.Claim(), "A frame boundary must not claim the same retry twice.");
+				bool rejected = false;
+				try { EmptyFrameRetirementReservation reservation(retired); }
+				catch(const std::bad_alloc&) {
+					rejected = true;
+					recovery.Suspend(lifecycle.Generation());
+					coordinator.PublishReservationFailure();
+				}
+				context.Expect(rejected && activeBundle == 55 && retired.entries.empty(),
+					"Failed reservation must retain the complete active bundle without partial retirement.");
+				context.Expect(recovery.Suspended() && coordinator.IsRecoveryPending()
+					&& !coordinator.OldSwapchainWasConsumed() && !coordinator.IsWaitingForRetirementProof()
+					&& lifecycle.Generation() == originalGeneration,
+					"Host allocation failure must suspend frame reuse without inventing a native handoff or completion proof.");
+			}
+			const auto retry = coordinator.Claim();
+			context.Expect(retry && retry->extent == extent && retry->reason == PresentationRecreationReason::CandidateFailure,
+				"The next frame must retry automatically after host memory becomes available.");
+			retired.fail = false;
+			{
+				EmptyFrameRetirementReservation reservation(retired);
+				context.Expect(lifecycle.Configure(3, 2, 2, 3), "Complete replacement owners must publish a newer generation.");
+				reservation.Commit(activeBundle, originalGeneration);
+			}
+			coordinator.PublishSuccess(extent);
+			context.Expect(recovery.CompleteReplacement(lifecycle.Generation(), true)
+				&& !recovery.Suspended() && !coordinator.IsRecoveryPending() && !coordinator.Claim(),
+				"Successful replacement must resume normal frame admission and stop scheduling retries.");
+			context.Expect(activeBundle == 0 && retired.entries.size() == 1 && retired.back().resources == 55
+				&& ValidateEmptyFrameAcquisition(lifecycle, {0, 0, lifecycle.Generation()}, {3, 3, 3}),
+				"Only the completed replacement may resume acquisition with the old bundle retained for retirement.");
+			// Keep the deterministic policy test connected to the actual native
+			// exception boundary; reverting only its call site must also fail.
+			const auto source = VulkanSourceContracts::ReadSources({"Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp"});
+			const auto reserve = source.find("retirementReservation.emplace(retiredPresentationBundles)");
+			const auto detach = source.find("PresentationResourceBundle activeBundle = TakePresentationResourceBundle()", reserve);
+			context.Expect(reserve != std::string::npos && detach != std::string::npos
+				&& source.substr(reserve, detach - reserve).find("presentationRecreation.PublishReservationFailure()") != std::string::npos,
+				"Native reservation rejection must use the tested automatic retry transition before detaching owners.");
 		});
 
 		registry.Add("Renderer.VulkanPresentationLifecycle.FailureAndPresentFenceRetirement", [](TestContext& context) {

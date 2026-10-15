@@ -1,0 +1,185 @@
+{
+  "schemaVersion": "runtime-memory-safety-v1",
+  "registryId": "runtime-memory-safety-066",
+  "minimumUniqueCases": 54,
+  "minimumEngineCases": 50,
+  "minimumEditorCases": 4,
+  "groups": [
+    {
+      "prefix": "Engine.RuntimeMemorySafety.TaskCache",
+      "minimumRegisteredCases": 8,
+      "cases": [
+        "Engine.RuntimeMemorySafety.TaskCache.CompletedNestedCapture",
+        "Engine.RuntimeMemorySafety.TaskCache.NeverDispatchedNestedCapture",
+        "Engine.RuntimeMemorySafety.TaskCache.DeepCapturedOwnership",
+        "Engine.RuntimeMemorySafety.TaskCache.ReleaseDuringShutdown",
+        "Engine.RuntimeMemorySafety.TaskCache.ReleaseAfterShutdown",
+        "Engine.RuntimeMemorySafety.TaskCache.PriorGenerationAfterRestart",
+        "Engine.RuntimeMemorySafety.TaskCache.QueuedCaptureReentry",
+        "Engine.RuntimeMemorySafety.TaskCache.OutstandingAccountingAndReinitialize"
+      ]
+    },
+    {
+      "prefix": "Engine.RuntimeMemorySafety.DependencyAdmission",
+      "minimumRegisteredCases": 10,
+      "cases": [
+        "Engine.RuntimeMemorySafety.DependencyAdmission.VoidParent",
+        "Engine.RuntimeMemorySafety.DependencyAdmission.ValueParent",
+        "Engine.RuntimeMemorySafety.DependencyAdmission.HeldAncestorSibling",
+        "Engine.RuntimeMemorySafety.DependencyAdmission.MultipleAncestors",
+        "Engine.RuntimeMemorySafety.DependencyAdmission.FirstFailurePreserved",
+        "Engine.RuntimeMemorySafety.DependencyAdmission.ParentBodySuppressed",
+        "Engine.RuntimeMemorySafety.DependencyAdmission.IndependentWorkSurvives",
+        "Engine.RuntimeMemorySafety.DependencyAdmission.OneWorkerHeldSibling",
+        "Engine.RuntimeMemorySafety.DependencyAdmission.TwoWorkerHeldSibling",
+        "Engine.RuntimeMemorySafety.DependencyAdmission.EightWorkerHeldSibling"
+      ]
+    },
+    {
+      "prefix": "Engine.RuntimeMemorySafety.Allocators.FixedPool",
+      "minimumRegisteredCases": 4,
+      "cases": [
+        "Engine.RuntimeMemorySafety.Allocators.FixedPool.ConstructorFailureReturnsSlot",
+        "Engine.RuntimeMemorySafety.Allocators.FixedPool.NeighborAndHighWaterRemainCommitted",
+        "Engine.RuntimeMemorySafety.Allocators.FixedPool.ClearDestroysSuccessfulObjectsOnly",
+        "Engine.RuntimeMemorySafety.Allocators.FixedPool.RepeatedFailurePreservesCapacity"
+      ]
+    },
+    {
+      "prefix": "Engine.RuntimeMemorySafety.Allocators.Alignment",
+      "minimumRegisteredCases": 4,
+      "cases": [
+        "Engine.RuntimeMemorySafety.Allocators.Alignment.ControlledBacking64And256",
+        "Engine.RuntimeMemorySafety.Allocators.Alignment.MixedLiveRanges",
+        "Engine.RuntimeMemorySafety.Allocators.Alignment.AlignedFallbackAndUpstream",
+        "Engine.RuntimeMemorySafety.Allocators.Alignment.ResetReusesRetiredBacking"
+      ]
+    },
+    {
+      "prefix": "Engine.RuntimeMemorySafety.Allocators.Overflow",
+      "minimumRegisteredCases": 6,
+      "cases": [
+        "Engine.RuntimeMemorySafety.Allocators.Overflow.DirectBytesRejectWrap",
+        "Engine.RuntimeMemorySafety.Allocators.Overflow.NewArrayRejectsCountOverflow",
+        "Engine.RuntimeMemorySafety.Allocators.Overflow.FrameAllocatorRejectsCountOverflow",
+        "Engine.RuntimeMemorySafety.Allocators.Overflow.FallbackAdjustedSizeRejectsWrap",
+        "Engine.RuntimeMemorySafety.Allocators.Overflow.ExactFitAndRejectedRequestPreserveState",
+        "Engine.RuntimeMemorySafety.Allocators.Overflow.ZeroInvalidAndFaultPolicies"
+      ]
+    },
+    {
+      "prefix": "Engine.RuntimeMemorySafety.RendererScratch",
+      "minimumRegisteredCases": 10,
+      "cases": [
+        "Engine.RuntimeMemorySafety.RendererScratch.ExclusiveLeaseBeforeReset",
+        "Engine.RuntimeMemorySafety.RendererScratch.VectorOwnersRetireBeforeLease",
+        "Engine.RuntimeMemorySafety.RendererScratch.HeldWorkerBorrower",
+        "Engine.RuntimeMemorySafety.RendererScratch.FailureAfterBorrowerSettlement",
+        "Engine.RuntimeMemorySafety.RendererScratch.CancelledEpisodeRetirement",
+        "Engine.RuntimeMemorySafety.RendererScratch.SceneClearOwnerRetirement",
+        "Engine.RuntimeMemorySafety.RendererScratch.ShutdownStrongOwnership",
+        "Engine.RuntimeMemorySafety.RendererScratch.RestartLifetimeIdentity",
+        "Engine.RuntimeMemorySafety.RendererScratch.FallbackBalancedAtProtectedReset",
+        "Engine.RuntimeMemorySafety.RendererScratch.CopiedDiagnosticsAcrossReset"
+      ]
+    },
+    {
+      "prefix": "Engine.RuntimeMemorySafety.EmptyFramePolicy",
+      "minimumRegisteredCases": 8,
+      "cases": [
+        "Engine.RuntimeMemorySafety.EmptyFramePolicy.AcquiredGenerationAndIndexValidation",
+        "Engine.RuntimeMemorySafety.EmptyFramePolicy.ConditionalAcquireWait",
+        "Engine.RuntimeMemorySafety.EmptyFramePolicy.RecordBeforeFenceReset",
+        "Engine.RuntimeMemorySafety.EmptyFramePolicy.BundleRollbackAndDestructionOrder",
+        "Engine.RuntimeMemorySafety.EmptyFramePolicy.RecoveryBeforeFrameReuse",
+        "Engine.RuntimeMemorySafety.EmptyFramePolicy.NoSceneShadowHiZPublication",
+        "Engine.RuntimeMemorySafety.EmptyFramePolicy.ImageOwnedPresentationSignals",
+        "Engine.RuntimeMemorySafety.EmptyFramePolicy.ColorOnlyPersistentFallback"
+      ]
+    },
+    {
+      "prefix": "Editor.RuntimeMemorySafety.Diagnostics",
+      "minimumRegisteredCases": 4,
+      "cases": [
+        "Editor.RuntimeMemorySafety.Diagnostics.CopiedCounters",
+        "Editor.RuntimeMemorySafety.Diagnostics.PreResetSnapshot",
+        "Editor.RuntimeMemorySafety.Diagnostics.FailedAndLifetimeIdentity",
+        "Editor.RuntimeMemorySafety.Diagnostics.ReadOnlyNoMutation"
+      ]
+    }
+  ],
+  "repetitionPolicy": {
+    "workerCounts": [
+      1,
+      2,
+      8
+    ],
+    "dependencyAdmission": 100,
+    "cacheNeverDispatched": 100,
+    "watchdogSeconds": 10,
+    "healthyFramesAfterEmpty": 2,
+    "freshEmptyAcquisitions": 100,
+    "rendererLifecyclePerLane": 100,
+    "cacheCompleted": 100,
+    "recreatedEmptyAcquisitions": 100
+  },
+  "rendererLifecycleLanes": [
+    "completed",
+    "failed",
+    "cancelled",
+    "scene-clear",
+    "shutdown",
+    "restart"
+  ],
+  "gpuFailureLanes": [
+    "fresh-acquisition",
+    "recreated-acquisition",
+    "previously-presented",
+    "acquire-wait-consumed",
+    "record-failure",
+    "fence-reset-failure",
+    "submit-failure",
+    "candidate-rollback",
+    "maintenance-enabled",
+    "maintenance-disabled"
+  ],
+  "timingPolicy": {
+    "warmupFrames": 60,
+    "protocolPath": "README.md#frozen-reference-timing-and-independent-parity",
+    "measuredFrames": 300,
+    "noise": "max_i abs(metric(Aprime_i)/metric(A_i)-1)",
+    "limit": "max(0.02,noise)",
+    "scopes": [
+      "RenderSystem: Protected Publication Capture",
+      "RenderSystem: Geometry Route Preparation",
+      "RenderSystem: Virtual Geometry Preparation"
+    ],
+    "protocolSha256": "03B339C72C46B61DD45141F3B49B6D75778B6C1C60C857733A8DDD83AE93DA01",
+    "comparisonCount": 18,
+    "median": "(x[150]+x[151])/2",
+    "allComparisonsRequired": true,
+    "maxFrames": 4096,
+    "metric": "rendererPreparationScopeSumMs",
+    "p95": "x[285]",
+    "thresholdCount": 6,
+    "referenceOrder": [
+      "A1",
+      "Aprime1",
+      "A2",
+      "Aprime2",
+      "A3",
+      "Aprime3"
+    ],
+    "selectedCount": 360,
+    "sampleIntervalFrames": 1,
+    "simulation": "PausedPlayNoExplicitStep",
+    "captureLevel": "detailed",
+    "selectedOffset": 0,
+    "invalidSampleReplacementAllowed": false,
+    "candidateOrder": [
+      "C1",
+      "C2",
+      "C3"
+    ]
+  }
+}

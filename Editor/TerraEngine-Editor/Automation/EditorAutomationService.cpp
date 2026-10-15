@@ -5,6 +5,7 @@
 // editor validation/action work against TerraEngine's existing systems.
 
 #include "EditorAutomationService.h"
+#include "RendererScratchDiagnostics.h"
 #include "EditorAutomationTransaction.h"
 #include "AnimationAdvancedOperations.h"
 #include "AnimationAssetOperations.h"
@@ -8371,6 +8372,8 @@ namespace TerraEngine::Editor::Automation
 		data["parallelFrame"] = parallelFrame;
 		data["sceneView"] = sceneViewDiagnostics;
 		data["rendererRecovery"] = SerializeRendererRecoverySnapshot(renderDiagnostics.rendererRecovery);
+		// This endpoint serializes existing copies; it cannot reset or allocate scratch.
+		data["rendererScratch"] = SerializeRendererScratchDiagnostics(renderDiagnostics);
 		data["profilerTimingStreams"] = profilerTimingStreams;
 		data["profilerCaptureEvidence"] = profilerCaptureEvidence;
 		data["hardBoundaries"] = boundaryFindings;

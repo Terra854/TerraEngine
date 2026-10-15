@@ -171,12 +171,89 @@ void VulkanContext::Impl::ResetShadowPublication(bool allocationReplaced) noexce
 }
 
 // VulkanContext::EndFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+bool VulkanContext::Impl::RecordEmptyRuntimeFallback(VkCommandBuffer& command)
+{
+	if (currentFrame >= emptyFrameCommandBuffers.size() || acquiredImageIndex >= emptyFrameFramebuffers.size()
+		|| emptyFrameRenderPass == VK_NULL_HANDLE) return false;
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	if (emptyFrameValidationActiveRequest.checkpoint == TerraEngine::Renderer::Vulkan::EmptyFrameValidationRequest::Checkpoint::BeforeRecording) {
+		emptyFrameValidationReceipt.rejectedCheckpoint = emptyFrameValidationActiveRequest.checkpoint;
+		return false;
+	}
+#endif
+	command = emptyFrameCommandBuffers[currentFrame];
+	VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+	begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	auto result = vkBeginCommandBuffer(command, &begin);
+	if (result != VK_SUCCESS) { MarkDeviceLost(result, "empty fallback begin recording"); return false; }
+	const auto plan = TerraEngine::Renderer::Vulkan::MakeEmptyFrameColorPassPlan();
+	VkClearValue clear{};
+	std::copy(plan.clearColor.begin(), plan.clearColor.end(), clear.color.float32);
+	VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+	pass.renderPass = emptyFrameRenderPass;
+	pass.framebuffer = emptyFrameFramebuffers[acquiredImageIndex];
+	pass.renderArea.extent = swapchainExtent;
+	pass.clearValueCount = plan.colorAttachmentCount;
+	pass.pClearValues = &clear;
+	vkCmdBeginRenderPass(command, &pass, VK_SUBPASS_CONTENTS_INLINE);
+	vkCmdEndRenderPass(command);
+	result = vkEndCommandBuffer(command);
+	if (result != VK_SUCCESS) { MarkDeviceLost(result, "empty fallback end recording"); return false; }
+	return true;
+}
+
+bool VulkanContext::Impl::DrainEmptyRuntimeAcquire()
+{
+	if (!swapchainImageAcquired || swapchainAcquireWaitConsumed) return true;
+	if (currentFrame >= imageAvailableSemaphores.size() || emptyFrameAcquireDrainFence != VK_NULL_HANDLE) return false;
+	VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+	VkFence candidateFence = VK_NULL_HANDLE;
+	auto result = vkCreateFence(device, &fenceInfo, nullptr, &candidateFence);
+	if (result != VK_SUCCESS) { MarkDeviceLost(result, "empty acquisition drain fence creation"); return false; }
+	emptyFrameAcquireDrainFence = candidateFence;
+	VkSemaphore semaphore = imageAvailableSemaphores[currentFrame];
+	VkPipelineStageFlags stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+	submit.waitSemaphoreCount = 1;
+	submit.pWaitSemaphores = &semaphore;
+	submit.pWaitDstStageMask = &stage;
+	// Acquisition-only drain: no command, present signal, or scene publication.
+	result = SubmitGraphicsQueue(1, &submit, emptyFrameAcquireDrainFence);
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	emptyFrameValidationReceipt.acquisitionDrainSubmitted = result == VK_SUCCESS;
+#endif
+	if (result != VK_SUCCESS) { MarkDeviceLost(result, "empty acquisition drain submit"); return false; }
+	swapchainAcquireWaitConsumed = true;
+	result = vkWaitForFences(device, 1, &emptyFrameAcquireDrainFence, VK_TRUE, UINT64_MAX);
+	if (result != VK_SUCCESS) { MarkDeviceLost(result, "empty acquisition drain completion"); return false; }
+	vkDestroyFence(device, emptyFrameAcquireDrainFence, nullptr);
+	emptyFrameAcquireDrainFence = VK_NULL_HANDLE;
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	emptyFrameValidationReceipt.acquisitionDrainCompleted = true;
+#endif
+	return true;
+}
+
+void VulkanContext::Impl::SuspendEmptyRuntimeFrame(bool drainAcquire)
+{
+	// A recording failure has not submitted an acquisition wait, so it can drain
+	// that wait explicitly. A failed queue submission has ambiguous consumption
+	// and must proceed directly to protected recreation without another wait.
+	if (!deviceLost && drainAcquire) (void)DrainEmptyRuntimeAcquire();
+	emptyFrameRecovery.Suspend(presentationLifecycle.Generation());
+	skipFrame = true;
+	RequestOutOfDateRecovery();
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	emptyFrameValidationReceipt.recoverySuspended = true;
+#endif
+}
+
 void VulkanContext::EndFrame() {
 	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	// EndFrame may submit these slices. A later host write requires BeginFrame's
 	// next fence proof, never the fact that a mirror previously succeeded.
 	impl->lightingUploadFrameSlotSafe[impl->currentFrame] = false;
-	if (!impl->initialized || impl->skipFrame || impl->deviceLost)
+	if (!impl->initialized || impl->skipFrame || impl->deviceLost || impl->emptyFrameRecovery.Suspended())
 	{
 		impl->DiscardRecordedShadowWrites(impl->currentFrame);
 		return;
@@ -191,6 +268,22 @@ void VulkanContext::EndFrame() {
 	}
 
 	auto& cmds = impl->pendingPrimaryCommandBuffers[impl->currentFrame];
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	if (!impl->editorMode && impl->swapchainImageAcquired && impl->emptyFrameValidationRequest.forceEmpty) {
+		impl->emptyFrameValidationActiveRequest = impl->emptyFrameValidationRequest;
+		// A scoped native fixture can reject fully recorded scene primaries after
+		// acquisition. Submitted prefixes keep their actual ownership receipts.
+		const bool alreadySubmitted = impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()
+			&& impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] != 0u;
+		if (!alreadySubmitted) {
+			impl->DiscardRecordedShadowWrites(impl->currentFrame);
+			impl->DiscardRecordedHiZWrites(impl->currentFrame, impl->swapchainAcquireWaitConsumed);
+			cmds.clear();
+			impl->emptyFrameValidationReceipt.forcedEmpty = true;
+		}
+		impl->emptyFrameValidationRequest = {};
+	}
+#endif
 	// RenderSystem can complete more than one editor-facing update before the UI
 	// present path advances this frame slot. A primary command buffer recorded
 	// with ONE_TIME_SUBMIT must never be submitted again while that slot is
@@ -207,7 +300,7 @@ void VulkanContext::EndFrame() {
 		// sized attachments, so submitting them can device-lost the queue on
 		// some drivers. Drop this frame and rebuild the resized targets before
 		// the editor UI pass acquires the next swapchain image.
-		impl->DiscardRecordedHiZWrites(impl->currentFrame);
+		impl->DiscardRecordedHiZWrites(impl->currentFrame, impl->swapchainAcquireWaitConsumed);
 		impl->DiscardRecordedShadowWrites(impl->currentFrame);
 		cmds.clear();
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
@@ -252,7 +345,7 @@ void VulkanContext::EndFrame() {
 			impl->shadowValidationReadback.AttachFixtureAction(action.commandSerial, action);
 		}
 		impl->DiscardRecordedShadowWrites(impl->currentFrame);
-		impl->DiscardRecordedHiZWrites(impl->currentFrame);
+		impl->DiscardRecordedHiZWrites(impl->currentFrame, impl->swapchainAcquireWaitConsumed);
 		cmds.clear();
 		impl->editorRenderSubmitted = false;
 		break;
@@ -260,8 +353,33 @@ void VulkanContext::EndFrame() {
 #endif
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (cmds.empty()) {
-		impl->DiscardRecordedShadowWrites(impl->currentFrame);
+		const auto publicationPlan = TerraEngine::Renderer::Vulkan::MakeEmptyFramePublicationPlan(impl->swapchainAcquireWaitConsumed);
+		if (publicationPlan.discardUnsubmittedShadow) impl->DiscardRecordedShadowWrites(impl->currentFrame);
+		if (publicationPlan.discardUnsubmittedHiZ) impl->DiscardRecordedHiZWrites(impl->currentFrame, publicationPlan.preserveSubmittedPrefix);
 		if (!impl->editorMode && impl->swapchainImageAcquired) {
+			// Validate all native owner collections before any image/slot indexing.
+			if (!impl->acquiredPresentationImage || !TerraEngine::Renderer::Vulkan::ValidateEmptyFrameAcquisition(
+				impl->presentationLifecycle, *impl->acquiredPresentationImage,
+				{impl->inFlightFences.size(), impl->imageAvailableSemaphores.size(), impl->uiSemaphores.size()})) {
+				impl->SuspendEmptyRuntimeFrame(false);
+				return;
+			}
+			TerraEngine::Renderer::Vulkan::EmptyFrameSubmissionProgress emptyProgress;
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+			if (impl->emptyFrameValidationActiveRequest.consumeAcquire && !impl->DrainEmptyRuntimeAcquire()) {
+				impl->SuspendEmptyRuntimeFrame(false);
+				return;
+			}
+#endif
+			VkCommandBuffer emptyCommand = VK_NULL_HANDLE;
+			if (!impl->RecordEmptyRuntimeFallback(emptyCommand)) {
+				impl->SuspendEmptyRuntimeFrame();
+				return;
+			}
+			emptyProgress.RecordEnded();
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+			impl->emptyFrameValidationReceipt.recordEnded = true;
+#endif
 			// Standalone runtime acquires the swapchain image in BeginFrame.
 			// If render graph rejection or startup state leaves no recorded
 			// command buffers, still consume the acquire semaphore and present
@@ -269,35 +387,72 @@ void VulkanContext::EndFrame() {
 			// while the presentation engine still owns pending work.
 			VkSemaphore waitSemaphores[] = {impl->imageAvailableSemaphores[impl->currentFrame]};
 			VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-			VkSemaphore signalSemaphore = impl->uiSemaphores[impl->acquiredImageIndex];
+			VkSemaphore signalSemaphore = impl->uiSemaphores[TerraEngine::Renderer::Vulkan::EmptyFramePresentSignalIndex(*impl->acquiredPresentationImage)];
 
 			VkSubmitInfo emptySubmitInfo{};
 			emptySubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-			if (!impl->swapchainAcquireWaitConsumed) {
+			emptySubmitInfo.commandBufferCount = 1;
+			emptySubmitInfo.pCommandBuffers = &emptyCommand;
+			if (TerraEngine::Renderer::Vulkan::EmptyFrameNeedsAcquireWait(impl->swapchainAcquireWaitConsumed)) {
 				emptySubmitInfo.waitSemaphoreCount = 1;
 				emptySubmitInfo.pWaitSemaphores = waitSemaphores;
 				emptySubmitInfo.pWaitDstStageMask = waitStages;
 			}
 			emptySubmitInfo.signalSemaphoreCount = 1;
 			emptySubmitInfo.pSignalSemaphores = &signalSemaphore;
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+			impl->emptyFrameValidationReceipt.acquireWaitConsumedBefore = impl->swapchainAcquireWaitConsumed;
+			impl->emptyFrameValidationReceipt.commandBufferCount = emptySubmitInfo.commandBufferCount;
+#endif
 
 			const auto resetFenceStart = BackendClock::now();
+			if (!emptyProgress.MayResetFence()) { impl->SuspendEmptyRuntimeFrame(); return; }
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+			if (impl->emptyFrameValidationActiveRequest.checkpoint == TerraEngine::Renderer::Vulkan::EmptyFrameValidationRequest::Checkpoint::BeforeFenceReset) {
+				impl->emptyFrameValidationReceipt.rejectedCheckpoint = impl->emptyFrameValidationActiveRequest.checkpoint;
+				impl->SuspendEmptyRuntimeFrame();
+				return;
+			}
+#endif
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+			impl->emptyFrameValidationReceipt.resetAttempted = true;
+#endif
 			const VkResult resetResult = vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+			impl->emptyFrameValidationReceipt.resetResult = resetResult;
+			impl->emptyFrameValidationReceipt.fenceResetAccepted = resetResult == VK_SUCCESS;
+#endif
 			if (resetResult != VK_SUCCESS) {
 				impl->ResetLightingUploadMirrors();
 			impl->DiscardRecordedShadowWrites(impl->currentFrame);
 				if (impl->MarkDeviceLost(resetResult, "empty runtime frame fence reset")) return;
 				TERRAENGINE_LOG(LogLevel::Error, "Empty runtime frame fence reset failed: " << resetResult);
-				impl->RecreateSwapChain();
+				impl->SuspendEmptyRuntimeFrame();
 				return;
 			}
+			(void)emptyProgress.FenceResetAccepted();
 			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
 				impl->pendingBackendFrameBreakdown,
 				{ TerraEngine::Renderer::BackendFrameCostCategory::RhiEndFrame, TerraEngine::Renderer::BackendSubmitStage::FrameAllocatorReset, RenderViewType::Game, 0u, "Reset frame fence for empty runtime submit", true, false },
 				ElapsedMilliseconds(resetFenceStart));
 
 			const auto submitStart = BackendClock::now();
+			if (!emptyProgress.MaySubmit()) { impl->SuspendEmptyRuntimeFrame(); return; }
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+			if (impl->emptyFrameValidationActiveRequest.checkpoint == TerraEngine::Renderer::Vulkan::EmptyFrameValidationRequest::Checkpoint::BeforeQueueSubmit) {
+				impl->emptyFrameValidationReceipt.rejectedCheckpoint = impl->emptyFrameValidationActiveRequest.checkpoint;
+				impl->SuspendEmptyRuntimeFrame();
+				return;
+			}
+#endif
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+			impl->emptyFrameValidationReceipt.submitAttempted = true;
+#endif
 			const VkResult submitResult = impl->SubmitGraphicsQueue(1, &emptySubmitInfo, impl->inFlightFences[impl->currentFrame]);
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+			impl->emptyFrameValidationReceipt.submitResult = submitResult;
+			impl->emptyFrameValidationReceipt.submitAccepted = submitResult == VK_SUCCESS;
+#endif
 			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 				impl->pendingBackendFrameBreakdown,
 				{ TerraEngine::Renderer::BackendFrameCostCategory::QueueSubmission, TerraEngine::Renderer::BackendSubmitStage::QueueSubmit, RenderViewType::Game, 0u, "Empty runtime queue submit", true, false },
@@ -310,9 +465,11 @@ void VulkanContext::EndFrame() {
 					return;
 				}
 				TERRAENGINE_LOG(LogLevel::Error, "[Vulkan] Empty QueueSubmit failed! Result: " << submitResult << ". Recreating swapchain to recover state.");
-				impl->RecreateSwapChain();
+				impl->SuspendEmptyRuntimeFrame(false);
 				return;
 			}
+			(void)emptyProgress.SubmitAccepted();
+			impl->swapchainAcquireWaitConsumed = true;
 
 			VkPresentInfoKHR presentInfo{};
 			presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -334,6 +491,10 @@ void VulkanContext::EndFrame() {
 
 			const auto presentStart = BackendClock::now();
 			const VkResult presentResult = impl->PresentSwapchain(&presentInfo);
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+			impl->emptyFrameValidationReceipt.presentAttempted = true;
+			impl->emptyFrameValidationReceipt.presentResult = presentResult;
+#endif
 			impl->ResolveUnenqueuedPresentationFence(presentCompletionFencePrepared, presentResult);
 			impl->RecordUnextendedPresent(impl->acquiredImageIndex, presentResult);
 			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
@@ -356,6 +517,7 @@ void VulkanContext::EndFrame() {
 			}
 
 			impl->swapchainImageAcquired = false;
+			impl->acquiredPresentationImage.reset();
 			impl->swapchainAcquireWaitConsumed = false;
 			impl->currentFrame = (impl->currentFrame + 1) % impl->MAX_FRAMES_IN_FLIGHT;
 			TerraEngine::Renderer::Vulkan::RecordVulkanFrameCost(
@@ -397,6 +559,9 @@ void VulkanContext::EndFrame() {
 		// In Editor Mode, we defer the frame fence signal to the UI pass (PresentEditor)
 		// so the frame is considered "in flight" until the UI is also done.
 		const auto submitStart = BackendClock::now();
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		impl->emptyFrameValidationReceipt.submitAttempted = true;
+#endif
 		VkResult submitResult = impl->SubmitGraphicsQueue(1, &submitInfo, VK_NULL_HANDLE);
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 			impl->pendingBackendFrameBreakdown,
@@ -452,7 +617,14 @@ void VulkanContext::EndFrame() {
 		}
 	} else {
 		const auto resetFenceStart = BackendClock::now();
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		impl->emptyFrameValidationReceipt.resetAttempted = true;
+#endif
 		const VkResult resetResult = vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		impl->emptyFrameValidationReceipt.resetResult = resetResult;
+		impl->emptyFrameValidationReceipt.fenceResetAccepted = resetResult == VK_SUCCESS;
+#endif
 		if (resetResult != VK_SUCCESS) {
 			impl->ResetLightingUploadMirrors();
 			impl->DiscardRecordedShadowWrites(impl->currentFrame);
@@ -466,7 +638,13 @@ void VulkanContext::EndFrame() {
 			{ TerraEngine::Renderer::BackendFrameCostCategory::RhiEndFrame, TerraEngine::Renderer::BackendSubmitStage::FrameAllocatorReset, RenderViewType::Game, 0u, "Reset frame fence", true, false },
 			ElapsedMilliseconds(resetFenceStart));
 		const auto submitStart = BackendClock::now();
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		impl->emptyFrameValidationReceipt.submitAttempted = true;
+#endif
 		VkResult submitResult = impl->SubmitGraphicsQueue(1, &submitInfo, impl->inFlightFences[impl->currentFrame]);
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		impl->emptyFrameValidationReceipt.submitResult = submitResult;
+#endif
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 			impl->pendingBackendFrameBreakdown,
 			{ TerraEngine::Renderer::BackendFrameCostCategory::QueueSubmission, TerraEngine::Renderer::BackendSubmitStage::QueueSubmit, RenderViewType::Game, 0u, "Runtime render queue submit", true, false },
@@ -503,6 +681,11 @@ void VulkanContext::EndFrame() {
 			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 1u;
 		}
 	}
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	impl->emptyFrameValidationReceipt.ordinarySubmitAccepted = true;
+	impl->emptyFrameValidationReceipt.ordinarySubmissionSerial = ++impl->emptyFrameValidationOrdinarySerial;
+	impl->emptyFrameValidationReceipt.commandBufferCount = submitInfo.commandBufferCount;
+#endif
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (RenderSnapshotOwnerSummary& owner : impl->pendingRenderSnapshotDiagnostics.ownerSummaries) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -531,6 +714,10 @@ void VulkanContext::EndFrame() {
 
 		const auto presentStart = BackendClock::now();
 		VkResult result = impl->PresentSwapchain(&presentInfo);
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		impl->emptyFrameValidationReceipt.presentAttempted = true;
+		impl->emptyFrameValidationReceipt.presentResult = result;
+#endif
 		impl->ResolveUnenqueuedPresentationFence(presentCompletionFencePrepared, result);
 		impl->RecordUnextendedPresent(impl->acquiredImageIndex, result);
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
@@ -561,6 +748,7 @@ void VulkanContext::EndFrame() {
 		}
 
 		impl->swapchainImageAcquired = false;
+		impl->acquiredPresentationImage.reset();
 		impl->swapchainAcquireWaitConsumed = false;
 		impl->currentFrame = (impl->currentFrame + 1) % impl->MAX_FRAMES_IN_FLIGHT;
 	}

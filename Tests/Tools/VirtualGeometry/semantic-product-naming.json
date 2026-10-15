@@ -17,7 +17,7 @@
 		"reason": "Version-one validation evidence retains these exact quoted wire identifiers. Only complete quoted content or decoded-content literals in these declared contract files are allowed; descriptions, filenames and all other patterns remain audited.",
 		"pattern": "requirement-or-success-criterion",
 		"files": [
-			"Editor/TerraEngine-Editor/Automation/EditorRendererEfficiencyValidation.cpp",
+			"Tests/Support/RendererEfficiency/Editor/EditorRendererEfficiencyValidation.cpp",
 			"Tests/Fixtures/RendererEfficiency/workloads.json",
 			"Tests/Tools/RendererEfficiency/Compare-RendererEfficiencyEvidence.ps1",
 			"Tests/Tools/RendererEfficiency/Schemas/evidence.schema.json"

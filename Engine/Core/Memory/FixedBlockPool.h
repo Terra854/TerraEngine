@@ -28,10 +28,27 @@ namespace TerraEngine::Memory {
 			if (freeHead_ >= Capacity) return nullptr;
 			const std::size_t index = freeHead_;
 			freeHead_ = next_[index];
+			// Remove the slot from the free list while user construction runs, but
+			// publish no live object until its lifetime has actually begun. If a
+			// constructor throws, return this reservation to the current list head;
+			// a nested successful allocation may have changed that head meanwhile.
+			struct Reservation {
+				FixedBlockPool& pool;
+				std::size_t index;
+				bool committed = false;
+				~Reservation() noexcept {
+					if (!committed) {
+						pool.next_[index] = pool.freeHead_;
+						pool.freeHead_ = index;
+					}
+				}
+			} reservation{ *this, index };
+			T* result = std::construct_at(Pointer(index), std::forward<Arguments>(arguments)...);
 			occupied_[index] = true;
 			++size_;
 			highWater_ = size_ > highWater_ ? size_ : highWater_;
-			return std::construct_at(Pointer(index), std::forward<Arguments>(arguments)...);
+			reservation.committed = true;
+			return result;
 		}
 
 		bool Destroy(T* value) noexcept

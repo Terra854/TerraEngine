@@ -119,6 +119,9 @@ add_executable(TerraEngine-EditorTests
 	VirtualGeometry/VirtualGeometryProductionScaffoldingTests.cpp
 	VirtualGeometry/VirtualGeometryDiagnosticsTests.cpp
 	VirtualGeometry/DenseAnimatedVirtualGeometryFixtureTests.cpp
+	# Read-only scratch diagnostics use the exact serializer linked by the editor.
+	Automation/RendererScratchDiagnosticsTests.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/RendererScratchDiagnostics.cpp
 	Automation/EditorAutomationServiceTests.cpp
 	Automation/EditorAutomationRegistryTests.cpp
 	Automation/EditorAutomationJobTests.cpp
@@ -818,3 +821,6 @@ if(TERRAENGINE_BUILD_NATIVE_GLFW_RECOVERY_TEST)
 	install(FILES $<TARGET_FILE:cimgui> $<TARGET_FILE:glfw>
 		DESTINATION ${CMAKE_BINARY_DIR}/Build/Tests/Editor/NativeGlfwRecovery)
 endif()
+
+# Preserve the frozen four-case diagnostics floor in installed native slices.
+terraengine_add_correctness_slice(Editor.RuntimeMemorySafety.Diagnostics TerraEngine-EditorTests Editor.RuntimeMemorySafety.Diagnostics 4)

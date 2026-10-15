@@ -2,10 +2,54 @@
 #include "../TestHarness.h"
 #include "../Runtime/CorrectnessTestSupport.h"
 #include "ThreadPool/ThreadPool.h"
+#include <typeinfo>
 
 namespace TerraEngine::Tests {
 	void RegisterOwnedImportExecutorTests(TestRegistry& registry)
 	{
+		registry.Add("Engine.OwnedImportExecutor.InitialGraphRejectionSettlesUnsubmittedBranches", [](TestContext& context) {
+			auto pool = ThreadPool::CreateOwned(1);
+			pool->shutdown();
+			auto bodies = std::make_shared<std::atomic<unsigned>>(0);
+			auto root = pool->createTask([bodies] { ++*bodies; return 42; });
+			auto branch = pool->createTask([bodies] { ++*bodies; });
+			auto leaf = pool->createTask([bodies] { ++*bodies; });
+			auto sibling = pool->createTask([bodies] { ++*bodies; });
+			// Observe actual identities instead of addDependency's fresh clones.
+			root->dependenciesList = {branch, sibling};
+			branch->setParentTask(root); sibling->setParentTask(root);
+			branch->dependenciesList = {leaf}; leaf->setParentTask(branch);
+			auto rootFuture = root->getFuture();
+			auto branchFuture = branch->getFuture();
+			auto leafFuture = leaf->getFuture();
+			auto siblingFuture = sibling->getFuture();
+			std::exception_ptr original;
+			std::string originalMessage;
+			try { pool->enqueue(root); }
+			catch(const std::runtime_error& error) {
+				original = std::current_exception();
+				originalMessage = error.what();
+				context.Expect(typeid(error) == typeid(std::runtime_error), "The initiating admission error must retain its exact runtime type.");
+			}
+			context.Expect(static_cast<bool>(original), "Closed admission must retain its caller-visible original exception.");
+			context.ExpectEqual(std::string("ThreadPool admission is closed"), originalMessage,
+				"The rejected request must identify the actual closed-admission cause.");
+			bool preserved = true;
+			auto consume = [&](auto& future) {
+				if(future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) { preserved = false; return; }
+				try { (void)future.get(); preserved = false; }
+				catch(const std::runtime_error& error) {
+					// Standard-library exception_ptr rethrows can copy the exception.
+					// Compare exact type and the initiating request's full cause text.
+					preserved = preserved && typeid(error) == typeid(std::runtime_error)
+						&& std::string(error.what()) == originalMessage;
+				}
+				catch(...) { preserved = false; }
+			};
+			consume(rootFuture); consume(branchFuture); consume(leafFuture); consume(siblingFuture);
+			context.Expect(preserved && bodies->load() == 0,
+				"Unsubmitted branches must settle without callable execution or a whole-graph rollback claim.");
+		});
 		registry.Add("Engine.OwnedImportExecutor.PositiveCapacityAndStartupRollback", [](TestContext& context) {
 			const auto frameWorkers = ThreadPool::instance().getThreadCount();
 			bool zeroRejected = false, startupRejected = false;

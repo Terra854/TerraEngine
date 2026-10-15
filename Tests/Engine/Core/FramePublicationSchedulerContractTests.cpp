@@ -31,6 +31,20 @@ namespace TerraEngine::Tests
 				});
 			context.Expect(rendererReadsPresentation,
 				"Renderer workloads must read the animation presentation resource.");
+			// Scratch ownership stays inside the same publication chain: capture
+			// alone writes storage, and every later stage reads captured values.
+			context.Expect(rendererWorkloads.size() == 5U,
+				"Scratch migration must preserve the existing five renderer stages.");
+			for(std::size_t index = 0U; index < rendererWorkloads.size(); ++index) {
+				const auto& workload = rendererWorkloads[index];
+				context.Expect(workload.phase == "Render", "Scratch must use the existing Render phase.");
+				context.Expect(hasResource(index == 0U ? workload.writes : workload.reads,
+					TerraEngine::Scheduling::kResourceRendererFrameScratch),
+					"Capture writes scratch and subsequent publication stages declare reads.");
+				if(index != 0U) context.Expect(!hasResource(workload.writes,
+					TerraEngine::Scheduling::kResourceRendererFrameScratch),
+					"Read-only worker/publication stages cannot allocate or reset capture storage.");
+			}
 		});
 	}
 }

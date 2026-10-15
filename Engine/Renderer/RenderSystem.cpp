@@ -45,7 +45,7 @@
 #include "ThreadPool/ScopedTaskSettlement.h"
 #include "Profiling/Profiler.h"
 #include "Profiling/ProfilerScope.h"
-#include "Core/Memory/FrameArena.h"
+#include "Renderer/Graph/RenderFrameScratchValidation.h"
 #include "File Formats/TerraEngineMaterialFile.h"
 #include "File Formats/TerraEngineMeshFile.h"
 #include "UI/UISystem.h"
@@ -67,8 +67,10 @@
 #include <initializer_list>
 #include <iterator>
 #include <limits>
+#include <memory_resource>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <utility>
 #include <unordered_map>
 #include <unordered_set>
@@ -2365,6 +2367,23 @@ namespace
 
 }
 
+namespace {
+	// A nonblocking admission gate also detects same-thread reentry. Its owner
+	// lives on RenderSystem, so replacing per-scene state cannot replace the gate.
+	class RenderExecutionBoundary final {
+	public:
+		explicit RenderExecutionBoundary(std::atomic_flag& flag) : flag_(flag) {
+			if(flag_.test_and_set(std::memory_order_acquire))
+				throw std::logic_error("Render frame execution is already active");
+		}
+		~RenderExecutionBoundary() { flag_.clear(std::memory_order_release); }
+		RenderExecutionBoundary(const RenderExecutionBoundary&) = delete;
+		RenderExecutionBoundary& operator=(const RenderExecutionBoundary&) = delete;
+	private:
+		std::atomic_flag& flag_;
+	};
+}
+
 // A render-frame coroutine keeps stack-owned immutable preparation state alive
 // between scheduler callbacks. It never schedules itself: the scheduler resumes
 // it at declared protected/worker boundaries, preserving normal exception flow.
@@ -2437,6 +2456,9 @@ struct RenderSystemLifetimeState
 	// guards the small immutable-root handoff only; no live ECS or GPU work runs
 	// while it is held.
 	std::mutex framePhaseMutex;
+	// Declared before the continuation: reverse destruction retires its vectors
+	// and strong lease before this lifetime can release the stable scratch owner.
+	std::shared_ptr<TerraEngine::Renderer::RenderFrameScratch> frameScratch;
 	FramePhaseState framePhase;
 	RetainedRenderTopologyState retainedRenderTopology;
 	GroupedSubmissionMembershipCacheState groupedSubmissionMembershipCache;
@@ -4521,6 +4543,11 @@ namespace
 // RenderSystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::Initialize()
 {
+	RenderExecutionBoundary boundary(frameExecutionBoundary);
+	RetireFrameExecutionAtProtectedBoundary();
+	// A failed initialization or a stopped backend cannot advertise readiness to
+	// a later frame. Initialization runs at the existing protected lifecycle edge.
+	initialized = false;
 	TERRAENGINE_LOG(LogLevel::Info, "Initializing RenderSystem...");
 	if (const auto startupSettings = ResourceManager::Instance().GetConfiguredRenderSettings()) {
 		// Editor direct-project and export profiles are resolved before system
@@ -4561,19 +4588,73 @@ void RenderSystem::Initialize()
 	initialized = true;
 }
 
-template<typename T>
-using FrameVector = std::vector<T, FrameAllocator<T>>;
-
 // RenderSystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::Update(float deltaTime)
 {
 	TERRAENGINE_PROFILE_SCOPE("RenderSystem::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-	RenderFrameExecution execution = BuildFrameExecution(deltaTime);
-	while(execution.Resume())
+	RenderExecutionBoundary boundary(frameExecutionBoundary);
+	UpdateAtExecutionBoundary(deltaTime);
+}
+
+void RenderSystem::RetireFrameExecutionAtProtectedBoundary()
+{
+	std::unique_ptr<RenderFrameExecution> retired;
 	{
-		// Direct callers do not have scheduler callbacks to resume each stage, so
-		// execute every declared boundary serially while preserving identical work.
+		std::lock_guard lock(lifetimeState->framePhaseMutex);
+		auto& phase = lifetimeState->framePhase;
+		retired = std::move(phase.execution);
+		phase.captureReady = phase.routeReady = phase.virtualGeometryReady = false;
+		phase.backendComplete = phase.publicationComplete = false;
 	}
+	// Cancellation destroys collection owners before the lease, outside handoff
+	// and diagnostics locks. The outer admission gate proves no Resume is active.
+	retired.reset();
+	ObserveFrameScratchAtProtectedBoundary();
+}
+
+void RenderSystem::ObserveFrameScratchAtProtectedBoundary()
+{
+	const auto owner = lifetimeState->frameScratch;
+	if(!owner) return;
+	const auto terminal = owner->LastSnapshot();
+	const auto reclamation = owner->ReclamationSnapshot();
+	TerraEngine::Renderer::RenderFrameScratchDiagnostics latest;
+	TerraEngine::Renderer::RenderFrameScratchDiagnostics previous;
+	TerraEngine::Renderer::RenderFrameScratchReclamationDiagnostics reclaimed;
+	{
+		std::lock_guard lock(statsMutex);
+		observedFrameScratchOwner = owner;
+		if(terminal.episodeId != 0U) {
+			if(latestFrameScratch.lifetimeId != terminal.lifetimeId
+				|| latestFrameScratch.episodeId != terminal.episodeId) {
+				previousFrameScratch = latestFrameScratch;
+			}
+			latestFrameScratch = terminal;
+			latestFrameScratchReclamation = reclamation;
+		}
+		TerraEngine::Renderer::ApplyFrameScratchDiagnostics(latestRenderGraphDiagnostics,
+			latestFrameScratch, previousFrameScratch, latestFrameScratchReclamation);
+		latest = latestFrameScratch;
+		previous = previousFrameScratch;
+		reclaimed = latestFrameScratchReclamation;
+	}
+	TerraEngine::Renderer::PublishFrameScratchDiagnostics(latest, previous, reclaimed);
+}
+
+void RenderSystem::UpdateAtExecutionBoundary(float deltaTime)
+{
+	RetireFrameExecutionAtProtectedBoundary();
+	try {
+		RenderFrameExecution execution = BuildFrameExecution(deltaTime);
+		while(execution.Resume()) {
+			// Direct callers execute the same declared stages serially. All nested
+			// borrowing jobs still settle before their owning stage returns.
+		}
+	} catch(...) {
+		ObserveFrameScratchAtProtectedBoundary();
+		throw;
+	}
+	ObserveFrameScratchAtProtectedBoundary();
 }
 
 RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
@@ -4616,10 +4697,15 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		}
 	}
 
-	// Reset the frame allocator at the start of the frame logic
+	// Only protected capture allocates/resets this unsynchronized resource. The
+	// previous continuation was retired before entry; lease release never resets.
+	if(!lifetimeState->frameScratch)
+		lifetimeState->frameScratch = TerraEngine::Renderer::RenderFrameScratch::Create();
+	auto scratchLease = lifetimeState->frameScratch->BeginEpisode(nextRenderFrameId);
+	const auto scratchValidation = frameScratchValidationCallbacks;
 	{
-		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reset Frame Arena", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		FrameArena::Instance().Reset();
+		std::lock_guard lock(statsMutex);
+		observedFrameScratchOwner = lifetimeState->frameScratch;
 	}
 
 	// Snapshot camera components so view/projection data is sourced from
@@ -4734,7 +4820,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		&& renderableMembershipTerrainProxyGeneration
 			== protectedTerrainProxyGeneration
 		&& retainedRenderableEntries.size() == renderableMembershipCache.size();
-	FrameVector<CameraEntry> cameras;
+	std::pmr::vector<CameraEntry> cameras(scratchLease.Resource());
 	cameras.reserve(10);
 	// This renderer-owned array crosses the coroutine's worker phases without
 	// aliasing live ECS storage. A compatible frame retains its values; a changed
@@ -4760,7 +4846,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		renderables.reserve(expectedRenderableCount);
 	// Snapshot scene light components so packing can run in worker tasks without
 	// touching the entity registry after this point.
-	FrameVector<LightEntry> lights;
+	std::pmr::vector<LightEntry> lights(scratchLease.Resource());
 	lights.reserve(256);
 	// These protected-boundary containers are populated only for validated
 	// canonical deformable meshes. Static TEMF records never touch the AnimationSystem
@@ -5629,6 +5715,26 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			TERRAENGINE_LOG(LogLevel::Error, TerraEngine::Scheduling::FormatEcsSystemGraphFrameSummary(graphSummary));
 		}
 	}
+	// Validation copies actual captured values before any worker can borrow the
+	// PMR arrays. Disabled native hooks add no copy or digest to ordinary frames.
+	TerraEngine::Renderer::RenderFrameScratchDiagnostics capturedScratchDiagnostics;
+	if(scratchValidation && scratchValidation->onEvent) {
+		auto inputs = std::make_shared<TerraEngine::Renderer::RenderFrameScratchCapturedInputs>();
+		inputs->cameras.reserve(cameras.size());
+		for(const auto& entry : cameras) {
+			const auto object = objManager.getObject(entry.entity);
+			if(!object) throw std::logic_error("Captured camera identity retired before protected validation");
+			inputs->cameras.push_back({objManager.getUUID(*object), entry.camera});
+		}
+		inputs->lights.reserve(lights.size());
+		for(const auto& entry : lights) inputs->lights.push_back({entry.lightId, entry.light});
+		capturedScratchDiagnostics = lifetimeState->frameScratch->Snapshot();
+		TerraEngine::Renderer::RenderFrameScratchValidationEvent event;
+		event.checkpoint = TerraEngine::Renderer::RenderFrameScratchValidationCheckpoint::Captured;
+		event.episode = capturedScratchDiagnostics;
+		event.capturedInputs = std::move(inputs);
+		scratchValidation->onEvent(event);
+	}
 	frameTerrainMaterialBindings.reserve(renderables.size());
 	for(const RenderableEntry& renderable : renderables)
 	{
@@ -6416,6 +6522,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		DrainCaptureReadbacks();
 		ResourceManager::Instance().RunResidencyCleanup(activeRenderFrameId);
 		ClearOverrideCameras();
+		scratchLease.MarkCompleted();
 		co_return;
 	}
 	// Capture every live generation and completed backend counter before leaving
@@ -10267,12 +10374,32 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			"RenderSystem Task: Hash Light Chunk",
 			[&](std::size_t start, std::size_t end)
 			{
+				const auto observeRange = [&](TerraEngine::Renderer::RenderFrameScratchValidationCheckpoint checkpoint) {
+					if(!scratchValidation || !scratchValidation->onEvent) return;
+					TerraEngine::Renderer::RenderFrameScratchValidationEvent event;
+					event.checkpoint = checkpoint;
+					event.episode = capturedScratchDiagnostics;
+					event.start = start; event.end = end;
+					event.workerLimit = renderGraphWorkerCount;
+					event.rangeDigest = 14695981039346656037ULL;
+					TerraEngine::Renderer::AppendScratchValidationWord(event.rangeDigest, start, 8U);
+					TerraEngine::Renderer::AppendScratchValidationWord(event.rangeDigest, end, 8U);
+					event.computedSignatureDigest = 14695981039346656037ULL;
+					for(std::size_t i = start; i < end; ++i) {
+						TerraEngine::Renderer::AppendScratchLightValidationDigest(event.rangeDigest, lights[i].lightId, lights[i].light);
+						if(checkpoint == TerraEngine::Renderer::RenderFrameScratchValidationCheckpoint::LightReadEnd)
+							TerraEngine::Renderer::AppendScratchValidationWord(event.computedSignatureDigest, lightCandidateSignatures[i], 8U);
+					}
+					scratchValidation->onEvent(event);
+				};
+				observeRange(TerraEngine::Renderer::RenderFrameScratchValidationCheckpoint::LightReadBegin);
 				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				for (std::size_t i = start; i < end; ++i)
 				{
 					const LightEntry& entry = lights[i];
 					lightCandidateSignatures[i] = BuildLightCandidateSignature(getWorldTransform(entry.entity), entry.light);
 				}
+				observeRange(TerraEngine::Renderer::RenderFrameScratchValidationCheckpoint::LightReadEnd);
 			});
 		packedLights.reserve(lights.size());
 		for (std::size_t i = 0u; i < lights.size(); ++i)
@@ -13471,11 +13598,23 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	DrainCaptureReadbacks();
 
 	ClearOverrideCameras();
+	scratchLease.MarkCompleted();
 }
 
 // RenderSystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::Shutdown()
 {
+	RenderExecutionBoundary boundary(frameExecutionBoundary);
+	RetireFrameExecutionAtProtectedBoundary();
+	initialized = false;
+	if(lifetimeState->frameScratch) lifetimeState->frameScratch->Retire();
+	ObserveFrameScratchAtProtectedBoundary();
+	{
+		std::lock_guard lock(statsMutex);
+		// The current lifetime still owns scratch. Drop the observer now so later
+		// lifetime replacement destroys backing outside this lock, protected.
+		observedFrameScratchOwner.reset();
+	}
 	// Restore tokens and pending requests belong to this renderer lifetime, not
 	// just Vulkan's counter (which may restart with a replacement instance).
 	{
@@ -13680,6 +13819,10 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.safeSubwork += " Materializes exact-bit isolated depth recipes into immutable worker-owned CPU inputs.";
 	declaration.protectedCommit += " Records physical depth query pairs and optional validation transfers; successful submit and existing fence completion qualify copied bounds, coverage, input and same-command color without query waits.";
 	declaration.protectedReason = "Live GPU queue and presentation ownership remain protected after worker preparation.";
+	declaration.reads.push_back(TerraEngine::Scheduling::kResourceRendererFrameScratch);
+	declaration.writes.push_back(TerraEngine::Scheduling::kResourceRendererFrameScratch);
+	declaration.safeSubwork += " Reads completed renderer-owned camera/light collections under one retained scratch episode; workers never allocate or reset that resource.";
+	declaration.protectedCommit += " Retires prior continuation borrowers before opening renderer scratch, then publishes copied terminal episode/reclamation facts at existing protected boundaries.";
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
 	return declaration;
@@ -13718,6 +13861,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	};
 	snapshot.writes = {
 		kResourceRuntimeRenderSettings, "RendererEfficiencyOptions",
+		kResourceRendererFrameScratch,
 		// Request admission stays at this protected boundary; workers consume
 		// only the captured owners and never request or wait for a live load.
 		"Resources", "StreamingNeeds",
@@ -13732,6 +13876,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	snapshot.boundaryClassification = HardBoundaryClassification::Protected;
 	snapshot.hardBoundary = true;
 	snapshot.protectedCommit = "Admits deduplicated async requests for missing mesh/material publications, then captures the already-published scene change packet, exact transforms, resources, immutable shadowcaster lifetime/resource/deformation inputs, animation presentation, page publication, readback, requested views, backend capabilities, and renderer generations without lowering the crowd.";
+	snapshot.protectedCommit += " Retires the previous continuation before allocating/resetting the exclusive renderer-owned camera/light scratch episode.";
 	snapshot.protectedReason = snapshot.protectedCommit;
 	snapshot.profilingLabel = "RenderSystem.RenderPublicationCapture";
 
@@ -13743,6 +13888,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	routePrepare.activationPredicateKey = snapshot.activationPredicateKey;
 	routePrepare.reads = {
 		"RendererEfficiencyOptions",
+		kResourceRendererFrameScratch,
 		kResourceRenderCaptureInputs,
 		kResourceVirtualGeometryQualityProfile
 	};
@@ -13758,6 +13904,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	routePrepare.boundaryClassification = HardBoundaryClassification::WorkerSafe;
 	routePrepare.safeSubwork = "Assembles immutable render records, scores representation candidates, applies calibrated hysteresis, commits transactional topology pages, and groups direct instances without touching live resources.";
 	routePrepare.profilingLabel = "RenderSystem.GeometryRoutePrepare";
+	routePrepare.safeSubwork += " Borrows completed camera/light scratch collections read-only; no allocation/reset occurs on workers.";
 
 	FrameWorkloadDeclaration& prepare = workloads[2];
 	prepare.workloadName = "VirtualGeometryPrepare";
@@ -13767,6 +13914,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	prepare.activationPredicateKey = snapshot.activationPredicateKey;
 	prepare.reads = {
 		"RendererEfficiencyOptions",
+		kResourceRendererFrameScratch,
 		kResourcePersistentRenderSceneState, kResourceDynamicRenderFrameState,
 		kResourceVirtualGeometryQualityProfile,
 		kResourceVirtualGeometryPageResidencySnapshots,
@@ -13794,6 +13942,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	prepare.safeSubwork += " Seals each light's immutable instance rows without using camera-visible membership.";
 	prepare.safeSubwork += " Per-view preparation materializes admitted exact-bit depth recipes into immutable owned bytes.";
 	prepare.profilingLabel = "RenderSystem.VirtualGeometryPrepare";
+	prepare.safeSubwork += " Reads the retained camera/light scratch episode, with all child borrowers settled before continuation retirement.";
 
 	FrameWorkloadDeclaration& commit = workloads[3];
 	commit.workloadName = "BackendCommit";
@@ -13803,6 +13952,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	commit.activationPredicateKey = snapshot.activationPredicateKey;
 	commit.reads = {
 		"RendererEfficiencyOptions",
+		kResourceRendererFrameScratch,
 		"LightingDepthPreparedInputs", "LightingDepthQueryOwners",
 		kResourcePersistentRenderSceneState, kResourceDynamicRenderFrameState,
 		kResourceRenderViewSelections, kResourceVirtualGeometryClusterPackets,
@@ -13831,6 +13981,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	commit.hardBoundary = true;
 	commit.protectedCommit = "Validates and seals one render-frame publication, then owns backend resource mutation, typed-range recording, queue submission, pending counters, and visibility targets.";
 	commit.protectedCommit += " Depth query recording, actual submit/completion ownership and optional completed validation copies stay here; workers do not issue Vulkan commands or mutate the scene.";
+	commit.protectedCommit += " Consumes captured camera/light scratch collections without reclaiming their resource while borrowed.";
 	commit.protectedReason = commit.protectedCommit;
 	commit.profilingLabel = "RenderSystem.BackendCommit";
 
@@ -13841,6 +13992,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	publication.stableDescriptorId = "RenderSystem/Render/RenderPublication";
 	publication.activationPredicateKey = snapshot.activationPredicateKey;
 	publication.reads = {
+		kResourceRendererFrameScratch,
 		kResourceRenderFramePublication,
 		kResourceVirtualGeometryGeneratedSubmissions,
 		kResourceVirtualGeometryVisibilitySnapshots
@@ -13858,6 +14010,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	publication.hardBoundary = true;
 	publication.sameFrameVisibilityRequired = true;
 	publication.protectedCommit = "Publishes complete render-frame receipt, diagnostics, profiler evidence, and visibility results only after protected backend work completes.";
+	publication.protectedCommit += " Retires the completed continuation and copies terminal scratch diagnostics; reclamation stays at the next protected capture or lifecycle boundary.";
 	publication.protectedReason = publication.protectedCommit;
 	publication.profilingLabel = "RenderSystem.RenderPublication";
 
@@ -13867,6 +14020,8 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	snapshot.work = [this, deltaTime](JobGraphContext&) {
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Protected Publication Capture",
 			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		RenderExecutionBoundary boundary(frameExecutionBoundary);
+		RetireFrameExecutionAtProtectedBoundary();
 		RenderSystemLifetimeState::FramePhaseState captured;
 		captured.deltaTime = deltaTime;
 		{
@@ -13888,6 +14043,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	routePrepare.work = [this](JobGraphContext&) {
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Geometry Route Preparation",
 			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		RenderExecutionBoundary boundary(frameExecutionBoundary);
 		RenderFrameExecution* execution = nullptr;
 		{
 			std::lock_guard phaseLock(lifetimeState->framePhaseMutex);
@@ -13901,6 +14057,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	prepare.work = [this](JobGraphContext&) {
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Virtual Geometry Preparation",
 			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		RenderExecutionBoundary boundary(frameExecutionBoundary);
 		RenderFrameExecution* execution = nullptr;
 		{
 			std::lock_guard phaseLock(lifetimeState->framePhaseMutex);
@@ -13914,6 +14071,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	commit.work = [this](JobGraphContext&) {
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Protected Backend Commit",
 			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		RenderExecutionBoundary boundary(frameExecutionBoundary);
 		RenderFrameExecution* execution = nullptr;
 		{
 			std::lock_guard phaseLock(lifetimeState->framePhaseMutex);
@@ -13925,16 +14083,19 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 		lifetimeState->framePhase.backendComplete = execution != nullptr && !hasMore;
 	};
 	publication.work = [this](JobGraphContext&) {
-		std::lock_guard phaseLock(lifetimeState->framePhaseMutex);
-		if(!lifetimeState->framePhase.backendComplete)
+		RenderExecutionBoundary boundary(frameExecutionBoundary);
+		std::unique_ptr<RenderFrameExecution> retired;
 		{
-			return;
-		}
+			std::lock_guard phaseLock(lifetimeState->framePhaseMutex);
+			if(!lifetimeState->framePhase.backendComplete) return;
 		// Update sealed the render root, submitted the backend frame, and swapped
 		// complete diagnostics. This final receipt makes that completed boundary
 		// explicit to scheduler diagnostics without rebuilding any scene data.
-		lifetimeState->framePhase.publicationComplete = true;
-		lifetimeState->framePhase.execution.reset();
+			lifetimeState->framePhase.publicationComplete = true;
+			retired = std::move(lifetimeState->framePhase.execution);
+		}
+		retired.reset();
+		ObserveFrameScratchAtProtectedBoundary();
 	};
 	return { workloads.begin(), workloads.end() };
 }
@@ -14752,6 +14913,14 @@ void RenderSystem::RetireLoadedResource(const TerraEngine::UUID& id, std::uint64
 // RenderSystem::Clear is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::Clear()
 {
+	RenderExecutionBoundary boundary(frameExecutionBoundary);
+	RetireFrameExecutionAtProtectedBoundary();
+	if(lifetimeState->frameScratch) lifetimeState->frameScratch->Retire();
+	ObserveFrameScratchAtProtectedBoundary();
+	{
+		std::lock_guard lock(statsMutex);
+		observedFrameScratchOwner.reset();
+	}
 	if (rhi)
 	{
 		rhi->ClearResources();
@@ -14992,7 +15161,31 @@ std::vector<TerraEngine::Renderer::OcclusionDebugSample> RenderSystem::GetLatest
 TerraEngine::Renderer::RenderDiagnosticsSummary RenderSystem::GetLatestRenderGraphDiagnostics() const
 {
 	std::lock_guard<std::mutex> lock(statsMutex);
-	return latestRenderGraphDiagnostics;
+	auto result = latestRenderGraphDiagnostics;
+	TerraEngine::Renderer::ApplyFrameScratchDiagnostics(result,
+		latestFrameScratch, previousFrameScratch, latestFrameScratchReclamation);
+	return result;
+}
+
+void RenderSystem::SetFrameScratchValidationCallbacks(
+	std::shared_ptr<const TerraEngine::Renderer::RenderFrameScratchValidationCallbacks> callbacks)
+{
+	RenderExecutionBoundary boundary(frameExecutionBoundary);
+#if !defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	if(callbacks) throw std::logic_error("Native renderer scratch validation is unavailable in this build");
+#endif
+	frameScratchValidationCallbacks = std::move(callbacks);
+}
+
+TerraEngine::Renderer::RenderFrameScratchValidationState RenderSystem::GetFrameScratchValidationState() const
+{
+	std::lock_guard lock(statsMutex);
+	TerraEngine::Renderer::RenderFrameScratchValidationState result;
+	result.active = observedFrameScratchOwner && observedFrameScratchOwner->IsActive();
+	result.latest = latestFrameScratch;
+	result.previous = previousFrameScratch;
+	result.reclamation = latestFrameScratchReclamation;
+	return result;
 }
 
 std::vector<TerraEngine::Renderer::BackendStageTiming> RenderSystem::GetLatestBackendStageTimings() const
@@ -15406,6 +15599,10 @@ void RenderSystem::DrainConventionalVisibilityIdentityReadbacks()
 
 TerraEngine::Renderer::RenderCaptureResult RenderSystem::CaptureImage(const TerraEngine::Renderer::RenderCaptureRequest& request)
 {
+	// Admission precedes QueueCaptureRequest: rejected recursive capture must not
+	// leave an orphan request. The intentional immediate update shares this gate.
+	std::optional<RenderExecutionBoundary> boundary;
+	boundary.emplace(frameExecutionBoundary);
 	TerraEngine::Renderer::RenderCaptureRequest preparedRequest = request;
 	if (preparedRequest.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView
 		&& preparedRequest.freshness == "nextFrame"
@@ -15446,12 +15643,13 @@ TerraEngine::Renderer::RenderCaptureResult RenderSystem::CaptureImage(const Terr
 		// MCP tool calls are synchronous. One render update submits the dedicated
 		// object/custom offscreen pass; subsequent iterations poll only its fence
 		// instead of recursively rendering many frames.
-		Update(0.0f);
+		UpdateAtExecutionBoundary(0.0f);
 	}
 	else
 	{
 		ProcessQueuedCaptureRequests();
 	}
+	boundary.reset();
 
 	const std::chrono::milliseconds timeout(preparedRequest.timeoutMs > 0u ? preparedRequest.timeoutMs : captureLimits.defaultTimeoutMs);
 	const auto deadline = std::chrono::steady_clock::now() + timeout;

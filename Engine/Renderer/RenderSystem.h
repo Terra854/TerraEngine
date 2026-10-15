@@ -10,6 +10,7 @@
 #include "RHI/RHIContext.h"
 #include "Core/Object/ObjectManager.h"
 #include <cstdint>
+#include <atomic>
 #include <cstddef>
 #include <deque>
 #include <filesystem>
@@ -50,6 +51,16 @@ struct Material;
 enum class AssetType : std::uint32_t;
 struct RenderSystemLifetimeState;
 struct RenderFrameExecution;
+
+namespace TerraEngine::Renderer {
+	struct RenderFrameScratchValidationCallbacks;
+	struct RenderFrameScratchValidationState {
+		bool active = false;
+		RenderFrameScratchDiagnostics latest;
+		RenderFrameScratchDiagnostics previous;
+		RenderFrameScratchReclamationDiagnostics reclamation;
+	};
+}
 
 namespace TerraEngine::Renderer
 {
@@ -237,6 +248,10 @@ public:
 	TerraEngine::Renderer::RendererRecoveryPolicy GetRendererRecoveryPolicy() const;
 	std::vector<TerraEngine::Renderer::OcclusionDebugSample> GetLatestVirtualGeometryOcclusionDebugSamples(RenderViewType viewType, std::size_t maxCount = TerraEngine::Renderer::kVirtualGeometryOcclusionDebugSampleCapacity) const;
 	TerraEngine::Renderer::RenderDiagnosticsSummary GetLatestRenderGraphDiagnostics() const;
+	// Native validation configures callbacks only while rendering is quiescent.
+	// Reads return copied observations and never expose an allocator or live ECS.
+	void SetFrameScratchValidationCallbacks(std::shared_ptr<const TerraEngine::Renderer::RenderFrameScratchValidationCallbacks> callbacks);
+	TerraEngine::Renderer::RenderFrameScratchValidationState GetFrameScratchValidationState() const;
 	// Profiler presentation needs only submit-stage timings. Returning that
 	// projection avoids copying cost samples, stall messages, and per-view work
 	// records under the renderer statistics mutex.
@@ -410,6 +425,9 @@ public:
 private:
 	RenderSystem();
 	RenderFrameExecution BuildFrameExecution(float deltaTime);
+	void UpdateAtExecutionBoundary(float deltaTime);
+	void RetireFrameExecutionAtProtectedBoundary();
+	void ObserveFrameScratchAtProtectedBoundary();
 	void ApplyQualityPreset(QualityPreset preset, bool persistProjectSettings);
 	void ApplyQueuedRuntimeRenderSettings();
 	void CompleteCapture(TerraEngine::Renderer::RenderCaptureResult result);
@@ -425,6 +443,10 @@ private:
 	// this public header does not expose backend or view-cache details. Ownership
 	// still follows this RenderSystem instance and is released on shutdown.
 	std::unique_ptr<RenderSystemLifetimeState> lifetimeState;
+	// One stable gate spans scene/lifetime replacement. Recursive or overlapping
+	// execution is rejected before continuation, queue, backend, or cache mutation.
+	std::atomic_flag frameExecutionBoundary = {};
+	std::shared_ptr<const TerraEngine::Renderer::RenderFrameScratchValidationCallbacks> frameScratchValidationCallbacks;
 	ObjectManager& objManager = ObjectManager::instance();
 	bool initialized = false;
 	bool taskShaderCullingEnabled = true;
@@ -524,6 +546,12 @@ private:
 		latestAnimationGpuBackendExecution{};
 	TerraEngine::Renderer::RendererRecoveryPolicy rendererRecoveryPolicy = TerraEngine::Renderer::MakeEditorRendererRecoveryPolicy();
 	TerraEngine::Renderer::RenderDiagnosticsSummary latestRenderGraphDiagnostics{};
+	TerraEngine::Renderer::RenderFrameScratchDiagnostics latestFrameScratch{};
+	TerraEngine::Renderer::RenderFrameScratchDiagnostics previousFrameScratch{};
+	TerraEngine::Renderer::RenderFrameScratchReclamationDiagnostics latestFrameScratchReclamation{};
+	// Getter observes active admission while holding statsMutex; it never exports
+	// this owner or reads concurrently changing per-allocation resource counters.
+	std::shared_ptr<TerraEngine::Renderer::RenderFrameScratch> observedFrameScratchOwner;
 	TerraEngine::Renderer::RenderFrameSnapshot latestRenderFrameSnapshot{};
 	// The protected publisher keeps one non-visible snapshot owner for capacity
 	// reuse. Readers continue to observe latestRenderFrameSnapshot atomically;

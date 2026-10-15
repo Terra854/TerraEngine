@@ -829,8 +829,92 @@ void VulkanContext::Resize(int width, int height, ViewType view) {
 }
 
 // VulkanContext::BeginFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+bool VulkanContext::ArmEmptyFrameValidation(TerraEngine::Renderer::Vulkan::EmptyFrameValidationRequest request)
+{
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	// Arming while an image is outstanding would change an already executing
+	// frame. Only the next protected BeginFrame may consume this request.
+	if (impl->editorMode || impl->swapchainImageAcquired || impl->emptyFrameValidationRequest.forceEmpty) return false;
+	impl->emptyFrameValidationRequest = request;
+	return request.forceEmpty;
+#else
+	(void)request;
+	return false;
+#endif
+}
+
+TerraEngine::Renderer::Vulkan::EmptyFrameValidationReceipt VulkanContext::GetEmptyFrameValidationReceipt() const
+{
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	auto receipt = impl->emptyFrameValidationReceipt;
+	receipt.initialized = impl->initialized;
+	receipt.validationActuallyEnabled = impl->validationLayersEnabled;
+	receipt.validationErrorsAfter = impl->emptyFrameValidationErrors.load();
+	receipt.recoverySuspended = impl->emptyFrameRecovery.Suspended();
+	receipt.maintenanceEnabled = impl->presentationFencesEnabled;
+	return receipt;
+#else
+	return {};
+#endif
+}
+
+bool VulkanContext::ConfigureEmptyFrameValidation(bool disableMaintenance)
+{
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	if (impl->instance != VK_NULL_HANDLE) return false;
+	impl->emptyFrameValidationDisableMaintenance = disableMaintenance;
+	return true;
+#else
+	(void)disableMaintenance;
+	return false;
+#endif
+}
+
+bool VulkanContext::RecreateEmptyFrameValidation(bool rejectCandidate)
+{
+	return RecreateEmptyFrameValidationAt(rejectCandidate
+		? TerraEngine::Renderer::Vulkan::EmptyFrameCandidateCheckpoint::BeforeSwapchain
+		: TerraEngine::Renderer::Vulkan::EmptyFrameCandidateCheckpoint::None);
+}
+
+bool VulkanContext::RecreateEmptyFrameValidationAt(TerraEngine::Renderer::Vulkan::EmptyFrameCandidateCheckpoint checkpoint)
+{
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	if (!impl->initialized || impl->deviceLost || impl->swapchainImageAcquired) return false;
+	impl->emptyFrameValidationCandidateCheckpoint = checkpoint;
+	impl->emptyFrameValidationRejectCandidate = checkpoint == TerraEngine::Renderer::Vulkan::EmptyFrameCandidateCheckpoint::BeforeSwapchain;
+	impl->emptyFrameValidationReceipt.candidateCheckpoint = checkpoint;
+	impl->emptyFrameValidationReceipt.candidateRejected = false;
+	impl->emptyFrameValidationReceipt.candidateFallbackPassCreated = false;
+	impl->emptyFrameValidationReceipt.candidatePartialCleanupCompleted = false;
+	impl->emptyFrameValidationReceipt.candidateOldSwapchainConsumed = false;
+	const auto generation = impl->presentationLifecycle.Generation();
+	impl->RequestOutOfDateRecovery();
+	impl->RecreateSwapChain();
+	return impl->presentationLifecycle.Generation() > generation && !impl->emptyFrameRecovery.Suspended();
+#else
+	(void)checkpoint;
+	return false;
+#endif
+}
+
 void VulkanContext::BeginFrame() {
 	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	if (!impl->initialized || impl->deviceLost) return;
+	// A failed submit can leave a reset slot fence permanently unsignaled. Repair
+	// ownership before any normal fence wait or pool reuse can observe that slot.
+	if (impl->emptyFrameRecovery.Suspended()) {
+		impl->skipFrame = true;
+		if (impl->ClaimFramebufferResizeRebuild()) impl->RecreateSwapChain();
+		if (impl->emptyFrameRecovery.Suspended() || impl->deviceLost) return;
+	}
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	impl->emptyFrameValidationActiveRequest = {};
+#endif
 	// Only the successful existing frame-fence wait below grants host-write use.
 	impl->lightingUploadFrameSlotSafe[impl->currentFrame] = false;
 	// Wait until the GPU is done with the resources for this frame before reusing them.
@@ -1053,6 +1137,7 @@ void VulkanContext::BeginFrame() {
 		}
 		impl->hiZReadIndexByViewFrame[hiZViewIndex][impl->currentFrame] = 0u;
 		impl->hiZWritePendingSwapByViewFrame[hiZViewIndex][impl->currentFrame] = false;
+		impl->submittedHiZWritesByViewFrame[hiZViewIndex][impl->currentFrame].Reset();
 		resizedHiZ = true;
 	}
 	if (resizedHiZ)
@@ -1308,11 +1393,28 @@ void VulkanContext::BeginFrame() {
 			impl->acquiredImageIndex,
 			impl->presentationLifecycle.Generation()
 		};
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		{
+			// Preserve the actual acquisition identity before the validation-only
+			// rejection point. No Vulkan submission/layout behavior changes here.
+			const auto sequence = impl->emptyFrameValidationReceipt.sequence + 1;
+			impl->emptyFrameValidationReceipt = {};
+			auto& receipt = impl->emptyFrameValidationReceipt;
+			receipt.sequence = sequence;
+			receipt.correlationId = impl->emptyFrameValidationRequest.correlationId;
+			receipt.generation = impl->presentationLifecycle.Generation();
+			receipt.frameSlot = impl->currentFrame;
+			receipt.imageIndex = impl->acquiredImageIndex;
+			receipt.swapchainImageCount = static_cast<std::uint32_t>(impl->swapchainImages.size());
+			receipt.frameSlotCount = static_cast<std::uint32_t>(impl->inFlightFences.size());
+			receipt.acquired = true;
+			receipt.validationErrorsBefore = impl->emptyFrameValidationErrors.load();
+		}
+#endif
 		if (!impl->presentationLifecycle.Validate(*impl->acquiredPresentationImage)
 			|| impl->acquiredImageIndex >= impl->uiSemaphores.size()) {
 			TERRAENGINE_LOG(LogLevel::Error, "Rejected an acquired image whose index or presentation generation is stale.");
-			impl->presentationLifecycle.RequestRecreation();
-			impl->skipFrame = true;
+			impl->SuspendEmptyRuntimeFrame(false);
 			return;
 		}
 	}
@@ -1822,7 +1924,14 @@ void VulkanContext::WaitIdle() {
 	if (impl && impl->device) {
 		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 		const auto waitStart = BackendClock::now();
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		impl->emptyFrameValidationReceipt.waitIdleAttempted = true;
+#endif
 		const VkResult idleResult = impl->WaitDeviceIdle();
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		impl->emptyFrameValidationReceipt.waitIdleResult = idleResult;
+		impl->emptyFrameValidationReceipt.waitIdleCompletionObserved = idleResult == VK_SUCCESS;
+#endif
 		if (impl->MarkDeviceLost(idleResult, "explicit Vulkan WaitIdle")) {
 			return;
 		}
@@ -1831,6 +1940,10 @@ void VulkanContext::WaitIdle() {
 			return;
 		}
 		// Reuse this explicit proof for every accepted shadow/readback receipt;
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		if (impl->emptyFrameValidationReceipt.ordinarySubmitAccepted)
+			impl->emptyFrameValidationReceipt.ordinaryCompletionObserved = true;
+#endif
 		// observing completion here adds no synchronization of its own.
 		for (std::uint32_t frame = 0; frame < impl->MAX_FRAMES_IN_FLIGHT; ++frame)
 			impl->CompleteShadowWrites(frame);

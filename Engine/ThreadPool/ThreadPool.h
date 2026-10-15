@@ -12,12 +12,14 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <stdexcept>
 #include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 class ThreadPool;
+struct ThreadPoolTestAccess;
 
 // ThreadPoolWorkerActivity describes the worker's state at the instant an
 // immutable telemetry snapshot is captured. Timing counters below retain the
@@ -83,10 +85,25 @@ struct ITask {
 	virtual std::shared_ptr<ITask> clone() const = 0;
 	
 	virtual void run() = 0;
+	// Cancel owned, unstarted work through its already-created typed promise.
+	// Queue retirement calls this outside executor locks; it never runs user code.
+	virtual void Fail(std::exception_ptr failure) noexcept = 0;
 	// Use weak_ptr instead of shared_ptr to avoid increasing reference count
 	// Otherwise it will not destroy itself on exit, resulting in memory leaks
 	virtual void setParentTask(std::weak_ptr<ITask> parent) = 0;
 	virtual std::weak_ptr<ITask> getParentTask() = 0;
+
+protected:
+	friend class ThreadPool;
+	enum class ExecutionState { Prepared, WaitingDependencies, Ready, Queued, Running, Terminal };
+	// One mutex decides readiness, terminal publication ownership, and notification.
+	// Callables, promise publication, and captured-owner destruction happen unlocked.
+	std::mutex settlementMutex;
+	ExecutionState executionState = ExecutionState::Prepared;
+	std::size_t remainingDependencies = 0;
+	std::exception_ptr infrastructureFailure;
+	bool terminalProducerClaimed = false;
+	bool parentNotificationDelivered = false;
 };
 
 template <typename ReturnType>
@@ -117,6 +134,12 @@ struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>
 
 	// run is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void run() override {
+		{
+			std::lock_guard lock(this->settlementMutex);
+			if(this->terminalProducerClaimed) std::terminate();
+			this->terminalProducerClaimed = true;
+			this->executionState = ITask::ExecutionState::Running;
+		}
 		try {
 			if constexpr (std::is_void_v<ReturnType>) {
 				taskFunc();  // Execute the task
@@ -127,8 +150,29 @@ struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>
 			}
 		}
 		catch (...) {
-			taskPromise.set_exception(std::current_exception()); // Handle any exceptions
+			// A callable exception belongs only to this task's existing result
+			// channel. It does not cancel dependent ancestors as infrastructure does.
+			try { taskPromise.set_exception(std::current_exception()); }
+			catch(...) { std::terminate(); }
 		}
+		std::lock_guard lock(this->settlementMutex);
+		this->executionState = ITask::ExecutionState::Terminal;
+	}
+
+	void Fail(std::exception_ptr failure) noexcept override {
+		try {
+			{
+				std::lock_guard lock(this->settlementMutex);
+				if(this->terminalProducerClaimed) std::terminate();
+				this->terminalProducerClaimed = true;
+				if(!this->infrastructureFailure) this->infrastructureFailure = failure;
+				failure = this->infrastructureFailure;
+				this->executionState = ITask::ExecutionState::Terminal;
+			}
+			// Reuse the existing promise state and exception pointer. No replacement
+			// promise, callback, diagnostic, or container is allocated during failure.
+			taskPromise.set_exception(std::move(failure));
+		} catch(...) { std::terminate(); }
 	}
 
 	// setParentTask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -159,11 +203,21 @@ struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>
 	
 	// reset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void reset(std::function<ReturnType()> func) {
+		// Promise allocation may fail. Preserve the old callable, dependencies,
+		// and state until replacement storage exists; callers own this exclusively.
+		std::promise<ReturnType> replacement;
 		taskFunc = std::move(func);
-		taskPromise = std::promise<ReturnType>();
+		taskPromise = std::move(replacement);
 		dependenciesList.clear();
 		unresolvedDependencies = -1;
 		parentTask.reset();
+		// reset is exclusive: retire old exception ownership outside state/cache
+		// locks, then establish a fresh execution before exporting another owner.
+		infrastructureFailure = {};
+		remainingDependencies = 0;
+		executionState = ITask::ExecutionState::Prepared;
+		terminalProducerClaimed = false;
+		parentNotificationDelivered = false;
 	}
 
 	// getFuture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -216,7 +270,16 @@ public:
 	// usefulItemCount records how much caller-visible work the dispatch owns.
 	// A zero value remains visible so diagnostics can identify useless dispatches.
 	void enqueue(std::shared_ptr<ITask> weakTask, std::uint64_t usefulItemCount = 1);
-	void completeTask(std::shared_ptr<ITask> completedTask);
+	void completeTask(std::shared_ptr<ITask> completedTask) noexcept;
+
+	// Native validation configures this only at a quiescent boundary. The exact
+	// parent remains caller-owned until drain; the pre-created exception lets a
+	// final-dependency admission failure be tested without global allocation faults.
+	TERRAENGINE_API void SetDependencyAdmissionFailureForTesting(
+		const ITask* target, std::exception_ptr failure);
+	[[nodiscard]] std::size_t DependencyAdmissionFailureCountForTesting() const noexcept {
+		return admissionFailureCount.load(std::memory_order_acquire);
+	}
 
 	std::shared_ptr<Task<void>> AllocateVoidTask(std::function<void()> func);
 	void ReleaseVoidTask(Task<void>* task) noexcept;
@@ -244,7 +307,14 @@ public:
 	}
 
 private:
-	ThreadPool() : stop(false) {}
+	// The native test friend stages only a quiescent unstarted queue. It adds no
+	// runtime control surface or conditional production admission behavior.
+	friend struct ThreadPoolTestAccess;
+	ThreadPool() : stop(false), shutdownFailure(std::make_exception_ptr(
+		std::runtime_error("ThreadPool shut down before queued task execution"))) {}
+	void ReleaseVoidTask(Task<void>* task, std::uint64_t allocationGeneration) noexcept;
+	void AdmitReady(const std::shared_ptr<ITask>& task, std::uint64_t usefulItemCount = 1);
+	void RejectUnstartedSubtree(const std::shared_ptr<ITask>& task, const std::exception_ptr& failure) noexcept;
 	void InitializeWorkers(std::size_t requestedWorkerCount,
 		const std::function<void(std::size_t)>& beforeWorker);
 
@@ -270,7 +340,9 @@ private:
 	// QueuedTask preserves diagnostic facts captured under the queue lock. The
 	// callable remains independent of telemetry and keeps existing task behavior.
 	struct QueuedTask {
-		std::function<void()> execute;
+		// Retain failure ownership directly; queue insertion no longer allocates a
+		// wrapper callable that hides the task from worker infrastructure recovery.
+		std::shared_ptr<ITask> failureOwner;
 		std::size_t queueDepthAtEnqueue = 0;
 		std::uint64_t usefulItemCount = 0;
 		std::uint64_t enqueueNanoseconds = 0;
@@ -288,10 +360,19 @@ private:
 	std::condition_variable condition;
 	bool stop;
 	bool ownedExecutor = false;
+	// Allocate the cancellation exception before any queue ownership is accepted.
+	// Shutdown itself can then publish cancellation without constructing an error.
+	std::exception_ptr shutdownFailure;
+	std::atomic<const ITask*> admissionFailureTarget{nullptr};
+	std::exception_ptr admissionFailure;
+	std::atomic<std::size_t> admissionFailureCount{0};
 	
 	std::vector<Task<void>*> voidTaskPool;
 	// Peak reservation happens before ownership; return-to-cache never grows.
 	std::size_t outstandingVoidTasks = 0U;
+	enum class RecyclingState { Closed, Recycling, Closing };
+	RecyclingState recyclingState = RecyclingState::Closed;
+	std::uint64_t cacheGeneration = 0;
 	std::mutex poolMutex;
 
 	mutable std::mutex telemetryMutex;

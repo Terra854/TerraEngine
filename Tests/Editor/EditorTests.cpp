@@ -100,6 +100,8 @@ namespace TerraEngine::EditorTests {
 	void RegisterCheckedImGuiVulkanBridgeTests(TestRegistry& registry);
 	void RegisterViewportTextureRetirementTests(TestRegistry& registry);
 	void RegisterMainEditorToolbarTests(TestRegistry& registry);
+	// Four registered cases verify copied scratch facts without allocator access.
+	void RegisterRendererScratchDiagnosticsTests(TestRegistry& registry);
 	void RegisterEditorAutomationServiceTests(TestRegistry& registry);
 	void RegisterEditorAutomationRegistryTests(TestRegistry& registry);
 	void RegisterRendererEfficiencyAutomationTests(TestRegistry& registry);
@@ -404,6 +406,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterCheckedImGuiVulkanBridgeTests(registry);
 	TerraEngine::EditorTests::RegisterViewportTextureRetirementTests(registry);
 	TerraEngine::EditorTests::RegisterMainEditorToolbarTests(registry);
+	TerraEngine::EditorTests::RegisterRendererScratchDiagnosticsTests(registry);
 	TerraEngine::EditorTests::RegisterEditorAutomationServiceTests(registry);
 	TerraEngine::EditorTests::RegisterEditorAutomationRegistryTests(registry);
 	TerraEngine::EditorTests::RegisterRendererEfficiencyAutomationTests(registry);

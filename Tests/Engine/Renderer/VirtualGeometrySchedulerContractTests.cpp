@@ -31,6 +31,45 @@ namespace TerraEngine::Tests
 
 	void RegisterVirtualGeometrySchedulerContractTests(TestRegistry &registry)
 	{
+		registry.Add("VirtualGeometry.Scheduler.RendererScratchHasOneProtectedWriter", [](TestContext& context) {
+			using namespace TerraEngine::Scheduling;
+			const auto workloads = RenderSystem::Instance().DeclareFrameWorkloads(0.0F);
+			const std::vector<std::string> names{"RenderPublicationCapture", "GeometryRoutePrepare", "VirtualGeometryPrepare", "BackendCommit", "RenderPublication"};
+			context.Expect(workloads.size() == names.size(), "Allocator ownership must preserve the existing five-workload render chain.");
+			for (std::size_t index = 0; index < names.size(); ++index) {
+				const auto* workload = FindWorkload(workloads, names[index]);
+				context.Expect(workload != nullptr, "Every existing renderer workload must remain declared.");
+				context.Expect(workload->phase == "Render", "Scratch storage must not introduce another scheduler phase.");
+				if (index == 0) {
+					context.Expect(Contains(workload->writes, kResourceRendererFrameScratch)
+						&& workload->mainThreadRequired && !workload->workerEligible,
+						"Only protected capture may open/reset and populate scratch after previous borrowers retire.");
+				} else {
+					context.Expect(Contains(workload->reads, kResourceRendererFrameScratch)
+						&& !Contains(workload->writes, kResourceRendererFrameScratch),
+						"Later stages borrow completed collections or copy terminal facts without allocator writes.");
+					const auto* previous = FindWorkload(workloads, names[index - 1]);
+					context.Expect(previous != nullptr && Contains(workload->explicitDependencies, previous->stableDescriptorId),
+						"Existing explicit dependencies must keep every borrower inside its captured episode.");
+				}
+			}
+			const auto* route = FindWorkload(workloads, names[1]);
+			const auto* prepare = FindWorkload(workloads, names[2]);
+			const auto* publication = FindWorkload(workloads, names[4]);
+			context.Expect(route->workerEligible && prepare->workerEligible,
+				"Read-only scratch borrowing must preserve both real worker phases.");
+			context.Expect(publication->mainThreadRequired && Contains(publication->writes, "RendererDiagnostics"),
+				"Copied scratch facts are published through the existing protected diagnostics owner.");
+			const auto phases = DefaultSchedulerPhases();
+			const auto renderPhase = std::find_if(phases.begin(), phases.end(), [](const auto& phase) { return phase.name == "Render"; });
+			context.Expect(renderPhase != phases.end() && !renderPhase->flushBefore && !renderPhase->flushAfter,
+				"Changing camera/light storage must not add a scene mutation flush around Render.");
+			const auto resources = DefaultSchedulerResources();
+			context.Expect(std::any_of(resources.begin(), resources.end(), [](const auto& resource) {
+				return resource.name == kResourceRendererFrameScratch && !resource.description.empty() && !resource.futureComponentScope.empty();
+			}), "Scratch must be a known scheduler resource with visible protected/worker ownership intent.");
+		});
+
 		registry.Add("VirtualGeometry.Scheduler.RendererStagesDeclareExecutableOwnership",
 			[](TestContext &context)
 			{

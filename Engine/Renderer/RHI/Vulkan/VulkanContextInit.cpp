@@ -16,6 +16,7 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	// Spin up instance, device, swapchain, and default resources so rendering can begin.
 	this->windowSystem = &windowSystem;
 	deviceLost = false;
+	emptyFrameRecovery = {};
 	deviceLostLogged = false;
 	++renderSessionGeneration;
 	// A newly initialized Vulkan device never shares presentation-compatible
@@ -92,6 +93,7 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	for (std::array<bool, MAX_FRAMES_IN_FLIGHT>& pendingSwaps : hiZWritePendingSwapByViewFrame) {
 		pendingSwaps.fill(false);
 	}
+	for (auto& view : submittedHiZWritesByViewFrame) for (auto& submitted : view) submitted.Reset();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vrsFeatures.pipelineFragmentShadingRate) {
@@ -102,6 +104,7 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!CreateRenderPass()) return false;
 	if (!CreateFramebuffers()) return false;
+	if (!CreateEmptyFrameFallbackResources()) return false;
 	if (!CreateSyncObjects()) return false;
 	if (!presentationLifecycle.Configure(MAX_FRAMES_IN_FLIGHT, surfaceMinimumImageCount,
 		requestedSwapchainImageCount, static_cast<std::uint32_t>(swapchainImages.size()))) return false;
@@ -938,6 +941,12 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		// nor an empty cache makes pending mesh/upload memory safe to destroy.
 		return;
 	}
+	if (device != VK_NULL_HANDLE && emptyFrameAcquireDrainFence != VK_NULL_HANDLE) {
+		// Terminal teardown has proven device-idle/device-loss above. An earlier
+		// failed drain wait could not safely destroy this possibly pending fence.
+		vkDestroyFence(device, emptyFrameAcquireDrainFence, nullptr);
+		emptyFrameAcquireDrainFence = VK_NULL_HANDLE;
+	}
 	if (presentationFenceWaitAllowed) {
 		// Device-idle alone does not prove that the presentation engine released a
 		// present wait semaphore. Maintenance fences provide that explicit proof for
@@ -1640,6 +1649,7 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		}
 	}
 	commandPools.clear();
+	emptyFrameCommandBuffers.clear();
 	editorCommandPools.clear();
 	editorCommandBuffers.clear();
 	if (device && immediateCommandPool != VK_NULL_HANDLE) {
@@ -1770,6 +1780,9 @@ void VulkanContext::Impl::PopulateDebugMessengerCreateInfo(VkDebugUtilsMessenger
 	createInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
 	createInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
 	createInfo.pfnUserCallback = DebugCallback;
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	createInfo.pUserData = this;
+#endif
 }
 
 // VulkanContext::Impl::SetupDebugMessenger is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2022,6 +2035,9 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 			: nullptr);
 	presentationFencesEnabled = maintenanceExtensionName != nullptr
 		&& supportedPresentationFenceFeatures.swapchainMaintenance1 == VK_TRUE;
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	if (emptyFrameValidationDisableMaintenance) presentationFencesEnabled = false;
+#endif
 	VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR presentationFenceFeatures{};
 	if (presentationFencesEnabled)
 	{
@@ -2157,7 +2173,14 @@ bool VulkanContext::Impl::CreateSwapChain(WindowSystem& windowSystem, VkSwapchai
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to enumerate swapchain image count: " << enumerateResult);
 		return false;
 	}
-	std::vector<VkImage> candidateImages(actualImageCount);
+	std::vector<VkImage> candidateImages;
+	try { candidateImages.resize(actualImageCount); }
+	catch (const std::bad_alloc&) {
+		// The local handle is not published into Impl yet. Dispose it here so
+		// the outer candidate catch cannot lose a newly created swapchain.
+		vkDestroySwapchainKHR(device, candidateSwapchain, nullptr);
+		return false;
+	}
 	enumerateResult = vkGetSwapchainImagesKHR(device, candidateSwapchain, &actualImageCount, candidateImages.data());
 	if ((enumerateResult != VK_SUCCESS && enumerateResult != VK_INCOMPLETE)
 		|| actualImageCount < requestedSwapchainImageCount) {
@@ -2630,6 +2653,68 @@ bool VulkanContext::Impl::CreateFramebuffers() {
 }
 
 // VulkanContext::Impl::CreateCommandPool is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+bool VulkanContext::Impl::CreateEmptyFrameFallbackResources() {
+	if (editorMode) return true; // The editor owns a separate UI presentation pass.
+	// Allocate host ownership slots before creating native resources. Allocation
+	// failure returns through the candidate transaction's existing rollback path.
+	try { emptyFrameFramebuffers.assign(swapchainImageViews.size(), VK_NULL_HANDLE); }
+	catch (const std::bad_alloc&) { return false; }
+	const auto plan = TerraEngine::Renderer::Vulkan::MakeEmptyFrameColorPassPlan();
+	VkAttachmentDescription color{};
+	color.format = swapchainImageFormat;
+	color.samples = static_cast<VkSampleCountFlagBits>(plan.samples);
+	color.loadOp = plan.clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	color.storeOp = plan.store ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	color.initialLayout = plan.discardInitialContents ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	color.finalLayout = plan.presentFinalLayout ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	VkAttachmentReference reference{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+	VkSubpassDescription subpass{};
+	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	subpass.colorAttachmentCount = plan.colorAttachmentCount;
+	subpass.pColorAttachments = &reference;
+	// Color-output ordering covers the clear and conditional acquisition wait.
+	// There is no scene depth, visibility identity, VRS, or transfer attachment.
+	VkSubpassDependency dependency{};
+	dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+	dependency.dstSubpass = 0;
+	dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	VkRenderPassCreateInfo passInfo{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+	passInfo.attachmentCount = plan.colorAttachmentCount;
+	passInfo.pAttachments = &color;
+	passInfo.subpassCount = 1;
+	passInfo.pSubpasses = &subpass;
+	passInfo.dependencyCount = 1;
+	passInfo.pDependencies = &dependency;
+	VkRenderPass candidatePass = VK_NULL_HANDLE;
+	if (vkCreateRenderPass(device, &passInfo, nullptr, &candidatePass) != VK_SUCCESS) return false;
+	emptyFrameRenderPass = candidatePass;
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	if (emptyFrameValidationCandidateCheckpoint == TerraEngine::Renderer::Vulkan::EmptyFrameCandidateCheckpoint::AfterFallbackPass) {
+		emptyFrameValidationCandidateCheckpoint = TerraEngine::Renderer::Vulkan::EmptyFrameCandidateCheckpoint::None;
+		emptyFrameValidationReceipt.candidateRejected = true;
+		emptyFrameValidationReceipt.candidateFallbackPassCreated = true;
+		return false; // Actual pass ownership is cleaned by failed-candidate rollback.
+	}
+#endif
+	for (std::size_t image = 0; image < swapchainImageViews.size(); ++image) {
+		VkFramebufferCreateInfo info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+		info.renderPass = emptyFrameRenderPass;
+		info.attachmentCount = plan.colorAttachmentCount;
+		info.pAttachments = &swapchainImageViews[image];
+		info.width = swapchainExtent.width;
+		info.height = swapchainExtent.height;
+		info.layers = 1;
+		VkFramebuffer candidateFramebuffer = VK_NULL_HANDLE;
+		if (vkCreateFramebuffer(device, &info, nullptr, &candidateFramebuffer) != VK_SUCCESS) return false;
+		emptyFrameFramebuffers[image] = candidateFramebuffer;
+	}
+	return TerraEngine::Renderer::Vulkan::CompleteEmptyFrameBundle(swapchainImages.size(), emptyFrameFramebuffers, emptyFrameRenderPass);
+}
+
 bool VulkanContext::Impl::CreateCommandPool() {
 	// Create command pools that separate per-frame rendering from immediate
 	// uploads. Texture imports and layout transitions can happen while the
@@ -2651,6 +2736,7 @@ bool VulkanContext::Impl::CreateCommandPool() {
 
 	commandPools.resize(MAX_FRAMES_IN_FLIGHT);
 	commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+	emptyFrameCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
 	editorCommandPools.resize(MAX_FRAMES_IN_FLIGHT);
 	editorCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
 
@@ -2687,6 +2773,9 @@ bool VulkanContext::Impl::CreateCommandPool() {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to allocate command buffers!");
 			return false;
 		}
+		// Pool-owned, persistent fallback primary. BeginFrame resets the pool only
+		// after slot completion; empty frames never allocate command buffers.
+		if (vkAllocateCommandBuffers(device, &allocInfo, &emptyFrameCommandBuffers[i]) != VK_SUCCESS) return false;
 	}
 	return true;
 }
@@ -2778,6 +2867,9 @@ VulkanContext::Impl::PresentationResourceBundle VulkanContext::Impl::TakePresent
 	bundle.imageViews = std::move(swapchainImageViews);
 	bundle.renderPass = std::exchange(renderPass, VK_NULL_HANDLE);
 	bundle.framebuffers = std::move(framebuffers);
+	bundle.emptyFrameRenderPass = std::exchange(emptyFrameRenderPass, VK_NULL_HANDLE);
+	bundle.emptyFrameFramebuffers = std::move(emptyFrameFramebuffers);
+	emptyFrameFramebuffers.clear();
 	bundle.depthImage = std::exchange(depthImage, VK_NULL_HANDLE);
 	bundle.depthAllocation = std::exchange(depthImageAllocation, VK_NULL_HANDLE);
 	bundle.depthView = std::exchange(depthImageView, VK_NULL_HANDLE);
@@ -2808,6 +2900,8 @@ void VulkanContext::Impl::RestorePresentationResourceBundle(PresentationResource
 	swapchainImageViews = std::move(bundle.imageViews);
 	renderPass = std::exchange(bundle.renderPass, VK_NULL_HANDLE);
 	framebuffers = std::move(bundle.framebuffers);
+	emptyFrameRenderPass = std::exchange(bundle.emptyFrameRenderPass, VK_NULL_HANDLE);
+	emptyFrameFramebuffers = std::move(bundle.emptyFrameFramebuffers);
 	depthImage = std::exchange(bundle.depthImage, VK_NULL_HANDLE);
 	depthImageAllocation = std::exchange(bundle.depthAllocation, VK_NULL_HANDLE);
 	depthImageView = std::exchange(bundle.depthView, VK_NULL_HANDLE);
@@ -2822,7 +2916,14 @@ void VulkanContext::Impl::RestorePresentationResourceBundle(PresentationResource
 }
 
 void VulkanContext::Impl::DestroyPresentationResourceBundle(PresentationResourceBundle& bundle) {
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	const bool partialValidationCandidate = emptyFrameValidationReceipt.candidateRejected
+		&& emptyFrameValidationReceipt.candidateFallbackPassCreated && bundle.emptyFrameRenderPass != VK_NULL_HANDLE;
+#endif
 	if (device != VK_NULL_HANDLE) {
+		TerraEngine::Renderer::Vulkan::DestroyEmptyFrameBundle(bundle.emptyFrameFramebuffers, bundle.emptyFrameRenderPass,
+			[this](VkFramebuffer framebuffer) { vkDestroyFramebuffer(device, framebuffer, nullptr); },
+			[this](VkRenderPass pass) { vkDestroyRenderPass(device, pass, nullptr); });
 		for (VkFramebuffer framebuffer : bundle.framebuffers) if (framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, framebuffer, nullptr);
 		if (bundle.renderPass != VK_NULL_HANDLE) vkDestroyRenderPass(device, bundle.renderPass, nullptr);
 		for (VkImageView view : bundle.imageViews) if (view != VK_NULL_HANDLE) vkDestroyImageView(device, view, nullptr);
@@ -2842,21 +2943,9 @@ void VulkanContext::Impl::DestroyPresentationResourceBundle(PresentationResource
 		DestroyConventionalVisibilityIdentityAttachment(identity);
 	}
 	bundle = {};
-}
-
-void VulkanContext::Impl::RetirePresentationResourceBundle(
-	PresentationResourceBundle&& bundle, std::uint64_t generation)
-{
-	if (bundle.swapchain == VK_NULL_HANDLE)
-	{
-		return;
-	}
-
-	// Image-owned present semaphores can outlive a render fence. Keep the full
-	// bundle together until a per-present fence proves every queued present has
-	// completed; without the optional extension retain a bounded backlog rather
-	// than guessing from vkDeviceWaitIdle.
-	retiredPresentationBundles.push_back({ std::move(bundle), generation });
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	if (partialValidationCandidate) emptyFrameValidationReceipt.candidatePartialCleanupCompleted = true;
+#endif
 }
 
 void VulkanContext::Impl::CollectCompletedPresentationResourceBundles()
@@ -3459,6 +3548,9 @@ VkExtent2D VulkanContext::Impl::ChooseSwapExtent(const VkSurfaceCapabilitiesKHR&
 void VulkanContext::Impl::CleanupSwapChain() {
 	// Destroy swapchain-related resources while keeping device-level objects intact.
 	if (device) {
+		TerraEngine::Renderer::Vulkan::DestroyEmptyFrameBundle(emptyFrameFramebuffers, emptyFrameRenderPass,
+			[this](VkFramebuffer framebuffer) { vkDestroyFramebuffer(device, framebuffer, nullptr); },
+			[this](VkRenderPass pass) { vkDestroyRenderPass(device, pass, nullptr); });
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto framebuffer : framebuffers) vkDestroyFramebuffer(device, framebuffer, nullptr);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -3530,38 +3622,72 @@ void VulkanContext::Impl::RecreateSwapChain() {
 		return;
 	}
 	editorCompletionTracker.RecordProtectedIdle();
+	if (emptyFrameAcquireDrainFence != VK_NULL_HANDLE) {
+		vkDestroyFence(device, emptyFrameAcquireDrainFence, nullptr);
+		emptyFrameAcquireDrainFence = VK_NULL_HANDLE;
+	}
 
 	// Keep the complete old presentation bundle alive while the candidate is
 	// built. Once it is supplied to vkCreateSwapchainKHR, however, that attempt
 	// becomes irreversible and the old chain may not be restored or acquired.
+	std::optional<TerraEngine::Renderer::Vulkan::EmptyFrameRetirementReservation<decltype(retiredPresentationBundles)>> retirementReservation;
+	try { retirementReservation.emplace(retiredPresentationBundles); }
+	catch (const std::bad_alloc&) {
+		// No active owner has moved and oldSwapchain has not been handed off.
+		// Publish one fresh revision for the next protected BeginFrame. A
+		// suspended frame cannot acquire an image to produce another recovery
+		// event, and retrying here would spin while host memory is unavailable.
+		emptyFrameRecovery.Suspend(presentationLifecycle.Generation());
+		skipFrame = true;
+		presentationRecreation.PublishReservationFailure();
+		framebufferResized = true;
+		return;
+	}
 	PresentationResourceBundle activeBundle = TakePresentationResourceBundle();
 	oldSwapchainConsumedByCreateAttempt = false;
 	VulkanVRS activeVrs = vrs;
 	vrs = {};
 	bool candidateVrsCreated = false;
 
-	const bool swapchainCreated = CreateSwapChain(*windowSystem, activeBundle.swapchain);
-	bool candidateCreated = swapchainCreated && CreateImageViews();
-	if (candidateCreated && !editorMode) {
-		candidateCreated = CreateDepthResources();
-		if (candidateCreated && vrsFeatures.pipelineFragmentShadingRate) {
-			vrs.Create(device, physicalDevice, allocator, swapchainExtent.width, swapchainExtent.height);
-			candidateVrsCreated = vrs.view != VK_NULL_HANDLE;
-			if (candidateVrsCreated) {
-				candidateCreated = TransitionImageLayout(vrs.image, VK_FORMAT_R8_UINT,
-					VK_IMAGE_LAYOUT_UNDEFINED,
-					VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR);
+	bool rejectCandidate = false;
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	// Reject a host-side candidate before vkCreateSwapchainKHR takes oldSwapchain.
+	// No Vulkan return value or consumed-handoff proof is fabricated.
+	rejectCandidate = std::exchange(emptyFrameValidationRejectCandidate, false);
+	if (rejectCandidate) emptyFrameValidationReceipt.candidateRejected = true;
+#endif
+	bool candidateCreated = false;
+	try {
+		const bool swapchainCreated = !rejectCandidate && CreateSwapChain(*windowSystem, activeBundle.swapchain);
+		candidateCreated = swapchainCreated && CreateImageViews();
+		if (candidateCreated && !editorMode) {
+			candidateCreated = CreateDepthResources();
+			if (candidateCreated && vrsFeatures.pipelineFragmentShadingRate) {
+				vrs.Create(device, physicalDevice, allocator, swapchainExtent.width, swapchainExtent.height);
+				candidateVrsCreated = vrs.view != VK_NULL_HANDLE;
+				if (candidateVrsCreated) {
+					candidateCreated = TransitionImageLayout(vrs.image, VK_FORMAT_R8_UINT,
+						VK_IMAGE_LAYOUT_UNDEFINED,
+						VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR);
+				}
 			}
 		}
+		candidateCreated = candidateCreated && CreateRenderPass()
+			&& CreateFramebuffers() && CreateEmptyFrameFallbackResources() && CreateSyncObjects();
+		if (candidateCreated) {
+			candidateCreated = presentationLifecycle.Configure(
+				MAX_FRAMES_IN_FLIGHT, surfaceMinimumImageCount,
+				requestedSwapchainImageCount,
+				static_cast<std::uint32_t>(swapchainImages.size()));
+		}
+	} catch (const std::bad_alloc&) {
+		// Native handoff may already have consumed oldSwapchain. Both allocation
+		// and native failures must therefore use the same branch below.
+		candidateCreated = false;
 	}
-	candidateCreated = candidateCreated && CreateRenderPass()
-		&& CreateFramebuffers() && CreateSyncObjects();
-	if (candidateCreated) {
-		candidateCreated = presentationLifecycle.Configure(
-			MAX_FRAMES_IN_FLIGHT, surfaceMinimumImageCount,
-			requestedSwapchainImageCount,
-			static_cast<std::uint32_t>(swapchainImages.size()));
-	}
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	emptyFrameValidationReceipt.candidateOldSwapchainConsumed = oldSwapchainConsumedByCreateAttempt;
+#endif
 
 	if (!candidateCreated) {
 		PresentationResourceBundle failedCandidate = TakePresentationResourceBundle();
@@ -3569,12 +3695,17 @@ void VulkanContext::Impl::RecreateSwapChain() {
 		if (candidateVrsCreated || vrs.view != VK_NULL_HANDLE) vrs.Destroy(device, allocator);
 		vrs = activeVrs;
 		if (oldSwapchainConsumedByCreateAttempt) {
+			emptyFrameRecovery.Suspend(presentationLifecycle.Generation());
+			skipFrame = true;
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+			emptyFrameValidationReceipt.recoverySuspended = true;
+#endif
 			// The old chain was supplied as oldSwapchain. Device-idle above proves
 			// submitted queue work is done, but it does not make the old handle
 			// reusable after the API ownership handoff attempt. Retire its image
 			// synchronization until completion proof and remain safely suspended.
 			const bool oldBundleHasExplicitCompletionProof = activeBundle.presentCompletionCoverageValid;
-			RetirePresentationResourceBundle(std::move(activeBundle), presentationLifecycle.Generation());
+			retirementReservation->Commit(activeBundle, presentationLifecycle.Generation());
 			// No replacement chain exists to provide the unextended acquire-history
 			// anchor for this newly retired bundle. Only maintenance fences can recover.
 			unextendedRetirementTracker.Reset();
@@ -3605,7 +3736,10 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	++backendResourceGeneration;
 	reusableSecondaryCommandSignatures.clear();
 	activeRenderFramePublication.reset();
-	RetirePresentationResourceBundle(std::move(activeBundle), presentationLifecycle.Generation());
+	if (activeBundle.swapchain != VK_NULL_HANDLE)
+		retirementReservation->Commit(activeBundle, presentationLifecycle.Generation());
+	else
+		retirementReservation.reset(); // No placeholder may reach collection/publication.
 	CollectCompletedPresentationResourceBundles();
 	if (activeVrs.view != VK_NULL_HANDLE) activeVrs.Destroy(device, allocator);
 
@@ -3648,6 +3782,7 @@ void VulkanContext::Impl::RecreateSwapChain() {
 		}
 		for (std::array<std::uint32_t, MAX_FRAMES_IN_FLIGHT>& indices : hiZReadIndexByViewFrame) indices.fill(0u);
 		for (std::array<bool, MAX_FRAMES_IN_FLIGHT>& swaps : hiZWritePendingSwapByViewFrame) swaps.fill(false);
+		for (auto& view : submittedHiZWritesByViewFrame) for (auto& submitted : view) submitted.Reset();
 		CreateAmbientOcclusionResources();
 		for (std::uint32_t frameIndex = 0; frameIndex < MAX_FRAMES_IN_FLIGHT; ++frameIndex) {
 			if (!UpdateGlobalHiZ(frameIndex)) {
@@ -3672,6 +3807,9 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	swapchainAcquireWaitConsumed = false;
 	acquiredPresentationImage.reset();
 	PublishPresentationRecreationSuccess();
+	// Only a fully published replacement (including late descriptor checks)
+	// authorizes normal waits on new, initially signaled frame synchronization.
+	(void)emptyFrameRecovery.CompleteReplacement(presentationLifecycle.Generation(), true);
 	TERRAENGINE_LOG(LogLevel::Info, "Presentation candidate published atomically. generation="
 		<< presentationLifecycle.Generation() << ", images=" << swapchainImages.size());
 }
@@ -3680,6 +3818,13 @@ void VulkanContext::Impl::RecreateSwapChain() {
 VKAPI_ATTR VkBool32 VKAPI_CALL VulkanContext::Impl::DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData) {
 	// Route validation messages through the engine logger so users see them in one place.
 	const char* message = (pCallbackData != nullptr && pCallbackData->pMessage != nullptr) ? pCallbackData->pMessage : "";
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	// Callback counts accompany the original native log; they never replace it
+	// or convert a requested-but-unavailable validation layer into a passing lane.
+	if (pUserData != nullptr && (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)) {
+		static_cast<Impl*>(pUserData)->emptyFrameValidationErrors.fetch_add(1);
+	}
+#endif
 
 	LogLevel level = LogLevel::Debug;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

@@ -14,6 +14,7 @@
 #include <string_view>
 
 #include "VulkanPresentationLifecycle.h"
+#include "VulkanEmptyFramePolicy.h"
 
 class TERRAENGINE_API VulkanContext : public RHIContext
 {
@@ -79,6 +80,13 @@ public:
 	bool PrepareRendererEfficiencyDeviceRecreation();
 	bool RecreateRendererEfficiencyDevice();
 	void SetValidationLayersRequested(bool enabled);
+	// Quiescent native-fixture hook. It rejects scene submission for one acquired
+	// runtime frame; receipts describe only operations actually attempted.
+	bool ArmEmptyFrameValidation(TerraEngine::Renderer::Vulkan::EmptyFrameValidationRequest request);
+	TerraEngine::Renderer::Vulkan::EmptyFrameValidationReceipt GetEmptyFrameValidationReceipt() const;
+	bool ConfigureEmptyFrameValidation(bool disableMaintenance);
+	bool RecreateEmptyFrameValidation(bool rejectCandidate);
+	bool RecreateEmptyFrameValidationAt(TerraEngine::Renderer::Vulkan::EmptyFrameCandidateCheckpoint checkpoint);
 	void SetVariableRateShadingEnabled(bool enabled);
 
 	// ViewType names the supported states explicitly so serialization and switches stay readable.

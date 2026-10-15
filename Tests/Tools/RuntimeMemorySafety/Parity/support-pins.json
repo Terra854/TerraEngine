@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "sourceRevision": "b99e76fe23551c813038720f6ce9c384320dcdaf",
+  "support": [
+    {
+      "sourceRevision": "b99e76fe23551c813038720f6ce9c384320dcdaf",
+      "source": "Tests/Support/RendererEfficiency/Renderer/RendererEfficiencyArtifacts.h",
+      "path": "support/Renderer/RendererEfficiencyArtifacts.h",
+      "sha256": "4a2e20f5fa3652cf34f17c936cb4b03f3c316635b7e7470b57b4eca3d3d882db",
+      "bytes": 5913,
+      "gitBlob": "fc1ff6b98d20a4ad5d8145b3526da747024184bd"
+    },
+    {
+      "sourceRevision": "b99e76fe23551c813038720f6ce9c384320dcdaf",
+      "source": "Tests/Support/RendererEfficiency/Renderer/RendererEfficiencyFixtureControls.h",
+      "path": "support/Renderer/RendererEfficiencyFixtureControls.h",
+      "sha256": "9c011cbb6fef846e8868e7b8302618b891093395a36e89e59fb4a9499a3217c9",
+      "bytes": 15761,
+      "gitBlob": "0f6b13ebfe139fdbb9cb40164a607c18d8564b7d"
+    }
+  ],
+  "note": "Immutable common-ABI support declarations copied unchanged from sourceRevision. Paths are relative to this manifest; runtime and reference receipt identities are explicit run inputs."
+}

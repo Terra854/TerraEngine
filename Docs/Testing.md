@@ -48,6 +48,256 @@ regressions are documented by the installed runner's parameter help.
 The runner preserves correlated native/live logs and package/managed/process
 observations; watchdog termination is a failed check, not an orderly shutdown.
 
+## Runtime memory safety and renderer scratch
+
+Runtime memory safety separates native regression checks, installed runtime
+observations, and performance qualification. The renderer integration, installed
+runner/editor helper scripts, and protocol CTests are integrated. The commands
+below do not establish acceptance by themselves. Retain final build/install,
+complete applicable CTest, CPU, Vulkan, renderer/editor, and performance receipts
+separately.
+
+Use an x64 Visual Studio developer shell with the repository's bundled
+dependencies. From a clean checkout, configure tests, compile, and install the
+same bytes before running installed tools:
+
+```powershell
+cmake --fresh --preset RelWithDebInfo -DBUILD_TESTING=ON
+if ($LASTEXITCODE -ne 0) { throw 'Configure failed.' }
+cmake --build --preset RelWithDebInfo --parallel 2
+if ($LASTEXITCODE -ne 0) { throw 'Compile failed.' }
+cmake --build --preset RelWithDebInfo --target install --parallel 2
+if ($LASTEXITCODE -ne 0) { throw 'Compile/install failed.' }
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+	-R '^(Engine\.RuntimeMemorySafety(\.|$)|Editor\.RuntimeMemorySafety\.Diagnostics|Runtime\.MemorySafety\.)' --output-on-failure
+if ($LASTEXITCODE -ne 0) { throw 'Focused CTest failed.' }
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+if ($LASTEXITCODE -ne 0) { throw 'Complete CTest failed.' }
+```
+
+The maintained install is `out/build/RelWithDebInfo/Build`, regardless of the
+preset's nominal install prefix. Runtime-memory tools live under its
+`Tests/Tools/RuntimeMemorySafety` directory. The installed
+`runtime-memory-safety-artifacts.json` pins their actual bytes and the required
+DLL, shader, managed, fixture, and watchdog closure. Close any installed editor
+before replacing its loaded binaries. Keep work and evidence outside install
+trees; every run needs a fresh work directory.
+
+The frozen native registration floors are:
+
+| Native filter / CTest entry | Minimum registered cases |
+| --- | ---: |
+| `Engine.RuntimeMemorySafety.TaskCache` | 8 |
+| `Engine.RuntimeMemorySafety.DependencyAdmission` | 10 |
+| `Engine.RuntimeMemorySafety.Allocators.FixedPool` | 4 |
+| `Engine.RuntimeMemorySafety.Allocators.Alignment` | 4 |
+| `Engine.RuntimeMemorySafety.Allocators.Overflow` | 6 |
+| `Engine.RuntimeMemorySafety.Allocators` (union) | 14 |
+| `Engine.RuntimeMemorySafety.RendererScratch` | 10 |
+| `Engine.RuntimeMemorySafety.EmptyFramePolicy` | 8 |
+| `Editor.RuntimeMemorySafety.Diagnostics` | 4 |
+
+These represent at least 54 unique cases: 50 engine and four editor. The
+allocator union and its subgroups overlap; repeated executions add no
+registrations. Empty or misspelled selections fail. Native `RMS_OBSERVATION`
+lines retain actual addresses, construction/destruction counts, ownership,
+worker counts, and lifetime facts alongside exact PASS names and watchdog logs.
+The parser accepts logger interleaving between the count and `selected tests`,
+including a newline, while preserving the count floor and original log bytes.
+
+The separate `Engine.VulkanPresentationReservationRecovery` regression injects
+three host retirement-reservation failures through the production reservation
+helper and recreation coordinator. It checks one retry per protected frame
+boundary at an unchanged extent, atomic retention of the active bundle, and
+frame admission after a complete replacement. It needs no GPU or resize event.
+After the build/install commands above, run it with:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+	-R '^Engine\.VulkanPresentationReservationRecovery$' --output-on-failure
+```
+
+For an installed allocator slice, after compilation and installation:
+
+```powershell
+$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$slice = Join-Path $installRoot 'Tests/Tools/Correctness/RunNativeCorrectnessSlice.ps1'
+$engineTests = Join-Path $installRoot 'Tests/Engine/TerraEngine-EngineTests.exe'
+& $slice -Executable $engineTests -Filter 'Engine.RuntimeMemorySafety.Allocators' `
+	-MinimumCases 14 -TimeoutSeconds 10 -LogDirectory './out/validation/runtime-memory-safety/allocators-fresh'
+if ($LASTEXITCODE -ne 0) { throw 'Allocator slice failed.' }
+```
+
+CPU acceptance additionally requires 100 independently watched completed-cache
+and 100 never-dispatched-cache runs. After the complete ten-case admission
+selection, repeat `DependencyAdmission.MultipleAncestors` 100 times at each
+actual worker count 1, 2, and 8. The native 10-second process-tree watchdog
+deadline is independent of in-test waits. Record original exceptions, terminal
+ancestors, held input lifetime, balanced ownership, and successful shutdown;
+requesting a worker count is insufficient without observing it.
+
+Vulkan acceptance requires actually enabled validation, 100 fresh first-image
+and 100 recreated first-image operations, valid acquired-image submission and
+presentation, and two actual healthy follow-up frames. Check recording/reset/
+submit failure checkpoints, consumed acquire waits, rollback, recovery, and
+terminal cleanup using their real receipts. A planner test, requested validation
+flag, or device preflight cannot establish GPU success. Renderer acceptance
+separately requires repeated completed/failed/cancelled/scene-clear/shutdown/
+restart episodes and installed editor loopback for copied read-only diagnostics.
+
+The central integration uses a stable renderer-owned `atomic_flag` to
+reject recursive/overlapping execution before mutation. Test direct execution,
+each coroutine resume, and lifecycle cancellation with the same exclusive gate;
+do not substitute the small continuation-handoff mutex for execution ownership.
+Camera/light vectors are coroutine locals declared after their strong episode
+lease. Borrowing jobs settle before vectors, then lease, retire; the next
+protected capture or lifecycle boundary owns the actual reset. Existing Render
+phase declarations cover scratch capture writes, worker/backend reads, and
+copied publication. No dependencies, shaders, phases, or mutation flushes are
+added by this scope.
+
+Installed editor loopback uses the existing `diagnostics.get_summary` operation
+and observes `data.rendererScratch.latest`, `.previous`, and `.reclamation`.
+Latest/previous terminal copies must retain completed/failed/cancelled outcome,
+identities, pre-reset use/peak/high-water, reuse/fallback deltas, and reset count
+across protected reclamation and renderer restart. Reclamation has a separate
+lifetime ID, cumulative actual fallback allocation/deallocation counts, actual
+outstanding count/bytes, and reset count. Compare release facts with actual
+counting-upstream deallocations and preserved fallback sentinels in native tests;
+an empty reset increasing reset count cannot prove that a fallback was freed.
+Automation reads published copies and offers no capacity override, arena pointer,
+or allocator control.
+
+The final installed campaign records these results for its content-addressed
+runtime manifest:
+
+- Complete integrated CTest: 183/183 groups, zero failures, skips, disabled tests
+  or exclusions; [suite gate](../out/evidence/runtime-memory-safety/final-ctest.json).
+- CPU: 54 unique scoped native cases and 500 repetitions: 100 completed-cache,
+  100 never-dispatched-cache, and 100 admission failures at each of 1/2/8 workers;
+  [actual CPU evidence](../out/evidence/runtime-memory-safety/final-cpu.json).
+- Vulkan: 10 lanes times 100 repetitions, 2000 healthy follow-up frames, zero
+  validation errors and actual context/window cleanup;
+  [actual Vulkan evidence](../out/evidence/runtime-memory-safety/final-vulkan.json).
+- Renderer: 100 repetitions in each of completion, failure, cancellation, scene
+  clear, shutdown and restart, plus installed read-only editor diagnostics;
+  [actual renderer/editor evidence](../out/evidence/runtime-memory-safety/final-renderer.json).
+- Small/normal/stress parity: exact camera/light identity and ordering,
+  equivalent published outputs and zero observed fallbacks;
+  [three-scale parity](../out/evidence/runtime-memory-safety/final-parity.json).
+- Preparation timing: all 18 separate median/p95 comparisons passed against the
+  original six sealed noise limits, using 60 warm-up and 300 measured frames;
+  [actual performance evidence](../out/evidence/runtime-memory-safety/final-performance.json).
+
+The [build/install gate](../out/evidence/runtime-memory-safety/final-build-install.json)
+pins the same installation. The final acceptance ledger joins these receipts
+with source, documentation and graph review. No speedup is inferred from a
+passing no-regression gate.
+
+An initial nine-capture timing attempt was rejected before metric comparison
+because its MCP port 43189 differed from the sealed reference port 43186. All
+nine captures were repeated with matching controls and the original frozen
+limits. [The invalid attempt and complete corrected run](../out/evidence/runtime-memory-safety/performance-port-control-correction.json)
+remain recorded; no old candidate samples were reused.
+
+Two earlier GPU attempts exited with access violations in NVIDIA App's Game
+Proxy, `nvspcap64.dll`, at the same module offset; their root cause remains
+unproven. [Failure records and host constraint](../out/evidence/runtime-memory-safety/gpu-host-environment-constraint.json)
+are retained. The final matrix kept the overlay enabled and used one hidden
+window per lane while constructing and destroying 100 fresh native Vulkan
+contexts, devices, surfaces and swapchains. Every iteration still observes
+context/thread-pool cleanup, and the root receipt observes final window cleanup.
+No driver module was pinned and no global capture setting was changed.
+
+The archived RHI does not expose its private camera-array capture. Parity uses
+common GameView/GPU output, authored command identity/order, actual candidate
+arrays and the recorded source-flow proof. Post-close fixture hashes establish
+on-disk byte identity; they do not establish the bytes held in memory during a
+timed run. Keep these limits alongside the raw evidence.
+
+Preserve the unchanged reference runtime and a separate immutable validation-tool
+install before production fixes. Reference and candidate timing both use that
+same `ToolInstallRoot`; `RuntimeInstallRoot` selects the runtime being measured.
+Decode archived journals as data rather than loading a new fixture into old
+runtime DLLs. Never overwrite the original reference or its sealed calibration.
+
+Preparation timing is the sum of the existing `RenderSystem: Protected
+Publication Capture`, `RenderSystem: Geometry Route Preparation`, and
+`RenderSystem: Virtual Geometry Preparation` inclusive callback scopes. Use
+Detailed capture at cadence one, select ordinals 0 through 359, discard exactly
+60 warm-up frames, and use all remaining 300 frames. V1 journal metadata proves
+detail/cadence; the actual capture-start API admission proves `maxFrames=4096`.
+The median averages sorted positions 150/151 and nearest-rank p95 uses 285.
+Freeze three A/A pairs per small/normal/stress scale and six separate
+`max(2%, max_i abs(Aprime_i / A_i - 1))` limits before candidate measurements.
+All 18 candidate run/metric comparisons must pass independently, together with
+exact camera/light identity/order and equivalent published outputs. Whole-frame
+CPU duration, pooled summaries, selective retries, or missing samples cannot
+replace this evidence. Report every fallback and retain raw journals and hashes.
+
+The installed `RunInstalledRuntimeMemorySafety.ps1` supports Cpu, Vulkan,
+Renderer, Performance, and All. Use PowerShell 7 and invoke its installed copy.
+Each WorkRoot must be fresh and outside candidate, reference, and frozen-tool
+installs. Source invocation, redirected/overlapping paths, missing artifacts,
+and installed hash mismatches are rejected. Cpu requires at least 100 iterations
+and exactly workers 1, 2, and 8; Vulkan and Renderer require at least 100
+iterations per lane. Vulkan covers ten native lanes and Renderer covers six
+lifecycle lanes plus the existing editor diagnostics loopback.
+
+```powershell
+$runner = Join-Path $installRoot 'Tests/Tools/RuntimeMemorySafety/RunInstalledRuntimeMemorySafety.ps1'
+$evidenceRoot = Join-Path (Get-Location).Path 'out/validation/runtime-memory-safety'
+function New-RmsEvidenceRoot([string]$Lane) {
+	Join-Path $evidenceRoot ($Lane + '-' + [guid]::NewGuid().ToString('N'))
+}
+& $runner -InstallRoot $installRoot -WorkRoot (New-RmsEvidenceRoot 'cpu') `
+	-Mode Cpu -Iterations 100 -WorkerCounts @(1,2,8)
+if ($LASTEXITCODE -ne 0) { throw 'CPU acceptance was nonpassing.' }
+& $runner -InstallRoot $installRoot -WorkRoot (New-RmsEvidenceRoot 'vulkan') `
+	-Mode Vulkan -Iterations 100
+if ($LASTEXITCODE -ne 0) { throw 'Vulkan acceptance was nonpassing.' }
+& $runner -InstallRoot $installRoot -WorkRoot (New-RmsEvidenceRoot 'renderer') `
+	-Mode Renderer -Iterations 100 -McpPort 43186
+if ($LASTEXITCODE -ne 0) { throw 'Renderer/editor acceptance was nonpassing.' }
+```
+
+Performance and All additionally require the original immutable reference,
+sealed calibration, frozen timing-tool install, and independently collected
+pinned parity evidence. The example paths below must identify those real
+artifacts; these instructions do not create or certify a parity receipt.
+
+```powershell
+$referenceRoot = (Resolve-Path './out/reference/runtime-memory-safety-prechange/Build').Path
+$timingTools = (Resolve-Path './out/reference/runtime-memory-safety-validation-tools-v2/Build').Path
+$calibration = (Resolve-Path './out/evidence/runtime-memory-safety/reference-calibration.json').Path
+$parity = (Resolve-Path './out/evidence/runtime-memory-safety/parity.json').Path
+& $runner -InstallRoot $installRoot -WorkRoot (New-RmsEvidenceRoot 'performance') `
+	-Mode Performance -ReferenceInstallRoot $referenceRoot `
+	-ReferenceCalibrationPath $calibration -ToolInstallRoot $timingTools `
+	-ParityEvidencePath $parity -McpPort 43186
+if ($LASTEXITCODE -ne 0) { throw 'Performance/parity acceptance was nonpassing.' }
+& $runner -InstallRoot $installRoot -WorkRoot (New-RmsEvidenceRoot 'all') `
+	-Mode All -Iterations 100 -WorkerCounts @(1,2,8) `
+	-ReferenceInstallRoot $referenceRoot -ReferenceCalibrationPath $calibration `
+	-ToolInstallRoot $timingTools -ParityEvidencePath $parity -McpPort 43186
+if ($LASTEXITCODE -ne 0) { throw 'A required acceptance lane was nonpassing.' }
+```
+
+All runs Cpu, Vulkan, Renderer/editor, then Performance and retains lane failures.
+Exit 0 means every requested lane passed, 1 means Failed, and 2 means Unverified;
+both nonzero outcomes are nonpassing. Inspect retained summary and raw child
+receipts; setup rejection may occur before a summary exists. Three installed
+protocol CTests cover runner, renderer, and editor evidence contracts:
+`Runtime.MemorySafety.RunnerProtocolContracts`,
+`Runtime.MemorySafety.RendererProtocolContracts`, and
+`Runtime.MemorySafety.EditorProtocolContracts`. Synthetic files and mocked
+transport in these checks cannot establish native/live/performance acceptance.
+See the maintained
+[runtime-memory validation notes](../Tests/Tools/RuntimeMemorySafety/README.md)
+for the current supported entry points. Run the complete applicable CTest and
+separately documented live/long-running lanes before final acceptance; retain
+inherited failures or unavailable lanes explicitly.
+
 ## Parented world edits and character scale
 
 Build the editor and both native test targets with the RelWithDebInfo workflow

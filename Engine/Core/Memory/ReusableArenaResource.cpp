@@ -25,6 +25,11 @@ namespace TerraEngine::Memory {
 	{
 		for (const FallbackAllocation& fallback : fallbacks_) {
 			upstream_->deallocate(fallback.memory, fallback.bytes, fallback.alignment);
+			// Publish reclamation only after this tracked allocation was actually
+			// returned upstream. Empty/repeated resets cannot invent releases.
+			++statistics_.fallbackDeallocationCount;
+			--statistics_.fallbackOutstandingCount;
+			statistics_.fallbackOutstandingBytes -= fallback.bytes;
 		}
 		fallbacks_.clear();
 		offset_ = 0U;
@@ -55,6 +60,10 @@ namespace TerraEngine::Memory {
 			throw;
 		}
 		++statistics_.fallbackAllocationCount;
+		// Tracking succeeded, so these bytes now belong to the reset episode.
+		// Allocation/tracking exceptions above leave committed counts untouched.
+		++statistics_.fallbackOutstandingCount;
+		statistics_.fallbackOutstandingBytes += bytes;
 		return memory;
 	}
 

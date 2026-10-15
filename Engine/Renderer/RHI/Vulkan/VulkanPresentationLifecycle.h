@@ -139,9 +139,9 @@ namespace TerraEngine::Renderer::Vulkan
 	};
 
 	// PresentationRecreationCoordinator coalesces native resize bursts into one
-	// protected recreation attempt. A failed attempt is not retried every frame:
-	// a new extent, an OUT_OF_DATE result, or an explicit retry creates a new
-	// revision. That prevents a minimized window from repeatedly idling the GPU.
+	// protected recreation attempt. Native candidate failures require a new event
+	// or explicit retirement proof. Pre-handoff host reservation failures arm
+	// one later attempt; zero extents still prevent a minimized rebuild loop.
 	class PresentationRecreationCoordinator
 	{
 	public:
@@ -152,6 +152,9 @@ namespace TerraEngine::Renderer::Vulkan
 		[[nodiscard]] std::optional<PresentationRecreationRequest> Claim() noexcept;
 		void PublishSuccess(PresentationExtent extent) noexcept;
 		void PublishFailure(bool oldSwapchainWasConsumed) noexcept;
+		// A host reservation failure precedes native handoff. Keep the current
+		// extent and arm one next-frame attempt without waiting for a resize.
+		void PublishReservationFailure() noexcept;
 		void PublishRetirementBlocked(bool oldSwapchainWasConsumed) noexcept;
 		[[nodiscard]] bool RequestRetryAfterRetirement() noexcept;
 

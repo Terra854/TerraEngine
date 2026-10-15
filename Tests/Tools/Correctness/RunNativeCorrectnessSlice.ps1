@@ -36,6 +36,16 @@ $recoveryFloors=@{
 	'Engine.Resource.Texture.Rgba'=5
 	'Engine.JobGraph.FailureSettlement'=6
 	'Engine.UI.HitTesting'=6
+	# Feature floors count actual registrations, never repeated corpus rows.
+	'Engine.RuntimeMemorySafety.TaskCache'=8
+	'Engine.RuntimeMemorySafety.DependencyAdmission'=10
+	'Engine.RuntimeMemorySafety.Allocators.FixedPool'=4
+	'Engine.RuntimeMemorySafety.Allocators.Alignment'=4
+	'Engine.RuntimeMemorySafety.Allocators.Overflow'=6
+	'Engine.RuntimeMemorySafety.Allocators'=14
+	'Engine.RuntimeMemorySafety.RendererScratch'=10
+	'Engine.RuntimeMemorySafety.EmptyFramePolicy'=8
+	'Editor.RuntimeMemorySafety.Diagnostics'=4
 }
 if ($recoveryFloors.ContainsKey($Filter) -and $MinimumCases -lt $recoveryFloors[$Filter]) {
 	throw "Recovery filter '$Filter' requires at least $($recoveryFloors[$Filter]) cases."
@@ -64,7 +74,9 @@ $sliceOutput = [regex]::Replace($sliceOutput, '\x1B\[[0-?]*[ -/]*[@-~]', '')
 # Worker logging can finish immediately before the harness summary on the same
 # line. Match the exact count phrase anywhere, still requiring a numeric token
 # boundary and the unchanged case floor; preserve all original log bytes.
-$sliceSummary = [regex]::Match($sliceOutput, '(?m)(?<![0-9A-Za-z])(\d+) selected tests\b[^\r\n]*')
+# An asynchronous logger can finish a line between the count and its phrase.
+# Accept that whitespace without accepting a missing count or reducing a floor.
+$sliceSummary = [regex]::Match($sliceOutput, '(?m)(?<![0-9A-Za-z])(\d+)\s+selected tests\b[^\r\n]*')
 $sliceOutput -split '\r?\n' | Where-Object { $_ -match '^\[(PASS|FAIL|ERROR)\]' } | Write-Output
 if ($sliceExit -ne 0) {
 	Write-Error "Native filter failed with exit $sliceExit; evidence: $sliceLogRoot" -ErrorAction Continue

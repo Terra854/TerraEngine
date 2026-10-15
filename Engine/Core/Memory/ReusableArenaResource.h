@@ -17,6 +17,11 @@ namespace TerraEngine::Memory {
 		std::size_t reuseAllocationCount = 0U;
 		std::size_t fallbackAllocationCount = 0U;
 		std::size_t resetCount = 0U;
+		// Cumulative releases count actual Reset deallocations, not reset calls.
+		// Outstanding facts describe committed fallback ownership at this instant.
+		std::size_t fallbackDeallocationCount = 0U;
+		std::size_t fallbackOutstandingCount = 0U;
+		std::size_t fallbackOutstandingBytes = 0U;
 	};
 
 	// One coordinator thread owns an arena. Reset is legal only after all PMR

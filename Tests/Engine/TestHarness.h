@@ -103,8 +103,13 @@ namespace TerraEngine::Tests {
 
 			// Report the selected count separately from registry size. Focused
 			// feature evidence must not describe skipped registrations as executed.
-			output << selectedCount << " selected tests (" << tests_.size()
+			// Build one complete record before writing it. Separate insertions let
+			// the asynchronous engine logger split the count from its phrase and
+			// make an otherwise successful watchdog run appear to select no cases.
+			std::ostringstream summary;
+			summary << '\n' << selectedCount << " selected tests (" << tests_.size()
 				<< " registered), " << failedCount << " failures\n";
+			output << summary.str();
 			// A filtered lane must execute a real case. An absent/misspelled
 			// registration is a failure, even when no assertion happened to run.
 			return failedCount == 0 && selectedCount != 0U ? 0 : 1;

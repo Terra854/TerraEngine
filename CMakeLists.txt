@@ -303,6 +303,8 @@ set(ENGINE_SOURCES
 	Engine/Renderer/Deformation/AnimatedVirtualGeometryRuntime.cpp
 	Engine/Renderer/RenderSystem.cpp
 	Engine/Renderer/Graph/RenderDiagnostics.cpp
+	# The renderer owns reusable scratch; an episode lease bounds its borrowers.
+	Engine/Renderer/Graph/RenderFrameScratch.cpp
 	Engine/Renderer/Graph/RenderFrameBreakdown.cpp
 	Engine/Renderer/Graph/RenderFramePublication.cpp
 	Engine/Renderer/Graph/RenderFrameSnapshot.cpp
@@ -964,7 +966,9 @@ target_compile_definitions(TerraEngine-Engine
 
 if(BUILD_TESTING)
 	# Restrict fault controls to installed correctness-enabled engine builds.
-	target_compile_definitions(TerraEngine-Engine PRIVATE TERRAENGINE_RENDERER_EFFICIENCY_VALIDATION=1)
+	target_compile_definitions(TerraEngine-Engine PRIVATE
+		TERRAENGINE_RENDERER_EFFICIENCY_VALIDATION=1
+		TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION=1)
 endif()
 
 set_target_properties(TerraEngine-Engine PROPERTIES
@@ -1732,6 +1736,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Core/CheckedImGuiVulkanBridge.cpp
 	Editor/TerraEngine-Editor/Core/ViewportTextureRegistry.cpp
 	Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp
+	Editor/TerraEngine-Editor/Automation/RendererScratchDiagnostics.cpp
 	# Owned validation sessions copy evidence and queue changes at existing boundaries.
 	Tests/Support/RendererEfficiency/Editor/EditorRendererEfficiencyValidation.cpp
 	Tests/Support/RendererEfficiency/Editor/RendererEfficiencyFixtureBindings.cpp
@@ -3129,4 +3134,7 @@ endif()
 # inventory, so installed acceptance never combines old tools with new binaries.
 if(BUILD_TESTING AND WIN32)
 	add_subdirectory(Tests/Tools/RendererEfficiency)
+	# Runtime-memory validation reads the same durable profiler format through
+	# the codec target above; keep its installed closure independently sealed.
+	add_subdirectory(Tests/Tools/RuntimeMemorySafety)
 endif()

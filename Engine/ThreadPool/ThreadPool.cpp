@@ -1,6 +1,7 @@
 // ThreadPool.cpp — Contains the Thread Pool queue state, worker coordination, and synchronization helpers implementation for task queue storage, worker thread lifecycle, and synchronization primitives.
 
 #include "ThreadPool.h"
+#include <cstdio>
 #include "ScopedTaskSettlement.h"
 #include "Core/Logger/Logger.h"
 #include "Profiling/Profiler.h"
@@ -92,6 +93,17 @@ void ThreadPool::InitializeWorkers(std::size_t requestedWorkerCount,
 		if (!workers.empty()) {
 			return;
 		}
+	}
+	{
+		std::lock_guard<std::mutex> lock(poolMutex);
+		// Never reuse a generation identity after wraparound. Lifecycle ownership
+		// serializes initialize/shutdown, so this reservation needs no second owner.
+		if(cacheGeneration == std::numeric_limits<std::uint64_t>::max()) {
+			throw std::overflow_error("ThreadPool cache generation exhausted");
+		}
+	}
+	{
+		std::lock_guard<std::mutex> lock(queue_mutex);
 		stop = false;
 	}
 
@@ -121,13 +133,17 @@ void ThreadPool::InitializeWorkers(std::size_t requestedWorkerCount,
 	// are intentionally not capped at hardware concurrency: deterministic stress
 	// matrices must be able to request the exact worker count they are measuring.
 	const size_t numThreads = std::max<std::size_t>(1, requestedWorkerCount == 0 ? detectedHardwareThreads : requestedWorkerCount);
-	ResetTelemetryForWorkers(numThreads);
-
 	try {
+		ResetTelemetryForWorkers(numThreads);
 		for (size_t i = 0; i < numThreads; ++i) {
 			if(beforeWorker) beforeWorker(i);
 			workers.emplace_back([this, i] { this->workerThread((int)i); });
 		}
+		// A partially started pool must never recycle. Open a fresh generation
+		// only after all requested workers were successfully constructed.
+		std::lock_guard<std::mutex> lock(poolMutex);
+		++cacheGeneration;
+		recyclingState = RecyclingState::Recycling;
 	} catch(...) {
 		// A partially started executor still owns joinable workers. Stop and join
 		// those workers before propagating the original construction failure.
@@ -139,6 +155,12 @@ void ThreadPool::InitializeWorkers(std::size_t requestedWorkerCount,
 // ThreadPool::shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ThreadPool::shutdown()
 {
+	{
+		std::lock_guard<std::mutex> lock(poolMutex);
+		// Close before joining: releases by draining workers must destroy outside
+		// locks instead of repopulating the cache being retired.
+		recyclingState = RecyclingState::Closing;
+	}
 	{
 		std::lock_guard<std::mutex> lock(queue_mutex);
 		// Workers observe this flag under the same mutex used by the condition
@@ -155,70 +177,126 @@ void ThreadPool::shutdown()
 	}
 	workers.clear();
 
-	{
-		std::lock_guard<std::mutex> lock(queue_mutex);
-		// A normal shutdown drains queued work before workers exit. This cleanup
-		// keeps repeated shutdown calls safe if a caller queued work before
-		// starting workers or if startup failed partway through.
-		std::queue<QueuedTask> emptyTasks;
-		tasks.swap(emptyTasks);
+	// Normal workers drain this queue. Unstarted/startup-failed ownership still
+	// needs terminal cancellation. Retire one owner at a time without allocating
+	// a replacement deque or destroying arbitrary captures under queue_mutex.
+	for(;;) {
+		QueuedTask retired;
+		{
+			std::lock_guard<std::mutex> lock(queue_mutex);
+			if(tasks.empty()) break;
+			retired = std::move(tasks.front());
+			tasks.pop();
+		}
+		retired.failureOwner->Fail(shutdownFailure);
+		completeTask(retired.failureOwner);
 	}
 
-	// Clean up task pool
+	std::vector<Task<void>*> retiredCache;
 	{
 		std::lock_guard<std::mutex> lock(poolMutex);
-		for (auto* task : voidTaskPool) {
-			delete task;
-		}
-		voidTaskPool.clear();
+		retiredCache.swap(voidTaskPool);
+		recyclingState = RecyclingState::Closed;
 	}
+	// A callable destructor can release other tasks or invoke application cleanup.
+	// The detached pointer owner remains stable through every such reentry.
+	for(auto* task : retiredCache) delete task;
 }
 
 // Enqueue a task; handle its dependencies automatically
 // ThreadPool::enqueue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ThreadPool::enqueue(std::shared_ptr<ITask> task, std::uint64_t usefulItemCount) {
-	if (task->unresolvedDependencies == -1) {
-		task->unresolvedDependencies = static_cast<int>(task->dependenciesList.size());
+	if(!task) throw std::invalid_argument("ThreadPool requires an owned task");
+	{
+		std::lock_guard lock(task->settlementMutex);
+		if(task->executionState != ITask::ExecutionState::Prepared) {
+			throw std::logic_error("ThreadPool task already submitted or completed");
+		}
+		if(task->dependenciesList.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+			throw std::length_error("ThreadPool dependency count exceeded");
+		}
+		task->remainingDependencies = task->dependenciesList.size();
+		task->unresolvedDependencies = static_cast<int>(task->remainingDependencies);
+		task->executionState = task->remainingDependencies == 0
+			? ITask::ExecutionState::Ready : ITask::ExecutionState::WaitingDependencies;
 	}
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (task->unresolvedDependencies == 0) {
-		{
-			// Lock the queue mutex to ensure exclusive access to the task queue
+	if(task->dependenciesList.empty()) {
+		try { AdmitReady(task, usefulItemCount); }
+		catch(...) {
+			// Dependency-free rejection retains its strong guarantee: the queue
+			// owns nothing and callers may remove the unadmitted future or retry.
+			std::lock_guard lock(task->settlementMutex);
+			task->executionState = ITask::ExecutionState::Prepared;
+			task->remainingDependencies = 0;
+			task->unresolvedDependencies = -1;
+			throw;
+		}
+		return;
+	}
+	for(std::size_t index = 0; index < task->dependenciesList.size(); ++index) {
+		try { enqueue(task->dependenciesList[index]); }
+		catch(...) {
+			const auto failure = std::current_exception();
 			{
-				std::unique_lock<std::mutex> lock(queue_mutex);
-				if(stop && executingPool != this) {
-					throw std::runtime_error("ThreadPool admission is closed");
-				}
-				const std::size_t queueDepthAtEnqueue = tasks.size() + 1;
-				tasks.emplace(QueuedTask{[this, task]() {
-					// The profiler returns whether a task sample was actually
-					// opened. Carry that through to completion so idle profiler
-					// sessions do not pay an unmatched EndSample call.
-					bool profilerSampleActive = false;
-					ObserveTaskSafely([&] { profilerSampleActive = TerraEngine::Profiling::Profiler::Instance().RecordTaskStarted("ThreadPool Task"); });
-					task->run();
-					completeTask(task);
-					ObserveTaskSafely([&] { TerraEngine::Profiling::Profiler::Instance().RecordTaskFinished(profilerSampleActive); });
-				}, queueDepthAtEnqueue, usefulItemCount, MonotonicNanoseconds()});
-			} // Release the lock asap when done to minimize the chances of deadlocks
+				std::lock_guard lock(task->settlementMutex);
+				if(!task->infrastructureFailure) task->infrastructureFailure = failure;
+			}
+			// Earlier children may already be admitted. Keep their real countdown
+			// and retire only untouched branches; this is not graph-wide rollback.
+			for(; index < task->dependenciesList.size(); ++index) {
+				RejectUnstartedSubtree(task->dependenciesList[index], failure);
+			}
+			std::rethrow_exception(failure);
+		}
+	}
+}
 
-			ObserveTaskSafely([] { TerraEngine::Profiling::Profiler::Instance().RecordTaskQueued(); });
+void ThreadPool::AdmitReady(const std::shared_ptr<ITask>& task, std::uint64_t usefulItemCount)
+{
+	{
+		// Task->queue is the sole nested lock order. Workers drop queue_mutex
+		// before touching task state, and shutdown retires task ownership unlocked.
+		std::lock_guard stateLock(task->settlementMutex);
+		if(task->executionState != ITask::ExecutionState::Ready || task->infrastructureFailure) {
+			throw std::logic_error("ThreadPool task is not ready for admission");
 		}
-		condition.notify_one();  // Notify a worker thread that a task is available
+		std::lock_guard queueLock(queue_mutex);
+		if(stop && executingPool != this) throw std::runtime_error("ThreadPool admission is closed");
+		const auto depth = tasks.size() + 1;
+		tasks.emplace(QueuedTask{task, depth, usefulItemCount, MonotonicNanoseconds()});
+		task->executionState = ITask::ExecutionState::Queued;
 	}
-	else {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (auto& dependentTask : task->dependenciesList) {
-			enqueue(dependentTask);
-		}
+	ObserveTaskSafely([] { TerraEngine::Profiling::Profiler::Instance().RecordTaskQueued(); });
+	condition.notify_one();
+}
+
+void ThreadPool::RejectUnstartedSubtree(const std::shared_ptr<ITask>& task,
+	const std::exception_ptr& failure) noexcept
+{
+	{
+		std::lock_guard lock(task->settlementMutex);
+		// A recursively rejected branch may still own earlier admitted children.
+		// It already established their settlement; never cancel/notify it twice.
+		if(task->executionState != ITask::ExecutionState::Prepared) return;
+		task->infrastructureFailure = failure;
+		task->remainingDependencies = task->dependenciesList.size();
+		task->unresolvedDependencies = static_cast<int>(task->remainingDependencies);
+		task->executionState = task->remainingDependencies == 0
+			? ITask::ExecutionState::Ready : ITask::ExecutionState::WaitingDependencies;
 	}
+	if(task->dependenciesList.empty()) {
+		task->Fail(failure);
+		completeTask(task);
+		return;
+	}
+	for(const auto& child : task->dependenciesList) RejectUnstartedSubtree(child, failure);
 }
 
 // ThreadPool::AllocateVoidTask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::shared_ptr<Task<void>> ThreadPool::AllocateVoidTask(std::function<void()> func)
 {
 	Task<void>* ptr = nullptr;
+	std::uint64_t allocationGeneration = 0;
 	{
 		std::lock_guard<std::mutex> lock(poolMutex);
 		// Reserve the observed concurrent peak before acquiring any task. Reserve
@@ -232,7 +310,10 @@ std::shared_ptr<Task<void>> ThreadPool::AllocateVoidTask(std::function<void()> f
 			voidTaskPool.reserve(std::min(maximum, next));
 		}
 		++outstandingVoidTasks;
-		if (!voidTaskPool.empty()) { ptr = voidTaskPool.back(); voidTaskPool.pop_back(); }
+		allocationGeneration = cacheGeneration;
+		if (recyclingState == RecyclingState::Recycling && !voidTaskPool.empty()) {
+			ptr = voidTaskPool.back(); voidTaskPool.pop_back();
+		}
 	}
 	try {
 		if (!ptr) ptr = new Task<void>(std::move(func));
@@ -240,11 +321,13 @@ std::shared_ptr<Task<void>> ThreadPool::AllocateVoidTask(std::function<void()> f
 	} catch (...) {
 		// A null rollback releases only the early ownership reservation. A
 		// failed reset still owns its task and returns it through the safe path.
-		ReleaseVoidTask(ptr); throw;
+		ReleaseVoidTask(ptr, allocationGeneration); throw;
 	}
 	// If shared_ptr control-block allocation fails, its constructor invokes this
 	// deleter exactly once. Do not also roll back that transferred pointer.
-	return std::shared_ptr<Task<void>>(ptr, [this](Task<void>* task) noexcept { ReleaseVoidTask(task); });
+	return std::shared_ptr<Task<void>>(ptr, [this, allocationGeneration](Task<void>* task) noexcept {
+		ReleaseVoidTask(task, allocationGeneration);
+	});
 }
 
 // The shared-task deleter may run during fatal settlement or stack unwinding.
@@ -252,34 +335,94 @@ std::shared_ptr<Task<void>> ThreadPool::AllocateVoidTask(std::function<void()> f
 // excess tasks and any unexpected cache/lock failure are deleted unlocked.
 void ThreadPool::ReleaseVoidTask(Task<void>* task) noexcept
 {
+	// Preserve the historical low-level entry point. Factory-exported owners
+	// always use the overload carrying their actual allocation generation.
+	std::uint64_t generation = 0;
+	try {
+		std::lock_guard<std::mutex> lock(poolMutex);
+		generation = cacheGeneration;
+	} catch(...) { delete task; return; }
+	ReleaseVoidTask(task, generation);
+}
+
+void ThreadPool::ReleaseVoidTask(Task<void>* task, std::uint64_t allocationGeneration) noexcept
+{
 	try {
 		std::lock_guard<std::mutex> lock(poolMutex);
 		if (outstandingVoidTasks != 0U) --outstandingVoidTasks;
-		if (task && voidTaskPool.size() < voidTaskPool.capacity()) {
+		if (task && recyclingState == RecyclingState::Recycling && allocationGeneration == cacheGeneration
+			&& voidTaskPool.size() < voidTaskPool.capacity()) {
 			voidTaskPool.push_back(task); task = nullptr;
 		}
 	} catch (...) {}
 	delete task;
 }
 
+void ThreadPool::SetDependencyAdmissionFailureForTesting(const ITask* target, std::exception_ptr failure)
+{
+	if((target != nullptr) != static_cast<bool>(failure)) {
+		throw std::invalid_argument("Dependency admission target and failure must both be set or cleared");
+	}
+	// Native callers own quiescence. Publishing the target last makes the immutable
+	// exception visible before any matching dispatch reads it; clear only after drain.
+	admissionFailureTarget.store(nullptr, std::memory_order_release);
+	admissionFailure = std::move(failure);
+	admissionFailureCount.store(0, std::memory_order_release);
+	admissionFailureTarget.store(target, std::memory_order_release);
+}
+
 // Notify that a task has completed; decrement unresolvedDependencies of the parent task
 // ThreadPool::completeTask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void ThreadPool::completeTask(std::shared_ptr<ITask> completedTask) {
-	if (auto parent = completedTask->getParentTask().lock()) {
-		// Atomically decrements the unresolvedDependencies and returns the previous value.
-		// If it returns 1, it means that after the decrement, the value is 0, and the task
-		// is ready to be enqueued.
-
-		// std::memory_order_acq_rel ensures that operations on the atomic variable are performed
-		// in a specific order, which is important for ensuring consistency across multiple threads.
-		if (parent->unresolvedDependencies.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-			// If the parent task now has no unresolved dependencies, enqueue it
-			enqueue(parent);
-			// Reset unresolved dependecies counter
-			parent->unresolvedDependencies = -1;
+void ThreadPool::completeTask(std::shared_ptr<ITask> completedTask) noexcept {
+	// Iterative failure propagation retains only shared owners/exception pointers.
+	// It allocates no callback, promise, container, diagnostic, or recursive stack.
+	while(completedTask) {
+		std::exception_ptr childFailure;
+		{
+			std::lock_guard lock(completedTask->settlementMutex);
+			if(completedTask->executionState != ITask::ExecutionState::Terminal
+				|| completedTask->parentNotificationDelivered) std::terminate();
+			completedTask->parentNotificationDelivered = true;
+			childFailure = completedTask->infrastructureFailure;
 		}
+		auto parent = completedTask->getParentTask().lock();
+		if(!parent) return;
+		std::exception_ptr failure;
+		{
+			std::lock_guard lock(parent->settlementMutex);
+			if(parent->executionState != ITask::ExecutionState::WaitingDependencies
+				|| parent->remainingDependencies == 0) std::terminate();
+			if(childFailure && !parent->infrastructureFailure) parent->infrastructureFailure = childFailure;
+			--parent->remainingDependencies;
+			parent->unresolvedDependencies = static_cast<int>(parent->remainingDependencies);
+			if(parent->remainingDependencies != 0) return;
+			parent->executionState = ITask::ExecutionState::Ready;
+			failure = parent->infrastructureFailure;
+		}
+		if(!failure) {
+			bool targetedFailure = false;
+			try {
+				if(admissionFailureTarget.load(std::memory_order_acquire) == parent.get()) {
+					admissionFailureCount.fetch_add(1, std::memory_order_release);
+					std::fputs("RMS_ADMISSION_FAILURE_CHECKPOINT reached=1\n", stderr);
+					std::fflush(stderr);
+					targetedFailure = true;
+					std::rethrow_exception(admissionFailure);
+				}
+				AdmitReady(parent);
+				return;
+			} catch(...) {
+				// MSVC may copy an exception during rethrow/current_exception.
+				// The native checkpoint already owns the original pointer; preserve
+				// it after the real throw instead of replacing it with that copy.
+				failure = targetedFailure ? admissionFailure : std::current_exception();
+			}
+		}
+		// Promise publication occurs after the ancestor's own admitted siblings
+		// physically complete, outside state locks, without running its callable.
+		parent->Fail(failure);
+		completedTask = std::move(parent);
 	}
-	// Optionally handle any other post-task logic here
 }
 
 void ThreadPool::ConfigureTelemetrySampling(std::uint32_t dispatchInterval, std::size_t historyCapacityPerWorker)
@@ -430,7 +573,7 @@ void ThreadPool::workerThread(int threadNum)
 		~ExecutionOwner() { executingPool = previous; }
 	} executionOwner(this);
 	// Log that the worker thread is live so we can trace thread lifecycle events.
-	TERRAENGINE_LOG(LogLevel::Info, "Worker thread no. " << threadNum << " initialized and running.");
+	ObserveTaskSafely([&] { TERRAENGINE_LOG(LogLevel::Info, "Worker thread no. " << threadNum << " initialized and running."); });
 	const std::size_t workerIndex = static_cast<std::size_t>(threadNum);
 	QueuedTask task;
 	while (true) {
@@ -438,7 +581,7 @@ void ThreadPool::workerThread(int threadNum)
 		std::size_t queueDepthAtStart = 0;
 		std::uint64_t waitNanoseconds = 0;
 		std::uint64_t idleNanoseconds = 0;
-		RecordWorkerActivity(workerIndex, ThreadPoolWorkerActivity::Idle);
+		ObserveTaskSafely([&] { RecordWorkerActivity(workerIndex, ThreadPoolWorkerActivity::Idle); });
 		{
 			std::unique_lock<std::mutex> lock(this->queue_mutex);
 			this->condition.wait(lock,
@@ -446,10 +589,10 @@ void ThreadPool::workerThread(int threadNum)
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (this->stop && this->tasks.empty()) {
 				const std::uint64_t stoppedNanoseconds = MonotonicNanoseconds();
-				RecordWorkerActivity(workerIndex, ThreadPoolWorkerActivity::Stopped,
-					ElapsedNanoseconds(idleStartedNanoseconds, stoppedNanoseconds));
+				ObserveTaskSafely([&] { RecordWorkerActivity(workerIndex, ThreadPoolWorkerActivity::Stopped,
+					ElapsedNanoseconds(idleStartedNanoseconds, stoppedNanoseconds)); });
 				// Record that the worker is exiting after processing its last job.
-				TERRAENGINE_LOG(LogLevel::Info, "Worker thread no. " << threadNum << " shutting down.");
+				ObserveTaskSafely([&] { TERRAENGINE_LOG(LogLevel::Info, "Worker thread no. " << threadNum << " shutting down."); });
 				return;
 			}
 			queueDepthAtStart = this->tasks.size();
@@ -458,11 +601,20 @@ void ThreadPool::workerThread(int threadNum)
 			const std::uint64_t startedNanoseconds = MonotonicNanoseconds();
 			idleNanoseconds = ElapsedNanoseconds(idleStartedNanoseconds, startedNanoseconds);
 			waitNanoseconds = ElapsedNanoseconds(task.enqueueNanoseconds, startedNanoseconds);
-			RecordWorkerTaskStarted(workerIndex, task.queueDepthAtEnqueue, queueDepthAtStart,
-				task.usefulItemCount, waitNanoseconds, idleNanoseconds);
+			ObserveTaskSafely([&] { RecordWorkerTaskStarted(workerIndex, task.queueDepthAtEnqueue, queueDepthAtStart,
+				task.usefulItemCount, waitNanoseconds, idleNanoseconds); });
 		}
 		const std::uint64_t runStartedNanoseconds = MonotonicNanoseconds();
-		task.execute();
+		bool profilerSampleActive = false;
+		ObserveTaskSafely([&] { profilerSampleActive = TerraEngine::Profiling::Profiler::Instance().RecordTaskStarted("ThreadPool Task"); });
+		try { task.failureOwner->run(); }
+		catch(...) {
+			// Direct queue ownership exposes the actual typed promise when owned
+			// dispatch infrastructure fails before ordinary callable settlement.
+			task.failureOwner->Fail(std::current_exception());
+		}
+		completeTask(task.failureOwner);
+		ObserveTaskSafely([&] { TerraEngine::Profiling::Profiler::Instance().RecordTaskFinished(profilerSampleActive); });
 		const std::uint64_t finishedNanoseconds = MonotonicNanoseconds();
 		ObserveTaskSafely([&] { RecordWorkerTaskFinished(workerIndex, task.queueDepthAtEnqueue, queueDepthAtStart,
 			task.usefulItemCount, waitNanoseconds, idleNanoseconds,

@@ -21,12 +21,16 @@ add_executable(TerraEngine-EngineTests
 	# Lighting transfer regressions use the production pure planner, without a GPU.
 	Renderer/LightingUploadPlanTests.cpp
 	Renderer/LightingUploadOwnershipTests.cpp
+	# Scratch episode ownership is checked independently of graphics availability.
+	Renderer/RenderFrameScratchTests.cpp
+	Renderer/VulkanEmptyFramePolicyTests.cpp
 	# Correctness cases exercise production entry points; watchdogs bound hangs.
 	Runtime/FrameFailureLifecycleTests.cpp
 	Runtime/ArtifactValidationTests.cpp
 	# Typed child settlement and isolated import capacity use real pool tasks.
 	ThreadPool/ScopedTaskSettlementTests.cpp
 	ThreadPool/OwnedImportExecutorTests.cpp
+	ThreadPool/DependencyAdmissionFailureTests.cpp
 	Audio/AudioWorldCellCaptureTests.cpp
 	Runtime/OwnedProcessTests.cpp
 	Resource/ResourceAsyncDependencyTests.cpp
@@ -124,6 +128,8 @@ add_executable(TerraEngine-EngineTests
 	Runtime/RendererStabilitySmokeToolTests.cpp
 	Utilities/BoundedRingBufferTests.cpp
 	Memory/MemoryFoundationTests.cpp
+	# Runtime memory regressions exercise the retained arena's real fast path.
+	Memory/FrameArenaSafetyTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackagingRequest.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackPlanner.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackWriter.cpp
@@ -557,7 +563,7 @@ add_test(NAME Engine.SpatialUnitTests COMMAND $<TARGET_FILE:TerraEngine-EngineTe
 # state or ThreadPool history, while full CTest still executes the exact gate.
 set_tests_properties(Engine.SpatialUnitTests PROPERTIES
 	LABELS "Engine"
-	ENVIRONMENT "TERRAENGINE_TEST_EXCLUDE_FILTER=Engine.ProfilerCapturePerformance.LiveThirtyThousandFramesStayResidentBounded,Engine.FrameFailureLifecycle,Engine.ResourceAsyncLifecycle,Engine.SceneMutationFailureSafety,Scene.SaveFailureSafety,Audio.WorldCellCapture,Engine.OwnedProcess,Engine.SceneLoadRecovery,Engine.NestedTaskSettlement,Engine.OwnedImportExecutor,Engine.ArtifactValidation,Engine.JobGraph.FailureSettlement"
+	ENVIRONMENT "TERRAENGINE_TEST_EXCLUDE_FILTER=Engine.ProfilerCapturePerformance.LiveThirtyThousandFramesStayResidentBounded,Engine.FrameFailureLifecycle,Engine.ResourceAsyncLifecycle,Engine.SceneMutationFailureSafety,Scene.SaveFailureSafety,Audio.WorldCellCapture,Engine.OwnedProcess,Engine.SceneLoadRecovery,Engine.NestedTaskSettlement,Engine.OwnedImportExecutor,Engine.ArtifactValidation,Engine.JobGraph.FailureSettlement,Engine.RuntimeMemorySafety"
 )
 
 # Keep the unbounded-scene scheduler contract independently selectable while
@@ -1079,6 +1085,17 @@ terraengine_add_correctness_slice(Engine.TextureRangeValidation TerraEngine-Engi
 terraengine_add_correctness_slice(Engine.TextureRgbaLayout TerraEngine-EngineTests Engine.Resource.Texture.Rgba 5)
 terraengine_add_correctness_slice(Engine.JobGraphFailureSettlement TerraEngine-EngineTests Engine.JobGraph.FailureSettlement 6)
 terraengine_add_correctness_slice(Engine.UIHitTesting TerraEngine-EngineTests Engine.UI.HitTesting 6)
+# Lifecycle and fault cases run under their own process watchdog and floors.
+terraengine_add_correctness_slice(Engine.RuntimeMemorySafety.TaskCache TerraEngine-EngineTests Engine.RuntimeMemorySafety.TaskCache 8)
+terraengine_add_correctness_slice(Engine.RuntimeMemorySafety.DependencyAdmission TerraEngine-EngineTests Engine.RuntimeMemorySafety.DependencyAdmission 10)
+terraengine_add_correctness_slice(Engine.RuntimeMemorySafety.Allocators.FixedPool TerraEngine-EngineTests Engine.RuntimeMemorySafety.Allocators.FixedPool 4)
+terraengine_add_correctness_slice(Engine.RuntimeMemorySafety.Allocators.Alignment TerraEngine-EngineTests Engine.RuntimeMemorySafety.Allocators.Alignment 4)
+terraengine_add_correctness_slice(Engine.RuntimeMemorySafety.Allocators.Overflow TerraEngine-EngineTests Engine.RuntimeMemorySafety.Allocators.Overflow 6)
+terraengine_add_correctness_slice(Engine.RuntimeMemorySafety.Allocators TerraEngine-EngineTests Engine.RuntimeMemorySafety.Allocators 14)
+terraengine_add_correctness_slice(Engine.RuntimeMemorySafety.RendererScratch TerraEngine-EngineTests Engine.RuntimeMemorySafety.RendererScratch 10)
+terraengine_add_correctness_slice(Engine.RuntimeMemorySafety.EmptyFramePolicy TerraEngine-EngineTests Engine.RuntimeMemorySafety.EmptyFramePolicy 8)
+# Protect unchanged-extent recovery from host retirement-reservation failures.
+terraengine_add_correctness_slice(Engine.VulkanPresentationReservationRecovery TerraEngine-EngineTests Renderer.VulkanPresentationLifecycle.ReservationFailureRetriesWithoutResize 1)
 # The root install variable is declared later in the top-level file. Use the
 # maintained build-relative destination here instead of emitting an empty value.
 set_property(TEST Engine.NestedTaskSettlement APPEND PROPERTY ENVIRONMENT "TERRAENGINE_LIFECYCLE_INSTALL_ROOT=${CMAKE_BINARY_DIR}/Build")

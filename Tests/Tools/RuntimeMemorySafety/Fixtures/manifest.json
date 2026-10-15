@@ -1,0 +1,25 @@
+{
+	"schemaVersion": 1,
+	"manifestId": "runtime-memory-safety-fixtures-v1",
+	"seed": 66007,
+	"bootstrapFixture": "lighting-dirty",
+	"bootstrapStage": "P2",
+	"cameraUuidPrefix": "066c000000000000",
+	"lightUuidPrefix": "066d000000000000",
+	"scales": [
+		{"id": "small", "cameraCount": 1, "lightCount": 16},
+		{"id": "normal", "cameraCount": 4, "lightCount": 256},
+		{"id": "stress", "cameraCount": 16, "lightCount": 4096}
+	],
+	"requestedExtent": {"width": 1920, "height": 1080},
+	"extentPolicy": "Requested only; actual active views and completed output extents require runtime readiness receipts before timing.",
+	"cameraPolicy": "Clone the installed foundation camera; no unimplemented Scene-only suppression control is assumed.",
+	"lightPolicy": {"type": 1, "unit": 0, "intensity": 0.25, "range": 30, "castsShadows": false, "priorityBase": 4097},
+	"simulationPolicy": "PausedPlayNoExplicitStep; disable authored automatic animation before launch.",
+	"warmupFrames": 60,
+	"measuredFrames": 300,
+	"imageNormalizedChannelError": 0.00784313725490196,
+	"allowExcludedImageRegions": false,
+	"collectionParityPolicy": "Authored rows are fixture inputs, not observed reference coroutine arrays. Common reference output parity uses actual GPU lighting payload bytes/IDs and completed image/view receipts; exact native captured arrays additionally require candidate regression evidence.",
+	"missingEvidenceResult": "Unverified"
+}
