@@ -19,6 +19,51 @@ namespace TerraEngine::Tests {
 	}
 
 	void RegisterAudioControlIntegrationTests(TestRegistry& registry) {
+		registry.Add("Audio.ControlIntegration.PreparedMixDiscardsWithoutPartialPublication", [](TestContext& context) {
+			TerraEngine::Audio::AudioMixConfiguration mix;
+			const auto before = mix.Snapshot();
+			std::string diagnostic;
+			{
+				auto candidate = before;
+				candidate.master.volume = 0.25F;
+				auto guard = mix.PrepareReplace(std::move(candidate), before.generation, diagnostic);
+				context.Expect(guard.has_value(), "A valid copied generation should prepare an exclusive mix publication.");
+				// Discard before the scene transaction commits: destruction releases the
+				// lock and leaves the entire prior mix generation unchanged.
+			}
+			const auto after = mix.Snapshot();
+			context.Expect(after.generation == before.generation && after.master.volume == before.master.volume,
+				"Discarding a prepared companion must preserve the old mix completely and release its lock.");
+		});
+		registry.Add("Audio.ControlIntegration.PreparedMixNormalizesBeforeNoFailCommit", [](TestContext& context) {
+			TerraEngine::Audio::AudioMixConfiguration mix;
+			auto candidate = mix.Snapshot();
+			const auto generation = candidate.generation;
+			candidate.master.volume = 4.0F;
+			candidate.groups.front().volume = -2.0F;
+			std::string diagnostic;
+			{
+				auto guard = mix.PrepareReplace(std::move(candidate), generation, diagnostic);
+				context.Expect(guard && guard->Candidate().master.volume == 1.0F && guard->Candidate().groups.front().volume == 0.0F,
+					"Normalization and all validation must finish before the caller can commit scene settings.");
+				guard->Commit();
+				guard->Commit();
+			}
+			const auto after = mix.Snapshot();
+			context.Expect(after.generation == generation + 1U && after.master.volume == 1.0F && after.groups.front().volume == 0.0F,
+				"No-fail publication must adopt one complete normalized generation exactly once.");
+		});
+		registry.Add("Audio.ControlIntegration.PreparedMixRejectsStaleAndMalformedCandidates", [](TestContext& context) {
+			TerraEngine::Audio::AudioMixConfiguration mix;
+			const auto stale = mix.Snapshot();
+			std::string diagnostic;
+			context.Expect(mix.SetMasterVolume(0.5F, diagnostic), "An intervening authored edit must advance the generation.");
+			context.Expect(!mix.PrepareReplace(stale, stale.generation, diagnostic), "A stale prepared generation must reject before scene publication.");
+			auto malformed = mix.Snapshot();
+			malformed.groups.push_back(malformed.groups.front());
+			context.Expect(!mix.PrepareReplace(malformed, malformed.generation, diagnostic), "Duplicate groups must reject without reserving a publication.");
+			context.ExpectEqual(0.5F, mix.Snapshot().master.volume, "Neither rejection may partially restore an old master value.");
+		});
 		registry.Add("Audio.ControlIntegration.PauseResumeStopAndReplayRemainDeterministic", [](TestContext& context) {
 			auto& system = TerraEngine::Audio::AudioSystem::Instance();
 			system.Shutdown();
@@ -36,49 +81,64 @@ namespace TerraEngine::Tests {
 			system.SetAuthoringSnapshot(TerraEngine::Audio::AudioAuthoringSnapshot::Create(data));
 			system.Initialize();
 
-			auto submit = [&](TerraEngine::Audio::AudioControlKind kind, std::uint32_t generation, float deltaSeconds) {
+			TerraEngine::Audio::AudioGeneration lastPlayGeneration = 0U;
+			auto submit = [&](TerraEngine::Audio::AudioControlKind kind, float deltaSeconds) {
 				TerraEngine::Audio::AudioControlBatch batch;
-				batch.commands.push_back({kind, {source.identity.objectId, 1U, 1U, generation}});
+				TerraEngine::Audio::AudioControlCommand command;
+				command.kind = kind;
+				command.source = {source.identity.objectId, 1U, 1U, 0U};
+				// Controls bind the engine-allocated predecessor, including autoplay;
+				// callers no longer synthesize playback identities in wrapper counters.
+				command.targetMode = TerraEngine::Audio::AudioControlTargetMode::BindCurrentAtAdmission;
+				batch.commands.push_back(command);
 				const auto queued = system.SubmitControlBatch(std::move(batch));
 				system.Update(deltaSeconds);
 				const auto receipt = system.ReadControlReceipt(queued.batchSequence);
 				context.Expect(receipt && receipt->status == TerraEngine::Audio::AudioControlStatus::Applied,
 					"Each lifecycle command must become visible only after its protected AudioCommit boundary.");
+				if(kind == TerraEngine::Audio::AudioControlKind::Play) lastPlayGeneration = receipt->resolvedPlaybackGeneration;
 				return system.LatestPlaybackSnapshot();
 			};
 
-			auto snapshot = submit(TerraEngine::Audio::AudioControlKind::Play, 1U, 1.0F);
+			auto snapshot = submit(TerraEngine::Audio::AudioControlKind::Play, 1.0F);
 			context.Expect(snapshot && snapshot->voices.size() == 1U && snapshot->voices[0].logicalFrame == 100U,
 				"Play should create one logical instance and advance it from frame zero.");
-			snapshot = submit(TerraEngine::Audio::AudioControlKind::Pause, 1U, 1.0F);
+			snapshot = submit(TerraEngine::Audio::AudioControlKind::Pause, 1.0F);
 			context.Expect(snapshot->voices[0].paused && snapshot->voices[0].logicalFrame == 100U,
 				"Pause must preserve the exact logical cursor.");
-			snapshot = submit(TerraEngine::Audio::AudioControlKind::Resume, 1U, 1.0F);
+			snapshot = submit(TerraEngine::Audio::AudioControlKind::Resume, 1.0F);
 			context.Expect(!snapshot->voices[0].paused && snapshot->voices[0].logicalFrame == 200U,
 				"Resume must continue from the paused cursor instead of restarting.");
-			snapshot = submit(TerraEngine::Audio::AudioControlKind::Stop, 1U, 1.0F);
+			snapshot = submit(TerraEngine::Audio::AudioControlKind::Stop, 1.0F);
 			context.Expect(snapshot->voices[0].logicalFrame == 0U,
 				"Stop must reset the logical cursor before a later replay.");
 
 			// Repeated stop/play cycles use fresh playback generations, matching a
 			// recorded gameplay command stream while proving the final snapshot is stable.
 			for(std::uint32_t replay = 0U; replay < 100U; ++replay) {
-				const std::uint32_t generation = replay + 2U;
 				TerraEngine::Audio::AudioControlBatch replayBatch;
 				if(replay != 0U) {
-					replayBatch.commands.push_back({TerraEngine::Audio::AudioControlKind::Stop,
-						{source.identity.objectId, 1U, 1U, generation - 1U}});
+					TerraEngine::Audio::AudioControlCommand stop;
+					stop.kind = TerraEngine::Audio::AudioControlKind::Stop;
+					stop.source = {source.identity.objectId, 1U, 1U, 0U};
+					stop.targetMode = TerraEngine::Audio::AudioControlTargetMode::BindCurrentAtAdmission;
+					replayBatch.commands.push_back(stop);
 				}
 				replayBatch.commands.push_back({TerraEngine::Audio::AudioControlKind::Play,
-					{source.identity.objectId, 1U, 1U, generation}});
-				(void)system.SubmitControlBatch(std::move(replayBatch));
+					{source.identity.objectId, 1U, 1U, 0U}});
+				const auto admitted = system.SubmitControlBatch(std::move(replayBatch));
 				system.Update(1.0F);
+				const auto receipt = system.ReadControlReceipt(admitted.batchSequence);
+				context.Expect(receipt && receipt->status == TerraEngine::Audio::AudioControlStatus::Applied
+					&& receipt->resolvedPlaybackGeneration > lastPlayGeneration,
+					"Every replay must apply and publish a fresh monotonic engine-owned playback identity.");
+				lastPlayGeneration = receipt->resolvedPlaybackGeneration;
 				snapshot = system.LatestPlaybackSnapshot();
 				context.Expect(snapshot != nullptr,
 					"Every recorded replay must publish an immutable playback snapshot.");
 				context.ExpectEqual<std::size_t>(1U, snapshot->voices.size(),
 					"Every recorded replay must publish exactly one logical voice.");
-				context.ExpectEqual(generation, snapshot->voices[0].identity.playbackGeneration,
+				context.ExpectEqual(lastPlayGeneration, snapshot->voices[0].identity.playbackGeneration,
 					"Every recorded replay must publish the newly assigned playback generation.");
 				context.ExpectEqual<TerraEngine::Audio::AudioFrame>(100U, snapshot->voices[0].logicalFrame,
 					"Every recorded replay must publish the same final logical cursor.");

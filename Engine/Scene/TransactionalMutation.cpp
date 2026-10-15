@@ -1,8 +1,10 @@
 // TransactionalMutation.cpp - validation and protected commit for scene STM.
 
 #include "TransactionalMutation.h"
+#include "Scene/TransactionCommitOutcome.h"
 
 #include "Components/Transform.h"
+#include "Components/AudioSourceComponent.h"
 #include "Components/ScriptComponent.h"
 #include "Components/AnimatorComponent.h"
 #include "Components/NavigationAgentComponent.h"
@@ -481,6 +483,10 @@ namespace TerraEngine::Scene {
 			std::unordered_map<std::string, bool> preparedComponentPresence;
 			std::unordered_map<std::string, NavigationAgentComponent> preparedNavigationAgents;
 			std::unordered_map<std::string, CharacterLocomotionComponent> preparedLocomotionComponents;
+			std::unordered_set<TerraEngine::UUID> preparedAudioComponentTargets;
+			for (const auto& write : transaction.writeSet.operations)
+				if (IsComponentWrite(write.kind) && write.componentName == AudioSourceComponent::kComponentName)
+					preparedAudioComponentTargets.insert(write.target.objectId);
 			for (std::size_t index = 0; index < transaction.writeSet.operations.size(); ++index)
 			{
 				const TransactionWriteOperation& operation = transaction.writeSet.operations[index];
@@ -564,6 +570,41 @@ namespace TerraEngine::Scene {
 					continue;
 				}
 
+				if (operation.kind == TransactionWriteKind::UpdateAudioSourceSettingsBatch)
+				{
+					// Every packet is bounded by actual field writes, not vector count.
+					// Validate supplied lifetimes independently of optional generic reads.
+					if (operation.audioSourceSettings.empty()) {
+						result.status = TransactionStatus::Rejected;
+						AddConflict(result, TransactionConflictReason::InvalidPayload, {}, index, "Audio settings batch is empty.", 0, 0, {}, {}, operation.kind);
+					}
+					std::unordered_set<TerraEngine::UUID> seen;
+					for (const auto& update : operation.audioSourceSettings) {
+						const auto& key = update.attachment;
+						const auto target = objects.getObject(key.objectId);
+						// Generic prepared setters retain full component candidates. Mixing
+						// one with this typed packet could restore an unrelated earlier field.
+						const bool overlapsPreparedComponent = preparedAudioComponentTargets.contains(key.objectId);
+						if (!key.IsValid() || !seen.insert(key.objectId).second
+							|| overlapsPreparedComponent
+							|| (!update.volume && !update.pitch)
+							|| (update.volume && !std::isfinite(*update.volume))
+							|| (update.pitch && !std::isfinite(*update.pitch))) {
+							result.status = TransactionStatus::Rejected;
+							AddConflict(result, TransactionConflictReason::InvalidPayload, key.objectId, index, "Audio settings require unique valid attachments and finite nonempty fields.", 0, 0, "AudioSourceComponent", {}, operation.kind);
+							continue;
+						}
+						if (key.sceneGeneration != objects.GetSceneGeneration()
+							|| !target || deletedTargets.contains(MakeObjectRefKey(ExistingObject(key.objectId)))
+							|| !objects.GetComponent<AudioSourceComponent>(*target)
+							|| key.objectGeneration != objects.getObjectLifetimeGeneration(*target)
+							|| key.componentGeneration != objects.getObjectComponentGeneration(*target)) {
+							result.status = TransactionStatus::Conflicted;
+							AddConflict(result, TransactionConflictReason::ComponentVersionMismatch, key.objectId, index, "Audio source attachment is missing or stale.", key.componentGeneration, target ? objects.getObjectComponentGeneration(*target) : 0U, "AudioSourceComponent", {}, operation.kind);
+						}
+					}
+					continue;
+				}
 				if (operation.kind == TransactionWriteKind::UpdateTransformBatch)
 				{
 					if (operation.transformUpdates.empty())
@@ -913,6 +954,12 @@ namespace TerraEngine::Scene {
 
 	std::size_t LogicalWriteCount(const TransactionWriteOperation& operation) noexcept
 	{
+		if (operation.kind == TransactionWriteKind::UpdateAudioSourceSettingsBatch) {
+			std::size_t count = 0U;
+			for (const auto& update : operation.audioSourceSettings)
+				count += static_cast<std::size_t>(update.volume.has_value()) + static_cast<std::size_t>(update.pitch.has_value());
+			return count;
+		}
 		// A typed packet represents one logical write per authored target/record.
 		if (operation.kind == TransactionWriteKind::UpdateTransformBatch) return operation.transformUpdates.size();
 		if (operation.kind == TransactionWriteKind::PublishAnimationMutations) return operation.animationPublications.size();
@@ -1192,6 +1239,15 @@ namespace TerraEngine::Scene {
 		return *this;
 	}
 
+	TransactionalMutationBuilder& TransactionalMutationBuilder::UpdateAudioSourceSettingsBatch(std::vector<AudioSourceSettingsUpdate> updates)
+	{
+		TransactionWriteOperation operation;
+		operation.kind = TransactionWriteKind::UpdateAudioSourceSettingsBatch;
+		operation.audioSourceSettings = std::move(updates);
+		transaction.writeSet.operations.push_back(std::move(operation));
+		return *this;
+	}
+
 	TransactionalMutationBuilder& TransactionalMutationBuilder::UpdateTransformBatch(ObjectManager& objects, std::vector<TransactionTransformUpdate> updates)
 	{
 		// Reserve once before capturing observations. Physics can publish thousands
@@ -1308,6 +1364,14 @@ namespace TerraEngine::Scene {
 
 	TransactionResult CommitTransaction(ObjectManager& objects, const Transaction& transaction)
 	{
+		TransactionCommitOutcome outcome;
+		return CommitTransaction(objects, transaction, outcome);
+	}
+
+	TransactionResult CommitTransaction(ObjectManager& objects, const Transaction& transaction, TransactionCommitOutcome& outcome)
+	{
+		// Reset the caller's preallocated witness before any preparation can throw.
+		outcome.committed = false;
 		const Clock::time_point validateStart = Clock::now();
 		TransactionResult result = ValidateTransaction(objects, transaction);
 		result.validationCostNs = ElapsedNs(validateStart);
@@ -1483,6 +1547,39 @@ namespace TerraEngine::Scene {
 				continue;
 			}
 
+			if (operation.kind == TransactionWriteKind::UpdateAudioSourceSettingsBatch)
+			{
+				ComponentAccessFunctions access;
+				{
+					std::lock_guard registryLock(ComponentAccessRegistryMutex());
+					access = ComponentAccessRegistry().at(std::string(AudioSourceComponent::kComponentName));
+				}
+				inverse.operation.kind = TransactionWriteKind::UpdateAudioSourceSettingsBatch;
+				inverse.operation.restoreExactAudioSourceSettings = true;
+				inverse.operation.audioSourceSettings.reserve(operation.audioSourceSettings.size());
+				for (const auto& update : operation.audioSourceSettings) {
+					const auto target = objects.getObject(update.attachment.objectId);
+					auto* source = target ? objects.GetComponent<AudioSourceComponent>(*target) : nullptr;
+					if (!source || update.attachment.sceneGeneration != objects.GetSceneGeneration()
+						|| update.attachment.objectGeneration != objects.getObjectLifetimeGeneration(*target)
+						|| update.attachment.componentGeneration != objects.getObjectComponentGeneration(*target))
+						throw std::runtime_error("Audio source attachment changed before protected publication.");
+					AudioSourceSettingsUpdate old{update.attachment};
+					if (update.volume) old.volume = source->volume;
+					if (update.pitch) old.pitch = source->pitch;
+					inverse.operation.audioSourceSettings.push_back(old);
+					// Retain the original component BEFORE its first write. Notification
+					// alone can retain revisions but would capture an already changed value.
+					objects.CaptureProtectedComponent(target->EntityId(), access);
+					if (update.volume) source->volume = operation.restoreExactAudioSourceSettings ? *update.volume : Audio::NormalizeAudioUnit(*update.volume);
+					// Runtime pitch historically permits .01, while authored SetPitch
+					// clamps at .125. Keep the established runtime normalization here.
+					if (update.pitch) source->pitch = operation.restoreExactAudioSourceSettings ? *update.pitch : Audio::NormalizeAudioPitch(*update.pitch);
+					objects.notifyObjectComponentValueChanged(*target, AudioSourceComponent::kComponentName);
+				}
+				result.inverseDeltas.push_back(std::move(inverse));
+				continue;
+			}
 			if (operation.kind == TransactionWriteKind::UpdateTransformBatch)
 			{
 				// Resolve every target before the first write. This retains all-or-nothing
@@ -1793,7 +1890,11 @@ namespace TerraEngine::Scene {
 					}
 					candidate->Apply(enttRegistry, targetEntity);
 					if (operation.componentName == Transform::kComponentName) objects.MarkObjectTransformDirty(*target);
-					if (operation.componentName != Transform::kComponentName) {
+					if (operation.componentName == AudioSourceComponent::kComponentName) {
+						// A value edit, including a same-value authored edit, supersedes
+						// runtime settings without replacing the source or managed facade.
+						objects.notifyObjectComponentValueChanged(*target, AudioSourceComponent::kComponentName);
+					} else if (operation.componentName != Transform::kComponentName) {
 						// The reflected Transform setter already publishes one
 						// spatial revision. Avoid double-incrementing it while
 						// retaining structural invalidation for other components.
@@ -1822,10 +1923,13 @@ namespace TerraEngine::Scene {
 				result.message = "Transaction committed.";
 				for (const auto& entry : removals) if (entry.pending) entry.access.entityRemoveComponent(objects.getRegistry(), entry.target.EntityId());
 				objects.FinishProtectedMutation();
+				outcome.committed = true;
 			}
 		} catch (const TransactionRestorationFailure&) { throw; }
 		catch (const std::exception& error) {
 			if (began && !objects.IsProtectedMutationActive()) {
+				// Retain the committed fact before allocating an exception's message.
+				outcome.committed = true;
 				// A notification failed after commit. It is a fatal execution error,
 				// never a truthful rejection of already published authored values.
 				throw TransactionPublicationFailure(std::move(result), error.what());
@@ -1833,7 +1937,10 @@ namespace TerraEngine::Scene {
 			AddConflict(result, TransactionConflictReason::InvalidPayload, TerraEngine::EMPTY_UUID, applyingIndex,
 				error.what());
 		} catch (...) {
-			if (began && !objects.IsProtectedMutationActive()) throw TransactionPublicationFailure(std::move(result), "Post-commit notification failed.");
+			if (began && !objects.IsProtectedMutationActive()) {
+				outcome.committed = true;
+				throw TransactionPublicationFailure(std::move(result), "Post-commit notification failed.");
+			}
 			AddConflict(result, TransactionConflictReason::InvalidPayload, TerraEngine::EMPTY_UUID, applyingIndex,
 				"Protected transaction application threw an unknown exception.");
 		}
@@ -2182,6 +2289,8 @@ namespace TerraEngine::Scene {
 				if (!encoded.contains("sourceGeneration") || !encoded["sourceGeneration"].is_number_unsigned() || !encoded.contains("destinationGeneration") || !encoded["destinationGeneration"].is_number_unsigned()) return fail("changeSimulationFrame requires unsigned generations");
 				operation.kind = TransactionWriteKind::ChangeSimulationFrame; operation.sourceSimulationFrameGeneration = encoded["sourceGeneration"].get<std::uint64_t>(); operation.destinationSimulationFrameGeneration = encoded["destinationGeneration"].get<std::uint64_t>();
 			}
+			else if (kind == "updateAudioSourceSettingsBatch" || kind == "UpdateAudioSourceSettingsBatch")
+				return fail("Audio source settings batches are native-only and cannot be lowered from JSON.");
 			else return fail("unsupported unbounded spatial operation");
 			result.writeSet.operations.push_back(std::move(operation));
 		}

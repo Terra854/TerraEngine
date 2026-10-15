@@ -12834,7 +12834,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		{
 			TERRAENGINE_LOG(LogLevel::Error,
 				"Render frame publication was rejected for frame " << activeRenderFrameId
-					<< ": " << publicationReceipt.diagnostic);
+					<< ": " << publicationReceipt.DiagnosticText());
 		}
 	}
 

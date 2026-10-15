@@ -1,0 +1,185 @@
+{
+  "format": "TerraSceneUnboundedV1",
+  "name": "Audio Control Continuity",
+  "objects": [
+    {
+      "uuid": "61000000000000000000000000000001",
+      "name": "Audio Camera",
+      "components": {
+        "Transform": {
+          "WorldPose": {
+            "position": {
+              "cell": {
+                "y": "0",
+                "x": "0",
+                "z": "0"
+              },
+              "offsetMetres": [
+                0.0,
+                1.0,
+                4.0
+              ]
+            },
+            "rotation": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "ParentRelativePose": {
+            "translationMetres": [
+              0.0,
+              1.0,
+              4.0
+            ],
+            "rotation": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "transformSpaceId": 0
+          }
+        },
+        "CameraComponent": {
+          "aspectRatio": 1.7777778,
+          "verticalFovDegrees": 60.0,
+          "farPlane": 100.0,
+          "up": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "nearPlane": 0.1
+        }
+      }
+    },
+    {
+      "uuid": "61000000000000000000000000000002",
+      "name": "Audio Continuity Source",
+      "components": {
+        "Transform": {
+          "WorldPose": {
+            "position": {
+              "cell": {
+                "y": "0",
+                "x": "0",
+                "z": "0"
+              },
+              "offsetMetres": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "rotation": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "ParentRelativePose": {
+            "translationMetres": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "rotation": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "transformSpaceId": 0
+          }
+        },
+        "AudioSourceComponent": {
+          "clipAssetId": "67000000000000000000000000000001",
+          "playOnStart": true,
+          "spatialBlend": 0.0,
+          "priority": 128,
+          "pitch": 1.0,
+          "loop": true,
+          "volume": 0.25
+        }
+      }
+    },
+    {
+      "uuid": "61000000000000000000000000000003",
+      "name": "Audio Control Observer",
+      "components": {
+        "Transform": {
+          "WorldPose": {
+            "position": {
+              "cell": {
+                "y": "0",
+                "x": "0",
+                "z": "0"
+              },
+              "offsetMetres": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "rotation": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "ParentRelativePose": {
+            "translationMetres": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "rotation": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "transformSpaceId": 0
+          }
+        },
+        "Script": {
+          "BindingsJson": "[{\"bindingId\":\"62000000000000000000000000000011\",\"assetGuid\":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],\"className\":\"AudioControlObserver\",\"enabled\":true,\"orderIndex\":0,\"serializedValues\":[],\"authoredStateVersion\":1}]"
+        }
+      }
+    }
+  ]
+}

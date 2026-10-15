@@ -7,7 +7,7 @@ The seven focused correctness entries are implemented: `Engine.SceneMutationFail
 `Engine.AudioWorldCellCapture`, `Engine.FrameFailureLifecycle`, `Engine.OwnedProcess`
 and `Editor.ExportLifecycle`. Their independent process-tree watchdogs reject
 missing/zero selections and enforce registered minimum counts. Current floors
-are respectively 42, 28, 10, 5, 7, 6 and 6. Retain native and live acceptance
+are respectively 52, 28, 10, 5, 7, 6 and 6. Retain native and live acceptance
 results with their installed artifact hashes and the naming-policy audit.
 
 Run in an x64 Visual Studio developer shell with supported SDK headers/libraries
@@ -3205,3 +3205,32 @@ the 60 warmup/300 measured windows. A failed collector or incomplete session
 cannot be manually promoted into accepted evidence. The current independent
 baseline compatibility collector deliberately reports Unverified until actual
 matched total-frame baseline proof is supplied.
+
+## Audio control continuity and renderer failure safety
+
+After the configure/build/install commands above, select the new watched groups:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --no-tests=error -R '^(Engine\.(AudioControlContinuity|AudioPlaybackBinding|AudioSourceSettings|RenderPublicationAllocationSafety)|Editor\.AudioControlPersistence)$' --output-on-failure
+```
+
+The harness floors are 12 `Audio.ControlContinuity`, 10 `Audio.PlaybackBinding`,
+10 `Audio.SourceSettings` and 4 `Editor.AudioControlPersistence` cases. The real
+allocation child supplies five checkpoint families at 100 repetitions. Queue
+coverage completes 20,000 distinct keyed requests with actual 1/2/8 task
+producers; source settings survive 120 later live frames. Existing audio,
+transaction rollback, scheduler and frame-failure tests remain required.
+
+Run the installed gameplay acceptance tool with a fresh work directory:
+
+```powershell
+$audioInstall = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$audioWork = Join-Path $PWD ('out/validation/audio-controls-' + [Guid]::NewGuid().ToString('N'))
+& "$audioInstall/Tests/Tools/Audio/RunInstalledAudioControlAcceptance.ps1" -InstallRoot $audioInstall -WorkRoot $audioWork -Lane All -Repetitions 100
+```
+
+The independent `-Lane Managed` option is useful during ABI development. Final
+acceptance requires All, exact installed manifest hashes, normal watched exits,
+real C# callbacks and positive-delta playback frames. Missing provider/device,
+callbacks or selections are failures. See `Tests/Tools/Audio/README.md` for
+prerequisites, retained receipts and the clean-checkout workflow.

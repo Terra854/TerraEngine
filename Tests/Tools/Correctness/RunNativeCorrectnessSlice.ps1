@@ -20,6 +20,11 @@ $ErrorActionPreference = 'Stop'
 # Preserve the generic wrapper for existing slices and compound/local filters,
 # but never allow an exact recovery slice to undercount its required cases.
 $recoveryFloors=@{
+	'Engine.SceneMutationFailureSafety'=52
+	'Audio.ControlContinuity'=12
+	'Audio.PlaybackBinding'=10
+	'Audio.SourceSettings'=10
+	'Editor.AudioControlPersistence'=4
 	'Engine.SceneLoadRecovery'=14
 	'Engine.NestedTaskSettlement'=11
 	'Editor.AssetDiscoveryRecovery'=8

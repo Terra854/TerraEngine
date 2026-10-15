@@ -10,6 +10,22 @@ namespace TerraEngine::Tests
 {
 	void RegisterRenderPublicationSourceGuardTests(TestRegistry& registry)
 	{
+		registry.Add("Renderer.PublicationSourceGuard.OwnedNoFailReceipt", [](TestContext& context) {
+			// This source contract complements the real allocator child: optional
+			// logging must consume the owned view and never regain a string receipt.
+			const auto read = [](const char* path) {
+				std::ifstream stream(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / path);
+				return std::string((std::istreambuf_iterator<char>(stream)), {});
+			};
+			const auto header = read("Engine/Renderer/Graph/RenderFramePublication.h");
+			const auto render = read("Engine/Renderer/RenderSystem.cpp");
+			const auto begin = header.find("struct RenderPublicationReceipt");
+			const auto end = header.find("struct RenderFramePublication", begin);
+			context.Expect(begin != std::string::npos && end != std::string::npos
+				&& header.substr(begin, end - begin).find("std::string diagnostic") == std::string::npos
+				&& render.find("publicationReceipt.DiagnosticText()") != std::string::npos,
+				"Receipt ownership and the optional logging consumer must remain allocation independent.");
+		});
 		registry.Add("Renderer.PublicationSourceGuard.RemovesLegacySubmission", [](TestContext& context) {
 			const auto readSource = [](const char* relativePath) {
 				std::ifstream source(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relativePath);

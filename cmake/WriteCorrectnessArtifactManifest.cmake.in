@@ -32,6 +32,13 @@ set(correctness_required
 	"Tests/Tools/Correctness/Fixtures/TextureUiProject/Assets/Scripts/TextureUiObserver.cs"
 	"Tests/Tools/Correctness/RunNativeCorrectnessSlice.ps1"
 	"Tests/Tools/Correctness/RunWithWatchdog.ps1"
+	"Tests/Tools/Audio/RunInstalledAudioControlAcceptance.ps1"
+	"Tests/Tools/Audio/AudioControlAcceptanceContract.ps1"
+	"Tests/Tools/Audio/Fixtures/ControlContinuityProject/Assets/Scripts/AudioControlObserver.cs"
+	"Tests/Tools/Audio/Fixtures/ControlContinuityProject/Assets/Scenes/Startup.tescene"
+	"Tests/Tools/Audio/Fixtures/ControlContinuityProject/Assets/Audio/Continuity.wav"
+	"Tests/Tools/AudioRendererSafety/RenderPublicationAllocationFixture@TERRAENGINE_EXECUTABLE_SUFFIX@"
+	"Tests/Tools/AudioRendererSafety/RunRenderPublicationAllocationSafety.ps1"
 	"Tests/Tools/ContentArchive/RunArchiveSafetyWatchdog.ps1"
 	"Tests/Tools/ContentArchive/RunArchiveSafetyStress.ps1"
 	"Tests/Tools/Correctness/Fixtures/ManagedExportProject/game.json"
@@ -60,6 +67,7 @@ endforeach()
 # Hashing an old install alone would merely bless a stale or mismatched binary.
 set(correctness_sources
 	"$<TARGET_FILE:TerraEngineTextureUiFixtureGenerator>"
+	"$<TARGET_FILE:RenderPublicationAllocationFixture>"
 	"$<TARGET_FILE:TerraEngineModelPackageCompiler>"
 	"$<TARGET_FILE:TerraEngine-Engine>"
 	"$<TARGET_FILE:TerraEngine-Editor>"
@@ -72,6 +80,7 @@ set(correctness_sources
 	"$<TARGET_FILE:TerraEngineCorrectnessProcessFixture>")
 set(correctness_copies
 	"Tests/Tools/Correctness/$<TARGET_FILE_NAME:TerraEngineTextureUiFixtureGenerator>"
+	"Tests/Tools/AudioRendererSafety/$<TARGET_FILE_NAME:RenderPublicationAllocationFixture>"
 	"Tests/Editor/$<TARGET_FILE_NAME:TerraEngineModelPackageCompiler>"
 	"Editor/$<TARGET_FILE_NAME:TerraEngine-Engine>"
 	"Editor/$<TARGET_FILE_NAME:TerraEngine-Editor>"
@@ -95,7 +104,7 @@ foreach(correctness_index RANGE 0 ${correctness_last})
 endforeach()
 if(WIN32)
 	file(SHA256 "$<TARGET_FILE:TerraEngine-Engine>" correctness_engine_hash)
-	foreach(correctness_category Engine Editor Tools/Correctness)
+	foreach(correctness_category Engine Editor Tools/Correctness Tools/AudioRendererSafety)
 		file(SHA256 "${correctness_root}/Tests/${correctness_category}/$<TARGET_FILE_NAME:TerraEngine-Engine>" correctness_copy_hash)
 		if(NOT correctness_engine_hash STREQUAL correctness_copy_hash)
 			message(FATAL_ERROR "Installed ${correctness_category} tests have a mismatched engine DLL")
@@ -120,6 +129,8 @@ file(GLOB_RECURSE correctness_support_files LIST_DIRECTORIES false RELATIVE "${c
 	"${correctness_root}/Editor/NativeAotNuGet/*"
 	"${correctness_root}/Tests/Editor/Managed/*"
 	"${correctness_root}/Tests/Tools/Correctness/*"
+	"${correctness_root}/Tests/Tools/Audio/*"
+	"${correctness_root}/Tests/Tools/AudioRendererSafety/*"
 	"${correctness_root}/Tests/Tools/LifecycleRecovery/*"
 	"${correctness_root}/Tests/Tools/ContentArchive/*"
 	"${correctness_root}/Tests/Tools/ExportRuntimeBaseline/*"
@@ -129,9 +140,11 @@ list(APPEND correctness_files ${correctness_support_files} ${correctness_require
 # Historical local build directories are not maintained fixture assets, even
 # when a previous install left them in the destination tree.
 list(FILTER correctness_files EXCLUDE REGEX "^Tests/(Tools/Correctness/Fixtures|Fixtures)/.*/(obj|bin|Build|Builds|Library|Temp)/")
+list(FILTER correctness_files EXCLUDE REGEX "^Tests/Tools/Audio/Fixtures/.*/(obj|bin|Build|Builds|Library|Temp)/")
+list(FILTER correctness_files EXCLUDE REGEX "^Tests/Tools/Audio/Evidence/")
 list(REMOVE_DUPLICATES correctness_files)
 list(SORT correctness_files)
-set(correctness_json "{\n  \"schemaVersion\":1,\n  \"minimumCases\":{\"Engine.SceneMutationFailureSafety\":39,\"Engine.ResourceAsyncLifecycle\":28,\"Scene.SaveFailureSafety\":10,\"Audio.WorldCellCapture\":5,\"Engine.FrameFailureLifecycle\":7,\"Engine.OwnedProcess\":6,\"Editor.ExportLifecycle\":6,\"Engine.SceneLoadRecovery\":14,\"Engine.NestedTaskSettlement\":11,\"Editor.AssetDiscoveryRecovery\":8,\"Editor.AssetImportAdmission\":13,\"Editor.ExportArtifactValidation\":12,\"Editor.ExportRetention\":10,\"Engine.ArtifactValidation\":6,\"Engine.OwnedImportExecutor\":5,\"Engine.ContentArchiveSafety\":30,\"Editor.ContentArchiveSafety\":29,\"Editor.TerrainIndependentCopy\":24,\"Editor.MCP.Transport.HttpAuthority\":4,\"Animation.ProgramPublisher\":9,\"Engine.Resource.Texture.Bounds\":8,\"Engine.Resource.Texture.Rgba\":5,\"Engine.JobGraph.FailureSettlement\":6,\"Engine.UI.HitTesting\":6},\n  \"files\":[")
+set(correctness_json "{\n  \"schemaVersion\":1,\n  \"minimumCases\":{\"Engine.SceneMutationFailureSafety\":52,\"Engine.ResourceAsyncLifecycle\":28,\"Scene.SaveFailureSafety\":10,\"Audio.WorldCellCapture\":5,\"Engine.FrameFailureLifecycle\":7,\"Engine.OwnedProcess\":6,\"Editor.ExportLifecycle\":6,\"Engine.SceneLoadRecovery\":14,\"Engine.NestedTaskSettlement\":11,\"Editor.AssetDiscoveryRecovery\":8,\"Editor.AssetImportAdmission\":13,\"Editor.ExportArtifactValidation\":12,\"Editor.ExportRetention\":10,\"Engine.ArtifactValidation\":6,\"Engine.OwnedImportExecutor\":5,\"Engine.ContentArchiveSafety\":30,\"Editor.ContentArchiveSafety\":29,\"Editor.TerrainIndependentCopy\":24,\"Editor.MCP.Transport.HttpAuthority\":4,\"Animation.ProgramPublisher\":9,\"Engine.Resource.Texture.Bounds\":8,\"Engine.Resource.Texture.Rgba\":5,\"Engine.JobGraph.FailureSettlement\":6,\"Engine.UI.HitTesting\":6,\"Audio.ControlContinuity\":12,\"Audio.PlaybackBinding\":10,\"Audio.SourceSettings\":10,\"Editor.AudioControlPersistence\":4},\n  \"files\":[")
 set(correctness_separator "")
 foreach(correctness_relative IN LISTS correctness_files)
 	file(SHA256 "${correctness_root}/${correctness_relative}" correctness_hash)

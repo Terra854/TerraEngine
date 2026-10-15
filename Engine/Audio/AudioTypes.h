@@ -30,6 +30,24 @@ namespace TerraEngine::Audio {
 	inline constexpr std::uint32_t kAudioProviderContractVersion = 2U;
 	inline constexpr std::uint32_t kAudioRenderChannelCount = 8U;
 
+	// This copied observation identifies one component attachment, independently
+	// of transient ECS storage and the individual playback instances it owns.
+	struct AudioSourceAttachmentKey {
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		AudioGeneration sceneGeneration = 0U;
+		AudioGeneration objectGeneration = 0U;
+		AudioGeneration componentGeneration = 0U;
+		bool IsValid() const noexcept {
+			return objectId != TerraEngine::EMPTY_UUID && sceneGeneration != 0U
+				&& objectGeneration != 0U && componentGeneration != 0U;
+		}
+		auto operator<=>(const AudioSourceAttachmentKey&) const = default;
+	};
+	struct AudioSourceBinding {
+		std::uint32_t objectEntity = 0U;
+		AudioSourceAttachmentKey attachment;
+	};
+
 	// One effective listener defines the player's output experience. These values
 	// are stable durable authoring data; an omitted field remains Stereo.
 	enum class AudioOutputMode : std::uint8_t {

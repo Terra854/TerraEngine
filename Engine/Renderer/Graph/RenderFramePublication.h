@@ -14,6 +14,7 @@
 #include "Core/Export.h"
 
 #include <atomic>
+#include <array>
 #include <compare>
 #include <cstdint>
 #include <limits>
@@ -21,7 +22,8 @@
 #include <mutex>
 #include <optional>
 #include <span>
-#include <string>
+#include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace TerraEngine::Renderer
@@ -554,7 +556,23 @@ namespace TerraEngine::Renderer
 		std::uint32_t changedDynamicPages = 0u;
 		std::uint32_t viewCount = 0u;
 		std::uint32_t rangeCount = 0u;
-		std::string diagnostic;
+		// Receipts must remain copyable even when the allocator is exhausted.
+		// Own the text so a result never borrows a destroyed candidate/message.
+		std::array<char, 256> diagnostic{};
+
+		void SetDiagnostic(std::string_view text) noexcept
+		{
+			const std::size_t count = text.size() < diagnostic.size() - 1u
+				? text.size() : diagnostic.size() - 1u;
+			for(std::size_t index = 0; index < count; ++index)
+				diagnostic[index] = text[index];
+			diagnostic[count] = '\0';
+		}
+
+		[[nodiscard]] const char* DiagnosticText() const noexcept
+		{
+			return diagnostic.data();
+		}
 
 		[[nodiscard]] bool IsSuccess() const noexcept
 		{
@@ -562,6 +580,12 @@ namespace TerraEngine::Renderer
 				|| outcome == RenderPublicationOutcome::Reused;
 		}
 	};
+
+	static_assert(std::is_nothrow_copy_constructible_v<RenderPublicationReceipt>
+		&& std::is_nothrow_move_constructible_v<RenderPublicationReceipt>
+		&& std::is_nothrow_copy_assignable_v<RenderPublicationReceipt>
+		&& std::is_nothrow_move_assignable_v<RenderPublicationReceipt>,
+		"Publication outcomes must remain reportable when allocation fails.");
 
 	struct RenderFramePublication
 	{

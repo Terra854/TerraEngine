@@ -501,11 +501,23 @@ namespace TerraEngine::Tests {
 					"The child animator must enter the real authored Animation binding publication.");
 				runtime.Movement()->animatorBinding = CharacterLocomotionComponent::kDescendantBinding;
 				runtime.Movement()->animatorObjectId = ObjectManager::instance().getUUID(child);
-				(void)runtime.RefreshAnimationAndLocomotion();
-				const auto descendant = CaptureLocomotionAnimator(runtime.Handle(), *runtime.Movement());
+				// A newly attached animator may still be compiling its controller or
+				// publishing streamed clip data. Like the reload check above, advance
+				// bounded real boundaries until the required authority row is ready;
+				// two successful frame executions alone do not prove binding readiness.
+				CapturedLocomotionAnimator descendant;
+				for(std::uint32_t boundary = 0U; boundary < 8U; ++boundary) {
+					if(!runtime.RefreshAnimationAndLocomotion()) break;
+					descendant = CaptureLocomotionAnimator(runtime.Handle(), *runtime.Movement());
+					if(descendant.animator.IsValid()
+						&& descendant.objectId == runtime.Movement()->animatorObjectId
+						&& descendant.mapping.error == MotionParameterError::None) break;
+				}
 				context.Expect(descendant.animator.IsValid() && descendant.objectId == runtime.Movement()->animatorObjectId
 					&& descendant.mapping.error == MotionParameterError::None,
-					"A live same-scene descendant animator must be accepted after the owner hierarchy changes.");
+					"A live same-scene descendant animator must be accepted after the owner hierarchy changes. reason="
+					+ std::to_string(static_cast<unsigned>(descendant.reason))
+					+ ", mappingError=" + std::to_string(static_cast<unsigned>(descendant.mapping.error)));
 
 				const Object outside = runtime.AddExternalParent();
 				context.Expect(ObjectManager::instance().setParent(child, outside),

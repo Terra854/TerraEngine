@@ -2990,6 +2990,25 @@ if(TARGET TerraEngineTerrainFixtureGenerator)
 	)
 endif()
 if(BUILD_TESTING)
+	# Install the isolated fault child before sealing the shared artifact manifest.
+	add_subdirectory(Tests/Tools/AudioRendererSafety)
+	if(WIN32)
+		add_test(NAME Engine.RenderPublicationAllocationSafety
+			COMMAND ${TERRAENGINE_CORRECTNESS_POWERSHELL} -NoProfile -ExecutionPolicy Bypass
+			-File ${CMAKE_SOURCE_DIR}/Tests/Tools/AudioRendererSafety/RunRenderPublicationAllocationSafety.ps1
+			-Executable $<TARGET_FILE:RenderPublicationAllocationFixture> -Repetitions 100
+			-WatchdogPath ${CMAKE_SOURCE_DIR}/Tests/Tools/Correctness/RunWithWatchdog.ps1)
+		set_tests_properties(Engine.RenderPublicationAllocationSafety PROPERTIES
+			LABELS "Engine;Renderer;Correctness;FailureSafety" RUN_SERIAL TRUE TIMEOUT 135)
+		add_test(NAME Audio.ControlAcceptanceContracts
+			COMMAND ${TERRAENGINE_CORRECTNESS_POWERSHELL} -NoProfile -ExecutionPolicy Bypass
+			-File ${CMAKE_SOURCE_DIR}/Tests/Tools/AudioRendererSafety/TestAudioControlAcceptanceContracts.ps1)
+		set_tests_properties(Audio.ControlAcceptanceContracts PROPERTIES LABELS "Audio;Correctness;Protocol" TIMEOUT 120)
+	endif()
+	install(FILES ${CMAKE_SOURCE_DIR}/Tests/Tools/AudioRendererSafety/TestAudioControlAcceptanceContracts.ps1
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/AudioRendererSafety)
+endif()
+if(BUILD_TESTING)
 	# Install validation executables under the test tree so the installed layout
 	# preserves the same production-versus-test boundary as the source tree.
 	install(TARGETS TerraEngine-EngineTests TerraEngineCorrectnessProcessFixture
@@ -3011,6 +3030,16 @@ if(BUILD_TESTING)
 		${CMAKE_SOURCE_DIR}/Tests/Tools/Correctness/RunInstalledTextureUiAcceptance.ps1
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Correctness
 	)
+	# The gameplay fixture and runner are sealed inputs, never local build output.
+	install(FILES
+		${CMAKE_SOURCE_DIR}/Tests/Tools/Audio/RunInstalledAudioControlAcceptance.ps1
+		${CMAKE_SOURCE_DIR}/Tests/Tools/Audio/AudioControlAcceptanceContract.ps1
+		${CMAKE_SOURCE_DIR}/Tests/Tools/Audio/README.md
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Audio)
+	install(DIRECTORY ${CMAKE_SOURCE_DIR}/Tests/Tools/Audio/Fixtures/ControlContinuityProject
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Audio/Fixtures
+		PATTERN "Build" EXCLUDE PATTERN "Builds" EXCLUDE PATTERN "obj" EXCLUDE
+		PATTERN "bin" EXCLUDE PATTERN "Library" EXCLUDE PATTERN "Temp" EXCLUDE)
 	# Recovery acceptance consumes only sealed installed runners and authored inputs.
 	install(FILES
 		${CMAKE_SOURCE_DIR}/Tests/Tools/ContentArchive/RunArchiveSafetyWatchdog.ps1

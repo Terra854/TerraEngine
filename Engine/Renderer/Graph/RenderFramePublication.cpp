@@ -20,7 +20,7 @@ namespace TerraEngine::Renderer
 			receipt.outcome = outcome;
 			receipt.publicationGeneration = publication.generation;
 			receipt.expectedPreviousGeneration = publication.expectedPreviousGeneration;
-			receipt.diagnostic = diagnostic;
+			receipt.SetDiagnostic(diagnostic);
 			return receipt;
 		}
 
@@ -91,45 +91,47 @@ namespace TerraEngine::Renderer
 			|| publication.dynamic->rendererSessionGeneration != expectedSessionGeneration)
 			return Reject(publication, RenderPublicationOutcome::RejectedSession,
 				"The candidate does not belong to the active renderer session.");
-		if(!publication.referenceFrames.empty())
-		{
-			std::unordered_set<std::uint64_t> viewIdentities;
-			for(const RenderReferenceFrame& referenceFrame : publication.referenceFrames)
-			{
-				if(!referenceFrame.IsValid() || referenceFrame.frameId != publication.frameId
-					|| !viewIdentities.insert(referenceFrame.viewId).second)
-					return Reject(publication, RenderPublicationOutcome::RejectedStaleGeneration,
-						"A render reference frame is invalid, stale, or duplicated.");
-			}
-		}
-		for (const RenderViewPresentationInput& presentation :
-			publication.presentationInputs)
-		{
-			if (!presentation.referenceFrame.IsValid()
-				|| presentation.referenceFrame.frameId != publication.frameId
-				|| presentation.referenceFrame.outputId
-					!= presentation.output.outputId)
-			{
-				return Reject(publication,
-					RenderPublicationOutcome::RejectedStaleGeneration,
-					"A presentation input does not match its render reference frame.");
-			}
-		}
-		if(publication.backendWork == nullptr || !publication.backendWork->valid
-			|| publication.backendWork->frameId != publication.frameId
-			|| !publication.backendWork->animationWork.valid
-			|| publication.backendWork->animationWork.frameId != publication.frameId
-			|| (publication.backendWork->deformationWork != nullptr
-				&& !publication.backendWork->deformationWork->IsComplete()))
-			return Reject(publication, RenderPublicationOutcome::RejectedBackendPreparation,
-				"The backend work root is incomplete or belongs to another frame.");
-		if(publication.persistent->pages.size()
-			!= publication.dynamic->pages.size())
-			return Reject(publication, RenderPublicationOutcome::RejectedStaleGeneration,
-				"Persistent and dynamic roots do not describe the same page set.");
-
+		// Reference-frame uniqueness is allocating validation scratch too. Its
+		// first insertion must be caught before a noexcept boundary is crossed.
 		try
 		{
+			if(!publication.referenceFrames.empty())
+			{
+				std::unordered_set<std::uint64_t> viewIdentities;
+				for(const RenderReferenceFrame& referenceFrame : publication.referenceFrames)
+				{
+					if(!referenceFrame.IsValid() || referenceFrame.frameId != publication.frameId
+						|| !viewIdentities.insert(referenceFrame.viewId).second)
+						return Reject(publication, RenderPublicationOutcome::RejectedStaleGeneration,
+							"A render reference frame is invalid, stale, or duplicated.");
+				}
+			}
+			for (const RenderViewPresentationInput& presentation :
+				publication.presentationInputs)
+			{
+				if (!presentation.referenceFrame.IsValid()
+					|| presentation.referenceFrame.frameId != publication.frameId
+					|| presentation.referenceFrame.outputId
+						!= presentation.output.outputId)
+				{
+					return Reject(publication,
+						RenderPublicationOutcome::RejectedStaleGeneration,
+						"A presentation input does not match its render reference frame.");
+				}
+			}
+			if(publication.backendWork == nullptr || !publication.backendWork->valid
+				|| publication.backendWork->frameId != publication.frameId
+				|| !publication.backendWork->animationWork.valid
+				|| publication.backendWork->animationWork.frameId != publication.frameId
+				|| (publication.backendWork->deformationWork != nullptr
+					&& !publication.backendWork->deformationWork->IsComplete()))
+				return Reject(publication, RenderPublicationOutcome::RejectedBackendPreparation,
+					"The backend work root is incomplete or belongs to another frame.");
+			if(publication.persistent->pages.size()
+				!= publication.dynamic->pages.size())
+				return Reject(publication, RenderPublicationOutcome::RejectedStaleGeneration,
+					"Persistent and dynamic roots do not describe the same page set.");
+
 			for(std::size_t pageIndex = 0u;
 				pageIndex < publication.persistent->pages.size(); ++pageIndex)
 			{
@@ -304,7 +306,7 @@ namespace TerraEngine::Renderer
 		catch(const std::bad_alloc&)
 		{
 			return Reject(publication, RenderPublicationOutcome::RejectedAllocation,
-				"Validation could not reserve its bounded duplicate-slot evidence.");
+				"Validation could not reserve its reference-frame uniqueness evidence.");
 		}
 
 		RenderPublicationReceipt receipt = publication.receipt;
@@ -896,7 +898,7 @@ namespace TerraEngine::Renderer
 		sealed.sessionGeneration_ = expectedSessionGeneration;
 		if(candidate == nullptr) {
 			sealed.receipt.outcome = RenderPublicationOutcome::RejectedStaleGeneration;
-			sealed.receipt.diagnostic = "A null publication candidate cannot be sealed.";
+			sealed.receipt.SetDiagnostic("A null publication candidate cannot be sealed.");
 			return sealed;
 		}
 		// The caller transfers its only mutable reference before validation.  Even a
@@ -916,7 +918,7 @@ namespace TerraEngine::Renderer
 			RenderPublicationReceipt receipt = candidate.Receipt();
 			if(receipt.IsSuccess()) {
 				receipt.outcome = RenderPublicationOutcome::RejectedSession;
-				receipt.diagnostic = "The sealed candidate does not belong to this renderer session.";
+				receipt.SetDiagnostic("The sealed candidate does not belong to this renderer session.");
 			}
 			return receipt;
 		}
@@ -929,7 +931,7 @@ namespace TerraEngine::Renderer
 			|| candidate.candidate_->expectedPreviousGeneration != observed)
 		{
 			receipt.outcome = RenderPublicationOutcome::RejectedStaleGeneration;
-			receipt.diagnostic = "The protected root changed before candidate exchange.";
+			receipt.SetDiagnostic("The protected root changed before candidate exchange.");
 			return receipt;
 		}
 		std::shared_ptr<const RenderFramePublication> expected = previous;
@@ -938,7 +940,7 @@ namespace TerraEngine::Renderer
 		{
 			receipt.outcome = RenderPublicationOutcome::RejectedStaleGeneration;
 			receipt.observedPreviousGeneration = expected ? expected->generation : 0u;
-			receipt.diagnostic = "Another protected publication won the root exchange.";
+			receipt.SetDiagnostic("Another protected publication won the root exchange.");
 		}
 		return receipt;
 	}

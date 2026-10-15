@@ -8,6 +8,7 @@
 #pragma once
 
 #include "Core/Export.h"
+#include "Audio/AudioTypes.h"
 #include "Components/Transform.h"
 #include "Core/Object/Reflection.h"
 #include "Scene/WorldCoordinate.h"
@@ -102,7 +103,15 @@ namespace TerraEngine::Scene {
 		PublishAnimationMutations,
 		// Append additive kinds to preserve existing native/wire enum values.
 		// Script runtime instances are never invoked during authored preparation.
-		AddScriptBinding
+		AddScriptBinding,
+		// Native audio packets publish only existing source values at a protected boundary.
+		UpdateAudioSourceSettingsBatch
+	};
+
+	struct AudioSourceSettingsUpdate {
+		Audio::AudioSourceAttachmentKey attachment;
+		std::optional<float> volume;
+		std::optional<float> pitch;
 	};
 
 	// A transform batch carries canonical world poses for existing objects. The
@@ -197,6 +206,10 @@ namespace TerraEngine::Scene {
 		std::uint64_t destinationSimulationFrameGeneration = 0;
 		std::vector<TransactionTransformUpdate> transformUpdates;
 		std::vector<AnimationMutationPublication> animationPublications;
+		std::vector<AudioSourceSettingsUpdate> audioSourceSettings;
+		// Native inverse replay restores exact authored values, including volume
+		// above the runtime unit range. External JSON cannot populate this flag.
+		bool restoreExactAudioSourceSettings = false;
 		// This payload is populated only by editor history replay. Runtime systems
 		// keep using compact typed fields and never pay serialization costs.
 		nlohmann::json serializedObject = nlohmann::json::object();
@@ -374,6 +387,9 @@ namespace TerraEngine::Scene {
 		// Snapshot every target while the protected producer owns ObjectManager,
 		// so the later protected flush can reject the whole batch if it went stale.
 		TransactionalMutationBuilder& UpdateTransformBatch(ObjectManager& objects, std::vector<TransactionTransformUpdate> updates);
+		// Caller supplies immutable attachment observations; never silently replace
+		// a stale source handle by re-observing the current ObjectManager contents.
+		TransactionalMutationBuilder& UpdateAudioSourceSettingsBatch(std::vector<AudioSourceSettingsUpdate> updates);
 		TransactionalMutationBuilder& PublishAnimationMutations(ObjectManager& objects, std::vector<AnimationMutationPublication> publications);
 		Transaction Build() &;
 		Transaction Build() &&;

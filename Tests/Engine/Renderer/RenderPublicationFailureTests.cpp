@@ -3,6 +3,8 @@
 #include "RendererThreadingTestFixtures.h"
 
 #include <memory>
+#include <cstring>
+#include <string>
 #include <vector>
 
 namespace TerraEngine::Tests
@@ -117,6 +119,42 @@ namespace TerraEngine::Tests
 
 	void RegisterRenderPublicationFailureTests(TestRegistry& registry)
 	{
+		registry.Add("Renderer.PublicationFailure.ReceiptOwnsBoundedTextAndNumericIdentity", [](TestContext& context) {
+			// Long and short replacements exercise bounded termination and ownership;
+			// mutating the original afterward must never alter a copied result.
+			Renderer::RenderPublicationReceipt source;
+			source.publicationGeneration = 41;
+			source.expectedPreviousGeneration = 39;
+			source.observedPreviousGeneration = 40;
+			source.SetDiagnostic(std::string(600, 'x'));
+			context.Expect(std::strlen(source.DiagnosticText()) == 255,
+				"Oversized diagnostics must be bounded and NUL terminated.");
+			auto copied = source;
+			source.SetDiagnostic("short");
+			context.Expect(std::strlen(copied.DiagnosticText()) == 255
+				&& std::string(source.DiagnosticText()) == "short",
+				"Receipt text must be owned independently, including shorter replacements.");
+			Renderer::RenderPublicationReceipt assigned;
+			assigned = std::move(copied);
+			context.Expect(assigned.publicationGeneration == 41
+				&& assigned.expectedPreviousGeneration == 39
+				&& assigned.observedPreviousGeneration == 40,
+				"No-fail receipt moves must preserve every numeric generation.");
+			source.SetDiagnostic({});
+			context.Expect(source.DiagnosticText()[0] == '\0',
+				"Clearing diagnostics must report empty text without stale suffixes.");
+		});
+		registry.Add("Renderer.PublicationFailure.RejectionKeepsOwnedDiagnosticAfterCandidateRelease", [](TestContext& context) {
+			Renderer::RenderPublicationReceipt result;
+			{
+				auto candidate = BuildPublication(2, 31);
+				result = Renderer::ValidateRenderFramePublication(*candidate, 1);
+			}
+			context.Expect(result.outcome == Renderer::RenderPublicationOutcome::RejectedSession
+				&& result.publicationGeneration == 32 && result.expectedPreviousGeneration == 31
+				&& std::string(result.DiagnosticText()).find("active renderer session") != std::string::npos,
+				"A rejected receipt must preserve identities and owned text after its input retires.");
+		});
 		registry.Add("Renderer.PublicationFailure.NullCandidateIsAtomic", [](TestContext& context) {
 			Renderer::RenderFramePublicationStore store;
 			store.ResetForSession(2U);

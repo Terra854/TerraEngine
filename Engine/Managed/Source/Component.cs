@@ -117,6 +117,9 @@ namespace TerraEngine
 				nameof(ConstraintSet) => "ConstraintSetComponent",
 				nameof(CharacterController) => "CharacterControllerComponent",
 				nameof(Animation.Animator) => "AnimatorComponent",
+				// Public gameplay lookup and reflected audio fields must target the
+				// registered native component, including a newly created facade.
+				nameof(Audio.AudioSource) => "AudioSourceComponent",
 				nameof(NavigationAgent) => "NavigationAgentComponent",
 				nameof(Locomotion.CharacterLocomotion) => "CharacterLocomotionComponent",
 				_ => managedType.Name

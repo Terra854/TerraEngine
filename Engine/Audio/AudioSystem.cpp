@@ -7,11 +7,17 @@
 #include "Core/Logger/Logger.h"
 #include "Core/Object/ObjectManager.h"
 #include "Resource/ResourceManager.h"
+#include "Scene/TransactionCommitOutcome.h"
 
 #include <algorithm>
 #include <cmath>
 #include <unordered_set>
 #include <array>
+#include <limits>
+#include <tuple>
+#include <exception>
+#include <type_traits>
+#include <iterator>
 
 namespace TerraEngine::Audio {
 	namespace {
@@ -27,10 +33,29 @@ namespace TerraEngine::Audio {
 		std::string ClipKey(const TerraEngine::UUID& id, AudioGeneration generation) {
 			return TerraEngine::ToHexString(id) + ':' + std::to_string(generation);
 		}
+
+		// Copy mix policy into owned source values before immutable construction;
+		// this helper never dereferences live component storage.
+		void ApplyMixValues(AudioAuthoringSnapshotData& data, const AudioMixSnapshot& snapshot) noexcept {
+			data.masterVolume = snapshot.master.volume;
+			data.masterMuted = snapshot.master.muted;
+			for(auto& source : data.sources) {
+				auto group = std::find_if(snapshot.groups.begin(), snapshot.groups.end(), [&](const auto& item) {
+					return item.id == source.mixGroupId;
+				});
+				if(group == snapshot.groups.end() && !snapshot.groups.empty()) group = snapshot.groups.begin();
+				source.mixVolume = group == snapshot.groups.end() ? 1.0F : group->volume;
+				source.mixMuted = group != snapshot.groups.end() && group->muted;
+			}
+		}
 	}
 	AudioSystem& AudioSystem::Instance() { static AudioSystem system; return system; }
 	void AudioSystem::Initialize() {
-		std::scoped_lock lock(mutex); if(initialized) return; controls.Reset(); Backend::RegisterMiniaudioBackend(); auto& registry = Backend::GlobalAudioBackendRegistry(); registry.Freeze(); AudioResult createResult; backend = registry.Create(providerId, createResult);
+		std::scoped_lock lock(mutex); if(initialized) return;
+		// Reset both admission owners together; reservations belong to the queue's
+		// epoch, while the central playback allocator deliberately survives restart.
+		controls.Reset(); playReservations.clear();
+		Backend::RegisterMiniaudioBackend(); auto& registry = Backend::GlobalAudioBackendRegistry(); registry.Freeze(); AudioResult createResult; backend = registry.Create(providerId, createResult);
 		const auto found = registry.Find(providerId); if(found) descriptor = *found;
 		AudioResult result = createResult; if(!backend || !(result = backend->Initialize({})).Succeeded()) { PublishFailure("provider.initialize", result.message.empty() ? "Audio is safely silent because the configured provider could not initialize." : result.message); backend.reset(); }
 		deviceAvailable = backend != nullptr;
@@ -49,48 +74,68 @@ namespace TerraEngine::Audio {
 	void AudioSystem::CapturePhase(float deltaTime) {
 		++frame;
 		auto data = authoring.Data();
+		auto candidatePlayback = playback;
 		std::vector<AudioAuthoringSourceRecord> liveSources;
 		std::vector<AudioAuthoringListenerRecord> liveListeners;
 		ObjectManager& objects = ObjectManager::instance();
-		objects.forEachObjectWithComponents<AudioSourceComponent, Transform>([&](Object object, AudioSourceComponent& source, Transform& transform) {
-			const std::optional<TerraEngine::Scene::WorldPose> pose = objects.GetCanonicalWorldPose(object);
-			if(!pose) return;
-			AudioAuthoringSourceRecord record;
-			record.identity = {objects.getUUID(object), objects.getObjectComponentGeneration(object), 1U};
-			record.clipAssetId = source.clipAssetId;
-			// Keep cells and double offsets together until worker listener selection.
-			// Separately converting cell offsets changes the physical separation.
-			record.worldPosition = pose->position;
-			record.volume = source.volume; record.pitch = source.pitch;
-			record.mixGroupId = source.mixGroupId;
-			record.maximumDistance = source.maxDistance; record.spatialBlend = source.spatialBlend; record.priority = source.priority;
-			record.enabled = source.active; record.loop = source.loop; record.spatial = source.spatialBlend > 0.0F;
-			// A provider-initialization failure leaves audio safely silent. Avoid
-			// initializing decoder/resource infrastructure in that state: the source
-			// still publishes as a pending logical voice, and there is no provider
-			// that could consume retained clip bytes during this frame.
-			if(backend) {
-				if(const auto clip = ResourceManager::Instance().GetAudioClip(source.clipAssetId)) {
-					record.clipGeneration = clip->Generation(); record.clipFrames = clip->FrameCount();
-					record.clipChecksum = clip->Metadata().payloadChecksum; record.clipSampleRate = clip->SampleRate(); record.clipChannels = clip->Channels();
-					record.clipEncoding = clip->Encoding() == AudioEncoding::OggVorbis ? AudioClipEncoding::OggVorbis : AudioClipEncoding::Wav;
-					record.clipPayload = clip->RetainedPayload();
+		if(!manualAuthoringSnapshot) {
+			objects.forEachObjectWithComponents<AudioSourceComponent, Transform>([&](Object object, AudioSourceComponent& source, Transform& transform) {
+				const std::optional<TerraEngine::Scene::WorldPose> pose = objects.GetCanonicalWorldPose(object);
+				if(!pose) return;
+				AudioAuthoringSourceRecord record;
+				record.identity = {objects.getUUID(object), objects.getObjectComponentGeneration(object), 0U};
+				record.attachment = {record.identity.objectId, objects.GetSceneGeneration(),
+					objects.getObjectLifetimeGeneration(object), record.identity.componentGeneration};
+				record.objectEntity = object.entityValue;
+				// A scene replacement can reuse UUID/component versions. Retire the old
+				// seed against its complete attachment before considering auto-start.
+				const auto priorSource = std::find_if(data.sources.begin(), data.sources.end(), [&](const auto& prior) {
+					return prior.identity.objectId == record.identity.objectId;
+				});
+				if(priorSource == data.sources.end() || priorSource->attachment != record.attachment)
+					candidatePlayback.erase(std::remove_if(candidatePlayback.begin(), candidatePlayback.end(), [&](const auto& seed) {
+						return seed.identity.objectId == record.identity.objectId;
+					}), candidatePlayback.end());
+				record.clipAssetId = source.clipAssetId;
+				// Keep cells and double offsets together until worker listener selection.
+				// Separately converting cell offsets changes the physical separation.
+				record.worldPosition = pose->position;
+				record.volume = source.volume; record.pitch = source.pitch;
+				record.mixGroupId = source.mixGroupId;
+				record.maximumDistance = source.maxDistance; record.spatialBlend = source.spatialBlend; record.priority = source.priority;
+				record.enabled = source.active; record.loop = source.loop; record.spatial = source.spatialBlend > 0.0F;
+				// A provider-initialization failure leaves audio safely silent. Avoid
+				// initializing decoder/resource infrastructure in that state: the source
+				// still publishes as a pending logical voice, and there is no provider
+				// that could consume retained clip bytes during this frame.
+				if(backend) {
+					if(const auto clip = ResourceManager::Instance().GetAudioClip(source.clipAssetId)) {
+						record.clipGeneration = clip->Generation(); record.clipFrames = clip->FrameCount();
+						record.clipChecksum = clip->Metadata().payloadChecksum; record.clipSampleRate = clip->SampleRate(); record.clipChannels = clip->Channels();
+						record.clipEncoding = clip->Encoding() == AudioEncoding::OggVorbis ? AudioClipEncoding::OggVorbis : AudioClipEncoding::Wav;
+						record.clipPayload = clip->RetainedPayload();
+					}
 				}
-			}
-			// playOnStart is a runtime lifecycle event, not an editor-preview action.
-			// The editor explicitly opens this gate on Play Mode entry; exported games
-			// leave it enabled from startup.
-			if(runtimePlaybackEnabled && source.playOnStart && std::none_of(playback.begin(), playback.end(), [&](const auto& seed) { return seed.identity.objectId == record.identity.objectId && seed.identity.componentGeneration == record.identity.componentGeneration; }))
-				playback.push_back({record.identity, AudioPlaybackState::Playing, 0U, record.clipAssetId, record.clipGeneration});
-			liveSources.push_back(std::move(record));
-		});
-		objects.forEachObjectWithComponents<AudioListenerComponent, Transform>([&](Object object, AudioListenerComponent& listener, Transform& transform) {
-			const std::optional<TerraEngine::Scene::WorldPose> pose = objects.GetCanonicalWorldPose(object);
-			if(!pose) return;
-			const glm::vec3 forward = pose->rotation * glm::vec3(0.0F, 0.0F, -1.0F);
-			liveListeners.push_back({objects.getUUID(object), objects.getObjectComponentGeneration(object),
-				{}, {forward.x, forward.y, forward.z}, listener.outputMode, listener.active, listener.eligible, pose->position});
-		});
+				// playOnStart is a runtime lifecycle event, not an editor-preview action.
+				// The editor explicitly opens this gate on Play Mode entry; exported games
+				// leave it enabled from startup.
+				if(runtimePlaybackEnabled && source.playOnStart && std::none_of(candidatePlayback.begin(), candidatePlayback.end(), [&](const auto& seed) { return seed.identity.objectId == record.identity.objectId && seed.identity.componentGeneration == record.identity.componentGeneration; })) {
+					auto identity = record.identity;
+					identity.playbackGeneration = AllocatePlaybackGeneration();
+					if(identity.playbackGeneration != 0U)
+						candidatePlayback.push_back({identity, AudioPlaybackState::Playing, 0U, record.clipAssetId, record.clipGeneration});
+					else PublishFailure("control.generation_exhausted", "Audio playback identities are exhausted; auto-start was refused.");
+				}
+				liveSources.push_back(std::move(record));
+			});
+			objects.forEachObjectWithComponents<AudioListenerComponent, Transform>([&](Object object, AudioListenerComponent& listener, Transform& transform) {
+				const std::optional<TerraEngine::Scene::WorldPose> pose = objects.GetCanonicalWorldPose(object);
+				if(!pose) return;
+				const glm::vec3 forward = pose->rotation * glm::vec3(0.0F, 0.0F, -1.0F);
+				liveListeners.push_back({objects.getUUID(object), objects.getObjectComponentGeneration(object),
+					{}, {forward.x, forward.y, forward.z}, listener.outputMode, listener.active, listener.eligible, pose->position});
+			});
+		}
 		if(!manualAuthoringSnapshot) {
 			data.coordinateMode = AudioCoordinateMode::CanonicalWorld;
 			data.sources = std::move(liveSources); data.listeners = std::move(liveListeners);
@@ -100,20 +145,21 @@ namespace TerraEngine::Audio {
 		// a second safety boundary for explicit controls racing a Play Mode exit.
 		data.gamePaused = !runtimePlaybackEnabled || runtimePlaybackPaused;
 		authoring = AudioAuthoringSnapshot::Create(std::move(data));
+		playback.swap(candidatePlayback);
 	}
-	void AudioSystem::Shutdown() { std::scoped_lock lock(mutex); controls.Stop(); if(backend) { (void)backend->Shutdown(); backend.reset(); } activeVoices.clear(); registeredClips.clear(); playback.clear(); controlReceipts.clear(); failures.clear(); authoring = AudioAuthoringSnapshot::Create({}); manualAuthoringSnapshot = false; frame = 0U; packetSequence = 0U; deviceAvailable = false; initialized = false; }
+	void AudioSystem::Shutdown() { std::scoped_lock lock(mutex); controls.Stop(); if(backend) { (void)backend->Shutdown(); backend.reset(); } activeVoices.clear(); registeredClips.clear(); playback.clear(); playReservations.clear(); published.reset(); controlReceipts.clear(); failures.clear(); authoring = AudioAuthoringSnapshot::Create({}); manualAuthoringSnapshot = false; frame = 0U; packetSequence = 0U; deviceAvailable = false; initialized = false; }
 	std::string AudioSystem::SystemName() { return "AudioSystem"; }
 	TerraEngine::Scheduling::SystemDeclaration AudioSystem::SchedulerDeclaration() {
 		TerraEngine::Scheduling::SystemDeclaration declaration;
 		declaration.name = SystemName(); declaration.phase = "Audio"; declaration.before = {"UISystem", "RenderSystem"};
-		declaration.reads = {"ObjectManager", "RuntimeLayout", "AudioAuthoring", "Canonical world poses", "Audio listeners", "Audio clip generations"};
-		declaration.writes = {"AudioPreparedFrame", "AudioProvider", "AudioDiagnostics"};
+		declaration.reads = {"ObjectManager", "RuntimeLayout", "AudioAuthoring", "Canonical world poses", "Audio listeners", "Audio clip generations", "Audio pending Play reservations"};
+		declaration.writes = {"AudioPreparedFrame", "AudioProvider", "AudioDiagnostics", "Audio source component values", "Scene transaction publication", "Audio control ownership", "Audio playback bindings"};
 		declaration.mainThread = true; declaration.requiresFlushedSceneMutations = true;
 		declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
 		declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::Protected;
 		declaration.hardBoundary = true;
 		declaration.safeSubwork = "Listener selection, checked canonical localization, attenuation, cursor advancement, and voice ranking over immutable records.";
-		declaration.protectedCommit = "Capture source/listener values, drain typed controls, submit one provider packet, and publish immutable snapshots.";
+		declaration.protectedCommit = "Capture source/listener values, commit typed source settings and prepared companion state, acknowledge controls, then publish provider and playback snapshots.";
 		declaration.protectedReason = "Scene capture and audio device calls cannot execute in worker-safe preparation.";
 		declaration.profilingLabel = "Audio"; declaration.omitWhenNoFrameWorkloads = true; declaration.usesDefaultMetadata = false;
 		return declaration;
@@ -122,7 +168,7 @@ namespace TerraEngine::Audio {
 		auto snapshot = TerraEngine::Scheduling::MakeSnapshotPhase("AudioSnapshot", SystemName(), {"Audio components", "Transforms", "Canonical world poses", "Audio listeners", "Audio clip generations", "Audio control queue"}, "AudioSnapshot");
 		snapshot.phase = "Audio";
 		snapshot.stableDescriptorId = "AudioSystem/Audio/AudioSnapshot";
-		snapshot.writes = {"Audio frame snapshot", "Audio receipts"};
+		snapshot.writes = {"Audio frame snapshot", "Audio receipts", "Audio playback bindings", "Audio pending Play reservations", "Audio source component values", "Scene transaction publication", "Audio control ownership"};
 		snapshot.estimatedWorkItemCount = authoring.Data().sources.size();
 		// Live ObjectManager capture is a protected operation. The resulting value
 		// snapshot, rather than component storage, crosses into worker preparation.
@@ -160,7 +206,115 @@ namespace TerraEngine::Audio {
 		};
 		return {std::move(snapshot), std::move(prepare), std::move(commit)};
 	}
-	AudioControlReceipt AudioSystem::SubmitControlBatch(AudioControlBatch batch) { return controls.Submit(std::move(batch)); }
+	AudioGeneration AudioSystem::AllocatePlaybackGeneration() noexcept {
+		const auto allocated = nextPlaybackGeneration;
+		if(allocated != 0U)
+			nextPlaybackGeneration = allocated == std::numeric_limits<AudioGeneration>::max() ? 0U : allocated + 1U;
+		return allocated;
+	}
+	bool AudioSystem::ResolveAdmission(AudioControlBatch& batch, AudioControlReceipt& receipt) {
+		// Queue admission already holds its lock after the system lock. Reserve
+		// every allocation before appending any external predecessor reservation.
+		playReservations.reserve(playReservations.size() + batch.commands.size());
+		std::vector<PlayReservation> staged;
+		staged.reserve(batch.commands.size());
+		if(batch.requestedFrame == 0U) batch.requestedFrame = frame + 1U;
+		receipt.requestedFrame = batch.requestedFrame;
+		auto reject = [&](AudioControlRejection reason, const char* diagnostic) {
+			receipt.rejection = reason;
+			receipt.diagnostic = diagnostic;
+			return false;
+		};
+		for(auto& command : batch.commands) {
+			if(command.kind > AudioControlKind::SetMasterMuted
+				|| (command.targetMode != AudioControlTargetMode::ExactInstance
+					&& command.targetMode != AudioControlTargetMode::BindCurrentAtAdmission))
+				return reject(AudioControlRejection::InvalidValue, "Audio command kind or target mode is unsupported.");
+			if(command.kind > AudioControlKind::SetSourcePitch) continue;
+			const auto source = std::find_if(authoring.Data().sources.begin(), authoring.Data().sources.end(), [&](const auto& item) {
+				return item.identity.objectId == command.source.objectId;
+			});
+			if(source == authoring.Data().sources.end()) return reject(AudioControlRejection::StaleTarget, "Audio source has not been captured or has retired.");
+			// Compatibility is confined to explicitly owned snapshots; production
+			// commands never turn a missing generation into a wildcard lookup.
+			if(manualAuthoringSnapshot && command.source.sceneGeneration == 0U)
+				command.source.sceneGeneration = source->attachment.sceneGeneration;
+			const AudioSourceAttachmentKey attachment{command.source.objectId, command.source.sceneGeneration,
+				command.source.objectGeneration, command.source.componentGeneration};
+			if(!attachment.IsValid() || attachment != source->attachment)
+				return reject(AudioControlRejection::StaleTarget, "Audio source attachment is stale.");
+			if(command.kind == AudioControlKind::Play) {
+				const auto generation = AllocatePlaybackGeneration();
+				if(generation == 0U) return reject(AudioControlRejection::GlobalCapacity, "Audio playback identity capacity is exhausted.");
+				command.source.playbackGeneration = generation;
+				staged.push_back({attachment, batch.requestedFrame, batch.batchSequence, command.commandIndex, generation});
+			} else if(command.kind <= AudioControlKind::Stop) {
+				if(command.targetMode == AudioControlTargetMode::BindCurrentAtAdmission) {
+					const PlayReservation* predecessor = nullptr;
+					const auto order = std::tuple{batch.requestedFrame, batch.batchSequence, command.commandIndex};
+					const auto consider = [&](const PlayReservation& candidate) {
+						const auto candidateOrder = std::tuple{candidate.requestedFrame, candidate.sequence, candidate.commandIndex};
+						if(candidate.attachment == attachment && candidateOrder < order
+							&& (predecessor == nullptr || std::tuple{predecessor->requestedFrame, predecessor->sequence, predecessor->commandIndex} < candidateOrder))
+							predecessor = &candidate;
+					};
+					for(const auto& candidate : playReservations) consider(candidate);
+					for(const auto& candidate : staged) consider(candidate);
+					command.source.playbackGeneration = predecessor == nullptr ? 0U : predecessor->playbackGeneration;
+					if(predecessor == nullptr) {
+						const auto current = std::find_if(playback.begin(), playback.end(), [&](const auto& seed) {
+							return seed.identity.objectId == attachment.objectId && seed.identity.componentGeneration == attachment.componentGeneration
+								&& seed.state != AudioPlaybackState::Stopped && seed.state != AudioPlaybackState::Completed && seed.state != AudioPlaybackState::Failed;
+						});
+						if(current != playback.end()) command.source.playbackGeneration = current->identity.playbackGeneration;
+					}
+				}
+				if(command.source.playbackGeneration == 0U)
+					return reject(AudioControlRejection::StaleTarget, "Audio source has no controllable playback instance.");
+			}
+			if(command.kind <= AudioControlKind::Stop)
+				receipt.resolvedPlaybackGeneration = command.source.playbackGeneration;
+		}
+		// All target checks, allocations and diagnostic construction precede this
+		// trivially copied append. The queue performs only no-fail publication next.
+		for(const auto& reservation : staged) playReservations.push_back(reservation);
+		return true;
+	}
+	AudioControlReceipt AudioSystem::SubmitControlBatch(AudioControlBatch batch) {
+		std::scoped_lock lock(mutex);
+		return controls.Submit(std::move(batch), [](void* owner, AudioControlBatch& staged, AudioControlReceipt& receipt) {
+			return static_cast<AudioSystem*>(owner)->ResolveAdmission(staged, receipt);
+		}, this);
+	}
+	std::optional<AudioSourceBinding> AudioSystem::ReadSourceBinding(std::uint32_t entity) const {
+		std::scoped_lock lock(mutex);
+		for(const auto& source : authoring.Data().sources)
+			if(source.objectEntity == entity && source.attachment.IsValid()) return AudioSourceBinding{entity, source.attachment};
+		return std::nullopt;
+	}
+	std::optional<AudioSourceBinding> AudioSystem::ReadSourceBinding(const TerraEngine::UUID& objectId) const {
+		std::scoped_lock lock(mutex);
+		for(const auto& source : authoring.Data().sources)
+			if(source.attachment.objectId == objectId && source.attachment.IsValid()) return AudioSourceBinding{source.objectEntity, source.attachment};
+		return std::nullopt;
+	}
+	std::optional<AudioSourcePlaybackObservation> AudioSystem::ReadSourcePlayback(const AudioSourceAttachmentKey& attachment) const {
+		std::scoped_lock lock(mutex);
+		if(!published || std::none_of(authoring.Data().sources.begin(), authoring.Data().sources.end(), [&](const auto& source) {
+			return source.attachment == attachment;
+		})) return std::nullopt;
+		// Snapshot and commit are distinct scheduler workloads. A newly captured
+		// attachment must never borrow an older publication with reused UUIDs.
+		if(std::none_of(published->sourceBindings.begin(), published->sourceBindings.end(), [&](const auto& binding) {
+			return binding.attachment == attachment;
+		})) return std::nullopt;
+		for(const auto& voice : published->voices) {
+			if(voice.identity.objectId != attachment.objectId || voice.identity.componentGeneration != attachment.componentGeneration) continue;
+			const auto logical = std::find_if(published->logicalPlayback.begin(), published->logicalPlayback.end(), [&](const auto& seed) { return seed.identity == voice.identity; });
+			if(logical != published->logicalPlayback.end()) return AudioSourcePlaybackObservation{published->frame, voice, logical->state};
+		}
+		return std::nullopt;
+	}
 	std::optional<AudioControlReceipt> AudioSystem::ReadControlReceipt(AudioBatchSequence batchSequence) const {
 		std::scoped_lock lock(mutex);
 		const auto found = std::find_if(controlReceipts.rbegin(), controlReceipts.rend(), [&](const auto& receipt) {
@@ -178,10 +332,34 @@ namespace TerraEngine::Audio {
 	bool AudioSystem::SetMixGroupVolume(const TerraEngine::UUID& id, float volume, std::string& diagnostic) { return mix.SetGroupVolume(id, volume, diagnostic); }
 	bool AudioSystem::SetMixGroupMuted(const TerraEngine::UUID& id, bool muted, std::string& diagnostic) { return mix.SetGroupMuted(id, muted, diagnostic); }
 	bool AudioSystem::RenameMixGroup(const TerraEngine::UUID& id, std::string name, std::string& diagnostic) { return mix.RenameGroup(id, std::move(name), diagnostic); }
-	void AudioSystem::SetAuthoringSnapshot(AudioAuthoringSnapshot snapshot) { std::scoped_lock lock(mutex); authoring = std::move(snapshot); manualAuthoringSnapshot = true; }
+	void AudioSystem::SetAuthoringSnapshot(AudioAuthoringSnapshot snapshot) {
+		std::scoped_lock lock(mutex);
+		auto data = snapshot.Data();
+		for(auto& source : data.sources)
+			if(!source.attachment.IsValid()) source.attachment = {source.identity.objectId, 1U, 1U, source.identity.componentGeneration};
+		auto candidatePlayback = playback;
+		candidatePlayback.erase(std::remove_if(candidatePlayback.begin(), candidatePlayback.end(), [&](const auto& seed) {
+			const auto oldSource = std::find_if(authoring.Data().sources.begin(), authoring.Data().sources.end(), [&](const auto& source) { return source.identity.objectId == seed.identity.objectId; });
+			return oldSource == authoring.Data().sources.end() || std::none_of(data.sources.begin(), data.sources.end(), [&](const auto& source) { return source.attachment == oldSource->attachment; });
+		}), candidatePlayback.end());
+		authoring = AudioAuthoringSnapshot::Create(std::move(data));
+		playback.swap(candidatePlayback);
+		manualAuthoringSnapshot = true;
+	}
 	void AudioSystem::SetConfiguredProvider(std::string value) { std::scoped_lock lock(mutex); if(!initialized) providerId = std::move(value); }
 	void AudioSystem::SetRuntimePlaybackEnabled(bool enabled) {
 		std::scoped_lock lock(mutex);
+		if(enabled != runtimePlaybackEnabled && !manualAuthoringSnapshot) {
+			// Play entry swaps the live scene before script creation. Retire edit
+			// bindings now so a first script facade waits for runtime capture instead
+			// of permanently binding an earlier scene's coincident entity number.
+			auto data = authoring.Data();
+			data.sources.clear(); data.listeners.clear();
+			auto emptyCapture = AudioAuthoringSnapshot::Create(std::move(data));
+			authoring = std::move(emptyCapture);
+			published.reset();
+			playback.clear(); playReservations.clear(); controls.Reset();
+		}
 		runtimePlaybackEnabled = enabled;
 		runtimePlaybackPaused = false;
 		// Leaving Play Mode retires every logical instance. A later Play entry then
@@ -202,13 +380,49 @@ namespace TerraEngine::Audio {
 					&& source.identity.componentGeneration == seed.identity.componentGeneration;
 			});
 		}), playback.end());
-		for(const auto& batch : controls.DrainEligible(frame)) {
+		const auto drained = controls.DrainEligible(frame);
+		// Draining transfers ownership rather than releasing pending capacity. On
+		// any exceptional exit every unacknowledged owner becomes terminal; retries
+		// cannot leave an abandoned in-flight request consuming capacity forever.
+		struct SettlementGuard {
+			AudioControlQueue& queue;
+			const std::vector<AudioControlBatch>& batches;
+			std::vector<PlayReservation>& reservations;
+			~SettlementGuard() {
+				for(const auto& pending : batches) {
+					(void)queue.Complete(pending.completionToken, AudioControlStatus::Rejected,
+						AudioControlRejection::InternalFailure);
+					reservations.erase(std::remove_if(reservations.begin(), reservations.end(), [&](const auto& record) {
+						return record.sequence == pending.batchSequence;
+					}), reservations.end());
+				}
+			}
+		} settlement{controls, drained, playReservations};
+		// Reserve the bounded receipt ring before any live publication. Moving its
+		// owned strings and erasing the oldest element cannot allocate after commit.
+		static_assert(std::is_nothrow_move_constructible_v<AudioControlReceipt>
+			&& std::is_nothrow_move_assignable_v<AudioControlReceipt>);
+		static_assert(std::is_nothrow_move_assignable_v<AudioAuthoringSnapshotData>
+			&& std::is_nothrow_move_assignable_v<AudioAuthoringSnapshot>
+			&& std::is_nothrow_move_assignable_v<std::vector<AudioPlaybackSeed>>);
+		controlReceipts.reserve(257U);
+		for(const auto& batch : drained) {
 			auto candidateData = data;
 			auto candidatePlayback = playback;
 			auto candidateMix = mix.Snapshot();
 			bool mixChanged = false;
 			AudioControlReceipt receipt{batch.batchSequence, batch.requestedFrame, AudioControlStatus::Applied,
 				AudioControlRejection::None, batch.correlationId, {}};
+			const auto settleReceipt = [&]() noexcept {
+				receipt.completionToken = batch.completionToken;
+				for(const auto& command : batch.commands)
+					if(command.kind <= AudioControlKind::Stop) receipt.resolvedPlaybackGeneration = command.source.playbackGeneration;
+				const auto status = receipt.status;
+				const auto rejection = receipt.rejection;
+				controlReceipts.push_back(std::move(receipt));
+				if(controlReceipts.size() > 256U) controlReceipts.erase(controlReceipts.begin());
+				(void)controls.Complete(batch.completionToken, status, rejection);
+			};
 			for(const auto& command : batch.commands) {
 				const AudioSourceIdentity identity{command.source.objectId, command.source.componentGeneration, command.source.playbackGeneration};
 				auto source = std::find_if(candidateData.sources.begin(), candidateData.sources.end(), [&](const auto& item) {
@@ -218,8 +432,10 @@ namespace TerraEngine::Audio {
 					return item.identity == identity;
 				});
 				const bool sourceCommand = command.kind <= AudioControlKind::SetSourcePitch;
+				const AudioSourceAttachmentKey attachment{command.source.objectId, command.source.sceneGeneration,
+					command.source.objectGeneration, command.source.componentGeneration};
 				if(sourceCommand && (identity.objectId == TerraEngine::EMPTY_UUID || identity.componentGeneration == 0U
-					|| source == candidateData.sources.end())) {
+					|| source == candidateData.sources.end() || source->attachment != attachment)) {
 					receipt = {batch.batchSequence, batch.requestedFrame, AudioControlStatus::Rejected,
 						AudioControlRejection::StaleTarget, batch.correlationId, "Audio source target is missing or stale."};
 					break;
@@ -246,7 +462,8 @@ namespace TerraEngine::Audio {
 				case AudioControlKind::Pause:
 				case AudioControlKind::Resume:
 				case AudioControlKind::Stop:
-					if(seed == candidatePlayback.end()) {
+					if(seed == candidatePlayback.end() || seed->state == AudioPlaybackState::Stopped
+						|| seed->state == AudioPlaybackState::Completed || seed->state == AudioPlaybackState::Failed) {
 						receipt = {batch.batchSequence, batch.requestedFrame, AudioControlStatus::Rejected,
 							AudioControlRejection::StaleTarget, batch.correlationId, "Playback generation is no longer active."};
 						break;
@@ -280,24 +497,70 @@ namespace TerraEngine::Audio {
 				receipt = {batch.batchSequence, batch.requestedFrame, AudioControlStatus::Rejected,
 					AudioControlRejection::InvalidValue, batch.correlationId, diagnostic};
 			if(receipt.status != AudioControlStatus::Rejected) {
-				data = std::move(candidateData);
-				playback = std::move(candidatePlayback);
-				if(mixChanged) (void)mix.Replace(std::move(candidateMix), diagnostic);
+				std::vector<TerraEngine::Scene::AudioSourceSettingsUpdate> settings;
+				if(!manualAuthoringSnapshot) {
+					settings.reserve(batch.commands.size());
+					for(const auto& command : batch.commands) {
+						if(command.kind != AudioControlKind::SetSourceVolume && command.kind != AudioControlKind::SetSourcePitch) continue;
+						const AudioSourceAttachmentKey attachment{command.source.objectId, command.source.sceneGeneration,
+							command.source.objectGeneration, command.source.componentGeneration};
+						auto update = std::find_if(settings.begin(), settings.end(), [&](const auto& item) { return item.attachment == attachment; });
+						if(update == settings.end()) { settings.push_back({attachment}); update = std::prev(settings.end()); }
+						// Fold ordered commands into one typed update for each attachment.
+						if(command.kind == AudioControlKind::SetSourceVolume) update->volume = NormalizeAudioUnit(command.scalarValue);
+						else update->pitch = NormalizeAudioPitch(command.scalarValue);
+					}
+				}
+				const auto expectedMixGeneration = candidateMix.generation;
+				auto mixPublication = (mixChanged || !settings.empty())
+					? mix.PrepareReplace(std::move(candidateMix), expectedMixGeneration, diagnostic)
+					: std::optional<AudioMixConfiguration::PreparedPublication>{};
+				if((mixChanged || !settings.empty()) && !mixPublication)
+					receipt = {batch.batchSequence, batch.requestedFrame, AudioControlStatus::Rejected,
+						AudioControlRejection::InvalidValue, batch.correlationId, diagnostic};
+				if(receipt.status != AudioControlStatus::Rejected) {
+					ApplyMixValues(candidateData, mixPublication ? mixPublication->Candidate() : candidateMix);
+					// Complete all immutable storage before live writes. The accepted
+					// source, playback and mix candidates are then adopted by no-fail moves.
+					auto candidateAuthoring = AudioAuthoringSnapshot::Create(candidateData);
+					const auto adoptCompanions = [&]() noexcept {
+						if(mixChanged) mixPublication->Commit();
+						data = std::move(candidateData);
+						playback = std::move(candidatePlayback);
+						authoring = std::move(candidateAuthoring);
+					};
+					if(!settings.empty()) {
+						TerraEngine::Scene::TransactionalMutationBuilder builder("audio-control-" + std::to_string(batch.batchSequence),
+							TerraEngine::Scene::TransactionOrigin::System, "AudioSnapshot source settings");
+						builder.UpdateAudioSourceSettingsBatch(std::move(settings));
+						const auto transaction = builder.Build();
+						TerraEngine::Scene::TransactionCommitOutcome outcome;
+						try {
+							const auto result = TerraEngine::Scene::CommitTransaction(ObjectManager::instance(), transaction, outcome);
+							if(result.status != TerraEngine::Scene::TransactionStatus::Committed)
+								receipt = {batch.batchSequence, batch.requestedFrame, AudioControlStatus::Rejected,
+									AudioControlRejection::StaleTarget, batch.correlationId, result.message};
+						} catch(const TerraEngine::Scene::TransactionRestorationFailure&) {
+							throw;
+						} catch(...) {
+							if(!outcome.committed) throw;
+							// The preallocated outcome survives even allocation failure while
+							// constructing the observer exception. Adopt and acknowledge the
+							// committed logical batch before propagating any such failure.
+							adoptCompanions();
+							settleReceipt();
+							throw;
+						}
+					}
+					if(receipt.status != AudioControlStatus::Rejected) adoptCompanions();
+				}
+				// A source-only guard discards its unchanged mix candidate after
+				// adoption, preserving the unrelated mix generation and values.
 			}
-			controlReceipts.push_back(std::move(receipt));
-			if(controlReceipts.size() > 256U) controlReceipts.erase(controlReceipts.begin());
+			settleReceipt();
 		}
 		const auto mixSnapshot = mix.Snapshot();
-		data.masterVolume = mixSnapshot.master.volume;
-		data.masterMuted = mixSnapshot.master.muted;
-		for(auto& source : data.sources) {
-			auto group = std::find_if(mixSnapshot.groups.begin(), mixSnapshot.groups.end(), [&](const auto& item) {
-				return item.id == source.mixGroupId;
-			});
-			if(group == mixSnapshot.groups.end() && !mixSnapshot.groups.empty()) group = mixSnapshot.groups.begin();
-			source.mixVolume = group == mixSnapshot.groups.end() ? 1.0F : group->volume;
-			source.mixMuted = group != mixSnapshot.groups.end() && group->muted;
-		}
+		ApplyMixValues(data, mixSnapshot);
 		authoring = AudioAuthoringSnapshot::Create(std::move(data));
 	}
 	void AudioSystem::PreparePhase() { prepared = PrepareAudioFrame(authoring, playback); }
@@ -399,7 +662,11 @@ namespace TerraEngine::Audio {
 		// playback became visible in that case; readers retain the last complete
 		// immutable publication while diagnostics still expose the failure episode.
 		if(!preservePlaybackPublication) {
-			published = std::make_shared<const AudioPlaybackSnapshot>(AudioPlaybackSnapshot{frame, prepared.voices});
+			AudioPlaybackSnapshot candidate{frame, prepared.voices, playback};
+			candidate.sourceBindings.reserve(authoring.Data().sources.size());
+			for(const auto& source : authoring.Data().sources)
+				candidate.sourceBindings.push_back({source.objectEntity, source.attachment});
+			published = std::make_shared<const AudioPlaybackSnapshot>(std::move(candidate));
 		}
 		auto diagnostics = std::make_shared<AudioDiagnosticsSnapshot>();
 		diagnostics->provider = descriptor;
@@ -408,7 +675,7 @@ namespace TerraEngine::Audio {
 		diagnostics->failures = failures;
 		diagnostics->controlReceipts = controlReceipts;
 		diagnostics->scheduler = {
-			{"AudioSnapshot", "protected snapshot", "components/canonical world poses/listeners/clip generations/controls", "frame snapshot/receipts", "controls visible to prepare", false, authoring.Data().sources.size()},
+			{"AudioSnapshot", "protected snapshot", "components/canonical world poses/listeners/clip generations/controls/pending Play reservations", "frame snapshot/receipts/source component values/scene transaction publication/source bindings/terminal ownership", "typed source commits and controls visible to prepare; frame-end mutations retain their declared flush", false, authoring.Data().sources.size()},
 			{"AudioPrepare", "worker prepare", "immutable canonical-or-shared-local frame/prior playback", "listener-relative prepared plan", "no live mutation", true, authoring.Data().sources.size()},
 			{"AudioCommit", "protected commit", "prepared plan/observations", "provider/snapshots", "visible after commit", false, prepared.voices.size()}
 		};

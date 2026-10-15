@@ -23,6 +23,7 @@ add_executable(TerraEngine-EditorTests
 	Audio/AudioClipCompilerTests.cpp
 	Audio/AudioImportPlaybackTests.cpp
 	Audio/AudioAuthoringPersistenceTests.cpp
+	Audio/AudioControlPersistenceTests.cpp
 	Audio/AudioEditorControlTests.cpp
 	Audio/AudioExportTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/AudioClipCompiler.cpp
@@ -824,3 +825,4 @@ endif()
 
 # Preserve the frozen four-case diagnostics floor in installed native slices.
 terraengine_add_correctness_slice(Editor.RuntimeMemorySafety.Diagnostics TerraEngine-EditorTests Editor.RuntimeMemorySafety.Diagnostics 4)
+terraengine_add_correctness_slice(Editor.AudioControlPersistence TerraEngine-EditorTests Editor.AudioControlPersistence 4)

@@ -297,6 +297,13 @@ namespace TerraEngine::Scheduling {
 			{ "AudioPreparedFrame", "Deterministic provider-neutral voice plan.", "Committed only by AudioSystem at its protected boundary." },
 			{ "AudioProvider", "Private device and decoder state owned by the selected audio backend.", "Never read from worker, managed, or editor code." },
 			{ "AudioDiagnostics", "Immutable playback/provider/resource/control diagnostic publication.", "Readers never access the live backend." },
+			// AudioSnapshot owns these protected writes. Register their names here
+			// as well as in its workload so headless and full schedules can validate.
+			{ "Audio source component values", "Existing source volume/pitch fields committed by typed transactions.", "Only the protected AudioSnapshot boundary writes live components." },
+			{ "Scene transaction publication", "Atomic source-setting journal and value notifications.", "Rejected batches restore authored state before leaving the boundary." },
+			{ "Audio control ownership", "Queued and in-flight requests retained until terminal completion.", "Admission and completion follow the system-before-queue lock order." },
+			{ "Audio playback bindings", "Captured scene/object/component attachment identities.", "Workers receive immutable full-width binding observations." },
+			{ "Audio pending Play reservations", "Admission-ordered engine playback identities awaiting application.", "Controls freeze their predecessor at admission and never rebind later." },
 			{ "SceneMutationQueue", "Deferred structural scene mutation requests.", "Feeds deferred entity/component mutation in Part 3." },
 			{ "Scripting", "Managed runtime, script assemblies, and script component state.", "May later expose script component query resources." },
 			{ "RuntimeTimeQueue", "Validated managed time-scale requests awaiting the next frame-start publication.", "Consumed before scheduler workload planning so every system observes one scale." },

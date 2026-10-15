@@ -29,6 +29,8 @@ namespace TerraEngine::Audio {
 		std::uint32_t priority = 128U;
 		bool enabled = true, loop = false, spatial = true, mixMuted = false;
 		std::optional<TerraEngine::Scene::WorldPosition> worldPosition;
+		AudioSourceAttachmentKey attachment;
+		std::uint32_t objectEntity = 0U;
 	};
 	struct AudioAuthoringListenerRecord { TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID; AudioGeneration componentGeneration = 0U; AudioVector3 position; AudioVector3 forward{0.0F, 0.0F, -1.0F}; AudioOutputMode outputMode = AudioOutputMode::Stereo; bool enabled = true, eligible = true; std::optional<TerraEngine::Scene::WorldPosition> worldPosition; };
 	struct AudioAuthoringSnapshotData { AudioFrame frame = 0U; float deltaSeconds = 0.0F; std::vector<AudioAuthoringSourceRecord> sources; std::vector<AudioAuthoringListenerRecord> listeners; float masterVolume = 1.0F; bool masterMuted = false, gamePaused = false; std::uint32_t voiceLimit = 64U; AudioCoordinateMode coordinateMode = AudioCoordinateMode::SharedLocalFrame; };

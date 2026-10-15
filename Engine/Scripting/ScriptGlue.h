@@ -19,7 +19,7 @@ inline constexpr std::uint32_t kNativeRuntimeAbiVersion = 1U;
 inline constexpr std::uint32_t kNativeRuntimeDiagnosticBytes = 192U;
 inline constexpr std::uint32_t kNativeInputKeyCapacity = 128U;
 inline constexpr std::uint32_t kNativeInputMouseButtonCapacity = 8U;
-inline constexpr std::uint32_t kNativeAudioAbiVersion = 1U;
+inline constexpr std::uint32_t kNativeAudioAbiVersion = 2U;
 inline constexpr std::uint32_t kNativeAudioDiagnosticBytes = 192U;
 // Navigation records use their own ABI version so gameplay route data can grow
 // independently of audio, physics, and the generic runtime dispatcher.
@@ -512,30 +512,39 @@ static_assert(offsetof(NativeTimeSnapshot, header) == 0U);
 static_assert(offsetof(NativeSceneRenderSettings, header) == 0U);
 static_assert(offsetof(NativeResourceStreamingStatus, header) == 0U);
 
-// Audio uses a deliberately small, fixed-width ABI. Native code copies every
-// request into the protected control queue and reads only committed snapshots.
+// Audio ABI v2 retains full attachment lifetimes and engine-owned playback IDs.
+// Fixed Pack8 records contain copied values only; provider ABI remains separate.
 #pragma pack(push, 8)
 struct NativeAudioAbiHeader { std::uint32_t abiVersion; std::uint32_t structSize; };
-
 enum class NativeAudioStatus : std::uint32_t {
-	Success = 0U, Queued, Accepted, NotFound, StaleTarget,
+	Success = 0u, Queued, Accepted, NotFound, StaleTarget,
 	InvalidArgument, LimitExceeded, ProviderFailure, VersionMismatch
 };
-
-enum class NativeAudioCommandKind : std::uint32_t { Play = 0U, Pause, Resume, Stop };
-
+enum class NativeAudioCommandKind : std::uint32_t { Play = 0u, Pause, Resume, Stop };
+enum class NativeAudioTargetMode : std::uint32_t { ExactInstance = 0u, BindCurrentAtAdmission = 1u };
+struct NativeAudioSourceTarget {
+	NativePhysicsUuid objectId;
+	std::uint64_t sceneGeneration;
+	std::uint64_t objectGeneration;
+	std::uint64_t componentGeneration;
+};
+struct NativeAudioSourceBinding {
+	NativeAudioAbiHeader header;
+	NativeAudioStatus status;
+	std::uint32_t objectEntity;
+	NativeAudioSourceTarget target;
+};
 struct NativeAudioCommandRequest {
 	NativeAudioAbiHeader header;
-	std::uint32_t objectEntity;
-	std::uint32_t componentGeneration;
-	std::uint32_t playbackGeneration;
 	NativeAudioCommandKind kind;
+	NativeAudioTargetMode targetMode;
+	NativeAudioSourceTarget target;
+	std::uint64_t playbackGeneration;
 	std::uint64_t requestedFrame;
 	std::uint64_t producerId;
 	std::uint64_t correlationId;
 	std::uint64_t idempotencyKey;
 };
-
 struct NativeAudioCommandReceipt {
 	NativeAudioAbiHeader header;
 	NativeAudioStatus status;
@@ -543,21 +552,21 @@ struct NativeAudioCommandReceipt {
 	std::uint64_t batchSequence;
 	std::uint64_t requestedFrame;
 	std::uint64_t correlationId;
+	std::uint64_t resolvedPlaybackGeneration;
 	char diagnostic[kNativeAudioDiagnosticBytes];
 };
-
 struct NativeAudioPlaybackState {
 	NativeAudioAbiHeader header;
 	NativeAudioStatus status;
 	std::uint32_t state;
-	std::uint32_t playbackGeneration;
+	std::uint64_t playbackGeneration;
 	std::uint32_t audible;
+	std::uint32_t reserved;
 	std::uint64_t frame;
 	std::uint64_t logicalFrame;
 	float gain;
 	float pitch;
 };
-
 struct NativeAudioMixState {
 	NativeAudioAbiHeader header;
 	NativeAudioStatus status;
@@ -567,11 +576,15 @@ struct NativeAudioMixState {
 	std::uint32_t reserved;
 };
 #pragma pack(pop)
-
-static_assert(offsetof(NativeAudioCommandRequest, header) == 0U);
-static_assert(offsetof(NativeAudioCommandReceipt, header) == 0U);
-static_assert(offsetof(NativeAudioPlaybackState, header) == 0U);
-static_assert(offsetof(NativeAudioMixState, header) == 0U);
+static_assert(sizeof(NativeAudioSourceTarget) == 40u && sizeof(NativeAudioSourceBinding) == 56u);
+static_assert(sizeof(NativeAudioCommandRequest) == 96u && sizeof(NativeAudioCommandReceipt) == 240u);
+static_assert(sizeof(NativeAudioPlaybackState) == 56u && sizeof(NativeAudioMixState) == 32u);
+static_assert(offsetof(NativeAudioSourceBinding, header) == 0u && offsetof(NativeAudioSourceBinding, target) == 16u);
+static_assert(offsetof(NativeAudioCommandRequest, header) == 0u && offsetof(NativeAudioCommandRequest, target) == 16u
+	&& offsetof(NativeAudioCommandRequest, playbackGeneration) == 56u);
+static_assert(offsetof(NativeAudioCommandReceipt, header) == 0u && offsetof(NativeAudioCommandReceipt, diagnostic) == 48u);
+static_assert(offsetof(NativeAudioPlaybackState, header) == 0u && offsetof(NativeAudioPlaybackState, playbackGeneration) == 16u);
+static_assert(offsetof(NativeAudioMixState, header) == 0u);
 
 // Navigation ABI v2 carries only fixed-width, copied engine values. In
 // particular, provider objects, STL containers, bool fields, and borrowed route
@@ -1125,10 +1138,12 @@ extern "C" {
 	TERRAENGINE_API NativeAudioStatus Native_Audio_SubmitCommand(
 		const NativeAudioCommandRequest* request,
 		NativeAudioCommandReceipt* receipt);
+	TERRAENGINE_API NativeAudioStatus Native_Audio_BindSource(
+		std::uint32_t objectEntity, NativeAudioSourceBinding* binding);
 	TERRAENGINE_API NativeAudioStatus Native_Audio_ReadPlayback(
-		std::uint32_t objectEntity,
-		std::uint32_t componentGeneration,
-		NativeAudioPlaybackState* state);
+		std::uint32_t legacyObjectEntity, std::uint32_t legacyComponentGeneration, void* legacyState);
+	TERRAENGINE_API NativeAudioStatus Native_Audio_ReadPlaybackV2(
+		const NativeAudioSourceBinding* binding, NativeAudioPlaybackState* state);
 	TERRAENGINE_API NativeAudioStatus Native_Audio_ReadMasterMix(NativeAudioMixState* state);
 	TERRAENGINE_API NativeAudioStatus Native_Audio_SetMasterMix(const NativeAudioMixState* state);
 

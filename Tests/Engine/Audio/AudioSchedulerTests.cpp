@@ -22,6 +22,12 @@ namespace TerraEngine::Tests {
 				"AudioSystem must declare its protected phase and boundary.");
 			context.Expect(workloads.size() == 3U && workloads[1].workerEligible && !workloads[1].mainThreadRequired,
 				"Audio must expose protected snapshot, worker preparation, and protected commit workloads.");
+			// Settings commit at the existing protected capture boundary. Resource
+			// declarations expose these writes to scheduling and diagnostics.
+			for(const auto* resource : {"Audio source component values", "Scene transaction publication", "Audio control ownership", "Audio playback bindings"}) {
+				context.Expect(std::find(workloads[0].writes.begin(), workloads[0].writes.end(), resource) != workloads[0].writes.end(),
+					"AudioSnapshot must declare every live source, transaction and ownership write.");
+			}
 			context.Expect(workloads.size() == 3U
 				&& workloads[0].phase == "Audio"
 				&& workloads[1].phase == "Audio"

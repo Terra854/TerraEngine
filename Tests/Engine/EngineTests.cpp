@@ -140,6 +140,10 @@ namespace TerraEngine::Tests {
 	void RegisterAudioFileFormatTests(TestRegistry& registry);
 	void RegisterAudioResourceTests(TestRegistry& registry);
 	void RegisterAudioControlQueueTests(TestRegistry& registry);
+	void RegisterAudioControlContinuityTests(TestRegistry& registry);
+	void RegisterAudioPlaybackBindingTests(TestRegistry& registry);
+	void RegisterAudioSourceSettingsTests(TestRegistry& registry);
+	void RegisterAudioSourceSettingsTransactionTests(TestRegistry& registry);
 	void RegisterAudioControlIntegrationTests(TestRegistry& registry);
 	void RegisterAudioPlaybackTests(TestRegistry& registry);
 	void RegisterAudioSpatialTests(TestRegistry& registry);
@@ -619,6 +623,10 @@ int main() {
 	TerraEngine::Tests::RegisterAudioFileFormatTests(registry);
 	TerraEngine::Tests::RegisterAudioResourceTests(registry);
 	TerraEngine::Tests::RegisterAudioControlQueueTests(registry);
+	TerraEngine::Tests::RegisterAudioControlContinuityTests(registry);
+	TerraEngine::Tests::RegisterAudioPlaybackBindingTests(registry);
+	TerraEngine::Tests::RegisterAudioSourceSettingsTests(registry);
+	TerraEngine::Tests::RegisterAudioSourceSettingsTransactionTests(registry);
 	TerraEngine::Tests::RegisterAudioControlIntegrationTests(registry);
 	TerraEngine::Tests::RegisterAudioPlaybackTests(registry);
 	TerraEngine::Tests::RegisterAudioSpatialTests(registry);

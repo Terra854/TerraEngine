@@ -11,7 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <deque>
+#include <list>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -62,9 +62,18 @@ namespace TerraEngine::Audio {
 	// newly-created component that happens to reuse the same ECS storage slot.
 	struct AudioSourceTarget {
 		TerraEngine::UUID objectId{};
-		std::uint32_t objectGeneration = 0U;
-		std::uint32_t componentGeneration = 0U;
-		std::uint32_t playbackGeneration = 0U;
+		std::uint64_t objectGeneration = 0U;
+		std::uint64_t componentGeneration = 0U;
+		std::uint64_t playbackGeneration = 0U;
+		std::uint64_t sceneGeneration = 0U;
+	};
+
+	// Exact callers keep an observed playback; bind-current callers ask admission
+	// to freeze the latest eligible instance before the request becomes visible.
+	enum class AudioControlTargetMode : std::uint8_t { ExactInstance, BindCurrentAtAdmission };
+	struct AudioControlCompletionToken {
+		std::uint64_t epoch = 0U;
+		AudioBatchSequence sequence = 0U;
 	};
 
 	struct AudioControlCommand {
@@ -74,6 +83,7 @@ namespace TerraEngine::Audio {
 		float scalarValue = 0.0F;
 		bool booleanValue = false;
 		std::uint32_t commandIndex = 0U;
+		AudioControlTargetMode targetMode = AudioControlTargetMode::ExactInstance;
 	};
 
 	struct AudioControlBatch {
@@ -84,6 +94,7 @@ namespace TerraEngine::Audio {
 		std::string idempotencyKey;
 		std::string requestFingerprint;
 		std::vector<AudioControlCommand> commands;
+		AudioControlCompletionToken completionToken;
 	};
 
 	struct AudioControlReceipt {
@@ -93,6 +104,20 @@ namespace TerraEngine::Audio {
 		AudioControlRejection rejection = AudioControlRejection::None;
 		std::string correlationId;
 		std::string diagnostic;
+		AudioControlCompletionToken completionToken;
+		std::uint64_t resolvedPlaybackGeneration = 0U;
+	};
+
+	// Counters are copied under the queue lock. Queued observations deliberately
+	// differ from pending capacity, which remains owned until acknowledgement.
+	struct AudioControlQueueStatistics {
+		std::size_t queuedCommands = 0U;
+		std::size_t inFlightCommands = 0U;
+		std::size_t pendingCommands = 0U;
+		std::size_t completedRecords = 0U;
+		std::size_t retainedKeyCount = 0U;
+		std::uint64_t evictedRecords = 0U;
+		std::uint64_t epoch = 0U;
 	};
 
 	struct AudioControlQueueLimits {
@@ -110,20 +135,35 @@ namespace TerraEngine::Audio {
 	public:
 		explicit AudioControlQueue(AudioControlQueueLimits limits = {});
 
-		AudioControlReceipt Submit(AudioControlBatch batch);
+		// The optional resolver runs only for a new, fully staged admission. It
+		// must stage external reservations before returning true, and undo them on
+		// failure. No queue allocation follows it, so successful publication cannot
+		// strand an allocated playback identity or accepted predecessor record.
+		using AdmissionResolver = bool(*)(void*, AudioControlBatch&, AudioControlReceipt&);
+		AudioControlReceipt Submit(AudioControlBatch batch, AdmissionResolver resolver = nullptr, void* resolverContext = nullptr);
 		std::vector<AudioControlBatch> DrainEligible(AudioFrameIndex frame);
+		bool Complete(AudioControlCompletionToken token, AudioControlStatus status,
+			AudioControlRejection rejection = AudioControlRejection::None) noexcept;
 		void Stop();
 		void Reset();
 
 		[[nodiscard]] std::size_t QueuedCommandCount() const;
 		[[nodiscard]] std::size_t Capacity() const noexcept;
 		[[nodiscard]] bool IsStopped() const;
+		[[nodiscard]] AudioControlQueueStatistics Statistics() const;
 
 	private:
-		struct IdempotencyRecord {
-			std::string fingerprint;
-			AudioBatchSequence sequence = 0U;
+		enum class RequestState : std::uint8_t { Queued, InFlight, Terminal };
+		struct RequestRecord {
+			AudioControlBatch original;
+			AudioControlBatch resolved;
+			AudioControlReceipt receipt;
+			RequestState state = RequestState::Queued;
 		};
+		using RequestList = std::list<RequestRecord>;
+		using RequestIterator = RequestList::iterator;
+		static bool Equivalent(const AudioControlBatch& left, const AudioControlBatch& right) noexcept;
+		void RetireAll() noexcept;
 
 		AudioControlReceipt Reject(
 			const AudioControlBatch& batch,
@@ -132,10 +172,15 @@ namespace TerraEngine::Audio {
 
 		AudioControlQueueLimits m_Limits;
 		mutable std::mutex m_Mutex;
-		std::deque<AudioControlBatch> m_Queued;
+		RequestList m_Pending;
+		RequestList m_Completed;
 		std::unordered_map<std::uint64_t, std::size_t> m_ProducerCommandCounts;
-		std::unordered_map<std::string, IdempotencyRecord> m_Idempotency;
+		std::unordered_map<std::string, RequestIterator> m_Idempotency;
+		std::unordered_map<AudioBatchSequence, RequestIterator> m_BySequence;
 		std::size_t m_QueuedCommandCount = 0U;
+		std::size_t m_PendingCommandCount = 0U;
+		std::uint64_t m_Epoch = 1U;
+		std::uint64_t m_EvictedRecords = 0U;
 		AudioBatchSequence m_NextSequence = 1U;
 		bool m_Stopped = false;
 	};

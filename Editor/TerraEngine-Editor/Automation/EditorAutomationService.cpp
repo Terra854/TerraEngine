@@ -2371,11 +2371,19 @@ namespace TerraEngine::Editor::Automation
 				}
 				const auto objectId = TerraEngine::ParseUUID(request.arguments.value("objectId", std::string{}));
 				if(!objectId) { result.message = "audio.control requires a 32-character objectId."; return result; }
+				// Resolve only protected captured metadata. Automation may submit from
+				// another system and must never dereference live component storage.
+				const auto binding = audio.ReadSourceBinding(*objectId);
+				if(!binding) { result.error = ErrorCategory::MissingTarget; result.message = "Audio source has not been captured or was retired."; return result; }
 				TerraEngine::Audio::AudioControlCommand command;
 				command.source.objectId = *objectId;
-				command.source.objectGeneration = request.arguments.value("objectGeneration", 0U);
-				command.source.componentGeneration = request.arguments.value("componentGeneration", 0U);
-				command.source.playbackGeneration = request.arguments.value("playbackGeneration", 0U);
+				command.source.sceneGeneration = request.arguments.value("sceneGeneration", binding->attachment.sceneGeneration);
+				command.source.objectGeneration = request.arguments.value("objectGeneration", binding->attachment.objectGeneration);
+				command.source.componentGeneration = request.arguments.value("componentGeneration", binding->attachment.componentGeneration);
+				command.source.playbackGeneration = request.arguments.value("playbackGeneration", std::uint64_t{0U});
+				command.targetMode = request.arguments.contains("playbackGeneration")
+					? TerraEngine::Audio::AudioControlTargetMode::ExactInstance
+					: TerraEngine::Audio::AudioControlTargetMode::BindCurrentAtAdmission;
 				const std::string kind = request.arguments.value("kind", std::string{});
 				if(kind == "play") command.kind = TerraEngine::Audio::AudioControlKind::Play;
 				else if(kind == "pause") command.kind = TerraEngine::Audio::AudioControlKind::Pause;
@@ -2386,12 +2394,28 @@ namespace TerraEngine::Editor::Automation
 				batch.requestedFrame = request.arguments.value("requestedFrame", 0ULL);
 				batch.producerId = request.arguments.value("producerId", 2ULL);
 				batch.correlationId = request.correlationId; batch.idempotencyKey = request.idempotencyKey;
-				batch.requestFingerprint = request.arguments.dump(); batch.commands.push_back(command);
+				// Typed equivalence already covers every decoded command field. Keep
+				// transport producer/correlation metadata outside retry identity.
+				batch.requestFingerprint = "editor-audio-v2"; batch.commands.push_back(command);
 				const auto receipt = audio.SubmitControlBatch(std::move(batch));
 				result.ok = receipt.status != TerraEngine::Audio::AudioControlStatus::Rejected;
-				result.error = result.ok ? ErrorCategory::Internal : ErrorCategory::QueueFull;
+				result.error = ErrorCategory::Internal;
+				if(!result.ok) {
+					// Capacity, stale identity and invalid payloads are distinct user
+					// outcomes; report the queue's actual admission result faithfully.
+					using Rejection = TerraEngine::Audio::AudioControlRejection;
+					switch(receipt.rejection) {
+					case Rejection::GlobalCapacity: case Rejection::ProducerCapacity: case Rejection::BatchCapacity:
+						result.error = ErrorCategory::QueueFull; break;
+					case Rejection::StaleTarget: result.error = ErrorCategory::StaleTarget; break;
+					case Rejection::InvalidTarget: result.error = ErrorCategory::MissingTarget; break;
+					case Rejection::IdempotencyConflict: result.error = ErrorCategory::Conflict; break;
+					default: result.error = ErrorCategory::Validation; break;
+					}
+				}
 				result.message = receipt.diagnostic;
 				result.data = {{"accepted", result.ok}, {"batchSequence", receipt.batchSequence},
+					{"resolvedPlaybackGeneration", receipt.resolvedPlaybackGeneration},
 					{"status", static_cast<std::uint32_t>(receipt.status)}, {"rejection", static_cast<std::uint32_t>(receipt.rejection)},
 					{"visibilityBoundary", "next_audio_commit"}};
 				return result;

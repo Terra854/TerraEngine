@@ -8,6 +8,8 @@
 #include <mutex>
 #include <unordered_set>
 #include <utility>
+#include <limits>
+#include <type_traits>
 
 namespace TerraEngine::Audio {
 	namespace {
@@ -29,6 +31,42 @@ namespace TerraEngine::Audio {
 	AudioMixSnapshot AudioMixConfiguration::Snapshot() const {
 		std::shared_lock lock(m_Mutex);
 		return m_State;
+	}
+
+	AudioMixConfiguration::PreparedPublication::PreparedPublication(AudioMixConfiguration& owner,
+		std::unique_lock<std::shared_mutex> lock, AudioMixSnapshot candidate) noexcept
+		: m_Owner(&owner), m_Lock(std::move(lock)), m_Candidate(std::move(candidate)) {}
+
+	AudioMixConfiguration::PreparedPublication::PreparedPublication(PreparedPublication&& other) noexcept
+		: m_Owner(std::exchange(other.m_Owner, nullptr)), m_Lock(std::move(other.m_Lock)), m_Candidate(std::move(other.m_Candidate)) {}
+
+	void AudioMixConfiguration::PreparedPublication::Commit() noexcept {
+		static_assert(std::is_nothrow_swappable_v<AudioMixSnapshot>);
+		if (!m_Owner) return;
+		// Swapping owned vectors transfers their allocations rather than allocating
+		// after scene state has committed. Retain the lock through companion adoption.
+		using std::swap;
+		swap(m_Owner->m_State, m_Candidate);
+		m_Owner = nullptr;
+	}
+
+	std::optional<AudioMixConfiguration::PreparedPublication> AudioMixConfiguration::PrepareReplace(
+		AudioMixSnapshot candidate, std::uint64_t expectedGeneration, std::string& diagnostic) {
+		if (!Validate(candidate, diagnostic)) return std::nullopt;
+		candidate.master.volume = NormalizeVolume(candidate.master.volume);
+		for (auto& group : candidate.groups) group.volume = NormalizeVolume(group.volume);
+		std::unique_lock lock(m_Mutex);
+		if (expectedGeneration == 0U || expectedGeneration != m_State.generation) {
+			diagnostic = "Audio mix changed after control preparation.";
+			return std::nullopt;
+		}
+		if (m_State.generation == std::numeric_limits<std::uint64_t>::max()) {
+			diagnostic = "Audio mix publication generation is exhausted.";
+			return std::nullopt;
+		}
+		candidate.generation = m_State.generation + 1U;
+		diagnostic.clear();
+		return PreparedPublication(*this, std::move(lock), std::move(candidate));
 	}
 
 	float AudioMixConfiguration::NormalizeVolume(float volume) noexcept {

@@ -2262,7 +2262,7 @@ namespace TerraEngine
 		[DllImport("TerraEngine")]
 		internal static extern uint Native_Physics_GetAbiVersion();
 
-		// Audio v1 uses caller-owned fixed-width records and the engine's protected
+		// Audio v2 uses caller-owned fixed-width records and the engine's protected
 		// queue/snapshot boundaries; no provider handle crosses managed code.
 		[DllImport("TerraEngine")]
 		internal static extern uint Native_Audio_GetAbiVersion();
@@ -2272,11 +2272,17 @@ namespace TerraEngine
 			ref Audio.NativeAudioCommandRequest request,
 			ref Audio.NativeAudioCommandReceipt receipt);
 
-		[DllImport("TerraEngine")]
+		// A distinct export preserves clean rejection of the old three-argument
+		// v1 entry point instead of interpreting an integer as a record pointer.
+		[DllImport("TerraEngine", EntryPoint = "Native_Audio_ReadPlaybackV2")]
 		internal static extern Audio.AudioStatus Native_Audio_ReadPlayback(
-			uint objectEntity,
-			uint componentGeneration,
+			ref Audio.NativeAudioSourceBinding binding,
 			ref Audio.NativeAudioPlaybackState state);
+
+		// Audio binding reads an immutable protected capture, never live ECS data.
+		[DllImport("TerraEngine", CallingConvention = CallingConvention.Cdecl)]
+		internal static extern Audio.AudioStatus Native_Audio_BindSource(
+			uint objectEntity, ref Audio.NativeAudioSourceBinding binding);
 
 		[DllImport("TerraEngine")]
 		internal static extern Audio.AudioStatus Native_Audio_ReadMasterMix(ref Audio.NativeAudioMixState state);

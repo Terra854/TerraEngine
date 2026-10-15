@@ -69,6 +69,10 @@ add_executable(TerraEngine-EngineTests
 	Audio/AudioFileFormatTests.cpp
 	Audio/AudioResourceTests.cpp
 	Audio/AudioControlQueueTests.cpp
+	Audio/AudioControlContinuityTests.cpp
+	Audio/AudioPlaybackBindingTests.cpp
+	Audio/AudioSourceSettingsTests.cpp
+	Scene/AudioSourceSettingsTransactionTests.cpp
 	Audio/AudioControlIntegrationTests.cpp
 	Audio/AudioPlaybackTests.cpp
 	Audio/AudioSpatialTests.cpp
@@ -1065,10 +1069,13 @@ function(terraengine_add_correctness_slice name target filter minimum_cases)
 		TIMEOUT 135 RUN_SERIAL TRUE
 		ENVIRONMENT "TERRAENGINE_TEST_FILTER=${filter};TERRAENGINE_THREADPOOL_WORKERS=${worker_count}")
 endfunction()
-terraengine_add_correctness_slice(Engine.SceneMutationFailureSafety TerraEngine-EngineTests Engine.SceneMutationFailureSafety 42)
+terraengine_add_correctness_slice(Engine.SceneMutationFailureSafety TerraEngine-EngineTests Engine.SceneMutationFailureSafety 52)
 terraengine_add_correctness_slice(Engine.ResourceAsyncLifecycle TerraEngine-EngineTests Engine.ResourceAsyncLifecycle 28)
 terraengine_add_correctness_slice(Engine.SceneSaveFailureSafety TerraEngine-EngineTests Scene.SaveFailureSafety 10)
 terraengine_add_correctness_slice(Engine.AudioWorldCellCapture TerraEngine-EngineTests Audio.WorldCellCapture 5)
+terraengine_add_correctness_slice(Engine.AudioControlContinuity TerraEngine-EngineTests Audio.ControlContinuity 12)
+terraengine_add_correctness_slice(Engine.AudioPlaybackBinding TerraEngine-EngineTests Audio.PlaybackBinding 10)
+terraengine_add_correctness_slice(Engine.AudioSourceSettings TerraEngine-EngineTests Audio.SourceSettings 10)
 terraengine_add_correctness_slice(Engine.FrameFailureLifecycle TerraEngine-EngineTests Engine.FrameFailureLifecycle 7)
 terraengine_add_correctness_slice(Engine.OwnedProcess TerraEngine-EngineTests Engine.OwnedProcess 6)
 

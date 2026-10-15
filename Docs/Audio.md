@@ -166,6 +166,37 @@ repository-locked `linux-x64` runtime and NativeAOT packs. WSL exposed no Linux
 playback device, so audible Linux output remains the only unexecuted Linux audio
 lane; see `Docs/LinuxSupport.md`.
 
+## Long-running controls and source identity
+
+Audio retry keys are global across producers. A matching retry returns the
+original admission and resolved playback ID without applying the command again.
+Pending requests retain capacity until the protected audio owner acknowledges
+them. Only the most recent 4,096 completed keyed requests are retained; once a
+key expires, submitting it again creates a new request. Retrying does not extend
+that retention window. Queue diagnostics distinguish queued, in-flight and
+completed ownership.
+
+The engine allocates every nonzero 64-bit playback ID, including autoplay.
+Pause, Resume and Stop bind the current eligible instance when admitted, so a
+fresh managed AudioSource facade can control autoplay without first calling
+Play. A pending earlier Play can be targeted in the same boundary; a future Play
+does not capture an earlier-frame control. Playback methods and ReadState retain
+the facade's captured scene, object and component attachment. Replacing that
+attachment makes those operations stale. Existing reflected Clip, Volume and
+Loop properties retain the generic authored component access contract. Rebuild
+managed callers with the installed audio bridge v2 runtime;
+incompatible v1 packets are rejected. The separate provider contract remains v2.
+
+Accepted source volume and pitch controls update the existing durable component
+fields at AudioSnapshot. Later captures and scene saves retain them until another
+control or authored edit supersedes them. An authored same-value edit still
+counts as a later write. Source value edits preserve playback attachment identity;
+component removal or replacement retires it. A rejected mixed batch publishes no
+partial source, playback or mix change.
+
+The installed continuity acceptance runner and exact test selections are
+documented in `Docs/Testing.md` and `Tests/Tools/Audio/README.md`.
+
 ## Troubleshooting
 
 - **No sound with valid logical voices:** check the diagnostics provider/device

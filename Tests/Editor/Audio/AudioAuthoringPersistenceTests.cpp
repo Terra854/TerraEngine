@@ -49,6 +49,27 @@ namespace TerraEngine::EditorTests
 
 	void RegisterAudioAuthoringPersistenceTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.AudioAuthoring.SameValueSourceEditUsesValueRevisionOnly", [](TestContext& context) {
+			ComponentRegistry::RegisterAllComponents();
+			auto& objects = ObjectManager::instance();
+			objects.clear();
+			const auto object = objects.createObject("Stable source value edit");
+			auto* source = objects.AddComponent<AudioSourceComponent>(object);
+			source->volume = 0.25F;
+			const auto component = objects.getObjectComponentGeneration(object);
+			const auto binding = objects.getObjectBindingGeneration(object);
+			const auto valueRevision = objects.GetComponentValueMutationRevision(AudioSourceComponent::kComponentName);
+			const auto id = objects.getUUID(object);
+			const auto result = TerraEngine::Scene::CommitTransaction(objects,
+				TerraEngine::Scene::TransactionalMutationBuilder("same-source-value", TerraEngine::Scene::TransactionOrigin::Editor)
+					.ObserveScene(objects).ObserveObject(objects, id)
+					.UpdateComponentProperty(id, "AudioSourceComponent", "volume", TerraEngine::Reflection::Variant{0.25F}).Build());
+			const bool valid = result.status == TerraEngine::Scene::TransactionStatus::Committed
+				&& component == objects.getObjectComponentGeneration(object) && binding == objects.getObjectBindingGeneration(object)
+				&& objects.GetComponentValueMutationRevision(AudioSourceComponent::kComponentName) > valueRevision;
+			objects.clear();
+			context.Expect(valid, "Same-value authored source edits publish a value revision without changing component membership or managed binding identity.");
+		});
 		registry.Add("Editor.AudioAuthoring.PersistenceSerializationAndTransactionVisibility", [](TestContext& context) {
 			ComponentRegistry::RegisterAllComponents();
 			ObjectManager& objects = ObjectManager::instance();

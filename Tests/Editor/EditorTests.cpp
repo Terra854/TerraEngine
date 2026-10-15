@@ -26,6 +26,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterAudioClipCompilerTests(TestRegistry& registry);
 	void RegisterAudioImportPlaybackTests(TestRegistry& registry);
 	void RegisterAudioAuthoringPersistenceTests(TestRegistry& registry);
+	void RegisterAudioControlPersistenceTests(TestRegistry& registry);
 	void RegisterAudioEditorControlTests(TestRegistry& registry);
 	void RegisterAudioExportTests(TestRegistry& registry);
 	void RegisterInspectorDisplayNameTests(TestRegistry& registry);
@@ -311,6 +312,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterAudioClipCompilerTests(registry);
 	TerraEngine::EditorTests::RegisterAudioImportPlaybackTests(registry);
 	TerraEngine::EditorTests::RegisterAudioAuthoringPersistenceTests(registry);
+	TerraEngine::EditorTests::RegisterAudioControlPersistenceTests(registry);
 	TerraEngine::EditorTests::RegisterAudioEditorControlTests(registry);
 	TerraEngine::EditorTests::RegisterAudioExportTests(registry);
 	TerraEngine::EditorTests::RegisterTerrainAssetDatabaseTests(registry);
