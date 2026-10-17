@@ -13,6 +13,7 @@
 #include "Renderer/RendererRecovery.h"
 #include "Renderer/VirtualGeometry/Diagnostics/VirtualGeometryReplay.h"
 #include "Core/Export.h"
+#include "CaptureReadbackLifetime.h"
 
 #include <string>
 #include <string_view>
@@ -22,7 +23,7 @@
 
 class WindowSystem;
 
-// class TERRAENGINE_API groups related state and operations so callers have one documented contract.
+
 class TERRAENGINE_API RHIContext
 {
 public:
@@ -31,9 +32,9 @@ public:
 	virtual void Initialize(WindowSystem& windowSystem) = 0;
 	virtual void BeginFrame() = 0;
 	virtual void RenderFrame(std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> publication, std::uint32_t viewIndex) = 0;
-	// RenderFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	virtual void EndFrame() = 0;
-	// SetGlobalTaskShaderCullingEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	virtual void SetGlobalTaskShaderCullingEnabled(bool enabled) {}
 	// Backend capability data keeps high-level scheduling decisions portable.
 	// The default profile is conservative so unknown backends remain correct.
@@ -89,6 +90,15 @@ public:
 	{
 		return {};
 	}
+	// Probe support before submitting asynchronous work. Unsupported is never
+	// retirement evidence; callers must fail/fallback before backend admission.
+	virtual TerraEngine::Renderer::CaptureReadbackOwnership GetCaptureReadbackOwnership(std::string_view) const
+	{
+		return TerraEngine::Renderer::CaptureReadbackOwnership::Unsupported;
+	}
+	// A failed native idle proof may pause Shutdown. The caller must retain this
+	// backend instance and retry rather than replacing its still-live device.
+	virtual bool IsShutdownComplete() const { return true; }
 	// Conventional visibility identity readback is intentionally a distinct
 	// typed queue: color capture metadata must never be mistaken for GPU picking.
 	virtual bool QueueConventionalVisibilityIdentityReadback(
@@ -107,7 +117,7 @@ public:
 	{
 		return {};
 	}
-	// IsTaskShaderSupported is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	virtual bool IsTaskShaderSupported() const { return false; }
 	// Virtual geometry can still render through TerraEngine's mesh-only shader
 	// collection when task shaders are absent, so this capability is tracked
@@ -163,28 +173,28 @@ public:
 	{
 		return std::nullopt;
 	}
-	// GetLatestRenderStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	virtual RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const
 	{
 		RenderStatsSnapshot snapshot{};
 		snapshot.viewType = viewType;
 		return snapshot;
 	}
-	// GetLatestFrameBudgetDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	virtual FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const
 	{
 		FrameBudgetDiagnosticsSnapshot snapshot{};
 		snapshot.viewType = viewType;
 		return snapshot;
 	}
-	// GetLatestLightingDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	virtual LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const
 	{
 		LightingDiagnosticsSnapshot snapshot{};
 		snapshot.viewType = viewType;
 		return snapshot;
 	}
-	// GetLatestRenderSnapshotDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	virtual RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const
 	{
 		return {};
@@ -201,13 +211,13 @@ public:
 	// stable so backends without explicit presentation recovery remain usable.
 	virtual std::uint64_t GetBackendResourceGeneration() const { return 1u; }
 	virtual void PublishRendererRecoverySnapshot(TerraEngine::Renderer::RendererRecoverySnapshot snapshot) { (void)snapshot; }
-	// InvalidateMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	virtual void InvalidateMaterial(const TerraEngine::UUID& materialId) {}
-	// InvalidateMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	virtual void InvalidateMesh(const TerraEngine::UUID& meshId) {}
-	// InvalidateTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	virtual void InvalidateTexture(const TerraEngine::UUID& textureId) {}
-	// InvalidateResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	virtual void InvalidateResource(const TerraEngine::UUID& id) {}
 	// RetireLoadedResource is used by RAM/VRAM residency cleanup. The default
 	// backend implementation is conservative and simply invalidates now; APIs
@@ -218,7 +228,7 @@ public:
 		(void)debugName;
 		InvalidateResource(id);
 	}
-	// ClearResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	virtual void ClearResources() {}
 	virtual void WaitIdle() = 0;
 	virtual void Shutdown() = 0;

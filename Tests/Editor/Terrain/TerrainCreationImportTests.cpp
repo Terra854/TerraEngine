@@ -11,10 +11,32 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <iterator>
 
 namespace TerraEngine::EditorTests
 {
+	namespace
+	{
+		// Source checks supplement runtime tests. Missing definitions must fail even
+		// when the caller only searches for forbidden text; ordering stays in one file.
+		std::string RequiredContractSource(const std::filesystem::path& relative)
+		{
+			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relative, std::ios::binary);
+			std::string text((std::istreambuf_iterator<char>(input)), {});
+			if(!input || input.bad() || text.empty())
+				throw std::runtime_error("Required source unavailable: " + relative.generic_string());
+			return text;
+		}
+		std::string RequiredContractRegion(const std::string& text, const char* first, const char* next)
+		{
+			const auto begin = text.find(first);
+			const auto end = begin == std::string::npos ? std::string::npos : text.find(next, begin + std::string(first).size());
+			if(begin == std::string::npos || end == std::string::npos || end <= begin)
+				throw std::runtime_error(std::string("Required definition boundaries unavailable: ") + first);
+			return text.substr(begin, end - begin);
+		}
+	}
 	void RegisterTerrainCreationImportTests(TestRegistry& registry)
 	{
 		registry.Add("Editor.TerrainCreation.ProjectBrowserExposesAtomicFlatCreation", [](TestContext& context) {
@@ -24,6 +46,7 @@ namespace TerraEngine::EditorTests
 			const std::string source(
 				(std::istreambuf_iterator<char>(browserSource)),
 				std::istreambuf_iterator<char>());
+			if(!browserSource || browserSource.bad() || source.empty()) throw std::runtime_error("Required terrain source unavailable: " + browserPath.string());
 			context.Expect(source.find("Terrain (.teterrain)") != std::string::npos
 				&& source.find("CreateProjectTerrainCreationService()") != std::string::npos
 				&& source.find("service.CreateOrImportAsync(request, targetPath") != std::string::npos
@@ -42,6 +65,7 @@ namespace TerraEngine::EditorTests
 			const std::string inspectorSource(
 				(std::istreambuf_iterator<char>(inspectorSourceFile)),
 				std::istreambuf_iterator<char>());
+			if(!inspectorSourceFile || inspectorSourceFile.bad() || inspectorSource.empty()) throw std::runtime_error("Required terrain source unavailable: " + inspectorPath.string());
 			const std::size_t queuedAssignment = inspectorSource.find(
 				"SceneMutationQueue::Instance().EnqueueTransaction(builder.Build())");
 			const std::size_t requestedProxyRestore = inspectorSource.find(
@@ -85,6 +109,7 @@ namespace TerraEngine::EditorTests
 			const std::string terrainWindowSource(
 				(std::istreambuf_iterator<char>(terrainWindowFile)),
 				std::istreambuf_iterator<char>());
+			if(!terrainWindowFile || terrainWindowFile.bad() || terrainWindowSource.empty()) throw std::runtime_error("Required terrain source unavailable: " + terrainWindowPath.string());
 			const std::size_t proxyPublication = terrainWindowSource.find(
 				"TerrainRenderProxyRegistry::Instance().Publish");
 			const std::size_t existingInstanceGate = terrainWindowSource.find(
@@ -124,6 +149,7 @@ namespace TerraEngine::EditorTests
 			const std::string inspectorSource(
 				(std::istreambuf_iterator<char>(inspectorFile)),
 				std::istreambuf_iterator<char>());
+			if(!inspectorFile || inspectorFile.bad() || inspectorSource.empty()) throw std::runtime_error("Required terrain source unavailable: " + inspectorPath.string());
 			context.Expect(inspectorSource.find("propertyName != \"baseColor\"") != std::string::npos
 				&& inspectorSource.find("propertyName != \"metallic\"") != std::string::npos
 				&& inspectorSource.find("propertyName != \"roughness\"") != std::string::npos,
@@ -138,6 +164,7 @@ namespace TerraEngine::EditorTests
 			const std::string editorSubsystemSource(
 				(std::istreambuf_iterator<char>(editorSubsystemFile)),
 				std::istreambuf_iterator<char>());
+			if(!editorSubsystemFile || editorSubsystemFile.bad() || editorSubsystemSource.empty()) throw std::runtime_error("Required terrain source unavailable: " + editorSubsystemPath.string());
 			context.Expect(editorSubsystemSource.find(
 				"TerrainRenderProxyRegistry::Instance()") != std::string::npos
 				&& editorSubsystemSource.find("terrainProxyRestorePending = true") != std::string::npos
@@ -175,9 +202,17 @@ namespace TerraEngine::EditorTests
 			const std::string rendererSource(
 				(std::istreambuf_iterator<char>(rendererFile)),
 				std::istreambuf_iterator<char>());
-			context.Expect(rendererSource.find("forEachObjectWithComponents<Transform, TerrainComponent>") != std::string::npos
-				&& rendererSource.find("Resolve(terrain->terrainAssetId)") != std::string::npos
-				&& rendererSource.find("kResourceTerrainRenderProxies") != std::string::npos,
+			if(!rendererFile || rendererFile.bad() || rendererSource.empty()) throw std::runtime_error("Required terrain source unavailable: " + rendererPath.string());
+			const auto scheduler = RequiredContractRegion(rendererSource,
+				"TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()",
+				"std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::DeclareFrameWorkloads(");
+			const auto terrainCapture = RequiredContractRegion(
+				RequiredContractSource("Engine/Renderer/Frame/RenderFrameCapture.cpp"),
+				"void RenderSystem::RefreshFrameRenderableMembership(",
+				"TerraEngine::Renderer::AnimationRenderBinding RenderSystem::CollectFrameAnimationBinding(");
+			context.Expect(terrainCapture.find("forEachObjectWithComponents<Transform, TerrainComponent>") != std::string::npos
+				&& terrainCapture.find("Resolve(terrain->terrainAssetId)") != std::string::npos
+				&& scheduler.find("kResourceTerrainRenderProxies") != std::string::npos,
 				"RenderSystem must collect TerrainComponent instances through the declared terrain proxy resource contract.");
 
 			const auto runtimeSystemPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
@@ -186,30 +221,35 @@ namespace TerraEngine::EditorTests
 			const std::string runtimeSystemSource(
 				(std::istreambuf_iterator<char>(runtimeSystemFile)),
 				std::istreambuf_iterator<char>());
+			if(!runtimeSystemFile || runtimeSystemFile.bad() || runtimeSystemSource.empty()) throw std::runtime_error("Required terrain source unavailable: " + runtimeSystemPath.string());
 			const auto collisionHeaderPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine/Physics/Terrain/TerrainCollisionSystem.h";
 			std::ifstream collisionHeaderFile(collisionHeaderPath);
 			const std::string collisionHeaderSource(
 				(std::istreambuf_iterator<char>(collisionHeaderFile)),
 				std::istreambuf_iterator<char>());
+			if(!collisionHeaderFile || collisionHeaderFile.bad() || collisionHeaderSource.empty()) throw std::runtime_error("Required terrain source unavailable: " + collisionHeaderPath.string());
 			const auto collisionSourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine/Physics/Terrain/TerrainCollisionSystem.cpp";
 			std::ifstream collisionSourceFile(collisionSourcePath);
 			const std::string collisionSource(
 				(std::istreambuf_iterator<char>(collisionSourceFile)),
 				std::istreambuf_iterator<char>());
+			if(!collisionSourceFile || collisionSourceFile.bad() || collisionSource.empty()) throw std::runtime_error("Required terrain source unavailable: " + collisionSourcePath.string());
 			const auto terrainMaterialPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine/Terrain/TerrainMaterial.cpp";
 			std::ifstream terrainMaterialFile(terrainMaterialPath);
 			const std::string terrainMaterialSource(
 				(std::istreambuf_iterator<char>(terrainMaterialFile)),
 				std::istreambuf_iterator<char>());
+			if(!terrainMaterialFile || terrainMaterialFile.bad() || terrainMaterialSource.empty()) throw std::runtime_error("Required terrain source unavailable: " + terrainMaterialPath.string());
 			const auto exportPipelinePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Editor/Export/ExportPipeline.cpp";
 			std::ifstream exportPipelineFile(exportPipelinePath);
 			const std::string exportPipelineSource(
 				(std::istreambuf_iterator<char>(exportPipelineFile)),
 				std::istreambuf_iterator<char>());
+			if(!exportPipelineFile || exportPipelineFile.bad() || exportPipelineSource.empty()) throw std::runtime_error("Required terrain source unavailable: " + exportPipelinePath.string());
 			context.Expect(runtimeSystemSource.find("BuildMountedTerrainRuntime") != std::string::npos
 				&& runtimeSystemSource.find("TerrainRenderProxyRegistry::Instance().Publish") != std::string::npos
 				&& runtimeSystemSource.find("PrepareMountedTerrainCollisionCandidate") != std::string::npos
@@ -236,12 +276,14 @@ namespace TerraEngine::EditorTests
 			const std::string proxyHeaderSource(
 				(std::istreambuf_iterator<char>(proxyHeaderFile)),
 				std::istreambuf_iterator<char>());
+			if(!proxyHeaderFile || proxyHeaderFile.bad() || proxyHeaderSource.empty()) throw std::runtime_error("Required terrain source unavailable: " + proxyHeaderPath.string());
 			const auto proxySourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine/Renderer/Terrain/TerrainRenderProxyRegistry.cpp";
 			std::ifstream proxySourceFile(proxySourcePath);
 			const std::string proxySource(
 				(std::istreambuf_iterator<char>(proxySourceFile)),
 				std::istreambuf_iterator<char>());
+			if(!proxySourceFile || proxySourceFile.bad() || proxySource.empty()) throw std::runtime_error("Required terrain source unavailable: " + proxySourcePath.string());
 			context.Expect(proxyHeaderSource.find("class TERRAENGINE_API TerrainRenderProxyRegistry final") != std::string::npos
 				&& proxyHeaderSource.find("static TerrainRenderProxyRegistry& Instance();") != std::string::npos
 				&& proxyHeaderSource.find("static TerrainRenderProxyRegistry registry;") == std::string::npos

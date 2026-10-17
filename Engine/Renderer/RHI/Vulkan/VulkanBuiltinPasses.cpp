@@ -6,7 +6,7 @@
 #include "VulkanContextSource.h"
 
 // Create Grid Pipeline for Scene View
-// VulkanContext::Impl::CreateSceneViewGridPipeline is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::CreateSceneViewGridPipeline(VkRenderPass renderPass) {
 	if (sceneViewGridPipeline != VK_NULL_HANDLE) return;
 
@@ -38,7 +38,7 @@ void VulkanContext::Impl::CreateSceneViewGridPipeline(VkRenderPass renderPass) {
 		createInfo.pCode = buffer.data();
 
 		VkShaderModule shaderModule;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "Failed to create shader module for: " << shaderPath);
 			return VK_NULL_HANDLE;
@@ -50,11 +50,11 @@ void VulkanContext::Impl::CreateSceneViewGridPipeline(VkRenderPass renderPass) {
 	VkShaderModule vertShader = loadShader("Shaders/Editor/SceneViewGrid.vert.spv");
 	VkShaderModule fragShader = loadShader("Shaders/Editor/SceneViewGrid.frag.spv");
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!vertShader || !fragShader) {
 		TERRAENGINE_LOG(LogLevel::Warning, "Grid shaders not found. Grid will not be rendered.");
 		if (vertShader) vkDestroyShaderModule(device, vertShader, nullptr);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (fragShader) vkDestroyShaderModule(device, fragShader, nullptr);
 		return;
 	}
@@ -157,7 +157,7 @@ void VulkanContext::Impl::CreateSceneViewGridPipeline(VkRenderPass renderPass) {
 	pipelineLayoutInfo.pushConstantRangeCount = 1;
 	pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &sceneViewGridPipelineLayout) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create grid pipeline layout!");
 		vkDestroyShaderModule(device, vertShader, nullptr);
@@ -182,7 +182,7 @@ void VulkanContext::Impl::CreateSceneViewGridPipeline(VkRenderPass renderPass) {
 	pipelineInfo.subpass = 0;
 	pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &sceneViewGridPipeline) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create grid pipeline!");
 	}
@@ -191,7 +191,7 @@ void VulkanContext::Impl::CreateSceneViewGridPipeline(VkRenderPass renderPass) {
 	vkDestroyShaderModule(device, fragShader, nullptr);
 }
 
-// VulkanContext::Impl::RenderSceneViewGrid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::RenderSceneViewGrid(VkCommandBuffer cmd,
 	const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
 	VkExtent2D renderExtent) {
@@ -236,7 +236,7 @@ void VulkanContext::Impl::RenderSceneViewGrid(VkCommandBuffer cmd,
 	vkCmdDraw(cmd, 6, 1, 0, 0); // 6 vertices for fullscreen quad
 }
 
-// struct SkyPushConstants groups related state and operations so callers have one documented contract.
+
 struct SkyPushConstants
 {
 	glm::vec4 cameraOrientation = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -248,7 +248,7 @@ struct SkyPushConstants
 	glm::vec4 editorTint = glm::vec4(0.0f);
 };
 
-// VulkanContext::Impl::CreateSkyBackgroundPipeline is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
 {
 	if (skyBackgroundPipeline != VK_NULL_HANDLE)
@@ -256,7 +256,7 @@ void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
 		return;
 	}
 
-	// struct LoadedSkyShader groups related state and operations so callers have one documented contract.
+
 	struct LoadedSkyShader
 	{
 		VkShaderModule module = VK_NULL_HANDLE;
@@ -283,7 +283,7 @@ void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
 		createInfo.codeSize = shader->bytecode.size();
 		createInfo.pCode = reinterpret_cast<const std::uint32_t*>(shader->bytecode.data());
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkCreateShaderModule(device, &createInfo, nullptr, &loadedShader.module) != VK_SUCCESS)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "Failed to create shader module for: " << resolvedPath);
@@ -295,7 +295,7 @@ void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
 		return loadedShader;
 	};
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!taskShaderSupported)
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Cannot create sky background pipeline without task shader support.");
@@ -305,19 +305,19 @@ void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
 	const LoadedSkyShader taskShader = loadShader("Shaders/Sky/SkyBackground.task.tspf");
 	const LoadedSkyShader meshShader = loadShader("Shaders/Sky/SkyBackground.mesh.tspf");
 	const LoadedSkyShader fragShader = loadShader("Shaders/Sky/SkyBackground.frag.tspf");
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (taskShader.module == VK_NULL_HANDLE || meshShader.module == VK_NULL_HANDLE || fragShader.module == VK_NULL_HANDLE)
 	{
 		if (taskShader.module != VK_NULL_HANDLE)
 		{
 			vkDestroyShaderModule(device, taskShader.module, nullptr);
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (meshShader.module != VK_NULL_HANDLE)
 		{
 			vkDestroyShaderModule(device, meshShader.module, nullptr);
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (fragShader.module != VK_NULL_HANDLE)
 		{
 			vkDestroyShaderModule(device, fragShader.module, nullptr);
@@ -407,7 +407,7 @@ void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
 	pipelineLayoutInfo.pushConstantRangeCount = 1;
 	pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &skyBackgroundPipelineLayout) != VK_SUCCESS)
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create sky background pipeline layout!");
@@ -433,7 +433,7 @@ void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
 	pipelineInfo.renderPass = renderPass;
 	pipelineInfo.subpass = 0;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &skyBackgroundPipeline) != VK_SUCCESS)
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create sky background pipeline!");
@@ -444,7 +444,7 @@ void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
 	vkDestroyShaderModule(device, fragShader.module, nullptr);
 }
 
-// VulkanContext::Impl::RenderSkyBackground is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd,
 	const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
 	VkExtent2D renderExtent)
@@ -486,12 +486,12 @@ void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd,
 	push.groundTintPadding = glm::vec4(presentation.sky.groundTint, 0.0f);
 	push.sunDirectionTextureIndex = glm::vec4(presentation.sky.sunDirection, 0.0f);
 	std::uint32_t skyFlags = 0u;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (presentation.sky.hasTexture)
 	{
 		skyFlags |= 1u;
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (presentation.sky.forceBlack)
 	{
 		skyFlags |= 2u;
@@ -505,11 +505,11 @@ void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd,
 	push.skyParams = glm::vec4(tanHalfFovX, tanHalfFovY, glm::radians(presentation.sky.rotationOffsetDegrees), static_cast<float>(skyFlags));
 	push.editorTint = presentation.editorContextTint;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (presentation.sky.hasTexture)
 	{
 		EnsureTexture(presentation.sky.textureId);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (const auto textureIndexIt = textureIndexMap.find(presentation.sky.textureId); textureIndexIt != textureIndexMap.end())
 		{
 			push.sunDirectionTextureIndex.w = static_cast<float>(textureIndexIt->second);
@@ -521,7 +521,7 @@ void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd,
 }
 
 // UI Rendering Implementation
-// VulkanContext::Impl::CreateUIPipelines is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 	auto loadShader = [&](const std::string& path) -> VkShaderModule {
 		const std::filesystem::path shaderPath = ResourceManager::Instance().ResolveEngineAssetPath(path);
@@ -541,7 +541,7 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 		createInfo.pCode = buffer.data();
 
 		VkShaderModule shaderModule = VK_NULL_HANDLE;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "Failed to create shader module for: " << shaderPath);
 			return VK_NULL_HANDLE;
@@ -646,7 +646,7 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 	pushConstantRange.offset = 0;
 	pushConstantRange.size = sizeof(glm::vec2) + (sizeof(uint32_t) * 2);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (staticUiPipelineLayout == VK_NULL_HANDLE) {
 		VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 		pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -655,21 +655,21 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 		pipelineLayoutInfo.pushConstantRangeCount = 1;
 		pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &staticUiPipelineLayout) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to create static UI pipeline layout!");
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (staticUiPipeline == VK_NULL_HANDLE && staticUiPipelineLayout != VK_NULL_HANDLE) {
 		VkShaderModule staticVert = loadShader("Shaders/UI/UI_Static.vert.spv");
 		VkShaderModule staticFrag = loadShader("Shaders/UI/UI_Static.frag.spv");
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!staticVert || !staticFrag) {
 			TERRAENGINE_LOG(LogLevel::Warning, "UI Static shaders not found. UI rendering may be disabled.");
 			if (staticVert) vkDestroyShaderModule(device, staticVert, nullptr);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (staticFrag) vkDestroyShaderModule(device, staticFrag, nullptr);
 		} else {
 			VkPipelineShaderStageCreateInfo shaderStages[2]{};
@@ -698,7 +698,7 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 			pipelineInfo.renderPass = renderPass;
 			pipelineInfo.subpass = 0;
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &staticUiPipeline) != VK_SUCCESS) {
 				TERRAENGINE_LOG(LogLevel::Error, "failed to create static UI pipeline!");
 			}
@@ -708,7 +708,7 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (uiFontDescriptorSetLayout == VK_NULL_HANDLE) {
 		VkDescriptorSetLayoutBinding textBindings[2]{};
 		textBindings[0].binding = 0;
@@ -725,13 +725,13 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 		setLayoutInfo.bindingCount = 2;
 		setLayoutInfo.pBindings = textBindings;
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &uiFontDescriptorSetLayout) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to create UI font descriptor set layout!");
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (uiFontDescriptorSet == VK_NULL_HANDLE && uiFontDescriptorSetLayout != VK_NULL_HANDLE) {
 		VkDescriptorSetAllocateInfo allocInfo{};
 		allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -739,14 +739,14 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 		allocInfo.descriptorSetCount = 1;
 		allocInfo.pSetLayouts = &uiFontDescriptorSetLayout;
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkAllocateDescriptorSets(device, &allocInfo, &uiFontDescriptorSet) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to allocate UI font descriptor set!");
 			uiFontDescriptorSet = VK_NULL_HANDLE;
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (sdfTextPipelineLayout == VK_NULL_HANDLE && uiFontDescriptorSetLayout != VK_NULL_HANDLE) {
 		VkPushConstantRange textPushConstantRange{};
 		textPushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
@@ -760,21 +760,21 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 		textLayoutInfo.pushConstantRangeCount = 1;
 		textLayoutInfo.pPushConstantRanges = &textPushConstantRange;
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkCreatePipelineLayout(device, &textLayoutInfo, nullptr, &sdfTextPipelineLayout) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to create SDF text pipeline layout!");
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (sdfTextPipeline == VK_NULL_HANDLE && sdfTextPipelineLayout != VK_NULL_HANDLE) {
 		VkShaderModule textVert = loadShader("Shaders/UI/UI_SDF_Text.vert.spv");
 		VkShaderModule textFrag = loadShader("Shaders/UI/UI_SDF_Text.frag.spv");
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!textVert || !textFrag) {
 			TERRAENGINE_LOG(LogLevel::Warning, "UI SDF text shaders not found. Runtime UI text rendering may be disabled.");
 			if (textVert) vkDestroyShaderModule(device, textVert, nullptr);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (textFrag) vkDestroyShaderModule(device, textFrag, nullptr);
 		} else {
 			VkPipelineShaderStageCreateInfo shaderStages[2]{};
@@ -803,7 +803,7 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 			pipelineInfo.renderPass = renderPass;
 			pipelineInfo.subpass = 0;
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &sdfTextPipeline) != VK_SUCCESS) {
 				TERRAENGINE_LOG(LogLevel::Error, "failed to create SDF text pipeline!");
 			}
@@ -814,7 +814,7 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 	}
 }
 
-// struct UIStaticPushConstants groups related state and operations so callers have one documented contract.
+
 struct UIStaticPushConstants
 {
 	glm::vec2 viewportSize;
@@ -822,7 +822,7 @@ struct UIStaticPushConstants
 	uint32_t useTexture;
 };
 
-// VulkanContext::Impl::RenderUI is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& batch) {
 	if (batch.staticQuads.empty() && batch.immediateQuads.empty() && batch.textRuns.empty() && batch.imageRuns.empty()) return;
 	if (uiStaticVertexBuffers.size() < MAX_FRAMES_IN_FLIGHT) {
@@ -857,7 +857,7 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 		addVertex(x + w, y + h, uvMax.x, uvMax.y);
 	};
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (staticUiPipeline != VK_NULL_HANDLE) {
 		std::vector<float> quadVertices;
 		struct ImageDraw {
@@ -869,12 +869,12 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 
 		quadVertices.reserve((batch.staticQuads.size() + batch.immediateQuads.size() + batch.imageRuns.size()) * 6 * 8);
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const auto& quad : batch.staticQuads) {
 			appendQuadVertices(quadVertices, quad.position, quad.size, quad.color, glm::vec2(0.0f, 0.0f), glm::vec2(1.0f, 1.0f));
 		}
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const auto& quad : batch.immediateQuads) {
 			appendQuadVertices(
 				quadVertices,
@@ -887,7 +887,7 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 
 		const uint32_t staticVertexCount = static_cast<uint32_t>(quadVertices.size() / 8);
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const auto& image : batch.imageRuns) {
 			ImageDraw draw;
 			draw.firstVertex = static_cast<uint32_t>(quadVertices.size() / 8);
@@ -898,11 +898,11 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 			appendQuadVertices(quadVertices, image.position, image.size, image.color, glm::vec2(0.0f, 0.0f), glm::vec2(1.0f, 1.0f));
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!quadVertices.empty()) {
 			const VkDeviceSize bufferSize = quadVertices.size() * sizeof(float);
 			if (uiStaticVertexBuffer.buffer == VK_NULL_HANDLE || uiStaticVertexBuffer.size < bufferSize) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (uiStaticVertexBuffer.buffer != VK_NULL_HANDLE) {
 					RetireBuffer(uiStaticVertexBuffer);
 				}
@@ -925,7 +925,7 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 			vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
 
 			// Draw non-textured quads
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (staticVertexCount > 0) {
 				UIStaticPushConstants push{};
 				push.viewportSize = batch.viewportSize;
@@ -936,7 +936,7 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 			}
 
 			// Draw each textured image run
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 			for (const auto& draw : imageDraws) {
 				UIStaticPushConstants push{};
 				push.viewportSize = batch.viewportSize;
@@ -944,7 +944,7 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 				push.textureIndex = 0;
 
 				TerraEngine::UUID textureId = ResourceManager::Instance().ResolveAssetReference(draw.texturePath, AssetType::Texture);
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (textureId != TerraEngine::EMPTY_UUID) {
 					EnsureTexture(textureId);
 					if (textureIndexMap.contains(textureId)) {
@@ -957,7 +957,7 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (batch.textRuns.empty() || sdfTextPipeline == VK_NULL_HANDLE || uiFontDescriptorSet == VK_NULL_HANDLE) {
 		return;
 	}
@@ -979,7 +979,7 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 		return;
 	}
 	const UIFontAtlas& fontAtlas = uiTextRenderer.EnsureSignedDistanceFontAtlasFromBytes(fontLogicalPath.generic_string(), uiFontAtlasSourceBytes, uiFontAtlasPixelHeight);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!fontAtlas.ready || fontAtlas.width <= 0 || fontAtlas.height <= 0 || fontAtlas.pixels.empty()) {
 		if (!uiFontAtlasMissingWarned) {
 			TERRAENGINE_LOG(LogLevel::Warning, "Runtime UI text atlas is unavailable. Missing or invalid font: " << fontPath);
@@ -989,17 +989,17 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 	}
 
 	auto destroyUIFontAtlasImage = [&]() {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (uiFontAtlasImage.sampler != VK_NULL_HANDLE) {
 			vkDestroySampler(device, uiFontAtlasImage.sampler, nullptr);
 			uiFontAtlasImage.sampler = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (uiFontAtlasImage.view != VK_NULL_HANDLE) {
 			vkDestroyImageView(device, uiFontAtlasImage.view, nullptr);
 			uiFontAtlasImage.view = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (uiFontAtlasImage.image != VK_NULL_HANDLE && uiFontAtlasImage.allocation != VK_NULL_HANDLE) {
 			vmaDestroyImage(allocator, uiFontAtlasImage.image, uiFontAtlasImage.allocation);
 			uiFontAtlasImage.image = VK_NULL_HANDLE;
@@ -1009,7 +1009,7 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 		uiFontAtlasHeight = 0;
 	};
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (uiFontAtlasImage.image == VK_NULL_HANDLE || uiFontAtlasWidth != fontAtlas.width || uiFontAtlasHeight != fontAtlas.height) {
 		destroyUIFontAtlasImage();
 
@@ -1038,7 +1038,7 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 
 		VmaAllocationCreateInfo allocInfo{};
 		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &uiFontAtlasImage.image, &uiFontAtlasImage.allocation, nullptr) != VK_SUCCESS) {
 			vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 			TERRAENGINE_LOG(LogLevel::Error, "Failed to allocate runtime UI font atlas image.");
@@ -1066,7 +1066,7 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 		samplerInfo.compareEnable = VK_FALSE;
 		samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
 		samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkCreateSampler(device, &samplerInfo, nullptr, &uiFontAtlasImage.sampler) != VK_SUCCESS) {
 			destroyUIFontAtlasImage();
 			TERRAENGINE_LOG(LogLevel::Error, "Failed to create runtime UI font atlas sampler.");
@@ -1102,7 +1102,7 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 	std::vector<float> textVertices;
 	textVertices.reserve(batch.textRuns.size() * 96 * 8);
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const UITextRun& textRun : batch.textRuns) {
 		if (textRun.text.empty() || textRun.fontSize <= 0.0f) {
 			continue;
@@ -1113,20 +1113,20 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 		float baselineY = textRun.position.y + textRun.fontSize;
 		const float lineAdvance = textRun.fontSize * 1.2f;
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (char character : textRun.text) {
 			if (character == '\n') {
 				penX = textRun.position.x;
 				baselineY += lineAdvance;
 				continue;
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (character == '\r') {
 				continue;
 			}
 
 			const auto glyphIt = fontAtlas.glyphs.find(character);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (glyphIt == fontAtlas.glyphs.end()) {
 				penX += textRun.fontSize * 0.35f;
 				continue;
@@ -1144,15 +1144,15 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (textVertices.empty()) {
 		return;
 	}
 
 	const VkDeviceSize textBufferSize = textVertices.size() * sizeof(float);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (uiSdfVertexBuffer.buffer == VK_NULL_HANDLE || uiSdfVertexBuffer.size < textBufferSize) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (uiSdfVertexBuffer.buffer != VK_NULL_HANDLE) {
 			RetireBuffer(uiSdfVertexBuffer);
 		}

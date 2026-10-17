@@ -431,6 +431,8 @@ target_link_libraries(TerraEngine-EditorTests
 		meshoptimizer
 		mikktspace
 		basisu
+		# This shared test-only decoder inspects actual MCP image content.
+		TerraEngineCaptureDecodeAssertions
 		libzstd_static
 		xxhash
 )
@@ -826,3 +828,6 @@ endif()
 # Preserve the frozen four-case diagnostics floor in installed native slices.
 terraengine_add_correctness_slice(Editor.RuntimeMemorySafety.Diagnostics TerraEngine-EditorTests Editor.RuntimeMemorySafety.Diagnostics 4)
 terraengine_add_correctness_slice(Editor.AudioControlPersistence TerraEngine-EditorTests Editor.AudioControlPersistence 4)
+
+# Decode the actual MCP image item and retain the existing rejection cases.
+terraengine_add_correctness_slice(Editor.RenderCaptureContracts TerraEngine-EditorTests Editor.MCP.CameraImages 11)

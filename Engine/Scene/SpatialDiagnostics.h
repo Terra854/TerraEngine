@@ -90,7 +90,7 @@ namespace TerraEngine::Scene
 		std::vector<SpatialDiagnosticRecord> transitionDiagnostics;
 	};
 
-	// struct SpatialDiagnosticsSnapshot groups related state and operations so callers have one documented contract.
+
 	struct SpatialDiagnosticsSnapshot
 	{
 		std::uint32_t indexedObjectCount = 0;

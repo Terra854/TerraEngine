@@ -510,11 +510,16 @@ namespace TerraEngine::EditorTests
 
 		registry.Add("ProfilerWindow.V1Finalization.PublishesExactSavedArtifact", [](TestContext& context) {
 			const std::string service = ReadEditorProfilerServiceSource();
-			const std::size_t finalization = service.find("const auto status = Profiler::Instance().GetJournalFinalizationStatus(*ticket)");
-			const std::size_t finalizationEnd = service.find("// EditorProfilerService::StartRecording", finalization);
-			const std::string finalizationPath = finalization != std::string::npos && finalizationEnd != std::string::npos
-				? service.substr(finalization, finalizationEnd - finalization)
-				: std::string{};
+			context.Expect(!service.empty(), "Finalization source guard requires readable, nonempty service source.");
+			// Use actual compiled definitions: comment cleanup must not change the selected policy region.
+			const std::size_t update = service.find("void EditorProfilerService::Update(float deltaTime)");
+			context.Expect(update != std::string::npos, "The actual profiler Update definition must exist.");
+			const std::size_t finalization = service.find("const auto status = Profiler::Instance().GetJournalFinalizationStatus(*ticket)", update);
+			const std::size_t finalizationEnd = service.find("void EditorProfilerService::StartRecording()", update);
+			context.Expect(finalization != std::string::npos && finalizationEnd != std::string::npos
+				&& update < finalization && finalization < finalizationEnd,
+				"Finalization must have nonempty bounds within Update before the next compiled definition.");
+			const std::string finalizationPath = service.substr(finalization, finalizationEnd - finalization);
 			context.Expect(service.find("WorkerCompletionKind::CapturePersisted") != std::string::npos
 				&& service.find("lastSavedCaptureArtifact = std::move(completion.savedCaptureArtifact)") != std::string::npos,
 				"A completed V1 writer must publish the exact validated artifact before automation can finish.");

@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <memory_resource>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -52,8 +53,38 @@ enum class AssetType : std::uint32_t;
 struct RenderSystemLifetimeState;
 struct RenderFrameExecution;
 
+namespace TerraEngine::Profiling { struct ProfilerFramePublicationEvidence; }
+namespace TerraEngine::Renderer::Vulkan { struct VulkanRendererPreparationSummary; }
+
+namespace TerraEngine::Resource { struct TerrainVisibleTextureTouchSnapshot; }
+
+namespace TerraEngine::Renderer::Frame {
+	struct RenderAnimationCaptureView;
+	struct RenderResourceCaptureView;
+	struct RenderAnimationCollectionView;
+	struct RenderMembershipCaptureView;
+	class FrameGeometryInputs;
+	struct GeometryRouteStatsAggregate;
+	struct CanonicalGeometryRouteFacts;
+	struct VirtualGeometryViewSelectionPacket;
+	struct VisibleCommandCacheRecord;
+	struct RetainedRenderTopologyState;
+	struct SpatialPreparationCacheState;
+	struct VisibleCommandBuildResult;
+	struct RenderableDrawWorkingSet;
+	struct DrawCommandCacheState;
+	struct RenderableFrameIdentityCacheState;
+	struct LightCandidateCacheState;
+	struct GroupedSubmissionMembershipCacheState;
+}
+
 namespace TerraEngine::Renderer {
+	struct RendererEfficiencyResolvedFixtureCamera;
 	struct RenderFrameScratchValidationCallbacks;
+	struct RenderPassNode;
+	struct SyntheticCaptureCheckpoint;
+	struct SyntheticCaptureTestAccess;
+	struct RenderCaptureBackendTestAccess;
 	struct RenderFrameScratchValidationState {
 		bool active = false;
 		RenderFrameScratchDiagnostics latest;
@@ -157,10 +188,10 @@ public:
 
 	void DeleteResource(const TerraEngine::UUID& id);
 	void RetireLoadedResource(const TerraEngine::UUID& id, std::uint64_t frameId, std::string_view debugName);
-	
+
 	void Clear();
 	void SetTaskShaderCullingEnabled(bool enabled);
-	// IsTaskShaderCullingEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool IsTaskShaderCullingEnabled() const { return taskShaderCullingEnabled; }
 	RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const;
 	TerraEngine::Scene::SpatialDiagnosticsSnapshot GetLatestSpatialDiagnostics(RenderViewType viewType) const;
@@ -306,7 +337,7 @@ public:
 	static CompactedVisibilitySet CompactVirtualGeometryClusterPackets(const std::vector<VirtualGeometryClusterPacket>& candidatePackets, std::vector<VirtualGeometryClusterPacket>& compactedPackets, RenderViewType viewType, std::uint32_t viewId, bool failOpenForMissingResourcePackets = true);
 
 	void SetQualityPreset(QualityPreset preset);
-	// GetQualityPreset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	QualityPreset GetQualityPreset() const { return currentPreset; }
 	void SetRenderSettings(const RenderSettings& settings);
 	// Managed gameplay callbacks enqueue game-wide runtime overrides here. The
@@ -354,7 +385,7 @@ public:
 	void LoadSettings();
 	void SaveSettings();
 
-	// GetContext is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	RHIContext* GetContext() const { return rhi.get(); }
 
 	struct OverrideCameraData {
@@ -363,7 +394,7 @@ public:
 		TerraEngine::Scene::WorldPosition canonicalPosition{};
 		bool orthographic = false;
 	};
-	// SetSceneViewCamera is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void SetSceneViewCamera(const glm::mat4& view, const glm::mat4& proj,
 		const TerraEngine::Scene::WorldPosition& canonicalPosition,
 		bool orthographic = false) {
@@ -386,9 +417,9 @@ public:
 		const TerraEngine::Physics::PhysicsDebugDisplaySelection& selection);
 	[[nodiscard]] SceneViewPhysicsDebugSubmissionSummary GetLatestSceneViewPhysicsDebugSubmission() const;
 	void SetSceneViewContextTint(const std::unordered_set<TerraEngine::UUID>& focusedObjectIds);
-	// SetEditorModeEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void SetEditorModeEnabled(bool enabled) { editorModeEnabled = enabled; }
-	// SetGameViewCamera is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void SetGameViewCamera(const glm::mat4& view, const glm::mat4& proj,
 		const TerraEngine::Scene::WorldPosition& canonicalPosition) {
 		OverrideCameraData camera{view, proj, canonicalPosition, false};
@@ -410,7 +441,7 @@ public:
 	// editor can suppress Game View submission for that frame and leave GPU time
 	// available for Scene View and the rest of the desktop.
 	void SetGameViewSuppressed(bool suppressed) { gameViewSuppressed = suppressed; }
-	// ClearOverrideCameras is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void ClearOverrideCameras() {
 		hasSceneViewCamera = false;
 		gameViewCameras.clear();
@@ -425,12 +456,41 @@ public:
 private:
 	RenderSystem();
 	RenderFrameExecution BuildFrameExecution(float deltaTime);
+	struct FrameCaptureRoots;
+	FrameCaptureRoots CaptureFrameRoots();
+	struct FrameWorldTransforms;
+	FrameWorldTransforms CaptureFrameWorldTransforms();
+	struct FrameSkyCapture;
+	struct FrameTerrainCapture;
+	struct FrameSnapshotShadowView;
+	struct FrameSnapshotRouteView;
+	struct FrameVirtualGeometryInputs;
+	struct FrameVirtualGeometryPreparation;
+	struct FrameVirtualRasterInputs;
+	struct FrameBackendObservations;
+	FrameSkyCapture CaptureFrameSky(std::uint64_t capturedHierarchyRevision);
+	FrameBackendObservations CaptureFrameBackendObservations();
+	struct FrameBackendCapture;
+	FrameBackendCapture CaptureFrameBackendInputs();
+	struct FrameSceneRevisions;
+	struct FrameResourceCohort;
+	FrameSceneRevisions CaptureFrameSceneRevisions();
+	FrameResourceCohort CaptureFrameResourceCohort(std::uint64_t protectedRendererResourceOwnerRevision);
 	void UpdateAtExecutionBoundary(float deltaTime);
 	void RetireFrameExecutionAtProtectedBoundary();
 	void ObserveFrameScratchAtProtectedBoundary();
 	void ApplyQualityPreset(QualityPreset preset, bool persistProjectSettings);
 	void ApplyQueuedRuntimeRenderSettings();
-	void CompleteCapture(TerraEngine::Renderer::RenderCaptureResult result);
+	friend struct TerraEngine::Renderer::SyntheticCaptureTestAccess;
+	friend struct TerraEngine::Renderer::RenderCaptureBackendTestAccess;
+	struct CaptureOperation;
+	std::string QueueCaptureRequestInternal(TerraEngine::Renderer::RenderCaptureRequest request, std::string& errorMessage, std::string& admissionId);
+	std::optional<TerraEngine::Renderer::RenderCaptureResult> PollCaptureAdmission(std::string_view admissionId);
+	void CompleteCapture(TerraEngine::Renderer::RenderCaptureResult result, bool physicallySettled = true);
+	void PollSyntheticCaptures();
+	void PollCaptureBackendOwnership();
+	bool TryReleaseCaptureBackend();
+	void RetireCaptureJobs();
 	// Moves non-blocking backend fence completions into the bounded public
 	// result queue. This runs only at the protected render boundary.
 	void DrainCaptureReadbacks();
@@ -473,13 +533,13 @@ private:
 	bool sceneViewContextTintEnabled = false;
 
 	// Internal structs for data gathering
-	// struct CameraEntry groups related state and operations so callers have one documented contract.
+
 	struct CameraEntry
 	{
 		entt::entity entity;
 		CameraComponent camera;
 	};
-	// struct RenderableEntry groups related state and operations so callers have one documented contract.
+
 	struct RenderableEntry
 	{
 		entt::entity entity;
@@ -522,13 +582,20 @@ private:
 		retainedMeshLocalBounds;
 	std::uint64_t retainedRenderableCaptureSourceSignature = 0U;
 	bool retainedRenderableEntriesReusable = false;
-	// struct LightEntry groups related state and operations so callers have one documented contract.
+
 	struct LightEntry
 	{
 		entt::entity entity;
 		TerraEngine::UUID lightId;
 		LightComponent light;
 	};
+
+	// Protected collection helpers borrow only this frame's scratch vectors.
+	void CollectFrameCameraInputs(std::pmr::vector<CameraEntry>& cameras);
+	void CollectFrameLightInputs(std::pmr::vector<LightEntry>& lights);
+	void RefreshFrameRenderableMembership(
+		const std::shared_ptr<const TerraEngine::Scene::SceneChangePacket>& protectedSceneChanges,
+		bool renderableMetadataCaptureCurrent, std::uint64_t protectedTerrainProxyGeneration);
 
 	mutable std::mutex statsMutex;
 	TerraEngine::Scene::SpatialIndex spatialIndex;
@@ -731,7 +798,13 @@ private:
 	std::unordered_map<std::uint64_t, VirtualGeometryDebugVisualizationMode> virtualGeometryDebugModes;
 	std::deque<TerraEngine::Renderer::RenderCaptureRequest> pendingCaptureRequests;
 	std::deque<TerraEngine::Renderer::RenderCaptureRequest> submittedCaptureReadbackRequests;
-	std::deque<TerraEngine::Renderer::RenderCaptureResult> completedCaptureResults;
+	std::vector<std::shared_ptr<CaptureOperation>> completedCaptureResults;
+	// Internal identities distinguish concurrent admissions with the same caller
+	// ID; only the original ID is ever returned through the public result API.
+	std::unordered_map<std::string, std::shared_ptr<CaptureOperation>> captureOperations;
+	std::shared_ptr<TerraEngine::Renderer::SyntheticCaptureCheckpoint> nextSyntheticCaptureCheckpoint;
+	std::uint64_t nextCaptureAdmissionSequence = 1;
+	bool retiringCaptures = false;
 	// The cache contains copied transforms and is touched only by RenderSystem's
 	// protected frame work, so render preparation never aliases live components.
 	TerraEngine::Renderer::RenderWorldTransformCache worldTransformCache;
@@ -780,4 +853,320 @@ private:
 	TerraEngine::Renderer::RendererEfficiencyEvidenceBatch latestRendererEfficiencyEvidenceBatch{};
 	QualityPreset currentPreset = QualityPreset::High;
 	RenderSettings currentSettings;
+	// A protected binding operation borrows captured roots and updates only its owned pose cache.
+	TerraEngine::Renderer::AnimationRenderBinding CollectFrameAnimationBinding(
+		RenderableMembershipCacheRecord& cached, const Mesh* runtimeMesh,
+		bool lastRuntimeMeshDeformable,
+		TerraEngine::Animation::AnimationCompatibilityFingerprint lastRuntimeMeshSkeletonFingerprint,
+		const TerraEngine::Renderer::Frame::RenderAnimationCaptureView& animationCapture,
+		const std::shared_ptr<const TerraEngine::Animation::AnimationPresentationFrame>& animationPresentationFrame,
+		std::optional<std::uint64_t>& animationAuthorityGeneration,
+		std::unordered_set<TerraEngine::UUID>& aliveCompatibleAnimationObjects);
+
+	// Narrow protected collector views never escape the synchronous ECS query graph.
+	void CollectFrameRenderableInputs(
+		const std::pmr::vector<CameraEntry>& cameras, std::vector<RenderableEntry>& renderables,
+		const TerraEngine::Renderer::Frame::RenderResourceCaptureView& resources,
+		const TerraEngine::Renderer::Frame::RenderAnimationCollectionView& animation,
+		const TerraEngine::Renderer::Frame::RenderMembershipCaptureView& membership);
+
+	// Produces strong immutable CPU deformation records; no arena references escape.
+	std::shared_ptr<TerraEngine::Renderer::CpuAnimationDeformationPlan>
+	BuildFrameCpuDeformationPlan(std::span<RenderableEntry> renderables,
+		bool hasCpuDeformationCandidates, std::uint64_t protectedRendererGeneration,
+		std::vector<std::uint32_t>& cpuDeformationRenderableIndices);
+
+	void CompleteFrameWithoutViews(
+		TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot,
+		std::uint64_t protectedSceneGeneration, std::uint64_t snapshotRendererGeneration,
+		const TerraEngine::Renderer::BackendCapabilityProfile& backendCapabilities);
+
+	std::vector<std::uint64_t> CaptureFrameShadowLifetimes(
+		std::span<const RenderableEntry> renderables, bool reuseRenderableRecords);
+
+	TerraEngine::Renderer::RenderFrameScratchDiagnostics ObserveFrameCapturedInputs(
+		const std::pmr::vector<CameraEntry>& cameras, const std::pmr::vector<LightEntry>& lights,
+		const std::shared_ptr<const TerraEngine::Renderer::RenderFrameScratchValidationCallbacks>& scratchValidation);
+	FrameTerrainCapture CaptureFrameTerrainInputs(
+		std::span<const RenderableEntry> renderables);
+	void RetireFrameAnimationPoseOwners(
+		const std::unordered_set<TerraEngine::UUID>& aliveCompatibleAnimationObjects);
+
+	void CaptureSnapshotShadowEvidence(const RenderableEntry& entry,
+		std::size_t renderableIndex, const Mesh* mesh,
+		const TerraEngine::Renderer::Frame::CanonicalGeometryRouteFacts& routeFacts,
+		TerraEngine::Renderer::RenderFrameRenderableRecord& snapshotRenderable,
+		const FrameSnapshotShadowView& inputs);
+
+	void RefreshFrameRenderablePoses(std::span<const RenderableEntry> renderables,
+		const FrameSceneRevisions& sceneRevisions, const FrameWorldTransforms& worldCapture);
+
+	void AssembleFrameSnapshotRows(std::span<RenderableEntry> renderables,
+		TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot,
+		TerraEngine::Renderer::Frame::FrameGeometryInputs& geometryInputs,
+		const FrameSnapshotRouteView& inputs, const FrameSnapshotShadowView& snapshotShadowInputs,
+		const FrameSceneRevisions& sceneRevisions, const FrameWorldTransforms& worldCapture,
+		TerraEngine::Renderer::Frame::GeometryRouteStatsAggregate& geometryRouteStats,
+		std::uint64_t& geometryRouteSelectionSignature, std::size_t expectedUniqueMeshCount);
+
+	void AppendSnapshotLightRows(const std::pmr::vector<LightEntry>& lights,
+		TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot);
+
+	void CollectFrameVirtualGeometryDiagnostics(const FrameVirtualGeometryInputs& inputs,
+		FrameVirtualGeometryPreparation& preparation, const std::vector<RenderItemRecord>& commands, RenderViewType viewType);
+	void RecordFrameVirtualGeometrySelection(const FrameVirtualGeometryInputs& inputs,
+		FrameVirtualGeometryPreparation& preparation, const std::vector<RenderItemRecord>& commands,
+			const std::vector<TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord>& selectedClusters,
+			const std::vector<TerraEngine::Renderer::VirtualGeometryPageNeedRecord>& pageNeeds,
+			const std::vector<VirtualGeometryClusterPacket>& clusterPackets,
+			const std::vector<ClusterWorkBatch>& clusterBatches,
+			const std::vector<CompactedVisibilitySet>& compactionResults,
+			const std::vector<FallbackCoverageChain>& fallbackCoverage,
+			const std::vector<VirtualGeometryLODTransitionState>& lodTransitionStates,
+			VirtualGeometryDebugVisualizationMode debugVisualizationMode,
+			RenderOutputKind outputKind,
+			RenderViewType viewType,
+			const glm::uvec2& targetSize,
+			std::uint32_t outputId,
+			bool shadowPass,
+			bool exportRuntime,
+			const std::vector<std::uint32_t>* virtualGeometryCommandIndices = nullptr,
+			bool reuseValidatedSelection = false,
+			const TerraEngine::Renderer::Frame::VirtualGeometryViewSelectionPacket* preparedSelection = nullptr,
+			const TerraEngine::Renderer::Frame::VisibleCommandCacheRecord* cachedSelectionEvidence = nullptr);
+	TerraEngine::Renderer::Frame::VirtualGeometryViewSelectionPacket ApplyFrameVirtualGeometrySelection(const FrameVirtualGeometryInputs& inputs,
+		FrameVirtualGeometryPreparation& preparation, std::vector<RenderItemRecord>& commands, const glm::mat4& viewProjection, RenderOutputKind outputKind, RenderViewType viewType, std::uint32_t outputId, const glm::vec3& cameraPosition, const glm::uvec2& targetSize, const VirtualGeometryQualityProfile& viewVirtualGeometryQuality);
+	void ApplyFrameShadowVirtualGeometrySelection(const FrameVirtualGeometryInputs& inputs,
+		FrameVirtualGeometryPreparation& preparation, std::vector<RenderItemRecord>& commands);
+
+	void FinalizeFrameVirtualGeometryEvidence(
+		TerraEngine::Renderer::VirtualGeometryViewSelectionState& state,
+		const TerraEngine::Renderer::Frame::VisibleCommandCacheRecord* cachedSelectionEvidence,
+		const TerraEngine::Renderer::Frame::VirtualGeometryViewSelectionPacket* preparedSelection,
+		bool reuseValidatedSelection);
+
+	void RouteFrameVirtualGeometryPackets(const FrameVirtualRasterInputs& inputs,
+		const RenderItemRecord& command, const Mesh* mesh, std::vector<VirtualGeometryClusterPacket>& localPackets,
+		const glm::mat4& viewProjection, const glm::uvec2& targetSize);
+
+	void ValidateFrameVirtualSelectionPacket(
+		TerraEngine::Renderer::Frame::VirtualGeometryViewSelectionPacket& packet,
+		RenderViewType viewType, std::uint32_t outputId, const glm::uvec2& targetSize,
+		VirtualGeometryDebugVisualizationMode debugVisualizationMode);
+	void FailOpenFrameVirtualPacketRecords(
+		TerraEngine::Renderer::Frame::VirtualGeometryViewSelectionPacket& packet,
+		GpuVirtualGeometryPacketFrameSet& frameSet, const std::string& gpuPacketValidationReason);
+
+	bool PrepareFramePersistentTopology(
+		TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot,
+		TerraEngine::Renderer::Frame::RetainedRenderTopologyState& retainedRenderTopology,
+		const FrameSceneRevisions& sceneRevisions, std::uint64_t snapshotRendererGeneration,
+		const TerraEngine::Renderer::BackendCapabilityProfile& backendCapabilities,
+		std::vector<TerraEngine::Renderer::RenderPassNode>& renderGraphPasses);
+
+	TerraEngine::Scene::SpatialDiagnosticsSnapshot PrepareFrameSpatialInputs(
+		std::span<const RenderableEntry> renderables, const TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot,
+		TerraEngine::Renderer::Frame::SpatialPreparationCacheState& cache,
+		const FrameSceneRevisions& revisions, const FrameWorldTransforms& worldCapture,
+		const std::unordered_map<TerraEngine::UUID, const Mesh*>& frameMeshResources,
+		const std::unordered_map<TerraEngine::UUID, TerraEngine::Scene::SpatialAABB>& frameMeshLocalBounds,
+		std::size_t expectedUniqueMeshCount, bool& spatialIndexRebuilt);
+
+	void PrepareFrameBaseCommands(std::span<const RenderableEntry> renderables,
+	const TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot,
+	TerraEngine::Renderer::Frame::RenderableDrawWorkingSet& workingSet,
+	TerraEngine::Renderer::Frame::DrawCommandCacheState& cache,
+	const FrameSceneRevisions& revisions, const FrameWorldTransforms& worldCapture,
+	std::size_t renderGraphWorkerCount, TerraEngine::Renderer::RenderDiagnosticsSummary& renderGraphDiagnostics);
+
+	std::vector<FrameLightCandidate> PrepareFrameLightCandidates(
+	std::span<const LightEntry> lights, TerraEngine::Renderer::Frame::LightCandidateCacheState& cache,
+	const FrameWorldTransforms& worldCapture, std::size_t renderGraphWorkerCount,
+	TerraEngine::Renderer::RenderDiagnosticsSummary& renderGraphDiagnostics,
+	const std::shared_ptr<const TerraEngine::Renderer::RenderFrameScratchValidationCallbacks>& scratchValidation,
+	const TerraEngine::Renderer::RenderFrameScratchDiagnostics& capturedScratchDiagnostics);
+
+	struct FrameCommandIdentity {
+		std::uint64_t world, submission, visibility;
+	};
+	FrameCommandIdentity PrepareFrameCommandIdentity(
+	std::span<const RenderableEntry> renderables, const TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot,
+	TerraEngine::Renderer::Frame::RenderableFrameIdentityCacheState& cache,
+	const std::vector<std::uint64_t>& drawCommandSignatures, const std::vector<bool>& conservativeAnimationBounds,
+	const FrameSceneRevisions& revisions, const FrameResourceCohort& resourceCohort,
+	const std::shared_ptr<const TerraEngine::Animation::AnimationPresentationFrame>& animationPresentationFrame);
+
+	struct AnimatedGeometryBuildResult {
+		std::shared_ptr<const TerraEngine::Renderer::GpuDeformationPlan> immutablePlan;
+		std::size_t demandCount = 0u;
+	};
+	AnimatedGeometryBuildResult BuildFrameAnimatedGeometryPlan(
+	const TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot,
+	const std::unordered_map<TerraEngine::UUID, const Mesh*>& frameMeshResources,
+	std::uint64_t snapshotRendererGeneration, std::uint64_t protectedSceneGeneration,
+	std::span<const std::uint8_t> visibleAnimatedRenderables,
+	const std::unordered_map<TerraEngine::UUID, std::size_t>& renderableIndicesByObjectId);
+
+	RenderViewBuildState PrepareFrameHeader(std::span<const LightEntry> lights,
+	std::vector<FrameLightCandidate>& packedLights, TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot,
+	const FrameSkyCapture& skyCapture, const FrameWorldTransforms& worldCapture,
+	const FrameBackendObservations& observations, float deltaTime, SkyRuntimeState& skyRuntimeState);
+
+	struct FrameVisibilityInputs;
+	struct FrameVisibleStreamingInputs;
+std::vector<std::size_t> CollectFrameVisibleCandidates(const FrameVisibilityInputs& inputs, const TerraEngine::Scene::SpatialQueryResult& query);
+std::vector<RenderItemRecord> MaterializeFrameVisibleCandidates(const FrameVisibilityInputs& inputs, const std::vector<std::size_t>& candidateIndices);
+TerraEngine::Renderer::VisibleStreamingTouchSet BuildFrameVisibleStreamingTouches(
+	const FrameVisibleStreamingInputs& inputs, const std::vector<RenderItemRecord>& commands,
+	RenderViewType viewType, std::uint32_t outputId, const glm::vec3& cameraPosition,
+	TerraEngine::Resource::TerrainVisibleTextureTouchSnapshot* terrainTouches);
+TerraEngine::Renderer::VisibleCommandReuseTelemetry BuildFrameVisibleCommandTelemetry(
+	RenderViewType viewType, std::uint32_t outputId, bool cacheHit, bool copiedCommands,
+	const TerraEngine::Renderer::VisibleStreamingTouchSet& touchSet);
+TerraEngine::Renderer::Frame::VisibleCommandBuildResult PrepareFrameVisibleCommands(
+	const FrameVisibilityInputs& inputs, const FrameVirtualGeometryInputs& virtualGeometryInputs,
+	FrameVirtualGeometryPreparation& virtualGeometryPreparation, const FrameVisibleStreamingInputs& streamingInputs,
+	std::vector<std::pair<RenderViewType, TerraEngine::Renderer::VisibleStreamingTouchSet>>& pendingStreamingTouchSets,
+	const glm::mat4& viewProjection, const glm::uvec2& targetSize, RenderOutputKind outputKind,
+	RenderViewType viewType, std::uint32_t outputId, const glm::vec3& cameraPosition,
+	const TerraEngine::Renderer::RenderReferenceFrame& referenceFrame);
+
+	std::vector<ShadowDrawList> PrepareFrameShadowLists(
+	const FrameVisibilityInputs& visibilityInputs, const FrameVirtualGeometryInputs& virtualGeometryInputs,
+	FrameVirtualGeometryPreparation& virtualGeometryPreparation,
+	std::span<const RenderItemRecord* const> renderableDrawCommandsByOrdinal,
+	std::uint64_t renderPreparationSettingsSignature, std::uint64_t renderableSubmissionSignature,
+	std::size_t renderGraphWorkerCount, std::span<const FrameLightCandidate> ownedViewLights,
+	const glm::vec3& viewCameraLocalPosition, const TerraEngine::Renderer::RenderReferenceFrame& viewReferenceFrame,
+	RenderViewType viewType, std::uint32_t outputId);
+
+	struct PreparedRenderSubmission;
+TerraEngine::Renderer::RenderViewPresentationInput MakeFramePresentationInput(
+	RenderViewBuildState&& frame, const RenderOutputRequest& output);
+void QueueFramePreparedSubmission(const FrameVisibilityInputs& inputs,
+	std::vector<PreparedRenderSubmission>& preparedRenderSubmissions, RenderViewBuildState&& preparedFrame,
+	RenderOutputRequest output, const std::vector<RenderItemRecord>& commands,
+	const TerraEngine::Renderer::Frame::VisibleCommandCacheRecord* cachedRecord);
+void CopyFrameVirtualGeometryPayload(RenderViewBuildState& target,
+	const TerraEngine::Renderer::Frame::VisibleCommandBuildResult& source);
+void ApplyFrameSceneContextTint(RenderViewBuildState& target, std::vector<RenderItemRecord>& commands);
+void PrepareFrameGroupedSubmissions(
+	const TerraEngine::Renderer::Frame::RetainedRenderTopologyState& retainedRenderTopology,
+	TerraEngine::Renderer::Frame::GroupedSubmissionMembershipCacheState& groupedSubmissionMembershipCache,
+	std::uint64_t snapshotRendererGeneration, bool renderTopologyRebuilt, RenderViewBuildState& target,
+	const std::vector<RenderItemRecord>& commands, RenderOutputKind outputKind, RenderViewType viewType,
+	std::uint64_t viewGeneration, std::uint64_t materializedCompatibilitySignature, bool viewEvidenceReused);
+
+	struct FrameViewBuildOutputs;
+	struct FrameViewSelectionSettings;
+void PrepareFrameSceneView(const FrameVisibilityInputs& visibilityInputs, const FrameVirtualGeometryInputs& virtualGeometryInputs,
+	FrameVirtualGeometryPreparation& virtualGeometryPreparation, const FrameVisibleStreamingInputs& visibleStreamingInputs,
+	const FrameViewSelectionSettings& settings, FrameViewBuildOutputs& outputs,
+	std::vector<std::pair<RenderViewType, TerraEngine::Renderer::VisibleStreamingTouchSet>>& pendingStreamingTouchSets,
+	const RenderViewBuildState& frameData,
+	const TerraEngine::Renderer::RendererEfficiencyResolvedFixtureCamera* fixedSceneCamera,
+	bool sealedCameraRecipeActive, std::span<const TerraEngine::Renderer::RendererEfficiencyResolvedFixtureCamera> sealedFixtureCameras);
+void PrepareFrameGameViews(const FrameVisibilityInputs& visibilityInputs, const FrameVirtualGeometryInputs& virtualGeometryInputs,
+	FrameVirtualGeometryPreparation& virtualGeometryPreparation, const FrameVisibleStreamingInputs& visibleStreamingInputs,
+	const FrameViewSelectionSettings& settings, FrameViewBuildOutputs& outputs,
+	std::vector<std::pair<RenderViewType, TerraEngine::Renderer::VisibleStreamingTouchSet>>& pendingStreamingTouchSets,
+	const RenderViewBuildState& frameData,
+	std::span<const CameraEntry> cameras, const FrameWorldTransforms& worldCapture,
+	const TerraEngine::Renderer::RendererEfficiencyResolvedFixtureCamera* fixedGameCamera,
+	bool sealedCameraRecipeActive, std::span<const TerraEngine::Renderer::RendererEfficiencyResolvedFixtureCamera> sealedFixtureCameras,
+	float deltaTime);
+void PrepareFrameDedicatedViews(const FrameVisibilityInputs& visibilityInputs, const FrameVirtualGeometryInputs& virtualGeometryInputs,
+	FrameVirtualGeometryPreparation& virtualGeometryPreparation, const FrameVisibleStreamingInputs& visibleStreamingInputs,
+	const FrameViewSelectionSettings& settings, FrameViewBuildOutputs& outputs,
+	std::vector<std::pair<RenderViewType, TerraEngine::Renderer::VisibleStreamingTouchSet>>& pendingStreamingTouchSets,
+	const RenderViewBuildState& frameData,
+	const TerraEngine::Renderer::BackendCapabilityProfile& backendCapabilities,
+	const std::deque<TerraEngine::Renderer::RenderCaptureRequest>& captureRequestsForReadback);
+
+	void PrepareFrameDynamicPages(
+	const std::shared_ptr<TerraEngine::Renderer::RenderFramePublication>& publication,
+	const TerraEngine::Renderer::Frame::RetainedRenderTopologyState& retainedRenderTopology,
+	const TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot,
+	const FrameCommandIdentity& commandIdentity, const FrameSceneRevisions& revisions,
+	const FrameResourceCohort& resourceCohort, std::span<const std::uint32_t> cpuDeformationRenderableIndices,
+	bool hasDenseAnimationPublication, std::size_t renderGraphWorkerCount);
+
+	struct FramePublicationTimings;
+std::shared_ptr<TerraEngine::Renderer::RenderFramePublication> BeginFramePublication(
+	const TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot, const FrameCaptureRoots& roots,
+	const TerraEngine::Renderer::Frame::RetainedRenderTopologyState& retainedRenderTopology,
+	TerraEngine::Renderer::RenderDiagnosticsSummary& renderGraphDiagnostics);
+void PrepareFrameBackendWork(const std::shared_ptr<TerraEngine::Renderer::RenderFramePublication>& publication,
+	const FrameCaptureRoots& roots, std::shared_ptr<TerraEngine::Renderer::CpuAnimationDeformationPlan>& cpuDeformationPlan,
+	TerraEngine::Renderer::DeformationBackendWorkPlan& selectedDeformation);
+void LowerFrameViewPublications(const std::shared_ptr<TerraEngine::Renderer::RenderFramePublication>& publication,
+	std::vector<PreparedRenderSubmission>& preparedRenderSubmissions,
+	const TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot);
+TerraEngine::Profiling::ProfilerFramePublicationEvidence FinalizeFramePublication(
+	std::shared_ptr<TerraEngine::Renderer::RenderFramePublication> publication,
+	TerraEngine::Renderer::Vulkan::VulkanRendererPreparationSummary& rendererPreparationSummary,
+	const std::vector<TerraEngine::Renderer::RenderPassNode>& renderGraphPasses,
+	const TerraEngine::Renderer::BackendCapabilityProfile& backendCapabilities,
+	const FrameCaptureRoots& roots, const FramePublicationTimings& timings);
+
+	struct FrameViewObservations;
+void OrderFramePreparedViews(TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot,
+	std::vector<PreparedRenderSubmission>& preparedRenderSubmissions);
+void RetireFrameViewHistories(const FrameVirtualGeometryPreparation& preparation);
+void PublishFrameAnimatedVisibility(const TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot,
+	std::span<const RenderableEntry> renderables, const std::vector<PreparedRenderSubmission>& preparedRenderSubmissions,
+	std::vector<std::uint8_t>& visibleAnimatedRenderableFlags, std::uint64_t protectedSceneGeneration);
+FrameViewObservations ObserveFrameViewOutputs(
+	const TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot,
+	const std::vector<PreparedRenderSubmission>& preparedRenderSubmissions, std::uint64_t snapshotRendererGeneration);
+
+std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> CommitFrameBackend(
+	const std::optional<TerraEngine::Profiling::ProfilerFramePublicationEvidence>& pendingProfilerPublicationEvidence,
+	const std::vector<std::pair<RenderViewType, TerraEngine::Renderer::VisibleStreamingTouchSet>>& pendingStreamingTouchSets,
+	const TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot, FrameViewObservations& observations,
+	std::deque<TerraEngine::Renderer::RenderCaptureRequest>& captureRequestsForReadback,
+	const TerraEngine::Renderer::Vulkan::VulkanRendererPreparationSummary& rendererPreparationSummary,
+	const TerraEngine::Renderer::BackendCapabilityProfile& backendCapabilities,
+	std::uint64_t snapshotRendererGeneration, TerraEngine::Renderer::RenderDiagnosticsSummary& renderGraphDiagnostics);
+void PublishFrameStreamingFeedback();
+void EnrichFrameVirtualGeometryDiagnostics(const TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot,
+	const FrameVirtualGeometryPreparation& preparation,
+	const std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication>& sealedPublication,
+	TerraEngine::Renderer::RenderDiagnosticsSummary& renderGraphDiagnostics);
+void PublishFrameDiagnostics(TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot,
+	const FrameVirtualGeometryPreparation& virtualGeometryPreparation, FrameViewBuildOutputs& outputs,
+	FrameViewObservations& observations, TerraEngine::Renderer::Frame::GeometryRouteStatsAggregate& geometryRouteStats,
+	std::uint64_t geometryRouteSelectionSignature, std::vector<TerraEngine::Renderer::RendererEfficiencyFixtureTargetProof>& fixtureTargets,
+	const SkyRuntimeState& skyRuntimeState, const TerraEngine::Renderer::RendererRecoverySnapshot& recoverySnapshot,
+	const std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication>& sealedPublication,
+	TerraEngine::Renderer::RenderDiagnosticsSummary& renderGraphDiagnostics);
+
+	struct FrameRenderableCaptureState;
+	FrameRenderableCaptureState CaptureFrameRenderableInputs(
+	const FrameCaptureRoots& roots, std::pmr::vector<CameraEntry>& cameras, std::pmr::vector<LightEntry>& lights,
+	const std::shared_ptr<const TerraEngine::Renderer::RenderFrameScratchValidationCallbacks>& scratchValidation);
+
+	struct FrameSnapshotCapture;
+	FrameSnapshotCapture CaptureFrameSnapshotHeader(
+	std::span<RenderableEntry> renderables, bool hasCameraInputs, const FrameRenderableCaptureState& capture,
+	const FrameCaptureRoots& roots, const FrameSceneRevisions& revisions, const FrameResourceCohort& resourceCohort,
+	const FrameBackendCapture& backendCapture, const FrameWorldTransforms& worldCapture);
+
+	static bool ValidateDepthFixtureIntent(const TerraEngine::Renderer::RendererEfficiencyFixtureIntent& intent, std::string& reason);
+	struct FrameFixtureCapture;
+	FrameFixtureCapture CaptureFrameFixtureInputs(
+	TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot, std::span<const RenderableEntry> renderables,
+	std::span<const CameraEntry> cameras, std::span<const LightEntry> lights,
+	const std::unordered_map<TerraEngine::UUID, const Mesh*>& frameMeshResources,
+	TerraEngine::Renderer::Frame::FrameGeometryInputs& geometryInputs, bool rendererResourceOwnerCohortStable,
+	const FrameWorldTransforms& worldCapture, bool hasPendingDedicatedCaptureRender);
+
+	void PrepareFrameVirtualGeometryEnvelope(
+	const TerraEngine::Renderer::RenderFrameSnapshot& renderFrameSnapshot,
+	const std::vector<PreparedRenderSubmission>& preparedRenderSubmissions,
+	const TerraEngine::Renderer::BackendCapabilityProfile& backendCapabilities,
+	std::uint64_t snapshotRendererGeneration,
+	const std::vector<TerraEngine::Renderer::VirtualGeometryAuthoritativeCounterReadback>& completedVirtualGeometryCounters,
+	TerraEngine::Renderer::RenderDiagnosticsSummary& renderGraphDiagnostics);
+
 };

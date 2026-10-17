@@ -107,7 +107,7 @@ namespace
 		return result;
 	}
 
-	// TryMultiply is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool TryMultiply(std::size_t lhs, std::size_t rhs, std::size_t& outValue)
 	{
 		if (lhs != 0 && rhs > (std::numeric_limits<std::size_t>::max() / lhs))
@@ -119,7 +119,7 @@ namespace
 		return true;
 	}
 
-	// TryAdd is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool TryAdd(std::size_t lhs, std::size_t rhs, std::size_t& outValue)
 	{
 		if (rhs > (std::numeric_limits<std::size_t>::max() - lhs))
@@ -151,17 +151,17 @@ namespace
 	{
 		outDecoded.resize(remapCount);
 		const std::size_t elementSize = static_cast<std::size_t>(GetRemapElementSizeBytes(encoding));
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (std::size_t remapIndex = 0; remapIndex < remapCount; ++remapIndex)
 		{
 			std::size_t byteOffset = 0;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!TryMultiply(remapIndex, elementSize, byteOffset))
 			{
 				return false;
 			}
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (encoding == MeshletRemapEncoding::Uint16)
 			{
 				std::uint16_t packed = 0;
@@ -179,13 +179,13 @@ namespace
 		return true;
 	}
 
-	// IsFiniteFloat is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool IsFiniteFloat(float value)
 	{
 		return std::isfinite(value) != 0;
 	}
 
-	// DisableConeData is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void DisableConeData(MeshletBounds& bounds)
 	{
 		bounds.coneApex[0] = bounds.center[0];
@@ -817,7 +817,7 @@ namespace
 		mesh.virtualGeometryOwnerFallbackReason.clear();
 	}
 
-	// IsCompiledMeshPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool IsCompiledMeshPath(const std::filesystem::path& path)
 	{
 		std::string extension = path.extension().generic_string();
@@ -1695,7 +1695,7 @@ void ResourceManager::CacheLoadedMeshBounds(const TerraEngine::UUID&, const void
 	// shaders to know about mesh-specific residency behavior.
 }
 
-// ResourceManager::LoadMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 TerraEngine::UUID ResourceManager::LoadMesh(const std::filesystem::path& path)
 {
 	if (!IsCompiledMeshPath(path))
@@ -1709,7 +1709,7 @@ TerraEngine::UUID ResourceManager::LoadMesh(const std::filesystem::path& path)
 	});
 }
 
-// ResourceManager::LoadMeshAsync is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::shared_future<TerraEngine::UUID> ResourceManager::LoadMeshAsync(const std::filesystem::path& path)
 {
 	if (!IsCompiledMeshPath(path))
@@ -1746,7 +1746,7 @@ std::shared_future<TerraEngine::UUID> ResourceManager::ReloadMeshAsync(const Ter
 	}, false);
 }
 
-// ResourceManager::GetMeshLocalBounds is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 TerraEngine::Scene::SpatialAABB ResourceManager::GetMeshLocalBounds(const TerraEngine::UUID& id)
 {
 	bool registered = false;

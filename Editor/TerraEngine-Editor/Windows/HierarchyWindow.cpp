@@ -295,7 +295,7 @@ void HierarchyWindow::DrawVisibleRow(const VisibleHierarchyRow& row)
 	}
 }
 
-// HierarchyWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void HierarchyWindow::OnGui() {
 	auto& objManager = ObjectManager::instance();
 
@@ -315,13 +315,13 @@ void HierarchyWindow::OnGui() {
 	}
 	
 	// Header: Add Button & Search
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::Button("+")) {
 		ImGui::OpenPopup("CreateEntityPopup");
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::BeginPopup("CreateEntityPopup")) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (ImGui::MenuItem("Create Empty Object")) {
 			Object obj = objManager.createObject("Object");
 			const entt::entity objEntity = obj.EntityId();
@@ -347,7 +347,7 @@ void HierarchyWindow::OnGui() {
 	strncpy(hierarchySearchBuf, m_SearchFilter.c_str(), sizeof(hierarchySearchBuf));
 	
 	ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::InputTextWithHint("##HierarchySearch", "Search...", hierarchySearchBuf, IM_ARRAYSIZE(hierarchySearchBuf))) {
 		m_SearchFilter = hierarchySearchBuf;
 	}
@@ -362,7 +362,7 @@ void HierarchyWindow::OnGui() {
 		const SceneDocument* activeScene = SceneManager::Instance().GetActiveScene();
 		std::string sceneName = activeScene ? activeScene->name : "No Active Scene";
 		
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (SceneManager::Instance().IsActiveSceneDirty()) {
 			sceneName += "*";
 		}
@@ -371,13 +371,13 @@ void HierarchyWindow::OnGui() {
 		bool sceneOpened = ImGui::TreeNodeEx(sceneName.c_str(), sceneNodeFlags);
 
 		// Accept Drop on Root (Scene Node) -> Detach Parent
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (ImGui::BeginDragDropTarget()) {
 			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ENTITY_CELL")) {
 				IM_ASSERT(payload->DataSize == sizeof(entt::entity));
 				entt::entity payload_n = *(const entt::entity*)payload->Data;
 				
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (std::optional<Object> payloadObject = objManager.getObject(payload_n)) {
 					// Detach from parent (make root)
 					objManager.setParent(*payloadObject, std::nullopt);
@@ -387,20 +387,20 @@ void HierarchyWindow::OnGui() {
 			ImGui::EndDragDropTarget();
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (sceneOpened) {
 			DrawCachedRootNodes();
 			ImGui::TreePop(); // Pop for scene name node
 		}
 	}
 	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (m_OpenEntityMenu) {
 		ImGui::OpenPopup("EntityContextMenu");
 		m_OpenEntityMenu = false;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::BeginPopup("EntityContextMenu")) {
 		if (m_ContextEntityId != entt::null) {
 			std::optional<Object> contextObject = objManager.getObject(m_ContextEntityId);
@@ -416,7 +416,7 @@ void HierarchyWindow::OnGui() {
 				const bool deletedObjectWasSelected = removedSelection != remainingSelection.end();
 				remainingSelection.erase(removedSelection, remainingSelection.end());
 				UndoRedoSystem::Instance().PushCommand(std::make_unique<DeleteObjectCommand>(m_ContextEntityId));
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				objManager.removeObject(*contextObject);
 				if (deletedObjectWasSelected) {
 					m_Owner->SetSelectedEntities(remainingSelection);
@@ -442,7 +442,7 @@ void HierarchyWindow::OnGui() {
 	}
 
 	// Handle Delete Key
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::IsKeyReleased(ImGuiKey_Delete)) {
 		auto selected = m_Owner->GetSelectedEntity();
 		if (selected) {
@@ -528,7 +528,7 @@ void HierarchyWindow::CreatePrefabFromSelection(entt::entity obj)
 	TERRAENGINE_LOG(LogLevel::Info, "Created prefab from selection: " << prefabPath);
 }
 
-// HierarchyWindow::DrawEntityNode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void HierarchyWindow::DrawEntityNode(
 	entt::entity obj,
 	const std::unordered_set<TerraEngine::UUID>* prefabSourceObjectIds,
@@ -545,19 +545,19 @@ void HierarchyWindow::DrawEntityNode(
 	std::string name = objManager.getObjectName(*object);
 	
 	bool matchesFilter = m_SearchFilter.empty();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!matchesFilter) {
 		std::string lowerName = name;
 		std::string lowerFilter = m_SearchFilter;
 		std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
 		std::transform(lowerFilter.begin(), lowerFilter.end(), lowerFilter.begin(), ::tolower);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (lowerName.find(lowerFilter) != std::string::npos) {
 			matchesFilter = true;
 		}
 	}
 	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!matchesFilter) {
 		// Simple skip for now
 		// return; // Uncomment to strict filter
@@ -579,12 +579,12 @@ void HierarchyWindow::DrawEntityNode(
 	{
 		children = objManager.getChildren(*object);
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (knownLeaf || children.empty()) {
 		flags |= ImGuiTreeNodeFlags_Leaf;
 	}
 	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!m_SearchFilter.empty()) {
 		flags |= ImGuiTreeNodeFlags_DefaultOpen;
 	}
@@ -634,7 +634,7 @@ void HierarchyWindow::DrawEntityNode(
 		ImGui::PopStyleColor();
 	}
 	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::IsItemClicked()) {
 		const ImGuiIO& io = ImGui::GetIO();
 		if (io.KeyCtrl)
@@ -663,14 +663,14 @@ void HierarchyWindow::DrawEntityNode(
 		m_Owner->OpenPrefabFromObject(obj);
 	}
 	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
 		m_ContextEntityId = obj;
 		m_OpenEntityMenu = true;
 	}
 
 	// Drag Source
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::BeginDragDropSource()) {
 		entt::entity entityId = obj;
 		ImGui::SetDragDropPayload("ENTITY_CELL", &entityId, sizeof(entt::entity));
@@ -679,13 +679,13 @@ void HierarchyWindow::DrawEntityNode(
 	}
 
 	// Drop Target (Parenting)
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::BeginDragDropTarget()) {
 		if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ENTITY_CELL")) {
 			IM_ASSERT(payload->DataSize == sizeof(entt::entity));
 			entt::entity payload_n = *(const entt::entity*)payload->Data;
 			
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (payload_n != obj) {
 				std::optional<Object> payloadObject = objManager.getObject(payload_n);
 				if (payloadObject) {
@@ -697,7 +697,7 @@ void HierarchyWindow::DrawEntityNode(
 		ImGui::EndDragDropTarget();
 	}
 	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (opened) {
 		if (drawChildren) {
 			for (Object child : children) {

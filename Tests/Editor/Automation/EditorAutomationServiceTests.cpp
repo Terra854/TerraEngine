@@ -12,6 +12,9 @@
 #include "Components/Transform.h"
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Core/Object/ObjectManager.h"
+#include "Engine/ThreadPool/ThreadPool.h"
+#include "Tests/Support/RenderCaptureBackendTestAccess.h"
+#include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Scene/SceneMutationQueue.h"
 #include "Engine/Scripting/ScriptingSystem.h"
@@ -35,6 +38,27 @@ namespace TerraEngine::EditorTests
 
 	namespace
 	{
+		// These service/transport tests do not initialize Engine. Synthetic image
+		// encoding still requires the production worker executor, so own one only
+		// when absent and settle capture jobs before releasing that owned pool.
+		class CaptureWorkerSession final
+		{
+		public:
+			CaptureWorkerSession() : ownsExecutor_(ThreadPool::instance().getThreadCount() == 0U)
+			{
+				if(ownsExecutor_) ThreadPool::instance().initialize(2U);
+			}
+			CaptureWorkerSession(const CaptureWorkerSession&) = delete;
+			CaptureWorkerSession& operator=(const CaptureWorkerSession&) = delete;
+			~CaptureWorkerSession()
+			{
+				TerraEngine::Renderer::RenderCaptureBackendTestAccess::RetireJobs(RenderSystem::Instance());
+				if(ownsExecutor_) ThreadPool::instance().shutdown();
+			}
+		private:
+			bool ownsExecutor_;
+		};
+
 		nlohmann::json CanonicalPosition(double x, double y, double z)
 		{
 			return {{"cell", {{"x", "0"}, {"y", "0"}, {"z", "0"}}}, {"offsetMetres", {x, y, z}}};
@@ -558,6 +582,7 @@ namespace TerraEngine::EditorTests
 		});
 
 		registry.Add("Editor.Automation.Service.CustomCameraCaptureReturnsMcpImageContent", [](TestContext& context) {
+			CaptureWorkerSession captureSession;
 			EditorAutomationService service;
 			const nlohmann::json result = service.HandleTool(
 				"camera.capture_custom",
@@ -583,6 +608,7 @@ namespace TerraEngine::EditorTests
 		});
 
 		registry.Add("Editor.Automation.Service.CustomCameraParallelUpUsesFiniteFallback", [](TestContext& context) {
+			CaptureWorkerSession captureSession;
 			EditorAutomationService service;
 			for (const nlohmann::json& target : {
 				CanonicalPosition(0.0, 2.0, 5.0),
@@ -611,6 +637,7 @@ namespace TerraEngine::EditorTests
 		});
 
 		registry.Add("Editor.Automation.Service.CameraObjectCaptureIncludesDisabledAuthoredCameras", [](TestContext& context) {
+			CaptureWorkerSession captureSession;
 			ObjectManager::instance().clear();
 			EditorAutomationService service;
 			Object cameraObject = ObjectManager::instance().createObject("Disabled Capture Camera");

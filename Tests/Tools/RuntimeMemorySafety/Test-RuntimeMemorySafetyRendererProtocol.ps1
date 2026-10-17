@@ -132,6 +132,100 @@ Reject 'between-iterations-late-vulkan-error-cannot-hide' {$null=RmsCheckFixture
 Reject 'between-iterations-log-cannot-claim-active-iteration' {$null=RmsCheckFixture (WithBetweenIterationLog BetweenIterations 1) renderer completed 1}
 Reject 'iteration-logger-needs-active-iteration' {$null=RmsCheckFixture (WithBetweenIterationLog Iteration 0) renderer completed 1}
 Reject 'host-logger-cannot-claim-active-iteration' {$null=RmsCheckFixture (WithBetweenIterationLog HostInitialize 1) renderer completed 1}
+# The optional bootstrap is a separately observed native instance. These schema
+# fixtures never claim actual driver residency or GPU acceptance from mock data.
+function RendererHostContext([int]$Iteration,[string]$Role){return @{iteration=$Iteration;role=$Role;instanceHandle='2000';deviceHandle='3000';initialized=$true;validationActuallyEnabled=$true;hostLiveBefore=($Role -cne 'Startup');hostLiveAfter=$true;distinctFromHost=$true;shutdownAttempted=$true;contextReleased=$true;observationCheckpoint=$(if($Role -ceq 'Startup'){'ExistingStartupContextAfterHostCreation'}else{'ContextInitializedUnderHost'})}}
+function RendererHostFixture([string]$Scenario='completed',[int]$Count=100){
+	$r=Fixture $Scenario $Count;$r.rendererEvidenceVersion=3
+	$r|Add-Member hostInstance @{requested=$true;createdCount=1;enumeratedCount=1;destroyedCount=1;createResult=0;enumerateCountResult=0;enumerateResult=0;physicalDeviceCount=1;instanceHandle='9000';cleanupResult='ReturnedNormally';handleCleared=$true;hostValidationCallbacks=$false;enabledExtensionCount=0;enabledLayerCount=0;engineOwnersShared=$false;driverModulePinned=$false;globalProcessInstanceCountClaim=$false;perIterationLastOwnedInstanceTeardownExercised=$false;coverageModel='RetainedFixtureHostInstance'}
+	$contexts=@((RendererHostContext 0 Startup))
+	foreach($row in $r.observations){
+		$local=@((RendererHostContext $row.iteration Primary))
+		if($Scenario -ceq 'restart'){$local+=,(RendererHostContext $row.iteration Restart)}
+		$contexts+=$local
+		$row|Add-Member hostInstance @{instanceHandle='9000';liveBeforeContextInitialization=$true;liveAfterContextCleanup=$true;contextLifecycles=$local}
+	}
+	$r|Add-Member rendererContexts @{observedInitializationCount=$contexts.Count;observedRetirementCount=$contexts.Count;finalRendererShutdownAttempted=$true;finalContextReleased=$true;windowLiveBeforeHostClose=$true;contexts=$contexts}
+	$logs=@($r.allSessionLog[0],$r.allSessionLog[1],(Boundary 0 0 HostInstanceInitializeBegin),(Boundary 0 0 HostInstanceInitializeEnd),(Boundary 0 0 StartupRendererShutdownBegin),(Boundary 0 0 StartupRendererShutdownEnd))
+	$logs+=@($r.allSessionLog|Where-Object iteration -GT 0)
+	$logs+=@((Boundary 0 0 HostInstanceShutdownBegin),(Boundary 0 0 HostInstanceShutdownEnd),$r.allSessionLog[-2],$r.allSessionLog[-1])
+	$r.allSessionLog=$logs
+	SyncRendererHostLogs $r
+	return ($r|ConvertTo-Json -Depth 100|ConvertFrom-Json)
+}
+function SyncRendererHostLogs($Receipt){
+	$sequence=0;foreach($entry in $Receipt.allSessionLog){$sequence++;$entry.sequence=$sequence}
+	foreach($row in $Receipt.observations){$row.allSessionLog=@($Receipt.allSessionLog|Where-Object iteration -EQ $row.iteration);$row.validationCallbackLog=@($row.allSessionLog|Where-Object eventKind -CEQ 'logger')}
+	$Receipt.validationCallbackLog=@($Receipt.observations|ForEach-Object {$_.validationCallbackLog})
+}
+foreach($lane in @('completed','failed','cancelled','scene-clear','shutdown','restart')){
+	Check "renderer-explicit-host-100-context-lifecycles-$lane" {$r=RendererHostFixture $lane;$null=RmsCheckFixture $r renderer $lane 100 -VulkanHostInstance;RmsRequire ($r.rendererContexts.observedInitializationCount -eq $(if($lane -ceq 'restart'){201}else{101})) 'Synthetic expected role count changed'}
+}
+Check 'renderer-default-false-v2-unchanged' {$null=RmsCheckFixture (Fixture completed) renderer completed 1 -VulkanHostInstance:$false}
+Reject 'renderer-v3-requires-explicit-host-request' {RmsCheckFixture (RendererHostFixture) renderer completed 100}
+Reject 'renderer-v2-cannot-satisfy-host-request' {RmsCheckFixture (Fixture completed 100) renderer completed 100 -VulkanHostInstance}
+Reject 'renderer-host-still-requires100' {RmsRunFixture $null renderer @('completed','failed','cancelled','scene-clear','shutdown','restart') 99 -VulkanHostInstance}
+Reject 'renderer-host-still-requires-six-lanes' {RmsRunFixture $null renderer @('completed') 100 -VulkanHostInstance}
+foreach($field in @('hostInstance','rendererContexts')){Reject "renderer-host-missing-root-$field" {$r=RendererHostFixture;$r.PSObject.Properties.Remove($field);RmsCheckFixture $r renderer completed 100 -VulkanHostInstance}}
+foreach($field in @('observedInitializationCount','observedRetirementCount','finalRendererShutdownAttempted','finalContextReleased','windowLiveBeforeHostClose','contexts')){Reject "renderer-host-missing-context-proof-$field" {$r=RendererHostFixture;$r.rendererContexts.PSObject.Properties.Remove($field);RmsCheckFixture $r renderer completed 100 -VulkanHostInstance}}
+$hostFaults=@('leadingzero-host','leadingzero-context','startup-invented-host-before','wrong-observation-checkpoint','missing-observation-checkpoint','bootstrap-not-created','bootstrap-not-destroyed','wrong-root-handle','shared-engine-owner','module-pinning','missing-startup','startup-not-released','context-not-initialized','context-no-validation','context-not-shutdown','context-retained','context-host-dead-before','context-host-dead-after','context-not-distinct','context-actual-host-handle','null-device','wrong-initialization-count','wrong-retirement-count','final-shutdown-not-attempted','final-context-retained','window-closed-before-host','row-missing-host','row-wrong-handle','row-host-dead-before','row-host-dead-after','row-missing-contexts','row-forged-context','missing-restart','wrong-role','wrong-context-order','host-initialize-before-engine','startup-shutdown-after-first-context','bootstrap-destroy-before-last-context','bootstrap-destroy-after-engine-shutdown','missing-bootstrap-close-boundary','context-null-proof-lost','scratch-still-active','workers-drained-per-iteration','final-workers-retained','root-validation-error','row-validation-error','only99-iterations')
+foreach($fault in $hostFaults){
+	$lane=$(if($fault -eq 'missing-restart'){'restart'}else{'completed'});$r=RendererHostFixture $lane;$o=$r.observations[-1];$contexts=$r.rendererContexts
+	switch($fault){
+		'leadingzero-host'{$r.hostInstance.instanceHandle='09000';foreach($row in $r.observations){$row.hostInstance.instanceHandle='09000'}}
+		'leadingzero-context'{$contexts.contexts[-1].instanceHandle='02000';$o.hostInstance.contextLifecycles[-1].instanceHandle='02000'}
+		'startup-invented-host-before'{$contexts.contexts[0].hostLiveBefore=$true}
+		'wrong-observation-checkpoint'{$contexts.contexts[-1].observationCheckpoint='ExistingStartupContextAfterHostCreation'}
+		'missing-observation-checkpoint'{$contexts.contexts[-1].PSObject.Properties.Remove('observationCheckpoint')}
+		'bootstrap-not-created'{$r.hostInstance.createdCount=0}
+		'bootstrap-not-destroyed'{$r.hostInstance.destroyedCount=0}
+		'wrong-root-handle'{$r.hostInstance.instanceHandle='9999'}
+		'shared-engine-owner'{$r.hostInstance.engineOwnersShared=$true}
+		'module-pinning'{$r.hostInstance.driverModulePinned=$true}
+		'missing-startup'{$contexts.contexts=@($contexts.contexts|Select-Object -Skip 1)}
+		'startup-not-released'{$contexts.contexts[0].contextReleased=$false}
+		'context-not-initialized'{$contexts.contexts[-1].initialized=$false}
+		'context-no-validation'{$contexts.contexts[-1].validationActuallyEnabled=$false}
+		'context-not-shutdown'{$contexts.contexts[-1].shutdownAttempted=$false}
+		'context-retained'{$contexts.contexts[-1].contextReleased=$false}
+		'context-host-dead-before'{$contexts.contexts[-1].hostLiveBefore=$false}
+		'context-host-dead-after'{$contexts.contexts[-1].hostLiveAfter=$false}
+		'context-not-distinct'{$contexts.contexts[-1].distinctFromHost=$false}
+		'context-actual-host-handle'{$contexts.contexts[-1].instanceHandle=$r.hostInstance.instanceHandle}
+		'null-device'{$contexts.contexts[-1].deviceHandle='0'}
+		'wrong-initialization-count'{$contexts.observedInitializationCount--}
+		'wrong-retirement-count'{$contexts.observedRetirementCount--}
+		'final-shutdown-not-attempted'{$contexts.finalRendererShutdownAttempted=$false}
+		'final-context-retained'{$contexts.finalContextReleased=$false}
+		'window-closed-before-host'{$contexts.windowLiveBeforeHostClose=$false}
+		'row-missing-host'{$o.PSObject.Properties.Remove('hostInstance')}
+		'row-wrong-handle'{$o.hostInstance.instanceHandle='9999'}
+		'row-host-dead-before'{$o.hostInstance.liveBeforeContextInitialization=$false}
+		'row-host-dead-after'{$o.hostInstance.liveAfterContextCleanup=$false}
+		'row-missing-contexts'{$o.hostInstance.PSObject.Properties.Remove('contextLifecycles')}
+		'row-forged-context'{$o.hostInstance.contextLifecycles[-1].deviceHandle='3333'}
+		'missing-restart'{$contexts.contexts=@($contexts.contexts|Where-Object role -CNE 'Restart');$o.hostInstance.contextLifecycles=@($o.hostInstance.contextLifecycles|Where-Object role -CNE 'Restart');$contexts.observedInitializationCount=$contexts.contexts.Count;$contexts.observedRetirementCount=$contexts.contexts.Count}
+		'wrong-role'{$contexts.contexts[-1].role='Startup'}
+		'wrong-context-order'{$contexts.contexts=@($contexts.contexts[1],$contexts.contexts[0])+@($contexts.contexts|Select-Object -Skip 2)}
+		'host-initialize-before-engine'{$logs=@($r.allSessionLog);$r.allSessionLog=@($logs[0],$logs[2],$logs[3],$logs[1])+@($logs|Select-Object -Skip 4)}
+		'startup-shutdown-after-first-context'{$logs=@($r.allSessionLog);$r.allSessionLog=@($logs[0..3])+@($logs[6..7])+@($logs[4..5])+@($logs|Select-Object -Skip 8)}
+		'bootstrap-destroy-before-last-context'{$logs=@($r.allSessionLog);$r.allSessionLog=@($logs[0..203])+@($logs[-4..-3])+@($logs[204..205])+@($logs[-2..-1])}
+		'bootstrap-destroy-after-engine-shutdown'{$logs=@($r.allSessionLog);$r.allSessionLog=@($logs[0..205])+@($logs[-2..-1])+@($logs[-4..-3])}
+		'missing-bootstrap-close-boundary'{$r.allSessionLog=@($r.allSessionLog|Where-Object phase -CNE 'HostInstanceShutdownEnd')}
+		'context-null-proof-lost'{$o.rendererCleanup.contextReleased=$false}
+		'scratch-still-active'{$o.rendererCleanup.activeAfterRetirement=$true}
+		'workers-drained-per-iteration'{$o.rendererCleanup.workerCountAfterRetirement=0}
+		'final-workers-retained'{$r.hostSession.threadPoolWorkersAfterCleanup=1}
+		'root-validation-error'{$r.allSessionValidationErrors=1}
+		'row-validation-error'{$o.allSessionValidationErrors=1}
+		'only99-iterations'{$r.observations=@($r.observations|Select-Object -First 99)}
+	}
+	if($fault -in @('host-initialize-before-engine','startup-shutdown-after-first-context','bootstrap-destroy-before-last-context','bootstrap-destroy-after-engine-shutdown')){SyncRendererHostLogs $r}
+	Reject "renderer-explicit-host-$fault" {RmsCheckFixture $r renderer $lane 100 -VulkanHostInstance}
+}
+Reject 'renderer-v2-cannot-hide-bootstrap-proof' {$r=Fixture completed;$r|Add-Member hostInstance (RendererHostFixture).hostInstance;RmsCheckFixture $r renderer completed 1}
+Reject 'renderer-v2-cannot-hide-context-lifecycle-proof' {$r=Fixture completed;$r|Add-Member rendererContexts (RendererHostFixture).rendererContexts;RmsCheckFixture $r renderer completed 1}
+Reject 'renderer-v2-cannot-hide-row-host-proof' {$r=Fixture completed;$r.observations[0]|Add-Member hostInstance (RendererHostFixture).observations[0].hostInstance;RmsCheckFixture $r renderer completed 1}
 RmsWrite (Join-Path $rendererTestRoot 'result.json') @{schemaVersion=1;status='RendererProtocolPassed';caseCount=$script:rendererChecks;syntheticSchemaOnly=$true;nativeAcceptance=$false;performanceAcceptance=$false;sourceIntegrationReleased=$false}
 Write-Output "$($script:rendererChecks) renderer protocol cases passed; synthetic schema only"
 exit 0

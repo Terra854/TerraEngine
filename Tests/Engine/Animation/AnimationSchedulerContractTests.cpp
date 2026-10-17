@@ -3,6 +3,10 @@
 #include "Animation/AnimationPresentationSystem.h"
 #include "Animation/AnimationSystem.h"
 #include "Animation/Diagnostics/AnimationDiagnostics.h"
+#include "Animation/Graph/EvaluationProgram.h"
+#include "AnimationClipCompiler.h"
+#include "Core/Object/ObjectManager.h"
+#include "Core/Scheduling/JobGraph.h"
 #include "Core/Scheduling/SystemScheduler.h"
 #include "Core/SystemBase.h"
 
@@ -12,6 +16,8 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <stdexcept>
 #include <memory>
 #include <string>
 #include <thread>
@@ -20,6 +26,8 @@
 
 namespace TerraEngine::Tests {
 	namespace {
+		using namespace TerraEngine::Animation;
+		using namespace TerraEngine::AssetPipeline;
 		using TerraEngine::Scheduling::FrameWorkloadDeclaration;
 		using TerraEngine::Scheduling::SchedulerPhaseDefinition;
 		using TerraEngine::Scheduling::SchedulerResourceDefinition;
@@ -78,6 +86,7 @@ namespace TerraEngine::Tests {
 			}
 
 			[[nodiscard]] std::size_t Size() const noexcept { return handles_.size(); }
+			[[nodiscard]] TerraEngine::Animation::AnimatorInstanceHandle At(std::size_t index) const { return handles_.at(index); }
 			[[nodiscard]] TerraEngine::Animation::AnimatorInstanceHandle First() const noexcept
 			{
 				return handles_.empty() ? TerraEngine::Animation::AnimatorInstanceHandle{} : handles_.front();
@@ -87,6 +96,436 @@ namespace TerraEngine::Tests {
 			TerraEngine::Animation::AnimationSystem& system_;
 			std::vector<TerraEngine::Animation::AnimatorInstanceHandle> handles_;
 		};
+
+		// Match the checked one-joint CPU/GPU integration fixtures so these contracts
+		// exercise native binding, lowering, and evaluation instead of fabricated rows.
+		AnimationGuid MakeStageGuid(std::uint8_t seed)
+		{
+			AnimationGuid guid;
+			for(std::size_t index = 0U; index < guid.value.size(); ++index) {
+				guid.value[index] = static_cast<std::uint8_t>(seed + index);
+			}
+			return guid;
+		}
+
+
+		AnimationMatrix4x4 MakeStageIdentityMatrix()
+		{
+			AnimationMatrix4x4 matrix;
+			matrix.values[0U] = 1.0F;
+			matrix.values[5U] = 1.0F;
+			matrix.values[10U] = 1.0F;
+			matrix.values[15U] = 1.0F;
+			return matrix;
+		}
+
+		std::shared_ptr<const SkeletonAsset> MakeStageSkeleton()
+		{
+			auto skeleton = std::make_shared<SkeletonAsset>();
+			skeleton->assetId = MakeStageGuid(40U);
+			skeleton->compatibilityFingerprint = 0x4387aabbccdd1122ULL;
+			skeleton->rootJointIndex = 0U;
+			SkeletonJoint root;
+			root.stableId = 101U;
+			root.parentIndex = -1;
+			root.normalizedSourcePath = "/root";
+			root.localBindTransform.rotation = {0.0F, 0.0F, 0.0F, 1.0F};
+			root.localBindTransform.scale = {1.0F, 1.0F, 1.0F};
+			skeleton->joints.push_back(root);
+			skeleton->inverseBindMatrices.push_back(MakeStageIdentityMatrix());
+			return skeleton;
+		}
+
+		std::shared_ptr<const AnimationClipAsset> MakeStageClip(
+			TestContext& context,
+			const SkeletonAsset& skeleton,
+			std::uint8_t assetSeed = 20U,
+			float beginTranslationX = 0.0F,
+			float endTranslationX = 1.0F,
+			AnimationFixedTick durationTicks = 1)
+		{
+			AnimationClipCompileInput input;
+			input.assetId = MakeStageGuid(assetSeed);
+			input.skeletonAssetId = skeleton.assetId;
+			input.compatibilityFingerprint = skeleton.compatibilityFingerprint;
+			input.durationTicks = durationTicks;
+			input.sampleRate = 60U;
+			input.segmentDurationTicks = durationTicks;
+
+			AnimationSourceTrack translation;
+			translation.stableTargetId = skeleton.joints[0U].stableId;
+			translation.kind = AnimationClipTrackKind::Translation;
+			translation.interpolation = AnimationInterpolation::Linear;
+			AnimationSourceKey begin;
+			begin.tick = 0;
+			begin.vectorValue = {beginTranslationX, 0.0F, 0.0F};
+			AnimationSourceKey end;
+			end.tick = durationTicks;
+			end.vectorValue = {endTranslationX, 0.0F, 0.0F};
+			translation.keys = {begin, end};
+			input.tracks.push_back(std::move(translation));
+
+			auto clip = std::make_shared<AnimationClipAsset>();
+			AnimationClipCompileReport report;
+			context.Expect(CompileAnimationClip(input, {}, *clip, report) == AnimationStatus::Ok,
+				"The production integration fixture must compile one valid immutable clip.");
+			return clip;
+		}
+
+
+		AnimatorPlaybackBinding MakeStageCpuBinding(TestContext& context)
+		{
+			AnimatorPlaybackBinding binding;
+			binding.skeleton = MakeStageSkeleton();
+			binding.clip = MakeStageClip(context, *binding.skeleton);
+			binding.updatePolicy = AnimatorUpdatePolicy::Manual;
+			binding.requestedExecutionPolicy =
+				AnimationExecutionPolicy::ForceCpuDeterministicFallback;
+			binding.fallbackCompatibilityFingerprint =
+				binding.skeleton->compatibilityFingerprint;
+			AnimationEvaluationExternalGenerations& generations =
+				binding.evaluationGenerations;
+			generations.consumerGeneration = 11U;
+			generations.morphGeneration = 12U;
+			generations.graphGeneration = 13U;
+			generations.viewGeneration = 14U;
+			generations.assetGeneration = 15U;
+			generations.residencyGeneration = 16U;
+			generations.materialGeneration = 17U;
+			generations.rendererGeneration = 18U;
+			generations.physicsGeneration = 19U;
+			generations.deterministicGeneration = 20U;
+			generations.unchangedInputReuseEligible = true;
+			return binding;
+		}
+
+
+		template<typename Value>
+		void WriteFixtureValue(std::vector<std::uint8_t>& bytes, std::size_t offset, const Value& value) {
+			if (offset > bytes.size() || sizeof(Value) > bytes.size() - offset) throw std::out_of_range("GPU fixture byte range");
+			std::memcpy(bytes.data() + offset, &value, sizeof(Value));
+		}
+		[[nodiscard]] std::shared_ptr<const GpuAnimationResidentPayloads>
+		MakeStageResidentPayload(float constantTranslationX)
+		{
+			GpuAnimationResidentPayloads payload{};
+
+			// One ATD1 directory selects one valid constant track. All T/R/S lanes
+			// may share it because atlas relocation is concerned with addresses,
+			// while these cases exercise CPU planning and ownership, not shader execution.
+			GpuAnimationTrackDirectoryHeader directory{};
+			directory.entryCount = 1U;
+			GpuAnimationTrackDirectoryEntry entry{};
+			entry.startTick = 0U;
+			entry.endTick = 60U;
+			entry.trackHeaderOffsetBytes =
+				sizeof(GpuAnimationTrackDirectoryHeader)
+				+ sizeof(GpuAnimationTrackDirectoryEntry);
+			AnimationCodecTrackHeaderV1 track{};
+			track.encoding = AnimationCodecValueEncoding::Vector3Unorm16;
+			track.flags = kAnimationCodecConstantTrack;
+			track.byteSize = sizeof(AnimationCodecTrackHeaderV1);
+			track.keyCount = 1U;
+			track.segmentStartTick = 0;
+			track.segmentEndTick = 60;
+			track.constantVector.x = constantTranslationX;
+			payload.packedClipBytes.resize(
+				entry.trackHeaderOffsetBytes + sizeof(track), 0U);
+			WriteFixtureValue(payload.packedClipBytes, 0U, directory);
+			WriteFixtureValue(
+				payload.packedClipBytes,
+				sizeof(directory),
+				entry);
+			WriteFixtureValue(
+				payload.packedClipBytes,
+				entry.trackHeaderOffsetBytes,
+				track);
+
+			// The frozen program layout is a 64-byte directory followed by one
+			// 16-byte joint record containing T/R/S locators and a reserved lane.
+			payload.programWords.assign(20U, 0U);
+			payload.programWords[16U] = 0U;
+			payload.programWords[17U] = 0U;
+			payload.programWords[18U] = 0U;
+
+			// The one-joint skeleton contains a directory, parent table, explicit
+			// per-joint depth, and one 64-byte palette/inverse-bind record.
+			payload.skeletonTables.resize(112U, 0U);
+			const std::uint32_t parentTableOffset = 16U;
+			const std::uint32_t depthTableOffset = 32U;
+			const std::uint32_t levelCount = 1U;
+			const std::uint32_t paletteTableOffset = 48U;
+			const std::int32_t rootParent = -1;
+			WriteFixtureValue(payload.skeletonTables, 0U, parentTableOffset);
+			WriteFixtureValue(payload.skeletonTables, 4U, depthTableOffset);
+			WriteFixtureValue(payload.skeletonTables, 8U, levelCount);
+			WriteFixtureValue(payload.skeletonTables, 12U, paletteTableOffset);
+			WriteFixtureValue(payload.skeletonTables, parentTableOffset, rootParent);
+			const std::uint32_t rootDepth = 0U;
+			WriteFixtureValue(payload.skeletonTables, depthTableOffset, rootDepth);
+			const std::uint32_t paletteJoint = 0U;
+			WriteFixtureValue(payload.skeletonTables, paletteTableOffset, paletteJoint);
+			const std::array<float, 12U> identityRows{
+				1.0F, 0.0F, 0.0F, 0.0F,
+				0.0F, 1.0F, 0.0F, 0.0F,
+				0.0F, 0.0F, 1.0F, 0.0F};
+			WriteFixtureValue(
+				payload.skeletonTables,
+				paletteTableOffset + 16U,
+				identityRows);
+
+			// Bounds always consume the morph resource, even when this atlas-only
+			// fixture has no animated targets. A checked zero-count AMT1 table keeps
+			// the validated request aligned with production deformable bindings.
+			GpuAnimationMorphTableHeader morphHeader{};
+			GpuAnimationMorphBoundsRecord morphBounds{};
+			morphBounds.minimum = {-1.0F, -1.0F, -1.0F, 0.0F};
+			morphBounds.maximum = {1.0F, 1.0F, 1.0F, 0.0F};
+			payload.morphInputs.resize(
+				sizeof(morphHeader) + sizeof(morphBounds), 0U);
+			WriteFixtureValue(payload.morphInputs, 0U, morphHeader);
+			WriteFixtureValue(
+				payload.morphInputs,
+				sizeof(morphHeader),
+				morphBounds);
+			return std::make_shared<const GpuAnimationResidentPayloads>(
+				std::move(payload));
+		}
+
+
+
+		AnimatorPlaybackBinding MakeStageCompactBinding(TestContext& context) {
+			AnimatorPlaybackBinding binding;
+			binding.skeleton = MakeStageSkeleton();
+			binding.clip = MakeStageClip(context, *binding.skeleton, 20U, 1.0F, 1.0F, 60);
+			binding.residentSegments.assign(binding.clip->segments.size(), 1U);
+			binding.jointStableIds = {101U}; binding.jointParents = {-1};
+			binding.requestedExecutionPolicy = AnimationExecutionPolicy::ForceGpuVisual;
+			binding.updatePolicy = AnimatorUpdatePolicy::EveryFrame;
+			binding.eventPolicy = AnimatorEventPolicy::Suppress;
+			binding.playback.loop = false; binding.playOnBind = false;
+			binding.rootMotionPolicy = AnimatorRootMotionPolicy::Ignore;
+			binding.evaluationGenerations.residencyGeneration = 1U;
+			// The same checked direct-clip program shape is authored by the real
+			// component coordinator. No controller transition or CPU consumer is added.
+			auto program = std::make_shared<EvaluationProgram>();
+			program->controllerAssetId = MakeStageGuid(80U);
+			program->compatibilityFingerprint = binding.skeleton->compatibilityFingerprint;
+			program->scratchPlan = {64U, 16U};
+			EvaluationInstruction instruction;
+			instruction.sourceStableId = 1U; instruction.opcode = EvaluationOpcode::SampleClip;
+			instruction.dependencyAssetId = binding.clip->assetId;
+			instruction.dependencyGeneration = 1U;
+			instruction.dependencyFingerprint = binding.skeleton->compatibilityFingerprint;
+			program->instructions.push_back(instruction);
+			program->bytecode.push_back(static_cast<std::uint8_t>(EvaluationOpcode::SampleClip));
+			program->states.push_back({1U, 0U, true, false, false, 1U, EvaluationOpcode::SampleClip});
+			EvaluationLayer layer; layer.stableId = 2U; layer.rootStateId = 1U; layer.defaultWeight = 1.0F;
+			program->layers.push_back(layer);
+			program->stableHash = ComputeEvaluationProgramStableHash(*program);
+			EvaluationDispatchState checked;
+			context.Expect(DispatchEvaluationProgramCpu(*program, checked) == AnimationStatus::Ok && checked.dispatchedInstructionCount == 1U,
+				"The real direct-clip evaluation program must pass production validation.");
+			binding.evaluationProgram = program;
+			binding.controllerClips.push_back({1U, binding.clip, binding.residentSegments, 1U});
+			binding.stateId = 1U;
+			binding.gpuResidentPayloads = MakeStageResidentPayload(1.0F);
+			binding.gpuProgramResourceIndex = 0U;
+			binding.gpuVisual.skeletonTopologyId = 1U;
+			binding.gpuVisual.compatibilityFingerprint = binding.skeleton->compatibilityFingerprint;
+			binding.gpuVisual.clipResourceIndex = 0U; binding.gpuVisual.skeletonResourceIndex = 0U;
+			binding.gpuVisual.morphResourceIndex = 0U;
+			binding.gpuVisual.jointCount = 1U; binding.gpuVisual.paletteEntryCount = 1U;
+			binding.gpuVisual.palettePartitionCount = 1U; binding.gpuVisual.looping = true;
+			binding.gpuVisual.generations.resourceGeneration = 1U;
+			binding.gpuVisual.renderIdentity.meshId[0] = 1U;
+			binding.gpuVisual.renderIdentity.meshHeaderVersion = 1U;
+			binding.gpuVisual.renderIdentity.deformablePayloadGeneration = 1U;
+			binding.gpuVisual.renderIdentity.rendererGeneration = 1U;
+			binding.gpuVisual.renderIdentity.sceneGeneration = ObjectManager::instance().GetSceneGeneration();
+			binding.gpuVisual.renderIdentity.skeletonCompatibilityFingerprint = binding.skeleton->compatibilityFingerprint;
+			auto fast = std::make_shared<AnimatorPlaybackBinding::GpuFastBinding>();
+			fast->programResourceIndex = 0U; fast->visual = binding.gpuVisual;
+			fast->residentPayloads = binding.gpuResidentPayloads;
+			fast->residentByteCount = fast->residentPayloads->programWords.size() * sizeof(std::uint32_t)
+				+ fast->residentPayloads->packedClipBytes.size() + fast->residentPayloads->skeletonTables.size() + fast->residentPayloads->morphInputs.size();
+			binding.gpuFastBinding = fast;
+			binding.gpuExecution = {true, true, true, true, static_cast<double>(fast->residentByteCount), 1.0e9};
+			// Use the checked default path, never the planner's prevalidated flags.
+			GpuAnimationLoweringInput lowering;
+			lowering.program = {program, program->stableHash, 0U}; lowering.visual = binding.gpuVisual;
+			lowering.visual.stableInstanceId = 1U;
+			lowering.visual.generations.instanceGeneration = 1U;
+			lowering.visual.generations.componentGeneration = 1U;
+			lowering.visual.generations.workGeneration = 1U;
+			lowering.visual.generations.programGeneration = 1U;
+			lowering.visual.generations.controllerGeneration = 1U;
+			lowering.visual.generations.clipGeneration = 1U;
+			lowering.visual.generations.skeletonGeneration = 1U;
+			lowering.visual.generations.meshGeneration = 1U;
+			lowering.visual.generations.rendererGeneration = 1U;
+			lowering.visual.generations.sceneGeneration = static_cast<std::uint32_t>(ObjectManager::instance().GetSceneGeneration());
+			lowering.visual.generations.frameIdLow = 1U;
+			lowering.effectiveMode = AnimationEffectiveExecutionMode::GpuVisual;
+			lowering.residentPayloads = binding.gpuResidentPayloads;
+			GpuAnimationWorkRequest lowered;
+			context.Expect(LowerGpuAnimationWorkRequest(lowering, lowered) == GpuAnimationLoweringStatus::Ok
+				&& ValidateGpuAnimationResidentPayloads(lowered, *binding.gpuResidentPayloads),
+				"The production GPU lowerer must accept the exact fixture program and resident bytes.");
+			return binding;
+		}
+
+
+		// Run the real declarations rather than reimplementing animation stages.
+		bool ExecuteStageFrame(AnimationSystem& system)
+		{
+			const auto plan = TerraEngine::Scheduling::ExecuteFrameWorkloadsCompatibility(
+				system.DeclareFrameWorkloads(0.0F), "animation-stage-contract");
+			return plan.valid && plan.completed;
+		}
+
+		void InvokeStage(const FrameWorkloadDeclaration& stage, std::size_t count,
+			TerraEngine::Scheduling::JobGraphContext& graphContext)
+		{
+			if(stage.rangeWork) stage.rangeWork({0U, 1U, 0U, count}, graphContext);
+			else if(stage.work) stage.work(graphContext);
+			else throw std::runtime_error("The production animation callback is missing.");
+		}
+
+		void CheckProductionWorkload(TestContext& context, std::size_t completeCount,
+			std::size_t compactCount)
+		{
+			AnimationSystem& system = AnimationSystem::Instance();
+			system.Initialize();
+			AnimatorMembershipGuard membership(system, completeCount + compactCount);
+			context.ExpectEqual(completeCount + compactCount, membership.Size(), "Every fixture owner must be admitted.");
+			for(std::size_t index = 0; index < membership.Size(); ++index) {
+				context.Expect(system.BindAnimatorPlayback(membership.At(index), index < completeCount
+					? MakeStageCpuBinding(context) : MakeStageCompactBinding(context)) == AnimationStatus::Ok,
+					"Checked CPU and resident GPU fixtures must bind through production admission.");
+			}
+			context.Expect(ExecuteStageFrame(system), "Initial binding admission must run all nine declared stages.");
+			const auto admitted = system.LoadPublishedAuthorityFrame();
+			for(std::size_t index = 0; index < membership.Size(); ++index) {
+				const auto* row = admitted ? admitted->Find(membership.At(index)) : nullptr;
+				context.Expect(row && row->effectiveExecutionMode == (index < completeCount
+					? AnimationEffectiveExecutionMode::CpuDeterministicFallback : AnimationEffectiveExecutionMode::GpuVisual),
+					"Initial complete admission must prove the actual selected CPU/GPU mode before compact capture.");
+			}
+			for(int frame = 0; frame < 2; ++frame) context.Expect(ExecuteStageFrame(system), "Compact warmup must execute the same nine declared stages.");
+			const auto held = system.LoadPublishedAuthorityFrame();
+			context.Expect(held && held->IsValid(), "The actual stages must publish a valid authority root.");
+			context.ExpectEqual(completeCount, system.ReadProductionIntegrationSnapshot().itemCount,
+				"Only complete owners may occupy the complete evaluation work plan after compact warmup.");
+			for(std::size_t index = 0; index < membership.Size(); ++index) {
+				const auto* row = held ? held->Find(membership.At(index)) : nullptr;
+				if(index < completeCount) {
+					context.Expect(row && row->effectiveExecutionMode == AnimationEffectiveExecutionMode::CpuDeterministicFallback
+						&& row->snapshot && row->snapshot->pose,
+						"Complete evaluation must preserve its selected CPU mode and sealed pose for readers.");
+				} else {
+					// The baseline compact writer leaves row mode/status metadata at
+					// their defaults. Prove the actual compact output with its native
+					// owner-qualified GPU sidecar, without claiming that metadata is correct.
+					bool matchingGpuCandidate = false;
+					if(held && held->sidecars) {
+						const auto handle = membership.At(index);
+						matchingGpuCandidate = std::any_of(held->sidecars->gpuCandidates.begin(), held->sidecars->gpuCandidates.end(),
+							[&](const AnimationSpecialistRecord& candidate) {
+								return candidate.key.slot == handle.slotIndex && candidate.key.lifetimeGeneration == handle.generation
+									&& candidate.key.sessionGeneration == held->sessionGeneration
+									&& candidate.IsValidFor(held->authorityGeneration) && candidate.kind == 1U
+									&& candidate.status == AnimationStatus::Ok;
+							});
+					}
+					context.Expect(row && !row->snapshot && !row->safeFallback && matchingGpuCandidate,
+						"Each compact owner must publish a successful GPU sidecar in the exact authority/session without a CPU snapshot or fallback.");
+				}
+			}
+			const auto* heldRow = held ? held->Find(membership.First()) : nullptr;
+			const auto heldTick = heldRow ? heldRow->tick : -1;
+			const auto heldPages = held ? held->pages : nullptr;
+			const auto heldSidecars = held ? held->sidecars : nullptr;
+			AnimationCommand command;
+			command.target = membership.First(); command.kind = AnimationCommandKind::Seek;
+			command.playbackTick = 1; command.producerId = 680U + completeCount * 10U + compactCount;
+			command.producerSequence = 1; command.correlationId = command.producerId * 100U;
+			context.Expect(system.SubmitCommand(command).status == AnimationStatus::Queued, "An exact seek must enter production command capture.");
+			context.Expect(ExecuteStageFrame(system), "The command-bearing frame must commit through the same nine stages.");
+			const auto published = system.LoadPublishedAuthorityFrame();
+			const auto receipt = system.ReadCommandReceipt(command.producerId, command.producerSequence, command.correlationId);
+			context.Expect(published && published != held && receipt.status == AnimationStatus::Ok
+				&& receipt.publicationGeneration == published->authorityGeneration
+				&& system.LoadAnimatorPlaybackState(command.target).absoluteTick == command.playbackTick,
+				"The real runtime exchange and exact terminal receipt must name the same authority generation.");
+			context.Expect(held && held->pages == heldPages && held->sidecars == heldSidecars
+				&& held->Find(command.target) == heldRow && heldRow && heldRow->tick == heldTick,
+				"A pinned reader must retain its exact immutable rows, pages, and sidecars across a successor exchange.");
+		}
+
+		void CheckGraphCancellationBoundary(TestContext& context, bool afterExchange)
+		{
+			using namespace TerraEngine::Scheduling;
+			AnimationSystem& system = AnimationSystem::Instance(); system.Initialize();
+			AnimatorMembershipGuard membership(system, 1U);
+			context.Expect(system.BindAnimatorPlayback(membership.First(), MakeStageCpuBinding(context)) == AnimationStatus::Ok,
+				"A fresh stopped CPU binding must admit a cache-eligible native evaluation.");
+			const auto prior = system.LoadPublishedAuthorityFrame();
+			const auto priorTick = system.LoadAnimatorPlaybackState(membership.First()).absoluteTick;
+			const auto initialCache = system.ReadProductionIntegrationSnapshot().cacheEntryCount;
+			AnimationCommand command;
+			command.target = membership.First(); command.kind = AnimationCommandKind::Seek; command.playbackTick = 1;
+			command.producerId = afterExchange ? 698U : 697U; command.producerSequence = 1; command.correlationId = command.producerId * 100U;
+			context.Expect(system.SubmitCommand(command).status == AnimationStatus::Queued, "The cancellation fixture must queue an actual command.");
+			auto stages = system.DeclareFrameWorkloads(0.0F);
+			context.ExpectEqual(std::size_t{9U}, stages.size(), "The baseline must retain all nine production callbacks.");
+			if(stages.size() != 9U) return;
+			JobGraph graph("animation-cancellation-boundary", "Real animation callback cancellation");
+			bool completedCallbacks = false;
+			std::shared_ptr<const AnimationAuthorityFrame> committed;
+			JobGraphJobDeclaration job;
+			job.name = "InvokeActualAnimationStages"; job.cancellable = false;
+			// A non-cancellable protected harness lets the actual callbacks observe
+			// one real cancelled JobGraphContext. This tests callback obligations,
+			// not the scheduler's separate cancelled-node admission policy.
+			job.work = [&](JobGraphContext& graphContext) {
+				for(std::size_t index = 0; index < 6U; ++index) InvokeStage(stages[index], 1U, graphContext);
+				if(afterExchange) {
+					InvokeStage(stages[6], 1U, graphContext);
+					committed = system.LoadPublishedAuthorityFrame();
+					context.Expect(committed && committed != prior, "Late cancellation must follow an observed real authority exchange.");
+				}
+				graph.RequestCancellation("exact authority boundary");
+				context.Expect(graphContext.IsCancellationRequested(), "The remaining callbacks must receive actual graph cancellation.");
+				if(!afterExchange) InvokeStage(stages[6], 1U, graphContext);
+				InvokeStage(stages[7], 1U, graphContext);
+				InvokeStage(stages[8], 1U, graphContext);
+				completedCallbacks = true;
+			};
+			(void)graph.AddJob(std::move(job));
+			const auto summary = graph.Execute();
+			context.Expect(summary.valid && completedCallbacks && summary.cancelled,
+				"The protected harness must finish both dependent callbacks under real cancellation.");
+			const auto receipt = system.ReadCommandReceipt(command.producerId, command.producerSequence, command.correlationId);
+			if(afterExchange) {
+				context.Expect(committed && system.LoadPublishedAuthorityFrame() == committed
+					&& receipt.status == AnimationStatus::Ok && receipt.publicationGeneration == committed->authorityGeneration
+					&& system.LoadAnimatorPlaybackState(command.target).absoluteTick == command.playbackTick,
+					"The cancelled finalizer must publish the committed ordinary receipt without revoking runtime progress.");
+				context.Expect(system.ReadProductionIntegrationSnapshot().cacheEntryCount > initialCache,
+					"The real dependent cache callback must complete committed cache work despite late graph cancellation.");
+				context.Expect(ExecuteStageFrame(system), "A healthy successor must remain possible after cancelled specialist finalization.");
+				const auto historical = system.ReadCommandReceipt(command.producerId, command.producerSequence, command.correlationId);
+				context.Expect(historical.status == AnimationStatus::Ok && historical.publicationGeneration == receipt.publicationGeneration,
+					"Subsequent capture must preserve the exact historical committed receipt.");
+			} else {
+				context.Expect(system.LoadPublishedAuthorityFrame() == prior && receipt.status == AnimationStatus::Cancelled
+					&& receipt.publicationGeneration == 0U && system.LoadAnimatorPlaybackState(command.target).absoluteTick == priorTick,
+					"Cancellation before exchange must settle the command without publishing any partial root or playback mutation.");
+				context.ExpectEqual(initialCache, system.ReadProductionIntegrationSnapshot().cacheEntryCount,
+					"An uncommitted candidate must not populate the published evaluation cache.");
+			}
+		}
 
 		bool Contains(const std::vector<std::string>& values, const std::string& expected)
 		{
@@ -174,6 +613,56 @@ namespace TerraEngine::Tests {
 
 	void RegisterAnimationSchedulerContractTests(TestRegistry& registry)
 	{
+		registry.Add("Animation.Scheduler.LifecycleRetirementRejectsSealedCallbacks", [](TestContext& context) {
+			using namespace TerraEngine::Scheduling;
+			AnimationSystem& system = AnimationSystem::Instance(); system.Initialize();
+			AnimatorMembershipGuard membership(system, 1U);
+			context.Expect(system.BindAnimatorPlayback(membership.First(), MakeStageCpuBinding(context)) == AnimationStatus::Ok
+				&& ExecuteStageFrame(system), "A real complete frame must establish the lifecycle fixture root.");
+			const auto held = system.LoadPublishedAuthorityFrame();
+			const auto* heldRow = held ? held->Find(membership.First()) : nullptr;
+			// Authority rows use the captured frame tick; playback owns a separate
+			// stopped clip cursor. Pin both identities rather than equating clocks.
+			const auto heldFrameTick = heldRow ? heldRow->tick : -1;
+			const auto heldSnapshot = heldRow ? heldRow->snapshot : nullptr;
+			const auto heldPose = heldSnapshot ? heldSnapshot->pose : nullptr;
+			context.Expect(heldRow && heldSnapshot && heldPose,
+				"The lifecycle fixture must acquire an actual sealed CPU pose before retirement.");
+			const auto priorTick = system.LoadAnimatorPlaybackState(membership.First()).absoluteTick;
+			AnimationCommand command;
+			command.target = membership.First(); command.kind = AnimationCommandKind::Seek; command.playbackTick = 1;
+			command.producerId = 699U; command.producerSequence = 1U; command.correlationId = 69901U;
+			context.Expect(system.SubmitCommand(command).status == AnimationStatus::Queued, "A real command must enter the candidate retired before exchange.");
+			auto stages = system.DeclareFrameWorkloads(0.0F);
+			context.ExpectEqual(std::size_t{9U}, stages.size(), "Lifecycle rejection must exercise the original nine callbacks.");
+			if(stages.size() != 9U) return;
+			JobGraph graph("animation-lifecycle-stage-contract");
+			JobGraphJobDeclaration job; job.name = "RetireAfterActualSeal";
+			job.work = [&](JobGraphContext& graphContext) {
+				for(std::size_t index = 0; index < 6U; ++index) InvokeStage(stages[index], 1U, graphContext);
+				context.Expect(system.NotifyLifecycleInvalidation(AnimationLifecycleBoundary::Renderer) == AnimationStatus::Ok,
+					"Protected lifecycle invalidation must retire the candidate and fresh authority lookup.");
+				for(std::size_t index = 6U; index < 9U; ++index) InvokeStage(stages[index], 1U, graphContext);
+			};
+			(void)graph.AddJob(std::move(job));
+			const auto summary = graph.Execute();
+			const auto receipt = system.ReadCommandReceipt(command.producerId, command.producerSequence, command.correlationId);
+			context.Expect(summary.valid && summary.completed && !system.LoadPublishedAuthorityFrame()
+				&& receipt.status == AnimationStatus::Cancelled && receipt.publicationGeneration == 0U
+				&& system.LoadAnimatorPlaybackState(command.target).absoluteTick == priorTick,
+				"Previously sealed callbacks must not resurrect a retired root or commit its queued playback changes.");
+			context.Expect(held && held->IsValid() && held->Find(command.target) == heldRow
+				&& heldRow && heldRow->snapshot == heldSnapshot && heldSnapshot->pose == heldPose
+				&& heldRow->tick == heldFrameTick,
+				"The reader pinned before lifecycle retirement must retain its exact sealed pose, row, and captured frame tick.");
+		});
+
+		registry.Add("Animation.Scheduler.ProductionCompleteStagesPreserveReaders", [](TestContext& context) { CheckProductionWorkload(context, 1U, 0U); });
+		registry.Add("Animation.Scheduler.ProductionCompactStagesPreserveReaders", [](TestContext& context) { CheckProductionWorkload(context, 0U, 1U); });
+		registry.Add("Animation.Scheduler.ProductionMixedStagesPreserveReaders", [](TestContext& context) { CheckProductionWorkload(context, 1U, 1U); });
+		registry.Add("Animation.Scheduler.GraphCancellationBeforeAuthorityExchange", [](TestContext& context) { CheckGraphCancellationBoundary(context, false); });
+		registry.Add("Animation.Scheduler.GraphCancellationAfterAuthorityExchange", [](TestContext& context) { CheckGraphCancellationBoundary(context, true); });
+
 		registry.Add("Animation.Scheduler.PhaseOrderAndResourcesAreStable", [](TestContext& context) {
 			const std::vector<SchedulerPhaseDefinition> phases = TerraEngine::Scheduling::DefaultSchedulerPhases();
 			const SchedulerPhaseDefinition* scripting = FindPhase(phases, "Scripting");

@@ -78,7 +78,7 @@ namespace
 	std::unique_ptr<Material> LoadMaterialFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
 	{
 		const auto fileBytes = manager.ReadFileBytes(resolvedPath);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (fileBytes.size() < sizeof(MaterialHeader))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TMAT file is too small: " << resolvedPath);
@@ -90,28 +90,28 @@ namespace
 
 		std::uint32_t magic = 0;
 		std::memcpy(&magic, header.magic, sizeof(magic));
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (magic != kMaterialMagicValue)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TMAT magic mismatch in " << resolvedPath);
 			return nullptr;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (header.version != kMaterialCurrentVersion)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TMAT version mismatch in " << resolvedPath << " (expected " << kMaterialCurrentVersion << ")");
 			return nullptr;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (header.headerSize > fileBytes.size())
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TMAT headerSize exceeds file length for " << resolvedPath);
 			return nullptr;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (header.textureCount > kMaxTextureBindings || header.floatParameterCount > kMaxFloatParameters)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TMAT exceeds supported limits in " << resolvedPath);
@@ -137,7 +137,7 @@ namespace
 		const std::size_t payloadSize = material->storage.size();
 		const std::uint8_t* payload = material->storage.data();
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (header.textureCount > 0)
 		{
 			if (header.textureArrayOffset < header.headerSize)
@@ -148,7 +148,7 @@ namespace
 
 			const std::size_t textureOffset = header.textureArrayOffset - header.headerSize;
 			const std::size_t textureBytes = header.textureCount * sizeof(TextureBinding);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (textureOffset + textureBytes > payloadSize)
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "TMAT texture array overruns payload in " << resolvedPath);
@@ -158,7 +158,7 @@ namespace
 			material->textures = std::span<const TextureBinding>(reinterpret_cast<const TextureBinding*>(payload + textureOffset), header.textureCount);
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (header.floatParameterCount > 0)
 		{
 			if (header.floatParameterOffset < header.headerSize)
@@ -169,7 +169,7 @@ namespace
 
 			const std::size_t floatOffset = header.floatParameterOffset - header.headerSize;
 			const std::size_t floatBytes = header.floatParameterCount * sizeof(FloatParameter);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (floatOffset + floatBytes > payloadSize)
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "TMAT float parameters overrun payload in " << resolvedPath);
@@ -212,7 +212,7 @@ namespace
 		return material;
 	}
 
-	// IsCompiledMaterialPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool IsCompiledMaterialPath(const std::filesystem::path& path)
 	{
 		std::string extension = path.extension().generic_string();
@@ -223,7 +223,7 @@ namespace
 	}
 }
 
-// ResourceManager::LoadMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 TerraEngine::UUID ResourceManager::LoadMaterial(const std::filesystem::path& path)
 {
 	if (!IsCompiledMaterialPath(path))
@@ -237,7 +237,7 @@ TerraEngine::UUID ResourceManager::LoadMaterial(const std::filesystem::path& pat
 	});
 }
 
-// ResourceManager::LoadMaterialAsync is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::shared_future<TerraEngine::UUID> ResourceManager::LoadMaterialAsync(const std::filesystem::path& path)
 {
 	if (!IsCompiledMaterialPath(path))
@@ -251,7 +251,7 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadMaterialAsync(const s
 	});
 }
 
-// ResourceManager::RegisterMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 TerraEngine::UUID ResourceManager::RegisterMaterial(const std::string& cacheKey, std::unique_ptr<Material> material)
 {
 	// Synthetic publications participate in invalidation and accounting too.

@@ -1,4 +1,6 @@
 #include "TestHarness.h"
+#include <string_view>
+#include <algorithm>
 
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "RendererThreadingTestFixtures.h"
@@ -11,15 +13,54 @@ namespace TerraEngine::Tests
 {
 	namespace
 	{
-		std::string ReadRendererSource(const char* relativePath)
+		// Required reads and lexical definition bounds fail before any token or
+		// ordering assertion can accidentally accept an empty/missing region.
+		std::string RequiredSource(TestContext& context, const char* path)
 		{
-			// This unit test validates the coordinator-side retention guard without
-			// requiring a live scene, device, or timing-sensitive worker execution.
-			const std::filesystem::path sourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ relativePath;
-			std::ifstream stream(sourcePath, std::ios::binary);
-			return stream ? std::string(std::istreambuf_iterator<char>(stream), {}) : std::string{};
+			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / path, std::ios::binary);
+			context.Expect(input.good(), std::string("Required source is unreadable: ") + path);
+			std::string text((std::istreambuf_iterator<char>(input)), {});
+			context.Expect(!text.empty(), std::string("Required source is empty: ") + path);
+			text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+			return text;
 		}
+		std::string RequiredDefinition(TestContext& context, const char* path, std::string_view signature)
+		{
+			const auto text = RequiredSource(context, path);
+			const auto start = text.find(signature);
+			context.Expect(start != std::string::npos, std::string("Required definition is absent: ") + std::string(signature));
+			const auto open = text.find('{', start + signature.size());
+			context.Expect(open != std::string::npos, "Required definition has no opening body.");
+			std::size_t depth = 0;
+			bool lineComment = false, blockComment = false, quoted = false, character = false, escape = false;
+			for(std::size_t index = open; index < text.size(); ++index)
+			{
+				const char value = text[index], next = index + 1 < text.size() ? text[index + 1] : '\0';
+				if(lineComment) { if(value == '\n') lineComment = false; continue; }
+				if(blockComment) { if(value == '*' && next == '/') { blockComment = false; ++index; } continue; }
+				if(quoted || character) {
+					if(escape) { escape = false; continue; }
+					if(value == '\\') { escape = true; continue; }
+					if((quoted && value == '"') || (character && value == '\'')) quoted = character = false;
+					continue;
+				}
+				if(value == '/' && next == '/') { lineComment = true; ++index; continue; }
+				if(value == '/' && next == '*') { blockComment = true; ++index; continue; }
+				if(value == '"') { quoted = true; continue; }
+				if(value == '\'') { character = true; continue; }
+				if(value == '{') ++depth;
+				if(value == '}' && --depth == 0) return text.substr(start, index + 1 - start);
+			}
+			context.Expect(false, "Required definition has no balanced closing body.");
+			return {};
+		}
+		bool SourceBefore(const std::string& text, std::string_view first, std::string_view second)
+		{
+			const auto a = text.find(first), b = text.find(second);
+			return a != std::string::npos && b != std::string::npos && a < b;
+		}
+
+
 	}
 
 	void RegisterPersistentRenderTopologyTests(TestRegistry& registry)
@@ -84,12 +125,10 @@ namespace TerraEngine::Tests
 
 		registry.Add("Renderer.PersistentTopology.ReusesCanonicalMembershipAndFailsClosedOnProducerGenerations", [](TestContext& context)
 		{
-			const std::string source = ReadRendererSource("Engine/Renderer/RenderSystem.cpp");
+			const auto source = RequiredDefinition(context, "Engine/Renderer/Frame/RenderTopologyPreparation.cpp", "RenderSystem::PrepareFramePersistentTopology(");
 			context.Expect(source.find("matchesRetainedOrder") != std::string::npos
 				&& source.find("if (!retainedOrderMatches)") != std::string::npos
-				&& source.find(
-					"retainedRenderTopology.conventionalVisibilityIdentityTable")
-					!= std::string::npos
+				&& source.find("retainedRenderTopology.conventionalVisibilityIdentityTable") != std::string::npos
 				&& source.find("if (topologyInputsChanged)") != std::string::npos
 				&& source.find("topologyComponentMutationRevision") != std::string::npos
 				&& source.find("topologyMeshComponentRevision") != std::string::npos
@@ -97,97 +136,91 @@ namespace TerraEngine::Tests
 				&& source.find("retainedRenderTopology.resourceRevision == renderFrameSnapshot.resourceRevision") != std::string::npos
 				&& source.find("retainedRenderTopology.rendererGeneration == snapshotRendererGeneration") != std::string::npos,
 				"Stable frames must reuse canonical membership, identity records, and the precomputed topology signature while exact producer generations invalidate the retained topology.");
+
 		});
 
 		registry.Add("Renderer.VisibleCommandCache.ReusesValidatedVirtualGeometrySelection", [](TestContext& context)
 		{
-			const std::string source = ReadRendererSource("Engine/Renderer/RenderSystem.cpp");
-			context.Expect(source.find("bool reuseValidatedSelection = false") != std::string::npos
-				&& source.find("preparedSelection == nullptr && !reuseValidatedSelection")
-					!= std::string::npos
-				&& source.find("&existing->second.virtualGeometryCommandIndices, true")
-					!= std::string::npos
-				&& source.find("const VirtualGeometryViewSelectionPacket* preparedSelection")
-					!= std::string::npos
-				&& source.find("true, &selectionPacket") != std::string::npos
-				&& source.find("const bool generatedSubmissionsValid = reuseValidatedSelection")
-					!= std::string::npos,
+			const auto visible = RequiredDefinition(context, "Engine/Renderer/Frame/RenderViewPreparation.cpp", "RenderSystem::PrepareFrameVisibleCommands(");
+			const auto selection = RequiredDefinition(context, "Engine/Renderer/Frame/RenderVirtualGeometrySelection.cpp", "RenderSystem::RecordFrameVirtualGeometrySelection(");
+			const auto finalize = RequiredDefinition(context, "Engine/Renderer/Frame/RenderVirtualGeometrySelection.cpp", "RenderSystem::FinalizeFrameVirtualGeometryEvidence(");
+			const auto declarations = RequiredSource(context, "Engine/Renderer/RenderSystem.h");
+			context.Expect(declarations.find("bool reuseValidatedSelection = false") != std::string::npos
+				&& finalize.find("preparedSelection == nullptr && !reuseValidatedSelection") != std::string::npos
+				&& selection.find("const TerraEngine::Renderer::Frame::VirtualGeometryViewSelectionPacket* preparedSelection") != std::string::npos
+				&& selection.find("FinalizeFrameVirtualGeometryEvidence(") != std::string::npos
+				&& visible.find("&existing->second.virtualGeometryCommandIndices, true") != std::string::npos
+				&& visible.find("true, &selectionPacket") != std::string::npos
+				&& finalize.find("const bool generatedSubmissionsValid = reuseValidatedSelection") != std::string::npos,
 				"Only an exact visible-command cache hit may reuse prior virtual-geometry validation; cache misses must retain CPU-oracle validation.");
+
 		});
 
 		registry.Add("Renderer.PersistentTopology.StaticReuseRetainsPublicationOrdinals", [](TestContext& context)
 		{
-			const std::string source = ReadRendererSource("Engine/Renderer/RenderSystem.cpp");
-			const std::size_t reuseBranch = source.find("reuseOrderedBaseCommands");
-			const std::size_t visibleCacheMaterialization = source.find(
-				"materializeCachedCommands");
-			context.Expect(reuseBranch != std::string::npos
-				&& visibleCacheMaterialization != std::string::npos
-				&& source.find("renderableDrawCommands[index].conventionalVisibilityIdentityIndex =",
-					reuseBranch) != std::string::npos
-				&& source.find("renderFrameSnapshot.renderables[index].conventionalVisibilityIdentityIndex",
-					reuseBranch) != std::string::npos,
+			const auto base = RequiredDefinition(context, "Engine/Renderer/Frame/RenderSpatialPreparation.cpp", "RenderSystem::PrepareFrameBaseCommands(");
+			const auto visible = RequiredDefinition(context, "Engine/Renderer/Frame/RenderViewPreparation.cpp", "RenderSystem::PrepareFrameVisibleCommands(");
+			const auto coordinator = RequiredDefinition(context, "Engine/Renderer/RenderSystem.cpp", "RenderSystem::BuildFrameExecution(");
+			const auto scene = RequiredDefinition(context, "Engine/Renderer/Frame/RenderViewBuilders.cpp", "RenderSystem::PrepareFrameSceneView(");
+			const auto reuseBegin = base.find("} else {");
+			const auto reuseEnd = reuseBegin == std::string::npos ? std::string::npos
+				: base.find("const bool drawMembershipChanged", reuseBegin);
+			context.Expect(reuseBegin != std::string::npos && reuseEnd != std::string::npos && reuseBegin < reuseEnd,
+				"The base-command reuse branch must exist before inspecting its canonical ordinal writes.");
+			const auto reuse = base.substr(reuseBegin, reuseEnd - reuseBegin);
+			context.Expect(reuse.find("renderableDrawCommands[index].conventionalVisibilityIdentityIndex =") != std::string::npos
+				&& reuse.find("renderFrameSnapshot.renderables[index]") != std::string::npos
+				&& reuse.find(".conventionalVisibilityIdentityIndex;") != std::string::npos
+				&& visible.find("materializeCachedCommands") != std::string::npos
+				&& SourceBefore(coordinator, "PrepareFrameBaseCommands(", "PrepareFrameSceneView(")
+				&& scene.find("PrepareFrameVisibleCommands(") != std::string::npos,
 				"Static draw-command reuse must restore each canonical visibility ordinal before cached views republish compact selectors; otherwise direct-only crowds resolve no backend draws.");
+
 		});
 
 		registry.Add("Renderer.PersistentTopology.StaticSnapshotProvidesCompleteBaselineGenerations", [](TestContext& context)
 		{
-			const std::string source = ReadRendererSource("Engine/Renderer/RenderSystem.cpp");
-			const std::size_t snapshotRow = source.find(
-				"RenderFrameRenderableRecord& snapshotRenderable");
-			const std::size_t animationOverride = source.find(
-				"snapshotRenderable.invalidation = binding.invalidation");
-			context.Expect(snapshotRow != std::string::npos
-				&& animationOverride != std::string::npos
-				&& source.find("snapshotRenderable.invalidation.asset =", snapshotRow)
-					!= std::string::npos
-				&& source.find("snapshotRenderable.invalidation.material =", snapshotRow)
-					!= std::string::npos
-				&& source.find("snapshotRenderable.invalidation.renderer =", snapshotRow)
-					!= std::string::npos
-				&& source.find("snapshotRenderable.invalidation.residency =", snapshotRow)
-					!= std::string::npos
-				&& source.find("snapshotRenderable.invalidation.asset =", snapshotRow)
-					< animationOverride,
+			const auto source = RequiredDefinition(context, "Engine/Renderer/Frame/RenderSnapshotPreparation.cpp", "RenderSystem::AssembleFrameSnapshotRows(");
+			context.Expect(SourceBefore(source, "RenderFrameRenderableRecord& snapshotRenderable", "snapshotRenderable.invalidation.asset =")
+				&& SourceBefore(source, "snapshotRenderable.invalidation.asset =", "snapshotRenderable.invalidation = binding.invalidation")
+				&& SourceBefore(source, "snapshotRenderable.invalidation.material =", "snapshotRenderable.invalidation = binding.invalidation")
+				&& SourceBefore(source, "snapshotRenderable.invalidation.renderer =", "snapshotRenderable.invalidation = binding.invalidation")
+				&& SourceBefore(source, "snapshotRenderable.invalidation.residency =", "snapshotRenderable.invalidation = binding.invalidation"),
 				"Every static snapshot row must initialize asset, material, renderer, and residency generations before an optional animation binding overrides them; otherwise direct-only topology slots are incomplete and publish no draws.");
+
 		});
 
 		registry.Add("Renderer.HotReload.InvalidatesSnapshotTopologyDynamicAndVisibleCaches", [](TestContext& context)
 		{
-			const std::string renderer = ReadRendererSource("Engine/Renderer/RenderSystem.cpp");
-			const std::string publication = ReadRendererSource(
-				"Engine/Renderer/Graph/RenderFramePublication.h");
-			context.Expect(renderer.find(
-				"resourceManager.GetRendererResourcePublicationGeneration()")
-					!= std::string::npos
-				&& renderer.find(
-					"retainedRenderTopology.resourceRevision == renderFrameSnapshot.resourceRevision")
-					!= std::string::npos
-				&& renderer.find("policyState.geometryGeneration = renderFrameSnapshot.resourceRevision")
-					!= std::string::npos
-				&& renderer.find("HashCombine(seed, rendererResourceGeneration)")
-					!= std::string::npos,
+			const auto capture = RequiredDefinition(context, "Engine/Renderer/Frame/RenderFrameCapture.cpp", "RenderSystem::CaptureFrameRenderableInputs(");
+			const auto topology = RequiredDefinition(context, "Engine/Renderer/Frame/RenderTopologyPreparation.cpp", "RenderSystem::PrepareFramePersistentTopology(");
+			const auto selection = RequiredDefinition(context, "Engine/Renderer/Frame/RenderVirtualGeometrySelection.cpp", "RenderSystem::RecordFrameVirtualGeometrySelection(");
+			const auto visible = RequiredDefinition(context, "Engine/Renderer/Frame/RenderViewPreparation.cpp", "BuildVisibleCommandCacheKey(");
+			const auto dynamic = RequiredDefinition(context, "Engine/Renderer/Frame/RenderDynamicPublication.cpp", "RenderSystem::PrepareFrameDynamicPages(");
+			const auto publication = RequiredSource(context, "Engine/Renderer/Graph/RenderFramePublication.h");
+			context.Expect(capture.find("resourceManager.GetRendererResourcePublicationGeneration()") != std::string::npos
+				&& topology.find("retainedRenderTopology.resourceRevision == renderFrameSnapshot.resourceRevision") != std::string::npos
+				&& selection.find("policyState.geometryGeneration = renderFrameSnapshot.resourceRevision") != std::string::npos
+				&& visible.find("HashCombine(seed, rendererResourceGeneration)") != std::string::npos,
 				"A successful renderer-resource reload must reach the immutable snapshot, retained topology, virtual-geometry history, and visible-command cache keys.");
-			context.Expect(publication.find("std::uint64_t resourceGeneration = 0u;")
-					!= std::string::npos
-				&& renderer.find("lane.resourceGeneration")
-					!= std::string::npos
-				&& renderer.find("renderable.invalidation.residency")
-					!= std::string::npos
-				&& renderer.find("left.resourceGeneration == right.resourceGeneration")
-					!= std::string::npos,
+			context.Expect(publication.find("std::uint64_t resourceGeneration = 0u;") != std::string::npos
+				&& dynamic.find("lane.resourceGeneration") != std::string::npos
+				&& dynamic.find("renderable.invalidation.residency") != std::string::npos
+				&& dynamic.find("left.resourceGeneration == right.resourceGeneration") != std::string::npos,
 				"Dynamic COW pages must reject lanes whose renderer resource generation changed even when transforms remain stable.");
+
 		});
 
 		registry.Add("Renderer.DeformationSelection.ReusesVisibilityAndMeshPageShapes", [](TestContext& context)
 		{
-			const std::string renderer = ReadRendererSource("Engine/Renderer/RenderSystem.cpp");
-			const std::string snapshot = ReadRendererSource(
-				"Engine/Renderer/Graph/RenderFrameSnapshot.cpp");
+			const auto renderer = RequiredDefinition(context, "Engine/Renderer/Frame/RenderAnimatedGeometryPreparation.cpp", "RenderSystem::BuildFrameAnimatedGeometryPlan(");
+			const auto coordinator = RequiredDefinition(context, "Engine/Renderer/RenderSystem.cpp", "RenderSystem::BuildFrameExecution(");
+
+			const std::string snapshot = RequiredDefinition(context, "Engine/Renderer/Graph/RenderFrameSnapshot.cpp", "SelectAnimatedGeometryPageDemands(");
 			context.Expect(renderer.find("std::vector<DeformablePageFamily> pageFamilies")
 					!= std::string::npos
-				&& renderer.find("buildAnimatedGeometryPlan(") != std::string::npos
-				&& renderer.find("visibleAnimatedRenderableFlags")
+				&& coordinator.find("BuildFrameAnimatedGeometryPlan(") != std::string::npos
+				&& coordinator.find("visibleAnimatedRenderableFlags")
 					!= std::string::npos
 				&& renderer.find("GpuDeformationPlanAccumulator accumulator")
 					!= std::string::npos

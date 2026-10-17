@@ -1,0 +1,233 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Proposed portable comment disposition ledger",
+  "description": "Shape only. The wrapper separately checks immutable IDs, batch joins, hashes, exact current lines and proof evidence.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "baselineRevision",
+    "productionCommentsSha256",
+    "commentBatchesSha256",
+    "beforeManifestSha256",
+    "batches",
+    "commentOnlyFiles",
+    "occurrences"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "source-review-comment-dispositions-v1"
+    },
+    "baselineRevision": {
+      "const": "0b9081841bd262ebacf1f2d1077875407916d296"
+    },
+    "productionCommentsSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "commentBatchesSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "beforeManifestSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "batches": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "occurrenceCount"
+        ],
+        "properties": {
+          "id": {
+            "enum": [
+              "renderer",
+              "animation",
+              "core-threadpool",
+              "remaining-engine",
+              "editor-main",
+              "remaining-editor"
+            ]
+          },
+          "occurrenceCount": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "commentOnlyFiles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "batchId",
+          "path",
+          "beforeSha256",
+          "afterSha256",
+          "beforeRelativePath",
+          "intentOnly",
+          "intent"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "batchId": {
+            "enum": [
+              "renderer",
+              "animation",
+              "core-threadpool",
+              "remaining-engine",
+              "editor-main",
+              "remaining-editor"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "beforeSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "afterSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "beforeRelativePath": {
+            "type": "string",
+            "minLength": 1
+          },
+          "intentOnly": {
+            "type": "boolean"
+          },
+          "intent": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "occurrences": {
+      "type": "array",
+      "minItems": 2345,
+      "maxItems": 2345,
+      "items": {
+        "type": "object",
+        "required": [
+          "occurrenceId",
+          "batchId",
+          "originalPath",
+          "originalSha256",
+          "originalLine",
+          "originalText",
+          "action",
+          "reason",
+          "proofPairId",
+          "currentPath",
+          "currentLine",
+          "beforeLineText",
+          "replacementLine",
+          "relocated"
+        ],
+        "properties": {
+          "occurrenceId": {
+            "type": "string",
+            "pattern": "^[^|]+\\|[0-9a-f]{64}\\|[1-9][0-9]*\\|[1-9][0-9]*$"
+          },
+          "batchId": {
+            "enum": [
+              "renderer",
+              "animation",
+              "core-threadpool",
+              "remaining-engine",
+              "editor-main",
+              "remaining-editor"
+            ]
+          },
+          "originalPath": {
+            "type": "string",
+            "minLength": 1
+          },
+          "originalSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "originalLine": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "originalText": {
+            "type": "string",
+            "minLength": 1
+          },
+          "action": {
+            "enum": [
+              "remove",
+              "rewrite"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "proofPairId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "currentPath": {
+            "type": "string",
+            "minLength": 1
+          },
+          "currentLine": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "beforeLineText": {
+            "type": "string",
+            "minLength": 1
+          },
+          "replacementLine": {
+            "type": "string"
+          },
+          "relocated": {
+            "type": "boolean"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "const": "remove"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "replacementLine": {
+                  "const": ""
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "replacementLine": {
+                  "pattern": "^\\s*//"
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

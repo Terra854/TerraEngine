@@ -51,6 +51,11 @@ $recoveryFloors=@{
 	'Engine.RuntimeMemorySafety.RendererScratch'=10
 	'Engine.RuntimeMemorySafety.EmptyFramePolicy'=8
 	'Editor.RuntimeMemorySafety.Diagnostics'=4
+	# Keep the production lifetime matrix and renderer physical-charge adapter
+	# together; a caller cannot weaken this registered behavioral selection.
+	'Renderer.ReadbackLifetime,Renderer.SyntheticCapture.FakeReadback'=29
+	# Keep all twelve actual stage/publication contracts in this exact slice.
+	'Engine.RuntimeMemorySafety.RendererScratch.Production,Renderer.FramePublication.StageContract,Animation.Scheduler.Production,Animation.Scheduler.GraphCancellation,Animation.Scheduler.LifecycleRetirementRejectsSealedCallbacks,Animation.AuthorityPublication.RejectedCandidatesPreservePinnedOwners'=12
 }
 if ($recoveryFloors.ContainsKey($Filter) -and $MinimumCases -lt $recoveryFloors[$Filter]) {
 	throw "Recovery filter '$Filter' requires at least $($recoveryFloors[$Filter]) cases."

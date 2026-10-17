@@ -54,18 +54,26 @@ namespace TerraEngine::Memory {
 		bool Destroy(T* value) noexcept
 		{
 			if (value == nullptr) return false;
-			const std::byte* address = reinterpret_cast<const std::byte*>(value);
-			const std::byte* begin = storage_.data();
-			const std::ptrdiff_t difference = address - begin;
-			if (difference < 0 || difference % static_cast<std::ptrdiff_t>(sizeof(T)) != 0) return false;
-			const std::size_t index = static_cast<std::size_t>(difference) / sizeof(T);
-			if (index >= Capacity || !occupied_[index]) return false;
-			std::destroy_at(value);
-			occupied_[index] = false;
-			next_[index] = freeHead_;
-			freeHead_ = index;
-			--size_;
-			return true;
+			// This thread-confined pool accepts arbitrary live-storage candidates.
+			// Equality is defined for foreign addresses; subtracting or ordering them
+			// against our storage would not establish portable ownership. The bounded
+			// O(Capacity) scan also avoids inspecting nonexistent zero-capacity slots.
+			// A stale raw alias at a reused address still identifies the new live
+			// object; callers needing generation checks must use a different interface.
+			for (std::size_t index = 0U; index < Capacity; ++index) {
+				if (!occupied_[index]) continue;
+				// Occupancy proves a T lifetime exists before laundering its owned
+				// address. Never dereference or destroy through the untrusted candidate.
+				T* owned = std::launder(Pointer(index));
+				if (owned != value) continue;
+				std::destroy_at(owned);
+				occupied_[index] = false;
+				next_[index] = freeHead_;
+				freeHead_ = index;
+				--size_;
+				return true;
+			}
+			return false;
 		}
 
 		void Clear() noexcept

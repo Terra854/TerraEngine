@@ -7,6 +7,7 @@
 #pragma once
 
 #include "VulkanContext.h"
+#include "VulkanReadbackLifecycle.h"
 #include "VulkanCommonIncludes.h"
 #include "VulkanHiZ.h"
 #include "VulkanVRS.h"
@@ -73,19 +74,19 @@ inline const std::vector<const char*> deviceExtensions = {
 };
 
 // Queue family indices used to set up graphics/present queues.
-// struct QueueFamilyIndices groups related state and operations so callers have one documented contract.
+
 struct QueueFamilyIndices {
 	std::optional<uint32_t> graphicsFamily;
 	std::optional<uint32_t> presentFamily;
 
-	// isComplete is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool isComplete() {
 		return graphicsFamily.has_value() && presentFamily.has_value();
 	}
 };
 
 // Swap chain capabilities returned by physical devices.
-// struct SwapChainSupportDetails groups related state and operations so callers have one documented contract.
+
 struct SwapChainSupportDetails {
 	VkSurfaceCapabilitiesKHR capabilities{};
 	std::vector<VkSurfaceFormatKHR> formats;
@@ -96,7 +97,7 @@ struct SwapChainSupportDetails {
 };
 
 // GPU buffer wrapper that keeps the VMA allocation alongside the VkBuffer.
-// struct VulkanBuffer groups related state and operations so callers have one documented contract.
+
 struct VulkanBuffer {
 	VkBuffer buffer = VK_NULL_HANDLE;
 	VmaAllocation allocation = VK_NULL_HANDLE;
@@ -134,7 +135,7 @@ static_assert(sizeof(VulkanGpuAnimationGraphicsRecord) == 64U,
 	"Animation graphics bridge records must remain 64-byte shader ABI values.");
 
 // GPU image wrapper for textures and attachments.
-// struct VulkanImage groups related state and operations so callers have one documented contract.
+
 struct VulkanImage {
 	VkImage image;
 	VmaAllocation allocation;
@@ -149,7 +150,7 @@ struct VulkanImage {
 };
 
 // Mesh buffers cached on the GPU.
-// struct VulkanMesh groups related state and operations so callers have one documented contract.
+
 struct VulkanMesh {
 	// Exact immutable CPU owner and accepted publication qualify these buffers.
 	// Reuploads get a new allocation generation; frame slots never change it.
@@ -179,7 +180,7 @@ struct VulkanMesh {
 };
 
 // Pipeline pairing with its layout to avoid redundant lookups.
-// struct VulkanPipeline groups related state and operations so callers have one documented contract.
+
 struct VulkanPipeline {
 	VkPipeline pipeline;
 	// Identity of the immutable collection actually used to build this pipeline.
@@ -197,7 +198,7 @@ struct VulkanPipeline {
 };
 
 // Must match shader definition
-// struct alignas groups related state and operations so callers have one documented contract.
+
 struct alignas(16) MaterialData {
 	glm::vec4 BaseColorFactor;
 	glm::vec4 EmissiveFactor;
@@ -237,7 +238,7 @@ static_assert(offsetof(MaterialData, TerrainLayerBaseColorFactors) == 256u);
 static_assert(offsetof(MaterialData, TerrainLayerUVTransforms) == 512u);
 static_assert(sizeof(MaterialData) == 768u);
 
-// struct PipelineKey groups related state and operations so callers have one documented contract.
+
 struct PipelineKey {
 	struct StagePublication {
 		ShaderStage stage = ShaderStage::Vertex;
@@ -270,7 +271,7 @@ struct PipelineKey {
 	}
 };
 
-// struct PipelineKeyHash groups related state and operations so callers have one documented contract.
+
 struct PipelineKeyHash {
 	std::size_t operator()(const PipelineKey& k) const {
 		std::size_t h1 = std::hash<TerraEngine::UUID>{}(k.shaderCollectionId);
@@ -311,7 +312,7 @@ struct VulkanSampledTextureAliasKeyHasher
 	}
 };
 
-// struct VulkanContext groups related state and operations so callers have one documented contract.
+
 struct VulkanContext::Impl {
 	VkInstance instance = VK_NULL_HANDLE;
 	VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
@@ -573,7 +574,7 @@ struct VulkanContext::Impl {
 	bool taskShaderSupported = false;
 	bool vrsAttachmentRuntimeEnabled = false;
 
-	// UsesVrsAttachment is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool UsesVrsAttachment() const
 	{
 		// VRS attachments are only safe when the runtime profile, device feature
@@ -633,7 +634,7 @@ struct VulkanContext::Impl {
 			}
 		}
 	};
-	// struct ShadowResourceRequest groups related state and operations so callers have one documented contract.
+
 	struct ShadowResourceRequest
 	{
 		std::uint32_t directionalCount = 0u;
@@ -641,13 +642,13 @@ struct VulkanContext::Impl {
 		std::uint32_t areaCount = 0u;
 		std::uint32_t pointCount = 0u;
 
-		// Total2DCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 		std::uint32_t Total2DCount() const
 		{
 			return directionalCount + spotCount + areaCount;
 		}
 
-		// TotalCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 		std::uint32_t TotalCount() const
 		{
 			return Total2DCount() + pointCount;
@@ -656,7 +657,7 @@ struct VulkanContext::Impl {
 		bool operator==(const ShadowResourceRequest&) const = default;
 	};
 
-	// struct ShadowStorageRegion groups related state and operations so callers have one documented contract.
+
 	struct ShadowStorageRegion
 	{
 		// A region describes one live GPU allocation slot or managed sub-region.
@@ -684,7 +685,7 @@ struct VulkanContext::Impl {
 		PendingRelease = 4u
 	};
 
-	// struct ShadowCacheEntry groups related state and operations so callers have one documented contract.
+
 	struct ShadowCacheEntry
 	{
 		// Cache entries are intentionally conservative: missing or changed
@@ -1190,7 +1191,7 @@ struct VulkanContext::Impl {
 	uint32_t ambientOcclusionHeight = 0u;
 	std::array<bool, MAX_FRAMES_IN_FLIGHT> ambientOcclusionHistoryValidByFrame{};
 
-	// struct GpuLightAnalysisViewSnapshot groups related state and operations so callers have one documented contract.
+
 	struct GpuLightAnalysisViewSnapshot
 	{
 		std::unordered_map<TerraEngine::UUID, GPULightAnalysisRecord> recordsByLightId;
@@ -1198,7 +1199,7 @@ struct VulkanContext::Impl {
 		bool valid = false;
 	};
 
-	// struct TemporalLightSelectionState groups related state and operations so callers have one documented contract.
+
 	struct TemporalLightSelectionState
 	{
 		float lastCompositeScore = 0.0f;
@@ -1209,7 +1210,7 @@ struct VulkanContext::Impl {
 		bool shadowedLastFrame = false;
 	};
 
-	// struct ViewLightingTemporalState groups related state and operations so callers have one documented contract.
+
 	struct ViewLightingTemporalState
 	{
 		std::unordered_map<TerraEngine::UUID, TemporalLightSelectionState> lights;
@@ -1221,7 +1222,7 @@ struct VulkanContext::Impl {
 		bool valid = false;
 	};
 
-	// struct ViewDepthHistoryState groups related state and operations so callers have one documented contract.
+
 	struct ViewDepthHistoryState
 	{
 		// Hi-Z is built from a depth buffer rendered earlier. The matching
@@ -1237,7 +1238,7 @@ struct VulkanContext::Impl {
 		bool valid = false;
 	};
 
-	// struct LightBudgetApplicationResult groups related state and operations so callers have one documented contract.
+
 	struct LightBudgetApplicationResult
 	{
 		std::vector<FrameLightCandidate> uploadedCandidates;
@@ -1394,7 +1395,7 @@ struct VulkanContext::Impl {
 	void ResetLightingUploadMirrors();
 			bool PrepareDepthForCompute(VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, bool updateGlobalDepthDescriptor);
 			void RestoreDepthForAttachment(VkCommandBuffer cmd, VkImage sourceDepthImage);
-			void StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd, VkImage sourceDepthImage, uint32_t viewIndex, const glm::mat4& viewProjection);
+			void StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd, VkImage sourceDepthImage, VkExtent2D sourceDepthExtent, uint32_t viewIndex, const glm::mat4& viewProjection);
 			bool GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, VkExtent2D sourceDepthExtent, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory);
 			bool GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex, VkImageView sampledDepthView);
 		void GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView);
@@ -1425,13 +1426,13 @@ struct VulkanContext::Impl {
 	void DestroyVulkanVirtualGeometryVisibilityPipelines();
 		void ResetMeshletCounters(uint32_t statsSlotIndex);
 	
-	// GetSnapshotLightDataOffset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	uint32_t GetSnapshotLightDataOffset(uint32_t slotIndex) const { return slotIndex * MAX_GLOBAL_LIGHTS; }
 	uint32_t GetSnapshotLightAnalysisInputOffset(uint32_t slotIndex) const { return slotIndex * MAX_GLOBAL_LIGHTS; }
 	uint32_t GetSnapshotClusterDataOffset(uint32_t slotIndex) const { return slotIndex * MAX_LIGHT_CLUSTERS; }
-	// GetSnapshotLightIndexOffset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	uint32_t GetSnapshotLightIndexOffset(uint32_t slotIndex) const { return slotIndex * MAX_LIGHT_INDEX_ENTRIES; }
-	// GetSnapshotClusterDepthOffset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	uint32_t GetSnapshotClusterDepthOffset(uint32_t slotIndex) const { return slotIndex * kLightingClusterDimX * kLightingClusterDimY; }
 	// ReserveIndirectDrawCommands returns a non-overlapping current-frame range
 	// after growing the slot's backing allocation when the real command count
@@ -1497,7 +1498,7 @@ struct VulkanContext::Impl {
 	uint32_t AllocateMaterialIndex();
 
 	// Editor / Offscreen Resources
-	// struct PushConstants groups related state and operations so callers have one documented contract.
+
 	struct PushConstants {
 		alignas(16) glm::mat4 viewProj;
 		alignas(16) glm::mat4 model;
@@ -1537,7 +1538,7 @@ struct VulkanContext::Impl {
 	};
 	static_assert(sizeof(PushConstants) == 256u, "Default mesh push constants must stay byte-compatible with Default.task/mesh/frag.hlsl.");
 
-	// struct OffscreenResources groups related state and operations so callers have one documented contract.
+
 	struct OffscreenResources {
 		VkImage image = VK_NULL_HANDLE;
 		VmaAllocation allocation = VK_NULL_HANDLE;
@@ -1885,6 +1886,9 @@ struct VulkanContext::Impl {
 	// resources remain alive after a client timeout until its fence proves that
 	// the queue has stopped using them.
 	struct VulkanReadbackRequest {
+		// Result delivery moves its strings out; retain independent correlation
+		// until the native fence releases physical ownership after a timeout.
+		std::string admissionId;
 		TerraEngine::Renderer::RenderCaptureResult completion;
 		RenderViewType viewType = RenderViewType::Game;
 		VkImage sourceImage = VK_NULL_HANDLE;
@@ -1902,19 +1906,23 @@ struct VulkanContext::Impl {
 		VkFormat sourceFormat = VK_FORMAT_UNDEFINED;
 		std::chrono::steady_clock::time_point submittedAt{};
 		std::chrono::milliseconds timeout = std::chrono::milliseconds(2000);
-		bool completionPublished = false;
+		TerraEngine::Renderer::Vulkan::ReadbackLifecycle lifecycle;
 		// Preserve which offscreen image owns this readback. Source kind remains
 		// GameView for next-frame captures even though their pixels come from the
 		// dedicated target rather than a potentially hidden dock target.
 		bool dedicatedRenderTarget = false;
+		bool deliveryReady = false;
+		bool validationTracked = false;
 	};
-	std::deque<VulkanReadbackRequest> inFlightReadbacks;
-	std::deque<TerraEngine::Renderer::RenderCaptureResult> completedReadbacks;
+	TerraEngine::Renderer::Vulkan::ReadbackOperationSlots<VulkanReadbackRequest,
+		TerraEngine::Renderer::Vulkan::kReadbackOperationCapacity> inFlightReadbacks;
 	// Identity copies are kept separate from image capture so their uint4 ABI and
 	// generation checks can fail closed without manufacturing color metadata.
 	struct VulkanConventionalVisibilityIdentityReadbackRequest
 	{
 		TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackResult completion;
+		TerraEngine::Renderer::Vulkan::ReadbackLifecycle lifecycle{TerraEngine::Renderer::Vulkan::ReadbackKind::VisibilityIdentity};
+		bool deliveryReady = false;
 		VkImage sourceImage = VK_NULL_HANDLE;
 		VkBuffer stagingBuffer = VK_NULL_HANDLE;
 		VmaAllocation stagingAllocation = VK_NULL_HANDLE;
@@ -1922,17 +1930,30 @@ struct VulkanContext::Impl {
 		VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
 		VkCommandPool commandPool = VK_NULL_HANDLE;
 	};
-	std::deque<VulkanConventionalVisibilityIdentityReadbackRequest> inFlightConventionalVisibilityIdentityReadbacks;
-	std::deque<TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackResult> completedConventionalVisibilityIdentityReadbacks;
+	TerraEngine::Renderer::Vulkan::ReadbackOperationSlots<VulkanConventionalVisibilityIdentityReadbackRequest,
+		TerraEngine::Renderer::Vulkan::kReadbackOperationCapacity> inFlightConventionalVisibilityIdentityReadbacks;
+
 
 	bool InitVulkan(WindowSystem& windowSystem);
 	void Cleanup(bool skipDeviceIdle = false);
 	void ProcessReadbackRequests();
-	void DestroyReadbackRequestResources(VulkanReadbackRequest& request);
-	void CancelReadbackRequests(std::string_view errorCategory, std::string_view message, bool publishResults);
+	void PublishCaptureReadbackTerminal(VulkanReadbackRequest& request, TerraEngine::Renderer::Vulkan::ReadbackTerminalReason reason);
+	void PublishIdentityReadbackTerminal(VulkanConventionalVisibilityIdentityReadbackRequest& request, TerraEngine::Renderer::Vulkan::ReadbackTerminalReason reason);
+	void DestroyReadbackRequestResources(VulkanReadbackRequest& request) noexcept;
+	void CancelReadbackRequests(std::string_view errorCategory, std::string_view message, bool publishResults, TerraEngine::Renderer::Vulkan::ReadbackRetirementProof proof);
+	void CancelIdentityReadbackRequests(TerraEngine::Renderer::Vulkan::ReadbackRetirementProof proof);
+	void RecordReadbackValidationEvent(TerraEngine::Renderer::Vulkan::ReadbackValidationEventKind kind, VkResult result = VK_SUCCESS) noexcept;
+	void DestroyReadbackValidationGate();
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	VkSemaphore readbackValidationGate = VK_NULL_HANDLE;
+	bool readbackTimelineSemaphoreEnabled = false;
+	VkImage readbackValidationSourceImage = VK_NULL_HANDLE;
+	VkCommandPool readbackValidationCommandPool = VK_NULL_HANDLE;
+	TerraEngine::Renderer::Vulkan::ReadbackLifetimeValidationSnapshot readbackValidationSnapshot;
+#endif
 	void ProcessConventionalVisibilityIdentityReadbacks();
 	void DestroyConventionalVisibilityIdentityReadbackRequestResources(
-		VulkanConventionalVisibilityIdentityReadbackRequest& request);
+		VulkanConventionalVisibilityIdentityReadbackRequest& request) noexcept;
 	[[nodiscard]] bool HasInFlightReadbackForImage(VkImage image) const;
 
 	void InitEditorMode();
@@ -1956,7 +1977,7 @@ struct VulkanContext::Impl {
 	VkPipeline skyBackgroundPipeline = VK_NULL_HANDLE;
 	VkPipelineLayout skyBackgroundPipelineLayout = VK_NULL_HANDLE;
 	
-	// struct GridPushConstants groups related state and operations so callers have one documented contract.
+
 	struct GridPushConstants {
 		glm::mat4 view;
 		glm::mat4 proj;

@@ -51,7 +51,7 @@ namespace
 	}
 }
 
-// VulkanContext::Impl::CreateDefaultTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::CreateDefaultTexture() {
 	defaultTextureShaderReadable = false;
 	// 1. Create Default White Texture (Index 0)
@@ -218,7 +218,7 @@ void VulkanContext::Impl::CreateDefaultTexture() {
 	defaultTextureShaderReadable = !deviceLost && textureDescriptorBootstrap.RequiredWritesComplete();
 }
 
-// VulkanContext::Impl::CreateBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VulkanBuffer VulkanContext::Impl::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, const char* name) {
 	VkBufferCreateInfo bufferInfo{};
 	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -241,14 +241,14 @@ VulkanBuffer VulkanContext::Impl::CreateBuffer(VkDeviceSize size, VkBufferUsageF
 	VulkanBuffer buffer{};
 	buffer.size = size;
 	VmaAllocationInfo allocationInfo{};
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer.buffer,
 		&buffer.allocation, &allocationInfo) != VK_SUCCESS) {
 		throw std::runtime_error("failed to create buffer!");
 	}
 	buffer.mappedData = hostVisible ? allocationInfo.pMappedData : nullptr;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (name) {
 		vmaSetAllocationName(allocator, buffer.allocation, name);
 	}
@@ -256,7 +256,7 @@ VulkanBuffer VulkanContext::Impl::CreateBuffer(VkDeviceSize size, VkBufferUsageF
 	return buffer;
 }
 
-// VulkanContext::Impl::DestroyBufferImmediate is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::DestroyBufferImmediate(VulkanBuffer& buffer)
 {
 	if (buffer.buffer != VK_NULL_HANDLE && buffer.allocation != VK_NULL_HANDLE)
@@ -267,7 +267,7 @@ void VulkanContext::Impl::DestroyBufferImmediate(VulkanBuffer& buffer)
 	buffer = {};
 }
 
-// VulkanContext::Impl::RetireBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::RetireBuffer(VulkanBuffer& buffer)
 {
 	if (buffer.buffer == VK_NULL_HANDLE || buffer.allocation == VK_NULL_HANDLE)
@@ -276,7 +276,7 @@ void VulkanContext::Impl::RetireBuffer(VulkanBuffer& buffer)
 		return;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (retiredBuffersByFrame.size() < MAX_FRAMES_IN_FLIGHT)
 	{
 		retiredBuffersByFrame.resize(MAX_FRAMES_IN_FLIGHT);
@@ -290,7 +290,7 @@ void VulkanContext::Impl::RetireBuffer(VulkanBuffer& buffer)
 }
 
 
-// VulkanContext::Impl::CopyBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 	if (commandBuffer == VK_NULL_HANDLE) return false;
@@ -327,7 +327,7 @@ void VulkanContext::Impl::ReleaseAmbiguousUploadsAfterIdle() noexcept {
 	ambiguousUploadBuffers.clear();
 }
 
-// VulkanContext::Impl::BeginSingleTimeCommands is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VkCommandBuffer VulkanContext::Impl::BeginSingleTimeCommands() {
 	std::lock_guard<std::mutex> lock(immediateCommandMutex);
 	VkCommandBufferAllocateInfo allocInfo{};
@@ -358,7 +358,7 @@ VkCommandBuffer VulkanContext::Impl::BeginSingleTimeCommands() {
 	return commandBuffer;
 }
 
-// VulkanContext::Impl::EndSingleTimeCommands is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer, std::string_view operation) {
 	if (commandBuffer == VK_NULL_HANDLE)
 	{
@@ -452,7 +452,7 @@ bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer, s
 	return true;
 }
 
-// VulkanContext::Impl::TransitionImageLayout is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels, uint32_t arrayLayers) {
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 	if (commandBuffer == VK_NULL_HANDLE)
@@ -469,12 +469,12 @@ bool VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, 
 	barrier.image = image;
 
 	// Determine aspect mask based on format
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
 		format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
 		format == VK_FORMAT_D24_UNORM_S8_UINT) {
 		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT) {
 			barrier.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
 		}
@@ -492,7 +492,7 @@ bool VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, 
 	VkPipelineStageFlags sourceStage;
 	VkPipelineStageFlags destinationStage;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
 		barrier.srcAccessMask = 0;
 		barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -559,7 +559,7 @@ bool VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, 
 	return EndSingleTimeCommands(commandBuffer, transitionOperation);
 }
 
-// VulkanContext::Impl::CopyBufferToImage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 	if (commandBuffer == VK_NULL_HANDLE)
@@ -587,7 +587,7 @@ bool VulkanContext::Impl::CopyBufferToImage(VkBuffer buffer, VkImage image, uint
 	return EndSingleTimeCommands(commandBuffer, "buffer-to-image copy");
 }
 
-// VulkanContext::Impl::CreateImageView is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VkImageView VulkanContext::Impl::CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t mipLevels) {
 	VkImageViewCreateInfo viewInfo{};
 	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -601,7 +601,7 @@ VkImageView VulkanContext::Impl::CreateImageView(VkImage image, VkFormat format,
 	viewInfo.subresourceRange.layerCount = 1;
 
 	VkImageView imageView;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkCreateImageView(device, &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
 		throw std::runtime_error("failed to create texture image view!");
 	}
@@ -609,11 +609,11 @@ VkImageView VulkanContext::Impl::CreateImageView(VkImage image, VkFormat format,
 	return imageView;
 }
 
-// VulkanContext::Impl::StageVisibilityToVulkan is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VkShaderStageFlags VulkanContext::Impl::StageVisibilityToVulkan(StageVisibilityMask visibility) {
 	VkShaderStageFlags flags = 0;
 	for (std::uint32_t bit = 0; bit < 32; ++bit) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if ((visibility & (1u << bit)) == 0) continue;
 		// Dispatch by explicit engine state so each case documents one supported behavior.
 		switch (static_cast<ShaderStage>(bit)) {
@@ -631,7 +631,7 @@ VkShaderStageFlags VulkanContext::Impl::StageVisibilityToVulkan(StageVisibilityM
 	return flags;
 }
 
-// VulkanContext::Impl::MapDescriptorType is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VkDescriptorType VulkanContext::Impl::MapDescriptorType(DescriptorType type) {
 	switch (type) {
 		case DescriptorType::UniformBuffer: return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -646,36 +646,36 @@ VkDescriptorType VulkanContext::Impl::MapDescriptorType(DescriptorType type) {
 	}
 }
 
-// VulkanContext::Impl::DestroyPipelines is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::DestroyPipelines() {
 	// Mesh descriptor sets are allocated from per-pipeline set layouts, so they
 	// must be freed before the corresponding layouts are destroyed.
 	std::vector<VkDescriptorSet> meshDescriptorSets;
 	for (auto& [meshId, mesh] : meshCache) {
 		for (const auto& [layout, descriptorSet] : mesh.descriptorSetsByLayout) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (descriptorSet != VK_NULL_HANDLE) {
 				meshDescriptorSets.push_back(descriptorSet);
 			}
 		}
 		mesh.descriptorSetsByLayout.clear();
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!meshDescriptorSets.empty() && device != VK_NULL_HANDLE && descriptorPool != VK_NULL_HANDLE) {
 		vkFreeDescriptorSets(device, descriptorPool, static_cast<uint32_t>(meshDescriptorSets.size()), meshDescriptorSets.data());
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (auto& outerEntry : pipelineCache) {
 		auto& map = outerEntry.second;
 		for (auto& innerEntry : map) {
 			VulkanPipeline& pipe = innerEntry.second;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (device) {
 				vkDestroyPipeline(device, pipe.pipeline, nullptr);
 				vkDestroyPipelineLayout(device, pipe.layout, nullptr);
 				// Start from 1 to skip the global descriptor set layout (index 0) which is shared and destroyed in Cleanup
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 				for (size_t i = 1; i < pipe.setLayouts.size(); ++i) {
 					vkDestroyDescriptorSetLayout(device, pipe.setLayouts[i], nullptr);
 				}
@@ -685,18 +685,18 @@ void VulkanContext::Impl::DestroyPipelines() {
 	pipelineCache.clear();
 }
 
-// VulkanContext::Impl::DestroyWorkerPools is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::DestroyWorkerPools() {
 	if (!device) return;
 	for (size_t frameIndex = 0; frameIndex < workerCommandPools.size(); ++frameIndex) {
 		auto& framePools = workerCommandPools[frameIndex];
 		std::vector<std::vector<VkCommandBuffer>> emptyBuffers;
 		auto& frameBuffers = (frameIndex < workerCommandBuffers.size()) ? workerCommandBuffers[frameIndex] : emptyBuffers;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (size_t poolIndex = 0; poolIndex < framePools.size(); ++poolIndex) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!framePools[poolIndex]) continue;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (poolIndex < frameBuffers.size() && !frameBuffers[poolIndex].empty()) {
 				vkFreeCommandBuffers(device, framePools[poolIndex], static_cast<uint32_t>(frameBuffers[poolIndex].size()), frameBuffers[poolIndex].data());
 				frameBuffers[poolIndex].clear();
@@ -709,12 +709,12 @@ void VulkanContext::Impl::DestroyWorkerPools() {
 	reusableSecondaryCommandSignatures.clear();
 }
 
-// VulkanContext::Impl::EnsureWorkerPools is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::EnsureWorkerPools(uint32_t frameIndex, size_t workerCount) {
 	if (workerCommandPools.size() <= frameIndex) {
 		workerCommandPools.resize(frameIndex + 1);
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (workerCommandBuffers.size() <= frameIndex) {
 		workerCommandBuffers.resize(frameIndex + 1);
 	}
@@ -723,7 +723,7 @@ void VulkanContext::Impl::EnsureWorkerPools(uint32_t frameIndex, size_t workerCo
 	auto& frameBuffers = workerCommandBuffers[frameIndex];
 	QueueFamilyIndices indices = FindQueueFamilies(physicalDevice);
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	while (framePools.size() < workerCount) {
 		VkCommandPoolCreateInfo poolInfo{};
 		poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -737,30 +737,30 @@ void VulkanContext::Impl::EnsureWorkerPools(uint32_t frameIndex, size_t workerCo
 	}
 }
 
-// VulkanContext::Impl::AcquirePrimaryCommandBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VkCommandBuffer VulkanContext::Impl::AcquirePrimaryCommandBuffer(uint32_t frameIndex) {
 	if (frameIndex >= commandBuffers.size()) return VK_NULL_HANDLE;
 	return commandBuffers[frameIndex];
 }
 
-// VulkanContext::Impl::AcquireWorkerCommandBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VkCommandBuffer VulkanContext::Impl::AcquireWorkerCommandBuffer(uint32_t frameIndex, size_t workerIndex) {
 	auto& framePools = workerCommandPools[frameIndex];
 	auto& frameBuffers = workerCommandBuffers[frameIndex];
 
 	// Ensure tracking structures are sized correctly
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (workerBufferUsage.size() <= frameIndex) workerBufferUsage.resize(frameIndex + 1);
 	if (workerBufferUsage[frameIndex].size() <= workerIndex) workerBufferUsage[frameIndex].resize(workerIndex + 1, 0);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (frameBuffers.size() <= workerIndex) frameBuffers.resize(workerIndex + 1);
 
 	size_t& usageIndex = workerBufferUsage[frameIndex][workerIndex];
 	std::vector<VkCommandBuffer>& buffers = frameBuffers[workerIndex];
 
 	// reuse existing buffer if available at this usage index
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (usageIndex < buffers.size()) {
 		return buffers[usageIndex++];
 	}
@@ -772,7 +772,7 @@ VkCommandBuffer VulkanContext::Impl::AcquireWorkerCommandBuffer(uint32_t frameIn
 	allocInfo.commandBufferCount = 1;
 
 	VkCommandBuffer secondary = VK_NULL_HANDLE;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkAllocateCommandBuffers(device, &allocInfo, &secondary) != VK_SUCCESS) {
 		return VK_NULL_HANDLE;
 	}
@@ -781,12 +781,12 @@ VkCommandBuffer VulkanContext::Impl::AcquireWorkerCommandBuffer(uint32_t frameIn
 	return secondary;
 }
 
-// VulkanContext::Impl::MapTextureFormat is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VkFormat VulkanContext::Impl::MapTextureFormat(uint32_t vkFormat) {
 	return static_cast<VkFormat>(vkFormat);
 }
 
-// VulkanContext::Impl::EnsureTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	if (deviceLost || !initialized) return;
@@ -827,11 +827,11 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	ambiguousUploadBuffers.reserve(ambiguousUploadBuffers.size() + 1U);
 	ambiguousUploadImages.reserve(ambiguousUploadImages.size() + 1U);
 	const Texture* cpuTexture = textureOwner.get(); // Retain bytes across asynchronous publication.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!cpuTexture || cpuTexture->publicationGeneration == 0U) return;
 
 	// Ensure we have transcoded UASTC data
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (cpuTexture->transcodedData.empty())
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Texture " << ToHexString(textureId) << " has no transcoded payload data.");
@@ -919,7 +919,7 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	VmaAllocationCreateInfo allocInfo = {};
 	allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &vImage.image, &vImage.allocation, nullptr) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to create image for texture");
 		vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
@@ -989,7 +989,7 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	vImage.sourceMipCount = sourceMipCount;
 	vImage.residentMipCount = residentMipCount;
 	vImage.residentMipOffset = residentMipOffset;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vImage.view == VK_NULL_HANDLE) {
 		vmaDestroyImage(allocator, vImage.image, vImage.allocation);
 		return;
@@ -1007,7 +1007,7 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	samplerInfo.minLod = 0.0f;
 	samplerInfo.maxLod = static_cast<float>(residentMipCount - 1u);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkCreateSampler(device, &samplerInfo, nullptr, &vImage.sampler) != VK_SUCCESS) {
 		vkDestroyImageView(device, vImage.view, nullptr);
 		vmaDestroyImage(allocator, vImage.image, vImage.allocation);
@@ -1037,16 +1037,16 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	textureIndexMap[textureId] = AcquireSampledTextureAlias(textureId, defaultKey);
 }
 
-// VulkanContext::Impl::EnsureMaterialDescriptorSets is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(TerraEngine::UUID shaderCollectionId, TerraEngine::UUID materialId) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	if (deviceLost || !initialized || currentFrame >= globalDescriptorSets.size()) return {};
 	// No longer returns descriptor sets, but acts as an upload mechanism for material data.
 	// The return value is kept for now to minimize API breakage, but it will be empty besides the global set.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	const auto materialOwner = ResourceManager::Instance().AcquireMaterialSnapshot(materialId);
 	const Material* material = materialOwner.get();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!material || material->publicationGeneration == 0U || material->header.textureCount > material->textures.size()) {
 		if (materialIndexMap.contains(materialId)) InvalidateMaterial(materialId);
 		return { globalDescriptorSets[currentFrame] };
@@ -1141,7 +1141,7 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	data.OcclusionTextureIndex = 2u;
 	data.EmissiveTextureIndex = 0u;
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (uint32_t i = 0; i < material->header.textureCount; ++i) {
 		const auto& binding = material->textures[i];
 		if (binding.textureUuid == TerraEngine::EMPTY_UUID) continue;
@@ -1256,7 +1256,7 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 		copyRegion.srcOffset = 0;
 		copyRegion.dstOffset = materialIndex * sizeof(MaterialData);
 		copyRegion.size = bufferSize;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 			vkCmdCopyBuffer(commandBuffer, stagingBuffer.buffer, globalMaterialSSBOs[i].buffer, 1, &copyRegion);
 		}
@@ -1273,7 +1273,7 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	return { globalDescriptorSets[currentFrame] };
 }
 
-// VulkanContext::Impl::InvalidateMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::InvalidateMaterial(TerraEngine::UUID materialId) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	// Material edits can change alpha clipping or shadow behavior, so cached
@@ -1294,7 +1294,7 @@ void VulkanContext::Impl::InvalidateMaterial(TerraEngine::UUID materialId) {
 	materialTextureSourceOwners.erase(materialId);
 }
 
-// VulkanContext::Impl::InvalidateMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
@@ -1319,18 +1319,18 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 			it->second.bindlessIndex = INVALID_BINDLESS_BUFFER_INDEX;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!it->second.descriptorSetsByLayout.empty() && descriptorPool != VK_NULL_HANDLE) {
 			std::vector<VkDescriptorSet> descriptorSets;
 			descriptorSets.reserve(it->second.descriptorSetsByLayout.size());
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 			for (const auto& [layout, set] : it->second.descriptorSetsByLayout) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (set != VK_NULL_HANDLE) {
 					descriptorSets.push_back(set);
 				}
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!descriptorSets.empty()) {
 				vkFreeDescriptorSets(device, descriptorPool, static_cast<uint32_t>(descriptorSets.size()), descriptorSets.data());
 			}
@@ -1338,7 +1338,7 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 		}
 		vmaDestroyBuffer(allocator, it->second.meshShaderVertexBuffer.buffer, it->second.meshShaderVertexBuffer.allocation);
 		vmaDestroyBuffer(allocator, it->second.meshletVertexRemapBuffer.buffer, it->second.meshletVertexRemapBuffer.allocation);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (it->second.meshSkinningBuffer.buffer != VK_NULL_HANDLE) {
 			vmaDestroyBuffer(allocator, it->second.meshSkinningBuffer.buffer, it->second.meshSkinningBuffer.allocation);
 		}
@@ -1356,7 +1356,7 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 	}
 }
 
-// VulkanContext::Impl::InvalidateTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::InvalidateTexture(
 	TerraEngine::UUID textureId, bool reloadAfterInvalidate,
 	bool preserveAliasesForReplacement) {
@@ -1382,7 +1382,7 @@ void VulkanContext::Impl::InvalidateTexture(
 	auto it = textureCache.find(textureId);
 	if (it != textureCache.end()) {
 		// Don't invalidate default texture
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (it->second.image == defaultTexture.image) return;
 
 		// No descriptor may continue naming a view that is about to be destroyed.
@@ -1432,7 +1432,7 @@ void VulkanContext::Impl::InvalidateTexture(
 	}
 }
 
-// VulkanContext::Impl::InvalidateResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::InvalidateResource(TerraEngine::UUID id, bool reloadTexturesAfterInvalidate) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	InvalidateMesh(id);
@@ -1440,7 +1440,7 @@ void VulkanContext::Impl::InvalidateResource(TerraEngine::UUID id, bool reloadTe
 	InvalidateMaterial(id);
 }
 
-// VulkanContext::Impl::EnsureMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	const auto meshOwner = ResourceManager::Instance().AcquireMeshSnapshot(meshId);
@@ -1476,7 +1476,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	}
 
 	const Mesh* cpuMesh = meshOwner.get(); // One immutable payload supplies the complete GPU upload.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!cpuMesh || cpuMesh->publicationGeneration == 0U || nextMeshAllocationGeneration == 0U) return;
 
 	const VkDeviceSize packedVertexSize = static_cast<VkDeviceSize>(cpuMesh->meshletVertexData.size());
@@ -1500,7 +1500,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	const VkDeviceSize meshletBoundsSize = static_cast<VkDeviceSize>(cpuMesh->meshletBounds.size() * sizeof(MeshletBounds));
 	const bool hasBoundsPayload = meshletBoundsSize > 0;
 	const VkDeviceSize boundsUploadSize = hasBoundsPayload ? meshletBoundsSize : static_cast<VkDeviceSize>(sizeof(MeshletBounds));
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (packedVertexSize == 0
 		|| vertexRemapSize == 0
 		|| primitiveIndexSize == 0
@@ -1514,20 +1514,20 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 
 	const uint32_t packedStride = cpuMesh->runtimeLayout.layout.strideBytes;
 	const uint32_t meshletVertexCount = cpuMesh->runtimeLayout.meshletVertexCount;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (packedStride != kMeshletPackedVertexStrideBytes || meshletVertexCount == 0) {
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh payload has invalid packed vertex stride/count for UUID " << ToHexString(meshId));
 		return;
 	}
 
 	const VkDeviceSize expectedVertexBytes = static_cast<VkDeviceSize>(packedStride) * static_cast<VkDeviceSize>(meshletVertexCount);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (expectedVertexBytes != packedVertexSize) {
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh payload packed vertex range is truncated for UUID " << ToHexString(meshId));
 		return;
 	}
 
-	// struct MeshDecodeInfo groups related state and operations so callers have one documented contract.
+
 	struct MeshDecodeInfo
 	{
 		float positionOffset[4];
@@ -1617,7 +1617,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 		mappedUploadsReady &= WriteMappedBuffer(allocator, stagingVertexRemap, cpuMesh->meshletVertexRemapData.data(), vertexRemapSize);
 
 		VulkanBuffer stagingSkinning = { VK_NULL_HANDLE, VK_NULL_HANDLE, 0 };
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (skinningDataSize > 0)
 		{
 			stagingSkinning = CreateBuffer(skinningDataSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
@@ -1642,7 +1642,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 		mappedUploadsReady &= WriteMappedBuffer(allocator, stagingMeshletSection, cpuMesh->meshletSections.data(), meshletSectionSize);
 
 		VulkanBuffer stagingMeshletBounds = CreateBuffer(boundsUploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (hasBoundsPayload)
 		{
 			mappedUploadsReady &= WriteMappedBuffer(allocator, stagingMeshletBounds, cpuMesh->meshletBounds.data(), meshletBoundsSize);
@@ -1757,7 +1757,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 		uploadDetail);
 }
 
-// VulkanContext::Impl::EnsureMeshDescriptorSet is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID meshId, const VulkanPipeline& pipeline) {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	auto meshIt = meshCache.find(meshId);
@@ -1765,13 +1765,13 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 		return VK_NULL_HANDLE;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (pipeline.setLayouts.size() <= 1 || pipeline.setLayouts[1] == VK_NULL_HANDLE) {
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh shader pipeline is missing descriptor set layout 1 for mesh payload buffers.");
 		return VK_NULL_HANDLE;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (pipeline.bindingsPerSet.size() <= 1) {
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh shader pipeline is missing reflected binding metadata for descriptor set 1.");
 		return VK_NULL_HANDLE;
@@ -1779,9 +1779,9 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 
 	const auto& meshBindings = pipeline.bindingsPerSet[1];
 	auto HasStorageBinding = [&](uint32_t bindingIndex) -> bool {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const DescriptorBinding& binding : meshBindings) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (binding.binding == bindingIndex) {
 				return binding.type == static_cast<uint32_t>(DescriptorType::StorageBuffer);
 			}
@@ -1802,7 +1802,7 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 	}
 
 	VulkanMesh& mesh = meshIt->second;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (mesh.meshShaderVertexBuffer.buffer == VK_NULL_HANDLE
 		|| mesh.meshletVertexRemapBuffer.buffer == VK_NULL_HANDLE
 		|| mesh.meshDecodeInfoBuffer.buffer == VK_NULL_HANDLE
@@ -1812,7 +1812,7 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 		return VK_NULL_HANDLE;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (HasStorageBinding(5) && mesh.meshletBoundsBuffer.buffer == VK_NULL_HANDLE) {
 		TERRAENGINE_LOG(LogLevel::Warning, "Mesh descriptor requires bounds binding 5 but meshlet bounds payload is unavailable.");
 		return VK_NULL_HANDLE;
@@ -1828,7 +1828,7 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 
 	const VkDescriptorSetLayout layout = pipeline.setLayouts[1];
 	auto cachedSetIt = mesh.descriptorSetsByLayout.find(layout);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (cachedSetIt != mesh.descriptorSetsByLayout.end() && cachedSetIt->second != VK_NULL_HANDLE) {
 		return cachedSetIt->second;
 	}
@@ -1840,7 +1840,7 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 	allocInfo.pSetLayouts = &layout;
 
 	VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to allocate mesh descriptor set for mesh shader pipeline.");
 		return VK_NULL_HANDLE;
@@ -1901,7 +1901,7 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 	w.dstBinding = 3; w.pBufferInfo = &vertexRemapInfo; writes.push_back(w);
 	w.dstBinding = 4; w.pBufferInfo = &decodeInfo; writes.push_back(w);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (HasStorageBinding(5))
 	{
 		w.dstBinding = 5; w.pBufferInfo = &boundsInfo; writes.push_back(w);
@@ -1928,14 +1928,14 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 }
 
 
-// VulkanContext::Impl::AllocateTextureIndex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 uint32_t VulkanContext::Impl::AllocateTextureIndex() {
 	if (!freeTextureIndices.empty()) {
 		uint32_t index = freeTextureIndices.back();
 		freeTextureIndices.pop_back();
 		return index;
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (nextTextureIndex >= MAX_BINDLESS_TEXTURES) {
 		TERRAENGINE_LOG(LogLevel::Error, "Max bindless textures exceeded!");
 		return 0; // Return default texture
@@ -2079,7 +2079,7 @@ bool VulkanContext::Impl::RetireSampledTextureAliases(TerraEngine::UUID textureI
 	return true;
 }
 
-// VulkanContext::Impl::AllocateMaterialIndex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 uint32_t VulkanContext::Impl::AllocateMaterialIndex() {
 	while (!freeMaterialIndices.empty()) {
 		uint32_t index = freeMaterialIndices.back();
@@ -2091,7 +2091,7 @@ uint32_t VulkanContext::Impl::AllocateMaterialIndex() {
 	if (nextMaterialIndex <= kFallbackMaterialIndex) {
 		nextMaterialIndex = kFirstRuntimeMaterialIndex;
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (nextMaterialIndex >= MAX_BINDLESS_MATERIALS) {
 		TERRAENGINE_LOG(LogLevel::Error, "Max bindless materials exceeded!");
 		return 0;
@@ -2099,7 +2099,7 @@ uint32_t VulkanContext::Impl::AllocateMaterialIndex() {
 	return nextMaterialIndex++;
 }
 
-// VulkanContext::Impl::UpdateGlobalTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::UpdateGlobalTexture(uint32_t index, const VulkanImage& image) {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
@@ -2192,7 +2192,7 @@ void VulkanContext::Impl::WriteGlobalTextureAlias(
 	imageInfo.imageView = view;
 	imageInfo.sampler = sampler;
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		VkWriteDescriptorSet descriptorWrite{};
 		descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2207,21 +2207,21 @@ void VulkanContext::Impl::WriteGlobalTextureAlias(
 	}
 }
 
-// VulkanContext::Impl::AllocateBufferIndex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 uint32_t VulkanContext::Impl::AllocateBufferIndex() {
 	if (!freeBufferIndices.empty()) {
 		uint32_t index = freeBufferIndices.back();
 		freeBufferIndices.pop_back();
 		return index;
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (nextBufferIndex >= MAX_BINDLESS_BUFFERS) {
 		throw std::runtime_error("Exceeded MAX_BINDLESS_BUFFERS!");
 	}
 	return nextBufferIndex++;
 }
 
-// VulkanContext::Impl::UpdateGlobalBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range) {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	if (index >= MAX_BINDLESS_BUFFERS
@@ -2238,7 +2238,7 @@ bool VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, Vk
 	bufferInfo.offset = offset;
 	bufferInfo.range = range;
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		VkWriteDescriptorSet descriptorWrite{};
 		descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2299,7 +2299,7 @@ bool VulkanContext::Impl::UpdateGlobalBufferForFrame(
 	return true;
 }
 
-// VulkanContext::Impl::UpdateGlobalHiZ is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::UpdateGlobalHiZ(uint32_t frameIndex) {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	if (device == VK_NULL_HANDLE || deviceLost || globalDescriptorSets.size() != MAX_FRAMES_IN_FLIGHT

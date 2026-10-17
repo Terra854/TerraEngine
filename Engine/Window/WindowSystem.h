@@ -35,7 +35,7 @@ public:
 
 	void SetResizeCallback(std::function<void(int, int)> callback);
 
-	// GetBackend is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	IWindowBackend* GetBackend() const { return backend.get(); }
 
 	struct WindowPollingBoundaryDiagnostics

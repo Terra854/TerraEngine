@@ -76,7 +76,7 @@ namespace TerraEngine::Scene
 		std::size_t movableRecordCount = 0;
 	};
 
-	// class SpatialIndex groups related state and operations so callers have one documented contract.
+
 	class SpatialIndex
 	{
 	public:
@@ -116,7 +116,7 @@ namespace TerraEngine::Scene
 		[[nodiscard]] SpatialDiagnosticsSnapshot GetDiagnosticsSnapshot() const;
 
 	private:
-		// struct Node groups related state and operations so callers have one documented contract.
+
 		struct Node
 		{
 			SpatialAABB looseBounds{};
@@ -135,7 +135,7 @@ namespace TerraEngine::Scene
 			Ray
 		};
 
-		// struct QueryShape groups related state and operations so callers have one documented contract.
+
 		struct QueryShape
 		{
 			QueryKind kind = QueryKind::AABB;

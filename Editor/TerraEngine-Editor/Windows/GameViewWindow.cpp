@@ -63,19 +63,19 @@ void GameViewWindow::OnBeforeBegin()
 	UISystem::Instance().SetEditorGameViewPointer(glm::vec2(-1.0f, -1.0f), false, false);
 }
 
-// GameViewWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void GameViewWindow::OnGui() {
 	// --- Toolbar ---
 	ImGui::SetNextItemWidth(150.0f);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::BeginCombo("##aspect", m_AspectRatios[m_SelectedAspectRatioIndex].Name.c_str())) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (int i = 0; i < static_cast<int>(m_AspectRatios.size()); i++) {
 			bool isSelected = (m_SelectedAspectRatioIndex == i);
 			if (ImGui::Selectable(m_AspectRatios[i].Name.c_str(), isSelected)) {
 				m_SelectedAspectRatioIndex = i;
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (isSelected) ImGui::SetItemDefaultFocus();
 		}
 		ImGui::EndCombo();
@@ -104,7 +104,7 @@ void GameViewWindow::OnGui() {
 	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, m_StatsToggleHoverBg);
 	ImGui::PushStyleColor(ImGuiCol_ButtonActive, m_StatsToggleActiveBg);
 	ImGui::PushStyleColor(ImGuiCol_Text, m_StatsToggleText);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::Button("Stats")) {
 		m_Stats = !m_Stats;
 	}
@@ -169,11 +169,11 @@ void GameViewWindow::OnGui() {
 
 	ImVec2 imageSize = availableSize;
 	AspectRatio& option = m_AspectRatios[m_SelectedAspectRatioIndex];
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (option.Width > 0 && option.Height > 0) {
 		float targetRatio = option.Width / option.Height;
 		float currentRatio = availableSize.x / availableSize.y;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (currentRatio > targetRatio) {
 			imageSize.x = availableSize.y * targetRatio;
 			imageSize.y = availableSize.y;
@@ -252,7 +252,7 @@ void GameViewWindow::OnGui() {
 			const glm::vec3 defaultForward(0.0f, 0.0f, -1.0f);
 			const glm::vec3 forward = rot * defaultForward;
 			glm::vec3 up = rot * camera->up;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (glm::length(up) < 0.0001f) up = glm::vec3(0.0f, 1.0f, 0.0f);
 
 			const glm::mat4 view = glm::lookAt(localCameraPosition, localCameraPosition + forward, glm::normalize(up));
@@ -296,7 +296,7 @@ void GameViewWindow::OnGui() {
 
 	ImVec2 imageMin = cursorPos;
 	ImVec2 imageMax = ImVec2(cursorPos.x + availableSize.x, cursorPos.y + availableSize.y);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (texID && hasCameras && updateDecision.publishRuntimePointer) {
 		float xOffset = (availableSize.x - imageSize.x) * 0.5f;
 		float yOffset = (availableSize.y - imageSize.y) * 0.5f;
@@ -314,7 +314,7 @@ void GameViewWindow::OnGui() {
 			&& mousePosition.y >= imageMin.y
 			&& mousePosition.y <= imageMax.y;
 		glm::vec2 localPointerPosition(-1.0f, -1.0f);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (pointerInsideImage)
 		{
 			const glm::vec2 rawLocalPointerPosition(mousePosition.x - imageMin.x, mousePosition.y - imageMin.y);
@@ -351,7 +351,7 @@ void GameViewWindow::OnGui() {
 	// renderer summary snapshots that can lag behind the live Game View path,
 	// while the right-side Stats panel reads the completed draw counters.
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (updateDecision.collectRenderStats) {
 		RenderStatsSnapshot stats{};
 		const bool statsReady = texID != nullptr
@@ -382,9 +382,9 @@ void GameViewWindow::OnGui() {
 
 		float textWidth = 0.0f;
 		int lineCount = 0;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const std::string& line : lines) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (line.empty()) {
 				continue;
 			}
@@ -402,9 +402,9 @@ void GameViewWindow::OnGui() {
 
 		drawList->AddRectFilled(panelMin, panelMax, IM_COL32(35, 35, 35, 195), 4.0f);
 		float textY = panelMin.y + panelPadding;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const std::string& line : lines) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (line.empty()) {
 				continue;
 			}

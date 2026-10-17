@@ -870,6 +870,20 @@ namespace TerraEngine::Editor::Automation
 				{"deterministicFallback", capture.deterministicFallback},
 				{"warnings", capture.warnings}
 			};
+			// Source target identity distinguishes a genuine backend resize from
+			// resampling an older image to the requested PNG dimensions. Synthetic
+			// preparation has no native target and leaves this observation absent.
+			if (capture.backendTarget)
+			{
+				const auto& target = *capture.backendTarget;
+				data["backendTarget"] = {
+					{"rendererSessionGeneration", target.rendererSessionGeneration},
+					{"targetGeneration", target.targetGeneration},
+					{"sourceWidth", target.sourceWidth},
+					{"sourceHeight", target.sourceHeight},
+					{"dedicatedCaptureTarget", target.dedicatedCaptureTarget}
+				};
+			}
 			nlohmann::json result = service.BuildSuccess(requestId, capture.message, std::move(data));
 			result["mcpContent"] = nlohmann::json::array({
 				{{"type", "image"}, {"mimeType", capture.mimeType}, {"data", capture.base64Data}}

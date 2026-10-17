@@ -7,7 +7,7 @@
 #include "ThreadPool/ScopedTaskSettlement.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 
-// VulkanContext::RenderFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::RenderFrame(
 	std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> publication,
 	std::uint32_t publicationIndex) {
@@ -55,7 +55,7 @@ void VulkanContext::RenderFrame(
 		publicationPresentation = &presentation;
 	const std::uint32_t publicationViewIndex = publicationIndex;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (currentFrame >= impl->pendingPrimaryCommandBuffers.size()) {
 		impl->pendingPrimaryCommandBuffers.resize(impl->MAX_FRAMES_IN_FLIGHT);
 	}
@@ -82,7 +82,7 @@ void VulkanContext::RenderFrame(
 		return VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME;
 	};
 	snapshotSlotIndex = chooseSnapshotSlot();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (snapshotSlotIndex >= VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME) {
 		TERRAENGINE_PROFILE_SCOPE("Vulkan: RenderFrame Snapshot Budget Recovery", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		RenderSnapshotFallbackEvent fallback{};
@@ -91,14 +91,14 @@ void VulkanContext::RenderFrame(
 		fallback.outputId = outputRequest.outputId;
 		fallback.required = outputRequest.priority == RenderOutputPriority::Required;
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (outputRequest.priority == RenderOutputPriority::Optional) {
 			fallback.result = RenderSnapshotFallbackResult::SkippedOptionalOutput;
 			impl->pendingRenderSnapshotDiagnostics.fallbackEvents.push_back(fallback);
 			return;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!impl->editorMode) {
 			fallback.result = RenderSnapshotFallbackResult::FrameRecovery;
 			impl->pendingRenderSnapshotDiagnostics.fallbackEvents.push_back(fallback);
@@ -113,7 +113,7 @@ void VulkanContext::RenderFrame(
 		pendingSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		pendingSubmitInfo.commandBufferCount = static_cast<uint32_t>(pendingCmdsForSnapshot.size());
 		pendingSubmitInfo.pCommandBuffers = pendingCmdsForSnapshot.data();
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		impl->lightingUploadFrameSlotSafe[currentFrame] = false;
 		const VkResult submitResult = impl->SubmitGraphicsQueue(1, &pendingSubmitInfo, VK_NULL_HANDLE);
 		if (submitResult != VK_SUCCESS) {
@@ -218,7 +218,7 @@ void VulkanContext::RenderFrame(
 	// Editor views and dedicated exported-runtime captures both use lazily sized
 	// offscreen targets. Runtime captures intentionally allocate only captureView;
 	// Scene/Game editor targets remain editor-owned.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (impl->editorMode || renderingDedicatedCaptureTarget) {
 		TERRAENGINE_PROFILE_SCOPE("Vulkan: RenderFrame Ensure Offscreen Targets", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const auto ensureOffscreenResources = [&](VulkanContext::Impl::OffscreenResources& resources, VkExtent2D targetExtent) {
@@ -269,7 +269,7 @@ void VulkanContext::RenderFrame(
 
 	std::optional<TerraEngine::Renderer::RendererEfficiencyFixtureActionReceipt> shadowResourceRecreationAction;
 	const auto EnsureShadowRenderResources = [&]() -> bool {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (requestedShadowSlotCount == 0u || requestedShadowResources.TotalCount() == 0u) {
 			return true;
 		}
@@ -288,7 +288,7 @@ void VulkanContext::RenderFrame(
 			&& presentation.efficiencyFixtureIntent.injection == TerraEngine::Renderer::RendererEfficiencyFixtureInjection::ShadowResourceRecreation
 			&& recreationKey != impl->lastShadowValidationResourceRecreationKey;
 #endif
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!(impl->activeShadowResourceRequest == requestedShadowResources)
 			|| directionalMissing
 			|| spotMissing
@@ -296,7 +296,7 @@ void VulkanContext::RenderFrame(
 			|| pointMissing || forceOwnedRecreation) {
 			const auto oldAllocation = impl->shadowAllocationGeneration;
 			const auto oldLogicalEntries = impl->shadowPublicationLedger.RetainedLogicalEntryCount();
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!impl->EnsureShadowRenderResources(requestedShadowResources)) {
 				return false;
 			}
@@ -317,7 +317,7 @@ void VulkanContext::RenderFrame(
 #endif
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (impl->shadowRenderPass == VK_NULL_HANDLE) {
 			VkAttachmentDescription colorAttachment{};
 			colorAttachment.format = impl->swapchainImageFormat;
@@ -394,7 +394,7 @@ void VulkanContext::RenderFrame(
 			renderPassInfo.pSubpasses = &subpass;
 			renderPassInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
 			renderPassInfo.pDependencies = dependencies.data();
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (vkCreateRenderPass(impl->device, &renderPassInfo, nullptr, &impl->shadowRenderPass) != VK_SUCCESS) {
 				TERRAENGINE_LOG(LogLevel::Warning, "failed to create shadow render pass");
 				impl->shadowRenderPass = VK_NULL_HANDLE;
@@ -412,7 +412,7 @@ void VulkanContext::RenderFrame(
 		};
 
 		auto EnsureFramebuffer = [&](VkFramebuffer& framebuffer, VkImageView colorView, VkImageView depthView, uint32_t width, uint32_t height) -> bool {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (framebuffer != VK_NULL_HANDLE) {
 				return true;
 			}
@@ -428,36 +428,36 @@ void VulkanContext::RenderFrame(
 			return vkCreateFramebuffer(impl->device, &framebufferInfo, nullptr, &framebuffer) == VK_SUCCESS;
 		};
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (uint32_t slotIndex = 0u; slotIndex < impl->activeShadowResourceRequest.directionalCount; ++slotIndex) {
 			const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
 			if (!EnsureFramebuffer(impl->directionalShadowFramebuffers[slotIndex], impl->directionalShadowColors[slotIndex].view, impl->directionalShadowDepths[slotIndex].view, regionSize, regionSize)) {
 				return false;
 			}
 		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (uint32_t slotIndex = 0u; slotIndex < impl->activeShadowResourceRequest.spotCount; ++slotIndex) {
 			const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
 			if (!EnsureFramebuffer(impl->spotShadowFramebuffers[slotIndex], impl->spotShadowColors[slotIndex].view, impl->spotShadowDepths[slotIndex].view, regionSize, regionSize)) {
 				return false;
 			}
 		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (uint32_t slotIndex = 0u; slotIndex < impl->activeShadowResourceRequest.areaCount; ++slotIndex) {
 			const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
 			if (!EnsureFramebuffer(impl->areaShadowFramebuffers[slotIndex], impl->areaShadowColors[slotIndex].view, impl->areaShadowDepths[slotIndex].view, regionSize, regionSize)) {
 				return false;
 			}
 		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (uint32_t slotIndex = 0u; slotIndex < impl->activeShadowResourceRequest.pointCount; ++slotIndex) {
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 			for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (impl->pointShadowColorFaceViewsBySlot[slotIndex][faceIndex] == VK_NULL_HANDLE || impl->pointShadowDepthFaceViewsBySlot[slotIndex][faceIndex] == VK_NULL_HANDLE) {
 					return false;
 				}
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (!EnsureFramebuffer(impl->pointShadowFaceFramebuffersBySlot[slotIndex][faceIndex], impl->pointShadowColorFaceViewsBySlot[slotIndex][faceIndex], impl->pointShadowDepthFaceViewsBySlot[slotIndex][faceIndex], pointShadowSize, pointShadowSize)) {
 					return false;
 				}
@@ -594,15 +594,15 @@ void VulkanContext::RenderFrame(
 			lastPreparationMaterialId = command.materialId;
 			lastPreparationMaterial = material;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!material) return;
 
 		TerraEngine::UUID collectionId = material->header.shaderCollectionId;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (collectionId == TerraEngine::EMPTY_UUID) {
 			collectionId = defaultMeshCollectionId;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (collectionId == defaultMeshCollectionId
 			&& defaultTaskPipelineAvailable
 			&& !command.animationBinding.RequiresOwnerMeshDeformationFallback()
@@ -651,11 +651,11 @@ void VulkanContext::RenderFrame(
 			const std::optional<PipelineKey> pipeKey =
 				impl->BuildPipelineKey(collectionId, material->header.flags,
 					preparationUsesConventionalVisibilityIdentity);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!pipeKey.has_value()
 				|| passIt->second.find(*pipeKey) == passIt->second.end()
 				|| passIt->second.at(*pipeKey).pipeline == VK_NULL_HANDLE) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (collectionId == defaultTaskCollectionId) {
 					impl->EnsurePipeline(defaultMeshCollectionId, preparationPass,
 						material->header.flags, preparationUsesConventionalVisibilityIdentity);
@@ -731,7 +731,7 @@ void VulkanContext::RenderFrame(
 			}
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (presentation.sky.hasTexture && presentation.sky.textureId != TerraEngine::EMPTY_UUID)
 		{
 			impl->EnsureTexture(presentation.sky.textureId);
@@ -761,7 +761,7 @@ void VulkanContext::RenderFrame(
 		|| impl->pendingPrimaryCommandBuffers[impl->currentFrame].empty();
 	{
 		TERRAENGINE_PROFILE_SCOPE("Vulkan: RenderFrame Acquire Command Buffer", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (useMainCommandBuffer) {
 			cmd = impl->commandBuffers[impl->currentFrame];
 			const auto resetCommandStart = BackendClock::now();
@@ -789,7 +789,7 @@ void VulkanContext::RenderFrame(
 			allocInfo.commandPool = impl->commandPools[impl->currentFrame];
 			allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 			allocInfo.commandBufferCount = 1;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			const auto allocateCommandStart = BackendClock::now();
 			if (vkAllocateCommandBuffers(impl->device, &allocInfo, &cmd) != VK_SUCCESS) {
 				TERRAENGINE_LOG(LogLevel::Error, "failed to allocate command buffer for additional camera pass");
@@ -800,7 +800,7 @@ void VulkanContext::RenderFrame(
 				{ TerraEngine::Renderer::BackendFrameCostCategory::QueueIdleWait, TerraEngine::Renderer::BackendSubmitStage::CommandBufferLifetime, renderViewType, diagnosticViewId, "Allocate additional camera command buffer", false, true },
 				ElapsedMilliseconds(allocateCommandStart),
 				0.25f);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (impl->currentFrame >= impl->extraPrimaryCommandBuffers.size()) {
 				impl->extraPrimaryCommandBuffers.resize(impl->MAX_FRAMES_IN_FLIGHT);
 			}
@@ -812,7 +812,7 @@ void VulkanContext::RenderFrame(
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	const auto commandRecordingStart = BackendClock::now();
 	// This scope intentionally spans the complete primary command recording
 	// interval. Resetting the optional immediately after vkEndCommandBuffer keeps
@@ -1000,7 +1000,7 @@ void VulkanContext::RenderFrame(
 	VkRenderPassBeginInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!impl->editorMode && !renderingDedicatedCaptureTarget) {
 		renderPassInfo.renderPass = impl->renderPass;
 		renderPassInfo.framebuffer = impl->framebuffers[imageIndex];
@@ -1037,7 +1037,7 @@ void VulkanContext::RenderFrame(
 	renderPassInfo.pClearValues = clearValues.data();
 
 	// Create Grid Pipeline if needed (lazy init).
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (view == ViewType::Scene && presentation.sceneViewGridVisible) {
 		impl->CreateSceneViewGridPipeline(renderPassInfo.renderPass);
 	}
@@ -1289,7 +1289,7 @@ void VulkanContext::RenderFrame(
 
 	std::vector<GPULight> analysisLightingPayload;
 	analysisLightingPayload.reserve(budgetResult.uploadedCandidates.size());
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const FrameLightCandidate& candidate : budgetResult.uploadedCandidates) {
 		analysisLightingPayload.push_back(candidate.gpuLight);
 	}
@@ -1297,16 +1297,16 @@ void VulkanContext::RenderFrame(
 	std::vector<GPULight> lightingPayload;
 	lightingPayload.reserve(budgetResult.retainedLights.size());
 	const auto FindShadowAssignment = [&](const TerraEngine::UUID& lightId) -> const ShadowResourceAssignmentDiagnostic* {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const ShadowResourceAssignmentDiagnostic& assignment : budgetResult.diagnostics.shadowAssignments) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (assignment.lightId == lightId) {
 				return &assignment;
 			}
 		}
 		return nullptr;
 	};
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const FrameLightCandidate& candidate : budgetResult.retainedLights) {
 		GPULight light = candidate.gpuLight;
 		if (const ShadowResourceAssignmentDiagnostic* assignment = FindShadowAssignment(candidate.lightId)) {
@@ -1384,7 +1384,7 @@ void VulkanContext::RenderFrame(
 	const bool forceFullLighting = presentation.efficiencyOptions.options.lightingUploads
 		== TerraEngine::Renderer::RendererEfficiencyLightingUploads::Full;
 	const auto EnsureLightingComputePipelines = [&]() {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (impl->lightingComputePipelineLayout == VK_NULL_HANDLE) {
 			VkPushConstantRange pushRange{};
 			pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -1397,7 +1397,7 @@ void VulkanContext::RenderFrame(
 			layoutInfo.pSetLayouts = &impl->globalDescriptorSetLayout;
 			layoutInfo.pushConstantRangeCount = 1;
 			layoutInfo.pPushConstantRanges = &pushRange;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (vkCreatePipelineLayout(impl->device, &layoutInfo, nullptr, &impl->lightingComputePipelineLayout) != VK_SUCCESS) {
 				impl->lightingComputePipelineLayout = VK_NULL_HANDLE;
 				return;
@@ -1419,7 +1419,7 @@ void VulkanContext::RenderFrame(
 			moduleInfo.codeSize = shaderBytes.size();
 			moduleInfo.pCode = code.data();
 			VkShaderModule module = VK_NULL_HANDLE;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (vkCreateShaderModule(impl->device, &moduleInfo, nullptr, &module) != VK_SUCCESS) {
 				return VK_NULL_HANDLE;
 			}
@@ -1427,12 +1427,12 @@ void VulkanContext::RenderFrame(
 		};
 
 		auto CreateComputePipelineWithLayout = [&](VkPipeline& pipeline, VkPipelineLayout layout, const char* shaderPath) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (pipeline != VK_NULL_HANDLE || layout == VK_NULL_HANDLE) {
 				return;
 			}
 			VkShaderModule module = LoadShaderModule(shaderPath);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (module == VK_NULL_HANDLE) {
 				return;
 			}
@@ -1447,7 +1447,7 @@ void VulkanContext::RenderFrame(
 			pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
 			pipelineInfo.stage = stageInfo;
 			pipelineInfo.layout = layout;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (vkCreateComputePipelines(impl->device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
 				pipeline = VK_NULL_HANDLE;
 			}
@@ -1608,11 +1608,14 @@ void VulkanContext::RenderFrame(
 
 	const glm::mat4 currentViewProjection = presentation.projectionMatrix * presentation.viewMatrix;
 	VulkanContext::Impl::ViewDepthHistoryState& depthHistory = impl->depthHistoryByView[viewIndex];
-	const bool firstPrimaryPassForFrame = useMainCommandBuffer;
+	// The first command buffer can belong to an independently sized capture.
+	// Runtime AO history owns swapchain-sized depth, so captures must neither
+	// sample that history nor replace it with their private depth attachment.
+	const bool runtimeAoHistoryPass = useMainCommandBuffer && !renderingDedicatedCaptureTarget;
 	const bool aoDepthHistorySlotReady = impl->currentFrame < depthHistory.ambientOcclusionDepthByFrame.size()
 		&& depthHistory.ambientOcclusionDepthByFrame[impl->currentFrame].view != VK_NULL_HANDLE;
 	const bool aoDepthHistoryMatchesView = !impl->editorMode
-		&& firstPrimaryPassForFrame
+		&& runtimeAoHistoryPass
 		&& aoDepthHistorySlotReady
 		&& depthHistory.ambientOcclusionDepthValidByFrame[impl->currentFrame]
 		&& MatricesApproximatelyEqual(
@@ -1766,11 +1769,11 @@ void VulkanContext::RenderFrame(
 	const bool clusteredLightingWorthBuilding = cullingData.clusterGridAndLightCount.w > kClusteredLightingMinimumLightCount;
 	const bool clusteredLightingAvailable = clusteredLightingPipelineReady && clusteredLightingWorthBuilding;
 	static bool loggedClusteredLightingUnavailable = false;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!clusteredLightingPipelineReady && cullingData.clusterGridAndLightCount.w > kClusteredLightingMinimumLightCount) {
 		// Warn once per outage so validation runs clearly explain why fragment
 		// shading fell back to the full-light path instead of using cluster bins.
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!loggedClusteredLightingUnavailable) {
 			TERRAENGINE_LOG(LogLevel::Warning, "Variable light bins are unavailable because one or more clustered-light compute pipelines failed to initialize. Falling back to full-light shading for this frame.");
 			loggedClusteredLightingUnavailable = true;
@@ -1803,7 +1806,7 @@ void VulkanContext::RenderFrame(
 		impl->UpdateFrameCullingData(statsSlotIndex, cullingData);
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	// Even zero lights upload/clear the analysis tail. Failed writes stop this
 	// command before shaders can consume partly updated or stale light records.
 	if (!impl->UploadLightAnalysisInputData(*canonicalAnalysisLights, renderViewType, diagnosticViewId,
@@ -1901,7 +1904,7 @@ void VulkanContext::RenderFrame(
 	pendingBudgetDiagnostics.viewType = renderViewType;
 	impl->RecordPendingBudgetDiagnostics(statsSlotIndex, pendingBudgetDiagnostics);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (impl->clusterValidationCaptureEnabled) {
 		ClusterValidationSnapshot pendingClusterValidation{};
 		pendingClusterValidation.valid = true;
@@ -2348,11 +2351,11 @@ void VulkanContext::RenderFrame(
 		const DrawResourcePreparationKey selection{TerraEngine::EMPTY_UUID, TerraEngine::EMPTY_UUID,
 			shaderCollectionId, currentPass, materialFlags, pipelineUsesConventionalVisibilityIdentity};
 		const auto pipelineIt = preparedFramePipelines.find(selection);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (pipelineIt == preparedFramePipelines.end() || pipelineIt->second == nullptr) {
 			return nullptr;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (pipelineIt->second->pipeline == VK_NULL_HANDLE
 			|| pipelineIt->second->layout == VK_NULL_HANDLE) {
 			return nullptr;
@@ -2963,7 +2966,7 @@ void VulkanContext::RenderFrame(
 		return &*lastStaticPreparation;
 	};
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::uint32_t commandIndex = 0u;
 		commandIndex < commandResolver.Count(); ++commandIndex) {
 		if(groupedCommandSuppressed[commandIndex] != 0u) {
@@ -2980,7 +2983,7 @@ void VulkanContext::RenderFrame(
 		uint32_t materialFlags = material->header.flags;
 
 		TerraEngine::UUID collectionId = material->header.shaderCollectionId;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (collectionId == TerraEngine::EMPTY_UUID) {
 			collectionId = defaultMeshCollectionId;
 		}
@@ -2997,7 +3000,7 @@ void VulkanContext::RenderFrame(
 			&& !canonicalGraphicsAvailable;
 
 		// Route default materials through the task pipeline whenever supported.
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (collectionId == defaultMeshCollectionId
 			&& defaultTaskPipelineAvailable
 			&& (groupedPerInstanceAnimationBridgeAvailable
@@ -3064,7 +3067,7 @@ void VulkanContext::RenderFrame(
 		push.viewProj = currentViewProjection;
 		push.model = command.modelMatrix;
 		push.materialIndex = 0;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if(const auto materialIndex = impl->materialIndexMap.find(command.materialId);
 			materialIndex != impl->materialIndexMap.end()) {
 			push.materialIndex = materialIndex->second;
@@ -3303,13 +3306,13 @@ void VulkanContext::RenderFrame(
 		pendingStats.vrsActive = pendingStats.vrsActive || impl->UsesVrsAttachment();
 
 		// Mesh-only and pass-through fallback paths keep conservative CPU estimates.
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!staticPreparation->hasTaskStage || !activeTaskCulling) {
 			pendingStats.meshletsDispatched += groupedInstanceCount * selectedMeshletCount;
 		}
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for(std::size_t shadowListIndex = 0U;
 		shadowListIndex < presentation.shadowDrawLists.size(); ++shadowListIndex) {
 		const ShadowDrawList& shadowDrawList =
@@ -3352,11 +3355,11 @@ void VulkanContext::RenderFrame(
 
 			uint32_t materialFlags = material->header.flags;
 			TerraEngine::UUID collectionId = material->header.shaderCollectionId;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (collectionId == TerraEngine::EMPTY_UUID) {
 				collectionId = defaultMeshCollectionId;
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			const std::optional<std::uint32_t> canonicalGraphicsGroup =
 				ResolveCanonicalGraphicsGroup(command);
 			if (collectionId == defaultMeshCollectionId
@@ -3401,7 +3404,7 @@ void VulkanContext::RenderFrame(
 			shadowDraw.push.viewProj = currentViewProjection;
 			shadowDraw.push.model = command.modelMatrix;
 			shadowDraw.push.materialIndex = 0u;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if(const auto materialIndex = impl->materialIndexMap.find(command.materialId);
 				materialIndex != impl->materialIndexMap.end()) {
 				shadowDraw.push.materialIndex = materialIndex->second;
@@ -3715,7 +3718,7 @@ void VulkanContext::RenderFrame(
 	pendingBudgetDiagnostics.cameraVisibleShadowCasterCount =
 		cameraVisibleShadowCasterCount;
 	pendingBudgetDiagnostics.lightVisibleShadowCasterCount = 0u;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const PreparedShadowList& preparedList : preparedShadowLists) {
 		pendingBudgetDiagnostics.lightVisibleShadowCasterCount += static_cast<std::uint32_t>(preparedList.draws.size());
 	}
@@ -3767,42 +3770,33 @@ void VulkanContext::RenderFrame(
 		HashFloat(seed, value.w);
 	};
 	const auto HashMat4 = [&](std::uint64_t& seed, const glm::mat4& value) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (int column = 0; column < 4; ++column) {
 			HashVec4(seed, value[column]);
 		}
 	};
 
-	// If this is a subsequent pass targeting the swapchain (multi-camera),
-	// inject a barrier to wait for the previous pass to finish its writes.
+	// A previous primary may have rendered only a private capture target. Order
+	// earlier color writes without claiming that the swapchain is already in a
+	// presentation layout; this pass's render pass owns its discard/transition.
 	if (!useMainCommandBuffer && !impl->editorMode && !renderingDedicatedCaptureTarget) {
-		VkImageMemoryBarrier barrier{};
-		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		VkMemoryBarrier barrier{};
+		barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 		barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 		barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-		barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-		barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		barrier.image = impl->swapchainImages[imageIndex];
-		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		barrier.subresourceRange.baseMipLevel = 0;
-		barrier.subresourceRange.levelCount = 1;
-		barrier.subresourceRange.baseArrayLayer = 0;
-		barrier.subresourceRange.layerCount = 1;
 
 		vkCmdPipelineBarrier(
 			cmd,
 			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 			0,
+			1, &barrier,
 			0, nullptr,
-			0, nullptr,
-			1, &barrier
+			0, nullptr
 		);
 	}
 
-	// struct ShadowLightRecord groups related state and operations so callers have one documented contract.
+
 	struct ShadowLightRecord
 	{
 		const GPULight* light = nullptr;
@@ -3840,16 +3834,16 @@ void VulkanContext::RenderFrame(
 	std::vector<ShadowLightRecord> shadowLightRecords;
 	shadowLightRecords.reserve(VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
 	auto FindShadowSlotFromTextureIndex = [](const std::array<uint32_t, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS>& textureIndices, uint32_t textureIndex) -> uint32_t {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (uint32_t slotIndex = 0u; slotIndex < VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS; ++slotIndex) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (textureIndices[slotIndex] == textureIndex) {
 				return slotIndex;
 			}
 		}
 		return VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS;
 	};
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::size_t payloadIndex = 0u; payloadIndex < lightingPayload.size(); ++payloadIndex) {
 		const GPULight& light = lightingPayload[payloadIndex];
 		if (light.shadowAndPadding.x <= 0.5f) {
@@ -3859,7 +3853,7 @@ void VulkanContext::RenderFrame(
 		const uint32_t lightType = static_cast<uint32_t>(std::max(0.0f, light.positionAndType.w));
 		const uint32_t shadowPayloadIndex = static_cast<uint32_t>(std::max(0.0f, light.shadowAndPadding.y));
 		uint32_t slotIndex = VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (lightType == 0u) {
 			slotIndex = FindShadowSlotFromTextureIndex(impl->directionalShadowTextureIndices, shadowPayloadIndex);
 		}
@@ -3872,7 +3866,7 @@ void VulkanContext::RenderFrame(
 		else if (lightType == 3u) {
 			slotIndex = FindShadowSlotFromTextureIndex(impl->areaShadowTextureIndices, shadowPayloadIndex);
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (slotIndex < VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS) {
 			ShadowLightRecord record{};
 			record.light = &light;
@@ -3880,21 +3874,21 @@ void VulkanContext::RenderFrame(
 			record.staticPriority = retainedCandidate.gpuLight.extraParams.w;
 			record.type = lightType;
 			record.slot = slotIndex;
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 			for (PreparedShadowList& preparedList : preparedShadowLists) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (preparedList.lightId == retainedCandidate.lightId) {
 					record.preparedDraws = &preparedList.draws;
 					record.preparedList = &preparedList;
 					break;
 				}
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (record.preparedDraws == nullptr) {
 				static const std::vector<PreparedDraw> kEmptyPreparedShadowDraws{};
 				record.preparedDraws = &kEmptyPreparedShadowDraws;
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (const ShadowResourceAssignmentDiagnostic* assignment = FindShadowAssignment(retainedCandidate.lightId)) {
 				record.atlasId = assignment->atlasId;
 				record.regionX = assignment->regionX;
@@ -4400,9 +4394,9 @@ void VulkanContext::RenderFrame(
 		VkPipelineLayout boundDescriptorLayout = VK_NULL_HANDLE;
 		std::array<VkDescriptorSet, 2u> boundDescriptorSets{};
 		bool descriptorsBound = false;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const PreparedDraw& draw : shadowDraws) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (draw.pipeline == VK_NULL_HANDLE
 				|| draw.pipelineLayout == VK_NULL_HANDLE
 				|| draw.meshletCount == 0u) {
@@ -4625,7 +4619,7 @@ void VulkanContext::RenderFrame(
 		impl->shadowValidationReadback.RecordFace(cmd, depthImage, static_cast<VkFormat>(record.qualifiedKey.depthFormat), face, observation);
 	};
 	auto RecordShadowPass = [&](VkFramebuffer framebuffer, VkImage colorImage, VkImage depthImage, uint32_t arrayLayer, uint32_t width, uint32_t height, ShadowLightRecord& record, const glm::mat4& lightViewProjection) -> bool {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (framebuffer == VK_NULL_HANDLE || colorImage == VK_NULL_HANDLE || depthImage == VK_NULL_HANDLE || impl->shadowRenderPass == VK_NULL_HANDLE) {
 			return false;
 		}
@@ -4865,15 +4859,15 @@ void VulkanContext::RenderFrame(
 	pendingBudgetDiagnostics.shadowDrawSubmissionCount = 0u;
 	pendingBudgetDiagnostics.shadowGroupedSubmissionCount = pendingBudgetDiagnostics.shadowSingletonSubmissionCount = 0;
 	pendingBudgetDiagnostics.shadowGroupedCasterSegmentCount = 0;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (shadowResourcesReady && impl->shadowRenderPass != VK_NULL_HANDLE && !shadowLightRecords.empty()) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (ShadowLightRecord& record : shadowLightRecords) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (record.light == nullptr || record.slot >= VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS) {
 				continue;
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (record.reusedCachedResult) {
 				const auto image = record.type == 0U ? impl->directionalShadowDepths[record.slot].image
 					: (record.type == 1U ? impl->pointShadowCubeDepths[record.slot].image
@@ -4882,7 +4876,7 @@ void VulkanContext::RenderFrame(
 					recordShadowValidationFace(record, image, face, 0);
 				continue;
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (recordStaticComposition(record)) continue;
 			if (record.type == 0u) {
 				const glm::mat4 lightViewProjection = LoadShadowViewProjection(*record.light);
@@ -4959,7 +4953,7 @@ void VulkanContext::RenderFrame(
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (recordedAnyShadowPass) {
 		VkMemoryBarrier shadowBarrier{};
 		shadowBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -5086,7 +5080,7 @@ void VulkanContext::RenderFrame(
 	// Mesh chunks plus optional sky/grid/UI command buffers form a small, known
 	// upper bound. Reserving once avoids vector growth inside primary recording.
 	secondaryBuffers.reserve(prepared.size() + 3u);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!prepared.empty()) {
 		const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
 		// Hardware cores do not imply available task workers. In particular a
@@ -5168,7 +5162,7 @@ void VulkanContext::RenderFrame(
 				renderExtent.height });
 		};
 		auto recordSecondaryRange = [this, computeCompositeReady, preparedForRecording](VkCommandBuffer secondary, VkRenderPass renderPass, VkFramebuffer framebuffer, VkExtent2D renderExtent, size_t start, size_t end) -> VkCommandBuffer {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (secondary == VK_NULL_HANDLE) return VK_NULL_HANDLE;
 			vkResetCommandBuffer(secondary, 0);
 
@@ -5209,7 +5203,7 @@ void VulkanContext::RenderFrame(
 			std::array<VkDescriptorSet, 2u> boundDescriptorSets{};
 			bool descriptorsBound = false;
 
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 			for (size_t i = start; i < end; ++i) {
 				const PreparedDraw& draw = (*preparedForRecording)[i];
 				if(computeCompositeReady
@@ -5266,7 +5260,7 @@ void VulkanContext::RenderFrame(
 		TerraEngine::Tasks::ScopedTaskSettlement<VkCommandBuffer> recordingSettlement(
 			futures, TerraEngine::Tasks::NestedTaskGroup::VulkanSecondaryRecording);
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (size_t taskIndex = 0; taskIndex < workerCount; ++taskIndex) {
 			const size_t start = taskIndex * chunkSize;
 			if (start >= prepared.size()) break;
@@ -5320,13 +5314,13 @@ void VulkanContext::RenderFrame(
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (presentation.sky.renderBackground)
 	{
 		const size_t workerIndex = secondaryBuffers.size();
 		impl->EnsureWorkerPools(impl->currentFrame, workerIndex + 1);
 		VkCommandBuffer skyCmd = impl->AcquireWorkerCommandBuffer(impl->currentFrame, workerIndex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (skyCmd != VK_NULL_HANDLE)
 		{
 			impl->reusableSecondaryCommandSignatures.erase(skyCmd);
@@ -5355,13 +5349,13 @@ void VulkanContext::RenderFrame(
 	}
 
 	// Render grid (Scene View only).
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (view == ViewType::Scene && presentation.sceneViewGridVisible) {
 		const size_t workerIndex = secondaryBuffers.size();
 		impl->EnsureWorkerPools(impl->currentFrame, workerIndex + 1);
 
 		VkCommandBuffer gridCmd = impl->AcquireWorkerCommandBuffer(impl->currentFrame, workerIndex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (gridCmd != VK_NULL_HANDLE) {
 			impl->reusableSecondaryCommandSignatures.erase(gridCmd);
 			vkResetCommandBuffer(gridCmd, 0);
@@ -5395,7 +5389,7 @@ void VulkanContext::RenderFrame(
 		const size_t workerIndex = secondaryBuffers.size();
 		impl->EnsureWorkerPools(impl->currentFrame, workerIndex + 1);
 		VkCommandBuffer uiCmd = impl->AcquireWorkerCommandBuffer(impl->currentFrame, workerIndex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (uiCmd != VK_NULL_HANDLE) {
 			impl->reusableSecondaryCommandSignatures.erase(uiCmd);
 			vkResetCommandBuffer(uiCmd, 0);
@@ -5489,7 +5483,7 @@ void VulkanContext::RenderFrame(
 	beginCommandRecordingPhase(
 		"Vulkan: Primary Finalize Render Pass");
 	vkCmdBeginRenderPass(cmd, &renderPassInfo, contents);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!secondaryBuffers.empty()) {
 		vkCmdExecuteCommands(cmd, static_cast<uint32_t>(secondaryBuffers.size()), secondaryBuffers.data());
 	}
@@ -5543,7 +5537,7 @@ void VulkanContext::RenderFrame(
 	}
 
 	// VRS Generation for next frame
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (impl->UsesVrsAttachment()) {
 		const VkImageView vrsColorView = renderingDedicatedCaptureTarget
 			? impl->captureView.view
@@ -5552,10 +5546,10 @@ void VulkanContext::RenderFrame(
 	}
 	if (kEnableRuntimeScreenSpaceAo
 		&& !impl->editorMode
-		&& firstPrimaryPassForFrame
+		&& runtimeAoHistoryPass
 		&& presentation.settings.ambientOcclusionStrength > 0.001f
 		&& presentation.settings.ambientOcclusionQuality > 0u) {
-		impl->StoreAmbientOcclusionDepthHistory(cmd, activeDepthImage, viewIndex, currentViewProjection);
+		impl->StoreAmbientOcclusionDepthHistory(cmd, activeDepthImage, activeRenderExtent, viewIndex, currentViewProjection);
 	}
 	// Generate the pyramid after scene depth is complete. Its task-shader
 	// consumer has a fixed four-load proof budget, so enabling Hi-Z cannot create
@@ -5639,7 +5633,7 @@ void VulkanContext::RenderFrame(
 	TerraEngine::Renderer::AddViewSubmitWorkItem(impl->pendingBackendFrameBreakdown, std::move(submitWork));
 	// Record the command buffer to be submitted at EndFrame so multiple cameras
 	// render sequentially before a single present.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (impl->currentFrame >= impl->pendingPrimaryCommandBuffers.size()) {
 		impl->pendingPrimaryCommandBuffers.resize(impl->MAX_FRAMES_IN_FLIGHT);
 	}
@@ -5649,7 +5643,7 @@ void VulkanContext::RenderFrame(
 	impl->pendingPrimaryCommandBuffers[impl->currentFrame].push_back(cmd);
 	shadowRecordingSettlement.admitted = true;
 	impl->activeRenderSnapshot.state = RenderSnapshotState::Recorded;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!impl->pendingRenderSnapshotDiagnostics.ownerSummaries.empty()) {
 		impl->pendingRenderSnapshotDiagnostics.ownerSummaries.back().state = RenderSnapshotState::Recorded;
 	}

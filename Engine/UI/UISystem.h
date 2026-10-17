@@ -92,7 +92,7 @@ public:
 		std::size_t estimatedStyleRuleCount = 0;
 	};
 
-	// struct UIBuildResult groups related state and operations so callers have one documented contract.
+
 	struct UIBuildResult
 	{
 		entt::entity entity = entt::null;
@@ -150,7 +150,7 @@ public:
 private:
 	UISystem() = default;
 
-	// struct UIDocumentState groups related state and operations so callers have one documented contract.
+
 	struct UIDocumentState
 	{
 		std::uint64_t contentVersion = 0;
@@ -167,7 +167,7 @@ private:
 		UIPublishStatus lastPublishStatus = UIPublishStatus::None;
 	};
 
-	// struct PointerState groups related state and operations so callers have one documented contract.
+
 	struct PointerState
 	{
 		glm::vec2 position = glm::vec2(0.0f);

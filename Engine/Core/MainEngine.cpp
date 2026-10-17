@@ -151,7 +151,7 @@ void Engine::Run()
 		
 		while(true) {
 			const double deltaSeconds = frameTimer.Tick();
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!Update((float)deltaSeconds)) break;
 		}
 		
@@ -180,7 +180,7 @@ void Engine::Run()
 	}
 }
 
-// Engine::SignalShutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void Engine::SignalShutdown()
 {
 	running = false;
@@ -194,7 +194,7 @@ void Engine::ResetFrameTimer()
 	frameTimer = FrameTimer();
 }
 
-// Engine::SetEditorMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void Engine::SetEditorMode(SystemsBase* system)
 {
 	editorSystem = system;
@@ -253,7 +253,7 @@ void Engine::ConfigureCharacterMotionReplayValidation()
 	if(systems.empty()) characterMotionReplayValidation = true;
 }
 
-// Engine::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void Engine::Initialize()
 {
 	if (lifecycleStarted) throw std::logic_error("Engine is already initialized; shut down its current lifetime before reinitializing.");
@@ -570,7 +570,7 @@ void Engine::InitializeImpl()
 			}
 		}
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (auto* system : systems) {
 			initializedSystemCount++;
 			system->Initialize();
@@ -588,7 +588,7 @@ void Engine::InitializeImpl()
 			}
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (editorMode && editorSystem != nullptr) {
 			editorSystemInitialized = true;
 			editorSystem->Initialize();
@@ -642,7 +642,7 @@ void Engine::InitializeImpl()
 	ResetFrameTimer();
 }
 
-// Engine::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool Engine::Update(float deltaTime)
 {
 	if (!running || !lifecycleStarted) {
@@ -1307,7 +1307,7 @@ TerraEngine::Runtime::PhysicsInvariantReport Engine::RunPhysicsInvariantFixture(
 	}
 }
 
-// Engine::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void Engine::Shutdown()
 {
 	if (!lifecycleStarted) return;
@@ -1346,7 +1346,7 @@ void Engine::Shutdown()
 		settle("Editor", [&] { editorSystem->Shutdown(); });
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	while (initializedSystemCount > 0U) {
 		SystemsBase* system = systems[--initializedSystemCount];
 		settle("System", [&] { system->Shutdown(); });

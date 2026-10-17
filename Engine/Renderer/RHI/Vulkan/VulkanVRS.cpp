@@ -19,7 +19,7 @@ void VulkanVRS::Create(VkDevice device, VkPhysicalDevice physicalDevice, VmaAllo
 	vkGetPhysicalDeviceProperties2(physicalDevice, &props);
 
 	texelSize = vrsProps.minFragmentShadingRateAttachmentTexelSize;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (texelSize.width == 0 || texelSize.height == 0) {
 		texelSize = { 8, 8 }; // Fallback
 	}
@@ -48,7 +48,7 @@ void VulkanVRS::Create(VkDevice device, VkPhysicalDevice physicalDevice, VmaAllo
 	VmaAllocationCreateInfo allocInfo = {};
 	allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image, &allocation, nullptr) != VK_SUCCESS) {
 		throw std::runtime_error("failed to create VRS image!");
 	}
@@ -65,19 +65,19 @@ void VulkanVRS::Create(VkDevice device, VkPhysicalDevice physicalDevice, VmaAllo
 	viewInfo.subresourceRange.baseArrayLayer = 0;
 	viewInfo.subresourceRange.layerCount = 1;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkCreateImageView(device, &viewInfo, nullptr, &view) != VK_SUCCESS) {
 		throw std::runtime_error("failed to create VRS image view!");
 	}
 }
 
-// VulkanVRS::Destroy is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanVRS::Destroy(VkDevice device, VmaAllocator allocator) {
 	if (view != VK_NULL_HANDLE) {
 		vkDestroyImageView(device, view, nullptr);
 		view = VK_NULL_HANDLE;
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (image != VK_NULL_HANDLE) {
 		vmaDestroyImage(allocator, image, allocation);
 		image = VK_NULL_HANDLE;

@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -13,14 +14,28 @@ namespace TerraEngine::Tests
 {
 	namespace
 	{
+		// Source checks supplement runtime tests. Missing definitions must fail even
+		// when the caller only searches for forbidden text; ordering stays in one file.
+		std::string RequiredContractSource(const std::filesystem::path& relative)
+		{
+			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relative, std::ios::binary);
+			std::string text((std::istreambuf_iterator<char>(input)), {});
+			if(!input || input.bad() || text.empty())
+				throw std::runtime_error("Required source unavailable: " + relative.generic_string());
+			return text;
+		}
+		std::string RequiredContractRegion(const std::string& text, const char* first, const char* next)
+		{
+			const auto begin = text.find(first);
+			const auto end = begin == std::string::npos ? std::string::npos : text.find(next, begin + std::string(first).size());
+			if(begin == std::string::npos || end == std::string::npos || end <= begin)
+				throw std::runtime_error(std::string("Required definition boundaries unavailable: ") + first);
+			return text.substr(begin, end - begin);
+		}
+
 		std::string ReadSourceFile(const std::filesystem::path& relativePath)
 		{
-			// TERRAENGINE_SOURCE_DIR is provided by the test target, so source
-			// contracts do not depend on CTest's current working directory.
-			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relativePath, std::ios::binary);
-			std::ostringstream contents;
-			contents << input.rdbuf();
-			return contents.str();
+			return RequiredContractSource(relativePath);
 		}
 	}
 
@@ -97,19 +112,23 @@ namespace TerraEngine::Tests
 			context.Expect(depthRejected, "Depth/stencil formats should fail cleanly instead of producing partial color data.");
 		});
 
-		registry.Add("Renderer.VulkanImageReadback.OwnsAsyncLifetimeContracts", [](TestContext& context) {
+		// These source checks supplement the executable Renderer.ReadbackLifetime
+		// controller cases and installed ReadbackLifetime native fixture. Finding
+		// a call site cannot prove fence timing, retained owners or safe teardown.
+		registry.Add("Renderer.VulkanImageReadback.SupplementaryNativeWiring", [](TestContext& context) {
 			const std::string contextSource = VulkanSourceContracts::ReadContextSources();
 			const std::string initSource = ReadSourceFile("Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp");
-			const std::string renderSource = ReadSourceFile("Engine/Renderer/RenderSystem.cpp");
+			const auto renderSource = RequiredContractRegion(ReadSourceFile("Engine/Renderer/RenderSystemCapture.cpp"),
+				"void RenderSystem::DrainCaptureReadbacks()", "void RenderSystem::DrainConventionalVisibilityIdentityReadbacks()");
 
-			context.Expect(contextSource.find("vkCmdCopyImageToBuffer") != std::string::npos, "Vulkan readback should record a real image-to-staging-buffer copy.");
-			context.Expect(contextSource.find("const VkResult endResult = vkEndCommandBuffer") != std::string::npos, "Readback should check command-buffer finalization before submission.");
-			context.Expect(contextSource.find("submitResult = impl->SubmitGraphicsQueue") != std::string::npos, "Readback should retain and check the synchronized queue submission result.");
-			context.Expect(contextSource.find("vkGetFenceStatus") != std::string::npos, "Readback completion should use non-blocking fence polling.");
-			context.Expect(contextSource.find("A timeout is a client-visible cancellation, not proof that Vulkan") != std::string::npos, "Timeout handling should retain GPU-owned resources until completion is proven.");
-			context.Expect(contextSource.find("request.sourceImage != target.image") != std::string::npos, "Resize validation should compare source image identity as well as dimensions.");
-			context.Expect(initSource.find("CancelReadbackRequests(") != std::string::npos, "Renderer teardown should explicitly drain in-flight capture resources.");
-			context.Expect(renderSource.find("rhi->PollCaptureReadbacks()") != std::string::npos, "RenderSystem should drain backend completion results through the bounded capture queue.");
+			context.Expect(contextSource.find("vkCmdCopyImageToBuffer") != std::string::npos, "Supplementary wiring: image-to-buffer copy call site is present.");
+			context.Expect(contextSource.find("const VkResult endResult = vkEndCommandBuffer") != std::string::npos, "Supplementary wiring: command finalization retains its result.");
+			context.Expect(contextSource.find("submitResult = impl->SubmitGraphicsQueue") != std::string::npos, "Supplementary wiring: capture uses synchronized submission.");
+			context.Expect(contextSource.find("vkGetFenceStatus") != std::string::npos, "Supplementary wiring: a native fence query call site is present.");
+			context.Expect(contextSource.find("request.sourceImage != target.image") != std::string::npos, "Supplementary wiring: source-image identity comparison is present.");
+			context.Expect(contextSource.find("iterator->lifecycle.Poll(adapter,") != std::string::npos, "Supplementary wiring: polling reaches the production lifecycle controller.");
+			context.Expect(initSource.find("CancelReadbackRequests(") != std::string::npos, "Supplementary wiring: cleanup reaches readback cancellation.");
+			context.Expect(renderSource.find("rhi->PollCaptureReadbacks()") != std::string::npos, "Supplementary wiring: RenderSystem consumes backend results.");
 		});
 	}
 }

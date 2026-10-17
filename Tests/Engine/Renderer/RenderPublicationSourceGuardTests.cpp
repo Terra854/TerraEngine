@@ -1,202 +1,186 @@
+// These supplementary guards follow real stage definitions after relocation.
+// Runtime ownership, allocation, and replay tests provide the behavioral evidence.
 #include "TestHarness.h"
-#include "VulkanSourceTestUtils.h"
-
-#include <fstream>
+#include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace TerraEngine::Tests
 {
+	namespace
+	{
+		struct SourceUnit { std::string path, text; };
+		std::string ReadRequired(TestContext& context, const std::string& path)
+		{
+			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / path, std::ios::binary);
+			context.Expect(input.good(), "Every required source-contract file must be readable.");
+			std::string text((std::istreambuf_iterator<char>(input)), {});
+			context.Expect(!text.empty(), "An empty source read cannot satisfy a relocation guard.");
+			return text;
+		}
+		std::string Region(TestContext& context, const std::string& text, std::string_view begin, std::string_view end)
+		{
+			const auto first = text.find(begin);
+			const auto last = first == std::string::npos ? std::string::npos : text.find(end, first + begin.size());
+			const bool found = first != std::string::npos && last != std::string::npos && last > first;
+			context.Expect(found, "Both ordered region boundaries must exist in the same required source file.");
+			return found ? text.substr(first, last - first) : std::string{};
+		}
+		bool Has(const std::string& text, std::string_view word) { return !text.empty() && text.find(word) != std::string::npos; }
+		std::size_t Count(const std::string& text, std::string_view word)
+		{
+			std::size_t count = 0, cursor = 0;
+			while((cursor = text.find(word, cursor)) != std::string::npos) { ++count; cursor += word.size(); }
+			return count;
+		}
+		std::vector<SourceUnit> RendererClosure(TestContext& context)
+		{
+			std::vector<std::string> paths;
+			const auto root = std::filesystem::path(TERRAENGINE_SOURCE_DIR);
+			const auto renderer = root / "Engine/Renderer";
+			const auto eligible = [](const auto& path) { const auto ext = path.extension(); return ext == ".cpp" || ext == ".h" || ext == ".inl"; };
+			for(const auto& entry : std::filesystem::directory_iterator(renderer))
+				if(entry.is_regular_file() && entry.path().filename().string().starts_with("RenderSystem") && eligible(entry.path()))
+					paths.push_back(entry.path().lexically_relative(root).generic_string());
+			for(const auto& entry : std::filesystem::recursive_directory_iterator(renderer / "Frame"))
+				if(entry.is_regular_file() && eligible(entry.path())) paths.push_back(entry.path().lexically_relative(root).generic_string());
+			std::sort(paths.begin(), paths.end());
+			context.Expect(paths.size() > 2 && std::find(paths.begin(), paths.end(), "Engine/Renderer/RenderSystem.cpp") != paths.end()
+				&& std::find(paths.begin(), paths.end(), "Engine/Renderer/RenderSystem.h") != paths.end(), "Inspect the complete coordinator/facade/Frame closure.");
+			std::vector<SourceUnit> result;
+			for(const auto& path : paths) result.push_back({path, ReadRequired(context, path)});
+			return result;
+		}
+		bool Absent(const std::vector<SourceUnit>& closure, std::string_view word)
+		{
+			return !closure.empty() && std::all_of(closure.begin(), closure.end(), [&](const auto& unit) { return !unit.text.empty() && !Has(unit.text, word); });
+		}
+		bool Before(const std::string& text, std::string_view first, std::string_view second)
+		{
+			const auto a = text.find(first), b = text.find(second);
+			return a != std::string::npos && b != std::string::npos && a < b;
+		}
+		std::string Compact(std::string text)
+		{
+			std::erase_if(text, [](unsigned char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; });
+			return text;
+		}
+	}
 	void RegisterRenderPublicationSourceGuardTests(TestRegistry& registry)
 	{
 		registry.Add("Renderer.PublicationSourceGuard.OwnedNoFailReceipt", [](TestContext& context) {
-			// This source contract complements the real allocator child: optional
-			// logging must consume the owned view and never regain a string receipt.
-			const auto read = [](const char* path) {
-				std::ifstream stream(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / path);
-				return std::string((std::istreambuf_iterator<char>(stream)), {});
-			};
-			const auto header = read("Engine/Renderer/Graph/RenderFramePublication.h");
-			const auto render = read("Engine/Renderer/RenderSystem.cpp");
-			const auto begin = header.find("struct RenderPublicationReceipt");
-			const auto end = header.find("struct RenderFramePublication", begin);
-			context.Expect(begin != std::string::npos && end != std::string::npos
-				&& header.substr(begin, end - begin).find("std::string diagnostic") == std::string::npos
-				&& render.find("publicationReceipt.DiagnosticText()") != std::string::npos,
-				"Receipt ownership and the optional logging consumer must remain allocation independent.");
+			const auto header = ReadRequired(context, "Engine/Renderer/Graph/RenderFramePublication.h");
+			const auto sealing = ReadRequired(context, "Engine/Renderer/Frame/RenderFrameSealing.cpp");
+			const auto receipt = Region(context, header, "struct RenderPublicationReceipt", "struct RenderFramePublication");
+			const auto finalizer = Region(context, sealing, "RenderSystem::FinalizeFramePublication(", "RenderSystem::OrderFramePreparedViews(");
+			context.Expect(!receipt.empty() && !Has(receipt, "std::string diagnostic") && Has(finalizer, "publicationReceipt.DiagnosticText()"),
+				"Receipt ownership and its relocated logging consumer remain allocation independent.");
 		});
 		registry.Add("Renderer.PublicationSourceGuard.RemovesLegacySubmission", [](TestContext& context) {
-			const auto readSource = [](const char* relativePath) {
-				std::ifstream source(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relativePath);
-				return std::string((std::istreambuf_iterator<char>(source)), {});
-			};
-			const std::string renderSystem = readSource("Engine/Renderer/RenderSystem.cpp");
-			const std::string publication = readSource(
-				"Engine/Renderer/Graph/RenderFramePublication.h");
-			const std::string publicationImplementation = readSource(
-				"Engine/Renderer/Graph/RenderFramePublication.cpp");
-			const std::string vulkan = VulkanSourceContracts::ReadContextSources();
-			context.Expect(!renderSystem.empty() && !publication.empty()
-				&& !publicationImplementation.empty() && !vulkan.empty(),
-				"The renderer source guard must inspect every command-publication boundary.");
-			context.Expect(renderSystem.find("MaterializeCommands") == std::string::npos,
-				"Renderer publication must not reconstruct legacy command collections.");
-			const std::string renderTypes = readSource("Engine/Renderer/RenderTypes.h");
-			const std::size_t shadowType = renderTypes.find("struct ShadowDrawList");
-			const std::size_t shadowTypeEnd = renderTypes.find("};", shadowType);
-			context.Expect(shadowType != std::string::npos
-				&& shadowTypeEnd != std::string::npos
-				&& renderTypes.substr(shadowType, shadowTypeEnd - shadowType)
-					.find("RenderItemRecord") == std::string::npos
-				&& renderTypes.substr(shadowType, shadowTypeEnd - shadowType)
-					.find("commands") == std::string::npos,
-				"Shadow views must retain compact ordinals and selectors, never copied full command arrays.");
-			const std::size_t viewBuildType = renderTypes.find(
-				"struct RenderViewBuildState");
-			const std::size_t viewBuildTypeEnd = renderTypes.find(
-				"struct RenderOutputRequest", viewBuildType);
-			context.Expect(viewBuildType != std::string::npos
-				&& viewBuildTypeEnd != std::string::npos
-				&& renderTypes.substr(viewBuildType,
-					viewBuildTypeEnd - viewBuildType).find(
-						"std::vector<RenderItemRecord>") == std::string::npos,
-				"A prepared view must carry compact selectors and lanes, not a second full command collection.");
-			context.Expect(renderSystem.find("selectedCommands") == std::string::npos
-				&& publication.find("selectedCommands") == std::string::npos
-				&& vulkan.find("selectedCommands") == std::string::npos,
-				"Renderer publication must not restore a copied full per-view command payload.");
-			context.Expect(renderSystem.find(
-				"input.groupedInstanceRecords = frame.groupedInstanceRecords")
-					== std::string::npos
-				&& renderSystem.find(
-					"input.groupedInstanceRecords = std::move(frame.groupedInstanceRecords)")
-					!= std::string::npos,
-				"Queueing a prepared view must transfer the grouped instance stream instead of copying the crowd-sized vector.");
-			const std::size_t preparedSubmission = renderSystem.find(
-				"struct PreparedRenderSubmission");
-			const std::size_t makePresentation = renderSystem.find(
-				"makePresentationInput", preparedSubmission);
-			context.Expect(preparedSubmission != std::string::npos
-				&& makePresentation != std::string::npos
-				&& renderSystem.substr(preparedSubmission,
-					makePresentation - preparedSubmission).find(
-						"RenderViewBuildState frame") == std::string::npos,
-				"A queued submission must retain only its immutable presentation, not a duplicate build-state owner.");
-			const std::size_t visibleCacheHit = renderSystem.find(
-				"RenderSystem: Reuse Visible Draw Commands");
-			const std::size_t visibleDiagnostics = renderSystem.find(
-				"RenderSystem: Reuse Visible Diagnostics", visibleCacheHit);
-			const std::string visibleCacheHitBody = visibleCacheHit != std::string::npos
-				&& visibleDiagnostics != std::string::npos
-				? renderSystem.substr(visibleCacheHit,
-					visibleDiagnostics - visibleCacheHit) : std::string{};
-			context.Expect(!visibleCacheHitBody.empty()
-				&& visibleCacheHitBody.find("std::vector<RenderItemRecord> cachedCommands;")
-					!= std::string::npos
-				&& visibleCacheHitBody.find("!existing->second.hasViewDrawEvidence")
-					!= std::string::npos
-				&& visibleCacheHitBody.find(
-					"std::vector<RenderItemRecord> cachedCommands =") == std::string::npos,
-				"A complete visible-cache hit must defer command materialization to the one mandatory publication pass.");
-			const std::size_t queueSubmission = renderSystem.find(
-				"auto queuePreparedSubmission");
-			const std::size_t queueSubmissionEnd = renderSystem.find(
-				"preparedRenderSubmissions.push_back", queueSubmission);
-			const std::string queueSubmissionBody = queueSubmission != std::string::npos
-				&& queueSubmissionEnd != std::string::npos
-					? renderSystem.substr(queueSubmission,
-						queueSubmissionEnd - queueSubmission) : std::string{};
-			context.Expect(!queueSubmissionBody.empty()
-				&& queueSubmissionBody.find("reuseCachedViewLanes") != std::string::npos
-				&& queueSubmissionBody.find(
-					"prepared.presentation.retainedCommandLanes = cachedRecord->commandLanes")
-					!= std::string::npos
-				&& queueSubmissionBody.find(
-					"prepared.selection.retainedPayload = cachedRecord->retainedViewSelection")
-					!= std::string::npos
-				&& queueSubmissionBody.find(
-					"prepared.presentation.retainedCommandSelectionIndices")
-					!= std::string::npos
-				&& queueSubmissionBody.find(
-					"cachedRecord->stableOrdinals[index]") != std::string::npos,
-				"A stable cached view must queue compact lanes and ordinals without rescanning full commands.");
-			context.Expect(renderSystem.find("backendWorkPlan") == std::string::npos
-				&& publication.find("backendWorkPlan") == std::string::npos
-				&& vulkan.find("backendWorkPlan") == std::string::npos,
-				"A sealed frame must carry only compact backend work, not a copied render-graph plan.");
-			context.Expect(renderSystem.find(
-					"snapshotRenderable.animationBinding = entry.animationBinding")
-						!= std::string::npos
-				&& renderSystem.find("if(!reuseRenderableRecords)")
-					!= std::string::npos
-				&& renderSystem.find(
-					"renderFrameSnapshot.renderables[index].animationBinding")
-						!= std::string::npos,
-				"A rebuilt snapshot must retain complete bindings, while stable frames skip the entire record-copy loop and consume the immutable owner.");
-			context.Expect(renderSystem.find("const bool applyDelta =")
-					!= std::string::npos
-				&& renderSystem.find("protectedSceneChanges->ComponentChanged()")
-					!= std::string::npos
-				&& renderSystem.find("renderableMembershipCache.erase(existing)")
-					!= std::string::npos,
-				"Validated scene-change packets must patch render membership instead of forcing a complete ECS scan for every edit.");
-			context.Expect(renderSystem.find(
-					"lane.transformGeneration =") != std::string::npos
-				&& renderSystem.find("renderable.transformGeneration")
-					!= std::string::npos
-				&& renderSystem.find("sparseTransformRefresh")
-					!= std::string::npos,
-				"Dynamic pages must use object-local propagated transform generations and sparse matrix refreshes.");
-			context.Expect(renderSystem.find(
-					"taskIndex = 1u; taskIndex < workerCount") != std::string::npos
-				&& renderSystem.find(
-					"work(0U, std::min(itemCount, chunkSize))") != std::string::npos,
-				"Chunked renderer work must use the current scheduler worker for one range rather than queueing every range back into the same pool.");
-			const std::string suspendMarker = "co_await std::suspend_always{};";
-			const std::size_t firstWorkerBoundary = renderSystem.find(suspendMarker);
-			const std::size_t secondWorkerBoundary = renderSystem.find(
-				suspendMarker, firstWorkerBoundary + suspendMarker.size());
-			const std::size_t protectedExchangeBoundary = renderSystem.find(
-				suspendMarker, secondWorkerBoundary + suspendMarker.size());
-			const std::string workerPreparation = firstWorkerBoundary != std::string::npos
-				&& protectedExchangeBoundary != std::string::npos
-				? renderSystem.substr(firstWorkerBoundary,
-					protectedExchangeBoundary - firstWorkerBoundary) : std::string{};
-			context.Expect(!workerPreparation.empty()
-				&& workerPreparation.find("objManager.") == std::string::npos
-				&& workerPreparation.find("objectManager.") == std::string::npos
-				&& workerPreparation.find("resourceManager.") == std::string::npos
-				&& workerPreparation.find("ResourceManager::Instance()")
-					== std::string::npos
-				&& workerPreparation.find("rhi->") == std::string::npos
-				&& workerPreparation.find("::Instance()") == std::string::npos,
-				"Worker renderer phases must consume captured immutable roots without reopening live engine singletons.");
-			context.Expect(renderSystem.find(
-					"resourceManager.PublishVisibleStreamingTouches")
-					> protectedExchangeBoundary,
-				"Visible streaming mutations must publish only after the protected exchange boundary.");
-			const std::size_t consumePublication = vulkan.find(
-				"VulkanContext::ConsumeRenderFramePublication");
-			const std::size_t consumeWork = vulkan.find(
-				"VulkanContext::ConsumePublishedWorkPlans", consumePublication);
-			context.Expect(consumePublication != std::string::npos
-				&& consumeWork != std::string::npos
-				&& vulkan.substr(consumePublication,
-					consumeWork - consumePublication).find(
-						"ValidateRenderFramePublication") == std::string::npos,
-				"The backend boundary must not repeat crowd-sized publication validation.");
-			context.Expect(renderSystem.find("DX12") == std::string::npos,
-				"The current renderer refactor must not add DX12 behavior.");
-			const std::size_t tryPublish = publicationImplementation.find(
-				"RenderFramePublicationStore::TryPublish");
-			const std::size_t resetForSession = publicationImplementation.find(
-				"RenderFramePublicationStore::ResetForSession");
-			context.Expect(tryPublish != std::string::npos && resetForSession != std::string::npos
-				&& publicationImplementation.substr(tryPublish,
-					resetForSession - tryPublish).find("ValidateRenderFramePublication")
-					== std::string::npos,
-				"The protected publication mutex must exchange only an already sealed root, never rescan crowd-sized validation data.");
+			const auto closure = RendererClosure(context);
+			const auto read = [&](const char* path) { return ReadRequired(context, path); };
+			const auto coordinator = read("Engine/Renderer/RenderSystem.cpp");
+			const auto publication = read("Engine/Renderer/Graph/RenderFramePublication.h");
+			const auto publicationImplementation = read("Engine/Renderer/Graph/RenderFramePublication.cpp");
+			const auto types = read("Engine/Renderer/RenderTypes.h");
+			const auto sealing = read("Engine/Renderer/Frame/RenderFrameSealing.cpp");
+			const auto sealingHeader = read("Engine/Renderer/Frame/RenderFrameSealing.h");
+			const auto visible = read("Engine/Renderer/Frame/RenderViewPreparation.cpp");
+			const auto snapshot = read("Engine/Renderer/Frame/RenderSnapshotPreparation.cpp");
+			const auto capture = read("Engine/Renderer/Frame/RenderFrameCapture.cpp");
+			const auto dynamic = read("Engine/Renderer/Frame/RenderDynamicPublication.cpp");
+			const auto spatial = read("Engine/Renderer/Frame/RenderSpatialPreparation.cpp");
+			const auto topology = read("Engine/Renderer/Frame/RenderTopologyPreparation.cpp");
+			const auto tasks = read("Engine/Renderer/Frame/RenderPreparationTasks.h");
+			std::vector<SourceUnit> vulkan;
+			for(const char* path : {"VulkanContext.cpp", "VulkanContextSource.h", "VulkanBuiltinPasses.cpp", "VulkanEditorRendering.cpp", "VulkanFrameRendering.cpp", "VulkanFrameSubmission.cpp", "VulkanPostProcessing.cpp", "VulkanReadback.cpp"})
+				vulkan.push_back({path, read((std::string("Engine/Renderer/RHI/Vulkan/") + path).c_str())});
+			context.Expect(Absent(closure, "MaterializeCommands"), "No renderer facade or stage may reconstruct legacy command collections.");
+			const auto shadow = Region(context, types, "struct ShadowDrawList", "};");
+			context.Expect(!shadow.empty() && !Has(shadow, "RenderItemRecord") && !Has(shadow, "commands"), "Shadow views retain compact ordinals/selectors instead of copied full command arrays.");
+			const auto viewBuild = Region(context, types, "struct RenderViewBuildState", "struct RenderOutputRequest");
+			context.Expect(!viewBuild.empty() && !Has(viewBuild, "std::vector<RenderItemRecord>"), "Prepared views must not own a second full command collection.");
+			context.Expect(Absent(closure, "selectedCommands") && !Has(publication, "selectedCommands") && Absent(vulkan, "selectedCommands"), "No copied full per-view command payload may return.");
+			context.Expect(Absent(closure, "input.groupedInstanceRecords = frame.groupedInstanceRecords")
+				&& Has(Region(context, sealing, "RenderSystem::MakeFramePresentationInput(", "RenderSystem::QueueFramePreparedSubmission("), "input.groupedInstanceRecords = std::move(frame.groupedInstanceRecords)"), "View lowering transfers the grouped instance stream.");
+			const auto prepared = Region(context, sealingHeader, "struct RenderSystem::PreparedRenderSubmission", "struct RenderSystem::FrameViewBuildOutputs");
+			context.Expect(!prepared.empty() && !Has(prepared, "RenderViewBuildState frame"), "Queued submission retains immutable presentation rather than another build-state owner.");
+			const auto hit = Region(context, visible, "RenderSystem: Reuse Visible Draw Commands", "RenderSystem: Reuse Visible Diagnostics");
+			context.Expect(Has(hit, "std::vector<RenderItemRecord> cachedCommands;") && Has(hit, "!existing->second.hasViewDrawEvidence") && !Has(hit, "std::vector<RenderItemRecord> cachedCommands ="), "Visible-cache hits defer full command materialization.");
+			const auto queue = Region(context, sealing, "RenderSystem::QueueFramePreparedSubmission(", "RenderSystem::CopyFrameVirtualGeometryPayload(");
+			context.Expect(Has(queue, "reuseCachedViewLanes") && Has(queue, "prepared.presentation.retainedCommandLanes = cachedRecord->commandLanes")
+				&& Has(queue, "prepared.selection.retainedPayload = cachedRecord->retainedViewSelection") && Has(queue, "prepared.presentation.retainedCommandSelectionIndices") && Has(queue, "cachedRecord->stableOrdinals[index]"), "Stable cached views retain compact lanes and ordinals without rescanning full commands.");
+			context.Expect(Absent(closure, "backendWorkPlan") && !Has(publication, "backendWorkPlan") && Absent(vulkan, "backendWorkPlan"), "Sealed frames retain compact backend work instead of copied graph plans.");
+			context.Expect(Has(snapshot, "RenderSystem::AssembleFrameSnapshotRows(") && Has(snapshot, "snapshotRenderable.animationBinding = entry.animationBinding")
+				&& Has(topology, "if(!reuseRenderableRecords)") && Has(spatial, "renderFrameSnapshot.renderables[index].animationBinding"), "Rebuilt snapshots retain complete bindings while warm frames preserve the immutable rows.");
+			const auto membership = Region(context, capture, "RenderSystem::RefreshFrameRenderableMembership(", "RenderSystem::CollectFrameAnimationBinding(");
+			context.Expect(Has(membership, "const bool applyDelta =") && Has(membership, "protectedSceneChanges->ComponentChanged()") && Has(membership, "renderableMembershipCache.erase(existing)"), "Validated scene packets patch membership without a full ECS scan for each edit.");
+			context.Expect(Has(dynamic, "RenderSystem::PrepareFrameDynamicPages(") && Has(dynamic, "lane.transformGeneration =") && Has(dynamic, "renderable.transformGeneration") && Has(spatial, "sparseTransformRefresh"), "Dynamic pages retain object-local generations and sparse matrix refresh.");
+			context.Expect(Has(tasks, "taskIndex = 1u; taskIndex < workerCount") && Has(tasks, "work(0U, std::min(itemCount, chunkSize))"), "Chunked work uses its current scheduler worker for one range.");
+
+			const auto coroutine = Region(context, coordinator, "RenderSystem::BuildFrameExecution(", "void RenderSystem::Shutdown()");
+			const std::string suspend = "co_await std::suspend_always{};";
+			std::vector<std::size_t> boundaries;
+			std::size_t cursor = 0;
+			for(int index = 0; index < 3; ++index) { const auto found = coroutine.find(suspend, cursor); if(found == std::string::npos) break; boundaries.push_back(found); cursor = found + suspend.size(); }
+			context.Expect(boundaries.size() == 3 && Count(coroutine, suspend) == 3, "Coordinator retains exactly three real coroutine suspensions.");
+			const auto worker = boundaries.size() == 3 ? coroutine.substr(boundaries[0], boundaries[2] - boundaries[0]) : std::string{};
+			context.Expect(!worker.empty() && !Has(worker, "objManager.") && !Has(worker, "objectManager.") && !Has(worker, "resourceManager.") && !Has(worker, "ResourceManager::Instance()") && !Has(worker, "rhi->"), "Worker coordinator delegates through captured values without reopening mutable scene/resource/backend state.");
+			for(const char* call : {"AssembleFrameSnapshotRows(", "PrepareFramePersistentTopology(", "PrepareFrameSpatialInputs(", "PrepareFrameBaseCommands(", "PrepareFrameLightCandidates(", "PrepareFrameSceneView(", "PrepareFrameGameViews(", "PrepareFrameDedicatedViews(", "PrepareFrameDynamicPages(", "FinalizeFramePublication("})
+				context.Expect(Has(worker, call), "Retained worker coordinator must call the actual relocated work, not merely keep suspension markers.");
+			for(const char* name : {"RenderPublicationCapture", "GeometryRoutePrepare", "VirtualGeometryPrepare", "BackendCommit", "RenderPublication"})
+				context.Expect(Has(coordinator, std::string("workloadName = \"") + name + "\""), "All five unchanged native scheduler callbacks remain declared.");
+
+			// Scan actual delegated module bodies as well as the coordinator. The
+			// two preserved VG publication getters are reviewed separately below;
+			// execution/profiling services are not live scene-data access.
+			for(const auto& unit : closure) {
+				if(!unit.path.starts_with("Engine/Renderer/Frame/") || !unit.path.ends_with(".cpp") || unit.path.ends_with("RenderFrameCapture.cpp") || unit.path.ends_with("RenderBackendCommit.cpp") || unit.path.ends_with("RenderStreamingFeedback.cpp")) continue;
+				const auto inspected = unit.path.ends_with("RenderDiagnosticsPublication.cpp")
+					? Region(context, unit.text, "CapabilityStage ToCapabilityStage(", "void RenderSystem::PublishFrameDiagnostics(") : unit.text;
+				context.Expect(Count(inspected, "VirtualGeometryStreamingSystem::Instance()")
+					== (unit.path.ends_with("RenderSnapshotPreparation.cpp") ? 2U : 0U),
+					"The reviewed copied VG snapshots are the only streaming singleton acquisitions in delegated worker modules.");
+				for(const char* forbidden : {"objManager.", "objectManager.", "ObjectManager::instance()", "ResourceManager::Instance()", "resourceManager.", "rhi->"})
+					context.Expect(!Has(inspected, forbidden), "Actual delegated worker helpers must not reopen mutable ECS/resource/backend owners.");
+			}
+			context.Expect(Count(snapshot, "VirtualGeometryStreamingSystem::Instance().ResidencySnapshot()") == 1 && Count(snapshot, "VirtualGeometryStreamingSystem::Instance().PublishedPages()") == 1, "Only the two original read-only VG snapshot acquisitions remain in snapshot assembly.");
+			const auto streamingHeader = read("Engine/Resource/VirtualGeometryStreamingSystem.h");
+			context.Expect(Has(streamingHeader, "std::vector<VirtualGeometryPagePublication> PublishedPages() const;")
+				&& Has(streamingHeader, "VirtualGeometryPhysicalPageResidencySnapshot ResidencySnapshot() const;"), "The two reviewed VG getters retain const by-value signatures.");
+			const auto streaming = read("Engine/Resource/VirtualGeometryStreamingSystem.cpp");
+			const auto pages = Compact(Region(context, streaming, "VirtualGeometryStreamingSystem::PublishedPages() const", "VirtualGeometryStreamingSystem::ResidencySnapshot() const"));
+			const auto residency = Compact(Region(context, streaming, "VirtualGeometryStreamingSystem::ResidencySnapshot() const", "VirtualGeometryStreamingSystem::DiagnosticsSnapshot() const"));
+			context.Expect(Has(pages, "{std::scoped_locklock(candidateMutex);returnpublicationStore.Snapshot();}") && Has(residency, "{std::scoped_locklock(candidateMutex);returnresidencyStore.Snapshot();}"), "Preserved worker VG reads lock and return owned value snapshots without publishing mutations.");
+			const auto stores = read("Engine/Resource/VirtualGeometryPagePublication.cpp");
+			context.Expect(Has(Compact(Region(context, stores, "VirtualGeometryPagePublicationStore::Snapshot() const", "VirtualGeometryPagePublicationStore::LastPublicationFrame()")), "{returnvisiblePages;}")
+				&& Has(Compact(Region(context, stores, "VirtualGeometryPhysicalPageResidencyStore::Snapshot() const", "VirtualGeometryPhysicalPageResidencyStore::PublishAtProtectedBoundary(")), "{returnvisibleSnapshot;}"), "VG publication getters preserve copied vector/scalar owners; no live store reference escapes.");
+
+			// Compare positions only inside their actual source file. Required marker
+			// existence prevents a missing call from passing through npos ordering.
+			const auto backend = read("Engine/Renderer/Frame/RenderBackendCommit.cpp");
+			const auto feedback = read("Engine/Renderer/Frame/RenderStreamingFeedback.cpp");
+			const auto commitCall = coroutine.find("CommitFrameBackend(");
+			const auto diagnosticsCall = coroutine.find("PublishFrameDiagnostics(");
+			const auto feedbackCall = coroutine.find("PublishFrameStreamingFeedback(");
+			const auto touch = backend.find("resourceManager.PublishVisibleStreamingTouches");
+			context.Expect(boundaries.size() == 3 && commitCall != std::string::npos && feedbackCall != std::string::npos
+				&& boundaries[2] < commitCall && diagnosticsCall != std::string::npos && commitCall < diagnosticsCall && diagnosticsCall < feedbackCall && touch != std::string::npos
+				&& Before(backend, "resourceManager.PublishVisibleStreamingTouches", "rhi->BeginFrame()") && Has(feedback, "SubmitPriorFrameFeedback"), "Streaming publication and actual feedback occur through real protected helpers; missing markers must never pass npos ordering.");
+			const auto callbacks = Region(context, coordinator, "RenderSystem::DeclareFrameWorkloads(", "RenderSystem::GetLiveGpuSubmissionBoundary()");
+			context.Expect(Count(callbacks, "execution->Resume()") == 4, "Four actual resumes and final retirement retain the five callback bodies.");
+			for(const char* assignment : {"snapshot.work =", "routePrepare.work =", "prepare.work =", "commit.work =", "publication.work ="})
+				context.Expect(Has(callbacks, assignment), "Every native callback must retain its actual assigned work.");
+			const auto vulkanContext = read("Engine/Renderer/RHI/Vulkan/VulkanContext.cpp");
+			const auto consume = Region(context, vulkanContext, "VulkanContext::ConsumeRenderFramePublication", "VulkanContext::ConsumePublishedWorkPlans");
+			context.Expect(!consume.empty() && !Has(consume, "ValidateRenderFramePublication"), "Backend consumption must not repeat crowd-sized publication validation.");
+			context.Expect(Absent(closure, "DX12"), "This renderer refactor does not add DX12 behavior.");
+			const auto exchange = Region(context, publicationImplementation, "RenderFramePublicationStore::TryPublish", "RenderFramePublicationStore::ResetForSession");
+			context.Expect(!exchange.empty() && !Has(exchange, "ValidateRenderFramePublication"), "Protected publication exchanges only an already sealed root.");
 		});
 	}
 }

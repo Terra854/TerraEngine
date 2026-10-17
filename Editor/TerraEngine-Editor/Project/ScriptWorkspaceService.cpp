@@ -41,11 +41,11 @@ namespace
 	constexpr DWORD kVisualStudioAttachPollMs = 250;
 #endif
 
-	// ReplaceAll is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void ReplaceAll(std::string& text, std::string_view needle, std::string_view replacement)
 	{
 		std::size_t searchIndex = 0;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		while ((searchIndex = text.find(needle.data(), searchIndex, needle.size())) != std::string::npos)
 		{
 			text.replace(searchIndex, needle.size(), replacement.data(), replacement.size());
@@ -53,11 +53,11 @@ namespace
 		}
 	}
 
-	// LoadTextFile is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::string LoadTextFile(const std::filesystem::path& path)
 	{
 		std::ifstream input(path, std::ios::binary);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!input)
 		{
 			return {};
@@ -68,7 +68,7 @@ namespace
 		return buffer.str();
 	}
 
-	// IsValidCSharpIdentifier is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool IsValidCSharpIdentifier(const std::string& className)
 	{
 		if (className.empty())
@@ -83,19 +83,19 @@ namespace
 			return std::isalnum(value) || value == '_';
 		};
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!isIdentifierStart(static_cast<unsigned char>(className.front())))
 		{
 			return false;
 		}
 
-		// std::all_of is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 		return std::all_of(className.begin() + 1, className.end(), [&](char value) {
 			return isIdentifierCharacter(static_cast<unsigned char>(value));
 		});
 	}
 
-	// TrimWhitespace is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::string TrimWhitespace(std::string text)
 	{
 		const auto firstNonWhitespace = std::find_if_not(text.begin(), text.end(), [](unsigned char value) {
@@ -104,7 +104,7 @@ namespace
 		const auto lastNonWhitespace = std::find_if_not(text.rbegin(), text.rend(), [](unsigned char value) {
 			return std::isspace(value) != 0;
 		}).base();
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (firstNonWhitespace >= lastNonWhitespace)
 		{
 			return {};
@@ -177,12 +177,12 @@ namespace
 	}
 #endif
 
-	// ResolveEditorExecutableDirectory is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::filesystem::path ResolveEditorExecutableDirectory()
 	{
 #if defined(_WIN32)
 		wchar_t path[MAX_PATH];
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (GetModuleFileNameW(nullptr, path, MAX_PATH) != 0)
 		{
 			return std::filesystem::path(path).parent_path();
@@ -192,7 +192,7 @@ namespace
 		return std::filesystem::current_path();
 	}
 
-	// AppendManagedRootCandidates is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void AppendManagedRootCandidates(const std::filesystem::path& baseDirectory, std::vector<std::filesystem::path>& roots)
 	{
 		if (baseDirectory.empty())
@@ -208,14 +208,14 @@ namespace
 		roots.push_back(baseDirectory.parent_path() / "Editor" / "Managed");
 	}
 
-	// IsRepoRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool IsRepoRoot(const std::filesystem::path& candidate)
 	{
 		return std::filesystem::exists(candidate / "Engine" / "Managed" / "TerraEngine.csproj")
 			&& std::filesystem::exists(candidate / "Editor" / "Managed" / "TerraEngine.Export.Generator" / "TerraEngine.Export.Generator.csproj");
 	}
 
-	// FindRepoRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::filesystem::path FindRepoRoot(std::filesystem::path start)
 	{
 		if (start.empty())
@@ -224,7 +224,7 @@ namespace
 		}
 
 		start = std::filesystem::absolute(start).lexically_normal();
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (std::filesystem::path current = start; !current.empty();)
 		{
 			if (IsRepoRoot(current))
@@ -233,7 +233,7 @@ namespace
 			}
 
 			const std::filesystem::path parent = current.parent_path();
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (parent == current)
 			{
 				break;
@@ -245,7 +245,7 @@ namespace
 		return {};
 	}
 
-	// AppendRepoBridgeCandidates is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void AppendRepoBridgeCandidates(const std::filesystem::path& repoRoot, std::vector<std::filesystem::path>& files)
 	{
 		if (repoRoot.empty())
@@ -264,7 +264,7 @@ namespace
 		files.push_back(binRoot / "Release" / "net10.0" / "win-x64" / "TerraEngine.CSharp.dll");
 	}
 
-	// AppendRepoAnalyzerCandidates is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void AppendRepoAnalyzerCandidates(const std::filesystem::path& repoRoot, std::vector<std::filesystem::path>& files)
 	{
 		if (repoRoot.empty())
@@ -277,17 +277,17 @@ namespace
 		files.push_back(binRoot / "Release" / "netstandard2.0" / "TerraEngine.Export.Generator.dll");
 	}
 
-	// SelectNewestExistingFile is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::filesystem::path SelectNewestExistingFile(const std::vector<std::filesystem::path>& candidates)
 	{
 		std::filesystem::path selectedPath;
 		std::filesystem::file_time_type selectedWriteTime{};
 		bool foundCandidate = false;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const std::filesystem::path& candidate : candidates)
 		{
 			std::error_code statusError;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!std::filesystem::is_regular_file(candidate, statusError))
 			{
 				continue;
@@ -295,13 +295,13 @@ namespace
 
 			std::error_code timeError;
 			const std::filesystem::file_time_type writeTime = std::filesystem::last_write_time(candidate, timeError);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (timeError)
 			{
 				continue;
 			}
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!foundCandidate || writeTime > selectedWriteTime)
 			{
 				selectedPath = candidate;
@@ -326,7 +326,7 @@ namespace
 
 		HANDLE readHandle = nullptr;
 		HANDLE writeHandle = nullptr;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!CreatePipe(&readHandle, &writeHandle, &securityAttributes, 0))
 		{
 			return false;
@@ -356,7 +356,7 @@ namespace
 			&processInfo);
 
 		CloseHandle(writeHandle);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!started)
 		{
 			CloseHandle(readHandle);
@@ -365,7 +365,7 @@ namespace
 
 		std::array<char, 4096> buffer{};
 		DWORD bytesRead = 0;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		while (ReadFile(readHandle, buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead, nullptr) && bytesRead > 0)
 		{
 			output.append(buffer.data(), bytesRead);
@@ -380,14 +380,14 @@ namespace
 		return true;
 	}
 
-	// struct ScopedComInitialization groups related state and operations so callers have one documented contract.
+
 	struct ScopedComInitialization
 	{
 		HRESULT result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
 		~ScopedComInitialization()
 		{
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (SUCCEEDED(result))
 			{
 				CoUninitialize();
@@ -400,7 +400,7 @@ namespace
 		}
 	};
 
-	// NormalizeWindowsPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::wstring NormalizeWindowsPath(const std::filesystem::path& path)
 	{
 		// Running Object Table display names are case-insensitive Windows paths,
@@ -412,7 +412,7 @@ namespace
 		return normalized;
 	}
 
-	// TryGetDispId is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool TryGetDispId(IDispatch* dispatch, const wchar_t* memberName, DISPID& outDispId)
 	{
 		if (dispatch == nullptr || memberName == nullptr)
@@ -424,7 +424,7 @@ namespace
 		return SUCCEEDED(dispatch->GetIDsOfNames(IID_NULL, names, 1, LOCALE_USER_DEFAULT, &outDispId));
 	}
 
-	// TryInvokeDispatch is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool TryInvokeDispatch(IDispatch* dispatch, DISPID dispId, WORD flags, VARIANT* arguments, UINT argumentCount, VARIANT* outResult = nullptr)
 	{
 		if (dispatch == nullptr)
@@ -438,11 +438,11 @@ namespace
 		return SUCCEEDED(dispatch->Invoke(dispId, IID_NULL, LOCALE_USER_DEFAULT, flags, &parameters, outResult, nullptr, nullptr));
 	}
 
-	// TryGetDispatchProperty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool TryGetDispatchProperty(IDispatch* dispatch, const wchar_t* propertyName, ComPtr<IDispatch>& outDispatch)
 	{
 		DISPID dispId = DISPID_UNKNOWN;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!TryGetDispId(dispatch, propertyName, dispId))
 		{
 			return false;
@@ -450,14 +450,14 @@ namespace
 
 		VARIANT result;
 		VariantInit(&result);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!TryInvokeDispatch(dispatch, dispId, DISPATCH_PROPERTYGET, nullptr, 0, &result))
 		{
 			VariantClear(&result);
 			return false;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (result.vt != VT_DISPATCH || result.pdispVal == nullptr)
 		{
 			VariantClear(&result);
@@ -470,11 +470,11 @@ namespace
 		return true;
 	}
 
-	// TryGetBstrProperty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool TryGetBstrProperty(IDispatch* dispatch, const wchar_t* propertyName, std::wstring& outValue)
 	{
 		DISPID dispId = DISPID_UNKNOWN;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!TryGetDispId(dispatch, propertyName, dispId))
 		{
 			return false;
@@ -482,7 +482,7 @@ namespace
 
 		VARIANT result;
 		VariantInit(&result);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!TryInvokeDispatch(dispatch, dispId, DISPATCH_PROPERTYGET, nullptr, 0, &result))
 		{
 			VariantClear(&result);
@@ -490,13 +490,13 @@ namespace
 		}
 
 		bool success = false;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (result.vt == VT_BSTR)
 		{
 			outValue = result.bstrVal != nullptr ? result.bstrVal : L"";
 			success = true;
 		}
-		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 		else if (result.vt == VT_EMPTY || result.vt == VT_NULL)
 		{
 			outValue.clear();
@@ -507,11 +507,11 @@ namespace
 		return success;
 	}
 
-	// TryCallMethod is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool TryCallMethod(IDispatch* dispatch, const wchar_t* methodName, VARIANT* arguments, UINT argumentCount, VARIANT* outResult = nullptr)
 	{
 		DISPID dispId = DISPID_UNKNOWN;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!TryGetDispId(dispatch, methodName, dispId))
 		{
 			return false;
@@ -520,11 +520,11 @@ namespace
 		return TryInvokeDispatch(dispatch, dispId, DISPATCH_METHOD, arguments, argumentCount, outResult);
 	}
 
-	// TryActivateVisualStudioInstance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool TryActivateVisualStudioInstance(IDispatch* visualStudioDispatch)
 	{
 		ComPtr<IDispatch> mainWindowDispatch;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!TryGetDispatchProperty(visualStudioDispatch, L"MainWindow", mainWindowDispatch))
 		{
 			return false;
@@ -533,18 +533,18 @@ namespace
 		return TryCallMethod(mainWindowDispatch.Get(), L"Activate", nullptr, 0);
 	}
 
-	// TryGetVisualStudioSolutionPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool TryGetVisualStudioSolutionPath(IDispatch* visualStudioDispatch, std::filesystem::path& outSolutionPath)
 	{
 		ComPtr<IDispatch> solutionDispatch;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!TryGetDispatchProperty(visualStudioDispatch, L"Solution", solutionDispatch))
 		{
 			return false;
 		}
 
 		std::wstring solutionFullName;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!TryGetBstrProperty(solutionDispatch.Get(), L"FullName", solutionFullName) || solutionFullName.empty())
 		{
 			return false;
@@ -554,11 +554,11 @@ namespace
 		return true;
 	}
 
-	// TryFindRunningVisualStudioForSolution is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool TryFindRunningVisualStudioForSolution(const std::filesystem::path& solutionPath, ComPtr<IDispatch>& outDispatch)
 	{
 		ScopedComInitialization comInitialization;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!comInitialization.IsReady())
 		{
 			return false;
@@ -567,7 +567,7 @@ namespace
 		ComPtr<IRunningObjectTable> runningObjectTable;
 		ComPtr<IEnumMoniker> monikerEnumerator;
 		ComPtr<IBindCtx> bindContext;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (FAILED(GetRunningObjectTable(0, &runningObjectTable))
 			|| FAILED(CreateBindCtx(0, &bindContext))
 			|| FAILED(runningObjectTable->EnumRunning(&monikerEnumerator)))
@@ -577,19 +577,19 @@ namespace
 
 		const std::wstring normalizedSolutionPath = NormalizeWindowsPath(solutionPath);
 		ComPtr<IMoniker> currentMoniker;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		while (monikerEnumerator->Next(1, &currentMoniker, nullptr) == S_OK)
 		{
 			LPOLESTR displayNameBuffer = nullptr;
 			std::wstring displayName;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (SUCCEEDED(currentMoniker->GetDisplayName(bindContext.Get(), nullptr, &displayNameBuffer)) && displayNameBuffer != nullptr)
 			{
 				displayName = displayNameBuffer;
 				CoTaskMemFree(displayNameBuffer);
 			}
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (displayName.rfind(kVisualStudioDtePrefix, 0) != 0)
 			{
 				currentMoniker.Reset();
@@ -598,7 +598,7 @@ namespace
 
 			ComPtr<IUnknown> runningObject;
 			ComPtr<IDispatch> visualStudioDispatch;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (FAILED(runningObjectTable->GetObject(currentMoniker.Get(), &runningObject))
 				|| FAILED(runningObject.As(&visualStudioDispatch)))
 			{
@@ -607,7 +607,7 @@ namespace
 			}
 
 			std::filesystem::path loadedSolutionPath;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (TryGetVisualStudioSolutionPath(visualStudioDispatch.Get(), loadedSolutionPath)
 				&& NormalizeWindowsPath(loadedSolutionPath) == normalizedSolutionPath)
 			{
@@ -621,11 +621,11 @@ namespace
 		return false;
 	}
 
-	// TryWaitForVisualStudioSolution is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool TryWaitForVisualStudioSolution(const std::filesystem::path& solutionPath, ComPtr<IDispatch>& outDispatch)
 	{
 		const ULONGLONG timeoutAt = GetTickCount64() + kVisualStudioAttachTimeoutMs;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		while (GetTickCount64() < timeoutAt)
 		{
 			if (TryFindRunningVisualStudioForSolution(solutionPath, outDispatch))
@@ -639,7 +639,7 @@ namespace
 		return false;
 	}
 
-	// TryOpenFileInVisualStudioInstance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool TryOpenFileInVisualStudioInstance(IDispatch* visualStudioDispatch, const std::filesystem::path& scriptPath)
 	{
 		if (visualStudioDispatch == nullptr)
@@ -647,7 +647,7 @@ namespace
 			return false;
 		}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (scriptPath.empty())
 	{
 		TryActivateVisualStudioInstance(visualStudioDispatch);
@@ -655,7 +655,7 @@ namespace
 	}
 
 		ComPtr<IDispatch> itemOperationsDispatch;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!TryGetDispatchProperty(visualStudioDispatch, L"ItemOperations", itemOperationsDispatch))
 		{
 			return false;
@@ -666,7 +666,7 @@ namespace
 		argument.vt = VT_BSTR;
 		const std::wstring wideScriptPath = std::filesystem::absolute(scriptPath).lexically_normal().wstring();
 		argument.bstrVal = SysAllocString(wideScriptPath.c_str());
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (argument.bstrVal == nullptr)
 		{
 			return false;
@@ -677,7 +677,7 @@ namespace
 		const bool openedFile = TryCallMethod(itemOperationsDispatch.Get(), L"OpenFile", &argument, 1, &result);
 		VariantClear(&argument);
 		VariantClear(&result);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!openedFile)
 		{
 			return false;
@@ -853,25 +853,25 @@ void ScriptWorkspaceService::SetProjectRoot(const std::filesystem::path& project
 	m_Status.lastMessage.clear();
 }
 
-// ScriptWorkspaceService::HasProjectRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ScriptWorkspaceService::HasProjectRoot() const
 {
 	return !m_ProjectRoot.empty();
 }
 
-// ScriptWorkspaceService::GetStatus is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 const ScriptWorkspaceStatus& ScriptWorkspaceService::GetStatus() const
 {
 	return m_Status;
 }
 
-// ScriptWorkspaceService::GetProjectRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::filesystem::path ScriptWorkspaceService::GetProjectRoot() const
 {
 	return m_ProjectRoot;
 }
 
-// ScriptWorkspaceService::GetSolutionPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::filesystem::path ScriptWorkspaceService::GetSolutionPath() const
 {
 	if (m_ProjectRoot.empty())
@@ -882,7 +882,7 @@ std::filesystem::path ScriptWorkspaceService::GetSolutionPath() const
 	return m_ProjectRoot / (GetProjectName() + ".sln");
 }
 
-// ScriptWorkspaceService::GetProjectPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::filesystem::path ScriptWorkspaceService::GetProjectPath() const
 {
 	if (m_ProjectRoot.empty())
@@ -893,7 +893,7 @@ std::filesystem::path ScriptWorkspaceService::GetProjectPath() const
 	return m_ProjectRoot / "Assembly-CSharp.csproj";
 }
 
-// ScriptWorkspaceService::GetOutputRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::filesystem::path ScriptWorkspaceService::GetOutputRoot() const
 {
 	if (m_ProjectRoot.empty())
@@ -904,13 +904,13 @@ std::filesystem::path ScriptWorkspaceService::GetOutputRoot() const
 	return m_ProjectRoot / "Build" / "Assembly-CSharp";
 }
 
-// ScriptWorkspaceService::GetReferenceRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::filesystem::path ScriptWorkspaceService::GetReferenceRoot() const
 {
 	return GetOutputRoot() / "References";
 }
 
-// ScriptWorkspaceService::GetAssemblyPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::filesystem::path ScriptWorkspaceService::GetAssemblyPath() const
 {
 	return GetOutputRoot() / "Assembly-CSharp.dll";
@@ -972,7 +972,7 @@ bool ScriptWorkspaceService::PublishManagedReadiness(const std::string& buildPro
 	return manifest.PersistAtomically(GetManagedReadinessManifestPath(), outError);
 }
 
-// ScriptWorkspaceService::EnsureWorkspace is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ScriptWorkspaceService::EnsureWorkspace(std::string* outError)
 {
 	if (!HasProjectRoot())
@@ -980,7 +980,7 @@ bool ScriptWorkspaceService::EnsureWorkspace(std::string* outError)
 		const std::string message = "Cannot generate the script workspace before a project is open.";
 		m_Status.health = ScriptWorkspaceHealth::Broken;
 		m_Status.lastMessage = message;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (outError)
 		{
 			*outError = message;
@@ -998,7 +998,7 @@ bool ScriptWorkspaceService::EnsureWorkspace(std::string* outError)
 	return SyncManagedReferences(outError);
 }
 
-// ScriptWorkspaceService::RegenerateWorkspace is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ScriptWorkspaceService::RegenerateWorkspace(std::string* outError)
 {
 	return EnsureWorkspace(outError);
@@ -1114,7 +1114,7 @@ bool ScriptWorkspaceService::SynchronizeWorkspace(ScriptWorkspaceStatus& outStat
 	return synchronized;
 }
 
-// ScriptWorkspaceService::CreateScriptFromTemplate is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ScriptWorkspaceService::CreateScriptFromTemplate(const std::filesystem::path& destinationDirectory, const std::string& className, std::filesystem::path& outCreatedPath, std::string* outError)
 {
 	const std::filesystem::path directory = destinationDirectory.empty() ? (m_ProjectRoot / "Assets") : destinationDirectory;
@@ -1135,13 +1135,13 @@ bool ScriptWorkspaceService::CreateScriptFromTemplate(const std::filesystem::pat
 	return true;
 }
 
-// ScriptWorkspaceService::OpenScriptInExternalEditor is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ScriptWorkspaceService::OpenScriptInExternalEditor(const std::filesystem::path& scriptPath, const std::string& commandTemplate, std::string* outError)
 {
 	if (!HasProjectRoot())
 	{
 		const std::string message = "Open a project before launching an external script editor.";
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (outError)
 		{
 			*outError = message;
@@ -1174,20 +1174,20 @@ bool ScriptWorkspaceService::OpenScriptInExternalEditor(const std::filesystem::p
 	return LaunchDefaultEditor(targetPath, outError);
 }
 
-// ScriptWorkspaceService::WriteWorkspaceFiles is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ScriptWorkspaceService::WriteWorkspaceFiles(std::string* outError)
 {
 	const std::filesystem::path templateRoot = ResolveTemplateRoot();
 	const std::string solutionTemplate = LoadTemplate(templateRoot / "Solution.sln.in");
 	const std::string projectTemplate = LoadTemplate(templateRoot / "Assembly-CSharp.csproj.in");
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (solutionTemplate.empty() || projectTemplate.empty())
 	{
 		const std::string message = "One or more scripting workspace templates are missing from " + templateRoot.string() + ".";
 		m_Status.health = ScriptWorkspaceHealth::Broken;
 		m_Status.lastMessage = message;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (outError)
 		{
 			*outError = message;
@@ -1195,13 +1195,13 @@ bool ScriptWorkspaceService::WriteWorkspaceFiles(std::string* outError)
 		return false;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!std::filesystem::exists(GetOutputRoot()))
 	{
 		std::filesystem::create_directories(GetOutputRoot());
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!std::filesystem::exists(GetReferenceRoot()))
 	{
 		std::filesystem::create_directories(GetReferenceRoot());
@@ -1214,13 +1214,13 @@ bool ScriptWorkspaceService::WriteWorkspaceFiles(std::string* outError)
 	std::string expandedProject = projectTemplate;
 	ReplaceAll(expandedProject, "@REFERENCE_DLL@", "Build/Assembly-CSharp/References/TerraEngine.CSharp.dll");
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!WriteTextIfChanged(GetSolutionPath(), expandedSolution, outError))
 	{
 		return false;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!WriteTextIfChanged(GetProjectPath(), expandedProject, outError))
 	{
 		return false;
@@ -1235,19 +1235,19 @@ bool ScriptWorkspaceService::WriteWorkspaceFiles(std::string* outError)
 	return true;
 }
 
-// ScriptWorkspaceService::SyncManagedReferences is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ScriptWorkspaceService::SyncManagedReferences(std::string* outError)
 {
 	const std::filesystem::path sourceDll = ResolveManagedBridgePath();
 	const std::filesystem::path targetDll = GetReferenceRoot() / "TerraEngine.CSharp.dll";
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!std::filesystem::exists(sourceDll))
 	{
 		const std::string message = "The installed TerraEngine.CSharp.dll runtime bridge was not found at " + sourceDll.string() + ".";
 		m_Status.health = ScriptWorkspaceHealth::Broken;
 		m_Status.lastMessage = message;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (outError)
 		{
 			*outError = message;
@@ -1255,7 +1255,7 @@ bool ScriptWorkspaceService::SyncManagedReferences(std::string* outError)
 		return false;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!std::filesystem::exists(GetReferenceRoot()))
 	{
 		std::filesystem::create_directories(GetReferenceRoot());
@@ -1272,7 +1272,7 @@ bool ScriptWorkspaceService::SyncManagedReferences(std::string* outError)
 	}
 
 	const std::filesystem::path sourcePdb = sourceDll.parent_path() / "TerraEngine.CSharp.pdb";
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (std::filesystem::exists(sourcePdb))
 	{
 		if (!CopyManagedReferenceIfChanged(sourcePdb, GetReferenceRoot() / "TerraEngine.CSharp.pdb", outError))
@@ -1295,7 +1295,7 @@ bool ScriptWorkspaceService::SyncManagedReferences(std::string* outError)
 		const std::string message = "The export script analyzer is missing from the editor install at " + analyzerSource.string() + ". Reinstall TerraEngine so project exports regenerate the managed script registry.";
 		m_Status.health = ScriptWorkspaceHealth::Broken;
 		m_Status.lastMessage = message;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (outError)
 		{
 			*outError = message;
@@ -1369,7 +1369,7 @@ bool ScriptWorkspaceService::RequiresManagedReferenceCopy(const std::filesystem:
 	return sourceFingerprint.empty() || sourceFingerprint != ManagedReadinessManifest::FingerprintFile(target);
 }
 
-// ScriptWorkspaceService::WriteTextIfChanged is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ScriptWorkspaceService::WriteTextIfChanged(const std::filesystem::path& path, const std::string& contents, std::string* outError) const
 {
 	if (LoadTextFile(path) == contents)
@@ -1378,11 +1378,11 @@ bool ScriptWorkspaceService::WriteTextIfChanged(const std::filesystem::path& pat
 	}
 
 	std::ofstream output(path, std::ios::binary | std::ios::trunc);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!output)
 	{
 		const std::string message = "Failed to write " + path.string() + ".";
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (outError)
 		{
 			*outError = message;
@@ -1395,7 +1395,7 @@ bool ScriptWorkspaceService::WriteTextIfChanged(const std::filesystem::path& pat
 	return true;
 }
 
-// ScriptWorkspaceService::ResolveTemplateRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::filesystem::path ScriptWorkspaceService::ResolveTemplateRoot() const
 {
 	// Test and developer targets may run far below the repository root. When
@@ -1412,7 +1412,7 @@ std::filesystem::path ScriptWorkspaceService::ResolveTemplateRoot() const
 	std::filesystem::path editorDir;
 #ifdef _WIN32
 	wchar_t path[MAX_PATH];
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (GetModuleFileNameW(NULL, path, MAX_PATH) != 0) {
 		editorDir = std::filesystem::path(path).parent_path();
 	} else {
@@ -1429,7 +1429,7 @@ std::filesystem::path ScriptWorkspaceService::ResolveTemplateRoot() const
 		editorDir.parent_path() / "Project" / "Templates"
 	};
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& candidate : candidates)
 	{
 		if (std::filesystem::exists(candidate / "Assembly-CSharp.csproj.in"))
@@ -1443,7 +1443,7 @@ std::filesystem::path ScriptWorkspaceService::ResolveTemplateRoot() const
 	return candidates[1];
 }
 
-// ScriptWorkspaceService::ResolveManagedBridgePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::filesystem::path ScriptWorkspaceService::ResolveManagedBridgePath() const
 {
 	std::vector<std::filesystem::path> candidates;
@@ -1452,14 +1452,14 @@ std::filesystem::path ScriptWorkspaceService::ResolveManagedBridgePath() const
 
 	std::vector<std::filesystem::path> bridgeCandidates;
 	bridgeCandidates.reserve(candidates.size() + 2);
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const std::filesystem::path& root : candidates)
 	{
 		bridgeCandidates.push_back(root / "TerraEngine.CSharp.dll");
 	}
 
 	std::filesystem::path repoRoot = FindRepoRoot(std::filesystem::current_path());
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (repoRoot.empty())
 	{
 		repoRoot = FindRepoRoot(ResolveEditorExecutableDirectory());
@@ -1473,7 +1473,7 @@ std::filesystem::path ScriptWorkspaceService::ResolveManagedBridgePath() const
 	return SelectNewestExistingFile(bridgeCandidates);
 }
 
-// ScriptWorkspaceService::ResolveManagedAnalyzerPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::filesystem::path ScriptWorkspaceService::ResolveManagedAnalyzerPath() const
 {
 	std::vector<std::filesystem::path> roots;
@@ -1482,14 +1482,14 @@ std::filesystem::path ScriptWorkspaceService::ResolveManagedAnalyzerPath() const
 
 	std::vector<std::filesystem::path> analyzerCandidates;
 	analyzerCandidates.reserve(roots.size() + 2);
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const std::filesystem::path& root : roots)
 	{
 		analyzerCandidates.push_back(root / "Analyzers" / "TerraEngine.Export.Generator.dll");
 	}
 
 	std::filesystem::path repoRoot = FindRepoRoot(std::filesystem::current_path());
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (repoRoot.empty())
 	{
 		repoRoot = FindRepoRoot(ResolveEditorExecutableDirectory());
@@ -1502,11 +1502,11 @@ std::filesystem::path ScriptWorkspaceService::ResolveManagedAnalyzerPath() const
 }
 
 #if defined(_WIN32)
-// ScriptWorkspaceService::ResolveVisualStudioPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::filesystem::path ScriptWorkspaceService::ResolveVisualStudioPath() const
 {
 	const std::filesystem::path vsWherePath(kVsWherePath);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!std::filesystem::exists(vsWherePath))
 	{
 		return {};
@@ -1515,21 +1515,21 @@ std::filesystem::path ScriptWorkspaceService::ResolveVisualStudioPath() const
 	std::wstring commandLine = L"\"" + vsWherePath.wstring() + L"\" -latest -products * -requires Microsoft.Component.MSBuild -property productPath";
 	std::string output;
 	DWORD exitCode = 0;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!RunProcessCapture(vsWherePath.parent_path(), vsWherePath.wstring(), commandLine, output, exitCode) || exitCode != 0)
 	{
 		return {};
 	}
 
 	const std::string trimmedOutput = TrimWhitespace(std::move(output));
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (trimmedOutput.empty())
 	{
 		return {};
 	}
 
 	const std::filesystem::path visualStudioPath = std::filesystem::path(trimmedOutput).lexically_normal();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!std::filesystem::exists(visualStudioPath))
 	{
 		return {};
@@ -1538,11 +1538,11 @@ std::filesystem::path ScriptWorkspaceService::ResolveVisualStudioPath() const
 	return visualStudioPath;
 }
 
-// ScriptWorkspaceService::LaunchVisualStudioWorkspace is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ScriptWorkspaceService::LaunchVisualStudioWorkspace(const std::filesystem::path& scriptPath, std::string* outError) const
 {
 	const std::filesystem::path visualStudioPath = ResolveVisualStudioPath();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (visualStudioPath.empty())
 	{
 		if (outError)
@@ -1556,12 +1556,12 @@ bool ScriptWorkspaceService::LaunchVisualStudioWorkspace(const std::filesystem::
 	ComPtr<IDispatch> runningVisualStudioDispatch;
 	// Reuse an existing solution window when possible so double-clicking a C#
 	// file keeps work inside the already open project session.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (TryFindRunningVisualStudioForSolution(solutionPath, runningVisualStudioDispatch))
 	{
 		if (!TryOpenFileInVisualStudioInstance(runningVisualStudioDispatch.Get(), scriptPath))
 		{
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (outError)
 			{
 				*outError = "Visual Studio is already running for this solution, but the requested C# file could not be opened in that window.";
@@ -1581,7 +1581,7 @@ bool ScriptWorkspaceService::LaunchVisualStudioWorkspace(const std::filesystem::
 	startupInfo.cb = sizeof(startupInfo);
 	PROCESS_INFORMATION processInfo{};
 	std::wstring mutableCommandLine = commandLine;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!CreateProcessW(
 		wideVisualStudioPath.c_str(),
 		mutableCommandLine.data(),
@@ -1595,7 +1595,7 @@ bool ScriptWorkspaceService::LaunchVisualStudioWorkspace(const std::filesystem::
 		&processInfo))
 	{
 		const DWORD errorCode = GetLastError();
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (outError)
 		{
 			*outError = "Failed to launch Visual Studio for the Assembly-CSharp workspace. Windows error code: " + std::to_string(errorCode) + ".";
@@ -1606,21 +1606,21 @@ bool ScriptWorkspaceService::LaunchVisualStudioWorkspace(const std::filesystem::
 	CloseHandle(processInfo.hThread);
 	CloseHandle(processInfo.hProcess);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (scriptPath.empty())
 	{
 		return true;
 	}
 
 	ComPtr<IDispatch> launchedVisualStudioDispatch;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!TryWaitForVisualStudioSolution(solutionPath, launchedVisualStudioDispatch))
 	{
 		TERRAENGINE_LOG(LogLevel::Warning, "Visual Studio launched for " << solutionPath.string() << " but did not register for automation before the timeout expired.");
 		return true;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!TryOpenFileInVisualStudioInstance(launchedVisualStudioDispatch.Get(), scriptPath))
 	{
 		TERRAENGINE_LOG(LogLevel::Warning, "Visual Studio launched for " << solutionPath.string() << " but could not open the requested C# file through automation.");
@@ -1630,7 +1630,7 @@ bool ScriptWorkspaceService::LaunchVisualStudioWorkspace(const std::filesystem::
 }
 #endif
 
-// ScriptWorkspaceService::GetProjectName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string ScriptWorkspaceService::GetProjectName() const
 {
 	return m_ProjectRoot.filename().string();
@@ -1696,7 +1696,7 @@ std::string ScriptWorkspaceService::BuildDefaultEditorCommand(const std::filesys
 #endif
 }
 
-// ScriptWorkspaceService::LoadTemplate is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string ScriptWorkspaceService::LoadTemplate(const std::filesystem::path& path) const
 {
 	return LoadTextFile(path);

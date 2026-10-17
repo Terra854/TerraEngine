@@ -107,7 +107,7 @@ enum MaterialFlags : std::uint32_t
 	TerrainLayerBlend = 1u << 3
 };
 
-// DeriveMaterialShadowBehavior is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 inline MaterialFileShadowBehavior DeriveMaterialShadowBehavior(std::uint32_t alphaMode, const float emissiveFactor[3])
 {
 	const bool hasEmissiveOutput =
@@ -115,7 +115,7 @@ inline MaterialFileShadowBehavior DeriveMaterialShadowBehavior(std::uint32_t alp
 		|| emissiveFactor[1] > 0.0f
 		|| emissiveFactor[2] > 0.0f;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (alphaMode == static_cast<std::uint32_t>(AlphaMode::Mask))
 	{
 		return hasEmissiveOutput
@@ -123,7 +123,7 @@ inline MaterialFileShadowBehavior DeriveMaterialShadowBehavior(std::uint32_t alp
 			: MaterialFileShadowBehavior::AlphaCutout;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (alphaMode == static_cast<std::uint32_t>(AlphaMode::Blend))
 	{
 		return MaterialFileShadowBehavior::TransparentNoShadow;
@@ -133,7 +133,7 @@ inline MaterialFileShadowBehavior DeriveMaterialShadowBehavior(std::uint32_t alp
 }
 
 #pragma pack(push, 1)
-// struct TextureBinding groups related state and operations so callers have one documented contract.
+
 struct TextureBinding
 {
 	TextureSemantic semantic;        // Binary layout remains uint32_t
@@ -147,7 +147,7 @@ struct TextureBinding
 	float uvOffset[2];               // Additive offset applied after scaling
 };
 
-// struct FloatParameter groups related state and operations so callers have one documented contract.
+
 struct FloatParameter
 {
 	std::uint32_t nameId;          // Stable identifier for the target uniform/constant buffer slot
@@ -168,7 +168,7 @@ struct ResolvedMaterialSlot
 };
 
 // On-disk header placed at the start of every TMAT blob.
-// struct MaterialHeader groups related state and operations so callers have one documented contract.
+
 struct MaterialHeader
 {
 	char magic[4];
@@ -247,7 +247,7 @@ inline constexpr bool IsValidVirtualGeometryMaterialExtension(const VirtualGeome
 }
 
 // In-memory representation of a fully loaded material file.
-// struct Material groups related state and operations so callers have one documented contract.
+
 struct Material
 {
 	// Runtime-only identity assigned by accepted ResourceManager publication.

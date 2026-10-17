@@ -26,7 +26,7 @@ struct PackageProgress {
 using PackageProgressCallback = std::function<void(const PackageProgress&)>;
 
 /// Result of a packaging operation.
-// struct PackageResult groups related state and operations so callers have one documented contract.
+
 struct PackageResult {
 	bool success = false;
 	std::filesystem::path outputPath;
@@ -37,7 +37,7 @@ struct PackageResult {
 };
 
 /// Creates TEPAK archives from project assets for export builds.
-// class TepakPackager groups related state and operations so callers have one documented contract.
+
 class TepakPackager {
 public:
 	/// Packages the given asset directory into a .tepak archive using the

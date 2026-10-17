@@ -10,6 +10,8 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <stdexcept>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -18,6 +20,25 @@ namespace TerraEngine::Tests
 {
 	namespace
 	{
+		// Source checks supplement runtime tests. Missing definitions must fail even
+		// when the caller only searches for forbidden text; ordering stays in one file.
+		std::string RequiredContractSource(const std::filesystem::path& relative)
+		{
+			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relative, std::ios::binary);
+			std::string text((std::istreambuf_iterator<char>(input)), {});
+			if(!input || input.bad() || text.empty())
+				throw std::runtime_error("Required source unavailable: " + relative.generic_string());
+			return text;
+		}
+		std::string RequiredContractRegion(const std::string& text, const char* first, const char* next)
+		{
+			const auto begin = text.find(first);
+			const auto end = begin == std::string::npos ? std::string::npos : text.find(next, begin + std::string(first).size());
+			if(begin == std::string::npos || end == std::string::npos || end <= begin)
+				throw std::runtime_error(std::string("Required definition boundaries unavailable: ") + first);
+			return text.substr(begin, end - begin);
+		}
+
 		std::string ReadDefaultFragmentShader()
 		{
 			// Shader debug modes are a source-level contract: the C++ enum and
@@ -28,6 +49,7 @@ namespace TerraEngine::Tests
 			std::ifstream input(shaderPath, std::ios::binary);
 			std::ostringstream buffer;
 			buffer << input.rdbuf();
+			if(!input || input.bad() || buffer.str().empty()) throw std::runtime_error("Required shader/source contract input unavailable: " + shaderPath.string());
 			return buffer.str();
 		}
 
@@ -41,6 +63,7 @@ namespace TerraEngine::Tests
 			std::ifstream input(shaderPath, std::ios::binary);
 			std::ostringstream buffer;
 			buffer << input.rdbuf();
+			if(!input || input.bad() || buffer.str().empty()) throw std::runtime_error("Required shader/source contract input unavailable: " + shaderPath.string());
 			return buffer.str();
 		}
 
@@ -54,6 +77,7 @@ namespace TerraEngine::Tests
 			std::ifstream input(shaderPath, std::ios::binary);
 			std::ostringstream buffer;
 			buffer << input.rdbuf();
+			if(!input || input.bad() || buffer.str().empty()) throw std::runtime_error("Required shader/source contract input unavailable: " + shaderPath.string());
 			return buffer.str();
 		}
 
@@ -66,6 +90,7 @@ namespace TerraEngine::Tests
 			std::ifstream input(shaderPath, std::ios::binary);
 			std::ostringstream buffer;
 			buffer << input.rdbuf();
+			if(!input || input.bad() || buffer.str().empty()) throw std::runtime_error("Required shader/source contract input unavailable: " + shaderPath.string());
 			return buffer.str();
 		}
 
@@ -77,6 +102,7 @@ namespace TerraEngine::Tests
 			std::ifstream input(shaderPath, std::ios::binary);
 			std::ostringstream buffer;
 			buffer << input.rdbuf();
+			if(!input || input.bad() || buffer.str().empty()) throw std::runtime_error("Required shader/source contract input unavailable: " + shaderPath.string());
 			return buffer.str();
 		}
 
@@ -91,6 +117,7 @@ namespace TerraEngine::Tests
 			std::ifstream input(shaderPath, std::ios::binary);
 			std::ostringstream buffer;
 			buffer << input.rdbuf();
+			if(!input || input.bad() || buffer.str().empty()) throw std::runtime_error("Required shader/source contract input unavailable: " + shaderPath.string());
 			return buffer.str();
 		}
 
@@ -104,6 +131,7 @@ namespace TerraEngine::Tests
 			std::ifstream input(shaderPath, std::ios::binary);
 			std::ostringstream buffer;
 			buffer << input.rdbuf();
+			if(!input || input.bad() || buffer.str().empty()) throw std::runtime_error("Required shader/source contract input unavailable: " + shaderPath.string());
 			return buffer.str();
 		}
 
@@ -125,6 +153,7 @@ namespace TerraEngine::Tests
 			std::ifstream input(sourcePath, std::ios::binary);
 			std::ostringstream buffer;
 			buffer << input.rdbuf();
+			if(!input || input.bad() || buffer.str().empty()) throw std::runtime_error("Required shader/source contract input unavailable: " + sourcePath.string());
 			return buffer.str();
 		}
 
@@ -146,6 +175,7 @@ namespace TerraEngine::Tests
 			std::ifstream input(sourcePath, std::ios::binary);
 			std::ostringstream buffer;
 			buffer << input.rdbuf();
+			if(!input || input.bad() || buffer.str().empty()) throw std::runtime_error("Required shader/source contract input unavailable: " + sourcePath.string());
 			return buffer.str();
 		}
 
@@ -159,21 +189,15 @@ namespace TerraEngine::Tests
 			std::ifstream input(sourcePath, std::ios::binary);
 			std::ostringstream buffer;
 			buffer << input.rdbuf();
+			if(!input || input.bad() || buffer.str().empty()) throw std::runtime_error("Required shader/source contract input unavailable: " + sourcePath.string());
 			return buffer.str();
 		}
 
 		std::string ReadRenderSystemSource()
 		{
-			// Virtual-geometry packet expansion owns the mapping from selected
-			// clusters to submitted packet descriptors. Tests read the source so
-			// package-import edge cases keep using packet ids instead of selection
-			// row offsets when addressing page-local payload streams.
-			const std::filesystem::path sourcePath =
-				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Renderer/RenderSystem.cpp";
-			std::ifstream input(sourcePath, std::ios::binary);
-			std::ostringstream buffer;
-			buffer << input.rdbuf();
-			return buffer.str();
+			// Runtime validation policy still belongs to the residual initializer.
+			return RequiredContractRegion(RequiredContractSource("Engine/Renderer/RenderSystem.cpp"),
+				"void RenderSystem::Initialize()", "void RenderSystem::Update(");
 		}
 
 		std::string ReadResourceManagerSource()
@@ -186,6 +210,7 @@ namespace TerraEngine::Tests
 			std::ifstream input(sourcePath, std::ios::binary);
 			std::ostringstream buffer;
 			buffer << input.rdbuf();
+			if(!input || input.bad() || buffer.str().empty()) throw std::runtime_error("Required shader/source contract input unavailable: " + sourcePath.string());
 			return buffer.str();
 		}
 
@@ -350,7 +375,12 @@ namespace TerraEngine::Tests
 			const std::string taskShader = ReadDefaultTaskShader();
 			const std::string meshShader = ReadDefaultMeshShader();
 			const std::string vulkanResources = ReadVulkanContextResourcesSource();
-			const std::string renderSystem = ReadRenderSystemSource();
+			const auto renderSystem = RequiredContractRegion(RequiredContractSource("Engine/Renderer/Frame/RenderVirtualGeometrySelection.cpp"),
+				"TerraEngine::Renderer::Frame::VirtualGeometryViewSelectionPacket RenderSystem::ApplyFrameVirtualGeometrySelection(",
+				"void RenderSystem::ApplyFrameShadowVirtualGeometrySelection(");
+			const auto gpuPackets = RequiredContractRegion(RequiredContractSource("Engine/Renderer/Frame/RenderVirtualGeometryPackets.cpp"),
+				"std::vector<GpuVirtualGeometryPacketRecord> RenderSystem::BuildGpuVirtualGeometryPacketRecords(",
+				"std::vector<GpuVirtualGeometryBatchDescriptor> RenderSystem::BuildGpuVirtualGeometryBatchDescriptors(");
 
 			context.Expect(ShaderContains(taskShader, "TryLoadPageLocalPayloadDescriptor"), "Task shader should validate page-local stream descriptors before culling resident page packets.");
 			context.Expect(ShaderContains(taskShader, "LoadPageLocalMeshletRecord"), "Task shader should cull resident pages from page-local meshlet records.");
@@ -382,7 +412,7 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanResources, "pagePayloadBytesByMesh"), "Per-view page-local payload resources should publish exact per-mesh byte ownership.");
 			context.Expect(ShaderContains(vulkanResources, "vulkan virtual geometry page-local payload"), "Backend residency snapshots should expose page-local VG payload bytes as mesh-owned Render GPU Bytes.");
 			context.Expect(ShaderContains(renderSystem, "batchCommand.virtualGeometryPacketDescriptorIndex = firstPacket.packetId"), "RenderSystem should bind each draw to the packet-local descriptor generated for that packet.");
-			context.Expect(ShaderContains(renderSystem, "record.packetId = packet.packetId"), "GPU packet publication should preserve CPU packet ids so page-local descriptors stay aligned after compaction.");
+			context.Expect(ShaderContains(gpuPackets, "record.packetId = packet.packetId"), "GPU packet publication should preserve CPU packet ids so page-local descriptors stay aligned after compaction.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.PageLocalBranchesDoNotEagerlyReadOwnerStreams", [](TestContext& context) {
@@ -471,7 +501,11 @@ namespace TerraEngine::Tests
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.AnimatedPagesUseCanonicalComputeOutput", [](TestContext& context) {
-			const std::string renderSystemSource = ReadRenderSystemSource();
+			const auto renderSystemSource = RequiredContractRegion(RequiredContractSource("Engine/Renderer/Frame/RenderVirtualGeometrySelection.cpp"),
+				"TerraEngine::Renderer::Frame::VirtualGeometryViewSelectionPacket RenderSystem::ApplyFrameVirtualGeometrySelection(",
+				"void RenderSystem::ApplyFrameShadowVirtualGeometrySelection(");
+			const auto backendInputs = RequiredContractRegion(RequiredContractSource("Engine/Renderer/Frame/RenderFrameCapture.cpp"),
+				"RenderSystem::FrameBackendCapture RenderSystem::CaptureFrameBackendInputs()", "RenderSystem::FrameSkyCapture RenderSystem::CaptureFrameSky(");
 			const std::string meshShader = ReadDefaultMeshShader();
 			const std::string taskShader = ReadDefaultTaskShader();
 			const std::string vulkanSource = ReadVulkanContextSource();
@@ -531,7 +565,7 @@ namespace TerraEngine::Tests
 						"|| gMeshShaderGpuDeformationAvailable == 0u)"),
 				"The mesh shader should consume canonical compute output for a matching page while keeping legacy owner deformation on its compatibility path.");
 			context.Expect(
-				ShaderContains(renderSystemSource,
+				ShaderContains(backendInputs,
 					"backendCapabilities.supportsVirtualGeometryGeneratedSubmissions")
 					&& ShaderContains(renderSystemSource,
 						"kVirtualGeometryFlagOwnerPaletteDeformation")
@@ -742,7 +776,8 @@ namespace TerraEngine::Tests
 		});
 
 		registry.Add("VirtualGeometry.Diagnostics.DetailedInventoryMergePreservesAnimatedFrameFacts", [](TestContext& context) {
-			const std::string renderSystem = ReadRenderSystemSource();
+			const auto renderSystem = RequiredContractRegion(RequiredContractSource("Engine/Renderer/Frame/RenderDiagnosticsPublication.cpp"),
+				"void RenderSystem::EnrichFrameVirtualGeometryDiagnostics(", "void RenderSystem::PublishFrameDiagnostics(");
 
 			context.Expect(
 				ShaderContains(renderSystem,

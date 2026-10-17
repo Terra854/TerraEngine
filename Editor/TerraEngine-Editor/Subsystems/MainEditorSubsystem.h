@@ -138,7 +138,7 @@ private:
 	std::uint64_t nextPrefabId = 1u;
 };
 
-// class MainEditorSubsystem groups related state and operations so callers have one documented contract.
+
 class MainEditorSubsystem : public IEditorSubsystem {
 public:
 	// Play Mode restoration is published at one protected boundary. Automation
@@ -178,7 +178,7 @@ public:
 	// EditorSystem forwards this independent terrain system contract into the
 	// frame scheduler without making ImGui callbacks publish terrain mutations.
 	[[nodiscard]] std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> DeclareTerrainAuthoringWorkloads(float deltaTime);
-	// GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	virtual std::string GetName() const override { return "Main Editor"; }
 
 	void OnProjectOpened();
@@ -209,7 +209,7 @@ public:
 	bool IsInspectorValueDragging() const;
 
 	// API for Windows
-	// GetContext is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	EditorContext* GetContext() const { return ctx; }
 	// Automation may submit an authored navigation replacement, but it never owns
 	// this coordinator or bypasses its protected post-commit history boundary.
@@ -232,7 +232,7 @@ public:
 	// Inspector consumes a bounded owner snapshot; the worker never accesses UI.
 	std::string GetIndependentTerrainCopyStatus(entt::entity entity) const;
 
-	// GetSelectedAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::optional<std::filesystem::path> GetSelectedAsset() const { return selectedAsset; }
 	void SetSelectedAsset(std::optional<std::filesystem::path> asset);
 	// Selects a cooked animation document and reveals its matching native editor.
@@ -271,7 +271,7 @@ public:
 	void RequestExit();
 	bool RebuildAssetFromInspector(const std::filesystem::path& path, std::string* outError = nullptr);
 
-	// GetSceneTextureID is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void* GetSceneTextureID() const { return viewportTextures.ActiveDescriptor(TerraEngine::Editor::ViewportTextureKind::Scene); }
 	void* GetGameTextureID() const { return viewportTextures.ActiveDescriptor(TerraEngine::Editor::ViewportTextureKind::Game); }
 	void CaptureViewportDrawDataUses();
@@ -282,7 +282,7 @@ public:
 	bool TryGetGameViewRenderStats(RenderStatsSnapshot& outStats) const;
 
 	template<typename T>
-	// GetWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::shared_ptr<T> GetWindow() const {
 		// Terrain authoring is an Inspector-backed service and does not derive from
 		// EditorWindow. Preserve this typed lookup contract for Scene View,
@@ -291,9 +291,9 @@ public:
 		{
 			return std::static_pointer_cast<T>(m_TerrainTools);
 		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (auto& win : m_Windows) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (auto casted = std::dynamic_pointer_cast<T>(win)) {
 				return casted;
 			}
@@ -301,7 +301,7 @@ public:
 		return nullptr;
 	}
 
-	// GetWindows is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	const std::vector<std::shared_ptr<EditorWindow>>& GetWindows() const { return m_Windows; }
 	void OpenProjectSettings(TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId categoryId =
 		TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Project);

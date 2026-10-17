@@ -79,7 +79,7 @@ ThreadPool::~ThreadPool()
 	shutdown();
 }
 
-// ThreadPool::initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ThreadPool::initialize(std::size_t requestedWorkerCount) {
 	InitializeWorkers(requestedWorkerCount, {});
 }
@@ -152,7 +152,7 @@ void ThreadPool::InitializeWorkers(std::size_t requestedWorkerCount,
 	}
 }
 
-// ThreadPool::shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ThreadPool::shutdown()
 {
 	{
@@ -169,7 +169,7 @@ void ThreadPool::shutdown()
 	}
 
 	condition.notify_all();
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::thread& worker : workers) {
 		if (worker.joinable()) {
 			worker.join();
@@ -204,7 +204,7 @@ void ThreadPool::shutdown()
 }
 
 // Enqueue a task; handle its dependencies automatically
-// ThreadPool::enqueue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ThreadPool::enqueue(std::shared_ptr<ITask> task, std::uint64_t usefulItemCount) {
 	if(!task) throw std::invalid_argument("ThreadPool requires an owned task");
 	{
@@ -292,7 +292,7 @@ void ThreadPool::RejectUnstartedSubtree(const std::shared_ptr<ITask>& task,
 	for(const auto& child : task->dependenciesList) RejectUnstartedSubtree(child, failure);
 }
 
-// ThreadPool::AllocateVoidTask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::shared_ptr<Task<void>> ThreadPool::AllocateVoidTask(std::function<void()> func)
 {
 	Task<void>* ptr = nullptr;
@@ -372,7 +372,7 @@ void ThreadPool::SetDependencyAdmissionFailureForTesting(const ITask* target, st
 }
 
 // Notify that a task has completed; decrement unresolvedDependencies of the parent task
-// ThreadPool::completeTask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ThreadPool::completeTask(std::shared_ptr<ITask> completedTask) noexcept {
 	// Iterative failure propagation retains only shared owners/exception pointers.
 	// It allocates no callback, promise, container, diagnostic, or recursive stack.
@@ -586,7 +586,7 @@ void ThreadPool::workerThread(int threadNum)
 			std::unique_lock<std::mutex> lock(this->queue_mutex);
 			this->condition.wait(lock,
 				[this] { return this->stop || !this->tasks.empty(); });
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (this->stop && this->tasks.empty()) {
 				const std::uint64_t stoppedNanoseconds = MonotonicNanoseconds();
 				ObserveTaskSafely([&] { RecordWorkerActivity(workerIndex, ThreadPoolWorkerActivity::Stopped,

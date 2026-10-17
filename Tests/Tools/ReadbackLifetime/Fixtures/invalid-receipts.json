@@ -1,0 +1,970 @@
+{
+	"schemaVersion": "readback-protocol-mutations-v1",
+	"protocolOnly": true,
+	"cases": [
+		{
+			"caseId": "Native-wrong-schema",
+			"lane": "Native",
+			"path": "schemaVersion",
+			"value": "wrong",
+			"expectedCode": "schema",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-incomplete-prerequisites",
+			"lane": "Native",
+			"path": "status",
+			"value": "Incomplete",
+			"expectedCode": "status",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-stale-launch-nonce",
+			"lane": "Native",
+			"path": "runNonce",
+			"value": "OTHER-LAUNCH",
+			"expectedCode": "nonce",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-wrong-install-manifest",
+			"lane": "Native",
+			"path": "installManifestSha256",
+			"value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+			"expectedCode": "manifest",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-uninstalled-executable",
+			"lane": "Native",
+			"path": "executablePath",
+			"value": "C:/uninstalled/other.exe",
+			"expectedCode": "executable",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-noncanonical-hash",
+			"lane": "Native",
+			"path": "watchdogPin.sha256",
+			"value": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+			"expectedCode": "hash",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-modified-raw-hash",
+			"lane": "Native",
+			"path": "rawObservationsPin.sha256",
+			"value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+			"expectedCode": "hash",
+			"synchronizeRaw": false,
+			"delete": false
+		},
+		{
+			"caseId": "Native-too-few-iterations",
+			"lane": "Native",
+			"path": "iterations",
+			"value": 99,
+			"expectedCode": "integer",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-duplicate-iteration",
+			"lane": "Native",
+			"path": "observations.1.iteration",
+			"value": 1,
+			"expectedCode": "iterations",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-stale-raw-join",
+			"lane": "Native",
+			"path": "observations.0.iteration",
+			"value": 99,
+			"expectedCode": "raw-join",
+			"synchronizeRaw": false,
+			"delete": false
+		},
+		{
+			"caseId": "Native-string-iteration",
+			"lane": "Native",
+			"path": "observations.0.iteration",
+			"value": "1",
+			"expectedCode": "integer",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-watchdog-pid-mismatch",
+			"lane": "Native",
+			"path": "processId",
+			"value": 7009,
+			"expectedCode": "watchdog",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-wrong-schema",
+			"lane": "Editor",
+			"path": "schemaVersion",
+			"value": "wrong",
+			"expectedCode": "schema",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-incomplete-prerequisites",
+			"lane": "Editor",
+			"path": "status",
+			"value": "Incomplete",
+			"expectedCode": "status",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-stale-launch-nonce",
+			"lane": "Editor",
+			"path": "runNonce",
+			"value": "OTHER-LAUNCH",
+			"expectedCode": "nonce",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-wrong-install-manifest",
+			"lane": "Editor",
+			"path": "installManifestSha256",
+			"value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+			"expectedCode": "manifest",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-uninstalled-executable",
+			"lane": "Editor",
+			"path": "executablePath",
+			"value": "C:/uninstalled/other.exe",
+			"expectedCode": "executable",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-noncanonical-hash",
+			"lane": "Editor",
+			"path": "watchdogPin.sha256",
+			"value": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+			"expectedCode": "hash",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-modified-raw-hash",
+			"lane": "Editor",
+			"path": "rawObservationsPin.sha256",
+			"value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+			"expectedCode": "hash",
+			"synchronizeRaw": false,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-too-few-iterations",
+			"lane": "Editor",
+			"path": "iterations",
+			"value": 99,
+			"expectedCode": "integer",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-duplicate-iteration",
+			"lane": "Editor",
+			"path": "observations.1.iteration",
+			"value": 1,
+			"expectedCode": "iterations",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-stale-raw-join",
+			"lane": "Editor",
+			"path": "observations.0.iteration",
+			"value": 99,
+			"expectedCode": "raw-join",
+			"synchronizeRaw": false,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-string-iteration",
+			"lane": "Editor",
+			"path": "observations.0.iteration",
+			"value": "1",
+			"expectedCode": "integer",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-watchdog-pid-mismatch",
+			"lane": "Editor",
+			"path": "processId",
+			"value": 7009,
+			"expectedCode": "watchdog",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-simulated-not-ready",
+			"lane": "Native",
+			"path": "observations.0.simulated",
+			"value": true,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-forced-not-ready",
+			"lane": "Native",
+			"path": "observations.0.forcedFenceObservation",
+			"value": true,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-policy-receipt",
+			"lane": "Native",
+			"path": "evidenceKind",
+			"value": "DeterministicPolicy",
+			"expectedCode": "native-kind",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-layers-requested-only",
+			"lane": "Native",
+			"path": "validation.actuallyEnabled",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-missing-validation-layer",
+			"lane": "Native",
+			"path": "validation.enabledLayers",
+			"value": [],
+			"expectedCode": "validation",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-missing-callback",
+			"lane": "Native",
+			"path": "validation.callbackInstalled",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-late-validation-error",
+			"lane": "Native",
+			"path": "validation.errors",
+			"value": [
+				"shutdown error"
+			],
+			"expectedCode": "validation",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-counter-hides-validation-error",
+			"lane": "Native",
+			"path": "validation.errorCount",
+			"value": 1,
+			"expectedCode": "validation",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-no-shutdown-log",
+			"lane": "Native",
+			"path": "validation.capturedThroughShutdown",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-no-adapter",
+			"lane": "Native",
+			"path": "adapter.hardwareName",
+			"value": "",
+			"expectedCode": "adapter",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-missing-driver",
+			"lane": "Native",
+			"path": "adapter.driverVersion",
+			"value": "",
+			"expectedCode": "adapter",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-context-not-destroyed",
+			"lane": "Native",
+			"path": "contextDestroyedAfterOperations",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-gate-wait-not-native",
+			"lane": "Native",
+			"path": "observations.0.gate.waitCall",
+			"value": "forced-fence",
+			"expectedCode": "gate",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-wrong-initial-timeline-value",
+			"lane": "Native",
+			"path": "observations.0.gate.initialValue",
+			"value": 1,
+			"expectedCode": "gate",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-wrong-transfer-stage",
+			"lane": "Native",
+			"path": "observations.0.gate.waitStageMask",
+			"value": 1,
+			"expectedCode": "gate",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-wait-after-copy",
+			"lane": "Native",
+			"path": "observations.0.gate.recordedBeforeCopy",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-gate-pre-signaled",
+			"lane": "Native",
+			"path": "observations.0.gate.signaledBeforeSubmit",
+			"value": true,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-idle-before-release",
+			"lane": "Native",
+			"path": "observations.0.gate.releaseGuardBeforeIdle",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-fake-ready",
+			"lane": "Native",
+			"path": "observations.0.events.1.result",
+			"value": 0,
+			"expectedCode": "vk-result",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-fake-poll-call",
+			"lane": "Native",
+			"path": "observations.0.events.1.call",
+			"value": "test-adapter",
+			"expectedCode": "vk-result",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-submit-not-accepted",
+			"lane": "Native",
+			"path": "observations.0.events.0.result",
+			"value": 1,
+			"expectedCode": "vk-result",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-timeline-release-failed",
+			"lane": "Native",
+			"path": "observations.0.events.3.result",
+			"value": 1,
+			"expectedCode": "vk-result",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-completion-not-observed",
+			"lane": "Native",
+			"path": "observations.0.events.4.result",
+			"value": 1,
+			"expectedCode": "vk-result",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-completion-before-release",
+			"lane": "Native",
+			"path": "observations.0.events.4.sequence",
+			"value": 3,
+			"expectedCode": "events",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-duplicate-terminal",
+			"lane": "Native",
+			"path": "observations.0.terminalCountAfterCompletion",
+			"value": 2,
+			"expectedCode": "terminal",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-terminal-success-for-timeout",
+			"lane": "Native",
+			"path": "observations.0.terminalReason",
+			"value": "success",
+			"expectedCode": "terminal",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-old-image-unblocked",
+			"lane": "Native",
+			"path": "observations.0.sourceBlockedAfterTerminal",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-blocker-never-retires",
+			"lane": "Native",
+			"path": "observations.0.sourceBlockedAfterCompletion",
+			"value": true,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-shared-pool-dies-early",
+			"lane": "Native",
+			"path": "observations.0.commandPoolAliveThroughRetirement",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-source-destroyed-early",
+			"lane": "Native",
+			"path": "observations.0.sourceImageDestroyedBeforeRetirement",
+			"value": true,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-resize-before-retirement",
+			"lane": "Native",
+			"path": "observations.1.resizeSequence",
+			"value": 3,
+			"expectedCode": "resize",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-unreleased-gate-semaphore",
+			"lane": "Native",
+			"path": "destroyedGateSemaphores",
+			"value": 99,
+			"expectedCode": "gate-destruction",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-duplicate-operation",
+			"lane": "Native",
+			"path": "observations.1.operationId",
+			"value": "PROTOCOL-ONLY-1",
+			"expectedCode": "identity",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-timeout-releases-stagingBuffer",
+			"lane": "Native",
+			"path": "observations.0.retainedAfterTerminal.stagingBuffer",
+			"value": 0,
+			"expectedCode": "ownership",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-premature-destroy-stagingBuffer",
+			"lane": "Native",
+			"path": "observations.0.destroyedAfterTerminal.stagingBuffer",
+			"value": 1,
+			"expectedCode": "ownership",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-double-destroy-stagingBuffer",
+			"lane": "Native",
+			"path": "observations.0.destroyedAfterCompletion.stagingBuffer",
+			"value": 2,
+			"expectedCode": "ownership",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-timeout-releases-allocation",
+			"lane": "Native",
+			"path": "observations.0.retainedAfterTerminal.allocation",
+			"value": 0,
+			"expectedCode": "ownership",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-premature-destroy-allocation",
+			"lane": "Native",
+			"path": "observations.0.destroyedAfterTerminal.allocation",
+			"value": 1,
+			"expectedCode": "ownership",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-double-destroy-allocation",
+			"lane": "Native",
+			"path": "observations.0.destroyedAfterCompletion.allocation",
+			"value": 2,
+			"expectedCode": "ownership",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-timeout-releases-commandBuffer",
+			"lane": "Native",
+			"path": "observations.0.retainedAfterTerminal.commandBuffer",
+			"value": 0,
+			"expectedCode": "ownership",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-premature-destroy-commandBuffer",
+			"lane": "Native",
+			"path": "observations.0.destroyedAfterTerminal.commandBuffer",
+			"value": 1,
+			"expectedCode": "ownership",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-double-destroy-commandBuffer",
+			"lane": "Native",
+			"path": "observations.0.destroyedAfterCompletion.commandBuffer",
+			"value": 2,
+			"expectedCode": "ownership",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-timeout-releases-fence",
+			"lane": "Native",
+			"path": "observations.0.retainedAfterTerminal.fence",
+			"value": 0,
+			"expectedCode": "ownership",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-premature-destroy-fence",
+			"lane": "Native",
+			"path": "observations.0.destroyedAfterTerminal.fence",
+			"value": 1,
+			"expectedCode": "ownership",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-double-destroy-fence",
+			"lane": "Native",
+			"path": "observations.0.destroyedAfterCompletion.fence",
+			"value": 2,
+			"expectedCode": "ownership",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-foreign-endpoint",
+			"lane": "Editor",
+			"path": "endpointOwnershipVerified",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-project-not-owned",
+			"lane": "Editor",
+			"path": "isolatedProjectVerified",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-authoring-mutated",
+			"lane": "Editor",
+			"path": "authoredObjectsUnchanged",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-scene-file-mutated",
+			"lane": "Editor",
+			"path": "sceneFileUnchanged",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-dirty-state-mutated",
+			"lane": "Editor",
+			"path": "sceneDirtyUnchanged",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-forced-close",
+			"lane": "Editor",
+			"path": "normalClose",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-wrong-response-id",
+			"lane": "Editor",
+			"path": "observations.0.responseId",
+			"value": "other",
+			"expectedCode": "response",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-duplicate-response",
+			"lane": "Editor",
+			"path": "observations.0.responseCount",
+			"value": 2,
+			"expectedCode": "response",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-lost-correlation",
+			"lane": "Editor",
+			"path": "observations.0.correlationId",
+			"value": "other",
+			"expectedCode": "correlation",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-write-operation",
+			"lane": "Editor",
+			"path": "observations.0.operation",
+			"value": "scene.delete",
+			"expectedCode": "operation",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-synthetic-pixels",
+			"lane": "Editor",
+			"path": "observations.0.deterministicFallback",
+			"value": true,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-missing-backend-readback",
+			"lane": "Editor",
+			"path": "observations.0.backendReadback",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-wrong-decoded-width",
+			"lane": "Editor",
+			"path": "observations.0.decoder.width",
+			"value": 1,
+			"expectedCode": "decode",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-bad-image-decoder-join",
+			"lane": "Editor",
+			"path": "observations.0.decoder.imageSha256",
+			"value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+			"expectedCode": "decode",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-checksum-not-verified",
+			"lane": "Editor",
+			"path": "observations.0.decoder.checksumsVerified",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-uninstalled-decoder",
+			"lane": "Editor",
+			"path": "observations.0.decoder.executablePath",
+			"value": "C:/other.exe",
+			"expectedCode": "decode-process",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-failed-decoder",
+			"lane": "Editor",
+			"path": "observations.0.decoder.exitCode",
+			"value": 1,
+			"expectedCode": "decode-process",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-raw-path-escape",
+			"lane": "Native",
+			"path": "rawObservationsPin.path",
+			"value": "C:/outside-readback-evidence.json",
+			"expectedCode": "path",
+			"synchronizeRaw": false,
+			"delete": false
+		},
+		{
+			"caseId": "Native-missing-driver-field",
+			"lane": "Native",
+			"path": "adapter.driverVersion",
+			"value": null,
+			"expectedCode": "field",
+			"synchronizeRaw": true,
+			"delete": true
+		},
+		{
+			"caseId": "Native-missing-owner-record",
+			"lane": "Native",
+			"path": "observations.0.retainedAfterTerminal",
+			"value": null,
+			"expectedCode": "field",
+			"synchronizeRaw": true,
+			"delete": true
+		},
+		{
+			"caseId": "Native-missing-owner-counter",
+			"lane": "Native",
+			"path": "observations.0.retainedAfterTerminal.fence",
+			"value": null,
+			"expectedCode": "field",
+			"synchronizeRaw": true,
+			"delete": true
+		},
+		{
+			"caseId": "Native-missing-gate-recording",
+			"lane": "Native",
+			"path": "observations.0.gate.recordedBeforeCopy",
+			"value": null,
+			"expectedCode": "field",
+			"synchronizeRaw": true,
+			"delete": true
+		},
+		{
+			"caseId": "Native-perScenarioCount",
+			"lane": "Native",
+			"path": "iterationsPerScenario",
+			"value": 101,
+			"expectedCode": "scenario-count",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-perScenario-underfloor",
+			"lane": "Native",
+			"path": "iterationsPerScenario",
+			"value": 99,
+			"expectedCode": "integer",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-rawMetadataForge",
+			"lane": "Native",
+			"path": "validation.actuallyEnabled",
+			"value": false,
+			"expectedCode": "raw-metadata",
+			"synchronizeRaw": false,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-backend-target-metadata-join",
+			"lane": "Editor",
+			"path": "observations.0.backendTarget.targetGeneration",
+			"value": 999,
+			"expectedCode": "target-join",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-warmup-rawMetadataForge",
+			"lane": "Editor",
+			"path": "warmup.backendTarget.targetGeneration",
+			"value": 999,
+			"expectedCode": "raw-metadata",
+			"synchronizeRaw": false,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-resize-count-underfloor",
+			"lane": "Editor",
+			"path": "resizeCount",
+			"value": 99,
+			"expectedCode": "integer",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-multiple-normal-closes",
+			"lane": "Editor",
+			"path": "normalCloseCount",
+			"value": 100,
+			"expectedCode": "editor-session",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Editor-close-before-all-captures",
+			"lane": "Editor",
+			"path": "capturesBeforeNormalClose",
+			"value": 99,
+			"expectedCode": "editor-session",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-rejects-old-host-event-gate",
+			"lane": "Native",
+			"path": "observations.0.gate",
+			"value": {
+				"kind": "HostEvent",
+				"waitCall": "vkCmdWaitEvents",
+				"sourceStageMask": 16384,
+				"destinationStageMask": 4096,
+				"recordedBeforeCopy": true,
+				"signaledBeforeSubmit": false,
+				"releaseGuardBeforeIdle": true
+			},
+			"expectedCode": "gate",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-rejects-old-vkSetEvent-release",
+			"lane": "Native",
+			"path": "observations.0.events.3.call",
+			"value": "vkSetEvent",
+			"expectedCode": "vk-result",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-timeline-wait-value-must-block",
+			"lane": "Native",
+			"path": "observations.0.gate.waitValue",
+			"value": 0,
+			"expectedCode": "gate",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-timeline-release-call-must-be-native",
+			"lane": "Native",
+			"path": "observations.0.gate.releaseCall",
+			"value": "test-release",
+			"expectedCode": "gate",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-timeline-feature-not-enabled",
+			"lane": "Native",
+			"path": "observations.0.gate.timelineSemaphoreEnabled",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-timeline-object-not-observed",
+			"lane": "Native",
+			"path": "observations.0.gate.timelineSemaphore",
+			"value": false,
+			"expectedCode": "boolean",
+			"synchronizeRaw": true,
+			"delete": false
+		},
+		{
+			"caseId": "Native-timeline-wrong-signal-value",
+			"lane": "Native",
+			"path": "observations.0.gate.signalValue",
+			"value": 0,
+			"expectedCode": "gate",
+			"synchronizeRaw": true,
+			"delete": false
+		}
+	]
+}

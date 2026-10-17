@@ -17,7 +17,7 @@ public:
 	virtual void Update(float deltaTime) override;
 	virtual void DrawUI() override;
 	virtual void Shutdown() override;
-	// GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	virtual std::string GetName() const override { return "Project Hub"; }
 
 	// Callback to notify the system that a project has been loaded

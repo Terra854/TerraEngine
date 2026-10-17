@@ -19,7 +19,7 @@
 
 class MainEditorSubsystem;
 
-// class ProjectBrowserWindow groups related state and operations so callers have one documented contract.
+
 class ProjectBrowserWindow : public EditorWindow {
 public:
 	ProjectBrowserWindow(MainEditorSubsystem* owner);

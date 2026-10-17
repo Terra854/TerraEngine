@@ -74,7 +74,7 @@ struct ThreadPoolTelemetrySnapshot {
 };
 
 // Interface for a task
-// struct ITask groups related state and operations so callers have one documented contract.
+
 struct ITask {
 	std::atomic<int> unresolvedDependencies = -1;
 	std::vector<std::shared_ptr<ITask>> dependenciesList;
@@ -107,14 +107,14 @@ protected:
 };
 
 template <typename ReturnType>
-// struct Task groups related state and operations so callers have one documented contract.
+
 struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>> {
 	std::function<ReturnType()> taskFunc;
 	std::promise<ReturnType> taskPromise;
 	std::weak_ptr<ITask> parentTask; // Weak pointer to the parent task to avoid increasing reference count
 
 	Task(std::function<ReturnType()> func)
-		// ITask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 		: ITask(), taskFunc(std::move(func)), parentTask() {}
 
 	std::shared_ptr<ITask> clone() const override {
@@ -122,7 +122,7 @@ struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>
 		auto clonedTask = std::make_shared<Task<ReturnType>>(taskFunc);
 
 		// Clone each dependency in the dependenciesList
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const auto& dependency : this->dependenciesList) {
 			auto clonedDependency = dependency->clone();
 			clonedTask->dependenciesList.push_back(clonedDependency);
@@ -132,7 +132,7 @@ struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>
 		return clonedTask;
 	}
 
-	// run is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void run() override {
 		{
 			std::lock_guard lock(this->settlementMutex);
@@ -175,12 +175,12 @@ struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>
 		} catch(...) { std::terminate(); }
 	}
 
-	// setParentTask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void setParentTask(std::weak_ptr<ITask> parent) override {
 		parentTask = parent;
 	}
 
-	// getParentTask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::weak_ptr<ITask> getParentTask() override {
 		return parentTask;
 	}
@@ -196,12 +196,12 @@ struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>
 	}
 
 	// Delete all dependencies from this task
-	// clearDependencies is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void clearDependencies() {
 		dependenciesList.clear();
 	}
 	
-	// reset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void reset(std::function<ReturnType()> func) {
 		// Promise allocation may fail. Preserve the old callable, dependencies,
 		// and state until replacement storage exists; callers own this exclusively.
@@ -220,13 +220,13 @@ struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>
 		parentNotificationDelivered = false;
 	}
 
-	// getFuture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::future<ReturnType> getFuture() {
 		return taskPromise.get_future();
 	}
 };
 
-// class ThreadPool groups related state and operations so callers have one documented contract.
+
 class ThreadPool {
 public:
 	static constexpr std::size_t kMaximumTelemetryHistoryCapacityPerWorker = 256;
@@ -256,7 +256,7 @@ public:
 		using ReturnType = std::invoke_result_t<Func, Args...>;
 		auto boundFunc = std::bind(std::forward<Func>(func), std::forward<Args>(args)...);
 		
-		// constexpr is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 		if constexpr (std::is_void_v<ReturnType>) {
 			// Owned pools must never export a raw-this reuse-cache deleter. Even an
 			// accidentally retained void handle can then safely outlive that pool.
@@ -284,7 +284,7 @@ public:
 	std::shared_ptr<Task<void>> AllocateVoidTask(std::function<void()> func);
 	void ReleaseVoidTask(Task<void>* task) noexcept;
 
-	// getThreadCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	size_t getThreadCount() const { return workers.size(); }
 
 	// ConfigureTelemetrySampling changes only diagnostic retention. Capacity is

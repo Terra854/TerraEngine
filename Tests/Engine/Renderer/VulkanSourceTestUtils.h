@@ -1,13 +1,14 @@
 #pragma once
 
-// Source-contract tests validate Vulkan behavior without requiring a physical
-// device. The implementation is split by responsibility, so these helpers read
-// the complete context or resource family instead of coupling tests to one file.
+// These supplementary source checks inspect Vulkan wiring without a device.
+// Call-site presence cannot prove GPU behavior, fence timing, or lifetime safety.
+// Read every listed module so relocation cannot hide a missing wiring input.
 
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -22,9 +23,15 @@ namespace TerraEngine::Tests::VulkanSourceContracts
 			const std::filesystem::path sourcePath =
 				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relativePath;
 			std::ifstream input(sourcePath, std::ios::binary);
+			// Every module is required, including files used only by exclusions.
+			if(!input) throw std::runtime_error("Vulkan source contract cannot read " + sourcePath.string());
+			std::ostringstream contents;
+			contents << input.rdbuf();
+			if(input.bad() || contents.str().empty())
+				throw std::runtime_error("Vulkan source contract found empty/unreadable file " + sourcePath.string());
 			combined << "\n// Vulkan source-contract boundary: "
 				<< relativePath << '\n';
-			combined << input.rdbuf();
+			combined << contents.str();
 		}
 		return combined.str();
 	}
@@ -39,7 +46,9 @@ namespace TerraEngine::Tests::VulkanSourceContracts
 			"Engine/Renderer/RHI/Vulkan/VulkanFrameRendering.cpp",
 			"Engine/Renderer/RHI/Vulkan/VulkanFrameSubmission.cpp",
 			"Engine/Renderer/RHI/Vulkan/VulkanPostProcessing.cpp",
-			"Engine/Renderer/RHI/Vulkan/VulkanReadback.cpp"
+			"Engine/Renderer/RHI/Vulkan/VulkanReadback.cpp",
+			"Engine/Renderer/RHI/Vulkan/VulkanReadbackLifecycle.cpp",
+			"Engine/Renderer/RHI/Vulkan/VulkanReadbackLifecycle.h"
 		});
 	}
 

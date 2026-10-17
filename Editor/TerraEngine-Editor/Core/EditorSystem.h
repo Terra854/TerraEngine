@@ -18,7 +18,7 @@ class VulkanContext;
 
 class ProjectHubSubsystem;
 class MainEditorSubsystem;
-// class Engine groups related state and operations so callers have one documented contract.
+
 class Engine;
 
 class EditorSystem : public SystemsBase {

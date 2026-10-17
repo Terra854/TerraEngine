@@ -215,70 +215,70 @@ void NotifySceneAfterComponentMutation(const std::string& componentName)
 }
 
 CreateObjectCommand::CreateObjectCommand(entt::entity entity) {
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ObjectManager::instance().getObject(entity).has_value()) {
 		m_Uuid = GetObjectUuid(entity);
 		m_Json = Serializer::SerializeObject(entity);
 	}
 }
 
-// CreateObjectCommand::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void CreateObjectCommand::Undo() {
 	if (auto object = ObjectManager::instance().getObject(m_Uuid)) {
 		ObjectManager::instance().removeObject(*object);
 	}
 }
 
-// CreateObjectCommand::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void CreateObjectCommand::Redo() {
 	RestoreImmediateObject(m_Uuid, m_Json);
 }
 
-// CreateObjectCommand::GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string CreateObjectCommand::GetName() const { return "Create Object"; }
 
 DeleteObjectCommand::DeleteObjectCommand(entt::entity entity) {
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ObjectManager::instance().getObject(entity).has_value()) {
 		m_Json = Serializer::SerializeObject(entity);
 		m_Uuid = GetObjectUuid(entity);
 	}
 }
 
-// DeleteObjectCommand::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void DeleteObjectCommand::Undo() {
 	RestoreImmediateObject(m_Uuid, m_Json);
 }
 
-// DeleteObjectCommand::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void DeleteObjectCommand::Redo() {
 	if (auto object = ObjectManager::instance().getObject(m_Uuid)) {
 		ObjectManager::instance().removeObject(*object);
 	}
 }
 
-// DeleteObjectCommand::GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string DeleteObjectCommand::GetName() const { return "Delete Object"; }
 
 RenameObjectCommand::RenameObjectCommand(entt::entity entity, const std::string& oldName, const std::string& newName)
-	// m_Uuid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	: m_Uuid(GetObjectUuid(entity)), m_OldName(oldName), m_NewName(newName) {}
 
 void RenameObjectCommand::Undo() {
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (auto object = ResolveObject(m_Uuid)) {
 		ObjectManager::instance().setObjectName(*object, m_OldName);
 	}
 }
 
-// RenameObjectCommand::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void RenameObjectCommand::Redo() {
 	if (auto object = ResolveObject(m_Uuid)) {
 		ObjectManager::instance().setObjectName(*object, m_NewName);
 	}
 }
 
-// RenameObjectCommand::GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string RenameObjectCommand::GetName() const { return "Rename Object"; }
 
 namespace
@@ -350,11 +350,11 @@ void SetParentCommand::Redo()
 std::string SetParentCommand::GetName() const { return "Set Object Parent"; }
 
 AddComponentCommand::AddComponentCommand(entt::entity entity, const std::string& componentName)
-	// m_Uuid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	: m_Uuid(GetObjectUuid(entity)), m_ComponentName(componentName) {}
 
 void AddComponentCommand::Undo() {
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (auto obj = ResolveObject(m_Uuid)) {
 		auto& reg = ComponentAccessRegistry();
 		if (reg.count(m_ComponentName)) {
@@ -368,11 +368,11 @@ void AddComponentCommand::Undo() {
 	}
 }
 
-// AddComponentCommand::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void AddComponentCommand::Redo() {
 	if (auto obj = ResolveObject(m_Uuid)) {
 		auto& reg = ComponentAccessRegistry();
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (reg.count(m_ComponentName)) {
 			reg[m_ComponentName].entityAddComponent(ObjectManager::instance().getRegistry(), obj->EntityId());
 			// Initial Inspector adds and redo share this publication path.
@@ -382,13 +382,13 @@ void AddComponentCommand::Redo() {
 	}
 }
 
-// AddComponentCommand::GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string AddComponentCommand::GetName() const { return "Add " + m_ComponentName; }
 
 RemoveComponentCommand::RemoveComponentCommand(entt::entity entity, const std::string& componentName)
-	// m_Uuid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	: m_Uuid(GetObjectUuid(entity)), m_ComponentName(componentName) {
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ObjectManager::instance().getObject(entity).has_value()) {
 		auto& reg = ComponentAccessRegistry();
 		if (reg.count(m_ComponentName)) {
@@ -399,7 +399,7 @@ RemoveComponentCommand::RemoveComponentCommand(entt::entity entity, const std::s
 	}
 }
 
-// RemoveComponentCommand::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void RemoveComponentCommand::Undo() {
 	if (auto object = ResolveObject(m_Uuid)) {
 		RestoreImmediateComponent(*object, m_ComponentName, m_ComponentJson);
@@ -407,11 +407,11 @@ void RemoveComponentCommand::Undo() {
 	}
 }
 
-// RemoveComponentCommand::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void RemoveComponentCommand::Redo() {
 	if (auto obj = ResolveObject(m_Uuid)) {
 		auto& reg = ComponentAccessRegistry();
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (reg.count(m_ComponentName)) {
 			reg[m_ComponentName].entityRemoveComponent(ObjectManager::instance().getRegistry(), obj->EntityId());
 			// Removal must retire retained draw membership without reloading a scene.
@@ -421,7 +421,7 @@ void RemoveComponentCommand::Redo() {
 	}
 }
 
-// RemoveComponentCommand::GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string RemoveComponentCommand::GetName() const { return "Remove " + m_ComponentName; }
 
 SetComponentPayloadCommand::SetComponentPayloadCommand(entt::entity entity, const std::string& componentName, nlohmann::json oldPayload, nlohmann::json newPayload)
@@ -456,7 +456,7 @@ UndoRedoSystem& UndoRedoSystem::Instance() {
 	return instance;
 }
 
-// UndoRedoSystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UndoRedoSystem::Initialize(EditorContext& context) {
 	// Initialization logic if needed
 }
@@ -479,12 +479,12 @@ void UndoRedoSystem::Shutdown() {
 	m_SavedStateId = m_CurrentStateId;
 }
 
-// UndoRedoSystem::PushCommand is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UndoRedoSystem::PushCommand(std::unique_ptr<ICommand> command) {
 	if (!command) return;
 	// Play-mode edits are transient because Stop restores the pre-play scene
 	// snapshot, so TerraEngine keeps the editor history frozen while running.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ScriptingSystem::Instance().IsRunning()) return;
 
 	TERRAENGINE_LOG(LogLevel::Debug, "Pushing command: " << command->GetName());
@@ -718,7 +718,7 @@ bool UndoRedoSystem::CompleteTerrainReplay(const TerraEngine::Terrain::TerrainTr
 	return true;
 }
 
-// UndoRedoSystem::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UndoRedoSystem::Undo() {
 	if (undoStack.empty()) return;
 	if (ScriptingSystem::Instance().IsRunning()) return;
@@ -755,7 +755,7 @@ void UndoRedoSystem::Undo() {
 	if (committedFailure) std::rethrow_exception(committedFailure);
 }
 
-// UndoRedoSystem::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UndoRedoSystem::Redo() {
 	if (redoStack.empty()) return;
 	if (ScriptingSystem::Instance().IsRunning()) return;
@@ -794,12 +794,12 @@ void UndoRedoSystem::Redo() {
 	if (committedFailure) std::rethrow_exception(committedFailure);
 }
 
-// UndoRedoSystem::CanUndo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool UndoRedoSystem::CanUndo() const {
 	return !ScriptingSystem::Instance().IsRunning() && !m_DeferredReplay && !undoStack.empty();
 }
 
-// UndoRedoSystem::CanRedo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool UndoRedoSystem::CanRedo() const {
 	return !ScriptingSystem::Instance().IsRunning() && !m_DeferredReplay && !redoStack.empty();
 }
@@ -836,13 +836,13 @@ void UndoRedoSystem::PruneToHistoryBudget()
 	}
 }
 
-// UndoRedoSystem::SetSavePoint is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UndoRedoSystem::SetSavePoint() {
 	m_SavedStateId = m_CurrentStateId;
 	UpdateDirtyState();
 }
 
-// UndoRedoSystem::Clear is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UndoRedoSystem::Clear() {
 	undoStack.clear();
 	for(const HistoryEntry& discarded : redoStack) m_HistoryBytes -= discarded.byteCost;
@@ -887,7 +887,7 @@ void UndoRedoSystem::DiscardHistoryDomain(std::string_view domain)
 	}
 }
 
-// UndoRedoSystem::UpdateDirtyState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UndoRedoSystem::UpdateDirtyState() {
 	// The scene is clean only at the exact state persisted by the latest save.
 	// This remains correct across undo, redo, branch replacement, and pruning.

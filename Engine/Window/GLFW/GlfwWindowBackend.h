@@ -24,7 +24,7 @@
 		GlfwWindowBackend();
 		~GlfwWindowBackend() override;
 
-		// BackendName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 		std::string BackendName() const override { return "GLFW"; }
 		void Initialize(const WindowConfig& config) override;
 		void PollEvents() override;

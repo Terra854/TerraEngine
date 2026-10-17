@@ -26,7 +26,7 @@ namespace
 	constexpr std::uint32_t kUastChunkId = MakeFourCC("UAST");
 
 	// Transcode raw UASTC blocks to hardware formats using the low-level API
-	// TranscodeUastc is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool TranscodeUastc(Texture& texture, const std::filesystem::path& path)
 	{
 		if(texture.uastcPayload.empty()) return false;
@@ -89,7 +89,7 @@ namespace
 		}
 
 		const std::uint64_t relativeOffset = fileOffset - payloadBase;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (relativeOffset > payloadSize || requiredSize > payloadSize - relativeOffset || relativeOffset > storage.size() || requiredSize > storage.size() - relativeOffset)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TETF offset overruns payload for " << path);
@@ -113,7 +113,7 @@ namespace
 			return nullptr;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (fileBytes.size() < sizeof(TETFHeader))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TETF file is too small: " << resolvedPath);
@@ -123,21 +123,21 @@ namespace
 		TETFHeader header{};
 		std::memcpy(&header, fileBytes.data(), sizeof(TETFHeader));
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (header.magic != kMagic)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TETF magic mismatch in " << resolvedPath);
 			return nullptr;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (header.version != kVersion)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TETF version mismatch in " << resolvedPath << " (expected " << kVersion << ")");
 			return nullptr;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (header.headerSize < sizeof(TETFHeader) || header.headerSize > fileBytes.size())
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TETF headerSize is invalid for " << resolvedPath);
@@ -145,7 +145,7 @@ namespace
 		}
 
 		const std::uint64_t chunkTableSize = std::uint64_t(header.chunkCount) * sizeof(TETFChunkEntry);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (header.tocOffset < header.headerSize || header.tocOffset > fileBytes.size() || chunkTableSize > fileBytes.size() - header.tocOffset)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TETF chunk table overruns file for " << resolvedPath);
@@ -160,7 +160,7 @@ namespace
 
 		// The preceding subtraction check proves this sum fits owned file bytes.
 		const std::uint64_t payloadBase = header.tocOffset + chunkTableSize;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (payloadBase > fileBytes.size())
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TETF payload base overruns file for " << resolvedPath);
@@ -170,7 +170,7 @@ namespace
 		texture->storage.assign(fileBytes.begin() + static_cast<std::ptrdiff_t>(payloadBase), fileBytes.end());
 
 		const std::size_t payloadSize = texture->storage.size();
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (payloadSize == 0)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TETF payload is empty for " << resolvedPath);
@@ -185,14 +185,14 @@ namespace
 		};
 
 		const TETFChunkEntry* descEntry = findChunkById(kDescChunkId);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!descEntry)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TETF missing DESC chunk in " << resolvedPath);
 			return nullptr;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (descEntry->size < sizeof(TETFDesc))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TETF DESC chunk is too small in " << resolvedPath);
@@ -200,7 +200,7 @@ namespace
 		}
 
 		const std::uint8_t* descPtr = MapPayload(resolvedPath, payloadBase, payloadSize, texture->storage, descEntry->offset, descEntry->size);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!descPtr)
 		{
 			return nullptr;
@@ -214,13 +214,13 @@ namespace
 
 
 		// Load Level Table
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (texture->descriptor.mipCount > 0)
 		{
 			const std::size_t levelTableSize = static_cast<std::size_t>(texture->descriptor.mipCount) * sizeof(TETFLevelEntry);
 			const std::size_t expectedDescSize = sizeof(TETFDesc) + levelTableSize;
 			
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (descEntry->size < expectedDescSize)
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "TETF DESC chunk truncated levelTable in " << resolvedPath);
@@ -240,12 +240,12 @@ namespace
 		if (uastEntry)
 		{
 			const std::uint8_t* uastPtr = MapPayload(resolvedPath, payloadBase, payloadSize, texture->storage, uastEntry->offset, uastEntry->size);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!uastPtr) return nullptr;
 			if (uastPtr)
 			{
 				texture->uastcPayload = std::span<const std::uint8_t>(uastPtr, static_cast<std::size_t>(uastEntry->size));
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (!TranscodeUastc(*texture, resolvedPath))
 				{
 					return nullptr;
@@ -258,24 +258,24 @@ namespace
 			return nullptr;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (texture->descriptor.userMetadataChunk != TETF_INVALID_CHUNK_INDEX && validateChunkIndex(texture->descriptor.userMetadataChunk))
 		{
 			const TETFChunkEntry& metaEntry = texture->chunkTable[texture->descriptor.userMetadataChunk];
 			const std::uint8_t* metaPtr = MapPayload(resolvedPath, payloadBase, payloadSize, texture->storage, metaEntry.offset, metaEntry.size);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (metaPtr)
 			{
 				texture->userMetadata = std::span<const std::uint8_t>(metaPtr, static_cast<std::size_t>(metaEntry.size));
 			}
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (texture->descriptor.thumbnailChunk != TETF_INVALID_CHUNK_INDEX && validateChunkIndex(texture->descriptor.thumbnailChunk))
 		{
 			const TETFChunkEntry& thumbEntry = texture->chunkTable[texture->descriptor.thumbnailChunk];
 			const std::uint8_t* thumbPtr = MapPayload(resolvedPath, payloadBase, payloadSize, texture->storage, thumbEntry.offset, thumbEntry.size);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (thumbPtr)
 			{
 				texture->thumbnail = std::span<const std::uint8_t>(thumbPtr, static_cast<std::size_t>(thumbEntry.size));
@@ -285,7 +285,7 @@ namespace
 		return texture;
 	}
 
-	// IsCompiledTexturePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool IsCompiledTexturePath(const std::filesystem::path& path)
 	{
 		std::string extension = path.extension().generic_string();
@@ -296,7 +296,7 @@ namespace
 	}
 }
 
-// ResourceManager::LoadTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 TerraEngine::UUID ResourceManager::LoadTexture(const std::filesystem::path& path)
 {
 	if (!IsCompiledTexturePath(path))
@@ -316,7 +316,7 @@ TerraEngine::UUID ResourceManager::RegisterTexture(const std::string& cacheKey, 
 	return RegisterGenerated(cacheKey, textureCache, std::move(texture));
 }
 
-// ResourceManager::LoadTextureAsync is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::shared_future<TerraEngine::UUID> ResourceManager::LoadTextureAsync(const std::filesystem::path& path)
 {
 	if (!IsCompiledTexturePath(path))
@@ -330,7 +330,7 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadTextureAsync(const st
 	});
 }
 
-// ResourceManager::ReloadTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::shared_future<TerraEngine::UUID> ResourceManager::ReloadTexturePublicationAsync(const TerraEngine::UUID& id)
 {
 	// Unlike the compatibility void future, this reports the actual accepted

@@ -16,7 +16,7 @@
 
 namespace
 {
-// ApplyOpacity is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 glm::vec4 ApplyOpacity(const glm::vec4& color, float opacity)
 {
 	glm::vec4 tinted = color;
@@ -24,7 +24,7 @@ glm::vec4 ApplyOpacity(const glm::vec4& color, float opacity)
 	return tinted;
 }
 
-// ResolvePaddingOffset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 glm::vec2 ResolvePaddingOffset(const UIStyle& style)
 {
 	if (!style.padding.has_value())
@@ -45,13 +45,13 @@ UIFontAtlas BuildSignedDistanceFontAtlas(const std::vector<unsigned char>& fontB
 	atlas.pixelHeight = pixelHeight;
 
 	stbtt_fontinfo fontInfo{};
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (fontBytes.empty() || stbtt_InitFont(&fontInfo, fontBytes.data(), 0) == 0)
 	{
 		return atlas;
 	}
 
-	// struct PendingGlyph groups related state and operations so callers have one documented contract.
+
 	struct PendingGlyph
 	{
 		char character = 0;
@@ -71,7 +71,7 @@ UIFontAtlas BuildSignedDistanceFontAtlas(const std::vector<unsigned char>& fontB
 	int rowHeight = 0;
 	std::vector<PendingGlyph> pendingGlyphs;
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (int codepoint = 32; codepoint <= 126; ++codepoint)
 	{
 		int width = 0;
@@ -79,7 +79,7 @@ UIFontAtlas BuildSignedDistanceFontAtlas(const std::vector<unsigned char>& fontB
 		int offsetX = 0;
 		int offsetY = 0;
 		unsigned char* sdfBitmap = stbtt_GetCodepointSDF(&fontInfo, scale, codepoint, 6, 128, 64.0f, &width, &height, &offsetX, &offsetY);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (sdfBitmap == nullptr || width <= 0 || height <= 0)
 		{
 			continue;
@@ -98,7 +98,7 @@ UIFontAtlas BuildSignedDistanceFontAtlas(const std::vector<unsigned char>& fontB
 		pendingGlyphs.push_back(std::move(glyph));
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const PendingGlyph& glyph : pendingGlyphs)
 	{
 		if (cursorX + glyph.width + 1 >= atlasWidth)
@@ -120,7 +120,7 @@ UIFontAtlas BuildSignedDistanceFontAtlas(const std::vector<unsigned char>& fontB
 	cursorX = 0;
 	cursorY = 0;
 	rowHeight = 0;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const PendingGlyph& glyph : pendingGlyphs)
 	{
 		if (cursorX + glyph.width + 1 >= atlasWidth)
@@ -130,7 +130,7 @@ UIFontAtlas BuildSignedDistanceFontAtlas(const std::vector<unsigned char>& fontB
 			rowHeight = 0;
 		}
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (int row = 0; row < glyph.height; ++row)
 		{
 			std::memcpy(
@@ -169,7 +169,7 @@ UIRenderBatch UIRenderer::BuildBatch(
 	batch.viewportSize = viewportSize;
 	batch.immediateQuads = immediateQuads;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (root)
 	{
 		CollectDraws(root, batch);
@@ -178,11 +178,11 @@ UIRenderBatch UIRenderer::BuildBatch(
 	return batch;
 }
 
-// UIRenderer::EnsureSignedDistanceFontAtlas is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 const UIFontAtlas& UIRenderer::EnsureSignedDistanceFontAtlas(const std::filesystem::path& fontPath, float pixelHeight) const
 {
 	std::ifstream input(fontPath, std::ios::binary);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!input)
 	{
 		static const UIFontAtlas emptyAtlas{};
@@ -193,13 +193,13 @@ const UIFontAtlas& UIRenderer::EnsureSignedDistanceFontAtlas(const std::filesyst
 	return EnsureSignedDistanceFontAtlasFromBytes(fontPath.generic_string(), fontBytes, pixelHeight);
 }
 
-// UIRenderer::EnsureSignedDistanceFontAtlasFromBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 const UIFontAtlas& UIRenderer::EnsureSignedDistanceFontAtlasFromBytes(const std::string& fontName, const std::vector<unsigned char>& fontBytes, float pixelHeight) const
 {
 	const std::string cacheKey = fontName + "#" + std::to_string(pixelHeight);
 
 	std::lock_guard<std::mutex> lock(fontAtlasMutex_);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (auto existing = fontAtlases_.find(cacheKey); existing != fontAtlases_.end())
 	{
 		return existing->second;
@@ -210,7 +210,7 @@ const UIFontAtlas& UIRenderer::EnsureSignedDistanceFontAtlasFromBytes(const std:
 	return fontAtlases_[cacheKey];
 }
 
-// UIRenderer::CollectDraws is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UIRenderer::CollectDraws(const UIElement::Ptr& element, UIRenderBatch& batch) const
 {
 	if (!element)
@@ -218,7 +218,7 @@ void UIRenderer::CollectDraws(const UIElement::Ptr& element, UIRenderBatch& batc
 		return;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!element->IsVisible())
 	{
 		return;
@@ -229,7 +229,7 @@ void UIRenderer::CollectDraws(const UIElement::Ptr& element, UIRenderBatch& batc
 	const glm::vec2 translate = style.transform.translate.value_or(glm::vec2(0.0f, 0.0f));
 	const float scale = style.transform.scale.value_or(1.0f);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (style.HasRenderableBackground() && element->calculatedSize.x > 0.0f && element->calculatedSize.y > 0.0f)
 	{
 		UIStaticQuad quad;
@@ -240,26 +240,26 @@ void UIRenderer::CollectDraws(const UIElement::Ptr& element, UIRenderBatch& batc
 		batch.staticQuads.push_back(quad);
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if ((element->type == UIElementType::Label || element->type == UIElementType::Button) && !element->text.empty())
 	{
 		batch.textRuns.push_back(BuildTextRun(*element));
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (element->type == UIElementType::Image && !element->source.empty())
 	{
 		batch.imageRuns.push_back(BuildImageRun(*element));
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const UIElement::Ptr& child : element->children)
 	{
 		CollectDraws(child, batch);
 	}
 }
 
-// UIRenderer::BuildTextRun is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 UITextRun UIRenderer::BuildTextRun(const UIElement& element) const
 {
 	UITextRun run;
@@ -274,7 +274,7 @@ UITextRun UIRenderer::BuildTextRun(const UIElement& element) const
 	run.bounds = element.calculatedSize;
 	run.position = element.calculatedPosition + translate + paddingOffset;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (element.type == UIElementType::Button)
 	{
 		const float estimatedWidth = static_cast<float>(element.text.size()) * fontSize * 0.55f;
@@ -285,7 +285,7 @@ UITextRun UIRenderer::BuildTextRun(const UIElement& element) const
 	return run;
 }
 
-// UIRenderer::BuildImageRun is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 UIImageRun UIRenderer::BuildImageRun(const UIElement& element) const
 {
 	UIImageRun run;

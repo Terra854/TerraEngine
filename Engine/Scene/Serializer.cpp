@@ -935,7 +935,7 @@ nlohmann::json SerializeObjectRecursive(Object object) {
 
 	for (auto& [compName, functions] : registry)
 	{
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (compName == "TagComponent") continue; // Skip TagComponent as it's now embedded in Object
 
 		if (functions.entityHasComponent && functions.entityHasComponent(enttRegistry, entity))
@@ -1002,34 +1002,34 @@ nlohmann::json SerializeObjectRecursive(Object object) {
 			}
 			nlohmann::json compJson = nlohmann::json::object();
 			TerraEngine::Reflection::Type type = functions.reflectionType;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (TerraEngine::Reflection::IsValid(type))
 			{
 				// Enumerate all reflected properties and convert their values into
 				// JSON-compatible primitives or arrays.
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 				for (const TerraEngine::Reflection::Property& prop : TerraEngine::Reflection::GetProperties(type))
 				{
 					std::string propName = TerraEngine::Reflection::GetPropertyName(prop);
 					TerraEngine::Reflection::Variant val = functions.entityGetter(enttRegistry, entity, propName);
 					
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 					if (TerraEngine::Reflection::IsType<float>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<float>(val);
 					else if (TerraEngine::Reflection::IsType<int>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<int>(val);
 					else if (TerraEngine::Reflection::IsType<std::uint32_t>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<std::uint32_t>(val);
 					else if (TerraEngine::Reflection::IsType<bool>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<bool>(val);
 					else if (TerraEngine::Reflection::IsType<std::string>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<std::string>(val);
-					// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 					else if (TerraEngine::Reflection::IsType<glm::vec3>(val)) {
 						auto v = TerraEngine::Reflection::GetValue<glm::vec3>(val);
 						compJson[propName] = {v.x, v.y, v.z};
 					}
-					// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 					else if (TerraEngine::Reflection::IsType<glm::quat>(val)) {
 						auto q = TerraEngine::Reflection::GetValue<glm::quat>(val);
 						compJson[propName] = {q.w, q.x, q.y, q.z};
 					}
-					// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 					else if (TerraEngine::Reflection::IsType<TerraEngine::UUID>(val)) {
 						auto uuid = TerraEngine::Reflection::GetValue<TerraEngine::UUID>(val);
 						compJson[propName] = TerraEngine::ToHexString(uuid);
@@ -1041,7 +1041,7 @@ nlohmann::json SerializeObjectRecursive(Object object) {
 	}
 	
 	auto children = objManager.getChildren(object);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!children.empty()) {
 		objJson["children"] = nlohmann::json::array();
 		for (Object child : children) {
@@ -1051,7 +1051,7 @@ nlohmann::json SerializeObjectRecursive(Object object) {
 	return objJson;
 }
 
-// Serializer::SerializeObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 nlohmann::json Serializer::SerializeObject(entt::entity entity) {
 	// Acquire an exclusive lock once for the entire graph to ensure a consistent
 	// snapshot while the recursion proceeds without further locking.
@@ -1067,7 +1067,7 @@ nlohmann::json Serializer::SerializeObject(Object& obj) {
 	return SerializeObject(obj.EntityId());
 }
 
-// Serializer::SerializeSceneRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 nlohmann::json Serializer::SerializeSceneRenderSettings(const SceneRenderSettings& settings)
 {
 	const SceneRenderSettings sanitizedSettings = SanitizeSceneRenderSettings(settings);
@@ -1081,11 +1081,11 @@ nlohmann::json Serializer::SerializeSceneRenderSettings(const SceneRenderSetting
 	return sceneSettingsJson;
 }
 
-// Serializer::DeserializeSceneRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 SceneRenderSettings Serializer::DeserializeSceneRenderSettings(const nlohmann::json& json)
 {
 	SceneRenderSettings settings = MakeDefaultSceneRenderSettings();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!json.is_object())
 	{
 		return settings;
@@ -1481,20 +1481,20 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 	TerraEngine::UUID uuid = TerraEngine::GenerateUUID();
 	bool hasUuid = false;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (json.contains("uuid")) {
 		auto& uuidVal = json["uuid"];
 		if (uuidVal.is_string()) {
 			auto parsed = TerraEngine::ParseUUID(uuidVal.get<std::string>());
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (parsed) {
 				uuid = *parsed;
 				hasUuid = true;
 			}
 		}
-		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 		else if (uuidVal.is_array() && uuidVal.size() == 16) {
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 			for (int i = 0; i < 16; ++i) uuid[i] = uuidVal[i].get<uint8_t>();
 			hasUuid = true;
 		}
@@ -1503,7 +1503,7 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 	Object obj = objManager.createObject(name);
 	const entt::entity entity = obj.EntityId();
 	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (hasUuid) {
 		// Force the newly created object to use the original identity from the
 		// JSON document instead of its automatically generated transient UUID.
@@ -1515,7 +1515,7 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 	objManager.setObjectActive(obj, json.value("active", true));
 	objManager.setObjectStatic(obj, json.value("isStatic", false));
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (parent) {
 		if (std::optional<Object> parentObject = objManager.getObject(*parent))
 		{
@@ -1523,12 +1523,12 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (json.contains("components")) {
 		std::lock_guard lock(ComponentAccessRegistryMutex());
 		auto& registry = ComponentAccessRegistry();
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (auto& [compName, compData] : json["components"].items()) {
 
 			if (registry.count(compName)) {
@@ -1597,15 +1597,15 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 				}
 
 					TerraEngine::Reflection::Type type = functions.reflectionType;
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (TerraEngine::Reflection::IsValid(type)) {
-					// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 					for (auto& [propName, propVal] : compData.items()) {
 						TerraEngine::Reflection::Property prop = TerraEngine::Reflection::FindProperty(type, propName);
 						if (TerraEngine::Reflection::IsValid(prop)) {
 							TerraEngine::Reflection::Variant val;
 							// Heuristic-based type reconstruction for JSON variants.
-							// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 							if (propVal.is_number_float()) val = propVal.get<float>();
 							else if (propVal.is_number_integer()) {
 								if (TerraEngine::Reflection::IsType<std::uint32_t>(TerraEngine::Reflection::GetPropertyType(prop))) {
@@ -1615,9 +1615,9 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 								}
 							}
 							else if (propVal.is_boolean()) val = propVal.get<bool>();
-							// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 							else if (propVal.is_string()) {
-								// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 								if (TerraEngine::Reflection::IsType<TerraEngine::UUID>(TerraEngine::Reflection::GetPropertyType(prop))) {
 									auto parsed = TerraEngine::ParseUUID(propVal.get<std::string>());
 									if (parsed) val = *parsed;
@@ -1625,25 +1625,25 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 									val = propVal.get<std::string>();
 								}
 							}
-							// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 							else if (propVal.is_array()) {
-								// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 								if (propVal.size() == 3) {
 									val = glm::vec3(propVal[0], propVal[1], propVal[2]);
 								} else if (propVal.size() == 4) {
-									// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 									if (TerraEngine::Reflection::IsType<glm::quat>(TerraEngine::Reflection::GetPropertyType(prop))) {
 										val = glm::quat(propVal[0], propVal[1], propVal[2], propVal[3]); // w, x, y, z
 									}
 								} else if (propVal.size() == 16 && TerraEngine::Reflection::IsType<TerraEngine::UUID>(TerraEngine::Reflection::GetPropertyType(prop))) {
 									TerraEngine::UUID u;
-									// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 									for(int i=0; i<16; ++i) u[i] = propVal[i].get<uint8_t>();
 									val = u;
 								}
 							}
 							
-							// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 							if (TerraEngine::Reflection::IsValid(val)) {
 								functions.entitySetter(enttRegistry, entity, propName, val);
 							}
@@ -1655,7 +1655,7 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 	}
 
 	// Recurse to build out the full hierarchy as defined in the source JSON.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (json.contains("children") && json["children"].is_array()) {
 		for (auto& childJson : json["children"]) {
 			DeserializeObjectEntity(childJson, entity);

@@ -6,16 +6,90 @@
 #include "Core/Memory/MemoryStrategy.h"
 #include "Core/Memory/ReusableArenaResource.h"
 #include "Core/Memory/TrackingMemoryResource.h"
+#include "Runtime/CorrectnessTestSupport.h"
+#include "ThreadPool/ThreadPool.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <memory>
 #include <memory_resource>
+#include <set>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace TerraEngine::Tests {
 	namespace {
+		// Each fixture owns its counters, so later worker jobs can exercise separate
+		// pools without making either the pool or its value type shared mutable state.
+		struct PoolOwnershipValue {
+			std::size_t* destructions;
+			std::uint64_t value;
+			std::uint64_t padding = 0;
+			PoolOwnershipValue(std::size_t& counter, std::uint64_t supplied)
+				: destructions(&counter), value(supplied) {}
+			~PoolOwnershipValue() { ++*destructions; }
+		};
+
+		struct alignas(128) AlignedPoolValue {
+			std::size_t* destructions;
+			std::uint64_t value;
+			AlignedPoolValue(std::size_t& counter, std::uint64_t supplied)
+				: destructions(&counter), value(supplied) {}
+			~AlignedPoolValue() { ++*destructions; }
+		};
+
+		struct PoolJobObservation {
+			std::thread::id thread;
+			std::size_t destructions;
+			std::size_t rejections;
+		};
+
+		PoolJobObservation ExerciseIndependentPool()
+		{
+			// The pool, values, counters and assertions all belong to this one job.
+			// Parallel coverage does not grant concurrent access to a shared pool.
+			TestContext context;
+			std::size_t destructions = 0U;
+			std::size_t foreignDestructions = 0U;
+			std::size_t rejections = 0U;
+			PoolOwnershipValue foreign(foreignDestructions, 991U);
+			Memory::FixedBlockPool<PoolOwnershipValue, 2U> pool;
+			for (std::size_t cycle = 0U; cycle < 256U; ++cycle) {
+				auto* first = pool.Create(destructions, cycle);
+				auto* neighbor = pool.Create(destructions, cycle + 1U);
+				context.Expect(first && neighbor, "each isolated cycle must retain both fixed slots");
+				auto* interior = reinterpret_cast<PoolOwnershipValue*>(&first->value);
+				for (auto* candidate : { static_cast<PoolOwnershipValue*>(nullptr), &foreign, interior }) {
+					context.Expect(!pool.Destroy(candidate) && destructions == cycle * 3U
+						&& foreignDestructions == 0U && pool.Size() == 2U && pool.HighWater() == 2U
+						&& first->value == cycle && neighbor->value == cycle + 1U,
+						"invalid destruction must preserve this job's complete live state");
+					++rejections;
+				}
+				context.Expect(pool.Destroy(first) && destructions == cycle * 3U + 1U,
+					"each cycle must destroy its first owned lifetime once");
+				for (unsigned repeat = 0U; repeat < 2U; ++repeat) {
+					context.Expect(!pool.Destroy(first) && destructions == cycle * 3U + 1U
+						&& pool.Size() == 1U && pool.HighWater() == 2U && neighbor->value == cycle + 1U,
+						"unoccupied rejection must leave the neighbor and reusable slot intact");
+					++rejections;
+				}
+				auto* replacement = pool.Create(destructions, cycle + 2U);
+				context.Expect(replacement == first && replacement->value == cycle + 2U
+					&& pool.Create(destructions, 0U) == nullptr,
+					"reuse must return exactly the freed slot without increasing capacity");
+				pool.Clear();
+				pool.Clear();
+				context.Expect(destructions == (cycle + 1U) * 3U && pool.Size() == 0U
+					&& pool.HighWater() == 2U && foreignDestructions == 0U,
+					"clear must settle each successful lifetime exactly once before the next cycle");
+			}
+			return { std::this_thread::get_id(), destructions, rejections };
+		}
+
 		// Lifetime counters belong to completed objects. The red-state guard below
 		// prevents cleanup from touching a slot whose construction did not complete.
 		struct ThrowingPoolValue {
@@ -158,6 +232,121 @@ namespace TerraEngine::Tests {
 			context.Expect(destroyed && reused == first && *reused == 14U
 					&& pool.Size() == 2U && pool.HighWater() == 2U,
 				"destroyed blocks must be reused without changing the fixed bound");
+		});
+
+		registry.Add("Engine.Memory.FixedPoolRejectsForeignLiveStorageWithoutMutation", [](TestContext& context) {
+			std::size_t destructions = 0;
+			FixedBlockPool<PoolOwnershipValue, 3U> pool;
+			auto* first = pool.Create(destructions, 11U);
+			auto* second = pool.Create(destructions, 22U);
+			PoolOwnershipValue stack(destructions, 33U);
+			auto heap = std::make_unique<PoolOwnershipValue>(destructions, 44U);
+			FixedBlockPool<PoolOwnershipValue, 1U> other;
+			auto* otherValue = other.Create(destructions, 55U);
+			context.Expect(first && second && otherValue, "fixture allocations must succeed");
+			// Foreign storage remains alive throughout every call. These cases expose
+			// the contract, but runtime success alone cannot prove the old unrelated
+			// pointer subtraction was defined; source review also verifies its removal.
+			for (auto* candidate : { static_cast<PoolOwnershipValue*>(nullptr), &stack, heap.get(), otherValue }) {
+				context.Expect(!pool.Destroy(candidate) && destructions == 0U
+					&& pool.Size() == 2U && pool.HighWater() == 2U
+					&& first->value == 11U && second->value == 22U
+					&& stack.value == 33U && heap->value == 44U && otherValue->value == 55U,
+					"foreign rejection must preserve every live value, destructor count and pool observation");
+			}
+			auto* third = pool.Create(destructions, 66U);
+			context.Expect(third && third != first && third != second && pool.Create(destructions, 77U) == nullptr,
+				"rejected foreign values must not consume or duplicate the remaining free slot");
+		});
+
+		registry.Add("Engine.Memory.FixedPoolRejectsInteriorAndUnoccupiedSlots", [](TestContext& context) {
+			std::size_t destructions = 0;
+			FixedBlockPool<PoolOwnershipValue, 2U> pool;
+			auto* first = pool.Create(destructions, 71U);
+			auto* neighbor = pool.Create(destructions, 72U);
+			context.Expect(first && neighbor, "fixture allocations must succeed");
+			// Convert an aligned member address inside live storage only for equality
+			// comparison. It is never dereferenced as a PoolOwnershipValue object.
+			auto* interior = reinterpret_cast<PoolOwnershipValue*>(&first->value);
+			context.Expect(!pool.Destroy(interior) && destructions == 0U && pool.Size() == 2U
+				&& pool.HighWater() == 2U && first->value == 71U && neighbor->value == 72U,
+				"an interior address must not authorize destruction or alter its neighbor");
+			context.Expect(pool.Destroy(first) && destructions == 1U, "a live owned object must be destroyed once");
+			context.Expect(!pool.Destroy(first) && !pool.Destroy(first) && destructions == 1U
+				&& pool.Size() == 1U && pool.HighWater() == 2U && neighbor->value == 72U,
+				"an unoccupied slot must reject repeated destruction before reuse");
+			auto* reused = pool.Create(destructions, 73U);
+			context.Expect(reused == first && reused->value == 73U && pool.Size() == 2U
+				&& pool.Create(destructions, 74U) == nullptr,
+				"rejection must leave precisely one reusable slot without duplicating its free-list entry");
+		});
+
+		registry.Add("Engine.Memory.FixedPoolHandlesZeroCapacityAndOverAlignedValues", [](TestContext& context) {
+			std::size_t destructions = 0;
+			AlignedPoolValue foreign(destructions, 9U);
+			FixedBlockPool<AlignedPoolValue, 0U> empty;
+			context.Expect(empty.Create(destructions, 1U) == nullptr && !empty.Destroy(nullptr)
+				&& !empty.Destroy(&foreign) && empty.Size() == 0U && empty.HighWater() == 0U,
+				"zero capacity must reject creation and destruction without accessing nonexistent slots");
+			FixedBlockPool<AlignedPoolValue, 2U> pool;
+			auto* first = pool.Create(destructions, 81U);
+			auto* second = pool.Create(destructions, 82U);
+			context.Expect(first && second && reinterpret_cast<std::uintptr_t>(first) % alignof(AlignedPoolValue) == 0U
+				&& reinterpret_cast<std::uintptr_t>(second) % alignof(AlignedPoolValue) == 0U,
+				"every slot must honor the value type's extended alignment");
+			context.Expect(!pool.Destroy(&foreign) && destructions == 0U && pool.Destroy(first)
+				&& destructions == 1U && second->value == 82U && pool.HighWater() == 2U,
+				"aligned foreign rejection and owned destruction must preserve live neighbors and high-water");
+			pool.Clear();
+			pool.Clear();
+			context.Expect(destructions == 2U && pool.Size() == 0U && pool.HighWater() == 2U,
+				"repeated clear must destroy only the two owned values and retain pressure history");
+		});
+
+		registry.Add("Engine.Memory.FixedPoolIndependentJobsPreserveReuseAtActualWorkerCounts", [](TestContext& context) {
+			for (const std::size_t requestedWorkers : { 1U, 2U, 8U }) {
+				// Owned capacity leaves the engine's frame executor unchanged. The gate
+				// cancels before executor destruction on every assertion/exception exit.
+				auto executor = ThreadPool::CreateOwned(requestedWorkers);
+				Correctness::ControlledGate gate;
+				std::vector<std::shared_ptr<Task<PoolJobObservation>>> tasks;
+				std::vector<std::future<PoolJobObservation>> results;
+				context.Expect(executor->getThreadCount() == requestedWorkers,
+					"actual owned worker capacity must match the requested 1/2/8 lane");
+				for (std::size_t job = 0U; job < requestedWorkers; ++job) {
+					auto task = executor->createTask([wait = gate.MakeWaiter()] {
+						if (wait() != Correctness::GateResult::Released)
+							throw std::runtime_error("isolated pool job did not receive its start release");
+						return ExerciseIndependentPool();
+					});
+					results.push_back(task->getFuture());
+					tasks.push_back(task);
+					executor->enqueue(task);
+				}
+				// Each job holds a worker at this gate. N arrivals therefore prove N
+				// distinct workers actually ran, rather than merely requesting capacity.
+				context.Expect(gate.WaitForArrivals(requestedWorkers), "every configured worker must enter a real pool job");
+				gate.Release();
+				std::set<std::thread::id> observedThreads;
+				std::size_t destructions = 0U;
+				std::size_t rejections = 0U;
+				for (auto& result : results) {
+					context.Expect(result.wait_for(Correctness::kDefaultTimeout) == std::future_status::ready,
+						"each finite isolated pool job must settle before evidence is collected");
+					const auto observation = result.get();
+					observedThreads.insert(observation.thread);
+					destructions += observation.destructions;
+					rejections += observation.rejections;
+				}
+				executor->shutdown();
+				context.Expect(observedThreads.size() == requestedWorkers
+					&& destructions == requestedWorkers * 256U * 3U
+					&& rejections == requestedWorkers * 256U * 5U && executor->getThreadCount() == 0U,
+					"all actual workers must finish independent reuse/rejection cycles before physical drain");
+				std::cout << "POOL_OWNERSHIP_OBSERVATION {\"actualWorkers\":" << observedThreads.size()
+					<< ",\"cyclesPerJob\":256,\"destructions\":" << destructions
+					<< ",\"rejections\":" << rejections << "}\n";
+			}
 		});
 
 		registry.Add("Engine.RuntimeMemorySafety.Allocators.FixedPool.ConstructorFailureReturnsSlot", [](TestContext& context) {

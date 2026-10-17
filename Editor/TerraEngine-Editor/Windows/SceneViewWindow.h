@@ -30,7 +30,7 @@
 
 class MainEditorSubsystem;
 
-// class SceneViewWindow groups related state and operations so callers have one documented contract.
+
 class SceneViewWindow : public EditorWindow {
 public:
 	SceneViewWindow(MainEditorSubsystem* owner);

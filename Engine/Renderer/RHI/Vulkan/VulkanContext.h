@@ -15,6 +15,7 @@
 
 #include "VulkanPresentationLifecycle.h"
 #include "VulkanEmptyFramePolicy.h"
+#include "VulkanReadbackValidation.h"
 
 class TERRAENGINE_API VulkanContext : public RHIContext
 {
@@ -24,7 +25,7 @@ public:
 
 	void Initialize(WindowSystem& windowSystem) override;
 	void BeginFrame() override;
-	// RenderFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void RenderFrame(std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> publication, std::uint32_t viewIndex) override;
 	void EndFrame() override;
 	void SetGlobalTaskShaderCullingEnabled(bool enabled) override;
@@ -33,6 +34,18 @@ public:
 		std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> publication) override;
 	TerraEngine::Renderer::RenderCaptureResult ReadbackCapture(const TerraEngine::Renderer::RenderCaptureRequest& request) override;
 	std::vector<TerraEngine::Renderer::RenderCaptureResult> PollCaptureReadbacks() override;
+	TerraEngine::Renderer::CaptureReadbackOwnership GetCaptureReadbackOwnership(std::string_view requestId) const override;
+	bool IsShutdownComplete() const override;
+	// Quiescent native validation only; these return unsupported in production
+	// builds and are deliberately absent from editor/MCP command dispatch.
+	bool ArmReadbackLifetimeGate(std::string_view requestId);
+	// Inject one C++ allocation failure at the real completed-payload allocation
+	// checkpoint. Requires this same native validation gate before submission.
+	bool ArmReadbackPayloadAllocationFailure(std::string_view requestId);
+	bool ReleaseReadbackLifetimeGate();
+	TerraEngine::Renderer::Vulkan::ReadbackLifetimeValidationSnapshot GetReadbackLifetimeValidationSnapshot() const;
+	// Four bounded slots admit scene/game x ordinary/dedicated selectors at
+	// once. Additional pending work returns false; drain results before retrying.
 	bool QueueConventionalVisibilityIdentityReadback(
 		const TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackRequest& request) override;
 	std::optional<TerraEngine::Renderer::ConventionalVisibilityIdentityTargetMetadata>
@@ -99,7 +112,7 @@ public:
 
 
 	// Editor / ImGui Integration
-	// struct EditorHandles groups related state and operations so callers have one documented contract.
+
 	struct EditorHandles {
 		void* instance = nullptr;
 		void* physicalDevice = nullptr;
@@ -147,7 +160,7 @@ private:
 	// hand-off from drifting away from the immutable publication root.
 	bool ConsumePublishedWorkPlans(
 		const TerraEngine::Renderer::RenderBackendWorkPublication& plan);
-	// struct Impl groups related state and operations so callers have one documented contract.
+
 	struct Impl;
 	std::unique_ptr<Impl> impl;
 	bool efficiencyDeviceRecreationPrepared = false;

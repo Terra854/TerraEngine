@@ -1,4 +1,6 @@
 #include "TestHarness.h"
+#include <string_view>
+#include <iterator>
 #include "VulkanSourceTestUtils.h"
 
 #include "RendererThreadingTestFixtures.h"
@@ -20,6 +22,71 @@
 #include <string>
 
 namespace TerraEngine::Tests {
+	namespace {
+
+		// Required reads and lexical definition bounds fail before any token or
+		// ordering assertion can accidentally accept an empty/missing region.
+		std::string RequiredSource(TestContext& context, const char* path)
+		{
+			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / path, std::ios::binary);
+			context.Expect(input.good(), "Required source-contract input must be readable.");
+			context.Expect(input.good(), std::string("Required source is unreadable: ") + path);
+			std::string text((std::istreambuf_iterator<char>(input)), {});
+			context.Expect(!text.empty(), std::string("Required source is empty: ") + path);
+			text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+			return text;
+		}
+		std::string RequiredDefinition(TestContext& context, const char* path, std::string_view signature)
+		{
+			const auto text = RequiredSource(context, path);
+			const auto start = text.find(signature);
+			context.Expect(start != std::string::npos, std::string("Required definition is absent: ") + std::string(signature));
+			const auto open = text.find('{', start + signature.size());
+			context.Expect(open != std::string::npos, "Required definition has no opening body.");
+			std::size_t depth = 0;
+			bool lineComment = false, blockComment = false, quoted = false, character = false, escape = false;
+			for(std::size_t index = open; index < text.size(); ++index)
+			{
+				const char value = text[index], next = index + 1 < text.size() ? text[index + 1] : '\0';
+				if(lineComment) { if(value == '\n') lineComment = false; continue; }
+				if(blockComment) { if(value == '*' && next == '/') { blockComment = false; ++index; } continue; }
+				if(quoted || character) {
+					if(escape) { escape = false; continue; }
+					if(value == '\\') { escape = true; continue; }
+					if((quoted && value == '"') || (character && value == '\'')) quoted = character = false;
+					continue;
+				}
+				if(value == '/' && next == '/') { lineComment = true; ++index; continue; }
+				if(value == '/' && next == '*') { blockComment = true; ++index; continue; }
+				if(value == '"') { quoted = true; continue; }
+				if(value == '\'') { character = true; continue; }
+				if(value == '{') ++depth;
+				if(value == '}' && --depth == 0) return text.substr(start, index + 1 - start);
+			}
+			context.Expect(false, "Required definition has no balanced closing body.");
+			return {};
+		}
+
+		std::string RequiredVulkanContext(TestContext& context)
+		{
+			for(const char* file : {"VulkanContext.cpp", "VulkanContextSource.h", "VulkanBuiltinPasses.cpp", "VulkanEditorRendering.cpp", "VulkanFrameRendering.cpp", "VulkanFrameSubmission.cpp", "VulkanPostProcessing.cpp", "VulkanReadback.cpp"})
+				RequiredSource(context, (std::string("Engine/Renderer/RHI/Vulkan/") + file).c_str());
+			return VulkanSourceContracts::ReadContextSources();
+		}
+		std::string RequiredVulkanResources(TestContext& context)
+		{
+			for(const char* file : {"VulkanContextResources.cpp", "VulkanResourceSource.h", "VulkanAnimationResources.cpp", "VulkanVirtualGeometryResources.cpp", "VulkanPipelineResources.cpp", "VulkanGlobalResources.cpp", "VulkanLightingResources.cpp", "VulkanGpuDiagnostics.cpp"})
+				RequiredSource(context, (std::string("Engine/Renderer/RHI/Vulkan/") + file).c_str());
+			return VulkanSourceContracts::ReadResourceSources();
+		}
+		bool SourceBefore(const std::string& text, std::string_view first, std::string_view second)
+		{
+			const auto a = text.find(first), b = text.find(second);
+			return a != std::string::npos && b != std::string::npos && a < b;
+		}
+
+	}
+
 
 	void RegisterVulkanRecordingSchedulingTests(TestRegistry& registry)
 	{
@@ -88,9 +155,10 @@ namespace TerraEngine::Tests {
 			const std::filesystem::path implPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContextImpl.h";
 			std::ifstream implStream(implPath, std::ios::binary);
+			context.Expect(implStream.good(), "Required source-contract input must be readable.");
 			const std::string implementation{ std::istreambuf_iterator<char>(implStream), {} };
-			const std::string resources = VulkanSourceContracts::ReadResourceSources();
-			const std::string contextSource = VulkanSourceContracts::ReadContextSources();
+			const std::string resources = RequiredVulkanResources(context);
+			const std::string contextSource = RequiredVulkanContext(context);
 
 			// Host-visible frame resources are updated every frame. Keeping their VMA
 			// allocations mapped removes repeated driver bookkeeping, while every path
@@ -202,7 +270,7 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Renderer.VulkanRecording.HiZReusesSealedVisibilitySignature", [](TestContext& context) {
-			const std::string source = VulkanSourceContracts::ReadContextSources();
+			const std::string source = RequiredVulkanContext(context);
 
 			// A sealed visibility result has already visited every command and folded
 			// world, resource, route, LOD, and view identity into one signature. Vulkan
@@ -279,13 +347,7 @@ namespace TerraEngine::Tests {
 			// Vulkan BeginFrame retires the reused slot and deliberately clears its
 			// pending animation plan. Freeze the coordinator call order so a future
 			// refactor cannot silently erase newly published compute work again.
-			const std::filesystem::path sourcePath =
-				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-					/ "Engine" / "Renderer" / "RenderSystem.cpp";
-			std::ifstream sourceStream(sourcePath, std::ios::binary);
-			const std::string source{
-				std::istreambuf_iterator<char>(sourceStream),
-				std::istreambuf_iterator<char>()};
+			const auto source = RequiredDefinition(context, "Engine/Renderer/Frame/RenderBackendCommit.cpp", "RenderSystem::CommitFrameBackend(");
 			const std::size_t beginFrame = source.find("rhi->BeginFrame();");
 			const std::size_t consumePlan = source.find(
 				"rhi->ConsumeRenderFramePublication(renderFramePublicationStore.Load())");
@@ -447,59 +509,56 @@ namespace TerraEngine::Tests {
 			context.Expect(!empty.authoritative && empty.identity == glm::uvec4(0u),
 				"A zero uint4 identity must never be presented as an authoritative GPU pick.");
 
-			const std::string source = VulkanSourceContracts::ReadContextSources();
+			const std::string source = RequiredVulkanContext(context);
 			context.Expect(source.find("inFlightConventionalVisibilityIdentityReadbacks") != std::string::npos
 				&& source.find("vkGetFenceStatus") != std::string::npos
 				&& source.find("Identity pixel was zero") != std::string::npos,
 				"The Vulkan identity path must publish only fence-completed, nonzero typed pixels.");
-			const std::filesystem::path renderSystemSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RenderSystem.cpp";
-			std::ifstream renderSystemStream(renderSystemSource, std::ios::binary);
-			const std::string renderSystem{ std::istreambuf_iterator<char>(renderSystemStream), {} };
+			const auto renderSystem = RequiredDefinition(context, "Engine/Renderer/RenderSystemCapture.cpp", "RenderSystem::DrainConventionalVisibilityIdentityReadbacks(");
 			context.Expect(renderSystem.find("candidate.payloadDescriptorIndex == result.identity.z") != std::string::npos
 				&& renderSystem.find("latestSceneAuthoritativeIdentityPick") != std::string::npos,
 				"RenderSystem must map a completed identity only to its immutable packet descriptor record.");
 		});
 
 		registry.Add("Renderer.VulkanRecording.CleanupDestroysGroupedInstanceStreams", [](TestContext& context) {
-			const std::filesystem::path initializationSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContextInit.cpp";
-			std::ifstream initializationStream(initializationSource, std::ios::binary);
-			const std::string initialization{ std::istreambuf_iterator<char>(initializationStream), {} };
+			const auto initialization = RequiredDefinition(context, "Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp", "VulkanContext::Impl::Cleanup(");
+
 
 			// The reusable streams are allocated once per frame slot. This source
 			// contract prevents shutdown from reaching vkDestroyDevice with those
 			// VMA allocations still alive after repeated static-scene submissions.
-			const std::size_t cleanup = initialization.find("void VulkanContext::Impl::Cleanup(bool skipDeviceIdle)");
+			const std::size_t cleanup = initialization.find("VulkanContext::Impl::Cleanup(bool skipDeviceIdle)");
 			const std::size_t groupedStreams = initialization.find("for (VulkanBuffer& buffer : groupedInstanceBuffers)", cleanup);
 			const std::size_t vmaTeardown = initialization.find("vmaDestroyAllocator", cleanup);
-			context.Expect(cleanup != std::string::npos
-				&& groupedStreams != std::string::npos
-				&& groupedStreams < vmaTeardown
-				&& initialization.find("DestroyBufferImmediate(buffer);", groupedStreams) != std::string::npos
-				&& initialization.find("groupedInstanceCapacities.fill(0u);", groupedStreams) != std::string::npos
-				&& initialization.find("groupedInstanceBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;", groupedStreams) != std::string::npos,
+			context.Expect(cleanup != std::string::npos && groupedStreams != std::string::npos
+				&& vmaTeardown != std::string::npos && groupedStreams < vmaTeardown,
+				"Cleanup must contain ordered grouped-stream and VMA teardown regions.");
+			const auto grouped = initialization.substr(groupedStreams, vmaTeardown - groupedStreams);
+			context.Expect(grouped.find("DestroyBufferImmediate(buffer);") != std::string::npos
+				&& grouped.find("groupedInstanceCapacities.fill(0u);") != std::string::npos
+				&& grouped.find("groupedInstanceBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;") != std::string::npos,
 				"Vulkan cleanup must release every grouped instance stream before VMA/device teardown.");
+
 		});
 
 		registry.Add("Renderer.VulkanRecording.CaptureIdentityExcludesShadowOffscreenOutputs", [](TestContext& context) {
-			const std::string vulkanContext =
-				VulkanSourceContracts::ReadContextSources();
+			const auto vulkanContext = RequiredDefinition(context, "Engine/Renderer/RHI/Vulkan/VulkanFrameRendering.cpp", "VulkanContext::RenderFrame(");
+
 
 			// Shadow diagnostics share the OffscreenTexture classification, but they
 			// do not own the dedicated MCP capture framebuffer or its identity image.
 			const std::size_t captureSelection = vulkanContext.find(
 				"const bool renderingDedicatedCaptureTarget =");
 			const std::size_t captureSelectionEnd = vulkanContext.find(
-				"// Normal runtime views require an acquired swapchain image.",
+				"VkExtent2D requestedCaptureExtent",
 				captureSelection);
 			const std::string capturePredicate = captureSelection != std::string::npos
 				&& captureSelectionEnd != std::string::npos
 				? vulkanContext.substr(captureSelection,
 					captureSelectionEnd - captureSelection)
 				: std::string{};
-			context.Expect(
-				capturePredicate.find(
+			context.Expect(!capturePredicate.empty()
+				&& capturePredicate.find(
 					"outputRequest.kind == RenderOutputKind::OffscreenTexture")
 					!= std::string::npos
 				&& capturePredicate.find(
@@ -516,10 +575,11 @@ namespace TerraEngine::Tests {
 
 		registry.Add("Renderer.VulkanRecording.ConventionalIdentityBlendRequiresIndependentBlend", [](TestContext& context) {
 			const std::string vulkanContext =
-				VulkanSourceContracts::ReadContextSources();
+				RequiredVulkanContext(context);
 			const std::filesystem::path initializationSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContextInit.cpp";
 			std::ifstream initializationStream(initializationSource, std::ios::binary);
+			context.Expect(initializationStream.good(), "Required source-contract input must be readable.");
 			const std::string initialization{ std::istreambuf_iterator<char>(initializationStream), {} };
 
 			// Target0-only pipelines deliberately differ from the integer identity
@@ -539,9 +599,9 @@ namespace TerraEngine::Tests {
 
 		registry.Add("Renderer.VulkanRecording.PrimaryCommandBuffersSubmitOncePerFrameSlot", [](TestContext& context) {
 			const std::string vulkanContext =
-				VulkanSourceContracts::ReadContextSources();
+				RequiredVulkanContext(context);
 			const std::string resources =
-				VulkanSourceContracts::ReadResourceSources();
+				RequiredVulkanResources(context);
 			// The marker is set after queue submission and cleared only when the
 			// owning frame slot becomes reusable. Descriptor-mutation prefix
 			// submissions must use the same ownership marker because asset
@@ -636,7 +696,7 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Renderer.VulkanRecording.StatsKeepPublicationAndCaptureProvenanceSeparate", [](TestContext& context) {
-			const std::string source = VulkanSourceContracts::ReadContextSources();
+			const std::string source = RequiredVulkanContext(context);
 
 			// Game and capture share a camera type but not an output target. Capture-
 			// only tools still need renderer counters, so the delayed snapshot carries
@@ -665,18 +725,18 @@ namespace TerraEngine::Tests {
 				/ "Engine" / "Shaders" / "Default" / "Default.mesh.hlsl";
 			const std::filesystem::path fragmentShaderPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine" / "Shaders" / "Default" / "Default.frag.hlsl";
-			const std::filesystem::path renderSystemPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RenderSystem.cpp";
 			std::ifstream taskStream(taskShaderPath, std::ios::binary);
+			context.Expect(taskStream.good(), "Required source-contract input must be readable.");
 			std::ifstream meshStream(meshShaderPath, std::ios::binary);
+			context.Expect(meshStream.good(), "Required source-contract input must be readable.");
 			std::ifstream fragmentStream(fragmentShaderPath, std::ios::binary);
-			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
+			context.Expect(fragmentStream.good(), "Required source-contract input must be readable.");
 			const std::string taskShader{ std::istreambuf_iterator<char>(taskStream), {} };
 			const std::string meshShader{ std::istreambuf_iterator<char>(meshStream), {} };
 			const std::string fragmentShader{ std::istreambuf_iterator<char>(fragmentStream), {} };
-			const std::string renderSystem{ std::istreambuf_iterator<char>(renderSystemStream), {} };
-			const std::string resources = VulkanSourceContracts::ReadResourceSources();
-			const std::string vulkan = VulkanSourceContracts::ReadContextSources();
+			const auto renderSystem = RequiredDefinition(context, "Engine/Renderer/RenderSystem.cpp", "RenderSystem::RequestConventionalVisibilityIdentityPick(");
+			const std::string resources = RequiredVulkanResources(context);
+			const std::string vulkan = RequiredVulkanContext(context);
 
 			// Later groups have a nonzero firstInstance. Their task payload must be
 			// validated against the complete stream, not only the local group count,
@@ -713,8 +773,9 @@ namespace TerraEngine::Tests {
 		registry.Add("Renderer.VulkanRecording.ComputeRasterPreservesPickingIdentity", [](TestContext& context) {
 			// Source-contract coverage spans the CPU packet and shared shader ABI;
 			// the installed-editor click check additionally verifies actual readback.
-			const auto read = [](const char* path) {
+			const auto read = [&](const char* path) {
 				std::ifstream stream(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / path, std::ios::binary);
+			context.Expect(stream.good(), "Required source-contract input must be readable.");
 				return std::string(std::istreambuf_iterator<char>(stream), {});
 			};
 			const auto resources = read("Engine/Renderer/RHI/Vulkan/VulkanVirtualGeometryResources.cpp");
@@ -729,22 +790,20 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Renderer.VulkanRecording.DedicatedCaptureIdentityUsesRetainedSnapshot", [](TestContext& context) {
-			const std::filesystem::path renderSystemPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Engine" / "Renderer" / "RenderSystem.cpp";
-			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
-			const std::string renderSystem{ std::istreambuf_iterator<char>(renderSystemStream), {} };
-			const std::string vulkan = VulkanSourceContracts::ReadContextSources();
-
-			// A capture image is intentionally long-lived relative to ordinary editor
-			// frames. Its typed pick must retain its own table/frame rather than fail
-			// merely because the latest Game frame advanced before automation polled.
-			context.Expect(renderSystem.find("latestGameCaptureIdentitySnapshot") != std::string::npos
-				&& renderSystem.find("completedGameCaptureIdentitySnapshot.frameId =") != std::string::npos
-				&& renderSystem.find("prepared.selection.generation") != std::string::npos
-				&& renderSystem.find("result.dedicatedCaptureTarget") != std::string::npos
-				&& renderSystem.find("identityTable.begin()") != std::string::npos
+			const auto admission = RequiredDefinition(context, "Engine/Renderer/RenderSystem.cpp", "RenderSystem::RequestConventionalVisibilityIdentityPick(");
+			const auto observations = RequiredDefinition(context, "Engine/Renderer/Frame/RenderFrameSealing.cpp", "RenderSystem::ObserveFrameViewOutputs(");
+			const auto readback = RequiredDefinition(context, "Engine/Renderer/RenderSystemCapture.cpp", "RenderSystem::DrainConventionalVisibilityIdentityReadbacks(");
+			const auto publication = RequiredDefinition(context, "Engine/Renderer/Frame/RenderDiagnosticsPublication.cpp", "RenderSystem::PublishFrameDiagnostics(");
+			const auto vulkan = RequiredVulkanContext(context);
+			context.Expect(admission.find("latestGameCaptureIdentitySnapshot") != std::string::npos
+				&& observations.find("completedGameCaptureIdentitySnapshot.frameId =") != std::string::npos
+				&& observations.find("prepared.selection.generation") != std::string::npos
+				&& publication.find("latestGameCaptureIdentitySnapshot = std::move(completedGameCaptureIdentitySnapshot)") != std::string::npos
+				&& readback.find("result.dedicatedCaptureTarget") != std::string::npos
+				&& readback.find("identityTable.begin()") != std::string::npos
 				&& vulkan.find("rendered target metadata does not match the request") != std::string::npos,
 				"Dedicated capture identity picks must retain matching immutable frame data and diagnose target metadata rejection.");
+
 		});
 
 		registry.Add("Renderer.VulkanRecording.InvalidatesUploadPlansAndRetiresResourcesDeterministically", [](TestContext& context) {

@@ -66,7 +66,7 @@ public:
 	// transform space and cannot replace the canonical world pose.
 	TerraEngine::Scene::ParentRelativePose parentRelativePose{};
 
-	// reflect is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	static void reflect(entt::meta_factory<Transform>& factory)
 	{
 		// The reflected values are intentionally structured. Tooling must issue

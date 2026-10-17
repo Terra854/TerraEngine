@@ -164,13 +164,13 @@ enum class MouseButton {
 	Count
 };
 
-// KeyCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 constexpr std::size_t KeyCount()
 {
 	return static_cast<std::size_t>(Key::Count);
 }
 
-// MouseButtonCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 constexpr std::size_t MouseButtonCount()
 {
 	return static_cast<std::size_t>(MouseButton::Count);

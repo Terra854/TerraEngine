@@ -9,7 +9,7 @@
 
 namespace
 {
-	// struct CommandLine groups related state and operations so callers have one documented contract.
+
 	struct CommandLine
 	{
 		std::filesystem::path input;
@@ -97,7 +97,7 @@ namespace
 		return false;
 	}
 
-	// ParseCommandLine is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool ParseCommandLine(int argc, char** argv, CommandLine& args)
 	{
 		for(int i = 1; i < argc; ++i)
@@ -108,26 +108,26 @@ namespace
 				args.showHelp = true;
 				return true;
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			else if((flag == "-i" || flag == "--input") && i + 1 < argc)
 			{
 				args.input = argv[++i];
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 			else if((flag == "-o" || flag == "--output") && i + 1 < argc)
 			{
 				args.output = argv[++i];
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 			else if((flag == "-s" || flag == "--semantic") && i + 1 < argc)
 			{
 				std::string_view value = argv[++i];
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if(value == "color")
 				{
 					args.semantic = TextureFileSemantic::Color;
 				}
-				// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 				else if(value == "data")
 				{
 					args.semantic = TextureFileSemantic::Data;
@@ -138,12 +138,12 @@ namespace
 					return false;
 				}
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 			else if((flag == "-q" || flag == "--quality") && i + 1 < argc)
 			{
 				args.quality = static_cast<std::uint32_t>(std::stoul(argv[++i]));
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 			else if((flag == "-f" || flag == "--format") && i + 1 < argc)
 			{
 				args.format = argv[++i];
@@ -172,7 +172,7 @@ namespace
 			}
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if(args.showHelp)
 		{
 			return true;
@@ -188,11 +188,11 @@ namespace
 	}
 }
 
-// main is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 int main(int argc, char** argv)
 {
 	CommandLine args {};
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if(!ParseCommandLine(argc, argv, args))
 	{
 		return 1;
@@ -204,7 +204,7 @@ int main(int argc, char** argv)
 		return 0;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	const TextureCompileProgressCallback progressCallback = [](float progress, std::string_view stage, std::string_view message)
 	{
 		EmitProgress(progress, stage, message);

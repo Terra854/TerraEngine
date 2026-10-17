@@ -12,7 +12,7 @@ FrameTimer::FrameTimer()
 {
 }
 
-// FrameTimer::Tick is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+// Measure seconds since the previous tick, then advance that tick to the current steady-clock time.
 double FrameTimer::Tick()
 {
 	const auto now = std::chrono::steady_clock::now();

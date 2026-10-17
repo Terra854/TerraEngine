@@ -126,7 +126,7 @@ namespace TerraEngine::Editor
 	}
 }
 
-// class GameViewWindow groups related state and operations so callers have one documented contract.
+
 class GameViewWindow : public EditorWindow {
 public:
 	GameViewWindow(MainEditorSubsystem* owner);
@@ -138,7 +138,7 @@ protected:
 private:
 	MainEditorSubsystem* m_Owner;
 
-	// struct AspectRatio groups related state and operations so callers have one documented contract.
+
 	struct AspectRatio {
 		std::string Name;
 		float Width;

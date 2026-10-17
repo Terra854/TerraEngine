@@ -1,11 +1,34 @@
 #include "Renderer/RenderCaptureEncoding.h"
 
 #include <array>
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 
 namespace TerraEngine::Renderer {
 namespace {
+
+	// Counts are validated before arithmetic, including platforms with narrower
+	// size_t/ptrdiff_t. No image-resolution policy is imposed by these limits.
+	std::size_t CheckedAdd(std::size_t left, std::size_t right, std::size_t limit, const char* reason = "Capture storage size is not representable.")
+	{
+		if (left > limit || right > limit - left) throw std::length_error(reason);
+		return left + right;
+	}
+	std::size_t CheckedMultiply(std::size_t left, std::size_t right, std::size_t limit, const char* reason = "Capture storage size is not representable.")
+	{
+		if (right != 0 && left > limit / right) throw std::length_error(reason);
+		return left * right;
+	}
+	std::size_t ByteLimit()
+	{
+		return std::min(std::vector<std::uint8_t>().max_size(), static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max()));
+	}
+	std::size_t RgbaByteCount(std::uint32_t width, std::uint32_t height)
+	{
+		if (width == 0 || height == 0) throw std::invalid_argument("Capture dimensions must be non-zero.");
+		return CheckedMultiply(CheckedMultiply(width, height, ByteLimit()), 4, ByteLimit(), "RGBA capture byte count exceeds storage capacity.");
+	}
 
 	void AppendUint32BigEndian(std::vector<std::uint8_t>& out, std::uint32_t value)
 	{
@@ -42,11 +65,12 @@ namespace {
 
 	void AppendChunk(std::vector<std::uint8_t>& png, std::span<const std::uint8_t, 4> chunkType, std::span<const std::uint8_t> chunkData)
 	{
-		if (chunkData.size() > std::numeric_limits<std::uint32_t>::max())
+		if (chunkData.size() > 0x7fffffffu)
 		{
 			throw std::invalid_argument("PNG chunk is too large to encode.");
 		}
 
+		(void)CheckedAdd(png.size(), CheckedAdd(chunkData.size(), 12, ByteLimit()), ByteLimit());
 		AppendUint32BigEndian(png, static_cast<std::uint32_t>(chunkData.size()));
 		png.insert(png.end(), chunkType.begin(), chunkType.end());
 		png.insert(png.end(), chunkData.begin(), chunkData.end());
@@ -98,6 +122,30 @@ namespace {
 
 }
 
+std::size_t ComputeBase64EncodedSize(std::size_t byteCount)
+{
+	const auto groups = CheckedAdd(byteCount / 3, byteCount % 3 != 0 ? 1 : 0, std::numeric_limits<std::size_t>::max());
+	return CheckedMultiply(groups, 4, std::string().max_size(), "Base64 output exceeds string capacity.");
+}
+
+Rgba8PngLayout ValidateRgba8PngLayout(std::uint32_t width, std::uint32_t height)
+{
+	// PNG dimensions and chunk lengths are unsigned 31-bit values. This encoder
+	// emits one IDAT chunk, so its complete stored stream must fit that chunk.
+	if (width > 0x7fffffffu || height > 0x7fffffffu) throw std::invalid_argument("PNG dimensions exceed the format bounds.");
+	Rgba8PngLayout layout;
+	const auto limit = ByteLimit();
+	layout.rgbaBytes = RgbaByteCount(width, height);
+	layout.rowBytes = CheckedMultiply(width, 4, limit);
+	layout.filteredBytes = CheckedMultiply(CheckedAdd(layout.rowBytes, 1, limit), height, limit, "PNG filtered rows exceed storage capacity.");
+	const auto blocks = CheckedAdd(layout.filteredBytes / 65535, layout.filteredBytes % 65535 != 0 ? 1 : 0, limit);
+	layout.zlibBytes = CheckedAdd(CheckedAdd(layout.filteredBytes, CheckedMultiply(blocks, 5, limit), limit, "PNG DEFLATE stream exceeds storage capacity."), 6, limit, "PNG DEFLATE stream exceeds storage capacity.");
+	if (layout.zlibBytes > 0x7fffffffu) throw std::length_error("PNG stored stream exceeds its IDAT chunk bounds.");
+	layout.pngBytes = CheckedAdd(layout.zlibBytes, 57, limit);
+	layout.base64Bytes = ComputeBase64EncodedSize(layout.pngBytes);
+	return layout;
+}
+
 std::vector<std::uint8_t> ResizeRgba8(
 	std::span<const std::uint8_t> rgbaPixels,
 	std::uint32_t sourceWidth,
@@ -110,11 +158,9 @@ std::vector<std::uint8_t> ResizeRgba8(
 		throw std::invalid_argument("RGBA resize dimensions must be non-zero.");
 	}
 
-	const std::uint64_t sourceBytes = static_cast<std::uint64_t>(sourceWidth) * static_cast<std::uint64_t>(sourceHeight) * 4u;
-	const std::uint64_t targetBytes = static_cast<std::uint64_t>(targetWidth) * static_cast<std::uint64_t>(targetHeight) * 4u;
-	if (sourceBytes > std::numeric_limits<std::size_t>::max()
-		|| targetBytes > std::numeric_limits<std::size_t>::max()
-		|| rgbaPixels.size() != static_cast<std::size_t>(sourceBytes))
+	const std::size_t sourceBytes = RgbaByteCount(sourceWidth, sourceHeight);
+	const std::size_t targetBytes = RgbaByteCount(targetWidth, targetHeight);
+	if (rgbaPixels.size() != sourceBytes)
 	{
 		throw std::invalid_argument("RGBA resize byte count does not match the source dimensions.");
 	}
@@ -153,28 +199,14 @@ std::vector<std::uint8_t> EncodeRgba8ToPng(
 	std::uint32_t width,
 	std::uint32_t height)
 {
-	if (width == 0u || height == 0u)
-	{
-		throw std::invalid_argument("PNG capture dimensions must be non-zero.");
-	}
-
-	const std::uint64_t pixelCount = static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
-	const std::uint64_t requiredBytes = pixelCount * 4u;
-	if (requiredBytes > std::numeric_limits<std::size_t>::max() || rgbaPixels.size() != static_cast<std::size_t>(requiredBytes))
+	const auto layout = ValidateRgba8PngLayout(width, height);
+	if (rgbaPixels.size() != layout.rgbaBytes)
 	{
 		throw std::invalid_argument("RGBA capture byte count does not match the requested dimensions.");
 	}
-
-	const std::uint64_t rowBytes64 = static_cast<std::uint64_t>(width) * 4u;
-	const std::uint64_t rawBytes64 = (rowBytes64 + 1u) * static_cast<std::uint64_t>(height);
-	if (rawBytes64 > std::numeric_limits<std::size_t>::max())
-	{
-		throw std::invalid_argument("PNG capture dimensions are too large to encode.");
-	}
-
-	const std::size_t rowBytes = static_cast<std::size_t>(rowBytes64);
+	const std::size_t rowBytes = layout.rowBytes;
 	std::vector<std::uint8_t> raw;
-	raw.reserve(static_cast<std::size_t>(rawBytes64));
+	raw.reserve(layout.filteredBytes);
 	for (std::uint32_t y = 0u; y < height; ++y)
 	{
 		raw.push_back(0u);
@@ -183,6 +215,7 @@ std::vector<std::uint8_t> EncodeRgba8ToPng(
 	}
 
 	std::vector<std::uint8_t> png;
+	png.reserve(layout.pngBytes);
 	constexpr std::array<std::uint8_t, 8> kSignature = { 137u, 80u, 78u, 71u, 13u, 10u, 26u, 10u };
 	png.insert(png.end(), kSignature.begin(), kSignature.end());
 
@@ -207,7 +240,7 @@ std::vector<std::uint8_t> EncodeRgba8ToPng(
 	AppendChunk(png, std::span<const std::uint8_t, 4>(kIhdr), ihdr);
 
 	std::vector<std::uint8_t> zlibData;
-	zlibData.reserve(raw.size() + (raw.size() / 65535u + 1u) * 5u + 6u);
+	zlibData.reserve(layout.zlibBytes);
 	AppendZlibStoredStream(zlibData, raw);
 	AppendChunk(png, std::span<const std::uint8_t, 4>(kIdat), zlibData);
 	AppendChunk(png, std::span<const std::uint8_t, 4>(kIend), {});
@@ -218,19 +251,21 @@ std::string EncodeBase64(std::span<const std::uint8_t> bytes)
 {
 	constexpr char kAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 	std::string encoded;
-	encoded.reserve(((bytes.size() + 2u) / 3u) * 4u);
+	encoded.reserve(ComputeBase64EncodedSize(bytes.size()));
 
-	for (std::size_t index = 0u; index < bytes.size(); index += 3u)
+	for (std::size_t index = 0u; index < bytes.size();)
 	{
+		const auto remaining = bytes.size() - index;
 		const std::uint32_t b0 = bytes[index];
-		const std::uint32_t b1 = (index + 1u < bytes.size()) ? bytes[index + 1u] : 0u;
-		const std::uint32_t b2 = (index + 2u < bytes.size()) ? bytes[index + 2u] : 0u;
+		const std::uint32_t b1 = (remaining > 1u) ? bytes[index + 1u] : 0u;
+		const std::uint32_t b2 = (remaining > 2u) ? bytes[index + 2u] : 0u;
 		const std::uint32_t packed = (b0 << 16u) | (b1 << 8u) | b2;
 
 		encoded.push_back(kAlphabet[(packed >> 18u) & 0x3fu]);
 		encoded.push_back(kAlphabet[(packed >> 12u) & 0x3fu]);
-		encoded.push_back(index + 1u < bytes.size() ? kAlphabet[(packed >> 6u) & 0x3fu] : '=');
-		encoded.push_back(index + 2u < bytes.size() ? kAlphabet[packed & 0x3fu] : '=');
+		encoded.push_back(remaining > 1u ? kAlphabet[(packed >> 6u) & 0x3fu] : '=');
+		encoded.push_back(remaining > 2u ? kAlphabet[packed & 0x3fu] : '=');
+		index += std::min<std::size_t>(remaining, 3);
 	}
 
 	return encoded;

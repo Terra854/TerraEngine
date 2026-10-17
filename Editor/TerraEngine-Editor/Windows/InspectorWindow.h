@@ -25,7 +25,7 @@
 class MainEditorSubsystem;
 class Object;
 namespace TerraEngine::Animation { struct AnimationClipAsset; }
-// struct ComponentAccessFunctions groups related state and operations so callers have one documented contract.
+
 struct ComponentAccessFunctions;
 
 class InspectorWindow : public EditorWindow {
@@ -38,7 +38,7 @@ public:
 	~InspectorWindow() override;
 	
 	// Reports whether a drag control in the inspector is active this frame for cursor wrapping.
-	// IsInspectorValueDragging is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool IsInspectorValueDragging() const { return m_InspectorValueDragging; }
 	std::vector<PhysicsRebuildIntent> DrainPhysicsRebuildIntentsForProtectedBoundary();
 	void QueuePhysicsRebuildIntentsForChangedObjects(const std::vector<TerraEngine::UUID>& objectIds, std::string reason);

@@ -1,0 +1,3140 @@
+{
+	"schemaVersion": 1,
+	"artifactKind": "validation-acceptance-contract",
+	"description": "Repository validation support only. Case identities are planned expectations, not claims that tests are registered or executed. This independent protocol does not alter RuntimeMemorySafety receipt schemas.",
+	"baseline": {
+		"revision": "0b9081841bd262ebacf1f2d1077875407916d296",
+		"sourceSnapshot": "out/evidence/runtime-contract-quality/baseline-source.json",
+		"commentInventory": "Tests/Tools/CodeQuality/Baseline/production-comments.json",
+		"stageInventory": "Tests/Tools/CodeQuality/Baseline/stage-ownership.json"
+	},
+	"statusPolicy": {
+		"initial": "pending",
+		"allowed": [
+			"pending",
+			"passed",
+			"failed",
+			"incomplete"
+		],
+		"prerequisiteStates": [
+			"unverified",
+			"available",
+			"unavailable"
+		],
+		"unverifiedPrerequisiteOutcome": "incomplete",
+		"unavailablePrerequisiteOutcome": "incomplete",
+		"passRule": "Each finding requires all its required cases and every integrated gate to pass with actual final-install identity and linked raw evidence. A missing prerequisite, empty case selection, forced termination or missing receipt cannot pass.",
+		"executionClaimRule": "A case identity becomes an executed test claim only when a receipt maps it to the actual executable/filter/test name and observed assertions."
+	},
+	"evidencePolicy": {
+		"requiredReceiptFields": [
+			"sourceRevision",
+			"sourceManifestSha256",
+			"installManifestSha256",
+			"toolManifestSha256",
+			"caseId",
+			"actualExecutableOrRunner",
+			"actualCaseOrScenario",
+			"observedOutcome",
+			"rawEvidencePaths"
+		],
+		"requiredCaseKinds": [
+			"behavioral",
+			"real-gpu",
+			"mutation-sensitivity",
+			"parity",
+			"timing",
+			"structural",
+			"token-equivalence"
+		],
+		"supplementary": [
+			"Source pattern checks",
+			"Explanatory wording",
+			"Requested capability flags without actual observations",
+			"Deterministic device-loss policy observations as GPU substitutes"
+		],
+		"prohibitedPassSubstitutes": [
+			"Synthetic images for real-backend output",
+			"Forced VK_NOT_READY for actual fence status",
+			"Simulated device loss for host GPU failure",
+			"Structural size counts for parity/lifetimes",
+			"Source-copy binaries for verified install closure",
+			"Historical or stale hashes for final-byte acceptance"
+		]
+	},
+	"prerequisites": [
+		{
+			"id": "source-baseline",
+			"requirement": "Exact source revision, drift and user-owned changes recorded before edits",
+			"missingOutcome": "incomplete"
+		},
+		{
+			"id": "reference-install",
+			"requirement": "Immutable unchanged compiled/installed runtime and tool closure with SHA-256 manifests",
+			"missingOutcome": "incomplete"
+		},
+		{
+			"id": "candidate-install",
+			"requirement": "Successful integrated compile/install and complete hashed runnable closure",
+			"missingOutcome": "incomplete"
+		},
+		{
+			"id": "native-test-runtime",
+			"requirement": "Installed native tests and registered nonempty case selection",
+			"missingOutcome": "incomplete"
+		},
+		{
+			"id": "png-integrity-decoder",
+			"requirement": "Bundled independent PNG decoder with CRC/Adler integrity enabled",
+			"missingOutcome": "incomplete"
+		},
+		{
+			"id": "thread-pool",
+			"requirement": "Initialized existing bounded ThreadPool with actual worker observations",
+			"missingOutcome": "incomplete"
+		},
+		{
+			"id": "vulkan-adapter",
+			"requirement": "Actual supported Vulkan adapter and usable native target",
+			"missingOutcome": "incomplete"
+		},
+		{
+			"id": "vulkan-validation",
+			"requirement": "Actually enabled Vulkan validation layer and retained callback log",
+			"missingOutcome": "incomplete"
+		},
+		{
+			"id": "editor-runtime",
+			"requirement": "Installed editor, bundled managed assets and usable desktop/offscreen target",
+			"missingOutcome": "incomplete"
+		},
+		{
+			"id": "watchdog",
+			"requirement": "Installed process-tree watchdog and fresh isolated evidence/work roots",
+			"missingOutcome": "incomplete"
+		},
+		{
+			"id": "sealed-replay",
+			"requirement": "Immutable authored workload controls, normalization map and actual worker counts",
+			"missingOutcome": "incomplete"
+		},
+		{
+			"id": "timing-calibration",
+			"requirement": "Three reference A/A pairs per scale and predeclared median/p95 thresholds",
+			"missingOutcome": "incomplete"
+		},
+		{
+			"id": "comment-baseline",
+			"requirement": "Committed frozen occurrence inventory, exact source hashes and batch copies",
+			"missingOutcome": "incomplete"
+		},
+		{
+			"id": "source-audit",
+			"requirement": "Native lexer self-tests and fail-closed symbol/token scanner",
+			"missingOutcome": "incomplete"
+		}
+	],
+	"findings": [
+		{
+			"id": "capture-output",
+			"name": "Trustworthy capture results",
+			"baselineScope": "Engine/Renderer/RenderCaptureEncoding.cpp",
+			"completionRule": "Valid exact-size PNG, truthful provenance and bounded exactly-once completion.",
+			"verificationScope": "Tests/Engine/Renderer; Tests/Editor/Automation",
+			"requiredCaseIds": [
+				"capture.native.one.opaque.plain",
+				"capture.native.one.opaque.overlays",
+				"capture.native.one.transparent.plain",
+				"capture.native.one.transparent.overlays",
+				"capture.native.non-square.opaque.plain",
+				"capture.native.non-square.opaque.overlays",
+				"capture.native.non-square.transparent.plain",
+				"capture.native.non-square.transparent.overlays",
+				"capture.native.viewport.opaque.plain",
+				"capture.native.viewport.opaque.overlays",
+				"capture.native.viewport.transparent.plain",
+				"capture.native.viewport.transparent.overlays",
+				"capture.native.large.opaque.plain",
+				"capture.native.large.opaque.overlays",
+				"capture.native.large.transparent.plain",
+				"capture.native.large.transparent.overlays",
+				"capture.editor.one.opaque.plain",
+				"capture.editor.one.opaque.overlays",
+				"capture.editor.one.transparent.plain",
+				"capture.editor.one.transparent.overlays",
+				"capture.editor.non-square.opaque.plain",
+				"capture.editor.non-square.opaque.overlays",
+				"capture.editor.non-square.transparent.plain",
+				"capture.editor.non-square.transparent.overlays",
+				"capture.editor.viewport.opaque.plain",
+				"capture.editor.viewport.opaque.overlays",
+				"capture.editor.viewport.transparent.plain",
+				"capture.editor.viewport.transparent.overlays",
+				"capture.editor.large.opaque.plain",
+				"capture.editor.large.opaque.overlays",
+				"capture.editor.large.transparent.plain",
+				"capture.editor.large.transparent.overlays",
+				"capture.failure.zero-width",
+				"capture.failure.zero-height",
+				"capture.failure.png-bound-overflow",
+				"capture.failure.pixel-size-overflow",
+				"capture.failure.row-size-overflow",
+				"capture.failure.deflate-size-overflow",
+				"capture.failure.chunk-size-overflow",
+				"capture.failure.base64-size-overflow",
+				"capture.failure.unsupported-format",
+				"capture.failure.allocation-failure",
+				"capture.failure.encoding-failure",
+				"capture.failure.executor-unavailable",
+				"capture.failure.fallback-denied",
+				"capture.failure.queue-exhaustion",
+				"capture.failure.cancel-before-admission",
+				"capture.failure.cancel-during-encoding",
+				"capture.failure.deadline-during-encoding",
+				"capture.failure.synchronous-deadline",
+				"capture.failure.shutdown-during-encoding",
+				"capture.native.real-backend",
+				"capture.editor.real-backend",
+				"capture.decoder.corrupt-baseline",
+				"capture.synthetic.requested-size-cost"
+			],
+			"supplementaryEvidence": [
+				"Source scans, comments and architecture review may support interpretation but do not replace required behavioral, GPU, parity or timing evidence."
+			]
+		},
+		{
+			"id": "pool-ownership",
+			"name": "Defined fixed-pool ownership rejection",
+			"baselineScope": "Engine/Core/Memory/FixedBlockPool.h",
+			"completionRule": "Defined foreign-value rejection without state change, valid destruction/reuse and constructor rollback.",
+			"verificationScope": "Tests/Engine/Memory",
+			"requiredCaseIds": [
+				"pool.owned-live",
+				"pool.null",
+				"pool.live-stack",
+				"pool.live-heap",
+				"pool.other-live-pool",
+				"pool.interior-address",
+				"pool.unoccupied-slot",
+				"pool.repeat-destroy-before-reuse",
+				"pool.zero-capacity",
+				"pool.over-aligned",
+				"pool.constructor-throw",
+				"pool.neighbor-preservation",
+				"pool.repeated-reuse"
+			],
+			"supplementaryEvidence": [
+				"Source scans, comments and architecture review may support interpretation but do not replace required behavioral, GPU, parity or timing evidence."
+			]
+		},
+		{
+			"id": "readback-lifetime",
+			"name": "Behavioral readback ownership evidence",
+			"baselineScope": "Engine/Renderer/RHI/Vulkan/VulkanReadback.cpp",
+			"completionRule": "Production ownership survives client terminal outcomes until valid retirement proof; actual GPU acceptance is mandatory.",
+			"verificationScope": "Tests/Tools/ReadbackLifetime",
+			"requiredCaseIds": [
+				"readback.policy.pre-submit-rejection",
+				"readback.policy.handoff-allocation-failure",
+				"readback.policy.submitted-pending",
+				"readback.policy.deadline-retains",
+				"readback.policy.cancel-retains",
+				"readback.policy.poll-error-retains",
+				"readback.policy.completion-after-terminal",
+				"readback.policy.source-replaced-after-completion",
+				"readback.policy.map-failure",
+				"readback.policy.encode-failure",
+				"readback.policy.repeated-poll",
+				"readback.policy.racing-terminals",
+				"readback.policy.cleanup-without-idle-proof",
+				"readback.policy.proven-idle",
+				"readback.policy.terminal-device-loss",
+				"readback.policy.teardown-order",
+				"readback.mutation.premature-release",
+				"readback.gpu.native.timeout-then-complete",
+				"readback.gpu.native.resize",
+				"readback.gpu.native.orderly-shutdown",
+				"readback.gpu.editor.read-only-captures",
+				"readback.gpu.editor.resize-after-capture",
+				"readback.gpu.editor.normal-close"
+			],
+			"supplementaryEvidence": [
+				"Source scans, comments and architecture review may support interpretation but do not replace required behavioral, GPU, parity or timing evidence."
+			]
+		},
+		{
+			"id": "runtime-stage-reviewability",
+			"name": "Reviewable renderer and animation stages",
+			"baselineScope": "Engine/Renderer/RenderSystem.cpp; Engine/Animation/AnimationSystem.cpp",
+			"completionRule": "Small coherent stages preserve sealed parity, scheduling, borrower lifetimes and calibrated timing.",
+			"verificationScope": "Engine/Renderer/Frame; Engine/Animation/Frame",
+			"requiredCaseIds": [
+				"stages.replay.w1.cold-direct-complete",
+				"stages.replay.w1.warm-direct-complete",
+				"stages.replay.w1.cold-virtual-compact",
+				"stages.replay.w1.warm-virtual-compact",
+				"stages.replay.w1.animated-mixed",
+				"stages.replay.w1.multi-output",
+				"stages.replay.w1.no-output",
+				"stages.replay.w1.rejection-rollback",
+				"stages.replay.w1.cancel-before-exchange",
+				"stages.replay.w1.cancel-after-exchange",
+				"stages.replay.w1.held-reader",
+				"stages.replay.w1.worker-failure",
+				"stages.replay.w1.scene-clear",
+				"stages.replay.w1.shutdown",
+				"stages.replay.w1.restart",
+				"stages.replay.w2.cold-direct-complete",
+				"stages.replay.w2.warm-direct-complete",
+				"stages.replay.w2.cold-virtual-compact",
+				"stages.replay.w2.warm-virtual-compact",
+				"stages.replay.w2.animated-mixed",
+				"stages.replay.w2.multi-output",
+				"stages.replay.w2.no-output",
+				"stages.replay.w2.rejection-rollback",
+				"stages.replay.w2.cancel-before-exchange",
+				"stages.replay.w2.cancel-after-exchange",
+				"stages.replay.w2.held-reader",
+				"stages.replay.w2.worker-failure",
+				"stages.replay.w2.scene-clear",
+				"stages.replay.w2.shutdown",
+				"stages.replay.w2.restart",
+				"stages.replay.w8.cold-direct-complete",
+				"stages.replay.w8.warm-direct-complete",
+				"stages.replay.w8.cold-virtual-compact",
+				"stages.replay.w8.warm-virtual-compact",
+				"stages.replay.w8.animated-mixed",
+				"stages.replay.w8.multi-output",
+				"stages.replay.w8.no-output",
+				"stages.replay.w8.rejection-rollback",
+				"stages.replay.w8.cancel-before-exchange",
+				"stages.replay.w8.cancel-after-exchange",
+				"stages.replay.w8.held-reader",
+				"stages.replay.w8.worker-failure",
+				"stages.replay.w8.scene-clear",
+				"stages.replay.w8.shutdown",
+				"stages.replay.w8.restart",
+				"stages.renderer.ownership-map",
+				"stages.animation.ownership-map",
+				"stages.function-budgets",
+				"stages.timing.small.replicate-1.median",
+				"stages.timing.small.replicate-1.p95",
+				"stages.timing.small.replicate-2.median",
+				"stages.timing.small.replicate-2.p95",
+				"stages.timing.small.replicate-3.median",
+				"stages.timing.small.replicate-3.p95",
+				"stages.timing.normal.replicate-1.median",
+				"stages.timing.normal.replicate-1.p95",
+				"stages.timing.normal.replicate-2.median",
+				"stages.timing.normal.replicate-2.p95",
+				"stages.timing.normal.replicate-3.median",
+				"stages.timing.normal.replicate-3.p95",
+				"stages.timing.stress.replicate-1.median",
+				"stages.timing.stress.replicate-1.p95",
+				"stages.timing.stress.replicate-2.median",
+				"stages.timing.stress.replicate-2.p95",
+				"stages.timing.stress.replicate-3.median",
+				"stages.timing.stress.replicate-3.p95"
+			],
+			"supplementaryEvidence": [
+				"Source scans, comments and architecture review may support interpretation but do not replace required behavioral, GPU, parity or timing evidence."
+			]
+		},
+		{
+			"id": "comment-quality",
+			"name": "Useful production comments",
+			"baselineScope": "Engine; Editor",
+			"completionRule": "All frozen filler occurrences resolved with meaningful intent retained and token-equivalent comment-only patches.",
+			"verificationScope": "Tests/Tools/CodeQuality",
+			"requiredCaseIds": [
+				"comments.inventory-dispositions",
+				"comments.batch.renderer",
+				"comments.batch.animation",
+				"comments.batch.core-threadpool",
+				"comments.batch.other-engine",
+				"comments.batch.editor-main",
+				"comments.batch.other-editor",
+				"comments.lexer-self-tests"
+			],
+			"supplementaryEvidence": [
+				"Source scans, comments and architecture review may support interpretation but do not replace required behavioral, GPU, parity or timing evidence."
+			]
+		}
+	],
+	"scenarioCases": [
+		{
+			"id": "capture.native.one.opaque.plain",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1,
+				"height": 1,
+				"alpha": "opaque",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.native.one.opaque.overlays",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1,
+				"height": 1,
+				"alpha": "opaque",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.native.one.transparent.plain",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1,
+				"height": 1,
+				"alpha": "transparent",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.native.one.transparent.overlays",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1,
+				"height": 1,
+				"alpha": "transparent",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.native.non-square.opaque.plain",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 17,
+				"height": 9,
+				"alpha": "opaque",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.native.non-square.opaque.overlays",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 17,
+				"height": 9,
+				"alpha": "opaque",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.native.non-square.transparent.plain",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 17,
+				"height": 9,
+				"alpha": "transparent",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.native.non-square.transparent.overlays",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 17,
+				"height": 9,
+				"alpha": "transparent",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.native.viewport.opaque.plain",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1280,
+				"height": 720,
+				"alpha": "opaque",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.native.viewport.opaque.overlays",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1280,
+				"height": 720,
+				"alpha": "opaque",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.native.viewport.transparent.plain",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1280,
+				"height": 720,
+				"alpha": "transparent",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.native.viewport.transparent.overlays",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1280,
+				"height": 720,
+				"alpha": "transparent",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.native.large.opaque.plain",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 4096,
+				"height": 4096,
+				"alpha": "opaque",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.native.large.opaque.overlays",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 4096,
+				"height": 4096,
+				"alpha": "opaque",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.native.large.transparent.plain",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 4096,
+				"height": 4096,
+				"alpha": "transparent",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.native.large.transparent.overlays",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 4096,
+				"height": 4096,
+				"alpha": "transparent",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.editor.one.opaque.plain",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1,
+				"height": 1,
+				"alpha": "opaque",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.editor.one.opaque.overlays",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1,
+				"height": 1,
+				"alpha": "opaque",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.editor.one.transparent.plain",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1,
+				"height": 1,
+				"alpha": "transparent",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.editor.one.transparent.overlays",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1,
+				"height": 1,
+				"alpha": "transparent",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.editor.non-square.opaque.plain",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 17,
+				"height": 9,
+				"alpha": "opaque",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.editor.non-square.opaque.overlays",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 17,
+				"height": 9,
+				"alpha": "opaque",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.editor.non-square.transparent.plain",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 17,
+				"height": 9,
+				"alpha": "transparent",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.editor.non-square.transparent.overlays",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 17,
+				"height": 9,
+				"alpha": "transparent",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.editor.viewport.opaque.plain",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1280,
+				"height": 720,
+				"alpha": "opaque",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.editor.viewport.opaque.overlays",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1280,
+				"height": 720,
+				"alpha": "opaque",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.editor.viewport.transparent.plain",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1280,
+				"height": 720,
+				"alpha": "transparent",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.editor.viewport.transparent.overlays",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 1280,
+				"height": 720,
+				"alpha": "transparent",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.editor.large.opaque.plain",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 4096,
+				"height": 4096,
+				"alpha": "opaque",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.editor.large.opaque.overlays",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 4096,
+				"height": 4096,
+				"alpha": "opaque",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.editor.large.transparent.plain",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 4096,
+				"height": 4096,
+				"alpha": "transparent",
+				"overlaysRequested": false
+			}
+		},
+		{
+			"id": "capture.editor.large.transparent.overlays",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime",
+				"png-integrity-decoder",
+				"thread-pool",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual delivered Base64 PNG; validate CRC/Adler, exact dimensions and black RGBA pixels, alpha 255/0, backendReadback=false, deterministicFallback=true, overlaysIncluded=false; preserve source/request context and warn when overlays were requested.",
+			"parameters": {
+				"width": 4096,
+				"height": 4096,
+				"alpha": "transparent",
+				"overlaysRequested": true
+			}
+		},
+		{
+			"id": "capture.failure.zero-width",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "zero-width"
+			}
+		},
+		{
+			"id": "capture.failure.zero-height",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "zero-height"
+			}
+		},
+		{
+			"id": "capture.failure.png-bound-overflow",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "png-bound-overflow"
+			}
+		},
+		{
+			"id": "capture.failure.pixel-size-overflow",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "pixel-size-overflow"
+			}
+		},
+		{
+			"id": "capture.failure.row-size-overflow",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "row-size-overflow"
+			}
+		},
+		{
+			"id": "capture.failure.deflate-size-overflow",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "deflate-size-overflow"
+			}
+		},
+		{
+			"id": "capture.failure.chunk-size-overflow",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "chunk-size-overflow"
+			}
+		},
+		{
+			"id": "capture.failure.base64-size-overflow",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "base64-size-overflow"
+			}
+		},
+		{
+			"id": "capture.failure.unsupported-format",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "unsupported-format"
+			}
+		},
+		{
+			"id": "capture.failure.allocation-failure",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "allocation-failure"
+			}
+		},
+		{
+			"id": "capture.failure.encoding-failure",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "encoding-failure"
+			}
+		},
+		{
+			"id": "capture.failure.executor-unavailable",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "executor-unavailable"
+			}
+		},
+		{
+			"id": "capture.failure.fallback-denied",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "fallback-denied"
+			}
+		},
+		{
+			"id": "capture.failure.queue-exhaustion",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "queue-exhaustion"
+			}
+		},
+		{
+			"id": "capture.failure.cancel-before-admission",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "cancel-before-admission"
+			}
+		},
+		{
+			"id": "capture.failure.cancel-during-encoding",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "cancel-during-encoding"
+			}
+		},
+		{
+			"id": "capture.failure.deadline-during-encoding",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "deadline-during-encoding"
+			}
+		},
+		{
+			"id": "capture.failure.synchronous-deadline",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "synchronous-deadline"
+			}
+		},
+		{
+			"id": "capture.failure.shutdown-during-encoding",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "One terminal failure without successful image content; no arithmetic wrap, silent downscale, leaked admission charge or second result; subsequent healthy request progresses after physical settlement within configured bounds.",
+			"parameters": {
+				"fault": "shutdown-during-encoding"
+			}
+		},
+		{
+			"id": "capture.native.real-backend",
+			"finding": "capture-output",
+			"lane": "native",
+			"evidenceKind": "real-gpu",
+			"prerequisiteIds": [
+				"candidate-install",
+				"png-integrity-decoder",
+				"vulkan-adapter",
+				"vulkan-validation"
+			],
+			"expectation": "Decode actual real-backend pixels and verify extent, source/request correlation, provenance and exactly-once delivery; synthetic output cannot pass this case.",
+			"parameters": {}
+		},
+		{
+			"id": "capture.editor.real-backend",
+			"finding": "capture-output",
+			"lane": "editor",
+			"evidenceKind": "real-gpu",
+			"prerequisiteIds": [
+				"candidate-install",
+				"png-integrity-decoder",
+				"vulkan-adapter",
+				"vulkan-validation",
+				"editor-runtime"
+			],
+			"expectation": "Decode actual real-backend pixels and verify extent, source/request correlation, provenance and exactly-once delivery; synthetic output cannot pass this case.",
+			"parameters": {}
+		},
+		{
+			"id": "capture.decoder.corrupt-baseline",
+			"finding": "capture-output",
+			"lane": "decoder",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"native-test-runtime",
+				"png-integrity-decoder"
+			],
+			"expectation": "Independent decoder rejects original malformed fixed PNG on integrity; known-valid images decode. Decoder sources/checksum validation are unchanged.",
+			"parameters": {}
+		},
+		{
+			"id": "capture.synthetic.requested-size-cost",
+			"finding": "capture-output",
+			"lane": "cost-characterization",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Measure newly correct requested-size image work separately from preparation parity; old fixed 1x1 fake output is not equivalent.",
+			"parameters": {}
+		},
+		{
+			"id": "pool.owned-live",
+			"finding": "pool-ownership",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Reject invalid candidates through defined behavior before mutation; preserve live values/destruction counts/free slots/size/high-water. Valid destruction occurs once and slots reuse; constructor failure restores capacity; live over-aligned objects remain aligned.",
+			"parameters": {
+				"scenario": "owned-live"
+			}
+		},
+		{
+			"id": "pool.null",
+			"finding": "pool-ownership",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Reject invalid candidates through defined behavior before mutation; preserve live values/destruction counts/free slots/size/high-water. Valid destruction occurs once and slots reuse; constructor failure restores capacity; live over-aligned objects remain aligned.",
+			"parameters": {
+				"scenario": "null"
+			}
+		},
+		{
+			"id": "pool.live-stack",
+			"finding": "pool-ownership",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Reject invalid candidates through defined behavior before mutation; preserve live values/destruction counts/free slots/size/high-water. Valid destruction occurs once and slots reuse; constructor failure restores capacity; live over-aligned objects remain aligned.",
+			"parameters": {
+				"scenario": "live-stack"
+			}
+		},
+		{
+			"id": "pool.live-heap",
+			"finding": "pool-ownership",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Reject invalid candidates through defined behavior before mutation; preserve live values/destruction counts/free slots/size/high-water. Valid destruction occurs once and slots reuse; constructor failure restores capacity; live over-aligned objects remain aligned.",
+			"parameters": {
+				"scenario": "live-heap"
+			}
+		},
+		{
+			"id": "pool.other-live-pool",
+			"finding": "pool-ownership",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Reject invalid candidates through defined behavior before mutation; preserve live values/destruction counts/free slots/size/high-water. Valid destruction occurs once and slots reuse; constructor failure restores capacity; live over-aligned objects remain aligned.",
+			"parameters": {
+				"scenario": "other-live-pool"
+			}
+		},
+		{
+			"id": "pool.interior-address",
+			"finding": "pool-ownership",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Reject invalid candidates through defined behavior before mutation; preserve live values/destruction counts/free slots/size/high-water. Valid destruction occurs once and slots reuse; constructor failure restores capacity; live over-aligned objects remain aligned.",
+			"parameters": {
+				"scenario": "interior-address"
+			}
+		},
+		{
+			"id": "pool.unoccupied-slot",
+			"finding": "pool-ownership",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Reject invalid candidates through defined behavior before mutation; preserve live values/destruction counts/free slots/size/high-water. Valid destruction occurs once and slots reuse; constructor failure restores capacity; live over-aligned objects remain aligned.",
+			"parameters": {
+				"scenario": "unoccupied-slot"
+			}
+		},
+		{
+			"id": "pool.repeat-destroy-before-reuse",
+			"finding": "pool-ownership",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Reject invalid candidates through defined behavior before mutation; preserve live values/destruction counts/free slots/size/high-water. Valid destruction occurs once and slots reuse; constructor failure restores capacity; live over-aligned objects remain aligned.",
+			"parameters": {
+				"scenario": "repeat-destroy-before-reuse"
+			}
+		},
+		{
+			"id": "pool.zero-capacity",
+			"finding": "pool-ownership",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Reject invalid candidates through defined behavior before mutation; preserve live values/destruction counts/free slots/size/high-water. Valid destruction occurs once and slots reuse; constructor failure restores capacity; live over-aligned objects remain aligned.",
+			"parameters": {
+				"scenario": "zero-capacity"
+			}
+		},
+		{
+			"id": "pool.over-aligned",
+			"finding": "pool-ownership",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Reject invalid candidates through defined behavior before mutation; preserve live values/destruction counts/free slots/size/high-water. Valid destruction occurs once and slots reuse; constructor failure restores capacity; live over-aligned objects remain aligned.",
+			"parameters": {
+				"scenario": "over-aligned"
+			}
+		},
+		{
+			"id": "pool.constructor-throw",
+			"finding": "pool-ownership",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Reject invalid candidates through defined behavior before mutation; preserve live values/destruction counts/free slots/size/high-water. Valid destruction occurs once and slots reuse; constructor failure restores capacity; live over-aligned objects remain aligned.",
+			"parameters": {
+				"scenario": "constructor-throw"
+			}
+		},
+		{
+			"id": "pool.neighbor-preservation",
+			"finding": "pool-ownership",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Reject invalid candidates through defined behavior before mutation; preserve live values/destruction counts/free slots/size/high-water. Valid destruction occurs once and slots reuse; constructor failure restores capacity; live over-aligned objects remain aligned.",
+			"parameters": {
+				"scenario": "neighbor-preservation"
+			}
+		},
+		{
+			"id": "pool.repeated-reuse",
+			"finding": "pool-ownership",
+			"lane": "native",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Reject invalid candidates through defined behavior before mutation; preserve live values/destruction counts/free slots/size/high-water. Valid destruction occurs once and slots reuse; constructor failure restores capacity; live over-aligned objects remain aligned.",
+			"parameters": {
+				"scenario": "repeated-reuse"
+			}
+		},
+		{
+			"id": "readback.policy.pre-submit-rejection",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "pre-submit-rejection"
+			}
+		},
+		{
+			"id": "readback.policy.handoff-allocation-failure",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "handoff-allocation-failure"
+			}
+		},
+		{
+			"id": "readback.policy.submitted-pending",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "submitted-pending"
+			}
+		},
+		{
+			"id": "readback.policy.deadline-retains",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "deadline-retains"
+			}
+		},
+		{
+			"id": "readback.policy.cancel-retains",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "cancel-retains"
+			}
+		},
+		{
+			"id": "readback.policy.poll-error-retains",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "poll-error-retains"
+			}
+		},
+		{
+			"id": "readback.policy.completion-after-terminal",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "completion-after-terminal"
+			}
+		},
+		{
+			"id": "readback.policy.source-replaced-after-completion",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "source-replaced-after-completion"
+			}
+		},
+		{
+			"id": "readback.policy.map-failure",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "map-failure"
+			}
+		},
+		{
+			"id": "readback.policy.encode-failure",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "encode-failure"
+			}
+		},
+		{
+			"id": "readback.policy.repeated-poll",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "repeated-poll"
+			}
+		},
+		{
+			"id": "readback.policy.racing-terminals",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "racing-terminals"
+			}
+		},
+		{
+			"id": "readback.policy.cleanup-without-idle-proof",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "cleanup-without-idle-proof"
+			}
+		},
+		{
+			"id": "readback.policy.proven-idle",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "proven-idle"
+			}
+		},
+		{
+			"id": "readback.policy.terminal-device-loss",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "terminal-device-loss"
+			}
+		},
+		{
+			"id": "readback.policy.teardown-order",
+			"finding": "readback-lifetime",
+			"lane": "deterministic-controller",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"candidate-install",
+				"native-test-runtime"
+			],
+			"expectation": "Exercise the same production controller used by submission, polling, teardown and source blockers; observe each counted native owner/result/old-image blocker. Only unsubmitted rejection, completion, proven idle or terminal device loss authorize exactly-once retirement; client timeout/cancellation/poll error alone retain owners.",
+			"parameters": {
+				"scenario": "teardown-order"
+			}
+		},
+		{
+			"id": "readback.mutation.premature-release",
+			"finding": "readback-lifetime",
+			"lane": "isolated-mutant",
+			"evidenceKind": "mutation-sensitivity",
+			"prerequisiteIds": [
+				"native-test-runtime"
+			],
+			"expectation": "Same behavioral regression fails with isolated premature-release mutation and unchanged comments; retain correct/mutant executable identities and assertion results. Only correct candidate binaries proceed to acceptance.",
+			"parameters": {}
+		},
+		{
+			"id": "readback.gpu.native.timeout-then-complete",
+			"finding": "readback-lifetime",
+			"lane": "native",
+			"evidenceKind": "real-gpu",
+			"prerequisiteIds": [
+				"candidate-install",
+				"vulkan-adapter",
+				"vulkan-validation",
+				"watchdog"
+			],
+			"expectation": "Real accepted submission is held by validation-only HOST-to-TRANSFER pre-copy event; observe actual VK_NOT_READY and timeout while native owners remain, host-release, actual fence completion and exactly-once destruction. Scope guard signals before idle on every exit.",
+			"parameters": {
+				"scenario": "timeout-then-complete",
+				"iterations": 100
+			}
+		},
+		{
+			"id": "readback.gpu.native.resize",
+			"finding": "readback-lifetime",
+			"lane": "native",
+			"evidenceKind": "real-gpu",
+			"prerequisiteIds": [
+				"candidate-install",
+				"vulkan-adapter",
+				"vulkan-validation",
+				"watchdog"
+			],
+			"expectation": "Real accepted submission is held by validation-only HOST-to-TRANSFER pre-copy event; observe actual VK_NOT_READY and timeout while native owners remain, host-release, actual fence completion and exactly-once destruction. Scope guard signals before idle on every exit.",
+			"parameters": {
+				"scenario": "resize",
+				"iterations": 100
+			}
+		},
+		{
+			"id": "readback.gpu.native.orderly-shutdown",
+			"finding": "readback-lifetime",
+			"lane": "native",
+			"evidenceKind": "real-gpu",
+			"prerequisiteIds": [
+				"candidate-install",
+				"vulkan-adapter",
+				"vulkan-validation",
+				"watchdog"
+			],
+			"expectation": "Real accepted submission is held by validation-only HOST-to-TRANSFER pre-copy event; observe actual VK_NOT_READY and timeout while native owners remain, host-release, actual fence completion and exactly-once destruction. Scope guard signals before idle on every exit.",
+			"parameters": {
+				"scenario": "orderly-shutdown",
+				"iterations": 100
+			}
+		},
+		{
+			"id": "readback.gpu.editor.read-only-captures",
+			"finding": "readback-lifetime",
+			"lane": "editor",
+			"evidenceKind": "real-gpu",
+			"prerequisiteIds": [
+				"candidate-install",
+				"vulkan-adapter",
+				"vulkan-validation",
+				"watchdog",
+				"editor-runtime",
+				"png-integrity-decoder"
+			],
+			"expectation": "Read-only installed camera captures preserve authored scene/settings, independently decode actual images and require backendReadback=true/deterministicFallback=false. Retain request/terminal identities and actual validation logs.",
+			"parameters": {
+				"scenario": "read-only-captures",
+				"iterations": 100
+			}
+		},
+		{
+			"id": "readback.gpu.editor.resize-after-capture",
+			"finding": "readback-lifetime",
+			"lane": "editor",
+			"evidenceKind": "real-gpu",
+			"prerequisiteIds": [
+				"candidate-install",
+				"vulkan-adapter",
+				"vulkan-validation",
+				"watchdog",
+				"editor-runtime",
+				"png-integrity-decoder"
+			],
+			"expectation": "Read-only installed camera captures preserve authored scene/settings, independently decode actual images and require backendReadback=true/deterministicFallback=false. Retain request/terminal identities and actual validation logs.",
+			"parameters": {
+				"scenario": "resize-after-capture",
+				"iterations": 100
+			}
+		},
+		{
+			"id": "readback.gpu.editor.normal-close",
+			"finding": "readback-lifetime",
+			"lane": "editor",
+			"evidenceKind": "real-gpu",
+			"prerequisiteIds": [
+				"candidate-install",
+				"vulkan-adapter",
+				"vulkan-validation",
+				"watchdog",
+				"editor-runtime",
+				"png-integrity-decoder"
+			],
+			"expectation": "Read-only installed camera captures preserve authored scene/settings, independently decode actual images and require backendReadback=true/deterministicFallback=false. Retain request/terminal identities and actual validation logs.",
+			"parameters": {
+				"scenario": "normal-close",
+				"iterations": 100
+			}
+		},
+		{
+			"id": "stages.replay.w1.cold-direct-complete",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 1,
+				"scenario": "cold-direct-complete"
+			}
+		},
+		{
+			"id": "stages.replay.w1.warm-direct-complete",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 1,
+				"scenario": "warm-direct-complete"
+			}
+		},
+		{
+			"id": "stages.replay.w1.cold-virtual-compact",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 1,
+				"scenario": "cold-virtual-compact"
+			}
+		},
+		{
+			"id": "stages.replay.w1.warm-virtual-compact",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 1,
+				"scenario": "warm-virtual-compact"
+			}
+		},
+		{
+			"id": "stages.replay.w1.animated-mixed",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 1,
+				"scenario": "animated-mixed"
+			}
+		},
+		{
+			"id": "stages.replay.w1.multi-output",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 1,
+				"scenario": "multi-output"
+			}
+		},
+		{
+			"id": "stages.replay.w1.no-output",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 1,
+				"scenario": "no-output"
+			}
+		},
+		{
+			"id": "stages.replay.w1.rejection-rollback",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 1,
+				"scenario": "rejection-rollback"
+			}
+		},
+		{
+			"id": "stages.replay.w1.cancel-before-exchange",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 1,
+				"scenario": "cancel-before-exchange"
+			}
+		},
+		{
+			"id": "stages.replay.w1.cancel-after-exchange",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 1,
+				"scenario": "cancel-after-exchange"
+			}
+		},
+		{
+			"id": "stages.replay.w1.held-reader",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 1,
+				"scenario": "held-reader"
+			}
+		},
+		{
+			"id": "stages.replay.w1.worker-failure",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 1,
+				"scenario": "worker-failure"
+			}
+		},
+		{
+			"id": "stages.replay.w1.scene-clear",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 1,
+				"scenario": "scene-clear"
+			}
+		},
+		{
+			"id": "stages.replay.w1.shutdown",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 1,
+				"scenario": "shutdown"
+			}
+		},
+		{
+			"id": "stages.replay.w1.restart",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 1,
+				"scenario": "restart"
+			}
+		},
+		{
+			"id": "stages.replay.w2.cold-direct-complete",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 2,
+				"scenario": "cold-direct-complete"
+			}
+		},
+		{
+			"id": "stages.replay.w2.warm-direct-complete",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 2,
+				"scenario": "warm-direct-complete"
+			}
+		},
+		{
+			"id": "stages.replay.w2.cold-virtual-compact",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 2,
+				"scenario": "cold-virtual-compact"
+			}
+		},
+		{
+			"id": "stages.replay.w2.warm-virtual-compact",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 2,
+				"scenario": "warm-virtual-compact"
+			}
+		},
+		{
+			"id": "stages.replay.w2.animated-mixed",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 2,
+				"scenario": "animated-mixed"
+			}
+		},
+		{
+			"id": "stages.replay.w2.multi-output",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 2,
+				"scenario": "multi-output"
+			}
+		},
+		{
+			"id": "stages.replay.w2.no-output",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 2,
+				"scenario": "no-output"
+			}
+		},
+		{
+			"id": "stages.replay.w2.rejection-rollback",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 2,
+				"scenario": "rejection-rollback"
+			}
+		},
+		{
+			"id": "stages.replay.w2.cancel-before-exchange",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 2,
+				"scenario": "cancel-before-exchange"
+			}
+		},
+		{
+			"id": "stages.replay.w2.cancel-after-exchange",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 2,
+				"scenario": "cancel-after-exchange"
+			}
+		},
+		{
+			"id": "stages.replay.w2.held-reader",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 2,
+				"scenario": "held-reader"
+			}
+		},
+		{
+			"id": "stages.replay.w2.worker-failure",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 2,
+				"scenario": "worker-failure"
+			}
+		},
+		{
+			"id": "stages.replay.w2.scene-clear",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 2,
+				"scenario": "scene-clear"
+			}
+		},
+		{
+			"id": "stages.replay.w2.shutdown",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 2,
+				"scenario": "shutdown"
+			}
+		},
+		{
+			"id": "stages.replay.w2.restart",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 2,
+				"scenario": "restart"
+			}
+		},
+		{
+			"id": "stages.replay.w8.cold-direct-complete",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 8,
+				"scenario": "cold-direct-complete"
+			}
+		},
+		{
+			"id": "stages.replay.w8.warm-direct-complete",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 8,
+				"scenario": "warm-direct-complete"
+			}
+		},
+		{
+			"id": "stages.replay.w8.cold-virtual-compact",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 8,
+				"scenario": "cold-virtual-compact"
+			}
+		},
+		{
+			"id": "stages.replay.w8.warm-virtual-compact",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 8,
+				"scenario": "warm-virtual-compact"
+			}
+		},
+		{
+			"id": "stages.replay.w8.animated-mixed",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 8,
+				"scenario": "animated-mixed"
+			}
+		},
+		{
+			"id": "stages.replay.w8.multi-output",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 8,
+				"scenario": "multi-output"
+			}
+		},
+		{
+			"id": "stages.replay.w8.no-output",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 8,
+				"scenario": "no-output"
+			}
+		},
+		{
+			"id": "stages.replay.w8.rejection-rollback",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 8,
+				"scenario": "rejection-rollback"
+			}
+		},
+		{
+			"id": "stages.replay.w8.cancel-before-exchange",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 8,
+				"scenario": "cancel-before-exchange"
+			}
+		},
+		{
+			"id": "stages.replay.w8.cancel-after-exchange",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 8,
+				"scenario": "cancel-after-exchange"
+			}
+		},
+		{
+			"id": "stages.replay.w8.held-reader",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 8,
+				"scenario": "held-reader"
+			}
+		},
+		{
+			"id": "stages.replay.w8.worker-failure",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 8,
+				"scenario": "worker-failure"
+			}
+		},
+		{
+			"id": "stages.replay.w8.scene-clear",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 8,
+				"scenario": "scene-clear"
+			}
+		},
+		{
+			"id": "stages.replay.w8.shutdown",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 8,
+				"scenario": "shutdown"
+			}
+		},
+		{
+			"id": "stages.replay.w8.restart",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-replay",
+			"evidenceKind": "parity",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay"
+			],
+			"expectation": "Actual worker count must match; exact authored output identities/order/values, rejection, resource/phase/flush fingerprints and lifetimes match baseline. Normalize only explicit bijective session IDs; post-exchange cancellation completes committed cache/receipts/finalization.",
+			"parameters": {
+				"workers": 8,
+				"scenario": "restart"
+			}
+		},
+		{
+			"id": "stages.renderer.ownership-map",
+			"finding": "runtime-stage-reviewability",
+			"lane": "source-audit",
+			"evidenceKind": "structural",
+			"prerequisiteIds": [
+				"comment-baseline",
+				"source-audit"
+			],
+			"expectation": "Map every owner/borrow/final consumer/child settlement/cancellation/publication; preserve four executing sections, three suspensions, five ordered descriptors, exclusive resume/retire gate and owner-before-lease-before-PMR declaration order.",
+			"parameters": {}
+		},
+		{
+			"id": "stages.animation.ownership-map",
+			"finding": "runtime-stage-reviewability",
+			"lane": "source-audit",
+			"evidenceKind": "structural",
+			"prerequisiteIds": [
+				"comment-baseline",
+				"source-audit"
+			],
+			"expectation": "Map nine unchanged workload callbacks, exact predecessor/session/lifecycle guards and held copy-on-write roots; no extra phase/flush or worker demotion.",
+			"parameters": {}
+		},
+		{
+			"id": "stages.function-budgets",
+			"finding": "runtime-stage-reviewability",
+			"lane": "source-audit",
+			"evidenceKind": "structural",
+			"prerequisiteIds": [
+				"source-audit"
+			],
+			"expectation": "Both orchestrators <=500 nonblank/noncomment physical lines; every extracted helper including nested lambdas <=400; each remaining coordinator .cpp <=2000. Exact symbol extents/all helpers audited; unknown syntax fails; no giant context/include-fragment bypass.",
+			"parameters": {}
+		},
+		{
+			"id": "stages.timing.small.replicate-1.median",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "small",
+				"ordinal": 1,
+				"metric": "median",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.small.replicate-1.p95",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "small",
+				"ordinal": 1,
+				"metric": "p95",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.small.replicate-2.median",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "small",
+				"ordinal": 2,
+				"metric": "median",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.small.replicate-2.p95",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "small",
+				"ordinal": 2,
+				"metric": "p95",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.small.replicate-3.median",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "small",
+				"ordinal": 3,
+				"metric": "median",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.small.replicate-3.p95",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "small",
+				"ordinal": 3,
+				"metric": "p95",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.normal.replicate-1.median",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "normal",
+				"ordinal": 1,
+				"metric": "median",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.normal.replicate-1.p95",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "normal",
+				"ordinal": 1,
+				"metric": "p95",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.normal.replicate-2.median",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "normal",
+				"ordinal": 2,
+				"metric": "median",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.normal.replicate-2.p95",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "normal",
+				"ordinal": 2,
+				"metric": "p95",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.normal.replicate-3.median",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "normal",
+				"ordinal": 3,
+				"metric": "median",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.normal.replicate-3.p95",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "normal",
+				"ordinal": 3,
+				"metric": "p95",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.stress.replicate-1.median",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "stress",
+				"ordinal": 1,
+				"metric": "median",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.stress.replicate-1.p95",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "stress",
+				"ordinal": 1,
+				"metric": "p95",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.stress.replicate-2.median",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "stress",
+				"ordinal": 2,
+				"metric": "median",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.stress.replicate-2.p95",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "stress",
+				"ordinal": 2,
+				"metric": "p95",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.stress.replicate-3.median",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "stress",
+				"ordinal": 3,
+				"metric": "median",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "stages.timing.stress.replicate-3.p95",
+			"finding": "runtime-stage-reviewability",
+			"lane": "sealed-timing",
+			"evidenceKind": "timing",
+			"prerequisiteIds": [
+				"reference-install",
+				"candidate-install",
+				"sealed-replay",
+				"timing-calibration",
+				"editor-runtime"
+			],
+			"expectation": "The actual runtime-memory-safety-timing-comparison-v1 comparisons row matching scale/ordinal/metric passes: candidate <= paired A ordinal reference * (1 + separately sealed scale/metric limit). Require all nine fresh C captures, all 18 unrounded individual comparisons, fixed hardware-default executor policy, 60 warm-up plus 300 measured frames, unchanged controls/tool identities, no selective retries or post-candidate retuning. This timing case does not claim a 1/2/8 worker or cold/warm timing sample.",
+			"parameters": {
+				"scale": "stress",
+				"ordinal": 3,
+				"metric": "p95",
+				"workerPolicy": "Unchanged hardware-default executor as observed by the installed timing matrix",
+				"warmupFrames": 60,
+				"measuredFrames": 300
+			}
+		},
+		{
+			"id": "comments.inventory-dispositions",
+			"finding": "comment-quality",
+			"lane": "source-audit",
+			"evidenceKind": "structural",
+			"prerequisiteIds": [
+				"comment-baseline",
+				"source-audit"
+			],
+			"expectation": "Exactly 2345 frozen occurrences in 170 files (101 Engine, 69 Editor) have unique remove/replace dispositions with no missing/duplicate entries; zero remaining production comment matches.",
+			"parameters": {}
+		},
+		{
+			"id": "comments.batch.renderer",
+			"finding": "comment-quality",
+			"lane": "comment-only-audit",
+			"evidenceKind": "token-equivalence",
+			"prerequisiteIds": [
+				"comment-baseline",
+				"source-audit"
+			],
+			"expectation": "Separate disjoint comment-only patch compares executable tokens to immutable immediately preceding source copy; preserve string/raw/verbatim/interpolated data and source-location-sensitive constructs; review meaningful intent/invariant/ordering explanations in each affected file.",
+			"parameters": {
+				"batch": "renderer"
+			}
+		},
+		{
+			"id": "comments.batch.animation",
+			"finding": "comment-quality",
+			"lane": "comment-only-audit",
+			"evidenceKind": "token-equivalence",
+			"prerequisiteIds": [
+				"comment-baseline",
+				"source-audit"
+			],
+			"expectation": "Separate disjoint comment-only patch compares executable tokens to immutable immediately preceding source copy; preserve string/raw/verbatim/interpolated data and source-location-sensitive constructs; review meaningful intent/invariant/ordering explanations in each affected file.",
+			"parameters": {
+				"batch": "animation"
+			}
+		},
+		{
+			"id": "comments.batch.core-threadpool",
+			"finding": "comment-quality",
+			"lane": "comment-only-audit",
+			"evidenceKind": "token-equivalence",
+			"prerequisiteIds": [
+				"comment-baseline",
+				"source-audit"
+			],
+			"expectation": "Separate disjoint comment-only patch compares executable tokens to immutable immediately preceding source copy; preserve string/raw/verbatim/interpolated data and source-location-sensitive constructs; review meaningful intent/invariant/ordering explanations in each affected file.",
+			"parameters": {
+				"batch": "core-threadpool"
+			}
+		},
+		{
+			"id": "comments.batch.other-engine",
+			"finding": "comment-quality",
+			"lane": "comment-only-audit",
+			"evidenceKind": "token-equivalence",
+			"prerequisiteIds": [
+				"comment-baseline",
+				"source-audit"
+			],
+			"expectation": "Separate disjoint comment-only patch compares executable tokens to immutable immediately preceding source copy; preserve string/raw/verbatim/interpolated data and source-location-sensitive constructs; review meaningful intent/invariant/ordering explanations in each affected file.",
+			"parameters": {
+				"batch": "other-engine"
+			}
+		},
+		{
+			"id": "comments.batch.editor-main",
+			"finding": "comment-quality",
+			"lane": "comment-only-audit",
+			"evidenceKind": "token-equivalence",
+			"prerequisiteIds": [
+				"comment-baseline",
+				"source-audit"
+			],
+			"expectation": "Separate disjoint comment-only patch compares executable tokens to immutable immediately preceding source copy; preserve string/raw/verbatim/interpolated data and source-location-sensitive constructs; review meaningful intent/invariant/ordering explanations in each affected file.",
+			"parameters": {
+				"batch": "editor-main"
+			}
+		},
+		{
+			"id": "comments.batch.other-editor",
+			"finding": "comment-quality",
+			"lane": "comment-only-audit",
+			"evidenceKind": "token-equivalence",
+			"prerequisiteIds": [
+				"comment-baseline",
+				"source-audit"
+			],
+			"expectation": "Separate disjoint comment-only patch compares executable tokens to immutable immediately preceding source copy; preserve string/raw/verbatim/interpolated data and source-location-sensitive constructs; review meaningful intent/invariant/ordering explanations in each affected file.",
+			"parameters": {
+				"batch": "other-editor"
+			}
+		},
+		{
+			"id": "comments.lexer-self-tests",
+			"finding": "comment-quality",
+			"lane": "source-audit",
+			"evidenceKind": "behavioral",
+			"prerequisiteIds": [
+				"comment-baseline",
+				"source-audit"
+			],
+			"expectation": "C++/C# comment/string/raw/verbatim/interpolated, nested-lambda extents and unsupported-input corpora prove scanner boundaries and fail-closed behavior; meaningful assertions detect scanner faults.",
+			"parameters": {}
+		}
+	],
+	"integratedGates": [
+		{
+			"id": "compile-install",
+			"expectation": "Parent successfully compiles/installs final integrated code, verifies full runnable closure and hashes."
+		},
+		{
+			"id": "full-ctest",
+			"expectation": "Parent runs full applicable CTest with registered case floors/timeouts; no arbitrary review timeout or empty success."
+		},
+		{
+			"id": "installed-readback",
+			"expectation": "Parent executes required installed Native and Editor real-GPU campaigns for 100 iterations per declared scenario; validation clean and native cleanup proven."
+		},
+		{
+			"id": "runtime-memory-cpu",
+			"expectation": "Run applicable existing installed CPU campaign, 100 iterations with actual worker counts 1/2/8 and frozen registry floors."
+		},
+		{
+			"id": "runtime-memory-vulkan",
+			"expectation": "Run applicable existing installed Vulkan campaign, 100 iterations per frozen lane; actual enabled validation and cleanup proof."
+		},
+		{
+			"id": "runtime-memory-renderer-editor",
+			"expectation": "Run applicable existing installed Renderer/editor campaign, 100 iterations per frozen lane, held-borrower and lifecycle proof."
+		},
+		{
+			"id": "final-parity",
+			"expectation": "Final-byte sealed baseline/candidate replay passes complete case matrix at actual worker counts 1/2/8."
+		},
+		{
+			"id": "final-performance",
+			"expectation": "Final-byte performance comparisons pass frozen A/A-qualified independent median/p95 controls; failures retained."
+		},
+		{
+			"id": "repository-audit",
+			"expectation": "Final source/token/comment/stage budgets pass; dependencies remain bundled, shaders separate, graph updated and user changes preserved."
+		},
+		{
+			"id": "five-finding-join",
+			"expectation": "Five separately assessable records link baseline, final diff scope and appropriate verification; all records join same final source/install/tool identities."
+		}
+	],
+	"limits": {
+		"pool": "Live valid foreign storage pointers only. Stale aliases at reused addresses and fabricated/dangling external pointer representations are outside contract.",
+		"timing": "Three immutable A/A calibration pairs per small/normal/stress scale; six separately sealed scale/metric median/p95 limits; nine hardware-default candidate C1/C2/C3 captures produce 18 scale/ordinal/metric comparisons. Every capture uses 60 warm-up plus 300 measured frames. Actual 1/2/8 cold/warm coverage belongs to the unchanged 45-case parity matrix, not these timing identities. Synthetic requested-size capture cost is measured separately. No retuning or selective retry.",
+		"nativeEvidence": "Deterministic policy tests may prove failed-idle/device-loss branches but cannot pass real-GPU lanes."
+	}
+}

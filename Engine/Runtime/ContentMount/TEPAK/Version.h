@@ -6,7 +6,7 @@
 
 namespace tepak {
 
-// struct Version groups related state and operations so callers have one documented contract.
+// Project release and public pack-format versions are separate constants.
 struct Version final {
 	static constexpr std::string_view kProjectName = "TEPAK";
 	static constexpr std::string_view kProjectVersion = "0.1.0";

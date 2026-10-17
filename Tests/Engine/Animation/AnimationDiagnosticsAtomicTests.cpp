@@ -1,64 +1,49 @@
-// AnimationDiagnosticsAtomicTests.cpp - Fixed compact evidence publication contracts.
-
+// Supplemental source integration checks accompany actual diagnostics validation below.
 #include "TestHarness.h"
-
 #include "Animation/Diagnostics/AnimationDiagnostics.h"
-
 #include <fstream>
 #include <iterator>
 #include <string>
 
 namespace TerraEngine::Tests {
 	using namespace TerraEngine::Animation;
+	namespace {
+		// A missing file or definition must fail before any negative substring assertion.
+		std::string ReadDiagnosticsDefinition(TestContext& context, const char* relative,
+			const char* declaration, const char* nextDeclaration) {
+			std::ifstream input(std::string(TERRAENGINE_SOURCE_DIR) + relative, std::ios::binary);
+			context.Expect(input.is_open(), "Supplemental diagnostics contract must open its actual production file.");
+			const std::string source{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+			context.Expect(!input.bad() && !source.empty(), "Diagnostics source must be readable and nonempty.");
+			const auto begin = source.find(declaration);
+			context.Expect(begin != std::string::npos, "The compiled diagnostics/presentation definition must exist.");
+			const auto end = source.find(nextDeclaration, begin + std::char_traits<char>::length(declaration));
+			context.Expect(end != std::string::npos && end > begin, "The actual definition region requires nonempty ordered bounds.");
+			return source.substr(begin, end - begin);
+		}
+	}
 
-	void RegisterAnimationDiagnosticsAtomicTests(TestRegistry& registry)
-	{
+	void RegisterAnimationDiagnosticsAtomicTests(TestRegistry& registry) {
 		registry.Add("Animation.Diagnostics.GpuCountersUsePublishedVulkanPlan", [](TestContext& context) {
-			// Keep this integration contract close to the snapshot validator: GPU
-			// counters are meaningful only when they name the exact immutable plan
-			// that the Vulkan command recorder can consume.
-			const std::string path = std::string(TERRAENGINE_SOURCE_DIR)
-				+ "/Engine/Animation/AnimationSystem.cpp";
-			std::ifstream sourceFile(path, std::ios::binary);
-			const std::string source{
-				std::istreambuf_iterator<char>(sourceFile), std::istreambuf_iterator<char>()};
-			const std::size_t diagnostics = source.find("BuildActiveDiagnosticsLocked");
-			const std::size_t presentation = source.find(
-				"presentation->plan.DispatchCommands().size()", diagnostics);
-			context.Expect(diagnostics != std::string::npos
-				&& presentation != std::string::npos
-				&& source.find("presentation->plan.Batches().size()", diagnostics) != std::string::npos
-				&& source.find("presentation->safeFallback", diagnostics) != std::string::npos
-				&& source.find("presentation->sourceGeneration == publicationGeneration", diagnostics)
-					!= std::string::npos,
-				"GPU diagnostics must count only the current accepted presentation plan.");
-			const std::size_t perItemAttempt = source.find("++counters.gpuDispatches", diagnostics);
-			context.Expect(perItemAttempt == std::string::npos
-				&& source.find("counters.gpuDispatches = presentation->plan.DispatchCommands().size()",
-					diagnostics) != std::string::npos,
-				"GPU dispatches must reflect Vulkan command-plan entries, not per-item lowering attempts.");
+			const auto source = ReadDiagnosticsDefinition(context, "/Engine/Animation/AnimationSystemDiagnostics.cpp",
+				"AnimationSystem::Impl::BuildActiveDiagnosticsLocked(", "AnimationSystem::Impl::BuildActiveDetailedDiagnosticsLocked(");
+			context.Expect(source.find("presentation->plan.DispatchCommands().size()") != std::string::npos
+				&& source.find("presentation->plan.Batches().size()") != std::string::npos
+				&& source.find("presentation->safeFallback") != std::string::npos
+				&& source.find("presentation->sourceGeneration == publicationGeneration") != std::string::npos,
+				"GPU diagnostics must count only the current accepted immutable presentation plan.");
+			context.Expect(source.find("++counters.gpuDispatches") == std::string::npos
+				&& source.find("counters.gpuDispatches = presentation->plan.DispatchCommands().size()") != std::string::npos,
+				"GPU dispatches reflect command-plan entries rather than per-item lowering attempts.");
 		});
 
 		registry.Add("Animation.Presentation.CapturesOwnerMappingBeforeMovingLoweringInput", [](TestContext& context) {
-			// The presentation handoff is fail-closed: one incomplete owner mapping
-			// returns no frame and the presentation system safely publishes an empty
-			// fallback. Keep the stable owner identity capture ahead of the move so a
-			// valid GPU visual input cannot be rejected through moved-from state.
-			const std::string path = std::string(TERRAENGINE_SOURCE_DIR)
-				+ "/Engine/Animation/AnimationSystem.cpp";
-			std::ifstream sourceFile(path, std::ios::binary);
-			const std::string source{
-				std::istreambuf_iterator<char>(sourceFile), std::istreambuf_iterator<char>()};
-			const std::size_t handoff = source.find("BuildGpuPresentationFrame");
-			const std::size_t stableIdentity = source.find(
-				"mapping.stableInstanceId", handoff);
-			const std::size_t transfer = source.find(
-				"frame->inputs.push_back(std::move(*item.gpuLowering))", handoff);
-			context.Expect(handoff != std::string::npos
-				&& stableIdentity != std::string::npos
-				&& transfer != std::string::npos
-				&& stableIdentity < transfer,
-				"GPU presentation must prove the owner mapping before moving its lowering input.");
+			const auto source = ReadDiagnosticsDefinition(context, "/Engine/Animation/Frame/AnimationAuthorityPublication.cpp",
+				"AnimationSystem::Impl::BuildGpuPresentationFrame(", "AnimationSystem::Impl::FindPreEvaluationPublication(");
+			const auto stableIdentity = source.find("mapping.stableInstanceId");
+			const auto transfer = source.find("frame->inputs.push_back(std::move(*item.gpuLowering))");
+			context.Expect(stableIdentity != std::string::npos && transfer != std::string::npos && stableIdentity < transfer,
+				"The same compiled presentation definition must capture owner identity before moving its lowering input.");
 		});
 
 		registry.Add("Animation.Diagnostics.FixedCompactCountersValidateAtomically", [](TestContext& context) {

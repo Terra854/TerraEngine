@@ -75,7 +75,7 @@ enum class UIAlignItems
 };
 
 // Numeric layout values can be authored as points, percentages, or `auto`.
-// struct UIValue groups related state and operations so callers have one documented contract.
+
 struct UIValue
 {
 	enum class Unit
@@ -107,7 +107,7 @@ struct UIEdgeValues
 	static UIEdgeValues All(const UIValue& value);
 };
 
-// struct UITransformProperties groups related state and operations so callers have one documented contract.
+
 struct UITransformProperties
 {
 	std::optional<glm::vec2> translate;
@@ -143,7 +143,7 @@ struct UIStyle
 	[[nodiscard]] bool HasRenderableBackground() const;
 };
 
-// struct UIStyleRule groups related state and operations so callers have one documented contract.
+
 struct UIStyleRule
 {
 	std::string selectorText;

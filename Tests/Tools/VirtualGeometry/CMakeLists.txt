@@ -45,13 +45,14 @@ if(TERRAENGINE_POWERSHELL_EXECUTABLE)
 	)
 	# Exercise the actual audit against isolated miniature repositories, proving
 	# that wire metadata does not exempt product names or unrelated planning text.
+	# The script enforces its case floor and fails on any rejected expectation;
+	# use its exit code so adding regressions cannot break a fixed-count regex.
 	add_test(NAME Repository.SemanticProductNamingContracts
 		COMMAND "${TERRAENGINE_POWERSHELL_EXECUTABLE}"
 			-NoProfile -ExecutionPolicy Bypass
 			-File "${CMAKE_CURRENT_SOURCE_DIR}/SemanticProductNaming.Tests.ps1")
 	set_tests_properties(Repository.SemanticProductNamingContracts PROPERTIES
 		LABELS "Repository;Naming;Contract"
-		PASS_REGULAR_EXPRESSION "13/13 naming audit regressions passed[.]"
 		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 		RUN_SERIAL TRUE TIMEOUT 180)
 else()

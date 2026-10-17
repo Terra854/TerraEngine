@@ -14,7 +14,7 @@
 class MainEditorSubsystem;
 struct ProfilerWindowCache;
 
-// class ProfilerWindow groups related state and operations so callers have one documented contract.
+
 class ProfilerWindow : public EditorWindow
 {
 public:

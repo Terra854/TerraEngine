@@ -1,5 +1,15 @@
 # Engine unit tests stay headless and deterministic so contributors can run
 # them before the editor or renderer is available.
+# Compile the independent decoder once. Keeping basisu private to this support
+# library prevents decoder include paths from changing every test translation
+# unit, while both executables still link the same committed implementation.
+add_library(TerraEngineCaptureDecodeAssertions STATIC
+	${CMAKE_SOURCE_DIR}/Tests/Support/DecodedCaptureAssertions.cpp)
+target_compile_features(TerraEngineCaptureDecodeAssertions PRIVATE cxx_std_20)
+target_include_directories(TerraEngineCaptureDecodeAssertions PRIVATE
+	${CMAKE_SOURCE_DIR}/External/basisu)
+target_link_libraries(TerraEngineCaptureDecodeAssertions PRIVATE basisu)
+
 # This child has no engine dependency: the watchdog can terminate a deliberately
 # blocked test without loading providers, managed assemblies or GPU resources.
 add_executable(TerraEngineCorrectnessProcessFixture
@@ -295,6 +305,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderCaptureDiagnosticsTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderCaptureEncodingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderCaptureQueueTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/SyntheticCaptureLifecycleTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderDeferredRetirementTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderRuntimeLayoutTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderDiagnosticsTests.cpp
@@ -424,6 +435,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanFrameDiagnosticsTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanVirtualGeometryTimingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanImageReadbackTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanReadbackLifetimeTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanPresentationLifecycleTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanUiSubmissionFailureTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/EditorFrameCompletionTrackerTests.cpp
@@ -516,6 +528,7 @@ target_link_libraries(TerraEngine-EngineTests
 		# provider headers or link requirements.
 		Jolt
 		TerraEngineAudioMiniaudioRuntime
+		TerraEngineCaptureDecodeAssertions
 		libzstd_static
 		xxhash
 )
@@ -530,6 +543,11 @@ target_include_directories(TerraEngineTextureUiFixtureGenerator PRIVATE
 	${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Tests/Engine
 	${CMAKE_SOURCE_DIR}/External/json/include)
 target_link_libraries(TerraEngineTextureUiFixtureGenerator PRIVATE TerraEngine-Engine)
+
+# Preserve the exact rejected bytes as validation data in a clean install.
+install(FILES ${CMAKE_SOURCE_DIR}/Tests/Fixtures/McpCameraImages/invalid-fallback.png
+	DESTINATION "${CMAKE_BINARY_DIR}/Build/Tests/Fixtures/McpCameraImages"
+	COMPONENT CaptureValidation)
 set_target_properties(TerraEngineTextureUiFixtureGenerator PROPERTIES
 	RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
@@ -1103,6 +1121,15 @@ terraengine_add_correctness_slice(Engine.RuntimeMemorySafety.RendererScratch Ter
 terraengine_add_correctness_slice(Engine.RuntimeMemorySafety.EmptyFramePolicy TerraEngine-EngineTests Engine.RuntimeMemorySafety.EmptyFramePolicy 8)
 # Protect unchanged-extent recovery from host retirement-reservation failures.
 terraengine_add_correctness_slice(Engine.VulkanPresentationReservationRecovery TerraEngine-EngineTests Renderer.VulkanPresentationLifecycle.ReservationFailureRetriesWithoutResize 1)
+
+# The floor counts registered cases; each image case decodes both overlay modes.
+terraengine_add_correctness_slice(Engine.RenderCaptureContracts TerraEngine-EngineTests "Renderer.CaptureEncoding,Renderer.CaptureQueue,Renderer.SyntheticCapture" 49)
+# Counted native-owner policy plus the renderer's real physical-charge adapter.
+terraengine_add_correctness_slice(Engine.ReadbackLifetime TerraEngine-EngineTests "Renderer.ReadbackLifetime,Renderer.SyntheticCapture.FakeReadback" 29)
+# Observe actual producer callbacks and retained publications before extraction.
+# These CPU fixtures complement the separately sealed installed replay matrix.
+terraengine_add_correctness_slice(Engine.FrameStageContracts TerraEngine-EngineTests
+	"Engine.RuntimeMemorySafety.RendererScratch.Production,Renderer.FramePublication.StageContract,Animation.Scheduler.Production,Animation.Scheduler.GraphCancellation,Animation.Scheduler.LifecycleRetirementRejectsSealedCallbacks,Animation.AuthorityPublication.RejectedCandidatesPreservePinnedOwners" 12)
 # The root install variable is declared later in the top-level file. Use the
 # maintained build-relative destination here instead of emitting an empty value.
 set_property(TEST Engine.NestedTaskSettlement APPEND PROPERTY ENVIRONMENT "TERRAENGINE_LIFECYCLE_INSTALL_ROOT=${CMAKE_BINARY_DIR}/Build")

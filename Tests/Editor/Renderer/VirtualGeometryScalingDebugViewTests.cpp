@@ -4,7 +4,11 @@
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Renderer/RenderSystem.h"
 
+#include <algorithm>
 #include <fstream>
+#include <iterator>
+#include <filesystem>
+#include <stdexcept>
 #include <sstream>
 #include <string>
 
@@ -12,53 +16,32 @@ namespace TerraEngine::EditorTests {
 
 	namespace
 	{
+		// Source checks supplement runtime tests. Missing definitions must fail even
+		// when the caller only searches for forbidden text; ordering stays in one file.
+		std::string RequiredContractSource(const std::filesystem::path& relative)
+		{
+			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relative, std::ios::binary);
+			std::string text((std::istreambuf_iterator<char>(input)), {});
+			if(!input || input.bad() || text.empty())
+				throw std::runtime_error("Required source unavailable: " + relative.generic_string());
+			return text;
+		}
+		std::string RequiredContractRegion(const std::string& text, const char* first, const char* next)
+		{
+			std::string boundaryText = text;
+			boundaryText.erase(std::remove(boundaryText.begin(), boundaryText.end(), '\r'), boundaryText.end());
+			const auto begin = boundaryText.find(first);
+			const auto end = begin == std::string::npos ? std::string::npos : boundaryText.find(next, begin + std::string(first).size());
+			if(begin == std::string::npos || end == std::string::npos || end <= begin)
+				throw std::runtime_error(std::string("Required definition boundaries unavailable: ") + first);
+			return boundaryText.substr(begin, end - begin);
+		}
+
 		std::string ReadSourceForDebugViewContract(const char* path)
 		{
-			// Source-layout tests protect editor-facing diagnostics from losing
-			// labels while the runtime packet path keeps evolving underneath.
-			const auto read = [](const std::string& candidate) {
-				std::ifstream file(candidate, std::ios::binary);
-				if (!file)
-				{
-					return std::string();
-				}
-				std::ostringstream buffer;
-				buffer << file.rdbuf();
-				return buffer.str();
-			};
-
-			std::string text = read(path);
-			if (!text.empty())
-			{
-				return text;
-			}
-			text = read(std::string("../../../") + path);
-			if (!text.empty())
-			{
-				return text;
-			}
-			text = read(std::string("../../../../") + path);
-			if (!text.empty())
-			{
-				return text;
-			}
-
-			const std::string thisFile = __FILE__;
-			const auto resolveFromMarker = [&](const std::string& marker) {
-				const std::size_t markerPosition = thisFile.find(marker);
-				if (markerPosition == std::string::npos)
-				{
-					return std::string();
-				}
-				return read(thisFile.substr(0u, markerPosition) + path);
-			};
-			text = resolveFromMarker("Tests\\Editor\\Renderer\\VirtualGeometryScalingDebugViewTests.cpp");
-			if (!text.empty())
-			{
-				return text;
-			}
-			return resolveFromMarker("Tests/Editor/Renderer/VirtualGeometryScalingDebugViewTests.cpp");
+			return RequiredContractSource(path);
 		}
+
 	}
 
 	void RegisterVirtualGeometryScalingDebugViewTests(TestRegistry& registry)
@@ -140,7 +123,8 @@ namespace TerraEngine::EditorTests {
 		});
 
 		registry.Add("VirtualGeometry.Editor.Diagnostics.ProfilingAndOverlaysExposeGpuPacketCounters", [](TestContext& context) {
-			const std::string renderSystem = ReadSourceForDebugViewContract("Engine/Renderer/RenderSystem.cpp");
+			const auto renderSystem = RequiredContractRegion(ReadSourceForDebugViewContract("Engine/Renderer/Frame/RenderVirtualGeometrySelection.cpp"),
+				"void RenderSystem::FinalizeFrameVirtualGeometryEvidence(", "void RenderSystem::RouteFrameVirtualGeometryPackets(");
 			const std::string profiler = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp");
 			const std::string gameView = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp");
 			const std::string sceneView = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp");
@@ -181,14 +165,21 @@ namespace TerraEngine::EditorTests {
 		registry.Add("VirtualGeometry.Editor.Diagnostics.ToolbarModeSwitchesPublishImmediately", [](TestContext& context) {
 			const std::string gameView = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp");
 			const std::string sceneView = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp");
-			const std::string renderSystem = ReadSourceForDebugViewContract("Engine/Renderer/RenderSystem.cpp");
+			const auto settings = RequiredContractRegion(RequiredContractSource("Engine/Renderer/RenderSystemSettings.cpp"),
+				"void RenderSystem::SetVirtualGeometryDebugVisualizationMode(", "VirtualGeometryDebugVisualizationMode RenderSystem::GetVirtualGeometryDebugVisualizationMode(");
+			const auto visible = RequiredContractRegion(RequiredContractSource("Engine/Renderer/Frame/RenderViewPreparation.cpp"),
+				"TerraEngine::Renderer::Frame::VisibleCommandBuildResult RenderSystem::PrepareFrameVisibleCommands(",
+				"++visibleCommandCache.missCount;\n\t\treturn result;\n\t}");
+			const auto renderSystem = RequiredContractRegion(RequiredContractSource("Engine/Renderer/Frame/RenderVirtualGeometrySelection.cpp"),
+				"TerraEngine::Renderer::Frame::VirtualGeometryViewSelectionPacket RenderSystem::ApplyFrameVirtualGeometrySelection(",
+				"void RenderSystem::ApplyFrameShadowVirtualGeometrySelection(");
 
 			context.Expect(gameView.find("ImGui::Selectable(ToString(mode), selected)") != std::string::npos, "Game View should let developers switch VG visualizer modes from the viewport toolbar.");
 			context.Expect(sceneView.find("ImGui::Selectable(ToString(mode), selected)") != std::string::npos, "Scene View should let developers switch VG visualizer modes from the viewport toolbar.");
 			context.Expect(gameView.find("RenderSystem::Instance().SetVirtualGeometryDebugVisualizationMode(RenderViewType::Game") != std::string::npos, "Game View mode changes should publish directly to RenderSystem in the same GUI event.");
 			context.Expect(sceneView.find("RenderSystem::Instance().SetVirtualGeometryDebugVisualizationMode(RenderViewType::Scene") != std::string::npos, "Scene View mode changes should publish directly to RenderSystem in the same GUI event.");
-			context.Expect(renderSystem.find("virtualGeometryDebugModes[BuildVirtualGeometryDebugModeKey(viewType, outputId)] = normalized") != std::string::npos, "RenderSystem should store view-local debug modes immediately instead of waiting for camera movement.");
-			context.Expect(renderSystem.find("viewVirtualGeometryQuality.debugVisualizationMode = GetVirtualGeometryDebugVisualizationMode(viewType, outputId)") != std::string::npos, "Visible-command preparation should read the latest view-local visualizer mode each frame.");
+			context.Expect(settings.find("virtualGeometryDebugModes[BuildVirtualGeometryDebugModeKey(viewType, outputId)] = normalized") != std::string::npos, "RenderSystem should store view-local debug modes immediately instead of waiting for camera movement.");
+			context.Expect(visible.find("viewVirtualGeometryQuality.debugVisualizationMode = GetVirtualGeometryDebugVisualizationMode(viewType, outputId)") != std::string::npos, "Visible-command preparation should read the latest view-local visualizer mode each frame.");
 			const std::size_t routeLoop = renderSystem.find("for (RenderItemRecord& command : commands)");
 			const std::size_t debugStamp = renderSystem.find("command.virtualGeometryFlags |= debugMode << kVirtualGeometryDebugModeShift", routeLoop);
 			const std::size_t routeGuard = renderSystem.find("!command.UsesVirtualGeometryRoute()", routeLoop);

@@ -1,6 +1,8 @@
 #include "../TestHarness.h"
 #include "EditorMcpTransport.h"
 #include "Engine/Core/Object/ObjectManager.h"
+#include "Engine/ThreadPool/ThreadPool.h"
+#include "Tests/Support/RenderCaptureBackendTestAccess.h"
 #include "Engine/Renderer/RenderSystem.h"
 
 #include <algorithm>
@@ -43,6 +45,27 @@ namespace TerraEngine::EditorTests
 
 	namespace
 	{
+		// These service/transport tests do not initialize Engine. Synthetic image
+		// encoding still requires the production worker executor, so own one only
+		// when absent and settle capture jobs before releasing that owned pool.
+		class CaptureWorkerSession final
+		{
+		public:
+			CaptureWorkerSession() : ownsExecutor_(ThreadPool::instance().getThreadCount() == 0U)
+			{
+				if(ownsExecutor_) ThreadPool::instance().initialize(2U);
+			}
+			CaptureWorkerSession(const CaptureWorkerSession&) = delete;
+			CaptureWorkerSession& operator=(const CaptureWorkerSession&) = delete;
+			~CaptureWorkerSession()
+			{
+				TerraEngine::Renderer::RenderCaptureBackendTestAccess::RetireJobs(RenderSystem::Instance());
+				if(ownsExecutor_) ThreadPool::instance().shutdown();
+			}
+		private:
+			bool ownsExecutor_;
+		};
+
 #if defined(_WIN32)
 		using TestSocket = SOCKET;
 		constexpr TestSocket kInvalidTestSocket = INVALID_SOCKET;
@@ -653,6 +676,7 @@ namespace TerraEngine::EditorTests
 		});
 
 		registry.Add("Editor.MCP.Transport.ToolsCallCanReturnTextAndImageContent", [](TestContext& context) {
+			CaptureWorkerSession captureSession;
 			EditorMcpBridge bridge;
 			bridge.Initialize(nullptr);
 			bridge.SetEnabled(true);
@@ -695,6 +719,7 @@ namespace TerraEngine::EditorTests
 		});
 
 		registry.Add("Editor.MCP.Transport.GameViewCaptureReturnsImageContent", [](TestContext& context) {
+			CaptureWorkerSession captureSession;
 			RenderSystem::Instance().Clear();
 			RenderSystem::Instance().SetGameViewTargetSize(glm::uvec2(32u, 32u));
 			TerraEngine::Scene::WorldPosition gameViewPosition;

@@ -1,0 +1,5 @@
+# These deliberately invalid generated-directory fixtures are committed data.
+!obj/
+!obj/*.cs
+!BUILD/
+!BUILD/*.cpp

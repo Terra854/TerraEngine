@@ -380,7 +380,7 @@ enum class TemfQuantizationProfile : std::uint32_t
 	Memory = 3u
 };
 
-// GetRemapElementSizeBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 constexpr std::uint32_t GetRemapElementSizeBytes(MeshletRemapEncoding encoding)
 {
 	return encoding == MeshletRemapEncoding::Uint16 ? static_cast<std::uint32_t>(sizeof(std::uint16_t)) : static_cast<std::uint32_t>(sizeof(std::uint32_t));
@@ -397,7 +397,7 @@ struct VertexAttribute
 };
 
 // Full vertex declaration stored in the header so viewers know how to decode the stream.
-// struct VertexLayout groups related state and operations so callers have one documented contract.
+
 struct VertexLayout
 {
 	std::uint32_t strideBytes;
@@ -406,7 +406,7 @@ struct VertexLayout
 };
 
 // Parameters required to denormalize packed positions/UVs back into model space.
-// struct QuantizationInfo groups related state and operations so callers have one documented contract.
+
 struct QuantizationInfo
 {
 	float positionOffset[3];  // Center of the bounding box
@@ -416,7 +416,7 @@ struct QuantizationInfo
 };
 
 // Per-meshlet table entry. Offsets/counts point into packed meshlet streams.
-// struct MeshletRecord groups related state and operations so callers have one documented contract.
+
 struct MeshletRecord
 {
 	std::uint32_t vertexOffset;          // Offset into meshlet vertex remap stream.
@@ -426,7 +426,7 @@ struct MeshletRecord
 };
 
 // Maps a render section to a contiguous range of meshlets.
-// struct MeshletSection groups related state and operations so callers have one documented contract.
+
 struct MeshletSection
 {
 	std::uint32_t meshletOffset;
@@ -434,7 +434,7 @@ struct MeshletSection
 };
 
 // Optional per-meshlet sphere + cone bounds for visibility/culling work.
-// struct MeshletBounds groups related state and operations so callers have one documented contract.
+
 struct MeshletBounds
 {
 	float center[3];

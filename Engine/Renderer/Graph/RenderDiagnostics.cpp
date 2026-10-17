@@ -1646,13 +1646,12 @@ namespace TerraEngine::Renderer {
 			"ResourceReadinessSnapshots"
 		};
 		diagnostics.writeResources = { "CaptureResultQueue", "CaptureDiagnostics" };
-		// Capture requests can validate JSON, resolve camera descriptors, and
-		// prepare immutable matrices before the protected GPU handoff. Actual
-		// readback remains coordinator-owned because color targets and staging
-		// resources are tied to live backend frame ownership.
-		diagnostics.workerSafePreparation = "Validate capture request, resolve camera descriptors, clamp target size, and prepare immutable view/projection data.";
+		// Synthetic jobs encode copied dimensions and transparency on workers.
+		// The coordinator alone submits GPU work and publishes settled results;
+		// neither worker encoding nor its retirement borrows live scene storage.
+		diagnostics.workerSafePreparation = "Validate capture extent and prepare immutable view/projection data; encode owned synthetic pixels and PNG bytes on workers.";
 		diagnostics.protectedBoundary = "LiveGpuSubmission";
-		diagnostics.visibilityBoundary = "Capture response becomes visible only after the protected readback or deterministic fallback completes.";
+		diagnostics.visibilityBoundary = "Capture response becomes visible at protected completion polling after readback or owned synthetic preparation settles.";
 		diagnostics.backendReadback = backendReadback;
 		diagnostics.deterministicFallback = deterministicFallback;
 		return diagnostics;

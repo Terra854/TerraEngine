@@ -10,12 +10,33 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <stdexcept>
 #include <sstream>
 
 namespace TerraEngine::Tests
 {
 	namespace
 	{
+		// Source checks supplement runtime tests. Missing definitions must fail even
+		// when the caller only searches for forbidden text; ordering stays in one file.
+		std::string RequiredContractSource(const std::filesystem::path& relative)
+		{
+			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relative, std::ios::binary);
+			std::string text((std::istreambuf_iterator<char>(input)), {});
+			if(!input || input.bad() || text.empty())
+				throw std::runtime_error("Required source unavailable: " + relative.generic_string());
+			return text;
+		}
+		std::string RequiredContractRegion(const std::string& text, const char* first, const char* next)
+		{
+			const auto begin = text.find(first);
+			const auto end = begin == std::string::npos ? std::string::npos : text.find(next, begin + std::string(first).size());
+			if(begin == std::string::npos || end == std::string::npos || end <= begin)
+				throw std::runtime_error(std::string("Required definition boundaries unavailable: ") + first);
+			return text.substr(begin, end - begin);
+		}
+
 		VirtualGeometryAssetRuntime MakeMixedClusterAsset()
 		{
 			VirtualGeometryAssetRuntime asset{};
@@ -113,6 +134,7 @@ namespace TerraEngine::Tests
 			std::ifstream input(sourcePath, std::ios::binary);
 			std::ostringstream buffer;
 			buffer << input.rdbuf();
+			if(!input || input.bad() || buffer.str().empty()) throw std::runtime_error("Required renderer source unavailable: " + sourcePath.string());
 			return buffer.str();
 		}
 
@@ -193,7 +215,8 @@ namespace TerraEngine::Tests
 	void RegisterVirtualGeometryRenderTests(TestRegistry& registry)
 	{
 		registry.Add("VirtualGeometry.Render.PhysicalPagePublicationDoesNotAssumeCatalogResidency", [](TestContext& context) {
-			const std::string rendererSource = ReadRendererSourceFile("Engine/Renderer/RenderSystem.cpp");
+			const auto rendererSource = RequiredContractRegion(RequiredContractSource("Engine/Renderer/Frame/RenderSnapshotPreparation.cpp"),
+				"VirtualGeometryAssetRuntime BuildVirtualGeometryRuntimeFromMesh(", "FrameGeometryInputs::FrameGeometryInputs(");
 			const std::string loaderSource = ReadRendererSourceFile("Engine/Resource/ResourceManagerMesh.cpp");
 			context.Expect(SourceContains(rendererSource, "virtualGeometryPhysicalPageStates"),
 				"Render snapshots must consume the resource-side physical page publication.");

@@ -90,7 +90,7 @@ enum class ProfilerTimingStreamSource : std::uint8_t
 	Unavailable
 };
 
-// struct ProfilerCaptureSettings groups related state and operations so callers have one documented contract.
+
 struct ProfilerCaptureSettings
 {
 	bool cpuEngineEnabled = true;
@@ -124,7 +124,7 @@ struct ProfilerCaptureSettings
 	std::uint64_t maximumSealedFrameBytes = 2u * 1024u * 1024u;
 };
 
-// struct ProfilerMetric groups related state and operations so callers have one documented contract.
+
 struct ProfilerMetric
 {
 	std::string name;
@@ -168,7 +168,7 @@ struct ProfilerTimingStreamAggregate
 	double stdDevMs = 0.0;
 };
 
-// struct ProfilerModuleSummary groups related state and operations so callers have one documented contract.
+
 struct ProfilerModuleSummary
 {
 	ProfilerModuleId moduleId = ProfilerModuleId::CpuEngine;
@@ -177,7 +177,7 @@ struct ProfilerModuleSummary
 	std::vector<ProfilerMetric> metrics;
 };
 
-// struct ProfilerSample groups related state and operations so callers have one documented contract.
+
 struct ProfilerSample
 {
 	std::uint64_t sampleId = 0u;
@@ -468,7 +468,7 @@ struct ProfilerAnimationFrameTelemetry
 	std::vector<ProfilerAnimationDetailRecord> details;
 };
 
-// struct ProfilerFrameRecord groups related state and operations so callers have one documented contract.
+
 struct ProfilerFrameRecord
 {
 	std::uint64_t frameIndex = 0u;
@@ -615,7 +615,7 @@ struct ProfilerFrameListItem
 	bool complete = true;
 };
 
-// struct ProfilerCaptureMetadata groups related state and operations so callers have one documented contract.
+
 struct ProfilerCaptureMetadata
 {
 	std::string terraEngineVersion = "unknown";
@@ -627,7 +627,7 @@ struct ProfilerCaptureMetadata
 	ProfilerCaptureSettings settings;
 };
 
-// struct ProfilerCaptureArtifact groups related state and operations so callers have one documented contract.
+
 struct ProfilerCaptureArtifact
 {
 	std::string fileName;
@@ -644,7 +644,7 @@ struct ProfilerCaptureArtifact
 	std::string status;
 };
 
-// struct ProfilerCaptureDocument groups related state and operations so callers have one documented contract.
+
 struct ProfilerCaptureDocument
 {
 	ProfilerCaptureMetadata metadata;

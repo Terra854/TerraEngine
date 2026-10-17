@@ -867,20 +867,20 @@ namespace
 		return result;
 	}
 
-	// HashClusterRangeValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void HashClusterRangeValue(std::uint64_t& hashValue, std::uint64_t input)
 	{
 		hashValue ^= input;
 		hashValue *= kClusterRangeHashPrime;
 	}
 
-	// RenderViewTypeToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	const char* RenderViewTypeToString(RenderViewType viewType)
 	{
 		return ToString(viewType);
 	}
 
-	// QualityPresetToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	const char* QualityPresetToString(QualityPreset preset)
 	{
 		switch (preset)
@@ -900,7 +900,7 @@ namespace
 		}
 	}
 
-	// LightingReductionCategoryToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	const char* LightingReductionCategoryToString(LightingReductionCategory category)
 	{
 		switch (category)
@@ -920,7 +920,7 @@ namespace
 		}
 	}
 
-	// ShadowResourceKindToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	const char* ShadowResourceKindToString(ShadowResourceKind kind)
 	{
 		switch (kind)
@@ -938,7 +938,7 @@ namespace
 		}
 	}
 
-	// ShadowQualityTierToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	const char* ShadowQualityTierToString(ShadowQualityTier tier)
 	{
 		switch (tier)
@@ -956,7 +956,7 @@ namespace
 		}
 	}
 
-	// ShadowDegradationReasonToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	const char* ShadowDegradationReasonToString(ShadowDegradationReason reason)
 	{
 		switch (reason)
@@ -976,7 +976,7 @@ namespace
 		}
 	}
 
-	// ShadowRefreshReasonToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	const char* ShadowRefreshReasonToString(ShadowRefreshReason reason)
 	{
 		switch (reason)
@@ -998,7 +998,7 @@ namespace
 		}
 	}
 
-	// BuildHashHex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::string BuildHashHex(std::uint64_t hashValue)
 	{
 		std::ostringstream stream;
@@ -1006,7 +1006,7 @@ namespace
 		return stream.str();
 	}
 
-	// IsTruthyEnvironmentValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool IsTruthyEnvironmentValue(const char* value)
 	{
 		if (value == nullptr || value[0] == '\0')
@@ -1015,7 +1015,7 @@ namespace
 		}
 
 		std::string normalizedValue;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const char* cursor = value; *cursor != '\0'; ++cursor)
 		{
 			normalizedValue.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(*cursor))));
@@ -1027,7 +1027,7 @@ namespace
 			|| normalizedValue == "on";
 	}
 
-	// IsClusterValidationCaptureEnabledFromEnvironment is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool IsClusterValidationCaptureEnabledFromEnvironment()
 	{
 		return IsTruthyEnvironmentValue(std::getenv("TERRAENGINE_CLUSTER_VALIDATION_CAPTURE"));

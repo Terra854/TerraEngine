@@ -75,7 +75,7 @@ struct ProfilerJournalFinalizationStatus
 	std::string error;
 };
 
-// class Profiler groups related state and operations so callers have one documented contract.
+
 class Profiler
 {
 public:

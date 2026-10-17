@@ -67,7 +67,7 @@ struct ProjectReadinessState
 	std::string sceneReadinessReason;
 };
 
-// class ProjectManager groups related state and operations so callers have one documented contract.
+
 class ProjectManager {
 public:
 	ProjectManager();

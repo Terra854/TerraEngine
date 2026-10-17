@@ -12,13 +12,13 @@
 
 namespace
 {
-// ToYogaFlexDirection is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 YGFlexDirection ToYogaFlexDirection(UIFlexDirection direction)
 {
 	return direction == UIFlexDirection::Row ? YGFlexDirectionRow : YGFlexDirectionColumn;
 }
 
-// ToYogaJustify is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 YGJustify ToYogaJustify(UIJustifyContent justifyContent)
 {
 	switch (justifyContent)
@@ -37,7 +37,7 @@ YGJustify ToYogaJustify(UIJustifyContent justifyContent)
 	}
 }
 
-// ToYogaAlign is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 YGAlign ToYogaAlign(UIAlignItems alignItems)
 {
 	switch (alignItems)
@@ -54,7 +54,7 @@ YGAlign ToYogaAlign(UIAlignItems alignItems)
 	}
 }
 
-// EstimateIntrinsicTextWidth is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 float EstimateIntrinsicTextWidth(const UIElement& element)
 {
 	const float fontSize = element.displayStyle.fontSize.value_or(18.0f);
@@ -62,7 +62,7 @@ float EstimateIntrinsicTextWidth(const UIElement& element)
 }
 }
 
-// UILayoutEngine::ComputeLayout is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UILayoutEngine::ComputeLayout(const UIElement::Ptr& root, const glm::vec2& viewportSize) const
 {
 	if (!root)
@@ -86,14 +86,14 @@ void UILayoutEngine::ComputeLayout(const UIElement::Ptr& root, const glm::vec2& 
 	YGNodeFreeRecursive(yogaRoot);
 
 	const auto clearNodePointers = [](const auto& self, const UIElement::Ptr& element) -> void {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!element)
 		{
 			return;
 		}
 
 		element->yogaNode = nullptr;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const UIElement::Ptr& child : element->children)
 		{
 			self(self, child);
@@ -102,36 +102,36 @@ void UILayoutEngine::ComputeLayout(const UIElement::Ptr& root, const glm::vec2& 
 	clearNodePointers(clearNodePointers, root);
 }
 
-// UILayoutEngine::ApplyStyleToNode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UILayoutEngine::ApplyStyleToNode(const UIElement& element, YGNodeRef node) const
 {
 	const UIStyle& style = element.computedStyle;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (style.flexDirection.has_value())
 	{
 		YGNodeStyleSetFlexDirection(node, ToYogaFlexDirection(*style.flexDirection));
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (style.justifyContent.has_value())
 	{
 		YGNodeStyleSetJustifyContent(node, ToYogaJustify(*style.justifyContent));
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (style.alignItems.has_value())
 	{
 		YGNodeStyleSetAlignItems(node, ToYogaAlign(*style.alignItems));
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (style.flexGrow.has_value())
 	{
 		YGNodeStyleSetFlexGrow(node, *style.flexGrow);
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (style.flexShrink.has_value())
 	{
 		YGNodeStyleSetFlexShrink(node, *style.flexShrink);
@@ -143,7 +143,7 @@ void UILayoutEngine::ApplyStyleToNode(const UIElement& element, YGNodeRef node) 
 	ApplyEdgeValues(style.margin, node, &YGNodeStyleSetMargin, &YGNodeStyleSetMarginPercent, &YGNodeStyleSetMarginAuto);
 	ApplyEdgeValues(style.padding, node, &YGNodeStyleSetPadding, &YGNodeStyleSetPaddingPercent, nullptr);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (style.borderWidth.has_value())
 	{
 		YGNodeStyleSetBorder(node, YGEdgeAll, *style.borderWidth);
@@ -156,37 +156,37 @@ void UILayoutEngine::ApplyStyleToNode(const UIElement& element, YGNodeRef node) 
 		YGNodeStyleSetWidth(node, EstimateIntrinsicTextWidth(element));
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!style.height.has_value() && (element.type == UIElementType::Label || element.type == UIElementType::Button))
 	{
 		YGNodeStyleSetHeight(node, element.displayStyle.fontSize.value_or(18.0f) + 16.0f);
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!style.width.has_value() && element.type == UIElementType::Image)
 	{
 		YGNodeStyleSetWidth(node, 100.0f);
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!style.height.has_value() && element.type == UIElementType::Image)
 	{
 		YGNodeStyleSetHeight(node, 100.0f);
 	}
 }
 
-// UILayoutEngine::BuildNodeTree is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 YGNodeRef UILayoutEngine::BuildNodeTree(const UIElement::Ptr& element) const
 {
 	YGNodeRef node = YGNodeNew();
 	element->yogaNode = node;
 	ApplyStyleToNode(*element, node);
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::size_t childIndex = 0; childIndex < element->children.size(); ++childIndex)
 	{
 		const UIElement::Ptr& child = element->children[childIndex];
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!child)
 		{
 			continue;
@@ -199,7 +199,7 @@ YGNodeRef UILayoutEngine::BuildNodeTree(const UIElement::Ptr& element) const
 	return node;
 }
 
-// UILayoutEngine::SynchronizeLayout is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UILayoutEngine::SynchronizeLayout(const UIElement::Ptr& element, const glm::vec2& parentOrigin) const
 {
 	if (!element || element->yogaNode == nullptr)
@@ -212,7 +212,7 @@ void UILayoutEngine::SynchronizeLayout(const UIElement::Ptr& element, const glm:
 	element->calculatedPosition = parentOrigin + localPosition;
 	element->calculatedSize = glm::vec2(YGNodeLayoutGetWidth(node), YGNodeLayoutGetHeight(node));
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const UIElement::Ptr& child : element->children)
 	{
 		SynchronizeLayout(child, element->calculatedPosition);
@@ -226,7 +226,7 @@ void UILayoutEngine::ApplyMeasuredValue(
 	void (*setPercent)(YGNodeRef, float),
 	void (*setAuto)(YGNodeRef)) const
 {
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!value.has_value())
 	{
 		return;
@@ -242,7 +242,7 @@ void UILayoutEngine::ApplyMeasuredValue(
 		setPercent(node, value->value);
 		break;
 	case UIValue::Unit::Auto:
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (setAuto != nullptr)
 		{
 			setAuto(node);
@@ -258,7 +258,7 @@ void UILayoutEngine::ApplyEdgeValues(
 	void (*setPercent)(YGNodeRef, YGEdge, float),
 	void (*setAuto)(YGNodeRef, YGEdge)) const
 {
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!values.has_value())
 	{
 		return;
@@ -275,7 +275,7 @@ void UILayoutEngine::ApplyEdgeValues(
 			setPercent(node, edge, value.value);
 			break;
 		case UIValue::Unit::Auto:
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (setAuto != nullptr)
 			{
 				setAuto(node, edge);

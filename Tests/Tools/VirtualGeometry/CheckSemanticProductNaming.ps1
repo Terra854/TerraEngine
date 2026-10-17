@@ -97,6 +97,49 @@ function Get-CompleteQuotedLiteralStarts([string]$Text, $Literals)
 	return ,$starts
 }
 
+# Frozen validation metadata is not an exception for descriptive strings. Admit
+# only original task matches inside two exact ASCII raw-byte regions. Changed
+# bytes/offsets fall back to ordinary findings; candidate data remains audited.
+function Get-FrozenValidationMetadataStarts([string]$Text, [string]$RelativePath,
+	[string]$Kind, $ConfigurationDocument)
+{
+	$starts = [Collections.Generic.HashSet[int]]::new()
+	if($Kind -cne 'content' -or
+		'frozenValidationMetadataAllowances' -notin $ConfigurationDocument.PSObject.Properties.Name) { return ,$starts }
+	$entries = @($ConfigurationDocument.frozenValidationMetadataAllowances | Where-Object { $_.file -ceq $RelativePath })
+	if($entries.Count -ne 1) { return ,$starts }
+	$entry = $entries[0]
+	if($entry.pattern -cne 'task') { return ,$starts }
+	$bytes = [IO.File]::ReadAllBytes((Resolve-RepositoryPath $RelativePath))
+	$length = [int]$entry.prefixBytes
+	if($length -le 0 -or $length -gt $bytes.Length -or $Text.Length -lt $length) { return ,$starts }
+	for($i = 0; $i -lt $length; ++$i) { if($bytes[$i] -gt 127) { return ,$starts } }
+	$prefix = [Text.Encoding]::ASCII.GetString($bytes, 0, $length)
+	if($Text.Substring(0, $length) -cne $prefix) { return ,$starts }
+	if($entry.region -ceq 'whole-file') {
+		if($bytes.Length -ne $length) { return ,$starts }
+	} elseif($entry.region -ceq 'before-root-candidate') {
+		$boundary = [Text.Encoding]::ASCII.GetBytes("`n`t`"candidate`":")
+		if($bytes.Length -lt $length + $boundary.Length) { return ,$starts }
+		for($i = 0; $i -lt $boundary.Length; ++$i) {
+			if($bytes[$length + $i] -ne $boundary[$i]) { return ,$starts }
+		}
+	} else { return ,$starts }
+	$algorithm = [Security.Cryptography.SHA256]::Create()
+	try { $hash = ([BitConverter]::ToString($algorithm.ComputeHash($bytes, 0, $length))).Replace('-', '').ToLowerInvariant() }
+	finally { $algorithm.Dispose() }
+	if($hash -cne $entry.sha256) { return ,$starts }
+	foreach($row in $entry.matches) {
+		$index = [int]$row.index; $literal = [string]$row.value
+		if($index -lt 0 -or $index + $literal.Length -gt $length -or
+			$prefix.Substring($index, $literal.Length) -cne $literal -or $starts.Contains($index)) {
+			return ,([Collections.Generic.HashSet[int]]::new())
+		}
+		[void]$starts.Add($index)
+	}
+	return ,$starts
+}
+
 function Add-Violations(
 	[Collections.Generic.List[object]]$Violations,
 	[string]$RelativePath,
@@ -105,6 +148,7 @@ function Add-Violations(
 	$Patterns,
 	$ConfigurationDocument)
 {
+	$frozenStarts = Get-FrozenValidationMetadataStarts $Text $RelativePath $Kind $ConfigurationDocument
 	$allowance = $ConfigurationDocument.protocolMetadataAllowance
 	$literalStarts = [Collections.Generic.HashSet[int]]::new()
 	if($Kind -in @('content', 'encoded-content') -and $RelativePath -cin @($allowance.files))
@@ -118,6 +162,7 @@ function Add-Violations(
 			# Version-one validation evidence has nine stable wire identifiers. Only
 			# an entire quoted identifier in a declared contract file is metadata;
 			# filenames, descriptions, unknown identifiers and other rules still fail.
+			if($Kind -ceq 'content' -and $pattern.name -ceq 'task' -and $frozenStarts.Contains($match.Index)) { continue }
 			$after = $match.Index + $match.Length
 			if($Kind -in @('content', 'encoded-content') -and
 				$pattern.name -ceq $allowance.pattern -and

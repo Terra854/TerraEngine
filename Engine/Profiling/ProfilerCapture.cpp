@@ -29,7 +29,7 @@ namespace TerraEngine::Profiling
 {
 namespace
 {
-// ModuleIdToStableName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string ModuleIdToStableName(ProfilerModuleId moduleId)
 {
 	switch (moduleId)
@@ -42,14 +42,14 @@ std::string ModuleIdToStableName(ProfilerModuleId moduleId)
 	return "cpu_engine";
 }
 
-// TryModuleIdFromStableName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::optional<ProfilerModuleId> TryModuleIdFromStableName(const std::string& value)
 {
 	if (value == "cpu_engine")
 	{
 		return ProfilerModuleId::CpuEngine;
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (value == "task_execution")
 	{
 		return ProfilerModuleId::TaskExecution;
@@ -177,7 +177,7 @@ double PercentileFromSortedValues(const std::vector<double>& sortedValues, doubl
 	return sortedValues[lowerIndex] + (sortedValues[upperIndex] - sortedValues[lowerIndex]) * blend;
 }
 
-// ToLocalTime is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::tm ToLocalTime(std::time_t timeValue)
 {
 	std::tm result{};
@@ -191,7 +191,7 @@ std::tm ToLocalTime(std::time_t timeValue)
 
 }
 
-// ToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 const char* ToString(ProfilerSessionState state)
 {
 	switch (state)
@@ -216,7 +216,7 @@ const char* ToString(ProfilerSessionState state)
 	return "Unknown";
 }
 
-// ToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 const char* ToString(ProfilerModuleId moduleId)
 {
 	switch (moduleId)
@@ -513,7 +513,7 @@ bool ValidateProfilerDisjointTimingBuckets(const std::array<std::uint64_t, 8U>& 
 	return total <= frameNanoseconds && frameNanoseconds - total <= toleranceNanoseconds;
 }
 
-// MakeTimestampForFileName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string MakeTimestampForFileName()
 {
 	const auto now = std::chrono::system_clock::now();
@@ -524,7 +524,7 @@ std::string MakeTimestampForFileName()
 	return stream.str();
 }
 
-// MakeReadableTimestamp is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string MakeReadableTimestamp()
 {
 	const auto now = std::chrono::system_clock::now();
@@ -535,13 +535,13 @@ std::string MakeReadableTimestamp()
 	return stream.str();
 }
 
-// AnyModuleEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool AnyModuleEnabled(const ProfilerCaptureSettings& settings)
 {
 	return settings.cpuEngineEnabled || settings.taskExecutionEnabled;
 }
 
-// MakeDefaultModuleSummaries is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::vector<ProfilerModuleSummary> MakeDefaultModuleSummaries(const ProfilerCaptureSettings& settings)
 {
 	std::vector<ProfilerModuleSummary> modules;
@@ -556,7 +556,7 @@ std::vector<ProfilerModuleSummary> MakeDefaultModuleSummaries(const ProfilerCapt
 	return modules;
 }
 
-// TrimFrameBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void TrimFrameBuffer(std::vector<ProfilerFrameRecord>& frames, const ProfilerCaptureSettings& settings)
 {
 	// A zero frame limit is intentionally unlimited. Explicit non-zero limits
@@ -567,7 +567,7 @@ void TrimFrameBuffer(std::vector<ProfilerFrameRecord>& frames, const ProfilerCap
 		frames.erase(frames.begin(), frames.begin() + static_cast<std::ptrdiff_t>(frames.size() - maxFrames));
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (settings.maxDurationSeconds > 0.0 && !frames.empty())
 	{
 		const double newestStart = frames.back().frameStartMs;
@@ -575,7 +575,7 @@ void TrimFrameBuffer(std::vector<ProfilerFrameRecord>& frames, const ProfilerCap
 		const auto firstKept = std::find_if(frames.begin(), frames.end(), [cutoff](const ProfilerFrameRecord& frame) {
 			return frame.frameStartMs >= cutoff;
 		});
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (firstKept != frames.begin())
 		{
 			frames.erase(frames.begin(), firstKept);
@@ -856,7 +856,7 @@ std::vector<ProfilerTimingStreamAggregate> BuildTimingStreamAggregates(const std
 	return aggregates;
 }
 
-// SaveCaptureDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::filesystem::path& path, std::string& outError)
 {
 	// Documents use the same append-only journal as live recording.  One writer
@@ -919,7 +919,7 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 	return writer.Finalize(document.complete, outError) == ProfilerJournalV1ResultCode::Ok;
 	}
 
-// LoadCaptureDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool LoadCaptureDocument(const std::filesystem::path& path, ProfilerCaptureDocument& outDocument, std::string& outError)
 {
 	ProfilerJournalV1OpenResult journalResult;
@@ -967,7 +967,7 @@ bool TryReadCaptureArtifactMetadata(const std::filesystem::path& path, ProfilerC
 	return true;
 	}
 
-// TryReadCaptureArtifact is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool TryReadCaptureArtifact(const std::filesystem::path& path, ProfilerCaptureArtifact& outArtifact)
 {
 	ProfilerCaptureDocument document;
@@ -975,7 +975,7 @@ bool TryReadCaptureArtifact(const std::filesystem::path& path, ProfilerCaptureAr
 	outArtifact = {};
 	outArtifact.absolutePath = path;
 	outArtifact.fileName = path.filename().string();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!LoadCaptureDocument(path, document, error))
 	{
 		outArtifact.supported = false;

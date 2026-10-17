@@ -70,7 +70,7 @@ struct FrameDurationStats
 	double stdDevMs = 0.0;
 };
 
-// FindModuleSummary is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 const TerraEngine::Profiling::ProfilerModuleSummary* FindModuleSummary(const ProfilerFrameRecord& frame, ProfilerModuleId moduleId)
 {
 	const auto found = std::find_if(frame.moduleSummaries.begin(), frame.moduleSummaries.end(), [moduleId](const auto& module) {
@@ -239,13 +239,13 @@ const char* TimingAggregateValue(const ProfilerTimingStreamAggregate& aggregate,
 	return buffer;
 }
 
-// DrawDisclosureControl is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool DrawDisclosureControl(bool hasChildren, bool isOpen)
 {
 	constexpr float kArrowSlotWidth = 7.0f;
 	constexpr float kArrowSize = 4.0f;
 	const float rowHeight = ImGui::GetTextLineHeight();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!hasChildren)
 	{
 		ImGui::Dummy(ImVec2(kArrowSlotWidth, rowHeight));
@@ -261,7 +261,7 @@ bool DrawDisclosureControl(bool hasChildren, bool isOpen)
 		buttonPosition.y + rowHeight * 0.5f
 	);
 	ImDrawList* drawList = ImGui::GetWindowDrawList();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (isOpen)
 	{
 		drawList->AddTriangleFilled(
@@ -335,7 +335,7 @@ void DrawSampleTreeRow(
 	bool isOpen = true;
 	const std::string rowId = std::to_string(frameIndex) + ":" + std::to_string(sample.sampleId);
 	ImGui::PushID(rowId.c_str());
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (hasChildren)
 	{
 		ImGuiStorage* storage = ImGui::GetStateStorage();
@@ -344,7 +344,7 @@ void DrawSampleTreeRow(
 		// hierarchy immediately. The stored value still preserves any manual
 		// collapse the developer makes after that first presentation.
 		isOpen = storage->GetBool(openStateId, true);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (DrawDisclosureControl(true, isOpen))
 		{
 			isOpen = !isOpen;
@@ -378,7 +378,7 @@ void DrawSampleTreeRow(
 	ImGui::TableSetColumnIndex(7);
 	ImGui::TextUnformatted(row.executionPath.empty() ? "-" : row.executionPath.c_str());
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (hasChildren && isOpen)
 	{
 		if (showUninstrumentedRows && node.selfDurationMs >= minimumDurationMs)
@@ -502,7 +502,7 @@ void ProfilerWindow::OnBeforeBegin()
 }
 
 ProfilerWindow::ProfilerWindow(MainEditorSubsystem* windowOwner)
-	// EditorWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	: EditorWindow("Profiler", false, "Rendering"), owner(windowOwner), cache(std::make_unique<ProfilerWindowCache>())
 {
 }
@@ -723,7 +723,7 @@ void ProfilerWindow::RefreshSampleAnalysis(const ProfilerFrameRecord& frame)
 	cache->sampleAnalysisValid = true;
 }
 
-// ProfilerWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ProfilerWindow::OnGui()
 {
 	EditorProfilerService* service = nullptr;
@@ -740,7 +740,7 @@ void ProfilerWindow::OnGui()
 	DrawToolbar();
 	ImGui::Separator();
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (service == nullptr || !cache->hasActiveProject)
 	{
 		ImGui::TextDisabled("Open a project to use the profiler.");
@@ -748,7 +748,7 @@ void ProfilerWindow::OnGui()
 	}
 
 	ImGui::Text("Status: %s", cache->statusText.c_str());
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!cache->lastError.empty())
 	{
 		ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f), "%s", cache->lastError.c_str());
@@ -775,7 +775,7 @@ void ProfilerWindow::OnGui()
 	}
 
 	constexpr ImGuiTableFlags layoutFlags = ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Resizable | ImGuiTableFlags_NoSavedSettings;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::BeginTable("ProfilerLayout", 2, layoutFlags, ImGui::GetContentRegionAvail()))
 	{
 		ImGui::TableSetupColumn("Capture Navigation", ImGuiTableColumnFlags_WidthStretch, 0.9f);
@@ -793,7 +793,7 @@ void ProfilerWindow::OnGui()
 	}
 }
 
-// ProfilerWindow::DrawToolbar is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ProfilerWindow::DrawToolbar()
 {
 	EditorProfilerService* service = owner && owner->GetContext() ? owner->GetContext()->editorProfiler.get() : nullptr;
@@ -859,11 +859,11 @@ void ProfilerWindow::DrawToolbar()
 	ImGui::TextDisabled("%s", TerraEngine::Profiling::ToString(state));
 }
 
-// ProfilerWindow::DrawCaptureList is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ProfilerWindow::DrawCaptureList()
 {
 	EditorProfilerService* service = owner && owner->GetContext() ? owner->GetContext()->editorProfiler.get() : nullptr;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (service == nullptr)
 	{
 		return;
@@ -872,7 +872,7 @@ void ProfilerWindow::DrawCaptureList()
 	ImGui::TextUnformatted("Project Captures");
 	const float capturesHeight = std::max(120.0f, ImGui::GetContentRegionAvail().y * 0.30f);
 	ImGui::BeginChild("ProfilerCaptures", ImVec2(0, capturesHeight), true);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (cache->captures.empty())
 	{
 		ImGui::TextDisabled("No captures in %s", cache->profilerDirectory.string().c_str());
@@ -895,7 +895,7 @@ void ProfilerWindow::DrawCaptureList()
 				cache->sampleAnalysisValid = false;
 				service->LoadCapture(capture.absolutePath);
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::IsItemHovered())
 			{
 				ImGui::SetTooltip("%llu frames\n%s", static_cast<unsigned long long>(capture.frameCount), capture.metadata.savedAt.c_str());
@@ -905,7 +905,7 @@ void ProfilerWindow::DrawCaptureList()
 	ImGui::EndChild();
 }
 
-// ProfilerWindow::DrawFrameList is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ProfilerWindow::DrawFrameList()
 {
 	ImGui::TextUnformatted("Frames");
@@ -919,7 +919,7 @@ void ProfilerWindow::DrawFrameList()
 		return;
 	}
 	const std::vector<ProfilerFrameListItem>& frames = cache->frames;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (frames.empty())
 	{
 		ImGui::TextDisabled(cache->indexTotalFrameCount == 0u
@@ -1021,7 +1021,7 @@ void ProfilerWindow::DrawFrameList()
 				const bool selected = cache->pinnedFrameIndex == frame.frameIndex
 					|| (cache->selectedFrame.has_value()
 						&& cache->selectedFrame->frameIndex == frame.frameIndex);
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (ImGui::Selectable(label, selected, ImGuiSelectableFlags_SpanAllColumns))
 				{
 					requestedFrameSelection = frame.frameIndex;
@@ -1051,11 +1051,11 @@ void ProfilerWindow::DrawFrameList()
 	ImGui::EndChild();
 }
 
-// ProfilerWindow::DrawFrameDetails is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ProfilerWindow::DrawFrameDetails()
 {
 	const std::optional<ProfilerFrameRecord>& selectedFrame = cache->selectedFrame;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!selectedFrame.has_value())
 	{
 		const bool captureActive = cache->state == ProfilerSessionState::Recording
@@ -1373,12 +1373,12 @@ void ProfilerWindow::DrawFrameDetails()
 		}
 		ImGui::TreePop();
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::BeginTabBar("ProfilerModules"))
 	{
 		for (ProfilerModuleId moduleId : {ProfilerModuleId::CpuEngine, ProfilerModuleId::TaskExecution})
 		{
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::BeginTabItem(TerraEngine::Profiling::ToString(moduleId)))
 			{
 				selectedModule = moduleId;
@@ -1545,7 +1545,7 @@ void ProfilerWindow::DrawRendererRecoverySummary()
 	}
 }
 
-// ProfilerWindow::DrawFrameOverview is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ProfilerWindow::DrawFrameOverview(const ProfilerFrameRecord& frame)
 {
 	const FrameDurationStats& stats = cache->frameDurationStats;
@@ -1686,25 +1686,25 @@ void ProfilerWindow::DrawFrameOverview(const ProfilerFrameRecord& frame)
 	DrawTimeBar(frame.durationMs, std::max(stats.p95Ms, 1.0));
 }
 
-// ProfilerWindow::DrawModuleSummary is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ProfilerWindow::DrawModuleSummary(const ProfilerFrameRecord& frame)
 {
 	const TerraEngine::Profiling::ProfilerModuleSummary* moduleSummary = FindModuleSummary(frame, selectedModule);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (moduleSummary == nullptr || !moduleSummary->available)
 	{
 		ImGui::TextDisabled("No data recorded for this module.");
 		return;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::BeginTable("ProfilerModuleMetrics", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
 	{
 		ImGui::TableSetupColumn("Metric");
 		ImGui::TableSetupColumn("Value");
 		ImGui::TableSetupColumn("Unit");
 		ImGui::TableHeadersRow();
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const auto& metric : moduleSummary->metrics)
 		{
 			ImGui::TableNextRow();
@@ -1772,7 +1772,7 @@ void ProfilerWindow::DrawDiagnosticSummary(const ProfilerFrameRecord& frame)
 	ImGui::Checkbox("Show uninstrumented", &cache->showUninstrumentedRows);
 }
 
-// ProfilerWindow::DrawHotSamples is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ProfilerWindow::DrawHotSamples(const ProfilerFrameRecord& frame)
 {
 	// Sorting every captured scope is analysis work, not ordinary live display.
@@ -1911,7 +1911,7 @@ void ProfilerWindow::DrawTimeline(const ProfilerFrameRecord& frame)
 	ImGui::TreePop();
 }
 
-// ProfilerWindow::DrawSamples is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ProfilerWindow::DrawSamples(const ProfilerFrameRecord& frame)
 {
 	ImGui::SeparatorText("Samples");
@@ -1925,7 +1925,7 @@ void ProfilerWindow::DrawSamples(const ProfilerFrameRecord& frame)
 	RefreshSampleAnalysis(frame);
 	const ProfilerDiagnosticAnalysis& analysis = cache->diagnosticAnalysis;
 	const ProfilerSampleHierarchy& tree = analysis.hierarchy;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (tree.samples.empty())
 	{
 		ImGui::TextDisabled("No samples for this module.");
@@ -1935,7 +1935,7 @@ void ProfilerWindow::DrawSamples(const ProfilerFrameRecord& frame)
 
 	const ImVec2 originalCellPadding = ImGui::GetStyle().CellPadding;
 	ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(1.0f, originalCellPadding.y));
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::BeginTable("ProfilerSamples", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 	{
 		ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 2.5f);
@@ -1947,7 +1947,7 @@ void ProfilerWindow::DrawSamples(const ProfilerFrameRecord& frame)
 		ImGui::TableSetupColumn("Phase");
 		ImGui::TableSetupColumn("Path");
 		ImGui::TableHeadersRow();
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const std::size_t rootIndex : tree.rootIndices)
 		{
 			DrawSampleTreeRow(analysis, rootIndex, frame.frameIndex, frame.durationMs,

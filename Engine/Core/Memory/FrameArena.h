@@ -129,7 +129,7 @@ public:
 	using value_type = T;
 
 	FrameAllocator() = default;
-	// FrameAllocator is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	template <typename U> FrameAllocator(const FrameAllocator<U>&) {}
 
 	T* allocate(size_t n) {
@@ -138,7 +138,7 @@ public:
 		return static_cast<T*>(FrameArena::Instance().Allocate(n * sizeof(T), alignof(T)));
 	}
 
-	// deallocate is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void deallocate(T*, size_t) {
 		// No-op: memory is freed when arena resets
 	}

@@ -49,14 +49,14 @@ namespace
 	constexpr std::string_view kDiagnosticsFolderName = "Diagnostics";
 	constexpr std::string_view kCrashDumpsFolderName = "CrashDumps";
 
-	// SanitizeProductName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::string SanitizeProductName(std::string_view productName)
 	{
 		std::string sanitized = productName.empty()
 			? std::string(kDefaultProductName)
 			: std::string(productName);
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (char& character : sanitized)
 		{
 			if (character == '/' || character == '\\' || character == ':' || character == '*' || character == '?' || character == '"' || character == '<' || character == '>' || character == '|')
@@ -65,7 +65,7 @@ namespace
 			}
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (sanitized.empty())
 		{
 			sanitized = kDefaultProductName;
@@ -74,21 +74,21 @@ namespace
 		return sanitized;
 	}
 
-	// HasUrlScheme is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool HasUrlScheme(std::string_view url)
 	{
 		const std::size_t separatorIndex = url.find(':');
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (separatorIndex == std::string_view::npos || separatorIndex == 0)
 		{
 			return false;
 		}
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (std::size_t index = 0; index < separatorIndex; ++index)
 		{
 			const unsigned char value = static_cast<unsigned char>(url[index]);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!std::isalnum(value) && value != '+' && value != '-' && value != '.')
 			{
 				return false;
@@ -168,7 +168,7 @@ namespace
 	}
 
 #ifdef _WIN32
-	// Utf8ToWide is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::wstring Utf8ToWide(std::string_view text)
 	{
 		if (text.empty())
@@ -177,7 +177,7 @@ namespace
 		}
 
 		const int wideLength = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (wideLength <= 0)
 		{
 			return {};
@@ -185,7 +185,7 @@ namespace
 
 		std::wstring wideText(static_cast<std::size_t>(wideLength), L'\0');
 		const int convertedLength = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wideText.data(), wideLength);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (convertedLength <= 0)
 		{
 			return {};
@@ -337,7 +337,7 @@ std::filesystem::path TerraEngine::PlatformUtils::GetPersistentDataPath(std::str
 	std::filesystem::path persistentDataPath = (productRoot / kDefaultProductVersionFolder).lexically_normal();
 	std::error_code errorCode;
 	std::filesystem::create_directories(persistentDataPath, errorCode);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (errorCode)
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "PersistentDataPath could not create '" << persistentDataPath << "': " << errorCode.message());
@@ -418,7 +418,7 @@ TerraEngine::FatalErrorDialogReport TerraEngine::PlatformUtils::WriteCrashDumpFo
 	return report;
 }
 
-// TerraEngine::PlatformUtils::OpenUrl is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool TerraEngine::PlatformUtils::OpenUrl(std::string_view url)
 {
 	if (url.empty() || !HasUrlScheme(url))
@@ -436,7 +436,7 @@ bool TerraEngine::PlatformUtils::OpenUrl(std::string_view url)
 	}
 
 	const HINSTANCE result = ShellExecuteW(nullptr, L"open", wideUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (reinterpret_cast<std::intptr_t>(result) <= 32)
 	{
 		TERRAENGINE_LOG(LogLevel::Warning, "Application.OpenURL failed to launch '" << std::string(url) << "' with ShellExecuteW.");
@@ -454,7 +454,7 @@ bool TerraEngine::PlatformUtils::OpenUrl(std::string_view url)
 
 	pid_t childProcessId = 0;
 	const int spawnResult = posix_spawnp(&childProcessId, "xdg-open", nullptr, nullptr, argv, environ);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (spawnResult != 0)
 	{
 		TERRAENGINE_LOG(LogLevel::Warning, "Application.OpenURL failed to launch '" << ownedUrl << "' with xdg-open (error " << spawnResult << ").");

@@ -253,7 +253,7 @@ private:
 	};
 
 	template <typename Resource>
-	// struct SceneCache groups related state and operations so callers have one documented contract.
+
 	struct SceneCache
 	{
 		std::unordered_map<std::string, TerraEngine::UUID> pathToId;
@@ -347,7 +347,7 @@ private:
 	static constexpr float kPreviewMaxZoomOut = -2.5f;
 };
 
-// SceneManager::MakeReadyFuture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 inline std::shared_future<TerraEngine::UUID> SceneManager::MakeReadyFuture(const TerraEngine::UUID& id)
 {
 	std::promise<TerraEngine::UUID> promise;
@@ -356,11 +356,11 @@ inline std::shared_future<TerraEngine::UUID> SceneManager::MakeReadyFuture(const
 }
 
 template <typename Resource>
-// SceneManager::GetResourceById is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 const Resource* SceneManager::GetResourceById(const TerraEngine::UUID& id, const SceneCache<Resource>& cache) const
 {
 	std::shared_lock lock(cache.mutex);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (auto existing = cache.resources.find(id); existing != cache.resources.end())
 	{
 		return existing->second.get();

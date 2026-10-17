@@ -72,7 +72,7 @@ public:
 	bool IsInitialized() const { return initialized; }
 
 	/// Returns true when the host was initialized in export-mode (NativeAOT).
-	// IsExportMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool IsExportMode() const { return exportMode; }
 	const std::string& GetLastNativeError() const { return m_LastNativeError; }
 

@@ -17,7 +17,7 @@
 
 class MainEditorSubsystem;
 
-// class HierarchyWindow groups related state and operations so callers have one documented contract.
+
 class HierarchyWindow : public EditorWindow {
 public:
 	HierarchyWindow(MainEditorSubsystem* owner);

@@ -10,5 +10,5 @@ namespace RuntimeMemorySafetyDraft {
 	int RunRendererMode(const std::filesystem::path& install,
 		const std::filesystem::path& outputPath,
 		const std::filesystem::path& projectRoot,
-		std::string_view scenario, std::uint32_t iterations);
+		std::string_view scenario, std::uint32_t iterations, bool hostInstanceRequested = false);
 }

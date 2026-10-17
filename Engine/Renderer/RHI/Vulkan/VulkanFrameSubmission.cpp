@@ -170,7 +170,7 @@ void VulkanContext::Impl::ResetShadowPublication(bool allocationReplaced) noexce
 	if (allocationReplaced && shadowAllocationGeneration != 0U) ++shadowAllocationGeneration;
 }
 
-// VulkanContext::EndFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::RecordEmptyRuntimeFallback(VkCommandBuffer& command)
 {
 	if (currentFrame >= emptyFrameCommandBuffers.size() || acquiredImageIndex >= emptyFrameFramebuffers.size()
@@ -351,7 +351,7 @@ void VulkanContext::EndFrame() {
 		break;
 	}
 #endif
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (cmds.empty()) {
 		const auto publicationPlan = TerraEngine::Renderer::Vulkan::MakeEmptyFramePublicationPlan(impl->swapchainAcquireWaitConsumed);
 		if (publicationPlan.discardUnsubmittedShadow) impl->DiscardRecordedShadowWrites(impl->currentFrame);
@@ -534,7 +534,7 @@ void VulkanContext::EndFrame() {
 
 	VkSemaphore waitSemaphores[] = {impl->imageAvailableSemaphores[impl->currentFrame]};
 	VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!impl->editorMode && impl->swapchainImageAcquired && !impl->swapchainAcquireWaitConsumed) {
 		submitInfo.waitSemaphoreCount = 1;
 		submitInfo.pWaitSemaphores = waitSemaphores;
@@ -554,7 +554,7 @@ void VulkanContext::EndFrame() {
 	submitInfo.signalSemaphoreCount = 1;
 	submitInfo.pSignalSemaphores = signalSemaphores;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (impl->editorMode) {
 		// In Editor Mode, we defer the frame fence signal to the UI pass (PresentEditor)
 		// so the frame is considered "in flight" until the UI is also done.
@@ -650,7 +650,7 @@ void VulkanContext::EndFrame() {
 			{ TerraEngine::Renderer::BackendFrameCostCategory::QueueSubmission, TerraEngine::Renderer::BackendSubmitStage::QueueSubmit, RenderViewType::Game, 0u, "Runtime render queue submit", true, false },
 			ElapsedMilliseconds(submitStart),
 			0.25f);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (submitResult != VK_SUCCESS) {
 			impl->ResetLightingUploadMirrors();
 			impl->DiscardRecordedShadowWrites(impl->currentFrame);
@@ -686,15 +686,15 @@ void VulkanContext::EndFrame() {
 	impl->emptyFrameValidationReceipt.ordinarySubmissionSerial = ++impl->emptyFrameValidationOrdinarySerial;
 	impl->emptyFrameValidationReceipt.commandBufferCount = submitInfo.commandBufferCount;
 #endif
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (RenderSnapshotOwnerSummary& owner : impl->pendingRenderSnapshotDiagnostics.ownerSummaries) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (owner.state == RenderSnapshotState::Recorded) {
 			owner.state = RenderSnapshotState::Submitted;
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!impl->editorMode) {
 		VkPresentInfoKHR presentInfo{};
 		presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -725,7 +725,7 @@ void VulkanContext::EndFrame() {
 			{ TerraEngine::Renderer::BackendFrameCostCategory::Presentation, TerraEngine::Renderer::BackendSubmitStage::Present, RenderViewType::Game, 0u, "Queue present", true, false },
 			ElapsedMilliseconds(presentStart),
 			0.25f);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (result == VK_ERROR_OUT_OF_DATE_KHR) {
 			impl->RequestOutOfDateRecovery();
 		} else if (result == VK_SUBOPTIMAL_KHR) {

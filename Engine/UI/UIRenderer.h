@@ -28,7 +28,7 @@ struct UIFontGlyph
 	float advance = 0.0f;
 };
 
-// struct UIFontAtlas groups related state and operations so callers have one documented contract.
+// Owns font pixels and glyph metrics cached for a font name and pixel height.
 struct UIFontAtlas
 {
 	bool ready = false;
@@ -39,7 +39,7 @@ struct UIFontAtlas
 	std::unordered_map<char, UIFontGlyph> glyphs;
 };
 
-// class UIRenderer groups related state and operations so callers have one documented contract.
+
 class UIRenderer
 {
 public:

@@ -26,7 +26,7 @@ enum class CompressionPreset : uint32_t {
 };
 
 /// One build profile that the user can create, edit, and export from the editor.
-// struct BuildProfile groups related state and operations so callers have one documented contract.
+
 struct BuildProfile {
 	/// Human-readable name shown in the BuildProfilesWindow and CLI.
 	std::string name = "Default";

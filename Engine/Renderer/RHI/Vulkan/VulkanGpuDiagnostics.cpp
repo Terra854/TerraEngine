@@ -5,7 +5,7 @@
 
 #include "VulkanResourceSource.h"
 
-// VulkanContext::Impl::CreateGpuTimestampQueries is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CreateGpuTimestampQueries() {
 	gpuTimestampQueriesSupported = false;
 	lightingDepthTimestampValidBits = 0;
@@ -116,7 +116,7 @@ bool VulkanContext::Impl::CreateGpuTimestampQueries() {
 	return true;
 }
 
-// VulkanContext::Impl::DestroyGpuTimestampQueries is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::DestroyGpuTimestampQueries() {
 	if (device != VK_NULL_HANDLE && gpuTimestampQueryPool != VK_NULL_HANDLE) {
 		vkDestroyQueryPool(device, gpuTimestampQueryPool, nullptr);
@@ -137,7 +137,7 @@ void VulkanContext::Impl::DestroyGpuTimestampQueries() {
 	}
 }
 
-// VulkanContext::Impl::MarkGpuTimestampBegin is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::MarkGpuTimestampBegin(VkCommandBuffer cmd, uint32_t frameIndex, VulkanContext::ViewType view, std::uint64_t frameId) {
 	if (!gpuTimestampQueriesSupported
 		|| gpuTimestampQueryPool == VK_NULL_HANDLE
@@ -163,7 +163,7 @@ void VulkanContext::Impl::MarkGpuTimestampBegin(VkCommandBuffer cmd, uint32_t fr
 	};
 }
 
-// VulkanContext::Impl::MarkGpuTimestampEnd is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::MarkGpuTimestampEnd(VkCommandBuffer cmd, uint32_t frameIndex, VulkanContext::ViewType view) {
 	if (!gpuTimestampQueriesSupported
 		|| gpuTimestampQueryPool == VK_NULL_HANDLE
@@ -293,7 +293,7 @@ void VulkanContext::Impl::MarkVirtualGeometryTimestampEnd(
 	sample.reason = "The live Vulkan virtual-geometry timestamp interval is pending delayed readback.";
 }
 
-// VulkanContext::Impl::ResolveCompletedGpuTimestamps is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::ResolveCompletedGpuTimestamps(uint32_t frameIndex) {
 	if (!gpuTimestampQueriesSupported
 		|| gpuTimestampQueryPool == VK_NULL_HANDLE
@@ -459,7 +459,7 @@ void VulkanContext::Impl::ResolveCompletedVirtualGeometryTimestamps(uint32_t fra
 	}
 }
 
-// VulkanContext::Impl::RecordPendingStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::RecordPendingStats(uint32_t statsSlotIndex, const RenderStatsSnapshot& snapshot) {
 	if (statsSlotIndex >= kStatsSlotCount) {
 		return;
@@ -467,7 +467,7 @@ void VulkanContext::Impl::RecordPendingStats(uint32_t statsSlotIndex, const Rend
 	pendingStatsBySlot[statsSlotIndex] = snapshot;
 }
 
-// VulkanContext::Impl::RecordPendingBudgetDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::RecordPendingBudgetDiagnostics(uint32_t statsSlotIndex, const FrameBudgetDiagnosticsSnapshot& snapshot) {
 	if (statsSlotIndex >= kStatsSlotCount) {
 		return;
@@ -475,7 +475,7 @@ void VulkanContext::Impl::RecordPendingBudgetDiagnostics(uint32_t statsSlotIndex
 	pendingBudgetDiagnosticsBySlot[statsSlotIndex] = snapshot;
 }
 
-// VulkanContext::Impl::RecordPendingLightAnalysisCandidates is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::RecordPendingLightAnalysisCandidates(uint32_t statsSlotIndex, const std::vector<FrameLightCandidate>& candidates) {
 	if (statsSlotIndex >= kStatsSlotCount) {
 		return;
@@ -483,7 +483,7 @@ void VulkanContext::Impl::RecordPendingLightAnalysisCandidates(uint32_t statsSlo
 	pendingLightAnalysisCandidatesBySlot[statsSlotIndex] = candidates;
 }
 
-// VulkanContext::Impl::PublishCompletedFrameStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 	// Called only after the frame fence (and any stranded editor drain) proves
 	// real completion; publishing counters must not manufacture shadow completion.
@@ -588,7 +588,7 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 	RenderStatsSnapshot gameSnapshot = pendingStatsBySlot[gameSlot];
 	const GpuTimestampViewSample gameGpuTimestamp = completedGpuTimestampSamplesByFrame[std::min(frameIndex, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT - 1))][0u];
 	const MeshletCullingCountersGPU gameCounters = ReadMeshletCounters(gameSlot);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (gameSnapshot.valid) {
 		gameSnapshot.gpuTimestampValid = gameGpuTimestamp.valid;
 		gameSnapshot.gpuTimestampMs = gameGpuTimestamp.milliseconds;
@@ -630,7 +630,7 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 	RenderStatsSnapshot sceneSnapshot = pendingStatsBySlot[sceneSlot];
 	const GpuTimestampViewSample sceneGpuTimestamp = completedGpuTimestampSamplesByFrame[std::min(frameIndex, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT - 1))][1u];
 	const MeshletCullingCountersGPU sceneCounters = ReadMeshletCounters(sceneSlot);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (sceneSnapshot.valid) {
 		sceneSnapshot.gpuTimestampValid = sceneGpuTimestamp.valid;
 		sceneSnapshot.gpuTimestampMs = sceneGpuTimestamp.milliseconds;
@@ -728,7 +728,7 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 			}
 		};
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const ShadowResourceAssignmentDiagnostic& assignment : budgetDiagnostics.shadowAssignments)
 		{
 			LightingDiagnosticEntry assignmentEntry{};
@@ -740,12 +740,12 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 			assignmentEntry.message = assignment.assigned
 				? std::string("Light received ") + shadowKindName(assignment.resourceKind) + " slot " + std::to_string(assignment.resourceSlot) + "."
 				: std::string("Light requested shadows but did not receive a ") + shadowKindName(assignment.resourceKind) + " slot this frame.";
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (assignment.reusedPreviousOwner)
 			{
 				assignmentEntry.message += " Reused previous assignment for stability.";
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (assignment.replacedPreviousOwner)
 			{
 				assignmentEntry.message += " Replaced the previous owner of this slot.";
@@ -801,23 +801,23 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 
 	GpuLightAnalysisViewSnapshot gameLightAnalysis{};
 	GpuLightAnalysisViewSnapshot sceneLightAnalysis{};
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (frameIndex < lightAnalysisSSBOs.size() && lightAnalysisSSBOs[frameIndex].buffer != VK_NULL_HANDLE) {
 		const VulkanBuffer& analysisBuffer = lightAnalysisSSBOs[frameIndex];
 		void* mappedAnalysis = nullptr;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vmaMapMemory(allocator, analysisBuffer.allocation, &mappedAnalysis) == VK_SUCCESS) {
 			vmaInvalidateAllocation(allocator, analysisBuffer.allocation, 0, analysisBuffer.size);
 			const auto* analysisRecords = static_cast<const GPULightAnalysisRecord*>(mappedAnalysis);
 			const auto readSnapshot = [&](uint32_t statsSlotIndex) {
 				GpuLightAnalysisViewSnapshot snapshot{};
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (statsSlotIndex >= pendingLightAnalysisCandidatesBySlot.size()) {
 					return snapshot;
 				}
 
 				const std::vector<FrameLightCandidate>& candidates = pendingLightAnalysisCandidatesBySlot[statsSlotIndex];
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (candidates.empty()) {
 					snapshot.valid = true;
 					return snapshot;
@@ -826,11 +826,11 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 				const std::size_t clampedCount = std::min<std::size_t>(candidates.size(), MAX_GLOBAL_LIGHTS);
 				const std::size_t baseIndex = static_cast<std::size_t>(statsSlotIndex) * static_cast<std::size_t>(MAX_GLOBAL_LIGHTS);
 				snapshot.recordsByLightId.reserve(clampedCount);
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 				for (std::size_t lightIndex = 0; lightIndex < clampedCount; ++lightIndex) {
 					const GPULightAnalysisRecord& record = analysisRecords[baseIndex + lightIndex];
 					snapshot.recordsByLightId.emplace(candidates[lightIndex].lightId, record);
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 					if ((record.flags & kGpuLightAnalysisFlagVisible) != 0u) {
 						snapshot.visibleCandidateCount += 1u;
 					}
@@ -846,7 +846,7 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 	}
 
 	ClusterValidationSnapshot clusterSnapshot{};
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (clusterValidationCaptureEnabled) {
 		clusterSnapshot = ReadCompletedClusterValidationSnapshot(frameIndex);
 	}
@@ -869,14 +869,14 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 		latestLightingDiagnosticsByView[1] = sceneLightingDiagnostics;
 		latestGpuLightAnalysisByView[0] = std::move(gameLightAnalysis);
 		latestGpuLightAnalysisByView[1] = std::move(sceneLightAnalysis);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (clusterSnapshot.valid) {
 			previousClusterValidationSnapshot = clusterSnapshot;
 			previousClusterValidationSnapshotValid = true;
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (clusterSnapshot.valid) {
 		const FrameBudgetDiagnosticsSnapshot& captureDiagnostics = (clusterSnapshot.viewType == RenderViewType::Scene)
 			? sceneBudgetDiagnostics
@@ -885,35 +885,35 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 	}
 }
 
-// VulkanContext::Impl::GetLatestStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 RenderStatsSnapshot VulkanContext::Impl::GetLatestStats(RenderViewType viewType) const {
 	const uint32_t index = (viewType == RenderViewType::Scene) ? 1u : 0u;
 	std::lock_guard<std::mutex> lock(statsMutex);
 	return latestStatsByView[index];
 }
 
-// VulkanContext::Impl::GetLatestBudgetDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 FrameBudgetDiagnosticsSnapshot VulkanContext::Impl::GetLatestBudgetDiagnostics(RenderViewType viewType) const {
 	const uint32_t index = (viewType == RenderViewType::Scene) ? 1u : 0u;
 	std::lock_guard<std::mutex> lock(statsMutex);
 	return latestBudgetDiagnosticsByView[index];
 }
 
-// VulkanContext::Impl::GetLatestLightingDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 LightingDiagnosticsSnapshot VulkanContext::Impl::GetLatestLightingDiagnostics(RenderViewType viewType) const {
 	const uint32_t index = (viewType == RenderViewType::Scene) ? 1u : 0u;
 	std::lock_guard<std::mutex> lock(statsMutex);
 	return latestLightingDiagnosticsByView[index];
 }
 
-// VulkanContext::Impl::GetLatestGpuLightAnalysis is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VulkanContext::Impl::GpuLightAnalysisViewSnapshot VulkanContext::Impl::GetLatestGpuLightAnalysis(RenderViewType viewType) const {
 	const uint32_t index = (viewType == RenderViewType::Scene) ? 1u : 0u;
 	std::lock_guard<std::mutex> lock(statsMutex);
 	return latestGpuLightAnalysisByView[index];
 }
 
-// VulkanContext::Impl::RecordPendingClusterValidationSnapshot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::RecordPendingClusterValidationSnapshot(uint32_t frameIndex, const ClusterValidationSnapshot& snapshot) {
 	if (frameIndex >= pendingClusterValidationByFrame.size()) {
 		return;
@@ -921,23 +921,23 @@ void VulkanContext::Impl::RecordPendingClusterValidationSnapshot(uint32_t frameI
 	pendingClusterValidationByFrame[frameIndex] = snapshot;
 }
 
-// VulkanContext::Impl::ReadCompletedClusterValidationSnapshot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSnapshot(uint32_t frameIndex) const {
 	if (!clusterValidationCaptureEnabled) {
 		return {};
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (frameIndex >= pendingClusterValidationByFrame.size()) {
 		return {};
 	}
 
 	ClusterValidationSnapshot snapshot = pendingClusterValidationByFrame[frameIndex];
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!snapshot.valid || !snapshot.buildMetadata.clusteredLightingAvailable) {
 		return snapshot;
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (frameIndex >= clusterGridSSBOs.size() || frameIndex >= lightIndexSSBOs.size()) {
 		snapshot.valid = false;
 		return snapshot;
@@ -945,7 +945,7 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 
 	const VulkanBuffer& clusterBuffer = clusterGridSSBOs[frameIndex];
 	const VulkanBuffer& lightIndexBuffer = lightIndexSSBOs[frameIndex];
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (clusterBuffer.buffer == VK_NULL_HANDLE || lightIndexBuffer.buffer == VK_NULL_HANDLE) {
 		snapshot.valid = false;
 		return snapshot;
@@ -956,7 +956,7 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 	snapshot.ranges.reserve(clusterCount);
 
 	void* mappedClusters = nullptr;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vmaMapMemory(allocator, clusterBuffer.allocation, &mappedClusters) != VK_SUCCESS) {
 		snapshot.valid = false;
 		return snapshot;
@@ -974,7 +974,7 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 	std::uint32_t maxClusterLightCount = 0u;
 	std::uint32_t outOfBoundsRangeCount = 0u;
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::uint32_t clusterIndex = 0u; clusterIndex < clusterCount; ++clusterIndex) {
 		const ClusterData& cluster = clusterGridData[clusterIndex];
 		const std::uint64_t rangeEnd = static_cast<std::uint64_t>(cluster.offset) + static_cast<std::uint64_t>(cluster.count);
@@ -988,20 +988,20 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 		rangeSnapshot.outOfBounds = outOfBounds;
 		snapshot.ranges.push_back(rangeSnapshot);
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (cluster.count == 0u) {
 			emptyClusterCount += 1u;
 		}
 		maxClusterLightCount = std::max(maxClusterLightCount, cluster.count);
 		actualAssignedLightCount += cluster.count;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (rangeEnd > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
 			usedIndexCount = std::numeric_limits<std::uint32_t>::max();
 		}
 		else {
 			usedIndexCount = std::max(usedIndexCount, static_cast<std::uint32_t>(rangeEnd));
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (outOfBounds) {
 			outOfBoundsRangeCount += 1u;
 		}
@@ -1015,7 +1015,7 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 	vmaUnmapMemory(allocator, clusterBuffer.allocation);
 
 	std::uint32_t invalidLightIndexCount = 0u;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (usedIndexCount > 0u) {
 		void* mappedLightIndices = nullptr;
 		if (vmaMapMemory(allocator, lightIndexBuffer.allocation, &mappedLightIndices) == VK_SUCCESS) {
@@ -1024,7 +1024,7 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 			vmaInvalidateAllocation(allocator, lightIndexBuffer.allocation, lightIndexReadOffset, lightIndexReadSize);
 
 			const std::uint32_t* lightIndexData = static_cast<const std::uint32_t*>(mappedLightIndices) + snapshot.buildMetadata.lightIndexOffset;
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 			for (std::uint32_t entryIndex = 0u; entryIndex < usedIndexCount; ++entryIndex) {
 				const std::uint32_t lightIndex = lightIndexData[entryIndex];
 				if (lightIndex == 0xFFFFFFFFu || lightIndex >= snapshot.buildMetadata.activeLightCount) {
@@ -1037,16 +1037,16 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 	}
 
 	std::uint32_t determinismMismatchCount = 0u;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (previousClusterValidationSnapshotValid
 		&& previousClusterValidationSnapshot.viewType == snapshot.viewType
 		&& previousClusterValidationSnapshot.ranges.size() == snapshot.ranges.size()
 		&& previousClusterValidationSnapshot.buildMetadata.activeLightCount == snapshot.buildMetadata.activeLightCount) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (size_t rangeIndex = 0; rangeIndex < snapshot.ranges.size(); ++rangeIndex) {
 			const ClusterLightRangeSnapshot& currentRange = snapshot.ranges[rangeIndex];
 			const ClusterLightRangeSnapshot& previousRange = previousClusterValidationSnapshot.ranges[rangeIndex];
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (currentRange.offset != previousRange.offset
 				|| currentRange.count != previousRange.count
 				|| currentRange.outOfBounds != previousRange.outOfBounds) {
@@ -1068,7 +1068,7 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 	return snapshot;
 }
 
-// VulkanContext::Impl::WriteClusterValidationCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::WriteClusterValidationCapture(const ClusterValidationSnapshot& snapshot, const FrameBudgetDiagnosticsSnapshot& diagnostics) const {
 	if (!clusterValidationCaptureEnabled || !snapshot.valid) {
 		return;
@@ -1077,7 +1077,7 @@ void VulkanContext::Impl::WriteClusterValidationCapture(const ClusterValidationS
 	try {
 		namespace fs = std::filesystem;
 		const fs::path outputPath = clusterValidationCapturePath;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (outputPath.has_parent_path()) {
 			fs::create_directories(outputPath.parent_path());
 		}
@@ -1144,7 +1144,7 @@ void VulkanContext::Impl::WriteClusterValidationCapture(const ClusterValidationS
 		capture["shadow_grouped_caster_segment_count"] = diagnostics.shadowGroupedCasterSegmentCount;
 		capture["shadow_pass_recorded"] = diagnostics.shadowPassRecorded;
 		capture["shadow_assignments"] = nlohmann::json::array();
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const ShadowResourceAssignmentDiagnostic& assignment : diagnostics.shadowAssignments) {
 			nlohmann::json assignmentJson;
 			assignmentJson["light_id"] = TerraEngine::ToHexString(assignment.lightId);
@@ -1190,7 +1190,7 @@ void VulkanContext::Impl::WriteClusterValidationCapture(const ClusterValidationS
 		capture["range_hash_hex"] = BuildHashHex(snapshot.buildMetadata.rangeHash);
 		capture["ranges"] = nlohmann::json::array();
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const ClusterLightRangeSnapshot& range : snapshot.ranges) {
 			nlohmann::json rangeJson;
 			rangeJson["cluster_index"] = range.clusterIndex;

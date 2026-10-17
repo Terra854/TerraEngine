@@ -45,9 +45,9 @@
 struct Material;
 struct Mesh;
 struct Shader;
-// struct ShaderCollection groups related state and operations so callers have one documented contract.
+
 struct ShaderCollection;
-// struct Texture groups related state and operations so callers have one documented contract.
+
 struct Texture;
 namespace TerraEngine::Animation
 {
@@ -338,7 +338,7 @@ private:
 #include "Resource/ResourceResidency.h"
 #include "Resource/ResourceStreaming.h"
 
-// struct ShaderStagePath groups related state and operations so callers have one documented contract.
+
 struct ShaderStagePath
 {
 	ShaderStage stage = ShaderStage::Vertex;
@@ -1013,7 +1013,7 @@ private:
 	static ResourceKind CacheKind(const ResourceCache<Resource>& cache);
 
 	template <typename Resource>
-	// struct ResourceCache groups related state and operations so callers have one documented contract.
+
 	struct ResourceCache
 	{
 		// Loaded instances keyed by normalized absolute paths and UUIDs for
@@ -1374,7 +1374,7 @@ inline std::string ToHexString(const TerraEngine::UUID& id)
 	return TerraEngine::ToHexString(id);
 }
 
-// ResourceManager::MakeReadyFuture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 inline std::shared_future<TerraEngine::UUID> ResourceManager::MakeReadyFuture(const TerraEngine::UUID& id)
 {
 	std::promise<TerraEngine::UUID> promise;
@@ -1399,15 +1399,15 @@ std::uint64_t ResourceManager::ComputeLoadedResourceBytes(const Resource&) const
 }
 
 template <typename Resource>
-// ResourceManager::ResolveCached is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::optional<TerraEngine::UUID> ResourceManager::ResolveCached(const std::string& key, ResourceCache<Resource>& cache)
 {
 	std::shared_lock lock(cache.mutex);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (auto existing = cache.pathToId.find(key); existing != cache.pathToId.end())
 	{
 		const TerraEngine::UUID& id = existing->second;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (HasCurrentAcceptedPayload(cache, key, id))
 		{
 			// Debug log helps trace cache reuse when resources are requested repeatedly.
@@ -1423,7 +1423,7 @@ std::optional<TerraEngine::UUID> ResourceManager::ResolveCached(const std::strin
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (auto pending = cache.inFlight.find(key); pending != cache.inFlight.end())
 	{
 		// Make it obvious when a caller piggybacks an already scheduled load instead of duplicating work.
@@ -1437,11 +1437,11 @@ std::optional<TerraEngine::UUID> ResourceManager::ResolveCached(const std::strin
 }
 
 template <typename Resource>
-// ResourceManager::EnsureResourceId is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 TerraEngine::UUID ResourceManager::EnsureResourceId(const std::string& key, ResourceCache<Resource>& cache)
 {
 	std::unique_lock lock(cache.mutex);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (auto existing = cache.pathToId.find(key); existing != cache.pathToId.end())
 	{
 		return existing->second;
@@ -1456,12 +1456,12 @@ TerraEngine::UUID ResourceManager::EnsureResourceId(const std::string& key, Reso
 }
 
 template <typename Resource>
-// ResourceManager::GetResourceById is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 Resource* ResourceManager::GetResourceById(const TerraEngine::UUID& id, ResourceCache<Resource>& cache, const std::function<TerraEngine::UUID(const std::filesystem::path&)>& loader)
 {
 	{
 		std::shared_lock lock(cache.mutex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (auto existing = cache.resources.find(id); existing != cache.resources.end())
 		{
 			UpdateStreamableLoadResult(
@@ -1474,7 +1474,7 @@ Resource* ResourceManager::GetResourceById(const TerraEngine::UUID& id, Resource
 			return existing->second.get();
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (loader)
 		{
 			if (auto it = cache.idToPath.find(id); it != cache.idToPath.end())
@@ -1537,7 +1537,7 @@ std::optional<TerraEngine::Animation::AnimationGeneration> ResourceManager::Adva
 	}
 
 template <typename Resource>
-// ResourceManager::FinalizeLoad is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 TerraEngine::UUID ResourceManager::FinalizeLoad(
 	const std::string& key,
 	ResourceCache<Resource>& cache,
@@ -1754,7 +1754,7 @@ TerraEngine::UUID ResourceManager::LoadOrGetCached(const std::filesystem::path& 
 }
 
 template <typename Visitor>
-// ResourceManager::VisitAssetCache is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ResourceManager::VisitAssetCache(AssetType type, Visitor&& visitor)
 {
 	switch (type)

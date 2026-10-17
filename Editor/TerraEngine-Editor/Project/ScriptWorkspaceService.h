@@ -17,7 +17,7 @@ enum class ScriptWorkspaceHealth
 	Broken
 };
 
-// struct ScriptWorkspaceStatus groups related state and operations so callers have one documented contract.
+
 struct ScriptWorkspaceStatus
 {
 	// "Missing" means no project is open yet, "Healthy" means the generated

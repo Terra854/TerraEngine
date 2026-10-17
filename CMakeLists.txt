@@ -297,11 +297,33 @@ set(ENGINE_SOURCES
 	Engine/Profiling/PerformanceBaseline.cpp
 	Engine/Profiling/PerformanceTelemetry.cpp
 	Engine/Renderer/RenderCaptureEncoding.cpp
+	Engine/Renderer/SyntheticCapture.cpp
 	Engine/Renderer/RendererRecovery.cpp
 	Engine/Renderer/RendererRecoveryPolicy.cpp
 	Engine/Renderer/Deformation/GpuDeformationPlan.cpp
 	Engine/Renderer/Deformation/AnimatedVirtualGeometryRuntime.cpp
 	Engine/Renderer/RenderSystem.cpp
+	Engine/Renderer/Frame/RenderAnimatedGeometryPreparation.cpp
+	Engine/Renderer/Frame/RenderBackendCommit.cpp
+	Engine/Renderer/Frame/RenderDiagnosticsPublication.cpp
+	Engine/Renderer/Frame/RenderDynamicPublication.cpp
+	Engine/Renderer/Frame/RenderFrameCapture.cpp
+	Engine/Renderer/Frame/RenderFrameSealing.cpp
+	Engine/Renderer/Frame/RenderLightingPreparation.cpp
+	Engine/Renderer/Frame/RenderShadowPreparation.cpp
+	Engine/Renderer/Frame/RenderSnapshotPreparation.cpp
+	Engine/Renderer/Frame/RenderSpatialPreparation.cpp
+	Engine/Renderer/Frame/RenderStreamingFeedback.cpp
+	Engine/Renderer/Frame/RenderTopologyPreparation.cpp
+	Engine/Renderer/Frame/RenderViewBuilders.cpp
+	Engine/Renderer/Frame/RenderViewGrouping.cpp
+	Engine/Renderer/Frame/RenderViewPreparation.cpp
+	Engine/Renderer/Frame/RenderVirtualGeometryPackets.cpp
+	Engine/Renderer/Frame/RenderVirtualGeometrySelection.cpp
+	Engine/Renderer/RenderSystemCapture.cpp
+	Engine/Renderer/RenderSystemDiagnostics.cpp
+	Engine/Renderer/RenderSystemResources.cpp
+	Engine/Renderer/RenderSystemSettings.cpp
 	Engine/Renderer/Graph/RenderDiagnostics.cpp
 	# The renderer owns reusable scratch; an episode lease bounds its borrowers.
 	Engine/Renderer/Graph/RenderFrameScratch.cpp
@@ -335,6 +357,7 @@ set(ENGINE_SOURCES
 	Engine/Renderer/RHI/Vulkan/VulkanPipelineResources.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanPostProcessing.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanReadback.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanReadbackLifecycle.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanVirtualGeometryResources.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanPresentationLifecycle.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanCommandRecording.cpp
@@ -487,11 +510,23 @@ set(ENGINE_HEADERS
 	Engine/Profiling/PerformanceBaseline.h
 	Engine/Profiling/PerformanceTelemetry.h
 	Engine/Renderer/RenderCaptureEncoding.h
+	Engine/Renderer/SyntheticCapture.h
 	Engine/Renderer/RendererRecovery.h
 	Engine/Renderer/RendererRecoveryPolicy.h
 	Engine/Renderer/Deformation/GpuDeformationPlan.h
 	Engine/Renderer/Deformation/AnimatedVirtualGeometryRuntime.h
 	Engine/Renderer/RenderSystem.h
+	Engine/Renderer/Frame/RenderCaptureOperationState.h
+	Engine/Renderer/Frame/RenderFrameAlgorithms.h
+	Engine/Renderer/Frame/RenderFrameCaches.h
+	Engine/Renderer/Frame/RenderFrameCapture.h
+	Engine/Renderer/Frame/RenderFrameSealing.h
+	Engine/Renderer/Frame/RenderFrameState.h
+	Engine/Renderer/Frame/RenderPreparationTasks.h
+	Engine/Renderer/Frame/RenderScratchEpisode.h
+	Engine/Renderer/Frame/RenderSnapshotPreparation.h
+	Engine/Renderer/Frame/RenderViewPreparation.h
+	Engine/Renderer/Frame/RenderVirtualGeometrySelection.h
 	Engine/Renderer/RenderTypes.h
 	Engine/Renderer/Graph/RenderDiagnostics.h
 	Engine/Renderer/Graph/RenderFrameBreakdown.h
@@ -503,6 +538,9 @@ set(ENGINE_HEADERS
 	Engine/Renderer/Graph/RenderWorkPacket.h
 	Engine/Renderer/RHI/RHIDefinitions.h
 	Engine/Renderer/RHI/RHIContext.h
+	Engine/Renderer/RHI/CaptureReadbackLifetime.h
+	Engine/Renderer/RHI/Vulkan/VulkanReadbackLifecycle.h
+	Engine/Renderer/RHI/Vulkan/VulkanReadbackValidation.h
 	Engine/Renderer/RHI/Vulkan/VulkanContext.h
 	Engine/Renderer/RHI/Vulkan/VulkanCommandRecording.h
 	Engine/Renderer/RHI/Vulkan/VulkanDescriptorPlanning.h
@@ -3166,4 +3204,12 @@ if(BUILD_TESTING AND WIN32)
 	# Runtime-memory validation reads the same durable profiler format through
 	# the codec target above; keep its installed closure independently sealed.
 	add_subdirectory(Tests/Tools/RuntimeMemorySafety)
+	# Real readback lifetime evidence has its own protocol and installed closure.
+	add_subdirectory(Tests/Tools/ReadbackLifetime)
+endif()
+
+# Source review tools are native, read-only validation utilities. Keep them out
+# of production-only builds and independent of editor/graphics availability.
+if(BUILD_TESTING)
+	add_subdirectory(Tests/Tools/CodeQuality)
 endif()

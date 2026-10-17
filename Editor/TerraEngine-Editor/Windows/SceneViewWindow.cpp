@@ -83,7 +83,7 @@ Mesh* ResolveSceneEntityRenderMesh(entt::entity entity)
 		? ResourceManager::Instance().GetMesh(renderable->meshId) : nullptr;
 }
 
-// SafeNormalize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 glm::vec3 SafeNormalize(const glm::vec3& value, const glm::vec3& fallback)
 {
 	if (!std::isfinite(value.x) || !std::isfinite(value.y) || !std::isfinite(value.z))
@@ -92,7 +92,7 @@ glm::vec3 SafeNormalize(const glm::vec3& value, const glm::vec3& fallback)
 	}
 
 	const float length = glm::length(value);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (length <= 0.0001f)
 	{
 		return fallback;
@@ -101,7 +101,7 @@ glm::vec3 SafeNormalize(const glm::vec3& value, const glm::vec3& fallback)
 	return value / length;
 }
 
-// BuildBasisFromDirection is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void BuildBasisFromDirection(const glm::vec3& direction, glm::vec3& outRight, glm::vec3& outUp)
 {
 	const glm::vec3 fallbackUp = (std::abs(glm::dot(direction, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
@@ -238,7 +238,7 @@ bool ProjectLocalPoint(
 	ImVec2& outScreenPosition)
 {
 	const glm::vec4 clipPosition = viewProjection * glm::vec4(referenceFrameLocalPosition, 1.0f);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (clipPosition.w <= 0.0001f)
 	{
 		return false;
@@ -262,7 +262,7 @@ void DrawLocalLine(
 {
 	ImVec2 screenStart{};
 	ImVec2 screenEnd{};
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!ProjectLocalPoint(localStart, viewProjection, viewportPos, viewportSize, screenStart)
 		|| !ProjectLocalPoint(localEnd, viewProjection, viewportPos, viewportSize, screenEnd))
 	{
@@ -416,7 +416,7 @@ void DrawWorldCircle(
 	float thickness)
 {
 	const float step = glm::two_pi<float>() / static_cast<float>(segments);
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (int segment = 0; segment < segments; ++segment)
 	{
 		const float angleA = step * static_cast<float>(segment);
@@ -444,7 +444,7 @@ void DrawDirectionalLightGizmo(
 	DrawWorldCircle(drawList, position, right, up, coreRadius, 32, viewProjection, viewportPos, viewportSize, color, 1.5f);
 
 	// Draw radial rays around the icon to match a classic directional-light "sun".
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (int rayIndex = 0; rayIndex < 12; ++rayIndex)
 	{
 		const float angle = glm::two_pi<float>() * (static_cast<float>(rayIndex) / 12.0f);
@@ -455,7 +455,7 @@ void DrawDirectionalLightGizmo(
 	}
 
 	// Draw multiple parallel lines to communicate directional lighting.
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (int lineIndex = 0; lineIndex < 4; ++lineIndex)
 	{
 		const float offset = (static_cast<float>(lineIndex) - 1.5f) * 0.2f;
@@ -508,7 +508,7 @@ void DrawSpotLightGizmo(
 	DrawWorldCircle(drawList, coneCenter, right, up, innerRadius, 36, viewProjection, viewportPos, viewportSize, color, 1.1f);
 
 	// Outline a sparse cone wireframe so users can read direction and range quickly.
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (int edgeIndex = 0; edgeIndex < 8; ++edgeIndex)
 	{
 		const float angle = glm::two_pi<float>() * (static_cast<float>(edgeIndex) / 8.0f);
@@ -802,7 +802,7 @@ const char* MarkerGlyph(SceneOverlay::MarkerCategory category)
 }
 
 SceneViewWindow::SceneViewWindow(MainEditorSubsystem* owner)
-	// EditorWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	: EditorWindow("Scene View", true, "Rendering"), m_Owner(owner) {
 	m_CurrentGizmoOperation = ImGuizmo::TRANSLATE;
 	m_IconDefinitions = SceneOverlay::BuildDefaultIconDefinitions();
@@ -2196,7 +2196,7 @@ void SceneViewWindow::PublishSceneViewDiagnostics(bool rendererAvailable, const 
 	SceneOverlay::PublishLatestDiagnosticsSnapshot(snapshot);
 }
 
-// SceneViewWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void SceneViewWindow::OnGui() {
 	ImGuizmo::BeginFrame();
 	LoadOverlayPreferencesIfNeeded();
@@ -2295,7 +2295,7 @@ void SceneViewWindow::OnGui() {
 		return;
 	}
 	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (texID) {
 		ImGui::Image((ImTextureID)texID, contentSize);
 	} else {
@@ -2480,7 +2480,7 @@ void SceneViewWindow::OnGui() {
 	view = glm::lookAt(glm::vec3(0.0f), forward, up);
 	
 	float aspect = (contentSize.y > 0.0001f) ? (contentSize.x / contentSize.y) : 1.0f;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (aspect <= 0.0001f) aspect = 1.0f;
 	// Scene View feeds the same projection into picking, gizmos, rendering, and
 	// Hi-Z validation. Make the depth convention explicit so all those users
@@ -3032,18 +3032,18 @@ void SceneViewWindow::DrawNavigationDebugOverlay(
 	}
 }
 
-// RayAABB is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool RayAABB(const glm::vec3& rayOrigin, const glm::vec3& rayDir, const glm::vec3& aabbMin, const glm::vec3& aabbMax, float& t)
 {
 	float tmin = 0.0f;
 	float tmax = std::numeric_limits<float>::max();
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (int i = 0; i < 3; i++)
 	{
 		if (std::abs(rayDir[i]) < 0.0001f)
 		{
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (rayOrigin[i] < aabbMin[i] || rayOrigin[i] > aabbMax[i]) return false;
 		}
 		else
@@ -3052,13 +3052,13 @@ bool RayAABB(const glm::vec3& rayOrigin, const glm::vec3& rayDir, const glm::vec
 			float t1 = (aabbMin[i] - rayOrigin[i]) * invD;
 			float t2 = (aabbMax[i] - rayOrigin[i]) * invD;
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (t1 > t2) std::swap(t1, t2);
 
 			tmin = std::max(tmin, t1);
 			tmax = std::min(tmax, t2);
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (tmin > tmax) return false;
 		}
 	}
@@ -3067,7 +3067,7 @@ bool RayAABB(const glm::vec3& rayOrigin, const glm::vec3& rayDir, const glm::vec
 	return true;
 }
 
-// SceneViewWindow::HandlePicking is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize) {
 	TerraEngine::Editor::SceneViewPickRequest currentPick;
 	currentPick.viewport = {viewportPos.x, viewportPos.y, viewportSize.x, viewportSize.y};
@@ -3232,7 +3232,7 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 	}
 
 	ImVec2 mousePos = ImGui::GetMousePos();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (mousePos.x < viewportPos.x || mousePos.x > viewportPos.x + viewportSize.x ||
 		mousePos.y < viewportPos.y || mousePos.y > viewportPos.y + viewportSize.y) return;
 
@@ -3251,7 +3251,7 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 	}
 }
 
-// SceneViewWindow::HandleCameraInput is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void SceneViewWindow::HandleCameraInput(float deltaTime, const ImVec2& viewportSize) {
 	// Need to include WindowSystem and GLFW for this
 	auto* window = static_cast<GLFWwindow*>(WindowSystem::Instance().GetNativeHandle());
@@ -3261,7 +3261,7 @@ void SceneViewWindow::HandleCameraInput(float deltaTime, const ImVec2& viewportS
 	}
 
 	if (m_IsFlyCamActive) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
 			m_IsFlyCamActive = false;
 			
@@ -3275,7 +3275,7 @@ void SceneViewWindow::HandleCameraInput(float deltaTime, const ImVec2& viewportS
 			double deltaY = currentPos.second - m_StoredCursorPos.second;
 
 			// Reset cursor to stored position to keep it locked
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (deltaX != 0.0 || deltaY != 0.0) {
 				InputSystem::Instance().SetCursorPosition(m_StoredCursorPos.first, m_StoredCursorPos.second);
 			}
@@ -3286,32 +3286,32 @@ void SceneViewWindow::HandleCameraInput(float deltaTime, const ImVec2& viewportS
 			glm::vec3 right = orientation * glm::vec3(1, 0, 0);
 			glm::vec3 up = orientation * glm::vec3(0, 1, 0);
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::IsKeyDown(ImGuiKey_W)) (void)TranslateCamera(glm::dvec3(forward * m_CameraSpeed * deltaTime));
 			if (ImGui::IsKeyDown(ImGuiKey_S)) (void)TranslateCamera(glm::dvec3(-forward * m_CameraSpeed * deltaTime));
 			if (ImGui::IsKeyDown(ImGuiKey_D)) (void)TranslateCamera(glm::dvec3(right * m_CameraSpeed * deltaTime));
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::IsKeyDown(ImGuiKey_A)) (void)TranslateCamera(glm::dvec3(-right * m_CameraSpeed * deltaTime));
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::IsKeyDown(ImGuiKey_E)) (void)TranslateCamera(glm::dvec3(up * m_CameraSpeed * deltaTime));
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::IsKeyDown(ImGuiKey_Q)) (void)TranslateCamera(glm::dvec3(-up * m_CameraSpeed * deltaTime));
 
 			// Mouse Look
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (deltaX != 0.0 || deltaY != 0.0) {
 				m_CameraRot.y -= (float)deltaX * m_MouseSensitivity * 0.01f;
 				m_CameraRot.x -= (float)deltaY * m_MouseSensitivity * 0.01f;
 				
 				// Clamp pitch
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (m_CameraRot.x > glm::radians(89.0f)) m_CameraRot.x = glm::radians(89.0f);
 				if (m_CameraRot.x < glm::radians(-89.0f)) m_CameraRot.x = glm::radians(-89.0f);
 			}
 		}
 	} else {
 		// Only activate if clicked THIS frame while hovered and not using gizmo
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && ImGui::IsWindowHovered() && !ImGuizmo::IsUsing()) {
 			m_IsFlyCamActive = true;
 			m_StoredCursorPos = InputSystem::Instance().GetCursorPosition();
@@ -3323,11 +3323,11 @@ void SceneViewWindow::HandleCameraInput(float deltaTime, const ImVec2& viewportS
 	}
 	
 	// Gizmo Shortcuts
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
 		if (ImGui::IsKeyPressed(ImGuiKey_W)) { m_CurrentGizmoOperation = ImGuizmo::TRANSLATE; m_ToolState.activeTool = SceneOverlay::SceneViewTool::Move; }
 		if (ImGui::IsKeyPressed(ImGuiKey_E)) { m_CurrentGizmoOperation = ImGuizmo::ROTATE; m_ToolState.activeTool = SceneOverlay::SceneViewTool::Rotate; }
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (ImGui::IsKeyPressed(ImGuiKey_R)) { m_CurrentGizmoOperation = ImGuizmo::SCALE; m_ToolState.activeTool = SceneOverlay::SceneViewTool::Scale; }
 	}
 }
@@ -3965,7 +3965,7 @@ void SceneViewWindow::DrawAnimationSceneHandles(
 	ImGui::End();
 }
 
-// SceneViewWindow::DrawGizmos is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize) {
 	if (!m_ToolState.gizmosVisible)
 	{
@@ -3987,7 +3987,7 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 	}
 	// Selection
 	auto selectedEntity = m_Owner->GetSelectedEntity();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (selectedEntity.has_value()) {
 		auto& registry = ObjectManager::instance().getRegistry();
 		if (registry.valid(*selectedEntity)) {
@@ -3995,7 +3995,7 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 			CameraComponent* camera = registry.try_get<CameraComponent>(*selectedEntity);
 			LightComponent* light = registry.try_get<LightComponent>(*selectedEntity);
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (transform || camera || light) {
 				const std::optional<glm::mat4> localizedModel =
 					ComputeEntityLocalWorldMatrix(*selectedEntity, m_CameraPosition);
@@ -4005,7 +4005,7 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 				}
 				glm::mat4 model = *localizedModel;
 
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (transform) {
 					if (ImGuizmo::Manipulate(
 						glm::value_ptr(view), 
@@ -4016,7 +4016,7 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 						nullptr, 
 						m_UsingSnap ? (m_CurrentGizmoOperation == ImGuizmo::ROTATE ? m_RotationSnapValue : (m_CurrentGizmoOperation == ImGuizmo::SCALE ? m_ScaleSnapValue : m_SnapValue)) : nullptr)) 
 					{
-						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 						if (!m_WasUsingGizmo) {
 							m_WasUsingGizmo = true;
 							m_GizmoStartPose = transform->worldPose;
@@ -4048,7 +4048,7 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 						}
 					}
 
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 					if (m_WasUsingGizmo && !ImGuizmo::IsUsing()) {
 						m_WasUsingGizmo = false;
 						// SceneView owns transient transform preview only. The
@@ -4063,7 +4063,7 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 					}
 				}
 
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (camera) {
 					float nearP = std::max(0.001f, camera->nearPlane);
 					float farP = std::max(nearP + 0.001f, camera->farPlane);
@@ -4084,12 +4084,12 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 					bool behind[8];
 					glm::mat4 viewProj = proj * view;
 
-					// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 					for (int i = 0; i < 8; i++) {
 						glm::vec4 worldPos = model * glm::vec4(corners[i], 1.0f);
 						glm::vec4 clipPos = viewProj * worldPos;
 						
-						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 						if (clipPos.w <= 0.0f) {
 							behind[i] = true;
 							continue;
@@ -4101,7 +4101,7 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 					}
 
 					auto drawLine = [&](int i, int j) {
-						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 						if (!behind[i] && !behind[j]) {
 							ImGui::GetWindowDrawList()->AddLine(projected[i], projected[j], IM_COL32(255, 255, 255, 255), 2.0f);
 						}
@@ -4115,7 +4115,7 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 					drawLine(0, 4); drawLine(1, 5); drawLine(2, 6); drawLine(3, 7);
 				}
 
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (light && transform) {
 					const glm::mat4 viewProjection = proj * view;
 					const glm::vec3 lightPosition = glm::vec3(model[3]);
@@ -4124,17 +4124,17 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 
 					const LightType lightType = light->type;
 
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 					if (lightType == LightType::Directional)
 					{
 						DrawDirectionalLightGizmo(ImGui::GetWindowDrawList(), lightPosition, lightDirection, viewProjection, viewportPos, viewportSize, lightColor);
 					}
-					// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 					else if (lightType == LightType::Point)
 					{
 						DrawPointLightGizmo(ImGui::GetWindowDrawList(), lightPosition, light->range, viewProjection, viewportPos, viewportSize, lightColor);
 					}
-					// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 					else if (lightType == LightType::Spot)
 					{
 						DrawSpotLightGizmo(

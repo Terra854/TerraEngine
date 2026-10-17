@@ -16,7 +16,7 @@ class MainEditorSubsystem;
 struct EditorContext;
 class EditorExportOperationController;
 
-// class BuildProfilesWindow groups related state and operations so callers have one documented contract.
+
 class BuildProfilesWindow : public EditorWindow {
 public:
 	BuildProfilesWindow(MainEditorSubsystem* owner);

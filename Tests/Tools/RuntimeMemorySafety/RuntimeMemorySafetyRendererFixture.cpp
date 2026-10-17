@@ -1,5 +1,6 @@
 // Installed native renderer lifecycle qualification. The main fixture parses
 // --mode renderer and passes an exact frozen lane plus fresh owned paths here.
+#include "RuntimeMemorySafetyHostInstance.h"
 #include "RendererBorrowerGate.h"
 #include "Renderer/Graph/RenderFrameScratchValidation.h"
 #include "Renderer/RenderSystem.h"
@@ -333,6 +334,49 @@ namespace RuntimeMemorySafetyDraft {
 		return {{"playSessionActive", time.playSessionActive}, {"playSessionPaused", time.playSessionPaused},
 			{"advancesSimulation", time.advancesSimulation}, {"physicsPaused", TerraEngine::Physics::PhysicsSystem::Instance().IsPaused()}};
 	}
+	// These are observed context lifetimes, not vkCreateInstance instrumentation.
+	// Startup predates the optional host; later Initialize calls run under it.
+	class HostContextObservations final {
+	public:
+		explicit HostContextObservations(RuntimeMemorySafetySupport::HostInstanceOwner& host) : host_(host) {}
+		std::size_t Initialized(RenderSystem& renderer, std::string_view role, std::uint32_t iteration, bool hostLiveBefore) {
+			auto* context = dynamic_cast<VulkanContext*>(renderer.GetContext());
+			Check(context != nullptr && host_.Ready(), "Host context observation requires actual Vulkan and a live host");
+			const auto native = context->GetEmptyFrameValidationReceipt(); VulkanContext::EditorHandles handles; context->GetEditorHandles(handles);
+			const bool distinct = host_.Distinct(reinterpret_cast<VkInstance>(handles.instance));
+			Check(native.initialized && native.validationActuallyEnabled && handles.instance && handles.device && distinct,
+				"Observed renderer context is not independently initialized and validated");
+			contexts_.push_back({{"iteration", iteration}, {"role", role},
+				{"instanceHandle", std::to_string(reinterpret_cast<std::uintptr_t>(handles.instance))},
+				{"deviceHandle", std::to_string(reinterpret_cast<std::uintptr_t>(handles.device))},
+				{"initialized", native.initialized}, {"validationActuallyEnabled", native.validationActuallyEnabled},
+				{"hostLiveBefore", hostLiveBefore}, {"hostLiveAfter", false}, {"distinctFromHost", distinct},
+				{"shutdownAttempted", false}, {"contextReleased", false},
+				{"observationCheckpoint", role == "Startup" ? "ExistingStartupContextAfterHostCreation" : "ContextInitializedUnderHost"}});
+			++initialized_; return contexts_.size()-1U;
+		}
+		void Shutdown(RenderSystem& renderer, std::optional<std::size_t>& index) {
+			if(index) contexts_.at(*index)["shutdownAttempted"] = true;
+			renderer.Shutdown();
+			if(index) {
+				auto& observation = contexts_.at(*index);
+				const bool released = renderer.GetContext() == nullptr;
+				observation["contextReleased"] = released; observation["hostLiveAfter"] = host_.Ready();
+				if(released) { ++retired_; index.reset(); }
+				Check(released && host_.Ready(), "Renderer context was not retired while the fixture host remained live");
+			}
+		}
+		Json ForIteration(std::uint32_t iteration) const {
+			Json result = Json::array(); for(const auto& row : contexts_) if(row["iteration"] == iteration) result.push_back(row); return result;
+		}
+		Json Snapshot(bool finalShutdownAttempted, bool contextReleased, bool windowLive) const {
+			return {{"observedInitializationCount", initialized_}, {"observedRetirementCount", retired_}, {"contexts", contexts_},
+				{"finalRendererShutdownAttempted", finalShutdownAttempted}, {"finalContextReleased", contextReleased}, {"windowLiveBeforeHostClose", windowLive}};
+		}
+	private:
+		RuntimeMemorySafetySupport::HostInstanceOwner& host_;
+		Json contexts_ = Json::array(); std::size_t initialized_ = 0U, retired_ = 0U;
+	};
 	void StopPausedPlayAtProtectedBoundary() {
 		// Mirror editor stop ordering without shutting down the managed host.
 		auto& animation = TerraEngine::Animation::AnimationSystem::Instance();
@@ -342,10 +386,14 @@ namespace RuntimeMemorySafetyDraft {
 		ScriptingSystem::Instance().SetRunning(false); ScriptingSystem::Instance().SetPaused(false);
 		animation.SetAuthoredComponentPlaybackEnabled(false); animation.SetAuthoredComponentPlaybackAdvancing(false);
 	}
-	Json RunRendererIteration(Engine& engine, const std::filesystem::path& project, std::string_view scenario, std::uint32_t iteration) {
+	Json RunRendererIteration(Engine& engine, const std::filesystem::path& project, std::string_view scenario, std::uint32_t iteration,
+		RuntimeMemorySafetySupport::HostInstanceOwner* hostInstance = nullptr, HostContextObservations* contextObservations = nullptr) {
 		Json output{{"status", "Unverified"}, {"scenarioId", scenario}, {"authoredLightCount", kPressureLights}, {"meshDrawClaim", false}};
 		auto& renderer = RenderSystem::Instance();
 		bool initialized = false, enteredPlay = false;
+		std::optional<std::size_t> observedContext;
+		if(hostInstance) output["hostInstance"] = {{"instanceHandle", hostInstance->Identity()},
+			{"liveBeforeContextInitialization", hostInstance->Ready()}, {"liveAfterContextCleanup", false}, {"contextLifecycles", Json::array()}};
 		try {
 			// The prior iteration already retired its renderer before clearing scene
 			// authority. Keep the process's engine/providers/pool alive throughout.
@@ -360,7 +408,9 @@ namespace RuntimeMemorySafetyDraft {
 			const auto scenePath = project / "Assets/Scenes" / ("Qualification-"+std::to_string(iteration)+".tescene");
 			Check(scenes.CreateSceneFile(scenePath, "Runtime memory safety qualification", &error), "Cannot create isolated qualification scene");
 			Check(scenes.SetActiveScene(scenes.LoadScene(scenePath)), "Cannot activate isolated qualification scene");
+			const bool hostLiveBeforePrimary = !hostInstance || hostInstance->Ready();
 			renderer.Initialize(); initialized = true;
+			if(contextObservations) observedContext = contextObservations->Initialized(renderer, "Primary", iteration, hostLiveBeforePrimary);
 			// SetRunning/SetPaused select state; the normal frame publishes the
 			// copied time snapshot and immutable producer inputs. This is a paused
 			// empty-scene warm frame, with no explicit simulation step.
@@ -408,11 +458,15 @@ namespace RuntimeMemorySafetyDraft {
 					output["nextCapture"] = StateJson(state);
 				} else if(scenario == "scene-clear") {
 					renderer.Clear(); ObjectManager::instance().clear();
-				} else { renderer.Shutdown(); }
+				} else { if(contextObservations) contextObservations->Shutdown(renderer, observedContext); else renderer.Shutdown(); }
 				const auto retired = renderer.GetFrameScratchValidationState(); RequireOutcome(retired, captured, RenderFrameScratchOutcome::Cancelled);
 				output["retired"] = StateJson(retired);
 				if(scenario != "cancelled") { Check(!retired.active, "Protected lifecycle left a live scratch lease"); RequireBalanced(retired.reclamation); }
-				if(scenario == "restart") renderer.Initialize();
+				if(scenario == "restart") {
+					const bool hostLiveBeforeRestart = !hostInstance || hostInstance->Ready();
+					renderer.Initialize();
+					if(contextObservations) observedContext = contextObservations->Initialized(renderer, "Restart", iteration, hostLiveBeforeRestart);
+				}
 				if(scenario == "scene-clear" || scenario == "restart") expected = AuthorProtectedInputs();
 			}
 			output["captured"] = Episode(captured);
@@ -454,7 +508,9 @@ namespace RuntimeMemorySafetyDraft {
 			if(enteredPlay) StopPausedPlayAtProtectedBoundary();
 		} catch(const std::exception& error) { output["status"] = "Failed"; output["reason"] = error.what(); }
 		try {
-			if(renderer.GetContext() != nullptr) renderer.Shutdown();
+			if(renderer.GetContext() != nullptr) {
+				if(contextObservations) contextObservations->Shutdown(renderer, observedContext); else renderer.Shutdown();
+			}
 			renderer.SetFrameScratchValidationCallbacks(nullptr);
 			const auto retired = renderer.GetFrameScratchValidationState();
 			rendererCleanup["contextReleased"] = renderer.GetContext() == nullptr;
@@ -471,6 +527,10 @@ namespace RuntimeMemorySafetyDraft {
 			Check(output["loadedScenesAfterCleanup"] == 0U && output["sceneObjectsAfterCleanup"] == 0U, "Iteration retained old scene documents or objects");
 		} catch(const std::exception& error) { output["status"] = "Failed"; output["reason"] = error.what(); }
 		output["rendererCleanup"] = std::move(rendererCleanup);
+		if(hostInstance) {
+			output["hostInstance"]["liveAfterContextCleanup"] = hostInstance->Ready();
+			output["hostInstance"]["contextLifecycles"] = contextObservations->ForIteration(iteration);
+		}
 		return output;
 	}
 
@@ -487,7 +547,10 @@ namespace RuntimeMemorySafetyDraft {
 		}
 		void HostBoundary(std::string phase, bool succeeded) {
 			std::lock_guard lock(mutex_); iteration_ = 0U;
-			phase_ = phase.starts_with("HostShutdown") ? "HostShutdown" : "HostInitialize";
+			phase_ = phase.starts_with("HostInstanceShutdown") ? "HostInstanceShutdown"
+				: phase.starts_with("HostInstanceInitialize") ? "HostInstanceInitialize"
+				: phase.starts_with("StartupRendererShutdown") ? "StartupRendererShutdown"
+				: phase.starts_with("HostShutdown") ? "HostShutdown" : "HostInitialize";
 			BoundaryLocked(std::move(phase), succeeded);
 		}
 		void BeginIteration(std::uint32_t iteration) {
@@ -526,9 +589,10 @@ namespace RuntimeMemorySafetyDraft {
 	// Parent CLI owns parsing. Recheck the narrow public contract before any
 	// startup or filesystem ownership is acquired by this fixture helper.
 	int RunRendererMode(const std::filesystem::path& install, const std::filesystem::path& outputPath,
-		const std::filesystem::path& projectRoot, std::string_view scenario, std::uint32_t iterations) {
+		const std::filesystem::path& projectRoot, std::string_view scenario, std::uint32_t iterations, bool hostInstanceRequested) {
 		const std::set<std::string_view> lanes{"completed", "failed", "cancelled", "scene-clear", "shutdown", "restart"};
 		Check(lanes.contains(scenario) && iterations > 0U && iterations <= 100000U, "Invalid renderer lifecycle lane or iteration count");
+		Check(!hostInstanceRequested || iterations >= 100U, "Host-instance qualification requires at least100 renderer lifetimes");
 		Check(install.is_absolute() && outputPath.is_absolute() && projectRoot.is_absolute()
 			&& std::filesystem::is_directory(install), "Renderer paths must be absolute with an existing install root");
 		// ScriptingSystem's normal startup searches current/Editor/Managed. Pin
@@ -546,7 +610,7 @@ namespace RuntimeMemorySafetyDraft {
 		Check(!std::filesystem::exists(projectRoot), "Renderer owned project parent must be fresh");
 		std::filesystem::create_directories(projectRoot);
 		std::filesystem::create_directories(projectRoot / "Build/Assets"); std::filesystem::create_directories(projectRoot / "Assets/Scenes");
-		Json receipt{{"schemaVersion", 1}, {"rendererEvidenceVersion", 2}, {"mode", "renderer"}, {"scenario", scenario}, {"requestedIterations", iterations},
+		Json receipt{{"schemaVersion", 1}, {"rendererEvidenceVersion", hostInstanceRequested ? 3 : 2}, {"mode", "renderer"}, {"scenario", scenario}, {"requestedIterations", iterations},
 			{"attemptedIterations", 0U}, {"completedIterations", 0U}, {"status", "Passed"}, {"nativeAcceptance", false},
 			{"capturedLifetimeIds", Json::array()}, {"observations", Json::array()}};
 		Json host{{"engineInitializeCount", 0U}, {"engineShutdownCount", 0U}, {"engineCleanupCompleted", false},
@@ -555,7 +619,19 @@ namespace RuntimeMemorySafetyDraft {
 		const auto sink = Logger::Instance().AddSink([&](const LogEntry& entry) { logs.Append(entry); });
 		struct SinkRemoval { Logger::SinkId id; ~SinkRemoval() { Logger::Instance().RemoveSink(id); } } remove{sink};
 		Engine engine;
-		struct EngineCleanup { Engine& engine; bool closed = false; ~EngineCleanup() { if(!closed) engine.Shutdown(); } } cleanup{engine};
+		RuntimeMemorySafetySupport::HostInstanceOwner hostInstance{hostInstanceRequested,
+			[](void* state, std::string_view name, bool succeeded) { static_cast<RendererSessionLog*>(state)->HostBoundary(std::string(name), succeeded); }, &logs};
+		HostContextObservations contextObservations{hostInstance};
+		// Unexpected unwind must retire the renderer first, then the independent
+		// host, before Engine can terminate GLFW. Failed retained contexts never pass.
+		struct EngineCleanup {
+			Engine& engine; RuntimeMemorySafetySupport::HostInstanceOwner& host; bool enabled, closed = false;
+			~EngineCleanup() noexcept {
+				if(closed) return;
+				if(enabled) { try { RenderSystem::Instance().Shutdown(); } catch(...) {} (void)host.Close(); }
+				try { engine.Shutdown(); } catch(...) {}
+			}
+		} cleanup{engine, hostInstance, hostInstanceRequested};
 		std::set<std::uint64_t> capturedLifetimes;
 		std::uint64_t previousLifetime = 0U;
 		logs.HostBoundary("HostInitializeBegin", true);
@@ -568,13 +644,28 @@ namespace RuntimeMemorySafetyDraft {
 			host["threadPoolWorkerCount"] = ThreadPool::instance().getThreadCount();
 			Check(ThreadPool::instance().getThreadCount() > 0U, "Single engine host did not start actual workers");
 			logs.HostBoundary("HostInitializeEnd", true);
+			if(hostInstanceRequested) {
+				logs.HostBoundary("HostInstanceInitializeBegin", true); hostInstance.Initialize();
+				logs.HostBoundary("HostInstanceInitializeEnd", hostInstance.Ready());
+			}
 			// Engine startup creates its renderer too. Retire that unused lifetime
 			// before the first protected scene reset, just like later iterations.
-			auto& renderer = RenderSystem::Instance(); renderer.Shutdown(); renderer.SetFrameScratchValidationCallbacks(nullptr);
+			auto& renderer = RenderSystem::Instance();
+			std::optional<std::size_t> startupObservation;
+			if(hostInstanceRequested) {
+				// Engine created this context before the host existed; do not claim
+				// its initialization happened under the later fixture-owned instance.
+				startupObservation = contextObservations.Initialized(renderer, "Startup", 0U, false);
+				logs.HostBoundary("StartupRendererShutdownBegin", true);
+				contextObservations.Shutdown(renderer, startupObservation);
+				logs.HostBoundary("StartupRendererShutdownEnd", renderer.GetContext() == nullptr && hostInstance.Ready());
+			} else renderer.Shutdown();
+			renderer.SetFrameScratchValidationCallbacks(nullptr);
 			SceneManager::Instance().UnloadAll(); ObjectManager::instance().clear();
 			for(std::uint32_t iteration = 1U; iteration <= iterations; ++iteration) {
 				logs.BeginIteration(iteration); Json observation;
-				try { observation = RunRendererIteration(engine, projectRoot, scenario, iteration); }
+				try { observation = RunRendererIteration(engine, projectRoot, scenario, iteration,
+					hostInstanceRequested ? &hostInstance : nullptr, hostInstanceRequested ? &contextObservations : nullptr); }
 				catch(const std::exception& error) { observation = {{"status", "Failed"}, {"reason", error.what()}}; }
 				observation["iteration"] = iteration; receipt["attemptedIterations"] = iteration;
 				if(observation["status"] == "Passed") {
@@ -596,6 +687,19 @@ namespace RuntimeMemorySafetyDraft {
 		} catch(const std::exception& error) {
 			receipt["status"] = receipt["attemptedIterations"] == 0U ? "Unverified" : "Failed"; receipt["reason"] = error.what();
 		}
+		bool finalRendererShutdownAttempted = false, finalContextReleased = true, windowLiveBeforeHostClose = true, bootstrapClosed = true;
+		if(hostInstanceRequested) {
+			finalRendererShutdownAttempted = true;
+			try { RenderSystem::Instance().Shutdown(); } catch(const std::exception& error) { receipt["status"] = "Failed"; receipt["reason"] = error.what(); }
+			finalContextReleased = RenderSystem::Instance().GetContext() == nullptr;
+			windowLiveBeforeHostClose = WindowSystem::Instance().GetNativeHandle() != nullptr;
+			// A retained Engine context still owns its own instance; the separate
+			// host has no borrowed Engine children. Its independent close is legal
+			// on failure too, but missing context retirement cannot qualify a pass.
+			bootstrapClosed = hostInstance.Close();
+			receipt["hostInstance"] = hostInstance.Snapshot();
+			receipt["rendererContexts"] = contextObservations.Snapshot(finalRendererShutdownAttempted, finalContextReleased, windowLiveBeforeHostClose);
+		}
 		logs.HostBoundary("HostShutdownBegin", true);
 		host["engineShutdownCount"] = 1U; engine.Shutdown(); cleanup.closed = true;
 		host["threadPoolWorkersAfterCleanup"] = ThreadPool::instance().getThreadCount();
@@ -606,7 +710,7 @@ namespace RuntimeMemorySafetyDraft {
 		// retires those producers and joins console logging before this snapshot;
 		// queued console messages do not create newly admitted sink callbacks.
 		logs.HostBoundary("HostShutdownEnd", hostClean); logs.CopyAll(receipt);
-		if(!hostClean || receipt["allSessionValidationErrors"].get<std::size_t>() != 0U) {
+		if(!hostClean || !finalContextReleased || !windowLiveBeforeHostClose || !bootstrapClosed || receipt["allSessionValidationErrors"].get<std::size_t>() != 0U) {
 			receipt["status"] = "Failed"; receipt["reason"] = "Single engine host cleanup or initialization-through-shutdown validation failed";
 		}
 		receipt["nativeAcceptance"] = receipt["status"] == "Passed" && receipt["completedIterations"] == iterations && capturedLifetimes.size() == iterations;

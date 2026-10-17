@@ -45,7 +45,7 @@ namespace TerraEngine {
 	[[nodiscard]] inline std::string ToHexString(const UUID& uuid) {
 		static const char hexChars[] = "0123456789abcdef";
 		std::string s(32, '0');
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (int i = 0; i < 16; ++i) {
 			s[2 * i] = hexChars[(uuid[i] >> 4) & 0xF];
 			s[2 * i + 1] = hexChars[uuid[i] & 0xF];
@@ -54,22 +54,22 @@ namespace TerraEngine {
 	}
 
 	[[nodiscard]] inline std::optional<UUID> ParseUUID(std::string_view hex) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (hex.size() != 32) return std::nullopt;
 		UUID uuid{};
 		for (int i = 0; i < 16; ++i) {
 			auto fromHex = [](char c) -> int {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (c >= '0' && c <= '9') return c - '0';
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (c >= 'A' && c <= 'F') return c - 'A' + 10;
 				return -1;
 			};
 			int h = fromHex(hex[2 * i]);
 			int l = fromHex(hex[2 * i + 1]);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (h < 0 || l < 0) return std::nullopt;
 			uuid[i] = static_cast<std::uint8_t>((h << 4) | l);
 		}
@@ -82,7 +82,7 @@ namespace TerraEngine {
 
 namespace std {
 	template<>
-	// struct hash groups related state and operations so callers have one documented contract.
+
 	struct hash<TerraEngine::UUID> {
 		std::size_t operator()(const TerraEngine::UUID& uuid) const noexcept {
 			std::uint64_t high;

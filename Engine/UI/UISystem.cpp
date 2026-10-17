@@ -26,7 +26,7 @@
 
 namespace
 {
-// GetInteractiveElementMin is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 glm::vec2 GetInteractiveElementMin(const UIElement& element)
 {
 	// Runtime hit testing must respect the same transform-driven translate
@@ -36,7 +36,7 @@ glm::vec2 GetInteractiveElementMin(const UIElement& element)
 	return element.calculatedPosition + translate;
 }
 
-// GetInteractiveElementSize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 glm::vec2 GetInteractiveElementSize(const UIElement& element)
 {
 	// Scale is authored on the visual style, so hit testing must expand or
@@ -51,7 +51,7 @@ bool BuildHoveredElementPath(
 	std::vector<UIElement::Ptr>& hoveredPath,
 	UIElement::Ptr& outHitElement)
 {
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!element || !element->IsVisible())
 	{
 		return false;
@@ -70,11 +70,11 @@ bool BuildHoveredElementPath(
 	{
 		hoveredPath.push_back(element);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::size_t reverseIndex = element->children.size(); reverseIndex > 0; --reverseIndex)
 	{
 		const UIElement::Ptr& child = element->children[reverseIndex - 1];
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (BuildHoveredElementPath(child, localPointerPosition, hoveredPath, outHitElement))
 		{
 			return true;
@@ -113,7 +113,7 @@ TerraEngine::Scheduling::EcsComponentQueryDeclaration MakeProtectedUiQuery(
 	return query;
 }
 
-// ApplyHoverStateRecursive is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ApplyHoverStateRecursive(const UIElement::Ptr& element, const std::unordered_set<const UIElement*>& hoveredElements)
 {
 	if (!element)
@@ -137,7 +137,7 @@ void CollectHoveredElements(
 	std::unordered_set<std::string>& outHoveredIds,
 	std::unordered_map<std::string, UIElement::Ptr>& outHoveredRefs)
 {
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const UIElement::Ptr& element : hoveredPath)
 	{
 		if (element != nullptr && !element->id.empty())
@@ -148,7 +148,7 @@ void CollectHoveredElements(
 	}
 }
 
-// DispatchElementEvent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void DispatchElementEvent(UIElement& element, UIElement::UIEventCallback callback, const glm::vec2& pointerPosition, std::string_view eventName)
 {
 	if (callback == nullptr)
@@ -161,14 +161,14 @@ void DispatchElementEvent(UIElement& element, UIElement::UIEventCallback callbac
 }
 }
 
-// UISystem::Instance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 UISystem& UISystem::Instance()
 {
 	static UISystem instance;
 	return instance;
 }
 
-// UISystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UISystem::Initialize()
 {
 	std::lock_guard<std::mutex> lock(stateMutex_);
@@ -182,11 +182,11 @@ void UISystem::Initialize()
 	initialized_ = true;
 }
 
-// UISystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UISystem::Update(float deltaTime)
 {
 	TERRAENGINE_PROFILE_SCOPE("UISystem::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!initialized_)
 	{
 		return;
@@ -208,7 +208,7 @@ void UISystem::Update(float deltaTime)
 	PointerState pointerState;
 	{
 		std::lock_guard<std::mutex> lock(stateMutex_);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (hasEditorGameViewPointer_)
 		{
 			pointerState = editorGameViewPointer_;
@@ -219,7 +219,7 @@ void UISystem::Update(float deltaTime)
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!pointerState.insideViewport && ResourceManager::Instance().IsExportRuntime())
 	{
 		// Standalone exports use the window-space cursor directly because there
@@ -244,7 +244,7 @@ void UISystem::Update(float deltaTime)
 			{
 				TERRAENGINE_PROFILE_SCOPE("UISystem: Collect UI Components", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				ObjectManager::instance().forEachObjectWithComponents<UIComponent>([&](Object object, UIComponent& component) {
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 					if (component.IsVisible())
 					{
 						liveComponents.emplace_back(object.EntityId(), &component);
@@ -284,7 +284,7 @@ void UISystem::Update(float deltaTime)
 			&& (exportMousePressedThisFrame || (pointerState.leftButtonDown && !previousLeftButtonDown_));
 		bool pointerConsumedByDocument = false;
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (auto componentIterator = liveComponents.rbegin(); componentIterator != liveComponents.rend(); ++componentIterator)
 		{
 			const auto& [entity, component] = *componentIterator;
@@ -302,19 +302,19 @@ void UISystem::Update(float deltaTime)
 			}
 
 			bool animationChanged = false;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (state.root)
 			{
 				std::vector<UIElement::Ptr> hoveredPath;
 				UIElement::Ptr hitElement;
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (!pointerConsumedByDocument && pointerState.insideViewport)
 				{
 					pointerConsumedByDocument = BuildHoveredElementPath(state.root, pointerState.position, hoveredPath, hitElement);
 				}
 
 				std::unordered_set<const UIElement*> hoveredElements;
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 				for (const UIElement::Ptr& hoveredElement : hoveredPath)
 				{
 					if (hoveredElement)
@@ -325,11 +325,11 @@ void UISystem::Update(float deltaTime)
 				ApplyHoverStateRecursive(state.root, hoveredElements);
 				animationChanged = state.root->AdvanceAnimationRecursive(deltaTime);
 
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (hitElement != nullptr)
 				{
 					CollectHoveredElements(hoveredPath, nextHoveredElementIds, nextHoveredElementRefs);
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 					if (leftButtonClickedThisFrame && !hitElement->id.empty())
 					{
 						nextClickedElementIds.insert(hitElement->id);
@@ -338,7 +338,7 @@ void UISystem::Update(float deltaTime)
 				}
 			}
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (state.root && !state.buildInFlight && (animationChanged || state.root->dirty))
 			{
 				// Managed runtime UI mutations mark the tree dirty in place, so the
@@ -362,7 +362,7 @@ void UISystem::Update(float deltaTime)
 
 			const bool viewportChanged = std::abs(state.viewportSize.x - viewportSize.x) > 0.1f ||
 				std::abs(state.viewportSize.y - viewportSize.y) > 0.1f;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!state.buildInFlight && state.root && state.contentVersion == component->GetContentVersion() && viewportChanged)
 			{
 				// Window and Game View resizes only need a fresh Yoga layout and
@@ -387,7 +387,7 @@ void UISystem::Update(float deltaTime)
 				continue;
 			}
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!state.buildInFlight
 				&& ((state.root == nullptr && state.lastError.empty())
 					|| state.contentVersion != component->GetContentVersion()
@@ -397,7 +397,7 @@ void UISystem::Update(float deltaTime)
 			}
 		}
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (auto iterator = documents_.begin(); iterator != documents_.end();)
 		{
 			if (!liveEntities.contains(iterator->first))
@@ -410,7 +410,7 @@ void UISystem::Update(float deltaTime)
 			}
 		}
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const auto& [hoveredId, hoveredElement] : nextHoveredElementRefs)
 		{
 			if (!hoveredElementIds_.contains(hoveredId) && hoveredElement)
@@ -419,7 +419,7 @@ void UISystem::Update(float deltaTime)
 			}
 		}
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const auto& [hoveredId, hoveredElement] : hoveredElementRefs_)
 		{
 			if (!nextHoveredElementIds.contains(hoveredId) && hoveredElement)
@@ -446,7 +446,7 @@ void UISystem::Update(float deltaTime)
 	}
 }
 
-// UISystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UISystem::Shutdown()
 {
 	std::lock_guard<std::mutex> lock(stateMutex_);
@@ -459,7 +459,7 @@ void UISystem::Shutdown()
 	initialized_ = false;
 }
 
-// UISystem::SystemName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string UISystem::SystemName()
 {
 	return "UISystem";
@@ -488,7 +488,7 @@ TerraEngine::Scheduling::SystemDeclaration UISystem::SchedulerDeclaration()
 	return declaration;
 }
 
-// UISystem::SetGameViewportSize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UISystem::SetGameViewportSize(const glm::vec2& viewportSize)
 {
 	if (viewportSize.x <= 0.0f || viewportSize.y <= 0.0f)
@@ -500,7 +500,7 @@ void UISystem::SetGameViewportSize(const glm::vec2& viewportSize)
 	gameViewportSize_ = viewportSize;
 }
 
-// UISystem::SetEditorGameViewPointer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UISystem::SetEditorGameViewPointer(const glm::vec2& pointerPosition, bool pointerInsideViewport, bool leftButtonDown)
 {
 	std::lock_guard<std::mutex> lock(stateMutex_);
@@ -510,35 +510,35 @@ void UISystem::SetEditorGameViewPointer(const glm::vec2& pointerPosition, bool p
 	hasEditorGameViewPointer_ = true;
 }
 
-// UISystem::SubmitImmediateQuad is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UISystem::SubmitImmediateQuad(const UIImmediateQuad& quad)
 {
 	std::lock_guard<std::mutex> lock(stateMutex_);
 	pendingImmediateQuads_.push_back(quad);
 }
 
-// UISystem::GetCombinedFrameBatch is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 UIRenderBatch UISystem::GetCombinedFrameBatch() const
 {
 	std::lock_guard<std::mutex> lock(stateMutex_);
 	return combinedBatch_;
 }
 
-// UISystem::WasElementClicked is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool UISystem::WasElementClicked(std::string_view elementId) const
 {
 	std::lock_guard<std::mutex> lock(stateMutex_);
 	return clickedElementIds_.contains(std::string(elementId));
 }
 
-// UISystem::IsElementHovered is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool UISystem::IsElementHovered(std::string_view elementId) const
 {
 	std::lock_guard<std::mutex> lock(stateMutex_);
 	return hoveredElementIds_.contains(std::string(elementId));
 }
 
-// UISystem::GetInteractionFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::uint64_t UISystem::GetInteractionFrame() const
 {
 	std::lock_guard<std::mutex> lock(stateMutex_);
@@ -627,7 +627,7 @@ UISystem::UIPublishStatus UISystem::ClassifyPreparedResult(
 	return UIPublishStatus::Published;
 }
 
-// UISystem::EnsureDocumentReady is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool UISystem::EnsureDocumentReady(entt::entity entity, UIComponent& component)
 {
 	const glm::vec2 viewportSize = GetFallbackViewportSize();
@@ -658,14 +658,14 @@ bool UISystem::EnsureDocumentReady(entt::entity entity, UIComponent& component)
 	{
 		std::lock_guard<std::mutex> lock(stateMutex_);
 		UIDocumentState& state = documents_[entity];
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (state.root != nullptr && state.contentVersion == component.GetContentVersion())
 		{
 			component.SetRoot(state.root);
 			return true;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (state.buildInFlight && state.buildFuture.valid())
 		{
 			pendingBuild = state.buildFuture;
@@ -688,7 +688,7 @@ bool UISystem::EnsureDocumentReady(entt::entity entity, UIComponent& component)
 		viewportSize));
 }
 
-// UISystem::BuildPreviewDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 UISystem::UIBuildResult UISystem::BuildPreviewDocument(const UIElement::Ptr& root, const glm::vec2& viewportSize) const
 {
 	UIPreparationRequest request;
@@ -699,19 +699,19 @@ UISystem::UIBuildResult UISystem::BuildPreviewDocument(const UIElement::Ptr& roo
 	return BuildPreparedDocument(request);
 }
 
-// UISystem::BuildPreviewBatch is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 UIRenderBatch UISystem::BuildPreviewBatch(const UIElement::Ptr& root, const glm::vec2& viewportSize) const
 {
 	return BuildPreviewDocument(root, viewportSize).batch;
 }
 
-// UISystem::SerializeMarkup is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string UISystem::SerializeMarkup(const UIElement::Ptr& root) const
 {
 	return parser_.SerializeMarkup(root);
 }
 
-// UISystem::SerializeStyles is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string UISystem::SerializeStyles(const UIElement::Ptr& root) const
 {
 	return parser_.SerializeStyles(root);
@@ -748,7 +748,7 @@ UISystem::UIBuildResult UISystem::BuildPreparedDocument(const UIPreparationReque
 	{
 		auto resolvePath = [](const std::string& pathText) -> std::filesystem::path {
 			std::filesystem::path path(pathText);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (path.is_absolute())
 			{
 				return path;
@@ -756,13 +756,13 @@ UISystem::UIBuildResult UISystem::BuildPreparedDocument(const UIPreparationReque
 			return ResourceManager::Instance().GetAssetRoot() / path;
 		};
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!request.sourceMarkup.empty())
 		{
 			TERRAENGINE_PROFILE_SCOPE("UISystem: Parse Markup", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			result.root = parser_.ParseMarkupFile(resolvePath(request.sourceMarkup));
 		}
-		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 		else if (request.existingRootSnapshot)
 		{
 			result.root = request.existingRootSnapshot->Clone();
@@ -774,25 +774,25 @@ UISystem::UIBuildResult UISystem::BuildPreparedDocument(const UIPreparationReque
 		}
 
 		std::vector<std::string> resolvedStylePaths = request.styleSources;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (resolvedStylePaths.empty() && result.root)
 		{
 			resolvedStylePaths = result.root->styleSheetSources;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (result.root && !resolvedStylePaths.empty())
 		{
 			result.root->styleSheetSources = resolvedStylePaths;
 
 			std::vector<UIStyleRule> combinedRules;
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 			for (const std::string& resolvedStylePath : resolvedStylePaths)
 			{
 				TERRAENGINE_PROFILE_SCOPE("UISystem: Parse Style", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				std::vector<UIStyleRule> styleRules = parser_.ParseStyleFile(resolvePath(resolvedStylePath));
 				const std::size_t orderOffset = combinedRules.size();
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 				for (UIStyleRule& rule : styleRules)
 				{
 					rule.order += orderOffset;
@@ -802,7 +802,7 @@ UISystem::UIBuildResult UISystem::BuildPreparedDocument(const UIPreparationReque
 
 			parser_.ApplyStyles(result.root, combinedRules);
 		}
-		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 		else if (result.root)
 		{
 			result.root->styleSheetSources.clear();
@@ -829,7 +829,7 @@ UISystem::UIBuildResult UISystem::BuildPreparedDocument(const UIPreparationReque
 	return result;
 }
 
-// UISystem::ScheduleDocumentBuild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UISystem::ScheduleDocumentBuild(entt::entity entity, UIComponent& component, UIDocumentState& state, const glm::vec2& viewportSize)
 {
 	TERRAENGINE_PROFILE_SCOPE("UISystem: Create Preparation Request", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -977,12 +977,12 @@ void UISystem::RecordPublishStatus(UIPublishStatus status)
 	}
 }
 
-// UISystem::IntegrateReadyBuilds is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UISystem::IntegrateReadyBuilds()
 {
 	std::lock_guard<std::mutex> lock(stateMutex_);
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (auto& [entity, state] : documents_)
 	{
 		if (!state.buildInFlight || !state.buildFuture.valid())
@@ -990,7 +990,7 @@ void UISystem::IntegrateReadyBuilds()
 			continue;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (state.buildFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
 		{
 			continue;
@@ -1005,7 +1005,7 @@ void UISystem::IntegrateReadyBuilds()
 	}
 }
 
-// UISystem::RefreshCombinedBatch is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UISystem::RefreshCombinedBatch()
 {
 	std::vector<std::string> activeImageTextures;
@@ -1013,7 +1013,7 @@ void UISystem::RefreshCombinedBatch()
 		std::lock_guard<std::mutex> lock(stateMutex_);
 
 		UIRenderBatch nextBatch;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		std::vector<entt::entity> sortedEntities;
 		sortedEntities.reserve(documents_.size());
 		for (const auto& [entity, state] : documents_)
@@ -1031,7 +1031,7 @@ void UISystem::RefreshCombinedBatch()
 			nextBatch.Append(state.batch);
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (nextBatch.viewportSize.x <= 0.0f || nextBatch.viewportSize.y <= 0.0f)
 		{
 			nextBatch.viewportSize = gameViewportSize_;
@@ -1059,7 +1059,7 @@ void UISystem::RefreshCombinedBatch()
 	}
 }
 
-// UISystem::GetFallbackViewportSize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 glm::vec2 UISystem::GetFallbackViewportSize() const
 {
 	std::lock_guard<std::mutex> lock(stateMutex_);

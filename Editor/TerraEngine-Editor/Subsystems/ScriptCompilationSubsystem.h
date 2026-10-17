@@ -58,7 +58,7 @@ enum class ScriptBuildReason
 	ExplicitRebuild
 };
 
-// struct ScriptCompilationStatus groups related state and operations so callers have one documented contract.
+
 struct ScriptCompilationStatus
 {
 	// High-level state mirrored into the editor UI and asset metadata so the
@@ -119,7 +119,7 @@ public:
 	[[nodiscard]] bool ShouldBlockEditorInteraction() const;
 
 private:
-	// struct ScriptBuildResult groups related state and operations so callers have one documented contract.
+
 	struct ScriptBuildResult
 	{
 		// Result returned from the async dotnet build worker back onto the editor

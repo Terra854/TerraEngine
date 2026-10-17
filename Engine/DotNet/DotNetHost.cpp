@@ -72,14 +72,14 @@ namespace
 		std::string message = messageLength > 0 && messageBuffer != nullptr
 			? std::string(messageBuffer, messageLength)
 			: "Unknown Win32 loader error.";
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (messageBuffer != nullptr) {
 			LocalFree(messageBuffer);
 		}
 		return "Win32 error " + std::to_string(errorCode) + ": " + message;
 	}
 #else
-	// BuildPlatformLoadErrorMessage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::string BuildPlatformLoadErrorMessage() {
 		const char* errorText = dlerror();
 		return errorText != nullptr ? std::string(errorText) : std::string("Unknown dlopen error.");
@@ -96,12 +96,12 @@ DotNetHost::~DotNetHost() {
 	Shutdown();
 }
 
-// DotNetHost::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool DotNetHost::Initialize(const std::filesystem::path& assemblyPath) {
 	if (initialized) return true;
 	SetNativeError({});
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!load_hostfxr(assemblyPath.parent_path())) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to load hostfxr.");
 		return false;
@@ -112,7 +112,7 @@ bool DotNetHost::Initialize(const std::filesystem::path& assemblyPath) {
 	auto get_delegate_fptr = (hostfxr_get_runtime_delegate_fn)GetNativeExport(hostfxr_handle, "hostfxr_get_runtime_delegate");
 	auto close_fptr = (hostfxr_close_fn)GetNativeExport(hostfxr_handle, "hostfxr_close");
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!init_fptr || !get_delegate_fptr || !close_fptr) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to get hostfxr function pointers.");
 		return false;
@@ -133,7 +133,7 @@ bool DotNetHost::Initialize(const std::filesystem::path& assemblyPath) {
 		hdt_load_assembly_and_get_function_pointer,
 		(void**)&load_assembly_and_get_function_pointer);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (rc != 0 || load_assembly_and_get_function_pointer == nullptr) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to get load_assembly_and_get_function_pointer delegate: " << std::hex << rc);
 		close_fptr(context_handle);
@@ -148,19 +148,19 @@ bool DotNetHost::Initialize(const std::filesystem::path& assemblyPath) {
 	return true;
 }
 
-// DotNetHost::InitializeExportRuntime is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool DotNetHost::InitializeExportRuntime(const std::filesystem::path& nativeAotLibaryPath, ManagedVTable* outTable) {
 	if (initialized) return true;
 	SetNativeError({});
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (outTable == nullptr) {
 		SetNativeError("DotNetHost::InitializeExportRuntime was called with a null ManagedVTable pointer.");
 		TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
 		return false;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!std::filesystem::exists(nativeAotLibaryPath)) {
 		SetNativeError("NativeAOT runtime library was not found at " + nativeAotLibaryPath.string() + ". Make sure the export output includes the platform runtime library under Managed/ and its native dependencies.");
 		TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
@@ -205,13 +205,13 @@ bool DotNetHost::InitializeExportRuntime(const std::filesystem::path& nativeAotL
 
 	TERRAENGINE_LOG(LogLevel::Debug, "--- RAW VTABLE DUMP ---");
 	uint64_t* rawPtr = reinterpret_cast<uint64_t*>(outTable);
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (int i = 0; i < sizeof(ManagedVTable) / 8; ++i) {
 		TERRAENGINE_LOG(LogLevel::Debug, "Offset " << (i * 8) << ": " << rawPtr[i]);
 	}
 	TERRAENGINE_LOG(LogLevel::Debug, "-----------------------");
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (result != 0) {
 		SetNativeError(std::string(initV4Fn != nullptr ? "InitManagedRuntimeV4" : (initV3Fn != nullptr ? "InitManagedRuntimeV3" : "InitManagedRuntime"))
 			+ " returned error code " + std::to_string(result)
@@ -223,7 +223,7 @@ bool DotNetHost::InitializeExportRuntime(const std::filesystem::path& nativeAotL
 	}
 
 	// Verify the VTable version is at least what the engine requires.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (outTable->version < kManagedVTableMinVersion) {
 		SetNativeError("ManagedVTable version " + std::to_string(outTable->version) + " is below the required minimum " + std::to_string(kManagedVTableMinVersion) + ".");
 		TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
@@ -314,7 +314,7 @@ void* DotNetHost::GetManagedFunction(
 	const std::wstring& methodName,
 	const std::wstring& delegateTypeName) {
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!initialized || !load_assembly_and_get_function_pointer) {
 		TERRAENGINE_LOG(LogLevel::Error, "DotNetHost not initialized.");
 		return nullptr;
@@ -343,7 +343,7 @@ void* DotNetHost::GetManagedFunction(
 		nullptr,
 		&fptr);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (rc != 0) {
 		const auto narrowAscii = [](const std::wstring& value) {
 			std::string text;
@@ -363,14 +363,14 @@ void* DotNetHost::GetManagedFunction(
 	return fptr;
 }
 
-// DotNetHost::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void DotNetHost::Shutdown() {
 	if (hostfxr_handle) {
 		FreeNativeLibrary(hostfxr_handle);
 		hostfxr_handle = nullptr;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (nativeAotLibraryHandle) {
 		// The NativeAOT library owns its GC heap, so unloading it cleanly
 		// tears down all managed state that was created during the session.
@@ -384,14 +384,14 @@ void DotNetHost::Shutdown() {
 	m_LastNativeError.clear();
 }
 
-// DotNetHost::load_hostfxr is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool DotNetHost::load_hostfxr(const std::filesystem::path& searchPath) {
 	// 1. Try to load from the specified search path (e.g., Managed directory)
 	if (!searchPath.empty()) {
 		std::filesystem::path localHostFxr = searchPath / std::filesystem::path(kHostFxrLibraryName);
 		if (std::filesystem::exists(localHostFxr)) {
 			hostfxr_handle = LoadNativeLibrary(localHostFxr);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (hostfxr_handle) {
 				TERRAENGINE_LOG(LogLevel::Info, "Loaded local hostfxr from: " << localHostFxr.string());
 				return true;
@@ -403,7 +403,7 @@ bool DotNetHost::load_hostfxr(const std::filesystem::path& searchPath) {
 	char_t buffer[4096];
 	size_t buffer_size = sizeof(buffer) / sizeof(char_t);
 	int rc = get_hostfxr_path(buffer, &buffer_size, nullptr);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (rc != 0) {
 		return false;
 	}
@@ -412,11 +412,11 @@ bool DotNetHost::load_hostfxr(const std::filesystem::path& searchPath) {
 	return hostfxr_handle != nullptr;
 }
 
-// DotNetHost::LoadNativeLibrary is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void* DotNetHost::LoadNativeLibrary(const std::filesystem::path& path) {
 #ifdef _WIN32
 	HMODULE moduleHandle = LoadLibraryW(path.c_str());
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (moduleHandle == nullptr) {
 		SetNativeError("Failed to load native library " + path.string() + ". " + BuildPlatformLoadErrorMessage());
 	}
@@ -432,7 +432,7 @@ void* DotNetHost::LoadNativeLibrary(const std::filesystem::path& path) {
 }
 
 void* DotNetHost::GetNativeExport(void* libraryHandle, const char* exportName) {
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (libraryHandle == nullptr || exportName == nullptr) {
 		return nullptr;
 	}
@@ -443,14 +443,14 @@ void* DotNetHost::GetNativeExport(void* libraryHandle, const char* exportName) {
 	dlerror();
 	void* exportPointer = dlsym(libraryHandle, exportName);
 #endif
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (exportPointer == nullptr) {
 		SetNativeError("Failed to locate export '" + std::string(exportName) + "'. " + BuildPlatformLoadErrorMessage());
 	}
 	return exportPointer;
 }
 
-// DotNetHost::FreeNativeLibrary is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void DotNetHost::FreeNativeLibrary(void* libraryHandle) {
 	if (libraryHandle == nullptr) {
 		return;

@@ -267,7 +267,7 @@ ObjectManager::ObjectManager()
 
 ObjectManager::~ObjectManager() = default;
 
-// ObjectManager::registerTag is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ObjectManager::registerTag(const std::string& tag)
 {
 	if (std::find(availableTags.begin(), availableTags.end(), tag) == availableTags.end())
@@ -276,7 +276,7 @@ void ObjectManager::registerTag(const std::string& tag)
 	}
 }
 
-// ObjectManager::registerLayer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ObjectManager::registerLayer(const std::string& layer)
 {
 	if (std::find(availableLayers.begin(), availableLayers.end(), layer) == availableLayers.end())
@@ -285,7 +285,7 @@ void ObjectManager::registerLayer(const std::string& layer)
 	}
 }
 
-// ObjectManager::makeHandle is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 Object ObjectManager::makeHandle(entt::entity entityId)
 {
 	// Object is a compact identity value. The manager owns all mutable access
@@ -332,7 +332,7 @@ void ObjectManager::removeFromLookupBucket(std::unordered_map<std::string, std::
 	}
 }
 
-// ObjectManager::notifySpatialObjectDirty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ObjectManager::notifySpatialObjectDirty(entt::entity entityId)
 {
 	CaptureProtectedEntity(entityId);
@@ -735,7 +735,7 @@ void ObjectManager::MarkObjectTransformDirty(const Object& obj)
 }
 
 // Create a new Object
-// ObjectManager::createObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 Object ObjectManager::createObject(const std::string& name) {
 	if (ReportWorkerObjectMutation("ObjectManager.createObject", "Worker code attempted to create a live object directly."))
 	{
@@ -789,7 +789,7 @@ Object ObjectManager::createObject(const std::string& name) {
 }
 
 // Remove an Object
-// ObjectManager::removeObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ObjectManager::removeObject(Object obj) {
 	if (protectedMutation) {
 		// Retain the complete branch until fallible application work has finished.
@@ -827,12 +827,12 @@ void ObjectManager::removeObject(Object obj) {
 
 	// Destroying the entity purges every component attached to it (Transform and any others),
 	// ensuring no dangling component data survives past object lifetime.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (registry.valid(entityId))
 	{
 		// Purge the UUID mapping before the component is destroyed to maintain
 		// consistency in the lookup table.
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (auto it = entityToUuid.find(entityId); it != entityToUuid.end())
 		{
 			uuidToEntity.erase(it->second);
@@ -851,7 +851,7 @@ void ObjectManager::removeObject(Object obj) {
 		childrenMap.erase(childIter);
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (entt::entity childId : childrenToDelete)
 	{
 		// removeObject expects an Object handle.
@@ -875,7 +875,7 @@ void ObjectManager::removeObject(Object obj) {
 	if (onModified && !bulkPublicationActive && !protectedMutation) onModified();
 }
 
-// ObjectManager::setParent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ObjectManager::setParent(Object child, std::optional<Object> parent, ReparentMode mode)
 {
 	CaptureProtectedEntity(child.EntityId());
@@ -899,7 +899,7 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent, Repare
 	}
 
 	// Prevent self-parenting and cycle creation by walking ancestors.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (parentId == childId || isDescendant(childId, parentId))
 	{
 		return false;
@@ -985,7 +985,7 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent, Repare
 	detachFromParent(childId);
 
 	parentMap[childId] = parentId;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (parentId != entt::null)
 	{
 		childrenMap[parentId].push_back(childId);
@@ -1056,7 +1056,7 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent, Repare
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (onModified && !bulkPublicationActive && !protectedMutation) onModified();
 	notifyHierarchyDirty();
 	// Reparenting can inherit a different active state for this entire branch,
@@ -1068,23 +1068,23 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent, Repare
 	return true;
 }
 
-// ObjectManager::getChildren is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::vector<Object> ObjectManager::getChildren(const Object& parent)
 {
 	std::vector<Object> children;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	const entt::entity parentId = parent.EntityId();
 	if (!registry.valid(parentId))
 	{
 		return children;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (auto iter = childrenMap.find(parentId); iter != childrenMap.end())
 	{
 		for (entt::entity childId : iter->second)
 		{
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (registry.valid(childId))
 			{
 				children.push_back(makeHandle(childId));
@@ -1100,16 +1100,16 @@ std::vector<Object> ObjectManager::getChildren(const Object& parent)
 	return children;
 }
 
-// ObjectManager::getRootObjects is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::vector<Object> ObjectManager::getRootObjects()
 {
 	std::vector<Object> roots;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& [entityId, metadata] : metadataMap)
 	{
 		(void)metadata;
 		auto parentIter = parentMap.find(entityId);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (parentIter == parentMap.end() || parentIter->second == entt::null)
 		{
 			roots.push_back(makeHandle(entityId));
@@ -1133,7 +1133,7 @@ std::optional<Object> ObjectManager::getParent(const Object& child) const
 	return const_cast<ObjectManager*>(this)->makeHandle(parentId);
 }
 
-// ObjectManager::getObjectName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string ObjectManager::getObjectName(const Object& obj) const
 {
 	const entt::entity entityId = obj.EntityId();
@@ -1145,7 +1145,7 @@ std::string ObjectManager::getObjectName(const Object& obj) const
 	return iter != metadataMap.end() ? iter->second.name : "Unnamed";
 }
 
-// ObjectManager::setObjectName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ObjectManager::setObjectName(const Object& obj, const std::string& name)
 {
 	CaptureProtectedEntity(obj.EntityId());
@@ -1174,7 +1174,7 @@ void ObjectManager::setObjectName(const Object& obj, const std::string& name)
 	}
 }
 
-// ObjectManager::setObjectActive is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string ObjectManager::getObjectTag(const Object& obj) const
 {
 	const entt::entity entityId = obj.EntityId();
@@ -1317,12 +1317,12 @@ void ObjectManager::setObjectActive(const Object& obj, bool active)
 		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Component, snapshot);
 		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Hierarchy, snapshot);
 		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Bounds, snapshot);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (onModified && !bulkPublicationActive && !protectedMutation) onModified();
 	}
 }
 
-// ObjectManager::isObjectStatic is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ObjectManager::isObjectStatic(const Object& obj) const
 {
 	const entt::entity entityId = obj.EntityId();
@@ -1334,7 +1334,7 @@ bool ObjectManager::isObjectStatic(const Object& obj) const
 	return iter != metadataMap.end() ? iter->second.isStatic : false;
 }
 
-// ObjectManager::setObjectStatic is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ObjectManager::setObjectStatic(const Object& obj, bool isStatic)
 {
 	CaptureProtectedEntity(obj.EntityId());
@@ -1355,7 +1355,7 @@ void ObjectManager::setObjectStatic(const Object& obj, bool isStatic)
 		const TerraEngine::Scene::SceneObjectRevisionSnapshot snapshot = captureSceneObjectRevision(obj);
 		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Metadata, snapshot);
 		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Bounds, snapshot);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (onModified && !bulkPublicationActive && !protectedMutation) onModified();
 	}
 }
@@ -1674,7 +1674,7 @@ std::uint64_t ObjectManager::getObjectBindingGeneration(const Object& obj) const
 	return 0;
 }
 
-// ObjectManager::FindObjectByName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::optional<Object> ObjectManager::FindObjectByName(std::string_view name) const
 {
 	auto bucket = nameIndex.find(std::string(name));
@@ -1700,7 +1700,7 @@ std::optional<Object> ObjectManager::FindObjectByName(std::string_view name) con
 	return std::nullopt;
 }
 
-// ObjectManager::FindObjectByTag is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::optional<Object> ObjectManager::FindObjectByTag(std::string_view tag) const
 {
 	auto bucket = tagIndex.find(std::string(tag));
@@ -1726,7 +1726,7 @@ std::optional<Object> ObjectManager::FindObjectByTag(std::string_view tag) const
 	return std::nullopt;
 }
 
-// ObjectManager::getObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::optional<Object> ObjectManager::getObject(entt::entity id)
 {
 	if (!registry.valid(id))
@@ -1736,7 +1736,7 @@ std::optional<Object> ObjectManager::getObject(entt::entity id)
 	return makeHandle(id);
 }
 
-// ObjectManager::getObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::optional<Object> ObjectManager::getObject(const TerraEngine::UUID& id)
 {
 	auto it = uuidToEntity.find(id);
@@ -1814,7 +1814,7 @@ void ObjectManager::SortObjectsByStableId(std::vector<Object>& objects)
 	});
 }
 
-// ObjectManager::UpdateObjectUUID is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ObjectManager::UpdateObjectUUID(const Object& object, const TerraEngine::UUID& newId)
 {
 	if (ReportWorkerObjectMutation("ObjectManager.UpdateObjectUUID", "Worker code attempted to replace a live object identity directly."))
@@ -1878,13 +1878,13 @@ void ObjectManager::UpdateObjectUUID(const Object& object, const TerraEngine::UU
 	}
 }
 
-// ObjectManager::detachFromParent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ObjectManager::detachFromParent(entt::entity childId)
 {
 	if (auto parentIter = parentMap.find(childId); parentIter != parentMap.end())
 	{
 		const entt::entity parentId = parentIter->second;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (parentId != entt::null)
 		{
 			if (auto childList = childrenMap.find(parentId); childList != childrenMap.end())
@@ -1896,11 +1896,11 @@ void ObjectManager::detachFromParent(entt::entity childId)
 	}
 }
 
-// ObjectManager::isDescendant is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ObjectManager::isDescendant(entt::entity ancestor, entt::entity potentialChild) const
 {
 	entt::entity cursor = potentialChild;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	while (cursor != entt::null)
 	{
 		if (cursor == ancestor)
@@ -1909,7 +1909,7 @@ bool ObjectManager::isDescendant(entt::entity ancestor, entt::entity potentialCh
 		}
 
 		auto parentIter = parentMap.find(cursor);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (parentIter == parentMap.end())
 		{
 			break;
@@ -1919,11 +1919,11 @@ bool ObjectManager::isDescendant(entt::entity ancestor, entt::entity potentialCh
 	return false;
 }
 
-// ObjectManager::getParentEntityInternal is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 entt::entity ObjectManager::getParentEntityInternal(entt::entity child) const
 {
 	auto iter = parentMap.find(child);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (iter != parentMap.end())
 	{
 		return iter->second;
@@ -1945,7 +1945,7 @@ TerraEngine::UUID ObjectManager::getEntityUUID(entt::entity entity) const
 	return TerraEngine::UUID();
 }
 
-// ObjectManager::clear is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ObjectManager::clear()
 {
 	if (ReportWorkerObjectMutation("ObjectManager.clear", "Worker code attempted to clear live scene state directly."))

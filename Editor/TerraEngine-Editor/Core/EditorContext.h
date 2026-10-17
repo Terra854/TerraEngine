@@ -13,7 +13,7 @@ class Engine;
 class ProjectManager;
 class AssetDatabase;
 class EditorExportOperationController;
-// class EditorProfilerService groups related state and operations so callers have one documented contract.
+
 class EditorProfilerService;
 namespace TerraEngine::Editor::Automation
 {
@@ -39,7 +39,7 @@ struct ScriptEditorState {
 	std::string activeEditedFieldPath;
 };
 
-// struct EditorContext groups related state and operations so callers have one documented contract.
+
 struct EditorContext {
 	Engine* engine = nullptr;
 	std::shared_ptr<ProjectManager> projectManager;

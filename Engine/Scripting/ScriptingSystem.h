@@ -239,7 +239,7 @@ public:
 	void InitializeExportModeForTesting(const ManagedVTable& vtable);
 
 private:
-	// struct InspectorWatchState groups related state and operations so callers have one documented contract.
+
 	struct InspectorWatchState
 	{
 		// The live inspector only polls the currently selected object so runtime

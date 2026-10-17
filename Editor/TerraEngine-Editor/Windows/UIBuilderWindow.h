@@ -61,7 +61,7 @@ enum class UIBuilderLibraryCategory
 	Media,
 };
 
-// struct StyleSheetSession groups related state and operations so callers have one documented contract.
+
 struct StyleSheetSession
 {
 	std::filesystem::path internalPath;
@@ -74,7 +74,7 @@ struct StyleSheetSession
 	std::string loadError;
 };
 
-// struct BuilderDocumentSession groups related state and operations so callers have one documented contract.
+
 struct BuilderDocumentSession
 {
 	std::filesystem::path internalPath;
@@ -87,7 +87,7 @@ struct BuilderDocumentSession
 	std::vector<StyleSheetSession> styleSheets;
 };
 
-// struct BuilderWorkspaceState groups related state and operations so callers have one documented contract.
+
 struct BuilderWorkspaceState
 {
 	std::weak_ptr<UIElement> selectedElement;
@@ -99,7 +99,7 @@ struct BuilderWorkspaceState
 	bool previewHover = false;
 };
 
-// struct UIBuilderPromptState groups related state and operations so callers have one documented contract.
+
 struct UIBuilderPromptState
 {
 	UIBuilderPendingPrompt kind = UIBuilderPendingPrompt::None;
@@ -109,7 +109,7 @@ struct UIBuilderPromptState
 	bool styleExternallyChanged = false;
 };
 
-// struct MatchingStyleRuleReference groups related state and operations so callers have one documented contract.
+
 struct MatchingStyleRuleReference
 {
 	int styleSheetIndex = -1;

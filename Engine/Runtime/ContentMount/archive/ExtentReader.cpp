@@ -13,36 +13,36 @@
 
 namespace {
 
-// FindEntry is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 const tepak::PackEntry& FindEntry(const tepak::archive::OpenedPack& openedPack, std::string_view logicalPath) {
 	const auto normalizedPath = tepak::io::NormalizeLookupPath(logicalPath);
 	const auto found = openedPack.fileLookup.find(normalizedPath);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (found == openedPack.fileLookup.end()) {
 		throw std::runtime_error("The requested path is not present in the pack.");
 	}
 	return openedPack.entries.at(found->second);
 }
 
-// ResolveWorkerCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::uint32_t ResolveWorkerCount(std::uint32_t requestedWorkers) {
 	if (requestedWorkers == 0U) {
 		return 1U;
 	}
 
 	const auto hardwareWorkers = std::thread::hardware_concurrency();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (hardwareWorkers == 0U) {
 		return requestedWorkers;
 	}
 	return std::min(requestedWorkers, hardwareWorkers);
 }
 
-// ReadStoredBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 tepak::ByteBuffer ReadStoredBytes(std::ifstream& stream, const tepak::PackExtent& extent) {
 	tepak::ByteBuffer storedBytes(extent.storedSize);
 	stream.seekg(static_cast<std::streamoff>(extent.storedOffset), std::ios::beg);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (extent.storedSize > 0U) {
 		stream.read(reinterpret_cast<char*>(storedBytes.data()), static_cast<std::streamsize>(extent.storedSize));
 		if (!stream) {
@@ -52,7 +52,7 @@ tepak::ByteBuffer ReadStoredBytes(std::ifstream& stream, const tepak::PackExtent
 	return storedBytes;
 }
 
-// ExtractEntryToPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ExtractEntryToPath(const tepak::archive::OpenedPack& openedPack, const tepak::PackEntry& entry, const tepak::io::ExtractionDestination& destination) {
 	// Complete verification precedes any destination publication. A rejected
 	// payload cannot truncate an earlier successful extraction.
@@ -77,7 +77,7 @@ void CollectDirectoryEntries(const tepak::archive::OpenedPack& openedPack,
 		visitedDirectories[directoryId]=true;
 		const auto& directory = openedPack.directories.at(directoryId);
 		if(directory.firstChildDirectoryIndex>visitedDirectories.size() || directory.childDirectoryCount>visitedDirectories.size()-directory.firstChildDirectoryIndex || directory.firstChildFileIndex>visitedFiles.size() || directory.childFileCount>visitedFiles.size()-directory.firstChildFileIndex) throw std::runtime_error("Archive subtree has invalid child spans.");
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (std::uint32_t index = 0U; index < directory.childFileCount; ++index) {
 			const auto fileId=directory.firstChildFileIndex+index; if(visitedFiles[fileId]) throw std::runtime_error("Archive subtree revisits a file."); visitedFiles[fileId]=true;
 			outputEntries.push_back(&openedPack.entries.at(fileId));
@@ -95,7 +95,7 @@ void CollectDirectoryEntries(const tepak::archive::OpenedPack& openedPack,
 
 namespace tepak::archive {
 
-// ReadLogicalBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 ByteBuffer ReadLogicalBytes(const OpenedPack& openedPack, std::string_view logicalPath, std::uint64_t offset, std::uint64_t size, bool verifyEntry) {
 	const auto& entry = FindEntry(openedPack, logicalPath);
 	if (offset > entry.logicalSize || size > entry.logicalSize - offset) {
@@ -112,14 +112,14 @@ ByteBuffer ReadLogicalBytes(const OpenedPack& openedPack, std::string_view logic
 
 	const codec::CodecProvider codecProvider;
 	// Destination offsets come from logical overlap, never concatenation order.
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::uint32_t index = 0U; index < entry.entryExtentCount; ++index) {
 		const auto& extent = openedPack.extents.at(entry.firstExtentIndex + index);
 		const auto extentStart = extent.fileOffset;
 		const auto extentEnd = extent.fileOffset + extent.uncompressedSize;
 		const auto requestStart = offset;
 		const auto requestEnd = offset + size;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!(verifyEntry && entry.logicalSize == 0) && (requestEnd <= extentStart || requestStart >= extentEnd)) {
 			continue;
 		}
@@ -147,7 +147,7 @@ ByteBuffer ReadLogicalBytes(const OpenedPack& openedPack, std::string_view logic
 	return output;
 }
 
-// ExtractLogicalPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ExtractLogicalPath(const OpenedPack& openedPack, const ExtractRequest& request) {
 	const auto normalizedPath=io::NormalizeLookupPath(request.normalizedPath);
 	std::vector<const PackEntry*> matchingEntries;

@@ -41,7 +41,7 @@ enum class ArchiveAssetClass : std::uint32_t {
 	RagdollProfile = 14U
 };
 
-// struct BinaryHeader groups related state and operations so callers have one documented contract.
+
 struct BinaryHeader final {
 	std::array<char, 4> magic = kMagic;
 	std::uint32_t versionMajor = kVersionMajor;
@@ -68,7 +68,7 @@ struct BinaryHeader final {
 	std::uint64_t archiveIdentifier = 0;
 };
 
-// struct BinaryDirectoryRecord groups related state and operations so callers have one documented contract.
+
 struct BinaryDirectoryRecord final {
 	std::uint64_t pathHash = 0;
 	std::uint32_t pathOffset = 0;
@@ -80,7 +80,7 @@ struct BinaryDirectoryRecord final {
 	std::uint32_t childFileCount = 0;
 };
 
-// struct BinaryEntryRecord groups related state and operations so callers have one documented contract.
+
 struct BinaryEntryRecord final {
 	std::uint32_t parentDirectoryId = kInvalidDirectoryId;
 	std::uint64_t pathHash = 0;
@@ -95,7 +95,7 @@ struct BinaryEntryRecord final {
 	std::uint64_t entryHash = 0;
 };
 
-// struct BinaryExtentRecord groups related state and operations so callers have one documented contract.
+
 struct BinaryExtentRecord final {
 	std::uint64_t fileOffset = 0;
 	std::uint64_t storedOffset = 0;
@@ -106,7 +106,7 @@ struct BinaryExtentRecord final {
 	std::uint32_t extentFlags = 0;
 };
 
-// struct StagedFile groups related state and operations so callers have one documented contract.
+
 struct StagedFile final {
 	std::filesystem::path sourcePath;
 	std::string normalizedPath;
@@ -116,7 +116,7 @@ struct StagedFile final {
 	std::uint64_t logicalSize = 0;
 };
 
-// struct PackagingInventory groups related state and operations so callers have one documented contract.
+
 struct PackagingInventory final {
 	std::vector<DirectoryNode> directories;
 	std::vector<StagedFile> stagedFiles;
@@ -124,7 +124,7 @@ struct PackagingInventory final {
 	std::uint64_t totalInputBytes = 0;
 };
 
-// struct ExtentPlan groups related state and operations so callers have one documented contract.
+
 struct ExtentPlan final {
 	std::uint32_t entryIndex = 0;
 	std::uint64_t fileOffset = 0;
@@ -135,7 +135,7 @@ struct ExtentPlan final {
 	StorageMode codec = StorageMode::Raw;
 };
 
-// struct CompressedExtentResult groups related state and operations so callers have one documented contract.
+
 struct CompressedExtentResult final {
 	ByteBuffer storedBytes;
 	StorageMode mode = StorageMode::Raw;
@@ -143,14 +143,14 @@ struct CompressedExtentResult final {
 	std::uint64_t uncompressedSize = 0;
 };
 
-// struct PendingCompressionTask groups related state and operations so callers have one documented contract.
+
 struct PendingCompressionTask final {
 	std::uint32_t extentIndex = 0;
 	std::uint32_t entryIndex = 0;
 	std::future<CompressedExtentResult> future;
 };
 
-// struct PackPlan groups related state and operations so callers have one documented contract.
+
 struct PackPlan final {
 	PackDescriptor descriptor;
 	DictionaryProfile dictionary;

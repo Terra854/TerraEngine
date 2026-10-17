@@ -5,7 +5,7 @@
 
 #include "VulkanResourceSource.h"
 
-// VulkanContext::Impl::CreateGlobalDescriptorResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	std::array<VkDescriptorSetLayoutBinding, 25> bindings{};
 	// Textures
@@ -207,7 +207,7 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
 	layoutInfo.pNext = &bindingFlags;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &globalDescriptorSetLayout) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to create global descriptor set layout!");
 		return false;
@@ -232,14 +232,14 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT;
 	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &globalDescriptorPool) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to create global descriptor pool!");
 		return false;
 	}
 
 	globalDescriptorSets.resize(MAX_FRAMES_IN_FLIGHT);
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		VkDescriptorSetAllocateInfo allocInfo{};
 		allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -247,7 +247,7 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 		allocInfo.descriptorSetCount = 1;
 		allocInfo.pSetLayouts = &globalDescriptorSetLayout;
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkAllocateDescriptorSets(device, &allocInfo, &globalDescriptorSets[i]) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "Failed to allocate global descriptor set for frame " << i);
 			return false;
@@ -300,11 +300,11 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	return true;
 }
 
-// VulkanContext::Impl::CreateMaterialBufferResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::CreateMaterialBufferResources() {
 	VkDeviceSize bufferSize = sizeof(MaterialData) * MAX_BINDLESS_MATERIALS;
 	globalMaterialSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		globalMaterialSSBOs[i] = CreateBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 
@@ -362,7 +362,7 @@ void VulkanContext::Impl::CreateMaterialBufferResources() {
 	nextMaterialIndex = kFirstRuntimeMaterialIndex;
 }
 
-// VulkanContext::Impl::CreateCullingBufferResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::CreateCullingBufferResources() {
 	const VkDeviceSize frameDataBufferSize = static_cast<VkDeviceSize>(sizeof(FrameCullingDataGPU) * kStatsSlotCount);
 	const VkDeviceSize countersBufferSize = static_cast<VkDeviceSize>(sizeof(MeshletCullingCountersGPU) * kStatsSlotCount);
@@ -370,17 +370,17 @@ void VulkanContext::Impl::CreateCullingBufferResources() {
 	globalFrameCullingSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
 	globalMeshletCountersSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		globalFrameCullingSSBOs[i] = CreateBuffer(frameDataBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 		globalMeshletCountersSSBOs[i] = CreateBuffer(countersBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 
 		FrameCullingDataGPU defaultFrameData{};
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (uint32_t slotIndex = 0; slotIndex < kStatsSlotCount; ++slotIndex) {
 			// Initialize all slots for this frame's buffer
 			void* mapped = nullptr;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (vmaMapMemory(allocator, globalFrameCullingSSBOs[i].allocation, &mapped) == VK_SUCCESS) {
 				const VkDeviceSize offset = static_cast<VkDeviceSize>(slotIndex) * sizeof(FrameCullingDataGPU);
 				std::memcpy(static_cast<std::uint8_t*>(mapped) + offset, &defaultFrameData, sizeof(FrameCullingDataGPU));
@@ -417,17 +417,17 @@ void VulkanContext::Impl::CreateCullingBufferResources() {
 		vkUpdateDescriptorSets(device, static_cast<uint32_t>(std::size(writes)), writes, 0, nullptr);
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (uint32_t viewIndex = 0; viewIndex < kStatsViewCount; ++viewIndex) {
 		latestStatsByView[viewIndex] = {};
 		latestStatsByView[viewIndex].viewType = (viewIndex == 0u) ? RenderViewType::Game : RenderViewType::Scene;
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (uint32_t slotIndex = 0; slotIndex < kStatsSlotCount; ++slotIndex) {
 		pendingStatsBySlot[slotIndex] = {};
 		pendingStatsBySlot[slotIndex].viewType = (slotIndex % kStatsViewCount == 0u) ? RenderViewType::Game : RenderViewType::Scene;
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (ClusterValidationSnapshot& snapshot : pendingClusterValidationByFrame) {
 		snapshot = {};
 		snapshot.viewType = RenderViewType::Game;
@@ -437,7 +437,7 @@ void VulkanContext::Impl::CreateCullingBufferResources() {
 	previousClusterValidationSnapshotValid = false;
 }
 
-// VulkanContext::Impl::CreateLightingBufferResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::CreateLightingBufferResources() {
 	// Resource recreation changes identity even if VMA later reuses a handle.
 	ResetLightingUploadMirrors();
@@ -452,7 +452,7 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 	const VkDeviceSize lightAnalysisBufferSize = static_cast<VkDeviceSize>(sizeof(GPULightAnalysisRecord) * MAX_GLOBAL_LIGHTS * kStatsSlotCount);
 
 	clusterValidationCaptureEnabled = IsClusterValidationCaptureEnabledFromEnvironment();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (clusterValidationCaptureEnabled) {
 		TERRAENGINE_LOG(LogLevel::Info, "Cluster validation capture enabled via TERRAENGINE_CLUSTER_VALIDATION_CAPTURE. Lighting buffers will remain CPU-visible for frame-end readback.");
 	}
@@ -468,7 +468,7 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 		? VMA_MEMORY_USAGE_CPU_TO_GPU
 		: VMA_MEMORY_USAGE_GPU_ONLY;
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		// Light uploads are CPU-driven every frame, so this buffer must remain
 		// CPU-visible regardless of whether validation capture is active.
@@ -483,7 +483,7 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 		clusterDepthSSBOs[i] = CreateBuffer(clusterDepthBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, clusterBufferMemoryUsage);
 		lightAnalysisSSBOs[i] = CreateBuffer(lightAnalysisBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU, "Light Analysis Buffer");
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (clusterValidationCaptureEnabled) {
 			// Validation mode seeds buffers with deterministic defaults so the
 			// frame-end readback code can flag incomplete writes immediately.
@@ -495,7 +495,7 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 			}
 
 			void* mappedLightIndices = nullptr;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (vmaMapMemory(allocator, lightIndexSSBOs[i].allocation, &mappedLightIndices) == VK_SUCCESS) {
 				std::fill_n(static_cast<std::uint32_t*>(mappedLightIndices), MAX_LIGHT_INDEX_ENTRIES * MAX_RENDER_SNAPSHOTS_PER_FRAME, 0xFFFFFFFFu);
 				vmaFlushAllocation(allocator, lightIndexSSBOs[i].allocation, 0, lightIndexBufferSize);
@@ -503,7 +503,7 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 			}
 
 			void* mappedClusterDepth = nullptr;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (vmaMapMemory(allocator, clusterDepthSSBOs[i].allocation, &mappedClusterDepth) == VK_SUCCESS) {
 				std::fill_n(static_cast<float*>(mappedClusterDepth), static_cast<size_t>(clusterDepthBufferSize / sizeof(float)), 1.0f);
 				vmaFlushAllocation(allocator, clusterDepthSSBOs[i].allocation, 0, clusterDepthBufferSize);
@@ -512,7 +512,7 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 		}
 
 		void* mappedLightAnalysis = nullptr;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vmaMapMemory(allocator, lightAnalysisSSBOs[i].allocation, &mappedLightAnalysis) == VK_SUCCESS) {
 			std::memset(mappedLightAnalysis, 0, static_cast<size_t>(lightAnalysisBufferSize));
 			vmaFlushAllocation(allocator, lightAnalysisSSBOs[i].allocation, 0, lightAnalysisBufferSize);
@@ -614,13 +614,13 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 	// Startup has no frame-fence proof and must not publish a successful mirror.
 }
 
-// VulkanContext::Impl::CreateIndirectDrawResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::CreateIndirectDrawResources() {
 	const VkDeviceSize indirectBufferSize =
 		static_cast<VkDeviceSize>(INITIAL_INDIRECT_DRAW_COMMAND_CAPACITY)
 		* sizeof(VkDrawMeshTasksIndirectCommandEXT);
 	indirectDrawBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		indirectDrawBuffers[i] = CreateBuffer(indirectBufferSize,
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
@@ -686,19 +686,19 @@ bool VulkanContext::Impl::ReserveIndirectDrawCommands(
 	return true;
 }
 
-// VulkanContext::Impl::DestroyEnvironmentLightingResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::DestroyEnvironmentLightingResources()
 {
 	auto DestroyImage = [&](VulkanImage& image) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (image.sampler != VK_NULL_HANDLE) {
 			vkDestroySampler(device, image.sampler, nullptr);
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (image.view != VK_NULL_HANDLE) {
 			vkDestroyImageView(device, image.view, nullptr);
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (image.image != VK_NULL_HANDLE && image.allocation != VK_NULL_HANDLE) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 		}
@@ -713,7 +713,7 @@ void VulkanContext::Impl::DestroyEnvironmentLightingResources()
 	brdfIntegrationTextureIndex = 0u;
 }
 
-// VulkanContext::Impl::CreateEnvironmentLightingResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::CreateEnvironmentLightingResources()
 {
 	if (environmentIrradianceTexture.view != VK_NULL_HANDLE
@@ -725,7 +725,7 @@ void VulkanContext::Impl::CreateEnvironmentLightingResources()
 	DestroyEnvironmentLightingResources();
 
 	auto CreateFloatTexture = [&](const std::vector<glm::vec4>& texels, uint32_t width, uint32_t height, const char* allocationName, VulkanImage& image) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (texels.empty() || width == 0u || height == 0u) {
 			return;
 		}
@@ -749,7 +749,7 @@ void VulkanContext::Impl::CreateEnvironmentLightingResources()
 
 		VmaAllocationCreateInfo allocInfo{};
 		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
 			vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 			image = {};
@@ -763,7 +763,7 @@ void VulkanContext::Impl::CreateEnvironmentLightingResources()
 		vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 
 		image.view = CreateImageView(image.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (image.view == VK_NULL_HANDLE) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 			image = {};
@@ -791,9 +791,9 @@ void VulkanContext::Impl::CreateEnvironmentLightingResources()
 
 	const uint32_t brdfSize = 64u;
 	std::vector<glm::vec4> brdfTexels(brdfSize * brdfSize);
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (uint32_t y = 0u; y < brdfSize; ++y) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (uint32_t x = 0u; x < brdfSize; ++x) {
 			const float roughness = (static_cast<float>(y) + 0.5f) / static_cast<float>(brdfSize);
 			const float nDotV = (static_cast<float>(x) + 0.5f) / static_cast<float>(brdfSize);
@@ -802,36 +802,36 @@ void VulkanContext::Impl::CreateEnvironmentLightingResources()
 	}
 	CreateFloatTexture(brdfTexels, brdfSize, brdfSize, "Fallback BRDF Integration LUT", brdfIntegrationTexture);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (environmentIrradianceTexture.view != VK_NULL_HANDLE) {
 		environmentIrradianceTextureIndex = AllocateTextureIndex();
 		UpdateGlobalTexture(environmentIrradianceTextureIndex, environmentIrradianceTexture);
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (prefilteredEnvironmentTexture.view != VK_NULL_HANDLE) {
 		prefilteredEnvironmentTextureIndex = AllocateTextureIndex();
 		UpdateGlobalTexture(prefilteredEnvironmentTextureIndex, prefilteredEnvironmentTexture);
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (brdfIntegrationTexture.view != VK_NULL_HANDLE) {
 		brdfIntegrationTextureIndex = AllocateTextureIndex();
 		UpdateGlobalTexture(brdfIntegrationTextureIndex, brdfIntegrationTexture);
 	}
 }
 
-// VulkanContext::Impl::DestroyAmbientOcclusionResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::DestroyAmbientOcclusionResources()
 {
 	auto DestroyImage = [&](VulkanImage& image) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (image.sampler != VK_NULL_HANDLE) {
 			vkDestroySampler(device, image.sampler, nullptr);
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (image.view != VK_NULL_HANDLE) {
 			vkDestroyImageView(device, image.view, nullptr);
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (image.image != VK_NULL_HANDLE && image.allocation != VK_NULL_HANDLE) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 		}
@@ -858,12 +858,12 @@ void VulkanContext::Impl::DestroyAmbientOcclusionResources()
 	ambientOcclusionHistoryValidByFrame.fill(false);
 }
 
-// VulkanContext::Impl::CreateAmbientOcclusionResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::CreateAmbientOcclusionResources()
 {
 	const uint32_t width = std::max(swapchainExtent.width, 1u);
 	const uint32_t height = std::max(swapchainExtent.height, 1u);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!ambientOcclusionRawByFrame.empty()
 		&& ambientOcclusionRawByFrame[0].image != VK_NULL_HANDLE
 		&& ambientOcclusionBlurredByFrame[0].image != VK_NULL_HANDLE
@@ -896,7 +896,7 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 
 		VmaAllocationCreateInfo allocInfo{};
 		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
 			image = {};
 			return;
@@ -904,7 +904,7 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 		vmaSetAllocationName(allocator, image.allocation, allocationName);
 
 		image.view = CreateImageView(image.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (image.view == VK_NULL_HANDLE) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 			image = {};

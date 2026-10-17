@@ -319,6 +319,121 @@ foreach($phase in @('BetweenIterations','WindowShutdown')){
 }
 Reject 'vulkan-logs-after-window-session-boundary' {$v=VkFixture;$v.allSessionLog+=,[pscustomobject]@{sequence=8;iteration=0;phase='WindowShutdown';eventKind='logger';level=1;message='outside captured boundary'};RmsCheckFixture $v vulkan fresh-acquisition 1}
 Reject 'vulkan-row-reported-validation-error' {$v=VkFixture;$v.observations[0].allSessionValidationErrors=1;RmsCheckFixture $v vulkan fresh-acquisition 1}
+# Host-instance protocol examples are synthetic schema coverage only. They do
+# not execute Vulkan or prove GPU acceptance; every engine context still retires.
+function VkHostFixture([string]$Scenario='fresh-acquisition',[int]$Count=100){
+	$v=VkFixture $Scenario $Count
+	$v.vulkanEvidenceVersion=3
+	$v|Add-Member hostInstance @{requested=$true;createdCount=1;enumeratedCount=1;destroyedCount=1;createResult=0;enumerateCountResult=0;enumerateResult=0;physicalDeviceCount=1;instanceHandle='9000';cleanupResult='ReturnedNormally';handleCleared=$true;hostValidationCallbacks=$false;enabledExtensionCount=0;enabledLayerCount=0;engineOwnersShared=$false;driverModulePinned=$false;globalProcessInstanceCountClaim=$false;perIterationLastOwnedInstanceTeardownExercised=$false;coverageModel='RetainedFixtureHostInstance'}
+	$logs=@($v.allSessionLog[0],$v.allSessionLog[1])
+	$logs+=,(VkBoundary 0 0 HostInstanceInitializeBegin);$logs+=,(VkBoundary 0 0 HostInstanceInitializeEnd)
+	$logs+=@($v.allSessionLog|Where-Object iteration -GT 0)
+	$logs+=,(VkBoundary 0 0 HostInstanceShutdownBegin);$logs+=,(VkBoundary 0 0 HostInstanceShutdownEnd)
+	$logs+=@($v.allSessionLog[-2],$v.allSessionLog[-1])
+	$sequence=0;foreach($entry in $logs){$sequence++;$entry.sequence=$sequence}
+	$v.allSessionLog=$logs
+	foreach($row in $v.observations){
+		$row|Add-Member hostInstance @{instanceHandle='9000';liveBeforeContextInitialization=$true;liveAfterContextCleanup=$true;distinctFromContextInstance=$true}
+		$row.allSessionLog=@($logs|Where-Object iteration -EQ $row.iteration)
+		$row.validationCallbackLog=@($row.allSessionLog|Where-Object eventKind -CEQ 'logger')
+	}
+	$v.validationCallbackLog=@($v.observations|ForEach-Object {$_.validationCallbackLog})
+	return VkClone $v
+}
+foreach($lane in $vkLanes){Check "vulkan-explicit-host-100-contexts-$lane" {$null=RmsCheckFixture (VkHostFixture $lane) vulkan $lane 100 -VulkanHostInstance}}
+Check 'vulkan-default-false-retains-v2-protocol' {$null=RmsCheckFixture (VkFixture) vulkan fresh-acquisition 1 -VulkanHostInstance:$false}
+Reject 'vulkan-v3-requires-explicit-host-request' {RmsCheckFixture (VkHostFixture) vulkan fresh-acquisition 100}
+Reject 'vulkan-v2-cannot-satisfy-explicit-host-request' {RmsCheckFixture (VkFixture fresh-acquisition 100) vulkan fresh-acquisition 100 -VulkanHostInstance}
+Reject 'vulkan-host-cannot-use-historical-parser-bypass' {RmsCheckFixture (VkHostFixture) vulkan fresh-acquisition 100 -VulkanHostInstance -ProtocolReplayHistoricalReceipt}
+Reject 'vulkan-host-still-requires-100-native-iterations' {RmsRunFixture $null vulkan $vkLanes 99 -VulkanHostInstance}
+Reject 'vulkan-host-still-requires-all-ten-native-lanes' {RmsRunFixture $null vulkan @('fresh-acquisition') 100 -VulkanHostInstance}
+foreach($field in @('requested','createdCount','enumeratedCount','destroyedCount','createResult','enumerateCountResult','enumerateResult','physicalDeviceCount','instanceHandle','cleanupResult','handleCleared','hostValidationCallbacks','enabledExtensionCount','enabledLayerCount','engineOwnersShared','driverModulePinned','globalProcessInstanceCountClaim','perIterationLastOwnedInstanceTeardownExercised','coverageModel')){
+	Reject "vulkan-host-missing-$field" {$v=VkHostFixture;$v.hostInstance.PSObject.Properties.Remove($field);RmsCheckFixture $v vulkan fresh-acquisition 100 -VulkanHostInstance}
+}
+foreach($field in @('instanceHandle','liveBeforeContextInitialization','liveAfterContextCleanup','distinctFromContextInstance')){
+	Reject "vulkan-host-row-missing-$field" {$v=VkHostFixture;$v.observations[-1].hostInstance.PSObject.Properties.Remove($field);RmsCheckFixture $v vulkan fresh-acquisition 100 -VulkanHostInstance}
+}
+$hostFaults=@('leadingzero-host','leadingzero-context','missing-root','requested-false','created-zero','created-many','enumerated-zero','enumerated-many','destroyed-zero','destroyed-many','create-failure','enumerate-count-failure','enumerate-failure','no-physical-devices','null-host-handle','numeric-host-handle','cleanup-not-returned','handle-not-cleared','host-validation-callbacks','host-extensions','host-layers','shared-engine-owners','pinned-driver-module','global-instance-claim','last-instance-teardown-claim','wrong-coverage-model','missing-row','foreign-row-handle','row-dead-before','row-dead-after','row-not-distinct','actual-context-is-host','missing-host-initialization','missing-host-shutdown','host-init-after-first-context','host-shutdown-before-last-context','host-shutdown-after-window','host-boundary-failed','context-not-destroyed','context-still-initialized','pool-not-cleaned','context-shutdown-not-attempted','context-cleanup-false','row-validation-error','validation-error','only99-contexts')
+foreach($fault in $hostFaults){
+	$v=VkHostFixture;$h=$v.hostInstance;$r=$v.observations[-1]
+	switch($fault){
+		'leadingzero-host'{$h.instanceHandle='09000';foreach($row in $v.observations){$row.hostInstance.instanceHandle='09000'}}
+		'leadingzero-context'{$r.contextLifetime.instanceHandle='02000'}
+		'missing-root'{$v.PSObject.Properties.Remove('hostInstance')}
+		'requested-false'{$h.requested=$false}
+		'created-zero'{$h.createdCount=0}
+		'created-many'{$h.createdCount=100}
+		'enumerated-zero'{$h.enumeratedCount=0}
+		'enumerated-many'{$h.enumeratedCount=100}
+		'destroyed-zero'{$h.destroyedCount=0}
+		'destroyed-many'{$h.destroyedCount=100}
+		'create-failure'{$h.createResult=-1}
+		'enumerate-count-failure'{$h.enumerateCountResult=-1}
+		'enumerate-failure'{$h.enumerateResult=-1}
+		'no-physical-devices'{$h.physicalDeviceCount=0}
+		'null-host-handle'{$h.instanceHandle='0'}
+		'numeric-host-handle'{$h.instanceHandle=9000}
+		'cleanup-not-returned'{$h.cleanupResult='NotCalled'}
+		'handle-not-cleared'{$h.handleCleared=$false}
+		'host-validation-callbacks'{$h.hostValidationCallbacks=$true}
+		'host-extensions'{$h.enabledExtensionCount=1}
+		'host-layers'{$h.enabledLayerCount=1}
+		'shared-engine-owners'{$h.engineOwnersShared=$true}
+		'pinned-driver-module'{$h.driverModulePinned=$true}
+		'global-instance-claim'{$h.globalProcessInstanceCountClaim=$true}
+		'last-instance-teardown-claim'{$h.perIterationLastOwnedInstanceTeardownExercised=$true}
+		'wrong-coverage-model'{$h.coverageModel='PerIterationLastInstance'}
+		'missing-row'{$r.PSObject.Properties.Remove('hostInstance')}
+		'foreign-row-handle'{$r.hostInstance.instanceHandle='9999'}
+		'row-dead-before'{$r.hostInstance.liveBeforeContextInitialization=$false}
+		'row-dead-after'{$r.hostInstance.liveAfterContextCleanup=$false}
+		'row-not-distinct'{$r.hostInstance.distinctFromContextInstance=$false}
+		'actual-context-is-host'{$r.contextLifetime.instanceHandle=$h.instanceHandle}
+		'missing-host-initialization'{$v.allSessionLog=@($v.allSessionLog|Where-Object phase -CNE 'HostInstanceInitializeEnd')}
+		'missing-host-shutdown'{$v.allSessionLog=@($v.allSessionLog|Where-Object phase -CNE 'HostInstanceShutdownEnd')}
+		'host-init-after-first-context'{$logs=@($v.allSessionLog);$v.allSessionLog=@($logs[0..2])+@($logs[4..6])+@($logs[3])+@($logs[7..($logs.Count-1)])}
+		'host-shutdown-before-last-context'{$logs=@($v.allSessionLog);$lastBegin=4+3*99;$v.allSessionLog=@($logs[0..($lastBegin-1)])+@($logs[-4])+@($logs[$lastBegin..($logs.Count-5)])+@($logs[-3..-1])}
+		'host-shutdown-after-window'{$logs=@($v.allSessionLog);$v.allSessionLog=@($logs[0..($logs.Count-4)])+@($logs[-2..-1])+@($logs[-3])}
+		'host-boundary-failed'{$v.allSessionLog[-3].succeeded=$false}
+		'context-not-destroyed'{$r.contextLifetime.destructionCompleted=$false}
+		'context-still-initialized'{$r.contextInitializedAfterShutdown=$true}
+		'pool-not-cleaned'{$r.threadPoolCleanupCompleted=$false}
+		'context-shutdown-not-attempted'{$r.contextShutdownAttempted=$false}
+		'context-cleanup-false'{$r.contextCleanupCompleted=$false}
+		'row-validation-error'{$r.allSessionValidationErrors=1}
+		'validation-error'{$v.allSessionValidationErrors=1}
+		'only99-contexts'{$v.observations=@($v.observations|Select-Object -First 99)}
+	}
+	# Rebuild actual slices after permutation so ordering failures cannot rely
+	# on stale copied rows or merely non-monotonic numeric sequence values.
+	if($fault -in @('host-init-after-first-context','host-shutdown-before-last-context','host-shutdown-after-window')){
+		$sequence=0;foreach($entry in $v.allSessionLog){$sequence++;$entry.sequence=$sequence}
+		foreach($row in $v.observations){$row.allSessionLog=@($v.allSessionLog|Where-Object iteration -EQ $row.iteration);$row.validationCallbackLog=@($row.allSessionLog|Where-Object eventKind -CEQ 'logger')}
+		$v.validationCallbackLog=@($v.observations|ForEach-Object {$_.validationCallbackLog})
+	}
+	Reject "vulkan-explicit-host-$fault" {RmsCheckFixture $v vulkan fresh-acquisition 100 -VulkanHostInstance}
+}
+Reject 'vulkan-v2-cannot-hide-root-host-proof' {$v=VkFixture;$v|Add-Member hostInstance (VkHostFixture).hostInstance;RmsCheckFixture $v vulkan fresh-acquisition 1}
+Reject 'vulkan-v2-cannot-hide-row-host-proof' {$v=VkFixture;$v.observations[0]|Add-Member hostInstance (VkHostFixture).observations[0].hostInstance;RmsCheckFixture $v vulkan fresh-acquisition 1}
+
+# Historical compatibility cannot discard a supplied host proof, even when old
+# per-context cleanup fields are also supplied to satisfy its legacy branch.
+foreach($kind in @('v3','v2-root','v2-row')){
+	Reject "vulkan-historical-host-proof-without-request-$kind" {
+		$v=VkHostFixture
+		foreach($row in $v.observations){$row|Add-Member windowCleanupCompleted $true}
+		if($kind -ne 'v3'){$v.vulkanEvidenceVersion=2}
+		if($kind -eq 'v2-row'){$v.PSObject.Properties.Remove('hostInstance')}
+		if($kind -eq 'v2-root'){foreach($row in $v.observations){$row.PSObject.Properties.Remove('hostInstance')}}
+		RmsCheckFixture $v vulkan fresh-acquisition 100 -ProtocolReplayHistoricalReceipt
+	}
+}
+Check 'host-switch-rejects-cpu-before-context-access' {
+	$caught=$false
+	try {RmsRunFixture $null cpu @('completed') 100 -VulkanHostInstance|Out-Null}
+	catch {$caught=$true;RmsRequire ($_.Exception.Message -ceq 'Host-instance qualification is Vulkan/Renderer-only and requires at least100 independent Engine contexts') 'Wrong rejection: host switch reached unrelated CPU setup'}
+	RmsRequire $caught 'Host-only switch was accepted by CPU'
+}
 $report=@{schemaVersion=1;status='RunnerProtocolPassed';caseCount=$script:runnerChecks;matrix=$matrixPin;mockSubprocessEvidence=$true;nativeAcceptance=$false;performanceAcceptance=$false;sourceIntegrationReleased=$false}
 RmsWrite (Join-Path $testRoot 'result.json') $report
 Write-Output "$($script:runnerChecks) runtime memory safety runner protocol cases passed; mocks only"

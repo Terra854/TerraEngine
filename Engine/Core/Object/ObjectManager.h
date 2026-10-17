@@ -59,7 +59,7 @@ struct BulkObjectStorageReservation {
 // exposes these hooks; tests clear the callback before their fixture teardown.
 enum class ObjectCreationStage { Allocated, DefaultsConstructed };
 
-// class ObjectManager groups related state and operations so callers have one documented contract.
+
 class ObjectManager {
 public:
 	static ObjectManager& instance();
@@ -158,13 +158,13 @@ public:
 		std::string_view componentName) const;
 
 	// Get the list of all globally available tags defined in the project.
-	// getAvailableTags is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	const std::vector<std::string>& getAvailableTags() const { return availableTags; }
 	// Register a new gameplay tag to the global project list.
 	void registerTag(const std::string& tag);
 
 	// Get the list of all globally available layers defined in the project.
-	// getAvailableLayers is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	const std::vector<std::string>& getAvailableLayers() const { return availableLayers; }
 	// Register a new system layer to the global project list.
 	void registerLayer(const std::string& layer);
@@ -380,7 +380,7 @@ public:
 	void FinishBulkPublication(bool published);
 	[[nodiscard]] bool IsBulkPublicationActive() const { return bulkPublicationActive; }
 
-	// getRegistry is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	entt::registry& getRegistry() { return registry; }
 
 	// Registers a callback that fires whenever the scene graph structure changes
@@ -389,7 +389,7 @@ public:
 	void SetOnModifiedCallback(std::function<void()> callback) { onModified = callback; }
 	// Spatial systems need a narrower signal so they can refresh object bounds
 	// without assuming every metadata edit changes placement or visibility.
-	// SetOnSpatialObjectDirtyCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void SetOnSpatialObjectDirtyCallback(std::function<void(entt::entity)> callback) { onSpatialObjectDirty = callback; }
 	std::uint64_t GetSpatialRevision() const { return spatialRevision; }
 	std::uint64_t GetHierarchyRevision() const { return hierarchyRevision; }

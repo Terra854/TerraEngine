@@ -44,7 +44,7 @@ public:
 	}
 
 	// For debugging, getting System Name
-	// SystemName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	virtual std::string SystemName() {
 		return "Unnamed system (If you are seeing this, you need to implement SystemName() inside the system)";
 	};

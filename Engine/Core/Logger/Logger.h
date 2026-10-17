@@ -30,7 +30,7 @@ enum class LogLevel {
 };
 
 // Structure for holding a log entry.
-// struct LogEntry groups related state and operations so callers have one documented contract.
+
 struct LogEntry {
 	std::chrono::system_clock::time_point timestamp; // When the log was generated.
 	LogLevel level;                                  // Severity level of the log.
@@ -60,7 +60,7 @@ struct LogContext {
 	std::string jobId;
 };
 
-// class Logger groups related state and operations so callers have one documented contract.
+
 class Logger {
 public:
 	using SinkId = std::uint64_t;
@@ -81,7 +81,7 @@ public:
 	};
 
 	// Retrieve the singleton instance.
-	// Instance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	// The storage must live in the engine DLL, not in an inline function: each
 	// Windows module would otherwise own a separate logger and sink collection.
 	static Logger& Instance();
@@ -101,9 +101,9 @@ public:
 	[[nodiscard]] static LogContext GetCurrentContext();
 
 	void SetMinLogLevel(LogLevel level) { minLevel = level; }
-	// GetMinLogLevel is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	LogLevel GetMinLogLevel() const { return minLevel; }
-	// ShouldLog is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool ShouldLog(LogLevel level) const { return level >= minLevel; }
 
 	// Gracefully shutdown the logger thread.

@@ -2,6 +2,7 @@
 // Usage: --mode vulkan --scenario <frozen lane> --iterations <positive count>
 //   --install-root <absolute Build> --output <fresh absolute json>.
 // Renderer lifecycle acceptance is a separate later fixture assignment.
+#include "RuntimeMemorySafetyHostInstance.h"
 #include "Core/Memory/ReusableArenaResource.h"
 #include "Core/Logger/Logger.h"
 #include "Renderer/RHI/Vulkan/VulkanContext.h"
@@ -11,6 +12,7 @@
 #include "Window/WindowSystem.h"
 #include "Window/GLFW/GlfwWindowBackend.h"
 #include "RuntimeMemorySafetyRendererFixture.h"
+#include <volk.h>
 #include <GLFW/glfw3.h>
 #include <nlohmann/json.hpp>
 #include <filesystem>
@@ -26,6 +28,7 @@
 #include <set>
 #include <algorithm>
 #include <optional>
+#include <vector>
 
 namespace
 {
@@ -190,7 +193,9 @@ namespace
 		}
 		void WindowBoundary(std::string name, bool succeeded) {
 			std::lock_guard lock(mutex); iteration = 0U;
-			phaseName = name.starts_with("WindowShutdown") ? "WindowShutdown" : "WindowInitialize";
+			phaseName = name.starts_with("HostInstanceShutdown") ? "HostInstanceShutdown"
+				: name.starts_with("HostInstanceInitialize") ? "HostInstanceInitialize"
+				: name.starts_with("WindowShutdown") ? "WindowShutdown" : "WindowInitialize";
 			BoundaryLocked(std::move(name), succeeded);
 		}
 		void BeginIteration(std::uint32_t index) {
@@ -226,6 +231,7 @@ namespace
 		void Close() noexcept { if(attempted) return; attempted = true; try { window.Shutdown(); completed = true; } catch(...) {} }
 		~WindowCleanup() { Close(); }
 	};
+	using HostInstanceOwner = RuntimeMemorySafetySupport::HostInstanceOwner;
 	struct ContextCleanup {
 		VulkanContext& context;
 		bool attempted = false, completed = false;
@@ -252,7 +258,7 @@ namespace
 		for(const auto* relative : paths) Require(std::filesystem::is_regular_file(root / "Editor" / relative), "Installed Vulkan shader closure is incomplete.");
 	}
 	Json RunVulkanIteration(const std::filesystem::path& root, std::string_view scenario, std::uint32_t iteration,
-		WindowSystem& window, GLFWwindow* sharedWindow, SessionLog& logs)
+		WindowSystem& window, GLFWwindow* sharedWindow, SessionLog& logs, HostInstanceOwner* hostInstance = nullptr)
 	{
 		Json result{{"iteration", iteration}, {"scenarioId", scenario}, {"status", "Unverified"},
 			{"graphicsInstantiated", false}, {"validationActuallyEnabled", false}, {"healthyFrames", Json::array()},
@@ -263,12 +269,15 @@ namespace
 		result["sharedWindow"] = {{"windowIdentity", PointerIdentity(sharedWindow)}, {"windowRetainedForSession", true},
 			{"liveBeforeContextInitialization", false}, {"liveAfterContextCleanup", false},
 			{"hiddenBeforeContextInitialization", false}, {"hiddenAfterContextCleanup", false}};
+		if(hostInstance) result["hostInstance"] = {{"instanceHandle", hostInstance->Identity()},
+			{"liveBeforeContextInitialization", hostInstance->Ready()}, {"liveAfterContextCleanup", false}, {"distinctFromContextInstance", false}};
 		auto& pool = ThreadPool::instance();
 		ThreadPoolCleanup poolCleanup{pool};
 		bool initialized = false, contextCleanupCompleted = false, contextConstructed = false;
 		const auto started = std::chrono::steady_clock::now();
 		try {
 			ValidateShaders(root);
+			Require(!hostInstance || hostInstance->Ready(), "Requested host instance is not live before Engine context creation.");
 			pool.initialize();
 			result["threadPoolWorkerCount"] = pool.getThreadCount();
 			Require(pool.getThreadCount() > 0U, "Normal renderer preparation requires an actually started worker pool.");
@@ -296,6 +305,11 @@ namespace
 					result["contextLifetime"]["instanceHandle"] = PointerIdentity(handles.instance);
 					result["contextLifetime"]["deviceHandle"] = PointerIdentity(handles.device);
 					Require(handles.instance != nullptr && handles.device != nullptr, "Initialized context did not expose live instance/device handles.");
+					if(hostInstance) {
+						const bool distinct = hostInstance->Distinct(reinterpret_cast<VkInstance>(handles.instance));
+						result["hostInstance"]["distinctFromContextInstance"] = distinct;
+						Require(distinct, "Engine context shared the live fixture host instance.");
+					}
 				}
 				result["graphicsInstantiated"] = initial.initialized; result["validationActuallyEnabled"] = initial.validationActuallyEnabled;
 				result["maintenanceEnabled"] = initial.maintenanceEnabled;
@@ -422,30 +436,34 @@ namespace
 		// This assignment occurs only after the context's lexical scope and its
 		// actual C++ destructor above have both completed, including unwind paths.
 		result["contextLifetime"]["destructionCompleted"] = contextConstructed;
+		if(hostInstance) result["hostInstance"]["liveAfterContextCleanup"] = hostInstance->Ready();
 		const bool windowLiveAfter = sharedWindow != nullptr && window.GetNativeHandle() == sharedWindow && glfwWindowShouldClose(sharedWindow) == GLFW_FALSE;
 		result["sharedWindow"]["liveAfterContextCleanup"] = windowLiveAfter;
 		result["sharedWindow"]["hiddenAfterContextCleanup"] = windowLiveAfter && glfwGetWindowAttrib(sharedWindow, GLFW_VISIBLE) == GLFW_FALSE;
 		logs.phase.store(7U); poolCleanup.Close();
 		result["contextCleanupCompleted"] = contextCleanupCompleted;
 		result["threadPoolCleanupCompleted"] = poolCleanup.completed;
-		if(!poolCleanup.completed || !windowLiveAfter || !result["sharedWindow"]["hiddenAfterContextCleanup"].get<bool>()
+		if(!poolCleanup.completed || !windowLiveAfter || (hostInstance && !hostInstance->Ready()) || !result["sharedWindow"]["hiddenAfterContextCleanup"].get<bool>()
 			|| (initialized && !contextCleanupCompleted)) {
 			result["status"] = "Failed"; result["reason"] = "Validation callbacks or native lifecycle cleanup failed; full initialization-through-shutdown log is retained.";
 		}
 		result["elapsedMilliseconds"] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 		return result;
 	}
-	int RunVulkanScenario(const std::filesystem::path& root, std::string_view scenario, std::uint32_t iterations, Json& receipt)
+	int RunVulkanScenario(const std::filesystem::path& root, std::string_view scenario, std::uint32_t iterations, Json& receipt, bool hostInstanceRequested = false)
 	{
 		receipt["scenario"] = scenario; receipt["requestedIterations"] = iterations;
 		receipt["observations"] = Json::array(); receipt["attemptedIterations"] = 0U; receipt["completedIterations"] = 0U;
-		receipt["vulkanEvidenceVersion"] = 2U;
+		receipt["vulkanEvidenceVersion"] = hostInstanceRequested ? 3U : 2U;
 		Json windowSession{{"windowInitializeCount", 0U}, {"windowShutdownCount", 0U}, {"windowCleanupCompleted", false},
 			{"windowIdentity", nullptr}, {"windowHidden", false}, {"handleCleared", false}};
 		SessionLog logs;
 		const auto sink = Logger::Instance().AddSink([&](const LogEntry& entry) { logs.Append(entry); });
 		struct SinkCleanup { Logger::SinkId sink; ~SinkCleanup() { Logger::Instance().RemoveSink(sink); } } sinkCleanup{sink};
 		auto& window = WindowSystem::Instance(); WindowCleanup windowCleanup{window};
+		HostInstanceOwner hostInstance{hostInstanceRequested, [](void* state, std::string_view name, bool succeeded) {
+			static_cast<SessionLog*>(state)->WindowBoundary(std::string(name), succeeded);
+		}, &logs};
 		std::string status = "Passed";
 		logs.WindowBoundary("WindowInitializeBegin", true);
 		try {
@@ -459,9 +477,13 @@ namespace
 			glfwHideWindow(sharedWindow); windowSession["windowHidden"] = glfwGetWindowAttrib(sharedWindow, GLFW_VISIBLE) == GLFW_FALSE;
 			Require(windowSession["windowHidden"].get<bool>(), "Shared fixture window could not be hidden.");
 			logs.WindowBoundary("WindowInitializeEnd", true);
+			if(hostInstanceRequested) {
+				logs.WindowBoundary("HostInstanceInitializeBegin", true); hostInstance.Initialize();
+				logs.WindowBoundary("HostInstanceInitializeEnd", hostInstance.Ready());
+			}
 			for(std::uint32_t iteration = 1U; iteration <= iterations; ++iteration) {
 				logs.BeginIteration(iteration);
-				auto result = RunVulkanIteration(root, scenario, iteration, window, sharedWindow, logs);
+				auto result = RunVulkanIteration(root, scenario, iteration, window, sharedWindow, logs, hostInstanceRequested ? &hostInstance : nullptr);
 				logs.EndIteration(result);
 				if(result["allSessionValidationErrors"].get<std::size_t>() != 0U) {
 					result["status"] = "Failed"; result["reason"] = "Actual iteration Vulkan validation callbacks reported errors.";
@@ -477,6 +499,10 @@ namespace
 		} catch(const std::exception& error) {
 			status = receipt["attemptedIterations"] == 0U ? "Unverified" : "Failed"; receipt["reason"] = error.what();
 		}
+		// Close the private host instance before GLFW can unload its loader. This
+		// also runs on setup/iteration failure, while the session logger is alive.
+		const bool hostClosed = hostInstance.Close();
+		if(hostInstanceRequested) receipt["hostInstance"] = hostInstance.Snapshot();
 		// Every per-iteration VulkanContext and pool has already retired. Only now
 		// destroy the lane's real window, retaining the logger sink through close.
 		logs.WindowBoundary("WindowShutdownBegin", true);
@@ -486,11 +512,11 @@ namespace
 		const bool windowClosed = windowCleanup.completed && windowSession["handleCleared"].get<bool>();
 		logs.WindowBoundary("WindowShutdownEnd", windowClosed); logs.CopyTo(receipt);
 		receipt["windowSession"] = std::move(windowSession);
-		if(!windowClosed || receipt["allSessionValidationErrors"].get<std::size_t>() != 0U) {
+		if(!hostClosed || !windowClosed || receipt["allSessionValidationErrors"].get<std::size_t>() != 0U) {
 			status = "Failed"; receipt["reason"] = "Actual shared-window cleanup or initialization-through-shutdown validation failed.";
 		}
 		receipt["status"] = status;
-		receipt["nativeAcceptance"] = status == "Passed" && receipt["completedIterations"] == iterations && windowClosed;
+		receipt["nativeAcceptance"] = status == "Passed" && receipt["completedIterations"] == iterations && windowClosed && hostClosed;
 		return status == "Passed" ? 0 : status == "Failed" ? 1 : 2;
 	}
 
@@ -601,6 +627,7 @@ int main(int argc, char** argv)
 		std::uint32_t iterations = 1U;
 		std::filesystem::path root, output, project;
 		bool hasMode = false, hasRoot = false, hasOutput = false, hasScenario = false, hasIterations = false, hasProject = false;
+		bool hostInstanceRequested = false, hasHostInstance = false;
 		for (int index = 1; index < argc; index += 2)
 		{
 			Require(index + 1 < argc, "Every option requires a value.");
@@ -610,6 +637,10 @@ int main(int argc, char** argv)
 			else if (option == "--output" && !hasOutput) { output = Path(value); hasOutput = true; }
 			else if (option == "--project" && !hasProject) { project = Path(value); hasProject = true; }
 			else if (option == "--scenario" && !hasScenario) { scenario = value; hasScenario = true; }
+			else if (option == "--vulkan-host-instance" && !hasHostInstance) {
+				Require(value == "true" || value == "false", "Vulkan host-instance flag requires true or false.");
+				hostInstanceRequested = value == "true"; hasHostInstance = true;
+			}
 			else if (option == "--iterations" && !hasIterations) {
 				const auto parsed = std::from_chars(value.data(), value.data() + value.size(), iterations);
 				Require(parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() && iterations > 0U && iterations <= 100000U,
@@ -621,6 +652,8 @@ int main(int argc, char** argv)
 		Require(hasMode && hasRoot && hasOutput && !mode.empty() && root.is_absolute() && output.is_absolute(),
 			"Require --mode, absolute --install-root and absolute --output.");
 		Require(std::filesystem::is_directory(root), "Install root is unavailable.");
+		Require(!hasHostInstance || mode == "vulkan" || mode == "renderer", "Host-instance flag belongs only to Vulkan or Renderer mode.");
+		Require(!hostInstanceRequested || (hasIterations && iterations >= 100U), "Host-instance qualification requires at least 100 independent Engine contexts.");
 		Require(!std::filesystem::exists(output), "Receipt output must be fresh.");
 		Require(std::filesystem::is_directory(output.parent_path()), "Receipt parent directory must already exist.");
 		if(mode == "vulkan") Require(hasScenario && std::find(kGpuScenarios.begin(), kGpuScenarios.end(), scenario) != kGpuScenarios.end(),
@@ -636,7 +669,7 @@ int main(int argc, char** argv)
 			Require(project.is_absolute() && !std::filesystem::exists(project), "Renderer project root must be absolute and fresh.");
 			// The renderer helper owns its full receipt and preserves all lifecycle
 			// logs, so return before the legacy Vulkan/preflight writer below.
-			return RuntimeMemorySafetyDraft::RunRendererMode(root, output, project, scenario, iterations);
+			return RuntimeMemorySafetyDraft::RunRendererMode(root, output, project, scenario, iterations, hostInstanceRequested);
 		}
 		nlohmann::json receipt{{"schemaVersion", 1}, {"mode", mode}, {"nativeAcceptance", false},
 			{"graphicsInstantiated", false}, {"installRoot", root.generic_string()}};
@@ -659,7 +692,7 @@ int main(int argc, char** argv)
 		{
 			exitCode = CaptureEmptyFirstFrame(root, receipt);
 		}
-		else if(mode == "vulkan") exitCode = RunVulkanScenario(root, scenario, iterations, receipt);
+		else if(mode == "vulkan") exitCode = RunVulkanScenario(root, scenario, iterations, receipt, hostInstanceRequested);
 		else
 		{
 			receipt["status"] = "Unverified";

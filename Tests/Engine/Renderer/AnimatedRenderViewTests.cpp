@@ -5,6 +5,8 @@
 // one complete palette without a camera movement rebuilding animation work.
 
 #include "TestHarness.h"
+#include <string_view>
+#include <iterator>
 
 #include "Renderer/Backend/RenderBackendWork.h"
 #include "Renderer/Graph/RenderFramePublication.h"
@@ -23,6 +25,53 @@ namespace TerraEngine::Tests
 {
 	namespace
 	{
+		// Required reads and lexical definition bounds fail before any token or
+		// ordering assertion can accidentally accept an empty/missing region.
+		std::string RequiredSource(TestContext& context, const char* path)
+		{
+			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / path, std::ios::binary);
+			context.Expect(input.good(), std::string("Required source is unreadable: ") + path);
+			std::string text((std::istreambuf_iterator<char>(input)), {});
+			context.Expect(!text.empty(), std::string("Required source is empty: ") + path);
+			text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+			return text;
+		}
+		std::string RequiredDefinition(TestContext& context, const char* path, std::string_view signature)
+		{
+			const auto text = RequiredSource(context, path);
+			const auto start = text.find(signature);
+			context.Expect(start != std::string::npos, std::string("Required definition is absent: ") + std::string(signature));
+			const auto open = text.find('{', start + signature.size());
+			context.Expect(open != std::string::npos, "Required definition has no opening body.");
+			std::size_t depth = 0;
+			bool lineComment = false, blockComment = false, quoted = false, character = false, escape = false;
+			for(std::size_t index = open; index < text.size(); ++index)
+			{
+				const char value = text[index], next = index + 1 < text.size() ? text[index + 1] : '\0';
+				if(lineComment) { if(value == '\n') lineComment = false; continue; }
+				if(blockComment) { if(value == '*' && next == '/') { blockComment = false; ++index; } continue; }
+				if(quoted || character) {
+					if(escape) { escape = false; continue; }
+					if(value == '\\') { escape = true; continue; }
+					if((quoted && value == '"') || (character && value == '\'')) quoted = character = false;
+					continue;
+				}
+				if(value == '/' && next == '/') { lineComment = true; ++index; continue; }
+				if(value == '/' && next == '*') { blockComment = true; ++index; continue; }
+				if(value == '"') { quoted = true; continue; }
+				if(value == '\'') { character = true; continue; }
+				if(value == '{') ++depth;
+				if(value == '}' && --depth == 0) return text.substr(start, index + 1 - start);
+			}
+			context.Expect(false, "Required definition has no balanced closing body.");
+			return {};
+		}
+		bool SourceBefore(const std::string& text, std::string_view first, std::string_view second)
+		{
+			const auto a = text.find(first), b = text.find(second);
+			return a != std::string::npos && b != std::string::npos && a < b;
+		}
+
 		UUID MakeAnimatedViewTestUuid(std::uint8_t seed)
 		{
 			UUID id{};
@@ -372,16 +421,7 @@ namespace TerraEngine::Tests
 
 		registry.Add("Renderer.AnimationView.PageCapabilitySurvivesPoseBindingResolution", [](TestContext& context) {
 			using namespace TerraEngine::Renderer;
-			const std::filesystem::path renderSystemPath =
-				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-					/ "Engine" / "Renderer" / "RenderSystem.cpp";
-			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
-			std::string renderSystemSource{
-				std::istreambuf_iterator<char>(renderSystemStream), {} };
-			// Source contracts describe tokens and control flow, not checkout line
-			// endings. Normalize CRLF so Windows worktrees match the reviewed LF text.
-			renderSystemSource.erase(std::remove(renderSystemSource.begin(),
-				renderSystemSource.end(), '\r'), renderSystemSource.end());
+			const auto renderSystemSource = RequiredDefinition(context, "Engine/Renderer/Frame/RenderSpatialPreparation.cpp", "RenderSystem::PrepareFrameCommandIdentity(");
 			auto request = BuildGpuVisualBindingRequest();
 			request.gpuVisualIdentity = BuildGpuVisualIdentity();
 			const AnimationRenderBinding legacy =
@@ -457,104 +497,50 @@ namespace TerraEngine::Tests
 		registry.Add("Renderer.AnimationView.MixedCpuFallbackRetainsDenseGpuPages",
 			[](TestContext& context)
 		{
-			const std::filesystem::path renderSystemPath =
-				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-					/ "Engine" / "Renderer" / "RenderSystem.cpp";
-			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
-			std::string renderSystemSource{
-				std::istreambuf_iterator<char>(renderSystemStream), {} };
-			// Source contracts describe tokens and control flow, not checkout line
-			// endings. Normalize CRLF so Windows worktrees match the reviewed LF text.
-			renderSystemSource.erase(std::remove(renderSystemSource.begin(),
-				renderSystemSource.end(), '\r'), renderSystemSource.end());
-			const bool denseIgnoresSparseCpuCount = renderSystemSource.find(
-				"const bool hasDenseAnimationPublication =\n\t\thasDenseAnimationTopologyCandidate;")
-				!= std::string::npos;
-			const bool currentCpuPagesMapped = renderSystemSource.find(
-				"currentCpuDynamicPageIndices.push_back(") != std::string::npos;
-			const bool priorCpuPagesRetired = renderSystemSource.find(
-				"markCpuPages(retainedCpuDynamicPageIndices);") != std::string::npos;
-			const bool unaffectedPagesSkipped = renderSystemSource.find(
-				"if(pagesRequiringDynamicRefresh[pageIndex] == 0U)")
-				!= std::string::npos;
-
-			context.Expect(denseIgnoresSparseCpuCount && currentCpuPagesMapped
-				&& priorCpuPagesRetired && unaffectedPagesSkipped,
+			const auto coordinator = RequiredDefinition(context, "Engine/Renderer/RenderSystem.cpp", "RenderSystem::BuildFrameExecution(");
+			const auto dynamic = RequiredDefinition(context, "Engine/Renderer/Frame/RenderDynamicPublication.cpp", "RenderSystem::PrepareFrameDynamicPages(");
+			context.Expect(coordinator.find("const bool hasDenseAnimationPublication =\n\t\thasDenseAnimationTopologyCandidate;") != std::string::npos
+				&& coordinator.find("PrepareFrameDynamicPages(") != std::string::npos
+				&& dynamic.find("currentCpuDynamicPageIndices.push_back(") != std::string::npos
+				&& dynamic.find("markCpuPages(retainedCpuDynamicPageIndices);") != std::string::npos
+				&& dynamic.find("if(pagesRequiringDynamicRefresh[pageIndex] == 0U)") != std::string::npos,
 				"Sparse CPU deformation must refresh its current and prior pages while a mixed crowd keeps producer-sealed GPU publication dense.");
+
 		});
 
 		registry.Add("Renderer.AnimationView.VisibleCacheInvalidatesEmptyPreReadyOwnerFallback", [](TestContext& context) {
-			const std::filesystem::path renderSystemPath =
-				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-					/ "Engine" / "Renderer" / "RenderSystem.cpp";
-			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
-			const std::string renderSystemSource{
-				std::istreambuf_iterator<char>(renderSystemStream), {} };
-			const std::size_t visibilitySignature = renderSystemSource.find(
-				"std::uint64_t renderableVisibilitySignature = renderableWorldSignature;");
-			const std::size_t ownerFallbackAdmission = renderSystemSource.find(
-				"RequiresVirtualGeometryOwnerFallbackVisibility(", visibilitySignature);
-			const std::size_t unboundedPoseInvalidation = renderSystemSource.find(
-				"if(requiresUnboundedCoarseVisibility)", ownerFallbackAdmission);
-			const std::size_t poseGenerationToken = renderSystemSource.find(
-				"binding.posePublicationGeneration", unboundedPoseInvalidation);
-			const std::size_t visibleCacheKey = renderSystemSource.find(
-				"std::uint64_t signature = BuildVisibleCommandCacheKey(",
-				poseGenerationToken);
-			const std::size_t visibleAdmissionArgument = renderSystemSource.find(
-				"renderableVisibilitySignature,", visibleCacheKey);
-			const std::size_t topologyGenerationArgument = renderSystemSource.find(
-				"HashCombine(signature, retainedRenderTopology.topology.generation);",
-				visibleCacheKey);
-			const std::size_t authoritativeReuseCounter = renderSystemSource.find(
-				"target.renderOptimization.viewEvidenceReuseHits =",
-				topologyGenerationArgument);
-
-			context.Expect(visibilitySignature != std::string::npos
-				&& ownerFallbackAdmission != std::string::npos
-				&& unboundedPoseInvalidation != std::string::npos
-				&& poseGenerationToken != std::string::npos
-				&& visibleCacheKey != std::string::npos
-				&& visibleAdmissionArgument != std::string::npos
-				&& topologyGenerationArgument != std::string::npos
-				&& authoritativeReuseCounter != std::string::npos,
+			const auto identity = RequiredDefinition(context, "Engine/Renderer/Frame/RenderSpatialPreparation.cpp", "RenderSystem::PrepareFrameCommandIdentity(");
+			const auto visible = RequiredDefinition(context, "Engine/Renderer/Frame/RenderViewPreparation.cpp", "RenderSystem::PrepareFrameVisibleCommands(");
+			const auto group = RequiredDefinition(context, "Engine/Renderer/Frame/RenderViewGrouping.cpp", "RenderSystem::PrepareFrameGroupedSubmissions(");
+			const auto coordinator = RequiredDefinition(context, "Engine/Renderer/RenderSystem.cpp", "RenderSystem::BuildFrameExecution(");
+			const auto scene = RequiredDefinition(context, "Engine/Renderer/Frame/RenderViewBuilders.cpp", "RenderSystem::PrepareFrameSceneView(");
+			context.Expect(SourceBefore(identity, "std::uint64_t renderableVisibilitySignature = renderableWorldSignature;", "RequiresVirtualGeometryOwnerFallbackVisibility(")
+				&& SourceBefore(identity, "RequiresVirtualGeometryOwnerFallbackVisibility(", "if(requiresUnboundedCoarseVisibility)")
+				&& SourceBefore(identity, "if(requiresUnboundedCoarseVisibility)", "binding.posePublicationGeneration")
+				&& SourceBefore(visible, "std::uint64_t signature = BuildVisibleCommandCacheKey(", "renderableVisibilitySignature,")
+				&& SourceBefore(visible, "renderableVisibilitySignature,", "HashCombine(signature, retainedRenderTopology.topology.generation);")
+				&& group.find("target.renderOptimization.viewEvidenceReuseHits =") != std::string::npos
+				&& SourceBefore(coordinator, "PrepareFrameCommandIdentity(", "PrepareFrameSceneView(")
+				&& SourceBefore(scene, "PrepareFrameVisibleCommands(", "PrepareFrameGroupedSubmissions("),
 				"A visible-command cache entry made before animation becomes ready must hash owner-fallback admission state, while pose generations invalidate only unbounded legacy deformation that lacks a conservative envelope.");
+
 		});
 
 		registry.Add("Renderer.AnimationView.CaptureSelectionReuseKeepsReadbackIdentitySeparate", [](TestContext& context) {
-			const std::filesystem::path renderSystemPath =
-				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-					/ "Engine" / "Renderer" / "RenderSystem.cpp";
-			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
-			const std::string source{
-				std::istreambuf_iterator<char>(renderSystemStream), {} };
-			const std::size_t cacheKeyBegin = source.find(
-				"std::uint64_t BuildVisibleCommandCacheKey(");
-			const std::size_t cacheKeyEnd = source.find("return seed;", cacheKeyBegin);
-			const std::string cacheKeyBody = cacheKeyBegin == std::string::npos
-				|| cacheKeyEnd == std::string::npos
-				? std::string{}
-				: source.substr(cacheKeyBegin, cacheKeyEnd - cacheKeyBegin);
-
-			context.Expect(!cacheKeyBody.empty()
-				&& cacheKeyBody.find("captureRequestIdentity") == std::string::npos
-				&& source.find("submittedCaptureReadbackRequests.push_back(")
-					!= std::string::npos
-				&& source.find("result.requestId = request.requestId;")
-					!= std::string::npos
-				&& source.find(
-					"result.targetGeneration != resolvedSnapshot.targetGeneration")
-					!= std::string::npos,
+			const auto key = RequiredDefinition(context, "Engine/Renderer/Frame/RenderViewPreparation.cpp", "BuildVisibleCommandCacheKey(");
+			const auto commit = RequiredDefinition(context, "Engine/Renderer/Frame/RenderBackendCommit.cpp", "RenderSystem::CommitFrameBackend(");
+			const auto queue = RequiredDefinition(context, "Engine/Renderer/RenderSystemCapture.cpp", "RenderSystem::ProcessQueuedCaptureRequests(");
+			const auto readback = RequiredDefinition(context, "Engine/Renderer/RenderSystemCapture.cpp", "RenderSystem::DrainConventionalVisibilityIdentityReadbacks(");
+			context.Expect(key.find("captureRequestIdentity") == std::string::npos
+				&& commit.find("submittedCaptureReadbackRequests.push_back(") != std::string::npos
+				&& queue.find("result.requestId = request.requestId;") != std::string::npos
+				&& readback.find("result.targetGeneration != resolvedSnapshot.targetGeneration") != std::string::npos,
 				"Repeated identical captures should reuse geometry selection while asynchronous readback retains request and target-generation ownership.");
+
 		});
 
 		registry.Add("Renderer.AnimationView.GroupedCacheInvalidatesEmptyPreReadyAnimation", [](TestContext& context) {
-			const std::filesystem::path renderSystemPath =
-				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-					/ "Engine" / "Renderer" / "RenderSystem.cpp";
-			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
-			const std::string renderSystemSource{
-				std::istreambuf_iterator<char>(renderSystemStream), {} };
+			const auto renderSystemSource = RequiredDefinition(context, "Engine/Renderer/Frame/RenderViewGrouping.cpp", "RenderSystem::PrepareFrameGroupedSubmissions(");
 			const std::size_t compatibilityHash = renderSystemSource.find(
 				"const auto dynamicCompatibilityHash");
 			const std::size_t animationReadyBit = renderSystemSource.find(
@@ -572,12 +558,7 @@ namespace TerraEngine::Tests
 		});
 
 		registry.Add("Renderer.AnimationView.GroupedSceneContextRetainsSharedTint", [](TestContext& context) {
-			const std::filesystem::path renderSystemPath =
-				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-					/ "Engine" / "Renderer" / "RenderSystem.cpp";
-			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
-			const std::string renderSystemSource{
-				std::istreambuf_iterator<char>(renderSystemStream), {} };
+			const auto renderSystemSource = RequiredDefinition(context, "Engine/Renderer/Frame/RenderViewGrouping.cpp", "RenderSystem::PrepareFrameGroupedSubmissions(");
 			const std::size_t compatibility = renderSystemSource.find(
 				"&& a.editorTint == b.editorTint;");
 			const std::size_t tintHash = renderSystemSource.find(
@@ -607,46 +588,31 @@ namespace TerraEngine::Tests
 		});
 
 		registry.Add("Renderer.AnimationView.DedicatedCaptureCollectsWithoutAuthoredCamera", [](TestContext& context) {
-			const std::filesystem::path renderSystemPath =
-				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-					/ "Engine" / "Renderer" / "RenderSystem.cpp";
-			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
-			const std::string renderSystemSource{
-				std::istreambuf_iterator<char>(renderSystemStream), {} };
-			const std::size_t queuedCaptureState = renderSystemSource.find(
-				"bool hasQueuedDedicatedCapture = false;");
-			const std::size_t renderableCollection = renderSystemSource.find(
-				"Render.CollectRenderables", queuedCaptureState);
-			const std::size_t admission = renderSystemSource.find(
-				"&& !hasQueuedDedicatedCapture", renderableCollection);
-
-			context.Expect(queuedCaptureState != std::string::npos
-				&& renderableCollection != std::string::npos
-				&& admission != std::string::npos,
+			const auto capture = RequiredDefinition(context, "Engine/Renderer/Frame/RenderFrameCapture.cpp", "RenderSystem::CaptureFrameRenderableInputs(");
+			const auto collection = RequiredDefinition(context, "Engine/Renderer/Frame/RenderFrameCapture.cpp", "RenderSystem::CollectFrameRenderableInputs(");
+			context.Expect(SourceBefore(capture, "bool hasQueuedDedicatedCapture = false;", "Render.CollectRenderables")
+				&& capture.find("CollectFrameRenderableInputs(") != std::string::npos
+				&& capture.find("renderableMetadataCaptureCurrent, hasQueuedDedicatedCapture") != std::string::npos
+				&& collection.find("if (cameras.empty() && !hasSceneViewCamera") != std::string::npos
+				&& collection.find("&& !hasQueuedDedicatedCapture") != std::string::npos,
 				"A queued custom dedicated capture must collect renderables even when the scene has no authored or Scene View camera.");
+
 		});
 
 		registry.Add("Renderer.AnimationView.DiagnosticsUseSealedDeformationPublication", [](TestContext& context) {
-			const std::filesystem::path renderSystemPath =
-				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-					/ "Engine" / "Renderer" / "RenderSystem.cpp";
-			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
-			const std::string renderSystemSource{
-				std::istreambuf_iterator<char>(renderSystemStream), {} };
-			const std::size_t transfer = renderSystemSource.find(
-				"backendWork->deformationWork = std::move(selectedDeformation.immutablePlan);");
-			const std::size_t diagnostics = renderSystemSource.find(
-				"BuildVirtualGeometryViewDiagnosticsFromSnapshot(", transfer);
-			const std::size_t sealedRoot = renderSystemSource.find(
-				"sealedPublication->backendWork->deformationWork.get()", diagnostics);
-			const std::size_t staleRoot = renderSystemSource.find(
-				"selectedDeformation.immutablePlan.get()", diagnostics);
-
-			context.Expect(transfer != std::string::npos
-				&& diagnostics != std::string::npos
-				&& sealedRoot != std::string::npos
-				&& (staleRoot == std::string::npos || staleRoot > sealedRoot),
+			const auto backend = RequiredDefinition(context, "Engine/Renderer/Frame/RenderFrameSealing.cpp", "RenderSystem::PrepareFrameBackendWork(");
+			const auto diagnostics = RequiredDefinition(context, "Engine/Renderer/Frame/RenderDiagnosticsPublication.cpp", "RenderSystem::EnrichFrameVirtualGeometryDiagnostics(");
+			const auto publish = RequiredDefinition(context, "Engine/Renderer/Frame/RenderDiagnosticsPublication.cpp", "RenderSystem::PublishFrameDiagnostics(");
+			const auto coordinator = RequiredDefinition(context, "Engine/Renderer/RenderSystem.cpp", "RenderSystem::BuildFrameExecution(");
+			context.Expect(backend.find("backendWork->deformationWork = std::move(selectedDeformation.immutablePlan);") != std::string::npos
+				&& SourceBefore(diagnostics, "BuildVirtualGeometryViewDiagnosticsFromSnapshot(", "sealedPublication->backendWork->deformationWork.get()")
+				&& diagnostics.find("selectedDeformation.immutablePlan.get()") == std::string::npos
+				&& publish.find("EnrichFrameVirtualGeometryDiagnostics(") != std::string::npos
+				&& SourceBefore(coordinator, "PrepareFrameBackendWork(", "FinalizeFramePublication(")
+				&& SourceBefore(coordinator, "FinalizeFramePublication(", "CommitFrameBackend(")
+				&& SourceBefore(coordinator, "CommitFrameBackend(", "PublishFrameDiagnostics("),
 				"Post-seal diagnostics must inspect the retained backend deformation root, never the moved-from selection candidate.");
+
 		});
 
 		registry.Add("Renderer.AnimationView.ActiveDeformationUsesProvenCpuBroadphaseEnvelope", [](TestContext& context) {
@@ -792,18 +758,15 @@ namespace TerraEngine::Tests
 		});
 
 		registry.Add("Renderer.AnimationView.GpuCrowdSkipsEmptyCpuDeformationScan", [](TestContext& context) {
-			const std::filesystem::path rendererPath =
-				std::filesystem::path(__FILE__).parent_path().parent_path()
-					.parent_path().parent_path()
-					/ "Engine" / "Renderer" / "RenderSystem.cpp";
-			std::ifstream stream(rendererPath, std::ios::binary);
-			const std::string source(
-				std::istreambuf_iterator<char>(stream), {});
-			context.Expect(source.find("hasCpuDeformationCandidates")
-					!= std::string::npos
-				&& source.find("std::span<RenderableEntry> cpuDeformationCandidates")
-					!= std::string::npos,
+			const auto collection = RequiredDefinition(context, "Engine/Renderer/Frame/RenderFrameCapture.cpp", "RenderSystem::CollectFrameRenderableInputs(");
+			const auto deformation = RequiredDefinition(context, "Engine/Renderer/Frame/RenderFrameCapture.cpp", "RenderSystem::BuildFrameCpuDeformationPlan(");
+			const auto coordinator = RequiredDefinition(context, "Engine/Renderer/RenderSystem.cpp", "RenderSystem::BuildFrameExecution(");
+			context.Expect(collection.find("hasCpuDeformationCandidates") != std::string::npos
+				&& deformation.find("std::span<RenderableEntry> cpuDeformationCandidates") != std::string::npos
+				&& deformation.find("hasCpuDeformationCandidates") != std::string::npos
+				&& SourceBefore(coordinator, "CaptureFrameRenderableInputs(", "BuildFrameCpuDeformationPlan("),
 				"Collection must carry the final CPU-deformation candidate proof so an all-GPU crowd does not get rescanned.");
+
 		});
 	}
 }

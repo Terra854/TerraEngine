@@ -1,0 +1,921 @@
+{
+	"schemaVersion": 1,
+	"status": "frozen-baseline",
+	"baselineRevision": "0b9081841bd262ebacf1f2d1077875407916d296",
+	"inventory": "production-comments.json",
+	"inventorySha256": "8dc0b9a78a80aaf8cfd86d046c652353be6f156f1296f503a491e65e9dabbc26",
+	"fileCount": 170,
+	"occurrenceCount": 2345,
+	"assignmentRule": "Each frozen file belongs to exactly one batch. Paths and occurrence text are preserved by production-comments.json. No cleanup is authorized by this manifest.",
+	"batches": [
+		{
+			"id": "renderer",
+			"taskId": "T087",
+			"status": "pending-classification",
+			"fileCount": 23,
+			"occurrenceCount": 474,
+			"files": [
+				{
+					"path": "Engine/Renderer/RenderSystem.cpp",
+					"sha256": "dd5ae4196e23f2c7491253c173494bf9fdcdad7581cd2a6dae148a350e429a29",
+					"occurrenceCount": 42
+				},
+				{
+					"path": "Engine/Renderer/RenderSystem.h",
+					"sha256": "1153d054bef054d703fdeccbdc8afa94e07a502bab76686ea668acbbe2be2eff",
+					"occurrenceCount": 10
+				},
+				{
+					"path": "Engine/Renderer/RenderTypes.h",
+					"sha256": "90d7d299a023c4327597196af9ec31e1923b34a0bd0b0d02176405c5f37c7883",
+					"occurrenceCount": 22
+				},
+				{
+					"path": "Engine/Renderer/RHI/RHIContext.h",
+					"sha256": "fe6135a0b48ddea3767d386014e99758d26c8ce03ff4d0dd89971a0ed3a5837f",
+					"occurrenceCount": 13
+				},
+				{
+					"path": "Engine/Renderer/RHI/RHIDefinitions.h",
+					"sha256": "31cd506944bc3df227be1bb310c88d5ffd1feb1d1814d8040b200b6f4ca5c875",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanBuiltinPasses.cpp",
+					"sha256": "9ecc7d8e9350c35065a4af0b9bd5e7faf555ad1f32f6fade86e4f9c3010d8353",
+					"occurrenceCount": 15
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanContext.cpp",
+					"sha256": "c893368f1b30101e78ddbe4fca9bdc8b50c9456b0ae60c50790fb75d49994a30",
+					"occurrenceCount": 43
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanContext.h",
+					"sha256": "00f5fb0646439da9b3e3e1e29c61cc8bb76b767537a3816581c4c23a38bee495",
+					"occurrenceCount": 3
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanContextImpl.h",
+					"sha256": "c660e6142d50c2cf23e93809ae71c97522e66713d45d31651ac85f3ebca2aedf",
+					"occurrenceCount": 28
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp",
+					"sha256": "131136854a33c8f8af5ac9c01291691c41ee96bf58c73719d2d423b22598b7f8",
+					"occurrenceCount": 60
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp",
+					"sha256": "06e5b930e2999a175bc9069fee4a277ae1b5d04549dff602ec3d131696b0e1b7",
+					"occurrenceCount": 43
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanContextSource.h",
+					"sha256": "a6d2c47e2f52cfa27333fe1daa7e7b9aba46962990cf33782ec3e75eeabef143",
+					"occurrenceCount": 24
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanEditorRendering.cpp",
+					"sha256": "95661cf8beeb638a57423840622984b2b7eb4512fe3ff52b67dd649ec5ff7cb9",
+					"occurrenceCount": 26
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanFrameRendering.cpp",
+					"sha256": "78e71bdd8ce428b7101171080d2f97ec65dcbbbdd45506278cf0460ff897bb53",
+					"occurrenceCount": 21
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanFrameSubmission.cpp",
+					"sha256": "e5d70ae09d2ecabef451d171430b466e2214bf1bf07dedab727762fa93b0304a",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanGlobalResources.cpp",
+					"sha256": "c2acadb3d5c39d6ffa2ff6d48e842b699aefe42ea14f7375974bc4361f24081c",
+					"occurrenceCount": 20
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanGpuDiagnostics.cpp",
+					"sha256": "687d82c061abe3094873c32eafaed4c662e8be35a1c96772f0a17872e55f9ac8",
+					"occurrenceCount": 23
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanHiZ.cpp",
+					"sha256": "47dbfcdb480030cbe8c0d899bddff5597d1cb36fa17a180076773df0c67cac16",
+					"occurrenceCount": 3
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanLightingResources.cpp",
+					"sha256": "1faaba8363c6a54f8a88accc29be0e05b2471861488166489511db344af0ce1d",
+					"occurrenceCount": 37
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanPipelineResources.cpp",
+					"sha256": "5a05334d3392ce308d1a3a890f204d1c11633fa3a679ca67ec637fac8ed441cc",
+					"occurrenceCount": 17
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanPostProcessing.cpp",
+					"sha256": "715e2492ecbc3d8d87c276960b73e0fa80a3db46c150d089719d081f59492490",
+					"occurrenceCount": 8
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanResourceSource.h",
+					"sha256": "e6c014d6015d3ad0048b48e3c695484858041e5ade1c157e7dc1654c93417a62",
+					"occurrenceCount": 12
+				},
+				{
+					"path": "Engine/Renderer/RHI/Vulkan/VulkanVRS.cpp",
+					"sha256": "fa7b3968906b1ca3895f55f326bedf01cddf128dc4e944a8dc46f96a09127a8f",
+					"occurrenceCount": 1
+				}
+			],
+			"note": "Classify each original occurrence before comment-only edits; reconcile relocation separately from executable extraction."
+		},
+		{
+			"id": "animation",
+			"taskId": "T088",
+			"status": "pending-classification",
+			"fileCount": 0,
+			"occurrenceCount": 0,
+			"files": [],
+			"note": "No frozen animation occurrences exist; T088 must produce an explicit no-op audit receipt, not invent cleanup."
+		},
+		{
+			"id": "core-threadpool",
+			"taskId": "T089",
+			"status": "pending-classification",
+			"fileCount": 14,
+			"occurrenceCount": 113,
+			"files": [
+				{
+					"path": "Engine/Core/Logger/Logger.cpp",
+					"sha256": "707f64376bf25f362e0653a81c0470d31883bdbf154ec3455e3eaa765d8a95d1",
+					"occurrenceCount": 6
+				},
+				{
+					"path": "Engine/Core/Logger/Logger.h",
+					"sha256": "f25c0a0d5f43153d7640c00ac1f5e91d19af2b1b866106d0acc036c818c010b5",
+					"occurrenceCount": 5
+				},
+				{
+					"path": "Engine/Core/MainEngine.cpp",
+					"sha256": "b56a21bcf959ec9f5a76efd3d7c4ee868a655d7a249fd46bac696ccee128ad5f",
+					"occurrenceCount": 7
+				},
+				{
+					"path": "Engine/Core/MainEngine.h",
+					"sha256": "cd4638c9c75f31d21fc4a75a062ba09ce1e19f78b173127cb6c3286b0b9a84e8",
+					"occurrenceCount": 3
+				},
+				{
+					"path": "Engine/Core/Memory/FrameArena.h",
+					"sha256": "9fc2827e405c72e928a0b47e71b42f496ae3ab54701892b248ba758b16ee718f",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Engine/Core/Object/Component.cpp",
+					"sha256": "eeabd6e3231815a29f71a84f8454de3a2f8638436e32bed63cec89beeeb87272",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Engine/Core/Object/Component.h",
+					"sha256": "02e71a43d8d1d3fe4d1e2e9ed2154d6064071cd8afefcaba9130b8b86af51bcc",
+					"occurrenceCount": 17
+				},
+				{
+					"path": "Engine/Core/Object/ObjectManager.cpp",
+					"sha256": "423960e8a8d78c155d728362bc351971ce57ba97c7b1ea33d1b69cac7b02b8a8",
+					"occurrenceCount": 26
+				},
+				{
+					"path": "Engine/Core/Object/ObjectManager.h",
+					"sha256": "c642d143f6386ae29ff3a328266f56f62afa3657b5080140df27a1ab7fe88551",
+					"occurrenceCount": 5
+				},
+				{
+					"path": "Engine/Core/Object/Reflection.h",
+					"sha256": "0c19973fe5f76f9319e6d316dadf71ad1c48693c66b4bccd0adacabc9a7e1776",
+					"occurrenceCount": 20
+				},
+				{
+					"path": "Engine/Core/SystemBase.h",
+					"sha256": "f78673289413b12238b0c48b15b0e80acb72ce583e18a67ed26d3553c4af9652",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Engine/Core/Timer.cpp",
+					"sha256": "c97d89746527b4c66e23791200913a388520cc4985e4dcc17c35d2c3cd80c183",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Engine/ThreadPool/ThreadPool.cpp",
+					"sha256": "696cf3c3f3c84cf740952ea95a5666cda0f25c03dfb6fa34506f8346e8c6aa94",
+					"occurrenceCount": 6
+				},
+				{
+					"path": "Engine/ThreadPool/ThreadPool.h",
+					"sha256": "76ce2d0ed3952287aa489bb0097c59d2da44b464d7c703d2450346ac0f1bb403",
+					"occurrenceCount": 13
+				}
+			],
+			"note": "Classify each original occurrence before comment-only edits; reconcile relocation separately from executable extraction."
+		},
+		{
+			"id": "remaining-engine",
+			"taskId": "T090",
+			"status": "pending-classification",
+			"fileCount": 64,
+			"occurrenceCount": 866,
+			"files": [
+				{
+					"path": "Engine/Components/LightComponent.h",
+					"sha256": "abd4747bcedff2d351f515f4072890e1b53fbda7e7a99fade6b6354150d5a977",
+					"occurrenceCount": 8
+				},
+				{
+					"path": "Engine/Components/ScriptComponent.h",
+					"sha256": "bb7e25faaea7002c98144bc06566751ee7f733c64a2c794909bbf20fb00ca904",
+					"occurrenceCount": 37
+				},
+				{
+					"path": "Engine/Components/Transform.h",
+					"sha256": "8b0aeff43acd6f65142d779372fa560ecc32ec4d331ac2fb21521c57a46d60a2",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Engine/Components/UIComponent.h",
+					"sha256": "b10494bb3e4a7acf435be3b9b08f1237f67d171a04b163d238d35369c88f8aa9",
+					"occurrenceCount": 19
+				},
+				{
+					"path": "Engine/DotNet/DotNetHost.cpp",
+					"sha256": "f9d6cbbac50d480629bac3805f0e3206b67e0c7001e8ebc3812e1ac6de6c088f",
+					"occurrenceCount": 8
+				},
+				{
+					"path": "Engine/DotNet/DotNetHost.h",
+					"sha256": "5f714f0b3dc5490e44a5b1fa4f0c996d5c6d075fc6a7b94dbe15b2ccd91aaa6a",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Engine/File Formats/TerraEngineMaterialFile.h",
+					"sha256": "274ddc3caca5e2267114e2667187311e589f3b5f23e6c30f1caf0c82b241e20e",
+					"occurrenceCount": 5
+				},
+				{
+					"path": "Engine/File Formats/TerraEngineMeshFile.h",
+					"sha256": "d4bb694f2ecfd6e5e129c48d176111aa9f2a457f9fc9a216babbbee5d8d479be",
+					"occurrenceCount": 6
+				},
+				{
+					"path": "Engine/File Formats/TerraEngineShaderFile.h",
+					"sha256": "62c78639492cc88ffdb15fe0506ac935bcc9b5d98d9170a6a93357b3b222f168",
+					"occurrenceCount": 9
+				},
+				{
+					"path": "Engine/File Formats/TerraEngineTextureFile.h",
+					"sha256": "6d06e8355e5a1be3b1d6bd93864ddd6432120faf542d4184eb6e36e8ed2ee135",
+					"occurrenceCount": 8
+				},
+				{
+					"path": "Engine/Input/GLFW/GlfwInputBackend.cpp",
+					"sha256": "4b9d21ad5d58d82db63a46090684d1d22f5ce3bbd2d41c0c9acdad9818d154a1",
+					"occurrenceCount": 15
+				},
+				{
+					"path": "Engine/Input/GLFW/GlfwInputBackend.h",
+					"sha256": "aba74800e881d2b46b922dec83a97664ccde099601b76f3823dcd7220529256e",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Engine/Input/InputCodes.h",
+					"sha256": "0f9bf6bd27470b4eb643a620aa384c6360e118c7766b81ebdd7f8c01ee26fd41",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Engine/Input/InputSystem.cpp",
+					"sha256": "bfeb2176a877ddb884af6361d7b4f28d4aeda0fbce9097e734e488891e3e6c12",
+					"occurrenceCount": 17
+				},
+				{
+					"path": "Engine/Profiling/Profiler.cpp",
+					"sha256": "e56b065f8534847a03c675d029829f60c4bbd7116a0735b8cacdacda0542b9c3",
+					"occurrenceCount": 30
+				},
+				{
+					"path": "Engine/Profiling/Profiler.h",
+					"sha256": "c756469d445f5edd1944f96cd7bbb319ffecff6e5d8f89df113e1c6b824532bb",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Engine/Profiling/ProfilerCapture.cpp",
+					"sha256": "6613a054589d6ca5378b6f8c57405699a051613f9bef5a510c4cdb90fa0a4df5",
+					"occurrenceCount": 13
+				},
+				{
+					"path": "Engine/Profiling/ProfilerCapture.h",
+					"sha256": "fd9e299835c7105527d3f909001989bfbfe80e1bd80da32aa36c0670900edc28",
+					"occurrenceCount": 8
+				},
+				{
+					"path": "Engine/Profiling/ProfilerScope.h",
+					"sha256": "e39b878879b3614c7f80f7b932747f3ef117cb4cc926536e166172cc8b8a311a",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Engine/Resource/ResourceManager.cpp",
+					"sha256": "65abced674a16f67981d92a80a165e1f139074762f9ac0c276eafd725459b133",
+					"occurrenceCount": 45
+				},
+				{
+					"path": "Engine/Resource/ResourceManager.h",
+					"sha256": "91c9da9344cb188b733b4b8740af45e9c1a211b1ac9f1c936debec7ab72d9c38",
+					"occurrenceCount": 10
+				},
+				{
+					"path": "Engine/Resource/ResourceManagerMaterial.cpp",
+					"sha256": "2590b3a7135e5a3206d917b4650ac25a96c54ae3dd669b129dd545f18347a23e",
+					"occurrenceCount": 4
+				},
+				{
+					"path": "Engine/Resource/ResourceManagerMesh.cpp",
+					"sha256": "f99f6fcf83717128984a165a11fdd99050c4707c8b35153ef612e00c5fbb8ec2",
+					"occurrenceCount": 9
+				},
+				{
+					"path": "Engine/Resource/ResourceManagerShader.cpp",
+					"sha256": "4eb85bc9b35ad5b9a8bf97d1c6dcdc39b89eeb8066cfdacc8964135c7e2c5b6d",
+					"occurrenceCount": 4
+				},
+				{
+					"path": "Engine/Resource/ResourceManagerShaderCollection.cpp",
+					"sha256": "0e8ec3fa8fdf0c423ea6f0de65490bda6a35b186a521f8721182f8ee1e69d30f",
+					"occurrenceCount": 6
+				},
+				{
+					"path": "Engine/Resource/ResourceManagerTexture.cpp",
+					"sha256": "a64bda797ce0f89a36c163a8ffcca30a97451d1c5175e39514c20e680207e0bd",
+					"occurrenceCount": 5
+				},
+				{
+					"path": "Engine/Runtime/ContentMount/archive/ArchiveSerialization.cpp",
+					"sha256": "67e285d835d1d65df24ea2d677f57f596c2e612aa6e707b2f3e82d2609548051",
+					"occurrenceCount": 4
+				},
+				{
+					"path": "Engine/Runtime/ContentMount/archive/ExtentReader.cpp",
+					"sha256": "2f6cfabd781c231155d38241f929055c339c2314042931281d14882e218a77e8",
+					"occurrenceCount": 8
+				},
+				{
+					"path": "Engine/Runtime/ContentMount/archive/PackReader.cpp",
+					"sha256": "a463e1eb29345db7263cb6d42da8560550526b3f93ac0abf565a7b3689692d75",
+					"occurrenceCount": 20
+				},
+				{
+					"path": "Engine/Runtime/ContentMount/codec/CodecProvider.cpp",
+					"sha256": "60012c16a3b32d140cf8151da75af9fba86dc02e73a7405569c64692a89d2088",
+					"occurrenceCount": 20
+				},
+				{
+					"path": "Engine/Runtime/ContentMount/codec/CodecProvider.h",
+					"sha256": "132de5af622c55e05c8b0a01d5e89538a26db59072299196b442d48a75bd7522",
+					"occurrenceCount": 3
+				},
+				{
+					"path": "Engine/Runtime/ContentMount/io/PathNormalizer.cpp",
+					"sha256": "1079bc745c09533ff52d7d0958e305469970c2bc99bb71cdd1819bfb2c0da118",
+					"occurrenceCount": 29
+				},
+				{
+					"path": "Engine/Runtime/ContentMount/io/PathText.h",
+					"sha256": "ab78c77bb6aa6cf17c0708115ae6da2983e340c38e817ed6102e25c5089bc487",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Engine/Runtime/ContentMount/model/PackModel.h",
+					"sha256": "d3cc37c3c9aaf9d7ca2ce26268d16cef9efa40267f02b4d3a2f1ef8b25e65c9e",
+					"occurrenceCount": 10
+				},
+				{
+					"path": "Engine/Runtime/ContentMount/TEPAK/PackReader.h",
+					"sha256": "29c53ca0c5da33b559c45b6b9bc5cd02f3e31a8857965630b9153c9c8bd2d8fb",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Engine/Runtime/ContentMount/TEPAK/PackTypes.h",
+					"sha256": "05704270b04cb0faf81e54bb0dc96d6486f534ce20726040b46262f51ab0c336",
+					"occurrenceCount": 8
+				},
+				{
+					"path": "Engine/Runtime/ContentMount/TEPAK/Version.h",
+					"sha256": "ddc699467a957758f66ad9c52dbdf8998a72cc7df963506a190af4d215b19a8e",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Engine/Scene/SceneManager.cpp",
+					"sha256": "b69afddf1f800c272087dcb26ce355372682d0082e56ba2f36b658b27056e096",
+					"occurrenceCount": 41
+				},
+				{
+					"path": "Engine/Scene/SceneManager.h",
+					"sha256": "7b9e9684ef14970459bb536431fe4eebbb872be3c53969fd81b692ed7d470e48",
+					"occurrenceCount": 3
+				},
+				{
+					"path": "Engine/Scene/Serializer.cpp",
+					"sha256": "207ecc45df0372b46b44ef711a5855f7b0c8d7f7bf6f8cc5d446b804f0365b53",
+					"occurrenceCount": 14
+				},
+				{
+					"path": "Engine/Scene/SpatialBounds.h",
+					"sha256": "c3d1bf831f89563c450175a702a388d5cd1c12cb7a5d92d497c38ded30b597a4",
+					"occurrenceCount": 8
+				},
+				{
+					"path": "Engine/Scene/SpatialDiagnostics.h",
+					"sha256": "b507773c68ccce3afe5c294580cbbb6b440018e91830ad692cf8985c2767dbc3",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Engine/Scene/SpatialIndex.cpp",
+					"sha256": "bfa55df675734c2eabd3763dbfb708c196b092c2660c4730de8cd02f896b8486",
+					"occurrenceCount": 38
+				},
+				{
+					"path": "Engine/Scene/SpatialIndex.h",
+					"sha256": "bd62f5a062be355776ae12364f4284958e3168bd5c07855b8d166642385b43ae",
+					"occurrenceCount": 3
+				},
+				{
+					"path": "Engine/Scene/SpatialQuery.h",
+					"sha256": "02f1d59cc222f3407b857ee5e8708f19a0ed86e1a6d5a5c3deba2620c93a1482",
+					"occurrenceCount": 4
+				},
+				{
+					"path": "Engine/Scripting/ExportVTable.h",
+					"sha256": "19867640ec69ea03fed3bd1a904e25a9e65948f342f4cca7b254947b3f5f7cd0",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Engine/Scripting/ScriptGlue.cpp",
+					"sha256": "ebd6fa7c58b04658d9142cb8ba8c65e73cf08f28d4cd0cfbd2fe40fe2ee283fc",
+					"occurrenceCount": 88
+				},
+				{
+					"path": "Engine/Scripting/ScriptingSystem.cpp",
+					"sha256": "c95f84775c9a50583b2ed566e2639beba796156bb8aaa59b53730e6eaca7b948",
+					"occurrenceCount": 59
+				},
+				{
+					"path": "Engine/Scripting/ScriptingSystem.h",
+					"sha256": "364d538280a4751ba9118f5888585feac92fceb043e3b9ca67d0ca64895cbcf6",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Engine/UI/UIElement.cpp",
+					"sha256": "dc394025eba933bd455fbd097ad145fa49f35ec6c4161396557f5883689f698b",
+					"occurrenceCount": 35
+				},
+				{
+					"path": "Engine/UI/UILayoutEngine.cpp",
+					"sha256": "ba6b5ef1a186a7461a17e668e0eb2b9bb64bc51b93b1bb35304af283d3fe7ea4",
+					"occurrenceCount": 11
+				},
+				{
+					"path": "Engine/UI/UIParser.cpp",
+					"sha256": "dc838a44e58866883c89fa565f2b90c35a6c3a22b2533fa04dd4a75ea769a7b4",
+					"occurrenceCount": 62
+				},
+				{
+					"path": "Engine/UI/UIRenderer.cpp",
+					"sha256": "f72a87f13b2c42e3944c3f8e5863b73ec4ef13af0fda26052bb138598aa3677e",
+					"occurrenceCount": 13
+				},
+				{
+					"path": "Engine/UI/UIRenderer.h",
+					"sha256": "2a5b31fed0950d611327abd8d947ca1049122e7568af6a2f4d8a46cb45bbf529",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Engine/UI/UIStyle.cpp",
+					"sha256": "71b8fb9e6fd67066b3dda4c7fc8e482d45359e5ff321f33119d07669c67087f5",
+					"occurrenceCount": 33
+				},
+				{
+					"path": "Engine/UI/UIStyle.h",
+					"sha256": "f7a8a1f293c9928683dfa485c61f3beedd28a327ef3bfd4359af837d4f6d6601",
+					"occurrenceCount": 3
+				},
+				{
+					"path": "Engine/UI/UISystem.cpp",
+					"sha256": "68ad7a695d63dd58f8940e0ded18005911c33eb17db5036440daa661bf2f0319",
+					"occurrenceCount": 38
+				},
+				{
+					"path": "Engine/UI/UISystem.h",
+					"sha256": "28c4d88d383b448d9ef07cfa954c4952b58a9f99130314892b099b21fdfbcaf0",
+					"occurrenceCount": 3
+				},
+				{
+					"path": "Engine/Utilities/PlatformUtils.cpp",
+					"sha256": "ee5fbea658ec02b97b0d3318038652dfac05784cec9e9aaf79711666e362fbf6",
+					"occurrenceCount": 6
+				},
+				{
+					"path": "Engine/Utilities/UUID.h",
+					"sha256": "3652702e75ce80eb7ad0f9bf5773bc65897185c92ec7b901b4bfff4fcb977ef7",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Engine/Window/GLFW/GlfwWindowBackend.cpp",
+					"sha256": "3d24d947ca595337ebf43c02749b031a59aed85ccac5fec182100b6d23182f2b",
+					"occurrenceCount": 9
+				},
+				{
+					"path": "Engine/Window/GLFW/GlfwWindowBackend.h",
+					"sha256": "af67df3fdcecb0ad6cf9cfe59219a557fa13641a5b6d48466935820417c48b32",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Engine/Window/WindowSystem.cpp",
+					"sha256": "36620698ab292668d69e967a114519faed53e71df92db57e6b62f1a7ae996b60",
+					"occurrenceCount": 7
+				},
+				{
+					"path": "Engine/Window/WindowSystem.h",
+					"sha256": "c8b86734c063bbedfaf654dcb01e1efacb7f0cb3990883f20da17f321b96078e",
+					"occurrenceCount": 1
+				}
+			],
+			"note": "Classify each original occurrence before comment-only edits; reconcile relocation separately from executable extraction."
+		},
+		{
+			"id": "editor-main",
+			"taskId": "T091",
+			"status": "pending-classification",
+			"fileCount": 42,
+			"occurrenceCount": 567,
+			"files": [
+				{
+					"path": "Editor/TerraEngine-Editor/Assets/AssetDatabase.cpp",
+					"sha256": "7f69536d6831d31bba421cf33940560321e5fbc0bfb044bf70eeb731b8dbf8f8",
+					"occurrenceCount": 42
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Assets/AssetDatabase.h",
+					"sha256": "4d519fe836fdc5be72a9a7e79e247f45155e5ab860483ea9a6749f8652a341af",
+					"occurrenceCount": 6
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Assets/FileWatcher.cpp",
+					"sha256": "c976a539715f9f11b5c2209636c5f3c1ec0d243b44ba1afbc4ee8b00aff86730",
+					"occurrenceCount": 15
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Assets/FileWatcher.h",
+					"sha256": "95945f43efdb3544eee62d2f72e4706d65a9aadd710d4b942df6b5d252dfcb7f",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Core/EditorContext.h",
+					"sha256": "f699dde82429d9d25f049abaafd8629aebf999708a3d1908fefa84d0235cf737",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Core/EditorSystem.cpp",
+					"sha256": "40795c31d5768306b4fa2741d5d4219a0c55128a25f475d1b9c7359cbe66384a",
+					"occurrenceCount": 13
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Core/EditorSystem.h",
+					"sha256": "fcf13a9af7b0453a9094224870f882957048b2a2e04486ef0196999e43354b02",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Framework/EditorWindow.cpp",
+					"sha256": "e4bb8195103ab98edbfb274291bcc4a070522a05732de4d697b91161198348a7",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Framework/EditorWindow.h",
+					"sha256": "125f92ac194646bf11d5d6757bc686453cdc0fee6aa581c8b25f69ffb574916d",
+					"occurrenceCount": 3
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Profiling/EditorProfilerService.cpp",
+					"sha256": "5b8119546ca1ae0772da16e3f5eb8e26041b9252e214f452a0c46134c8dc9aa6",
+					"occurrenceCount": 20
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Profiling/EditorProfilerService.h",
+					"sha256": "300d161a38e3335c6d86ded2c7ddbbbc544b2e2084cdfeabe8fa99999b9fbd95",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Profiling/ProfilerCaptureStore.cpp",
+					"sha256": "69992501d4b994f76a4092b84b74b1fd2d45632dd0d489a0be45f3bf1e178486",
+					"occurrenceCount": 12
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Project/EditorPreferences.h",
+					"sha256": "4b0f980617e6234ab32f6c22bb887e0f9493caa4e76df7a01ce666a53e61a11f",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Project/ProjectManager.cpp",
+					"sha256": "a4b47bca9756ed8c07a6a41206babdcb20f8ac714bd972aff064606ca27877d5",
+					"occurrenceCount": 18
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Project/ProjectManager.h",
+					"sha256": "e7b54e0d2fbe7f0743c4dd530d92afedcdf9c5676fafad51351a30b5b32fc1b1",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.cpp",
+					"sha256": "471ef8bb9f4283bbbb958d711c534a4b25fe30f267088751a41ce4c25d5d9e4a",
+					"occurrenceCount": 56
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.h",
+					"sha256": "04f7df43a5336340961f621dd3e5451e2decc5b374ec333300a16c842ca8c77a",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Subsystems/IEditorSubsystem.h",
+					"sha256": "302043632b3ad5d1f743b3d8a1f12038d430ab3088aad881f9657bec2f576704",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp",
+					"sha256": "82d531df22fa66dd966b690c71cd08cbca55d734aaba2dbd2a9d1fb5a55bf910",
+					"occurrenceCount": 27
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.h",
+					"sha256": "0012db4ca84f8f25f0b06c00b25446728ce1bf4324178b1dd0414fa03ab7e723",
+					"occurrenceCount": 8
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.cpp",
+					"sha256": "d4dab6379654f9fad23105d7f54f8fa3ad8ecb6fa385c2874c8e54df4d89f6f2",
+					"occurrenceCount": 7
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.h",
+					"sha256": "0d4618ce71d9330cf712200e5bf2cdf3610cb03ee70484c21525081c2fa9665d",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.cpp",
+					"sha256": "b91963ffe9ab32417b7462524471e78ace34ffdbd57e2b0ae8e2fbf8711b05d9",
+					"occurrenceCount": 30
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.h",
+					"sha256": "e96dbd37d1b38b493281a8d17943d3bf2aacbf992516b6cfba8519941e3d483e",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.cpp",
+					"sha256": "0d19da6cce8ae2c609e06ec68f33964b9fb2647e93d927683bdac33975059be7",
+					"occurrenceCount": 25
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.h",
+					"sha256": "1c4df0a9cd35d22c1063bce29e8ee6560889449ea860972f71c94e1aa6ca368c",
+					"occurrenceCount": 4
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp",
+					"sha256": "67b711bb78098d79f8da927e147507ef25113de525c2f6399628378899f1cee5",
+					"occurrenceCount": 12
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.h",
+					"sha256": "7effe7241a1d3bd678706dc32d82eb434779b12dd676064456149bb33fd78d1c",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp",
+					"sha256": "0371c2c56e56e109d4ea296833685f21f955821d85cbfae65ebbf270ec6969c6",
+					"occurrenceCount": 4
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/GameViewWindow.h",
+					"sha256": "ff67e02556fcc62a8e64abd4278355410cab70c41ae4ca8b663a9b69ec82f241",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/HierarchyWindow.cpp",
+					"sha256": "a3a51ef02a3c3f60a17662a11f43818237bf46831d4daba7517f2c1a7fc90fc1",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/HierarchyWindow.h",
+					"sha256": "23c6f3c32fb506eac897d7e2536dbb3db8fe4c45d1e4da460bc6c09d8a58b069",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp",
+					"sha256": "fdb09d5fa90b43823fb56912ce769b5aac812b85d7cde10699a0864851face3b",
+					"occurrenceCount": 84
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/InspectorWindow.h",
+					"sha256": "d8602610f35a12598a3c9116998b86535726a0624e6d6bd8de7494746767b238",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp",
+					"sha256": "42c91439b2ebe5b5c296228dca737d7816568bcd5390ff2ed2e4dc3e53e9a1d1",
+					"occurrenceCount": 14
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/ProfilerWindow.h",
+					"sha256": "3a85041a42cbc2e5718b35a114ce3f0f07d0944235566323c0a1f6fde80dde82",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/ProjectBrowserWindow.cpp",
+					"sha256": "8a50a4f05fc48b0c9850485576d73601ddfbc0476e09ad1a02bd74340e02f543",
+					"occurrenceCount": 10
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/ProjectBrowserWindow.h",
+					"sha256": "d085fb5a40e30eb44f212965d5c1d831b7e0a2fdcf48557e94ad3496189d903d",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp",
+					"sha256": "4668f2243e35dcffd92db6254477fe9f2bf588455ca525b96c5bfd7284758a46",
+					"occurrenceCount": 16
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/SceneViewWindow.h",
+					"sha256": "626b3cc49cf50b024f4abfc8da09dfbe0a43f08798015c0e0f630e4c18e07549",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp",
+					"sha256": "4fdb9a3b6d2fb6643ade6092c34c1105bd65918038fa9883eec4e01353a58343",
+					"occurrenceCount": 110
+				},
+				{
+					"path": "Editor/TerraEngine-Editor/Windows/UIBuilderWindow.h",
+					"sha256": "fbdc7faed8ac5337c674003ad1475de60083516a86b6cea14633839013aeb374",
+					"occurrenceCount": 5
+				}
+			],
+			"note": "Classify each original occurrence before comment-only edits; reconcile relocation separately from executable extraction."
+		},
+		{
+			"id": "remaining-editor",
+			"taskId": "T092",
+			"status": "pending-classification",
+			"fileCount": 27,
+			"occurrenceCount": 325,
+			"files": [
+				{
+					"path": "Editor/AssetCompilers/MeshCompiler.cpp",
+					"sha256": "8a53254bad347d1aa3b388114346cb77ccba4f98f30a69f36a8fc97d462144b5",
+					"occurrenceCount": 56
+				},
+				{
+					"path": "Editor/AssetCompilers/ShaderCompiler.cpp",
+					"sha256": "d101550b3d357e4f90b15aa1899d5abe47ca963d133d849bdbff491e8338eda9",
+					"occurrenceCount": 26
+				},
+				{
+					"path": "Editor/AssetCompilers/TextureCompiler.cpp",
+					"sha256": "3ee6fa47e6dbf3e2a1a2c6536503f06af97758a9061122b4950bbdc33e798390",
+					"occurrenceCount": 14
+				},
+				{
+					"path": "Editor/Export/archive/ArchiveSerialization.cpp",
+					"sha256": "2cbb0159bf917a8d0a93382aa2337ab8c3f16c76afb8212d624327eb3caadb24",
+					"occurrenceCount": 4
+				},
+				{
+					"path": "Editor/Export/archive/ExtentReader.cpp",
+					"sha256": "9a3a7f3a047d5832933ae7325a8c862234e2fa119f9878ea825682a2d8685714",
+					"occurrenceCount": 8
+				},
+				{
+					"path": "Editor/Export/archive/PackagingRequest.cpp",
+					"sha256": "58c2b1a4132f934652f56659460e2290099a0cb60b982293a86ebad25081c312",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/Export/archive/PackPlanner.cpp",
+					"sha256": "54e2ceaaa62766af1cc3d50ddd320bac1884867aea2e173836a85074fb3d2c74",
+					"occurrenceCount": 10
+				},
+				{
+					"path": "Editor/Export/archive/PackReader.cpp",
+					"sha256": "a463e1eb29345db7263cb6d42da8560550526b3f93ac0abf565a7b3689692d75",
+					"occurrenceCount": 20
+				},
+				{
+					"path": "Editor/Export/archive/PackWriter.cpp",
+					"sha256": "ea5c7f359f22e20fae23c75f7abcd9f9727744e431a0f30e87fadd2a6d611309",
+					"occurrenceCount": 22
+				},
+				{
+					"path": "Editor/Export/BuildProfile.cpp",
+					"sha256": "91227deeba7b96bb334bb25b398e109793a1963a7a51b4be14a7c91d381dfe62",
+					"occurrenceCount": 6
+				},
+				{
+					"path": "Editor/Export/BuildProfile.h",
+					"sha256": "61ad967cc54dc8fc8abd8a37dbe4d575a390d2dbad28dd89c6777a8eda3835de",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/Export/codec/CodecProvider.cpp",
+					"sha256": "dcf858b5509598a29b32f11054afe84fbe7a9a2e8da45a4786c63f9df8e3549c",
+					"occurrenceCount": 20
+				},
+				{
+					"path": "Editor/Export/codec/CodecProvider.h",
+					"sha256": "a426c2f0718db83d5972f63ac7f8028531257b1860f6f6652d616a78103c22fb",
+					"occurrenceCount": 3
+				},
+				{
+					"path": "Editor/Export/ExportPipeline.cpp",
+					"sha256": "56377159dc281d0d892383fa940132bdd21d0f176f7d9f4ce4556f3137bff548",
+					"occurrenceCount": 9
+				},
+				{
+					"path": "Editor/Export/ExportValidator.cpp",
+					"sha256": "0957d0455b06246188a44b4758a857553df6f86c5c1a90c8b2835f6991aeb6e9",
+					"occurrenceCount": 24
+				},
+				{
+					"path": "Editor/Export/ExportValidator.h",
+					"sha256": "262ff45b3092d25635253cbef8aa244629578dd26b4568b25f4fea6dedd3e9b9",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Editor/Export/io/PathNormalizer.cpp",
+					"sha256": "3fe39223d59ded2428a19487605b6fc3a9aad364c3b6d0f04e95dfec2e513f6f",
+					"occurrenceCount": 29
+				},
+				{
+					"path": "Editor/Export/io/PathText.h",
+					"sha256": "13510c0c7000687c2b3b20632f7296c8a63730692f13fc580afaeaade8ba5bc0",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Editor/Export/model/PackModel.h",
+					"sha256": "99ce169fdc4e5fb12fe3b5e5f3177b858cfff751abc68d436338ba3d62be6251",
+					"occurrenceCount": 10
+				},
+				{
+					"path": "Editor/Export/TEPAK/PackReader.h",
+					"sha256": "d928f18a01ebec917620eb32df03ef8338b7c96bde430209a763b4eadb06c357",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/Export/TEPAK/PackTypes.h",
+					"sha256": "04ba62d5c5c6d017c15ed809bb1e1b1354013a4c03c04a6d94f2a5d7a7cd2078",
+					"occurrenceCount": 8
+				},
+				{
+					"path": "Editor/Export/TEPAK/Version.h",
+					"sha256": "5e6453481a521d1c7391599af44a8bbe10d64b3a12a3d3f1845c32521128fdd5",
+					"occurrenceCount": 1
+				},
+				{
+					"path": "Editor/Export/TepakPackager.h",
+					"sha256": "bab75e16fb5c793c259884b3f59adc89bd5249066a6997325812245a656eaec0",
+					"occurrenceCount": 2
+				},
+				{
+					"path": "Editor/Export/validation/PackValidator.cpp",
+					"sha256": "9f3bb676a345154657065740643d5980671c0b637beabf49506c8bb2ae578ba9",
+					"occurrenceCount": 6
+				},
+				{
+					"path": "Editor/TerraEngineMeshCompiler.cpp",
+					"sha256": "34540197043ce932d0fb18331a9b8bff57bf6d3b81c1bed68d352e6c9f712e4d",
+					"occurrenceCount": 23
+				},
+				{
+					"path": "Editor/TerraEngineShaderCompiler.cpp",
+					"sha256": "312b99c28c95319991d3eaa2374aa3ef7905bae65df63423f40008260bbf3856",
+					"occurrenceCount": 9
+				},
+				{
+					"path": "Editor/TerraEngineTextureCompiler.cpp",
+					"sha256": "f47ff2df71b6ad6843165525000109bfe163ca4c822d798833833274b358c79c",
+					"occurrenceCount": 8
+				}
+			],
+			"note": "Classify each original occurrence before comment-only edits; reconcile relocation separately from executable extraction."
+		}
+	]
+}

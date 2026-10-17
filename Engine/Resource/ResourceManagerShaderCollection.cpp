@@ -18,7 +18,7 @@
 
 namespace
 {
-	// struct StageRequest groups related state and operations so callers have one documented contract.
+
 	struct StageRequest
 	{
 		ShaderStage stage = ShaderStage::Vertex;
@@ -31,7 +31,7 @@ namespace
 	std::string BuildShaderCollectionKey(const std::vector<StageRequest>& stages)
 	{
 		std::ostringstream combined;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const StageRequest& request : stages)
 		{
 			combined << static_cast<std::uint32_t>(request.stage) << ":" << request.key << ";";
@@ -50,7 +50,7 @@ namespace
 			return true;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vertexShader.outputs.empty())
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "Fragment shader requests inputs but vertex shader exposes no outputs.");
@@ -58,17 +58,17 @@ namespace
 		}
 
 		std::unordered_map<std::uint32_t, const StageIOAttribute*> outputsByLocation;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const StageIOAttribute& output : vertexShader.outputs)
 		{
 			outputsByLocation.emplace(output.location, &output);
 		}
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const StageIOAttribute& input : fragmentShader.inputs)
 		{
 			const auto found = outputsByLocation.find(input.location);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (found == outputsByLocation.end())
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "Fragment input at location " << input.location << " is not provided by the vertex shader.");
@@ -76,7 +76,7 @@ namespace
 			}
 
 			const StageIOAttribute* source = found->second;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (input.componentType != source->componentType || input.componentCount != source->componentCount)
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "Fragment input at location " << input.location << " does not match vertex output type/width.");
@@ -94,20 +94,20 @@ namespace
 		const std::vector<std::pair<TerraEngine::UUID, std::shared_ptr<const Shader>>>& payloads)
 	{
 		auto collection = std::make_unique<ShaderCollection>();
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (std::size_t index = 0U; index < stages.size(); ++index)
 		{
 			const auto& request = stages[index];
 			const TerraEngine::UUID shaderId = payloads[index].first;
 			const Shader* shader = payloads[index].second.get();
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (shader == nullptr)
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "Failed to load shader stage from " << request.path);
 				return nullptr;
 			}
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (shader->reflection.source.stage != static_cast<std::uint32_t>(request.stage))
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "Shader " << request.path << " reports stage " << shader->reflection.source.stage << " but stage " << static_cast<std::uint32_t>(request.stage) << " was requested.");
@@ -144,7 +144,7 @@ namespace
 		for (std::size_t index = 0U; index < collection->stages.size(); ++index)
 		{
 			const auto& binding = collection->stages[index];
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (binding.stage == ShaderStage::Vertex)
 			{
 				vertexShader = payloads[index].second.get();
@@ -153,14 +153,14 @@ namespace
 			{
 				meshShader = payloads[index].second.get();
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 			else if (binding.stage == ShaderStage::Fragment)
 			{
 				fragmentShader = payloads[index].second.get();
 			}
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		const Shader* geometryOutputShader =
 			meshShader != nullptr ? meshShader : vertexShader;
 		if (geometryOutputShader && fragmentShader

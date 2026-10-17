@@ -106,9 +106,10 @@ separate small handoff mutex protects continuation pointers and readiness, and
 is released before resuming or destroying the continuation.
 
 `RenderFrameScratch` adds an exclusive episode lease with strong resource
-ownership. The coroutine declares its lease before the camera/light vectors;
-reverse destruction retires both vectors before releasing the lease. Its stable
-owner is likewise declared before the continuation in renderer lifetime state,
+ownership. The extracted `Frame/RenderScratchEpisode.h` declares a strong owner, then
+its lease, then camera/light PMR vectors. Reverse destruction therefore retires
+both vectors before the lease and its resource owner. The stable scratch owner
+is likewise declared before the continuation in `Frame/RenderFrameState.h`,
 so lifetime teardown destroys the continuation first. One protected coordinator
 allocates; workers borrow completed collections, and all admitted borrowers
 settle before collection destruction. Lease release marks the episode inactive
@@ -144,6 +145,63 @@ rules intact, preserve the runtime memory safety campaign's immutable reference/
 and report fallbacks and unavailable metrics explicitly. See
 [runtime-memory validation](Testing.md#runtime-memory-safety-and-renderer-scratch)
 for installed filters, registration floors, and evidence requirements.
+
+## Extracted frame ownership and animation reservations
+
+Renderer stage extraction preserves that episode inside the coroutine across
+all three suspensions. The first capture opens it; worker stages read completed
+camera/light collections; the protected backend continuation completes it.
+`RetireFrameExecutionAtProtectedBoundary` detaches the continuation under the
+handoff mutex and destroys it outside that mutex. Clear and shutdown retire the
+continuation before resetting or releasing scratch. A suspended episode must
+never be reset merely because a scheduler callback has returned.
+
+Nested preparation has the same last-consumer rule. Light preparation settles
+admitted children before returning or rethrowing; shadow sealing uses
+`ScopedTaskSettlement`. That guard is declared after borrowed inputs and its
+future collection is reserved before admission. Its unwind path waits without
+replacing the initiating exception; successful result collection observes all
+admitted children before accepting a result. This is task completion ownership,
+not permission for worker jobs to reclaim frame storage.
+
+Animation has a separate reservation contract. `FrameStorage::frameScratch` is
+an ordinary owned byte vector resized to the checked work plan's
+`totalScratchBytes`; `frameScratchLease` accounts for that ScratchPool budget.
+The current typed evaluation path writes indexed completion records: it does
+not obtain a data pointer or span from this vector. Do not describe the vector
+as a PMR arena or an observed worker byte borrower. Entirely compact GPU-visual
+plans have no generic scratch and skip the zero-byte reservation. Clearing the
+frame clears the vector's size and releases its accounting lease; retained
+capacity is ordinary vector storage.
+
+Pose reservations can escape the frame deliberately. Complete evaluation sets
+`published.poseMemoryReservation` to the prior publication's shared lease for a
+retained visual pose, or to `framePoseReservation` for the new pose. Authority
+rows and their immutable snapshots can therefore outlive active frame storage.
+The shared lease retains `AnimationMemoryState`; release checks the reservation
+serial before changing accounting, so a late reader cannot release a reused
+slot. The lease accounts for pose memory; it does not own the snapshot's vector
+allocation. Clearing the frame's shared pointer does not invalidate a reader's
+owned pose. Controller shutdown can retire accounting while those immutable
+values remain owned by readers.
+
+The four animation nested groups in frame capture, homogeneous/mixed authority
+sealing, and compact runtime-root preparation settle admitted children before
+borrowed inputs expire. Live `authorityPublisher` and its generation remain
+outside the fallible authority candidate group. A rejected candidate must leave
+the accepted root intact; retiring live lookup does not revoke a strong reader.
+
+Existing regression cases distinguish production callback coverage from utility
+coverage. `RendererScratch.ProductionStagesRetainRootsAcrossSuspensions` and
+`RendererScratch.ProductionFailureSettlesAdmittedLightChildren` exercise actual
+renderer declarations. Other `RendererScratch` lifecycle cases directly test
+the scratch owner/lease utility. `Engine.NestedTaskSettlement.Animation*` drives
+the four actual animation groups with held siblings and injected failures;
+authority publication tests separately check pinned readers and atomic
+rejection. These source locations describe available checks, not a new execution
+receipt. Integrated held-reader, cancellation, scene-clear, shutdown and restart
+qualification must still use the installed lifecycle/replay workflow in
+[Testing.md](Testing.md).
 
 ## Adoption rule
 

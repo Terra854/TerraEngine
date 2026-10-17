@@ -1,6 +1,8 @@
 // RenderInstanceAbiTests.cpp - renderer instance-stream contract checks.
 
 #include "TestHarness.h"
+#include <string_view>
+#include <algorithm>
 #include "VulkanSourceTestUtils.h"
 #include "RendererThreadingTestFixtures.h"
 
@@ -15,14 +17,67 @@
 namespace TerraEngine::Tests {
 
 	namespace {
-
-		std::string ReadShader(const char* relativePath)
+		// Required reads and lexical definition bounds fail before any token or
+		// ordering assertion can accidentally accept an empty/missing region.
+		std::string RequiredSource(TestContext& context, const char* path)
 		{
-			const std::filesystem::path path = std::filesystem::path(__FILE__).parent_path()
-				.parent_path().parent_path().parent_path() / relativePath;
-			std::ifstream stream(path, std::ios::binary);
-			return stream ? std::string(std::istreambuf_iterator<char>(stream), {}) : std::string{};
+			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / path, std::ios::binary);
+			context.Expect(input.good(), std::string("Required source is unreadable: ") + path);
+			std::string text((std::istreambuf_iterator<char>(input)), {});
+			context.Expect(!text.empty(), std::string("Required source is empty: ") + path);
+			text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+			return text;
 		}
+		std::string RequiredDefinition(TestContext& context, const char* path, std::string_view signature)
+		{
+			const auto text = RequiredSource(context, path);
+			const auto start = text.find(signature);
+			context.Expect(start != std::string::npos, std::string("Required definition is absent: ") + std::string(signature));
+			const auto open = text.find('{', start + signature.size());
+			context.Expect(open != std::string::npos, "Required definition has no opening body.");
+			std::size_t depth = 0;
+			bool lineComment = false, blockComment = false, quoted = false, character = false, escape = false;
+			for(std::size_t index = open; index < text.size(); ++index)
+			{
+				const char value = text[index], next = index + 1 < text.size() ? text[index + 1] : '\0';
+				if(lineComment) { if(value == '\n') lineComment = false; continue; }
+				if(blockComment) { if(value == '*' && next == '/') { blockComment = false; ++index; } continue; }
+				if(quoted || character) {
+					if(escape) { escape = false; continue; }
+					if(value == '\\') { escape = true; continue; }
+					if((quoted && value == '"') || (character && value == '\'')) quoted = character = false;
+					continue;
+				}
+				if(value == '/' && next == '/') { lineComment = true; ++index; continue; }
+				if(value == '/' && next == '*') { blockComment = true; ++index; continue; }
+				if(value == '"') { quoted = true; continue; }
+				if(value == '\'') { character = true; continue; }
+				if(value == '{') ++depth;
+				if(value == '}' && --depth == 0) return text.substr(start, index + 1 - start);
+			}
+			context.Expect(false, "Required definition has no balanced closing body.");
+			return {};
+		}
+
+		std::string RequiredVulkanContext(TestContext& context)
+		{
+			for(const char* file : {"VulkanContext.cpp", "VulkanContextSource.h", "VulkanBuiltinPasses.cpp", "VulkanEditorRendering.cpp", "VulkanFrameRendering.cpp", "VulkanFrameSubmission.cpp", "VulkanPostProcessing.cpp", "VulkanReadback.cpp"})
+				RequiredSource(context, (std::string("Engine/Renderer/RHI/Vulkan/") + file).c_str());
+			return VulkanSourceContracts::ReadContextSources();
+		}
+		std::string RequiredVulkanResources(TestContext& context)
+		{
+			for(const char* file : {"VulkanContextResources.cpp", "VulkanResourceSource.h", "VulkanAnimationResources.cpp", "VulkanVirtualGeometryResources.cpp", "VulkanPipelineResources.cpp", "VulkanGlobalResources.cpp", "VulkanLightingResources.cpp", "VulkanGpuDiagnostics.cpp"})
+				RequiredSource(context, (std::string("Engine/Renderer/RHI/Vulkan/") + file).c_str());
+			return VulkanSourceContracts::ReadResourceSources();
+		}
+		bool SourceBefore(const std::string& text, std::string_view first, std::string_view second)
+		{
+			const auto a = text.find(first), b = text.find(second);
+			return a != std::string::npos && b != std::string::npos && a < b;
+		}
+
+
 
 		void MakeGroupable(TerraEngine::Renderer::RenderFrameSnapshot& snapshot)
 		{
@@ -73,7 +128,7 @@ namespace TerraEngine::Tests {
 				"The instance stream must retain the documented byte stride.");
 			context.ExpectEqual<std::size_t>(64u, offsetof(RenderInstanceRecord, editorTint),
 				"Editor tint must follow the transform at the shader ABI offset.");
-			const std::string shader = ReadShader("Engine/Shaders/Default/RenderInstanceAbi.hlsli");
+			const std::string shader = RequiredSource(context, "Engine/Shaders/Default/RenderInstanceAbi.hlsli");
 			context.Expect(shader.find("kRenderInstanceRecordBytes = 176u") != std::string::npos,
 				"The shader must declare the C++ instance stride.");
 			context.Expect(shader.find("instanceIndex >= instanceCount") != std::string::npos,
@@ -100,7 +155,7 @@ namespace TerraEngine::Tests {
 				"The third HLSL row must combine the CPU Z basis and translation lane.");
 			context.ExpectEqual(expected.w, decoded.w,
 				"The reconstructed homogeneous row must keep an affine w of one.");
-			const std::string shader = ReadShader("Engine/Shaders/Default/RenderInstanceAbi.hlsli");
+			const std::string shader = RequiredSource(context, "Engine/Shaders/Default/RenderInstanceAbi.hlsli");
 			context.Expect(shader.find("for (uint row = 0u; row < 4u; ++row)") != std::string::npos
 				&& shader.find("instanceWords[wordOffset + 0u + row]") != std::string::npos
 				&& shader.find("instanceWords[wordOffset + 4u + row]") != std::string::npos
@@ -121,7 +176,7 @@ namespace TerraEngine::Tests {
 				(packed >> RenderInstanceRecord::kAnimationSourcePolicyShift)
 					& RenderInstanceRecord::kAnimationSourcePolicyMask,
 				"The compact proof must preserve the exact animation source.");
-			const std::string backend = VulkanSourceContracts::ReadContextSources();
+			const std::string backend = RequiredVulkanContext(context);
 			context.Expect(backend.find("groupedRecordMatchesRepresentative")
 					!= std::string::npos
 				&& backend.find("commandResolver.Resolve(memberCommandIndex, member)")
@@ -225,8 +280,8 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Renderer.SharedSubmission.AnimatedMeshShaderUsesPerInstanceBridge", [](TestContext& context) {
-			const std::string meshShader = ReadShader("Engine/Shaders/Default/Default.mesh.hlsl");
-			const std::string taskShader = ReadShader("Engine/Shaders/Default/Default.task.hlsl");
+			const std::string meshShader = RequiredSource(context, "Engine/Shaders/Default/Default.mesh.hlsl");
+			const std::string taskShader = RequiredSource(context, "Engine/Shaders/Default/Default.task.hlsl");
 			context.Expect(meshShader.find("TryLoadGpuAnimationGraphicsRecordAt") != std::string::npos,
 				"Animated grouped meshlets must resolve a record-specific graphics bridge.");
 			context.Expect(meshShader.find("instanceRecord.animationSelectors.x") != std::string::npos,
@@ -245,8 +300,8 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Renderer.SharedSubmission.VirtualGeometryLoadsExactPerInstancePayload", [](TestContext& context) {
-			const std::string renderer = ReadShader("Engine/Renderer/RenderSystem.cpp");
-			const std::string taskShader = ReadShader("Engine/Shaders/Default/Default.task.hlsl");
+			const auto renderer = RequiredDefinition(context, "Engine/Renderer/Frame/RenderViewGrouping.cpp", "RenderSystem::PrepareFrameGroupedSubmissions(");
+			const std::string taskShader = RequiredSource(context, "Engine/Shaders/Default/Default.task.hlsl");
 			context.Expect(renderer.find("virtualGeometryPacketDescriptorIndex == b.virtualGeometryPacketDescriptorIndex") == std::string::npos,
 				"Dense VG grouping should not split compatible instances merely because their packet descriptors differ.");
 			context.Expect(renderer.find("virtualGeometryPagePayloadByteOffset == b.virtualGeometryPagePayloadByteOffset") == std::string::npos,

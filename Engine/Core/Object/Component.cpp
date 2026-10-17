@@ -20,7 +20,7 @@ std::unordered_map<std::string, ComponentAccessFunctions>& ComponentAccessRegist
 	return registry;
 }
 
-// ComponentAccessRegistryMutex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::mutex& ComponentAccessRegistryMutex()
 {
 	static std::mutex mutex;

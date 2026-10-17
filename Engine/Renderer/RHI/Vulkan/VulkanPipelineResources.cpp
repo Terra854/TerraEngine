@@ -5,14 +5,14 @@
 
 #include "VulkanResourceSource.h"
 
-// VulkanContext::Impl::BuildPipelineLayouts is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collection, std::vector<VkDescriptorSetLayout>& setLayouts, std::vector<std::vector<DescriptorBinding>>& bindingsPerSet, std::vector<VkPushConstantRange>& pushConstants, bool& supportsDefaultPushConstants) {
 	if (globalDescriptorSetLayout == VK_NULL_HANDLE) {
 		TERRAENGINE_LOG(LogLevel::Error, "Global descriptor set layout is not initialized; cannot build reflected pipeline layouts.");
 		return false;
 	}
 
-	// struct AggregatedBinding groups related state and operations so callers have one documented contract.
+
 	struct AggregatedBinding {
 		DescriptorBinding binding{};
 		VkShaderStageFlags stages = 0;
@@ -23,7 +23,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 	std::map<std::pair<uint32_t, uint32_t>, VkShaderStageFlags> pushConstantMerge;
 	supportsDefaultPushConstants = false;
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& stage : collection.stages) {
 		const Shader* shader = stage.shader.get();
 		if (!shader) {
@@ -31,15 +31,15 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 			return false;
 		}
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const DescriptorSetLayoutDesc& setDesc : shader->descriptorSets) {
 			for (uint32_t idx = 0; idx < setDesc.bindingCount; ++idx) {
 				const uint32_t bindingIndex = setDesc.firstBinding + idx;
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (bindingIndex >= shader->descriptorBindings.size()) continue;
 			const DescriptorBinding& srcBinding = shader->descriptorBindings[bindingIndex];
 			auto& aggregated = setBindings[setDesc.setIndex][srcBinding.binding];
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!aggregated.initialized) {
 				aggregated.binding = srcBinding;
 				if (aggregated.binding.arrayCount == 0) {
@@ -47,13 +47,13 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 				}
 				aggregated.initialized = true;
 			} else {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (aggregated.binding.type != srcBinding.type || aggregated.binding.arrayCount != srcBinding.arrayCount) {
 					TERRAENGINE_LOG(LogLevel::Warning, "Descriptor binding mismatch across stages for set " << setDesc.setIndex << ", binding " << srcBinding.binding);
 				}
 				}
 				StageVisibilityMask visibility = srcBinding.visibility;
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (visibility == 0) {
 					visibility = StageToMask(static_cast<ShaderStage>(shader->reflection.source.stage));
 				}
@@ -61,7 +61,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 			}
 		}
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const PushConstantRange& pc : shader->pushConstants) {
 			StageVisibilityMask visibility = pc.visibility;
 			if (visibility == 0) {
@@ -70,7 +70,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 			const VkShaderStageFlags vkStages = StageVisibilityToVulkan(visibility);
 			std::pair<uint32_t, uint32_t> key = {pc.offsetBytes, pc.sizeBytes};
 			pushConstantMerge[key] |= vkStages;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (pc.offsetBytes == 0
 				&& pc.sizeBytes >= sizeof(PushConstants)
 				&& (vkStages & VK_SHADER_STAGE_MESH_BIT_EXT)) {
@@ -79,7 +79,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 		}
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& [key, stages] : pushConstantMerge) {
 		VkPushConstantRange range{};
 		range.offset = key.first;
@@ -88,7 +88,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 		pushConstants.push_back(range);
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (pushConstants.empty()) {
 		VkPushConstantRange fallback{};
 		fallback.offset = 0;
@@ -102,7 +102,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 	setLayouts.push_back(globalDescriptorSetLayout);
 	bindingsPerSet.push_back({});
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& [setIndex, bindingMap] : setBindings) {
 		if (setIndex == 0) continue; // Skip Set 0, handled globally
 
@@ -124,7 +124,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 		vkBindings.reserve(bindingMap.size());
 		storedBindings.reserve(bindingMap.size());
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const auto& [bindingNumber, aggregated] : bindingMap) {
 			VkDescriptorSetLayoutBinding vkBinding{};
 			vkBinding.binding = bindingNumber;
@@ -141,17 +141,17 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 		layoutInfo.pBindings = vkBindings.data();
 
 		VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "Failed to create descriptor set layout from reflection");
 			for (size_t i = 1; i < setLayouts.size(); ++i) { // Start from 1 to avoid destroying global layout
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (setLayouts[i] != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, setLayouts[i], nullptr);
 			}
 			return false;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (setLayouts.size() <= setIndex) {
 			setLayouts.resize(setIndex + 1, VK_NULL_HANDLE);
 			bindingsPerSet.resize(setIndex + 1);
@@ -199,13 +199,13 @@ std::optional<PipelineKey> VulkanContext::Impl::BuildPipelineKey(
 		materialFlags, usesConventionalVisibilityIdentity) : std::nullopt;
 }
 
-// VulkanContext::Impl::EnsurePipeline is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::EnsurePipeline(
 	TerraEngine::UUID shaderCollectionId,
 	VkRenderPass renderPass,
 	uint32_t materialFlags,
 	bool usesConventionalVisibilityIdentity) {
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (renderPass == VK_NULL_HANDLE) {
 		TERRAENGINE_LOG(LogLevel::Error, "Cannot ensure pipeline: render pass handle is null.");
 		return;
@@ -250,12 +250,12 @@ void VulkanContext::Impl::EnsurePipeline(
 	}
 
 	auto passIt = pipelineCache.find(renderPass);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (passIt != pipelineCache.end()) {
 		auto cachedPipelineIt = passIt->second.find(*key);
 		if (cachedPipelineIt != passIt->second.end()) {
 			VulkanPipeline& cached = cachedPipelineIt->second;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (cached.pipeline != VK_NULL_HANDLE && cached.layout != VK_NULL_HANDLE) {
 				return;
 			}
@@ -266,13 +266,13 @@ void VulkanContext::Impl::EnsurePipeline(
 				if (cached.pipeline != VK_NULL_HANDLE) {
 					vkDestroyPipeline(device, cached.pipeline, nullptr);
 				}
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (cached.layout != VK_NULL_HANDLE) {
 					vkDestroyPipelineLayout(device, cached.layout, nullptr);
 				}
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 				for (size_t layoutIndex = 1; layoutIndex < cached.setLayouts.size(); ++layoutIndex) {
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 					if (cached.setLayouts[layoutIndex] != VK_NULL_HANDLE) {
 						vkDestroyDescriptorSetLayout(device, cached.setLayouts[layoutIndex], nullptr);
 					}
@@ -308,7 +308,7 @@ void VulkanContext::Impl::EnsurePipeline(
 	bool hasMeshStage = false;
 	bool hasTaskStage = false;
 	bool identityVariantLoadFailed = false;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (auto& stage : collection->stages) {
 		const Shader* shader = stage.shader.get();
 		if (shader) {
@@ -348,7 +348,7 @@ void VulkanContext::Impl::EnsurePipeline(
 			}
 
 			VkShaderModule shaderModule;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
 				TERRAENGINE_LOG(LogLevel::Error, "Failed to create shader module");
 				continue;
@@ -356,12 +356,12 @@ void VulkanContext::Impl::EnsurePipeline(
 
 			VkPipelineShaderStageCreateInfo stageInfo{};
 			stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (stage.stage == ShaderStage::Fragment) {
 				stageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 			}
 			else if (stage.stage == ShaderStage::Mesh) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (!meshShaderSupported) {
 					TERRAENGINE_LOG(LogLevel::Error, "Cannot build mesh pipeline because mesh shader support is unavailable on this device.");
 					vkDestroyShaderModule(device, shaderModule, nullptr);
@@ -371,7 +371,7 @@ void VulkanContext::Impl::EnsurePipeline(
 				hasMeshStage = true;
 			}
 			else if (stage.stage == ShaderStage::Task) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (!taskShaderSupported) {
 					TERRAENGINE_LOG(LogLevel::Error, "Cannot build task shader stage because task shader support is unavailable on this device.");
 					vkDestroyShaderModule(device, shaderModule, nullptr);
@@ -400,13 +400,13 @@ void VulkanContext::Impl::EnsurePipeline(
 		return;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (shaderStages.empty()) {
 		TERRAENGINE_LOG(LogLevel::Error, "No shader stages available to build pipeline");
 		return;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!hasMeshStage) {
 		TERRAENGINE_LOG(LogLevel::Error, "Graphics pipeline must include a mesh stage in this renderer.");
 		for (auto& stage : shaderStages) {
@@ -415,7 +415,7 @@ void VulkanContext::Impl::EnsurePipeline(
 		return;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (hasTaskStage && !hasMeshStage) {
 		TERRAENGINE_LOG(LogLevel::Error, "Shader collection includes a task stage without a mesh stage.");
 		for (auto& stage : shaderStages) {
@@ -428,9 +428,9 @@ void VulkanContext::Impl::EnsurePipeline(
 	std::vector<std::vector<DescriptorBinding>> bindingsPerSet;
 	std::vector<VkPushConstantRange> pushConstants;
 	bool supportsDefaultPushConstants = false;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!BuildPipelineLayouts(*collection, setLayouts, bindingsPerSet, pushConstants, supportsDefaultPushConstants)) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (auto& stage : shaderStages) {
 			vkDestroyShaderModule(device, stage.module, nullptr);
 		}
@@ -549,16 +549,16 @@ void VulkanContext::Impl::EnsurePipeline(
 	pipelineLayoutInfo.pPushConstantRanges = pushConstants.data();
 
 	VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (size_t layoutIndex = 1; layoutIndex < setLayouts.size(); ++layoutIndex) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (setLayouts[layoutIndex] != VK_NULL_HANDLE) {
 				vkDestroyDescriptorSetLayout(device, setLayouts[layoutIndex], nullptr);
 			}
 		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (auto& stage : shaderStages) {
 			vkDestroyShaderModule(device, stage.module, nullptr);
 		}
@@ -570,14 +570,14 @@ void VulkanContext::Impl::EnsurePipeline(
 	vrsState.sType = VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR;
 	vrsState.fragmentSize = { 1, 1 };
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vrsFeatures.primitiveFragmentShadingRate) {
 		vrsState.combinerOps[0] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MIN_KHR;
 	} else {
 		vrsState.combinerOps[0] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (UsesVrsAttachment()) {
 		vrsState.combinerOps[1] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MIN_KHR;
 	} else {
@@ -603,17 +603,17 @@ void VulkanContext::Impl::EnsurePipeline(
 	pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
 
 	VkPipeline graphicsPipeline = VK_NULL_HANDLE;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (size_t layoutIndex = 1; layoutIndex < setLayouts.size(); ++layoutIndex) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (setLayouts[layoutIndex] != VK_NULL_HANDLE) {
 				vkDestroyDescriptorSetLayout(device, setLayouts[layoutIndex], nullptr);
 			}
 		}
 		vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (auto& stage : shaderStages) {
 			vkDestroyShaderModule(device, stage.module, nullptr);
 		}
@@ -621,7 +621,7 @@ void VulkanContext::Impl::EnsurePipeline(
 		return;
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (auto& stage : shaderStages) {
 		vkDestroyShaderModule(device, stage.module, nullptr);
 	}

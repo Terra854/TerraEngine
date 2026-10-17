@@ -609,6 +609,17 @@ namespace TerraEngine::Renderer {
 		};
 	}
 
+	// Read-only provenance of the exact native image accepted for a backend
+	// capture. Synthetic results leave this absent because they own no target.
+	struct RenderCaptureBackendTargetObservation
+	{
+		std::uint64_t rendererSessionGeneration = 0;
+		std::uint64_t targetGeneration = 0;
+		std::uint32_t sourceWidth = 0;
+		std::uint32_t sourceHeight = 0;
+		bool dedicatedCaptureTarget = false;
+	};
+
 	struct RenderCaptureResult
 	{
 		std::string requestId;
@@ -626,6 +637,7 @@ namespace TerraEngine::Renderer {
 		bool backendReadback = false;
 		bool deterministicFallback = false;
 		bool pendingAsync = false;
+		std::optional<RenderCaptureBackendTargetObservation> backendTarget;
 		std::vector<std::string> warnings;
 	};
 
@@ -2921,7 +2933,7 @@ namespace TerraEngine::Renderer {
 	struct ShadowCasterStamp;
 }
 
-// struct RenderSettings groups related state and operations so callers have one documented contract.
+
 struct RenderSettings
 {
 	std::uint32_t shadowResolution = 2048u;
@@ -2994,7 +3006,7 @@ struct SkyRuntimeState
 };
 
 // Compact per-frame sky payload submitted to the renderer background pass.
-// struct FrameSkyData groups related state and operations so callers have one documented contract.
+
 struct FrameSkyData
 {
 	bool renderBackground = false;
@@ -3011,7 +3023,7 @@ struct FrameSkyData
 	TerraEngine::UUID textureId = TerraEngine::EMPTY_UUID;
 };
 
-// ClampSkyTint is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 inline glm::vec3 ClampSkyTint(const glm::vec3& tint)
 {
 	return glm::clamp(tint, glm::vec3(0.0f), glm::vec3(4.0f));
@@ -3033,7 +3045,7 @@ inline float ClampSkyRotationOffset(float rotationOffsetDegrees)
 		: 0.0f;
 }
 
-// MakeDefaultSceneRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 inline SceneRenderSettings MakeDefaultSceneRenderSettings()
 {
 	SceneRenderSettings settings;
@@ -3043,7 +3055,7 @@ inline SceneRenderSettings MakeDefaultSceneRenderSettings()
 	return settings;
 }
 
-// SanitizeSceneRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 inline SceneRenderSettings SanitizeSceneRenderSettings(const SceneRenderSettings& input)
 {
 	SceneRenderSettings sanitized = input;
@@ -3053,7 +3065,7 @@ inline SceneRenderSettings SanitizeSceneRenderSettings(const SceneRenderSettings
 	return sanitized;
 }
 
-// struct RenderItemRecord groups related state and operations so callers have one documented contract.
+
 struct RenderItemRecord
 {
 	TerraEngine::UUID meshId;
@@ -3227,7 +3239,7 @@ struct ShadowDrawList
 	}
 };
 
-// struct PushConstants groups related state and operations so callers have one documented contract.
+
 struct PushConstants
 {
 	glm::mat4 viewProj;
@@ -3277,7 +3289,7 @@ inline constexpr std::uint32_t kLightingClusterDimY = 9u;
 inline constexpr std::uint32_t kLightingClusterDimZ = 24u;
 
 // Compact light payload uploaded once per frame and consumed by forward shaders.
-// struct alignas groups related state and operations so callers have one documented contract.
+
 struct alignas(16) GPULight
 {
 	glm::vec4 positionAndType = glm::vec4(0.0f);       // xyz = position, w = type enum value
@@ -3320,7 +3332,7 @@ struct alignas(16) GPULightAnalysisRecord
 static_assert(sizeof(GPULightAnalysisRecord) == 16, "GPU light analysis layout changed; update shader mirrors.");
 
 // Cluster table entry mapping one cluster to a segment of the flat light-index list.
-// struct alignas groups related state and operations so callers have one documented contract.
+
 struct alignas(16) ClusterData
 {
 	std::uint32_t offset = 0u;
@@ -3637,7 +3649,7 @@ struct ShadowResourceAssignmentDiagnostic
 	bool invalidatedThisFrame = false;
 };
 
-// struct FrameBudgetDiagnosticsSnapshot groups related state and operations so callers have one documented contract.
+
 struct FrameBudgetDiagnosticsSnapshot
 {
 	RenderViewType viewType = RenderViewType::Game;
@@ -3697,7 +3709,7 @@ struct FrameBudgetDiagnosticsSnapshot
 	bool valid = false;
 };
 
-// struct LightingDiagnosticEntry groups related state and operations so callers have one documented contract.
+
 struct LightingDiagnosticEntry
 {
 	LightingDiagnosticCategory category = LightingDiagnosticCategory::Budget;
@@ -3707,7 +3719,7 @@ struct LightingDiagnosticEntry
 	std::string recommendedAction;
 };
 
-// struct LightingDiagnosticsSnapshot groups related state and operations so callers have one documented contract.
+
 struct LightingDiagnosticsSnapshot
 {
 	RenderViewType viewType = RenderViewType::Game;
@@ -3759,7 +3771,7 @@ struct UIImageRun
 	float cornerRadius = 0.0f;
 };
 
-// struct UIRenderBatch groups related state and operations so callers have one documented contract.
+
 struct UIRenderBatch
 {
 	glm::vec2 viewportSize = glm::vec2(0.0f, 0.0f);
@@ -3768,7 +3780,7 @@ struct UIRenderBatch
 	std::vector<UITextRun> textRuns;
 	std::vector<UIImageRun> imageRuns;
 
-	// Append is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void Append(const UIRenderBatch& other)
 	{
 		if (viewportSize.x <= 0.0f || viewportSize.y <= 0.0f)
@@ -3815,7 +3827,7 @@ struct VirtualGeometryRetainedGpuEvidence
 	std::vector<VirtualGeometryGpuFallbackRecord> fallbackRecords;
 };
 
-// struct RenderViewBuildState groups related state and operations so callers have one documented contract.
+
 struct RenderViewBuildState
 {
 	// Every view submitted from this value shares one immutable frame identity.
@@ -3940,7 +3952,7 @@ struct RenderViewBuildState
 	UIRenderBatch uiBatch;
 };
 
-// struct RenderOutputRequest groups related state and operations so callers have one documented contract.
+
 struct RenderOutputRequest
 {
 	// Describes one renderer output before command recording starts. Today the
@@ -3953,7 +3965,7 @@ struct RenderOutputRequest
 	std::uint32_t outputId = 0u;
 };
 
-// struct RenderSnapshotHandle groups related state and operations so callers have one documented contract.
+
 struct RenderSnapshotHandle
 {
 	// A handle points at one fixed slice inside each fixed-stride per-frame GPU
@@ -3972,7 +3984,7 @@ struct RenderSnapshotHandle
 	bool valid = false;
 };
 
-// struct RenderSnapshotOwnerSummary groups related state and operations so callers have one documented contract.
+
 struct RenderSnapshotOwnerSummary
 {
 	// Diagnostics copy the ownership result by value after a frame completes.
@@ -3991,7 +4003,7 @@ struct RenderSnapshotOwnerSummary
 	bool indirectDrawsIsolated = false;
 };
 
-// struct RenderSnapshotFallbackEvent groups related state and operations so callers have one documented contract.
+
 struct RenderSnapshotFallbackEvent
 {
 	// Fallback events are exceptional paths. Normal warmed-up rendering should
@@ -4005,7 +4017,7 @@ struct RenderSnapshotFallbackEvent
 	bool required = true;
 };
 
-// struct RenderSnapshotDiagnosticsSnapshot groups related state and operations so callers have one documented contract.
+
 struct RenderSnapshotDiagnosticsSnapshot
 {
 	// Snapshot diagnostics are cheap CPU-side counters and owner records. They
@@ -4025,7 +4037,7 @@ struct RenderSnapshotDiagnosticsSnapshot
 };
 
 // GPU-facing frustum/camera payload consumed by the task shader path.
-// struct alignas groups related state and operations so callers have one documented contract.
+
 struct alignas(16) FrameCullingDataGPU
 {
 	std::array<glm::vec4, 6> frustumPlanes{};
@@ -4050,7 +4062,7 @@ struct alignas(16) FrameCullingDataGPU
 static_assert(sizeof(FrameCullingDataGPU) == 336, "Frame culling payload must stay tightly packed for GPU uploads.");
 
 // GPU counters written by task shader atomic operations per view/frame slot.
-// struct alignas groups related state and operations so callers have one documented contract.
+
 struct alignas(16) MeshletCullingCountersGPU
 {
 	std::uint32_t meshletsTotal = 0u;

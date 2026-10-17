@@ -5,7 +5,7 @@
 
 #include "VulkanContextSource.h"
 
-// VulkanContext::PresentEditor is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 	std::function<void()> prepareUI,
 	std::function<void(void*)> renderUI) {
@@ -466,9 +466,16 @@ void VulkanContext::Impl::InitEditorMode() {
 	CreateOffscreenResources(gameView);
 }
 
-// VulkanContext::Impl::CreateOffscreenResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::DestroyOffscreenResourceSet(OffscreenResources& resources)
 {
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	if (resources.image != VK_NULL_HANDLE && resources.image == readbackValidationSourceImage) {
+		readbackValidationSnapshot.sourceImageDestroyObserved = true;
+		readbackValidationSnapshot.sourceImageDestroyedBeforeRetirement |= HasInFlightReadbackForImage(resources.image);
+		RecordReadbackValidationEvent(TerraEngine::Renderer::Vulkan::ReadbackValidationEventKind::SourceImageDestroyed);
+	}
+#endif
 	if (resources.sampler != VK_NULL_HANDLE) vkDestroySampler(device, resources.sampler, nullptr);
 	if (resources.framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, resources.framebuffer, nullptr);
 	DestroyConventionalVisibilityIdentityAttachment(resources.visibilityIdentity);
@@ -500,7 +507,7 @@ void VulkanContext::Impl::DrainRetiredOffscreenResources()
 	}
 }
 
-// VulkanContext::Impl::CreateOffscreenResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkExtent2D requestedExtent) {
 	// Keep the allocation/replacement cost visible beneath the caller's broader
 	// target-check marker. Driver allocation stalls can otherwise be mistaken for
@@ -530,7 +537,7 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 		return;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (offscreenColorFormat == VK_FORMAT_UNDEFINED) {
 			// Scene and game views are sampled by the editor after rendering and may
 			// be copied into MCP capture staging buffers. The selected format must
@@ -543,25 +550,25 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 			VK_FORMAT_R8G8B8A8_UNORM
 		};
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (VkFormat candidate : candidates) {
 			VkFormatProperties properties{};
 			vkGetPhysicalDeviceFormatProperties(physicalDevice, candidate, &properties);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if ((properties.optimalTilingFeatures & requiredFeatures) == requiredFeatures) {
 				offscreenColorFormat = candidate;
 				break;
 			}
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (offscreenColorFormat == VK_FORMAT_UNDEFINED) {
 				TERRAENGINE_LOG(LogLevel::Warning, "No sampled, copyable color-attachment format reported for editor offscreen rendering; falling back to R8G8B8A8_UNORM.");
 				offscreenColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
 			}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (offscreenRenderPass == VK_NULL_HANDLE) {
 		if (UsesVrsAttachment()) {
 			VkAttachmentDescription2 colorAttachment{};
@@ -666,7 +673,7 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 			renderPassInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
 			renderPassInfo.pDependencies = dependencies.data();
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (vkCreateRenderPass2(device, &renderPassInfo, nullptr, &offscreenRenderPass) != VK_SUCCESS) {
 				TERRAENGINE_LOG(LogLevel::Error, "failed to create offscreen render pass 2!");
 				return;
@@ -773,7 +780,7 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 			renderPassInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
 			renderPassInfo.pDependencies = dependencies.data();
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &offscreenRenderPass) != VK_SUCCESS) {
 				TERRAENGINE_LOG(LogLevel::Error, "failed to create offscreen render pass!");
 				return;
@@ -870,7 +877,7 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 		candidate.visibilityIdentity.view,
 		candidate.depthView
 	};
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (UsesVrsAttachment()) {
 		fbAttachments.push_back(vrs.view);
 	}
@@ -929,7 +936,7 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 	DrainRetiredOffscreenResources();
 }
 
-// VulkanContext::Impl::RecreateOffscreenResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::RecreateOffscreenResources() {
 	if (deviceLost) {
 		return;
@@ -946,7 +953,7 @@ void VulkanContext::Impl::RecreateOffscreenResources() {
 	}
 }
 
-// VulkanContext::Impl::ClearResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::ClearResources() {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
@@ -998,19 +1005,19 @@ void VulkanContext::Impl::ClearResources() {
 	DestroyShadowAuthoredPagePayloads(); // The existing device-idle proof covers every page buffer.
 	ReleaseAmbiguousUploadsAfterIdle();
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (auto& [id, mesh] : meshCache) {
 		if (!mesh.descriptorSetsByLayout.empty() && descriptorPool != VK_NULL_HANDLE) {
 			std::vector<VkDescriptorSet> descriptorSets;
 			descriptorSets.reserve(mesh.descriptorSetsByLayout.size());
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 			for (const auto& [layout, set] : mesh.descriptorSetsByLayout) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (set != VK_NULL_HANDLE) {
 					descriptorSets.push_back(set);
 				}
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!descriptorSets.empty()) {
 				vkFreeDescriptorSets(device, descriptorPool, static_cast<uint32_t>(descriptorSets.size()), descriptorSets.data());
 			}
@@ -1094,7 +1101,7 @@ void VulkanContext::Impl::ClearResources() {
 	DestroyVulkanVirtualGeometryProductionDecodePipeline();
 	DestroyVulkanVirtualGeometryVisibilityPipelines();
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (auto& [id, tex] : textureCache) {
 		vkDestroySampler(device, tex.sampler, nullptr);
 		vkDestroyImageView(device, tex.view, nullptr);
@@ -1103,15 +1110,15 @@ void VulkanContext::Impl::ClearResources() {
 	textureCache.clear();
 
 	auto DestroyVulkanImage = [&](VulkanImage& image) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (device && image.sampler != VK_NULL_HANDLE) {
 			vkDestroySampler(device, image.sampler, nullptr);
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (device && image.view != VK_NULL_HANDLE) {
 			vkDestroyImageView(device, image.view, nullptr);
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (image.image != VK_NULL_HANDLE && image.allocation != VK_NULL_HANDLE) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 		}
@@ -1122,84 +1129,84 @@ void VulkanContext::Impl::ClearResources() {
 	};
 
 	auto DestroyFramebuffer = [&](VkFramebuffer& framebuffer) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (framebuffer != VK_NULL_HANDLE) {
 			vkDestroyFramebuffer(device, framebuffer, nullptr);
 			framebuffer = VK_NULL_HANDLE;
 		}
 	};
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VkFramebuffer& framebuffer : directionalShadowFramebuffers) {
 		DestroyFramebuffer(framebuffer);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VkFramebuffer& framebuffer : spotShadowFramebuffers) {
 		DestroyFramebuffer(framebuffer);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VkFramebuffer& framebuffer : areaShadowFramebuffers) {
 		DestroyFramebuffer(framebuffer);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::array<VkFramebuffer, 6>& faceFramebuffers : pointShadowFaceFramebuffersBySlot) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (VkFramebuffer& framebuffer : faceFramebuffers) {
 			DestroyFramebuffer(framebuffer);
 		}
 	}
 
 	auto DestroyImageView = [&](VkImageView& imageView) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (imageView != VK_NULL_HANDLE) {
 			vkDestroyImageView(device, imageView, nullptr);
 			imageView = VK_NULL_HANDLE;
 		}
 	};
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::array<VkImageView, 6>& faceViews : pointShadowDepthFaceViewsBySlot) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (VkImageView& faceView : faceViews) {
-			DestroyImageView(faceView);
-		}
-	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (std::array<VkImageView, 6>& faceViews : pointShadowColorFaceViewsBySlot) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (VkImageView& faceView : faceViews) {
 			DestroyImageView(faceView);
 		}
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+	for (std::array<VkImageView, 6>& faceViews : pointShadowColorFaceViewsBySlot) {
+
+		for (VkImageView& faceView : faceViews) {
+			DestroyImageView(faceView);
+		}
+	}
+
+
 	for (VulkanImage& image : directionalShadowDepths) {
 		DestroyVulkanImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : directionalShadowColors) {
 		DestroyVulkanImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : spotShadowDepths) {
 		DestroyVulkanImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : spotShadowColors) {
 		DestroyVulkanImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : areaShadowDepths) {
 		DestroyVulkanImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : areaShadowColors) {
 		DestroyVulkanImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : pointShadowCubeDepths) {
 		DestroyVulkanImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : pointShadowCubeColors) {
 		DestroyVulkanImage(image);
 	}
@@ -1244,15 +1251,15 @@ void VulkanContext::Impl::ClearResources() {
 	brdfIntegrationTextureIndex = 0;
 
 	// Reset default texture descriptors to prevent stale views from being sampled if they were overwritten
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (defaultTexture.view != VK_NULL_HANDLE) {
 		UpdateGlobalTexture(0, defaultTexture);
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (defaultNormalTexture.view != VK_NULL_HANDLE) {
 		UpdateGlobalTexture(1, defaultNormalTexture);
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (defaultMaterialMaskTexture.view != VK_NULL_HANDLE) {
 		UpdateGlobalTexture(2, defaultMaterialMaskTexture);
 	}

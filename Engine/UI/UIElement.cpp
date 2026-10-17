@@ -14,13 +14,13 @@ namespace
 constexpr float kHoverAnimationSpeed = 6.0f;
 }
 
-// UIElement::Create is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 UIElement::Ptr UIElement::Create(UIElementType nextType)
 {
 	return std::make_shared<UIElement>(nextType);
 }
 
-// UIElement::CreateDefault is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 UIElement::Ptr UIElement::CreateDefault(UIElementType nextType)
 {
 	Ptr element = Create(nextType);
@@ -48,20 +48,20 @@ UIElement::Ptr UIElement::CreateDefault(UIElementType nextType)
 }
 
 UIElement::UIElement(UIElementType nextType)
-	// type is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	: type(nextType)
 	, typeName(ToString(nextType))
 {
 	RefreshDisplayStyle();
 }
 
-// UIElement::AddChild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UIElement::AddChild(const Ptr& child)
 {
 	InsertChild(children.size(), child);
 }
 
-// UIElement::InsertChild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+// Reject self/ancestor links before detaching the child to keep the tree acyclic.
 bool UIElement::InsertChild(std::size_t index, const Ptr& child)
 {
 	if (!child)
@@ -69,18 +69,18 @@ bool UIElement::InsertChild(std::size_t index, const Ptr& child)
 		return false;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (child.get() == this || child->IsAncestorOf(this))
 	{
 		return false;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (child->parent != nullptr && child->parent != this)
 	{
 		child->parent->RemoveChild(child);
 	}
-	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	else if (child->parent == this)
 	{
 		RemoveChild(child);
@@ -93,7 +93,7 @@ bool UIElement::InsertChild(std::size_t index, const Ptr& child)
 	return true;
 }
 
-// UIElement::RemoveChild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool UIElement::RemoveChild(const Ptr& child)
 {
 	if (!child)
@@ -102,7 +102,7 @@ bool UIElement::RemoveChild(const Ptr& child)
 	}
 
 	const auto iterator = std::find(children.begin(), children.end(), child);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (iterator == children.end())
 	{
 		return false;
@@ -114,7 +114,7 @@ bool UIElement::RemoveChild(const Ptr& child)
 	return true;
 }
 
-// UIElement::MoveChild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool UIElement::MoveChild(std::size_t fromIndex, std::size_t toIndex)
 {
 	if (fromIndex >= children.size() || toIndex >= children.size() || fromIndex == toIndex)
@@ -129,7 +129,7 @@ bool UIElement::MoveChild(std::size_t fromIndex, std::size_t toIndex)
 	return true;
 }
 
-// UIElement::ReparentTo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool UIElement::ReparentTo(const Ptr& newParent, std::size_t insertIndex)
 {
 	if (!newParent || newParent.get() == this || IsAncestorOf(newParent.get()))
@@ -138,7 +138,7 @@ bool UIElement::ReparentTo(const Ptr& newParent, std::size_t insertIndex)
 	}
 
 	Ptr self = shared_from_this();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (parent != nullptr)
 	{
 		parent->RemoveChild(self);
@@ -150,12 +150,12 @@ bool UIElement::ReparentTo(const Ptr& newParent, std::size_t insertIndex)
 	return newParent->InsertChild(resolvedIndex, self);
 }
 
-// UIElement::ClearChildren is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UIElement::ClearChildren()
 {
 	for (const Ptr& child : children)
 	{
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (child)
 		{
 			child->parent = nullptr;
@@ -165,7 +165,7 @@ void UIElement::ClearChildren()
 	dirty = true;
 }
 
-// UIElement::Clone is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 UIElement::Ptr UIElement::Clone() const
 {
 	Ptr clone = Create(type);
@@ -185,7 +185,7 @@ UIElement::Ptr UIElement::Clone() const
 	clone->dirty = dirty;
 	clone->visible = visible;
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const Ptr& child : children)
 	{
 		if (!child)
@@ -201,7 +201,7 @@ UIElement::Ptr UIElement::Clone() const
 	return clone;
 }
 
-// UIElement::FindById is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 UIElement::Ptr UIElement::FindById(std::string_view wantedId)
 {
 	if (id == wantedId)
@@ -209,7 +209,7 @@ UIElement::Ptr UIElement::FindById(std::string_view wantedId)
 		return shared_from_this();
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const Ptr& child : children)
 	{
 		if (!child)
@@ -218,7 +218,7 @@ UIElement::Ptr UIElement::FindById(std::string_view wantedId)
 		}
 
 		Ptr found = child->FindById(wantedId);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (found)
 		{
 			return found;
@@ -228,17 +228,17 @@ UIElement::Ptr UIElement::FindById(std::string_view wantedId)
 	return nullptr;
 }
 
-// UIElement::HasClass is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool UIElement::HasClass(std::string_view className) const
 {
 	return std::find(classList.begin(), classList.end(), className) != classList.end();
 }
 
-// UIElement::IsAncestorOf is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool UIElement::IsAncestorOf(const UIElement* candidate) const
 {
 	const UIElement* current = candidate;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	while (current != nullptr)
 	{
 		if (current == this)
@@ -251,7 +251,7 @@ bool UIElement::IsAncestorOf(const UIElement* candidate) const
 	return false;
 }
 
-// UIElement::GetDisplayLabel is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string UIElement::GetDisplayLabel() const
 {
 	if (!id.empty())
@@ -259,7 +259,7 @@ std::string UIElement::GetDisplayLabel() const
 		return typeName + " [" + id + "]";
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!text.empty())
 	{
 		return typeName + " \"" + text + "\"";
@@ -268,14 +268,14 @@ std::string UIElement::GetDisplayLabel() const
 	return typeName;
 }
 
-// UIElement::SetClassListFromString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UIElement::SetClassListFromString(std::string_view classText)
 {
 	classList.clear();
 
 	std::stringstream stream{ std::string(classText) };
 	std::string token;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	while (stream >> token)
 	{
 		classList.push_back(token);
@@ -284,11 +284,11 @@ void UIElement::SetClassListFromString(std::string_view classText)
 	dirty = true;
 }
 
-// UIElement::GetClassListAsString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string UIElement::GetClassListAsString() const
 {
 	std::string joined;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::size_t index = 0; index < classList.size(); ++index)
 	{
 		if (index > 0)
@@ -300,13 +300,13 @@ std::string UIElement::GetClassListAsString() const
 	return joined;
 }
 
-// UIElement::MarkDirty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UIElement::MarkDirty()
 {
 	dirty = true;
 
 	UIElement* current = parent;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	while (current != nullptr)
 	{
 		current->dirty = true;
@@ -314,11 +314,11 @@ void UIElement::MarkDirty()
 	}
 }
 
-// UIElement::ClearDirtyRecursive is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UIElement::ClearDirtyRecursive()
 {
 	dirty = false;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const Ptr& child : children)
 	{
 		if (child)
@@ -328,7 +328,7 @@ void UIElement::ClearDirtyRecursive()
 	}
 }
 
-// UIElement::SetVisible is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UIElement::SetVisible(bool nextVisible)
 {
 	if (visible == nextVisible)
@@ -340,36 +340,36 @@ void UIElement::SetVisible(bool nextVisible)
 	MarkDirty();
 }
 
-// UIElement::IsVisible is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool UIElement::IsVisible() const
 {
 	return visible;
 }
 
-// UIElement::SetHoverState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UIElement::SetHoverState(bool hovered)
 {
 	hoverActive_ = hovered;
 }
 
-// UIElement::AdvanceAnimation is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool UIElement::AdvanceAnimation(float deltaTime)
 {
 	const float previousBlend = hoverBlend_;
 	const float targetBlend = hoverActive_ ? 1.0f : 0.0f;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (hoverBlend_ < targetBlend)
 	{
 		hoverBlend_ = std::min(targetBlend, hoverBlend_ + (deltaTime * kHoverAnimationSpeed));
 	}
-	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	else if (hoverBlend_ > targetBlend)
 	{
 		hoverBlend_ = std::max(targetBlend, hoverBlend_ - (deltaTime * kHoverAnimationSpeed));
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (std::abs(hoverBlend_ - previousBlend) > 0.0001f)
 	{
 		RefreshDisplayStyle();
@@ -379,11 +379,11 @@ bool UIElement::AdvanceAnimation(float deltaTime)
 	return false;
 }
 
-// UIElement::AdvanceAnimationRecursive is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool UIElement::AdvanceAnimationRecursive(float deltaTime)
 {
 	bool changed = AdvanceAnimation(deltaTime);
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const Ptr& child : children)
 	{
 		if (child)
@@ -394,7 +394,7 @@ bool UIElement::AdvanceAnimationRecursive(float deltaTime)
 	return changed;
 }
 
-// UIElement::BuildTargetDisplayStyle is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 UIStyle UIElement::BuildTargetDisplayStyle() const
 {
 	UIStyle target = computedStyle;
@@ -402,7 +402,7 @@ UIStyle UIElement::BuildTargetDisplayStyle() const
 	return target;
 }
 
-// UIElement::RefreshDisplayStyle is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void UIElement::RefreshDisplayStyle()
 {
 	displayStyle = UIStyle::Lerp(computedStyle, BuildTargetDisplayStyle(), hoverBlend_);

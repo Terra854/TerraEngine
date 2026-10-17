@@ -163,7 +163,7 @@ bool VulkanContext::Impl::EnsureStaticShadowLoadRenderPass()
 			renderPassInfo.pSubpasses = &subpass;
 			renderPassInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
 			renderPassInfo.pDependencies = dependencies.data();
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &staticShadowLoadRenderPass) != VK_SUCCESS) {
 				TERRAENGINE_LOG(LogLevel::Warning, "failed to create shadow render pass");
 				staticShadowLoadRenderPass = VK_NULL_HANDLE;

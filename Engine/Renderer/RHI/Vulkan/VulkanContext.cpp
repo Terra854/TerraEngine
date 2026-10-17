@@ -55,7 +55,7 @@ std::vector<TerraEngine::Renderer::RendererEfficiencyEvidence> VulkanContext::Po
 	return rows;
 }
 
-// VulkanContext::Impl::ApplyFrameLightBudgets is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VulkanContext::Impl::LightBudgetApplicationResult
 VulkanContext::Impl::ApplyFrameLightBudgets(
 	const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
@@ -74,7 +74,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 
 	const std::uint32_t viewIndex = (viewType == RenderViewType::Scene) ? 1u : 0u;
 	ViewLightingTemporalState& viewState = lightingTemporalStateByView[viewIndex];
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ShouldResetTemporalViewState(viewState.valid, viewState.lastCameraLocalPosition, viewState.lastProjectionMatrix, presentation))
 	{
 		viewState.lights.clear();
@@ -86,13 +86,13 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 
 	const GpuLightAnalysisViewSnapshot previousGpuAnalysis = GetLatestGpuLightAnalysis(viewType);
 	const std::array<glm::vec4, 6> frustumPlanes = BuildFrustumPlanes(presentation.projectionMatrix * presentation.viewMatrix);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (previousGpuAnalysis.valid)
 	{
 		result.diagnostics.gpuVisibleCandidateCount = previousGpuAnalysis.visibleCandidateCount;
 	}
 
-	// struct UploadScoredCandidate groups related state and operations so callers have one documented contract.
+
 	struct UploadScoredCandidate
 	{
 		float score = 0.0f;
@@ -101,7 +101,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 
 	std::vector<UploadScoredCandidate> uploadScores;
 	uploadScores.reserve(presentation.lightCandidates.size());
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::size_t candidateIndex = 0; candidateIndex < presentation.lightCandidates.size(); ++candidateIndex)
 	{
 		UploadScoredCandidate entry{};
@@ -110,14 +110,14 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		uploadScores.push_back(entry);
 	}
 	std::stable_sort(uploadScores.begin(), uploadScores.end(), [](const UploadScoredCandidate& lhs, const UploadScoredCandidate& rhs) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (lhs.score == rhs.score)
 		{
 			return lhs.originalIndex < rhs.originalIndex;
 		}
 		return lhs.score > rhs.score;
 	});
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (uploadScores.size() > static_cast<std::size_t>(result.diagnostics.uploadedLightBudget))
 	{
 		uploadScores.resize(result.diagnostics.uploadedLightBudget);
@@ -127,14 +127,14 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 	});
 
 	result.uploadedCandidates.reserve(uploadScores.size());
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const UploadScoredCandidate& uploadScore : uploadScores)
 	{
 		result.uploadedCandidates.push_back(presentation.lightCandidates[uploadScore.originalIndex]);
 	}
 	result.diagnostics.uploadedLightCount = static_cast<std::uint32_t>(result.uploadedCandidates.size());
 	result.diagnostics.uploadedReductionOccurred = result.diagnostics.uploadedLightCount < result.diagnostics.candidateLightCount;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (result.diagnostics.uploadedReductionOccurred)
 	{
 		result.diagnostics.reductionCategory = LightingReductionCategory::Uploaded;
@@ -142,7 +142,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 
 	std::vector<ScoredCandidate> scoredCandidates;
 	scoredCandidates.reserve(result.uploadedCandidates.size());
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::size_t uploadedIndex = 0; uploadedIndex < result.uploadedCandidates.size(); ++uploadedIndex)
 	{
 		const FrameLightCandidate& candidate = result.uploadedCandidates[uploadedIndex];
@@ -154,7 +154,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		scored.baseScore += scored.screenInfluence * 4000.0f;
 
 		const auto gpuIt = previousGpuAnalysis.recordsByLightId.find(candidate.lightId);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (gpuIt != previousGpuAnalysis.recordsByLightId.end())
 		{
 			scored.gpuVisibilityScore = std::max(gpuIt->second.gpuVisibilityScore, 0.0f);
@@ -162,7 +162,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		}
 
 		const auto temporalIt = viewState.lights.find(candidate.lightId);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (temporalIt != viewState.lights.end() && temporalIt->second.retainedLastFrame)
 		{
 			const float stabilityWeight = 0.08f + std::clamp(candidate.stabilityPreference, 0.0f, 1.0f) * 0.20f;
@@ -176,7 +176,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 
 	std::vector<ScoredCandidate> sortedCandidates = scoredCandidates;
 	std::stable_sort(sortedCandidates.begin(), sortedCandidates.end(), [](const ScoredCandidate& lhs, const ScoredCandidate& rhs) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (lhs.score == rhs.score)
 		{
 			return lhs.uploadedIndex < rhs.uploadedIndex;
@@ -188,7 +188,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 	retainedIndices.reserve(std::min<std::size_t>(sortedCandidates.size(), result.diagnostics.retainedLightBudget));
 	std::uint32_t retainedSpecialCount = 0u;
 	bool specialBudgetReduced = false;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const ScoredCandidate& scored : sortedCandidates)
 	{
 		if (retainedIndices.size() >= static_cast<std::size_t>(result.diagnostics.retainedLightBudget))
@@ -198,7 +198,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 
 		const FrameLightCandidate& candidate = result.uploadedCandidates[scored.uploadedIndex];
 		const bool specialCost = (candidate.candidateFlags & kFrameLightCandidateFlagSpecialCost) != 0u;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (specialCost && retainedSpecialCount >= result.diagnostics.specialLightBudget)
 		{
 			specialBudgetReduced = true;
@@ -206,7 +206,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		}
 
 		retainedIndices.push_back(scored.uploadedIndex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (specialCost)
 		{
 			retainedSpecialCount += 1u;
@@ -215,14 +215,14 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 	std::stable_sort(retainedIndices.begin(), retainedIndices.end());
 
 	std::vector<bool> retainedMask(result.uploadedCandidates.size(), false);
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::size_t retainedIndex : retainedIndices)
 	{
 		retainedMask[retainedIndex] = true;
 	}
 
 	result.retainedLights.reserve(retainedIndices.size());
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::size_t retainedIndex : retainedIndices)
 	{
 		result.retainedLights.push_back(result.uploadedCandidates[retainedIndex]);
@@ -233,13 +233,13 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 	result.diagnostics.specialReductionOccurred = specialBudgetReduced;
 	result.diagnostics.budgetReductionOccurred = result.diagnostics.retainedLightCount < result.diagnostics.candidateLightCount
 		|| result.diagnostics.specialReductionOccurred;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (result.diagnostics.reductionCategory == LightingReductionCategory::None
 		&& result.diagnostics.specialReductionOccurred)
 	{
 		result.diagnostics.reductionCategory = LightingReductionCategory::Special;
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (result.diagnostics.reductionCategory == LightingReductionCategory::None
 		&& result.diagnostics.retainedLightCount < result.diagnostics.uploadedLightCount)
 	{
@@ -248,7 +248,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 
 	std::vector<TerraEngine::UUID> previousRetainedLights;
 	previousRetainedLights.reserve(viewState.lights.size());
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& [lightId, lightState] : viewState.lights)
 	{
 		if (lightState.retainedLastFrame)
@@ -258,7 +258,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 	}
 
 	std::uint32_t retainedReplacementCount = 0u;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const ScoredCandidate& scored : scoredCandidates)
 	{
 		if (!retainedMask[scored.uploadedIndex])
@@ -267,17 +267,17 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		}
 
 		const FrameLightCandidate& candidate = result.uploadedCandidates[scored.uploadedIndex];
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (scored.stabilityBiasApplied)
 		{
 			result.diagnostics.stabilityBiasAppliedCount += 1u;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if ((candidate.candidateFlags & kFrameLightCandidateFlagDirectional) != 0u)
 		{
 			result.diagnostics.retainedDirectionalLightCount += 1u;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (candidate.gpuLight.extraParams.w > 0.0f)
 		{
 			result.diagnostics.retainedAuthoredPriorityLightCount += 1u;
@@ -285,12 +285,12 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 
 		const auto temporalIt = viewState.lights.find(candidate.lightId);
 		const bool retainedPreviously = temporalIt != viewState.lights.end() && temporalIt->second.retainedLastFrame;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!retainedPreviously)
 		{
 			retainedReplacementCount += 1u;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if ((candidate.candidateFlags & kFrameLightCandidateFlagShadowCapable) != 0u)
 		{
 			result.diagnostics.shadowEligibleLightCount += 1u;
@@ -299,11 +299,11 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 	result.diagnostics.retainedLightReplacementCount = retainedReplacementCount;
 
 	std::uint32_t retainedChurnCount = 0u;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const TerraEngine::UUID& previousLightId : previousRetainedLights)
 	{
 		bool stillRetained = false;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (std::size_t retainedIndex : retainedIndices)
 		{
 			if (result.uploadedCandidates[retainedIndex].lightId == previousLightId)
@@ -312,7 +312,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 				break;
 			}
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!stillRetained)
 		{
 			retainedChurnCount += 1u;
@@ -322,7 +322,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 	result.diagnostics.retainedLightChurnCount = retainedChurnCount;
 
 	std::vector<ShadowWinner> shadowWinners;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const ScoredCandidate& scored : scoredCandidates)
 	{
 		if (!retainedMask[scored.uploadedIndex])
@@ -331,7 +331,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		}
 
 		const FrameLightCandidate& candidate = result.uploadedCandidates[scored.uploadedIndex];
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if ((candidate.candidateFlags & kFrameLightCandidateFlagShadowCapable) == 0u)
 		{
 			continue;
@@ -341,7 +341,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		winner.score = scored.score;
 		winner.uploadedIndex = scored.uploadedIndex;
 		winner.slotIndex = kMaxShadowResourceSlots;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (std::uint32_t previousSlotIndex = 0u; previousSlotIndex < MAX_SHADOW_RESOURCE_SLOTS; ++previousSlotIndex)
 		{
 			if (viewState.previousShadowOwners[previousSlotIndex] == candidate.lightId)
@@ -354,7 +354,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		}
 
 		const auto temporalIt = viewState.lights.find(candidate.lightId);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (temporalIt != viewState.lights.end() && temporalIt->second.shadowedLastFrame)
 		{
 			winner.score += 1500.0f;
@@ -363,14 +363,14 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		shadowWinners.push_back(winner);
 	}
 	std::stable_sort(shadowWinners.begin(), shadowWinners.end(), [](const ShadowWinner& lhs, const ShadowWinner& rhs) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (lhs.score == rhs.score)
 		{
 			return lhs.uploadedIndex < rhs.uploadedIndex;
 		}
 		return lhs.score > rhs.score;
 	});
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (shadowWinners.size() > static_cast<std::size_t>(result.diagnostics.shadowLightBudget))
 	{
 		shadowWinners.resize(result.diagnostics.shadowLightBudget);
@@ -382,11 +382,11 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 	std::vector<std::uint32_t> assignedShadowSlots(result.uploadedCandidates.size(), kMaxShadowResourceSlots);
 	std::array<TerraEngine::UUID, MAX_SHADOW_RESOURCE_SLOTS> currentShadowOwners{};
 	std::array<std::uint32_t, 4> assignedShadowTypeCounts{};
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::size_t winnerOrder = 0u; winnerOrder < shadowWinners.size(); ++winnerOrder)
 	{
 		ShadowWinner& winner = shadowWinners[winnerOrder];
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (winner.uploadedIndex >= result.uploadedCandidates.size())
 		{
 			continue;
@@ -394,7 +394,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 
 		const FrameLightCandidate& candidate = result.uploadedCandidates[winner.uploadedIndex];
 		const std::uint32_t lightType = GetLightType(candidate.gpuLight);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (lightType >= assignedShadowTypeCounts.size())
 		{
 			winner.slotIndex = kMaxShadowResourceSlots;
@@ -404,7 +404,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		std::uint32_t& typedSlotCounter = assignedShadowTypeCounts[lightType];
 		winner.slotIndex = typedSlotCounter;
 		typedSlotCounter += 1u;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (winner.slotIndex >= MAX_SHADOW_RESOURCE_SLOTS)
 		{
 			continue;
@@ -412,7 +412,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		shadowedMask[winner.uploadedIndex] = true;
 		shadowReuseMask[winner.uploadedIndex] = winner.reuseBonusApplied;
 		assignedShadowSlots[winner.uploadedIndex] = winner.slotIndex;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (winnerOrder < currentShadowOwners.size())
 		{
 			currentShadowOwners[winnerOrder] = candidate.lightId;
@@ -420,7 +420,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 				viewState.previousShadowOwners[winnerOrder] != TerraEngine::EMPTY_UUID
 				&& viewState.previousShadowOwners[winnerOrder] != candidate.lightId;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (winner.reuseBonusApplied)
 		{
 			result.diagnostics.shadowReuseCount += 1u;
@@ -428,17 +428,17 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 	}
 	result.diagnostics.shadowReplacementCount = static_cast<std::uint32_t>(std::count(shadowReplacementMask.begin(), shadowReplacementMask.end(), true));
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (FrameLightCandidate& retainedCandidate : result.retainedLights)
 	{
 		retainedCandidate.gpuLight.shadowAndPadding.x = 0.0f;
 		retainedCandidate.gpuLight.shadowAndPadding.y = -1.0f;
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::size_t retainedVectorIndex = 0u; retainedVectorIndex < retainedIndices.size(); ++retainedVectorIndex)
 	{
 		const std::size_t uploadedIndex = retainedIndices[retainedVectorIndex];
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (shadowedMask[uploadedIndex])
 		{
 			result.retainedLights[retainedVectorIndex].gpuLight.shadowAndPadding.x = 1.0f;
@@ -447,7 +447,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		}
 
 		const FrameLightCandidate& retainedCandidate = result.uploadedCandidates[uploadedIndex];
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if ((retainedCandidate.candidateFlags & kFrameLightCandidateFlagShadowCapable) != 0u)
 		{
 			const std::uint32_t slotIndex = assignedShadowSlots[uploadedIndex] < kMaxShadowResourceSlots
@@ -484,7 +484,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 				: ShadowRefreshReason::Unavailable;
 			assignment.refreshedThisFrame = assignment.assigned;
 			const auto temporalIt = viewState.lights.find(retainedCandidate.lightId);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (temporalIt != viewState.lights.end())
 			{
 				assignment.framesSinceLastSeen = frameSerial - temporalIt->second.lastSeenFrameSerial;
@@ -509,14 +509,14 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		result.diagnostics.allocated2DRegionCount
 		+ result.diagnostics.allocatedPointRegionCount;
 	result.diagnostics.estimatedShadowMemoryBytes = 0u;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const ShadowResourceAssignmentDiagnostic& assignment : result.diagnostics.shadowAssignments)
 	{
 		result.diagnostics.estimatedShadowMemoryBytes += assignment.estimatedBytes;
 	}
 	result.diagnostics.cacheRefreshCount = result.diagnostics.shadowedLightCount;
 	result.diagnostics.degradedShadowCount = 0u;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const ShadowResourceAssignmentDiagnostic& assignment : result.diagnostics.shadowAssignments)
 	{
 		if (assignment.degradationReason != ShadowDegradationReason::None)
@@ -525,21 +525,21 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		}
 	}
 	result.diagnostics.shadowReductionOccurred = result.diagnostics.shadowedLightCount < result.diagnostics.shadowEligibleLightCount;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (result.diagnostics.reductionCategory == LightingReductionCategory::None
 		&& result.diagnostics.shadowReductionOccurred)
 	{
 		result.diagnostics.reductionCategory = LightingReductionCategory::Shadow;
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (auto& [lightId, lightState] : viewState.lights)
 	{
 		lightState.retainedLastFrame = false;
 		lightState.shadowedLastFrame = false;
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const ScoredCandidate& scored : scoredCandidates)
 	{
 		const FrameLightCandidate& candidate = result.uploadedCandidates[scored.uploadedIndex];
@@ -552,7 +552,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 		lightState.shadowedLastFrame = shadowedMask[scored.uploadedIndex];
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (auto stateIt = viewState.lights.begin(); stateIt != viewState.lights.end(); )
 	{
 		if ((frameSerial - stateIt->second.lastSeenFrameSerial) > kTemporalStateHistoryFrames)
@@ -575,7 +575,7 @@ VulkanContext::Impl::ApplyFrameLightBudgets(
 	return result;
 }
 
-// VulkanContext::Impl::MarkDeviceLost is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::MarkDeviceLost(VkResult result, std::string_view operation)
 {
 	if (result != VK_ERROR_DEVICE_LOST)
@@ -811,14 +811,14 @@ void VulkanContext::SetVariableRateShadingEnabled(bool enabled)
 	impl->vrsAttachmentRuntimeEnabled = enabled;
 }
 
-// VulkanContext::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Initialize(WindowSystem& windowSystem) {
 	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	// Build the Vulkan instance/device chain and prime per-frame resources.
 	impl->InitVulkan(windowSystem);
 }
 
-// VulkanContext::Resize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Resize(int width, int height, ViewType view) {
 	if (impl) {
 		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
@@ -828,7 +828,7 @@ void VulkanContext::Resize(int width, int height, ViewType view) {
 	}
 }
 
-// VulkanContext::BeginFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::ArmEmptyFrameValidation(TerraEngine::Renderer::Vulkan::EmptyFrameValidationRequest request)
 {
 #if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
@@ -1162,9 +1162,9 @@ void VulkanContext::BeginFrame() {
 	{
 		std::lock_guard<std::mutex> lock(impl->statsMutex);
 		impl->latestRenderSnapshotDiagnostics = impl->pendingRenderSnapshotDiagnostics;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (RenderSnapshotOwnerSummary& owner : impl->latestRenderSnapshotDiagnostics.ownerSummaries) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (owner.state == RenderSnapshotState::Submitted || owner.state == RenderSnapshotState::Recorded) {
 				owner.state = RenderSnapshotState::Completed;
 			}
@@ -1189,7 +1189,7 @@ void VulkanContext::BeginFrame() {
 				extras.clear();
 			}
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
 			impl->DiscardRecordedShadowWrites(impl->currentFrame);
 			impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
@@ -1206,7 +1206,7 @@ void VulkanContext::BeginFrame() {
 		impl->pendingRenderSnapshotDiagnostics = {};
 		impl->pendingRenderSnapshotDiagnostics.valid = true;
 		impl->pendingRenderSnapshotDiagnostics.maxSnapshotsPerFrame = VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (impl->currentFrame < impl->retiredBuffersByFrame.size()) {
 				auto& retiredBuffers = impl->retiredBuffersByFrame[impl->currentFrame];
 				for (VulkanBuffer& retiredBuffer : retiredBuffers) {
@@ -1324,7 +1324,7 @@ void VulkanContext::BeginFrame() {
 		}
 	}
 	// Reset usage counts for this frame
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (impl->currentFrame < impl->workerBufferUsage.size()) {
 		std::fill(impl->workerBufferUsage[impl->currentFrame].begin(), impl->workerBufferUsage[impl->currentFrame].end(), 0);
 	} else if (impl->workerBufferUsage.size() <= impl->currentFrame) {
@@ -1429,7 +1429,7 @@ void VulkanContext::BeginFrame() {
 }
 
 
-// VulkanContext::SetGlobalTaskShaderCullingEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::SetGlobalTaskShaderCullingEnabled(bool enabled) {
 	if (impl) {
 		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
@@ -1437,7 +1437,7 @@ void VulkanContext::SetGlobalTaskShaderCullingEnabled(bool enabled) {
 	}
 }
 
-// VulkanContext::IsTaskShaderSupported is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::IsTaskShaderSupported() const {
 	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	return impl != nullptr && impl->taskShaderSupported;
@@ -1449,7 +1449,7 @@ bool VulkanContext::SupportsVirtualGeometryMeshShaderRoute() const
 	return impl != nullptr && impl->meshShaderSupported;
 }
 
-// VulkanContext::GetLatestRenderStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 RenderStatsSnapshot VulkanContext::GetLatestRenderStats(RenderViewType viewType) const {
 	if (!impl) {
 		RenderStatsSnapshot snapshot{};
@@ -1459,7 +1459,7 @@ RenderStatsSnapshot VulkanContext::GetLatestRenderStats(RenderViewType viewType)
 	return impl->GetLatestStats(viewType);
 }
 
-// VulkanContext::GetLatestFrameBudgetDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 FrameBudgetDiagnosticsSnapshot VulkanContext::GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const {
 	if (!impl) {
 		FrameBudgetDiagnosticsSnapshot snapshot{};
@@ -1469,7 +1469,7 @@ FrameBudgetDiagnosticsSnapshot VulkanContext::GetLatestFrameBudgetDiagnostics(Re
 	return impl->GetLatestBudgetDiagnostics(viewType);
 }
 
-// VulkanContext::GetLatestLightingDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 LightingDiagnosticsSnapshot VulkanContext::GetLatestLightingDiagnostics(RenderViewType viewType) const {
 	if (!impl) {
 		LightingDiagnosticsSnapshot snapshot{};
@@ -1810,7 +1810,7 @@ VulkanContext::GetLatestAnimationGpuBackendExecution() const
 	return impl->latestAnimationGpuBackendExecution;
 }
 
-// VulkanContext::GetLatestRenderSnapshotDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 RenderSnapshotDiagnosticsSnapshot VulkanContext::GetLatestRenderSnapshotDiagnostics() const {
 	if (!impl) {
 		return {};
@@ -1875,7 +1875,7 @@ VulkanContext::LiveGpuSubmissionBoundary VulkanContext::GetLiveGpuSubmissionBoun
 	};
 }
 
-// VulkanContext::InvalidateMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::InvalidateMaterial(const TerraEngine::UUID& materialId) {
 	if (impl) {
 		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
@@ -1883,7 +1883,7 @@ void VulkanContext::InvalidateMaterial(const TerraEngine::UUID& materialId) {
 	}
 }
 
-// VulkanContext::InvalidateMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::InvalidateMesh(const TerraEngine::UUID& meshId) {
 	if (impl) {
 		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
@@ -1891,7 +1891,7 @@ void VulkanContext::InvalidateMesh(const TerraEngine::UUID& meshId) {
 	}
 }
 
-// VulkanContext::InvalidateTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::InvalidateTexture(const TerraEngine::UUID& textureId) {
 	if (impl) {
 		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
@@ -1899,7 +1899,7 @@ void VulkanContext::InvalidateTexture(const TerraEngine::UUID& textureId) {
 	}
 }
 
-// VulkanContext::InvalidateResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::InvalidateResource(const TerraEngine::UUID& id) {
 	if (impl) {
 		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
@@ -1919,7 +1919,7 @@ void VulkanContext::RetireLoadedResource(const TerraEngine::UUID& id, std::uint6
 	}
 }
 
-// VulkanContext::WaitIdle is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::WaitIdle() {
 	if (impl && impl->device) {
 		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
@@ -1956,13 +1956,13 @@ void VulkanContext::WaitIdle() {
 	}
 }
 
-// VulkanContext::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Shutdown() {
 	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	impl->Cleanup();
 }
 
-// VulkanContext::ClearResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::PrepareRendererEfficiencyDeviceRecreation()
 {
 	efficiencyDeviceRecreationPrepared = false;
@@ -2031,7 +2031,7 @@ void VulkanContext::ClearResources() {
 	impl->ClearResources();
 }
 
-// VulkanContext::GetEditorHandles is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::GetEditorHandles(EditorHandles& h) {
 	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	h.instance = impl->instance;
@@ -2069,10 +2069,10 @@ void VulkanContext::RunWithQueueAccess(const std::function<void()>& operation)
 	operation();
 }
 
-// VulkanContext::EnableEditorMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::EnableEditorMode() {
 	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	impl->InitEditorMode();
 }
 
-// VulkanContext::PresentEditor is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+// Keep editor resource initialization serialized with device-state changes.

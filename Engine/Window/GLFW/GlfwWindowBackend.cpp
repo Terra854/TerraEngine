@@ -18,11 +18,11 @@ GlfwWindowBackend::~GlfwWindowBackend()
 	Shutdown();
 }
 
-// GlfwWindowBackend::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void GlfwWindowBackend::Initialize(const WindowConfig& config)
 {
 	// Initialize GLFW before creating any windows.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!glfwInit()) {
 		throw std::runtime_error("Failed to initialize GLFW.");
 	}
@@ -48,13 +48,13 @@ void GlfwWindowBackend::Initialize(const WindowConfig& config)
 	InstallCallbacks();
 }
 
-// GlfwWindowBackend::PollEvents is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void GlfwWindowBackend::PollEvents()
 {
 	glfwPollEvents();
 }
 
-// GlfwWindowBackend::SwapBuffers is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void GlfwWindowBackend::SwapBuffers()
 {
 	// TerraEngine creates GLFW windows with GLFW_NO_API so Vulkan owns the
@@ -63,25 +63,25 @@ void GlfwWindowBackend::SwapBuffers()
 	// anything, so this backend hook intentionally stays empty.
 }
 
-// GlfwWindowBackend::ShouldClose is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool GlfwWindowBackend::ShouldClose() const
 {
 	return windowHandle && glfwWindowShouldClose(windowHandle);
 }
 
-// GlfwWindowBackend::GetNativeHandle is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void* GlfwWindowBackend::GetNativeHandle() const
 {
 	return windowHandle;
 }
 
-// GlfwWindowBackend::SetCloseCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void GlfwWindowBackend::SetCloseCallback(std::function<void()> onClose)
 {
 	closeCallback = std::move(onClose);
 }
 
-// GlfwWindowBackend::SetResizeCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void GlfwWindowBackend::SetResizeCallback(std::function<void(int, int)> onResize)
 {
 	if (windowHandle) {
@@ -89,7 +89,7 @@ void GlfwWindowBackend::SetResizeCallback(std::function<void(int, int)> onResize
 	}
 }
 
-// GlfwWindowBackend::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void GlfwWindowBackend::Shutdown()
 {
 	if (windowHandle) {
@@ -105,7 +105,7 @@ void GlfwWindowBackend::Shutdown()
 	TERRAENGINE_LOG(LogLevel::Debug, "GLFW backend shutdown and window destroyed");
 }
 
-// GlfwWindowBackend::InstallCallbacks is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void GlfwWindowBackend::InstallCallbacks()
 {
 	// Forward GLFW close events to the user-defined callback so the engine can
@@ -121,7 +121,7 @@ void GlfwWindowBackend::InstallCallbacks()
 	glfwSetFramebufferSizeCallback(windowHandle, [](GLFWwindow* window, int width, int height) {
 		// Use static map lookup
 		auto it = g_ResizeCallbacks.find(window);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (it != g_ResizeCallbacks.end() && it->second) {
 			try {
 				it->second(width, height);

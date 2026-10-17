@@ -37,7 +37,7 @@ void Logger::Log(LogLevel level, const std::string& file, int line, const std::s
 	entry.line = line;
 	
 	std::string cleanedSignature = functionSignature;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!isManaged) {
 		// Simple cleanup for __PRETTY_FUNCTION__ (GCC/Clang) or __FUNCSIG__ (MSVC)
 		// We want to remove the return type and arguments, while preserving template parameters.
@@ -51,9 +51,9 @@ void Logger::Log(LogLevel level, const std::string& file, int line, const std::s
 		
 		size_t parenPos = std::string::npos;
 		int angleBracketDepth = 0;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (size_t i = 0; i < cleanedSignature.length(); ++i) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (cleanedSignature[i] == '<') angleBracketDepth++;
 			else if (cleanedSignature[i] == '>') angleBracketDepth--;
 			else if (cleanedSignature[i] == '(' && angleBracketDepth == 0) {
@@ -62,7 +62,7 @@ void Logger::Log(LogLevel level, const std::string& file, int line, const std::s
 			}
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (parenPos != std::string::npos) {
 			cleanedSignature = cleanedSignature.substr(0, parenPos);
 		}
@@ -80,7 +80,7 @@ void Logger::Log(LogLevel level, const std::string& file, int line, const std::s
 		size_t lastSpace = std::string::npos;
 		angleBracketDepth = 0;
 		for (int i = (int)cleanedSignature.length() - 1; i >= 0; --i) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (cleanedSignature[i] == '>') angleBracketDepth++;
 			else if (cleanedSignature[i] == '<') angleBracketDepth--;
 			else if (cleanedSignature[i] == ' ' && angleBracketDepth == 0) {
@@ -89,7 +89,7 @@ void Logger::Log(LogLevel level, const std::string& file, int line, const std::s
 			}
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (lastSpace != std::string::npos) {
 			cleanedSignature = cleanedSignature.substr(lastSpace + 1);
 		}
@@ -108,7 +108,7 @@ void Logger::Log(LogLevel level, const std::string& file, int line, const std::s
 		removeKeyword("volatile ");
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (cleanedSignature.empty()) {
 		cleanedSignature = "Unknown";
 	}
@@ -165,12 +165,12 @@ LogContext Logger::GetCurrentContext()
 	return currentContext;
 }
 
-// Logger::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void Logger::Shutdown()
 {
 	done = true;
 	cv.notify_one();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (t.joinable())
 		t.join();
 }
@@ -186,7 +186,7 @@ Logger::~Logger()
 	Shutdown();
 }
 
-// Logger::ProcessEntries is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void Logger::ProcessEntries()
 {
 	while (true) {
@@ -194,7 +194,7 @@ void Logger::ProcessEntries()
 		{
 			std::unique_lock<std::mutex> lock(m);
 			cv.wait(lock, [this] { return !q.empty() || done; });
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (done && q.empty())
 				break;
 			entry = std::move(q.front());
@@ -234,7 +234,7 @@ void Logger::ProcessEntries()
 }
 
 // Convert LogLevel to string.
-// Logger::LogLevelToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string Logger::LogLevelToString(LogLevel level)
 {
 	switch (level) {
@@ -248,7 +248,7 @@ std::string Logger::LogLevelToString(LogLevel level)
 }
 
 // Return ANSI color codes based on the log level.
-// Logger::GetColorCode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string Logger::GetColorCode(LogLevel level)
 {
 	switch (level) {
@@ -262,7 +262,7 @@ std::string Logger::GetColorCode(LogLevel level)
 }
 
 // Helper function to extract the file name from a full file path.
-// Logger::ExtractFileName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string Logger::ExtractFileName(const std::string& filePath) {
 	size_t pos = filePath.find_last_of("/\\");
 	if (pos != std::string::npos) {

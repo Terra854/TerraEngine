@@ -929,7 +929,7 @@ namespace
 		return std::filesystem::current_path();
 	}
 
-	// StopPlayModeFromApplicationQuit is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void StopPlayModeFromApplicationQuit()
 	{
 		if (g_ActiveMainEditorSubsystem != nullptr)
@@ -1473,7 +1473,7 @@ namespace
 	}
 }
 
-// MainEditorSubsystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::InitializeTerrainCopyService() {
 	using namespace TerraEngine::Editor::Terrain;
 	TerrainCopyCallbacks callbacks;
@@ -1637,7 +1637,7 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	SetApplicationEditorStopPlayModeCallback(&StopPlayModeFromApplicationQuit);
 }
 
-// MainEditorSubsystem::OnProjectOpened is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::OnProjectOpened() {
 	if (!ctx || !ctx->projectManager->HasActiveProject()) return;
 	++m_TerrainCopyProjectEpoch;
@@ -1656,7 +1656,7 @@ void MainEditorSubsystem::OnProjectOpened() {
 	std::filesystem::path assetRoot = projectRoot / "Assets";
 	std::filesystem::path sceneRoot = assetRoot / "Scenes";
 	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!std::filesystem::exists(sceneRoot)) {
 		std::filesystem::create_directories(sceneRoot);
 	}
@@ -1685,11 +1685,11 @@ void MainEditorSubsystem::OnProjectOpened() {
 		std::filesystem::path lastScenePath = projectRoot / "Library" / "LastScene.txt";
 		bool loaded = false;
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (std::filesystem::exists(lastScenePath)) {
 			std::ifstream in(lastScenePath);
 			std::string relPath;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (std::getline(in, relPath) && !relPath.empty()) {
 				// Verify it still exists
 				if (std::filesystem::exists(assetRoot / relPath)) {
@@ -1699,17 +1699,17 @@ void MainEditorSubsystem::OnProjectOpened() {
 			}
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!loaded) {
 			bool foundAny = false;
 			if (std::filesystem::exists(assetRoot)) {
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 				for (const auto& entry : std::filesystem::recursive_directory_iterator(assetRoot)) {
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 					if (entry.is_regular_file() && entry.path().extension() == ".tescene") {
 						std::error_code ec;
 						auto rel = std::filesystem::relative(entry.path(), assetRoot, ec);
-						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 						if (!ec) {
 							OpenScene(rel);
 							foundAny = true;
@@ -1719,7 +1719,7 @@ void MainEditorSubsystem::OnProjectOpened() {
 				}
 			}
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!foundAny) {
 				// Maybe create a new one? For now just do nothing or log.
 			}
@@ -1741,7 +1741,7 @@ void MainEditorSubsystem::OnProjectOpened() {
 	ctx->projectManager->MarkEditorMetadataReady();
 }
 
-// MainEditorSubsystem::CapturePlayModeSceneState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::CapturePlayModeSceneState()
 {
 	m_HasPlayModeSceneSnapshot = false;
@@ -1773,7 +1773,7 @@ void MainEditorSubsystem::CapturePlayModeSceneState()
 	auto summary = TerraEngine::Scene::BuildSceneRuntimeSummary(graph);
 	TERRAENGINE_LOG(LogLevel::Info, "Captured editor play-mode scene summary with " << summary.objects.size() << " objects.");
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (selectedEntity.has_value())
 	{
 		if (std::optional<Object> selectedObject = ObjectManager::instance().getObject(*selectedEntity))
@@ -1807,7 +1807,7 @@ void MainEditorSubsystem::CapturePlayModeSceneState()
 	m_HasPlayModeSceneSnapshot = true;
 }
 
-// MainEditorSubsystem::RestorePlayModeSceneState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::RestorePlayModeSceneState()
 {
 	if (!m_HasPlayModeSceneSnapshot || !m_PlayModeSceneSnapshotPacket.has_value())
@@ -1859,7 +1859,7 @@ void MainEditorSubsystem::RestorePlayModeSceneState()
 	auto restoredGraph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(ObjectManager::instance());
 	auto restoredSummary = TerraEngine::Scene::BuildSceneRuntimeSummary(restoredGraph);
 	TERRAENGINE_LOG(LogLevel::Info, "Restored editor play-mode scene summary with " << restoredSummary.objects.size() << " objects.");
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (m_PlayModeSceneWasDirty)
 	{
 		SceneManager::Instance().ForceMarkActiveSceneDirty();
@@ -1871,7 +1871,7 @@ void MainEditorSubsystem::RestorePlayModeSceneState()
 	m_LastPlayModeRestorationResult.dirtyStateRestored = true;
 	m_LastPlayModeRestorationResult.prefabStatePreserved = m_IsPrefabEditingMode;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	std::vector<entt::entity> restoredSelection;
 	restoredSelection.reserve(m_PlayModeSelectedEntityUuids.size());
 	for (const TerraEngine::UUID objectId : m_PlayModeSelectedEntityUuids)
@@ -1907,7 +1907,7 @@ void MainEditorSubsystem::RestorePlayModeSceneState()
 	ClearPlayModeSceneState();
 }
 
-// MainEditorSubsystem::ClearPlayModeSceneState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::ClearPlayModeSceneState()
 {
 	m_HasPlayModeSceneSnapshot = false;
@@ -2228,7 +2228,7 @@ bool MainEditorSubsystem::LoadPrefabIntoIsolatedObjectManager(const std::filesys
 	return true;
 }
 
-// MainEditorSubsystem::OpenScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
 	if(!RetireTerrainCopies()) return;
 	++m_TerrainCopyProjectEpoch;
@@ -2296,7 +2296,7 @@ void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
 		if (ctx && ctx->projectManager->HasActiveProject()) {
 			auto projectRoot = ctx->projectManager->GetProjectRoot();
 			std::filesystem::path libDir = projectRoot / "Library";
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!std::filesystem::exists(libDir)) {
 				std::filesystem::create_directories(libDir);
 			}
@@ -2593,7 +2593,7 @@ void MainEditorSubsystem::ClosePrefabMode()
 	TERRAENGINE_LOG(LogLevel::Info, "Closed prefab edit mode and restored the active scene.");
 }
 
-// MainEditorSubsystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::Shutdown() {
 	if(!RetireTerrainCopies())
 		throw std::runtime_error("Editor shutdown cannot discard unresolved terrain copy ownership.");
@@ -2616,7 +2616,7 @@ void MainEditorSubsystem::Shutdown() {
 	SetApplicationEditorStopPlayModeCallback(nullptr);
 	ScriptCompilationSubsystem::Instance().Shutdown();
 	UndoRedoSystem::Instance().Shutdown();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ctx != nullptr && ctx->editorProfiler) {
 		ctx->editorProfiler->Shutdown();
 		ctx->editorProfiler.reset();
@@ -2786,7 +2786,7 @@ bool MainEditorSubsystem::StepPlayMode()
 	return true;
 }
 
-// MainEditorSubsystem::StopPlayMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::StopPlayMode()
 {
 	if(!RetireTerrainCopies()) return;
@@ -3106,23 +3106,23 @@ void MainEditorSubsystem::ShutdownViewportTextures(bool deviceLost)
 		: TerraEngine::Editor::ViewportTextureRegistry::ReleaseCallback{});
 }
 
-// MainEditorSubsystem::OnBackendReady is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::OnBackendReady() {
 	if (!ctx || !ctx->engine) return;
 	
 	RenderSystem* renderSystem = ctx->engine->GetSystem<RenderSystem>();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!renderSystem) return;
 
 	RHIContext* rhi = renderSystem->GetContext();
 	VulkanContext* vulkan = dynamic_cast<VulkanContext*>(rhi);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!vulkan) return;
 
 	RefreshViewportTextures(*vulkan);
 }
 
-// MainEditorSubsystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::Update(float deltaTime) {
 	// Future adoption and launch eligibility belong to this protected editor
 	// boundary, never to a worker callback or a hidden panel's lifetime.
@@ -3275,7 +3275,7 @@ void MainEditorSubsystem::Update(float deltaTime) {
 	}
 
 	// Ensure UI system updates even when the game is not playing so we get live previews.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!ScriptingSystem::Instance().IsRunning())
 	{
 		UISystem::Instance().Update(deltaTime);
@@ -3294,7 +3294,7 @@ void MainEditorSubsystem::Update(float deltaTime) {
 	if (ctx != nullptr)
 	{
 		std::optional<uint32_t> watchedObjectId;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (selectedEntity.has_value())
 		{
 			watchedObjectId = static_cast<uint32_t>(*selectedEntity);
@@ -3306,7 +3306,7 @@ void MainEditorSubsystem::Update(float deltaTime) {
 	}
 
 	// Process editor-wide hotkeys.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) {
 		if (ImGui::IsKeyPressed(ImGuiKey_S)) {
 			if (m_IsPrefabEditingMode) {
@@ -3323,24 +3323,24 @@ void MainEditorSubsystem::Update(float deltaTime) {
 				}
 			}
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (ImGui::IsKeyPressed(ImGuiKey_Z)) {
 			UndoRedoSystem::Instance().Undo();
 		}
 		// Traditional Windows redo shortcut (Ctrl+Y).
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (ImGui::IsKeyPressed(ImGuiKey_Y)) {
 			UndoRedoSystem::Instance().Redo();
 		}
 		
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (ImGui::IsKeyPressed(ImGuiKey_B)) {
 			if (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift)) {
 				if (auto win = GetWindow<BuildProfilesWindow>()) {
 					win->SetVisible(true);
 				}
 			} else {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (auto win = GetWindow<BuildProfilesWindow>()) {
 					win->SetVisible(true);
 					win->StartExportAndRun();
@@ -3423,12 +3423,12 @@ void MainEditorSubsystem::PublishEditorStreamingNeeds()
 	}
 }
 
-// MainEditorSubsystem::SetOnProjectClosedCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::SetOnProjectClosedCallback(std::function<void()> callback) {
 	onProjectClosed = callback;
 }
 
-// MainEditorSubsystem::SetSelectedEntity is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::SetSelectedEntity(std::optional<entt::entity> entity)
 {
 	selectedEntity = std::nullopt;
@@ -3441,14 +3441,14 @@ void MainEditorSubsystem::SetSelectedEntity(std::optional<entt::entity> entity)
 			selectedEntityUuids.push_back(ObjectManager::instance().getUUID(*object));
 		}
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (selectedEntity)
 	{
 		selectedAsset = std::nullopt;
 		selectedPackageChildAsset = std::nullopt;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ctx != nullptr)
 	{
 		ctx->scripting.selectionVersion++;
@@ -3616,19 +3616,19 @@ void MainEditorSubsystem::PublishCommittedEditorTransactionsToUndo()
 		TERRAENGINE_LOG(LogLevel::Error, "Editor receipts remain owned after an unexpected consumer failure.");
 	}
 }
-// MainEditorSubsystem::SetSelectedAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::SetSelectedAsset(std::optional<std::filesystem::path> asset)
 {
 	selectedAsset = asset;
 	selectedPackageChildAsset = std::nullopt;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (asset)
 	{
 		selectedEntity = std::nullopt;
 		selectedEntityUuids.clear();
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ctx != nullptr)
 	{
 		ctx->scripting.selectionVersion++;
@@ -3686,14 +3686,14 @@ void MainEditorSubsystem::SetSelectedPackageChildAsset(std::optional<SelectedPac
 {
 	selectedPackageChildAsset = asset;
 	selectedAsset = asset ? std::optional<std::filesystem::path>(asset->packagePath) : std::nullopt;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (asset)
 	{
 		selectedEntity = std::nullopt;
 		selectedEntityUuids.clear();
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ctx != nullptr)
 	{
 		ctx->scripting.selectionVersion++;
@@ -3702,21 +3702,21 @@ void MainEditorSubsystem::SetSelectedPackageChildAsset(std::optional<SelectedPac
 	}
 }
 
-// MainEditorSubsystem::IsInspectorValueDragging is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool MainEditorSubsystem::IsInspectorValueDragging() const {
 	auto inspector = const_cast<MainEditorSubsystem*>(this)->GetWindow<InspectorWindow>();
 	if (inspector) return inspector->IsInspectorValueDragging();
 	return false;
 }
 
-// MainEditorSubsystem::TryGetGameViewRenderStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool MainEditorSubsystem::TryGetGameViewRenderStats(RenderStatsSnapshot& outStats) const {
 	if (!ctx || !ctx->engine) {
 		return false;
 	}
 
 	RenderSystem* renderSystem = ctx->engine->GetSystem<RenderSystem>();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!renderSystem) {
 		return false;
 	}
@@ -3752,7 +3752,7 @@ void MainEditorSubsystem::DrawProjectHubWindows()
 	}
 }
 
-// MainEditorSubsystem::DrawUI is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::DrawUI() {
 	EditorMainDrawStageBatch mainDrawStages;
 	EnsurePrefabObjectsLoadedForEditor();
@@ -3766,7 +3766,7 @@ void MainEditorSubsystem::DrawUI() {
 			// hidden/blank offscreen pass while Scene View remains responsive.
 			renderSystem->SetGameViewSuppressed(IsAssetPrefabEditingMode());
 			VulkanContext* vulkan = dynamic_cast<VulkanContext*>(renderSystem->GetContext());
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (vulkan) {
 				mainDrawStages.Measure("Editor.MainDraw.ViewportTextures", [&]() {
 					RefreshViewportTextures(*vulkan);
@@ -3809,7 +3809,7 @@ void MainEditorSubsystem::DrawUI() {
 		const bool isRunning = ScriptingSystem::Instance().IsRunning();
 		const bool isPaused = ScriptingSystem::Instance().IsPaused();
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (DrawPlayModeToolbarIconButton(
 			"play_mode_play_stop",
 			isRunning ? PlayModeToolbarIcon::Stop : PlayModeToolbarIcon::Play,
@@ -3836,7 +3836,7 @@ void MainEditorSubsystem::DrawUI() {
 		}
 		ImGui::SameLine();
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (DrawPlayModeToolbarIconButton("play_mode_next", PlayModeToolbarIcon::Next, false, "Next", buttonSize)) {
 			(void)StepPlayMode();
 		}
@@ -3856,7 +3856,7 @@ void MainEditorSubsystem::DrawUI() {
 		EnsurePrefabObjectsLoadedForEditor();
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (auto& win : m_Windows) {
 		const bool drawSceneViewInSceneContext = ShouldSceneViewUseSceneContextForPrefabEdit()
 			&& std::dynamic_pointer_cast<SceneViewWindow>(win) != nullptr
@@ -3893,18 +3893,18 @@ void MainEditorSubsystem::DrawUI() {
 	DrawImportCloseConfirmationModal();
 	DrawScriptCompilationModal();
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (showDemoWindow) ImGui::ShowDemoWindow(&showDemoWindow);
 
 	ImGui::End();
 	RestoreSceneObjectsForRuntimeDuringPrefabEdit();
 }
 
-// MainEditorSubsystem::DrawMainMenuBar is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::DrawMainMenuBar() {
 	if (ImGui::BeginMenuBar()) {
 		if (ImGui::BeginMenu("File")) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
 				const bool saved = m_IsPrefabEditingMode ? SaveOpenPrefab() : SceneManager::Instance().SaveScene(m_CurrentScenePath);
 				if (saved && !m_IsPrefabEditingMode) {
@@ -3912,41 +3912,41 @@ void MainEditorSubsystem::DrawMainMenuBar() {
 				}
 			}
 			ImGui::Separator();
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::MenuItem("Build Profiles...", "Ctrl+Shift+B")) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (auto win = GetWindow<BuildProfilesWindow>()) {
 					win->SetVisible(true);
 				}
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::MenuItem("Build and Run", "Ctrl+B")) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (auto win = GetWindow<BuildProfilesWindow>()) {
 					win->SetVisible(true);
 					win->StartExportAndRun();
 				}
 			}
 			ImGui::Separator();
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::MenuItem("Close Project")) {
 				RequestCloseProject();
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::MenuItem("Exit")) {
 				RequestExit();
 			}
 			ImGui::EndMenu();
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (ImGui::BeginMenu("Edit")) {
 			// Context-aware menu enabling ensures users know when history is 
 			// available or exhausted.
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::MenuItem("Undo", "Ctrl+Z", false, UndoRedoSystem::Instance().CanUndo())) {
 				UndoRedoSystem::Instance().Undo();
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::MenuItem("Redo", "Ctrl+Y", false, UndoRedoSystem::Instance().CanRedo())) {
 				UndoRedoSystem::Instance().Redo();
 			}
@@ -3963,30 +3963,30 @@ void MainEditorSubsystem::DrawMainMenuBar() {
 			}
 			ImGui::EndMenu();
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (ImGui::BeginMenu("View")) {
 			ImGui::MenuItem("ImGui Demo", nullptr, &showDemoWindow);
 			ImGui::EndMenu();
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (ImGui::BeginMenu("Scripting")) {
 			// Keep script actions reachable from the menu, but leave build status
 			// text out of the chrome so attaching scripts stays drag-and-drop only.
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::MenuItem("Open Workspace")) {
 				ScriptCompilationSubsystem::Instance().OpenWorkspace();
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::MenuItem("Regenerate Workspace")) {
 				ScriptCompilationSubsystem::Instance().RegenerateWorkspace();
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ImGui::MenuItem("Rebuild Scripts")) {
 				ScriptCompilationSubsystem::Instance().RequestBuild(ScriptBuildReason::ManualRefresh);
 			}
 			ImGui::EndMenu();
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (ImGui::BeginMenu("Windows")) {
 			// Categories and nesting come entirely from each window's declared
 			// menu path. This renderer contains no list of category names.
@@ -3998,12 +3998,12 @@ void MainEditorSubsystem::DrawMainMenuBar() {
 			}
 
 			EditorSystem* editorSystem = nullptr;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ctx && ctx->engine) {
 				editorSystem = dynamic_cast<EditorSystem*>(ctx->engine->GetEditorSystem());
 			}
 			
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (editorSystem) {
 				editorSystem->DrawWindowMenu();
 			}
@@ -4014,7 +4014,7 @@ void MainEditorSubsystem::DrawMainMenuBar() {
 	}
 }
 
-// MainEditorSubsystem::RequestOpenScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::RequestOpenScene(const std::filesystem::path& path) {
 	const bool terrainDirty = [&]() { if(auto terrainTools = GetWindow<TerrainWindow>()) return terrainTools->IsTerrainDirty(); return false; }();
 	if (SceneManager::Instance().IsActiveSceneDirty() || terrainDirty || (m_IsPrefabEditingMode && m_PrefabEditingDirty)) {
@@ -4026,7 +4026,7 @@ void MainEditorSubsystem::RequestOpenScene(const std::filesystem::path& path) {
 	}
 }
 
-// MainEditorSubsystem::RequestCloseProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::RequestCloseProject() {
 	if (AssetDatabase::Instance().IsCompiling()) {
 		m_PendingAction = PendingAction::CloseProject;
@@ -4042,7 +4042,7 @@ void MainEditorSubsystem::RequestCloseProject() {
 	}
 }
 
-// MainEditorSubsystem::RequestExit is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::RequestExit() {
 	if (AssetDatabase::Instance().IsCompiling()) {
 		m_PendingAction = PendingAction::Exit;
@@ -4055,12 +4055,12 @@ void MainEditorSubsystem::RequestExit() {
 		m_ShowSaveConfirmation = true;
 	} else {
 		if(!CloseCurrentProject()) return;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (ctx && ctx->engine) ctx->engine->SignalShutdown();
 	}
 }
 
-// MainEditorSubsystem::ExecutePendingAction is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::ExecutePendingAction() {
 	switch (m_PendingAction) {
 		case PendingAction::OpenScene:
@@ -4073,7 +4073,7 @@ void MainEditorSubsystem::ExecutePendingAction() {
 			// A recoverable ownership failure must also block the exit caller;
 			// merely returning from project close would still signal teardown here.
 			if(!CloseCurrentProject()) break;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (ctx && ctx->engine) ctx->engine->SignalShutdown();
 			break;
 		default:
@@ -4083,19 +4083,19 @@ void MainEditorSubsystem::ExecutePendingAction() {
 	m_PendingScenePath.clear();
 }
 
-// MainEditorSubsystem::DrawSaveConfirmationModal is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::DrawSaveConfirmationModal() {
 	if (m_ShowSaveConfirmation) {
 		ImGui::OpenPopup("Save Changes?");
 		m_ShowSaveConfirmation = false;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::BeginPopupModal("Save Changes?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
 		ImGui::Text("There are unsaved changes to the current scene, terrain, or prefab.\nDo you want to save them?");
 		ImGui::Separator();
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (ImGui::Button("Yes", ImVec2(120, 0))) {
 			// A failed save must keep this modal and the live document available.
 			// Closing unconditionally here would discard the edits we failed to save.
@@ -4130,7 +4130,7 @@ void MainEditorSubsystem::DrawSaveConfirmationModal() {
 		}
 		ImGui::SetItemDefaultFocus();
 		ImGui::SameLine();
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (ImGui::Button("No", ImVec2(120, 0))) {
 			if (m_IsPrefabEditingMode) {
 				m_PrefabEditingDirty = false;
@@ -4139,7 +4139,7 @@ void MainEditorSubsystem::DrawSaveConfirmationModal() {
 			ImGui::CloseCurrentPopup();
 		}
 		ImGui::SameLine();
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (ImGui::Button("Cancel", ImVec2(120, 0))) {
 			m_PendingAction = PendingAction::None;
 			ImGui::CloseCurrentPopup();
@@ -4179,22 +4179,22 @@ void MainEditorSubsystem::DrawImportCloseConfirmationModal() {
 	}
 }
 
-// MainEditorSubsystem::DrawScriptCompilationModal is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void MainEditorSubsystem::DrawScriptCompilationModal() {
 	const ScriptCompilationSubsystem& scriptCompilation = ScriptCompilationSubsystem::Instance();
 	const ScriptCompilationStatus& scriptStatus = scriptCompilation.GetStatus();
 	const bool isCompilingScripts = scriptCompilation.IsBusy();
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (isCompilingScripts) {
 		ImGui::OpenPopup("Compiling C# Scripts");
 	}
 
 	ImGuiViewport* viewport = ImGui::GetMainViewport();
 	ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::BeginPopupModal("Compiling C# Scripts", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!isCompilingScripts) {
 			ImGui::CloseCurrentPopup();
 			ImGui::EndPopup();
@@ -4215,7 +4215,7 @@ void MainEditorSubsystem::DrawScriptCompilationModal() {
 	}
 }
 
-// MainEditorSubsystem::CloseCurrentProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool MainEditorSubsystem::CloseCurrentProject() {
 	if(!RetireTerrainCopies()) return false;
 	++m_TerrainCopyProjectEpoch;
@@ -4310,11 +4310,11 @@ bool MainEditorSubsystem::CloseCurrentProject() {
 		ScriptingSystem::Instance().UpdateInspectorWatch(std::nullopt, ctx->scripting.selectionVersion);
 	}
 	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (onProjectClosed) onProjectClosed();
 
 	// Close Project
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ctx && ctx->projectManager) {
 		ctx->projectManager->CloseProject();
 	}

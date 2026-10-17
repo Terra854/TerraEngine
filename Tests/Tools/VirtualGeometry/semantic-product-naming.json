@@ -24,6 +24,64 @@
 		],
 		"literals": ["SC-001", "SC-002", "SC-003", "SC-004", "SC-005", "SC-006", "SC-007", "SC-008", "SC-009"]
 	},
+	"frozenValidationMetadataAllowances": [
+		{
+			"file": "Tests/Tools/CodeQuality/Baseline/comment-batches.json",
+			"pattern": "task",
+			"region": "whole-file",
+			"prefixBytes": 33722,
+			"sha256": "6d13e2f9a72d073b5e8101b8e23827b4714568663cb02ac3ff17e23cb875e985",
+			"matches": [
+				{
+					"index": 539,
+					"value": "T087"
+				},
+				{
+					"index": 5205,
+					"value": "T088"
+				},
+				{
+					"index": 5367,
+					"value": "T088"
+				},
+				{
+					"index": 5494,
+					"value": "T089"
+				},
+				{
+					"index": 8229,
+					"value": "T090"
+				},
+				{
+					"index": 19980,
+					"value": "T091"
+				},
+				{
+					"index": 28615,
+					"value": "T092"
+				}
+			],
+			"reason": "Immutable validation baseline metadata only; exact original raw region and match offsets. Candidate suffix, filenames, encoded text, other rules and all other files stay audited."
+		},
+		{
+			"file": "Tests/Tools/CodeQuality/Baseline/stage-ownership.json",
+			"pattern": "task",
+			"region": "before-root-candidate",
+			"prefixBytes": 71976,
+			"sha256": "8d575f028f21a93c0dab14ad7f4dd8fc9f3d794ba23dfe1bc2bdde9f40ac5603",
+			"matches": [
+				{
+					"index": 69605,
+					"value": "T078"
+				},
+				{
+					"index": 69633,
+					"value": "T081"
+				}
+			],
+			"reason": "Immutable validation baseline metadata only; exact original raw region and match offsets. Candidate suffix, filenames, encoded text, other rules and all other files stay audited."
+		}
+	],
 	"textExtensions": [".bat", ".cmd", ".cmake", ".cpp", ".cs", ".frag", ".gltf", ".h", ".hlsl", ".hlsli", ".hpp", ".json", ".md", ".ps1", ".py", ".sh", ".teanimctrl", ".teanimmask", ".teprefab", ".tescene", ".tmat", ".txt", ".vert", ".yaml", ".yml"],
 	"maximumTextBytes": 4194304,
 	"patterns": [

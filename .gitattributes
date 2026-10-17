@@ -8,3 +8,231 @@
 /Tests/Tools/Animation/PerformanceWorkloads.json -text
 /Tests/Fixtures/Animation/stress/workloads.json -text
 /Tests/Fixtures/RendererPerformanceBaseline/workloads.json -text
+
+# TERRAROOT1 manifests and CURRENT pointers use canonical LF bytes. Automatic
+# CRLF conversion breaks root recovery and content-hash validation on Windows.
+/Tests/Fixtures/Navigation/AgentWorkload/TerrainSeed/*.teterrain.data/** -text
+
+# Exact byte-pinned source-review cohort. Mixed files must retain their raw bytes.
+"/Editor/AssetCompilers/MeshCompiler.cpp" -text
+"/Editor/AssetCompilers/ShaderCompiler.cpp" -text
+"/Editor/AssetCompilers/TextureCompiler.cpp" -text
+"/Editor/Export/BuildProfile.cpp" text eol=crlf
+"/Editor/Export/BuildProfile.h" text eol=crlf
+"/Editor/Export/ExportPipeline.cpp" -text
+"/Editor/Export/ExportValidator.cpp" text eol=crlf
+"/Editor/Export/ExportValidator.h" text eol=crlf
+"/Editor/Export/TEPAK/PackReader.h" text eol=crlf
+"/Editor/Export/TEPAK/PackTypes.h" text eol=crlf
+"/Editor/Export/TEPAK/Version.h" text eol=crlf
+"/Editor/Export/TepakPackager.h" text eol=crlf
+"/Editor/Export/archive/ArchiveSerialization.cpp" text eol=crlf
+"/Editor/Export/archive/ExtentReader.cpp" text eol=crlf
+"/Editor/Export/archive/PackPlanner.cpp" -text
+"/Editor/Export/archive/PackReader.cpp" text eol=crlf
+"/Editor/Export/archive/PackWriter.cpp" -text
+"/Editor/Export/archive/PackagingRequest.cpp" text eol=crlf
+"/Editor/Export/codec/CodecProvider.cpp" text eol=crlf
+"/Editor/Export/codec/CodecProvider.h" text eol=crlf
+"/Editor/Export/io/PathNormalizer.cpp" text eol=crlf
+"/Editor/Export/io/PathText.h" text eol=crlf
+"/Editor/Export/model/PackModel.h" text eol=crlf
+"/Editor/Export/validation/PackValidator.cpp" -text
+"/Editor/TerraEngine-Editor/Assets/AssetDatabase.cpp" -text
+"/Editor/TerraEngine-Editor/Assets/AssetDatabase.h" -text
+"/Editor/TerraEngine-Editor/Assets/FileWatcher.cpp" -text
+"/Editor/TerraEngine-Editor/Assets/FileWatcher.h" -text
+"/Editor/TerraEngine-Editor/Core/EditorContext.h" -text
+"/Editor/TerraEngine-Editor/Core/EditorSystem.cpp" -text
+"/Editor/TerraEngine-Editor/Core/EditorSystem.h" -text
+"/Editor/TerraEngine-Editor/Framework/EditorWindow.cpp" text eol=crlf
+"/Editor/TerraEngine-Editor/Framework/EditorWindow.h" text eol=crlf
+"/Editor/TerraEngine-Editor/Profiling/EditorProfilerService.cpp" -text
+"/Editor/TerraEngine-Editor/Profiling/EditorProfilerService.h" -text
+"/Editor/TerraEngine-Editor/Profiling/ProfilerCaptureStore.cpp" -text
+"/Editor/TerraEngine-Editor/Project/EditorPreferences.h" -text
+"/Editor/TerraEngine-Editor/Project/ProjectManager.cpp" text eol=crlf
+"/Editor/TerraEngine-Editor/Project/ProjectManager.h" -text
+"/Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.cpp" -text
+"/Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.h" -text
+"/Editor/TerraEngine-Editor/Subsystems/IEditorSubsystem.h" text eol=crlf
+"/Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp" -text
+"/Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.h" -text
+"/Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.cpp" text eol=crlf
+"/Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.h" text eol=crlf
+"/Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.cpp" -text
+"/Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.h" -text
+"/Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.cpp" -text
+"/Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.h" -text
+"/Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp" -text
+"/Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.h" -text
+"/Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp" text eol=crlf
+"/Editor/TerraEngine-Editor/Windows/GameViewWindow.h" -text
+"/Editor/TerraEngine-Editor/Windows/HierarchyWindow.cpp" text eol=crlf
+"/Editor/TerraEngine-Editor/Windows/HierarchyWindow.h" -text
+"/Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp" -text
+"/Editor/TerraEngine-Editor/Windows/InspectorWindow.h" -text
+"/Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp" -text
+"/Editor/TerraEngine-Editor/Windows/ProfilerWindow.h" -text
+"/Editor/TerraEngine-Editor/Windows/ProjectBrowserWindow.cpp" -text
+"/Editor/TerraEngine-Editor/Windows/ProjectBrowserWindow.h" -text
+"/Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp" text eol=crlf
+"/Editor/TerraEngine-Editor/Windows/SceneViewWindow.h" -text
+"/Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp" text eol=crlf
+"/Editor/TerraEngine-Editor/Windows/UIBuilderWindow.h" text eol=crlf
+"/Editor/TerraEngineMeshCompiler.cpp" -text
+"/Editor/TerraEngineShaderCompiler.cpp" text eol=crlf
+"/Editor/TerraEngineTextureCompiler.cpp" text eol=crlf
+"/Engine/Animation/AnimationSystem.cpp" text eol=crlf
+"/Engine/Animation/AnimationSystem.h" -text
+"/Engine/Animation/AnimationSystemBindings.cpp" text eol=crlf
+"/Engine/Animation/AnimationSystemDiagnostics.cpp" text eol=crlf
+"/Engine/Animation/AnimationSystemLifecycle.cpp" text eol=crlf
+"/Engine/Animation/Frame/AnimationAuthorityPublication.cpp" text eol=crlf
+"/Engine/Animation/Frame/AnimationAuthoritySealing.cpp" text eol=crlf
+"/Engine/Animation/Frame/AnimationCompactEvaluation.cpp" text eol=crlf
+"/Engine/Animation/Frame/AnimationCompleteEvaluation.cpp" text eol=crlf
+"/Engine/Animation/Frame/AnimationFrameCapture.cpp" text eol=crlf
+"/Engine/Animation/Frame/AnimationFramePlanning.cpp" text eol=crlf
+"/Engine/Animation/Frame/AnimationFrameRuntime.h" text eol=crlf
+"/Engine/Animation/Frame/AnimationRuntimeRootPreparation.cpp" text eol=crlf
+"/Engine/Components/LightComponent.h" text eol=crlf
+"/Engine/Components/ScriptComponent.h" text eol=crlf
+"/Engine/Components/Transform.h" text eol=crlf
+"/Engine/Components/UIComponent.h" text eol=crlf
+"/Engine/Core/Logger/Logger.cpp" -text
+"/Engine/Core/Logger/Logger.h" -text
+"/Engine/Core/MainEngine.cpp" -text
+"/Engine/Core/MainEngine.h" -text
+"/Engine/Core/Memory/FrameArena.h" text eol=crlf
+"/Engine/Core/Object/Component.cpp" -text
+"/Engine/Core/Object/Component.h" text eol=crlf
+"/Engine/Core/Object/ObjectManager.cpp" text eol=crlf
+"/Engine/Core/Object/ObjectManager.h" -text
+"/Engine/Core/Object/Reflection.h" text eol=crlf
+"/Engine/Core/SystemBase.h" -text
+"/Engine/Core/Timer.cpp" text eol=crlf
+"/Engine/DotNet/DotNetHost.cpp" text eol=crlf
+"/Engine/DotNet/DotNetHost.h" text eol=crlf
+"/Engine/File Formats/TerraEngineMaterialFile.h" -text
+"/Engine/File Formats/TerraEngineMeshFile.h" -text
+"/Engine/File Formats/TerraEngineShaderFile.h" -text
+"/Engine/File Formats/TerraEngineTextureFile.h" -text
+"/Engine/Input/GLFW/GlfwInputBackend.cpp" text eol=crlf
+"/Engine/Input/GLFW/GlfwInputBackend.h" text eol=crlf
+"/Engine/Input/InputCodes.h" text eol=crlf
+"/Engine/Input/InputSystem.cpp" text eol=crlf
+"/Engine/Profiling/Profiler.cpp" -text
+"/Engine/Profiling/Profiler.h" -text
+"/Engine/Profiling/ProfilerCapture.cpp" -text
+"/Engine/Profiling/ProfilerCapture.h" -text
+"/Engine/Profiling/ProfilerScope.h" -text
+"/Engine/Renderer/Frame/RenderAnimatedGeometryPreparation.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderBackendCommit.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderCaptureOperationState.h" text eol=crlf
+"/Engine/Renderer/Frame/RenderDiagnosticsPublication.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderDynamicPublication.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderFrameAlgorithms.h" text eol=crlf
+"/Engine/Renderer/Frame/RenderFrameCaches.h" text eol=crlf
+"/Engine/Renderer/Frame/RenderFrameCapture.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderFrameCapture.h" text eol=crlf
+"/Engine/Renderer/Frame/RenderFrameSealing.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderFrameSealing.h" text eol=crlf
+"/Engine/Renderer/Frame/RenderFrameState.h" text eol=crlf
+"/Engine/Renderer/Frame/RenderLightingPreparation.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderPreparationTasks.h" text eol=crlf
+"/Engine/Renderer/Frame/RenderScratchEpisode.h" text eol=crlf
+"/Engine/Renderer/Frame/RenderShadowPreparation.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderSnapshotPreparation.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderSnapshotPreparation.h" text eol=crlf
+"/Engine/Renderer/Frame/RenderSpatialPreparation.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderStreamingFeedback.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderTopologyPreparation.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderViewBuilders.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderViewGrouping.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderViewPreparation.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderViewPreparation.h" text eol=crlf
+"/Engine/Renderer/Frame/RenderVirtualGeometryPackets.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderVirtualGeometrySelection.cpp" text eol=crlf
+"/Engine/Renderer/Frame/RenderVirtualGeometrySelection.h" text eol=crlf
+"/Engine/Renderer/RHI/RHIContext.h" -text
+"/Engine/Renderer/RHI/RHIDefinitions.h" text eol=crlf
+"/Engine/Renderer/RHI/Vulkan/VulkanBuiltinPasses.cpp" text eol=lf
+"/Engine/Renderer/RHI/Vulkan/VulkanContext.cpp" text eol=lf
+"/Engine/Renderer/RHI/Vulkan/VulkanContext.h" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanContextImpl.h" text eol=crlf
+"/Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp" text eol=crlf
+"/Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanContextSource.h" text eol=lf
+"/Engine/Renderer/RHI/Vulkan/VulkanEditorRendering.cpp" text eol=crlf
+"/Engine/Renderer/RHI/Vulkan/VulkanFrameRendering.cpp" text eol=lf
+"/Engine/Renderer/RHI/Vulkan/VulkanFrameSubmission.cpp" text eol=lf
+"/Engine/Renderer/RHI/Vulkan/VulkanGlobalResources.cpp" text eol=lf
+"/Engine/Renderer/RHI/Vulkan/VulkanGpuDiagnostics.cpp" text eol=lf
+"/Engine/Renderer/RHI/Vulkan/VulkanHiZ.cpp" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanLightingResources.cpp" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanPipelineResources.cpp" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanPostProcessing.cpp" text eol=lf
+"/Engine/Renderer/RHI/Vulkan/VulkanResourceSource.h" text eol=lf
+"/Engine/Renderer/RHI/Vulkan/VulkanVRS.cpp" text eol=crlf
+"/Engine/Renderer/RenderSystem.cpp" text eol=crlf
+"/Engine/Renderer/RenderSystem.h" text eol=crlf
+"/Engine/Renderer/RenderSystemCapture.cpp" text eol=crlf
+"/Engine/Renderer/RenderSystemDiagnostics.cpp" text eol=crlf
+"/Engine/Renderer/RenderSystemResources.cpp" text eol=crlf
+"/Engine/Renderer/RenderSystemSettings.cpp" text eol=crlf
+"/Engine/Renderer/RenderTypes.h" text eol=lf
+"/Engine/Resource/ResourceManager.cpp" -text
+"/Engine/Resource/ResourceManager.h" -text
+"/Engine/Resource/ResourceManagerMaterial.cpp" -text
+"/Engine/Resource/ResourceManagerMesh.cpp" -text
+"/Engine/Resource/ResourceManagerShader.cpp" -text
+"/Engine/Resource/ResourceManagerShaderCollection.cpp" -text
+"/Engine/Resource/ResourceManagerTexture.cpp" -text
+"/Engine/Runtime/ContentMount/TEPAK/PackReader.h" text eol=crlf
+"/Engine/Runtime/ContentMount/TEPAK/PackTypes.h" text eol=crlf
+"/Engine/Runtime/ContentMount/TEPAK/Version.h" text eol=crlf
+"/Engine/Runtime/ContentMount/archive/ArchiveSerialization.cpp" text eol=crlf
+"/Engine/Runtime/ContentMount/archive/ExtentReader.cpp" text eol=crlf
+"/Engine/Runtime/ContentMount/archive/PackReader.cpp" text eol=crlf
+"/Engine/Runtime/ContentMount/codec/CodecProvider.cpp" text eol=crlf
+"/Engine/Runtime/ContentMount/codec/CodecProvider.h" text eol=crlf
+"/Engine/Runtime/ContentMount/io/PathNormalizer.cpp" text eol=crlf
+"/Engine/Runtime/ContentMount/io/PathText.h" text eol=crlf
+"/Engine/Runtime/ContentMount/model/PackModel.h" text eol=crlf
+"/Engine/Scene/SceneManager.cpp" -text
+"/Engine/Scene/SceneManager.h" -text
+"/Engine/Scene/Serializer.cpp" text eol=crlf
+"/Engine/Scene/SpatialBounds.h" text eol=crlf
+"/Engine/Scene/SpatialDiagnostics.h" text eol=crlf
+"/Engine/Scene/SpatialIndex.cpp" text eol=crlf
+"/Engine/Scene/SpatialIndex.h" text eol=crlf
+"/Engine/Scene/SpatialQuery.h" text eol=crlf
+"/Engine/Scripting/ExportVTable.h" -text
+"/Engine/Scripting/ScriptGlue.cpp" -text
+"/Engine/Scripting/ScriptingSystem.cpp" -text
+"/Engine/Scripting/ScriptingSystem.h" text eol=crlf
+"/Engine/ThreadPool/ThreadPool.cpp" text eol=crlf
+"/Engine/ThreadPool/ThreadPool.h" text eol=crlf
+"/Engine/UI/UIElement.cpp" text eol=crlf
+"/Engine/UI/UILayoutEngine.cpp" text eol=crlf
+"/Engine/UI/UIParser.cpp" text eol=crlf
+"/Engine/UI/UIRenderer.cpp" text eol=crlf
+"/Engine/UI/UIRenderer.h" text eol=crlf
+"/Engine/UI/UIStyle.cpp" text eol=crlf
+"/Engine/UI/UIStyle.h" text eol=crlf
+"/Engine/UI/UISystem.cpp" text eol=crlf
+"/Engine/UI/UISystem.h" text eol=crlf
+"/Engine/Utilities/PlatformUtils.cpp" text eol=crlf
+"/Engine/Utilities/UUID.h" -text
+"/Engine/Window/GLFW/GlfwWindowBackend.cpp" text eol=crlf
+"/Engine/Window/GLFW/GlfwWindowBackend.h" text eol=crlf
+"/Engine/Window/WindowSystem.cpp" text eol=crlf
+"/Engine/Window/WindowSystem.h" text eol=crlf
+"/Tests/Tools/CodeQuality/Baseline/comment-batches.json" -text
+"/Tests/Tools/CodeQuality/Baseline/production-comments.json" -text
+"/Tests/Tools/CodeQuality/Baseline/stage-ownership.json" -text
+
+# The final disposition ledger and acceptance contract are also raw-hash pinned.
+"/Tests/Tools/CodeQuality/Baseline/comment-dispositions.json" -text
+"/Tests/Tools/CodeQuality/acceptance-contract.json" -text

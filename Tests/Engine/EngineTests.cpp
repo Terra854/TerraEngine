@@ -295,6 +295,8 @@ namespace TerraEngine::Tests {
 	void RegisterRenderCaptureDiagnosticsTests(TestRegistry& registry);
 	void RegisterRenderCaptureEncodingTests(TestRegistry& registry);
 	void RegisterRenderCaptureQueueTests(TestRegistry& registry);
+	void RegisterSyntheticCaptureLifecycleTests(TestRegistry& registry);
+	void RegisterVulkanReadbackLifetimeTests(TestRegistry& registry);
 	void RegisterRenderDeferredRetirementTests(TestRegistry& registry);
 	void RegisterRendererDeviceLossLatchTests(TestRegistry& registry);
 	void RegisterRendererRecoveryDiagnosticsTests(TestRegistry& registry);
@@ -847,6 +849,8 @@ int main() {
 	TerraEngine::Tests::RegisterRenderCaptureDiagnosticsTests(registry);
 	TerraEngine::Tests::RegisterRenderCaptureEncodingTests(registry);
 	TerraEngine::Tests::RegisterRenderCaptureQueueTests(registry);
+	TerraEngine::Tests::RegisterSyntheticCaptureLifecycleTests(registry);
+	TerraEngine::Tests::RegisterVulkanReadbackLifetimeTests(registry);
 	TerraEngine::Tests::RegisterRenderPerformanceGateTests(registry);
 	TerraEngine::Tests::RegisterRenderReferenceFrameTests(registry);
 	TerraEngine::Tests::RegisterUnboundedWorldPerformanceTests(registry);

@@ -24,7 +24,7 @@ enum class FileStatus {
 	Erased
 };
 
-// struct FileEvent groups related state and operations so callers have one documented contract.
+
 struct FileEvent {
 	std::filesystem::path path;
 	FileStatus status;
@@ -41,7 +41,7 @@ struct FileWatcherDiagnostics {
 	bool reconcileRequired = false;
 };
 
-// class FileWatcher groups related state and operations so callers have one documented contract.
+
 class FileWatcher {
 public:
 	using Callback = std::function<void(std::filesystem::path, FileStatus)>;

@@ -238,6 +238,37 @@ namespace TerraEngine::Tests {
 					"A one-row COW update must replace its page while retaining every unchanged page identity.");
 			});
 
+		registry.Add("Animation.AuthorityPublication.RejectedCandidatesPreservePinnedOwners", [](TestContext& context) {
+			AnimationAuthorityPublisher publisher;
+			context.Expect(publisher.Publish(MakeSealed(0U, 1U), 9U, 4U).Published(), "The initial actual publisher exchange must succeed.");
+			const auto held = publisher.Load();
+			const auto pages = held->pages;
+			const auto sidecars = held->sidecars;
+			const auto* row = held->Find({3U, 7U, 9U});
+			const auto pose = row->snapshot->pose;
+			auto cancelled = MakeSealed(1U, 2U); cancelled.cancelled = true;
+			const auto cancelledReceipt = publisher.Publish(cancelled, 9U, 4U);
+			const auto sessionReceipt = publisher.Publish(MakeSealed(1U, 2U, 10U), 9U, 4U);
+			const auto lifecycleReceipt = publisher.Publish(MakeSealed(1U, 2U), 9U, 5U);
+			const auto predecessorReceipt = publisher.Publish(MakeSealed(0U, 2U), 9U, 4U);
+			context.Expect(cancelledReceipt.outcome == AnimationAuthorityPublicationOutcome::RejectedCancelled
+				&& sessionReceipt.outcome == AnimationAuthorityPublicationOutcome::RejectedLifecycle
+				&& lifecycleReceipt.outcome == AnimationAuthorityPublicationOutcome::RejectedLifecycle
+				&& predecessorReceipt.outcome == AnimationAuthorityPublicationOutcome::RejectedStalePredecessor,
+				"Actual publisher guards must distinguish cancellation, session/lifecycle, and predecessor rejection.");
+			context.Expect(publisher.Load() == held && held->pages == pages && held->sidecars == sidecars
+				&& held->Find({3U, 7U, 9U}) == row && row->snapshot->pose == pose && row->tick == 42,
+				"Every rejection must preserve exact root, page, sidecar, row, pose, and playback identities.");
+			// A rejected candidate must not poison the predecessor for a later valid
+			// exchange, and lifecycle retirement must not invalidate pinned readers.
+			context.Expect(publisher.Publish(MakeSealed(1U, 2U), 9U, 4U).Published()
+				&& publisher.Load() != held, "A valid successor must remain admissible after rejected candidates.");
+			publisher.Clear(10U, 5U);
+			context.Expect(!publisher.Load() && held->IsValid() && held->pages == pages && held->sidecars == sidecars
+				&& held->Find({3U, 7U, 9U}) == row && row->snapshot->pose == pose && row->tick == 42,
+				"A held reader must survive both successor publication and lifecycle retirement with its sealed pose intact.");
+		});
+
 		registry.Add("Animation.AuthorityPublication.StalePredecessorLeavesRootUntouched", [](TestContext& context) {
 			AnimationAuthorityPublisher publisher;
 			const AnimationPublicationReceipt first = publisher.Publish(MakeSealed(0U, 1U), 9U, 4U);

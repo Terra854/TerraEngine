@@ -290,7 +290,7 @@ struct ModelPackageAnimationSummaryMetadata {
 	std::vector<std::string> diagnostics;
 };
 
-// class AssetDatabase groups related state and operations so callers have one documented contract.
+
 class AssetDatabase {
 public:
 	static AssetDatabase& Instance();
@@ -325,7 +325,7 @@ public:
 		const TerraEngine::UUID& expectedId, std::string& outError);
 
 	// Getters
-	// GetAssets is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	const std::map<std::filesystem::path, AssetMetadata>& GetAssets() const { return assets; }
 	std::filesystem::path GetAssetRoot() const { return assetRoot; }
 	std::filesystem::path GetBuildRoot() const { return buildRoot; }
@@ -378,7 +378,7 @@ public:
 		std::string_view operation,
 		std::string_view approvedImpactFingerprint = {});
 
-	// IsCompiling is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool IsCompiling() const;
 	bool IsAssetCompiling(const std::filesystem::path& absSourcePath) const;
 	std::vector<AssetImportProgress> GetImportProgressSnapshot() const;
@@ -531,7 +531,7 @@ private:
 	std::uint64_t nextTerrainMaterialChangeGeneration = 0u;
 	
 	// Debouncing
-	// struct PendingEvent groups related state and operations so callers have one documented contract.
+
 	struct PendingEvent {
 		FileStatus status;
 		float timer; // Seconds until process
@@ -555,7 +555,7 @@ private:
 	std::deque<std::filesystem::path> pendingReconcileRemovals;
 	std::deque<std::filesystem::path> pendingReconcileOrphanedMetas;
 
-	// struct AsyncCompileJob groups related state and operations so callers have one documented contract.
+
 	struct AsyncImportProgressState {
 #ifdef TERRAENGINE_EDITOR_TESTS
 		// Immutable copied native checkpoint; workers never read the owner's hook.
@@ -600,7 +600,7 @@ private:
 	AnimationPackagePostPublisherPrepareHookForTests animationPackagePostPublisherPrepareHookForTests;
 #endif
 
-	// struct RecentlyRemovedAsset groups related state and operations so callers have one documented contract.
+
 	struct RecentlyRemovedAsset {
 		AssetMetadata metadata;
 		std::filesystem::path absSourcePath;

@@ -9,12 +9,33 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <stdexcept>
 #include <string>
 
 namespace TerraEngine::Tests
 {
 	namespace
 	{
+		// Source checks supplement runtime tests. Missing definitions must fail even
+		// when the caller only searches for forbidden text; ordering stays in one file.
+		std::string RequiredContractSource(const std::filesystem::path& relative)
+		{
+			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relative, std::ios::binary);
+			std::string text((std::istreambuf_iterator<char>(input)), {});
+			if(!input || input.bad() || text.empty())
+				throw std::runtime_error("Required source unavailable: " + relative.generic_string());
+			return text;
+		}
+		std::string RequiredContractRegion(const std::string& text, const char* first, const char* next)
+		{
+			const auto begin = text.find(first);
+			const auto end = begin == std::string::npos ? std::string::npos : text.find(next, begin + std::string(first).size());
+			if(begin == std::string::npos || end == std::string::npos || end <= begin)
+				throw std::runtime_error(std::string("Required definition boundaries unavailable: ") + first);
+			return text.substr(begin, end - begin);
+		}
+
 		class TemporaryMaterialFile final
 		{
 			public:
@@ -97,27 +118,37 @@ namespace TerraEngine::Tests
 			[](TestContext& context)
 			{
 				const std::filesystem::path sourceRoot = TERRAENGINE_SOURCE_DIR;
-				const auto ReadSource = [](const std::filesystem::path& path)
-				{
-					std::ifstream stream(path, std::ios::binary);
-					return std::string{
-						std::istreambuf_iterator<char>(stream),
-						std::istreambuf_iterator<char>() };
-				};
-				const std::string rasterShader = ReadSource(sourceRoot
-					/ "Engine/Shaders/VirtualGeometry/VirtualGeometryComputeRaster.comp.hlsl");
-				const std::string setupShader = ReadSource(sourceRoot
-					/ "Engine/Shaders/VirtualGeometry/VirtualGeometryTriangleSetup.comp.hlsl");
-				const std::string renderer = ReadSource(sourceRoot
-					/ "Engine/Renderer/RenderSystem.cpp");
+
+				const std::string rasterShader = RequiredContractSource("Engine/Shaders/VirtualGeometry/VirtualGeometryComputeRaster.comp.hlsl");
+				const std::string setupShader = RequiredContractSource("Engine/Shaders/VirtualGeometry/VirtualGeometryTriangleSetup.comp.hlsl");
+				const auto route = RequiredContractRegion(RequiredContractSource("Engine/Renderer/Frame/RenderVirtualGeometrySelection.cpp"),
+					"void RenderSystem::RouteFrameVirtualGeometryPackets(", "void RenderSystem::ValidateFrameVirtualSelectionPacket(");
+				bool forbiddenRouteAbsent = true;
+				std::size_t closureFiles = 0u;
+				// A forbidden route must not hide after relocation into a stage/header.
+				for(const auto& entry : std::filesystem::recursive_directory_iterator(sourceRoot / "Engine/Renderer")) {
+					if(!entry.is_regular_file()) continue;
+					const auto relative = entry.path().lexically_relative(sourceRoot);
+					const auto extension = entry.path().extension().string();
+					if(extension != ".cpp" && extension != ".h" && extension != ".hpp" && extension != ".inl") continue;
+					if(!entry.path().filename().string().starts_with("RenderSystem")
+						&& !relative.generic_string().starts_with("Engine/Renderer/Frame/")) continue;
+					++closureFiles;
+					forbiddenRouteAbsent &= RequiredContractSource(relative).find("singleSidedComputeSurface") == std::string::npos;
+				}
+				if(closureFiles == 0u) throw std::runtime_error("Required renderer closure is empty");
 				context.Expect(
 					rasterShader.find("TE_VIRTUAL_GEOMETRY_RASTER_FLAG_DOUBLE_SIDED")
 						!= std::string::npos
 						&& setupShader.find("packet.identity.w") != std::string::npos
-						&& renderer.find("singleSidedComputeSurface") == std::string::npos,
+						&& forbiddenRouteAbsent
+						&& route.find("candidate.computeSupported =") != std::string::npos,
 					"Default double-sided materials must carry explicit winding policy through GPU setup instead of falling off the compute route.");
 
-				const std::string vulkan = VulkanSourceContracts::ReadContextSources();
+				// Both ordering markers belong to this one native RenderFrame definition.
+				const auto vulkan = RequiredContractRegion(
+					RequiredContractSource("Engine/Renderer/RHI/Vulkan/VulkanFrameRendering.cpp"),
+					"void VulkanContext::RenderFrame(", "\n}");
 				const std::size_t shadowPreparation = vulkan.find("preparedShadowLists");
 				const std::size_t computeOwnership = vulkan.find("hasComputeOwnedDraw");
 				context.Expect(

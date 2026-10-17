@@ -329,7 +329,7 @@ namespace
 			push);
 	}
 
-	// struct ScoredCandidate groups related state and operations so callers have one documented contract.
+
 	struct ScoredCandidate
 	{
 		float score = 0.0f;
@@ -340,7 +340,7 @@ namespace
 		bool stabilityBiasApplied = false;
 	};
 
-	// struct ShadowWinner groups related state and operations so callers have one documented contract.
+
 	struct ShadowWinner
 	{
 		float score = 0.0f;
@@ -349,17 +349,17 @@ namespace
 		bool reuseBonusApplied = false;
 	};
 
-	// GetMatrixRow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	glm::vec4 GetMatrixRow(const glm::mat4& matrix, int rowIndex)
 	{
 		return glm::vec4(matrix[0][rowIndex], matrix[1][rowIndex], matrix[2][rowIndex], matrix[3][rowIndex]);
 	}
 
-	// NormalizePlane is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	glm::vec4 NormalizePlane(const glm::vec4& plane)
 	{
 		const float length = glm::length(glm::vec3(plane));
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (length <= 1e-6f)
 		{
 			return glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -367,7 +367,7 @@ namespace
 		return plane / length;
 	}
 
-	// BuildFrustumPlanes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::array<glm::vec4, 6> BuildFrustumPlanes(const glm::mat4& viewProjection)
 	{
 		const glm::vec4 row0 = GetMatrixRow(viewProjection, 0);
@@ -389,12 +389,12 @@ namespace
 		return planes;
 	}
 
-	// GetEffectiveLightInfluenceRadius is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	float GetEffectiveLightInfluenceRadius(const FrameLightCandidate& candidate)
 	{
 		const GPULight& light = candidate.gpuLight;
 		float influenceRadius = std::max(light.directionAndRange.w, 0.001f);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if ((candidate.candidateFlags & kFrameLightCandidateFlagSpecialCost) != 0u)
 		{
 			const float specialExtent = std::max(light.coneAnglesAndArea.z, light.coneAnglesAndArea.w);
@@ -403,12 +403,12 @@ namespace
 		return influenceRadius;
 	}
 
-	// SphereIntersectsFrustum is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool SphereIntersectsFrustum(const glm::vec3& center, float radius, const std::array<glm::vec4, 6>& planes)
 	{
 		for (const glm::vec4& plane : planes)
 		{
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (glm::dot(glm::vec3(plane), center) + plane.w < -radius)
 			{
 				return false;
@@ -417,7 +417,7 @@ namespace
 		return true;
 	}
 
-	// SafeFrameTimeMs is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	float SafeFrameTimeMs(float deltaTimeSeconds)
 	{
 		if (deltaTimeSeconds <= 0.0f)
@@ -427,11 +427,11 @@ namespace
 		return deltaTimeSeconds * 1000.0f;
 	}
 
-	// SafeNormalize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	glm::vec3 SafeNormalize(const glm::vec3& value, const glm::vec3& fallback)
 	{
 		const float len = glm::length(value);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!std::isfinite(len) || len <= 1e-5f)
 		{
 			return fallback;
@@ -439,12 +439,12 @@ namespace
 		return value / len;
 	}
 
-	// MatricesApproximatelyEqual is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool MatricesApproximatelyEqual(const glm::mat4& lhs, const glm::mat4& rhs, float epsilon)
 	{
 		for (int column = 0; column < 4; ++column)
 		{
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 			for (int row = 0; row < 4; ++row)
 			{
 				if (std::abs(lhs[column][row] - rhs[column][row]) > epsilon)
@@ -456,13 +456,13 @@ namespace
 		return true;
 	}
 
-	// GetLightType is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::uint32_t GetLightType(const GPULight& light)
 	{
 		return static_cast<std::uint32_t>(std::max(light.positionAndType.w, 0.0f) + 0.5f);
 	}
 
-	// GetShadowSlotIndex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::uint32_t GetShadowSlotIndex(const FrameLightCandidate& candidate)
 	{
 		switch (GetLightType(candidate.gpuLight))
@@ -475,7 +475,7 @@ namespace
 		}
 	}
 
-	// GetShadowResourceKind is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	ShadowResourceKind GetShadowResourceKind(const FrameLightCandidate& candidate)
 	{
 		switch (GetLightType(candidate.gpuLight))
@@ -488,7 +488,7 @@ namespace
 		}
 	}
 
-	// EstimateShadowResourceBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::uint64_t EstimateShadowResourceBytes(ShadowResourceKind kind, ShadowQualityTier qualityTier = ShadowQualityTier::FullResolution)
 	{
 		constexpr std::uint64_t kDepthBytesPerPixel = 4u;
@@ -543,7 +543,7 @@ namespace
 		score += ((candidate.candidateFlags & kFrameLightCandidateFlagDirectional) != 0u) ? 2000000.0f : 0.0f;
 		score += ((candidate.candidateFlags & kFrameLightCandidateFlagSpecialCost) != 0u) ? specialExtent * 150.0f : 0.0f;
 		score -= distanceOutsideInfluence * 2.0f;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (lightType == 0u)
 		{
 			score += 500000.0f;
@@ -558,14 +558,14 @@ namespace
 		const std::array<glm::vec4, 6>& frustumPlanes)
 	{
 		const GPULight& light = candidate.gpuLight;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if ((candidate.candidateFlags & kFrameLightCandidateFlagDirectional) != 0u)
 		{
 			return 1.0f;
 		}
 
 		const float influenceRadius = GetEffectiveLightInfluenceRadius(candidate);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!SphereIntersectsFrustum(glm::vec3(light.positionAndType), influenceRadius, frustumPlanes))
 		{
 			return 0.0f;
@@ -574,7 +574,7 @@ namespace
 		const glm::vec4 viewPosition = viewMatrix * glm::vec4(glm::vec3(light.positionAndType), 1.0f);
 		const float depth = -viewPosition.z;
 		const glm::vec4 clipPosition = projectionMatrix * viewPosition;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!std::isfinite(clipPosition.w) || std::abs(clipPosition.w) <= 1e-5f)
 		{
 			const float intensity = std::max(light.colorAndIntensity.w, 0.0f);
@@ -591,7 +591,7 @@ namespace
 		return std::max(visibility * visibility * (1.0f + intensity), 0.1f * (1.0f + intensity));
 	}
 
-	// ShouldResetTemporalViewState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool ShouldResetTemporalViewState(bool stateValid,
 		const glm::vec3& lastCameraLocalPosition,
 		const glm::mat4& lastProjectionMatrix,
@@ -604,7 +604,7 @@ namespace
 
 		const float cameraDistance = glm::length(
 			presentation.cameraLocalPosition - lastCameraLocalPosition);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (cameraDistance > kTemporalResetDistance)
 		{
 			return true;
@@ -614,7 +614,7 @@ namespace
 			lastProjectionMatrix, kTemporalResetMatrixEpsilon);
 	}
 
-	// ComputeDirectionalShadowCenter is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	glm::vec3 ComputeDirectionalShadowCenter(const GPULight& light, const glm::vec3& cameraLocalPosition)
 	{
 		const glm::vec3 lightDirection = SafeNormalize(-glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
@@ -634,7 +634,7 @@ namespace
 		return glm::vec3(glm::inverse(provisionalView) * snappedCenterLightSpace);
 	}
 
-	// BuildDirectionalShadowViewProjection is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	glm::mat4 BuildDirectionalShadowViewProjection(const GPULight& light, const glm::vec3& cameraLocalPosition)
 	{
 		const glm::vec3 lightDirection = SafeNormalize(-glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
@@ -651,7 +651,7 @@ namespace
 		return projection * view;
 	}
 
-	// BuildSpotShadowViewProjection is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	glm::mat4 BuildSpotShadowViewProjection(const GPULight& light)
 	{
 		const glm::vec3 lightPosition = glm::vec3(light.positionAndType);
@@ -668,7 +668,7 @@ namespace
 		return projection * view;
 	}
 
-	// BuildAreaShadowViewProjection is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	glm::mat4 BuildAreaShadowViewProjection(const GPULight& light)
 	{
 		const glm::vec3 lightPosition = glm::vec3(light.positionAndType);
@@ -686,7 +686,7 @@ namespace
 		return projection * view;
 	}
 
-	// BuildPointShadowViewProjection is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	glm::mat4 BuildPointShadowViewProjection(const GPULight& light, uint32_t faceIndex)
 	{
 		static constexpr std::array<glm::vec3, 6> kFaceDirections = {
@@ -717,7 +717,7 @@ namespace
 		return projection * view;
 	}
 
-	// StoreShadowViewProjection is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void StoreShadowViewProjection(GPULight& light, const glm::mat4& viewProjection)
 	{
 		// GLM stores matrices as columns. Keep that column order in the GPU
@@ -729,7 +729,7 @@ namespace
 		light.shadowMatrixC3 = viewProjection[3];
 	}
 
-	// LoadShadowViewProjection is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	glm::mat4 LoadShadowViewProjection(const GPULight& light)
 	{
 		glm::mat4 viewProjection(1.0f);
@@ -740,7 +740,7 @@ namespace
 		return viewProjection;
 	}
 
-	// ShouldMaterialCastShadow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool ShouldMaterialCastShadow(MaterialFileShadowBehavior behavior)
 	{
 		// Transparent materials are excluded from the first shadow milestone

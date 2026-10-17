@@ -16,7 +16,7 @@ EditorWindow::EditorWindow(const std::string& title, bool startVisible, std::str
 	// path generically, so categories remain owned by each concrete window.
 }
 
-// EditorWindow::Draw is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void EditorWindow::Draw() {
 	if (!m_IsVisible) return;
 
@@ -26,9 +26,9 @@ void EditorWindow::Draw() {
 	OnBeforeBegin();
 	bool nextVisible = m_IsVisible;
 	bool expanded = ImGui::Begin(m_Title.c_str(), &nextVisible, m_Flags);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!nextVisible && m_IsVisible) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (OnCloseRequested()) {
 			m_IsVisible = false;
 		} else {
@@ -42,16 +42,16 @@ void EditorWindow::Draw() {
 	bool tabHovered = false;
 	if (window->DockNode && window->DockNode->TabBar) {
 		ImGuiTabBar* tabBar = window->DockNode->TabBar;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const auto& tab : tabBar->Tabs) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (tab.ID == window->TabId) {
 				ImVec2 tabMin = tabBar->BarRect.Min;
 				tabMin.x += tab.Offset - tabBar->ScrollingAnim;
 				ImVec2 tabMax = ImVec2(tabMin.x + tab.Width, tabBar->BarRect.Max.y);
 
 				ImVec2 mousePos = ImGui::GetMousePos();
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (mousePos.x >= tabMin.x && mousePos.x <= tabMax.x &&
 					mousePos.y >= tabMin.y && mousePos.y <= tabMax.y) {
 					tabHovered = true;
@@ -62,22 +62,22 @@ void EditorWindow::Draw() {
 	}
 
 	bool titleBarHovered = false;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!window->DockNode && (window->Flags & ImGuiWindowFlags_NoTitleBar) == 0) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (window->TitleBarRect().Contains(ImGui::GetMousePos())) {
 			titleBarHovered = true;
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
 		if (titleBarHovered || tabHovered) {
 			ImGui::OpenPopup("WindowContextMenu");
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ImGui::BeginPopup("WindowContextMenu")) {
 		OnContextMenu();
 		if (ImGui::MenuItem("Close") && OnCloseRequested()) m_IsVisible = false;

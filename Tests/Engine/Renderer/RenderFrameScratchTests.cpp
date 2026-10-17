@@ -2,6 +2,14 @@
 #include "TestHarness.h"
 #include "Core/Memory/TrackingMemoryResource.h"
 #include "Renderer/Graph/RenderFrameScratch.h"
+#include "Renderer/Graph/RenderFrameScratchValidation.h"
+#include "ThreadPool/ThreadPool.h"
+#include "Core/Object/ObjectManager.h"
+#include "Core/Scheduling/JobGraph.h"
+#include "../../Support/RenderCaptureBackendTestAccess.h"
+
+#include <array>
+#include <atomic>
 
 #include <future>
 #include <chrono>
@@ -59,6 +67,88 @@ namespace TerraEngine::Tests {
 			}
 			~ReleaseBorrower() { Release(); }
 		};
+		// The backend records only the real coordinator's typed calls. All capture,
+		// preparation, sealing, suspension and retirement still run in RenderSystem.
+		class StageBackend final : public RHIContext {
+		public:
+			std::size_t begins = 0U, ends = 0U;
+			std::vector<std::uint32_t> viewIndices;
+			std::shared_ptr<const Renderer::RenderFramePublication> publication;
+			void Initialize(WindowSystem&) override {}
+			void BeginFrame() override { ++begins; }
+			void EndFrame() override { ++ends; }
+			void WaitIdle() override {}
+			void Shutdown() override { publication.reset(); }
+			void RenderFrame(std::shared_ptr<const Renderer::RenderFramePublication> root,
+				std::uint32_t viewIndex) override {
+				if(publication && publication != root)
+					throw std::logic_error("One backend frame received different publication roots");
+				publication = std::move(root); viewIndices.push_back(viewIndex);
+			}
+			Renderer::BackendCapabilityProfile GetBackendCapabilityProfile() const override {
+				auto result = RHIContext::GetBackendCapabilityProfile();
+				result.maxRecordingWorkers = 2U;
+				return result;
+			}
+		};
+		// Singleton replacement is legal only at this quiescent native test boundary.
+		// Destroy the continuation before authored inputs and any owned pool workers.
+		struct StageFixture {
+			RenderSystem& renderer = RenderSystem::Instance();
+			bool ownsPool = ThreadPool::instance().getThreadCount() == 0U;
+			StageBackend* backend = nullptr;
+			std::vector<Object> lights;
+			StageFixture() {
+				bool attached = false;
+				try {
+					if(ownsPool) ThreadPool::instance().initialize(2U);
+					renderer.Clear();
+					auto context = std::make_unique<StageBackend>(); backend = context.get();
+					if(!Renderer::RenderCaptureBackendTestAccess::Attach(renderer, std::move(context)))
+						throw std::logic_error("Stage fixture cannot replace a retained backend");
+					attached = true;
+					// Child-admission assertions require parallel preparation even if a
+					// preceding fixture left serial comparison options behind. Shutdown
+					// resets these transient options when this fixture retires its owner.
+					auto options = renderer.GetRendererEfficiencyOptionsSnapshot().options;
+					options.validationPreparation = Renderer::RendererEfficiencyPreparation::Concurrent;
+					if(!renderer.QueueRendererEfficiencyOptions(options).accepted)
+						throw std::logic_error("Stage fixture cannot select parallel preparation");
+					renderer.SetEditorModeEnabled(true);
+					renderer.ClearOverrideCameras();
+					renderer.SetGameViewSuppressed(false);
+					renderer.SetSceneViewCamera(glm::mat4(1.0f), glm::mat4(1.0f), {});
+					renderer.SetGameViewCamera(glm::mat4(1.0f), glm::mat4(1.0f), {});
+					renderer.SetSceneViewTargetSize({7U, 3U});
+					renderer.SetGameViewTargetSize({5U, 2U});
+				} catch(...) {
+					// A failed constructor has no fixture destructor to retire its owners.
+					if(attached) { renderer.Shutdown(); renderer.ClearOverrideCameras(); renderer.SetEditorModeEnabled(false); }
+					if(ownsPool) ThreadPool::instance().shutdown();
+					throw;
+				}
+			}
+			void AuthorLights() {
+				lights.reserve(128U);
+				for(std::size_t index = 0U; index < 128U; ++index) {
+					const auto object = ObjectManager::instance().createObject("Stage contract light");
+					lights.push_back(object);
+					ObjectManager::instance().AddComponent<LightComponent>(object);
+				}
+			}
+			~StageFixture() {
+				renderer.Shutdown();
+				renderer.SetFrameScratchValidationCallbacks(nullptr);
+				renderer.ClearOverrideCameras();
+				renderer.SetEditorModeEnabled(false);
+				for(const auto object : lights) ObjectManager::instance().removeObject(object);
+				if(ownsPool) ThreadPool::instance().shutdown();
+			}
+		};
+		struct StageBoundaryObservation {
+			bool active = false, rootRetained = false;
+			std::size_t begins = 0U, renders = 0U, ends = 0U;
+		};
 		// Destruction records whether the PMR owner still had its episode lease.
 		// No throwing assertion is allowed while destructors unwind a failure.
 		struct TrackedValue {
@@ -70,6 +160,130 @@ namespace TerraEngine::Tests {
 
 	void RegisterRenderFrameScratchTests(TestRegistry& registry)
 	{
+		registry.Add("Engine.RuntimeMemorySafety.RendererScratch.ProductionStagesRetainRootsAcrossSuspensions", [](TestContext& context) {
+			StageFixture fixture;
+			auto& objects = ObjectManager::instance();
+			objects.PublishSceneChangePacket();
+			auto protectedRoot = objects.LoadPublishedSceneChangePacketShared();
+			std::weak_ptr<const TerraEngine::Scene::SceneChangePacket> capturedRoot = protectedRoot;
+			Renderer::RenderFrameScratchDiagnostics captured;
+			auto callbacks = std::make_shared<Renderer::RenderFrameScratchValidationCallbacks>();
+			callbacks->onEvent = [&](const Renderer::RenderFrameScratchValidationEvent& event) {
+				if(event.checkpoint == Renderer::RenderFrameScratchValidationCheckpoint::Captured) captured = event.episode;
+			};
+			fixture.renderer.SetFrameScratchValidationCallbacks(callbacks);
+			auto stages = fixture.renderer.DeclareFrameWorkloads(0.0f);
+			const std::array<std::string_view, 5> names{"RenderPublicationCapture", "GeometryRoutePrepare",
+				"VirtualGeometryPrepare", "BackendCommit", "RenderPublication"};
+			context.Expect(stages.size() == names.size(), "The production coordinator must expose four resumes and final retirement");
+			std::array<StageBoundaryObservation, 5> entries{}, exits{};
+			const auto observe = [&] {
+				return StageBoundaryObservation{fixture.renderer.GetFrameScratchValidationState().active,
+					!capturedRoot.expired(), fixture.backend->begins, fixture.backend->viewIndices.size(), fixture.backend->ends};
+			};
+			// Wrap the actual declared callbacks; this records their observable edges,
+			// rather than reproducing their coroutine or scheduler in a test model.
+			for(std::size_t index = 0U; index < stages.size(); ++index) {
+				context.Expect(stages[index].workloadName == names[index], "Production stage order changed");
+				auto work = std::move(stages[index].work);
+				stages[index].work = [&, index, work = std::move(work)](TerraEngine::Scheduling::JobGraphContext& job) {
+					entries[index] = observe(); work(job); exits[index] = observe();
+				};
+			}
+			TerraEngine::Scheduling::JobGraphContext job;
+			stages[0].work(job);
+			// Replacing the public packet leaves only the suspended frame holding
+			// this exact old protected root. No scene generation or live input changes.
+			objects.PublishSceneChangePacket(); protectedRoot.reset();
+			for(std::size_t index = 1U; index < stages.size(); ++index) stages[index].work(job);
+			context.Expect(captured.episodeId != 0U && !entries[0].active,
+				"Capture must start a real scratch episode from a quiescent owner");
+			for(std::size_t index = 0U; index < 3U; ++index) {
+				context.Expect(exits[index].active && exits[index].rootRetained && exits[index].begins == 0U,
+					"Every production suspension must retain its lease and exact protected root before any backend work");
+				context.Expect(entries[index + 1U].active && entries[index + 1U].rootRetained,
+					"The next resume must inherit the same owned inputs and active scratch episode");
+			}
+			context.Expect(exits[3].begins == 1U && exits[3].renders == 2U && exits[3].ends == 1U
+				&& !exits[3].active && !exits[4].active && !exits[4].rootRetained,
+				"Backend completion must settle owned inputs; final publication must retire without submitting more work");
+			context.Expect(exits[4].begins == exits[3].begins && exits[4].renders == exits[3].renders
+				&& exits[4].ends == exits[3].ends, "The fifth callback is retirement only");
+			const auto publication = fixture.backend->publication;
+			context.Expect(publication && publication->views.size() == 2U
+				&& fixture.backend->viewIndices == std::vector<std::uint32_t>{0U, 1U}
+				&& publication->views[0].outputKind == RenderOutputKind::SceneView
+				&& publication->views[0].outputId == 1U
+				&& publication->views[1].outputKind == RenderOutputKind::GameView
+				&& publication->views[1].outputId == 2U,
+				"Actual typed Scene and Game selections must reach the backend in their original output order");
+			const auto terminal = fixture.renderer.GetFrameScratchValidationState();
+			context.Expect(terminal.latest.episodeId == captured.episodeId
+				&& terminal.latest.outcome == RenderFrameScratchOutcome::Completed,
+				"Final retirement must publish the exact completed episode, not an active or replacement snapshot");
+		});
+		registry.Add("Engine.RuntimeMemorySafety.RendererScratch.ProductionFailureSettlesAdmittedLightChildren", [](TestContext& context) {
+			StageFixture fixture; fixture.AuthorLights();
+			ObjectManager::instance().PublishSceneChangePacket();
+			std::promise<void> childEntered, releaseChild, inlineFailed;
+			auto entered = childEntered.get_future().share();
+			auto released = releaseChild.get_future().share();
+			auto failed = inlineFailed.get_future();
+			std::atomic<bool> selected = false, childEnded = false, childEndedWhileActive = false;
+			std::atomic<std::size_t> heldStart = 0U;
+			Renderer::RenderFrameScratchDiagnostics captured;
+			auto callbacks = std::make_shared<Renderer::RenderFrameScratchValidationCallbacks>();
+			callbacks->onEvent = [&](const Renderer::RenderFrameScratchValidationEvent& event) {
+				using Checkpoint = Renderer::RenderFrameScratchValidationCheckpoint;
+				if(event.checkpoint == Checkpoint::Captured) { captured = event.episode; return; }
+				if(event.checkpoint == Checkpoint::LightReadBegin && event.start != 0U && !selected.exchange(true)) {
+					heldStart.store(event.start); childEntered.set_value();
+					if(released.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
+						throw std::runtime_error("Production light child gate timed out");
+				}
+				if(event.checkpoint == Checkpoint::LightReadBegin && event.start == 0U) {
+					if(entered.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
+						throw std::runtime_error("Production light child was not admitted");
+					inlineFailed.set_value();
+					throw std::runtime_error("Stage contract inline failure after child admission");
+				}
+				if(event.checkpoint == Checkpoint::LightReadEnd && event.start == heldStart.load()) {
+					childEndedWhileActive.store(fixture.renderer.GetFrameScratchValidationState().active);
+					childEnded.store(true);
+				}
+			};
+			fixture.renderer.SetFrameScratchValidationCallbacks(callbacks);
+			std::weak_ptr<const Renderer::RenderFrameScratchValidationCallbacks> capturedCallbacks = callbacks;
+			auto stages = fixture.renderer.DeclareFrameWorkloads(0.0f);
+			TerraEngine::Scheduling::JobGraphContext job; stages.at(0).work(job);
+			fixture.renderer.SetFrameScratchValidationCallbacks(nullptr); callbacks.reset();
+			// Keep engine pool workers available for actual admitted children. The
+			// release guard is later than the future, so failure unwinds without a join deadlock.
+			auto phase = std::async(std::launch::async, [&] { stages.at(1).work(job); });
+			ReleaseBorrower release{releaseChild};
+			context.Expect(entered.wait_for(std::chrono::seconds(10)) == std::future_status::ready
+				&& failed.wait_for(std::chrono::seconds(10)) == std::future_status::ready,
+				"The real preparation stage must admit a child before the injected inline failure");
+			context.Expect(fixture.renderer.GetFrameScratchValidationState().active && !capturedCallbacks.expired()
+				&& phase.wait_for(std::chrono::milliseconds(25)) != std::future_status::ready && !childEnded.load(),
+				"Failure cannot retire its input owner or settle the stage while an admitted child still borrows lights");
+			bool clearRejected = false;
+			try { fixture.renderer.Clear(); } catch(const std::logic_error&) { clearRejected = true; }
+			context.Expect(clearRejected && fixture.renderer.GetFrameScratchValidationState().active,
+				"A competing lifecycle reset must reject atomically while production preparation owns borrowers");
+			release.Release();
+			std::string failure;
+			try { phase.get(); } catch(const std::runtime_error& error) { failure = error.what(); }
+			context.Expect(failure == "Stage contract inline failure after child admission"
+				&& childEnded.load() && childEndedWhileActive.load() && capturedCallbacks.expired(),
+				"Original inline failure must propagate only after the child reads and releases its captured owner");
+			fixture.renderer.Clear();
+			const auto terminal = fixture.renderer.GetFrameScratchValidationState();
+			context.Expect(!terminal.active && terminal.latest.episodeId == captured.episodeId
+				&& terminal.latest.outcome == RenderFrameScratchOutcome::Failed
+				&& fixture.backend->begins == 0U && fixture.backend->viewIndices.empty(),
+				"A failed production episode must retire exactly once without partial backend publication");
+		});
 		registry.Add("Engine.RuntimeMemorySafety.RendererScratch.ExclusiveLeaseBeforeReset", [](TestContext& context) {
 			auto owner = RenderFrameScratch::Create(256U);
 			auto lease = owner->BeginEpisode(1U);

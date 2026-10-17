@@ -1,0 +1,62 @@
+# This manifest proves installed input identity, not graphics correctness. It
+# excludes itself so repeated installs never create a recursive hash dependency.
+set(readback_root "@ENGINE_INSTALL_DESTINATION@")
+set(readback_subdir "Tests/Tools/ReadbackLifetime")
+set(readback_required
+	"${readback_subdir}/ReadbackLifetimeFixture.exe"
+	"${readback_subdir}/TerraEngine.dll" "${readback_subdir}/glfw3.dll"
+	"${readback_subdir}/RunInstalledReadbackLifetime.ps1"
+	"${readback_subdir}/InvokeReadbackEditorAcceptance.ps1"
+	"${readback_subdir}/ReadbackLifetimeProtocol.psm1"
+	"${readback_subdir}/TestReadbackLifetimeRunner.ps1"
+	"${readback_subdir}/TestReadbackLifetimeSensitivity.ps1" "${readback_subdir}/README.md"
+	"Editor/TerraEngine-Editor.exe" "Editor/TerraEngine.dll" "Editor/glfw3.dll"
+	"Tests/Engine/TerraEngine-EngineTests.exe" "Tests/Engine/TerraEngine.dll"
+	"Tests/Editor/TerraEngine-EditorTests.exe" "Tests/Editor/TerraEngine.dll"
+	"Tests/Tools/Correctness/RunWithWatchdog.ps1"
+	"Tests/Tools/Correctness/RunNativeCorrectnessSlice.ps1"
+	"Tests/Tools/RuntimeMemorySafety/MaterializeRuntimeMemorySafetyFixture.ps1"
+	"Tests/Tools/RuntimeMemorySafety/Fixtures/manifest.json"
+	"Tests/Tools/RendererEfficiency/TerraEngine-RendererEfficiencyFixtureMaterializer.exe"
+	"Tests/Fixtures/RendererEfficiency/workloads.json" "correctness-artifacts.json")
+foreach(readback_pair IN ITEMS
+	"$<TARGET_FILE:ReadbackLifetimeFixture>|${readback_subdir}/ReadbackLifetimeFixture.exe"
+	"$<TARGET_FILE:TerraEngine-Engine>|${readback_subdir}/TerraEngine.dll"
+	"$<TARGET_FILE:TerraEngine-Editor>|Editor/TerraEngine-Editor.exe")
+	string(REPLACE "|" ";" readback_parts "${readback_pair}")
+	list(GET readback_parts 0 readback_built)
+	list(GET readback_parts 1 readback_relative)
+	file(SHA256 "${readback_built}" readback_built_hash)
+	file(SHA256 "${readback_root}/${readback_relative}" readback_installed_hash)
+	if(NOT readback_built_hash STREQUAL readback_installed_hash)
+		message(FATAL_ERROR "Readback installed target differs from its build: ${readback_relative}")
+	endif()
+endforeach()
+# Include dynamically loaded managed/shader/template/tool inputs as well as
+# linked DLLs; a developer PATH or an old materializer cannot supply the closure.
+file(GLOB_RECURSE readback_closure RELATIVE "${readback_root}" LIST_DIRECTORIES FALSE
+	"${readback_root}/Editor/*" "${readback_root}/Engine/*"
+	"${readback_root}/Binaries/*" "${readback_root}/Tools/*"
+	"${readback_root}/Intermediate/InstalledShaders/*"
+	"${readback_root}/${readback_subdir}/*"
+	"${readback_root}/Tests/Tools/RendererEfficiency/*"
+	"${readback_root}/Tests/Tools/RuntimeMemorySafety/Fixtures/*"
+	"${readback_root}/Tests/Fixtures/RendererEfficiency/*")
+list(APPEND readback_required ${readback_closure})
+list(REMOVE_ITEM readback_required "${readback_subdir}/readback-lifetime-artifacts.json")
+list(REMOVE_DUPLICATES readback_required)
+list(SORT readback_required)
+set(readback_json "{\"schemaVersion\":\"readback-lifetime-artifacts-v1\",\"nativeAcceptance\":false,\"editorAcceptance\":false,\"files\":[")
+set(readback_separator "")
+foreach(readback_relative IN LISTS readback_required)
+	if(NOT EXISTS "${readback_root}/${readback_relative}")
+		message(FATAL_ERROR "Missing installed readback input: ${readback_relative}")
+	endif()
+	file(SHA256 "${readback_root}/${readback_relative}" readback_hash)
+	file(SIZE "${readback_root}/${readback_relative}" readback_size)
+	string(APPEND readback_json "${readback_separator}{\"path\":\"${readback_relative}\",\"sha256\":\"${readback_hash}\",\"bytes\":${readback_size}}")
+	set(readback_separator ",")
+endforeach()
+string(APPEND readback_json "]}")
+file(WRITE "${readback_root}/${readback_subdir}/readback-lifetime-artifacts.json" "${readback_json}\n")
+message(STATUS "Sealed installed readback lifetime validation artifacts")

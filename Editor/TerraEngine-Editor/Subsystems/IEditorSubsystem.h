@@ -12,7 +12,7 @@ public:
 	virtual ~IEditorSubsystem() = default;
 	
 	virtual void Initialize(EditorContext& context) = 0;
-	// OnBackendReady is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+	// Subsystems may override this hook; the default performs no backend-ready work.
 	virtual void OnBackendReady() {}
 	virtual void Update(float deltaTime) = 0;
 	virtual void DrawUI() = 0;

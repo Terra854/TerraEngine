@@ -12,6 +12,7 @@ param(
 	[string]$ReferenceInstallRoot='', [string]$ReferenceCalibrationPath='',
 	[string]$ToolInstallRoot='', [string]$ParityEvidencePath='',
 	[string]$EditorDiagnosticsEvidencePath='',
+	[switch]$VulkanHostInstance,
 	[ValidateRange(1024,65535)][int]$McpPort=43186
 )
 function RmsRequire([bool]$Condition,[string]$Message){if(!$Condition){throw $Message}}
@@ -207,8 +208,28 @@ function RmsVulkanFlag($Value,[string]$Name,[bool]$Expected=$true){$flag=RmsFiel
 function RmsVulkanHandle($Value,[string]$Name){
 	$handle=RmsField $Value $Name;RmsRequire ($handle -is [string] -and $handle -cmatch '^[0-9]+$' -and $handle -notmatch '^0+$') "Vulkan actual nonnull handle missing: $Name";return $handle
 }
-function RmsCheckVulkanSession($Receipt,[int]$Iterations){
-	RmsRequire ($Iterations -gt 0 -and (RmsUint $Receipt vulkanEvidenceVersion 2 2) -eq 2) 'Vulkan evidence must use the retained-window session protocol'
+function RmsCheckHostInstance($Receipt){
+	$hostFacts=RmsField $Receipt hostInstance
+	foreach($name in @('requested','handleCleared')){RmsVulkanFlag $hostFacts $name}
+	foreach($name in @('hostValidationCallbacks','engineOwnersShared','driverModulePinned','globalProcessInstanceCountClaim','perIterationLastOwnedInstanceTeardownExercised')){RmsVulkanFlag $hostFacts $name $false}
+	foreach($name in @('createdCount','enumeratedCount','destroyedCount')){$null=RmsUint $hostFacts $name 1 1}
+	foreach($name in @('createResult','enumerateCountResult','enumerateResult','enabledExtensionCount','enabledLayerCount')){$null=RmsUint $hostFacts $name 0 0}
+	$null=RmsUint $hostFacts physicalDeviceCount 1;$identity=RmsVulkanHandle $hostFacts instanceHandle
+	RmsRequire ($identity -cmatch '^[1-9][0-9]*$') 'Host handle must use canonical positive decimal identity'
+	RmsRequire ((RmsField $hostFacts cleanupResult) -ceq 'ReturnedNormally' -and (RmsField $hostFacts coverageModel) -ceq 'RetainedFixtureHostInstance') 'Host instance cleanup/coverage facts are missing or relabelled'
+	return $identity
+}
+function RmsCheckVulkanSession($Receipt,[int]$Iterations,[bool]$HostInstanceRequested=$false){
+	$version=if($HostInstanceRequested){3}else{2}
+	RmsRequire ($Iterations -gt 0 -and (RmsUint $Receipt vulkanEvidenceVersion $version $version) -eq $version) 'Vulkan evidence differs from the requested host-lifetime protocol'
+	$hostPresent=($Receipt -is [Collections.IDictionary] -and $Receipt.Contains('hostInstance')) -or $null -ne $Receipt.PSObject.Properties['hostInstance']
+	RmsRequire ($hostPresent -eq $HostInstanceRequested) 'Unrequested or missing Vulkan host-instance setup'
+	$hostIdentity=$null
+	if($HostInstanceRequested){
+		# This is a distinct declared compatibility lifetime, not an overlay fix.
+		RmsRequire ($Iterations -ge 100) 'Host-instance qualification requires at least100 independent Engine contexts'
+		$hostIdentity=RmsCheckHostInstance $Receipt
+	}
 	$s=RmsField $Receipt windowSession;foreach($name in @('windowInitializeCount','windowShutdownCount')){$null=RmsUint $s $name 1 1}
 	foreach($name in @('windowCleanupCompleted','windowHidden','handleCleared')){RmsVulkanFlag $s $name};$identity=RmsVulkanHandle $s windowIdentity
 	$null=RmsUint $Receipt allSessionValidationErrors 0 0
@@ -219,25 +240,36 @@ function RmsCheckVulkanSession($Receipt,[int]$Iterations){
 		$null=RmsUint $entry iteration 0 $Iterations;RmsRequire ((RmsField $entry message) -is [string]) 'Session log message missing'
 		$kind=RmsField $entry eventKind;$phase=RmsField $entry phase
 		if($kind -ceq 'fixtureBoundary'){
-			RmsRequire ($phase -cin @('WindowInitializeBegin','WindowInitializeEnd','IterationBegin','IterationEnd','WindowShutdownBegin','WindowShutdownEnd') -and $null -eq (RmsField $entry level) -and (RmsField $entry succeeded) -is [bool]) 'Invalid actual fixture boundary'
+			$allowedBoundaries=@('WindowInitializeBegin','WindowInitializeEnd','IterationBegin','IterationEnd','WindowShutdownBegin','WindowShutdownEnd');if($HostInstanceRequested){$allowedBoundaries+=@('HostInstanceInitializeBegin','HostInstanceInitializeEnd','HostInstanceShutdownBegin','HostInstanceShutdownEnd')}
+			RmsRequire ($phase -cin $allowedBoundaries -and $null -eq (RmsField $entry level) -and (RmsField $entry succeeded) -is [bool]) 'Invalid actual fixture boundary'
 			$boundaries+=,$entry
 		}else{
-			RmsRequire ($kind -ceq 'logger' -and $phase -cin @('WindowInitialize','Iteration','BetweenIterations','WindowShutdown')) 'Unrecognized actual logger record'
+			$allowedPhases=@('WindowInitialize','Iteration','BetweenIterations','WindowShutdown');if($HostInstanceRequested){$allowedPhases+=@('HostInstanceInitialize','HostInstanceShutdown')}
+			RmsRequire ($kind -ceq 'logger' -and $phase -cin $allowedPhases) 'Unrecognized actual logger record'
 			RmsRequire (($phase -ceq 'Iteration' -and $entry.iteration -gt 0) -or ($phase -cne 'Iteration' -and $entry.iteration -eq 0)) 'Logger phase/iteration scope is inconsistent'
 			$level=RmsUint $entry level 0 4
 			if($entry.message.Contains('[Vulkan]')){RmsRequire ($level -lt 3) 'Actual Vulkan error arrived during the complete window session';$callbacks+=,$entry}
 		}
 	}
-	RmsRequire ($boundaries.Count -eq 2*$Iterations+4 -and $boundaries[0].phase -ceq 'WindowInitializeBegin' -and $boundaries[-1].phase -ceq 'WindowShutdownEnd') 'Session sink did not span initialization through final shutdown'
+	$extraBoundaries=if($HostInstanceRequested){8}else{4}
+	RmsRequire ($boundaries.Count -eq 2*$Iterations+$extraBoundaries -and $boundaries[0].phase -ceq 'WindowInitializeBegin' -and $boundaries[-1].phase -ceq 'WindowShutdownEnd') 'Session sink did not span initialization through final shutdown'
 	RmsRequire ($Receipt.allSessionLog[0].phase -ceq 'WindowInitializeBegin' -and $Receipt.allSessionLog[-1].phase -ceq 'WindowShutdownEnd') 'Vulkan sink records fall outside the actual window session boundaries'
 	$hostBoundaries=@{};foreach($phase in @('WindowInitializeBegin','WindowInitializeEnd','WindowShutdownBegin','WindowShutdownEnd')){$found=@($boundaries|Where-Object {$_.phase -ceq $phase -and $_.iteration -eq 0});RmsRequire ($found.Count -eq 1) "Missing/repeated actual session boundary: $phase";$hostBoundaries[$phase]=$found[0]}
 	RmsVulkanFlag $hostBoundaries.WindowInitializeEnd succeeded;RmsVulkanFlag $hostBoundaries.WindowShutdownEnd succeeded
 	RmsRequire ($hostBoundaries.WindowInitializeBegin.sequence -lt $hostBoundaries.WindowInitializeEnd.sequence -and $hostBoundaries.WindowInitializeEnd.sequence -lt $hostBoundaries.WindowShutdownBegin.sequence -and $hostBoundaries.WindowShutdownBegin.sequence -lt $hostBoundaries.WindowShutdownEnd.sequence) 'Actual host lifecycle boundaries are out of order'
 	$previous=$hostBoundaries.WindowInitializeEnd.sequence
-	for($i=1;$i -le $Iterations;$i++){$begin=@($boundaries|Where-Object {$_.phase -ceq 'IterationBegin' -and $_.iteration -eq $i});$end=@($boundaries|Where-Object {$_.phase -ceq 'IterationEnd' -and $_.iteration -eq $i});RmsRequire ($begin.Count -eq 1 -and $end.Count -eq 1 -and $begin[0].sequence -gt $previous -and $begin[0].sequence -lt $end[0].sequence -and $end[0].sequence -lt $hostBoundaries.WindowShutdownBegin.sequence) 'Vulkan iteration boundaries are missing/reordered';RmsVulkanFlag $end[0] succeeded;$previous=$end[0].sequence}
+	$shutdownBoundary=$hostBoundaries.WindowShutdownBegin.sequence
+	if($HostInstanceRequested){
+		foreach($phase in @('HostInstanceInitializeBegin','HostInstanceInitializeEnd','HostInstanceShutdownBegin','HostInstanceShutdownEnd')){
+			$found=@($boundaries|Where-Object {$_.phase -ceq $phase -and $_.iteration -eq 0});RmsRequire ($found.Count -eq 1) "Missing/repeated host-instance boundary: $phase";RmsVulkanFlag $found[0] succeeded;$hostBoundaries[$phase]=$found[0]
+		}
+		RmsRequire ($hostBoundaries.WindowInitializeEnd.sequence -lt $hostBoundaries.HostInstanceInitializeBegin.sequence -and $hostBoundaries.HostInstanceInitializeBegin.sequence -lt $hostBoundaries.HostInstanceInitializeEnd.sequence -and $hostBoundaries.HostInstanceInitializeEnd.sequence -lt $hostBoundaries.HostInstanceShutdownBegin.sequence -and $hostBoundaries.HostInstanceShutdownBegin.sequence -lt $hostBoundaries.HostInstanceShutdownEnd.sequence -and $hostBoundaries.HostInstanceShutdownEnd.sequence -lt $hostBoundaries.WindowShutdownBegin.sequence) 'Host instance did not span Engine contexts and retire before GLFW loader shutdown'
+		$previous=$hostBoundaries.HostInstanceInitializeEnd.sequence;$shutdownBoundary=$hostBoundaries.HostInstanceShutdownBegin.sequence
+	}
+	for($i=1;$i -le $Iterations;$i++){$begin=@($boundaries|Where-Object {$_.phase -ceq 'IterationBegin' -and $_.iteration -eq $i});$end=@($boundaries|Where-Object {$_.phase -ceq 'IterationEnd' -and $_.iteration -eq $i});RmsRequire ($begin.Count -eq 1 -and $end.Count -eq 1 -and $begin[0].sequence -gt $previous -and $begin[0].sequence -lt $end[0].sequence -and $end[0].sequence -lt $shutdownBoundary) 'Vulkan iteration boundaries are missing/reordered';RmsVulkanFlag $end[0] succeeded;$previous=$end[0].sequence}
 	RmsRequire ($Receipt.validationCallbackLog.Count -eq $callbacks.Count) 'Session callback slice omitted actual native messages'
 	for($i=0;$i -lt $callbacks.Count;$i++){RmsRequire ((RmsStableJson $Receipt.validationCallbackLog[$i]) -ceq (RmsStableJson $callbacks[$i])) 'Session callback does not match actual logger provenance'}
-	return [pscustomobject]@{windowIdentity=$identity;records=$records}
+	return [pscustomobject]@{windowIdentity=$identity;records=$records;hostInstanceRequested=$HostInstanceRequested;hostInstanceIdentity=$hostIdentity}
 }
 function RmsCheckVulkanRowSession($Row,$Session){
 	# A retained window must not claim per-iteration destruction. The final root
@@ -249,6 +281,14 @@ function RmsCheckVulkanRowSession($Row,$Session){
 	$lifetime=RmsField $Row contextLifetime;RmsRequire ((RmsUint $lifetime fixtureLifetimeId 1) -eq $Row.iteration) 'Vulkan context scope identity differs from its iteration'
 	RmsVulkanFlag $lifetime constructed;RmsVulkanFlag $lifetime destructionCompleted
 	foreach($name in @('instanceHandle','deviceHandle')){$null=RmsVulkanHandle $lifetime $name}
+	$rowHostPresent=($Row -is [Collections.IDictionary] -and $Row.Contains('hostInstance')) -or $null -ne $Row.PSObject.Properties['hostInstance']
+	RmsRequire ($rowHostPresent -eq $Session.hostInstanceRequested) 'Vulkan row has unrequested or missing host-instance evidence'
+	if($Session.hostInstanceRequested){
+		$hostFacts=RmsField $Row hostInstance
+		$contextIdentity=RmsVulkanHandle $lifetime instanceHandle
+		RmsRequire ($contextIdentity -cmatch '^[1-9][0-9]*$' -and (RmsVulkanHandle $hostFacts instanceHandle) -ceq $Session.hostInstanceIdentity -and $contextIdentity -cne $Session.hostInstanceIdentity) 'Engine context shared or changed the live host instance'
+		foreach($name in @('liveBeforeContextInitialization','liveAfterContextCleanup','distinctFromContextInstance')){RmsVulkanFlag $hostFacts $name}
+	}
 	foreach($name in @('allSessionLog','validationCallbackLog')){
 		$null=RmsField $Row $name;RmsRequire ($Row.$name -is [Array]) "Vulkan iteration log array missing: $name";$last=0UL
 		foreach($entry in $Row.$name){$sequence=RmsUint $entry sequence 1;RmsRequire ($sequence -gt $last -and $entry.iteration -eq $Row.iteration -and $Session.records.ContainsKey([string]$sequence) -and (RmsStableJson $entry) -ceq (RmsStableJson $Session.records[[string]$sequence])) 'Vulkan iteration log is not an actual ordered session slice';$last=$sequence;if($name -ceq 'validationCallbackLog'){RmsRequire ($entry.eventKind -ceq 'logger' -and $entry.message.Contains('[Vulkan]')) 'Iteration callback lacks actual native logger provenance'}}
@@ -335,8 +375,34 @@ function RmsCheckRendererBalance($State,[uint64]$Lifetime){
 	$null=RmsUint $r resetCount
 }
 function RmsRendererFlag($Value,[string]$Name,[bool]$Expected=$true){$flag=RmsField $Value $Name;RmsRequire ($flag -is [bool] -and $flag -eq $Expected) "Renderer lifecycle observation missing/invalid: $Name"}
-function RmsCheckRendererSession($Receipt,[int]$Iterations){
-	RmsRequire ($Iterations -gt 0 -and (RmsUint $Receipt rendererEvidenceVersion 2 2) -eq 2) 'Renderer evidence must use the one-engine-session protocol'
+function RmsCheckRendererSession($Receipt,[int]$Iterations,[bool]$HostInstanceRequested=$false){
+	$version=if($HostInstanceRequested){3}else{2}
+	RmsRequire ($Iterations -gt 0 -and (RmsUint $Receipt rendererEvidenceVersion $version $version) -eq $version) 'Renderer evidence differs from requested one-engine-session protocol'
+	foreach($name in @('hostInstance','rendererContexts')){
+		$present=($Receipt -is [Collections.IDictionary] -and $Receipt.Contains($name)) -or $null -ne $Receipt.PSObject.Properties[$name]
+		RmsRequire ($present -eq $HostInstanceRequested) 'Renderer host setup is missing or was not requested'
+	}
+	$hostIdentity=$null;$contextRecords=@()
+	if($HostInstanceRequested){
+		RmsRequire ($Iterations -ge 100) 'Renderer host-instance qualification requires at least100 lifetimes'
+		$hostIdentity=RmsCheckHostInstance $Receipt;$proof=RmsField $Receipt rendererContexts
+		foreach($name in @('finalRendererShutdownAttempted','finalContextReleased','windowLiveBeforeHostClose')){RmsVulkanFlag $proof $name}
+		$contextRecords=RmsField $proof contexts;RmsRequire ($contextRecords -is [Array]) 'Actual renderer context observations missing'
+		$perIteration=if((RmsField $Receipt scenario) -ceq 'restart'){2}else{1};$expectedCount=1+$Iterations*$perIteration
+		RmsRequire ($contextRecords.Count -eq $expectedCount) 'Renderer observed context lifecycle closure incomplete'
+		$null=RmsUint $proof observedInitializationCount $expectedCount $expectedCount;$null=RmsUint $proof observedRetirementCount $expectedCount $expectedCount
+		for($index=0;$index -lt $contextRecords.Count;$index++){
+			$row=$contextRecords[$index];$role=if($index -eq 0){'Startup'}elseif($perIteration -eq 2 -and $index%2 -eq 0){'Restart'}else{'Primary'}
+			$iteration=if($index -eq 0){0}else{1+[int][Math]::Floor(($index-1)/$perIteration)}
+			RmsRequire ((RmsField $row role) -ceq $role -and (RmsUint $row iteration 0 $Iterations) -eq $iteration) 'Renderer context role/iteration order differs'
+			foreach($name in @('initialized','validationActuallyEnabled','hostLiveAfter','distinctFromHost','shutdownAttempted','contextReleased')){RmsVulkanFlag $row $name}
+			RmsVulkanFlag $row hostLiveBefore ($role -cne 'Startup')
+			$checkpoint=if($role -ceq 'Startup'){'ExistingStartupContextAfterHostCreation'}else{'ContextInitializedUnderHost'}
+			RmsRequire ((RmsField $row observationCheckpoint) -ceq $checkpoint) 'Renderer startup/host creation order was relabelled'
+			$contextIdentity=RmsVulkanHandle $row instanceHandle
+			RmsRequire ($contextIdentity -cmatch '^[1-9][0-9]*$' -and $contextIdentity -cne $hostIdentity) 'Renderer shared the live host instance';$null=RmsVulkanHandle $row deviceHandle
+		}
+	}
 	$s=RmsField $Receipt hostSession;foreach($name in @('engineInitializeCount','engineShutdownCount')){$null=RmsUint $s $name 1 1};RmsRendererFlag $s engineCleanupCompleted
 	$workers=RmsUint $s threadPoolWorkerCount 1;$null=RmsUint $s threadPoolWorkersAfterCleanup 0 0;RmsRequire ($null -eq (RmsField $s frameFailure)) 'Final host frame failure was not cleared'
 	$null=RmsUint $Receipt allSessionValidationErrors 0 0
@@ -349,26 +415,49 @@ function RmsCheckRendererSession($Receipt,[int]$Iterations){
 		$null=RmsUint $entry iteration 0 $Iterations;RmsRequire ((RmsField $entry message) -is [string]) 'Session log message missing'
 		$kind=RmsField $entry eventKind;$phase=RmsField $entry phase
 		if($kind -ceq 'fixtureBoundary'){
-			RmsRequire ($phase -cin @('HostInitializeBegin','HostInitializeEnd','IterationBegin','IterationEnd','HostShutdownBegin','HostShutdownEnd') -and $null -eq (RmsField $entry level) -and (RmsField $entry succeeded) -is [bool]) 'Invalid actual fixture boundary'
+			$allowed=@('HostInitializeBegin','HostInitializeEnd','IterationBegin','IterationEnd','HostShutdownBegin','HostShutdownEnd');if($HostInstanceRequested){$allowed+=@('HostInstanceInitializeBegin','HostInstanceInitializeEnd','StartupRendererShutdownBegin','StartupRendererShutdownEnd','HostInstanceShutdownBegin','HostInstanceShutdownEnd')}
+			RmsRequire ($phase -cin $allowed -and $null -eq (RmsField $entry level) -and (RmsField $entry succeeded) -is [bool]) 'Invalid actual fixture boundary'
 			$boundaries+=,$entry
 		}else{
-			RmsRequire ($kind -ceq 'logger' -and $phase -cin @('HostInitialize','Iteration','BetweenIterations','HostShutdown')) 'Unrecognized actual logger record'
+			$allowed=@('HostInitialize','Iteration','BetweenIterations','HostShutdown');if($HostInstanceRequested){$allowed+=@('HostInstanceInitialize','StartupRendererShutdown','HostInstanceShutdown')}
+			RmsRequire ($kind -ceq 'logger' -and $phase -cin $allowed) 'Unrecognized actual logger record'
 			RmsRequire (($phase -ceq 'Iteration' -and $entry.iteration -gt 0) -or ($phase -cne 'Iteration' -and $entry.iteration -eq 0)) 'Logger phase/iteration scope is inconsistent'
 			$level=RmsUint $entry level 0 4
 			if($entry.message.Contains('[Vulkan]')){RmsRequire ($level -lt 3) 'Actual Vulkan error arrived during the complete engine session';$callbacks+=,$entry}
 		}
 	}
-	RmsRequire ($boundaries.Count -eq 2*$Iterations+4 -and $boundaries[0].phase -ceq 'HostInitializeBegin' -and $boundaries[-1].phase -ceq 'HostShutdownEnd') 'Session sink did not span initialization through final shutdown'
+	$extra=if($HostInstanceRequested){10}else{4}
+	RmsRequire ($boundaries.Count -eq 2*$Iterations+$extra -and $boundaries[0].phase -ceq 'HostInitializeBegin' -and $boundaries[-1].phase -ceq 'HostShutdownEnd') 'Session sink did not span initialization through final shutdown'
 	$hostBoundaries=@{};foreach($phase in @('HostInitializeBegin','HostInitializeEnd','HostShutdownBegin','HostShutdownEnd')){$found=@($boundaries|Where-Object {$_.phase -ceq $phase -and $_.iteration -eq 0});RmsRequire ($found.Count -eq 1) "Missing/repeated actual session boundary: $phase";$hostBoundaries[$phase]=$found[0]}
 	RmsRendererFlag $hostBoundaries.HostInitializeEnd succeeded;RmsRendererFlag $hostBoundaries.HostShutdownEnd succeeded
 	RmsRequire ($hostBoundaries.HostInitializeBegin.sequence -lt $hostBoundaries.HostInitializeEnd.sequence -and $hostBoundaries.HostInitializeEnd.sequence -lt $hostBoundaries.HostShutdownBegin.sequence -and $hostBoundaries.HostShutdownBegin.sequence -lt $hostBoundaries.HostShutdownEnd.sequence) 'Actual host lifecycle boundaries are out of order'
 	$previous=$hostBoundaries.HostInitializeEnd.sequence
-	for($i=1;$i -le $Iterations;$i++){$begin=@($boundaries|Where-Object {$_.phase -ceq 'IterationBegin' -and $_.iteration -eq $i});$end=@($boundaries|Where-Object {$_.phase -ceq 'IterationEnd' -and $_.iteration -eq $i});RmsRequire ($begin.Count -eq 1 -and $end.Count -eq 1 -and $begin[0].sequence -gt $previous -and $begin[0].sequence -lt $end[0].sequence -and $end[0].sequence -lt $hostBoundaries.HostShutdownBegin.sequence) 'Renderer iteration boundaries are missing/reordered';RmsRendererFlag $end[0] succeeded;$previous=$end[0].sequence}
+	$shutdown=$hostBoundaries.HostShutdownBegin.sequence
+	if($HostInstanceRequested){
+		foreach($phase in @('HostInstanceInitializeBegin','HostInstanceInitializeEnd','StartupRendererShutdownBegin','StartupRendererShutdownEnd','HostInstanceShutdownBegin','HostInstanceShutdownEnd')){
+			$found=@($boundaries|Where-Object {$_.phase -ceq $phase -and $_.iteration -eq 0});RmsRequire ($found.Count -eq 1) "Missing/repeated renderer host boundary: $phase";RmsRendererFlag $found[0] succeeded;$hostBoundaries[$phase]=$found[0]
+		}
+		$order=@('HostInitializeEnd','HostInstanceInitializeBegin','HostInstanceInitializeEnd','StartupRendererShutdownBegin','StartupRendererShutdownEnd','HostInstanceShutdownBegin','HostInstanceShutdownEnd','HostShutdownBegin')
+		for($i=1;$i -lt $order.Count;$i++){RmsRequire ($hostBoundaries[$order[$i-1]].sequence -lt $hostBoundaries[$order[$i]].sequence) 'Renderer host/startup/engine shutdown boundaries reordered'}
+		$previous=$hostBoundaries.StartupRendererShutdownEnd.sequence;$shutdown=$hostBoundaries.HostInstanceShutdownBegin.sequence
+	}
+	for($i=1;$i -le $Iterations;$i++){$begin=@($boundaries|Where-Object {$_.phase -ceq 'IterationBegin' -and $_.iteration -eq $i});$end=@($boundaries|Where-Object {$_.phase -ceq 'IterationEnd' -and $_.iteration -eq $i});RmsRequire ($begin.Count -eq 1 -and $end.Count -eq 1 -and $begin[0].sequence -gt $previous -and $begin[0].sequence -lt $end[0].sequence -and $end[0].sequence -lt $shutdown) 'Renderer iteration boundaries are missing/reordered';RmsRendererFlag $end[0] succeeded;$previous=$end[0].sequence}
 	RmsRequire ($Receipt.validationCallbackLog.Count -eq $callbacks.Count) 'Session callback slice omitted actual native messages'
 	for($i=0;$i -lt $callbacks.Count;$i++){RmsRequire ((RmsStableJson $Receipt.validationCallbackLog[$i]) -ceq (RmsStableJson $callbacks[$i])) 'Session callback does not match actual logger provenance'}
-	return [pscustomobject]@{workers=$workers;records=$records;capturedLifetimeIds=$Receipt.capturedLifetimeIds}
+	return [pscustomobject]@{workers=$workers;records=$records;capturedLifetimeIds=$Receipt.capturedLifetimeIds;hostInstanceRequested=$HostInstanceRequested;hostInstanceIdentity=$hostIdentity;contextRecords=$contextRecords}
 }
 function RmsCheckRendererRowSession($Row,$Session){
+	$present=($Row -is [Collections.IDictionary] -and $Row.Contains('hostInstance')) -or $null -ne $Row.PSObject.Properties['hostInstance']
+	RmsRequire ($present -eq $Session.hostInstanceRequested) 'Renderer row has hidden or missing host-instance proof'
+	if($Session.hostInstanceRequested){
+		$hostFacts=RmsField $Row hostInstance;RmsRequire ((RmsVulkanHandle $hostFacts instanceHandle) -ceq $Session.hostInstanceIdentity) 'Renderer row host identity changed'
+		foreach($name in @('liveBeforeContextInitialization','liveAfterContextCleanup')){RmsVulkanFlag $hostFacts $name}
+		# Read the property directly so a single native context remains an array, while scalar forgeries still fail.
+		$null=RmsField $hostFacts contextLifecycles
+		if($hostFacts -is [Collections.IDictionary]){$actual=$hostFacts['contextLifecycles']}else{$actual=$hostFacts.contextLifecycles}
+		$expected=@($Session.contextRecords|Where-Object iteration -EQ $Row.iteration)
+		RmsRequire ($actual -is [Array] -and $actual.Count -eq $expected.Count -and (RmsStableJson $actual) -ceq (RmsStableJson $expected)) 'Renderer row contexts do not join actual root lifetime observations'
+	}
 	RmsRequire ($Row.threadPoolWorkerCount -eq $Session.workers -and $Row.rendererCleanup.workerCountAfterRetirement -eq $Session.workers) 'Renderer iteration prematurely changed the shared host worker pool'
 	foreach($name in @('allSessionLog','validationCallbackLog')){
 		$null=RmsField $Row $name;RmsRequire ($Row.$name -is [Array]) "Renderer iteration log array missing: $name";$last=0UL
@@ -485,13 +574,24 @@ function RmsCheckEditorLoopback($Receipt,[string]$RuntimeManifestHash,[string]$R
 	RmsRequire ((RmsStableJson $o.objectsBeforeRead) -ceq (RmsStableJson $o.objectsAfterRead) -and (RmsStableJson $o.baselineObjects) -ceq (RmsStableJson $o.restoredObjects)) 'Raw authoring objects changed during diagnostics or Play/Stop'
 	RmsCheckPin $o.sourceScene
 }
-function RmsCheckFixture($Receipt,[string]$Mode,[string]$Scenario,[int]$Iterations,[switch]$ProtocolReplayHistoricalReceipt){
+function RmsCheckFixture($Receipt,[string]$Mode,[string]$Scenario,[int]$Iterations,[switch]$ProtocolReplayHistoricalReceipt,[switch]$VulkanHostInstance){
+	RmsRequire (!$VulkanHostInstance -or ($Mode -cin @('vulkan','renderer') -and !$ProtocolReplayHistoricalReceipt)) 'Host-instance evidence is Vulkan/Renderer-only and cannot use historical protocol replay'
+	if($Mode -ceq 'vulkan' -and $ProtocolReplayHistoricalReceipt){
+		# Historical schema replay cannot hide the new host-lifetime contract.
+		$hostPresent=($Receipt -is [Collections.IDictionary] -and $Receipt.Contains('hostInstance')) -or $null -ne $Receipt.PSObject.Properties['hostInstance']
+		$versionPresent=($Receipt -is [Collections.IDictionary] -and $Receipt.Contains('vulkanEvidenceVersion')) -or $null -ne $Receipt.PSObject.Properties['vulkanEvidenceVersion']
+		RmsRequire (!$hostPresent -and (!$versionPresent -or $Receipt.vulkanEvidenceVersion -ne 3)) 'Version3 host evidence cannot use historical protocol replay'
+		foreach($row in @(RmsField $Receipt observations)){
+			$rowHost=($row -is [Collections.IDictionary] -and $row.Contains('hostInstance')) -or $null -ne $row.PSObject.Properties['hostInstance']
+			RmsRequire (!$rowHost) 'Historical row cannot hide host-instance evidence'
+		}
+	}
 	RmsRequire ((RmsField $Receipt 'schemaVersion') -eq 1 -and (RmsField $Receipt 'mode') -ceq $Mode -and (RmsField $Receipt 'scenario') -ceq $Scenario) 'Fixture identity mismatch'
 	if((RmsField $Receipt 'status') -ceq 'Unverified'){throw 'UNVERIFIED: Native fixture could not establish requested graphics/lifecycle evidence'}
 	RmsRequire ((RmsField $Receipt 'status') -ceq 'Passed' -and (RmsField $Receipt 'nativeAcceptance') -eq $true -and (RmsField $Receipt 'completedIterations') -eq $Iterations -and (RmsField $Receipt 'attemptedIterations') -eq $Iterations -and (RmsField $Receipt 'requestedIterations') -eq $Iterations) 'Native fixture did not complete every requested iteration'
 	$observations=@(RmsField $Receipt 'observations');RmsRequire ($observations.Count -eq $Iterations) 'Fixture iteration count differs from observations'
-	$rendererSession=$null;if($Mode -ceq 'renderer'){$rendererSession=RmsCheckRendererSession $Receipt $Iterations}
-	$vulkanSession=$null;if($Mode -ceq 'vulkan' -and !$ProtocolReplayHistoricalReceipt){$vulkanSession=RmsCheckVulkanSession $Receipt $Iterations}
+	$rendererSession=$null;if($Mode -ceq 'renderer'){$rendererSession=RmsCheckRendererSession $Receipt $Iterations ([bool]$VulkanHostInstance)}
+	$vulkanSession=$null;if($Mode -ceq 'vulkan' -and !$ProtocolReplayHistoricalReceipt){$vulkanSession=RmsCheckVulkanSession $Receipt $Iterations ([bool]$VulkanHostInstance)}
 	$seen=@{};$lifetimes=@{};$observationOrdinal=0
 	foreach($row in $observations){
 		$observationOrdinal++
@@ -509,7 +609,8 @@ function RmsCheckFixture($Receipt,[string]$Mode,[string]$Scenario,[int]$Iteratio
 	}
 	return $observations
 }
-function RmsRunFixture($Context,[string]$Mode,[string[]]$Scenarios,[int]$Iterations){
+function RmsRunFixture($Context,[string]$Mode,[string[]]$Scenarios,[int]$Iterations,[switch]$VulkanHostInstance){
+	RmsRequire (!$VulkanHostInstance -or ($Mode -cin @('vulkan','renderer') -and $Iterations -ge 100)) 'Host-instance qualification is Vulkan/Renderer-only and requires at least100 independent Engine contexts'
 	RmsRequire ($Iterations -ge 100) 'Native acceptance requires at least100 repetitions per lane'
 	if($Mode -ceq 'renderer'){RmsRequire ((@($Scenarios|Sort-Object)-join ',') -ceq 'cancelled,completed,failed,restart,scene-clear,shutdown') 'Renderer acceptance requires all six exact lifecycle lanes'}
 	if($Mode -ceq 'vulkan'){RmsRequire ((@($Scenarios|Sort-Object)-join ',') -ceq 'acquire-wait-consumed,candidate-rollback,fence-reset-failure,fresh-acquisition,maintenance-disabled,maintenance-enabled,previously-presented,record-failure,recreated-acquisition,submit-failure') 'Vulkan acceptance requires all ten exact native lanes'}
@@ -517,18 +618,19 @@ function RmsRunFixture($Context,[string]$Mode,[string[]]$Scenarios,[int]$Iterati
 	foreach($scenario in $Scenarios){
 		$caseRoot=Join-Path $Context.work "$Mode-$scenario";$null=[IO.Directory]::CreateDirectory($caseRoot);$receiptPath=Join-Path $caseRoot 'receipt.json';$logs=Join-Path $caseRoot 'process'
 		$arguments=@('--mode',$Mode,'--scenario',$scenario,'--iterations',[string]$Iterations,'--install-root',$Context.install.root,'--output',$receiptPath)
+		if($VulkanHostInstance){$arguments+=@('--vulkan-host-instance','true')}
 		if($Mode -ceq 'renderer'){$arguments+=@('--project',(Join-Path $caseRoot 'project'))}
 		& $Context.watchdog -Executable $Context.fixture -ArgumentList $arguments -WorkingDirectory (Split-Path $Context.fixture) -TimeoutSeconds 3600 -LogDirectory $logs|Out-Host;$code=$LASTEXITCODE
 		$watchPath=Join-Path $logs 'watchdog.json';$watch=Get-Content $watchPath -Raw|ConvertFrom-Json;RmsRequire (!$watch.timedOut -and $watch.exitCode -ne 124 -and $watch.exitCode -ne 125) 'Fixture watchdog killed or failed launch'
 		$receipt=Get-Content $receiptPath -Raw|ConvertFrom-Json
 		if($code -eq 2 -and $receipt.status -ceq 'Unverified'){throw "UNVERIFIED: $Mode $scenario unavailable"};RmsRequire ($code -eq 0 -and $watch.exitCode -eq 0) 'Native fixture child failed'
-		$actual=RmsCheckFixture $receipt $Mode $scenario $Iterations
+		$actual=RmsCheckFixture $receipt $Mode $scenario $Iterations -VulkanHostInstance:$VulkanHostInstance
 		$rows.Add([pscustomobject]@{scenarioId="$Mode-$scenario";status='Passed';observations=$actual;watchdog=$watch;rawEvidence=@((RmsPin $receiptPath),(RmsPin $watchPath),(RmsPin (Join-Path $logs 'stdout.log')),(RmsPin (Join-Path $logs 'stderr.log')))})
 	}
 	return $rows.ToArray()
 }
-function RmsRunRenderer($Context,[string[]]$Scenarios,[int]$Iterations,[string]$ToolRoot,[string]$ExistingEditorReceipt,[int]$Port){
-	$rows=@(RmsRunFixture $Context renderer $Scenarios $Iterations)
+function RmsRunRenderer($Context,[string[]]$Scenarios,[int]$Iterations,[string]$ToolRoot,[string]$ExistingEditorReceipt,[int]$Port,[switch]$VulkanHostInstance){
+	$rows=@(RmsRunFixture $Context renderer $Scenarios $Iterations -VulkanHostInstance:$VulkanHostInstance)
 	if($ExistingEditorReceipt){$path=$ExistingEditorReceipt}
 	else{
 		$helper=RmsInstalled $Context.install 'Tests/Tools/RuntimeMemorySafety/InvokeRuntimeMemorySafetyEditorDiagnostics.ps1'
@@ -566,6 +668,8 @@ function RmsRunPerformance($Context,[string]$ReferenceRoot,[string]$CalibrationP
 	return [pscustomobject]@{scenarioId='performance';status='Passed';comparisonCount=18;rawEvidence=@((RmsPin $output),$calibrationPin,$parityPin);toolManifest=$tools.manifest;comparisons=$result.comparisons}
 }
 function InvokeRmsInstalledRunner($Configuration,[string]$InvokedPath){
+	$hostRequested=($Configuration -is [Collections.IDictionary] -and $Configuration.Contains('VulkanHostInstance') -and [bool]$Configuration.VulkanHostInstance)
+	RmsRequire (!$hostRequested -or $Configuration.Mode -cin @('Vulkan','Renderer')) 'VulkanHostInstance must be requested explicitly with Mode Vulkan or Renderer; it never changes timing or other lanes'
 	$install=RmsLoadInstall $Configuration.InstallRoot;$work=[IO.Path]::GetFullPath($Configuration.WorkRoot)
 	RmsAssertInvocationPaths $install $work $InvokedPath @($Configuration.ToolInstallRoot,$Configuration.ReferenceInstallRoot)
 	$registryPath=RmsInstalled $install 'Tests/Tools/RuntimeMemorySafety/ValidationCases.json';$registry=Get-Content $registryPath -Raw|ConvertFrom-Json
@@ -573,12 +677,13 @@ function InvokeRmsInstalledRunner($Configuration,[string]$InvokedPath){
 	$null=[IO.Directory]::CreateDirectory($work)
 	$context=[pscustomobject]@{install=$install;work=$work;registry=$registry;engineTests=(RmsInstalled $install 'Tests/Engine/TerraEngine-EngineTests.exe');editorTests=(RmsInstalled $install 'Tests/Editor/TerraEngine-EditorTests.exe');slice=(RmsInstalled $install 'Tests/Tools/Correctness/RunNativeCorrectnessSlice.ps1');watchdog=(RmsInstalled $install 'Tests/Tools/Correctness/RunWithWatchdog.ps1');fixture=(RmsInstalled $install 'Tests/Tools/RuntimeMemorySafety/RuntimeMemorySafetyFixture.exe')}
 	$summary=[ordered]@{schemaVersion='runtime-memory-safety-v1';runId=[Guid]::NewGuid().ToString('N');createdUtc=[DateTime]::UtcNow.ToString('o');mode=$Configuration.Mode;installIdentity=$install.manifest;referenceInstall=$Configuration.ReferenceInstallRoot;toolInstall=$Configuration.ToolInstallRoot;requiredRegistry=(RmsPin $registryPath);observations=@();outcome='Failed';unavailableReasons=@();failures=@()}
+	if($hostRequested){$summary.vulkanHostInstance=$true}
 	$lanes=$(if($Configuration.Mode -ceq 'All'){@('Cpu','Vulkan','Renderer','Performance')}else{@($Configuration.Mode)})
 	foreach($lane in $lanes){try{
 		$rows=switch($lane){
 			'Cpu'{RmsRunCpu $context $Configuration.Iterations $Configuration.WorkerCounts}
-			'Vulkan'{RmsRunFixture $context vulkan @($registry.gpuFailureLanes) $Configuration.Iterations}
-			'Renderer'{RmsRunRenderer $context @($registry.rendererLifecycleLanes) $Configuration.Iterations $Configuration.ToolInstallRoot $Configuration.EditorDiagnosticsEvidencePath $Configuration.McpPort}
+			'Vulkan'{RmsRunFixture $context vulkan @($registry.gpuFailureLanes) $Configuration.Iterations -VulkanHostInstance:$hostRequested}
+			'Renderer'{RmsRunRenderer $context @($registry.rendererLifecycleLanes) $Configuration.Iterations $Configuration.ToolInstallRoot $Configuration.EditorDiagnosticsEvidencePath $Configuration.McpPort -VulkanHostInstance:$hostRequested}
 			'Performance'{RmsRunPerformance $context $Configuration.ReferenceInstallRoot $Configuration.ReferenceCalibrationPath $Configuration.ToolInstallRoot $Configuration.ParityEvidencePath $Configuration.McpPort}
 		};$summary.observations+=@($rows)
 	}catch{if($_.Exception.Message.StartsWith('UNVERIFIED:')){$summary.unavailableReasons+=@{lane=$lane;reason=$_.Exception.Message}}else{$summary.failures+=@{lane=$lane;reason=$_.Exception.Message;stack=$_.ScriptStackTrace}}}}
@@ -588,5 +693,5 @@ function InvokeRmsInstalledRunner($Configuration,[string]$InvokedPath){
 }
 if($MyInvocation.InvocationName -ne '.'){
 	Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
-	try{$config=@{};foreach($name in @('InstallRoot','WorkRoot','Mode','Iterations','WorkerCounts','ReferenceInstallRoot','ReferenceCalibrationPath','ToolInstallRoot','ParityEvidencePath','EditorDiagnosticsEvidencePath','McpPort')){$config[$name]=Get-Variable $name -ValueOnly};$result=InvokeRmsInstalledRunner $config $PSCommandPath;Write-Output "Runtime memory safety requested lanes: $($result.outcome)";exit $(if($result.outcome -ceq 'Passed'){0}elseif($result.outcome -ceq 'Unverified'){2}else{1})}catch{Write-Error $_ -ErrorAction Continue;exit 1}
+	try{$config=@{};foreach($name in @('InstallRoot','WorkRoot','Mode','Iterations','WorkerCounts','ReferenceInstallRoot','ReferenceCalibrationPath','ToolInstallRoot','ParityEvidencePath','EditorDiagnosticsEvidencePath','McpPort','VulkanHostInstance')){$config[$name]=Get-Variable $name -ValueOnly};$result=InvokeRmsInstalledRunner $config $PSCommandPath;Write-Output "Runtime memory safety requested lanes: $($result.outcome)";exit $(if($result.outcome -ceq 'Passed'){0}elseif($result.outcome -ceq 'Unverified'){2}else{1})}catch{Write-Error $_ -ErrorAction Continue;exit 1}
 }

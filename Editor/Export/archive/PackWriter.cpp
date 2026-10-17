@@ -18,11 +18,11 @@
 
 namespace {
 
-// BuildDirectoryRecords is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::vector<tepak::model::BinaryDirectoryRecord> BuildDirectoryRecords(const tepak::model::PackPlan& plan) {
 	std::vector<tepak::model::BinaryDirectoryRecord> records;
 	records.reserve(plan.directories.size());
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& directory : plan.directories) {
 		tepak::model::BinaryDirectoryRecord record;
 		record.pathHash = directory.pathHash;
@@ -38,11 +38,11 @@ std::vector<tepak::model::BinaryDirectoryRecord> BuildDirectoryRecords(const tep
 	return records;
 }
 
-// BuildEntryRecords is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::vector<tepak::model::BinaryEntryRecord> BuildEntryRecords(const tepak::model::PackPlan& plan) {
 	std::vector<tepak::model::BinaryEntryRecord> records;
 	records.reserve(plan.entries.size());
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& entry : plan.entries) {
 		tepak::model::BinaryEntryRecord record;
 		record.parentDirectoryId = entry.parentDirectoryId;
@@ -61,11 +61,11 @@ std::vector<tepak::model::BinaryEntryRecord> BuildEntryRecords(const tepak::mode
 	return records;
 }
 
-// BuildExtentRecords is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::vector<tepak::model::BinaryExtentRecord> BuildExtentRecords(const tepak::model::PackPlan& plan) {
 	std::vector<tepak::model::BinaryExtentRecord> records;
 	records.reserve(plan.extents.size());
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& extent : plan.extents) {
 		tepak::model::BinaryExtentRecord record;
 		record.fileOffset = extent.fileOffset;
@@ -93,17 +93,17 @@ tepak::ByteBuffer BuildMetadataBytes(const std::vector<tepak::model::BinaryDirec
 		(extentRecords.size() * sizeof(tepak::model::BinaryExtentRecord)) +
 		pathTable.size());
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& record : directoryRecords) {
 		const auto* raw = reinterpret_cast<const std::uint8_t*>(&record);
 		metadataBytes.insert(metadataBytes.end(), raw, raw + sizeof(record));
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& record : entryRecords) {
 		const auto* raw = reinterpret_cast<const std::uint8_t*>(&record);
 		metadataBytes.insert(metadataBytes.end(), raw, raw + sizeof(record));
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& record : extentRecords) {
 		const auto* raw = reinterpret_cast<const std::uint8_t*>(&record);
 		metadataBytes.insert(metadataBytes.end(), raw, raw + sizeof(record));
@@ -121,7 +121,7 @@ tepak::model::CompressedExtentResult CompressExtentBytes(const tepak::codec::Cod
 	tepak::model::CompressedExtentResult result;
 	result.uncompressedSize = bytes.size();
 	result.extentHash = codecProvider.HashBytes(bytes);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!enableCompression) {
 		result.mode = tepak::StorageMode::Raw;
 		result.storedBytes = std::move(bytes);
@@ -134,18 +134,18 @@ tepak::model::CompressedExtentResult CompressExtentBytes(const tepak::codec::Cod
 	return result;
 }
 
-// MaxInFlightTasks is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::uint32_t MaxInFlightTasks(std::uint32_t workerCount) {
 	return std::max<std::uint32_t>(2U, workerCount * 2U);
 }
 
-// struct CommittedExtent groups related state and operations so callers have one documented contract.
+
 struct CommittedExtent final {
 	std::uint32_t extentIndex = 0;
 	std::uint32_t entryIndex = 0;
 };
 
-// struct PackProgressState groups related state and operations so callers have one documented contract.
+
 struct PackProgressState final {
 	std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
 	std::chrono::steady_clock::time_point lastReportTime = startTime;
@@ -158,14 +158,14 @@ struct PackProgressState final {
 	std::vector<std::uint32_t> remainingExtentsByEntry;
 };
 
-// BuildPackProgressState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 PackProgressState BuildPackProgressState(const tepak::model::PackPlan& plan, const tepak::model::PackagingInventory& inventory) {
 	PackProgressState state;
 	state.totalLogicalBytes = inventory.totalInputBytes;
 	state.totalEntries = static_cast<std::uint32_t>(plan.entries.size());
 	state.totalExtents = static_cast<std::uint32_t>(plan.extents.size());
 	state.remainingExtentsByEntry.reserve(plan.entries.size());
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& entry : plan.entries) {
 		state.remainingExtentsByEntry.push_back(entry.entryExtentCount);
 	}
@@ -178,13 +178,13 @@ void MaybeEmitProgress(const tepak::PackagingRequest& request,
 	std::string_view currentEntryPath,
 	bool force,
 	bool finalUpdate) {
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!request.progressCallback) {
 		return;
 	}
 
 	const auto now = std::chrono::steady_clock::now();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!force && request.progressUpdateIntervalMs > 0U) {
 		const auto elapsedSinceLastReport = std::chrono::duration_cast<std::chrono::milliseconds>(now - state.lastReportTime);
 		if (elapsedSinceLastReport.count() < request.progressUpdateIntervalMs) {
@@ -204,11 +204,11 @@ void MaybeEmitProgress(const tepak::PackagingRequest& request,
 	progress.elapsedSeconds = std::chrono::duration<double>(now - state.startTime).count();
 	progress.finalUpdate = finalUpdate;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (progress.elapsedSeconds > 0.0 && state.processedLogicalBytes > 0U && state.processedLogicalBytes < state.totalLogicalBytes) {
 		const auto remainingLogicalBytes = state.totalLogicalBytes - state.processedLogicalBytes;
 		const auto logicalBytesPerSecond = static_cast<double>(state.processedLogicalBytes) / progress.elapsedSeconds;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (logicalBytesPerSecond > 0.0) {
 			progress.estimatedRemainingSeconds = static_cast<double>(remainingLogicalBytes) / logicalBytesPerSecond;
 			progress.etaAvailable = true;
@@ -232,7 +232,7 @@ void RecordCommittedExtentProgress(const tepak::PackagingRequest& request,
 	++state.completedExtents;
 
 	auto& remainingExtents = state.remainingExtentsByEntry.at(entry.fileId);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (remainingExtents > 0U) {
 		--remainingExtents;
 		if (remainingExtents == 0U) {
@@ -265,7 +265,7 @@ CommittedExtent CommitPendingFront(std::ofstream& stream,
 	entry.storedSize += extent.storedSize;
 	plan.descriptor.codecMask |= (1ULL << static_cast<std::uint32_t>(extent.codec));
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!result.storedBytes.empty()) {
 		stream.write(reinterpret_cast<const char*>(result.storedBytes.data()), static_cast<std::streamsize>(result.storedBytes.size()));
 		if (!stream) {
@@ -280,7 +280,7 @@ CommittedExtent CommitPendingFront(std::ofstream& stream,
 
 namespace tepak {
 
-// PackWriter::Create is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 PackWriteResult PackWriter::Create(const PackagingRequest& request) {
 	if (std::filesystem::exists(request.outputPackPath) && !request.overwriteExisting) {
 		throw std::runtime_error("Refusing to overwrite an existing pack without explicit permission.");
@@ -316,12 +316,12 @@ PackWriteResult PackWriter::Create(const PackagingRequest& request) {
 	header.dataRegionOffset = util::AlignValue(header.dictionaryOffset + plan.dictionaryBytes.size(), model::kMetadataAlignment);
 	header.dictionaryHash = dictionaryHash;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!request.outputPackPath.parent_path().empty()) {
 		std::filesystem::create_directories(request.outputPackPath.parent_path());
 	}
 	std::ofstream stream(request.outputPackPath, std::ios::binary | std::ios::trunc);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!stream) {
 		throw std::runtime_error("Failed to open the output pack for writing.");
 	}
@@ -335,25 +335,25 @@ PackWriteResult PackWriter::Create(const PackagingRequest& request) {
 	pendingTasks.reserve(MaxInFlightTasks(plan.workerCountUsed));
 	std::uint64_t currentStoredOffset = header.dataRegionOffset;
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::uint32_t fileIndex = 0U; fileIndex < inventory.stagedFiles.size(); ++fileIndex) {
 		const auto& stagedFile = inventory.stagedFiles[fileIndex];
 		auto& entry = plan.entries.at(fileIndex);
 
 		std::ifstream input(stagedFile.sourcePath, std::ios::binary);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!input) {
 			throw std::runtime_error("Failed to reopen staged input for streaming pack creation.");
 		}
 
 		XXH3_state_t hashState {};
 		XXH3_64bits_reset(&hashState);
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (std::uint32_t localExtentIndex = 0U; localExtentIndex < entry.entryExtentCount; ++localExtentIndex) {
 			const auto extentIndex = entry.firstExtentIndex + localExtentIndex;
 			const auto& extentPlan = plan.extents.at(extentIndex);
 			ByteBuffer chunkBytes(static_cast<std::size_t>(extentPlan.uncompressedSize));
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (extentPlan.uncompressedSize > 0U) {
 				input.read(reinterpret_cast<char*>(chunkBytes.data()), static_cast<std::streamsize>(chunkBytes.size()));
 				if (!input) {
@@ -378,7 +378,7 @@ PackWriteResult PackWriter::Create(const PackagingRequest& request) {
 			});
 			pendingTasks.push_back(std::move(pendingTask));
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (pendingTasks.size() >= MaxInFlightTasks(plan.workerCountUsed)) {
 				const auto committedExtent = CommitPendingFront(stream, plan, pendingTasks, currentStoredOffset);
 				RecordCommittedExtentProgress(request, plan, progressState, committedExtent, currentStoredOffset, false, false);
@@ -388,7 +388,7 @@ PackWriteResult PackWriter::Create(const PackagingRequest& request) {
 		entry.entryHash = XXH3_64bits_digest(&hashState);
 	}
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	while (!pendingTasks.empty()) {
 		const auto committedExtent = CommitPendingFront(stream, plan, pendingTasks, currentStoredOffset);
 		RecordCommittedExtentProgress(request, plan, progressState, committedExtent, currentStoredOffset, false, false);
@@ -415,27 +415,27 @@ PackWriteResult PackWriter::Create(const PackagingRequest& request) {
 	stream.seekp(0, std::ios::beg);
 	util::WritePod(stream, header);
 	util::WritePadding(stream, header.directoryTableOffset - header.headerSize);
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& record : directoryRecords) {
 		util::WritePod(stream, record);
 	}
 	util::WritePadding(stream, header.fileTableOffset - static_cast<std::uint64_t>(stream.tellp()));
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& record : entryRecords) {
 		util::WritePod(stream, record);
 	}
 	util::WritePadding(stream, header.extentTableOffset - static_cast<std::uint64_t>(stream.tellp()));
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& record : extentRecords) {
 		util::WritePod(stream, record);
 	}
 	util::WritePadding(stream, header.pathTableOffset - static_cast<std::uint64_t>(stream.tellp()));
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!plan.pathTable.empty()) {
 		stream.write(plan.pathTable.data(), static_cast<std::streamsize>(plan.pathTable.size()));
 	}
 	util::WritePadding(stream, header.dictionaryOffset - static_cast<std::uint64_t>(stream.tellp()));
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!plan.dictionaryBytes.empty()) {
 		stream.write(reinterpret_cast<const char*>(plan.dictionaryBytes.data()), static_cast<std::streamsize>(plan.dictionaryBytes.size()));
 	}
@@ -468,7 +468,7 @@ PackWriteResult PackWriter::Create(const PackagingRequest& request) {
 	result.entries = plan.entries;
 	result.workerCountUsed = plan.workerCountUsed;
 	result.estimatedPeakResidentBytes = plan.estimatedPeakResidentBytes;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& extentPlan : plan.extents) {
 		PackExtent extent;
 		extent.fileOffset = extentPlan.fileOffset;

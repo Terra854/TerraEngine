@@ -18,25 +18,25 @@
 
 namespace {
 
-// ThrowIfZstdError is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ThrowIfZstdError(std::size_t code, const char* message) {
 	if (ZSTD_isError(code) != 0U) {
 		throw std::runtime_error(std::string(message) + ": " + ZSTD_getErrorName(code));
 	}
 }
 
-// ResolveEstimatedSize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::size_t ResolveEstimatedSize(std::size_t code, const char* message) {
 	ThrowIfZstdError(code, message);
 	return code;
 }
 
-// ClampCompressionLevel is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 int ClampCompressionLevel(std::int32_t requestedLevel) {
 	return std::clamp(requestedLevel, ZSTD_minCLevel(), ZSTD_maxCLevel());
 }
 
-// struct ThreadCodecContexts groups related state and operations so callers have one documented contract.
+
 struct ThreadCodecContexts final {
 	// TEPAK reuses one compression and decompression context per worker thread
 	// so repeated extent operations do not pay full context creation cost.
@@ -44,18 +44,18 @@ struct ThreadCodecContexts final {
 	ZSTD_DCtx* decompressionContext = ZSTD_createDCtx();
 
 	~ThreadCodecContexts() {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (compressionContext != nullptr) {
 			ZSTD_freeCCtx(compressionContext);
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (decompressionContext != nullptr) {
 			ZSTD_freeDCtx(decompressionContext);
 		}
 	}
 };
 
-// GetThreadCodecContexts is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 ThreadCodecContexts& GetThreadCodecContexts() {
 	thread_local ThreadCodecContexts contexts;
 	if (contexts.compressionContext == nullptr || contexts.decompressionContext == nullptr) {
@@ -68,28 +68,28 @@ ThreadCodecContexts& GetThreadCodecContexts() {
 
 namespace tepak::codec {
 
-// struct CodecProvider groups related state and operations so callers have one documented contract.
+
 struct CodecProvider::Impl final {
 };
 
-// struct PreparedCompressionDictionary groups related state and operations so callers have one documented contract.
+
 struct PreparedCompressionDictionary::Impl final {
 	ZSTD_CDict* dictionary = nullptr;
 
 	~Impl() {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (dictionary != nullptr) {
 			ZSTD_freeCDict(dictionary);
 		}
 	}
 };
 
-// struct PreparedDecompressionDictionary groups related state and operations so callers have one documented contract.
+
 struct PreparedDecompressionDictionary::Impl final {
 	ZSTD_DDict* dictionary = nullptr;
 
 	~Impl() {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (dictionary != nullptr) {
 			ZSTD_freeDDict(dictionary);
 		}
@@ -103,7 +103,7 @@ PreparedCompressionDictionary& PreparedCompressionDictionary::operator=(const Pr
 PreparedCompressionDictionary::PreparedCompressionDictionary(PreparedCompressionDictionary&&) noexcept = default;
 PreparedCompressionDictionary& PreparedCompressionDictionary::operator=(PreparedCompressionDictionary&&) noexcept = default;
 
-// PreparedCompressionDictionary::IsAvailable is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool PreparedCompressionDictionary::IsAvailable() const {
 	return m_impl != nullptr && m_impl->dictionary != nullptr;
 }
@@ -115,7 +115,7 @@ PreparedDecompressionDictionary& PreparedDecompressionDictionary::operator=(cons
 PreparedDecompressionDictionary::PreparedDecompressionDictionary(PreparedDecompressionDictionary&&) noexcept = default;
 PreparedDecompressionDictionary& PreparedDecompressionDictionary::operator=(PreparedDecompressionDictionary&&) noexcept = default;
 
-// PreparedDecompressionDictionary::IsAvailable is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool PreparedDecompressionDictionary::IsAvailable() const {
 	return m_impl != nullptr && m_impl->dictionary != nullptr;
 }
@@ -127,21 +127,21 @@ CodecProvider::~CodecProvider() = default;
 CodecProvider::CodecProvider(CodecProvider&&) noexcept = default;
 CodecProvider& CodecProvider::operator=(CodecProvider&&) noexcept = default;
 
-// CodecProvider::HashBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::uint64_t CodecProvider::HashBytes(const ByteBuffer& bytes) const {
 	return XXH3_64bits(bytes.data(), bytes.size());
 }
 
-// CodecProvider::HashBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::uint64_t CodecProvider::HashBytes(const std::string& text) const {
 	return XXH3_64bits(text.data(), text.size());
 }
 
-// CodecProvider::TrainDictionary is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 DictionaryProfile CodecProvider::TrainDictionary(const std::vector<ByteBuffer>& samples, std::uint32_t maxDictionaryBytes) const {
 	DictionaryProfile profile;
 	const auto dictionaryBytes = TrainDictionaryBytes(samples, maxDictionaryBytes);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (dictionaryBytes.empty()) {
 		return profile;
 	}
@@ -152,7 +152,7 @@ DictionaryProfile CodecProvider::TrainDictionary(const std::vector<ByteBuffer>& 
 	return profile;
 }
 
-// CodecProvider::TrainDictionaryBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 ByteBuffer CodecProvider::TrainDictionaryBytes(const std::vector<ByteBuffer>& samples, std::uint32_t maxDictionaryBytes) const {
 	if (samples.size() < 8U || maxDictionaryBytes == 0U) {
 		return {};
@@ -161,13 +161,13 @@ ByteBuffer CodecProvider::TrainDictionaryBytes(const std::vector<ByteBuffer>& sa
 	std::size_t totalBytes = 0U;
 	std::vector<std::size_t> sampleSizes;
 	sampleSizes.reserve(samples.size());
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& sample : samples) {
 		totalBytes += sample.size();
 		sampleSizes.push_back(sample.size());
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (totalBytes < (16U * 1024U)) {
 		return {};
 	}
@@ -178,14 +178,14 @@ ByteBuffer CodecProvider::TrainDictionaryBytes(const std::vector<ByteBuffer>& sa
 	const auto dictionaryCapacity = std::max<std::size_t>(4096U, std::min<std::size_t>(maxDictionaryBytes, totalBytes / 2U));
 	ByteBuffer trainingData;
 	trainingData.reserve(totalBytes);
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& sample : samples) {
 		trainingData.insert(trainingData.end(), sample.begin(), sample.end());
 	}
 
 	ByteBuffer dictionaryBytes(dictionaryCapacity);
 	const auto trainedSize = ZDICT_trainFromBuffer(dictionaryBytes.data(), dictionaryBytes.size(), trainingData.data(), sampleSizes.data(), sampleSizes.size());
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ZDICT_isError(trainedSize) != 0U || trainedSize < 1024U) {
 		return {};
 	}
@@ -194,7 +194,7 @@ ByteBuffer CodecProvider::TrainDictionaryBytes(const std::vector<ByteBuffer>& sa
 	return dictionaryBytes;
 }
 
-// CodecProvider::EstimateCompressionContextBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::uint64_t CodecProvider::EstimateCompressionContextBytes(std::size_t sourceBytes, std::int32_t compressionLevel, std::size_t dictionaryBytes) const {
 	// The pack planner uses the same one-shot compression path as the worker
 	// threads, so the estimate needs to scale with both extent size and
@@ -208,7 +208,7 @@ std::uint64_t CodecProvider::EstimateCompressionContextBytes(std::size_t sourceB
 		"Failed to estimate zstd compression context size"));
 }
 
-// CodecProvider::EstimatePreparedCompressionDictionaryBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::uint64_t CodecProvider::EstimatePreparedCompressionDictionaryBytes(std::size_t sourceBytes, std::int32_t compressionLevel, std::size_t dictionaryBytes) const {
 	if (dictionaryBytes < 8U) {
 		return 0U;
@@ -225,7 +225,7 @@ std::uint64_t CodecProvider::EstimatePreparedCompressionDictionaryBytes(std::siz
 		"Failed to estimate zstd prepared dictionary size"));
 }
 
-// CodecProvider::PrepareCompressionDictionary is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 PreparedCompressionDictionary CodecProvider::PrepareCompressionDictionary(const ByteBuffer& dictionaryBytes, std::int32_t compressionLevel) const {
 	PreparedCompressionDictionary preparedDictionary;
 	if (dictionaryBytes.size() < 8U) {
@@ -238,7 +238,7 @@ PreparedCompressionDictionary CodecProvider::PrepareCompressionDictionary(const 
 	state->dictionary = ZSTD_createCDict_byReference(dictionaryBytes.data(),
 		dictionaryBytes.size(),
 		ClampCompressionLevel(compressionLevel));
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (state->dictionary == nullptr) {
 		throw std::runtime_error("Failed to prepare the pack compression dictionary.");
 	}
@@ -247,7 +247,7 @@ PreparedCompressionDictionary CodecProvider::PrepareCompressionDictionary(const 
 	return preparedDictionary;
 }
 
-// CodecProvider::PrepareDecompressionDictionary is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 PreparedDecompressionDictionary CodecProvider::PrepareDecompressionDictionary(const ByteBuffer& dictionaryBytes) const {
 	PreparedDecompressionDictionary preparedDictionary;
 	if (dictionaryBytes.size() < 8U) {
@@ -291,7 +291,7 @@ CompressionDecision CodecProvider::ChooseCompression(const ByteBuffer& bytes,
 		decision.storedBytes.resize(ZSTD_compressBound(bytes.size()));
 
 		std::size_t compressedSize = 0U;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (dictionary.empty()) {
 			auto& contexts = GetThreadCodecContexts();
 			compressedSize = ZSTD_compressCCtx(contexts.compressionContext,
@@ -329,12 +329,12 @@ CompressionDecision CodecProvider::ChooseCompression(const ByteBuffer& bytes,
 	};
 
 	const auto plainDecision = tryCompress(StorageMode::Zstd, {});
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (plainDecision.storedBytes.size() + 8U < bestDecision.storedBytes.size()) {
 		bestDecision = plainDecision;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!dictionaryBytes.empty()) {
 		const auto dictionaryDecision = tryCompress(StorageMode::ZstdDictionary, dictionaryBytes);
 		if (dictionaryDecision.storedBytes.size() + 8U < bestDecision.storedBytes.size()) {
@@ -350,7 +350,7 @@ ByteBuffer CodecProvider::Decompress(const ByteBuffer& storedBytes,
 	std::size_t expectedSize,
 	const ByteBuffer& dictionaryBytes,
 	const PreparedDecompressionDictionary* preparedDictionary) const {
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (mode == StorageMode::Raw) {
 		// Raw decoding is identity only when the declared length matches exactly.
 		if(storedBytes.size() != expectedSize) throw std::runtime_error("Raw extent size mismatch.");
@@ -395,7 +395,7 @@ ByteBuffer CodecProvider::Decompress(const ByteBuffer& storedBytes,
 	}
 
 	ThrowIfZstdError(decompressedSize, "Failed to decompress extent bytes");
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (decompressedSize != expectedSize) {
 		throw std::runtime_error("Decoded extent size did not match the expected size.");
 	}

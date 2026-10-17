@@ -1,0 +1,2699 @@
+{
+  "schemaVersion": "frame-stage-replay-v1",
+  "protocolFixture": true,
+  "runNonce": "synthetic-reference",
+  "scenarioId": "cold-direct-complete",
+  "requestedWorkers": 1,
+  "actualWorkers": 1,
+  "status": "Passed",
+  "unsupportedObservations": [],
+  "coverageJoin": {
+    "requiredLanes": [
+      "FullEngine",
+      "ProducerBoundaries"
+    ],
+    "observedLanes": [
+      "FullEngine",
+      "ProducerBoundaries"
+    ]
+  },
+  "lanes": [
+    {
+      "laneId": "FullEngine",
+      "status": "Passed",
+      "authoritative": {
+        "frames": [
+          {
+            "ordinal": 0,
+            "renderer": {
+              "present": true,
+              "root": {
+                "frameId": 1,
+                "rendererSessionGeneration": 1,
+                "backendResourceGeneration": 1,
+                "sceneGeneration": 1,
+                "animationPresentationGeneration": 1,
+                "expectedPreviousGeneration": 1,
+                "generation": 1,
+                "selectedOrdinals": [
+                  {
+                    "ordinal": 0,
+                    "lifetimeGeneration": 1
+                  }
+                ],
+                "receipt": {
+                  "outcome": 1,
+                  "publicationGeneration": 1,
+                  "expectedPreviousGeneration": 1,
+                  "observedPreviousGeneration": 1,
+                  "reusedPersistentPages": 1,
+                  "changedDynamicPages": 1,
+                  "viewCount": 1,
+                  "rangeCount": 1,
+                  "diagnostic": 1
+                },
+                "persistent": {
+                  "generation": 1,
+                  "rendererSessionGeneration": 1,
+                  "pages": [
+                    {
+                      "generation": 1,
+                      "firstOrdinal": 0,
+                      "producerValidatedSlotCount": 1,
+                      "slots": [
+                        {
+                          "objectId": 1,
+                          "meshId": 1,
+                          "materialId": 1,
+                          "meshGeneration": 1,
+                          "materialGeneration": 1,
+                          "resourceGeneration": 1,
+                          "packetTemplateIdentity": 1,
+                          "routeTemplate": 1,
+                          "key": {
+                            "ordinal": 0,
+                            "lifetimeGeneration": 1
+                          },
+                          "occupied": true
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "dynamic": null,
+                "views": [],
+                "submissionRanges": [],
+                "resourcePreparation": {
+                  "generation": 1,
+                  "records": [
+                    {
+                      "resourceId": "mesh-authored",
+                      "resident": true
+                    }
+                  ]
+                }
+              }
+            },
+            "animation": {
+              "present": true,
+              "root": {
+                "frameId": 1,
+                "sessionGeneration": 1,
+                "lifecycleGeneration": 1,
+                "authorityGeneration": 1,
+                "receipt": {
+                  "outcome": 1,
+                  "authorityGeneration": 1,
+                  "expectedPreviousGeneration": 1,
+                  "observedPreviousGeneration": 1,
+                  "reusedPages": 1,
+                  "changedPages": 1,
+                  "evaluatedRows": 1,
+                  "fallbackRows": 1,
+                  "eventCount": 1,
+                  "gpuCandidateCount": 1
+                },
+                "pages": [
+                  {
+                    "firstSlot": 1,
+                    "capacity": 1,
+                    "changedMasks": 1,
+                    "workerValidatedRowCount": 1,
+                    "rows": [
+                      {
+                        "ownerObjectId": 1,
+                        "objectGeneration": 1,
+                        "componentGeneration": 1,
+                        "sourceGeneration": 1,
+                        "poseGeneration": 1,
+                        "authorityPublicationGeneration": 1,
+                        "tick": 1,
+                        "stateId": 1,
+                        "controller": 1,
+                        "clip": 1,
+                        "skeleton": 1,
+                        "jointStableIds": 1,
+                        "sourceObjectWorldTransform": 1,
+                        "requestedExecutionPolicy": 1,
+                        "effectiveExecutionMode": 1,
+                        "status": 1,
+                        "key": {
+                          "slot": 0,
+                          "lifetimeGeneration": 1
+                        },
+                        "snapshot": null,
+                        "active": true,
+                        "safeFallback": false
+                      }
+                    ]
+                  }
+                ],
+                "sidecars": null
+              }
+            },
+            "scheduler": {
+              "valid": true,
+              "completed": true,
+              "executionMode": "Serial",
+              "declarations": [
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "PublishAnimationAuthority",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.descriptor",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": []
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "RenderPublicationCapture",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.RenderPublicationCapture",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 1
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "GeometryRoutePrepare",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.GeometryRoutePrepare",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 2
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "VirtualGeometryPrepare",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.VirtualGeometryPrepare",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 3
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "BackendCommit",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.BackendCommit",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 4
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "RenderPublication",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.RenderPublication",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 5
+                }
+              ],
+              "dependencyEdges": [],
+              "results": [
+                {
+                  "stableDescriptorId": "synthetic.descriptor",
+                  "completed": true,
+                  "executionPolicy": 0,
+                  "omitted": false,
+                  "partitionCount": 1
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.RenderPublicationCapture",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.GeometryRoutePrepare",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.VirtualGeometryPrepare",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.BackendCommit",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.RenderPublication",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                }
+              ],
+              "phaseNames": [
+                "Prepare"
+              ],
+              "declaredFlushNames": [
+                "FrameEnd"
+              ],
+              "declaredMutationFlushCount": 1,
+              "firstFailure": null,
+              "jobGraph": {
+                "valid": true,
+                "completed": true,
+                "cancelled": false,
+                "fatalExecution": false,
+                "secondaryWorkerFailureCount": 0,
+                "settledWorkerCount": 1,
+                "terminalStates": [
+                  1
+                ],
+                "workerJobCount": 1,
+                "protectedJobCount": 0,
+                "inlineJobCount": 0,
+                "rejectedJobCount": 0,
+                "fallbackJobCount": 0,
+                "blockedDependencyCount": 0,
+                "jobs": [
+                  {
+                    "name": "SyntheticOnly",
+                    "kind": 1,
+                    "state": 1,
+                    "executionPolicy": 1,
+                    "partitionIndex": 0,
+                    "partitionCount": 1,
+                    "itemBegin": 0,
+                    "itemEnd": 1,
+                    "usefulWorkItemCount": 1,
+                    "dependencyWave": 0
+                  }
+                ],
+                "taskGroups": [],
+                "barriers": []
+              },
+              "scheduleValid": true,
+              "scheduleDiagnostics": [],
+              "systemNames": [
+                "SyntheticScripting",
+                "SyntheticAnimation",
+                "SyntheticPhysics",
+                "SyntheticPresentation",
+                "SyntheticUI",
+                "SyntheticStreaming",
+                "SyntheticRenderer"
+              ]
+            },
+            "commandReceipts": [
+              {
+                "producerId": 1,
+                "producerSequence": 1,
+                "correlationId": 1,
+                "idempotencyKey": 1,
+                "cancellationToken": 1,
+                "status": 1,
+                "targetTick": 1,
+                "observableTick": 1,
+                "publicationGeneration": 1,
+                "target": {
+                  "slotIndex": 0,
+                  "generation": 1
+                },
+                "duplicate": false
+              }
+            ]
+          },
+          {
+            "ordinal": 1,
+            "renderer": {
+              "present": true,
+              "root": {
+                "frameId": 1,
+                "rendererSessionGeneration": 1,
+                "backendResourceGeneration": 1,
+                "sceneGeneration": 1,
+                "animationPresentationGeneration": 1,
+                "expectedPreviousGeneration": 1,
+                "generation": 1,
+                "selectedOrdinals": [
+                  {
+                    "ordinal": 0,
+                    "lifetimeGeneration": 1
+                  }
+                ],
+                "receipt": {
+                  "outcome": 1,
+                  "publicationGeneration": 1,
+                  "expectedPreviousGeneration": 1,
+                  "observedPreviousGeneration": 1,
+                  "reusedPersistentPages": 1,
+                  "changedDynamicPages": 1,
+                  "viewCount": 1,
+                  "rangeCount": 1,
+                  "diagnostic": 1
+                },
+                "persistent": {
+                  "generation": 1,
+                  "rendererSessionGeneration": 1,
+                  "pages": [
+                    {
+                      "generation": 1,
+                      "firstOrdinal": 0,
+                      "producerValidatedSlotCount": 1,
+                      "slots": [
+                        {
+                          "objectId": 1,
+                          "meshId": 1,
+                          "materialId": 1,
+                          "meshGeneration": 1,
+                          "materialGeneration": 1,
+                          "resourceGeneration": 1,
+                          "packetTemplateIdentity": 1,
+                          "routeTemplate": 1,
+                          "key": {
+                            "ordinal": 0,
+                            "lifetimeGeneration": 1
+                          },
+                          "occupied": true
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "dynamic": null,
+                "views": [],
+                "submissionRanges": [],
+                "resourcePreparation": {
+                  "generation": 1,
+                  "records": [
+                    {
+                      "resourceId": "mesh-authored",
+                      "resident": true
+                    }
+                  ]
+                }
+              }
+            },
+            "animation": {
+              "present": true,
+              "root": {
+                "frameId": 1,
+                "sessionGeneration": 1,
+                "lifecycleGeneration": 1,
+                "authorityGeneration": 1,
+                "receipt": {
+                  "outcome": 1,
+                  "authorityGeneration": 1,
+                  "expectedPreviousGeneration": 1,
+                  "observedPreviousGeneration": 1,
+                  "reusedPages": 1,
+                  "changedPages": 1,
+                  "evaluatedRows": 1,
+                  "fallbackRows": 1,
+                  "eventCount": 1,
+                  "gpuCandidateCount": 1
+                },
+                "pages": [
+                  {
+                    "firstSlot": 1,
+                    "capacity": 1,
+                    "changedMasks": 1,
+                    "workerValidatedRowCount": 1,
+                    "rows": [
+                      {
+                        "ownerObjectId": 1,
+                        "objectGeneration": 1,
+                        "componentGeneration": 1,
+                        "sourceGeneration": 1,
+                        "poseGeneration": 1,
+                        "authorityPublicationGeneration": 1,
+                        "tick": 1,
+                        "stateId": 1,
+                        "controller": 1,
+                        "clip": 1,
+                        "skeleton": 1,
+                        "jointStableIds": 1,
+                        "sourceObjectWorldTransform": 1,
+                        "requestedExecutionPolicy": 1,
+                        "effectiveExecutionMode": 1,
+                        "status": 1,
+                        "key": {
+                          "slot": 0,
+                          "lifetimeGeneration": 1
+                        },
+                        "snapshot": null,
+                        "active": true,
+                        "safeFallback": false
+                      }
+                    ]
+                  }
+                ],
+                "sidecars": null
+              }
+            },
+            "scheduler": {
+              "valid": true,
+              "completed": true,
+              "executionMode": "Serial",
+              "declarations": [
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "PublishAnimationAuthority",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.descriptor",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": []
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "RenderPublicationCapture",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.RenderPublicationCapture",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 1
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "GeometryRoutePrepare",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.GeometryRoutePrepare",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 2
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "VirtualGeometryPrepare",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.VirtualGeometryPrepare",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 3
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "BackendCommit",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.BackendCommit",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 4
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "RenderPublication",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.RenderPublication",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 5
+                }
+              ],
+              "dependencyEdges": [],
+              "results": [
+                {
+                  "stableDescriptorId": "synthetic.descriptor",
+                  "completed": true,
+                  "executionPolicy": 0,
+                  "omitted": false,
+                  "partitionCount": 1
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.RenderPublicationCapture",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.GeometryRoutePrepare",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.VirtualGeometryPrepare",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.BackendCommit",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.RenderPublication",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                }
+              ],
+              "phaseNames": [
+                "Prepare"
+              ],
+              "declaredFlushNames": [
+                "FrameEnd"
+              ],
+              "declaredMutationFlushCount": 1,
+              "firstFailure": null,
+              "jobGraph": {
+                "valid": true,
+                "completed": true,
+                "cancelled": false,
+                "fatalExecution": false,
+                "secondaryWorkerFailureCount": 0,
+                "settledWorkerCount": 1,
+                "terminalStates": [
+                  1
+                ],
+                "workerJobCount": 1,
+                "protectedJobCount": 0,
+                "inlineJobCount": 0,
+                "rejectedJobCount": 0,
+                "fallbackJobCount": 0,
+                "blockedDependencyCount": 0,
+                "jobs": [
+                  {
+                    "name": "SyntheticOnly",
+                    "kind": 1,
+                    "state": 1,
+                    "executionPolicy": 1,
+                    "partitionIndex": 0,
+                    "partitionCount": 1,
+                    "itemBegin": 0,
+                    "itemEnd": 1,
+                    "usefulWorkItemCount": 1,
+                    "dependencyWave": 0
+                  }
+                ],
+                "taskGroups": [],
+                "barriers": []
+              },
+              "scheduleValid": true,
+              "scheduleDiagnostics": [],
+              "systemNames": [
+                "SyntheticScripting",
+                "SyntheticAnimation",
+                "SyntheticPhysics",
+                "SyntheticPresentation",
+                "SyntheticUI",
+                "SyntheticStreaming",
+                "SyntheticRenderer"
+              ]
+            },
+            "commandReceipts": [
+              {
+                "producerId": 1,
+                "producerSequence": 1,
+                "correlationId": 1,
+                "idempotencyKey": 1,
+                "cancellationToken": 1,
+                "status": 1,
+                "targetTick": 1,
+                "observableTick": 1,
+                "publicationGeneration": 1,
+                "target": {
+                  "slotIndex": 0,
+                  "generation": 1
+                },
+                "duplicate": false
+              }
+            ]
+          },
+          {
+            "ordinal": 2,
+            "renderer": {
+              "present": true,
+              "root": {
+                "frameId": 1,
+                "rendererSessionGeneration": 1,
+                "backendResourceGeneration": 1,
+                "sceneGeneration": 1,
+                "animationPresentationGeneration": 1,
+                "expectedPreviousGeneration": 1,
+                "generation": 1,
+                "selectedOrdinals": [
+                  {
+                    "ordinal": 0,
+                    "lifetimeGeneration": 1
+                  }
+                ],
+                "receipt": {
+                  "outcome": 1,
+                  "publicationGeneration": 1,
+                  "expectedPreviousGeneration": 1,
+                  "observedPreviousGeneration": 1,
+                  "reusedPersistentPages": 1,
+                  "changedDynamicPages": 1,
+                  "viewCount": 1,
+                  "rangeCount": 1,
+                  "diagnostic": 1
+                },
+                "persistent": {
+                  "generation": 1,
+                  "rendererSessionGeneration": 1,
+                  "pages": [
+                    {
+                      "generation": 1,
+                      "firstOrdinal": 0,
+                      "producerValidatedSlotCount": 1,
+                      "slots": [
+                        {
+                          "objectId": 1,
+                          "meshId": 1,
+                          "materialId": 1,
+                          "meshGeneration": 1,
+                          "materialGeneration": 1,
+                          "resourceGeneration": 1,
+                          "packetTemplateIdentity": 1,
+                          "routeTemplate": 1,
+                          "key": {
+                            "ordinal": 0,
+                            "lifetimeGeneration": 1
+                          },
+                          "occupied": true
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "dynamic": null,
+                "views": [],
+                "submissionRanges": [],
+                "resourcePreparation": {
+                  "generation": 1,
+                  "records": [
+                    {
+                      "resourceId": "mesh-authored",
+                      "resident": true
+                    }
+                  ]
+                }
+              }
+            },
+            "animation": {
+              "present": true,
+              "root": {
+                "frameId": 1,
+                "sessionGeneration": 1,
+                "lifecycleGeneration": 1,
+                "authorityGeneration": 1,
+                "receipt": {
+                  "outcome": 1,
+                  "authorityGeneration": 1,
+                  "expectedPreviousGeneration": 1,
+                  "observedPreviousGeneration": 1,
+                  "reusedPages": 1,
+                  "changedPages": 1,
+                  "evaluatedRows": 1,
+                  "fallbackRows": 1,
+                  "eventCount": 1,
+                  "gpuCandidateCount": 1
+                },
+                "pages": [
+                  {
+                    "firstSlot": 1,
+                    "capacity": 1,
+                    "changedMasks": 1,
+                    "workerValidatedRowCount": 1,
+                    "rows": [
+                      {
+                        "ownerObjectId": 1,
+                        "objectGeneration": 1,
+                        "componentGeneration": 1,
+                        "sourceGeneration": 1,
+                        "poseGeneration": 1,
+                        "authorityPublicationGeneration": 1,
+                        "tick": 1,
+                        "stateId": 1,
+                        "controller": 1,
+                        "clip": 1,
+                        "skeleton": 1,
+                        "jointStableIds": 1,
+                        "sourceObjectWorldTransform": 1,
+                        "requestedExecutionPolicy": 1,
+                        "effectiveExecutionMode": 1,
+                        "status": 1,
+                        "key": {
+                          "slot": 0,
+                          "lifetimeGeneration": 1
+                        },
+                        "snapshot": null,
+                        "active": true,
+                        "safeFallback": false
+                      }
+                    ]
+                  }
+                ],
+                "sidecars": null
+              }
+            },
+            "scheduler": {
+              "valid": true,
+              "completed": true,
+              "executionMode": "Serial",
+              "declarations": [
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "PublishAnimationAuthority",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.descriptor",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": []
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "RenderPublicationCapture",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.RenderPublicationCapture",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 1
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "GeometryRoutePrepare",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.GeometryRoutePrepare",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 2
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "VirtualGeometryPrepare",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.VirtualGeometryPrepare",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 3
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "BackendCommit",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.BackendCommit",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 4
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "RenderPublication",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.RenderPublication",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 5
+                }
+              ],
+              "dependencyEdges": [],
+              "results": [
+                {
+                  "stableDescriptorId": "synthetic.descriptor",
+                  "completed": true,
+                  "executionPolicy": 0,
+                  "omitted": false,
+                  "partitionCount": 1
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.RenderPublicationCapture",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.GeometryRoutePrepare",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.VirtualGeometryPrepare",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.BackendCommit",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.RenderPublication",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                }
+              ],
+              "phaseNames": [
+                "Prepare"
+              ],
+              "declaredFlushNames": [
+                "FrameEnd"
+              ],
+              "declaredMutationFlushCount": 1,
+              "firstFailure": null,
+              "jobGraph": {
+                "valid": true,
+                "completed": true,
+                "cancelled": false,
+                "fatalExecution": false,
+                "secondaryWorkerFailureCount": 0,
+                "settledWorkerCount": 1,
+                "terminalStates": [
+                  1
+                ],
+                "workerJobCount": 1,
+                "protectedJobCount": 0,
+                "inlineJobCount": 0,
+                "rejectedJobCount": 0,
+                "fallbackJobCount": 0,
+                "blockedDependencyCount": 0,
+                "jobs": [
+                  {
+                    "name": "SyntheticOnly",
+                    "kind": 1,
+                    "state": 1,
+                    "executionPolicy": 1,
+                    "partitionIndex": 0,
+                    "partitionCount": 1,
+                    "itemBegin": 0,
+                    "itemEnd": 1,
+                    "usefulWorkItemCount": 1,
+                    "dependencyWave": 0
+                  }
+                ],
+                "taskGroups": [],
+                "barriers": []
+              },
+              "scheduleValid": true,
+              "scheduleDiagnostics": [],
+              "systemNames": [
+                "SyntheticScripting",
+                "SyntheticAnimation",
+                "SyntheticPhysics",
+                "SyntheticPresentation",
+                "SyntheticUI",
+                "SyntheticStreaming",
+                "SyntheticRenderer"
+              ]
+            },
+            "commandReceipts": [
+              {
+                "producerId": 1,
+                "producerSequence": 1,
+                "correlationId": 1,
+                "idempotencyKey": 1,
+                "cancellationToken": 1,
+                "status": 1,
+                "targetTick": 1,
+                "observableTick": 1,
+                "publicationGeneration": 1,
+                "target": {
+                  "slotIndex": 0,
+                  "generation": 1
+                },
+                "duplicate": false
+              }
+            ]
+          }
+        ],
+        "boundaries": [],
+        "mutationObservations": [
+          {
+            "checkpoint": "SyntheticOnly",
+            "before": false,
+            "after": true
+          }
+        ],
+        "lifetimeObservations": [],
+        "scenarioAssertions": [
+          {
+            "id": "actual-workers",
+            "expected": 1,
+            "observed": 1,
+            "passed": true
+          },
+          {
+            "id": "observed-frame-count",
+            "expected": 3,
+            "observed": 3,
+            "passed": true
+          },
+          {
+            "id": "renderer-root-observed",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "animation-root-observed",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "authored-render-identity",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "authored-animation-identity",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "profile-observed",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "command-published",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "mutation-not-visible-before-frame",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "mutation-visible-after-frame",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "mutation-receipt-committed",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "full-engine-execution",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          }
+        ],
+        "scheduleConstruction": {
+          "valid": true,
+          "systems": [
+            "SyntheticScripting",
+            "SyntheticAnimation",
+            "SyntheticPhysics",
+            "SyntheticPresentation",
+            "SyntheticUI",
+            "SyntheticStreaming",
+            "SyntheticRenderer"
+          ],
+          "diagnostics": []
+        }
+      },
+      "diagnostic": {
+        "timings": [
+          42
+        ],
+        "runtimeIdentifiers": [
+          "synthetic-address"
+        ]
+      }
+    },
+    {
+      "laneId": "ProducerBoundaries",
+      "status": "Passed",
+      "authoritative": {
+        "frames": [
+          {
+            "ordinal": 0,
+            "renderer": {
+              "present": true,
+              "root": {
+                "frameId": 1,
+                "rendererSessionGeneration": 1,
+                "backendResourceGeneration": 1,
+                "sceneGeneration": 1,
+                "animationPresentationGeneration": 1,
+                "expectedPreviousGeneration": 1,
+                "generation": 1,
+                "selectedOrdinals": [
+                  {
+                    "ordinal": 0,
+                    "lifetimeGeneration": 1
+                  }
+                ],
+                "receipt": {
+                  "outcome": 1,
+                  "publicationGeneration": 1,
+                  "expectedPreviousGeneration": 1,
+                  "observedPreviousGeneration": 1,
+                  "reusedPersistentPages": 1,
+                  "changedDynamicPages": 1,
+                  "viewCount": 1,
+                  "rangeCount": 1,
+                  "diagnostic": 1
+                },
+                "persistent": {
+                  "generation": 1,
+                  "rendererSessionGeneration": 1,
+                  "pages": [
+                    {
+                      "generation": 1,
+                      "firstOrdinal": 0,
+                      "producerValidatedSlotCount": 1,
+                      "slots": [
+                        {
+                          "objectId": 1,
+                          "meshId": 1,
+                          "materialId": 1,
+                          "meshGeneration": 1,
+                          "materialGeneration": 1,
+                          "resourceGeneration": 1,
+                          "packetTemplateIdentity": 1,
+                          "routeTemplate": 1,
+                          "key": {
+                            "ordinal": 0,
+                            "lifetimeGeneration": 1
+                          },
+                          "occupied": true
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "dynamic": null,
+                "views": [],
+                "submissionRanges": [],
+                "resourcePreparation": {
+                  "generation": 1,
+                  "records": [
+                    {
+                      "resourceId": "mesh-authored",
+                      "resident": true
+                    }
+                  ]
+                }
+              }
+            },
+            "animation": {
+              "present": true,
+              "root": {
+                "frameId": 1,
+                "sessionGeneration": 1,
+                "lifecycleGeneration": 1,
+                "authorityGeneration": 1,
+                "receipt": {
+                  "outcome": 1,
+                  "authorityGeneration": 1,
+                  "expectedPreviousGeneration": 1,
+                  "observedPreviousGeneration": 1,
+                  "reusedPages": 1,
+                  "changedPages": 1,
+                  "evaluatedRows": 1,
+                  "fallbackRows": 1,
+                  "eventCount": 1,
+                  "gpuCandidateCount": 1
+                },
+                "pages": [
+                  {
+                    "firstSlot": 1,
+                    "capacity": 1,
+                    "changedMasks": 1,
+                    "workerValidatedRowCount": 1,
+                    "rows": [
+                      {
+                        "ownerObjectId": 1,
+                        "objectGeneration": 1,
+                        "componentGeneration": 1,
+                        "sourceGeneration": 1,
+                        "poseGeneration": 1,
+                        "authorityPublicationGeneration": 1,
+                        "tick": 1,
+                        "stateId": 1,
+                        "controller": 1,
+                        "clip": 1,
+                        "skeleton": 1,
+                        "jointStableIds": 1,
+                        "sourceObjectWorldTransform": 1,
+                        "requestedExecutionPolicy": 1,
+                        "effectiveExecutionMode": 1,
+                        "status": 1,
+                        "key": {
+                          "slot": 0,
+                          "lifetimeGeneration": 1
+                        },
+                        "snapshot": null,
+                        "active": true,
+                        "safeFallback": false
+                      }
+                    ]
+                  }
+                ],
+                "sidecars": null
+              }
+            },
+            "scheduler": {
+              "valid": true,
+              "completed": true,
+              "executionMode": "Serial",
+              "declarations": [
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "PublishAnimationAuthority",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.descriptor",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 0
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "RenderPublicationCapture",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.dependent",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 1
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "GeometryRoutePrepare",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.GeometryRoutePrepare",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 2
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "VirtualGeometryPrepare",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.VirtualGeometryPrepare",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 3
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "BackendCommit",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.BackendCommit",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 4
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "RenderPublication",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.RenderPublication",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 5
+                }
+              ],
+              "dependencyEdges": [
+                [
+                  0,
+                  1
+                ]
+              ],
+              "results": [
+                {
+                  "stableDescriptorId": "synthetic.descriptor",
+                  "completed": true,
+                  "omitted": false,
+                  "partitionCount": 1,
+                  "executionPolicy": 0
+                },
+                {
+                  "stableDescriptorId": "synthetic.dependent",
+                  "completed": true,
+                  "omitted": false,
+                  "partitionCount": 1,
+                  "executionPolicy": 0
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.GeometryRoutePrepare",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.VirtualGeometryPrepare",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.BackendCommit",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.RenderPublication",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                }
+              ],
+              "phaseNames": [
+                "Prepare"
+              ],
+              "declaredFlushNames": [
+                "FrameEnd"
+              ],
+              "declaredMutationFlushCount": 1,
+              "firstFailure": null,
+              "jobGraph": null,
+              "scheduleValid": true,
+              "scheduleDiagnostics": [],
+              "systemNames": [
+                "SyntheticScripting",
+                "SyntheticAnimation",
+                "SyntheticPhysics",
+                "SyntheticPresentation",
+                "SyntheticUI",
+                "SyntheticStreaming",
+                "SyntheticRenderer"
+              ]
+            },
+            "commandReceipts": [
+              {
+                "producerId": 1,
+                "producerSequence": 1,
+                "correlationId": 1,
+                "idempotencyKey": 1,
+                "cancellationToken": 1,
+                "status": 1,
+                "targetTick": 1,
+                "observableTick": 1,
+                "publicationGeneration": 1,
+                "target": {
+                  "slotIndex": 0,
+                  "generation": 1
+                },
+                "duplicate": false
+              }
+            ]
+          },
+          {
+            "ordinal": 1,
+            "renderer": {
+              "present": true,
+              "root": {
+                "frameId": 1,
+                "rendererSessionGeneration": 1,
+                "backendResourceGeneration": 1,
+                "sceneGeneration": 1,
+                "animationPresentationGeneration": 1,
+                "expectedPreviousGeneration": 1,
+                "generation": 1,
+                "selectedOrdinals": [
+                  {
+                    "ordinal": 0,
+                    "lifetimeGeneration": 1
+                  }
+                ],
+                "receipt": {
+                  "outcome": 1,
+                  "publicationGeneration": 1,
+                  "expectedPreviousGeneration": 1,
+                  "observedPreviousGeneration": 1,
+                  "reusedPersistentPages": 1,
+                  "changedDynamicPages": 1,
+                  "viewCount": 1,
+                  "rangeCount": 1,
+                  "diagnostic": 1
+                },
+                "persistent": {
+                  "generation": 1,
+                  "rendererSessionGeneration": 1,
+                  "pages": [
+                    {
+                      "generation": 1,
+                      "firstOrdinal": 0,
+                      "producerValidatedSlotCount": 1,
+                      "slots": [
+                        {
+                          "objectId": 1,
+                          "meshId": 1,
+                          "materialId": 1,
+                          "meshGeneration": 1,
+                          "materialGeneration": 1,
+                          "resourceGeneration": 1,
+                          "packetTemplateIdentity": 1,
+                          "routeTemplate": 1,
+                          "key": {
+                            "ordinal": 0,
+                            "lifetimeGeneration": 1
+                          },
+                          "occupied": true
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "dynamic": null,
+                "views": [],
+                "submissionRanges": [],
+                "resourcePreparation": {
+                  "generation": 1,
+                  "records": [
+                    {
+                      "resourceId": "mesh-authored",
+                      "resident": true
+                    }
+                  ]
+                }
+              }
+            },
+            "animation": {
+              "present": true,
+              "root": {
+                "frameId": 1,
+                "sessionGeneration": 1,
+                "lifecycleGeneration": 1,
+                "authorityGeneration": 1,
+                "receipt": {
+                  "outcome": 1,
+                  "authorityGeneration": 1,
+                  "expectedPreviousGeneration": 1,
+                  "observedPreviousGeneration": 1,
+                  "reusedPages": 1,
+                  "changedPages": 1,
+                  "evaluatedRows": 1,
+                  "fallbackRows": 1,
+                  "eventCount": 1,
+                  "gpuCandidateCount": 1
+                },
+                "pages": [
+                  {
+                    "firstSlot": 1,
+                    "capacity": 1,
+                    "changedMasks": 1,
+                    "workerValidatedRowCount": 1,
+                    "rows": [
+                      {
+                        "ownerObjectId": 1,
+                        "objectGeneration": 1,
+                        "componentGeneration": 1,
+                        "sourceGeneration": 1,
+                        "poseGeneration": 1,
+                        "authorityPublicationGeneration": 1,
+                        "tick": 1,
+                        "stateId": 1,
+                        "controller": 1,
+                        "clip": 1,
+                        "skeleton": 1,
+                        "jointStableIds": 1,
+                        "sourceObjectWorldTransform": 1,
+                        "requestedExecutionPolicy": 1,
+                        "effectiveExecutionMode": 1,
+                        "status": 1,
+                        "key": {
+                          "slot": 0,
+                          "lifetimeGeneration": 1
+                        },
+                        "snapshot": null,
+                        "active": true,
+                        "safeFallback": false
+                      }
+                    ]
+                  }
+                ],
+                "sidecars": null
+              }
+            },
+            "scheduler": {
+              "valid": true,
+              "completed": true,
+              "executionMode": "Serial",
+              "declarations": [
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "PublishAnimationAuthority",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.descriptor",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 0
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "RenderPublicationCapture",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.dependent",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 1
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "GeometryRoutePrepare",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.GeometryRoutePrepare",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 2
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "VirtualGeometryPrepare",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.VirtualGeometryPrepare",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 3
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "BackendCommit",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.BackendCommit",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 4
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "RenderPublication",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.RenderPublication",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 5
+                }
+              ],
+              "dependencyEdges": [
+                [
+                  0,
+                  1
+                ]
+              ],
+              "results": [
+                {
+                  "stableDescriptorId": "synthetic.descriptor",
+                  "completed": true,
+                  "omitted": false,
+                  "partitionCount": 1,
+                  "executionPolicy": 0
+                },
+                {
+                  "stableDescriptorId": "synthetic.dependent",
+                  "completed": true,
+                  "omitted": false,
+                  "partitionCount": 1,
+                  "executionPolicy": 0
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.GeometryRoutePrepare",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.VirtualGeometryPrepare",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.BackendCommit",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.RenderPublication",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                }
+              ],
+              "phaseNames": [
+                "Prepare"
+              ],
+              "declaredFlushNames": [
+                "FrameEnd"
+              ],
+              "declaredMutationFlushCount": 1,
+              "firstFailure": null,
+              "jobGraph": null,
+              "scheduleValid": true,
+              "scheduleDiagnostics": [],
+              "systemNames": [
+                "SyntheticScripting",
+                "SyntheticAnimation",
+                "SyntheticPhysics",
+                "SyntheticPresentation",
+                "SyntheticUI",
+                "SyntheticStreaming",
+                "SyntheticRenderer"
+              ]
+            },
+            "commandReceipts": [
+              {
+                "producerId": 1,
+                "producerSequence": 1,
+                "correlationId": 1,
+                "idempotencyKey": 1,
+                "cancellationToken": 1,
+                "status": 1,
+                "targetTick": 1,
+                "observableTick": 1,
+                "publicationGeneration": 1,
+                "target": {
+                  "slotIndex": 0,
+                  "generation": 1
+                },
+                "duplicate": false
+              }
+            ]
+          },
+          {
+            "ordinal": 2,
+            "renderer": {
+              "present": true,
+              "root": {
+                "frameId": 1,
+                "rendererSessionGeneration": 1,
+                "backendResourceGeneration": 1,
+                "sceneGeneration": 1,
+                "animationPresentationGeneration": 1,
+                "expectedPreviousGeneration": 1,
+                "generation": 1,
+                "selectedOrdinals": [
+                  {
+                    "ordinal": 0,
+                    "lifetimeGeneration": 1
+                  }
+                ],
+                "receipt": {
+                  "outcome": 1,
+                  "publicationGeneration": 1,
+                  "expectedPreviousGeneration": 1,
+                  "observedPreviousGeneration": 1,
+                  "reusedPersistentPages": 1,
+                  "changedDynamicPages": 1,
+                  "viewCount": 1,
+                  "rangeCount": 1,
+                  "diagnostic": 1
+                },
+                "persistent": {
+                  "generation": 1,
+                  "rendererSessionGeneration": 1,
+                  "pages": [
+                    {
+                      "generation": 1,
+                      "firstOrdinal": 0,
+                      "producerValidatedSlotCount": 1,
+                      "slots": [
+                        {
+                          "objectId": 1,
+                          "meshId": 1,
+                          "materialId": 1,
+                          "meshGeneration": 1,
+                          "materialGeneration": 1,
+                          "resourceGeneration": 1,
+                          "packetTemplateIdentity": 1,
+                          "routeTemplate": 1,
+                          "key": {
+                            "ordinal": 0,
+                            "lifetimeGeneration": 1
+                          },
+                          "occupied": true
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "dynamic": null,
+                "views": [],
+                "submissionRanges": [],
+                "resourcePreparation": {
+                  "generation": 1,
+                  "records": [
+                    {
+                      "resourceId": "mesh-authored",
+                      "resident": true
+                    }
+                  ]
+                }
+              }
+            },
+            "animation": {
+              "present": true,
+              "root": {
+                "frameId": 1,
+                "sessionGeneration": 1,
+                "lifecycleGeneration": 1,
+                "authorityGeneration": 1,
+                "receipt": {
+                  "outcome": 1,
+                  "authorityGeneration": 1,
+                  "expectedPreviousGeneration": 1,
+                  "observedPreviousGeneration": 1,
+                  "reusedPages": 1,
+                  "changedPages": 1,
+                  "evaluatedRows": 1,
+                  "fallbackRows": 1,
+                  "eventCount": 1,
+                  "gpuCandidateCount": 1
+                },
+                "pages": [
+                  {
+                    "firstSlot": 1,
+                    "capacity": 1,
+                    "changedMasks": 1,
+                    "workerValidatedRowCount": 1,
+                    "rows": [
+                      {
+                        "ownerObjectId": 1,
+                        "objectGeneration": 1,
+                        "componentGeneration": 1,
+                        "sourceGeneration": 1,
+                        "poseGeneration": 1,
+                        "authorityPublicationGeneration": 1,
+                        "tick": 1,
+                        "stateId": 1,
+                        "controller": 1,
+                        "clip": 1,
+                        "skeleton": 1,
+                        "jointStableIds": 1,
+                        "sourceObjectWorldTransform": 1,
+                        "requestedExecutionPolicy": 1,
+                        "effectiveExecutionMode": 1,
+                        "status": 1,
+                        "key": {
+                          "slot": 0,
+                          "lifetimeGeneration": 1
+                        },
+                        "snapshot": null,
+                        "active": true,
+                        "safeFallback": false
+                      }
+                    ]
+                  }
+                ],
+                "sidecars": null
+              }
+            },
+            "scheduler": {
+              "valid": true,
+              "completed": true,
+              "executionMode": "Serial",
+              "declarations": [
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "PublishAnimationAuthority",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.descriptor",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 0
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "RenderPublicationCapture",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.dependent",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 1
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "GeometryRoutePrepare",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.GeometryRoutePrepare",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 2
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "VirtualGeometryPrepare",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.VirtualGeometryPrepare",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 3
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "BackendCommit",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.BackendCommit",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 4
+                },
+                {
+                  "workerEligible": false,
+                  "mainThreadRequired": false,
+                  "phaseKind": false,
+                  "boundaryClassification": false,
+                  "hardBoundary": false,
+                  "workloadName": "RenderPublication",
+                  "ownerSystem": "SyntheticOnly",
+                  "phase": "Prepare",
+                  "stableDescriptorId": "synthetic.required.RenderPublication",
+                  "reads": [
+                    "AuthoredInput"
+                  ],
+                  "writes": [
+                    "PreparedOutput"
+                  ],
+                  "explicitDependencies": [],
+                  "executionOrder": 5
+                }
+              ],
+              "dependencyEdges": [
+                [
+                  0,
+                  1
+                ]
+              ],
+              "results": [
+                {
+                  "stableDescriptorId": "synthetic.descriptor",
+                  "completed": true,
+                  "omitted": false,
+                  "partitionCount": 1,
+                  "executionPolicy": 0
+                },
+                {
+                  "stableDescriptorId": "synthetic.dependent",
+                  "completed": true,
+                  "omitted": false,
+                  "partitionCount": 1,
+                  "executionPolicy": 0
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.GeometryRoutePrepare",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.VirtualGeometryPrepare",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.BackendCommit",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                },
+                {
+                  "stableDescriptorId": "synthetic.required.RenderPublication",
+                  "completed": true,
+                  "omitted": true,
+                  "partitionCount": 0,
+                  "executionPolicy": 3
+                }
+              ],
+              "phaseNames": [
+                "Prepare"
+              ],
+              "declaredFlushNames": [
+                "FrameEnd"
+              ],
+              "declaredMutationFlushCount": 1,
+              "firstFailure": null,
+              "jobGraph": null,
+              "scheduleValid": true,
+              "scheduleDiagnostics": [],
+              "systemNames": [
+                "SyntheticScripting",
+                "SyntheticAnimation",
+                "SyntheticPhysics",
+                "SyntheticPresentation",
+                "SyntheticUI",
+                "SyntheticStreaming",
+                "SyntheticRenderer"
+              ]
+            },
+            "commandReceipts": [
+              {
+                "producerId": 1,
+                "producerSequence": 1,
+                "correlationId": 1,
+                "idempotencyKey": 1,
+                "cancellationToken": 1,
+                "status": 1,
+                "targetTick": 1,
+                "observableTick": 1,
+                "publicationGeneration": 1,
+                "target": {
+                  "slotIndex": 0,
+                  "generation": 1
+                },
+                "duplicate": false
+              }
+            ]
+          }
+        ],
+        "boundaries": [
+          {
+            "frameOrdinal": 0,
+            "stableDescriptorId": "synthetic.descriptor",
+            "executionOrder": 0,
+            "partitionIndex": 0,
+            "partitionCount": 1,
+            "itemBegin": 0,
+            "itemEnd": 1,
+            "checkpoint": "Enter",
+            "failed": false,
+            "onCoordinator": false
+          },
+          {
+            "frameOrdinal": 0,
+            "stableDescriptorId": "synthetic.descriptor",
+            "executionOrder": 0,
+            "partitionIndex": 0,
+            "partitionCount": 1,
+            "itemBegin": 0,
+            "itemEnd": 1,
+            "checkpoint": "Exit",
+            "failed": false,
+            "onCoordinator": false
+          },
+          {
+            "frameOrdinal": 0,
+            "stableDescriptorId": "synthetic.dependent",
+            "executionOrder": 1,
+            "partitionIndex": 0,
+            "partitionCount": 1,
+            "itemBegin": 0,
+            "itemEnd": 1,
+            "checkpoint": "Enter",
+            "failed": false,
+            "onCoordinator": false
+          },
+          {
+            "frameOrdinal": 0,
+            "stableDescriptorId": "synthetic.dependent",
+            "executionOrder": 1,
+            "partitionIndex": 0,
+            "partitionCount": 1,
+            "itemBegin": 0,
+            "itemEnd": 1,
+            "checkpoint": "Exit",
+            "failed": false,
+            "onCoordinator": false
+          },
+          {
+            "frameOrdinal": 1,
+            "stableDescriptorId": "synthetic.descriptor",
+            "executionOrder": 0,
+            "partitionIndex": 0,
+            "partitionCount": 1,
+            "itemBegin": 0,
+            "itemEnd": 1,
+            "checkpoint": "Enter",
+            "failed": false,
+            "onCoordinator": false
+          },
+          {
+            "frameOrdinal": 1,
+            "stableDescriptorId": "synthetic.descriptor",
+            "executionOrder": 0,
+            "partitionIndex": 0,
+            "partitionCount": 1,
+            "itemBegin": 0,
+            "itemEnd": 1,
+            "checkpoint": "Exit",
+            "failed": false,
+            "onCoordinator": false
+          },
+          {
+            "frameOrdinal": 1,
+            "stableDescriptorId": "synthetic.dependent",
+            "executionOrder": 1,
+            "partitionIndex": 0,
+            "partitionCount": 1,
+            "itemBegin": 0,
+            "itemEnd": 1,
+            "checkpoint": "Enter",
+            "failed": false,
+            "onCoordinator": false
+          },
+          {
+            "frameOrdinal": 1,
+            "stableDescriptorId": "synthetic.dependent",
+            "executionOrder": 1,
+            "partitionIndex": 0,
+            "partitionCount": 1,
+            "itemBegin": 0,
+            "itemEnd": 1,
+            "checkpoint": "Exit",
+            "failed": false,
+            "onCoordinator": false
+          },
+          {
+            "frameOrdinal": 2,
+            "stableDescriptorId": "synthetic.descriptor",
+            "executionOrder": 0,
+            "partitionIndex": 0,
+            "partitionCount": 1,
+            "itemBegin": 0,
+            "itemEnd": 1,
+            "checkpoint": "Enter",
+            "failed": false,
+            "onCoordinator": false
+          },
+          {
+            "frameOrdinal": 2,
+            "stableDescriptorId": "synthetic.descriptor",
+            "executionOrder": 0,
+            "partitionIndex": 0,
+            "partitionCount": 1,
+            "itemBegin": 0,
+            "itemEnd": 1,
+            "checkpoint": "Exit",
+            "failed": false,
+            "onCoordinator": false
+          },
+          {
+            "frameOrdinal": 2,
+            "stableDescriptorId": "synthetic.dependent",
+            "executionOrder": 1,
+            "partitionIndex": 0,
+            "partitionCount": 1,
+            "itemBegin": 0,
+            "itemEnd": 1,
+            "checkpoint": "Enter",
+            "failed": false,
+            "onCoordinator": false
+          },
+          {
+            "frameOrdinal": 2,
+            "stableDescriptorId": "synthetic.dependent",
+            "executionOrder": 1,
+            "partitionIndex": 0,
+            "partitionCount": 1,
+            "itemBegin": 0,
+            "itemEnd": 1,
+            "checkpoint": "Exit",
+            "failed": false,
+            "onCoordinator": false
+          }
+        ],
+        "mutationObservations": [
+          {
+            "checkpoint": "SyntheticOnly",
+            "before": false,
+            "after": true
+          }
+        ],
+        "lifetimeObservations": [],
+        "scenarioAssertions": [
+          {
+            "id": "actual-workers",
+            "expected": 1,
+            "observed": 1,
+            "passed": true
+          },
+          {
+            "id": "observed-frame-count",
+            "expected": 3,
+            "observed": 3,
+            "passed": true
+          },
+          {
+            "id": "renderer-root-observed",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "animation-root-observed",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "authored-render-identity",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "authored-animation-identity",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "profile-observed",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "command-published",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "mutation-not-visible-before-frame",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "mutation-visible-after-frame",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "mutation-receipt-committed",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          },
+          {
+            "id": "production-boundaries-observed",
+            "expected": true,
+            "observed": true,
+            "passed": true
+          }
+        ],
+        "causality": [
+          {
+            "frameOrdinal": 0,
+            "passed": true,
+            "issues": [],
+            "observedInvocationCount": 2,
+            "expectedCompletedInvocationCount": 2,
+            "checkedDependencyCount": 1,
+            "omittedDependencyCount": 0
+          },
+          {
+            "frameOrdinal": 1,
+            "passed": true,
+            "issues": [],
+            "observedInvocationCount": 2,
+            "expectedCompletedInvocationCount": 2,
+            "checkedDependencyCount": 1,
+            "omittedDependencyCount": 0
+          },
+          {
+            "frameOrdinal": 2,
+            "passed": true,
+            "issues": [],
+            "observedInvocationCount": 2,
+            "expectedCompletedInvocationCount": 2,
+            "checkedDependencyCount": 1,
+            "omittedDependencyCount": 0
+          }
+        ],
+        "scheduleConstruction": {
+          "valid": true,
+          "systems": [
+            "SyntheticScripting",
+            "SyntheticAnimation",
+            "SyntheticPhysics",
+            "SyntheticPresentation",
+            "SyntheticUI",
+            "SyntheticStreaming",
+            "SyntheticRenderer"
+          ],
+          "diagnostics": []
+        }
+      },
+      "diagnostic": {
+        "timings": [
+          42
+        ],
+        "runtimeIdentifiers": [
+          {
+            "kind": "ActualBoundaryObservationOrder",
+            "frameOrdinal": 0,
+            "events": [
+              {
+                "frameOrdinal": 0,
+                "stableDescriptorId": "synthetic.descriptor",
+                "executionOrder": 0,
+                "partitionIndex": 0,
+                "partitionCount": 1,
+                "itemBegin": 0,
+                "itemEnd": 1,
+                "checkpoint": "Enter",
+                "failed": false,
+                "observedSequence": 1,
+                "onCoordinator": false
+              },
+              {
+                "frameOrdinal": 0,
+                "stableDescriptorId": "synthetic.descriptor",
+                "executionOrder": 0,
+                "partitionIndex": 0,
+                "partitionCount": 1,
+                "itemBegin": 0,
+                "itemEnd": 1,
+                "checkpoint": "Exit",
+                "failed": false,
+                "observedSequence": 2,
+                "onCoordinator": false
+              },
+              {
+                "frameOrdinal": 0,
+                "stableDescriptorId": "synthetic.dependent",
+                "executionOrder": 1,
+                "partitionIndex": 0,
+                "partitionCount": 1,
+                "itemBegin": 0,
+                "itemEnd": 1,
+                "checkpoint": "Enter",
+                "failed": false,
+                "observedSequence": 3,
+                "onCoordinator": false
+              },
+              {
+                "frameOrdinal": 0,
+                "stableDescriptorId": "synthetic.dependent",
+                "executionOrder": 1,
+                "partitionIndex": 0,
+                "partitionCount": 1,
+                "itemBegin": 0,
+                "itemEnd": 1,
+                "checkpoint": "Exit",
+                "failed": false,
+                "observedSequence": 4,
+                "onCoordinator": false
+              }
+            ]
+          },
+          {
+            "kind": "ActualBoundaryObservationOrder",
+            "frameOrdinal": 1,
+            "events": [
+              {
+                "frameOrdinal": 1,
+                "stableDescriptorId": "synthetic.descriptor",
+                "executionOrder": 0,
+                "partitionIndex": 0,
+                "partitionCount": 1,
+                "itemBegin": 0,
+                "itemEnd": 1,
+                "checkpoint": "Enter",
+                "failed": false,
+                "observedSequence": 1,
+                "onCoordinator": false
+              },
+              {
+                "frameOrdinal": 1,
+                "stableDescriptorId": "synthetic.descriptor",
+                "executionOrder": 0,
+                "partitionIndex": 0,
+                "partitionCount": 1,
+                "itemBegin": 0,
+                "itemEnd": 1,
+                "checkpoint": "Exit",
+                "failed": false,
+                "observedSequence": 2,
+                "onCoordinator": false
+              },
+              {
+                "frameOrdinal": 1,
+                "stableDescriptorId": "synthetic.dependent",
+                "executionOrder": 1,
+                "partitionIndex": 0,
+                "partitionCount": 1,
+                "itemBegin": 0,
+                "itemEnd": 1,
+                "checkpoint": "Enter",
+                "failed": false,
+                "observedSequence": 3,
+                "onCoordinator": false
+              },
+              {
+                "frameOrdinal": 1,
+                "stableDescriptorId": "synthetic.dependent",
+                "executionOrder": 1,
+                "partitionIndex": 0,
+                "partitionCount": 1,
+                "itemBegin": 0,
+                "itemEnd": 1,
+                "checkpoint": "Exit",
+                "failed": false,
+                "observedSequence": 4,
+                "onCoordinator": false
+              }
+            ]
+          },
+          {
+            "kind": "ActualBoundaryObservationOrder",
+            "frameOrdinal": 2,
+            "events": [
+              {
+                "frameOrdinal": 2,
+                "stableDescriptorId": "synthetic.descriptor",
+                "executionOrder": 0,
+                "partitionIndex": 0,
+                "partitionCount": 1,
+                "itemBegin": 0,
+                "itemEnd": 1,
+                "checkpoint": "Enter",
+                "failed": false,
+                "observedSequence": 1,
+                "onCoordinator": false
+              },
+              {
+                "frameOrdinal": 2,
+                "stableDescriptorId": "synthetic.descriptor",
+                "executionOrder": 0,
+                "partitionIndex": 0,
+                "partitionCount": 1,
+                "itemBegin": 0,
+                "itemEnd": 1,
+                "checkpoint": "Exit",
+                "failed": false,
+                "observedSequence": 2,
+                "onCoordinator": false
+              },
+              {
+                "frameOrdinal": 2,
+                "stableDescriptorId": "synthetic.dependent",
+                "executionOrder": 1,
+                "partitionIndex": 0,
+                "partitionCount": 1,
+                "itemBegin": 0,
+                "itemEnd": 1,
+                "checkpoint": "Enter",
+                "failed": false,
+                "observedSequence": 3,
+                "onCoordinator": false
+              },
+              {
+                "frameOrdinal": 2,
+                "stableDescriptorId": "synthetic.dependent",
+                "executionOrder": 1,
+                "partitionIndex": 0,
+                "partitionCount": 1,
+                "itemBegin": 0,
+                "itemEnd": 1,
+                "checkpoint": "Exit",
+                "failed": false,
+                "observedSequence": 4,
+                "onCoordinator": false
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

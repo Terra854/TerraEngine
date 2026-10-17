@@ -22,7 +22,7 @@ enum class RHIBackend
 	Vulkan
 };
 
-// struct RHIConfig groups related state and operations so callers have one documented contract.
+
 struct RHIConfig
 {
 	RHIBackend backend = RHIBackend::Vulkan;

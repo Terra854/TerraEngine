@@ -261,6 +261,21 @@ if ($LASTEXITCODE -ne 0) { throw 'Vulkan acceptance was nonpassing.' }
 if ($LASTEXITCODE -ne 0) { throw 'Renderer/editor acceptance was nonpassing.' }
 ```
 
+For repeated-context compatibility testing with overlays enabled, Vulkan and
+Renderer modes also accept the explicit `-VulkanHostInstance` switch. This fixture mode
+retains one additional instance across the lane, then destroys it before GLFW
+shutdown. All 100 independent engine contexts, instances, devices, surfaces and
+swapchains must still retire normally. Version-3 receipts record and validate
+that extra owner; its extension-free instance has no validation messenger, while
+every engine context still requires enabled validation with zero errors. This
+mode reduces fixture-owned last-instance teardown to once per lane. It does not
+qualify repeated last-instance churn or establish that an overlay crash is fixed.
+Keep the default-mode failures and the selected mode in the evidence. See the
+[runtime-memory tool guide](../Tests/Tools/RuntimeMemorySafety/README.md) for the
+exact command and receipt requirements. Do not apply this mode to frozen timing
+controls. Renderer mode also retains its original startup, restart, scratch and
+Engine shutdown checks; the extra instance closes before Engine releases GLFW.
+
 Performance and All additionally require the original immutable reference,
 sealed calibration, frozen timing-tool install, and independently collected
 pinned parity evidence. The example paths below must identify those real
@@ -1284,47 +1299,159 @@ $env:TERRAENGINE_TEST_FILTER="Scripting.Workload;RenderWorkerSafety;Renderer.Dia
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
-MCP camera image coverage lives in the editor automation and MCP bridge tests.
-Use this focused pass when changing `game_view.capture`,
-`camera.capture_object`, `camera.capture_custom`, mixed MCP image content, or
-`terraengine://capture/availability`:
+### Extracted frame stages and source quality
+
+After the configured compile/install above, run the focused production-stage and
+repository contract entries, then the complete applicable CTest suite:
 
 ```powershell
-$env:TERRAENGINE_TEST_FILTER="Capture"
-.\out\build\Debug\TerraEngine-EditorTests.exe
-$env:TERRAENGINE_TEST_FILTER="Editor.MCP.Contract"
-.\out\build\Debug\TerraEngine-EditorTests.exe
-Remove-Item Env:TERRAENGINE_TEST_FILTER
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+	-R '^(Engine\.FrameStageContracts|Repository\.(SourceReviewAuditParser|StageOwnershipContracts|FrameStageReplayComparison|SourceReviewQuality))$' `
+	--no-tests=error --output-on-failure
+if ($LASTEXITCODE -ne 0) { throw 'Frame-stage/source-quality contracts failed.' }
 ```
 
-The Vulkan editor backend now advertises native image readback. It submits
-render-target copies to host-visible staging buffers, polls completion fences
-without blocking normal frame updates, converts RGBA8/BGRA8/HDR half-float
-pixels, and publishes the resulting PNG through the bounded MCP capture queue.
-Headless tests still exercise the deterministic fallback because they do not
-create a Vulkan device. Run the focused CPU/lifecycle regression slice with:
+[RendererFrameStages.md](RendererFrameStages.md) describes the actual coroutine
+sections, owners and settlement paths. The [CodeQuality tools guide](../Tests/Tools/CodeQuality/README.md)
+contains installed replay launch/comparison commands, trusted provenance joins,
+source-quality `Portable` versus independent `PrivateProof`, and the six-case
+requested-size synthetic cost fixture. The cost fixture pins its tool-adjacent
+DLL under `Tests/Tools/CodeQuality`; the editor runtime copy is a different path.
+
+Portable source-quality success does not execute ignored before/after token
+proof. Protocol/lexical checks do not establish installed GPU/editor or timing
+acceptance. Retain separate raw receipts and actual artifact hashes for each
+scope; documentation of a command is not its passing result. Continue the
+installed runtime-memory Cpu matrix with `-Iterations 100 -WorkerCounts @(1,2,8)`
+and its separate Vulkan/Renderer lanes using the commands above.
+
+### MCP capture bytes and readback ownership
+
+Camera capture coverage includes `game_view.capture`, `camera.capture_object`,
+`camera.capture_custom`, mixed MCP image content and
+`terraengine://capture/availability`. From a clean checkout, run these commands
+at the repository root in PowerShell 7 with an x64 Visual Studio developer
+environment, Windows SDK, CMake and Ninja:
 
 ```powershell
-ctest --test-dir out/build/Debug -C Debug -R "Engine.VulkanImageReadback|Engine.RendererRecovery" --output-on-failure
+git submodule update --init --recursive
+if ($LASTEXITCODE -ne 0) { throw 'Dependency checkout failed.' }
+cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
+if ($LASTEXITCODE -ne 0) { throw 'Configure failed.' }
+cmake --build --preset RelWithDebInfo --target install --parallel 2
+if ($LASTEXITCODE -ne 0) { throw 'Compile/install failed.' }
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+	-R '^(Engine\.(RenderCaptureContracts|ReadbackLifetime|VulkanImageReadback)|Editor\.RenderCaptureContracts|Runtime\.ReadbackLifetime\.ProtocolContracts)$' `
+	--no-tests=error --output-on-failure
+if ($LASTEXITCODE -ne 0) { throw 'Capture/readback regression failed.' }
 ```
 
-Live validation must use the installed editor and a real Vulkan adapter. Enable
-Vulkan validation layers and the local MCP bridge in isolated editor
-preferences, open a project containing an active camera, call
-`game_view.capture` and `camera.capture_custom`, and verify each response carries
-non-empty `image/png` content with `backendReadback=true` and
-`deterministicFallback=false`. Resize a view between requests and confirm the
-editor log has no Vulkan lifetime/layout validation errors.
+The maintained installation is `out/build/RelWithDebInfo/Build`. It contains the
+native/editor DLL closures, managed assets, shaders, fixture, decoder, scripts
+and watchdog. The runner verifies `readback-lifetime-artifacts.json` against
+actual installed bytes; use its installed copy and close installed editors before
+replacing their binaries. Dependencies and PNG decoding come from committed
+repository copies.
 
-After code changes, rebuild the Visual Studio-compatible targets and run the
-install target so native, managed, editor, launcher, and shader-tool outputs are
-verified together:
+Headless tests independently decode actual fallback/MCP image bytes. Synthetic
+success must have the exact requested extent and deterministic black RGBA pixels:
+alpha 255 for opaque or 0 for transparent, `backendReadback=false`,
+`deterministicFallback=true`, and `overlaysIncluded=false`. The preserved
+[invalid-fallback.png](../Tests/Fixtures/McpCameraImages/invalid-fallback.png) is
+the original 68-byte malformed image and must fail checksum validation. The
+bundled `pv_png` decoder, separate PNG chunk-CRC checks and strict Base64 handling
+in [DecodedCaptureAssertions.cpp](../Tests/Support/DecodedCaptureAssertions.cpp)
+validate pixels and integrity rather than trusting a PNG signature or metadata.
+Allocation, encoding, cancellation and deadline cases also verify one terminal
+result and later queue progress.
+
+Readback evidence has distinct scopes:
+
+| Evidence | What it establishes |
+| --- | --- |
+| `Engine.ReadbackLifetime` | The production controller's retirement decisions, counted owners and capture-charge settlement under deterministic observations. |
+| `Engine.VulkanImageReadback` | Pixel conversion plus supplementary native wiring; source wording cannot prove runtime lifetime safety. |
+| `Runtime.ReadbackLifetime.ProtocolContracts` | Synthetic receipt rejection and provenance joins; it launches no real GPU/editor acceptance. |
+| Installed `Native` / `Editor` lanes | Actual adapter, enabled validation, native ownership events and independently decoded editor output from the pinned installation. |
+
+The separate [sensitivity runner](../Tests/Tools/ReadbackLifetime/TestReadbackLifetimeSensitivity.ps1)
+compiles isolated copies of the same production controller and tests, then runs
+correct → premature-release mutant → correct. Both correct runs must pass; the
+mutant must fail the expected owner-count assertion without changing comments.
+From the same developer shell:
 
 ```powershell
-cmd /c "call ""C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"" >nul && cmake --build out\build\CodexDebug --target TerraEngine-EngineTests TerraEngine-EditorTests --config Debug"
-ctest --test-dir out\build\CodexDebug --output-on-failure -C Debug
-cmd /c "call ""C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"" >nul && cmake --build out\build\CodexDebug --target install --config Debug"
+$readbackInstall = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$readbackTools = Join-Path $readbackInstall 'Tests/Tools/ReadbackLifetime'
+$readbackSensitivity = Join-Path $PWD ('out/validation/readback-sensitivity-' + [guid]::NewGuid().ToString('N'))
+& (Join-Path $readbackTools 'TestReadbackLifetimeSensitivity.ps1') `
+	-SourceRoot $PWD.Path -WorkRoot $readbackSensitivity `
+	-CompilerPath (Get-Command cl.exe -ErrorAction Stop).Source
+$readbackSensitivityResult = Get-Content (Join-Path $readbackSensitivity 'sensitivity.json') -Raw | ConvertFrom-Json
+if ($readbackSensitivityResult.status -ne 'passed') { throw 'Readback mutation sensitivity failed.' }
 ```
+
+Installed acceptance additionally needs Windows, a usable desktop/Vulkan adapter,
+timeline-semaphore support and the host diagnostic `VK_LAYER_KHRONOS_validation`
+layer. The layer is a documented diagnostic prerequisite, not a bundled runtime
+dependency. A requested flag or SDK path does not establish actual enablement:
+receipts require the enabled feature/layer and installed callback observations.
+Missing capabilities leave acceptance incomplete. Watchdog termination,
+validation errors, skipped work or simulated device loss cannot pass a real lane.
+
+Each invocation needs a nonexistent work directory outside the installation.
+Choose `Native`, `Editor` or `All`; `All` runs both lanes once:
+
+```powershell
+$readbackInstall = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$readbackRunner = Join-Path $readbackInstall 'Tests/Tools/ReadbackLifetime/RunInstalledReadbackLifetime.ps1'
+$readbackMode = 'All' # Native, Editor or All
+$readbackWork = Join-Path $PWD ('out/validation/readback-' + $readbackMode + '-' + [guid]::NewGuid().ToString('N'))
+& $readbackRunner -InstallRoot $readbackInstall -WorkRoot $readbackWork `
+	-Mode $readbackMode -Iterations 100
+if ($LASTEXITCODE -eq 2) { throw 'Readback prerequisites are incomplete; inspect result.json.' }
+if ($LASTEXITCODE -ne 0) { throw 'Installed readback acceptance failed; retain its raw evidence.' }
+```
+
+Exit 0 means the requested lanes passed, 1 means failure and 2 means incomplete
+prerequisites. `-Iterations 100` means 100 **per native scenario**: timeout,
+resize and orderly shutdown, or 300 core native operations. One separately
+labelled C++ payload-allocation fault exercises the actual completed-payload
+adapter, an explicit empty-image failure, native retirement and a healthy retry;
+it does not replace a core operation or simulate device loss.
+
+The native gate is a real timeline semaphore initially at 0. The accepted
+`vkQueueSubmit` waits for value 1 at TRANSFER; actual `vkSignalSemaphore` to 1
+releases it only after genuine `VK_NOT_READY`, one timeout delivery and retained
+buffer/allocation/command/fence/source-image ownership. Normal/resize lanes
+require actual fence success; orderly shutdown requires actual successful
+device idle after host release. Resources and the gate retire exactly once.
+Resize occurs after retirement and proves a changed native target generation and
+extent; it makes no claim about target replacement while the gate is blocked.
+
+The editor lane uses one warmup followed by 100 actual read-only captures,
+100 observed native target resizes and one normal session close. Both
+`game_view.capture` with `freshness=nextFrame` and `camera.capture_custom` use the
+dedicated target. Each response must have real-backend provenance, native
+`backendTarget` generation/extent matching the request and independently decoded
+PNG, and exactly one correlated response. The runner preserves authored scene
+bytes, objects and dirty state. These editor captures do not claim GPU timeout
+retention or 100 independent shutdowns.
+
+Retain `result.json`, lane receipts/verification, pinned raw observations, RPCs,
+PNG/decoder results, watchdogs and initialization-through-shutdown logs. A passing
+campaign qualifies its hashed installed bytes only; later source/binary changes
+need their own required acceptance. After implementation is integrated, also run
+the complete applicable CTest suite with its registered timeouts:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --no-tests=error --output-on-failure
+if ($LASTEXITCODE -ne 0) { throw 'Complete CTest failed.' }
+```
+
+See the [installed-tool guide](../Tests/Tools/ReadbackLifetime/README.md) and
+[camera fixture notes](../Tests/Fixtures/McpCameraImages/README.md) for the same
+evidence boundaries and image controls.
 
 Scene View overlay coverage lives in the
 editor harness. It validates the toolbar tool state, snap fallback, marker

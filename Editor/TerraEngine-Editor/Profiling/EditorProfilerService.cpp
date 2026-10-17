@@ -37,7 +37,7 @@ std::string MakeRecordingStatus(const ProfilerCaptureSettings& settings)
 
 }
 
-// EditorProfilerService::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void EditorProfilerService::Initialize(EditorContext& context)
 {
 	ctx = &context;
@@ -49,14 +49,14 @@ void EditorProfilerService::Initialize(EditorContext& context)
 	OnProjectOpened();
 }
 
-// EditorProfilerService::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void EditorProfilerService::Shutdown()
 {
 	OnProjectClosed();
 	ctx = nullptr;
 }
 
-// EditorProfilerService::OnProjectOpened is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void EditorProfilerService::OnProjectOpened()
 {
 	if (!ctx || !ctx->projectManager || !ctx->projectManager->HasActiveProject())
@@ -147,13 +147,13 @@ void EditorProfilerService::BeginProjectClose()
 	}
 }
 
-// EditorProfilerService::OnProjectClosed is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void EditorProfilerService::OnProjectClosed()
 {
 	BeginProjectClose();
 }
 
-// EditorProfilerService::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void EditorProfilerService::Update(float deltaTime)
 {
 	std::deque<WorkerCompletion> completions;
@@ -323,7 +323,7 @@ void EditorProfilerService::Update(float deltaTime)
 	}
 }
 
-// EditorProfilerService::StartRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void EditorProfilerService::StartRecording()
 {
 	ProfilerCaptureSettings settings{};
@@ -430,7 +430,7 @@ void EditorProfilerService::StartRecording(const ProfilerCaptureSettings& settin
 	}
 }
 
-// EditorProfilerService::PauseRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void EditorProfilerService::PauseRecording()
 {
 	Profiler::Instance().PauseRecording();
@@ -439,7 +439,7 @@ void EditorProfilerService::PauseRecording()
 	PublishPresentationLocked();
 }
 
-// EditorProfilerService::ResumeRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void EditorProfilerService::ResumeRecording()
 {
 	Profiler::Instance().ResumeRecording();
@@ -515,7 +515,7 @@ EditorProfilerFrameTiming EditorProfilerService::GetEditorFrameTiming() const no
 	return result;
 }
 
-// EditorProfilerService::FinishCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool EditorProfilerService::FinishCapture()
 {
 	std::uint64_t finishProjectEpoch = 0u;
@@ -550,7 +550,7 @@ bool EditorProfilerService::FinishCapture()
 	return true;
 }
 
-// EditorProfilerService::Clear is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void EditorProfilerService::Clear()
 {
 	Profiler::Instance().Clear();
@@ -561,7 +561,7 @@ void EditorProfilerService::Clear()
 	PublishPresentationLocked();
 }
 
-// EditorProfilerService::RefreshCaptureList is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void EditorProfilerService::RefreshCaptureList()
 {
 	if (!HasActiveProject())
@@ -608,7 +608,7 @@ void EditorProfilerService::RefreshCaptureList()
 	ThreadPool::instance().enqueue(task);
 }
 
-// EditorProfilerService::LoadCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void EditorProfilerService::LoadCapture(const std::filesystem::path& capturePath)
 {
 	if (!HasActiveProject())
@@ -850,7 +850,7 @@ void EditorProfilerService::RequestSelectedFrame(std::uint64_t frameIndex)
 	ThreadPool::instance().enqueue(task);
 }
 
-// EditorProfilerService::GetState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 ProfilerSessionState EditorProfilerService::GetState() const
 {
 	return Profiler::Instance().GetState();
@@ -866,7 +866,7 @@ std::shared_ptr<const EditorProfilerPresentationSnapshot> EditorProfilerService:
 	return std::atomic_load_explicit(&presentationSnapshot, std::memory_order_acquire);
 }
 
-// EditorProfilerService::GetStatusText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string EditorProfilerService::GetStatusText() const
 {
 	const ProfilerSessionState profilerState = Profiler::Instance().GetState();
@@ -880,14 +880,14 @@ std::string EditorProfilerService::GetStatusText() const
 	return statusText;
 }
 
-// EditorProfilerService::GetLastError is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string EditorProfilerService::GetLastError() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return lastError;
 }
 
-// EditorProfilerService::GetCaptureList is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> EditorProfilerService::GetCaptureList() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
@@ -1149,14 +1149,14 @@ void EditorProfilerService::AcceptWorkerCompletion(WorkerCompletion&& completion
 	PublishPresentationLocked();
 }
 
-// EditorProfilerService::HasActiveProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool EditorProfilerService::HasActiveProject() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return sessionAccepting && captureStore.HasProjectRoot();
 }
 
-// EditorProfilerService::IsBusy is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool EditorProfilerService::IsBusy() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
@@ -1173,20 +1173,20 @@ bool EditorProfilerService::IsPersisting() const
 	return persistenceIndex < operations.size() && operations[persistenceIndex].active;
 }
 
-// EditorProfilerService::GetProfilerDirectory is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::filesystem::path EditorProfilerService::GetProfilerDirectory() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return captureStore.GetProfilerDirectory();
 }
 
-// EditorProfilerService::MakeMetadata is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 TerraEngine::Profiling::ProfilerCaptureMetadata EditorProfilerService::MakeMetadata() const
 {
 	TerraEngine::Profiling::ProfilerCaptureMetadata metadata;
 	metadata.terraEngineVersion = "TerraEngine";
 	metadata.startedAt = TerraEngine::Profiling::MakeReadableTimestamp();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ctx && ctx->projectManager && ctx->projectManager->HasActiveProject())
 	{
 		const auto root = ctx->projectManager->GetProjectRoot();

@@ -137,6 +137,98 @@ iteration's context/thread-pool cleanup with that final window closure. This
 fixture lifecycle establishes no acceptance result without the actual completed
 installed matrix and its retained receipts.
 
+An optional, explicit compatibility setup retains one **separate fixture-owned
+Vulkan instance** across the same ten100-context lanes:
+
+```powershell
+./RunInstalledRuntimeMemorySafety.ps1 -InstallRoot <installed-Build> `
+  -WorkRoot <fresh-absolute-directory> -Mode Vulkan -Iterations 100 -VulkanHostInstance
+```
+
+The default is false and keeps the version2 receipt/behavior above. The switch is
+accepted only with `-Mode Vulkan` or `-Mode Renderer`; it cannot affect CPU, editor or timing
+campaigns, including through `-Mode All`. The runner passes the explicit native
+option `--vulkan-host-instance true`. The native parser accepts only `true` or
+`false`, rejects duplicates/other modes, and requires at least100 iterations
+when enabled. No Engine, device, surface, swapchain or vendor DLL is pinned or
+shared through this owner; overlays and graphics settings remain enabled/unchanged.
+
+This configuration is transparent lifetime compatibility, **not a NVIDIA crash
+fix or proof that the failed unhosted campaigns passed**. It still constructs,
+initializes, validates, shuts down and destroys all100 real Engine contexts and
+their own instances/devices/surfaces/swapchains per lane. It deliberately no longer
+exercises the fixture returning to its last owned instance after each iteration;
+that final host-instance release occurs once before final window/GLFW shutdown.
+It makes no claim about the number of other instances in the process or driver
+dependency residency. Sequential Engine handles may repeat; each concurrently
+live Engine instance must differ from the live fixture host instance.
+
+Enabled receipts use `vulkanEvidenceVersion=3`, with root `hostInstance` recording
+`requested=true`, actual `createdCount=enumeratedCount=destroyedCount=1`, actual
+`createResult=enumerateCountResult=enumerateResult=0`, positive
+`physicalDeviceCount`, the actual nonzero `instanceHandle`,
+`cleanupResult=ReturnedNormally`, and `handleCleared=true`. Its
+`coverageModel=RetainedFixtureHostInstance` is explicit. Both extension/layer counts
+are zero, so `hostValidationCallbacks=false`: the bootstrap instance does not claim
+debug-messenger coverage. `engineOwnersShared`, `driverModulePinned`,
+`globalProcessInstanceCountClaim`, and
+`perIterationLastOwnedInstanceTeardownExercised` are all false. Each Engine context
+still requires actually enabled validation, every existing native operation and
+retirement assertion, and zero session validation errors.
+
+Each row's `hostInstance.instanceHandle` joins that root identity, with actual
+`liveBeforeContextInitialization`, `liveAfterContextCleanup`, and
+`distinctFromContextInstance` all true; the runner independently compares the
+observed Engine instance handle too. The source owns private create/GIPA and
+instance-specific destroy/enumeration function pointers from GLFW's loader. It
+never installs the bootstrap into Volk's mutable Engine dispatch globals. Its
+normal/exception cleanup runs after all context lifetimes and before GLFW can
+release its loader.
+
+The existing ordered session log additionally includes
+`HostInstanceInitializeBegin/End` after `WindowInitializeEnd`, then all iterations,
+then `HostInstanceShutdownBegin/End` before `WindowShutdownBegin`. These four
+successful actual boundaries, the matching row slices, final window closure and
+normal watchdog-observed process exit are mandatory. Failure during final host
+destruction cannot produce an accepted completed case. Version3 cannot be silently
+accepted through a default/version2 or historical-protocol request; malformed,
+missing or unrequested host facts fail closed. Its protocol regressions exercise
+synthetic schema evidence only; parent-installed execution supplies native proof.
+
+With `-Mode Renderer -VulkanHostInstance`, the single normal Engine host remains
+unchanged and `rendererEvidenceVersion=3` adds the same host-instance facts. The
+bootstrap starts after `HostInitializeEnd`, before retiring Engine's startup
+renderer. Thus startup context observation is explicitly
+`ExistingStartupContextAfterHostCreation` with `hostLiveBefore=false`; it does not
+pretend that startup initialization occurred under an instance created later.
+All later Primary/Restart contexts use `ContextInitializedUnderHost`, with actual
+host liveness before and after their initialization/retirement.
+
+Root `rendererContexts` contains ordered actual `contexts` observations with
+iteration/role, native instance/device handles, initialized/validation facts,
+`hostLiveBefore/After`, `distinctFromHost`, `shutdownAttempted`, `contextReleased`
+and the checkpoint above. `observedInitializationCount` and
+`observedRetirementCount` count these observed context lifetimes, not instrumented
+low-level Vulkan API calls. Startup occurs once; each iteration requires Primary,
+and the restart lane additionally requires Restart. Every row's
+`hostInstance.contextLifecycles` must exactly join its actual root subset.
+Sequential native handles may repeat, but none may equal the concurrently live
+host handle.
+
+Successful ordering is `HostInitializeEnd`, bootstrap InitializeBegin/End,
+`StartupRendererShutdownBegin/End`, all iteration boundaries, bootstrap
+ShutdownBegin/End, then `HostShutdownBegin/End`. Final explicit renderer Shutdown
+must observe a null context while the window remains live; root
+`finalRendererShutdownAttempted`, `finalContextReleased`, and
+`windowLiveBeforeHostClose` are mandatory. Only then close the independent host,
+then Engine (which owns GLFW/pool teardown). Exception cleanup follows the same
+order without throwing from destructors. A retained Engine RHI still owns its own
+instance; closing the independent bootstrap on failure does not borrow or release
+that Engine instance, and cannot turn incomplete retirement into a passing row.
+Engine must still finish with zero workers, null renderer context and no frame
+failure. Existing scratch pressure, borrower, cancellation and rollback checks
+remain unchanged. The default false Renderer version2 path is preserved.
+
 `Renderer` executes `completed`, `failed`, `cancelled`, `scene-clear`, `shutdown`,
 and `restart` at least 100 times each. It verifies real capture/terminal identities,
 held-worker read ranges and digests, original failure propagation, owner lifetime,

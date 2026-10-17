@@ -1,0 +1,284 @@
+{
+	"schemaVersion": "frame-replay-workloads-v1",
+	"workloadId": "production-frame-stage-replay",
+	"seed": 68050,
+	"scenarios": [
+		{
+			"id": "cold-direct-complete",
+			"inputProfile": "DirectComplete",
+			"warmupFrames": 0,
+			"measuredFrames": 3,
+			"deltaSeconds": 0.016666666666666666,
+			"action": "None",
+			"requiredLanes": [
+				"FullEngine",
+				"ProducerBoundaries"
+			],
+			"requiredWorkers": [
+				1,
+				2,
+				8
+			]
+		},
+		{
+			"id": "warm-direct-complete",
+			"inputProfile": "DirectComplete",
+			"warmupFrames": 8,
+			"measuredFrames": 3,
+			"deltaSeconds": 0.016666666666666666,
+			"action": "None",
+			"requiredLanes": [
+				"FullEngine",
+				"ProducerBoundaries"
+			],
+			"requiredWorkers": [
+				1,
+				2,
+				8
+			]
+		},
+		{
+			"id": "cold-virtual-compact",
+			"inputProfile": "VirtualCompact",
+			"warmupFrames": 0,
+			"measuredFrames": 3,
+			"deltaSeconds": 0.016666666666666666,
+			"action": "None",
+			"requiredLanes": [
+				"FullEngine",
+				"ProducerBoundaries"
+			],
+			"requiredWorkers": [
+				1,
+				2,
+				8
+			]
+		},
+		{
+			"id": "warm-virtual-compact",
+			"inputProfile": "VirtualCompact",
+			"warmupFrames": 8,
+			"measuredFrames": 3,
+			"deltaSeconds": 0.016666666666666666,
+			"action": "None",
+			"requiredLanes": [
+				"FullEngine",
+				"ProducerBoundaries"
+			],
+			"requiredWorkers": [
+				1,
+				2,
+				8
+			]
+		},
+		{
+			"id": "animated-mixed",
+			"inputProfile": "Mixed",
+			"warmupFrames": 8,
+			"measuredFrames": 3,
+			"deltaSeconds": 0.016666666666666666,
+			"action": "None",
+			"requiredLanes": [
+				"FullEngine",
+				"ProducerBoundaries"
+			],
+			"requiredWorkers": [
+				1,
+				2,
+				8
+			]
+		},
+		{
+			"id": "multi-output",
+			"inputProfile": "Mixed",
+			"warmupFrames": 8,
+			"measuredFrames": 3,
+			"deltaSeconds": 0.016666666666666666,
+			"action": "None",
+			"requiredLanes": [
+				"FullEngine",
+				"ProducerBoundaries"
+			],
+			"requiredWorkers": [
+				1,
+				2,
+				8
+			]
+		},
+		{
+			"id": "no-output",
+			"inputProfile": "Mixed",
+			"warmupFrames": 8,
+			"measuredFrames": 3,
+			"deltaSeconds": 0.016666666666666666,
+			"action": "None",
+			"requiredLanes": [
+				"FullEngine",
+				"ProducerBoundaries"
+			],
+			"requiredWorkers": [
+				1,
+				2,
+				8
+			]
+		},
+		{
+			"id": "rejection-rollback",
+			"inputProfile": "Mixed",
+			"warmupFrames": 8,
+			"measuredFrames": 3,
+			"deltaSeconds": 0.016666666666666666,
+			"action": "RejectedAllocation",
+			"requiredLanes": [
+				"FullEngine",
+				"ProducerBoundaries"
+			],
+			"requiredWorkers": [
+				1,
+				2,
+				8
+			]
+		},
+		{
+			"id": "cancel-before-exchange",
+			"inputProfile": "Mixed",
+			"warmupFrames": 8,
+			"measuredFrames": 3,
+			"deltaSeconds": 0.016666666666666666,
+			"action": "BeforeAuthorityExchange",
+			"requiredLanes": [
+				"FullEngine",
+				"ProducerBoundaries"
+			],
+			"requiredWorkers": [
+				1,
+				2,
+				8
+			]
+		},
+		{
+			"id": "cancel-after-exchange",
+			"inputProfile": "Mixed",
+			"warmupFrames": 8,
+			"measuredFrames": 3,
+			"deltaSeconds": 0.016666666666666666,
+			"action": "AfterAuthorityExchange",
+			"requiredLanes": [
+				"FullEngine",
+				"ProducerBoundaries"
+			],
+			"requiredWorkers": [
+				1,
+				2,
+				8
+			]
+		},
+		{
+			"id": "held-reader",
+			"inputProfile": "Mixed",
+			"warmupFrames": 8,
+			"measuredFrames": 3,
+			"deltaSeconds": 0.016666666666666666,
+			"action": "HoldStrongRoots",
+			"requiredLanes": [
+				"FullEngine",
+				"ProducerBoundaries"
+			],
+			"requiredWorkers": [
+				1,
+				2,
+				8
+			]
+		},
+		{
+			"id": "worker-failure",
+			"inputProfile": "Mixed",
+			"warmupFrames": 8,
+			"measuredFrames": 3,
+			"deltaSeconds": 0.016666666666666666,
+			"action": "ThrowAtGeometryRoutePrepare",
+			"requiredLanes": [
+				"FullEngine",
+				"ProducerBoundaries"
+			],
+			"requiredWorkers": [
+				1,
+				2,
+				8
+			]
+		},
+		{
+			"id": "scene-clear",
+			"inputProfile": "Mixed",
+			"warmupFrames": 8,
+			"measuredFrames": 3,
+			"deltaSeconds": 0.016666666666666666,
+			"action": "SceneClear",
+			"requiredLanes": [
+				"FullEngine",
+				"ProducerBoundaries"
+			],
+			"requiredWorkers": [
+				1,
+				2,
+				8
+			]
+		},
+		{
+			"id": "shutdown",
+			"inputProfile": "Mixed",
+			"warmupFrames": 8,
+			"measuredFrames": 3,
+			"deltaSeconds": 0.016666666666666666,
+			"action": "Shutdown",
+			"requiredLanes": [
+				"FullEngine",
+				"ProducerBoundaries"
+			],
+			"requiredWorkers": [
+				1,
+				2,
+				8
+			]
+		},
+		{
+			"id": "restart",
+			"inputProfile": "Mixed",
+			"warmupFrames": 8,
+			"measuredFrames": 3,
+			"deltaSeconds": 0.016666666666666666,
+			"action": "Restart",
+			"requiredLanes": [
+				"FullEngine",
+				"ProducerBoundaries"
+			],
+			"requiredWorkers": [
+				1,
+				2,
+				8
+			]
+		}
+	],
+	"identityPolicy": "Preserve actual authored UUIDs, slot identities, values and vector order; only explicitly bijective session generation mapping is permitted.",
+	"observationPolicy": "The FullEngine lane executes Engine.Update with its maintained protected publication and mutation flush callback. The ProducerBoundaries lane executes unchanged production callback bodies through SystemScheduler; these are separate executions.",
+	"inputPolicy": "Each run requires an externally qualified immutable authored project and cooked asset closure matching inputProfile. The collector checks observed routes and execution modes; a mismatched or absent capability is Incomplete.",
+	"timingPolicy": {
+		"controlReceipt": "out/evidence/runtime-contract-quality/sealed-controls.json",
+		"controlStatus": "Existing timing controls remain sealed; this collector is correctness-only.",
+		"performanceQualification": false,
+		"existingTimingWarmupFrames": 60,
+		"existingTimingMeasuredFrames": 300,
+		"existingTimingPairsPerScale": 3,
+		"existingTimingScales": [
+			"small",
+			"normal",
+			"stress"
+		],
+		"replayWorkerMatrixIsTimingReplacement": false
+	},
+	"missingEvidenceResult": "Incomplete",
+	"bootstrapFrames": 8,
+	"coldTopologyPolicy": "After fixed asset-readiness bootstrap, quiescent RenderSystem.Clear retires topology before cold observation; no adaptive warmup or timing substitution.",
+	"readinessPolicy": "AuthoredNativeDependenciesExactPublicationBeforeBootstrap",
+	"readinessDeadlineMilliseconds": 60000
+}

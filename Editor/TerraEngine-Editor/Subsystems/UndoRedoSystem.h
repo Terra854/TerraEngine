@@ -68,7 +68,7 @@ private:
 	nlohmann::json m_Json;
 };
 
-// class RenameObjectCommand groups related state and operations so callers have one documented contract.
+
 class RenameObjectCommand : public ICommand {
 public:
 	RenameObjectCommand(entt::entity entity, const std::string& oldName, const std::string& newName);
@@ -113,7 +113,7 @@ private:
 	std::optional<TerraEngine::UUID> m_NewParent;
 };
 
-// class AddComponentCommand groups related state and operations so callers have one documented contract.
+
 class AddComponentCommand : public ICommand {
 public:
 	AddComponentCommand(entt::entity entity, const std::string& componentName);
@@ -126,7 +126,7 @@ private:
 	std::string m_ComponentName;
 };
 
-// class RemoveComponentCommand groups related state and operations so callers have one documented contract.
+
 class RemoveComponentCommand : public ICommand {
 public:
 	RemoveComponentCommand(entt::entity entity, const std::string& componentName);
@@ -168,7 +168,7 @@ public:
 	void Update(float deltaTime) override;
 	void DrawUI() override;
 	void Shutdown() override;
-	// GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::string GetName() const override { return "Undo/Redo System"; }
 
 	// Adds a new action to the history. This clears any currently available 

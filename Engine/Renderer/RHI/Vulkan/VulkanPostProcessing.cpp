@@ -5,7 +5,7 @@
 
 #include "VulkanContextSource.h"
 
-// VulkanContext::Impl::PrepareDepthForCompute is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::PrepareDepthForCompute(VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, bool updateGlobalDepthDescriptor) {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	if (cmd == VK_NULL_HANDLE
@@ -74,7 +74,7 @@ bool VulkanContext::Impl::PrepareDepthForCompute(VkCommandBuffer cmd, VkImage so
 	return true;
 }
 
-// VulkanContext::Impl::RestoreDepthForAttachment is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::RestoreDepthForAttachment(VkCommandBuffer cmd, VkImage sourceDepthImage) {
 	if (cmd == VK_NULL_HANDLE || sourceDepthImage == VK_NULL_HANDLE) {
 		return;
@@ -108,8 +108,8 @@ void VulkanContext::Impl::RestoreDepthForAttachment(VkCommandBuffer cmd, VkImage
 		1, &depthBarrier);
 }
 
-// VulkanContext::Impl::StoreAmbientOcclusionDepthHistory is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd, VkImage sourceDepthImage, uint32_t viewIndex, const glm::mat4& viewProjection) {
+
+void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd, VkImage sourceDepthImage, VkExtent2D sourceDepthExtent, uint32_t viewIndex, const glm::mat4& viewProjection) {
 	if (cmd == VK_NULL_HANDLE
 		|| sourceDepthImage == VK_NULL_HANDLE
 		|| viewIndex >= depthHistoryByView.size()
@@ -120,6 +120,14 @@ void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd,
 	}
 
 	ViewDepthHistoryState& viewHistory = depthHistoryByView[viewIndex];
+	// History images are allocated at the swapchain extent. Never copy that
+	// extent from a smaller capture or a resized source, and do not leave stale
+	// history eligible for the next frame after rejecting a mismatched source.
+	if (sourceDepthExtent.width != ambientOcclusionWidth
+		|| sourceDepthExtent.height != ambientOcclusionHeight) {
+		viewHistory.ambientOcclusionDepthValidByFrame[currentFrame] = false;
+		return;
+	}
 	VulkanImage& historyDepth = viewHistory.ambientOcclusionDepthByFrame[currentFrame];
 	if (historyDepth.image == VK_NULL_HANDLE || historyDepth.view == VK_NULL_HANDLE) {
 		viewHistory.ambientOcclusionDepthValidByFrame[currentFrame] = false;
@@ -208,7 +216,7 @@ void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd,
 	viewHistory.ambientOcclusionDepthValidByFrame[currentFrame] = true;
 }
 
-// VulkanContext::Impl::GenerateHiZPyramid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, VkExtent2D sourceDepthExtent, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory) {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	// Viewport dimensions can change between RenderFrame discovering the desired
@@ -545,7 +553,7 @@ bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd
 	return true;
 }
 
-// VulkanContext::Impl::GenerateAmbientOcclusion is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex, VkImageView sampledDepthView) {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	const bool aoEnabled = frameData.renderSettings2.y > 0.001f && frameData.renderSettings2.z > 0.5f;
@@ -701,7 +709,7 @@ bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 	gtaoWrites[1].pImageInfo = &rawOutputInfo;
 	vkUpdateDescriptorSets(device, static_cast<uint32_t>(gtaoWrites.size()), gtaoWrites.data(), 0, nullptr);
 
-	// struct GTAOPushConstants groups related state and operations so callers have one documented contract.
+
 	struct GTAOPushConstants
 	{
 		glm::uvec2 viewportSize = glm::uvec2(1u);
@@ -785,7 +793,7 @@ bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 	blurWrites[3].pImageInfo = &historyInputInfo;
 	vkUpdateDescriptorSets(device, static_cast<uint32_t>(blurWrites.size()), blurWrites.data(), 0, nullptr);
 
-	// struct GTAOBlurPushConstants groups related state and operations so callers have one documented contract.
+
 	struct GTAOBlurPushConstants
 	{
 		glm::uvec2 viewportSize = glm::uvec2(1u);
@@ -866,7 +874,7 @@ bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 	return true;
 }
 
-// VulkanContext::Impl::GenerateVRSImage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView) {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	if (cmd == VK_NULL_HANDLE

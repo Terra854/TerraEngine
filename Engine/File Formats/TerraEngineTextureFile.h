@@ -16,7 +16,7 @@ constexpr uint16_t kVersion = 1;
 constexpr uint32_t kMagic = 0x54455446; // "TETF" little-endian
 constexpr uint32_t TETF_INVALID_CHUNK_INDEX = 0xFFFFFFFFu;
 
-// MakeFourCC is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 inline constexpr uint32_t MakeFourCC(const char(&c)[5]) {
 	return (static_cast<uint32_t>(c[0]) << 0) |
 		(static_cast<uint32_t>(c[1]) << 8) |
@@ -24,7 +24,7 @@ inline constexpr uint32_t MakeFourCC(const char(&c)[5]) {
 		(static_cast<uint32_t>(c[3]) << 24);
 }
 
-// MakeFourCC is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 inline constexpr uint32_t MakeFourCC(const char a, const char b, const char c, const char d) {
 	return (static_cast<uint32_t>(a) << 0) |
 		(static_cast<uint32_t>(b) << 8) |
@@ -32,14 +32,14 @@ inline constexpr uint32_t MakeFourCC(const char a, const char b, const char c, c
 		(static_cast<uint32_t>(d) << 24);
 }
 
-// AlignUp is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 inline constexpr size_t AlignUp(size_t value, size_t alignment) {
 	const size_t mask = alignment - 1;
 	return (value + mask) & ~mask;
 }
 
 #pragma pack(push, 1)
-// struct TETFHeader groups related state and operations so callers have one documented contract.
+
 struct TETFHeader {
 	uint32_t magic;
 	uint16_t version;
@@ -54,7 +54,7 @@ struct TETFHeader {
 	uint32_t reserved2;
 };
 
-// struct TETFChunkEntry groups related state and operations so callers have one documented contract.
+
 struct TETFChunkEntry {
 	uint32_t id;       // FourCC (e.g., 'DESC', 'UAST', 'THMB', 'META')
 	uint32_t reserved; // must be 0
@@ -67,13 +67,13 @@ constexpr uint32_t kChunkTHMB = MakeFourCC('T', 'H', 'M', 'B');
 constexpr uint32_t kChunkMETA = MakeFourCC('M', 'E', 'T', 'A');
 constexpr uint32_t kChunkDESC = MakeFourCC('D', 'E', 'S', 'C');
 
-// struct TETFLevelEntry groups related state and operations so callers have one documented contract.
+
 struct TETFLevelEntry {
 	uint64_t offset;   // byte offset relative to the START of the 'UAST' chunk payload
 	uint64_t size;     // size of the raw level data in bytes
 };
 
-// struct TETFDesc groups related state and operations so callers have one documented contract.
+
 struct TETFDesc {
 	uint16_t width;
 	uint16_t height;
@@ -111,7 +111,7 @@ enum class TextureFileSemantic : uint8_t {
 uint32_t ComputeCrc32(const uint8_t* data, size_t size);
 
 // Fully loaded representation of a .TETF blob. 
-// struct Texture groups related state and operations so callers have one documented contract.
+
 struct Texture {
 	// Runtime-only identity assigned by accepted ResourceManager publication.
 	std::uint64_t publicationGeneration = 0U;

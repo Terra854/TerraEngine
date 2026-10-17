@@ -18,6 +18,14 @@ $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
 $utf8 = [Text.UTF8Encoding]::new($false)
 $hostExecutable = (Get-Process -Id $PID).Path
 $configuration = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'semantic-product-naming.json') -Raw | ConvertFrom-Json
+# Reuse actual immutable bytes. Mutable candidate suffixes are constructed only
+# in these isolated fixture repositories; no maintained metadata is rewritten.
+$sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
+$frozenBatches = [IO.File]::ReadAllText((Join-Path $sourceRoot 'Tests/Tools/CodeQuality/Baseline/comment-batches.json'))
+$stageBytes = [IO.File]::ReadAllBytes((Join-Path $sourceRoot 'Tests/Tools/CodeQuality/Baseline/stage-ownership.json'))
+$stageAllowance = @($configuration.frozenValidationMetadataAllowances | Where-Object { $_.region -ceq 'before-root-candidate' })[0]
+$frozenStagePrefix = [Text.Encoding]::ASCII.GetString($stageBytes, 0, [int]$stageAllowance.prefixBytes)
+$stageFixture = $frozenStagePrefix + "`n`t`"candidate`": {}`n}"
 $cases = @(
 	@{name='all-declared-protocol-literals'; path='Tests/Fixtures/RendererEfficiency/workloads.json'; text='["SC-001","SC-002","SC-003","SC-004","SC-005","SC-006","SC-007","SC-008","SC-009"]'; pass=$true},
 	@{name='unknown-criterion'; path='Tests/Fixtures/RendererEfficiency/workloads.json'; text='"SC-010"'; pass=$false},
@@ -31,8 +39,20 @@ $cases = @(
 	@{name='decoded-description'; path='Tests/Fixtures/RendererEfficiency/workloads.json'; text='%22Failure%20for%20SC-001%22'; pass=$false},
 	@{name='requirement-not-protocol'; path='Tests/Fixtures/RendererEfficiency/workloads.json'; text='"FR-001"'; pass=$false},
 	@{name='case-not-protocol'; path='Tests/Fixtures/RendererEfficiency/workloads.json'; text='"sc-001"'; pass=$false},
-	@{name='user-agent-instructions'; path='AGENTS.md'; text='Spec Kit /speckit.implement'; pass=$true}
+	@{name='user-agent-instructions'; path='AGENTS.md'; text='Spec Kit /speckit.implement'; pass=$true},
+	@{name='frozen-batch-task-metadata'; path='Tests/Tools/CodeQuality/Baseline/comment-batches.json'; text=$frozenBatches; pass=$true},
+	@{name='frozen-stage-prefix-metadata'; path='Tests/Tools/CodeQuality/Baseline/stage-ownership.json'; text=$stageFixture; pass=$true},
+	@{name='corrupt-frozen-note'; path='Tests/Tools/CodeQuality/Baseline/comment-batches.json'; text=$frozenBatches.Replace('invent cleanup.', 'invent cleanups.'); pass=$false},
+	@{name='frozen-offset-drift'; path='Tests/Tools/CodeQuality/Baseline/comment-batches.json'; text=(' ' + $frozenBatches); pass=$false},
+	@{name='extra-task-after-frozen-file'; path='Tests/Tools/CodeQuality/Baseline/comment-batches.json'; text=($frozenBatches + '"T099"'); pass=$false},
+	@{name='candidate-suffix-user-story'; path='Tests/Tools/CodeQuality/Baseline/stage-ownership.json'; text=($frozenStagePrefix + "`n`t`"candidate`": {`"note`":`"US1`"}`n}"); pass=$false},
+	@{name='changed-candidate-boundary'; path='Tests/Tools/CodeQuality/Baseline/stage-ownership.json'; text=$stageFixture.Replace('"candidate":', '"changedCandidate":'); pass=$false},
+	@{name='frozen-task-filename'; path='Tests/Tools/CodeQuality/Baseline/T087.json'; text='{}'; pass=$false},
+	@{name='frozen-task-encoded-content'; path='Tests/Tools/CodeQuality/Baseline/comment-batches.json'; text='%22T087%22'; pass=$false},
+	@{name='frozen-task-production-source'; path='Engine/ordinary.cpp'; text='"T087"'; pass=$false}
 )
+# Retain existing wire-literal checks as well as every frozen-region boundary case.
+if($cases.Count -lt 23) { throw 'Naming contract regression floor was reduced.' }
 $results = [Collections.Generic.List[object]]::new()
 foreach($case in $cases)
 {

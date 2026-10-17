@@ -193,7 +193,7 @@ bool RunProcessCapture(const TerraEngine::Utilities::OwnedProcessRequest& reques
 			CloseOwned(processInfo.hThread); CloseOwned(processInfo.hProcess);
 			CloseOwned(writeHandle); CloseOwned(readHandle);
 		}};
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!CreatePipe(&readHandle, &writeHandle, &securityAttributes, 0))
 		{
 			return false;
@@ -256,7 +256,7 @@ bool RunProcessCapture(const TerraEngine::Utilities::OwnedProcessRequest& reques
 		const DWORD launchError = started ? ERROR_SUCCESS : GetLastError();
 
 		CloseOwned(writeHandle);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!started)
 		{
 			output = DescribeWindowsProcessError("CreateProcessW", launchError);

@@ -23,7 +23,7 @@ struct ProfilerLiteralLabel
 	}
 };
 
-// class ProfilerScope groups related state and operations so callers have one documented contract.
+
 class ProfilerScope
 {
 public:
@@ -37,7 +37,7 @@ public:
 
 	~ProfilerScope()
 	{
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (active)
 		{
 			Profiler::Instance().EndSample();

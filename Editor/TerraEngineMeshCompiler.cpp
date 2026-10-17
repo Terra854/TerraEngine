@@ -17,7 +17,7 @@
 
 namespace
 {
-	// struct CommandLine groups related state and operations so callers have one documented contract.
+
 	struct CommandLine
 	{
 		std::filesystem::path input;
@@ -30,7 +30,7 @@ namespace
 		std::optional<VirtualGeometryAdaptiveCompileSettings> adaptiveSettings;
 	};
 
-	// ToBoolText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::string ToBoolText(bool value)
 	{
 		return value ? "true" : "false";
@@ -53,13 +53,13 @@ namespace
 		}
 	}
 
-	// BuildMetadataPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::filesystem::path BuildMetadataPath(const std::filesystem::path& artifactPath)
 	{
 		return std::filesystem::path(artifactPath.string() + ".meshreport");
 	}
 
-	// TryParseUInt64 is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool TryParseUInt64(std::string_view text, std::uint64_t& outValue)
 	{
 		if (text.empty())
@@ -68,7 +68,7 @@ namespace
 		}
 
 		std::uint64_t value = 0;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (char c : text)
 		{
 			if (c < '0' || c > '9')
@@ -77,7 +77,7 @@ namespace
 			}
 
 			const std::uint64_t digit = static_cast<std::uint64_t>(c - '0');
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (value > (std::numeric_limits<std::uint64_t>::max() - digit) / 10u)
 			{
 				return false;
@@ -159,7 +159,7 @@ namespace
 		return !outRatios.empty();
 	}
 
-	// PrintUsage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void PrintUsage()
 	{
 		std::cout << "Usage: TerraEngineMeshCompiler -i <input.mesh> -o <output.temf> [options]\n";
@@ -181,19 +181,19 @@ namespace
 		std::cout << "  -h, --help                         Show this help message.\n";
 	}
 
-	// ParseCommandLine is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool ParseCommandLine(int argc, char** argv, CommandLine& args)
 	{
 		for (int i = 1; i < argc; ++i)
 		{
 			const std::string_view flag{ argv[i] };
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (flag == "-h" || flag == "--help")
 			{
 				args.showHelp = true;
 				return true;
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 			else if (flag == "-i" || flag == "--input")
 			{
 				if (i + 1 >= argc)
@@ -204,7 +204,7 @@ namespace
 
 				args.input = argv[++i];
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 			else if (flag == "-o" || flag == "--output")
 			{
 				if (i + 1 >= argc)
@@ -215,7 +215,7 @@ namespace
 
 				args.output = argv[++i];
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 			else if (flag == "-b" || flag == "--baseline")
 			{
 				if (i + 1 >= argc)
@@ -226,22 +226,22 @@ namespace
 
 				args.baseline = argv[++i];
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 			else if (flag == "--include-bounds" || flag == "--includeMeshletBounds")
 			{
 				args.includeMeshletBounds = true;
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 			else if (flag == "--omit-bounds" || flag == "--excludeMeshletBounds")
 			{
 				args.includeMeshletBounds = false;
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 			else if (flag == "--smoothing-angle" && i + 1 < argc)
 			{
 				args.smoothingAngle = std::stof(argv[++i]);
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 			else if (flag == "--weld-threshold" && i + 1 < argc)
 			{
 				args.weldThreshold = std::stof(argv[++i]);
@@ -314,13 +314,13 @@ namespace
 			}
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (args.showHelp)
 		{
 			return true;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (args.input.empty() || args.output.empty())
 		{
 			std::cerr << "Input/output arguments are required.\n";
@@ -330,12 +330,12 @@ namespace
 		return true;
 	}
 
-	// EscapeJson is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::string EscapeJson(const std::string& value)
 	{
 		std::string escaped;
 		escaped.reserve(value.size());
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const char c : value)
 		{
 			switch (c)
@@ -515,7 +515,7 @@ namespace
 		json << "]";
 	}
 
-	// BuildReportJson is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::string BuildReportJson(const MeshCompileReport& report)
 	{
 		std::ostringstream ratio;
@@ -566,12 +566,12 @@ namespace
 		return json.str();
 	}
 
-	// WriteMetadataFile is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void WriteMetadataFile(const std::filesystem::path& outputArtifactPath, const MeshCompileReport& report)
 	{
 		const std::filesystem::path metadataPath = BuildMetadataPath(outputArtifactPath);
 		std::ofstream out(metadataPath, std::ios::trunc);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!out)
 		{
 			std::cerr << "Warning: failed to write baseline metadata file '" << metadataPath << "'.\n";
@@ -594,23 +594,23 @@ namespace
 		out << "virtualGeometryWarningCount=" << report.virtualGeometry.warnings.size() << "\n";
 	}
 
-	// LoadMetadataFile is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool LoadMetadataFile(const std::filesystem::path& metadataPath, std::unordered_map<std::string, std::string>& outValues)
 	{
 		outValues.clear();
 		std::ifstream in(metadataPath);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!in)
 		{
 			return false;
 		}
 
 		std::string line;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		while (std::getline(in, line))
 		{
 			const std::size_t equalsIndex = line.find('=');
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (equalsIndex == std::string::npos || equalsIndex == 0 || equalsIndex + 1 >= line.size())
 			{
 				continue;
@@ -624,19 +624,19 @@ namespace
 		return true;
 	}
 
-	// ApplyBaselinePolicy is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void ApplyBaselinePolicy(const CommandLine& args, MeshCompileReport& report)
 	{
 		report.baselineBytes = 0;
 		report.baselinePass = true;
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (args.baseline.empty())
 		{
 			return;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!std::filesystem::exists(args.baseline))
 		{
 			std::cerr << "Baseline file not found: " << args.baseline << "\n";
@@ -648,11 +648,11 @@ namespace
 		bool shouldEnforceRegressionCheck = true;
 		const std::filesystem::path baselineMetadataPath = BuildMetadataPath(args.baseline);
 		std::unordered_map<std::string, std::string> metadataValues;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (LoadMetadataFile(baselineMetadataPath, metadataValues))
 		{
 			const auto sourceHashIt = metadataValues.find("sourceHashHex");
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (sourceHashIt != metadataValues.end()
 				&& !report.sourceHashHex.empty()
 				&& sourceHashIt->second != report.sourceHashHex)
@@ -662,11 +662,11 @@ namespace
 			}
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (shouldEnforceRegressionCheck)
 		{
 			report.baselinePass = report.outputBytes <= report.baselineBytes;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!report.baselinePass
 				&& report.status != "compile_fail"
 				&& report.status != "budget_fail")
@@ -677,7 +677,7 @@ namespace
 		}
 	}
 
-	// EmitCompileReport is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void EmitCompileReport(const MeshCompileReport& report)
 	{
 		std::cout << "CompileReport: " << BuildReportJson(report) << "\n";
@@ -705,18 +705,18 @@ namespace
 	}
 }
 
-// main is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 int main(int argc, char** argv)
 {
 	CommandLine args{};
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!ParseCommandLine(argc, argv, args))
 	{
 		PrintUsage();
 		return 1;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (args.showHelp)
 	{
 		PrintUsage();
@@ -733,14 +733,14 @@ int main(int argc, char** argv)
 	};
 	const bool compileResult = CompileMesh(args.input, args.output, args.includeMeshletBounds, &report, args.smoothingAngle, args.weldThreshold, adaptiveSettings, progressCallback);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (compileResult || std::filesystem::exists(args.output))
 	{
 		ApplyBaselinePolicy(args, report);
 		WriteMetadataFile(args.output, report);
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!report.runtimeValidationPass
 		&& report.status != "compile_fail"
 		&& report.status != "budget_fail")
@@ -755,7 +755,7 @@ int main(int argc, char** argv)
 		&& report.baselinePass
 		&& report.runtimeValidationPass;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!accepted)
 	{
 		std::cerr << "Compilation failed acceptance gates for '" << args.input << "'.\n";

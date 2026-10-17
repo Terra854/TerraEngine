@@ -21,7 +21,7 @@ struct RecentProjectEntry {
 	NLOHMANN_DEFINE_TYPE_INTRUSIVE(RecentProjectEntry, name, path, lastOpened)
 };
 
-// struct EditorPreferences groups related state and operations so callers have one documented contract.
+
 struct EditorPreferences {
 	std::vector<RecentProjectEntry> recentProjects;
 	std::string theme = "Dark";

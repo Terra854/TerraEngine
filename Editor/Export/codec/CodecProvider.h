@@ -34,7 +34,7 @@ public:
 
 private:
 	friend class CodecProvider;
-	// struct Impl groups related state and operations so callers have one documented contract.
+
 	struct Impl;
 	std::shared_ptr<const Impl> m_impl;
 };
@@ -55,7 +55,7 @@ public:
 
 private:
 	friend class CodecProvider;
-	// struct Impl groups related state and operations so callers have one documented contract.
+
 	struct Impl;
 	std::shared_ptr<const Impl> m_impl;
 };
@@ -102,7 +102,7 @@ public:
 		const PreparedDecompressionDictionary* preparedDictionary = nullptr) const;
 
 private:
-	// struct Impl groups related state and operations so callers have one documented contract.
+
 	struct Impl;
 	std::unique_ptr<Impl> m_impl;
 };

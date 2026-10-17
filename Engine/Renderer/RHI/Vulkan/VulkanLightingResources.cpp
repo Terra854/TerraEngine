@@ -5,7 +5,7 @@
 
 #include "VulkanResourceSource.h"
 
-// VulkanContext::Impl::EnsureShadowRenderResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceRequest& request) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	ShadowResourceRequest targetRequest{};
@@ -53,60 +53,60 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 			framebuffer = VK_NULL_HANDLE;
 		}
 	};
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VkFramebuffer& framebuffer : directionalShadowFramebuffers) {
 		DestroyFramebuffer(framebuffer);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VkFramebuffer& framebuffer : spotShadowFramebuffers) {
 		DestroyFramebuffer(framebuffer);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VkFramebuffer& framebuffer : areaShadowFramebuffers) {
 		DestroyFramebuffer(framebuffer);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::array<VkFramebuffer, 6>& faceFramebuffers : pointShadowFaceFramebuffersBySlot) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (VkFramebuffer& framebuffer : faceFramebuffers) {
 			DestroyFramebuffer(framebuffer);
 		}
 	}
 
 	auto DestroyImageView = [&](VkImageView& imageView) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (imageView != VK_NULL_HANDLE) {
 			vkDestroyImageView(device, imageView, nullptr);
 			imageView = VK_NULL_HANDLE;
 		}
 	};
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::array<VkImageView, 6>& faceViews : pointShadowDepthFaceViewsBySlot) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (VkImageView& faceView : faceViews) {
 			DestroyImageView(faceView);
 		}
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::array<VkImageView, 6>& faceViews : pointShadowColorFaceViewsBySlot) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (VkImageView& faceView : faceViews) {
 			DestroyImageView(faceView);
 		}
 	}
 
 	auto DestroyImage = [&](VulkanImage& image) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (image.sampler != VK_NULL_HANDLE) {
 			vkDestroySampler(device, image.sampler, nullptr);
 			image.sampler = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (image.view != VK_NULL_HANDLE) {
 			vkDestroyImageView(device, image.view, nullptr);
 			image.view = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (image.image != VK_NULL_HANDLE && image.allocation != VK_NULL_HANDLE) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 		}
@@ -114,35 +114,35 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		image.allocation = VK_NULL_HANDLE;
 	};
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : directionalShadowDepths) {
 		DestroyImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : directionalShadowColors) {
 		DestroyImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : spotShadowDepths) {
 		DestroyImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : spotShadowColors) {
 		DestroyImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : areaShadowDepths) {
 		DestroyImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : areaShadowColors) {
 		DestroyImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : pointShadowCubeDepths) {
 		DestroyImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : pointShadowCubeColors) {
 		DestroyImage(image);
 	}
@@ -151,7 +151,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	DestroyImage(ltcAmplitudeTexture);
 	DestroyImage(ltcInverseTexture);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (targetRequest.TotalCount() == 0u) {
 		return true;
 	}
@@ -193,7 +193,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 
 		VmaAllocationCreateInfo allocInfo{};
 		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
 			image.image = VK_NULL_HANDLE;
 			image.allocation = VK_NULL_HANDLE;
@@ -219,7 +219,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		viewInfo.subresourceRange.levelCount = 1;
 		viewInfo.subresourceRange.baseArrayLayer = 0;
 		viewInfo.subresourceRange.layerCount = layers;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkCreateImageView(device, &viewInfo, nullptr, &image.view) != VK_SUCCESS) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 			image.image = VK_NULL_HANDLE;
@@ -246,7 +246,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 
 		VmaAllocationCreateInfo allocInfo{};
 		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
 			image.image = VK_NULL_HANDLE;
 			image.allocation = VK_NULL_HANDLE;
@@ -284,7 +284,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 
 		VmaAllocationCreateInfo allocInfo{};
 		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
 			image.image = VK_NULL_HANDLE;
 			image.allocation = VK_NULL_HANDLE;
@@ -310,7 +310,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		viewInfo.subresourceRange.levelCount = 1;
 		viewInfo.subresourceRange.baseArrayLayer = 0;
 		viewInfo.subresourceRange.layerCount = 6;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkCreateImageView(device, &viewInfo, nullptr, &image.view) != VK_SUCCESS) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 			image.image = VK_NULL_HANDLE;
@@ -320,7 +320,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	};
 
 	auto CreateShadowSampler = [&](VulkanImage& image, bool useCompareSampler) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (image.image == VK_NULL_HANDLE) {
 			return;
 		}
@@ -344,34 +344,34 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		vkCreateSampler(device, &samplerInfo, nullptr, &image.sampler);
 	};
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.directionalCount; ++slotIndex) {
 		const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
 		CreateColorAttachment(regionSize, regionSize, 1u, 0u, directionalShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
 		CreateDepthAttachment2D(regionSize, regionSize, directionalShadowDepths[slotIndex]);
 		CreateShadowSampler(directionalShadowDepths[slotIndex], false);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.spotCount; ++slotIndex) {
 		const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
 		CreateColorAttachment(regionSize, regionSize, 1u, 0u, spotShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
 		CreateDepthAttachment2D(regionSize, regionSize, spotShadowDepths[slotIndex]);
 		CreateShadowSampler(spotShadowDepths[slotIndex], false);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.areaCount; ++slotIndex) {
 		const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
 		CreateColorAttachment(regionSize, regionSize, 1u, 0u, areaShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
 		CreateDepthAttachment2D(regionSize, regionSize, areaShadowDepths[slotIndex]);
 		CreateShadowSampler(areaShadowDepths[slotIndex], false);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.pointCount; ++slotIndex) {
 		CreateColorAttachment(pointShadowSize, pointShadowSize, 6u, VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT, pointShadowCubeColors[slotIndex], VK_IMAGE_VIEW_TYPE_CUBE);
 		CreateDepthAttachmentCube(pointShadowSize, pointShadowCubeDepths[slotIndex]);
 		CreateShadowSampler(pointShadowCubeDepths[slotIndex], false);
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
 			VkImageViewCreateInfo depthFaceViewInfo{};
 			depthFaceViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -405,7 +405,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		imageInfo.imageView = image.view;
 		imageInfo.sampler = image.sampler;
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 			VkWriteDescriptorSet descriptorWrite{};
 			descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -443,11 +443,11 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.directionalCount; ++slotIndex) {
 		BindDepthTexture(directionalShadowTextureIndices[slotIndex], directionalShadowDepths[slotIndex]);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.spotCount; ++slotIndex) {
 		BindDepthTexture(spotShadowTextureIndices[slotIndex], spotShadowDepths[slotIndex]);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.areaCount; ++slotIndex) {
 		BindDepthTexture(areaShadowTextureIndices[slotIndex], areaShadowDepths[slotIndex]);
 	}
@@ -467,7 +467,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		pointShadowCubeSamplerInfo.imageView = VK_NULL_HANDLE;
 		pointShadowCubeSamplerInfo.sampler = pointShadowCubeDepths[0].sampler;
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 			std::array<VkWriteDescriptorSet, 2> pointShadowCubeWrites{};
 			pointShadowCubeWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -499,7 +499,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	};
 	std::uint32_t regionIndex = 0u;
 	auto registerRegion = [&](ShadowResourceKind kind, std::uint32_t typedSlot) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (regionIndex >= shadowStorageRegions.size()) {
 			return;
 		}
@@ -514,25 +514,25 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		region.height = reduced2DRegion ? Shadow2DRegionSizeForSlot(typedSlot) : SHADOW_MAP_RESOLUTION;
 		region.qualityTier = reduced2DRegion ? ShadowQualityTier::ReducedResolution : ShadowQualityTier::FullResolution;
 		region.estimatedBytes = estimateRegionBytes(kind);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (reduced2DRegion) {
 			region.estimatedBytes /= 4u;
 		}
 		region.live = true;
 	};
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::uint32_t slotIndex = 0u; slotIndex < targetRequest.directionalCount; ++slotIndex) {
 		registerRegion(ShadowResourceKind::DirectionalCascade, slotIndex);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::uint32_t slotIndex = 0u; slotIndex < targetRequest.spotCount; ++slotIndex) {
 		registerRegion(ShadowResourceKind::SpotAtlas, slotIndex);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::uint32_t slotIndex = 0u; slotIndex < targetRequest.areaCount; ++slotIndex) {
 		registerRegion(ShadowResourceKind::AreaAtlas, slotIndex);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (std::uint32_t slotIndex = 0u; slotIndex < targetRequest.pointCount; ++slotIndex) {
 		registerRegion(ShadowResourceKind::PointCube, slotIndex);
 	}
@@ -569,7 +569,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 
 		VmaAllocationCreateInfo allocInfo{};
 		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
 			image.image = VK_NULL_HANDLE;
 			image.allocation = VK_NULL_HANDLE;
@@ -609,9 +609,9 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	const uint32_t lutSize = LTC_LUT_RESOLUTION;
 	std::vector<glm::vec4> amplitudeLut(lutSize * lutSize, glm::vec4(1.0f));
 	std::vector<glm::vec4> inverseLut(lutSize * lutSize, glm::vec4(0.0f));
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (uint32_t y = 0u; y < lutSize; ++y) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (uint32_t x = 0u; x < lutSize; ++x) {
 			const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(lutSize);
 			const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(lutSize);
@@ -626,11 +626,11 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		|| !CreateLtcLookupTexture(inverseLut, ltcInverseTexture)) return false;
 	if (!retainSlot(ltcAmplitudeTextureIndex) || !retainSlot(ltcInverseTextureIndex)) return false;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ltcAmplitudeTexture.image != VK_NULL_HANDLE) {
 		WriteGlobalTextureAlias(ltcAmplitudeTextureIndex, ltcAmplitudeTexture.view, ltcAmplitudeTexture.sampler);
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (ltcInverseTexture.image != VK_NULL_HANDLE) {
 		WriteGlobalTextureAlias(ltcInverseTextureIndex, ltcInverseTexture.view, ltcInverseTexture.sampler);
 	}
@@ -771,7 +771,7 @@ bool VulkanContext::Impl::UploadCanonicalLighting(
 	return finish(committed, committed ? "Lighting ranges written and successfully published." : "Lighting flush failed; full retry remains required.");
 }
 
-// VulkanContext::Impl::ResetMeshletCounters is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::ResetMeshletCounters(uint32_t statsSlotIndex) {
 	if (globalMeshletCountersSSBOs.empty() || globalMeshletCountersSSBOs[currentFrame].buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
 		return;
@@ -779,7 +779,7 @@ void VulkanContext::Impl::ResetMeshletCounters(uint32_t statsSlotIndex) {
 
 	MeshletCullingCountersGPU counters{};
 	void* mapped = nullptr;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vmaMapMemory(allocator, globalMeshletCountersSSBOs[currentFrame].allocation, &mapped) != VK_SUCCESS) {
 		return;
 	}
@@ -789,14 +789,14 @@ void VulkanContext::Impl::ResetMeshletCounters(uint32_t statsSlotIndex) {
 	vmaUnmapMemory(allocator, globalMeshletCountersSSBOs[currentFrame].allocation);
 }
 
-// VulkanContext::Impl::UpdateFrameCullingData is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::UpdateFrameCullingData(uint32_t statsSlotIndex, const FrameCullingDataGPU& frameData) {
 	if (globalFrameCullingSSBOs.empty() || globalFrameCullingSSBOs[currentFrame].buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
 		return;
 	}
 
 	void* mapped = nullptr;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vmaMapMemory(allocator, globalFrameCullingSSBOs[currentFrame].allocation, &mapped) != VK_SUCCESS) {
 		return;
 	}
@@ -806,7 +806,7 @@ void VulkanContext::Impl::UpdateFrameCullingData(uint32_t statsSlotIndex, const 
 	vmaUnmapMemory(allocator, globalFrameCullingSSBOs[currentFrame].allocation);
 }
 
-// VulkanContext::Impl::ReadMeshletCounters is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 MeshletCullingCountersGPU VulkanContext::Impl::ReadMeshletCounters(uint32_t statsSlotIndex) const {
 	MeshletCullingCountersGPU counters{};
 	if (globalMeshletCountersSSBOs.empty() || globalMeshletCountersSSBOs[currentFrame].buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
@@ -814,7 +814,7 @@ MeshletCullingCountersGPU VulkanContext::Impl::ReadMeshletCounters(uint32_t stat
 	}
 
 	void* mapped = nullptr;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vmaMapMemory(allocator, globalMeshletCountersSSBOs[currentFrame].allocation, &mapped) != VK_SUCCESS) {
 		return counters;
 	}
@@ -825,7 +825,7 @@ MeshletCullingCountersGPU VulkanContext::Impl::ReadMeshletCounters(uint32_t stat
 	return counters;
 }
 
-// VulkanContext::Impl::GetStatsSlotIndex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 uint32_t VulkanContext::Impl::GetStatsSlotIndex(uint32_t frameIndex, VulkanContext::ViewType view) const {
 	const uint32_t clampedFrameIndex = std::min(frameIndex, kMaxStatsFrameSlots - 1u);
 	const uint32_t viewIndex = (view == VulkanContext::ViewType::Game) ? 0u : 1u;

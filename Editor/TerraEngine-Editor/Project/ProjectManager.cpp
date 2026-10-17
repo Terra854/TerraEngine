@@ -336,7 +336,7 @@ namespace
 		return recentProjects.size() != originalSize;
 	}
 
-	// EnsureProjectManifest is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	nlohmann::json BuildDefaultStreamingPolicyManifest()
 	{
 		const TerraEngine::Resource::StreamingPolicy policy = TerraEngine::Resource::MakeDefaultStreamingPolicy();
@@ -364,7 +364,7 @@ namespace
 	bool EnsureProjectManifest(const fs::path& projectRoot, std::string_view requestedName, std::string* outError = nullptr)
 	{
 		const fs::path manifestPath = projectRoot / "game.json";
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (fs::exists(manifestPath))
 		{
 			return true;
@@ -376,12 +376,12 @@ namespace
 		manifest["streamingPolicy"] = BuildDefaultStreamingPolicyManifest();
 
 		std::ofstream manifestFile(manifestPath);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!manifestFile)
 		{
 			const std::string message = "Failed to create project manifest: " + manifestPath.string();
 			TERRAENGINE_LOG(LogLevel::Error, message);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (outError != nullptr)
 			{
 				*outError = message;
@@ -390,12 +390,12 @@ namespace
 		}
 
 		manifestFile << manifest.dump(4);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!manifestFile.good())
 		{
 			const std::string message = "Failed to write project manifest: " + manifestPath.string();
 			TERRAENGINE_LOG(LogLevel::Error, message);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (outError != nullptr)
 			{
 				*outError = message;
@@ -425,12 +425,12 @@ ProjectManager::~ProjectManager() {
 	SaveEditorPreferences();
 }
 
-// ProjectManager::CreateProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ProjectManager::CreateProject(const fs::path& location, const std::string& name, ProjectTemplate tmpl, std::string* outError) {
 	if (fs::exists(location) && !fs::is_empty(location)) {
 		std::string msg = "Project location must be empty or new: " + location.string();
 		TERRAENGINE_LOG(LogLevel::Error, msg);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (outError) *outError = msg;
 		return false;
 	}
@@ -533,7 +533,7 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
 		currentSettings = settings;
 		projectRoot = location;
 		SaveProjectSettings();
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!EnsureProjectManifest(location, name, outError)) {
 			return false;
 		}
@@ -543,13 +543,13 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
 	} catch (const std::exception& e) {
 		std::string msg = std::string("Failed to create project: ") + e.what();
 		TERRAENGINE_LOG(LogLevel::Error, msg);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (outError) *outError = msg;
 		return false;
 	}
 }
 
-// ProjectManager::LoadProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ProjectManager::LoadProject(const fs::path& location, std::string* outError) {
 	// The user must select the project folder itself, not the settings file inside it.
 	fs::path projectDir = location;
@@ -560,7 +560,7 @@ bool ProjectManager::LoadProject(const fs::path& location, std::string* outError
 	if (!fs::exists(settingsPath)) {
 		std::string msg = "Not a valid project folder (missing ProjectSettings/ProjectSettings.terra): " + fs::absolute(settingsPath).string();
 		TERRAENGINE_LOG(LogLevel::Error, msg);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (outError) *outError = msg;
 		return false;
 	}
@@ -604,7 +604,7 @@ bool ProjectManager::LoadProject(const fs::path& location, std::string* outError
 		try {
 			fs::path obsoleteDir = projectDir / "Project" / "Internal" / "Export";
 			if (fs::exists(obsoleteDir)) {
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 				for (const auto& entry : fs::recursive_directory_iterator(obsoleteDir)) {
 					fs::permissions(entry, fs::perms::all);
 				}
@@ -619,7 +619,7 @@ bool ProjectManager::LoadProject(const fs::path& location, std::string* outError
 	} catch (const std::exception& e) {
 		std::string msg = std::string("Failed to load project settings: ") + e.what();
 		TERRAENGINE_LOG(LogLevel::Error, msg);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (outError) *outError = msg;
 		return false;
 	}
@@ -855,7 +855,7 @@ void ProjectManager::MarkEditorMetadataReady()
 	}
 }
 
-// ProjectManager::CloseProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ProjectManager::CloseProject() {
 	if (isProjectLoaded) {
 		// Invalidate worker-prepared scene packets before any project paths or
@@ -879,12 +879,12 @@ void ProjectManager::CloseProject() {
 	}
 }
 
-// ProjectManager::HasActiveProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ProjectManager::HasActiveProject() const {
 	return isProjectLoaded;
 }
 
-// ProjectManager::GetSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 const ProjectSettings& ProjectManager::GetSettings() const {
 	static ProjectSettings empty;
 	return currentSettings.has_value() ? *currentSettings : empty;
@@ -903,17 +903,17 @@ bool ProjectManager::SetProjectDisplayName(const std::string& displayName) {
 	return true;
 }
 
-// ProjectManager::GetProjectRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::filesystem::path ProjectManager::GetProjectRoot() const {
 	return projectRoot;
 }
 
-// ProjectManager::GetRecentProjects is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 const std::vector<RecentProjectEntry>& ProjectManager::GetRecentProjects() const {
 	return editorPrefs.recentProjects;
 }
 
-// ProjectManager::GetEditorPreferences is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 const EditorPreferences& ProjectManager::GetEditorPreferences() const {
 	return editorPrefs;
 }
@@ -971,23 +971,23 @@ const RendererRecoveryProjectActionState& ProjectManager::GetRendererRecoveryAct
 	return rendererRecoveryActionState;
 }
 
-// ProjectManager::GetExternalScriptEditorCommand is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::string ProjectManager::GetExternalScriptEditorCommand() const {
 	return editorPrefs.externalScriptEditorCommand;
 }
 
-// ProjectManager::ShouldAutoBuildScripts is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ProjectManager::ShouldAutoBuildScripts() const {
 	return editorPrefs.autoBuildScripts;
 }
 
-// ProjectManager::SetExternalScriptEditorCommand is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ProjectManager::SetExternalScriptEditorCommand(const std::string& commandTemplate) {
 	editorPrefs.externalScriptEditorCommand = commandTemplate;
 	SaveEditorPreferences();
 }
 
-// ProjectManager::SetAutoBuildScripts is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ProjectManager::SetAutoBuildScripts(bool enabled) {
 	editorPrefs.autoBuildScripts = enabled;
 	SaveEditorPreferences();
@@ -1047,12 +1047,12 @@ bool ProjectManager::SetSceneViewOverlayPreference(const TerraEngine::Editor::Sc
 	return true;
 }
 
-// ProjectManager::SaveProjectSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ProjectManager::SaveProjectSettings() {
 	if (!currentSettings.has_value() || projectRoot.empty()) return;
 
 	fs::path settingsPath = projectRoot / "ProjectSettings" / "ProjectSettings.terra";
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!fs::exists(settingsPath.parent_path())) {
 		fs::create_directories(settingsPath.parent_path());
 	}
@@ -1062,7 +1062,7 @@ void ProjectManager::SaveProjectSettings() {
 	file << j.dump(4);
 }
 
-// ProjectManager::SaveEditorPreferences is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool ProjectManager::SaveEditorPreferences(std::string* outError) {
 	const fs::path& preferencesPath = editorPreferencesStorage.path;
 	if (preferencesPath.empty()) {
@@ -1177,7 +1177,7 @@ bool ProjectManager::SaveProjectDataForRendererRecovery(std::string* outError) {
 	}
 }
 
-// ProjectManager::LoadEditorPreferences is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ProjectManager::LoadEditorPreferences() {
 	const fs::path& preferencesPath = editorPreferencesStorage.path;
 	if (!preferencesPath.empty() && fs::exists(preferencesPath)) {
@@ -1197,7 +1197,7 @@ void ProjectManager::LoadEditorPreferences() {
 	}
 }
 
-// ProjectManager::AddToRecentProjects is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void ProjectManager::AddToRecentProjects(const fs::path& path, const std::string& name) {
 	auto& list = editorPrefs.recentProjects;
 	std::string pathStr = fs::absolute(path).string();
@@ -1222,7 +1222,7 @@ void ProjectManager::AddToRecentProjects(const fs::path& path, const std::string
 	list.insert(list.begin(), entry);
 
 	// Trim
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (list.size() > 10) {
 		list.resize(10);
 	}

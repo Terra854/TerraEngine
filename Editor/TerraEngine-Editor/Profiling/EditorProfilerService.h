@@ -159,7 +159,7 @@ struct EditorProfilerPresentationSnapshot
 	std::optional<TerraEngine::Terrain::TerrainDiagnosticSnapshot> terrainDiagnostics;
 };
 
-// class EditorProfilerService groups related state and operations so callers have one documented contract.
+
 class EditorProfilerService : public std::enable_shared_from_this<EditorProfilerService>
 {
 public:

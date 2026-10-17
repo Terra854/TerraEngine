@@ -4,6 +4,7 @@
 #include "RendererThreadingTestFixtures.h"
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <numeric>
 #include <type_traits>
@@ -192,6 +193,111 @@ namespace TerraEngine::Tests
 			context.Expect(receipt.IsSuccess(), "A complete candidate must publish atomically.");
 			context.Expect(store.Load() == candidate,
 				"Readers must acquire the exact sealed root selected at the protected boundary.");
+		});
+
+		registry.Add("Renderer.FramePublication.StageContractRetainsExactRootsAcrossExchangeAndSessionReset", [](TestContext& context)
+		{
+			using namespace TerraEngine::Renderer;
+			RenderFramePublicationStore store;
+			auto first = std::make_shared<RenderFramePublication>(*BuildPublication(store.SessionGeneration(), 0u));
+			auto payload = std::make_shared<RenderViewSelectionPayload>();
+			auto& selection = first->views.front();
+			payload->visibleOrdinals.swap(selection.visibleOrdinals);
+			payload->selectedLods.swap(selection.selectedLods);
+			payload->routeSelectors.swap(selection.routeSelectors);
+			payload->packetTemplateIdentities.swap(selection.packetTemplateIdentities);
+			payload->tintSelectors.swap(selection.tintSelectors);
+			payload->editorTints.swap(selection.editorTints);
+			selection.retainedPayload = payload;
+			const auto expectedObject = first->persistent->pages.front()->slots.front().objectId;
+			std::weak_ptr<const RenderPersistentTopologyRoot> persistent = first->persistent;
+			std::weak_ptr<const RenderDynamicStateRoot> dynamic = first->dynamic;
+			std::weak_ptr<const RenderBackendWorkPublication> backend = first->backendWork;
+			std::weak_ptr<const RenderViewSelectionPayload> view = payload;
+			context.Expect(store.TryPublish(SealRenderFramePublication(first, store.SessionGeneration()), store.SessionGeneration()).IsSuccess(),
+				"The production publication store must accept the first complete owned root.");
+			auto heldReader = store.Load();
+			const auto second = BuildPublication(store.SessionGeneration(), first->generation);
+			context.Expect(store.TryPublish(SealRenderFramePublication(second, store.SessionGeneration()), store.SessionGeneration()).IsSuccess(),
+				"A later complete generation must exchange the live root.");
+			first.reset(); payload.reset();
+			store.ResetForSession(store.SessionGeneration() + 1u);
+			context.Expect(!store.Load() && !persistent.expired() && !dynamic.expired() && !backend.expired() && !view.expired(),
+				"Exchange and session retirement must not destroy exact roots retained by an earlier immutable reader.");
+			{
+				// The real resolver borrows its reader; finish the last typed command
+				// consumption before releasing that reader's strong page/root owners.
+				const auto resolver = MakeRenderViewCommandResolver(*heldReader, 0u);
+				RenderItemRecord command;
+				context.Expect(resolver.Count() == 1u && resolver.Resolve(0u, command) && command.objectId == expectedObject
+					&& command.modelMatrix[3][0] == 7.0f && command.materialIndex == 3u,
+					"The held generation must still resolve its original identity, transform and lane after a new session starts.");
+			}
+			heldReader.reset();
+			context.Expect(persistent.expired() && dynamic.expired() && backend.expired() && view.expired(),
+				"Exact old-generation roots must retire once their final real reader finishes, without a hidden global retention owner.");
+		});
+
+		registry.Add("Renderer.FramePublication.StageContractPreservesTypedOutputOrderAtSealAndResolve", [](TestContext& context)
+		{
+			using namespace TerraEngine::Renderer;
+			auto publication = std::make_shared<RenderFramePublication>(*BuildPublication(1u, 0u));
+			const auto sourceView = publication->views.front();
+			const auto sourcePresentation = publication->presentationInputs.front();
+			publication->views.clear(); publication->presentationInputs.clear(); publication->referenceFrames.clear(); publication->submissionRanges.clear();
+			// Deliberately non-sorted IDs make an accidental stage-local sort visible.
+			const std::array<std::uint32_t,3> ids{31u,7u,19u};
+			const std::array<RenderOutputKind,3> kinds{RenderOutputKind::SceneView,RenderOutputKind::GameView,RenderOutputKind::MainRuntimeView};
+			for (std::size_t index = 0; index < ids.size(); ++index) {
+				auto view = sourceView; view.outputId = ids[index]; view.outputKind = kinds[index]; view.viewType = index == 0 ? RenderViewType::Scene : RenderViewType::Game; view.selectedLods.front() = static_cast<std::uint32_t>(index);
+				auto presentation = sourcePresentation;
+				presentation.output.outputId = view.outputId; presentation.output.kind = view.outputKind; presentation.output.diagnosticsView = view.viewType;
+				presentation.referenceFrame = MakeRendererTestReferenceFrame(publication->frameId, index + 1u, ids[index]);
+				presentation.referenceFrame.canonicalOrigin.offsetMetres.x = 100.0;
+				presentation.commandLanes.front().materialIndex = static_cast<std::uint32_t>(40u + index);
+				publication->referenceFrames.push_back(presentation.referenceFrame);
+				publication->views.push_back(std::move(view));
+				publication->presentationInputs.push_back(std::move(presentation));
+				const auto ranges = BuildRenderSubmissionRanges(publication->views.back(), static_cast<std::uint32_t>(index));
+				publication->submissionRanges.insert(publication->submissionRanges.end(), ranges.begin(), ranges.end());
+			}
+			const auto sealed = SealRenderFramePublication(publication, 1u);
+			context.Expect(sealed.IsValid(), "Multi-output selectors and presentation inputs must pass the actual production seal.");
+			const auto& actual = *sealed.Publication();
+			context.Expect(actual.views.size() == ids.size() && actual.submissionRanges.size() == ids.size(), "Sealing must preserve every typed output and its submission range.");
+			for (std::size_t index = 0; index < ids.size(); ++index) {
+				const auto resolver = MakeRenderViewCommandResolver(actual, index); RenderItemRecord command;
+				context.Expect(actual.views[index].outputId == ids[index] && actual.views[index].outputKind == kinds[index]
+					&& actual.presentationInputs[index].output.outputId == ids[index] && actual.submissionRanges[index].viewIndex == index
+					&& resolver.Resolve(0u, command) && command.materialIndex == 40u + index
+					&& actual.views[index].SelectedLods().front() == index,
+					"Protected sealing and real command resolution must retain authored output order and each output's exact parallel selectors.");
+			}
+		});
+
+		registry.Add("Renderer.FramePublication.StageContractRejectsStaleAndFailedCandidatesAtomically", [](TestContext& context)
+		{
+			using namespace TerraEngine::Renderer;
+			RenderFramePublicationStore store;
+			const auto first = BuildPublication(store.SessionGeneration(), 0u);
+			context.Expect(store.TryPublish(SealRenderFramePublication(first, store.SessionGeneration()), store.SessionGeneration()).IsSuccess(), "Publish a valid predecessor before worker candidate preparation.");
+			const auto stalePrepared = SealRenderFramePublication(BuildPublication(store.SessionGeneration(), first->generation), store.SessionGeneration());
+			const auto winner = BuildPublication(store.SessionGeneration(), first->generation);
+			context.Expect(store.TryPublish(SealRenderFramePublication(winner, store.SessionGeneration()), store.SessionGeneration()).IsSuccess(), "A different prepared candidate must be able to win the protected exchange first.");
+			context.Expect(store.TryPublish(stalePrepared, store.SessionGeneration()).outcome == RenderPublicationOutcome::RejectedStaleGeneration
+				&& store.Load() == winner, "A previously sealed worker candidate cannot overwrite its changed predecessor or partially exchange root owners.");
+			const std::array<RenderPublicationFailureInjection,3> faults{{{true,false,false},{false,true,false},{false,false,true}}};
+			const std::array<RenderPublicationOutcome,3> expected{RenderPublicationOutcome::RejectedAllocation,RenderPublicationOutcome::RejectedCancellation,RenderPublicationOutcome::RejectedBackendPreparation};
+			for (std::size_t index = 0; index < faults.size(); ++index) {
+				const auto candidate = BuildPublication(store.SessionGeneration(), winner->generation);
+				const auto rejected = store.TryPublish(SealRenderFramePublication(candidate, store.SessionGeneration(), faults[index]), store.SessionGeneration());
+				context.Expect(rejected.outcome == expected[index] && store.Load() == winner
+					&& store.Load()->persistent == winner->persistent && store.Load()->dynamic == winner->dynamic && store.Load()->backendWork == winner->backendWork,
+					"Allocation, cancellation and backend rejection must preserve the complete prior root and its exact constituent owners.");
+			}
+			const auto oldSessionCandidate = SealRenderFramePublication(BuildPublication(store.SessionGeneration(), winner->generation), store.SessionGeneration());
+			const auto oldSession = store.SessionGeneration(); store.ResetForSession(oldSession + 1u);
+			context.Expect(!store.TryPublish(oldSessionCandidate, oldSession).IsSuccess() && !store.Load(), "A prepared old-session candidate cannot resurrect roots after a protected lifecycle reset.");
 		});
 
 		registry.Add("Renderer.FramePublication.StaleProducerProofFallsBackToFullValidation",

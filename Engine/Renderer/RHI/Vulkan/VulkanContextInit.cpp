@@ -31,7 +31,7 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	editorRenderSubmitted = false;
 	volkInitialize();
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!CreateInstance()) {
 		RecordInitializationFailure("VK_ERROR_INITIALIZATION_FAILED", "Vulkan instance creation");
 		return false;
@@ -42,14 +42,14 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	}
 	
 	auto* window = static_cast<GLFWwindow*>(windowSystem.GetNativeHandle());
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create window surface!");
 		RecordInitializationFailure("VK_ERROR_SURFACE_LOST_KHR", "Vulkan window surface creation");
 		return false;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!PickPhysicalDevice()) {
 		RecordInitializationFailure("VK_ERROR_INCOMPATIBLE_DRIVER", "Vulkan physical device selection");
 		return false;
@@ -72,11 +72,11 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	
 	vmaCreateAllocator(&allocatorInfo, &allocator);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!CreateSwapChain(windowSystem)) return false;
 	if (!CreateCommandPool()) return false;
 	if (!CreateImageViews()) return false;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!CreateDepthResources()) return false;
 
 	VkFormat depthFmt = FindDepthFormat();
@@ -95,13 +95,13 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	}
 	for (auto& view : submittedHiZWritesByViewFrame) for (auto& submitted : view) submitted.Reset();
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vrsFeatures.pipelineFragmentShadingRate) {
 		vrs.Create(device, physicalDevice, allocator, swapchainExtent.width, swapchainExtent.height);
 		TransitionImageLayout(vrs.image, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR);
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!CreateRenderPass()) return false;
 	if (!CreateFramebuffers()) return false;
 	if (!CreateEmptyFrameFallbackResources()) return false;
@@ -113,9 +113,9 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	presentationRecreation.SetActiveExtent({ swapchainExtent.width, swapchainExtent.height });
 	editorCompletionTracker.SetPresentationGeneration(presentationLifecycle.Generation());
 	if (!CreateGpuTimestampQueries()) return false;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!CreateDescriptorPool()) return false;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!CreateGlobalDescriptorResources()) return false;
 	
 	{
@@ -915,7 +915,7 @@ void VulkanContext::Impl::DestroyVulkanDeformationComputePipelines()
 	deformationComputePipelines = {};
 }
 
-// VulkanContext::Impl::Cleanup is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	textureDescriptorBootstrap.Reset();
@@ -923,11 +923,22 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	// Shutdown/device recovery invalidates depth ownership even if the native
 	// device is already gone and teardown skips its normal resource branches.
 	ResetShadowPublication(true);
+	using ReadbackProof = TerraEngine::Renderer::Vulkan::ReadbackRetirementProof;
+	ReadbackProof readbackTeardownProof = deviceLost ? ReadbackProof::DeviceLost : ReadbackProof::None;
 	bool shadowTeardownProven = deviceLost;
 	bool presentationFenceWaitAllowed = device != VK_NULL_HANDLE && !skipDeviceIdle && !deviceLost;
 	if (device && !skipDeviceIdle) {
 		const VkResult idleResult = WaitDeviceIdle();
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		if (readbackValidationSnapshot.submitAccepted) {
+			readbackValidationSnapshot.idleObserved = true;
+			readbackValidationSnapshot.idleResult = idleResult;
+			RecordReadbackValidationEvent(TerraEngine::Renderer::Vulkan::ReadbackValidationEventKind::IdleObserved, idleResult);
+		}
+#endif
 		shadowTeardownProven = idleResult == VK_SUCCESS || idleResult == VK_ERROR_DEVICE_LOST;
+		if (idleResult == VK_SUCCESS) readbackTeardownProof = ReadbackProof::DeviceIdle;
+		else if (idleResult == VK_ERROR_DEVICE_LOST) readbackTeardownProof = ReadbackProof::DeviceLost;
 		if (idleResult != VK_SUCCESS)
 		{
 			TERRAENGINE_LOG(LogLevel::Warning, "Vulkan cleanup could not prove the device idle before teardown: " << idleResult);
@@ -1000,17 +1011,13 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	// Device-loss teardown is terminal for submitted work, while normal cleanup
 	// has already waited for device idle above.
 	CancelReadbackRequests(
-		deviceLost ? "device_lost" : "canceled",
-		deviceLost
+		readbackTeardownProof == ReadbackProof::DeviceLost ? "device_lost" : "canceled",
+		readbackTeardownProof == ReadbackProof::DeviceLost
 			? "Vulkan image readback was canceled because the device was lost."
 			: "Vulkan image readback was canceled during renderer shutdown.",
-		true);
-	for (VulkanConventionalVisibilityIdentityReadbackRequest& request :
-		inFlightConventionalVisibilityIdentityReadbacks) {
-		DestroyConventionalVisibilityIdentityReadbackRequestResources(request);
-	}
-	inFlightConventionalVisibilityIdentityReadbacks.clear();
-	completedConventionalVisibilityIdentityReadbacks.clear();
+		true, readbackTeardownProof);
+	CancelIdentityReadbackRequests(readbackTeardownProof);
+	DestroyReadbackValidationGate();
 
 	DestroyAmbientOcclusionResources();
 	DestroyEnvironmentLightingResources();
@@ -1044,19 +1051,19 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	}
 	retiredPresentationBundles.clear();
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (auto& [id, mesh] : meshCache) {
 		if (!mesh.descriptorSetsByLayout.empty() && descriptorPool != VK_NULL_HANDLE) {
 			std::vector<VkDescriptorSet> descriptorSets;
 			descriptorSets.reserve(mesh.descriptorSetsByLayout.size());
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 			for (const auto& [layout, set] : mesh.descriptorSetsByLayout) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (set != VK_NULL_HANDLE) {
 					descriptorSets.push_back(set);
 				}
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!descriptorSets.empty()) {
 				vkFreeDescriptorSets(device, descriptorPool, static_cast<uint32_t>(descriptorSets.size()), descriptorSets.data());
 			}
@@ -1241,7 +1248,7 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	}
 	animationDescriptorSetLayout = VK_NULL_HANDLE;
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (auto& retiredBuffers : retiredBuffersByFrame) {
 		for (VulkanBuffer& retiredBuffer : retiredBuffers) {
 			DestroyBufferImmediate(retiredBuffer);
@@ -1250,7 +1257,7 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	}
 	retiredBuffersByFrame.clear();
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (auto& [id, tex] : textureCache) {
 		if (device) {
 			vkDestroySampler(device, tex.sampler, nullptr);
@@ -1268,7 +1275,7 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	}
 	retiredOffscreenResources.clear();
 	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (device && offscreenRenderPass != VK_NULL_HANDLE) {
 		vkDestroyRenderPass(device, offscreenRenderPass, nullptr);
 		offscreenRenderPass = VK_NULL_HANDLE;
@@ -1276,30 +1283,30 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 
 	DestroyPipelines();
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (device) {
 		if (sceneViewGridPipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, sceneViewGridPipeline, nullptr);
 			sceneViewGridPipeline = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (sceneViewGridPipelineLayout != VK_NULL_HANDLE) {
 			vkDestroyPipelineLayout(device, sceneViewGridPipelineLayout, nullptr);
 			sceneViewGridPipelineLayout = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (skyBackgroundPipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, skyBackgroundPipeline, nullptr);
 			skyBackgroundPipeline = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (skyBackgroundPipelineLayout != VK_NULL_HANDLE) {
 			vkDestroyPipelineLayout(device, skyBackgroundPipelineLayout, nullptr);
 			skyBackgroundPipelineLayout = VK_NULL_HANDLE;
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (device) {
 		vkDestroySampler(device, defaultTexture.sampler, nullptr);
 		vkDestroyImageView(device, defaultTexture.view, nullptr);
@@ -1313,54 +1320,54 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	vmaDestroyImage(allocator, defaultMaterialMaskTexture.image, defaultMaterialMaskTexture.allocation);
 
 	// UI Rendering cleanup
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (device) {
 		if (staticUiPipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, staticUiPipeline, nullptr);
 			staticUiPipeline = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (staticUiPipelineLayout != VK_NULL_HANDLE) {
 			vkDestroyPipelineLayout(device, staticUiPipelineLayout, nullptr);
 			staticUiPipelineLayout = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (instancedUiPipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, instancedUiPipeline, nullptr);
 			instancedUiPipeline = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (instancedUiPipelineLayout != VK_NULL_HANDLE) {
 			vkDestroyPipelineLayout(device, instancedUiPipelineLayout, nullptr);
 			instancedUiPipelineLayout = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (sdfTextPipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, sdfTextPipeline, nullptr);
 			sdfTextPipeline = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (sdfTextPipelineLayout != VK_NULL_HANDLE) {
 			vkDestroyPipelineLayout(device, sdfTextPipelineLayout, nullptr);
 			sdfTextPipelineLayout = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (uiFontDescriptorSetLayout != VK_NULL_HANDLE) {
 			vkDestroyDescriptorSetLayout(device, uiFontDescriptorSetLayout, nullptr);
 			uiFontDescriptorSetLayout = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (uiFontAtlasImage.sampler != VK_NULL_HANDLE) {
 			vkDestroySampler(device, uiFontAtlasImage.sampler, nullptr);
 			uiFontAtlasImage.sampler = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (uiFontAtlasImage.view != VK_NULL_HANDLE) {
 			vkDestroyImageView(device, uiFontAtlasImage.view, nullptr);
 			uiFontAtlasImage.view = VK_NULL_HANDLE;
 		}
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (uiFontAtlasImage.image != VK_NULL_HANDLE && uiFontAtlasImage.allocation != VK_NULL_HANDLE) {
 		vmaDestroyImage(allocator, uiFontAtlasImage.image, uiFontAtlasImage.allocation);
 		uiFontAtlasImage.image = VK_NULL_HANDLE;
@@ -1377,7 +1384,7 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		}
 	}
 	uiStaticVertexBuffers.clear();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (uiInstanceBuffer.buffer != VK_NULL_HANDLE) {
 		vmaDestroyBuffer(allocator, uiInstanceBuffer.buffer, uiInstanceBuffer.allocation);
 		uiInstanceBuffer.buffer = VK_NULL_HANDLE;
@@ -1389,13 +1396,13 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	}
 	uiSdfVertexBuffers.clear();
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (device) {
 		if (clusterGridComputePipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, clusterGridComputePipeline, nullptr);
 			clusterGridComputePipeline = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (clusterDepthMaskComputePipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, clusterDepthMaskComputePipeline, nullptr);
 			clusterDepthMaskComputePipeline = VK_NULL_HANDLE;
@@ -1406,47 +1413,47 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		}
 		clusterDepthDeviceLimitsChecked = false;
 		clusterDepthCooperativeDeviceSupported = clusterDepthReferenceDeviceSupported = false;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (clusterLightCountComputePipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, clusterLightCountComputePipeline, nullptr);
 			clusterLightCountComputePipeline = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (clusterLightPrefixComputePipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, clusterLightPrefixComputePipeline, nullptr);
 			clusterLightPrefixComputePipeline = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (clusterLightFillComputePipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, clusterLightFillComputePipeline, nullptr);
 			clusterLightFillComputePipeline = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (lightAnalysisComputePipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, lightAnalysisComputePipeline, nullptr);
 			lightAnalysisComputePipeline = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (hiZComputePipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, hiZComputePipeline, nullptr);
 			hiZComputePipeline = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vrsComputePipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, vrsComputePipeline, nullptr);
 			vrsComputePipeline = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (gtaoComputePipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, gtaoComputePipeline, nullptr);
 			gtaoComputePipeline = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (gtaoBlurComputePipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, gtaoBlurComputePipeline, nullptr);
 			gtaoBlurComputePipeline = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (lightingComputePipelineLayout != VK_NULL_HANDLE) {
 			vkDestroyPipelineLayout(device, lightingComputePipelineLayout, nullptr);
 			lightingComputePipelineLayout = VK_NULL_HANDLE;
@@ -1478,53 +1485,53 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 			aoDescriptorSetLayout = VK_NULL_HANDLE;
 		}
 		auto DestroyShadowFramebuffer = [&](VkFramebuffer& framebuffer) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (framebuffer != VK_NULL_HANDLE) {
 				vkDestroyFramebuffer(device, framebuffer, nullptr);
 				framebuffer = VK_NULL_HANDLE;
 			}
 		};
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (VkFramebuffer& framebuffer : directionalShadowFramebuffers) {
 			DestroyShadowFramebuffer(framebuffer);
 		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (VkFramebuffer& framebuffer : spotShadowFramebuffers) {
 			DestroyShadowFramebuffer(framebuffer);
 		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (VkFramebuffer& framebuffer : areaShadowFramebuffers) {
 			DestroyShadowFramebuffer(framebuffer);
 		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (std::array<VkFramebuffer, 6>& faceFramebuffers : pointShadowFaceFramebuffersBySlot) {
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 			for (VkFramebuffer& framebuffer : faceFramebuffers) {
 				DestroyShadowFramebuffer(framebuffer);
 			}
 		}
 		auto DestroyShadowImageView = [&](VkImageView& imageView) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (imageView != VK_NULL_HANDLE) {
 				vkDestroyImageView(device, imageView, nullptr);
 				imageView = VK_NULL_HANDLE;
 			}
 		};
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (std::array<VkImageView, 6>& faceViews : pointShadowDepthFaceViewsBySlot) {
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 			for (VkImageView& faceView : faceViews) {
 				DestroyShadowImageView(faceView);
 			}
 		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (std::array<VkImageView, 6>& faceViews : pointShadowColorFaceViewsBySlot) {
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 			for (VkImageView& faceView : faceViews) {
 				DestroyShadowImageView(faceView);
 			}
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (shadowRenderPass != VK_NULL_HANDLE) {
 			vkDestroyRenderPass(device, shadowRenderPass, nullptr);
 			shadowRenderPass = VK_NULL_HANDLE;
@@ -1534,15 +1541,15 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	}
 
 	auto DestroyVulkanImage = [&](VulkanImage& image) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (device && image.sampler != VK_NULL_HANDLE) {
 			vkDestroySampler(device, image.sampler, nullptr);
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (device && image.view != VK_NULL_HANDLE) {
 			vkDestroyImageView(device, image.view, nullptr);
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (image.image != VK_NULL_HANDLE && image.allocation != VK_NULL_HANDLE) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 		}
@@ -1552,35 +1559,35 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		image.sampler = VK_NULL_HANDLE;
 	};
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : directionalShadowDepths) {
 		DestroyVulkanImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : directionalShadowColors) {
 		DestroyVulkanImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : spotShadowDepths) {
 		DestroyVulkanImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : spotShadowColors) {
 		DestroyVulkanImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : areaShadowDepths) {
 		DestroyVulkanImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : areaShadowColors) {
 		DestroyVulkanImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : pointShadowCubeDepths) {
 		DestroyVulkanImage(image);
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (VulkanImage& image : pointShadowCubeColors) {
 		DestroyVulkanImage(image);
 	}
@@ -1588,9 +1595,9 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	DestroyVulkanImage(ltcInverseTexture);
 
 	auto DestroyBufferVector = [&](std::vector<VulkanBuffer>& buffers) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (auto& buffer : buffers) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (buffer.buffer != VK_NULL_HANDLE) {
 				vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
 			}
@@ -1630,7 +1637,7 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	pendingUnextendedAcquireProofs.clear();
 	unextendedRetirementTracker.Reset();
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (device) {
 		vkDestroyImageView(device, depthImageView, nullptr);
 		vmaDestroyImage(allocator, depthImage, depthImageAllocation);
@@ -1639,9 +1646,15 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		depthImageAllocation = VK_NULL_HANDLE;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (device) {
 		for (VkCommandPool pool : commandPools) {
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+			if (pool == readbackValidationCommandPool) {
+				readbackValidationSnapshot.commandPoolDestroyedBeforeRetirement |= readbackValidationSnapshot.sourceImageBlocked;
+				RecordReadbackValidationEvent(TerraEngine::Renderer::Vulkan::ReadbackValidationEventKind::CommandPoolDestroyed);
+			}
+#endif
 			vkDestroyCommandPool(device, pool, nullptr);
 		}
 		for (VkCommandPool pool : editorCommandPools) {
@@ -1653,11 +1666,17 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	editorCommandPools.clear();
 	editorCommandBuffers.clear();
 	if (device && immediateCommandPool != VK_NULL_HANDLE) {
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		if (immediateCommandPool == readbackValidationCommandPool) {
+			readbackValidationSnapshot.commandPoolDestroyedBeforeRetirement |= readbackValidationSnapshot.sourceImageBlocked;
+			RecordReadbackValidationEvent(TerraEngine::Renderer::Vulkan::ReadbackValidationEventKind::CommandPoolDestroyed);
+		}
+#endif
 		vkDestroyCommandPool(device, immediateCommandPool, nullptr);
 		immediateCommandPool = VK_NULL_HANDLE;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (device) {
 		if (fallbackPointShadowSampler != VK_NULL_HANDLE) {
 			vkDestroySampler(device, fallbackPointShadowSampler, nullptr);
@@ -1685,12 +1704,12 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		globalDescriptorSetLayout = VK_NULL_HANDLE;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (allocator) vmaDestroyAllocator(allocator);
 	allocator = VK_NULL_HANDLE;
 
 	DestroyWorkerPools();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (device) vkDestroyDevice(device, nullptr);
 	device = VK_NULL_HANDLE;
 	physicalDevice = VK_NULL_HANDLE;
@@ -1702,7 +1721,7 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	}
 	debugMessenger = VK_NULL_HANDLE;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (instance) {
 		vkDestroySurfaceKHR(instance, surface, nullptr);
 		vkDestroyInstance(instance, nullptr);
@@ -1712,7 +1731,7 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	initialized = false;
 }
 
-// VulkanContext::Impl::CreateInstance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CreateInstance() {
 	// Build the instance and verify that requested validation layers are present.
 	// This request comes from editor/export render settings in every compile
@@ -1744,7 +1763,7 @@ bool VulkanContext::Impl::CreateInstance() {
 	VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo{};
 	VkValidationFeatureEnableEXT validationFeature = VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
 	VkValidationFeaturesEXT validationFeatures{};
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (validationLayersEnabled) {
 		createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
 		createInfo.ppEnabledLayerNames = validationLayers.data();
@@ -1762,7 +1781,7 @@ bool VulkanContext::Impl::CreateInstance() {
 		createInfo.pNext = nullptr;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkCreateInstance(&createInfo, nullptr, &instance) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create instance!");
 		return false;
@@ -1772,7 +1791,7 @@ bool VulkanContext::Impl::CreateInstance() {
 	return true;
 }
 
-// VulkanContext::Impl::PopulateDebugMessengerCreateInfo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::PopulateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& createInfo) {
 	// Configure debug messenger severity and message types before creation.
 	createInfo = {};
@@ -1785,7 +1804,7 @@ void VulkanContext::Impl::PopulateDebugMessengerCreateInfo(VkDebugUtilsMessenger
 #endif
 }
 
-// VulkanContext::Impl::SetupDebugMessenger is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::SetupDebugMessenger() {
 	// Install the debug messenger when validation layers are enabled.
 	if (!validationLayersEnabled) return true;
@@ -1793,21 +1812,25 @@ bool VulkanContext::Impl::SetupDebugMessenger() {
 	VkDebugUtilsMessengerCreateInfoEXT createInfo;
 	PopulateDebugMessengerCreateInfo(createInfo);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (CreateDebugUtilsMessengerEXT(instance, &createInfo, nullptr, &debugMessenger) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to set up debug messenger!");
 		return false;
 	}
+	// Emit this only after the requested layer actually survived availability
+	// checks and its native callback was created. Installed editor validation can
+	// then distinguish enabled diagnostics from a requested preference alone.
+	TERRAENGINE_LOG(LogLevel::Info, "[VulkanValidation] layer=VK_LAYER_KHRONOS_validation callbackInstalled=true");
 	return true;
 }
 
-// VulkanContext::Impl::PickPhysicalDevice is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::PickPhysicalDevice() {
 	// Select the best suitable GPU using a scoring system.
 	uint32_t deviceCount = 0;
 	vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (deviceCount == 0) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to find GPUs with Vulkan support!");
 		return false;
@@ -1825,7 +1848,7 @@ bool VulkanContext::Impl::PickPhysicalDevice() {
 	}
 
 	// Check if the best candidate is suitable at all.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (candidates.rbegin()->first > 0) {
 		physicalDevice = candidates.rbegin()->second;
 		
@@ -1879,7 +1902,7 @@ bool VulkanContext::Impl::PickPhysicalDevice() {
 		return false;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!meshShaderSupported) {
 		TERRAENGINE_LOG(LogLevel::Error, "Selected GPU does not expose VK_EXT_mesh_shader meshShader support.");
 		return false;
@@ -1888,7 +1911,7 @@ bool VulkanContext::Impl::PickPhysicalDevice() {
 	return true;
 }
 
-// VulkanContext::Impl::RateDeviceSuitability is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 int VulkanContext::Impl::RateDeviceSuitability(VkPhysicalDevice device) {
 	if (!IsDeviceSuitable(device)) {
 		return 0;
@@ -1903,7 +1926,7 @@ int VulkanContext::Impl::RateDeviceSuitability(VkPhysicalDevice device) {
 	int score = 0;
 
 	// Discrete GPUs have a significant performance advantage
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
 		score += 1000;
 	}
@@ -1914,7 +1937,7 @@ int VulkanContext::Impl::RateDeviceSuitability(VkPhysicalDevice device) {
 	return score;
 }
 
-// VulkanContext::Impl::CreateLogicalDevice is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CreateLogicalDevice() {
 	// Build queues and logical device features needed for rendering.
 	QueueFamilyIndices indices = FindQueueFamilies(physicalDevice);
@@ -1923,7 +1946,7 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	std::set<uint32_t> uniqueQueueFamilies = {indices.graphicsFamily.value(), indices.presentFamily.value()};
 
 	float queuePriority = 1.0f;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (uint32_t queueFamily : uniqueQueueFamilies) {
 		VkDeviceQueueCreateInfo queueCreateInfo{};
 		queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -1956,6 +1979,24 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	vulkan12Features.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
 	// Buffer device address is often useful with bindless but strictly optional
 	vulkan12Features.bufferDeviceAddress = VK_TRUE;
+	// This optional validation gate uses a host-signaled timeline semaphore.
+	// Normal validation-off devices retain their previous feature configuration;
+	// unsupported hardware remains usable and reports this lane unavailable.
+	bool enableReadbackTimelineSemaphore = false;
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	readbackTimelineSemaphoreEnabled = false;
+	if (validationLayersEnabled) {
+		VkPhysicalDeviceVulkan12Features supportedTimeline{};
+		supportedTimeline.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+		VkPhysicalDeviceFeatures2 timelineQuery{};
+		timelineQuery.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+		timelineQuery.pNext = &supportedTimeline;
+		vkGetPhysicalDeviceFeatures2(physicalDevice, &timelineQuery);
+		enableReadbackTimelineSemaphore = supportedTimeline.timelineSemaphore == VK_TRUE;
+	}
+#endif
+	vulkan12Features.timelineSemaphore = enableReadbackTimelineSemaphore ? VK_TRUE : VK_FALSE;
+
 
 	vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 	vulkan13Features.shaderDemoteToHelperInvocation = VK_TRUE;
@@ -2071,18 +2112,23 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledDeviceExtensions.size());
 	createInfo.ppEnabledExtensionNames = enabledDeviceExtensions.data();
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	// Device layers are deprecated; instance-level validation layers cover device calls.
 	createInfo.enabledLayerCount = 0;
 	createInfo.ppEnabledLayerNames = nullptr;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create logical device!");
 		return false;
 	}
 
 	volkLoadDevice(device);
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	// Feature support alone is not admission: retain the flag only after the
+	// logical device accepted the feature and its real host entrypoint loaded.
+	readbackTimelineSemaphoreEnabled = enableReadbackTimelineSemaphore && vkSignalSemaphore != nullptr;
+#endif
 	diagnosticCheckpointsEnabled = diagnosticCheckpointsEnabled
 		&& vkCmdSetCheckpointNV != nullptr
 		&& vkGetQueueCheckpointDataNV != nullptr;
@@ -2098,7 +2144,7 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	return true;
 }
 
-// VulkanContext::Impl::CreateSwapChain is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CreateSwapChain(WindowSystem& windowSystem, VkSwapchainKHR oldSwapchain) {
 	// Assemble swapchain matching the current surface capabilities.
 	SwapChainSupportDetails swapChainSupport = QuerySwapChainSupport(physicalDevice);
@@ -2120,7 +2166,7 @@ bool VulkanContext::Impl::CreateSwapChain(WindowSystem& windowSystem, VkSwapchai
 	}
 
 	uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount) {
 		imageCount = swapChainSupport.capabilities.maxImageCount;
 	}
@@ -2141,7 +2187,7 @@ bool VulkanContext::Impl::CreateSwapChain(WindowSystem& windowSystem, VkSwapchai
 	QueueFamilyIndices indices = FindQueueFamilies(physicalDevice);
 	uint32_t queueFamilyIndices[] = {indices.graphicsFamily.value(), indices.presentFamily.value()};
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (indices.graphicsFamily != indices.presentFamily) {
 		createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
 		createInfo.queueFamilyIndexCount = 2;
@@ -2203,20 +2249,20 @@ bool VulkanContext::Impl::CreateSwapChain(WindowSystem& windowSystem, VkSwapchai
 	return true;
 }
 
-// VulkanContext::Impl::CreateImageViews is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CreateImageViews() {
 	// Build image views for every swapchain image.
 	swapchainImageViews.resize(swapchainImages.size());
 
 	for (size_t i = 0; i < swapchainImages.size(); i++) {
 		swapchainImageViews[i] = CreateImageView(swapchainImages[i], swapchainImageFormat, VK_IMAGE_ASPECT_COLOR_BIT);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (swapchainImageViews[i] == VK_NULL_HANDLE) return false;
 	}
 	return true;
 }
 
-// VulkanContext::Impl::FindDepthFormat is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VkFormat VulkanContext::Impl::FindDepthFormat() {
 	// Find a depth format compatible with the GPU for depth testing.
 	return FindSupportedFormat(
@@ -2226,14 +2272,14 @@ VkFormat VulkanContext::Impl::FindDepthFormat() {
 	);
 }
 
-// VulkanContext::Impl::FindSupportedFormat is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VkFormat VulkanContext::Impl::FindSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features) {
 	// Pick the first candidate that supports requested tiling and features.
 	for (VkFormat format : candidates) {
 		VkFormatProperties props;
 		vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &props);
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (tiling == VK_IMAGE_TILING_LINEAR && (props.linearTilingFeatures & features) == features) {
 			return format;
 		} else if (tiling == VK_IMAGE_TILING_OPTIMAL && (props.optimalTilingFeatures & features) == features) {
@@ -2243,7 +2289,7 @@ VkFormat VulkanContext::Impl::FindSupportedFormat(const std::vector<VkFormat>& c
 	throw std::runtime_error("failed to find supported format!");
 }
 
-// VulkanContext::Impl::CreateDepthResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CreateDepthResources() {
 	// Allocate a depth attachment that matches the swapchain extent.
 	VkFormat chosenDepthFormat = FindDepthFormat();
@@ -2267,7 +2313,7 @@ bool VulkanContext::Impl::CreateDepthResources() {
 	VmaAllocationCreateInfo allocInfo = {};
 	allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &depthImage, &depthImageAllocation, nullptr) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create depth image!");
 		return false;
@@ -2361,7 +2407,7 @@ void VulkanContext::Impl::DestroyConventionalVisibilityIdentityAttachment(
 	attachment = {};
 }
 
-// VulkanContext::Impl::CreateRenderPass is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CreateRenderPass() {
 	if (editorMode) {
 		// The swapchain pass only presents ImGui. Scene View and Game View render
@@ -2514,7 +2560,7 @@ bool VulkanContext::Impl::CreateRenderPass() {
 		renderPassInfo.dependencyCount = 1;
 		renderPassInfo.pDependencies = &dependency;
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkCreateRenderPass2(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to create render pass 2!");
 			return false;
@@ -2592,7 +2638,7 @@ bool VulkanContext::Impl::CreateRenderPass() {
 		renderPassInfo.dependencyCount = 1;
 		renderPassInfo.pDependencies = &dependency;
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to create render pass!");
 			return false;
@@ -2601,7 +2647,7 @@ bool VulkanContext::Impl::CreateRenderPass() {
 	return true;
 }
 
-// VulkanContext::Impl::CreateFramebuffers is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CreateFramebuffers() {
 	// Editor presentation is color-only. Runtime framebuffers retain depth and
 	// optional VRS plus one image-owned integer identity target. Keeping identity
@@ -2629,7 +2675,7 @@ bool VulkanContext::Impl::CreateFramebuffers() {
 				presentationVisibilityIdentities[i].view);
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (UsesVrsAttachment()) {
 			attachments.push_back(vrs.view);
 		}
@@ -2643,7 +2689,7 @@ bool VulkanContext::Impl::CreateFramebuffers() {
 		framebufferInfo.height = swapchainExtent.height;
 		framebufferInfo.layers = 1;
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &framebuffers[i]) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to create framebuffer!");
 			return false;
@@ -2652,7 +2698,7 @@ bool VulkanContext::Impl::CreateFramebuffers() {
 	return true;
 }
 
-// VulkanContext::Impl::CreateCommandPool is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CreateEmptyFrameFallbackResources() {
 	if (editorMode) return true; // The editor owns a separate UI presentation pass.
 	// Allocate host ownership slots before creating native resources. Allocation
@@ -2740,7 +2786,7 @@ bool VulkanContext::Impl::CreateCommandPool() {
 	editorCommandPools.resize(MAX_FRAMES_IN_FLIGHT);
 	editorCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
 		if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPools[i]) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to create command pool!");
@@ -2768,7 +2814,7 @@ bool VulkanContext::Impl::CreateCommandPool() {
 		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 		allocInfo.commandBufferCount = 1;
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (vkAllocateCommandBuffers(device, &allocInfo, &commandBuffers[i]) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to allocate command buffers!");
 			return false;
@@ -2780,7 +2826,7 @@ bool VulkanContext::Impl::CreateCommandPool() {
 	return true;
 }
 
-// VulkanContext::Impl::CreateSyncObjects is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CreateSyncObjects() {
 	// Frame-owned synchronization is independent from swapchain image ownership.
 	presentationCompletionCoverageValid = presentationFencesEnabled;
@@ -3182,7 +3228,7 @@ void VulkanContext::Impl::RecordUnextendedPresent(
 		presentationLifecycle.Generation(), imageIndex);
 }
 
-// VulkanContext::Impl::CreateDescriptorPool is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CreateDescriptorPool() {
 	// Pool sized with a mix of common descriptor types so different shaders can allocate safely.
 	std::array<VkDescriptorPoolSize, 7> poolSizes{};
@@ -3212,7 +3258,7 @@ bool VulkanContext::Impl::CreateDescriptorPool() {
 	poolInfo.pPoolSizes = poolSizes.data();
 	poolInfo.maxSets = 512;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create descriptor pool!");
 		return false;
@@ -3245,7 +3291,7 @@ bool VulkanContext::Impl::CreateDescriptorPool() {
 	return true;
 }
 
-// VulkanContext::Impl::CheckValidationLayerSupport is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CheckValidationLayerSupport() {
 	// Ensure requested validation layers are available before enabling them.
 	uint32_t layerCount;
@@ -3254,18 +3300,18 @@ bool VulkanContext::Impl::CheckValidationLayerSupport() {
 	std::vector<VkLayerProperties> availableLayers(layerCount);
 	vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const char* layerName : validationLayers) {
 		bool layerFound = false;
 		for (const auto& layerProperties : availableLayers) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (strcmp(layerName, layerProperties.layerName) == 0) {
 				layerFound = true;
 				break;
 			}
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!layerFound) {
 			return false;
 		}
@@ -3274,7 +3320,7 @@ bool VulkanContext::Impl::CheckValidationLayerSupport() {
 	return true;
 }
 
-// VulkanContext::Impl::GetRequiredExtensions is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 std::vector<const char*> VulkanContext::Impl::GetRequiredExtensions() {
 	// Gather extensions required by GLFW and validation layers.
 	uint32_t glfwExtensionCount = 0;
@@ -3320,7 +3366,7 @@ std::vector<const char*> VulkanContext::Impl::GetRequiredExtensions() {
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (validationLayersEnabled) {
 		extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 	}
@@ -3328,20 +3374,20 @@ std::vector<const char*> VulkanContext::Impl::GetRequiredExtensions() {
 	return extensions;
 }
 
-// VulkanContext::Impl::IsDeviceSuitable is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::IsDeviceSuitable(VkPhysicalDevice device) {
 	// Check for queues, extensions, and swapchain support.
 	QueueFamilyIndices indices = FindQueueFamilies(device);
 	bool extensionsSupported = CheckDeviceExtensionSupport(device);
 	bool swapChainAdequate = false;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (extensionsSupported) {
 		SwapChainSupportDetails swapChainSupport = QuerySwapChainSupport(device);
 		swapChainAdequate = swapChainSupport.valid
 			&& !swapChainSupport.formats.empty() && !swapChainSupport.presentModes.empty();
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!indices.isComplete() || !extensionsSupported || !swapChainAdequate) {
 		return false;
 	}
@@ -3377,7 +3423,7 @@ bool VulkanContext::Impl::IsDeviceSuitable(VkPhysicalDevice device) {
 		return false;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (!features12.descriptorIndexing || !features12.runtimeDescriptorArray || 
 		!features12.shaderSampledImageArrayNonUniformIndexing || 
 		!features12.descriptorBindingPartiallyBound || 
@@ -3390,7 +3436,7 @@ bool VulkanContext::Impl::IsDeviceSuitable(VkPhysicalDevice device) {
 	return true;
 }
 
-// VulkanContext::Impl::CheckDeviceExtensionSupport is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 bool VulkanContext::Impl::CheckDeviceExtensionSupport(VkPhysicalDevice device) {
 	// Verify the device supports the extensions we require (swapchain).
 	uint32_t extensionCount;
@@ -3401,7 +3447,7 @@ bool VulkanContext::Impl::CheckDeviceExtensionSupport(VkPhysicalDevice device) {
 
 	std::set<std::string> requiredExtensions(deviceExtensions.begin(), deviceExtensions.end());
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& extension : availableExtensions) {
 		requiredExtensions.erase(extension.extensionName);
 	}
@@ -3409,7 +3455,7 @@ bool VulkanContext::Impl::CheckDeviceExtensionSupport(VkPhysicalDevice device) {
 	return requiredExtensions.empty();
 }
 
-// VulkanContext::Impl::FindQueueFamilies is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 QueueFamilyIndices VulkanContext::Impl::FindQueueFamilies(VkPhysicalDevice device) {
 	// Locate queue families capable of graphics and present operations.
 	QueueFamilyIndices indices;
@@ -3419,26 +3465,26 @@ QueueFamilyIndices VulkanContext::Impl::FindQueueFamilies(VkPhysicalDevice devic
 	vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
 
 	int i = 0;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 	for (const auto& queueFamily : queueFamilies) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
 			indices.graphicsFamily = i;
 		}
 		VkBool32 presentSupport = false;
 		vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupport);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (presentSupport) {
 			indices.presentFamily = i;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (indices.isComplete()) break;
 		i++;
 	}
 	return indices;
 }
 
-// VulkanContext::Impl::QuerySwapChainSupport is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 SwapChainSupportDetails VulkanContext::Impl::QuerySwapChainSupport(VkPhysicalDevice device) {
 	// Query swapchain capabilities for the given physical device.
 	SwapChainSupportDetails details;
@@ -3498,11 +3544,11 @@ SwapChainSupportDetails VulkanContext::Impl::QuerySwapChainSupport(VkPhysicalDev
 	return details;
 }
 
-// VulkanContext::Impl::ChooseSwapSurfaceFormat is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VkSurfaceFormatKHR VulkanContext::Impl::ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats) {
 	// Prefer SRGB if available, otherwise pick the first format.
 	for (const auto& availableFormat : availableFormats) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (availableFormat.format == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
 			return availableFormat;
 		}
@@ -3510,11 +3556,11 @@ VkSurfaceFormatKHR VulkanContext::Impl::ChooseSwapSurfaceFormat(const std::vecto
 	return availableFormats[0];
 }
 
-// VulkanContext::Impl::ChooseSwapPresentMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VkPresentModeKHR VulkanContext::Impl::ChooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) {
 	// Use mailbox for low latency when possible, otherwise fallback to FIFO.
 	for (const auto& availablePresentMode : availablePresentModes) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
 			return availablePresentMode;
 		}
@@ -3522,7 +3568,7 @@ VkPresentModeKHR VulkanContext::Impl::ChooseSwapPresentMode(const std::vector<Vk
 	return VK_PRESENT_MODE_FIFO_KHR;
 }
 
-// VulkanContext::Impl::ChooseSwapExtent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VkExtent2D VulkanContext::Impl::ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities, WindowSystem& windowSystem) {
 	// Match the window framebuffer size to keep the swapchain in sync with the viewport.
 	if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
@@ -3544,20 +3590,20 @@ VkExtent2D VulkanContext::Impl::ChooseSwapExtent(const VkSurfaceCapabilitiesKHR&
 	}
 }
 
-// VulkanContext::Impl::CleanupSwapChain is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::CleanupSwapChain() {
 	// Destroy swapchain-related resources while keeping device-level objects intact.
 	if (device) {
 		TerraEngine::Renderer::Vulkan::DestroyEmptyFrameBundle(emptyFrameFramebuffers, emptyFrameRenderPass,
 			[this](VkFramebuffer framebuffer) { vkDestroyFramebuffer(device, framebuffer, nullptr); },
 			[this](VkRenderPass pass) { vkDestroyRenderPass(device, pass, nullptr); });
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (auto framebuffer : framebuffers) vkDestroyFramebuffer(device, framebuffer, nullptr);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (renderPass) vkDestroyRenderPass(device, renderPass, nullptr);
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (auto imageView : swapchainImageViews) vkDestroyImageView(device, imageView, nullptr);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (swapchain) vkDestroySwapchainKHR(device, swapchain, nullptr);
 	}
 	for (ConventionalVisibilityIdentityAttachment& identity : presentationVisibilityIdentities) {
@@ -3571,7 +3617,7 @@ void VulkanContext::Impl::CleanupSwapChain() {
 	swapchain = VK_NULL_HANDLE;
 }
 
-// VulkanContext::Impl::RecreateSwapChain is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::RecreateSwapChain() {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	if (deviceLost) {
@@ -3814,7 +3860,7 @@ void VulkanContext::Impl::RecreateSwapChain() {
 		<< presentationLifecycle.Generation() << ", images=" << swapchainImages.size());
 }
 
-// VulkanContext::Impl::DebugCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VKAPI_ATTR VkBool32 VKAPI_CALL VulkanContext::Impl::DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData) {
 	// Route validation messages through the engine logger so users see them in one place.
 	const char* message = (pCallbackData != nullptr && pCallbackData->pMessage != nullptr) ? pCallbackData->pMessage : "";
@@ -3827,7 +3873,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL VulkanContext::Impl::DebugCallback(VkDebugUtilsMe
 #endif
 
 	LogLevel level = LogLevel::Debug;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) level = LogLevel::Error;
 	else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) level = LogLevel::Warning;
 	else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) level = LogLevel::Info;
@@ -3837,11 +3883,11 @@ VKAPI_ATTR VkBool32 VKAPI_CALL VulkanContext::Impl::DebugCallback(VkDebugUtilsMe
 	return VK_FALSE;
 }
 
-// VulkanContext::Impl::CreateDebugUtilsMessengerEXT is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 VkResult VulkanContext::Impl::CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
 	// Dynamically fetch the debug messenger extension function.
 	auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (func != nullptr) {
 		return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
 	} else {
@@ -3849,11 +3895,11 @@ VkResult VulkanContext::Impl::CreateDebugUtilsMessengerEXT(VkInstance instance, 
 	}
 }
 
-// VulkanContext::Impl::DestroyDebugUtilsMessengerEXT is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 void VulkanContext::Impl::DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator) {
 	// Safely tear down the debug messenger when the instance is destroyed.
 	auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 	if (func != nullptr) {
 		func(instance, debugMessenger, pAllocator);
 	}

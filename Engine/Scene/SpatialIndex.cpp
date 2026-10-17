@@ -115,7 +115,7 @@ namespace TerraEngine::Scene
 		}
 	}
 
-	// SpatialIndex::Clear is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void SpatialIndex::Clear()
 	{
 		if (!partitionLeaf)
@@ -140,7 +140,7 @@ namespace TerraEngine::Scene
 		hasBuiltIndex = false;
 	}
 
-	// SpatialIndex::Rebuild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void SpatialIndex::Rebuild(const std::vector<SpatialObjectRecord>& records)
 	{
 		if (!partitionLeaf)
@@ -174,7 +174,7 @@ namespace TerraEngine::Scene
 		diagnostics.fullRefreshObjectCount = static_cast<std::uint32_t>(records.size());
 
 		SpatialAABB rootBounds{};
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const SpatialObjectRecord& record : records)
 		{
 			if (record.objectId == TerraEngine::EMPTY_UUID)
@@ -192,7 +192,7 @@ namespace TerraEngine::Scene
 			diagnostics.indexedObjectCount++;
 			diagnostics.staticObjectCount += record.isStatic ? 1u : 0u;
 			diagnostics.dynamicObjectCount += record.isStatic ? 0u : 1u;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!record.localBounds.IsUsable() || IsFallbackRecord(record))
 			{
 				fallbackObjectIds.push_back(record.objectId);
@@ -205,7 +205,7 @@ namespace TerraEngine::Scene
 		}
 
 		std::sort(fallbackObjectIds.begin(), fallbackObjectIds.end(), UuidLess);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!rootBounds.IsUsable())
 		{
 			const auto end = std::chrono::steady_clock::now();
@@ -220,7 +220,7 @@ namespace TerraEngine::Scene
 		Expand(rootBounds, 0.01f);
 
 		const int root = CreateNode(rootBounds, 0);
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const SpatialObjectRecord& record : records)
 		{
 			if (record.objectId != TerraEngine::EMPTY_UUID && record.frameGeneration == referenceFrame.generation
@@ -235,7 +235,7 @@ namespace TerraEngine::Scene
 		diagnostics.lastUpdateDurationMs = std::chrono::duration<double, std::milli>(end - start).count();
 	}
 
-	// SpatialIndex::Refresh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void SpatialIndex::Refresh(const std::vector<SpatialObjectRecord>& records, bool forceFullRefresh)
 	{
 		if (!partitionLeaf)
@@ -289,7 +289,7 @@ namespace TerraEngine::Scene
 		std::unordered_map<TerraEngine::UUID, SpatialObjectRecord> latestRecords;
 		latestRecords.reserve(records.size());
 		bool duplicateObjectIdFound = false;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const SpatialObjectRecord& record : records)
 		{
 			if (record.objectId == TerraEngine::EMPTY_UUID)
@@ -297,7 +297,7 @@ namespace TerraEngine::Scene
 				continue;
 			}
 			const auto insertResult = latestRecords.emplace(record.objectId, record);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (!insertResult.second)
 			{
 				duplicateObjectIdFound = true;
@@ -305,7 +305,7 @@ namespace TerraEngine::Scene
 			}
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (duplicateObjectIdFound)
 		{
 			Rebuild(records);
@@ -319,11 +319,11 @@ namespace TerraEngine::Scene
 		addedRecords.reserve(latestRecords.size());
 		updatedRecords.reserve(latestRecords.size());
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const auto& entry : recordsById)
 		{
 			const TerraEngine::UUID& objectId = entry.first;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (latestRecords.find(objectId) == latestRecords.end())
 			{
 				removedObjectIds.push_back(objectId);
@@ -331,17 +331,17 @@ namespace TerraEngine::Scene
 		}
 
 		std::uint32_t unchangedCount = 0;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const auto& [objectId, record] : latestRecords)
 		{
 			const auto existing = recordsById.find(objectId);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (existing == recordsById.end())
 			{
 				addedRecords.push_back(record);
 				continue;
 			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (dirtyObjectIds.find(objectId) != dirtyObjectIds.end() || !RecordsEquivalent(existing->second, record))
 			{
 				updatedRecords.push_back(record);
@@ -351,24 +351,24 @@ namespace TerraEngine::Scene
 		}
 
 		bool requiresFullRefresh = false;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const SpatialObjectRecord& record : addedRecords)
 		{
 			requiresFullRefresh = requiresFullRefresh || !CanRefreshRecordIncrementally(record);
 		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const SpatialObjectRecord& record : updatedRecords)
 		{
 			requiresFullRefresh = requiresFullRefresh || !CanRefreshRecordIncrementally(record);
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (requiresFullRefresh)
 		{
 			Rebuild(records);
 			return;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (removedObjectIds.empty() && addedRecords.empty() && updatedRecords.empty())
 		{
 			ResetRefreshCounters(SpatialRefreshMode::Unchanged);
@@ -383,18 +383,18 @@ namespace TerraEngine::Scene
 			return;
 		}
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const TerraEngine::UUID& objectId : removedObjectIds)
 		{
 			RemoveStoredRecord(objectId);
 		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const SpatialObjectRecord& record : updatedRecords)
 		{
 			RemoveStoredRecord(record.objectId);
 			InsertStoredRecord(record);
 		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const SpatialObjectRecord& record : addedRecords)
 		{
 			InsertStoredRecord(record);
@@ -415,7 +415,7 @@ namespace TerraEngine::Scene
 		diagnostics.lastUpdateDurationMs = std::chrono::duration<double, std::milli>(end - start).count();
 	}
 
-	// SpatialIndex::MarkDirty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void SpatialIndex::MarkDirty(const TerraEngine::UUID& objectId)
 	{
 		if (!partitionLeaf)
@@ -624,11 +624,11 @@ namespace TerraEngine::Scene
 		return lastBoundsPublicationOrder;
 	}
 
-	// SpatialIndex::QueryAABB is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	SpatialQueryResult SpatialIndex::QueryAABB(const SpatialAABB& area, const SpatialQueryFilter& filter) const
 	{
 		SpatialQueryResult result{};
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!area.IsUsable())
 		{
 			result.validInput = false;
@@ -641,11 +641,11 @@ namespace TerraEngine::Scene
 		return result;
 	}
 
-	// SpatialIndex::QuerySphere is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	SpatialQueryResult SpatialIndex::QuerySphere(const SpatialSphere& sphere, const SpatialQueryFilter& filter) const
 	{
 		SpatialQueryResult result{};
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!IsFinite(sphere.center) || !IsFinite(sphere.radius) || sphere.radius < 0.0f)
 		{
 			result.validInput = false;
@@ -668,7 +668,7 @@ namespace TerraEngine::Scene
 		return QuerySphere(sphere, filter);
 	}
 
-	// SpatialIndex::QueryFrustum is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	SpatialQueryResult SpatialIndex::QueryFrustum(const SpatialFrustum& frustum, const SpatialQueryFilter& filter) const
 	{
 		SpatialQueryResult result{};
@@ -679,11 +679,11 @@ namespace TerraEngine::Scene
 		return result;
 	}
 
-	// SpatialIndex::QueryRay is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	SpatialQueryResult SpatialIndex::QueryRay(const SpatialRay& ray, const SpatialQueryFilter& filter) const
 	{
 		SpatialQueryResult result{};
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!IsFinite(ray.origin) || !IsFinite(ray.direction) || !IsFinite(ray.maxDistance) || ray.maxDistance < 0.0f || glm::dot(ray.direction, ray.direction) <= 1e-10f)
 		{
 			result.validInput = false;
@@ -696,14 +696,14 @@ namespace TerraEngine::Scene
 		return result;
 	}
 
-	// SpatialIndex::GetDiagnosticsSnapshot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	SpatialDiagnosticsSnapshot SpatialIndex::GetDiagnosticsSnapshot() const
 	{
 		std::scoped_lock lock(diagnosticsMutex);
 		return diagnostics;
 	}
 
-	// SpatialIndex::CreateNode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	int SpatialIndex::CreateNode(const SpatialAABB& tightBounds, std::uint32_t depth)
 	{
 		Node node{};
@@ -716,19 +716,19 @@ namespace TerraEngine::Scene
 		return static_cast<int>(nodes.size() - 1);
 	}
 
-	// SpatialIndex::InsertObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void SpatialIndex::InsertObject(int nodeIndex, const SpatialObjectRecord& record)
 	{
 		const Node& node = nodes[static_cast<std::size_t>(nodeIndex)];
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (node.depth < kMaxDepth)
 		{
 			const int childSlot = FindContainingChild(node, record.localBounds);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (childSlot >= 0)
 			{
 				int childNode = nodes[static_cast<std::size_t>(nodeIndex)].children[static_cast<std::size_t>(childSlot)];
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 				if (childNode < 0)
 				{
 					childNode = CreateNode(MakeChildBounds(node.tightBounds, childSlot), node.depth + 1);
@@ -740,7 +740,7 @@ namespace TerraEngine::Scene
 		}
 
 		Node& writableNode = nodes[static_cast<std::size_t>(nodeIndex)];
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (writableNode.depth == 0 && writableNode.objectIds.size() > kNodeSplitObjectCount)
 		{
 			diagnostics.largeObjectCount++;
@@ -750,7 +750,7 @@ namespace TerraEngine::Scene
 		nodeByObjectId[record.objectId] = nodeIndex;
 	}
 
-	// SpatialIndex::InsertStoredRecord is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool SpatialIndex::InsertStoredRecord(const SpatialObjectRecord& record)
 	{
 		if (record.objectId == TerraEngine::EMPTY_UUID || record.frameGeneration != referenceFrame.generation
@@ -760,7 +760,7 @@ namespace TerraEngine::Scene
 		}
 
 		recordsById[record.objectId] = record;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!record.localBounds.IsUsable() || IsFallbackRecord(record))
 		{
 			fallbackObjectIds.push_back(record.objectId);
@@ -769,7 +769,7 @@ namespace TerraEngine::Scene
 			return true;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (nodes.empty())
 		{
 			return false;
@@ -779,17 +779,17 @@ namespace TerraEngine::Scene
 		return true;
 	}
 
-	// SpatialIndex::RemoveStoredRecord is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool SpatialIndex::RemoveStoredRecord(const TerraEngine::UUID& objectId)
 	{
 		const auto membership = nodeByObjectId.find(objectId);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (membership == nodeByObjectId.end())
 		{
 			return recordsById.erase(objectId) > 0u;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (membership->second < 0)
 		{
 			fallbackObjectIds.erase(std::remove(fallbackObjectIds.begin(), fallbackObjectIds.end(), objectId), fallbackObjectIds.end());
@@ -805,7 +805,7 @@ namespace TerraEngine::Scene
 		return true;
 	}
 
-	// SpatialIndex::CanRefreshRecordIncrementally is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool SpatialIndex::CanRefreshRecordIncrementally(const SpatialObjectRecord& record) const
 	{
 		if (record.frameGeneration != referenceFrame.generation || !FitsReferenceFrame(record, referenceFrame))
@@ -823,13 +823,13 @@ namespace TerraEngine::Scene
 		return !nodes.empty() && Contains(nodes.front().looseBounds, record.localBounds);
 	}
 
-	// SpatialIndex::RecalculateStoredDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void SpatialIndex::RecalculateStoredDiagnostics()
 	{
 		diagnostics.indexedObjectCount = static_cast<std::uint32_t>(recordsById.size());
 		diagnostics.staticObjectCount = 0u;
 		diagnostics.dynamicObjectCount = 0u;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const auto& entry : recordsById)
 		{
 			const SpatialObjectRecord& record = entry.second;
@@ -839,7 +839,7 @@ namespace TerraEngine::Scene
 
 		diagnostics.fallbackObjectCount = static_cast<std::uint32_t>(fallbackObjectIds.size());
 		diagnostics.largeObjectCount = 0u;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!nodes.empty() && nodes.front().objectIds.size() > kNodeSplitObjectCount)
 		{
 			diagnostics.largeObjectCount = static_cast<std::uint32_t>(nodes.front().objectIds.size());
@@ -882,7 +882,7 @@ namespace TerraEngine::Scene
 		diagnostics = aggregate;
 	}
 
-	// SpatialIndex::ResetRefreshCounters is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void SpatialIndex::ResetRefreshCounters(SpatialRefreshMode mode)
 	{
 		diagnostics.refreshMode = mode;
@@ -897,13 +897,13 @@ namespace TerraEngine::Scene
 		diagnostics.invalidBoundsObjectCount = 0u;
 	}
 
-	// SpatialIndex::FindContainingChild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	int SpatialIndex::FindContainingChild(const Node& node, const SpatialAABB& bounds) const
 	{
 		for (int childIndex = 0; childIndex < 8; ++childIndex)
 		{
 			const SpatialAABB childBounds = MakeLooseBounds(MakeChildBounds(node.tightBounds, childIndex));
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (Contains(childBounds, bounds))
 			{
 				return childIndex;
@@ -912,7 +912,7 @@ namespace TerraEngine::Scene
 		return -1;
 	}
 
-	// SpatialIndex::MakeChildBounds is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	SpatialAABB SpatialIndex::MakeChildBounds(const SpatialAABB& parentBounds, int childIndex) const
 	{
 		const glm::vec3 center = parentBounds.Center();
@@ -927,7 +927,7 @@ namespace TerraEngine::Scene
 		return MakeAABB(childMin, childMax, SpatialBoundsSource::Aggregate);
 	}
 
-	// SpatialIndex::MakeLooseBounds is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	SpatialAABB SpatialIndex::MakeLooseBounds(const SpatialAABB& tightBounds) const
 	{
 		const glm::vec3 center = tightBounds.Center();
@@ -935,7 +935,7 @@ namespace TerraEngine::Scene
 		return MakeAABB(center - extent, center + extent, SpatialBoundsSource::Aggregate);
 	}
 
-	// SpatialIndex::NodeCouldIntersect is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool SpatialIndex::NodeCouldIntersect(const QueryShape& shape, const SpatialAABB& bounds) const
 	{
 		switch (shape.kind)
@@ -948,7 +948,7 @@ namespace TerraEngine::Scene
 		return false;
 	}
 
-	// SpatialIndex::ObjectIntersects is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	std::optional<float> SpatialIndex::ObjectIntersects(const QueryShape& shape, const SpatialObjectRecord& record) const
 	{
 		if (IsFallbackRecord(record))
@@ -971,7 +971,7 @@ namespace TerraEngine::Scene
 		return std::nullopt;
 	}
 
-	// SpatialIndex::PassesFilter is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	bool SpatialIndex::PassesFilter(const SpatialObjectRecord& record, const SpatialQueryFilter& filter) const
 	{
 		if (!filter.includeInactive && !record.active)
@@ -981,7 +981,7 @@ namespace TerraEngine::Scene
 		return (record.categoryMask & filter.categoryMask) != 0u;
 	}
 
-	// SpatialIndex::AppendHit is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void SpatialIndex::AppendHit(SpatialQueryResult& result, const SpatialObjectRecord& record, float distance, const SpatialQueryFilter& filter) const
 	{
 		if (!PassesFilter(record, filter))
@@ -989,7 +989,7 @@ namespace TerraEngine::Scene
 			result.rejectedCount++;
 			return;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (filter.maxResults != 0u && result.hits.size() >= filter.maxResults)
 		{
 			result.rejectedCount++;
@@ -1008,17 +1008,17 @@ namespace TerraEngine::Scene
 		result.hits.push_back(hit);
 	}
 
-	// SpatialIndex::QueryNode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void SpatialIndex::QueryNode(int nodeIndex, const QueryShape& shape, const SpatialQueryFilter& filter, SpatialQueryResult& result, std::unordered_set<TerraEngine::UUID>& seen) const
 	{
 		const Node& node = nodes[static_cast<std::size_t>(nodeIndex)];
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!NodeCouldIntersect(shape, node.looseBounds))
 		{
 			return;
 		}
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (const TerraEngine::UUID& objectId : node.objectIds)
 		{
 			if (!seen.insert(objectId).second)
@@ -1026,7 +1026,7 @@ namespace TerraEngine::Scene
 				continue;
 			}
 			const SpatialObjectRecord& record = recordsById.at(objectId);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (const std::optional<float> distance = ObjectIntersects(shape, record))
 			{
 				AppendHit(result, record, *distance, filter);
@@ -1037,7 +1037,7 @@ namespace TerraEngine::Scene
 			}
 		}
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+
 		for (int child : node.children)
 		{
 			if (child >= 0)
@@ -1047,7 +1047,7 @@ namespace TerraEngine::Scene
 		}
 	}
 
-	// SpatialIndex::FinishResult is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+
 	void SpatialIndex::FinishResult(const QueryShape& shape, const SpatialQueryFilter& filter, SpatialQueryResult& result) const
 	{
 		const auto start = std::chrono::steady_clock::now();
@@ -1096,7 +1096,7 @@ namespace TerraEngine::Scene
 			diagnostics.lastQueryDurationMs = std::chrono::duration<double, std::milli>(end - start).count();
 			return;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 		if (!nodes.empty())
 		{
 			QueryNode(0, shape, filter, result, seen);
@@ -1116,7 +1116,7 @@ namespace TerraEngine::Scene
 		}
 
 		std::sort(result.hits.begin(), result.hits.end(), [&](const SpatialQueryHit& left, const SpatialQueryHit& right) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+
 			if (filter.sortMode == SpatialSortMode::DistanceAscending && left.distance != right.distance)
 			{
 				return left.distance < right.distance;
